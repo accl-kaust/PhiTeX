@@ -174,9 +174,14 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "aftergroup" => &["ag"],
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
         // the same node is packaged there and sets \\\\badness, §1086, §649)
-        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
-            &["box:", "align", "param:", "lvlfix", "badness", "markclasses"]
-        }
+        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => &[
+            "box:",
+            "align",
+            "param:",
+            "lvlfix",
+            "badness",
+            "markclasses",
+        ],
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
         | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
@@ -721,7 +726,11 @@ impl TextHints {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
     if kind != FileKind::Document {
-        return if text.is_empty() { (Vec::new(), Vec::new()) } else { (vec![(0, text.len())], vec![true]) };
+        return if text.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            (vec![(0, text.len())], vec![true])
+        };
     }
     let n = p.atoms.len();
     // brace depth before each atom
@@ -746,10 +755,7 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             pass::Claim::Pending { cause, .. }
                 if matches!(*cause, "command in value position" | "value is a macro") =>
             {
-                p.items
-                    .get(i + 1)
-                    .map_or(it.end, |x| x.atom)
-                    .max(it.end)
+                p.items.get(i + 1).map_or(it.end, |x| x.atom).max(it.end)
             }
             _ => it.end,
         };
@@ -766,7 +772,11 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             && matches!(*cause, "command in value position" | "value is a macro")
         {
             let end = p.items.get(i + 1).map_or(it.end, |x| x.atom).max(it.end);
-            for c in extended.iter_mut().take(end.min(n)).skip(it.end.max(it.atom + 1)) {
+            for c in extended
+                .iter_mut()
+                .take(end.min(n))
+                .skip(it.end.max(it.atom + 1))
+            {
                 *c = true;
             }
         }
@@ -874,7 +884,9 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             } else if b.kind == AtomKind::Char('=')
                 && last == k
                 && claimed[j]
-                && p.atoms.get(j + 1).is_some_and(|x| x.kind == AtomKind::Open && x.mate != usize::MAX)
+                && p.atoms
+                    .get(j + 1)
+                    .is_some_and(|x| x.kind == AtomKind::Open && x.mate != usize::MAX)
             {
                 // (`\headline={...}`: a register the format defines, its
                 // `=` and value read by it, one slice)
@@ -963,10 +975,10 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                                 !claimed.get(j).copied().unwrap_or(true)
                                     && !inside.get(j).copied().unwrap_or(true)
                                     && p.atoms.get(j).is_some_and(|x| match x.kind {
-                                    AtomKind::Char(_) | AtomKind::Verb => true,
-                                    AtomKind::Cs => starts_par(x.name(text)),
-                                    _ => false,
-                                })
+                                        AtomKind::Char(_) | AtomKind::Verb => true,
+                                        AtomKind::Cs => starts_par(x.name(text)),
+                                        _ => false,
+                                    })
                             })
                 }
                 _ => false,
@@ -1010,17 +1022,21 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             );
         }
         for it in &p.items {
-            eprintln!("slices: item {:?} {}..{} {:?}", it.name, it.atom, it.end, it.hints.implicit);
+            eprintln!(
+                "slices: item {:?} {}..{} {:?}",
+                it.name, it.atom, it.end, it.hints.implicit
+            );
         }
     }
     let mut starts: Vec<usize> = vec![0];
     let mut prev_char = false;
     for (k, a) in p.atoms.iter().enumerate() {
         let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
-        let inside_if = ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
+        let inside_if =
+            ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
         // (an operand a primitive reads never starts a slice; a macro's
         // operand range is the pass's guess and does not cut)
-        if !(ch && prev_char) && !inside_if && !inside[k] && !operand[k] {
+        if !(inside_if || inside[k] || operand[k] || (ch && prev_char)) {
             starts.push(a.start);
         }
         prev_char = ch;
@@ -1064,14 +1080,21 @@ fn last_item(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
     let _ = text;
     p.items
         .iter()
-        .filter(|it| p.atoms.get(it.atom).is_some_and(|a| a.start >= s && a.start < e))
+        .filter(|it| {
+            p.atoms
+                .get(it.atom)
+                .is_some_and(|a| a.start >= s && a.start < e)
+        })
         .last()
         .map(|it| it.name.clone())
 }
 
 /// The first control sequence atom of the slice, if it starts with one.
 fn first_cs(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
-    let a = p.atoms.iter().find(|a| a.start >= s && a.start < e && a.kind != AtomKind::Space)?;
+    let a = p
+        .atoms
+        .iter()
+        .find(|a| a.start >= s && a.start < e && a.kind != AtomKind::Space)?;
     (a.kind == AtomKind::Cs).then(|| a.name(text).to_owned())
 }
 
@@ -2035,12 +2058,17 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     let mut prim_operand = vec![false; an.p.atoms.len()];
     for it in &an.p.items {
         if crate::prims::PRIMS.iter().any(|q| q.0 == it.name) {
-            for c in prim_operand.iter_mut().take(it.end.min(an.p.atoms.len())).skip(it.atom + 1) {
+            for c in prim_operand
+                .iter_mut()
+                .take(it.end.min(an.p.atoms.len()))
+                .skip(it.atom + 1)
+            {
                 *c = true;
             }
         }
     }
     let mut prev_char = false;
+    #[allow(clippy::needless_range_loop)]
     for a in 0..an.p.atoms.len() {
         let at = &an.p.atoms[a];
         starts.push(at.start);
@@ -2058,7 +2086,8 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // slice: its rows count in the union)
         skip.push(
             (ch && prev_char)
-                || (an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand))
+                || (an.claimed[a]
+                    && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand))
                 || at.kind == AtomKind::Space,
         );
         prev_char = ch;
@@ -2084,18 +2113,24 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // such scanning command, transitively)
         {
             let mut j = i;
-            while let (Some(last), Some(&(ns, ne))) = (last_item(&an.p, text, t.slices[j]), t.slices.get(j + 1)) {
+            while let (Some(last), Some(&(ns, ne))) =
+                (last_item(&an.p, text, t.slices[j]), t.slices.get(j + 1))
+            {
                 if !SCANS_ON.contains(&last.as_str()) {
                     break;
                 }
-                let Some(first) = first_cs(&an.p, text, (ns, ne)) else { break };
+                let Some(first) = first_cs(&an.p, text, (ns, ne)) else {
+                    break;
+                };
                 let next = t.at_until(ns, ne);
                 match (&mut h.bound, &next.bound) {
                     (Some(a), Some(b)) => union(a, b),
                     (Some(_), None) => h = next.clone(),
                     (None, _) => {}
                 }
-                if crate::prims::PRIMS.iter().any(|q| q.0 == first) && !SCANS_ON.contains(&first.as_str()) {
+                if crate::prims::PRIMS.iter().any(|q| q.0 == first)
+                    && !SCANS_ON.contains(&first.as_str())
+                {
                     break;
                 }
                 if !crate::prims::PRIMS.iter().any(|q| q.0 == first) {
@@ -2762,7 +2797,8 @@ mod tests {
     fn control_space_after_a_macro_is_a_region() {
         let t = "\\def\\hello{Hello}\n\\hello\\ world.\n\\bye\n";
         // (under the plain prelude's definitions, as a build reads it)
-        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../oracle/fixtures/dvi/plaintext.tex");
+        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../oracle/fixtures/dvi/plaintext.tex");
         let plain = std::fs::read_to_string(fx).expect("plaintext.tex");
         let mut d = pass::Definitions::new();
         d.harvest(&plain, kind_of(&plain, FileKind::Package), 0);
@@ -2771,7 +2807,10 @@ mod tests {
         let (sl, pars) = slices_of(t, &an.p, FileKind::Document);
         eprintln!("{sl:?} {pars:?}");
         let h = t.find("world").expect("world");
-        let k = sl.iter().position(|x| x.0 <= h && h < x.1).expect("a slice");
+        let k = sl
+            .iter()
+            .position(|x| x.0 <= h && h < x.1)
+            .expect("a slice");
         assert!(pars[k], "{sl:?} {pars:?}");
     }
 
@@ -2789,7 +2828,14 @@ mod tests {
         // `\\afterassignment`'s rows are its too
         assert_eq!(
             st(10).as_deref(),
-            Some(&["par:".to_owned(), "pg:".to_owned(), "if:".to_owned(), "aftertoken".to_owned()][..])
+            Some(
+                &[
+                    "par:".to_owned(),
+                    "pg:".to_owned(),
+                    "if:".to_owned(),
+                    "aftertoken".to_owned()
+                ][..]
+            )
         );
         // a run of text after \par may start a paragraph
         assert!(st(5).expect("some").contains(&"par:".to_owned()));
@@ -2830,4 +2876,3 @@ mod tests {
         }
     }
 }
-
