@@ -454,6 +454,13 @@ pub struct Report {
     /// node had.
     pub refuted_nodes: u64,
     pub refutations_max: u32,
+    /// Runs that defined a field outside their node's declared set
+    /// ([`Operation::may_define`]): the definitions stand and re-bind their
+    /// readers, and the node's set is unbounded until its text changes
+    /// (readers after it wait on its later runs; a new text has a new
+    /// declaration, checked afresh). A static definition list that a run
+    /// contradicts is an error instead.
+    pub declarations_refuted: u64,
     /// Speculative runs that ran out of fuel.
     pub fuel_outs: u64,
     /// Scheduler steps.
@@ -961,6 +968,9 @@ pub(crate) struct Aux {
     diagnostics: Vec<ValueId>,
     /// A static opener whose kind the run sets (`Brackets::kind_pending`).
     kind_pending: bool,
+    /// A run defined outside the declared set: the set is unbounded until
+    /// the text changes.
+    decl_refuted: bool,
     /// The last stopped attempt's state, for a resume (taken by the next
     /// attempt on its thread; behind a mutex only for that hand-off).
     suspended: Mutex<Option<Box<Suspended>>>,
@@ -1472,6 +1482,11 @@ pub struct Engine {
     /// Label renumberings so far: a stream claim's run that spans one has
     /// read labels that no longer mean the same.
     pub(crate) relabels: u64,
+    /// Changes that can move a reaching definition without the reader's
+    /// run having seen them coming: a scope boundary arriving, moving or
+    /// going, a definition outside a declared set. A result computed
+    /// before one re-checks the sites of its uses at apply.
+    pub(crate) binding_epoch: u64,
     /// Set while a balanced, newly created text gets its scope kinds: a
     /// local definition there has no readers yet.
     fresh_scope: bool,
@@ -1556,6 +1571,11 @@ pub struct Engine {
     apps_at_collect: usize,
     claim_dirty: FxHashSet<Slot>,
     errors: Vec<EvalError>,
+    /// Errors of a node's current result (an undeclared definition, a
+    /// conflicting publication): withdrawn when the node runs again, so a
+    /// run on a binding that a later structure change undoes does not end
+    /// the evaluation; reported when it ends with them standing.
+    node_errors: FxHashMap<Slot, EvalError>,
     pub(crate) level: u32,
     report: Report,
     touched: FxHashMap<NodeId, Snap>,
@@ -1681,6 +1701,8 @@ impl Iterator for Following<'_> {
 }
 
 impl Engine {
+    // One initialiser per field: the count is the engine's state.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new() -> Self {
         let values = Values::new();
@@ -1705,6 +1727,7 @@ impl Engine {
             touch_log: Vec::new(),
             in_eval: false,
             relabels: 0,
+            binding_epoch: 0,
             fresh_scope: false,
             environment: FxHashMap::default(),
             env_next: None,
@@ -1750,6 +1773,7 @@ impl Engine {
             apps_at_collect: 0,
             claim_dirty: FxHashSet::default(),
             errors: Vec::new(),
+            node_errors: FxHashMap::default(),
             level: 0,
             report: Report::default(),
             touched: FxHashMap::default(),
@@ -2750,6 +2774,9 @@ impl Engine {
         let inert = self.n(s).state == State::Inert;
         let maybe = decl.is_none() && st.may_define != MayDefine::Any;
         self.set_flag(s, F_MAYBE, maybe);
+        if let Some(a) = self.aux_mut_opt(s) {
+            a.decl_refuted = false;
+        }
         self.set_flag(s, F_HINT, hint);
         let predict = st.predict;
         self.set_flag(s, F_PREDICT, predict);
@@ -4015,7 +4042,8 @@ impl Engine {
     /// indexed: only the swallow check in `walk` can make a use wait on it.
     fn pend_ix(&self, s: Slot) -> PendIx {
         let n = self.n(s);
-        let bounded = n.has(F_DYN) && n.has(F_MAYBE);
+        let refuted = self.aux_of(s).is_some_and(|a| a.decl_refuted);
+        let bounded = n.has(F_DYN) && n.has(F_MAYBE) && !refuted;
         let bound = if bounded {
             self.statics(n.op, n.args).may_define.clone()
         } else {
@@ -4459,6 +4487,7 @@ impl Engine {
         if (co, oo) == (cn, on) {
             return;
         }
+        self.binding_epoch += 1;
         self.flush_order();
         let root = self.units[unit as usize].root;
         let before = self.order.fold(&OAug, root, 0, label);
@@ -5335,11 +5364,32 @@ impl Engine {
         self.make_dirty_quiet(x);
     }
 
+    /// Records an error of `x`'s current result (the first one stands
+    /// until the node runs again).
+    fn node_error(&mut self, x: Slot, e: EvalError) {
+        self.node_errors.entry(x).or_insert(e);
+    }
+
+    /// Ends an evaluation that has nothing left to run: the standing node
+    /// error of the lowest node id, if any (all of them are then dropped,
+    /// as a returned error is).
+    fn standing_errors(&mut self) -> Result<(), EvalError> {
+        let first = self
+            .node_errors
+            .iter()
+            .filter(|(x, _)| self.live(**x))
+            .min_by_key(|(x, _)| self.n(**x).id)
+            .map(|(_, e)| e.clone());
+        self.node_errors.clear();
+        first.map_or(Ok(()), Err)
+    }
+
     /// `make_dirty` with the cause already noted.
     fn make_dirty_quiet(&mut self, x: Slot) {
         if !self.live(x) || self.n(x).state == State::Inert {
             return;
         }
+        self.node_errors.remove(&x);
         self.set_flag(x, F_REBIND, false);
         self.touch(x);
         let n = self.nm(x);
@@ -5664,6 +5714,7 @@ impl Engine {
 
     fn free_node(&mut self, x: Slot) {
         count!(Free);
+        self.node_errors.remove(&x);
         self.touch(x);
         let kids = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
         if !kids.is_empty() {
@@ -6304,7 +6355,11 @@ impl Engine {
             let st = self.statics(op, args);
             let av = self.args_vec(args);
             let mut undeclared = Vec::new();
+            let refuted = self.aux_of(x).is_some_and(|a| a.decl_refuted);
             for &(f, _, _) in defs {
+                if refuted {
+                    break;
+                }
                 let f = self.canon(f);
                 if !self.is_client_def(x, f) {
                     continue;
@@ -6323,7 +6378,16 @@ impl Engine {
                     undeclared.push(EvalError::UndeclaredDefinition { node: id, field: name });
                 }
             }
-            self.errors.extend(undeclared);
+            if !undeclared.is_empty() {
+                // The declaration was too small: refuted, like a wrong
+                // prediction. The definitions below re-bind their readers;
+                // from now on the node may define anything, so readers
+                // after it wait for its runs.
+                self.report.declarations_refuted += 1;
+                self.ax(x).decl_refuted = true;
+                // Results of this batch bound past the node re-check.
+                self.binding_epoch += 1;
+            }
             let set: Vec<(Field, bool)> = defs.iter().map(|d| (d.0, d.2)).collect();
             self.set_defset(x, &set);
         } else {
@@ -6338,14 +6402,14 @@ impl Engine {
                 if !declared.contains(&f) && self.is_client_def(x, f) {
                     let id = self.n(x).id;
                     let field = self.client_name(f);
-                    self.errors.push(EvalError::UndeclaredDefinition { node: id, field });
+                    self.node_error(x, EvalError::UndeclaredDefinition { node: id, field });
                 }
             }
             for &f in &declared {
                 if !defs.iter().any(|d| d.0 == f) {
                     let id = self.n(x).id;
                     let field = self.client_name(f);
-                    self.errors.push(EvalError::UndeclaredDefinition { node: id, field });
+                    self.node_error(x, EvalError::UndeclaredDefinition { node: id, field });
                 }
             }
         }
@@ -6641,6 +6705,26 @@ impl Engine {
             }
             return;
         }
+        // A scope boundary arrived, moved or went, or a definition outside
+        // a declared set was made, while it ran (by another result of this
+        // batch): a use bound on the old structure may reach another site
+        // now. Run again.
+        if r.binding_epoch != self.binding_epoch {
+            let (unit, label) = (self.n(x).unit, self.n(x).label);
+            let moved = r.uses.iter().any(|u| {
+                u.kind == K_FIELD && {
+                    let w = self.walk(unit, label, Field(ValueId(u.key)));
+                    w.pending != NIL || w.site != u.site
+                }
+            });
+            if moved {
+                count!(StaleSite);
+                if r.speculative {
+                    self.set_flag(x, F_NOSPEC, true);
+                }
+                return;
+            }
+        }
         // The structure a stream claim scanned changed while it ran (or
         // the labels it compares against were renumbered meanwhile).
         if let Some(sr) = r.stream {
@@ -6689,8 +6773,10 @@ impl Engine {
                 return;
             }
         }
+        // A new result replaces the last one's errors.
+        self.node_errors.remove(&x);
         if let Some(e) = r.error.clone() {
-            self.errors.push(e);
+            self.node_error(x, e);
         }
         if r.raise > 0 && !matches!(r.end, End::Raise(..)) {
             // A read of a finished node not settled below this level, then
@@ -8029,7 +8115,7 @@ impl Engine {
                 if self.absorb(edits) {
                     continue;
                 }
-                return Ok(());
+                return self.standing_errors();
             };
             if self.past_deadline() {
                 return Err(EvalError::Deadline {
@@ -8260,6 +8346,8 @@ pub struct RunResult {
     pub(crate) touch_seq: usize,
     /// `Engine::relabels` when the run started.
     pub(crate) relabels: u64,
+    /// `Engine::binding_epoch` when the run started.
+    pub(crate) binding_epoch: u64,
     pub(crate) assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     pub(crate) sig: u64,
     pub(crate) error: Option<EvalError>,
