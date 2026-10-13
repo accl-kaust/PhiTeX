@@ -2125,10 +2125,10 @@ impl Engine {
     }
 
     pub(crate) fn args_vec(&self, args: ValueId) -> Vec<ValueId> {
-        match &*self.values.get(args) {
+        self.values.with(args, |v| match v {
             Value::List(xs) => xs.to_vec(),
             _ => Vec::new(),
-        }
+        })
     }
 
     fn slot_of(&self, id: NodeId) -> Slot {
@@ -5949,6 +5949,7 @@ impl Engine {
         &mut self,
         x: Slot,
         specs: &[(OpId, ValueId)],
+        ids: &[NodeId],
         follows: usize,
         heights: &[(u32, HeightFrom)],
         provisional: bool,
@@ -5960,7 +5961,11 @@ impl Engine {
         // Continuations are the last `follows` specs: siblings of `x` in the
         // tree (its own depth), owned by its run like children.
         let follows_at = specs.len().saturating_sub(follows);
-        let ids = self.child_ids(x, specs);
+        let ids = if ids.len() == specs.len() {
+            ids.to_vec()
+        } else {
+            self.child_ids(x, specs)
+        };
         let old_ids: Vec<NodeId> = old.iter().map(|&c| self.n(c).id).collect();
         let body = self.aux_of(x).and_then(|a| a.body);
         let unit = body.unwrap_or(self.n(x).unit);
@@ -6355,7 +6360,10 @@ impl Engine {
     }
 
     fn update_taint(&mut self, x: Slot) {
-        self.flush_order();
+        if self.aux_of(x).is_some_and(|a| a.watch.is_some()) {
+            // A range reader's taint folds over its range.
+            self.flush_order();
+        }
         let mut stack = vec![x];
         while let Some(y) = stack.pop() {
             if !self.live(y) {
@@ -6389,6 +6397,12 @@ impl Engine {
     }
 
     fn touch(&mut self, x: Slot) {
+        self.touch_with(x, None);
+    }
+
+    /// `touch` with the site list already computed (by the run, in
+    /// parallel) when `sites` is given.
+    fn touch_with(&mut self, x: Slot, sites: Option<Vec<(u64, u64)>>) {
         let n = self.n(x);
         if self.touched.contains_key(&n.id) {
             return;
@@ -6398,7 +6412,7 @@ impl Engine {
             sig: n.sig,
             args: n.args,
             out: self.out_hash(x),
-            sites: self.site_list(x),
+            sites: sites.unwrap_or_else(|| self.site_list(x)),
         };
         let id = n.id;
         self.touched.insert(id, snap);
@@ -6606,7 +6620,8 @@ impl Engine {
                 return;
             }
         };
-        self.touch(x);
+        let mut r = r;
+        self.touch_with(x, r.old_sites.take());
         let provisional = r.speculative && !r.assumptions.is_empty();
         if r.speculative && self.shape_changes(x, &r) {
             // A guess that changes the structure (claim, unfolding, scope
@@ -6651,7 +6666,7 @@ impl Engine {
         }
         {
             span!(Children);
-            self.set_children(x, &r.children, r.follows, &r.child_heights, provisional);
+            self.set_children(x, &r.children, &r.child_ids, r.follows, &r.child_heights, provisional);
         }
         // A stream claim may have read its own previous unfolding, which
         // the line above just replaced: those reads are gone.
@@ -6863,7 +6878,7 @@ impl Engine {
             specs = old_specs;
             follows = old.iter().filter(|&&c| self.n(c).parent != x).count();
         }
-        self.set_children(x, &specs, follows, &[], false);
+        self.set_children(x, &specs, &[], follows, &[], false);
         if let Some(body) = self.aux_of(x).and_then(|a| a.body) {
             for &(f, v) in &r.env {
                 self.set_env_slot(body, f, v);
@@ -8013,6 +8028,11 @@ pub struct RunResult {
     /// The starting height of each child (see [`Engine::child_heights`]),
     /// or empty when not computed.
     pub(crate) child_heights: Vec<(u32, HeightFrom)>,
+    /// The ids of `children`, computed by the run (empty: compute at apply).
+    pub(crate) child_ids: Vec<NodeId>,
+    /// The sites the node's previous uses were bound to, for the touch
+    /// snapshot (computed by the run; `None`: compute at apply).
+    pub(crate) old_sites: Option<Vec<(u64, u64)>>,
     pub(crate) env: Vec<(Field, ValueId)>,
     pub(crate) publishes: Vec<(Field, ValueId)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
@@ -8055,6 +8075,10 @@ impl Node {
 impl Engine {
     pub(crate) fn child_ids_pub(&self, x: Slot, specs: &[(OpId, ValueId)]) -> Vec<NodeId> {
         self.child_ids(x, specs)
+    }
+
+    pub(crate) fn site_list_pub(&self, x: Slot) -> Vec<(u64, u64)> {
+        self.site_list(x)
     }
 
     pub(crate) fn slot_by_id(&self, id: NodeId) -> Option<Slot> {
