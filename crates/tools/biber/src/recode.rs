@@ -64,7 +64,7 @@ impl Recode {
                 continue;
             }
             let mut keys: Vec<Vec<char>> = m.keys().cloned().collect();
-            keys.sort_by(|a, b| b.len().cmp(&a.len()));
+            keys.sort_by_key(|k| core::cmp::Reverse(k.len()));
             if keys.is_empty() {
                 continue;
             }
@@ -103,7 +103,7 @@ impl Recode {
         });
         // ([^{]\\\w)([;,.:%]) -> $1{}$2
         t = subst(&t, |t, p| {
-            if p + 3 < t.len() + 0
+            if p + 3 < t.len()
                 && t[p] != '{'
                 && t[p + 1] == '\\'
                 && is_word(t[p + 2])
@@ -213,7 +213,7 @@ impl Recode {
                     });
                 }
                 "diacritics" => {
-                    t = self.diacritics(&t, map, keys);
+                    t = Self::diacritics(&t, map, keys);
                 }
                 _ => {}
             }
@@ -248,7 +248,6 @@ impl Recode {
     }
 
     fn diacritics(
-        &self,
         t0: &[char],
         map: &BTreeMap<Vec<char>, String>,
         keys: &[Vec<char>],
@@ -269,7 +268,7 @@ impl Recode {
             }
             // preceded by \ + some key
             for k in keys {
-                if p >= k.len() + 1
+                if p > k.len()
                     && &t[p - k.len()..p] == k.as_slice()
                     && t[p - k.len() - 1] == '\\'
                 {

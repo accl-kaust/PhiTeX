@@ -726,7 +726,7 @@ impl Biber<'_> {
                             &s,
                             &alloc::format!("<BDS>{}-PERNAMEHASH</BDS>,?", esc(&nid)),
                             "",
-                        )
+                        );
                     }
                 }
             }

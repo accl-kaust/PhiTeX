@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::biber::{Biber, Fatal};
 use crate::collate::Collator;
-use crate::model::{LabelDate, Val, numify, truthy};
+use crate::model::{Val, numify, truthy};
 use crate::section::{DataList, DisStep, FieldV, Filter};
 use crate::unicode::{fc, lc};
 
@@ -158,7 +158,7 @@ impl Biber<'_> {
     }
 
     fn process_list(&mut self, dl: &mut DataList) -> Result<(), Fatal> {
-        dl.state = Default::default();
+        dl.state = crate::section::ListState::default();
         for f in [
             &mut dl.sortingnamekeytemplatename,
             &mut dl.uniquenametemplatename,
@@ -264,11 +264,11 @@ impl Biber<'_> {
                 }
                 let nd = dl.nd(&d.nlid, &d.nid);
                 nd.namestring = Some(d.namestring);
-                nd.namestrings = d.namestrings.clone();
+                nd.namestrings.clone_from(&d.namestrings);
                 for (i, se) in d.schema.iter().enumerate() {
                     if se.0 == "base" {
                         nd.basenamestring = d.namestrings.get(i).cloned();
-                        nd.basenamestringparts = se.1.clone();
+                        nd.basenamestringparts.clone_from(&se.1);
                         break;
                     }
                 }
@@ -1347,7 +1347,7 @@ impl Biber<'_> {
                         }
                     }
                     for np in n.parts() {
-                        let v = match pnun.get(&np).map(String::as_str).unwrap_or("none") {
+                        let v = match pnun.get(&np).map_or("none", String::as_str) {
                             "none" => "0",
                             "init" => "1",
                             "full" => "2",

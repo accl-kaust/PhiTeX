@@ -1,13 +1,13 @@
 //! Biber::Internals and the string helpers of Biber::Utils: name hashes,
 //! alphabetic labels, sort keys, and the normalisations they use.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::biber::Biber;
 use crate::config::{Config, SnkPart, SortAttrs};
-use crate::model::{Name, Names, Shared, Val, looks_like_number, numify, truthy};
+use crate::model::{Name, Names, Val, looks_like_number, numify, truthy};
 use crate::regex::{Regex, cap};
 use crate::section::{DataList, LabelCacheV};
 use crate::unicode::{fc, gc_len, gc_substr, lc, nfc, nfd, nfkd, uc};

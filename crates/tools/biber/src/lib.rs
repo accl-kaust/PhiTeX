@@ -110,7 +110,12 @@ pub fn run(bcf: &[u8], files: &mut dyn Files) -> Outcome {
     let r = b.parse_ctrlfile(&text).and_then(|()| b.prepare());
     let bbl = match r {
         Ok(()) => Some(b.bbl_text()),
-        Err(_) => None,
+        Err(f) => {
+            if !b.errors.contains(&f.0) {
+                b.errors.push(f.0);
+            }
+            None
+        }
     };
     let mut blg = String::new();
     blg.push_str("INFO - This is the native biber (biber 2.22 port)\n");

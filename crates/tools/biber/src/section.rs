@@ -5,7 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::config::{BV, SortTemplate};
+use crate::config::SortTemplate;
 use crate::model::EntryRef;
 
 #[derive(Clone, Debug)]
@@ -28,7 +28,6 @@ pub struct LabelCacheV {
 
 #[derive(Clone, Debug, Default)]
 pub struct Section {
-    pub number: String,
     pub entries: BTreeMap<String, EntryRef>,
     pub np_lengths: BTreeMap<String, usize>,
     pub keytorelclone: BTreeMap<String, String>,
@@ -56,9 +55,8 @@ pub struct Section {
 }
 
 impl Section {
-    pub fn new(n: &str) -> Section {
+    pub fn new(_number: &str) -> Section {
         Section {
-            number: n.into(),
             ..Section::default()
         }
     }
@@ -263,7 +261,6 @@ pub struct DataList {
     pub labelalphanametemplatename: String,
     pub namehashtemplatename: String,
     pub labelprefix: String,
-    pub sortinit_locale: String,
     pub filters: Vec<Filter>,
     pub keys: Vec<String>,
     pub state: ListState,
@@ -295,8 +292,7 @@ impl DataList {
         self.state
             .namelistdata
             .get(nlid)
-            .map(|l| (l.viscite, l.visbib, l.vissort, l.visalpha))
-            .unwrap_or((0, 0, 0, 0))
+            .map_or((0, 0, 0, 0), |l| (l.viscite, l.visbib, l.vissort, l.visalpha))
     }
     pub fn entryfield(&self, key: &str, f: &str) -> Option<FieldV> {
         self.state.fields.get(key).and_then(|m| m.get(f)).cloned()
