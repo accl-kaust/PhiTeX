@@ -1136,10 +1136,17 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                             field: format!("{fam}:{v}"),
                             global: gl,
                         }),
-                        None => e.prefixes.push(Def {
-                            field: format!("{fam}:"),
-                            global: gl,
-                        }),
+                        None => {
+                            if std::env::var_os("PHITEX_FAM_TRACE").is_some() {
+                                let a0 = atoms[k.saturating_sub(4)].start;
+                                let a1 = atoms.get(k + 3).map_or(text.len(), |x| x.start);
+                                eprintln!("FAMTRACE {fam} {:?}", &text[a0..a1]);
+                            }
+                            e.prefixes.push(Def {
+                                field: format!("{fam}:"),
+                                global: gl,
+                            });
+                        }
                     }
                     continue;
                 }
