@@ -40,7 +40,7 @@ impl Run<'_, '_> {
         // (the common case: a token of the list on top that is not an
         // internal marker, and no alignment entry to watch for)
         if let Some(tok) = self.input.next_of_top()
-            && tok.as_cs().is_none_or(|n| !n.frozen())
+            && !tok.is_frozen_cs()
         {
             self.set_cur_flag(tok);
             if self.aopen != 0
