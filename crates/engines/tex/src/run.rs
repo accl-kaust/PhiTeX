@@ -249,7 +249,7 @@ pub(crate) struct Run<'c, 'a> {
     sfields: FxHashMap<usize, (Rc<str>, Field)>,
     /// The names of the control sequences the run tokenized, one shared
     /// allocation per name (so [`Self::sfields`] hits).
-    syms: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<phitex_defuse::FxHasher>>,
+    syms: phitex_defuse::FxHashSet<Rc<str>, std::hash::BuildHasherDefault<phitex_defuse::FxHasher>>,
     /// The scope kind last decoded (`Run::mode`, once a command): its
     /// value and its fields `(group, sid, lid, mode, depth, extra)`.
     pub kind_memo: Option<(ValueId, KindFields)>,
@@ -315,7 +315,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mcache: FxHashMap::default(),
             tfields: FxHashMap::default(),
             sfields: FxHashMap::default(),
-            syms: std::collections::HashSet::default(),
+            syms: phitex_defuse::FxHashSet::default(),
             kind_memo: None,
             astate: None,
             lines_entered: 0,

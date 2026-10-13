@@ -2867,7 +2867,7 @@ fn jpeg_info(d: &[u8]) -> (i32, i32, i32, i32, bool, i32, i32) {
 /// `pdf_vlist_out`: pdfTeX §729–§746), by its handle: `(cur_h, cur_v)`
 /// from the page's corner, and the page's height.
 pub(crate) struct Positions {
-    pub at: std::collections::HashMap<u32, (i32, i32)>,
+    pub at: phitex_defuse::FxHashMap<u32, (i32, i32)>,
     pub page_height: i32,
     pub pdf: bool,
 }
@@ -2895,7 +2895,7 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
     } else {
         b.height + b.depth + 2 * v0 + 2 * 4_736_286
     };
-    let mut at = std::collections::HashMap::new();
+    let mut at = phitex_defuse::FxHashMap::default();
     let width = |f: u32, c: u16| view.char_dims(f, u32::from(c)).map_or(0, |d| d.width);
     let mut w = Walk {
         at: &mut at,
@@ -2915,7 +2915,7 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
 }
 
 struct Walk<'a> {
-    at: &'a mut std::collections::HashMap<u32, (i32, i32)>,
+    at: &'a mut phitex_defuse::FxHashMap<u32, (i32, i32)>,
     width: &'a dyn Fn(u32, u16) -> i32,
 }
 
