@@ -43,7 +43,8 @@ pub(crate) struct Ops {
     pub put: OpId,
     pub pagestep: OpId,
     pub pagestep_any: OpId,
-    pub breaks: OpId,
+    pub pageplan: OpId,
+    pub brk: OpId,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
     /// The format's definitions the build analyses document texts with
@@ -213,6 +214,9 @@ pub(crate) struct Run<'c, 'a> {
     /// 256, plus one (0: not read yet); emptied whenever `own` changes.
     cats: [u8; 256],
     pub own: FxHashMap<Field, Option<ValueId>>,
+    /// Values read in place of the fields' reaching definitions (a page
+    /// step's `\count0..9` from `pgdef:<j-1>`), below this run's own.
+    pub over: FxHashMap<Field, ValueId>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     /// Where each field's definitions are in `defs`, latest last: a
     /// redefinition within the same group replaces in place instead of
@@ -282,6 +286,7 @@ impl<'c, 'a> Run<'c, 'a> {
             fread: Vec::new(),
             no_pull: false,
             own: FxHashMap::default(),
+            over: FxHashMap::default(),
             cats: [0; 256],
             defs: Vec::new(),
             def_ix: FxHashMap::default(),
@@ -322,7 +327,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(&x) = self.own.get(&f) {
             return Ok(x);
         }
+        if let Some(&x) = self.over.get(&f) {
+            return Ok(Some(x));
+        }
         let r = self.cx.use_field(f);
+        crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
@@ -431,7 +440,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if !self.cx.is_loopback(wk) {
             return Ok(false);
         }
-        let keys = self.cx.use_field(wk)?.map(|x| list_of(v, x)).unwrap_or_default();
+        let keys = self
+            .cx
+            .use_field(wk)?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
         for k in keys {
             let name = str_of(v, k);
             let wd = v.field(&format!("wdef:{name}"));
@@ -600,14 +613,23 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.own.insert(f, Some(val));
         self.cats = [0; 256];
-        let loc = if global { Locality::Global } else { Locality::Local };
+        let loc = if global {
+            Locality::Global
+        } else {
+            Locality::Local
+        };
         // the definitions since the innermost group opened are the
         // group's (`nest.rs` pop_level truncates to its opening): one
         // per field there; outside every group, one per field at all. A
         // local after a global is kept apart, in a group (its close drops
         // the local, the global stays, §283) and at level 0 (the engine's
         // scope sees the global, then the local)
-        let floor = self.nest.iter().rev().find(|l| l.group != 0).map_or(0, |l| l.defs_len);
+        let floor = self
+            .nest
+            .iter()
+            .rev()
+            .find(|l| l.group != 0)
+            .map_or(0, |l| l.defs_len);
         let ix = self.def_ix.entry(f).or_default();
         if let Some(&i) = ix.last()
             && i >= floor
@@ -1542,6 +1564,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.contribute("items", s);
         }
         for (f, x, l) in std::mem::take(&mut self.defs) {
+            crate::exec::widths::def(f);
             self.cx.define_with(f, x, l);
         }
         if !self.own.is_empty() {

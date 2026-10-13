@@ -84,6 +84,10 @@ pub struct Options {
     /// candidates per step. The output is the same either way.
     pub speculation: Speculation,
     pub speculation_budget: usize,
+    /// The loop-back rounds an evaluation may take before it ends with
+    /// a no-fixpoint error naming the loop-back fields (a document whose
+    /// written files oscillate), instead of running on.
+    pub max_rounds: u64,
 }
 
 /// When the engine speculates ([`Options::speculation`]).
@@ -312,6 +316,7 @@ impl Default for Options {
             // commands answer `Any`
             speculation: Speculation::Predicted,
             speculation_budget: 256,
+            max_rounds: 64,
         }
     }
 }
@@ -416,13 +421,17 @@ pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
 /// stood, page `j` where it fired) with each page's entries in place.
 /// Without a plan entry for them, the document nodes' entries go first.
 pub(crate) fn ordered_entries(v: &Values, plan: &[ValueId], streams: &[ValueId]) -> Vec<ValueId> {
-    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> = std::collections::BTreeMap::default();
+    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> =
+        std::collections::BTreeMap::default();
     let mut imm = Vec::new();
     for &e in streams {
         let xs = list_of(v, e);
         match xs.as_slice() {
             [j, x] if v.as_int(*j).is_some() => {
-                by_page.entry(v.as_int(*j).unwrap_or(0)).or_default().push(*x);
+                by_page
+                    .entry(v.as_int(*j).unwrap_or(0))
+                    .or_default()
+                    .push(*x);
             }
             _ => imm.push(e),
         }
@@ -1022,7 +1031,8 @@ impl Graph {
                 any,
             }))
         });
-        let breaks = eng.register(Arc::new(crate::page::Breaks(shared.clone())));
+        let pageplan = eng.register(Arc::new(crate::page::PagePlan(shared.clone())));
+        let brk = eng.register(Arc::new(crate::page::Brk(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -1037,7 +1047,8 @@ impl Graph {
             put,
             pagestep,
             pagestep_any,
-            breaks,
+            pageplan,
+            brk,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
         };
@@ -1068,6 +1079,10 @@ impl Graph {
             let f = eng.values().field(&format!("pagefx:{j}"));
             let none = eng.values().list(Vec::new());
             eng.declare_loopback(f, none);
+            // what `\count0..9` are after page j's step (the build's
+            // guess in round one, `page_guesses`)
+            let f = eng.values().field(&format!("pgdef:{j}"));
+            eng.declare_loopback(f, ValueId::UNIT);
         }
         for f in crate::hints::COUNTERS {
             let fld = eng.values().field(f);
@@ -1116,6 +1131,16 @@ impl Graph {
         let v = self.eng.values();
         if let E::UndeclaredDefinition { field, .. } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
+        }
+        // (the engine does not say which loop-backs kept changing: the
+        // job's read-back fields are the candidates)
+        if let E::NonConvergence { .. } = e {
+            for name in &self.written {
+                let _ = write!(out, "\n  written file {name}");
+            }
+            for f in &self.wdefs {
+                let _ = write!(out, "\n  read-back field {f}");
+            }
         }
         for id in ids {
             let what = self.eng.node_info(id).map_or_else(
@@ -1795,6 +1820,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     };
     let finder = &opts.finder;
     let mut g = Graph::new(opts.time_limit, opts.threads);
+    g.eng.set_max_rounds(opts.max_rounds);
     g.sched = opts.speculation.scheduler(opts.speculation_budget);
     let unit = g.eng.new_unit();
     // the files a previous build of this prelude read, supplied before
@@ -1946,6 +1972,7 @@ impl Build {
         let defs = prelude_defs(&cached, prelude, &opts.finder);
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
+        g.eng.set_max_rounds(opts.max_rounds);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
@@ -1961,7 +1988,11 @@ impl Build {
         // from the start (`.bbl` and `.ind` stay files until their
         // BibTeX and makeindex nodes publish them)
         for ext in WRITTEN_EXTS {
-            g.written_file(&format!("{}.{ext}", opts.jobname), opts.fixpoint, &opts.finder);
+            g.written_file(
+                &format!("{}.{ext}", opts.jobname),
+                opts.fixpoint,
+                &opts.finder,
+            );
         }
         {
             g.absorb_provided();
@@ -2015,8 +2046,9 @@ impl Build {
         let nodes = g.push_text(unit, &as_file(document), &defs, doc);
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
-        let breaks = g.ops.breaks;
-        let _ = g.eng.push(unit, breaks, Vec::new());
+        let pageplan = g.ops.pageplan;
+        let _ = g.eng.push(unit, pageplan, Vec::new());
+        page_guesses(&mut g, &env);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
         let files_op = g.files_op;
@@ -2078,6 +2110,21 @@ impl Build {
         );
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            let (nodes, units, values) = self.sizes();
+            let (node, use_) = Engine::record_sizes();
+            let rss = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|t| {
+                    t.lines()
+                        .find_map(|l| l.strip_prefix("VmRSS:"))
+                        .map(|v| v.trim().to_owned())
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
+            );
+        }
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
         // their claims and their descendants' (a debugging dump)
         if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
@@ -2171,6 +2218,23 @@ impl Build {
     #[must_use]
     pub fn pdf_exact_reason(&self) -> Option<&str> {
         self.g.pdf_exact.as_deref()
+    }
+
+    /// Frees the engine's memoized applications nothing reaches any
+    /// more (a long session calls it between edits); returns the nodes
+    /// freed.
+    pub fn collect_garbage(&mut self) -> usize {
+        self.g.eng.collect_garbage()
+    }
+
+    /// The engine's live nodes, live units and values in its table.
+    #[must_use]
+    pub fn sizes(&self) -> (usize, usize, usize) {
+        (
+            self.g.eng.live_nodes(),
+            self.g.eng.live_units(),
+            self.g.eng.values().len(),
+        )
     }
 
     /// The document changed to `text`: the nodes whose slices differ are
@@ -2808,5 +2872,30 @@ mod prelude_tests {
         assert!(deserialise(&other).is_none());
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
+    }
+}
+
+/// The cold guess of the page steps' loop-back `pgdef:<j>` (`\count0..9`
+/// after page j's step), declared as its round-one value before the
+/// first evaluation: `\count0` advanced by one per page (plain's and
+/// LaTeX's routines), the others as the format left them. A right guess
+/// costs nothing; a wrong one re-runs the steps after it.
+fn page_guesses(g: &mut Graph, env: &Env) {
+    let v = g.eng.values();
+    let int = |k: &str| {
+        env.iter()
+            .find(|(n, _)| n == k)
+            .map_or(0, |(_, t)| crate::val::int_of(v, import(v, t)))
+    };
+    let base: Vec<i64> = (0..10).map(|k| int(&format!("count:{k}"))).collect();
+    let mut decl = Vec::new();
+    for j in 0..crate::page::MAX_PAGES {
+        let d = i64::try_from(j).unwrap_or(0) + 1;
+        let mut cs: Vec<ValueId> = base.iter().map(|&c| v.int(c)).collect();
+        cs[0] = v.int(if base[0] >= 0 { base[0] + d } else { base[0] - d });
+        decl.push((v.field(&format!("pgdef:{j}")), v.list(cs)));
+    }
+    for (f, x) in decl {
+        g.eng.declare_loopback(f, x);
     }
 }
