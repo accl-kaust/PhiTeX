@@ -97,7 +97,10 @@ impl Operation for Exec {
             return false;
         }
         // (a boundary node may begin the next region, keyed by its own id)
-        let boundary = args.get(3).and_then(|&b| v.as_int(b)).is_some_and(|b| b != 0);
+        let boundary = args
+            .get(3)
+            .and_then(|&b| v.as_int(b))
+            .is_some_and(|b| b != 0);
         if !boundary
             && let Some(&x) = args.get(2)
             && let Some(mine) = v.as_int(x)

@@ -951,7 +951,7 @@ impl Graph {
         let mut out = format!("evaluation: {e}\n{e:?}");
         let v = self.eng.values();
         if let E::UndeclaredDefinition { field, .. } = e {
-            out.push_str(&format!("\n  field {}", field_name(v, *field)));
+            let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
         for id in ids {
             let what = self.eng.node_info(id).map_or_else(

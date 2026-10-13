@@ -1791,7 +1791,11 @@ impl Cx<'_> {
         } else {
             // (its arguments may be expanded as it reads them: what
             // they define counts here; a box's content runs after it)
-            let hi = if boxk.is_some() { a + 1 } else { it.end.max(a + 1) };
+            let hi = if boxk.is_some() {
+                a + 1
+            } else {
+                it.end.max(a + 1)
+            };
             let e = hints::effects(self.text, self.atoms, a, hi, global);
             closure.of(&e)
         };

@@ -827,7 +827,11 @@ fn scan(b: &[u8], mut i: usize, limit: usize, cat: &Catcodes) -> (SyntaxKind, us
                     // (`\^^M`: the character `^^` stands for is the
                     // symbol's name, §355)
                     let hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
-                    i += if i + 3 < limit && hex(b[i + 2]) && hex(b[i + 3]) { 4 } else { 3 };
+                    i += if i + 3 < limit && hex(b[i + 2]) && hex(b[i + 3]) {
+                        4
+                    } else {
+                        3
+                    };
                 } else {
                     i = (i + utf8_len(b[i])).min(limit);
                 }
