@@ -204,7 +204,7 @@ impl Run<'_, '_> {
 
     /// Rebuilds `def_ix` after `defs` moved (an in-place change below
     /// the innermost group, `modify_at`).
-    fn reindex_defs(&mut self) {
+    pub(crate) fn reindex_defs(&mut self) {
         self.def_ix.clear();
         for (i, d) in self.defs.iter().enumerate() {
             self.def_ix.entry(d.0).or_default().push(i);

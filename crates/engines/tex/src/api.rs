@@ -190,10 +190,6 @@ struct Absorb<'a> {
     defs: Defs,
     /// Whether the text is a document's ([`is_doc`]).
     doc: bool,
-    /// The latest version taken whose text was the one the nodes have
-    /// already: nothing applied, so not reported to the engine (its
-    /// contract: `None` when nothing was applied); the result is for it.
-    unchanged: Option<u64>,
     /// The finder `\\input` files are sliced with, and the text applied.
     finder: Finder,
     text: &'a mut String,
@@ -202,7 +198,7 @@ struct Absorb<'a> {
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
-        let changed = apply_text(
+        apply_text(
             eng,
             self.exec,
             self.dvi,
@@ -213,13 +209,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             Some(&self.finder),
         );
         *self.text = text;
-        if changed {
-            self.unchanged = None;
-            Some(version)
-        } else {
-            self.unchanged = Some(version);
-            None
-        }
+        Some(version)
     }
 }
 
@@ -236,10 +226,6 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
 /// Edited texts of `\\input` files by name: the text and its bytes.
 type Overrides = Arc<Mutex<FxHashMap<String, (String, Vec<u8>)>>>;
 
-/// Edits the document's nodes `nodes` to the text `text`: the slices
-/// both texts share at the start and the end stay, those between are
-/// replaced, removed or inserted. Whether anything changed (a text
-/// whose slices are the nodes' already changes nothing).
 /// `PHITEX_TEX_TIME`: an edit's apply, its phases (`t`: slices, hints,
 /// diff, as elapsed since `t_all`) and slice counts (`n`: old, new, kept,
 /// replaced, removed, inserted, text bytes).
@@ -298,6 +284,9 @@ fn slice_keys(text: &str, defs: &Defs, doc: bool) -> Vec<(String, (usize, usize)
         .collect()
 }
 
+/// Edits the document's nodes `nodes` to the text `text`: the slices
+/// both texts share at the start and the end stay, those between are
+/// replaced, removed or inserted.
 // one call site (Absorb::absorb), which passes its fields apart
 #[allow(clippy::too_many_arguments)]
 fn apply_text(
@@ -309,15 +298,12 @@ fn apply_text(
     defs: &Defs,
     doc: bool,
     finder: Option<&Finder>,
-) -> bool {
+) {
     let t_all = std::time::Instant::now();
     let text = as_file(text);
     let new = slice_keys(&text, defs, doc);
     let t_slices = t_all.elapsed();
     let old = &*nodes_now;
-    if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
-        return false;
-    }
     let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
     let t_hints = t_all.elapsed();
     if doc {
@@ -404,7 +390,6 @@ fn apply_text(
             text.len(),
         ],
     );
-    true
 }
 
 impl Default for Options {
@@ -916,9 +901,6 @@ pub struct Stats {
     pub gated: u64,
     /// The version of the text the result is for ([`Build::version`]).
     pub version: u64,
-    /// The texts taken while the engine evaluated (the engine's
-    /// `edits_applied`): each one's version and the step it came before.
-    pub absorbed: Vec<(u64, u64)>,
     /// Scheduler steps, and the nodes run in them summed: `ready_mean`
     /// is the mean batch.
     pub steps: u64,
@@ -1075,7 +1057,6 @@ impl Stats {
         }
         self.env_provided += r.env_provided;
         self.version = r.version;
-        self.absorbed.extend_from_slice(&r.edits_applied);
         self.steps += r.steps;
         self.ready_total += r.ready_total;
         self.speculations += r.speculations;
@@ -2481,7 +2462,6 @@ impl Build {
             dvi: self.dvi,
             defs: self.defs.clone(),
             doc: self.doc,
-            unchanged: None,
             finder: self.g.input_finder(&self.opts.finder),
             text: &mut self.text,
         };
@@ -2496,10 +2476,6 @@ impl Build {
             self.opts.fixpoint,
             &mut absorb,
         );
-        // (a text taken last that changed nothing: the result is for it)
-        if let Some(v) = absorb.unchanged {
-            stats.version = stats.version.max(v);
-        }
         stats.live = self.g.eng.live_nodes();
         stats.page_steps_completed = self.g.take_steps_done();
         stats.refuted_guesses = self.g.take_refuted();
