@@ -2186,7 +2186,7 @@ impl Run<'_, '_> {
             // a text paging inline: §1054 as tex.web has it
             if self.all_over_inline()? {
                 self.claim_rest = true;
-                self.frames.clear();
+                self.input = crate::input::Input::new();
                 return Ok(());
             }
             self.back_cur();
@@ -2199,7 +2199,7 @@ impl Run<'_, '_> {
         self.append(0, m);
         // nothing after `\end` is read
         self.claim_rest = true;
-        self.frames.clear();
+        self.input = crate::input::Input::new();
         Ok(())
     }
 
