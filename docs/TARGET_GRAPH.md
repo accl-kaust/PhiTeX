@@ -97,8 +97,12 @@ Forbidden, and asserted by the test:
 Critical path: the format's definition chain (cached) + one region (1)
 + `breaks` (1) + `brk:<j>` (1) + one page step (1) + `dvi` (1),
 independent of the page count: a page step defines nothing to the
-engine (only the exact PDF writer's `pdf:state` fold chains, by
-design). The test asserts `height <= 6 + pages` per fixture.
+engine. The exact PDF writer's page steps write their pages apart
+(`pdfout::ship_apart`) and the `dvi` node ships them in order; only a
+document whose output routine runs a PDF command folds the pages
+through `pdf:state` (`pdf:fold`). The test asserts `height <= 6 +
+pages` per fixture, and `chain.rs::pdf_exact_no_page_chain` height
+<= 6 with no step-to-step link in exact PDF mode.
 
 ## Why this shape
 
