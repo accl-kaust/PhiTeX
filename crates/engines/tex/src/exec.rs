@@ -338,6 +338,9 @@ impl Executor for Threads {
                 .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
         }
         self.batches.fetch_add(1, Ordering::Relaxed);
+        if std::env::var_os("PHITEX_BATCH_TRACE").is_some() {
+            eprintln!("batch: {n}");
+        }
         self.jobs_max_batch.fetch_max(n, Ordering::Relaxed);
         if self.n <= 1 || n < job_grain() || !threads_possible() {
             self.batches_inline.fetch_add(1, Ordering::Relaxed);
