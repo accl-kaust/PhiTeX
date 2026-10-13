@@ -943,7 +943,9 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                                 while p.atoms.get(j).is_some_and(|x| x.kind == AtomKind::Space) {
                                     j += 1;
                                 }
-                                p.atoms.get(j).is_some_and(|x| match x.kind {
+                                !claimed[j]
+                                    && !inside[j]
+                                    && p.atoms.get(j).is_some_and(|x| match x.kind {
                                     AtomKind::Char(_) | AtomKind::Verb => true,
                                     AtomKind::Cs => starts_par(x.name(text)),
                                     _ => false,
@@ -1407,6 +1409,9 @@ impl Analysis<'_> {
         if at.kind != AtomKind::Cs
             && let Some(p) = self.prev(a)
             && self.atoms()[p].kind == AtomKind::Cs
+            // (a command that is itself an operand, `\\footnote\\dag{…}`,
+            // reads nothing: its reader does)
+            && !self.claimed[p]
             && {
                 let h = self.hint(p);
                 h.bound.is_none() && !is_demoted(&h)
@@ -1858,6 +1863,16 @@ impl Analysis<'_> {
             }
             pass::MayDefine::Prefixes(ds) => {
                 add_defs(ds, true, b);
+                true
+            }
+            pass::MayDefine::Any
+                if !self.defs.is_defined(name) && self.prelude.is_defined(name) && {
+                    // (the format's definition is final: its body's
+                    // closure bounds the call)
+                    let set = self.defset(name);
+                    set.unbounded.is_empty() && self.add_set(&set, b, cause)
+                } =>
+            {
                 true
             }
             pass::MayDefine::Any => {
