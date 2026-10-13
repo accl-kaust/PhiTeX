@@ -44,7 +44,7 @@ fn equal_content_publishes_nothing_the_second_time() {
         .find(|(n, _)| n == "t.aux")
         .map(|(_, t)| t.as_str())
         .unwrap_or_default();
-    assert_eq!(aux, "\\addfoo{abc}\n\\gdef \\bar {xyz}\n");
+    assert_eq!(aux, "\\addfoo {abc}\n\\gdef \\bar {xyz}\n");
     // the page typeset with the read-back values: `abc/xyz` set in the
     // DVI (set_char opcodes are the ASCII codes)
     let (dvi, _) = b.output();
