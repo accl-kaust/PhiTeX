@@ -3426,7 +3426,9 @@ fn mean_kind(m: &Mean) -> &'static str {
 /// The definitions a run made outside its bound: the violation, if any.
 pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
     let b = h.bound.as_ref()?;
-    for f in r.def_fields() {
+    // (a local definition of the value the run read is no definition:
+    // `\\everypar` set back to what it was, the binding unchanged)
+    for f in r.published_fields() {
         let name = match &*r.v.get(f.0) {
             Value::Str(s) => s.to_string(),
             _ => continue,
