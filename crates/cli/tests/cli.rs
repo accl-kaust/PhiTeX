@@ -452,6 +452,51 @@ fn build_to_the_fixpoint() {
     }
 }
 
+/// A biblatex document (`oracle/fixtures/biber/numeric.tex` and its
+/// `refs.bib`) built to the fixpoint by `phitex build`, biber run in
+/// process between the runs: its `.bbl` is biber's and its DVI file is
+/// that of `latex`, `biber`, `latex`, `latex` (both blessed by
+/// scripts/bless-biber.sh).
+#[test]
+#[ignore = "waits for phitex-tex running biblatex (at \\printbibliography: hint regime violated, catcode of ' ' is 9)"]
+fn build_biblatex_with_native_biber() {
+    let _one = one();
+    let src = fixtures().join("biber");
+    let name = "numeric";
+    let ours = scratch("biber-numeric");
+    for f in [format!("{name}.tex"), "refs.bib".to_string()] {
+        std::fs::copy(src.join(&f), ours.join(&f)).expect("a copy");
+    }
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &ours)
+        .args([
+            "build",
+            "-v",
+            "--output-format",
+            "dvi",
+            &format!("{name}.tex"),
+        ])
+        .output()
+        .expect("phitex runs");
+    let errs = String::from_utf8_lossy(&out.stderr);
+    eprintln!("{name}: phitex build:\n{errs}");
+    assert!(out.status.success(), "{name}: phitex build failed:\n{errs}");
+    assert!(errs.contains("biber"), "{name}: biber did not run:\n{errs}");
+    let got = std::fs::read(ours.join(format!("{name}.bbl"))).unwrap_or_default();
+    let want = std::fs::read(src.join(format!("{name}.bbl"))).expect("the .bbl oracle");
+    assert!(
+        got == want,
+        "{name}: the native biber's .bbl is not biber's"
+    );
+    let got = std::fs::read(ours.join(format!("{name}.dvi"))).unwrap_or_default();
+    let want = std::fs::read(src.join(format!("fixpoint/{name}.dvi"))).expect("the DVI oracle");
+    assert!(
+        masked(&got) == masked(&want),
+        "{name}: the fixpoint's DVI is not latex+biber's: {} (ours in {})",
+        first_difference(&got, &want),
+        ours.display()
+    );
+}
+
 /// The 48-page plain document of phitex-red's budgets ("big"), in PDF
 /// mode, as one `-ini` file.
 fn big() -> String {
@@ -1189,7 +1234,14 @@ fn watch_tables_bounded() {
     std::fs::write(dir.join("big.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
-            "watch", "--json", "--no-view", "--ini", "--etex", "-j", "8", "big.tex",
+            "watch",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "8",
+            "big.tex",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1234,7 +1286,10 @@ fn watch_tables_bounded() {
     }
     if std::env::var_os("PHITEX_NO_GC").is_none() {
         let (a, b) = (&sizes[1], &sizes[sizes.len() - 1]);
-        assert!(b[0] <= a[0] * 11 / 10 && b[2] <= a[2] * 11 / 10, "grew: {a:?} -> {b:?}");
+        assert!(
+            b[0] <= a[0] * 11 / 10 && b[2] <= a[2] * 11 / 10,
+            "grew: {a:?} -> {b:?}"
+        );
     }
 }
 
@@ -1297,9 +1352,14 @@ fn watch_gc_series(name: &str, file: &str, text: &str, args: &[&str], word: usiz
     }
     let _ = child.wait();
     let gc = std::env::var_os("PHITEX_NO_GC").is_none();
-    eprintln!("GCSERIES {name} gc={gc}: build | nodes units values | RSS kB | gc us (freed) | wall ms | notes");
+    eprintln!(
+        "GCSERIES {name} gc={gc}: build | nodes units values | RSS kB | gc us (freed) | wall ms | notes"
+    );
     for (k, (s, wall, runs)) in rows.iter().enumerate() {
-        eprintln!("GCROW {name} gc={gc} build {} {s:?} wall {wall:.1} | {runs}", k + 1);
+        eprintln!(
+            "GCROW {name} gc={gc} build {} {s:?} wall {wall:.1} | {runs}",
+            k + 1
+        );
     }
     let walls: Vec<f64> = rows[1..].iter().map(|r| r.1).collect();
     let gcs: Vec<u64> = rows[1..].iter().map(|r| r.0[4]).collect();
@@ -1320,7 +1380,13 @@ fn watch_gc_para400() {
     let text = std::fs::read_to_string(p).expect("scratch/para400.tex");
     let mid = text.len() / 2;
     let word = text[mid..].find(" the ").expect("a word") + mid;
-    watch_gc_series("gc-para400", "para400.tex", &text, &["--engine", "tex", "-j", "8"], word);
+    watch_gc_series(
+        "gc-para400",
+        "para400.tex",
+        &text,
+        &["--engine", "tex", "-j", "8"],
+        word,
+    );
 }
 
 /// LaTeX's hello with 30 paragraphs added: the GC series under
@@ -1343,7 +1409,13 @@ fn watch_gc_latex30() {
     // (" the " right after "15. This is")
     word += "15. ".len();
     assert_eq!(&text[word..word + 5], " the ");
-    watch_gc_series("gc-latex30", "hello.tex", &text, &["--engine", "pdflatex", "-j", "8"], word);
+    watch_gc_series(
+        "gc-latex30",
+        "hello.tex",
+        &text,
+        &["--engine", "pdflatex", "-j", "8"],
+        word,
+    );
 }
 
 /// `phitex watch`, headless: the main file edited on disk while the cold

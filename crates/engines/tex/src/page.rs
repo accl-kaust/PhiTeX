@@ -198,6 +198,7 @@ impl Run<'_, '_> {
     /// (`pp:start:<j>`) and the `marks:before:<N>` values; then one `brk`
     /// node per page, which re-folds its own page and fires its step:
     /// the pages' material is made and the steps run in parallel.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn page_plan(&mut self) -> R<()> {
         let v = self.v;
         let l = self.list_fold(0)?;
@@ -235,7 +236,11 @@ impl Run<'_, '_> {
         let mut plan: Vec<ValueId> = Vec::new();
         let mut j = 0;
         while !ended && j < MAX_PAGES {
-            let fx = if j > 0 { self.page_effects(j - 1)? } else { Vec::new() };
+            let fx = if j > 0 {
+                self.page_effects(j - 1)?
+            } else {
+                Vec::new()
+            };
             let out = fold_page(v, &items, &table, marker, &start, fx);
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
@@ -249,27 +254,24 @@ impl Run<'_, '_> {
                     }
                 }
             }
-            match out.fired {
-                Some((f, side, end)) => {
-                    plan.push(v.int(i64::try_from(j).unwrap_or(0)));
-                    let ms: Vec<ValueId> = f
-                        .marks
-                        .iter()
-                        .filter_map(|&k| side.marks.get(k as usize).copied())
-                        .collect();
-                    marks.fire_values(v, &ms);
-                    starts.push(end.value(v));
-                    start = end;
+            if let Some((f, side, end)) = out.fired {
+                plan.push(v.int(i64::try_from(j).unwrap_or(0)));
+                let ms: Vec<ValueId> = f
+                    .marks
+                    .iter()
+                    .filter_map(|&k| side.marks.get(k as usize).copied())
+                    .collect();
+                marks.fire_values(v, &ms);
+                starts.push(end.value(v));
+                start = end;
+            } else {
+                if out.stuck {
+                    self.diag(
+                        true,
+                        "\\end could not empty the page (an output routine that never ships?)",
+                    );
                 }
-                None => {
-                    if out.stuck {
-                        self.diag(
-                            true,
-                            "\\end could not empty the page (an output routine that never ships?)",
-                        );
-                    }
-                    ended = true;
-                }
+                ended = true;
             }
             j += 1;
         }
@@ -285,7 +287,7 @@ impl Run<'_, '_> {
             self.set(&format!("pp:start:{j}"), s, true);
         }
         for j in 0..starts.len() {
-            self.kid(self.ops.brk, vec![v.int(j as i64)]);
+            self.kid(self.ops.brk, vec![v.int(i64::try_from(j).unwrap_or(0))]);
         }
         Ok(())
     }
@@ -314,7 +316,11 @@ impl Run<'_, '_> {
             self.ops.pagestep
         };
         let marker0 = self.get("pp:marker")?.unwrap_or(ValueId::UNIT);
-        let fx = if j > 0 { self.page_effects(j - 1)? } else { Vec::new() };
+        let fx = if j > 0 {
+            self.page_effects(j - 1)?
+        } else {
+            Vec::new()
+        };
         let guard = v.get(items_v);
         let items: &[ValueId] = match &*guard {
             Value::List(xs) => xs,
@@ -324,7 +330,7 @@ impl Run<'_, '_> {
         drop(guard);
         if let Some((f, side, _)) = out.fired {
             let data = self.page_data(&f, &side)?;
-            self.kid(op, vec![v.int(j as i64), data]);
+            self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), data]);
         }
         Ok(())
     }
@@ -394,7 +400,11 @@ impl Run<'_, '_> {
                 let xs = list_of(v, x);
                 if xs.len() == 10 {
                     for (k, &c) in xs.iter().enumerate() {
-                        let cf = self.ops.fields.get_at(v, self.cx.values_epoch(), &format!("count:{k}"));
+                        let cf = self.ops.fields.get_at(
+                            v,
+                            self.cx.values_epoch(),
+                            &format!("count:{k}"),
+                        );
                         self.over.insert(cf, c);
                     }
                 }
@@ -807,8 +817,11 @@ fn fold_page(
             .or_else(|| items.get(cursor).copied())
             .and_then(|y| nodes::decode(v, y, &mut Side::default()));
         if let Outcome::Fire(f) = pb.contribute(p, next.as_ref(), &params, &mut class) {
-            let mut carried: Vec<ValueId> =
-                f.contributions.iter().map(|n| nodes::encode(v, n, &side)).collect();
+            let mut carried: Vec<ValueId> = f
+                .contributions
+                .iter()
+                .map(|n| nodes::encode(v, n, &side))
+                .collect();
             carried.extend(queue.drain(..));
             // the canonical end: the material carried over is the
             // list's own items before the cursor whenever it can be
@@ -859,6 +872,7 @@ impl Operation for PagePlan {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
+    #[allow(clippy::redundant_closure_for_method_calls)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         run_node(cx, ops(&self.0), |r| r.page_plan())
     }
