@@ -829,6 +829,7 @@ fn union(a: &mut Bound, b: &Bound) {
             }
         }
         (st, None) => *st = None,
+        (None, Some(_)) => {}
     }
     a.no_scope = a.no_scope && b.no_scope;
 }

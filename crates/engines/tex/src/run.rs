@@ -189,7 +189,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The category codes this run read (§232), by character below
     /// 256, plus one (0: not read yet); emptied whenever `own` changes.
     cats: [u8; 256],
-    own: FxHashMap<Field, Option<ValueId>>,
+    pub own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
     pub kids: Vec<(OpId, Vec<ValueId>)>,

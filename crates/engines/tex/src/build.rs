@@ -254,7 +254,7 @@ impl Run<'_, '_> {
         }
         self.effect = Effect::Scope(Brackets {
             closes: 0,
-            opens: u32::try_from(n).unwrap_or(1),
+            opens: u8::try_from(n).unwrap_or(1),
             before: true,
             kind,
             kind_pending: false,
