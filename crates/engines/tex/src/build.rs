@@ -187,7 +187,7 @@ impl Run<'_, '_> {
             let v = self.v;
             let mut defs = Vec::new();
             let mut carry = Vec::new();
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = phitex_defuse::FxHashSet::default();
             for f in fix {
                 let name = crate::val::str_of(v, f);
                 if !seen.insert(name.clone()) {
@@ -666,11 +666,11 @@ impl Run<'_, '_> {
     /// The hyphenation patterns and exceptions so far, entered once per
     /// value for the process.
     fn patterns(&mut self) -> R<Arc<phitex_typeset::hyph::Patterns>> {
-        type Cache = Mutex<std::collections::HashMap<u64, Arc<phitex_typeset::hyph::Patterns>>>;
+        type Cache = Mutex<phitex_defuse::FxHashMap<u64, Arc<phitex_typeset::hyph::Patterns>>>;
         static C: OnceLock<Cache> = OnceLock::new();
         let x = self.get("patterns")?;
         let key = x.map_or(0, ValueId::raw);
-        let cache = C.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        let cache = C.get_or_init(|| Mutex::new(phitex_defuse::FxHashMap::default()));
         if let Some(p) = cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

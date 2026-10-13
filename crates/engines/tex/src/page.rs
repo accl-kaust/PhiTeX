@@ -214,7 +214,7 @@ impl Run<'_, '_> {
         // the marks in force after each fired page (§1012–§1014), by
         // class: what a document node reading them at a later point sees
         let mut marks = MarksState::default();
-        let mut published = std::collections::HashSet::new();
+        let mut published = phitex_defuse::FxHashSet::default();
         // the job-written files' order: an immediate write's entry where
         // its marker is, page `j` where it fires (`wplan`)
         let mut plan: Vec<ValueId> = Vec::new();
@@ -725,7 +725,7 @@ fn dvi_page(v: &Values, w: &mut phitex_dvi::DviWriter, page: ValueId) {
     {
         counts[k] = i32::try_from(int_of(v, *c)).unwrap_or(0);
     }
-    let mut defs = std::collections::HashMap::new();
+    let mut defs = phitex_defuse::FxHashMap::default();
     for fx in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
         let ys = list_of(v, fx);
         let id = u32::try_from(ys.first().map_or(0, |&y| int_of(v, y))).unwrap_or(0);
