@@ -31,7 +31,10 @@ fn an_edit_on_the_last_page_reruns_no_earlier_page() {
     let pages = b.pages();
     let cold_steps = b.stats.page_steps;
     // a word of the last paragraph, same length: no break moves
-    let at = src.rfind("Paragraph 39: the quick").expect("the last paragraph") + 18;
+    let at = src
+        .rfind("Paragraph 39: the quick")
+        .expect("the last paragraph")
+        + 18;
     let new = format!("{}kciuq{}", &src[..at], &src[at + 5..]);
     b.edit(&new);
     let after = b.pages();
