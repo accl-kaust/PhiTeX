@@ -707,7 +707,7 @@ pub struct Stats {
 /// A round's counters (`PHITEX_TEX_TIME`).
 fn print_round(t: std::time::Duration, r: &Report) {
     eprintln!(
-        "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} raises, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
+        "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} env_provided, {} raises, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
         r.nodes_run,
         r.runs,
         r.gated,
@@ -716,6 +716,7 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.restarts,
         r.rounds,
         r.stops,
+        r.env_provided,
         r.raises,
         r.pending_waits,
         r.created,
