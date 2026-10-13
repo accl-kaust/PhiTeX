@@ -211,9 +211,14 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
     eng.declare_loopback(f, ValueId::UNIT);
 }
 
+/// Edited texts of `\\input` files by name: the text and its bytes.
+type Overrides = Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>;
+
 /// Edits the document's nodes `nodes` to the text `text`: the slices
 /// both texts share at the start and the end stay, those between are
 /// replaced, removed or inserted.
+// one call site (Absorb::absorb), which passes its fields apart
+#[allow(clippy::too_many_arguments)]
 fn apply_text(
     eng: &mut Engine,
     exec: OpId,
@@ -1032,7 +1037,7 @@ struct Graph {
     /// (`crate::inputs`), and their texts as edited (`Build::edit_file`)
     /// over the finder's.
     inputs_read: Vec<String>,
-    overrides: Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>,
+    overrides: Overrides,
 }
 
 /// A file the environment provider answered: name, field, the value
@@ -2041,7 +2046,6 @@ impl Build {
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.eng.set_max_rounds(opts.max_rounds);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
-        g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
         }
@@ -2067,32 +2071,7 @@ impl Build {
             g.eng.set_environment(env);
             g.eng.set_environment_absent(g.absent.clone());
         }
-        {
-            let v = g.eng.values();
-            let mut sets: Vec<(Field, ValueId)> = Vec::new();
-            for (k, t) in env.iter() {
-                sets.push((v.field(k), import(v, t)));
-            }
-            sets.push((v.field("jobname"), v.str(&opts.jobname)));
-            sets.push((v.field("dvicomment"), v.str(&opts.comment)));
-            sets.push((
-                v.field("pdf:relaxed"),
-                v.int(i64::from(!opts.exact_objects)),
-            ));
-            sets.push((
-                v.field("pdfdate"),
-                v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
-            ));
-            if let Some(t) = opts.epoch {
-                // §241 fix_date_and_time, at the job's start
-                for (k, x) in date_params(t) {
-                    sets.push((v.field(k), v.int(x)));
-                }
-            }
-            for (f, x) in sets {
-                g.eng.set_env(unit, f, x);
-            }
-        }
+        job_env(&mut g, unit, &env, &opts);
         // §1337: `\everyjob`, before the job's first line
         let every = env
             .iter()
@@ -2148,6 +2127,54 @@ impl Build {
             );
         }
         b
+    }
+
+    /// `PHITEX_CLAIMS=<text>`: the debugging dump after a settle.
+    fn dump_claims(&self) {
+        // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
+        // their claims and their descendants' (a debugging dump)
+        if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
+            fn dump(eng: &Engine, v: &Values, n: NodeId, depth: usize) {
+                let Some(i) = eng.node_info(n) else { return };
+                let a = i
+                    .args
+                    .first()
+                    .map(|&x| v.render(x).chars().take(60).collect::<String>())
+                    .unwrap_or_default();
+                let claimed: Vec<String> = eng
+                    .claimed(n)
+                    .iter()
+                    .map(|&c| {
+                        eng.node_info(c)
+                            .and_then(|ci| ci.args.first().map(|&x| v.render(x)))
+                            .map_or_else(
+                                || "?".to_owned(),
+                                |t| t.chars().take(30).collect::<String>(),
+                            )
+                    })
+                    .collect();
+                eprintln!(
+                    "{}{} {:?} {} claims {:?}",
+                    "  ".repeat(depth),
+                    n.raw() % 100_000,
+                    i.state,
+                    a,
+                    claimed
+                );
+                if depth < 4 {
+                    for c in eng.children(n) {
+                        dump(eng, v, c, depth + 1);
+                    }
+                }
+            }
+            let v = self.g.eng.values();
+            let eng = &self.g.eng;
+            for (k, n) in &self.nodes {
+                if k.contains(&want) {
+                    dump(eng, v, *n, 0);
+                }
+            }
+        }
     }
 
     fn settle(&mut self) {
@@ -2207,50 +2234,7 @@ impl Build {
                 "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
             );
         }
-        // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
-        // their claims and their descendants' (a debugging dump)
-        if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
-            fn dump(eng: &Engine, v: &Values, n: NodeId, depth: usize) {
-                let Some(i) = eng.node_info(n) else { return };
-                let a = i
-                    .args
-                    .first()
-                    .map(|&x| v.render(x).chars().take(60).collect::<String>())
-                    .unwrap_or_default();
-                let claimed: Vec<String> = eng
-                    .claimed(n)
-                    .iter()
-                    .map(|&c| {
-                        eng.node_info(c)
-                            .and_then(|ci| ci.args.first().map(|&x| v.render(x)))
-                            .map_or_else(
-                                || "?".to_owned(),
-                                |t| t.chars().take(30).collect::<String>(),
-                            )
-                    })
-                    .collect();
-                eprintln!(
-                    "{}{} {:?} {} claims {:?}",
-                    "  ".repeat(depth),
-                    n.raw() % 100_000,
-                    i.state,
-                    a,
-                    claimed
-                );
-                if depth < 4 {
-                    for c in eng.children(n) {
-                        dump(eng, v, c, depth + 1);
-                    }
-                }
-            }
-            let v = self.g.eng.values();
-            let eng = &self.g.eng;
-            for (k, n) in &self.nodes {
-                if k.contains(&want) {
-                    dump(eng, v, *n, 0);
-                }
-            }
-        }
+        self.dump_claims();
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
             for (k, &h) in pages.iter().enumerate() {
@@ -2954,6 +2938,35 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
         let a: String = a.unwrap_or_default().chars().take(80).collect();
         format!("{} {a}", i.op)
     })
+}
+
+/// The job's environment: the format's parameters, the job name, the
+/// PDF options and the date (§241), set on `unit` before the first line.
+fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
+    let v = g.eng.values();
+    let mut sets: Vec<(Field, ValueId)> = Vec::new();
+    for (k, t) in env.iter() {
+        sets.push((v.field(k), import(v, t)));
+    }
+    sets.push((v.field("jobname"), v.str(&opts.jobname)));
+    sets.push((v.field("dvicomment"), v.str(&opts.comment)));
+    sets.push((
+        v.field("pdf:relaxed"),
+        v.int(i64::from(!opts.exact_objects)),
+    ));
+    sets.push((
+        v.field("pdfdate"),
+        v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
+    ));
+    if let Some(t) = opts.epoch {
+        // §241 fix_date_and_time, at the job's start
+        for (k, x) in date_params(t) {
+            sets.push((v.field(k), v.int(x)));
+        }
+    }
+    for (f, x) in sets {
+        g.eng.set_env(unit, f, x);
+    }
 }
 
 /// The cold guess of the page steps' loop-back `pgdef:<j>` (`\count0..9`
