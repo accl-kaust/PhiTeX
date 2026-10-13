@@ -29,6 +29,7 @@
 )]
 
 mod cache;
+mod compare;
 mod compat;
 mod config;
 mod dvipdf;
