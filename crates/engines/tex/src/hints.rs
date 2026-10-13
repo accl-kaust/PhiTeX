@@ -907,7 +907,9 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                 AtomKind::Cs => starts_par(a.name(text)),
                 _ => false,
             };
-            if horizontal && depth[k] == 0 && ifd[k] == 0 && !inside[k] && !claimed[k] {
+            // (an operand a macro is guessed to read still starts one: the
+            // guess is not the run, `\hello\ world.`)
+            if horizontal && depth[k] == 0 && ifd[k] == 0 && !inside[k] && !operand[k] {
                 // the first atom after the paragraph's end, at depth 0
                 // and outside every conditional
                 let mut e = ends.partition_point(|&x| x <= k);
