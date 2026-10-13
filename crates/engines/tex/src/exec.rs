@@ -342,6 +342,7 @@ impl Executor for Threads {
         if self.n <= 1 || n < job_grain() || !threads_possible() {
             self.batches_inline.fetch_add(1, Ordering::Relaxed);
             out.extend((0..n).map(|i| self.node_job(|| run(i))));
+            phitex_defuse::obs::flush();
             return;
         }
         let slots: Vec<OnceLock<RunResult>> = (0..n).map(|_| OnceLock::new()).collect();
@@ -368,6 +369,7 @@ impl Threads {
     fn parallel_each(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         if self.n <= 1 || n < GRAIN || !threads_possible() {
             (0..n).for_each(f);
+            phitex_defuse::obs::flush();
             return;
         }
         let grain = (n / (self.n * 8)).clamp(4, GRAIN);
@@ -389,6 +391,12 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) 
     pool.install(|| {
         (0..n).into_par_iter().with_min_len(grain).for_each(f);
     });
+    // every worker adds its probe counts and spans to the totals (a
+    // no-op without the `profile` feature, so the broadcast is skipped)
+    if cfg!(feature = "profile") {
+        pool.broadcast(|_| phitex_defuse::obs::flush());
+        phitex_defuse::obs::flush();
+    }
 }
 
 /// The persistent pool of `threads` workers.
@@ -434,6 +442,7 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) 
                 f(i);
             }
         }
+        phitex_defuse::obs::flush();
     };
     std::thread::scope(|sc| {
         for _ in 1..threads.min(n.div_ceil(grain)) {
