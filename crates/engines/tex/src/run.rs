@@ -1929,7 +1929,7 @@ fn ptok(t: &Tok) -> PTok {
 fn utok(t: PTok) -> Tok {
     match t {
         PTok::C(c) => Tok::C(c),
-        PTok::S(s) => Tok::S(Rc::from(s)),
+        PTok::S(s) => Tok::cs(&s),
     }
 }
 
