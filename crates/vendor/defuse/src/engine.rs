@@ -140,6 +140,10 @@ pub struct Brackets {
     pub opens: u8,
     pub before: bool,
     pub kind: Option<ValueId>,
+    /// The kind is set by the run ([`Ctx::set_kind`]): the brackets are
+    /// known from the text, so readers do not wait on the node to know
+    /// it is one, only readers of [`Ctx::scope_kind`] wait for the kind.
+    pub kind_pending: bool,
 }
 
 /// Extent of a node's claim on its following siblings, from the text.
@@ -185,6 +189,8 @@ pub(crate) struct Static {
 struct PendIx {
     unbounded: bool,
     effect: bool,
+    /// A static opener whose kind the run sets: pending for the kind field.
+    kind: bool,
     bound: MayDefine,
 }
 
@@ -431,6 +437,13 @@ pub struct Report {
     pub confirmations: u64,
     /// Speculative runs whose assumptions failed.
     pub mispredictions: u64,
+    /// Of those refuted by a pending node defining what the run read (or
+    /// its definer changing), by field, most refuted first.
+    pub refuted_by_field: Vec<(Field, u64)>,
+    /// Nodes with a refuted speculative run, and the most refutations one
+    /// node had.
+    pub refuted_nodes: u64,
+    pub refutations_max: u32,
     /// Speculative runs that ran out of fuel.
     pub fuel_outs: u64,
     /// Scheduler steps.
@@ -899,6 +912,8 @@ pub(crate) struct Aux {
     stream: Option<StreamRange>,
     /// The diagnostics of the node's last applied run ([`Ctx::diagnostic`]).
     diagnostics: Vec<ValueId>,
+    /// A static opener whose kind the run sets (`Brackets::kind_pending`).
+    kind_pending: bool,
 }
 
 /// The range a stream claim read, as nodes (labels change under
@@ -2687,7 +2702,7 @@ impl Engine {
                 eff_code(eff)
             };
             if eff != Effect::Pending {
-                self.ax(s).kind = eff_kind(eff);
+                self.set_static_kind(s, eff);
             }
             self.change_effect(s, new_eff);
             self.make_dirty(s);
@@ -3031,14 +3046,14 @@ impl Engine {
         }
         if region {
             self.effect_region_changed(s, EFF_NONE);
-            self.set_kind(s, eff_kind(eff));
+            self.set_static_kind(s, eff);
         }
     }
 
     fn set_created_kind(&mut self, s: Slot) {
         let eff = self.statics(self.n(s).op, self.n(s).args).eff;
         if eff != Effect::Pending && eff != Effect::None {
-            self.set_kind(s, eff_kind(eff));
+            self.set_static_kind(s, eff);
         }
     }
 
@@ -3926,6 +3941,7 @@ impl Engine {
         PendIx {
             unbounded: n.has(F_DYN) && !bounded,
             effect: n.has(F_EFF_DYN),
+            kind: self.aux_of(s).is_some_and(|a| a.kind_pending),
             bound,
         }
     }
@@ -3982,6 +3998,14 @@ impl Engine {
                 }
             }
         }
+        if ix.kind {
+            let key = (unit, self.kind_field, label);
+            if insert {
+                self.pending_f.insert(key, s);
+            } else {
+                self.pending_f.remove(&key);
+            }
+        }
     }
 
     fn sync_pending(&mut self, s: Slot) {
@@ -3989,7 +4013,10 @@ impl Engine {
         let want = n.in_work()
             && n.state != State::Inert
             && !n.has(F_APP)
-            && (n.has(F_DYN) || n.has(F_EFF_DYN) || n.has(F_CLAIM_DYN));
+            && (n.has(F_DYN)
+                || n.has(F_EFF_DYN)
+                || n.has(F_CLAIM_DYN)
+                || self.aux_of(s).is_some_and(|a| a.kind_pending));
         if want == n.has(F_INPEND) {
             return;
         }
@@ -4631,6 +4658,20 @@ impl Engine {
         self.sync_kind(s);
     }
 
+    /// Sets the kind of the scope `s` opens from its static effect; with
+    /// `Brackets::kind_pending` the run sets it and readers of the kind
+    /// wait for the run (the node is pending for the kind field).
+    fn set_static_kind(&mut self, s: Slot, eff: Effect) {
+        let pending = matches!(eff, Effect::Scope(b) if b.kind_pending);
+        if pending != self.aux_of(s).is_some_and(|a| a.kind_pending) {
+            self.ax(s).kind_pending = pending;
+            self.set_flag(s, F_INPEND, false);
+            self.pending_index(s, false);
+            self.sync_pending(s);
+        }
+        self.set_kind(s, eff_kind(eff));
+    }
+
     /// Sets the kind of the scope `s` opens (from its effect).
     fn set_kind(&mut self, s: Slot, kind: Option<ValueId>) {
         if self.aux_of(s).and_then(|a| a.kind) != kind {
@@ -4965,7 +5006,7 @@ impl Engine {
             self.effect_region_changed(s, EFF_NONE);
         }
         if eff != Effect::Pending {
-            self.set_kind(s, eff_kind(eff));
+            self.set_static_kind(s, eff);
         }
         if self.n(s).has(F_CLAIMER) {
             self.claim_dirty.insert(s);
@@ -5217,7 +5258,19 @@ impl Engine {
             if self.tracing > 0 {
                 self.note(u, cause.clone());
             }
+            let n = self.n(u);
+            if n.state == State::Spec || (n.state == State::Done && self.spec_done.contains(&u)) {
+                // A speculative result read a definition that changed.
+                self.count_refuted(f);
+            }
             self.make_dirty_quiet(u);
+        }
+    }
+
+    fn count_refuted(&mut self, f: Field) {
+        match self.report.refuted_by_field.iter_mut().find(|c| c.0 == f) {
+            Some(c) => c.1 += 1,
+            None => self.report.refuted_by_field.push((f, 1)),
         }
     }
 
@@ -6636,6 +6689,10 @@ impl Engine {
                 self.ax(x).kind = r.kind;
             }
             self.change_effect(x, e);
+        } else if r.kind.is_some() && self.aux_of(x).is_some_and(|a| a.kind_pending && a.kind != r.kind) {
+            // A static opener's kind, from its run.
+            self.ax(x).kind = r.kind;
+            self.sync_kind(x);
         }
         if self.n(x).output != output || !self.n(x).has(F_RAN) {
             changed = true;
@@ -6926,6 +6983,9 @@ impl Engine {
                         work.push((a.node, h));
                     }
                 } else {
+                    if let AssumeKind::Structure(f) | AssumeKind::Def(f) = a.kind {
+                        self.count_refuted(f);
+                    }
                     self.make_dirty(a.node);
                 }
             }
@@ -7276,6 +7336,11 @@ impl Engine {
 
     fn finalize_report(&mut self) {
         self.report.critical_path = self.critical_path();
+        self.report
+            .refuted_by_field
+            .sort_by_key(|&(f, c)| (std::cmp::Reverse(c), f.0.raw()));
+        self.report.refuted_nodes = self.mispredicted.len() as u64;
+        self.report.refutations_max = self.mispredicted.values().copied().max().unwrap_or(0);
         let mut top: Vec<(Slot, u64)> = std::mem::take(&mut self.wait_counts).into_iter().collect();
         top.sort_unstable_by_key(|&(s, c)| (std::cmp::Reverse(c), s.ix));
         self.report.top_waited = top

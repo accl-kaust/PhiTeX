@@ -935,6 +935,16 @@ fn wrong_prediction_is_corrected() {
         .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(&prog.render(&eng)[..4], ["5", "6", "7", "8"]);
     assert!(r.mispredictions > 0, "{r:?}");
+    // The refutations are counted by the field whose assumed definition
+    // changed, and per node.
+    let by_field: u64 = r.refuted_by_field.iter().map(|c| c.1).sum();
+    assert!(by_field > 0 && by_field <= r.mispredictions, "{r:?}");
+    assert!(r.refuted_by_field.windows(2).all(|w| w[0].1 >= w[1].1), "{r:?}");
+    assert!(
+        r.refuted_nodes > 0 && u64::from(r.refutations_max) <= r.mispredictions,
+        "{r:?}"
+    );
+    assert!(r.refuted_nodes <= r.mispredictions, "{r:?}");
 }
 
 #[test]
