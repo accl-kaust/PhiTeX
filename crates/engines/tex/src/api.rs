@@ -1522,6 +1522,20 @@ impl Graph {
         }
     }
 
+    /// The document's nodes pushed onto `unit`, with its units kept for
+    /// its edits.
+    fn push_document(
+        &mut self,
+        unit: UnitId,
+        text: &str,
+        defs: Defs,
+        doc: bool,
+    ) -> (Vec<(String, NodeId)>, Incr) {
+        let mut incr = Incr::new(defs);
+        let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr));
+        (nodes, incr)
+    }
+
     /// The text's nodes pushed onto `unit`.
     /// `doc`: whether it is a document's text (paragraph regions), not a
     /// format's (one node).
@@ -2067,8 +2081,7 @@ impl Build {
         }
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
-        let mut incr = Incr::new(defs);
-        let nodes = g.push_text(unit, &as_file(document), doc.then_some(&mut incr));
+        let (nodes, incr) = g.push_document(unit, document, defs, doc);
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
         let breaks = g.ops.breaks;
