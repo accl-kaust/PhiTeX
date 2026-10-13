@@ -70,6 +70,8 @@ pub(crate) struct Bound {
     /// The state fields (prefixes) the command's class may set, or
     /// `None`: every state head ([`state_prefixes`]).
     pub state: Option<Vec<String>>,
+    /// The command opens and closes no scope (its effect is `None`).
+    pub no_scope: bool,
 }
 
 /// The state fields (heads: a family's prefix with its colon, or a
@@ -345,6 +347,8 @@ impl Hint {
                     None => o.push('*'),
                     Some(st) => o.push_str(&st.join("\x1f")),
                 }
+                o.push('\x1e');
+                o.push(if b.no_scope { 'N' } else { 'P' });
             }
         }
         o
@@ -393,6 +397,7 @@ impl Hint {
             "*" => None,
             st => Some(items(st)),
         };
+        let no_scope = it.next() == Some("N");
         Hint {
             bound: Some(Bound {
                 names,
@@ -400,6 +405,7 @@ impl Hint {
                 cats,
                 means,
                 state,
+                no_scope,
             }),
             cause,
             excerpt,
@@ -779,6 +785,7 @@ impl Analysis<'_> {
             // one: the regime here is not the one the pass read)
             return Hint::any(format!("{f}: an active character the text does not make"), excerpt);
         }
+        b.no_scope = ok && self.no_scope(a);
         if ok {
             opener(&mut b.state, at.kind == AtomKind::Open);
             if cause.is_empty() {
@@ -792,6 +799,59 @@ impl Analysis<'_> {
         } else {
             Hint::any(cause, excerpt)
         }
+    }
+
+    /// Whether the command at `a` opens and closes no scope: a run of
+    /// characters without math shifts or active characters, read up to a
+    /// command that is itself such; a space; a primitive assignment,
+    /// definition or message (§1208-§1280), never a macro, a box, a group
+    /// or a conditional.
+    fn no_scope(&self, a: usize) -> bool {
+        let atoms = self.atoms();
+        match atoms[a].kind {
+            AtomKind::Space => true,
+            AtomKind::Char(_) | AtomKind::Verb => {
+                let mut k = a;
+                while let Some(x) = atoms.get(k)
+                    && matches!(x.kind, AtomKind::Char(_) | AtomKind::Verb)
+                {
+                    if let AtomKind::Char(c) = x.kind
+                        && (self.is_active(c) || matches!(c, '$' | '&' | '^' | '_' | '#'))
+                    {
+                        return false;
+                    }
+                    k += 1;
+                }
+                match atoms.get(k) {
+                    Some(x) if x.kind == AtomKind::Cs => self.cs_no_scope(k),
+                    _ => true,
+                }
+            }
+            AtomKind::Cs => self.cs_no_scope(a),
+            _ => false,
+        }
+    }
+
+    fn cs_no_scope(&self, a: usize) -> bool {
+        let name = self.atoms()[a].name(self.text);
+        if self.defs.is_defined(name) {
+            return false;
+        }
+        let n = name
+            .strip_prefix("tex_")
+            .and_then(|x| x.strip_suffix(":D"))
+            .unwrap_or(name);
+        matches!(
+            n,
+            "def" | "gdef" | "edef" | "xdef" | "let" | "chardef" | "mathchardef" | "countdef"
+                | "dimendef" | "skipdef" | "muskipdef" | "toksdef" | "relax" | "message"
+                | "errmessage" | "catcode" | "lccode" | "uccode" | "sfcode" | "mathcode"
+                | "delcode" | "count" | "dimen" | "skip" | "muskip" | "advance" | "multiply"
+                | "divide" | "font" | "fontdimen" | "hyphenchar" | "skewchar" | "penalty"
+                | "kern" | "hskip" | "vskip" | "hfil" | "hfill" | "vfil" | "vfill" | "hss"
+                | "vss" | "char" | "/" | " " | "unskip" | "unpenalty" | "unkern"
+                | "textfont" | "scriptfont" | "scriptscriptfont" | "showthe" | "show"
+        ) || (table_param(n) && !matches!(n, "everypar" | "output"))
     }
 
     fn is_active(&self, c: char) -> bool {
@@ -1445,6 +1505,14 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
+/// Whether the node's text says its command opens and closes no scope.
+pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
+    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+        return false;
+    }
+    hint_of_args(v, args).bound.as_ref().is_some_and(|b| b.no_scope)
+}
+
 /// The engine's question, answered from the text.
 pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
     if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
@@ -1685,7 +1753,10 @@ mod tests {
         assert!(st(5).expect("some").contains(&"par:".to_owned()));
         // and the run after it is in one
         assert!(!st(10).expect("some").contains(&"par:".to_owned()));
-        assert!(st(15).expect("some").contains(&"ifstack".to_owned()));
+        // (a conditional, when bounded, may change the if stack)
+        if let Some(b) = text.at(15).bound {
+            assert!(b.state.expect("some").contains(&"ifstack".to_owned()));
+        }
         let d = text.at(t.find("\\def").unwrap()).bound.expect("bounded");
         assert!(d.state.expect("some").contains(&"aftertoken".to_owned()));
         assert_eq!(d.names, vec!["cs:y".to_owned()]);

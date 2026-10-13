@@ -109,8 +109,15 @@ impl Operation for Exec {
         }
         true
     }
-    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
-        Effect::Pending
+    /// No scope effect where the text says the command opens and closes
+    /// nothing ([`crate::hints`]); otherwise known when it runs (the
+    /// scope's kind comes from the run).
+    fn effect(&self, args: &[ValueId], v: &Values) -> Effect {
+        if crate::hints::effect_none(v, args) {
+            Effect::None
+        } else {
+            Effect::Pending
+        }
     }
     fn claim(
         &self,
