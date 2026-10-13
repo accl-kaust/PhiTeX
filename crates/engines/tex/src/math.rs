@@ -296,7 +296,7 @@ impl Run<'_, '_> {
         outer.m = vm;
         outer.km = vm;
         outer.lid = md.vlid;
-        self.build_page(&outer)
+        self.build_page_mark(&outer)
     }
 
     /// §1146: the width of the paragraph's last line up to its last
@@ -1090,7 +1090,7 @@ impl Run<'_, '_> {
         if self.cur.cmd != cmd::SPACER {
             self.back_cur();
         }
-        self.build_page(&vm)
+        self.build_page_mark(&vm)
     }
 
     /// §1195: whether families 2 and 3 lack their parameters.
