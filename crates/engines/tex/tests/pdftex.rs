@@ -238,17 +238,22 @@ fn pdf_edits() {
 #[test]
 fn pdf_state_cutoff() {
     let dir = common::fixtures().join("pdf");
-    let src = common::read(&dir.join("pageref.tex"));
+    // pageref.tex's catcodes as the prelude (a format), the rest as
+    // the document: a formatless job is one node (its whole text, paging
+    // inline), so only a document's regions can cut off an edit
+    let all = common::read(&dir.join("pageref.tex"));
+    let split = all.find("\\pdfoutput").unwrap_or(0);
+    let (prelude, src) = (all[..split].to_owned(), all[split..].to_owned());
     let opts = || phitex_tex::Options {
         epoch: Some(0),
         ..common::options("./pageref.tex", "pageref", "", &dir)
     };
     let run = |to: &str| {
-        let mut b = common::build(opts(), None, &src);
+        let mut b = common::build(opts(), Some(&prelude), &src);
         let text = src.replacen("A\\a\\par", to, 1);
         assert_ne!(text, src);
         b.edit(&text);
-        let cold = common::build(opts(), None, &text);
+        let cold = common::build(opts(), Some(&prelude), &text);
         assert_eq!(
             common::first_difference(&b.output().0, &cold.output().0),
             None,
