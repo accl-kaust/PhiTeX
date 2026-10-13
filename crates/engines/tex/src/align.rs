@@ -421,6 +421,7 @@ impl Run<'_, '_> {
                 opens: 1,
                 before: false,
                 kind: Some(k),
+                kind_pending: false,
             });
             Ok(())
         };
