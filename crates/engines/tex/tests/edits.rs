@@ -446,7 +446,10 @@ fn oscillating_written_file() {
     };
     let b = common::build(opts, Some(&prelude), doc);
     let msgs: Vec<String> = b.diagnostics().into_iter().map(|d| d.message).collect();
-    eprintln!("oscillating: {} loop rounds, {msgs:#?}", b.stats.loop_rounds);
+    eprintln!(
+        "oscillating: {} loop rounds, {msgs:#?}",
+        b.stats.loop_rounds
+    );
     assert!(
         msgs.iter()
             .any(|m| m.contains("no fixpoint after 8 rounds") && m.contains("main.aux")),
