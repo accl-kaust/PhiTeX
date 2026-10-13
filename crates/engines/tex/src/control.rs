@@ -18,7 +18,7 @@ pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 512;
 pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 
 /// `PHITEX_HEARTBEAT_FROM`: the command count the per-command trace starts at.
-static HEARTBEAT_FROM: OnceLock<u64> = OnceLock::new();
+static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
