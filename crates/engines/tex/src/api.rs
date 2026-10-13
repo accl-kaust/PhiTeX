@@ -172,12 +172,14 @@ struct Absorb<'a> {
     dvi: NodeId,
     /// The format's definitions, for the new slices' hints and regions.
     defs: Defs,
+    /// Whether the text is a document's ([`is_doc`]).
+    doc: bool,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
-        apply_text(eng, self.exec, self.dvi, self.nodes, &text, &self.defs);
+        apply_text(eng, self.exec, self.dvi, self.nodes, &text, &self.defs, self.doc);
         Some(version)
     }
 }
@@ -192,9 +194,17 @@ fn apply_text(
     nodes_now: &mut Vec<(String, NodeId)>,
     text: &str,
     defs: &Defs,
+    doc: bool,
 ) {
     let text = as_file(text);
-    let new: Vec<(String, (usize, usize))> = slices(&text, defs)
+    let sl = if doc {
+        slices(&text, defs)
+    } else if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![(0, text.len())]
+    };
+    let new: Vec<(String, (usize, usize))> = sl
         .into_iter()
         .map(|(s, e)| {
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
@@ -203,10 +213,6 @@ fn apply_text(
         .collect();
     let old = &*nodes_now;
     let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
-    // (only a document's fragments take their hints from the whole
-    // analysis; a format's keep the hint of their own text: a format
-    // fragment bounded from the whole analysis left its siblings waiting)
-    let doc = crate::hints::kind_of(&text, pass::FileKind::Document) == pass::FileKind::Document;
     if doc {
         crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
     }
@@ -217,12 +223,16 @@ fn apply_text(
         let mut args = if doc {
             let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
             // (a document node is a top-level node)
-            a[1] = v.int(1);
+            a[1] = v.int(3);
             a
         } else {
             slice_args(v, &text[s..e], starts)
         };
-        args.push(crate::hints::hint_arg(v, &hints, s));
+        args.push(if doc {
+            crate::hints::hint_arg(v, &hints, s)
+        } else {
+            v.str(FORMAT_HINT)
+        });
         args
     };
     let mut a = 0;
@@ -1173,11 +1183,18 @@ impl Graph {
     }
 
     /// The text's nodes pushed onto `unit`.
-    fn push_text(&mut self, unit: UnitId, text: &str, defs: &Defs) -> Vec<(String, NodeId)> {
+    /// `doc`: whether it is a document's text (paragraph regions), not a
+    /// format's (one node).
+    fn push_text(
+        &mut self,
+        unit: UnitId,
+        text: &str,
+        defs: &Defs,
+        doc: bool,
+    ) -> Vec<(String, NodeId)> {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
         let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
-        let doc = crate::hints::kind_of(text, pass::FileKind::Document) == pass::FileKind::Document;
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
         // from its parts, so anything (it runs once, serially, cached)
@@ -1201,7 +1218,7 @@ impl Graph {
             let v = self.eng.values();
             let mut args = if doc {
                 let mut a = slice_args_in_file(v, piece, starts, v.str(DOC_NAME), s);
-                a[1] = v.int(1);
+                a[1] = v.int(3);
                 a
             } else {
                 slice_args(v, piece, starts)
@@ -1227,6 +1244,13 @@ impl Graph {
 
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.
 const FORMAT_HINT: &str = "A\x1eformat: the whole text, run once\x1e";
+
+/// Whether the job's text is a document's (paragraph regions): always
+/// after a format; without one, unless it reads as a format's source.
+fn is_doc(prelude: Option<&str>, text: &str) -> bool {
+    prelude.is_some()
+        || crate::hints::kind_of(text, pass::FileKind::Document) == pass::FileKind::Document
+}
 
 /// The name a document's own text is registered under for the hints
 /// of nodes made from parts of it (`hints::register_text`).
@@ -1373,7 +1397,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             g.eng.set_env(unit, f, x);
         }
         // (the prelude's own slices: INITEX knows no definitions yet)
-        g.push_text(unit, &as_file(p), crate::hints::no_defs());
+        g.push_text(unit, &as_file(p), crate::hints::no_defs(), false);
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
@@ -1475,6 +1499,8 @@ pub struct Build {
     edits: EditSender,
     /// The pages' hashes the callback last saw.
     settled: Vec<u64>,
+    /// Whether the job's text is a document's ([`is_doc`]).
+    doc: bool,
 }
 
 impl Build {
@@ -1554,7 +1580,8 @@ impl Build {
                 g.eng.push(unit, exec, args);
             }
         }
-        let nodes = g.push_text(unit, &as_file(document), &defs);
+        let doc = is_doc(prelude, document);
+        let nodes = g.push_text(unit, &as_file(document), &defs, doc);
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
         let breaks = g.ops.breaks;
@@ -1576,6 +1603,7 @@ impl Build {
             stats: Stats::default(),
             edits,
             settled: Vec::new(),
+            doc,
         };
         b.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -1604,6 +1632,7 @@ impl Build {
             exec: self.g.ops.exec,
             dvi: self.dvi,
             defs: self.defs.clone(),
+            doc: self.doc,
         };
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
