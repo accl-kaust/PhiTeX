@@ -3092,7 +3092,7 @@ pub fn set_hints_enabled(on: bool) {
 /// Whether a slice calls a command that leaves `\\everypar` other
 /// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
 /// a list item, an environment's begin or end (`\\@doendpe`), a title.
-fn sets_everypar(slice: &str) -> bool {
+pub(crate) fn sets_everypar(slice: &str) -> bool {
     const SETS: &[&str] = &[
         "\\section",
         "\\subsection",

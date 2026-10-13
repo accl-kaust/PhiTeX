@@ -290,14 +290,23 @@ struct Open {
     expl: bool,
     catcode: bool,
     newifs: HashSet<String>,
+    /// Paragraph units still to take after a heading's (or another
+    /// command that leaves `\\everypar` set, `hints::sets_everypar`):
+    /// the slices that consume it declare it, so they are analysed with it.
+    after_sets: u8,
 }
 
 impl Open {
     fn closed(&self) -> bool {
-        self.conds == 0 && !self.at_letter && !self.expl && !self.catcode
+        self.conds == 0 && !self.at_letter && !self.expl && !self.catcode && self.after_sets == 0
     }
 
     fn scan(&mut self, t: &str) {
+        if crate::hints::sets_everypar(t) {
+            self.after_sets = 3;
+        } else if !t.trim().is_empty() {
+            self.after_sets = self.after_sets.saturating_sub(1);
+        }
         let b = t.as_bytes();
         let mut k = 0;
         let mut prev = String::new();
