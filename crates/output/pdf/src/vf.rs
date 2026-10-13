@@ -82,6 +82,7 @@ impl Packet<'_> {
 impl PdfState {
     /// `do_vf`: the font's type, from its virtual font if it has one.
     pub(crate) fn do_vf(&mut self, f: FontId, src: &dyn FontSource) {
+        self.rec_font(crate::replay::FontEv::DoVf(f));
         let vf = src.virtual_font(f);
         let st = self.font_mut(f);
         st.kind = FontType::Real;

@@ -1519,3 +1519,82 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
         first_difference(&watched, &cold_dvi)
     );
 }
+
+/// A document named `plain.tex` is not the format's `plain.tex`: the
+/// pdfTeX format is built (and checked) away from the document's
+/// directory, as fmtutil builds it in a scratch directory.
+#[test]
+fn document_named_plain() {
+    let _one = one();
+    let dir = scratch("document_named_plain");
+    std::fs::write(dir.join("plain.tex"), "\\tenrm Hello\\bye\n").expect("the text");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "-j", "1", "plain.tex"])
+        .output()
+        .expect("phitex runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // (the same text under another name: the same PDF but for the
+    // file name's hash in /ID)
+    std::fs::write(dir.join("other.tex"), "\\tenrm Hello\\bye\n").expect("the text");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "-j", "1", "other.tex"])
+        .output()
+        .expect("phitex runs");
+    assert!(out.status.success());
+    let pdf = std::fs::read(dir.join("plain.pdf")).expect("plain.pdf");
+    let other = std::fs::read(dir.join("other.pdf")).expect("other.pdf");
+    assert_eq!(pdf.len(), other.len());
+}
+
+/// A build has no terminal (it runs as pdfTeX's `-interaction=nonstopmode`):
+/// a `\read` from the terminal (§484) and a file not found (§530, LaTeX's
+/// `\@missingfileerror` reading the terminal) end the job at once with
+/// the fatal error, as `pdftex -interaction=nonstopmode` does
+/// (`oracle/fixtures/nonstop/`), after the errors before them are logged.
+#[test]
+fn nonstop_fatal_errors_end_the_job() {
+    let _one = one();
+    for (name, fatal) in [
+        (
+            "errread",
+            "*** (cannot \\read from terminal in nonstop modes)",
+        ),
+        ("missplain", "*** (job aborted, file error in nonstop mode)"),
+        (
+            "missing",
+            "*** (cannot \\read from terminal in nonstop modes)",
+        ),
+    ] {
+        let dir = scratch(&format!("nonstop-{name}"));
+        std::fs::copy(
+            fixtures().join(format!("nonstop/{name}.tex")),
+            dir.join(format!("{name}.tex")),
+        )
+        .expect("the fixture");
+        let t = Instant::now();
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", &format!("{name}.tex")])
+            .output()
+            .expect("phitex runs");
+        let errs = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            t.elapsed() < Duration::from_secs(60),
+            "{name}: {:?}",
+            t.elapsed()
+        );
+        assert!(!out.status.success(), "{name}: {errs}");
+        assert!(errs.contains(fatal), "{name}: {errs}");
+        let log = chars(&std::fs::read(dir.join(format!("{name}.log"))).unwrap_or_default());
+        assert!(log.contains(fatal), "{name}: {log}");
+        if name == "errread" {
+            assert!(log.contains("! a first error."), "{name}: {log}");
+        }
+        // (pdfTeX writes no PDF file after a fatal error)
+        assert!(log.contains("no output PDF file produced"), "{name}: {log}");
+        assert!(!dir.join(format!("{name}.pdf")).exists(), "{name}");
+    }
+}

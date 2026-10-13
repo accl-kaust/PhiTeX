@@ -448,6 +448,11 @@ fn pdf_exact_no_page_chain() {
         b.stats.critical_path,
         b.stats.loop_rounds
     );
+    if std::env::var_os("PHITEX_CHAIN").is_some() {
+        for l in b.critical_chain_lines() {
+            eprintln!("  {l}");
+        }
+    }
     for l in &links {
         eprintln!("  page step <- page step: {l}");
     }
