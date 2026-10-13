@@ -2615,6 +2615,20 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         {
             add_head(&mut b.state, "param:everypar");
             add_head(&mut b.state, "param:clubpenalty");
+            // (what the `\\everypar` of a list item or a heading sets
+            // when the paragraph consumes it, latex.ltx `\\@item`,
+            // `\\@afterheading`)
+            for n in [
+                "cs:if@minipage",
+                "cs:if@newlist",
+                "cs:if@inlabel",
+                "cs:if@nobreak",
+                "cs:if@noskipsec",
+            ] {
+                if !b.names.iter().any(|x| x == n) {
+                    b.names.push(n.to_owned());
+                }
+            }
         }
         // (the next slice's first paragraph consumes what this one set
         // and resets `\\everypar`: it declares it too)
