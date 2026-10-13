@@ -584,9 +584,16 @@ impl Session {
                         .wkeys_path()
                         .and_then(|p| self.cache.as_ref()?.get(&p.with_file_name("pagefx")))
                         .unwrap_or_default(),
+                    // (the document's own last values, else what the first
+                    // document built with this format learned)
                     pgst: self
                         .wkeys_path()
                         .and_then(|p| self.cache.as_ref()?.get(&p.with_file_name("pgst")))
+                        .or_else(|| {
+                            let c = self.cache.as_ref()?;
+                            let name = self.format_name(prelude.as_deref()?);
+                            c.get(&c.format_file(&name, "pgst1"))
+                        })
                         .unwrap_or_default(),
                     ..Options::default()
                 };
@@ -870,6 +877,15 @@ impl Session {
             && let Some(bytes) = b.export_prelude()
         {
             let _ = c.put_format(&self.format_name(text), &key, &bytes);
+        }
+        // the page chain's values of the first document built with this
+        // format: a later document's round-one guesses
+        let p = c.format_file(&self.format_name(text), "pgst1");
+        if c.get(&p).is_none() {
+            let st = b.export_pgst();
+            if !st.is_empty() {
+                let _ = c.put(&p, &st, &[]);
+            }
         }
     }
 

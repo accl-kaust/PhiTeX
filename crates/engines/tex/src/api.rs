@@ -3405,14 +3405,28 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
 /// The last session's page-chain loop-backs ([`Build::export_pgst`]):
 /// `[kind, j, value]`, kind 0 `pgst:<j>`, 1 `pgdef:<j>`; declared after
 /// the cold guesses, which they replace.
+///
+/// A page past the last one given guesses the last `pgst` (the state a
+/// routine left settles: a first-page hook clears itself once).
 fn chain_guesses(g: &mut Graph, bytes: &[u8]) {
     let mut rd = Rd(bytes);
+    let mut last: Option<(usize, ValueId)> = None;
     while let (Some(k), Some(j), Some(t)) = (rd.u64(), rd.u64(), rd.tree()) {
-        if usize::try_from(j).is_ok_and(|j| j < crate::page::MAX_PAGES) {
+        let Ok(j) = usize::try_from(j) else { continue };
+        if j < crate::page::MAX_PAGES {
             let v = g.eng.values();
             let name = if k == 0 { "pgst" } else { "pgdef" };
             let f = v.field(&format!("{name}:{j}"));
             let x = import(v, &t);
+            g.eng.declare_loopback(f, x);
+            if k == 0 && last.is_none_or(|(l, _)| j > l) {
+                last = Some((j, x));
+            }
+        }
+    }
+    if let Some((l, x)) = last {
+        for j in l + 1..crate::page::MAX_PAGES {
+            let f = g.eng.values().field(&format!("pgst:{j}"));
             g.eng.declare_loopback(f, x);
         }
     }
