@@ -394,6 +394,8 @@ pub struct Stats {
     pub batches_inline: u64,
     pub jobs_max_batch: usize,
     pub critical_path: Option<usize>,
+    /// The engine's pending waits by kind, summed over the evaluations.
+    pub waits_by_kind: Vec<(&'static str, u64)>,
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
@@ -444,6 +446,12 @@ impl Stats {
         self.loop_rounds += r.rounds;
         self.pending_waits += r.pending_waits;
         self.stops += r.stops;
+        for &(k, n) in &r.waits_by_kind {
+            match self.waits_by_kind.iter_mut().find(|x| x.0 == k) {
+                Some(x) => x.1 += n,
+                None => self.waits_by_kind.push((k, n)),
+            }
+        }
     }
 }
 
@@ -642,6 +650,15 @@ impl Graph {
             };
             if std::env::var_os("PHITEX_TEX_TIME").is_some() {
                 print_round(t0.elapsed(), &r);
+                eprintln!("  waits by kind {:?}", r.waits_by_kind);
+                for &(n, w) in &r.top_waited {
+                    let what = self.eng.node_info(n).map_or_else(String::new, |i| {
+                        let a = i.args.first().map(|&x| self.eng.values().render(x));
+                        let a: String = a.unwrap_or_default().chars().take(80).collect();
+                        format!("{} {a}", i.op)
+                    });
+                    eprintln!("  waited on {w}x: {what}");
+                }
             }
             stats.add(&r);
             stats.add_exec(&ex, c0, &self.eng);
