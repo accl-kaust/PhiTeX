@@ -1085,7 +1085,7 @@ fn last_item(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
                 .get(it.atom)
                 .is_some_and(|a| a.start >= s && a.start < e)
         })
-        .last()
+        .next_back()
         .map(|it| it.name.clone())
 }
 
@@ -1468,6 +1468,7 @@ impl Analysis<'_> {
 
     /// The hint of the atom at `a` as if it ran (a command a macro is
     /// only guessed to read does run, when the guess is wrong).
+    #[allow(clippy::too_many_lines)]
     fn hint_run(&self, a: usize) -> Hint {
         let atoms = self.atoms();
         let Some(at) = atoms.get(a) else {
