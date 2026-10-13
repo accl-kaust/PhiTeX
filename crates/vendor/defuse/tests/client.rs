@@ -1948,8 +1948,9 @@ fn an_environment_provider_answers_reads_in_place_of_a_wait() {
     let seven = v.int(7);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let c = Arc::clone(&calls);
-    eng.set_env_provider(Box::new(move |f: Field| {
+    eng.set_env_provider(Box::new(move |vals: &Values, f: Field| {
         c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(&*vals.get(f.0), Value::Str(_)), "a field's name is its value");
         if f == fast {
             Some(Some(seven))
         } else if f == absent {
@@ -1983,5 +1984,56 @@ fn an_environment_provider_answers_reads_in_place_of_a_wait() {
     let r = eng.evaluate_sequential().expect("supplied");
     assert_eq!(eng.output(ids[2]), Some(seven), "{r:?}");
     assert_eq!(r.nodes_run, 1, "only the waiter runs: {r:?}");
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// `["g", n]` contributes 1 to `acc` and, for `n > 0`, unfolds a child
+/// `["g", n - 1]` (one level per batch); `["r"]` folds `acc` from the
+/// unit start.
+struct Unfolding;
+
+impl Operation for Unfolding {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let acc = v.field("acc");
+        match tag(v, &a).as_str() {
+            "g" => {
+                cx.contribute(acc, v.seq_unit(v.int(1)));
+                let n = v.as_int(a[1]).unwrap_or(0);
+                if n > 0 {
+                    cx.child(cx.op(), vec![v.str("g"), v.int(n - 1)]);
+                }
+                Ok(ValueId::UNIT)
+            }
+            "r" => cx.acc_range(acc, None),
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+#[test]
+fn a_range_reader_waiting_for_an_unfolding_range_runs_once_it_is_done() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Unfolding));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let (g, r) = {
+        let v = eng.values();
+        (vec![v.str("g"), v.int(20)], vec![v.str("r")])
+    };
+    eng.push(u, op, g);
+    let r = eng.push(u, op, r);
+    let rep = eng.evaluate_sequential().expect("evaluate");
+    let items = eng.values().seq_to_vec(eng.output(r).expect("output")).len();
+    assert_eq!(items, 21, "{rep:?}");
+    assert_eq!(rep.nodes_run, 22, "{rep:?}");
+    // The reader stops once on its range and runs once when the range is
+    // done: not once per unfolded level.
+    assert!(rep.stops <= 2, "the reader re-ran per unfold: {rep:?}");
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
 }
