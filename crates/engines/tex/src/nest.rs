@@ -135,11 +135,15 @@ impl Run<'_, '_> {
     /// back (§282); the level is returned with its list.
     pub(crate) fn pop_level(&mut self) -> Option<Level> {
         let l = self.nest.pop()?;
-        // the group's definitions: the globals stay, the locals go
-        let tail: Vec<(Field, ValueId, Locality)> = self.defs.split_off(l.defs_len.min(self.defs.len()));
-        for d in tail {
-            if d.2 == Locality::Global {
-                self.defs.push(d);
+        // the group's definitions: the globals stay, the locals go (a
+        // paragraph is no group: its definitions are the level's below)
+        if l.group != 0 {
+            let tail: Vec<(Field, ValueId, Locality)> =
+                self.defs.split_off(l.defs_len.min(self.defs.len()));
+            for d in tail {
+                if d.2 == Locality::Global {
+                    self.defs.push(d);
+                }
             }
         }
         for &(f, prev, inert) in l.saved.iter().rev() {
