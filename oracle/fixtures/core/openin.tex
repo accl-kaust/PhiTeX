@@ -1,0 +1,7 @@
+% \openin and \input with web2c's quoted file names (the quotes are no
+% part of the name; a space inside them is), unquoted, and a missing file.
+\input "ifsub.dat"
+\openin1"ifsub.dat" \ifeof1 \message{[no]}\else\message{[yes]}\closein1 \fi
+\openin1=ifsub.dat \ifeof1 \message{[no]}\else\message{[yes]}\closein1 \fi
+\openin1"missing.dat" \ifeof1 \message{[no]}\else\message{[yes]}\closein1 \fi
+\openin1"ifs"ub.dat \ifeof1 \message{[no]}\else\message{[yes]}\read1 to\x \message{\meaning\x}\closein1 \fi
