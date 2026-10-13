@@ -919,7 +919,8 @@ impl Graph {
                 any,
             }))
         });
-        let breaks = eng.register(Arc::new(crate::page::Breaks(shared.clone())));
+        let pageplan = eng.register(Arc::new(crate::page::PagePlan(shared.clone())));
+        let brk = eng.register(Arc::new(crate::page::Brk(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -934,7 +935,8 @@ impl Graph {
             put,
             pagestep,
             pagestep_any,
-            breaks,
+            pageplan,
+            brk,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
         };
@@ -964,6 +966,14 @@ impl Graph {
             let f = eng.values().field(&format!("pagefx:{j}"));
             let none = eng.values().list(Vec::new());
             eng.declare_loopback(f, none);
+            // where page j starts (published by `brk:<j-1>`), what
+            // `\count0..9` are after page j's step, and the marks reads
+            // `brk:<j>` passed: the build's guesses for the first two
+            // (`page_guesses`)
+            for h in ["pstart", "pgdef", "pmarks"] {
+                let f = eng.values().field(&format!("{h}:{j}"));
+                eng.declare_loopback(f, ValueId::UNIT);
+            }
         }
         for f in crate::hints::COUNTERS {
             let fld = eng.values().field(f);
@@ -1829,8 +1839,9 @@ impl Build {
         let nodes = g.push_text(unit, &as_file(document), &defs, doc);
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
-        let breaks = g.ops.breaks;
-        let _ = g.eng.push(unit, breaks, Vec::new());
+        let pageplan = g.ops.pageplan;
+        let _ = g.eng.push(unit, pageplan, Vec::new());
+        page_guesses(&mut g, &env, document, doc, &defs);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
         let files_op = g.files_op;
@@ -2628,5 +2639,190 @@ mod prelude_tests {
         assert!(deserialise(&other).is_none());
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
+    }
+}
+
+/// The cold guesses of the page loop-backs (`pstart:<j>`, `pgdef:<j>`),
+/// declared as their round-one values before the first evaluation: a
+/// text model of the document's paragraph slices (its characters at an
+/// average width against `\hsize` give lines; lines at `\baselineskip`,
+/// with `\parskip` and the club and widow penalties, give the main
+/// list's items), broken against `\vsize` as §1005–§1010 would at
+/// natural sizes. A right guess costs nothing; a wrong one re-runs the
+/// `brk` nodes and page steps after it once (the engine's fixpoint).
+/// `\count0` is guessed advanced by one per page (plain's and LaTeX's
+/// routines).
+fn page_guesses(g: &mut Graph, env: &Env, text: &str, doc: bool, defs: &Defs) {
+    if !doc {
+        return;
+    }
+    let v = g.eng.values();
+    let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, t)| import(v, t));
+    let int = |k: &str| get(k).map_or(0, |x| crate::val::int_of(v, x));
+    let glue = |k: &str| i64::from(crate::val::glue_of(v, get(k)).width);
+    // (a document that sets them in its text: the first plain
+    // assignment `\vsize=8.5in`)
+    let dim = |k: &str, dflt: i64| -> i64 {
+        let Some(at) = text.find(&format!("\\{k}=")) else {
+            return dflt;
+        };
+        let rest = &text[at + k.len() + 2..];
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        let Ok(x) = num.parse::<f64>() else { return dflt };
+        let unit = rest[num.len()..].trim_start();
+        let per = if unit.starts_with("in") {
+            72.27
+        } else if unit.starts_with("cm") {
+            72.27 / 2.54
+        } else if unit.starts_with("mm") {
+            72.27 / 25.4
+        } else if unit.starts_with("pt") {
+            1.0
+        } else {
+            return dflt;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let sp = (x * per * 65536.0) as i64;
+        sp
+    };
+    let vsize = dim("vsize", int("param:vsize"));
+    let hsize = dim("hsize", int("param:hsize"));
+    let bs = glue("param:baselineskip");
+    let parskip = glue("param:parskip");
+    let topskip = glue("param:topskip");
+    let (club, widow, inter) = (
+        int("param:clubpenalty"),
+        int("param:widowpenalty"),
+        int("param:interlinepenalty"),
+    );
+    if vsize <= 0 || hsize <= 0 || bs <= 0 {
+        return;
+    }
+    // an average character of a 10pt text font, with its share of space
+    let avg = 5 * 65536;
+    let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
+    // the model's items: (0 box | 1 glue | 2 penalty, size)
+    let mut items: Vec<(u8, i64)> = Vec::new();
+    for &(s, e) in &hints.slices {
+        let piece = &text[s..e];
+        let mut chars = 0i64;
+        let mut in_cs = false;
+        let mut stop = false;
+        for line in piece.lines() {
+            let line = line.split('%').next().unwrap_or("");
+            if line.contains("\\bye") || line.contains("\\end") {
+                stop = true;
+            }
+            for c in line.chars() {
+                if c == '\\' {
+                    in_cs = true;
+                } else if in_cs {
+                    if !c.is_ascii_alphabetic() {
+                        in_cs = false;
+                    }
+                } else if c.is_alphanumeric() || c.is_ascii_punctuation() && c != '{' && c != '}' || c == ' ' {
+                    chars += 1;
+                }
+            }
+            chars += 1;
+        }
+        if chars > 2 && piece.chars().any(char::is_alphabetic) {
+            let lines = ((chars * avg + hsize - 1) / hsize).max(1);
+            if !items.is_empty() {
+                items.push((1, parskip));
+            }
+            for i in 0..lines {
+                // (the interline glue: none before the list's first box)
+                if !items.is_empty() {
+                    items.push((1, 0));
+                }
+                items.push((0, bs));
+                if i + 1 < lines {
+                    let p = inter
+                        + if i == 0 { club } else { 0 }
+                        + if i + 2 == lines { widow } else { 0 };
+                    if p != 0 {
+                        items.push((2, p));
+                    }
+                }
+            }
+        }
+        if stop {
+            break;
+        }
+    }
+    // the breaks: the last legal breakpoint before the page overflows
+    let mut starts = Vec::new();
+    let mut i = 0;
+    let mut total = 0i64;
+    let mut empty = true;
+    let mut prev_box = false;
+    let mut best: Option<usize> = None;
+    while i < items.len() {
+        let (k, x) = items[i];
+        let mut at = None;
+        match k {
+            0 => {
+                if empty {
+                    empty = false;
+                    total = topskip.max(0);
+                    best = None;
+                } else {
+                    total += x;
+                }
+                prev_box = true;
+            }
+            1 if !empty => {
+                if prev_box {
+                    best = Some(i);
+                }
+                total += x;
+                prev_box = false;
+            }
+            2 if !empty => {
+                if x <= -10000 {
+                    at = Some(i);
+                } else if x < 10000 {
+                    best = Some(i);
+                }
+                prev_box = false;
+            }
+            _ => {}
+        }
+        if at.is_none() && !empty && total > vsize {
+            at = best;
+        }
+        if let Some(b) = at {
+            starts.push(b);
+            empty = true;
+            prev_box = false;
+            best = None;
+            i = b + 1;
+            if starts.len() + 2 >= crate::page::MAX_PAGES {
+                break;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    let base: Vec<i64> = (0..10).map(|k| int(&format!("count:{k}"))).collect();
+    let mut decl = Vec::new();
+    for (j, &b) in starts.iter().enumerate() {
+        let s = crate::page::PageStart {
+            idx: b,
+            ..crate::page::PageStart::FIRST
+        };
+        decl.push((format!("pstart:{}", j + 1), s.value(v)));
+    }
+    decl.push((format!("pstart:{}", starts.len() + 1), v.str("end")));
+    for j in 0..=starts.len() {
+        let d = i64::try_from(j).unwrap_or(0) + 1;
+        let mut cs: Vec<ValueId> = base.iter().map(|&c| v.int(c)).collect();
+        cs[0] = v.int(if base[0] >= 0 { base[0] + d } else { base[0] - d });
+        decl.push((format!("pgdef:{j}"), v.list(cs)));
+    }
+    let decl: Vec<(Field, ValueId)> = decl.into_iter().map(|(n, x)| (v.field(&n), x)).collect();
+    for (f, x) in decl {
+        g.eng.declare_loopback(f, x);
     }
 }

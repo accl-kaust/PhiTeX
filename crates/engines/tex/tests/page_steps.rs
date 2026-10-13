@@ -55,3 +55,56 @@ fn an_edit_on_the_last_page_reruns_no_earlier_page() {
         b.stats.page_steps
     );
 }
+
+/// The generated documents of `PHITEX_GEN` (a directory with
+/// `para400.tex`, `para4000.tex`): loop-back rounds, the critical path
+/// and the runs, cold and after a one-word edit in the middle
+/// paragraph (same length: no break moves).
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn generated_documents() {
+    let Ok(dir) = std::env::var("PHITEX_GEN") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    for name in ["para400", "para4000"] {
+        let Ok(src) = std::fs::read_to_string(dir.join(format!("{name}.tex"))) else {
+            continue;
+        };
+        let opts = || common::options(&format!("./{name}.tex"), name, "", &dir);
+        let mut b = common::build(opts(), Some(&common::plain()), &src);
+        let s = &b.stats;
+        eprintln!(
+            "{name} cold: pages {}, loop rounds {}, critical path {:?}, runs {}, nodes run {}, page steps {}",
+            b.pages().len(),
+            s.loop_rounds,
+            s.critical_path,
+            s.runs,
+            s.nodes_run,
+            s.page_steps
+        );
+        let (r0, l0, p0) = (s.runs, s.loop_rounds, s.page_steps);
+        let mid = src.len() / 2;
+        let at = mid + src[mid..].find(" the ").expect("a word") + 1;
+        let new = format!("{}eht{}", &src[..at], &src[at + 3..]);
+        b.edit(&new);
+        let s = &b.stats;
+        eprintln!(
+            "{name} edit: loop rounds {}, critical path {:?}, runs {} (cumulative {}), nodes run {}, page steps {} (cumulative {})",
+            s.loop_rounds - l0,
+            s.critical_path,
+            s.runs - r0,
+            s.runs,
+            s.nodes_run,
+            s.page_steps - p0,
+            s.page_steps
+        );
+        if name == "para400" {
+            let cold = common::build(opts(), Some(&common::plain()), &new);
+            assert!(
+                common::first_difference(&b.output().0, &cold.output().0).is_none(),
+                "{name}: edit != cold"
+            );
+        }
+    }
+}

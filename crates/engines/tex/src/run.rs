@@ -43,7 +43,8 @@ pub(crate) struct Ops {
     pub put: OpId,
     pub pagestep: OpId,
     pub pagestep_any: OpId,
-    pub breaks: OpId,
+    pub pageplan: OpId,
+    pub brk: OpId,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
     /// The format's definitions the build analyses document texts with
@@ -213,6 +214,9 @@ pub(crate) struct Run<'c, 'a> {
     /// 256, plus one (0: not read yet); emptied whenever `own` changes.
     cats: [u8; 256],
     pub own: FxHashMap<Field, Option<ValueId>>,
+    /// Values read in place of the fields' reaching definitions (a page
+    /// step's `\count0..9` from `pgdef:<j-1>`), below this run's own.
+    pub over: FxHashMap<Field, ValueId>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     /// Where each field's definitions are in `defs`, latest last: a
     /// redefinition within the same group replaces in place instead of
@@ -274,6 +278,7 @@ impl<'c, 'a> Run<'c, 'a> {
             fread: Vec::new(),
             no_pull: false,
             own: FxHashMap::default(),
+            over: FxHashMap::default(),
             cats: [0; 256],
             defs: Vec::new(),
             def_ix: FxHashMap::default(),
@@ -310,6 +315,9 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn get_f(&mut self, f: Field) -> R<Option<ValueId>> {
         if let Some(&x) = self.own.get(&f) {
             return Ok(x);
+        }
+        if let Some(&x) = self.over.get(&f) {
+            return Ok(Some(x));
         }
         let r = self.cx.use_field(f);
         if crate::exec::env_flag!("PHITEX_READS") {
