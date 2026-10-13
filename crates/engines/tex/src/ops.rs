@@ -89,8 +89,12 @@ impl Operation for Exec {
     fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
         crate::hints::may_define(v, args)
     }
-    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
+    /// For an unbounded region: the fields its hint's guess names (its
+    /// commands' rows, its calls' bodies); a wrong `false` is refuted
+    /// by the engine, never wrong output.
+    fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
         client_only(v, f)
+            && crate::hints::hint_of_args(v, args).may_define_field(&crate::val::field_name(v, f))
     }
     /// The meanings and catcodes the text's hint rests on
     /// ([`crate::hints::reads`]): the node waits for them instead of
@@ -108,13 +112,40 @@ impl Operation for Exec {
             Effect::Pending
         }
     }
+    /// The siblings the slice takes when its text says so exactly
+    /// (a balanced region whose items all end inside it: none).
     fn claim(
         &self,
-        _: &[ValueId],
-        _: &Values,
+        args: &[ValueId],
+        v: &Values,
         _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Claim {
-        Claim::Pending
+        if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
+            return Claim::Pending;
+        }
+        match crate::hints::hint_of_args(v, args)
+            .bound
+            .as_ref()
+            .and_then(|b| b.claim)
+        {
+            Some(0) => Claim::None,
+            Some(n) => Claim::Count(n),
+            None => Claim::Pending,
+        }
+    }
+    fn claim_limit(
+        &self,
+        args: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Option<usize> {
+        if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
+            return None;
+        }
+        crate::hints::hint_of_args(v, args)
+            .bound
+            .as_ref()
+            .and_then(|b| b.claim)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
@@ -232,6 +263,7 @@ impl Operation for Put {
             let val = xs.get(1).copied().unwrap_or(ValueId::UNIT);
             let f = v.field(&name);
             names.push(f.0);
+            crate::exec::widths::def(f);
             cx.define_with(f, val, if g { Locality::Global } else { Locality::Local });
         }
         // the fields defined, for the prelude's export (as `Run::finish`)
