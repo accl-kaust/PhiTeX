@@ -125,6 +125,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("span", ""),
     ("omit", ""),
     ("noalign", "B"),
+    ("halign", "b"),
+    ("valign", "b"),
     ("end", ""),
     ("dump", ""),
     ("begingroup", ""),

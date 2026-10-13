@@ -42,9 +42,9 @@ mod value;
 
 pub use ctx::{Ctx, Stop};
 pub use engine::{
-    Brackets, Cause, Claim, Edit, EditQueue, EditSource, Effect, Engine, EvalError, Lifted, Limits, Locality,
-    MayDefine, Monoid, NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, Report, RunResult, SeqMonoid, Settled,
-    SumMonoid, UnitId, Until, WaitKind, WaitOn, Waiter,
+    Brackets, Cause, Claim, Edit, EditQueue, EditSource, Effect, Engine, EnvProvider, EvalError, Lifted, Limits,
+    Locality, LoopStart, MayDefine, Monoid, NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, Report, RunResult,
+    SeqMonoid, Settled, SumMonoid, UnitId, Until, WaitKind, WaitOn, Waiter,
 };
 pub use hash::{FxHashMap, FxHashSet, FxHasher, hash_bytes, hash_words};
 pub use sched::{Candidate, Executor, Greedy, Job, RandomScheduler, Rng, Scheduler, Sequential, Speculation};

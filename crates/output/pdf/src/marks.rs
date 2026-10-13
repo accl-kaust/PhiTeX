@@ -265,6 +265,14 @@ impl PdfState {
         if self.doing_leaders {
             return;
         }
+        // pdfTeX §1385 (`scan_annot`, `useobjnum`): a number that is not
+        // an object of this file is an error, never an index. (A run fed
+        // another mode's handles, before the engine runs it again with
+        // its own, meets this too.)
+        if objnum == 0 || objnum > self.sys_obj_ptr() {
+            self.fail(pdf_error("ext1", "invalid object number being reused"));
+            return;
+        }
         let objnum = if self.is_scheduled(objnum) {
             self.new_objnum_()
         } else {
@@ -300,6 +308,13 @@ impl PdfState {
                 "ext4",
                 "link annotations cannot be inside an XForm",
             ));
+            return;
+        }
+        // (pdfTeX numbers a link with `pdf_new_objnum`: a number that is
+        // not an object of this file comes from another mode's handles,
+        // a run the engine repeats with its own)
+        if objnum == 0 || objnum > self.sys_obj_ptr() {
+            self.fail(pdf_error("ext1", "invalid object number being reused"));
             return;
         }
         let objnum = if self.is_scheduled(objnum) {

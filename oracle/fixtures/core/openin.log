@@ -1,0 +1,1 @@
+(./core.tex [yes] [yes] [no] [yes] macro:->\message {[sub]}  )

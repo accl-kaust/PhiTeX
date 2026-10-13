@@ -1,6 +1,7 @@
 //! Gate: `oracle/fixtures/etex/*.tex` under INITEX in e-TeX's extended
 //! mode (pdfTeX's, as the oracle ran them): the log's lines from
-//! `(./core.tex` on equal pdfTeX's.
+//! `(./core.tex` on equal pdfTeX's, and the DVI file where the oracle
+//! wrote one (`<name>.dvi`).
 
 mod common;
 
@@ -18,12 +19,27 @@ fn run(names: &[&str]) {
         let want = common::read(&dir.join(format!("{n}.log")));
         let want = want.trim_end_matches('\n');
         let doc = format!("{PRELUDE}{src}\\end\n");
-        let opts = common::options("./core.tex", "texput", "", &dir);
+        // a fixture that ships pages has the oracle's DVI too: equal bytes
+        let want_dvi = std::fs::read(dir.join(format!("{n}.dvi"))).ok();
+        let comment = want_dvi
+            .as_deref()
+            .map(common::dvi_comment)
+            .unwrap_or_default();
+        let opts = common::options("./core.tex", "texput", &comment, &dir);
         let b = common::build(opts, None, &doc);
-        let (_, log) = b.output();
+        let (dvi, log) = b.output();
         let log = common::log_excerpt(&log);
-        match common::first_difference(log.as_bytes(), want.as_bytes()) {
-            None => eprintln!("etex/{n}: ok ({} nodes run)", b.stats.nodes_run),
+        let mut diff = common::first_difference(log.as_bytes(), want.as_bytes());
+        if diff.is_none()
+            && let Some(w) = &want_dvi
+        {
+            diff = common::first_difference(&dvi, w).map(|d| format!("DVI {d}"));
+        }
+        match diff {
+            None => eprintln!(
+                "etex/{n}: ok ({} nodes run, {} rounds, {} loop rounds, restarted_by {:?})",
+                b.stats.nodes_run, b.stats.rounds, b.stats.loop_rounds, b.stats.restarted_by
+            ),
             Some(d) => {
                 eprintln!("etex/{n}: FAIL {d}");
                 failed.push(n);
@@ -78,4 +94,20 @@ fn io() {
 #[ignore = "error contexts, \\showbox, font expansion"]
 fn diagnostics() {
     run(&["show", "expr_errors", "ignoreerr", "pdfmatch", "micro"]);
+}
+
+/// Catcodes set locally inside groups that read files line by line
+/// (`\read`, `\readline`), use `\scantokens`/`\everyeof`, recurse, or
+/// mix `\global` and local assignments come back to the run's own
+/// values at the group's end (§282, §283).
+#[test]
+fn catcode_restore() {
+    run(&["catrestore"]);
+}
+
+/// `\expandafter` over `\else`/`\fi` with e-TeX's conditionals
+/// (`\unless`, `\ifcsname`, `\ifdefined`, `\detokenize` emptiness).
+#[test]
+fn expandafter_conditionals() {
+    run(&["xcondx"]);
 }

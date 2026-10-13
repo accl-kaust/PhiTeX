@@ -1211,3 +1211,64 @@ fn help_is_sectioned() {
         "escape sequences off a terminal:\n{text}"
     );
 }
+
+/// `phitex watch` over 50 word edits of the big document: the engine's
+/// tables (the build's "engine tables" note) stay bounded, the collector
+/// running after each build (`PHITEX_NO_GC=1` for the before numbers).
+#[test]
+#[ignore = "heavy: 50 edits of the 48-page document"]
+fn watch_tables_bounded() {
+    let _one = one();
+    let text = big();
+    let dir = scratch("watch-tables");
+    std::fs::write(dir.join("big.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch", "--json", "--no-view", "--ini", "--etex", "-j", "8", "big.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let tables = |line: &serde_json::Value| -> Vec<u64> {
+        let n = line["notes"]
+            .as_array()
+            .and_then(|a| {
+                a.iter()
+                    .filter_map(|n| n.as_str())
+                    .find(|n| n.starts_with("engine tables:"))
+            })
+            .unwrap_or_else(|| panic!("no tables note: {line}"))
+            .to_owned();
+        n.split(|c: char| !c.is_ascii_digit())
+            .filter_map(|w| w.parse().ok())
+            .collect()
+    };
+    let first = until(&mut lines, "build", &1.into(), &mut seen);
+    let mut sizes = vec![tables(&first)];
+    let at = text.rfind("\\message{[part 2 story]}").expect("part 2");
+    let word = text[at..].find(" the ").expect("a word") + at;
+    for k in 0..50u64 {
+        let w = if k % 2 == 0 { " thy " } else { " the " };
+        let edited = format!("{}{w}{}", &text[..word], &text[word + 5..]);
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(dir.join("big.tex"), &edited).expect("the edit");
+        let line = until(&mut lines, "build", &(k + 2).into(), &mut seen);
+        sizes.push(tables(&line));
+    }
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    for (k, s) in sizes.iter().enumerate() {
+        eprintln!("build {}: nodes, units, values {s:?}", k + 1);
+    }
+    if std::env::var_os("PHITEX_NO_GC").is_none() {
+        let (a, b) = (&sizes[1], &sizes[sizes.len() - 1]);
+        assert!(b[0] <= a[0] * 11 / 10 && b[2] <= a[2] * 11 / 10, "grew: {a:?} -> {b:?}");
+    }
+}

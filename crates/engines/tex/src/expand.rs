@@ -36,7 +36,7 @@ impl Run<'_, '_> {
                     // §386
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(self.cur.chr).unwrap_or(0).min(4)];
-                    let m = self.get(&format!("mark:{name}"))?;
+                    let m = crate::etex::mark_read(self, name, 0)?;
                     let toks = crate::val::toks_of(self.v, m);
                     self.push_toks(toks);
                 }
@@ -83,6 +83,7 @@ impl Run<'_, '_> {
                             self.pass_text()?;
                         }
                         self.conds.pop();
+                        self.if_codes.truncate(self.conds.len());
                     }
                 }
                 cmd::INPUT => {
@@ -94,7 +95,7 @@ impl Run<'_, '_> {
                 }
                 _ => {
                     // §370: "Undefined control sequence" (dropped)
-                    if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+                    if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                         eprintln!("undefined {:?}", self.cur.tok);
                     }
                     self.log("error", "Undefined control sequence")?;
@@ -479,6 +480,7 @@ impl Run<'_, '_> {
                         }
                     } else if self.cur.chr == FI_CODE {
                         self.conds.pop();
+                        self.if_codes.truncate(self.conds.len());
                     }
                 }
                 self.change_if_limit(OR_CODE, save);
@@ -503,6 +505,7 @@ impl Run<'_, '_> {
                 // "Extra \or": ignored
             } else if self.cur.chr == FI_CODE {
                 self.conds.pop();
+                self.if_codes.truncate(self.conds.len());
             }
         }
         self.common_ending(save);
@@ -527,6 +530,7 @@ impl Run<'_, '_> {
     fn common_ending(&mut self, save: usize) {
         if self.cur.chr == FI_CODE {
             self.conds.truncate(save - 1);
+            self.if_codes.truncate(self.conds.len());
         } else {
             self.change_if_limit(FI_CODE, save);
         }
@@ -689,7 +693,7 @@ impl Run<'_, '_> {
                     s.push(':');
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(h).unwrap_or(0).min(4)];
-                    let mk = self.get(&format!("mark:{name}"))?;
+                    let mk = crate::etex::mark_read(self, name, 0)?;
                     let toks = crate::val::toks_of(self.v, mk);
                     self.show_toks_into(s, &toks)?;
                 }
@@ -793,6 +797,8 @@ impl Run<'_, '_> {
             self.log("error", "I can't find file")?;
             return Ok(());
         };
+        // (a job-written file whose read-back only defines)
+        self.read_back(&key)?;
         let xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
             self.log("error", "I can't find file")?;
@@ -813,6 +819,7 @@ impl Run<'_, '_> {
     pub(crate) fn scan_file_name(&mut self) -> R<String> {
         self.skip_blanks_x()?;
         let mut name = String::new();
+        let mut quoted = false;
         loop {
             if self.cur.cmd > cmd::OTHER_CHAR
                 || self.cur.chr > 255
@@ -822,10 +829,16 @@ impl Run<'_, '_> {
                 self.back_input(t);
                 break;
             }
-            if self.cur.chr == 32 {
+            // web2c's more_name (tex.ch, §516): a `"` toggles quoting
+            // and is not part of the name; a space ends it unquoted
+            if self.cur.chr == 32 && !quoted {
                 break;
             }
-            print::push_code(&mut name, u32::try_from(self.cur.chr).unwrap_or(0));
+            if self.cur.chr == 34 {
+                quoted = !quoted;
+            } else {
+                print::push_code(&mut name, u32::try_from(self.cur.chr).unwrap_or(0));
+            }
             self.get_x_token()?;
         }
         Ok(name)
