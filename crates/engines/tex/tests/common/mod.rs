@@ -220,7 +220,10 @@ impl Census {
             f.push(format!("{n}: {} loop rounds cold", self.cold_rounds));
         }
         if self.edit_rounds > 1 {
-            f.push(format!("{n}: {} loop rounds on a word edit", self.edit_rounds));
+            f.push(format!(
+                "{n}: {} loop rounds on a word edit",
+                self.edit_rounds
+            ));
         }
         if self.undeclared > 0 {
             f.push(format!("{n}: {} undeclared definitions", self.undeclared));

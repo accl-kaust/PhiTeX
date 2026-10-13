@@ -593,6 +593,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
     // (the groups the text opens so far: braces and named groups)
     let mut depth: i64 = 0;
     let mut letted: Vec<&str> = Vec::new();
+    let mut bodies: Vec<(&str, usize, usize)> = Vec::new();
     // (what the previous atom added, and whether it ran inside a group
     // without `\global`: its local definitions are undone at the
     // group's end, §283)
@@ -784,15 +785,27 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             }
         };
         let gg = gl || matches!(n, "gdef" | "xdef" | "protected@xdef");
+        // (a name this text defines runs as defined here: `\\def\\next`)
+        let local_name = atoms
+            .get(skip(atoms, k))
+            .filter(|x| x.kind == AtomKind::Cs)
+            .map(|x| x.name(text));
         match n {
             "def" | "gdef" => {
                 let p = target(&mut e, k, gg);
                 k = past_body(atoms, p);
+                if let Some(x) = local_name {
+                    bodies.push((x, p, k));
+                }
             }
             // (an expanded body runs as expansion here: `\csname` in it
             // defines; the loop reads it as code, an over-approximation)
             "edef" | "xdef" | "protected@edef" | "protected@xdef" => {
-                k = target(&mut e, k, gg);
+                let p = target(&mut e, k, gg);
+                if let Some(x) = local_name {
+                    bodies.push((x, p, past_body(atoms, p)));
+                }
+                k = p;
             }
             "let" | "futurelet" => {
                 if let Some(x) = atoms.get(skip(atoms, k)).filter(|x| x.kind == AtomKind::Cs) {
@@ -1228,6 +1241,26 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                 // a call the `\let` recorded, not as its definitions
                 // elsewhere: `\let\next\f@@t ... \next`)
                 if rd || letted.contains(&n) {
+                    continue;
+                }
+                if let Some(&(_, b0, b1)) = bodies.iter().rev().find(|b| b.0 == n) {
+                    // (its body as this text defined it runs here)
+                    let x = effects(text, atoms, b0, b1, gl);
+                    e.names.extend(x.names);
+                    e.prefixes.extend(x.prefixes);
+                    e.assigned.extend(x.assigned);
+                    e.unbounded.extend(x.unbounded);
+                    for c in x.calls {
+                        if (depth <= 0 || gl)
+                            && x.outer_calls.contains(&c)
+                            && !e.outer_calls.contains(&c)
+                        {
+                            e.outer_calls.push(c.clone());
+                        }
+                        if !e.calls.contains(&c) {
+                            e.calls.push(c);
+                        }
+                    }
                     continue;
                 }
                 e.calls.push(n.to_owned());

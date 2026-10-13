@@ -379,7 +379,10 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
         (Some(v), Some(hs)) => {
             for h in hs {
                 if std::env::var("PHITEX_HEAD_TRACE").is_ok_and(|w| *h == w) {
-                    eprintln!("HEADTRACE {h}\n{}", std::backtrace::Backtrace::force_capture());
+                    eprintln!(
+                        "HEADTRACE {h}\n{}",
+                        std::backtrace::Backtrace::force_capture()
+                    );
                 }
                 if !v.iter().any(|x| x == h) {
                     v.push((*h).to_owned());
@@ -2215,7 +2218,10 @@ impl Analysis<'_> {
                 }
             } else if let Some(h) = head_of_pass_field(f) {
                 if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
-                    eprintln!("slices: head {h} from name {f} relied {:?} calls {:?}", set.relied, set.calls);
+                    eprintln!(
+                        "slices: head {h} from name {f} relied {:?} calls {:?}",
+                        set.relied, set.calls
+                    );
                 }
                 add_head(&mut b.state, h);
             }
