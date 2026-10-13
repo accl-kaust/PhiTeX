@@ -754,23 +754,26 @@ fn latex_input_include() {
     edit_check("inputs", &b, &cold, 4);
 }
 
-/// The chain census gate (`common::Census`) on `pdflatex` documents:
-/// hello + 30 paragraphs and the environments article, cold and after
-/// a one-word edit.
+/// The chain census gate (`common::Census`) on a `pdflatex` document:
+/// hello + 30 paragraphs, cold and after a one-word edit.
 #[test]
 fn census_latex() {
+    census_of("paras30", "Paragraph 17 of the text: the quick ");
+}
+
+/// The chain census gate on the environments article (its cold build
+/// is `latex_environments`'s).
+#[test]
+fn census_envs() {
+    census_of("envs", "Item 3 of the list: the quick ");
+}
+
+fn census_of(name: &str, marker: &str) {
     let dir = common::fixtures().join("latex/pdfdocs");
-    let mut rows = Vec::new();
-    for (name, marker) in [
-        ("paras30", "Paragraph 17 of the text: the quick "),
-        ("envs", "Item 3 of the list: the quick "),
-    ] {
-        let src = common::read(&dir.join(format!("{name}.tex")));
-        let (mut b, _) = cold_nodes(name, &dir, &src);
-        let new = quack(&src, marker);
-        rows.push(common::Census::take(name, &mut b, &new));
-    }
-    common::assert_census(&rows);
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let (mut b, _) = cold_nodes(name, &dir, &src);
+    let new = quack(&src, marker);
+    common::assert_census(&[common::Census::take(name, &mut b, &new)]);
 }
 
 /// `pdflatex` on UTF-8 text (`pdfdocs/utf8.tex`: `inputenc`, T1,
