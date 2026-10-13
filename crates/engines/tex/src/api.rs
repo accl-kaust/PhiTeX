@@ -3008,11 +3008,28 @@ impl Build {
         self.output().0.starts_with(b"%PDF")
     }
 
+    /// Whether the job ended on a fatal error (§93, `history =
+    /// fatal_error_stop`).
+    #[must_use]
+    pub fn fatal(&self) -> bool {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("log"))
+            .is_some_and(|e| {
+                v.seq_to_vec(e).into_iter().any(|x| {
+                    list_of(v, x)
+                        .first()
+                        .is_some_and(|&k| str_of(v, k) == "fatal")
+                })
+            })
+    }
+
     /// The output file (DVI or PDF) and the log.
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
         let v = self.g.eng.values();
-        let dvi: Vec<u8> = self
+        let mut dvi: Vec<u8> = self
             .g
             .eng
             .output(self.dvi)
@@ -3024,7 +3041,11 @@ impl Build {
             })
             .unwrap_or_default();
         let n = self.pages().len();
-        let end = if n == 0 {
+        // (pdfTeX §794: after a fatal error the PDF file is removed)
+        let end = if dvi.starts_with(b"%PDF") && self.fatal() {
+            dvi.clear();
+            "!  ==> Fatal error occurred, no output PDF file produced!".to_owned()
+        } else if n == 0 {
             "No pages of output.".to_owned()
         } else {
             // §642 (pdfTeX §794): the file's name, its pages and bytes
