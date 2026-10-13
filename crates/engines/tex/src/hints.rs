@@ -2704,6 +2704,23 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         }
         slice_hints.push(intern(&h));
     }
+    // (`PHITEX_HINTS_DIGEST`: one line per text, a hash of every atom's
+    // and slice's hint as encoded: the check that a rework of the
+    // analysis keeps its answers byte for byte)
+    if crate::exec::env_flag!("PHITEX_HINTS_DIGEST") {
+        let mut d = phitex_defuse::hash_bytes(0, text.as_bytes());
+        for h in &t.hints {
+            d = phitex_defuse::hash_bytes(d, h.encode().as_bytes());
+        }
+        for h in &slice_hints {
+            d = phitex_defuse::hash_bytes(d, h.as_bytes());
+        }
+        eprintln!(
+            "hints digest: {d:016x} ({} atoms, {} slices)",
+            t.hints.len(),
+            slice_hints.len()
+        );
+    }
     if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
         let open = slice_hints
             .iter()
