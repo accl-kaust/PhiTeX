@@ -150,6 +150,11 @@ pub struct RunInfo {
     pub critical_path: Option<usize>,
     /// The most nodes running at once.
     pub peak_running: usize,
+    /// The batches of jobs the engine ran, those run on the calling thread
+    /// (one job, or one thread), and the largest.
+    pub batches: u64,
+    pub batches_inline: u64,
+    pub max_batch: usize,
 }
 
 impl RunInfo {
@@ -544,6 +549,9 @@ impl Session {
                 engine_wall: s.wall,
                 critical_path: s.critical_path,
                 peak_running: s.peak_running,
+                batches: s.batches,
+                batches_inline: s.batches_inline,
+                max_batch: s.jobs_max_batch,
             }],
             internal: None,
             diagnostics: b.diagnostics(),

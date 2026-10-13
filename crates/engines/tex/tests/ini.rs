@@ -55,3 +55,31 @@ fn pdfetex_ini() {
         );
     }
 }
+
+/// A word before a ligature that ends in letters (`footnote---and`):
+/// §899 (`oracle/fixtures/plain/hy`, the CLI's report).
+#[test]
+fn hyphenation_after_a_ligature() {
+    let dir = common::fixtures().join("plain/hy");
+    let src = common::read(&dir.join("hy.tex"));
+    let want = std::fs::read(dir.join("hy-etex.dvi")).expect("the oracle");
+    let opts = Options {
+        epoch: Some(0),
+        prelude_jobname: "etex".to_owned(),
+        ..common::options("./hy.tex", "hy", &common::dvi_comment(&want), &dir)
+    };
+    let b = common::build(opts, Some("\\input etex.ini\n"), &src);
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("etex hy.dvi: {d}");
+    }
+    let want = std::fs::read(dir.join("hy.pdf")).expect("the oracle");
+    let opts = Options {
+        epoch: Some(0),
+        prelude_jobname: "pdftex".to_owned(),
+        ..common::options("./hy.tex", "hy", "", &dir)
+    };
+    let b = common::build(opts, Some("\\input pdfetex.ini\n"), &src);
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("pdftex hy.pdf: {d}");
+    }
+}
