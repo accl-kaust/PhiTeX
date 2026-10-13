@@ -224,6 +224,7 @@ impl Run<'_, '_> {
     /// closes keep it. `base` is the depth of level 0.
     pub(crate) fn modify_at(&mut self, f: Field, val: ValueId, lvl: i64, base: i64) {
         self.own.insert(f, Some(val));
+        self.irreversible += 1;
         self.forget_cats();
         // the first open group deeper than the binding's level
         let mut depth = base;
