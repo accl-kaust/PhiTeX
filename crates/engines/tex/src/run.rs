@@ -95,12 +95,6 @@ impl FileRest {
         }
     }
 
-    /// The position of the next line in the file (its characters are the
-    /// file's bytes).
-    fn byte_pos(&self) -> usize {
-        self.pos
-    }
-
     /// The file's name and the line number of the next line, for
     /// diagnostics ([`Run::heartbeat`]).
     pub(crate) fn where_(&self, v: &Values) -> (String, usize) {
@@ -120,15 +114,39 @@ impl FileRest {
         self.off < self.str().len()
     }
 
-    /// The next line, with its end of line; the offset moves past it.
-    fn take_line(&mut self) -> String {
+    /// The next line as a segment not yet reached (what a top-level
+    /// node's arguments for it decode to, without a value or a string per
+    /// line: its bytes are its characters, trailing blanks removed, as
+    /// web2c's `input_line`); the offset moves past it.
+    fn take_src(&mut self) -> Src {
+        let at = self.pos;
         let s = self.str();
         let rest = &s[self.off..];
         let n = rest.find('\n').map_or(rest.len(), |k| k + 1);
-        let line = rest[..n].to_owned();
-        self.pos += line.chars().count();
+        let line = &rest[..n];
+        let bytes = line.as_bytes();
+        let mut end = bytes.len();
+        while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
+            end -= 1;
+        }
+        while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+            end -= 1;
+        }
+        let mut buf = Vec::with_capacity(end + 1);
+        buf.extend(bytes[..end].iter().map(|&b| u32::from(b)));
+        let chars = line.chars().count();
+        self.pos += chars;
         self.off += n;
-        line
+        Src {
+            buf,
+            loc: 0,
+            state: NEW_LINE,
+            endch: -2,
+            starts: true,
+            ends: true,
+            origin: Some((self.name, at)),
+            rescanned: false,
+        }
     }
 }
 
@@ -790,6 +808,16 @@ impl<'c, 'a> Run<'c, 'a> {
                 _ => {}
             }
         }
+        // (the token just read from the list on top is that list's
+        // previous token again: it is read next by stepping back, the
+        // same tokens in the same order without a new list)
+        if let Some(Frame::Toks(l, p)) = self.frames.front_mut()
+            && *p > 0
+            && l[*p - 1] == t
+        {
+            *p -= 1;
+            return;
+        }
         self.drop_spent_lists();
         self.frames.push_front(Frame::Toks(Rc::from([t]), 0));
     }
@@ -958,16 +986,8 @@ impl<'c, 'a> Run<'c, 'a> {
                         unreachable!()
                     };
                     if f.has_lines() {
-                        let at = f.byte_pos();
-                        let name = f.name;
-                        let line = f.take_line();
-                        let args = line_args(self.v, &line);
-                        for mut fr in decode_frames(self.v, &args).into_iter().rev() {
-                            if let Frame::Src(s) = &mut fr {
-                                s.origin = Some((name, at));
-                            }
-                            self.frames.push_front(fr);
-                        }
+                        let src = f.take_src();
+                        self.frames.push_front(Frame::Src(src));
                     } else {
                         self.frames.pop_front();
                     }
@@ -1081,7 +1101,7 @@ impl<'c, 'a> Run<'c, 'a> {
     fn end_line_char(&mut self) -> R<()> {
         let due = matches!(self.frames.front(), Some(Frame::Src(s)) if s.ends && s.endch == -3 && s.loc >= s.buf.len());
         if due {
-            let e = self.int("param:endlinechar")?;
+            let e = i64::from(self.param("endlinechar")?);
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
                 if (0..256).contains(&e) {
                     s.buf.push(u32::try_from(e).unwrap_or(13));
@@ -1218,7 +1238,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 s.loc = loc + 1;
             }
             let mut b = [0; 4];
-            return Ok(Tok::cs(char::from_u32(c).unwrap_or('?').encode_utf8(&mut b)));
+            return Ok(Tok::cs(
+                char::from_u32(c).unwrap_or('?').encode_utf8(&mut b),
+            ));
         }
     }
 
@@ -1787,28 +1809,6 @@ pub(crate) fn src_frame(line: &str, endlinechar: i64) -> Frame {
         origin: None,
         rescanned: true,
     })
-}
-
-/// A source line as a top-level node's arguments: its characters with
-/// trailing spaces removed (web2c's `input_line`), not yet read.
-pub(crate) fn line_args(v: &Values, line: &str) -> Vec<ValueId> {
-    let bytes = line.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-        end -= 1;
-    }
-    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
-        end -= 1;
-    }
-    let text: String = bytes[..end].iter().map(|&b| char::from(b)).collect();
-    let frame = v.list(vec![
-        v.str("s"),
-        v.str(&text),
-        v.int(i64::from(NEW_LINE)),
-        v.int(-2),
-        v.int(3),
-    ]);
-    vec![v.list(vec![frame]), v.int(1)]
 }
 
 /// [`slice_args`] for a piece of a file `\input` read, beginning at
