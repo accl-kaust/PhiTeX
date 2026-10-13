@@ -270,7 +270,7 @@ pub(crate) fn do_vf(r: &mut Run<'_, '_>, f: u32) -> R<()> {
     for lf in &vf.fonts {
         let fs = store_scaled_f(lf.scaled, i.size);
         let name = String::from_utf8_lossy(&lf.name).into_owned();
-        let count = r.int("fontcount")?;
+        let count = r.cint(crate::fields::cell::FONTCOUNT)?;
         let mut found = None;
         for g in 1..=count {
             if let Some(j) = crate::fonts::info(v, r.get(&format!("fontinfo:{g}"))?)
@@ -420,7 +420,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         // first needs it, as the next internal font number; here the
         // number after the fonts so far (the engine's `fontcount` does
         // not count it)
-        let n = r.int("fontcount")?;
+        let n = r.cint(crate::fields::cell::FONTCOUNT)?;
         let id = u32::try_from(n + 1).unwrap_or(u32::MAX - 1);
         wanted.push((id, "pdftexspace".to_owned(), x, -1000));
         out.space = Some(id);
@@ -456,7 +456,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     }
     // the files of `\pdfmapline`s and `\pdfmapfile`s
     for e in r
-        .get("pdf:maps")?
+        .get_loc(crate::fields::cell::PDF_MAPS)?
         .map(|x| list_of(v, x))
         .unwrap_or_default()
     {
@@ -490,7 +490,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
 /// The fold's state where this node is (`pdf:state`), if a step made
 /// one.
 fn before(r: &mut Run<'_, '_>) -> R<(u64, Option<Arc<Fold>>)> {
-    let k0 = u64::from_ne_bytes(r.int("pdf:state")?.to_ne_bytes());
+    let k0 = u64::from_ne_bytes(r.cint(crate::fields::cell::PDF_STATE)?.to_ne_bytes());
     let a = states()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -532,9 +532,12 @@ pub(crate) fn step_forms<T>(
     } else {
         {
             let date = r
-                .get("pdfdate")?
+                .get_loc(crate::fields::cell::PDFDATE)?
                 .map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
-            let jobname = r.get("jobname")?.map(|x| str_of(v, x)).unwrap_or_default();
+            let jobname = r
+                .get_loc(crate::fields::cell::JOBNAME)?
+                .map(|x| str_of(v, x))
+                .unwrap_or_default();
             let p = PdfParams {
                 date,
                 banner: BANNER.to_owned(),

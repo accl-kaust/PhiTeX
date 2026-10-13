@@ -1,6 +1,4 @@
-#!/bin/bash
-export PHITEX_CACHE_DIR=$PWD/target/cache
-S=scripts/sandbox
-for t in edits hints plain page_steps diagnostics core inputs; do echo "== $t"; $S cargo test --profile fastdev -p phitex-tex --test $t 2>&1 | grep -E "test result|FAILED|panicked|error(\[|:)" | head; done
-echo "== incr"; $S cargo test --profile fastdev -p phitex-tex --lib incr 2>&1 | grep -E "test result|panicked"
-echo "== cli"; $S cargo test --profile fastdev -p phitex-cli 2>&1 | grep -E "test result|FAILED|panicked" | head
+export PHITEX_CACHE_DIR=$PWD/target/phcache
+cargo clippy --all-targets 2>&1 | grep -A6 "^warning: [^p]\|^error" | head -40
+cargo test -p phitex-tex --profile fastdev --test plain --test ini --test etex --test core --test edits --test page_steps --test hints --test diagnostics --test pdftex 2>&1 | grep -E "^test |test result|FAILED|panicked|failures|^error" | grep -v " ok$"
+timeout 400 cargo test -p phitex-tex --profile fastdev --test latex -- latex_hello --exact --ignored --nocapture 2>&1 | grep -E "resumed|test result|panicked"

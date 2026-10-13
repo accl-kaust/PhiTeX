@@ -133,7 +133,7 @@ impl Run<'_, '_> {
         let h = v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes())));
         self.contribute("pagehash", h);
         self.log("shipend", "]")?;
-        self.set("deadcycles", v.int(0), true);
+        self.set_cell(crate::fields::cell::DEADCYCLES, v.int(0), true);
         Ok(())
     }
 
@@ -157,7 +157,10 @@ impl Run<'_, '_> {
         ] {
             xs.push(v.int(i64::from(self.param(p)?)));
         }
-        xs.push(self.get("pdf:colorstacks")?.unwrap_or(ValueId::UNIT));
+        xs.push(
+            self.get_loc(crate::fields::cell::PDF_COLORSTACKS)?
+                .unwrap_or(ValueId::UNIT),
+        );
         for p in ["pdfobjcompresslevel", "pdfgentounicode"] {
             xs.push(v.int(i64::from(self.param(p)?)));
         }
@@ -553,8 +556,10 @@ impl Run<'_, '_> {
                 (m(xs[0]), m(xs[1]))
             }
             _ => (
-                self.get("mark:top")?.filter(|&x| x != ValueId::UNIT),
-                self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT),
+                self.get_loc(crate::fields::cell::MARK_TOP)?
+                    .filter(|&x| x != ValueId::UNIT),
+                self.get_loc(crate::fields::cell::MARK_BOT)?
+                    .filter(|&x| x != ValueId::UNIT),
             ),
         };
         let mut first = None;
@@ -616,9 +621,13 @@ impl Run<'_, '_> {
             return Ok(false);
         }
         // §1025
-        let dead = self.int("deadcycles")? + 1;
-        self.set("deadcycles", v.int(dead), true);
-        self.set("box:255", v.list(vec![v.int(0), b255]), true);
+        let dead = self.cint(crate::fields::cell::DEADCYCLES)? + 1;
+        self.set_cell(crate::fields::cell::DEADCYCLES, v.int(dead), true);
+        self.set_cell(
+            crate::fields::cell::BOX255,
+            v.list(vec![v.int(0), b255]),
+            true,
+        );
         // the page parameters the routine starts with: one it changes
         // globally reaches the fold for the next page (`output_end`)
         let before = self.page_params_marker()?;
@@ -651,7 +660,7 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     if r.box_reg(255)?.is_some() {
         r.log("error", "Output routine didn't use all of \\box255")?;
     }
-    r.set("inspen", v.int(0), true);
+    r.set_cell(crate::fields::cell::INSPEN, v.int(0), true);
     left.extend(items);
     if r.pg.is_some() {
         // a text paging inline (`pageinline.rs`): §1026's contributions
@@ -670,7 +679,7 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             r.contribute("pagefxs", v.seq_unit(v.list(vec![v.int(jj), x])));
         }
     }
-    r.set("deadcycles", v.int(0), true);
+    r.set_cell(crate::fields::cell::DEADCYCLES, v.int(0), true);
     Ok(())
 }
 
@@ -1313,13 +1322,7 @@ impl FinalState {
             .min(MAX_PAGES);
         // each step's entry: [j, own pairs, pgst read, counts, pgdef
         // read, serial] (`Run::page_step`)
-        let mut entries: std::collections::BTreeMap<usize, Vec<ValueId>> =
-            std::collections::BTreeMap::new();
-        for e in v.seq_to_vec(all) {
-            let xs = list_of(v, e);
-            let Some(&j) = xs.first() else { continue };
-            entries.insert(usize::try_from(int_of(v, j)).unwrap_or(0), xs);
-        }
+        let entries = Self::entries(v, all);
         let stored = cx.use_field(v.field("pgref"))?;
         let old = pgref_now(v, o, stored);
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -1327,13 +1330,7 @@ impl FinalState {
             std::collections::BTreeMap::new();
         let mut cur = ValueId::UNIT;
         // `\\count0..9` before the chain, then as folded
-        let mut counts: Vec<i64> = Vec::with_capacity(10);
-        for k in 0..10 {
-            counts.push(
-                cx.use_field(v.field(&format!("count:{k}")))?
-                    .map_or(0, |x| int_of(v, x)),
-            );
-        }
+        let mut counts = Self::counts(cx)?;
         let ints =
             |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
         for j in 0..steps {
@@ -1426,14 +1423,7 @@ impl FinalState {
         } else {
             (old + 1).min(2)
         };
-        if !refuted.is_empty() {
-            let names: Vec<String> = refuted.into_iter().collect();
-            o.lblog
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .rounds
-                .insert(format!("refuted round {}: {}", old + 1, names.join(" ")));
-        }
+        Self::log_refuted(o, old, refuted);
         if new > 0 {
             let e = o.eval.load(std::sync::atomic::Ordering::Relaxed);
             let x = v.list(vec![v.int(i64::try_from(e).unwrap_or(0)), v.int(new)]);
@@ -1446,6 +1436,42 @@ impl FinalState {
         Ok(FinalState {
             map: state.into_values().collect(),
         })
+    }
+
+    /// Each step's entry in the chain's accumulation, by page.
+    fn entries(v: &Values, all: ValueId) -> std::collections::BTreeMap<usize, Vec<ValueId>> {
+        let mut entries = std::collections::BTreeMap::new();
+        for e in v.seq_to_vec(all) {
+            let xs = list_of(v, e);
+            let Some(&j) = xs.first() else { continue };
+            entries.insert(usize::try_from(int_of(v, j)).unwrap_or(0), xs);
+        }
+        entries
+    }
+
+    /// `\\count0..9` before the chain.
+    fn counts(cx: &mut Ctx<'_>) -> Result<Vec<i64>, Stop> {
+        let v = cx.values();
+        let mut counts: Vec<i64> = Vec::with_capacity(10);
+        for k in 0..10 {
+            counts.push(
+                cx.use_field(v.field(&format!("count:{k}")))?
+                    .map_or(0, |x| int_of(v, x)),
+            );
+        }
+        Ok(counts)
+    }
+
+    /// The loop-back log's line for a refuted round.
+    fn log_refuted(o: &crate::run::Ops, old: i64, refuted: std::collections::BTreeSet<String>) {
+        if !refuted.is_empty() {
+            let names: Vec<String> = refuted.into_iter().collect();
+            o.lblog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .rounds
+                .insert(format!("refuted round {}: {}", old + 1, names.join(" ")));
+        }
     }
 
     /// Field `f` after the chain.

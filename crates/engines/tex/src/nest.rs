@@ -15,8 +15,12 @@
 //! Level 0 is the engine's scope the node runs in: its mode and list come
 //! from the scope kind the engine gives it. A format node runs its whole file and closes
 //! every group it opens: a group open at a format node's end is an
-//! error. A document region is balanced by the pass, so a region never
-//! leaves one either.
+//! error. A document region is cut at every paragraph end at brace depth
+//! 0 of its text: one whose run ends with one group of its own open (an
+//! environment's `\begin`) leaves it to the engine as a scope
+//! (`Run::leave_scope`), and one that closes the scope it runs in (an
+//! environment's `\end`) ends there, its engine effect a close
+//! (`Run::close_group`), the rest of its input following it outside.
 
 use phitex_defuse::ValueId;
 

@@ -193,7 +193,7 @@ impl Run<'_, '_> {
     /// its arguments substituted is built in another, then pushed as one
     /// shared list (one allocation a call).
     pub(crate) fn macro_call(&mut self) -> R<()> {
-        let Mean::Macro(m) = self.cur.mean.clone() else {
+        let Mean::Macro(m) = self.cur.mean() else {
             return Ok(());
         };
         if m.params.is_empty() {
@@ -494,11 +494,11 @@ impl Run<'_, '_> {
             12 => {
                 // §507
                 if self.get_next()? {
-                    let m1 = self.cur.mean.clone();
+                    let m1 = self.cur.mean();
                     let t1 = self.cur.tok;
                     let (p, q) = self.cur_cmd_chr_for_ifx(t1, &m1);
                     if self.get_next()? {
-                        let m2 = self.cur.mean.clone();
+                        let m2 = self.cur.mean();
                         let t2 = self.cur.tok;
                         let (c2, h2) = self.cur_cmd_chr_for_ifx(t2, &m2);
                         if c2 != p {
@@ -644,7 +644,7 @@ impl Run<'_, '_> {
             }
             2 => {
                 self.get_token()?;
-                let esc = self.int("param:escapechar")?;
+                let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
                 if self.cur.is_cs() {
                     print::sprint_cs(&mut s, self.cur.tok, esc);
                 } else {
@@ -653,7 +653,7 @@ impl Run<'_, '_> {
             }
             3 => {
                 self.get_token()?;
-                let (t, m) = (self.cur.tok, self.cur.mean.clone());
+                let (t, m) = (self.cur.tok, self.cur.mean());
                 let (c, h) = (self.cur.cmd, self.cur.chr);
                 let _ = t;
                 self.print_meaning(&mut s, &m, c, h)?;
@@ -663,7 +663,7 @@ impl Run<'_, '_> {
                 self.print_font_name(&mut s, f)?;
             }
             _ => {
-                let j = self.get("jobname")?;
+                let j = self.get_loc(crate::fields::cell::JOBNAME)?;
                 s.push_str(&j.map_or_else(|| "texput".to_owned(), |x| str_of(self.v, x)));
             }
         }
@@ -693,7 +693,7 @@ impl Run<'_, '_> {
 
     /// `print_meaning` (§296) with `print_cmd_chr` (§298 and the others).
     pub(crate) fn print_meaning(&mut self, s: &mut String, m: &Mean, c: u8, h: i32) -> R<()> {
-        let esc = self.int("param:escapechar")?;
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         match m {
             Mean::Macro(mac) => {
                 if mac.flags & crate::etex::PROTECTED != 0 {
@@ -774,7 +774,7 @@ impl Run<'_, '_> {
 
     /// `show_token_list` with the current `\escapechar` and category codes.
     pub(crate) fn show_toks_into(&mut self, s: &mut String, toks: &[Tok]) -> R<()> {
-        let esc = self.int("param:escapechar")?;
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         // single-character names: their current category code (§262)
         let mut cats: crate::FxHashMap<u32, i64> = crate::FxHashMap::default();
         for t in toks {
@@ -886,7 +886,7 @@ impl Run<'_, '_> {
         loop {
             if self.cur.cmd > cmd::OTHER_CHAR
                 || self.cur.chr > 255
-                || self.cur.is_cs() && !matches!(self.cur.mean, Mean::Char(..))
+                || self.cur.is_cs() && !matches!(self.cur.mean(), Mean::Char(..))
             {
                 let t = self.cur.tok;
                 self.back_input(t);

@@ -205,7 +205,7 @@ impl Run<'_, '_> {
         drain(self, &mut pg);
         let empty = pg.pb.page.is_empty() && pg.queue.is_empty();
         self.pg = Some(pg);
-        Ok(empty && self.int("deadcycles")? == 0)
+        Ok(empty && self.cint(crate::fields::cell::DEADCYCLES)? == 0)
     }
 }
 
