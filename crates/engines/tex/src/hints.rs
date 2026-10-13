@@ -821,6 +821,9 @@ pub(crate) struct TextHints {
     pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
+    /// Whether the text defines anything the pass harvests (a macro, an
+    /// active character).
+    pub defines: bool,
 }
 
 impl TextHints {
@@ -2673,6 +2676,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         prev_char = ch;
     }
     let mut t = TextHints {
+        defines: !an.defs.is_empty() || an.defs.active_chars() != 0,
         slices,
         starts,
         hints,
