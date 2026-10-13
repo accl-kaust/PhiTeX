@@ -112,9 +112,11 @@ fn a_text_sent_while_the_cold_build_evaluates() {
     let t = std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
         while t0.elapsed() < std::time::Duration::from_secs(600) {
-            let deep = p2.running().iter().flatten().any(|&(op, off)| {
-                op == 1 && off > 2000 && off != phitex_tex::Progress::INSIDE
-            });
+            let deep = p2
+                .running()
+                .iter()
+                .flatten()
+                .any(|&(op, off)| op == 1 && off > 2000 && off != phitex_tex::Progress::INSIDE);
             if deep {
                 // (then the same text again: what a watcher sends on
                 // every write; those change nothing)
