@@ -2132,7 +2132,7 @@ pub(crate) fn fold_item(
         }
         // the page builder's markers (page parameters, a marks read): kept
         // in place for its fold, invisible to the list's readers
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT => out.push(n),
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2171,7 +2171,10 @@ pub(crate) fn fold_item(
 /// Whether `x` is a marker for the page builder's fold
 /// (`T_PAGE_PARAMS`, `T_MARKS_AT`), not list material.
 fn is_marker(v: &Values, x: ValueId) -> bool {
-    matches!(nodes::tag(v, x), nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT)
+    matches!(
+        nodes::tag(v, x),
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT
+    )
 }
 
 /// A list's contents as its reader sees them ([`Run::list_fold`]).
