@@ -1856,6 +1856,18 @@ fn texts() -> &'static Cache<(u64, u8, usize)> {
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Registers a text's analysis under `name` (a string value): a node
+/// made from part of that text later (the rest of a slice another
+/// command's read-ahead claimed, `Run::leftover`) names it and its
+/// offset, and gets the union hint of its text from the whole analysis
+/// instead of one computed on its own without the definitions.
+pub(crate) fn register_text(name: ValueId, t: &Arc<TextHints>) {
+    let mut bn = by_name().lock().unwrap_or_else(PoisonError::into_inner);
+    if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, t)) {
+        bn.insert(name.raw(), t.clone());
+    }
+}
+
 fn by_name() -> &'static Cache<u64> {
     static C: OnceLock<Cache<u64>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))

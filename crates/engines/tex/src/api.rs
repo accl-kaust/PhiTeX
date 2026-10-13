@@ -18,7 +18,7 @@ use phitex_source::pass;
 
 use crate::hints::Defs;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
-use crate::run::{Ops, slice_args};
+use crate::run::{slice_args_in_file, Ops, slice_args};
 use crate::val::{field_name, int_of, list_of, str_of};
 
 /// Finds a file by the name TeX asks for: the name to print and the
@@ -203,11 +203,15 @@ fn apply_text(
         .collect();
     let old = &*nodes_now;
     let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
+    crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
     let args_of = |eng: &Engine, k: usize| {
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        let mut args = slice_args(eng.values(), &text[s..e], starts);
-        args.push(crate::hints::hint_arg(eng.values(), &hints, s));
+        let v = eng.values();
+        let mut args = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
+        // (a document node is a top-level node)
+        args[1] = v.int(1);
+        args.push(crate::hints::hint_arg(v, &hints, s));
         args
     };
     let mut a = 0;
@@ -1145,14 +1149,17 @@ impl Graph {
         let sl = slices(text, defs);
         let t1 = t0.elapsed();
         let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
+        crate::hints::register_text(self.eng.values().str(DOC_NAME), &hints);
         for (s, e) in sl {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 eprintln!("node {piece:?}");
             }
-            let mut args = slice_args(self.eng.values(), piece, starts);
-            args.push(crate::hints::hint_arg(self.eng.values(), &hints, s));
+            let v = self.eng.values();
+            let mut args = slice_args_in_file(v, piece, starts, v.str(DOC_NAME), s);
+            args[1] = v.int(1);
+            args.push(crate::hints::hint_arg(v, &hints, s));
             let n = self.eng.push(unit, self.ops.exec, args);
             out.push((key(piece, starts), n));
         }
@@ -1166,6 +1173,10 @@ impl Graph {
         out
     }
 }
+
+/// The name a document's own text is registered under for the hints
+/// of nodes made from parts of it (`hints::register_text`).
+const DOC_NAME: &str = "\u{10FFFE}document";
 
 /// A node's identity for edits: its text and whether it begins a line.
 fn key(piece: &str, starts: bool) -> String {
