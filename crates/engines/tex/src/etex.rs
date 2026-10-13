@@ -925,7 +925,6 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
         r.log("error", "Missing `to' inserted")?;
     }
     let p = get_r_token(r)?;
-    let v = r.v;
     let m = if (0..=15).contains(&n) { n } else { 16 };
     let field = format!("read:{m}");
     let st = r.get(&field)?.filter(|&x| x != ValueId::UNIT);
