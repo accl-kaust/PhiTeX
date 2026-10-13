@@ -323,6 +323,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(x);
         }
         let r = self.cx.use_field(f);
+        crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
@@ -1542,6 +1543,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.contribute("items", s);
         }
         for (f, x, l) in std::mem::take(&mut self.defs) {
+            crate::exec::widths::def(f);
             self.cx.define_with(f, x, l);
         }
         if !self.own.is_empty() {
