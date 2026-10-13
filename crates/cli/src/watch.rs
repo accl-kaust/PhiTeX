@@ -122,25 +122,35 @@ fn tex_text(s: &str) -> String {
 }
 
 /// The diagnostics of a build for the viewer: the engine's, at their
-/// places, else the transcript's.
-fn diagnostics(r: &session::Report, log: &str) -> Vec<Value> {
+/// places, each a whole problem (the viewer's `Problem`: its line, the
+/// culprit underlined, TeX's context and help), else the transcript's.
+fn diagnostics(s: &Session, r: &session::Report, log: &str) -> Vec<Value> {
     if r.internal.is_none() && !r.diagnostics.is_empty() {
         return r
             .diagnostics
             .iter()
             .map(|d| {
-                let mut detail = d.context.clone();
-                if let Some(h) = &d.help {
-                    detail.push_str("\n\n");
-                    detail.push_str(h);
-                }
+                let p = crate::problems::from_diagnostic(d, s.source(&d.file).as_deref(), false);
+                let chars = |b: usize| p.text.get(..b.min(p.text.len())).map_or(0, |t| t.chars().count());
+                let error = d.severity == phitex_tex::Severity::Error;
+                let excerpt = (!p.text.is_empty()).then(|| {
+                    json!({"text": p.text, "start": chars(p.start), "len": chars(p.end).saturating_sub(chars(p.start))})
+                });
                 json!({
-                    "severity": if d.severity == phitex_tex::Severity::Error { "error" } else { "warning" },
+                    "severity": if error { "error" } else { "warning" },
                     "code": "tex",
                     "message": d.message,
-                    "file": d.file.trim_start_matches("./"),
+                    "notes": p.label.iter().collect::<Vec<_>>(),
+                    "help": d.help.iter().flat_map(|h| h.lines()).collect::<Vec<_>>(),
+                    "suggestions": [],
+                    "file": p.file,
                     "line": d.line,
-                    "detail": detail,
+                    "col": excerpt.as_ref().map(|_| chars(p.start) + 1),
+                    "excerpt": excerpt,
+                    "context": [],
+                    "included": [],
+                    "box": null,
+                    "detail": d.context,
                 })
             })
             .collect();
@@ -623,7 +633,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 history: r.history(),
                 ms: r.wall.as_secs_f64() * 1e3,
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
-                diagnostics: diagnostics(&r, &log),
+                diagnostics: diagnostics(s, &r, &log),
             });
             v.building(false);
             status.set("");
