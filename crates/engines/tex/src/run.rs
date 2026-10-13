@@ -213,6 +213,10 @@ pub(crate) struct Run<'c, 'a> {
     cats: [u8; 256],
     pub own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
+    /// Where each field's definitions are in `defs`, latest last: a
+    /// redefinition within the same group replaces in place instead of
+    /// growing `defs` (and no linear search finds the earlier one).
+    pub def_ix: FxHashMap<Field, Vec<usize>>,
     pub contribs: Vec<(Field, ValueId)>,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
@@ -271,6 +275,7 @@ impl<'c, 'a> Run<'c, 'a> {
             own: FxHashMap::default(),
             cats: [0; 256],
             defs: Vec::new(),
+            def_ix: FxHashMap::default(),
             contribs: Vec::new(),
             kids: Vec::new(),
             effect: Effect::None,
@@ -388,20 +393,23 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.own.insert(f, Some(val));
         self.cats = [0; 256];
-        // (inside a group of this run the earlier definition stays on the
-        // list: the group's close truncates to its opening)
-        if !self.in_local_group() {
-            self.defs.retain(|d| d.0 != f);
+        let loc = if global { Locality::Global } else { Locality::Local };
+        // the definitions since the innermost group opened are the
+        // group's (`nest.rs` pop_level truncates to its opening): one
+        // per field there; outside every group, one per field at all. A
+        // local after a global of the same group is kept apart: the
+        // group's close drops it and the global stays (§283)
+        let floor = self.nest.iter().rev().find(|l| l.group != 0).map_or(0, |l| l.defs_len);
+        let ix = self.def_ix.entry(f).or_default();
+        if let Some(&i) = ix.last() {
+            if i >= floor && !(self.defs[i].2 == Locality::Global && loc == Locality::Local && floor > 0)
+            {
+                self.defs[i] = (f, val, loc);
+                return;
+            }
         }
-        self.defs.push((
-            f,
-            val,
-            if global {
-                Locality::Global
-            } else {
-                Locality::Local
-            },
-        ));
+        ix.push(self.defs.len());
+        self.defs.push((f, val, loc));
     }
 
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
@@ -537,16 +545,28 @@ impl<'c, 'a> Run<'c, 'a> {
                 _ => {}
             }
         }
-        if let Some(Frame::Toks(_, _)) = self.frames.front() {
-            // a fresh one-token list, as tex.web makes one
-        }
+        self.drop_spent_lists();
         self.frames.push_front(Frame::Toks(Rc::from(vec![t]), 0));
     }
 
     /// `begin_token_list` (§323): `toks` are read next.
     pub(crate) fn push_toks(&mut self, toks: Vec<Tok>) {
         if !toks.is_empty() {
+            self.drop_spent_lists();
             self.frames.push_front(Frame::Toks(Rc::from(toks), 0));
+        }
+    }
+
+    /// Ends the token lists read to their end before another goes on
+    /// top (§325 and §390, "conserve stack space"): without it a tail
+    /// recursive macro leaves one spent list per round, and the input
+    /// stack grows with the number of rounds.
+    fn drop_spent_lists(&mut self) {
+        while let Some(Frame::Toks(t, p)) = self.frames.front() {
+            if *p < t.len() {
+                break;
+            }
+            self.frames.pop_front();
         }
     }
 

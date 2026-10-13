@@ -60,7 +60,12 @@ impl Run<'_, '_> {
             c.set(Some(t));
             t
         });
-        if n % 100_000 != 0 {
+        static FROM: OnceLock<u64> = OnceLock::new();
+        let from = *FROM.get_or_init(|| {
+            std::env::var("PHITEX_HEARTBEAT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX)
+        });
+        let trace = n >= from && n < from.saturating_add(150_000);
+        if n % 100_000 != 0 && !trace {
             return;
         }
         let (file, line) = self
@@ -76,9 +81,11 @@ impl Run<'_, '_> {
             if char::from_u32(c).is_some_and(char::is_alphabetic) { 11 } else { 12 }
         });
         eprintln!(
-            "hb {:.1}s cmds {n} {file}:{line} last {last} cmd {} defs {} own {} nest {} frames {}",
+            "hb{} {:.1}s cmds {n} {file}:{line} last {last} cmd {} mode {} defs {} own {} nest {} frames {}",
+            if trace { "t" } else { "" },
             t0.elapsed().as_secs_f64(),
             self.cur.cmd,
+            self.nest.last().map_or(0, |l| l.mode),
             self.defs.len(),
             self.own.len(),
             self.nest.len(),
