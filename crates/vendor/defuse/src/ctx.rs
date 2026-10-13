@@ -530,7 +530,7 @@ impl<'a> Ctx<'a> {
         let mut val = self.use_field(h)?;
         let e = self.eng;
         let n = e.n(self.slot);
-        let mut site = e.walk(n.unit, n.label, h).site;
+        let mut site = e.walk_site(n.unit, n.label, h).0;
         let vals = e.values();
         let mut rev = Vec::new();
         let mut skip = 0u64;

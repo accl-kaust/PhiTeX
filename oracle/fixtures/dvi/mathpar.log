@@ -1,0 +1,92 @@
+(./mathpar.tex
+! Missing $ inserted.
+<inserted text> 
+                $
+...
+l.8 Text $a\par
+                b$ more.\par
+I've inserted a begin-math/end-math symbol since I think
+you left one out. Proceed, with fingers crossed.
+
+! Missing $ inserted.
+<inserted text> 
+                $
+...
+l.8 Text $a\par b$ more.\par
+                            
+I've inserted a begin-math/end-math symbol since I think
+you left one out. Proceed, with fingers crossed.
+
+! Missing $ inserted.
+<inserted text> 
+                $
+...
+l.9 Text $c\vskip
+                 1pt d$ more.\par
+I've inserted a begin-math/end-math symbol since I think
+you left one out. Proceed, with fingers crossed.
+
+! Missing $ inserted.
+<inserted text> 
+                $
+...
+l.9 Text $c\vskip1pt d$ more.\par
+                                 
+I've inserted a begin-math/end-math symbol since I think
+you left one out. Proceed, with fingers crossed.
+
+! Missing $ inserted.
+<inserted text> 
+                $
+...
+l.10 Text $e{f\par
+                   g}h$ more.\par
+I've inserted a begin-math/end-math symbol since I think
+you left one out. Proceed, with fingers crossed.
+
+! Missing } inserted.
+<inserted text> 
+                }
+...
+l.10 Text $e{f\par
+                   g}h$ more.\par
+I've inserted something that you may have forgotten.
+(See the <inserted text> above.)
+With luck, this will get me unwedged. But if you
+really didn't forget anything, try typing `2' now; then
+my insertion and my current dilemma will both disappear.
+
+! Too many }'s.
+l.10 Text $e{f\par g}
+                     h$ more.\par
+You've closed more groups than you opened.
+Such booboos are generally harmless, so keep going.
+
+! Missing $ inserted.
+<inserted text> 
+                $
+...
+l.10 Text $e{f\par g}h$ more.\par
+                                 
+I've inserted a begin-math/end-math symbol since I think
+you left one out. Proceed, with fingers crossed.
+
+! Missing } inserted.
+<inserted text> 
+                }
+...
+l.11 Text \begingroup i{j\endgroup
+                                   k} more.\par
+I've inserted something that you may have forgotten.
+(See the <inserted text> above.)
+With luck, this will get me unwedged. But if you
+really didn't forget anything, try typing `2' now; then
+my insertion and my current dilemma will both disappear.
+
+! Too many }'s.
+l.11 Text \begingroup i{j\endgroup k}
+                                      more.\par
+You've closed more groups than you opened.
+Such booboos are generally harmless, so keep going.
+
+[0] )
