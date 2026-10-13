@@ -75,7 +75,17 @@ pub(crate) fn run_node_parking(
     // (a long run, the format's: its commands' time, then its finish)
     let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
     if timed {
-        eprintln!("run: commands {t_body:?}");
+        eprintln!(
+            "run: commands {t_body:?} ({}, speculative {}, resumed {})",
+            match &res {
+                Ok(()) => "ok",
+                Err(Halt::Stop(_)) => "stop",
+                Err(Halt::Starve) => "starve",
+                Err(Halt::Fatal) => "fatal",
+            },
+            r.cx.is_speculative(),
+            r.resumed
+        );
     }
     if trace {
         eprintln!(
