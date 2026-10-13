@@ -14,7 +14,11 @@ fn profile_pages() {
     let src = common::read(&fx.join("pages.tex"));
     let prelude = common::plain();
     let t0 = std::time::Instant::now();
-    let b = common::build(common::options("./pages.tex", "pages", "", &fx), Some(&prelude), &src);
+    let b = common::build(
+        common::options("./pages.tex", "pages", "", &fx),
+        Some(&prelude),
+        &src,
+    );
     eprintln!("pages: {:?}, {} nodes run", t0.elapsed(), b.stats.nodes_run);
 }
 
