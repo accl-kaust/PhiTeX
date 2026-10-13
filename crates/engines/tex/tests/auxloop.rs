@@ -86,3 +86,31 @@ fn equal_content_publishes_nothing_the_second_time() {
         );
     }
 }
+
+/// `\immediate` before a macro that expands to `\immediate\write` (§1375:
+/// the token read is not `\write`, so it is backed up and `\immediate`
+/// has done nothing; the macro's own `\immediate\write` then writes at
+/// once). LaTeX's `\enddocument` makes `\write` such a macro
+/// (`\__shipout_force_immediate_writes:`), and the page steps interpret
+/// the `.aux`'s `\@writefile` lines in that state.
+const IMMEDIATE_DOC: &str = r"\immediate\openout1=\jobname.aux
+\def\w{\immediate\write}
+\immediate\w1{hi}
+\immediate\write1{there}
+Text.
+\bye
+";
+
+#[test]
+fn immediate_before_a_macro_for_immediate_write() {
+    let dir = common::fixtures().join("plain");
+    let opts = common::options("./i.tex", "i", "", &dir);
+    let b = common::build(opts, Some(&common::plain()), IMMEDIATE_DOC);
+    let files = b.files();
+    let aux = files
+        .iter()
+        .find(|(n, _)| n == "i.aux")
+        .map(|(_, t)| t.as_str())
+        .unwrap_or_default();
+    assert_eq!(aux, "hi\nthere\n");
+}
