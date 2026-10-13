@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 
 use crate::engine::{
     AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_ENV, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
-    RunResult, Slot, State, StreamRange, Until, Use, WalkResult, eff_code, eff_kind,
+    RunResult, Slot, State, StreamRange, Until, Use, WaitKind, WalkResult, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
 use crate::value::{Field, Value, ValueId, Values};
@@ -177,7 +177,7 @@ impl<'a> Ctx<'a> {
             return Ok(val);
         }
         if tn.in_work() {
-            self.stop(End::Wait(t))
+            self.stop(End::Wait(t, WaitKind::Value))
         } else {
             self.raise = self.raise.max(tn.height + 1);
             Ok(val)
@@ -224,7 +224,7 @@ impl<'a> Ctx<'a> {
             .map_or_else(|| e.walk(n.unit, n.label, f), |x| x.1);
         let crossed = w.pending;
         if crossed != NIL && !self.spec {
-            return self.stop(End::Wait(crossed));
+            return self.stop(End::Wait(crossed, w.pending_kind));
         }
         let v = if w.site == NIL {
             e.start_value(n.unit, f)
@@ -409,7 +409,7 @@ impl<'a> Ctx<'a> {
             let w = e.walk(sn.unit, sn.label, h);
             // A link crossing pending structure is not predicted.
             if w.pending != NIL {
-                return self.stop(End::Wait(w.pending));
+                return self.stop(End::Wait(w.pending, w.pending_kind));
             }
             site = w.site;
             let key = h.0.raw();
@@ -619,7 +619,7 @@ impl<'a> Ctx<'a> {
         let an = e.n(at);
         let w = e.walk(an.unit, an.label, f);
         if w.pending != NIL {
-            return self.stop(End::Wait(w.pending));
+            return self.stop(End::Wait(w.pending, w.pending_kind));
         }
         let v = if w.site == NIL {
             e.start_value(an.unit, f)

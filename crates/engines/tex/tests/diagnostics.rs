@@ -124,3 +124,13 @@ fn the_time_limit_is_an_error_not_a_panic() {
     show(&ds);
     assert!(ds.iter().any(|d| d.severity == Severity::Error), "{ds:?}");
 }
+
+#[test]
+fn did_you_mean() {
+    let doc = "\\hbx{}\n\\bye\n";
+    let b = build(doc, |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let h = ds[0].help.as_deref().unwrap_or("");
+    assert!(h.contains("Did you mean \\hbox"), "{h}");
+}
