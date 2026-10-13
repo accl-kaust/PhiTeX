@@ -2033,3 +2033,53 @@ fn the_critical_chain_names_each_wait_and_its_cause() {
         chain[2]
     );
 }
+
+/// An opener's effect still unknown (it runs again) at the unit's top
+/// level may stop opening its scope, whose definitions then reach past its
+/// close: a chain read after the close waits for it rather than binding
+/// past it, so a batch applying the opener's result first cannot leave the
+/// read bound to the old structure. Replacing `scope doc` with a plain
+/// line takes `item` out of a list and `para` out of its scope; `before()`
+/// then sees the `add 1` the item's scope held.
+#[test]
+fn a_chain_read_waits_for_a_top_level_opener_that_may_stop_opening() {
+    let src = [
+        "end",
+        "scope doc",
+        "cap = 12",
+        "item a = prev()",
+        "fold \"when k == 2 add 5  global g = k\"",
+        "take",
+        "add 1",
+        "{ add 6  z = prev() }",
+        "cap = 9",
+        "w = x + 1",
+        "{ add 6  z = prev() }",
+        "para",
+        "eval \"add 4\"",
+        "add 3",
+        "s = fold.state",
+        "y = before()",
+        "end",
+    ];
+    for seed in 0..40 {
+        for spec in [false, true] {
+            let (mut eng, mut prog) = Program::load(lines(&src));
+            eng.evaluate(&mut RandomScheduler::new(seed, spec), &mut Sequential)
+                .expect("cold");
+            prog.set_line(&mut eng, 1, "cap = 12".to_string());
+            eng.evaluate(&mut RandomScheduler::new(seed + 1, spec), &mut Sequential)
+                .expect("edit");
+            assert_eq!(
+                prog.render(&eng),
+                {
+                    let (mut cold, p) = Program::load(prog.lines.clone());
+                    cold.evaluate_sequential().expect("cold");
+                    p.render(&cold)
+                },
+                "seed {seed} spec {spec}"
+            );
+            assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+        }
+    }
+}
