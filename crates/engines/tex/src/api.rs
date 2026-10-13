@@ -16,6 +16,7 @@ use phitex_defuse::{
 };
 use phitex_source::pass;
 
+use crate::hints::Defs;
 use crate::ops::{Dvi, Exec, Files, Mark, OutPage, Put, Shared};
 use crate::run::{Ops, slice_args};
 use crate::val::{field_name, int_of, list_of, str_of};
@@ -169,12 +170,14 @@ struct Absorb<'a> {
     nodes: &'a mut Vec<(String, NodeId)>,
     exec: OpId,
     dvi: NodeId,
+    /// The format's definitions, for the new slices' hints and regions.
+    defs: Defs,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
-        apply_text(eng, self.exec, self.dvi, self.nodes, &text);
+        apply_text(eng, self.exec, self.dvi, self.nodes, &text, &self.defs);
         Some(version)
     }
 }
@@ -188,9 +191,10 @@ fn apply_text(
     dvi: NodeId,
     nodes_now: &mut Vec<(String, NodeId)>,
     text: &str,
+    defs: &Defs,
 ) {
     let text = as_file(text);
-    let new: Vec<(String, (usize, usize))> = slices(&text)
+    let new: Vec<(String, (usize, usize))> = slices(&text, defs)
         .into_iter()
         .map(|(s, e)| {
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
@@ -213,9 +217,9 @@ fn apply_text(
     let common = old_mid.min(new_mid);
     // the paragraph regions before and after (OUTPUT.md §5): a kept node
     // whose anchor or boundary flag changed is replaced
-    let (new_flags, new_depths) = slice_info(&text);
+    let (new_flags, new_depths) = slice_info(&text, defs);
     let old_text: String = old.iter().map(|(k, _)| k.get(1..).unwrap_or("")).collect();
-    let (old_flags, old_depths) = slice_info(&old_text);
+    let (old_flags, old_depths) = slice_info(&old_text, defs);
     let old_regions =
         (old_flags.len() == old.len()).then(|| regions(&old_flags, |i| raw_of(old[i].1)));
     let args_of = |eng: &Engine, k: usize, anchor: i64| {
@@ -224,7 +228,7 @@ fn apply_text(
         let boundary = new_flags.get(k).is_some_and(|f| f & 1 != 0);
         let depth = new_depths.get(k).copied().unwrap_or(0);
         let mut args = slice_args(eng.values(), &text[s..e], starts, anchor, boundary, depth);
-        args.push(crate::hints::hint_arg(eng.values(), &text, s));
+        args.push(crate::hints::hint_arg(eng.values(), &text, s, defs));
         args
     };
     for k in common..old_mid {
@@ -617,8 +621,8 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
 /// The nodes of a text: slices starting at the pass's atoms (characters
 /// run together), each with the blanks before the next; the pass over
 /// the whole text also gives each slice's hint ([`crate::hints`]).
-pub(crate) fn slices(text: &str) -> Vec<(usize, usize)> {
-    crate::hints::text_hints(text, pass::FileKind::Document)
+pub(crate) fn slices(text: &str, defs: &Defs) -> Vec<(usize, usize)> {
+    crate::hints::text_hints(text, pass::FileKind::Document, defs)
         .slices
         .clone()
 }
@@ -660,15 +664,21 @@ const CONDITIONALS: &[&str] = &[
 /// (OUTPUT.md §6): the primitive conditionals before it less the `\fi`s,
 /// items consumed by an earlier one (a `\let`'s, a definition's body)
 /// not counted.
-pub(crate) fn slice_info(text: &str) -> (Vec<u8>, Vec<i64>) {
-    let defs = pass::Definitions::default();
+///
+/// A macro ends a paragraph when its body does (`Definitions::ends_paragraph`),
+/// so the text's own definitions are harvested first and the format's
+/// (`defs`) stand behind them: a document written as calls of a
+/// paragraph macro has one region per call, not one for the file.
+pub(crate) fn slice_info(text: &str, defs: &Defs) -> (Vec<u8>, Vec<i64>) {
+    let mut doc = pass::Definitions::new();
+    doc.harvest(text, pass::FileKind::Document, 0);
     let scope = pass::Scope {
-        document: &defs,
+        document: &doc,
         file: 0,
-        prelude: &defs,
+        prelude: defs,
     };
     let p = pass::analyze(text, pass::FileKind::Document, scope);
-    let sl = slices(text);
+    let sl = slices(text, defs);
     let mut flags = vec![0u8; sl.len()];
     // brace depth before each atom
     let mut depth = Vec::with_capacity(p.atoms.len());
@@ -1303,11 +1313,11 @@ impl Graph {
     }
 
     /// The text's nodes pushed onto `unit`.
-    fn push_text(&mut self, unit: UnitId, text: &str) -> Vec<(String, NodeId)> {
+    fn push_text(&mut self, unit: UnitId, text: &str, defs: &Defs) -> Vec<(String, NodeId)> {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
-        let sl = slices(text);
-        let (flags, depths) = slice_info(text);
+        let sl = slices(text, defs);
+        let (flags, depths) = slice_info(text, defs);
         let t1 = t0.elapsed();
         let (mut anchor, mut last) = (0, None);
         for (i, (s, e)) in sl.into_iter().enumerate() {
@@ -1324,7 +1334,7 @@ impl Graph {
             }
             let depth = depths.get(i).copied().unwrap_or(0);
             let mut args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
-            args.push(crate::hints::hint_arg(self.eng.values(), text, s));
+            args.push(crate::hints::hint_arg(self.eng.values(), text, s, defs));
             let n = self.eng.push(unit, self.ops.exec, args);
             if f & 1 != 0 {
                 last = Some(raw_of(n));
@@ -1354,6 +1364,69 @@ fn as_file(text: &str) -> String {
     } else {
         format!("{text}\n")
     }
+}
+
+/// Whether a file the prelude read is TeX text worth harvesting (fonts,
+/// encodings and maps are not).
+fn is_tex_text(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    match base.rsplit_once('.') {
+        None => true,
+        Some((_, ext)) => matches!(
+            ext,
+            "tex" | "ltx" | "sty" | "cls" | "def" | "fd" | "clo" | "cfg" | "ini" | "dtx" | "ldf"
+        ),
+    }
+}
+
+/// The definitions the prelude's text and the files it read make, in
+/// load order: the format's macros, which the hints bound a document's
+/// calls with ([`crate::hints`]) and whose bodies mark paragraph regions
+/// ([`slice_info`]). Harvested once per prelude key (a text pass, no
+/// evaluation), for a prelude evaluated here or imported from bytes.
+fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
+    static C: OnceLock<Mutex<HashMap<[u8; 32], Defs>>> = OnceLock::new();
+    let cache = C.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(d) = cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&c.key)
+    {
+        return d.clone();
+    }
+    let t0 = std::time::Instant::now();
+    let mut defs = pass::Definitions::new();
+    let mut order: Vec<u32> = Vec::new();
+    if let Some(p) = prelude {
+        defs.harvest(p, crate::hints::kind_of(p, pass::FileKind::Package), 0);
+        order.push(0);
+    }
+    for (k, (name, h)) in c.reads.iter().enumerate() {
+        if *h == 0 || !is_tex_text(name) {
+            continue;
+        }
+        let Some((_, bytes)) = finder(name) else { continue };
+        let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+        let file = u32::try_from(k + 1).unwrap_or(u32::MAX);
+        let kind = crate::hints::kind_of(&text, pass::FileKind::from_path(name));
+        defs.harvest(&text, kind, file);
+        order.push(file);
+    }
+    defs.set_load_order(&order);
+    if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        eprintln!(
+            "prelude definitions: {} names from {} files in {:?}",
+            defs.len(),
+            order.len(),
+            t0.elapsed()
+        );
+    }
+    let d: Defs = Arc::new(defs);
+    cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(c.key, d.clone());
+    d
 }
 
 /// INITEX's state, and the prelude's on top of it: a format, `\dump`
@@ -1401,7 +1474,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             let (f, x) = (v.field("jobname"), v.str(&opts.prelude_jobname));
             g.eng.set_env(unit, f, x);
         }
-        g.push_text(unit, &as_file(p));
+        // (the prelude's own slices: INITEX knows no definitions yet)
+        g.push_text(unit, &as_file(p), crate::hints::no_defs());
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
@@ -1495,6 +1569,8 @@ pub struct Build {
     nodes: Vec<(String, NodeId)>,
     dvi: NodeId,
     prelude: Arc<Cached>,
+    /// The format's definitions ([`prelude_defs`]).
+    defs: Defs,
     /// What the last build or edit ran.
     pub stats: Stats,
     /// Where new texts come from ([`Options::edits`]).
@@ -1520,6 +1596,7 @@ impl Build {
         let t0 = std::time::Instant::now();
         let cached = prelude_env(prelude, &opts);
         let env = cached.env.clone();
+        let defs = prelude_defs(&cached, prelude, &opts.finder);
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
@@ -1569,7 +1646,7 @@ impl Build {
                 g.eng.push(unit, exec, args);
             }
         }
-        let nodes = g.push_text(unit, &as_file(document));
+        let nodes = g.push_text(unit, &as_file(document), &defs);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
         let files_op = g.files_op;
@@ -1583,6 +1660,7 @@ impl Build {
             nodes,
             dvi,
             prelude: cached,
+            defs,
             stats: Stats::default(),
             edits,
             settled: Vec::new(),
@@ -1613,6 +1691,7 @@ impl Build {
             nodes: &mut self.nodes,
             exec: self.g.ops.exec,
             dvi: self.dvi,
+            defs: self.defs.clone(),
         };
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {

@@ -174,14 +174,16 @@ impl Operation for Exec {
             r.command()?;
             // the token list an expansion left goes on in this run, not as
             // a child per token: expansion steps are not nodes (the run
-            // goes on after an expansion only, so the command it reaches
-            // is still this node's one command). Only while
-            // nothing bounds the node (a bound covers its first command),
-            // no scope opened or closed, no child, claim or page step made
+            // goes on through the whole token frame: the commands of a
+            // macro body run inline, docs/TARGET_GRAPH.md), and a
+            // paragraph it ends moves it to the next region
+            // (`Run::region_advance`). Only while nothing bounds the node
+            // (a bound covers its first command; a bounded call leaves
+            // its body's commands as children, keyed by its region), no
+            // scope opened or closed, no child, claim or page step made
             // (`PHITEX_LEFTOVER=children`: the children, for an A/B)
             if hint.bound.is_none() && !leftover_children() {
-                while r.expanded
-                    && r.effect == Effect::None
+                while r.effect == Effect::None
                     && r.kids.is_empty()
                     && r.page_due.is_none()
                     && !r.claim_rest

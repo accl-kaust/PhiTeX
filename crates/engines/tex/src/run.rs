@@ -162,9 +162,6 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
-    /// The last command was an expansion step (`Run::command`): the
-    /// node goes on with the tokens it left.
-    pub expanded: bool,
     /// In a trial (`measure_tail`): the scope kind its own commands
     /// opened and closed so far, in place of the node's.
     #[allow(clippy::option_option)]
@@ -186,6 +183,10 @@ pub(crate) struct Run<'c, 'a> {
     /// Whether the node is a document node holding such an item: its
     /// first command is checked (`par_boundary_violations`).
     pub boundary: bool,
+    /// The same, kept for the run's length: when its paragraph ends, the
+    /// run and its children go on in the region after it, keyed by this
+    /// node's id as the pass keyed the siblings ([`Run::region_advance`]).
+    pub region_end: bool,
     /// The condition-stack depth below this node's own conditionals
     /// (OUTPUT.md §6): node arg 4, from the text's nesting; a `\fi` of an
     /// outer conditional lowers it.
@@ -263,6 +264,7 @@ impl<'c, 'a> Run<'c, 'a> {
             no_pull: false,
             anchor,
             boundary,
+            region_end: boundary,
             ifbase,
             if_codes: Vec::new(),
             if_top_written: ifbase,
@@ -272,7 +274,6 @@ impl<'c, 'a> Run<'c, 'a> {
             contribs: Vec::new(),
             kids: Vec::new(),
             effect: Effect::None,
-            expanded: false,
             cur: Cur {
                 tok: Tok::C(0),
                 cmd: 0,
@@ -297,6 +298,18 @@ impl<'c, 'a> Run<'c, 'a> {
         let x = self.node_raw_of(id);
         self.minted.borrow_mut().push(x);
         x
+    }
+
+    /// A paragraph ended in this run (`end_graf`, a display's start): if
+    /// the pass marked this node paragraph-ending, the text after it is
+    /// in a new region whose anchor is this node (api.rs `regions`), so
+    /// the rest of this run and the children it leaves use that anchor
+    /// too (OUTPUT.md §5). Otherwise the region goes on (the pass did not
+    /// see the end: the siblings read the same cells; correct, serial).
+    pub(crate) fn region_advance(&mut self) {
+        if self.region_end {
+            self.anchor = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        }
     }
 
     fn node_raw_of(&self, id: i64) -> i64 {
@@ -1395,6 +1408,7 @@ impl<'c, 'a> Run<'c, 'a> {
             claim_rest: self.claim_rest,
             astate: self.astate,
             page_due: self.page_due,
+            anchor: self.anchor,
         }
     }
 
@@ -1414,6 +1428,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.claim_rest = s.claim_rest;
         self.astate = s.astate;
         self.page_due = s.page_due;
+        self.anchor = s.anchor;
     }
 
     /// Ends the run: definitions, contributions, children (what the
@@ -1509,6 +1524,7 @@ struct Snapshot {
     claim_rest: bool,
     astate: Option<i64>,
     page_due: Option<(usize, usize, bool)>,
+    anchor: i64,
 }
 
 fn is_hex(c: u32) -> bool {
