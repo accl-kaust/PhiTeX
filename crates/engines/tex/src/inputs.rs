@@ -28,14 +28,26 @@ use crate::hints::{Defs, TextHints};
 
 /// A node's text: a slice of the document or of a file it inputs.
 pub(crate) struct Piece {
-    /// Its identity for edits (`api::key`, prefixed by the file).
-    pub key: String,
+    /// Its identity for edits (`api::key`, a file's seeded by its path).
+    pub key: u64,
     text: Arc<str>,
     s: usize,
     e: usize,
     /// The file's path (`None`: the document).
     file: Option<Arc<str>>,
     hints: Arc<TextHints>,
+}
+
+impl Piece {
+    /// Whether it is a slice of a file the document inputs.
+    pub(crate) fn is_file(&self) -> bool {
+        self.file.is_some()
+    }
+
+    /// Its text: the file's (or document's) text and its bytes in it.
+    pub(crate) fn span(&self) -> (Arc<str>, usize, usize) {
+        (self.text.clone(), self.s, self.e)
+    }
 }
 
 impl Piece {
@@ -180,8 +192,11 @@ fn add(
         }
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
         let key = match file {
-            None => format!("{}{piece}", u8::from(starts)),
-            Some(p) => format!("\u{1}{p}\u{1}{}{piece}", u8::from(starts)),
+            None => crate::api::key(piece, starts),
+            Some(p) => phitex_defuse::hash_bytes(
+                phitex_defuse::hash_bytes(5, p.as_bytes()) ^ u64::from(starts),
+                piece.as_bytes(),
+            ),
         };
         out.push(Piece {
             key,
