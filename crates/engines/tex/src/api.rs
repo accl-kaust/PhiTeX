@@ -2174,6 +2174,8 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
 /// INITEX's state, and the prelude's on top of it: a format, `\dump`
 /// ending it (or its text's end). Cached by the prelude's text, and good
 /// while every file it read is what the finder gives now.
+// (its phases timed and measured inline, PHITEX_TEX_TIME)
+#[allow(clippy::too_many_lines)]
 fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let key = prelude.map_or(0, |p| {
         let mut b = p.as_bytes().to_vec();
@@ -2196,6 +2198,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         Err(known) => known,
     };
     let t_check = t_start.elapsed();
+    let m_check = mem_mb();
     let finder = &opts.finder;
     let mut g = Graph::new(opts.time_limit, opts.threads);
     g.eng.set_max_rounds(opts.max_rounds);
@@ -2213,6 +2216,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         g.eng.set_environment_absent(g.absent.clone());
     }
     let t_supply = t_start.elapsed();
+    let m_supply = mem_mb();
+    let mut m_settle = m_supply;
     let mut t_settle = t_supply;
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
@@ -2236,9 +2241,11 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
         t_settle = t_start.elapsed();
+        m_settle = mem_mb();
         env = final_bindings(&g, unit, end, env);
     }
     let t_bindings = t_start.elapsed();
+    let m_bindings = mem_mb();
     let v = g.eng.values();
     let out: Vec<(String, Tree)> = env.into_iter().map(|(k, x)| (k, export(v, x))).collect();
     let e = Arc::new(out);
@@ -2253,6 +2260,10 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
                 .checked_sub(t_bindings)
                 .unwrap_or_default(),
             e.len()
+        );
+        let m_export = mem_mb();
+        eprintln!(
+            "prelude memory (MB resident/peak): before {m_check:?}, after supply {m_supply:?}, after the run {m_settle:?}, after final bindings {m_bindings:?}, after export {m_export:?}"
         );
     }
     let c = Arc::new(Cached {
@@ -2342,6 +2353,21 @@ fn final_bindings(
         );
     }
     slots.into_iter().flatten().collect()
+}
+
+/// The process's resident and peak resident memory now, in MB
+/// (`PHITEX_TEX_TIME`'s phase lines), from `/proc/self/status` (zeros
+/// elsewhere).
+pub(crate) fn mem_mb() -> (u64, u64) {
+    let t = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |k: &str| {
+        t.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+            .unwrap_or(0)
+            / 1024
+    };
+    (kb("VmRSS:"), kb("VmHWM:"))
 }
 
 /// How bad a [`Diagnostic`] is.
