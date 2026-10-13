@@ -448,7 +448,7 @@ impl Run<'_, '_> {
                     flags: u8::try_from(a % 4).unwrap_or(0)
                         | if protected { crate::etex::PROTECTED } else { 0 },
                     params,
-                    body,
+                    body: body.into(),
                 }));
                 self.define_cs(&p, &m, global);
             }
@@ -511,7 +511,7 @@ impl Run<'_, '_> {
                 let m = Mean::Macro(Rc::new(Macro {
                     flags: 0,
                     params: Vec::new(),
-                    body,
+                    body: body.into(),
                 }));
                 self.define_cs(&p, &m, global);
             }
@@ -915,7 +915,7 @@ impl Run<'_, '_> {
         let v = self.v;
         self.define_cs(&u, &Mean::Font(f), global);
         // §1257: the font identifier
-        let id = Tok::S(Rc::from(format!("\u{10FFFE}F{f}\u{2}{t}")));
+        let id = Tok::cs(&format!("\u{10FFFE}F{f}\u{2}{t}"));
         self.define_cs(&id, &Mean::Font(f), true);
         self.set(&format!("fontid:{f}"), v.str(&t), true);
         Ok(())

@@ -14,7 +14,6 @@
 //! field (`pdf:random`) read and defined by every draw.
 
 use std::fmt::Write as _;
-use std::rc::Rc;
 
 use phitex_defuse::ValueId;
 use phitex_typeset::glue::{GlueSign, Order};
@@ -357,7 +356,7 @@ pub(crate) fn pdf_primitive(r: &mut Run<'_, '_>) -> R<()> {
         return Ok(());
     };
     // the frozen copy of the primitive
-    let t = Tok::S(Rc::from(format!("\u{10FFFE}{n}")));
+    let t = Tok::cs(&format!("\u{10FFFE}{n}"));
     let f = t.field_name().unwrap_or_default();
     if r.get(&f)?.is_none() {
         let m = Mean::Prim(n, c, h).encode(r.v);
@@ -1598,7 +1597,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         }
         let nf = copy_font(r, f, &suffix)?;
         r.define_cs(&u, &Mean::Font(nf), global);
-        let id = Tok::S(Rc::from(format!("\u{10FFFE}F{nf}\u{2}{t}")));
+        let id = Tok::cs(&format!("\u{10FFFE}F{nf}\u{2}{t}"));
         r.define_cs(&id, &Mean::Font(nf), true);
         r.set(&format!("fontid:{nf}"), v.str(&t), true);
         return Ok(true);

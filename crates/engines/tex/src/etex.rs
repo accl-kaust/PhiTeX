@@ -356,7 +356,7 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
                 r.log("error", "Missing \\endcsname inserted")?;
                 r.back_cur();
             }
-            let t = Tok::S(Rc::from(name));
+            let t = Tok::cs(&name);
             r.mean_of(&t)? != Mean::Undefined
         }
         IF_FONT_CHAR => {
@@ -951,7 +951,7 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
     let m = Mean::Macro(Rc::new(Macro {
         flags: 0,
         params: Vec::new(),
-        body,
+        body: body.into(),
     }));
     r.define_cs(&p, &m, global);
     Ok(())
