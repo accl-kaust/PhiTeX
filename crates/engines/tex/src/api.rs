@@ -2527,6 +2527,10 @@ impl Build {
         let mut stats = Stats::default();
         self.g.take_steps_done();
         self.g.take_refuted();
+        // the serial fallback is per evaluation: an edit starts with the
+        // page chain parallel again (its guesses the last values)
+        let f = self.g.eng.values().field("pgref");
+        self.g.eng.declare_loopback(f, ValueId::UNIT);
         self.g.queries.clear();
         // (the files sliced into the document's regions were read)
         let sliced: Vec<(String, bool)> = self

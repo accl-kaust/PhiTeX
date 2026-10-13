@@ -177,7 +177,7 @@ fn self_dependent_routine() {
         &common::dvi_comment(&want),
         &dir,
     );
-    let b = common::build(opts, Some(&common::plain()), &src);
+    let mut b = common::build(opts.clone(), Some(&common::plain()), &src);
     let s = &b.stats;
     eprintln!(
         "selfdep: pages {}, loop rounds {}, critical path {:?}, refuted guesses {}",
@@ -193,5 +193,20 @@ fn self_dependent_routine() {
         common::first_difference(&b.output().0, &want).is_none(),
         "selfdep.dvi differs: {:?}",
         common::first_difference(&b.output().0, &want)
+    );
+    let mid = src.len() / 2;
+    let at = mid + src[mid..].find(" the ").expect("a word") + 1;
+    let new = format!("{}eht{}", &src[..at], &src[at + 3..]);
+    b.edit(&new);
+    eprintln!(
+        "selfdep edit: loop rounds {}, page steps re-run {}, refuted {:?}",
+        b.stats.loop_rounds,
+        b.stats.page_steps,
+        b.stats.refuted_guesses
+    );
+    let cold = common::build(opts, Some(&common::plain()), &new);
+    assert!(
+        common::first_difference(&b.output().0, &cold.output().0).is_none(),
+        "selfdep edit != cold"
     );
 }
