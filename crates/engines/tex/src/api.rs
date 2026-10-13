@@ -750,6 +750,10 @@ pub struct Stats {
     pub pending_sets: u64,
     pub pending_sets_defining: u64,
     pub stops: u64,
+    /// Attempts that resumed a stopped run at its blocked read, and that
+    /// started over though one was kept (a read changed).
+    pub resumed: u64,
+    pub restarted: u64,
     /// Stopped runs restarted instead of resumed, by the first read that
     /// refused the resume.
     pub restarted_by: Vec<(&'static str, u64)>,
@@ -923,6 +927,8 @@ impl Stats {
         self.pending_sets += r.pending_sets;
         self.pending_sets_defining += r.pending_sets_defining;
         self.stops += r.stops;
+        self.resumed += r.resumed;
+        self.restarted += r.restarted;
         for &(k, n) in &r.restarted_by {
             match self.restarted_by.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,
