@@ -11,7 +11,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::tex;
 
@@ -89,13 +89,44 @@ impl Cache {
         Some((key, b[32..].to_vec()))
     }
 
-    /// A format's evaluated state stored as `name` with its key, the
-    /// cache held to its limit.
+    /// A format's evaluated state stored as `name` (`engine-build-text`)
+    /// with its key, the cache held to its limit; the same format from
+    /// other builds removed once a day has passed without their use (two
+    /// binaries in turn keep theirs).
     pub fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) -> io::Result<()> {
         let p = self.format_path(name);
         let mut b = key.to_vec();
         b.extend_from_slice(bytes);
-        self.put(&p, &b, std::slice::from_ref(&p))
+        self.put(&p, &b, std::slice::from_ref(&p))?;
+        self.drop_superseded(name, Duration::from_hours(24));
+        Ok(())
+    }
+
+    /// The formats other builds stored for `name`'s engine and text, not
+    /// used for `idle`, removed.
+    fn drop_superseded(&self, name: &str, idle: Duration) {
+        let (Some((engine, _)), Some((_, text))) = (name.split_once('-'), name.rsplit_once('-'))
+        else {
+            return;
+        };
+        let Ok(rd) = std::fs::read_dir(self.dir.join("formats")) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let same = n != name
+                && n.split_once('-').is_some_and(|(a, _)| a == engine)
+                && n.rsplit_once('-').is_some_and(|(_, c)| c == text)
+                // (`engine-text`: named before builds were)
+                && matches!(n.matches('-').count(), 1 | 2);
+            let unused = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t.elapsed().is_ok_and(|d| d >= idle));
+            if same && unused {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
     }
 
     /// The bytes at `path` in the cache, its use noted (none: no cache,
@@ -292,6 +323,50 @@ mod tests {
         let f = off.dir.join("f");
         off.put(&f, &[1], &[]).unwrap();
         assert!(!f.exists() && off.get(&f).is_none());
+    }
+
+    #[test]
+    fn other_builds_formats_dropped_when_idle() {
+        let dir = scratch("superseded");
+        let c = Cache {
+            dir: dir.clone(),
+            limit: 1 << 30,
+        };
+        let f = dir.join("formats");
+        std::fs::create_dir_all(&f).unwrap();
+        let day_ago = SystemTime::now() - Duration::from_hours(48);
+        for n in [
+            "pdftex-1111",
+            "pdftex-aaaa-1111",
+            "pdftex-bbbb-1111",
+            "pdftex-aaaa-2222",
+            "etex-aaaa-1111",
+        ] {
+            std::fs::write(f.join(n), b"x").unwrap();
+            let h = std::fs::File::options()
+                .write(true)
+                .open(f.join(n))
+                .unwrap();
+            h.set_modified(day_ago).unwrap();
+        }
+        std::fs::write(f.join("pdftex-dddd-1111"), b"x").unwrap();
+        c.put_format("pdftex-cccc-1111", &[0; 32], b"new").unwrap();
+        let mut left: Vec<String> = std::fs::read_dir(&f)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        // (the other builds' idle ones gone; in use, other texts, other engines kept)
+        assert_eq!(
+            left,
+            [
+                "etex-aaaa-1111",
+                "pdftex-aaaa-2222",
+                "pdftex-cccc-1111",
+                "pdftex-dddd-1111"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

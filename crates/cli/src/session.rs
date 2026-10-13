@@ -115,6 +115,9 @@ pub struct Job {
     /// `--exact-pdf`: the PDF's objects numbered as pdfTeX numbers them
     /// (false: the engine's default).
     pub exact_pdf: bool,
+    /// `--spec`: when the engine runs steps ahead of their inputs (none:
+    /// its default).
+    pub spec: Option<String>,
     /// `-synctex`.
     pub synctex: bool,
     /// `-recorder`: `JOB.fls`.
@@ -160,6 +163,16 @@ pub struct RunInfo {
     pub waits_by_kind: Vec<(&'static str, u64)>,
     pub top_waited: Vec<(u64, u64)>,
     pub gated: u64,
+    /// The steps run ahead of their inputs, those confirmed, those run
+    /// again, the raises, the runs out of fuel; the most steps ready at
+    /// once and the mean per scheduler step.
+    pub speculations: u64,
+    pub confirmations: u64,
+    pub mispredictions: u64,
+    pub raises: u64,
+    pub fuel_outs: u64,
+    pub max_ready: usize,
+    pub ready_mean: f64,
 }
 
 impl RunInfo {
@@ -337,6 +350,38 @@ pub struct Session {
     changed: Vec<String>,
     /// The formats' evaluated states (none: no cache).
     cache: Option<Cache>,
+    /// The texts sent to the build while it runs, by version.
+    absorb: Absorb,
+    /// When the change came that the last build took last while it ran.
+    absorbed_at: Option<Instant>,
+}
+
+/// The main text sent to a running build from another thread: the build
+/// takes the latest between its steps ([`phitex_tex::EditSender`]). Each
+/// text sent is kept with when it came, until a result is for it or a
+/// later one.
+#[derive(Clone, Default)]
+pub struct Absorb {
+    tx: phitex_tex::EditSender,
+    sent: Arc<Mutex<BTreeMap<u64, (String, Instant)>>>,
+}
+
+impl Absorb {
+    /// Sends the main text (TeX's characters): its version.
+    pub fn send(&self, text: &str, came: Instant) -> u64 {
+        let mut m = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
+        let v = self.tx.send(text);
+        m.insert(v, (text.to_owned(), came));
+        v
+    }
+
+    /// Version `v`'s text and when it came, the earlier ones forgotten.
+    fn take(&self, v: u64) -> Option<(String, Instant)> {
+        let mut m = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
+        let got = m.get(&v).cloned();
+        m.retain(|&k, _| k > v);
+        got
+    }
 }
 
 /// The job's clock as engine `e` reads it, in seconds whose UTC fields are
@@ -382,6 +427,8 @@ impl Session {
             buffers: Arc::default(),
             changed: Vec::new(),
             cache,
+            absorb: Absorb::default(),
+            absorbed_at: None,
         })
     }
 
@@ -399,6 +446,26 @@ impl Session {
         bufs.push((name.clone(), text.map(str::to_owned)));
         drop(bufs);
         self.changed.push(name);
+    }
+
+    /// A handle to send the main text to a build while it runs, from
+    /// another thread (none before the first build).
+    pub fn absorb(&self) -> Option<Absorb> {
+        self.build.as_ref().map(|_| self.absorb.clone())
+    }
+
+    /// Whether the last build is for the files as they are now (an edit
+    /// sent while it ran was taken by it).
+    pub fn up_to_date(&self) -> bool {
+        self.build.is_some()
+            && self.changed.is_empty()
+            && self.built_text.as_deref() == Some(self.text_now().as_str())
+    }
+
+    /// When the latest change the last build took came, if it took one
+    /// sent while it ran.
+    pub fn absorbed_at(&self) -> Option<Instant> {
+        self.absorbed_at
     }
 
     /// Builds: the first time from nothing, then as an edit of the main
@@ -431,8 +498,9 @@ impl Session {
             internal,
             diagnostics: Vec::new(),
         };
-        let text = self.text_now();
-        let edit_line = self
+        let mut text = self.text_now();
+        self.absorbed_at = None;
+        let mut edit_line = self
             .built_text
             .as_deref()
             .and_then(|old| first_difference_line(old, &text));
@@ -463,7 +531,10 @@ impl Session {
                 for name in &reread {
                     b.edit_file(name, None);
                 }
-                b.edit(&text);
+                // (sent as a version of its own: what another thread sends
+                // while it runs is taken between the engine's steps)
+                self.absorb.send(&text, Instant::now());
+                b.absorb_pending();
             } else {
                 self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
@@ -488,7 +559,17 @@ impl Session {
                     progress: Some(progress),
                     // (--exact-pdf: pdfTeX's numbering asked for; else the engine's default)
                     exact_objects: self.job.exact_pdf || Options::default().exact_objects,
+                    speculation: match self.job.spec.as_deref() {
+                        Some("off") => phitex_tex::Speculation::Off,
+                        Some("all") => phitex_tex::Speculation::All,
+                        Some("predicted") => phitex_tex::Speculation::Predicted,
+                        _ => Options::default().speculation,
+                    },
                     ..Options::default()
+                };
+                let opts = Options {
+                    edits: Some(self.absorb.tx.clone()),
+                    ..opts
                 };
                 let b = Build::with(opts, prelude.as_deref(), &text);
                 self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
@@ -505,6 +586,19 @@ impl Session {
                 self.built_text = None;
                 return fail(engine_stop(&e), Some(e));
             }
+        }
+        // (the result is for the latest text the build took)
+        if let Some(b) = &self.build
+            && let Some((t, came)) = self.absorb.take(b.version())
+            && t != text
+        {
+            edit_line = self
+                .built_text
+                .as_deref()
+                .and_then(|old| first_difference_line(old, &t));
+            text = t;
+            self.absorbed_at = Some(came);
+            self.text.clone_from(&text);
         }
         self.status.set("output");
         let b = self.build.as_ref().expect("built above");
@@ -560,6 +654,13 @@ impl Session {
                 waits_by_kind: s.waits_by_kind.clone(),
                 top_waited: s.top_waited.clone(),
                 gated: s.gated,
+                speculations: s.speculations,
+                confirmations: s.confirmations,
+                mispredictions: s.mispredictions,
+                raises: s.raises,
+                fuel_outs: s.fuel_outs,
+                max_ready: s.max_ready,
+                ready_mean: s.ready_mean(),
             }],
             internal: None,
             diagnostics: b.diagnostics(),
@@ -620,11 +721,13 @@ impl Session {
         Ok((Some(text), cached))
     }
 
-    /// The format's name in the cache: its engine, and its text's hash.
+    /// The format's name in the cache: its engine, this binary's sources'
+    /// hash (another build's format is never read), its text's hash.
     fn format_name(&self, text: &str) -> String {
         format!(
-            "{}-{:016x}",
+            "{}-{}-{:016x}",
             self.job.engine.name,
+            env!("PHITEX_BUILD_ID"),
             tex::Fnv::new().add(text.as_bytes()).0
         )
     }

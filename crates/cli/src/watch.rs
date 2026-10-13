@@ -11,7 +11,7 @@
 //! message the terminal shows is the viewer's too (its console).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +39,8 @@ enum Event {
     Asked,
     /// This many browsers show the viewer now.
     Clients(usize),
+    /// File `0`'s buffer changed (applied already, while a build ran).
+    Edited(String),
 }
 
 /// The extensions of the files a change of rebuilds.
@@ -580,7 +582,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let open_cmd = t.viewer.clone().filter(|_| o.open);
     let mut started = false;
     // (`since`: when the change came; none for the cold build)
-    let mut rebuild = |s: &mut Session, why: &str, since: Option<Instant>| {
+    // (`meanwhile`: called again and again while the build runs, on this
+    // thread: the build runs on one of its own)
+    let mut rebuild = |s: &mut Session,
+                       why: &str,
+                       since: Option<Instant>,
+                       meanwhile: &mut dyn FnMut()| {
         builds += 1;
         last.borrow_mut().builds = builds;
         status.take();
@@ -592,7 +599,20 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let spin = ui.spin(format!("{what}: build {builds} ({why})"), status.clone());
         // (a build that fails inside the engine — a panic: the pieces did
         // not settle — is reported, and the watch goes on waiting)
-        let r = match crate::ui::catch(|| s.build()) {
+        let ran = std::thread::scope(|sc| {
+            let h = sc.spawn(|| crate::ui::catch(|| s.build()));
+            while !h.is_finished() {
+                meanwhile();
+            }
+            h.join()
+                .unwrap_or_else(|_| Err("the build's thread panicked".to_owned()))
+        });
+        // (an edit the build took while it ran: timed from it)
+        let since = match (since, s.absorbed_at()) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        let r = match ran {
             Ok(r) => r,
             Err(m) => {
                 spin.done();
@@ -858,6 +878,24 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     }
                     rows.push(("waits".to_owned(), w.trim_start_matches(" · ").to_owned()));
                 }
+                if x.max_ready > 0 {
+                    rows.push((
+                        "ready".to_owned(),
+                        format!(
+                            "{:.1} a step on average · at most {}",
+                            x.ready_mean, x.max_ready
+                        ),
+                    ));
+                }
+                if x.speculations > 0 {
+                    rows.push((
+                        "ahead".to_owned(),
+                        format!(
+                            "{} run ahead · {} confirmed · {} run again · {} raises · {} out of fuel",
+                            x.speculations, x.confirmations, x.mispredictions, x.raises, x.fuel_outs
+                        ),
+                    ));
+                }
             }
             let head = format!(
                 "{}  {}  {}",
@@ -889,6 +927,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 "waits_by_kind": x.waits_by_kind.iter().map(|(k, n)| json!({"kind": k, "waits": n})).collect::<Vec<_>>(),
                 "top_waited": x.top_waited.iter().map(|(id, n)| json!({"node": id, "waits": n})).collect::<Vec<_>>(),
                 "gated": x.gated,
+                "ready_mean": x.ready_mean,
+                "max_ready": x.max_ready,
+                "speculation": {
+                    "run": x.speculations,
+                    "confirmed": x.confirmations,
+                    "mispredicted": x.mispredictions,
+                    "raises": x.raises,
+                    "fuel_outs": x.fuel_outs,
+                },
             })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": r.out.errors,
@@ -939,7 +986,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         }
     };
-    rebuild(&mut s, "cold", None);
+    // (what came while a build ran and it could not take: done after it)
+    let mut held: VecDeque<(Instant, Event)> = VecDeque::new();
+    let mut held_asks: Vec<Ask> = Vec::new();
+    let mut idle = || std::thread::sleep(Duration::from_millis(5));
+    rebuild(&mut s, "cold", None, &mut idle);
     let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {
         let text = buffers.get(file).map(|b| tex_text(b));
         if file == main_rel {
@@ -956,16 +1007,17 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
     let mut diff_asks: Vec<Ask> = Vec::new();
-    while let Ok(first) = rx.recv() {
+    while let Some(first) = held.pop_front().or_else(|| rx.recv().ok()) {
         // (what came meanwhile, a build's time of keystrokes among it, is
         // one edit, timed from the last of them: the wait a writer feels)
         let mut events = vec![first];
+        events.extend(held.drain(..));
         while let Ok(e) = rx.recv_timeout(Duration::from_millis(2)) {
             events.push(e);
         }
         let came = events
             .iter()
-            .filter(|e| matches!(e.1, Event::Files(_) | Event::Asked))
+            .filter(|e| matches!(e.1, Event::Files(_) | Event::Asked | Event::Edited(_)))
             .map(|e| e.0)
             .max()
             .unwrap_or_else(Instant::now);
@@ -1100,8 +1152,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         again = true;
                     }
                 }
+                Event::Edited(file) => {
+                    set(&mut s, &buffers, &file);
+                    why.push(format!("{file} (editor)"));
+                    again = true;
+                }
                 Event::Asked => {
-                    for a in view.as_ref().map(View::take_asks).unwrap_or_default() {
+                    let mut asks = std::mem::take(&mut held_asks);
+                    asks.extend(view.as_ref().map(View::take_asks).unwrap_or_default());
+                    for a in asks {
                         let file = match a {
                             Ask::Painted(us) => {
                                 let mut l = last.borrow_mut();
@@ -1151,9 +1210,83 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 }
             }
         }
+        // (a change the last build took while it ran: built already)
+        // (r, or Rebuild in the viewer: built again whatever)
+        let asked = why.iter().any(|w| w.starts_with("asked"));
+        if again && !asked && s.up_to_date() {
+            again = false;
+        }
         if again {
             why.dedup();
-            rebuild(&mut s, &why.join(", "), Some(came));
+            let absorb = s.absorb();
+            // (while the build runs: the main file's edits sent to it, the
+            // rest held for after it)
+            let mut meanwhile = || {
+                let Ok((at, e)) = rx.recv_timeout(Duration::from_millis(5)) else {
+                    return;
+                };
+                let send_main = |buffers: &HashMap<String, String>, file: &str| -> bool {
+                    let Some(a) = &absorb else { return false };
+                    if file != main_rel {
+                        return false;
+                    }
+                    let t = buffers.get(file).map_or_else(
+                        || {
+                            std::fs::read(&main_file)
+                                .map(|b| tex::chars(&b))
+                                .unwrap_or_default()
+                        },
+                        |b| tex_text(b),
+                    );
+                    a.send(&t, at);
+                    true
+                };
+                match e {
+                    Event::Asked => {
+                        for a in view.as_ref().map(View::take_asks).unwrap_or_default() {
+                            match a {
+                                Ask::SetFile { ref file, ref text } if *file == main_rel => {
+                                    buffers.insert(file.clone(), text.clone());
+                                }
+                                Ask::Edit {
+                                    ref file,
+                                    start,
+                                    end,
+                                    ref text,
+                                } if *file == main_rel => {
+                                    let cur = buffers.get(file).cloned().unwrap_or_else(|| {
+                                        std::fs::read(&main_file)
+                                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                                            .unwrap_or_default()
+                                    });
+                                    buffers
+                                        .insert(file.clone(), splice_utf16(&cur, start, end, text));
+                                }
+                                other => {
+                                    held_asks.push(other);
+                                    continue;
+                                }
+                            }
+                            if send_main(&buffers, &main_rel) {
+                                held.push_back((at, Event::Edited(main_rel.clone())));
+                            }
+                        }
+                        if !held_asks.is_empty() {
+                            held.push_back((at, Event::Asked));
+                        }
+                    }
+                    Event::Files(ps)
+                        if ps.iter().all(|p| {
+                            p.strip_prefix(&root).unwrap_or(p) == Path::new(&main_rel)
+                        }) && !buffers.contains_key(&main_rel) =>
+                    {
+                        send_main(&buffers, &main_rel);
+                        held.push_back((at, Event::Files(ps)));
+                    }
+                    e => held.push_back((at, e)),
+                }
+            };
+            rebuild(&mut s, &why.join(", "), Some(came), &mut meanwhile);
         }
         // (the diff: asked for, or diffed again after the edit)
         if let Some(v) = &view {
