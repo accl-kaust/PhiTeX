@@ -2637,7 +2637,12 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     for a in 0..an.p.atoms.len() {
         let at = &an.p.atoms[a];
         starts.push(at.start);
-        let h = if an.claimed[a] && at.kind == AtomKind::Cs && !prim_operand[a] {
+        let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
+        // (an atom inside a run of characters, or a space, is skipped
+        // whatever its hint: no span reads it, so none is made)
+        let h = if (ch && prev_char) || at.kind == AtomKind::Space {
+            Hint::default()
+        } else if an.claimed[a] && at.kind == AtomKind::Cs && !prim_operand[a] {
             an.hint_run(a)
         } else {
             an.hint(a)
@@ -2646,7 +2651,6 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // read, not run: `\\headline={\\tenrm…}`)
         let unbounded_operand = an.claimed[a] && h.bound.is_none();
         hints.push(Arc::new(h));
-        let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
         skip.push(
@@ -2817,8 +2821,9 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         slice_hints.push(intern(&h));
     }
     // (`PHITEX_HINTS_DIGEST`: one line per text, a hash of every hint
-    // a span reads (the atoms not skipped) and every slice's, encoded: the check that a rework of the
-    // analysis keeps its answers byte for byte)
+    // a span reads (the atoms not skipped) and every slice's, encoded:
+    // the check that a rework of the analysis keeps its answers byte
+    // for byte)
     if crate::exec::env_flag!("PHITEX_HINTS_DIGEST") {
         let mut d = phitex_defuse::hash_bytes(0, text.as_bytes());
         for (h, &skip) in t.hints.iter().zip(&t.skip) {
