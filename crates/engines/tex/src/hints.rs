@@ -166,7 +166,10 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
         // and the box a `\\setbox` or box context gets (§1077 box_end)
         // (an output routine's `}` resumes the page builder, §1100)
-        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:"],
+        // (a box's `}` sets a register only in a `\\setbox`'s context,
+        // §1075, and that command's row names it; a `}` closing a box
+        // begun before the node is a fragment's, [`fragment_context`])
+        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen"],
         // arguments expanded while read: a conditional may end (§366, §498)
         "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["cs:"],
         "mark" => &[],
@@ -187,9 +190,8 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "aftergroup" => &[],
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
         // the same node is packaged there and sets \\\\badness, §1086, §649)
-        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
-            &["box:", "lvlfix", "badness", "markclasses"]
-        }
+        "hbox" | "vbox" | "vtop" | "vcenter" => &["lvlfix", "badness", "markclasses"],
+        "setbox" | "vsplit" => &["box:", "lvlfix", "badness", "markclasses"],
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
         | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
@@ -3009,6 +3011,8 @@ fn fragment_context(b: &mut Bound) {
     // (a `}` among them may end the output routine: the page's state
     // and the held-over contributions are restored, §1100)
     add_heads(&mut b.state, Some(&["deadcycles"]));
+    // (and a box a `\\setbox` before it began, §1075)
+    add_head(&mut b.state, "box:");
     add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
     add_head(&mut b.state, "pg:");
     add_head(&mut b.state, "aftertoken");
