@@ -1319,6 +1319,23 @@ impl Graph {
                 .find(|(n, _)| n == name && defines_only(name))
                 .map_or(none, |(_, ks)| v.list(ks.iter().map(|k| v.str(k)).collect()));
             self.eng.declare_loopback(w, guess);
+            // the guessed keys' `wdef:<field>` loop-backs declared with
+            // it: a read-back of a guessed key never waits for them
+            let keys: Vec<String> = self
+                .wkeys_guess
+                .iter()
+                .filter(|(n, _)| n == name && defines_only(name))
+                .flat_map(|(_, ks)| ks.iter().cloned())
+                .collect();
+            for k in keys {
+                if !self.wdefs.contains(&k) {
+                    let v = self.eng.values();
+                    let none = v.list(Vec::new());
+                    let wd = v.field(&format!("wdef:{k}"));
+                    self.eng.declare_loopback(wd, none);
+                    self.wdefs.push(k);
+                }
+            }
         }
         self.written.push(name.to_owned());
     }
