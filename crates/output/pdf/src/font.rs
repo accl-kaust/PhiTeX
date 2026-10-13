@@ -93,7 +93,7 @@ impl PdfState {
 
     /// `pdf_check_vf_cur_val` and `pdf_init_font` for the commands that
     /// name a font.
-    fn font_command(&mut self, f: FontId, src: &dyn FontSource) -> Result<(), PdfError> {
+    pub(crate) fn font_command(&mut self, f: FontId, src: &dyn FontSource) -> Result<(), PdfError> {
         if f == 0 {
             return Err(pdf_error("font", "invalid font identifier"));
         }
