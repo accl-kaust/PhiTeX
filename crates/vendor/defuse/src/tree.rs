@@ -125,6 +125,68 @@ impl<I, S: Copy> Arena<I, S> {
         self.merge(a, l, r)
     }
 
+    /// Inserts a run of new keys at once (`items` sorted by key, none of
+    /// them present, and no present key inside the run's span): one split
+    /// at the run's start, a treap of the run built in linear time, two
+    /// merges, instead of a split and two merges per key.
+    pub(crate) fn insert_run<A: Aug<I, S>>(&mut self, a: &A, root: u32, items: Vec<(u64, I)>) -> u32 {
+        let Some(&(first, _)) = items.first() else {
+            return root;
+        };
+        let (l, r) = self.split(a, root, first);
+        // A Cartesian tree by priority over the sorted keys: the right
+        // spine as a stack.
+        let mut spine: Vec<u32> = Vec::new();
+        let mut run_root = NIL;
+        for (key, item) in items {
+            let sum = a.leaf(&item);
+            let node = TNode {
+                key,
+                prio: prio_of(key),
+                left: NIL,
+                right: NIL,
+                item,
+                sum,
+            };
+            let i = if let Some(i) = self.free.pop() {
+                self.nodes[i as usize] = Some(node);
+                i
+            } else {
+                self.nodes.push(Some(node));
+                u32::try_from(self.nodes.len() - 1).expect("treap arena overflow")
+            };
+            let mut last = NIL;
+            while let Some(&top) = spine.last() {
+                if self.n(top).prio >= self.n(i).prio {
+                    break;
+                }
+                last = spine.pop().expect("a spine node");
+            }
+            self.nm(i).left = last;
+            match spine.last() {
+                Some(&top) => self.nm(top).right = i,
+                None => run_root = i,
+            }
+            spine.push(i);
+        }
+        // Summaries bottom-up: the spine from the deepest node, and every
+        // left subtree hangs off a spine node it was popped under.
+        self.pull_all(a, run_root);
+        let l = self.merge(a, l, run_root);
+        self.merge(a, l, r)
+    }
+
+    /// Recomputes the summaries of a whole subtree (post-order).
+    fn pull_all<A: Aug<I, S>>(&mut self, a: &A, t: u32) {
+        if t == NIL {
+            return;
+        }
+        let (l, r) = (self.n(t).left, self.n(t).right);
+        self.pull_all(a, l);
+        self.pull_all(a, r);
+        self.pull(a, t);
+    }
+
     pub(crate) fn remove<A: Aug<I, S>>(&mut self, a: &A, root: u32, key: u64) -> (u32, Option<I>) {
         let (l, r) = self.split(a, root, key);
         let (m, r) = self.split(a, r, key.saturating_add(1));

@@ -2414,6 +2414,18 @@ fn a_loop_back_field_without_publishers_returns_to_its_initial_value() {
     assert_eq!(out(&eng, &prog, 1), "4");
 }
 
+/// Every step that applied runs is counted once in the batch-width
+/// histogram, in the power-of-two bucket of its width.
+#[test]
+fn the_report_counts_steps_by_the_width_of_what_they_applied() {
+    let (eng, _, r) = load(&["x = 1", "y = 2", "z = x + y", "w = z + 1"]);
+    let steps: u64 = r.applied_widths.iter().sum();
+    assert!(steps >= 2 && steps <= r.steps, "{r:?}");
+    assert_eq!(r.applied_widths.len(), 2, "{:?}", r.applied_widths);
+    assert!(r.applied_widths[1] >= 1, "{:?}", r.applied_widths);
+    drop(eng);
+}
+
 /// Reports marked nodes final as they come, with the absorb call each
 /// report came before.
 #[derive(Default)]
