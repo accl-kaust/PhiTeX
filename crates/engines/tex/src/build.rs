@@ -163,9 +163,10 @@ impl Run<'_, '_> {
         if let Some(k) = self.nest.iter().rposition(|l| l.group != 0) {
             let above = self.nest.split_off(k + 1);
             self.pop_level();
-            let floor = self.defs.len();
+            let (_, floor_s, floor_d, _) = self.st.open();
             for mut l in above {
-                l.defs_len = l.defs_len.min(floor);
+                l.save_base = l.save_base.min(floor_s);
+                l.def_base = l.def_base.min(floor_d);
                 self.nest.push(l);
             }
             return self.mode();
@@ -180,7 +181,9 @@ impl Run<'_, '_> {
     /// they own goes to the main list (lid 0). A format node closes its
     /// own groups; one open at its end is an error.
     pub(crate) fn end_open(&mut self) {
-        for l in std::mem::take(&mut self.nest) {
+        let nest = std::mem::take(&mut self.nest);
+        self.abandon_levels(&nest);
+        for l in nest {
             if self.claim_rest && l.owns {
                 for x in l.list {
                     self.append(0, x);
@@ -202,6 +205,7 @@ impl Run<'_, '_> {
         let Some(l) = self.nest.pop() else {
             return Ok(());
         };
+        self.abandon_levels(std::slice::from_ref(&l));
         let sid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         let mut xs = vec![
             v.int(l.group),
@@ -832,7 +836,8 @@ impl Run<'_, '_> {
         let lvl = x.map_or(0, |x| crate::val::int_at(v, x, 0));
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let base = self.base_mode()?.depth;
-        self.modify_at(f, val, lvl, base);
+        let l = self.loc_of(f);
+        self.modify_at(l, val, lvl, base);
         Ok(())
     }
 
@@ -1266,7 +1271,7 @@ impl Run<'_, '_> {
                     | group::NO_ALIGN
             )
         {
-            let t = self.cur.tok.clone();
+            let t = self.cur.tok;
             self.back_input(t);
             self.back_input(Tok::cs("\u{10FFFE}endgraf"));
             return Ok(());

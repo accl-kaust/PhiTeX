@@ -121,9 +121,8 @@ impl Run<'_, '_> {
     /// `cur` was taken.
     pub(crate) fn align_token(&mut self) -> R<bool> {
         let c = self.cur.cmd;
-        let brace = matches!(self.cur.tok, Tok::C(_))
-            && !self.cur.tok.is_cs_or_active()
-            && (c == cmd::LEFT_BRACE || c == cmd::RIGHT_BRACE);
+        let brace =
+            !self.cur.tok.is_cs_or_active() && (c == cmd::LEFT_BRACE || c == cmd::RIGHT_BRACE);
         let tab = c == cmd::TAB_MARK || c == cmd::CAR_RET;
         if !(brace || tab) || !self.align_open()? {
             return Ok(false);
@@ -238,7 +237,7 @@ impl Run<'_, '_> {
                         break;
                     }
                 } else if c != cmd::SPACER || !u.is_empty() {
-                    u.push(self.cur.tok.clone());
+                    u.push(self.cur.tok);
                 }
             }
             // §783: the v part
@@ -253,7 +252,7 @@ impl Run<'_, '_> {
                     self.log("error", "Only one # is allowed per tab")?;
                     continue;
                 }
-                w.push(self.cur.tok.clone());
+                w.push(self.cur.tok);
             }
             pre.cols.push((u, w, tab));
             if self.cur.cmd == cmd::CAR_RET {

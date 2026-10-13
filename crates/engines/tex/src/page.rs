@@ -431,8 +431,8 @@ impl Run<'_, '_> {
                             self.cx.values_epoch(),
                             &format!("count:{k}"),
                         );
-                        self.over.insert(cf, c);
-                        self.slot_note(cf, None);
+                        let l = self.loc_of(cf);
+                        self.st.preload(l, Some(c));
                     }
                 }
             }
@@ -447,8 +447,8 @@ impl Run<'_, '_> {
             let pairs = pgst_pairs(v, x);
             log_read(&self.ops, "pgst", j - 1, named(v, &pairs));
             for (f, x) in pairs {
-                self.over.insert(f, x);
-                self.slot_note(f, None);
+                let l = self.loc_of(f);
+                self.st.preload(l, Some(x));
             }
         }
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
