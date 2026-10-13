@@ -1085,7 +1085,7 @@ fn the_critical_chain_falls_by_one_through_reads_ranges_and_raises() {
                     assert_eq!((*to, *by), (h, Some(next)), "seed {seed}: {w:?}");
                     assert_eq!(hn + 1, h, "seed {seed}: {w:?}");
                 }
-                Cause::Woken { by } => {
+                Cause::Woken { by, .. } => {
                     assert_eq!(*by, next, "seed {seed}: {w:?}");
                     assert!(hn + 1 >= h, "seed {seed}: {w:?}");
                 }

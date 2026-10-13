@@ -280,7 +280,11 @@ impl<'a> Ctx<'a> {
             return Ok(val);
         }
         if tn.in_work() {
-            self.stop(End::Wait(t, WaitKind::Value))
+            let field = match kind {
+                AssumeKind::Def(f) | AssumeKind::Structure(f) => Some(f),
+                AssumeKind::Output => None,
+            };
+            self.stop(End::Wait(t, WaitKind::Value, field))
         } else {
             if tn.height + 1 > self.raise {
                 self.raise = tn.height + 1;
@@ -330,7 +334,7 @@ impl<'a> Ctx<'a> {
             .map_or_else(|| e.walk(n.unit, n.label, f), |x| x.1);
         let crossed = w.pending;
         if crossed != NIL && !self.spec {
-            return self.stop(End::Wait(crossed, w.pending_kind));
+            return self.stop(End::Wait(crossed, w.pending_kind, Some(f)));
         }
         let v = if w.site == NIL {
             e.start_value(n.unit, f)
@@ -523,7 +527,7 @@ impl<'a> Ctx<'a> {
             let w = e.walk(sn.unit, sn.label, h);
             // A link crossing pending structure is not predicted.
             if w.pending != NIL {
-                return self.stop(End::Wait(w.pending, w.pending_kind));
+                return self.stop(End::Wait(w.pending, w.pending_kind, Some(h)));
             }
             site = w.site;
             let key = h.0.raw();
@@ -740,7 +744,7 @@ impl<'a> Ctx<'a> {
         let an = e.n(at);
         let w = e.walk(an.unit, an.label, f);
         if w.pending != NIL {
-            return self.stop(End::Wait(w.pending, w.pending_kind));
+            return self.stop(End::Wait(w.pending, w.pending_kind, Some(f)));
         }
         let v = if w.site == NIL {
             e.start_value(an.unit, f)

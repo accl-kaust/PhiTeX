@@ -71,7 +71,7 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
     {
         let s = &b.stats;
         eprintln!(
-            "{name}: {} token-frame nodes, {} text nodes; waits_by_kind {:?}, hints {} bounded / {} any / {} demoted / {} violations / {} undeclared, speculations {}, raises {}, stops {}",
+            "{name}: {} token-frame nodes, {} text nodes; waits_by_kind {:?}, hints {} bounded / {} any / {} demoted / {} violations / {} undeclared, speculations {}, raises {}, stops {}, pending sets {} ({} defining)",
             s.nodes_token_frames,
             s.nodes_text_frames,
             s.waits_by_kind,
@@ -82,7 +82,9 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
             s.undeclared_definitions,
             s.speculations,
             s.raises,
-            s.stops
+            s.stops,
+            s.pending_sets,
+            s.pending_sets_defining
         );
         for (k, l) in b.chain_waits().iter().enumerate() {
             eprintln!("  {name} wait {k}: {l}");
