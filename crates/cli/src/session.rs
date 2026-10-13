@@ -343,6 +343,9 @@ pub struct Session {
     page_hashes: Vec<u64>,
     /// kpathsea as the job's program: the build's finder.
     tree: Arc<tex::Tree>,
+    /// kpathsea as the format's build sees it: without the current
+    /// directory (fmtutil builds formats in a scratch directory).
+    format_tree: Arc<tex::Tree>,
     builds: usize,
     /// The hashes of the files the last write wrote (an unchanged file is
     /// not written again).
@@ -414,6 +417,7 @@ impl Session {
     ) -> Result<Session, String> {
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         let tree = Arc::new(tex::Tree::open(&job.engine));
+        let format_tree = Arc::new(tex::Tree::open_format(&job.engine));
         let cache = Cache::open(job.cache_limit).ok();
         if let Some(c) = &cache
             && let Some(w) = c.unkept()
@@ -427,6 +431,7 @@ impl Session {
             built_text: None,
             page_hashes: Vec::new(),
             tree,
+            format_tree,
             builds: 0,
             written: Mutex::new(BTreeMap::new()),
             status,
@@ -565,6 +570,7 @@ impl Session {
                     jobname: self.job.jobname.clone(),
                     comment: dvi_comment(self.job.pdf_date),
                     finder: self.finder(),
+                    prelude_finder: Some(self.format_finder()),
                     epoch: Some(self.job.pdf_date),
                     fixpoint: self.job.fixpoint,
                     prelude_jobname: self.job.engine.name.to_owned(),
@@ -782,7 +788,7 @@ impl Session {
             return Ok((None, None));
         }
         let ini = self.job.engine.ini;
-        self.tree
+        self.format_tree
             .input(ini)
             .ok_or_else(|| format!("can't find {ini} (kpathsea)"))?;
         let text = format!("\\input {ini}\n");
@@ -912,6 +918,16 @@ impl Session {
         } else {
             format!("./{p}")
         }
+    }
+
+    /// The format's files, by kpathsea outside the document's directory.
+    fn format_finder(&self) -> Finder {
+        let tree = self.format_tree.clone();
+        Arc::new(move |name: &str| {
+            let p = tree.input(name)?;
+            let bytes = std::fs::read(&p).ok()?;
+            Some((p.to_string_lossy().into_owned(), bytes))
+        })
     }
 
     /// Files by kpathsea, as TeX names them: an editor's buffer for one

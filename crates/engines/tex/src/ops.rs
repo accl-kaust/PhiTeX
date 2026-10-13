@@ -129,8 +129,17 @@ pub(crate) fn run_node_parking(
         // (§1335: the job ends there, its log written up to the error,
         // as pdfTeX's close_files_and_terminate leaves it)
         Err(Halt::Fatal) => {
-            if !r.too_many_errors {
+            if !r.fatal_logged {
                 let _ = r.log("error", "*** (job aborted, no legal \\end found)");
+            }
+            // nothing after the error is read: the rest of the input is
+            // claimed, and the main list ends here for the page builder
+            // (the page it holds is not shipped)
+            r.frames.clear();
+            r.claim_rest = true;
+            if r.pg.is_none() {
+                let v = r.v;
+                r.append(0, v.list(vec![v.int(crate::nodes::T_ABORT)]));
             }
             r.end_open();
             Ok(r.finish())
