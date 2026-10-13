@@ -740,7 +740,10 @@ impl NodeTimer {
 impl Drop for NodeTimer {
     fn drop(&mut self) {
         if let Some((t, op, node)) = self.0 {
-            eprintln!("nodetime: {op} {node} {:.3}", t.elapsed().as_secs_f64() * 1e3);
+            eprintln!(
+                "nodetime: {op} {node} {:.3}",
+                t.elapsed().as_secs_f64() * 1e3
+            );
         }
     }
 }
