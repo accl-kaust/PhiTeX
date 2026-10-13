@@ -682,7 +682,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let nest_len = self.nest.len();
         let conds = self.conds.clone();
         let codes = self.if_codes.clone();
-        let cur = self.cur.clone();
+        let cur = self.cur;
         let (eof, no_pull, claim) = (self.eof, self.no_pull, self.claim_rest);
         let effect = self.effect;
         self.eof = true;
