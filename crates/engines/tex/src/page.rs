@@ -192,7 +192,9 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn breaks(&mut self) -> R<()> {
         let v = self.v;
+        phase("range");
         let l = self.list_fold(0)?;
+        phase("params");
         let mut params = PageParams {
             vsize: self.param("vsize")?,
             max_depth: self.param("maxdepth")?,
@@ -258,6 +260,7 @@ impl Run<'_, '_> {
                 .and_then(|&y| nodes::decode(v, y, &mut Side::default()));
             let mut halt: Option<Halt> = None;
             let out = {
+                phase("insert");
                 let mut class = |n: u16| match self.insert_class(n) {
                     Ok(c) => c,
                     Err(h) => {
@@ -287,6 +290,7 @@ impl Run<'_, '_> {
                     let j = pages.len();
                     // the material the fold could not place goes on
                     // (§1017); what the routine leaves is next round's
+                    phase("pagefx");
                     let fx = self.page_effects(j)?;
                     let mut rest: Vec<ValueId> = fx;
                     rest.extend(f.contributions.iter().map(|n| nodes::encode(v, n, &side)));
@@ -306,7 +310,9 @@ impl Run<'_, '_> {
                 "\\end could not empty the page (an output routine that never ships?)",
             );
         }
+        phase("output");
         let output = self.get("param:output")?;
+        phase("finish");
         let any = toks_of(v, output).is_empty();
         let op = if any {
             self.ops.pagestep_any
@@ -510,7 +516,10 @@ impl Operation for Breaks {
     }
     #[allow(clippy::redundant_closure_for_method_calls)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        run_node(cx, ops(&self.0), |r| r.breaks())
+        phase("start");
+        let res = run_node(cx, ops(&self.0), |r| r.breaks());
+        attempt("breaks", res.is_ok());
+        res
     }
 }
 
@@ -551,7 +560,10 @@ const MAX_DIMEN: i32 = 0o7777777777;
 /// read at the end.
 pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     let v = cx.values();
-    let pages = cx.acc_range(v.field("pages"), None)?;
+    phase("pages");
+    let pages = cx.acc_range(v.field("pages"), None);
+    attempt("dvi", pages.is_ok());
+    let pages = pages?;
     let all = v.seq_to_vec(pages);
     // the format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`)
     let pdf = all.first().is_some_and(|&p| {
@@ -648,4 +660,26 @@ fn dvi_shown(v: &Values, page: ValueId) -> u64 {
         return phitex_defuse::hash_bytes(0, b);
     }
     phitex_defuse::hash_bytes(phitex_defuse::hash_bytes(0, &b[..41]), &b[45..])
+}
+
+thread_local! {
+    static PHASE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+/// Where the page fold's current attempt is (`PHITEX_BREAKS_STATS`).
+fn phase(p: &'static str) {
+    PHASE.with(|c| c.set(p));
+}
+
+/// One attempt of `Breaks` or `Dvi`, counted and, with
+/// `PHITEX_BREAKS_STATS`, printed with the read it stopped at.
+fn attempt(op: &str, ok: bool) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    if std::env::var_os("PHITEX_BREAKS_STATS").is_some() {
+        let k = N.fetch_add(1, Ordering::Relaxed) + 1;
+        let at = PHASE.with(std::cell::Cell::get);
+        let how = if ok { "done" } else { "stopped" };
+        eprintln!("attempt {k} {op}: {how} at {at}");
+    }
 }
