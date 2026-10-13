@@ -150,6 +150,9 @@ impl Cur {
     }
 }
 
+/// A decoded scope kind: `(group, sid, lid, mode, depth, extra)`.
+pub(crate) type KindFields = (i64, i64, i64, i32, i64, Vec<ValueId>);
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
     pub cx: &'c mut Ctx<'a>,
@@ -214,7 +217,7 @@ pub(crate) struct Run<'c, 'a> {
     tfields: FxHashMap<Tok, Field>,
     /// The scope kind last decoded (`Run::mode`, once a command): its
     /// value and its fields `(group, sid, lid, mode, depth, extra)`.
-    pub kind_memo: Option<(ValueId, (i64, i64, i64, i32, i64, Vec<ValueId>))>,
+    pub kind_memo: Option<(ValueId, KindFields)>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
     /// Lines entered by this run (for `\inputlineno`).
@@ -1076,10 +1079,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// token (a run of characters is one node), and the text not yet read
     /// as one node per segment.
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
-        let tag = |n: &str| self.ops.fields.get(self.v, n).0;
-        let (tag_t, tag_s, tag_f) = (tag("t"), tag("s"), tag("f"));
         let v = self.v;
         let epoch = self.cx.values_epoch();
+        let tag = |n: &str| self.ops.fields.get_at(v, epoch, n).0;
+        let (tag_t, tag_s, tag_f) = (tag("t"), tag("s"), tag("f"));
         let anchor = v.int(self.anchor);
         let base = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
         let depths = self.kid_ifdepths.as_deref().unwrap_or(&[]);

@@ -1405,7 +1405,9 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         if *h == 0 || !is_tex_text(name) {
             continue;
         }
-        let Some((_, bytes)) = finder(name) else { continue };
+        let Some((_, bytes)) = finder(name) else {
+            continue;
+        };
         let text: String = bytes.iter().map(|&b| char::from(b)).collect();
         let file = u32::try_from(k + 1).unwrap_or(u32::MAX);
         let kind = crate::hints::kind_of(&text, pass::FileKind::from_path(name));
