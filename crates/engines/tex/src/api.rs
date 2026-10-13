@@ -1067,11 +1067,17 @@ impl Graph {
         let finder = Arc::clone(finder);
         let log = Arc::clone(&self.provided);
         let written = self.written.clone();
+        let t0 = std::time::Instant::now();
+        let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         self.eng.set_env_provider(Box::new(move |v, f| {
             let name = v.as_str(f.0)?;
             let name = name.strip_prefix("file:")?;
             if written.iter().any(|w| w == name) {
                 return None;
+            }
+            let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if crate::exec::env_flag!("PHITEX_TEX_TIME") && (n == 1 || n % 100 == 0) {
+                eprintln!("provider: {:.1} s, {n} answers, last {name}", t0.elapsed().as_secs_f64());
             }
             let found = finder(name);
             let hash = file_hash(found.as_ref());
@@ -1171,7 +1177,9 @@ impl Graph {
     ) {
         let needs_f = self.eng.values().field("needs");
         loop {
-            self.provide(finder);
+            if !crate::exec::env_flag!("PHITEX_NO_PROVIDER") {
+                self.provide(finder);
+            }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
