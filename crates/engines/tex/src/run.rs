@@ -218,6 +218,11 @@ pub(crate) struct Run<'c, 'a> {
     /// redefinition within the same group replaces in place instead of
     /// growing `defs` (and no linear search finds the earlier one).
     pub def_ix: FxHashMap<Field, Vec<usize>>,
+    /// Per field, the stamp of its latest global definition inside a
+    /// group of this run: saved entries stamped before it are inert.
+    pub ginert: FxHashMap<Field, u64>,
+    /// The clock of `ginert` and the saved entries (`nest.rs`).
+    pub stamp: u64,
     pub contribs: Vec<(Field, ValueId)>,
     /// The page builder of a text run as one node, paging inline
     /// (`pageinline.rs`).
@@ -280,6 +285,8 @@ impl<'c, 'a> Run<'c, 'a> {
             cats: [0; 256],
             defs: Vec::new(),
             def_ix: FxHashMap::default(),
+            ginert: FxHashMap::default(),
+            stamp: 0,
             contribs: Vec::new(),
             pg: None,
             kids: Vec::new(),
