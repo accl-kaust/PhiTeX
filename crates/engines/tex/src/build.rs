@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use phitex_defuse::{Brackets, Effect, Value, ValueId, Values};
+use phitex_defuse::{Effect, Value, ValueId, Values};
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{BoxKind, BoxNode, Disc, GlueKind, KernKind, Ligature, List, Node};
 use phitex_typeset::pack::{PackParams, Spec};
@@ -41,8 +41,6 @@ pub(crate) struct Mode {
     pub sid: i64,
     pub depth: i64,
     pub extra: Vec<ValueId>,
-    /// The paragraph's record `[list, clang]`, in a paragraph.
-    pub para: Option<(i64, i64)>,
     pub vm: i32,
 }
 
@@ -60,9 +58,9 @@ impl Run<'_, '_> {
     /// or, with none open, the scope kind the node runs in.
     pub(crate) fn mode(&mut self) -> R<Mode> {
         let base = self.base_mode()?;
-        let Some(top) = self.nest.last() else {
+        if self.nest.is_empty() {
             return Ok(base);
-        };
+        }
         let groups = self.local_groups();
         // the vertical list a paragraph belongs to: the level below it
         let (vlid, vm) = self
@@ -89,7 +87,6 @@ impl Run<'_, '_> {
             sid: t.lid,
             depth: base.depth + groups,
             extra: t.extra.clone(),
-            para: t.par.map(|(lang, _)| (t.lid, lang)),
             vm,
         })
     }
@@ -127,66 +124,14 @@ impl Run<'_, '_> {
             sid,
             depth,
             extra,
-            para: None,
             vm: km,
         })
     }
 
-    /// A scope kind (a group the run leaves open to the engine): `[group,
-    /// sid, list, mode, depth, parent kind, extra…]`; the parent is the
-    /// kind the group's end returns to.
-    pub(crate) fn kind_value(
-        &mut self,
-        md: &Mode,
-        grp: i64,
-        sid: i64,
-        lid: i64,
-        m: i32,
-        extra: Vec<ValueId>,
-    ) -> R<ValueId> {
-        let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
-        Ok(self.kind_with_parent(md, grp, sid, lid, m, extra, parent))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn kind_with_parent(
-        &self,
-        md: &Mode,
-        grp: i64,
-        sid: i64,
-        lid: i64,
-        m: i32,
-        extra: Vec<ValueId>,
-        parent: ValueId,
-    ) -> ValueId {
-        let v = self.v;
-        let mut xs = vec![
-            v.int(grp),
-            v.int(sid),
-            v.int(lid),
-            v.int(i64::from(m)),
-            v.int(md.depth + 1),
-            parent,
-        ];
-        xs.extend(extra);
-        v.list(xs)
-    }
-
-    /// Opens a group whose scope includes this node (`new_save_level`,
-    /// §274).
-    pub(crate) fn open_scope_here(&mut self, k: ValueId) {
-        self.effect = Effect::Scope(Brackets {
-            closes: 0,
-            opens: 1,
-            before: true,
-            kind: Some(k),
-            kind_pending: false,
-        });
-    }
-
     /// `{` and `\begingroup` (§1063): a level of the nest sharing the
-    /// current list. The group is the run's; only one still open when
-    /// the run ends becomes an engine scope ([`Run::leave_open`]).
+    /// current list. The group is the run's: a node closes every group
+    /// it opens (one still open at a format node's end is an error).
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn open_group(&mut self, md: &Mode, grp: i64, extra: Vec<ValueId>) -> R<()> {
         self.push_group(md.m, md.lid, grp, extra);
         Ok(())
@@ -215,70 +160,18 @@ impl Run<'_, '_> {
         self.kind_outer(md)
     }
 
-    /// The groups still open when the run ends, innermost last: a
-    /// format line's `\begingroup` or `\setbox0\vbox{` whose end is on
-    /// a later line. They become engine scopes here (their locals made so
-    /// far are the run's definitions, their lists' items contributions
-    /// tagged with the scope's id). A document region is balanced, so
-    /// it reaches this with an empty nest.
-    pub(crate) fn leave_open(&mut self) -> R<()> {
-        let v = self.v;
-        let n = self.nest.len();
-        if n == 0 {
-            return Ok(());
-        }
-        if self.claim_rest {
-            // `\end` ended the job inside the groups (§1054): nothing
-            // after it reads them, so they open no engine scope; what
-            // they own goes to the main list (lid 0)
-            for l in std::mem::take(&mut self.nest) {
-                if l.owns {
-                    for x in l.list {
-                        self.append(0, x);
-                    }
+    /// The groups still open when the run ends. Only `\end` inside
+    /// groups (§1054) leaves any: nothing after it reads them, so what
+    /// they own goes to the main list (lid 0). A format node closes its
+    /// own groups; one open at its end is an error.
+    pub(crate) fn end_open(&mut self) {
+        for l in std::mem::take(&mut self.nest) {
+            if self.claim_rest && l.owns {
+                for x in l.list {
+                    self.append(0, x);
                 }
             }
-            return Ok(());
         }
-        let base = self.base_mode()?;
-        let mut parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
-        let mut md = base;
-        let levels: Vec<crate::nest::Level> = std::mem::take(&mut self.nest);
-        let mut kind = None;
-        for l in levels {
-            let sid = self.node_raw();
-            let (lid, items) = if l.owns {
-                // the list becomes contributions under the scope's id
-                (sid, l.list)
-            } else {
-                (md.lid, Vec::new())
-            };
-            for x in items {
-                let e = v.list(vec![v.int(lid), x]);
-                self.contribs.push((v.field("items"), v.seq_unit(e)));
-            }
-            let k = self.kind_with_parent(&md, l.group, sid, lid, l.mode, l.extra.clone(), parent);
-            parent = k;
-            kind = Some(k);
-            md.depth += i64::from(l.group != 0);
-            md.lid = lid;
-            md.m = l.mode;
-            md.km = l.mode;
-            if !l.ag.is_empty() {
-                let toks: Vec<ValueId> = l.ag.iter().map(|t| t.encode(v)).collect();
-                let mut xs = vec![v.int(sid)];
-                xs.extend(toks);
-                self.set("ag", v.list(xs), false);
-            }
-        }
-        self.effect = Effect::Scope(Brackets {
-            closes: 0,
-            opens: u8::try_from(n).unwrap_or(1),
-            before: true,
-            kind,
-            kind_pending: false,
-        });
-        Ok(())
     }
 
     /// What `unsave` does besides restoring: the `\aftergroup` tokens
@@ -372,18 +265,10 @@ impl Run<'_, '_> {
     pub(crate) fn list_fold(&mut self, lid: i64) -> R<ListFold> {
         let v = self.v;
         let f = v.field("items");
-        let opener = if lid == 0 {
-            None
-        } else if self.minted.borrow().contains(&lid) {
-            // this run opened it: its own contributions hold the list
-            Some(None)
-        } else {
-            self.get(&format!("lopen:{lid}"))?.map(|o| {
-                let xs = list_of(v, o);
-                let raw = u64::from_ne_bytes(crate::val::int_at(v, o, 0).to_ne_bytes());
-                Some((raw, xs.get(1).copied().unwrap_or(ValueId::UNIT)))
-            })
-        };
+        // a list is this run's or the engine's (lid 0): no list is opened
+        // by one node and read by another
+        let opener: Option<Option<(u64, ValueId)>> =
+            if lid != 0 && self.minted.borrow().contains(&lid) { Some(None) } else { None };
         let all = match opener {
             Some(None) => ValueId::NIL,
             Some(Some((raw, first))) => {
@@ -405,7 +290,6 @@ impl Run<'_, '_> {
             // depth ignored
             pd: IGNORE_DEPTH,
             since_bp: 0,
-            bp_at: 0,
         };
         let own: Vec<ValueId> = self
             .contribs
@@ -428,13 +312,11 @@ impl Run<'_, '_> {
                 push(x, &mut out);
             }
         }
-        let bp_at = st.bp_at.min(out.len());
         Ok(ListFold {
             items: out,
             since_bp: st.since_bp,
             sf: st.sf,
             pd: st.pd,
-            bp_at,
         })
     }
 
@@ -785,8 +667,8 @@ impl Run<'_, '_> {
     }
 
     /// The paragraph's packed language and hyphen minima (§1091), from
-    /// the level that was its (just popped by `end_graf`) or kept in
-    /// `md.para`; 0 outside a paragraph.
+    /// the level that was its (just popped by `end_graf`); 0 outside a
+    /// paragraph.
     fn par_packed(&self, md: &Mode) -> i64 {
         let _ = md;
         self.last_par.1
@@ -1428,8 +1310,7 @@ impl Run<'_, '_> {
     /// The mode outside the innermost group (what `pop_nest` returns to)
     /// without closing it: the level below, or the engine scope's parent.
     pub(crate) fn outer_mode(&mut self, md: &Mode) -> R<Mode> {
-        if self.nest.last().is_some_and(|l| l.group != 0) {
-            let l = self.nest.pop().expect("a level");
+        if let Some(l) = self.nest.pop_if(|l| l.group != 0) {
             let m = self.mode();
             self.nest.push(l);
             return m;
@@ -1451,8 +1332,7 @@ impl Run<'_, '_> {
                 sid: 0,
                 depth: 0,
                 extra: Vec::new(),
-                para: None,
-                vm: 1,
+                    vm: 1,
             });
         }
         let xs = list_of(v, k);
@@ -1467,7 +1347,6 @@ impl Run<'_, '_> {
             sid: n(1),
             depth: n(4),
             extra: xs.get(6..).map(<[ValueId]>::to_vec).unwrap_or_default(),
-            para: None,
             vm: km,
         })
     }
@@ -2234,13 +2113,12 @@ pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
 const SF_UNREAD: i32 = i32::MIN;
 
 /// The state of a list's fold: the space factor (§1034), the previous
-/// depth (§679), and the `build_page` positions a format list carries.
+/// depth (§679), and the items since the last `build_page` marker.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FoldState {
     pub sf: i32,
     pub pd: i32,
     pub since_bp: usize,
-    pub bp_at: usize,
 }
 
 /// One item appended to list `lid` folded into `out` (§1034's space
@@ -2257,7 +2135,6 @@ pub(crate) fn fold_item(v: &Values, lid: i64, n: ValueId, st: &mut FoldState, ou
         }
         T_BUILD_PAGE => {
             st.since_bp = 0;
-            st.bp_at = out.len();
         }
         T_PD => st.pd = i32::try_from(crate::val::int_at(v, n, 1)).unwrap_or(0),
         T_VBOX => {
@@ -2302,8 +2179,6 @@ pub(crate) struct ListFold {
     pub sf: i32,
     /// The previous depth at the end (§679).
     pub pd: i32,
-    /// How many items stood before the last `build_page` marker.
-    pub bp_at: usize,
 }
 
 /// A transition setting the previous depth to `d`.
