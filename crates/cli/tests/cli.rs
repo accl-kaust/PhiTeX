@@ -1200,10 +1200,21 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
         .args(["build", "--engine", "tex", "warm.tex"])
         .output()
         .expect("phitex build runs");
-    assert!(warm.status.success(), "{}", String::from_utf8_lossy(&warm.stderr));
+    assert!(
+        warm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
     std::fs::write(dir.join("slow.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--json", "--no-view", "--engine", "tex", "slow.tex"])
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--engine",
+            "tex",
+            "slow.tex",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1251,7 +1262,11 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
         .args(["build", "--engine", "tex", "slow.tex"])
         .output()
         .expect("phitex build runs");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let cold_dvi = std::fs::read(cold_dir.join("slow.dvi")).expect("the cold DVI");
     assert!(
         masked(&watched) == masked(&cold_dvi),
