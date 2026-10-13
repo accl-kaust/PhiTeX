@@ -99,6 +99,8 @@ pub mod norm;
 pub mod num;
 mod objects;
 pub mod relaxed;
+mod replay;
+pub use replay::PageRecord;
 mod ship;
 pub mod t1;
 mod tounicode;
@@ -732,6 +734,8 @@ pub struct PdfState {
     vf_cur_s: i32,
     /// `pdf_last_byte`, which `pdf_newline` reads.
     last_byte: u8,
+    /// A page's walk being recorded ([`PdfState::ship_recorded`]).
+    rec: Option<Box<replay::Recording>>,
 }
 
 impl PdfState {
@@ -839,6 +843,7 @@ impl PdfState {
             no_default_map: false,
             vf_cur_s: 0,
             last_byte: 0,
+            rec: None,
         }
     }
 
@@ -976,7 +981,7 @@ impl PdfState {
     /// `pdf_end_stream`, with `write_stream_length` (`utils.c`).
     fn end_stream(&mut self) {
         let length = if let Some(data) = self.zip.take() {
-            let z = phitex_codecs::deflate::compress(&data, self.p.compress_level);
+            let z = compress_memo(&data, self.p.compress_level);
             self.out.extend_from_slice(&z);
             z.len()
         } else {
@@ -1071,6 +1076,51 @@ impl PdfState {
             self.print_ln(s);
         }
     }
+}
+
+/// `compress(data, level)`, memoized: a page whose content stream an
+/// earlier write already compressed (the exact writer's page steps
+/// write each page ahead, in parallel, before the finish writes it in
+/// order) is not compressed again. A pure function's memo, keyed by
+/// two independent hashes of the data, its length and the level.
+fn compress_memo(data: &[u8], level: i32) -> Vec<u8> {
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    type Memo = Mutex<(
+        std::collections::HashMap<(u64, u64, usize, i32), Arc<[u8]>>,
+        usize,
+    )>;
+    static MEMO: OnceLock<Memo> = OnceLock::new();
+    /// The bytes kept before the memo starts again.
+    const ROOM: usize = 256 << 20;
+    if data.len() < 512 {
+        return phitex_codecs::deflate::compress(data, level);
+    }
+    let h = |seed: u64| {
+        let mut s = std::hash::DefaultHasher::new();
+        seed.hash(&mut s);
+        data.hash(&mut s);
+        s.finish()
+    };
+    let key = (h(0), h(0x9e37_79b9_7f4a_7c15), data.len(), level);
+    let memo = MEMO.get_or_init(|| Mutex::new((std::collections::HashMap::new(), 0)));
+    if let Some(z) = memo
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .0
+        .get(&key)
+    {
+        return z.to_vec();
+    }
+    let z = phitex_codecs::deflate::compress(data, level);
+    let mut m = memo.lock().unwrap_or_else(PoisonError::into_inner);
+    if m.1 + z.len() > ROOM {
+        m.0.clear();
+        m.1 = 0;
+    }
+    m.1 += z.len();
+    m.0.insert(key, Arc::from(z.as_slice()));
+    z
 }
 
 /// `substr_of_str(s, t)`: whether `s` occurs in `t` (not at its very

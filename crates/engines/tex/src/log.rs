@@ -144,6 +144,7 @@ impl Log {
             }
             "shipend" => self.raw(']'),
             "println" => self.print_ln(),
+            "fatal" => {}
             _ => self.print(text, nl),
         }
     }
