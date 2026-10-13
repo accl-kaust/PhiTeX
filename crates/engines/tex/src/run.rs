@@ -663,15 +663,11 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.own_frames = self.own_frames.saturating_sub(1);
                 }
                 Frame::File(_) => {
-                    // a document file's lines are paragraph-region
-                    // children ([`Run::leftover`]) unless a span is open
-                    if let Some(Frame::File(f)) = self.frames.front()
-                        && f.has_lines()
-                        && !self.open_span()
-                        && self.doc_file(f)
-                    {
-                        return Ok(None);
-                    }
+                    // (a document file's lines are paragraph-region
+                    // children, [`Run::leftover`], at a command's start:
+                    // [`Run::has_input`] stops the run there; a command
+                    // still scanning, `\count1=\input n`, reads on into
+                    // the file, §362)
                     let Some(Frame::File(f)) = self.frames.front_mut() else {
                         unreachable!()
                     };

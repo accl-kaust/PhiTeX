@@ -172,9 +172,10 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "shipout" | "insert" | "vadjust" | "output" => &["param:"],
         "afterassignment" => &["aftertoken"],
         "aftergroup" => &["ag"],
-        // boxes (§1083 begin_box, §1077 \setbox)
+        // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
+        // the same node is packaged there and sets \\\\badness, §1086, §649)
         "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
-            &["box:", "align", "param:", "lvlfix"]
+            &["box:", "align", "param:", "lvlfix", "badness"]
         }
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
@@ -242,7 +243,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // expansion only (§367, §369)
         "noexpand" => &[],
         // boxes in a box context (§1073 begin_box via §1084)
-        "moveleft" | "moveright" | "raise" | "lower" => &["box:", "align", "param:", "lvlfix"],
+        "moveleft" | "moveright" | "raise" | "lower" => {
+            &["box:", "align", "param:", "lvlfix", "badness"]
+        }
         // a language whatsit (§1377) in horizontal material, which may
         // start a paragraph (`par:`, `lopen:`, `pg:`, §1091)
         "setlanguage" => &["box:", "lvlfix", "par:", "lopen:", "pg:"],
@@ -709,8 +712,22 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     }
     // atoms an earlier item claims (operands: never a slice's start)
     let mut claimed = vec![false; n];
-    for it in &p.items {
-        for c in claimed.iter_mut().take(it.end.min(n)).skip(it.atom + 1) {
+    for (i, it) in p.items.iter().enumerate() {
+        // (a value whose last token is a command the pass cannot read
+        // through, `\count1=\input inc-num`: the text up to the next
+        // command is the value's too, §440)
+        let end = match &it.hints.claim {
+            pass::Claim::Pending { cause, .. }
+                if matches!(*cause, "command in value position" | "value is a macro") =>
+            {
+                p.items
+                    .get(i + 1)
+                    .map_or(it.end, |x| x.atom)
+                    .max(it.end)
+            }
+            _ => it.end,
+        };
+        for c in claimed.iter_mut().take(end.min(n)).skip(it.atom + 1) {
             *c = true;
         }
     }
@@ -847,7 +864,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     for (k, a) in p.atoms.iter().enumerate() {
         let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
         let inside_if = ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
-        if !(ch && prev_char) && !inside_if && !inside[k] && !operand[k] {
+        // (an operand an earlier command claims never starts a slice)
+        if !(ch && prev_char) && !inside_if && !inside[k] && !operand[k] && !claimed[k] {
             starts.push(a.start);
         }
         prev_char = ch;
@@ -982,11 +1000,6 @@ fn line_span_end(text: &str, off: usize) -> usize {
 /// The union of bounds: what a slice of several commands may define.
 /// `None` state in either is `None` (every head).
 fn union(a: &mut Bound, b: &Bound) {
-    for n in &b.names {
-        if !a.names.contains(n) {
-            a.names.push(n.clone());
-        }
-    }
     for p in &b.prefixes {
         if !a.prefixes.contains(p) {
             a.prefixes.push(p.clone());
@@ -998,8 +1011,15 @@ fn union(a: &mut Bound, b: &Bound) {
         }
     }
     for m in &b.means {
-        if !a.means.iter().any(|x| x.0 == m.0) {
+        // (a meaning an earlier command of the span defines is the
+        // run's own, not assumed of the state before it)
+        if !a.means.iter().any(|x| x.0 == m.0) && !a.names.contains(&m.0) {
             a.means.push(m.clone());
+        }
+    }
+    for n in &b.names {
+        if !a.names.contains(n) {
+            a.names.push(n.clone());
         }
     }
     match (&mut a.state, &b.state) {
@@ -1077,9 +1097,18 @@ impl Analysis<'_> {
             .collect();
         let mut claimed = vec![false; p.atoms.len()];
         for it in &p.items {
+            // (a scope opener, `\\hbox to 3pt{`, claims its operands up
+            // to its brace; the list inside runs, §1083, §1086)
+            let end = match (&it.hints.scope, &it.hints.claim) {
+                (pass::ScopeHint::Open(_), pass::Claim::Known(b)) => {
+                    let to = p.atoms.get(it.atom).map_or(0, |a| a.end) + b;
+                    p.atoms.partition_point(|a| a.start < to).min(it.end)
+                }
+                _ => it.end,
+            };
             for c in claimed
                 .iter_mut()
-                .take(it.end.min(p.atoms.len()))
+                .take(end.min(p.atoms.len()))
                 .skip(it.atom + 1)
             {
                 *c = true;
@@ -2534,3 +2563,4 @@ mod tests {
         }
     }
 }
+
