@@ -346,6 +346,7 @@ impl Run<'_, '_> {
             .filter(|(g, _)| *g == f)
             .map(|(_, x)| *x)
             .collect();
+        fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
         let mut push = |x: ValueId, out: &mut Vec<ValueId>| {
             let Value::List(xs) = &*v.get(x) else { return };
             if xs.len() != 2 || int_of(v, xs[0]) != lid {
@@ -353,9 +354,6 @@ impl Run<'_, '_> {
             }
             fold_item(v, lid, xs[1], &mut st, out);
         };
-        for x in v.seq_to_vec(all) {
-            push(x, &mut out);
-        }
         for s in own {
             for x in v.seq_to_vec(s) {
                 push(x, &mut out);
@@ -2324,6 +2322,125 @@ pub(crate) fn fold_item(
             out.push(n);
             st.since_bp += 1;
         }
+    }
+}
+
+/// A block of a list's entries as [`fold_item`] folds it, for a state
+/// in: the state out, and the items it leaves, those it made (interline
+/// glue, spaces resolved) kept outside the value table (a sweep may free
+/// them).
+struct BlockMemo {
+    sf: i32,
+    pd: i32,
+    since_bp: usize,
+    out: Vec<Result<ValueId, crate::api::Tree>>,
+}
+
+type BlockCache = std::sync::Mutex<phitex_defuse::FxHashMap<u64, std::sync::Arc<BlockMemo>>>;
+
+fn block_cache() -> &'static BlockCache {
+    static C: std::sync::OnceLock<BlockCache> = std::sync::OnceLock::new();
+    C.get_or_init(BlockCache::default)
+}
+
+/// The accumulated entries `[lid, item]` of a list folded ([`fold_item`]
+/// for those of list `lid`), memoized by blocks: a block ends after an
+/// entry whose id is 0 mod 64 (content-defined, so an edit moves no
+/// later block's bounds) and is keyed by the state in and its entries;
+/// a block with a deletion (which reaches into what came before) is
+/// folded every time. An edit folds again only the blocks it changed.
+pub(crate) fn fold_entries(
+    v: &Values,
+    lid: i64,
+    entries: &[ValueId],
+    st: &mut FoldState,
+    out: &mut Vec<ValueId>,
+) {
+    let push = |x: ValueId, st: &mut FoldState, out: &mut Vec<ValueId>| -> bool {
+        let Value::List(xs) = &*v.get(x) else {
+            return true;
+        };
+        if xs.len() != 2 || int_of(v, xs[0]) != lid {
+            return true;
+        }
+        let deletes = nodes::tag(v, xs[1]) == T_DELETE;
+        fold_item(v, lid, xs[1], st, out);
+        !deletes
+    };
+    let mut at = 0;
+    while at < entries.len() {
+        let end = entries[at..]
+            .iter()
+            .position(|x| x.raw() % 64 == 0)
+            .map_or(entries.len(), |k| at + k + 1);
+        let block = &entries[at..end];
+        at = end;
+        let mut words = vec![
+            v.instance(),
+            u64::from_ne_bytes(lid.to_ne_bytes()),
+            u64::from(st.sf.cast_unsigned()),
+            u64::from(st.pd.cast_unsigned()),
+            st.since_bp as u64,
+        ];
+        words.extend(block.iter().map(|x| x.raw()));
+        let key = phitex_defuse::hash_words(13, &words);
+        let hit = block_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(m) = hit {
+            out.extend(m.out.iter().map(|x| match x {
+                Ok(id) => *id,
+                Err(t) => crate::api::import(v, t),
+            }));
+            (st.sf, st.pd, st.since_bp) = (m.sf, m.pd, m.since_bp);
+            continue;
+        }
+        let o = out.len();
+        let mut plain = true;
+        for &x in block {
+            plain &= push(x, st, out);
+        }
+        if !plain || out.len() < o {
+            continue;
+        }
+        // the items the entries hold pass as they are; the rest were made
+        let mut given = phitex_defuse::FxHashSet::default();
+        for &x in block {
+            if let Value::List(xs) = &*v.get(x)
+                && let Some(&n) = xs.get(1)
+            {
+                given.insert(n);
+                if let Value::List(ys) = &*v.get(n)
+                    && let Some(&b) = ys.get(1)
+                {
+                    given.insert(b);
+                }
+            }
+        }
+        let memo = BlockMemo {
+            sf: st.sf,
+            pd: st.pd,
+            since_bp: st.since_bp,
+            out: out[o..]
+                .iter()
+                .map(|&x| {
+                    if given.contains(&x) {
+                        Ok(x)
+                    } else {
+                        Err(crate::api::export(v, x))
+                    }
+                })
+                .collect(),
+        };
+        let mut c = block_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if c.len() > 1 << 18 {
+            c.clear();
+        }
+        c.insert(key, std::sync::Arc::new(memo));
     }
 }
 
