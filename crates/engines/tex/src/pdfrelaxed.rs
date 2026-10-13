@@ -468,7 +468,7 @@ pub(crate) fn ximage(
     let mut fonts = Fonts::default();
     fonts.ps = crate::pdfout::default_ps_map(r)?;
     let _ = relaxed::ximage(&p, key, spec.clone(), &fonts);
-    for n in std::mem::take(&mut *fonts.missed.borrow_mut()) {
+    for n in std::mem::take(&mut *fonts.missed.lock().unwrap_or_else(PoisonError::into_inner)) {
         if let Some(b) = crate::pdfout::file_bytes(r, &String::from_utf8_lossy(&n))? {
             fonts.files.insert(n, b);
         }

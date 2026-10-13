@@ -371,7 +371,13 @@ impl Run<'_, '_> {
         if let Some((f, side, _)) = out.fired {
             let data = self.page_data(&f, &side)?;
             let mk = self.get(&format!("pp:mk:{j}"))?.unwrap_or(ValueId::UNIT);
-            self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), data, mk]);
+            // whether the exact PDF writer folds the pages (`pdf:fold`):
+            // only then does a step define anything (`pdf:state`)
+            let fold = self.cint(crate::fields::cell::PDF_FOLD)?;
+            self.kid(
+                op,
+                vec![v.int(i64::try_from(j).unwrap_or(0)), data, mk, v.int(fold)],
+            );
         }
         Ok(())
     }
@@ -1028,8 +1034,10 @@ impl Operation for Brk {
 /// without one). It defines nothing to the engine: what the routine
 /// defines at its base level goes to the chain's delta (`pgdeltas`,
 /// folded by the writer into the loop-backs `pgst:<j>`), `\count0..9`
-/// to `pgdef:<j>`; only the exact PDF writer's fold (`pdf:state`) is a
-/// definition, a chain by design (relaxed mode has none).
+/// to `pgdef:<j>`. The exact PDF writer's page is written on its own
+/// (`pdfout::ship`, finished in order by the `Dvi` node); only when the
+/// writer folds the pages (`pdf:fold`, a document whose output routine
+/// runs a PDF command) is its state (`pdf:state`) a definition.
 pub(crate) struct PageStep {
     pub shared: Shared,
     pub any: bool,
@@ -1039,10 +1047,14 @@ impl Operation for PageStep {
     fn name(&self) -> &'static str {
         if self.any { "pagestep_any" } else { "pagestep" }
     }
-    /// Only the exact PDF fold's state ([`Run::finish`]).
-    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        let _ = v;
-        MayDefine::Prefixes(vec!["pdf:state".to_owned()])
+    /// Nothing, but the exact PDF fold's state ([`Run::finish`]) when
+    /// the writer folds the pages (the fourth argument).
+    fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
+        if args.get(3).and_then(|&x| v.as_int(x)).unwrap_or(0) != 0 {
+            MayDefine::Prefixes(vec!["pdf:state".to_owned()])
+        } else {
+            MayDefine::Nothing
+        }
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None

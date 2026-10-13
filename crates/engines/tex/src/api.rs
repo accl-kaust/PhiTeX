@@ -1118,6 +1118,8 @@ struct Graph {
     threads: usize,
     /// Why the relaxed PDF mode gave way to exact mode, once it has.
     pdf_exact: Option<String>,
+    /// Why the exact PDF writer folds the pages (`pdf:fold`), if it does.
+    pdf_fold: Option<String>,
     /// The `marks:before:<node>` loop-backs declared for nodes the graph
     /// made (they asked through `marksdecl:<node>`), as the
     /// environment's answers.
@@ -1235,6 +1237,7 @@ impl Graph {
             written: Vec::new(),
             threads: crate::exec::threads(threads),
             pdf_exact: None,
+            pdf_fold: None,
             marks_decl: Vec::new(),
             wdefs: Vec::new(),
             wkeys_guess: Vec::new(),
@@ -1526,6 +1529,9 @@ impl Graph {
         if self.pdf_exact.is_some() {
             env.push((v.field("pdf:exact"), v.int(1)));
         }
+        if self.pdf_fold.is_some() {
+            env.push((v.field("pdf:fold"), v.int(1)));
+        }
         if fixpoint {
             let names = self.written.iter().map(|n| v.str(n)).collect();
             env.push((v.field("loopfiles"), v.list(names)));
@@ -1683,6 +1689,12 @@ impl Graph {
                 // build again, in exact mode
                 if kind == "pdf:exact" && self.pdf_exact.is_none() {
                     self.pdf_exact = Some(why.clone());
+                    asked = true;
+                }
+                // the exact writer's pages cannot be written apart:
+                // the build again, with the pages in the `pdf:state` fold
+                if kind == "pdf:fold" && self.pdf_fold.is_none() {
+                    self.pdf_fold = Some(why.clone());
                     asked = true;
                 }
             }
@@ -2751,6 +2763,14 @@ impl Build {
         self.g.pdf_exact.as_deref()
     }
 
+    /// Why the exact PDF writer folded the pages in order (`pdf:state`
+    /// threaded through the page steps) instead of writing each on its
+    /// own, if it did.
+    #[must_use]
+    pub fn pdf_fold_reason(&self) -> Option<&str> {
+        self.g.pdf_fold.as_deref()
+    }
+
     /// Frees the engine's memoized applications nothing reaches any
     /// more (a long session calls it between edits); returns the nodes
     /// freed.
@@ -3594,6 +3614,7 @@ fn declare_fields(eng: &mut Engine) {
         "pgdeltas",
         "pgsts",
         crate::pdfrelaxed::PIECES,
+        crate::pdfout::XPAGES,
     ] {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
