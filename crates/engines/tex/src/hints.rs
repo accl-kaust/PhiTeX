@@ -684,19 +684,28 @@ impl TextHints {
 
 /// The slices of a text, each with the blanks before the next.
 ///
+/// A format's or a package's text (`Initex`, `Package`) is one slice,
+/// the whole file: one node, a sequential run of it (nested inputs
+/// inline), its output the definitions in force at its end.
+///
 /// A document's slices are its paragraph regions (`docs/TARGET_GRAPH.md`):
 /// a region runs from its start to the end of the next item the pass
 /// marks paragraph-ending (`Implicit::EndsParagraph`: a blank line,
 /// `\par`, a vertical command, a macro whose body ends in one) that is
 /// at brace depth 0, consumed by no earlier item, and outside every
 /// conditional. So a region is balanced: its run opens and closes its
-/// own groups and conditionals and leaves nothing to another node. A
-/// format's (`Initex`, `Package`) slices are one command each (its
-/// definitions, one per node), extended through a conditional opened at
-/// depth 0 to its `\fi`.
+/// own groups and conditionals and leaves nothing to another node.
+/// A loading command (`\documentclass`, `\usepackage`, `\RequirePackage`,
+/// `\LoadClass`, `\input`, `\include`) with its `[...]` and `{...}`
+/// arguments is one slice of its own (vertical: a paragraph before it
+/// ends there). Any other control sequence at depth 0 takes the
+/// `[...]`/`{...}` groups right after it into its slice
+/// (`\centerline{...}`).
 #[allow(clippy::too_many_lines)]
 pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
-    let _ = kind;
+    if kind != FileKind::Document {
+        return if text.is_empty() { (Vec::new(), Vec::new()) } else { (vec![(0, text.len())], vec![true]) };
+    }
     let n = p.atoms.len();
     // brace depth before each atom
     let mut depth = Vec::with_capacity(n);
@@ -790,6 +799,65 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             }
         }
     }
+    // a control sequence at depth 0 and its `[...]`/`{...}` arguments
+    // (with the spaces between): one slice; a loading command's are
+    // never cut and end a paragraph before it
+    let mut loaders: Vec<usize> = Vec::new();
+    for k in 0..n {
+        let a = &p.atoms[k];
+        if a.kind != AtomKind::Cs || depth[k] != 0 || ifd[k] != 0 || inside[k] || claimed[k] {
+            continue;
+        }
+        let name = a.name(text);
+        let loader = matches!(
+            name,
+            "documentclass" | "usepackage" | "RequirePackage" | "LoadClass" | "input" | "include"
+        );
+        let mut last = k;
+        let mut j = k + 1;
+        loop {
+            while j < n && p.atoms[j].kind == AtomKind::Space {
+                j += 1;
+            }
+            let Some(b) = p.atoms.get(j) else { break };
+            if b.kind == AtomKind::Open && b.mate != usize::MAX && b.mate > j {
+                last = b.mate;
+                j = b.mate + 1;
+            } else if b.kind == AtomKind::Char('[') {
+                let mut q = j + 1;
+                while q < n && !(p.atoms[q].kind == AtomKind::Char(']') && depth[q] == depth[j]) {
+                    if p.atoms[q].kind == AtomKind::Par {
+                        q = n;
+                        break;
+                    }
+                    q += 1;
+                }
+                if q >= n {
+                    break;
+                }
+                last = q;
+                j = q + 1;
+            } else if loader && last == k && matches!(name, "input" | "include") {
+                // `\input file`: the name runs to a space or a command
+                let mut q = j;
+                while q < n && matches!(p.atoms[q].kind, AtomKind::Char(_)) {
+                    q += 1;
+                }
+                if q > j {
+                    last = q - 1;
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+        if loader {
+            loaders.push(k);
+        }
+        for x in inside.iter_mut().take(last + 1).skip(k + 1) {
+            *x = true;
+        }
+    }
     // a paragraph: from its first horizontal atom at depth 0 (a
     // character, a command of §1090) to the end of the next item the
     // pass marks paragraph-ending (a blank line, `\par`, a vertical
@@ -824,6 +892,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                 ends.push(m.atom + 1);
             }
         }
+        // (a loading command is vertical: the paragraph ends before it)
+        ends.extend(loaders.iter().copied());
         ends.sort_unstable();
         ends.dedup();
     }
