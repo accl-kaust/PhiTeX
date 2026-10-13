@@ -653,10 +653,23 @@ impl Session {
         let (bytes, log) = b.output();
         let pdf = b.is_pdf();
         let s = &b.stats;
+        let diagnostics = b.diagnostics();
+        // (and the evaluation's own errors — no fixpoint, a stop — which
+        // the log does not have: errors at no place, without context)
         let errors = log
             .lines()
             .filter(|l| l.starts_with("! "))
             .map(str::to_owned)
+            .chain(
+                diagnostics
+                    .iter()
+                    .filter(|d| {
+                        d.severity == phitex_tex::Severity::Error
+                            && d.range == (0, 0)
+                            && d.context.is_empty()
+                    })
+                    .map(|d| d.message.lines().next().unwrap_or("").to_owned()),
+            )
             .collect();
         // (a PDF file's pages: not known until the engine reports them;
         // the viewer counts the PDF's itself and draws each page again)
@@ -725,7 +738,7 @@ impl Session {
                 ],
             }],
             internal: None,
-            diagnostics: b.diagnostics(),
+            diagnostics,
             unsettled: Vec::new(),
             notes: std::iter::once(format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds",
