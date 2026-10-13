@@ -74,10 +74,27 @@ fn options(name: &str, dir: &Path, comment: &str, fixpoint: bool, pdf: bool) -> 
 
 fn report(name: &str, b: &Build) -> String {
     let s = &b.stats;
-    format!(
-        "{name}: {} nodes run, {} runs, {} live, {} rounds, {} loop rounds, {} waits, starved {}",
-        s.nodes_run, s.runs, s.live, s.rounds, s.loop_rounds, s.pending_waits, s.starved
-    )
+    let mut out = format!(
+        "{name}: {} nodes run, {} runs, {} stops, {} gated, {} live, {} rounds, {} loop rounds, {} waits, starved {}, wall {:?}\n  waits by kind {:?}",
+        s.nodes_run,
+        s.runs,
+        s.stops,
+        s.gated,
+        s.live,
+        s.rounds,
+        s.loop_rounds,
+        s.pending_waits,
+        s.starved,
+        s.wall,
+        s.waits_by_kind
+    );
+    for &(n, w) in &s.top_waited {
+        let _ = std::fmt::Write::write_fmt(
+            &mut out,
+            format_args!("\n  waited on {w}x: {}", b.describe_node(n)),
+        );
+    }
+    out
 }
 
 fn names() -> Vec<String> {
