@@ -18,7 +18,7 @@ use phitex_source::pass;
 
 use crate::hints::Defs;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
-use crate::run::{slice_args_in_file, Ops, slice_args};
+use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
 
 /// Finds a file by the name TeX asks for: the name to print and the
@@ -179,7 +179,9 @@ struct Absorb<'a> {
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
-        apply_text(eng, self.exec, self.dvi, self.nodes, &text, &self.defs, self.doc);
+        apply_text(
+            eng, self.exec, self.dvi, self.nodes, &text, &self.defs, self.doc,
+        );
         Some(version)
     }
 }
@@ -1024,7 +1026,8 @@ impl Graph {
         let found = finder(name);
         self.queries.push((name.to_owned(), found.is_some()));
         let v = self.eng.values();
-        self.reads.push((name.to_owned(), file_hash(found.as_ref())));
+        self.reads
+            .push((name.to_owned(), file_hash(found.as_ref())));
         if let Some((path, bytes)) = found {
             let text: String = bytes.iter().map(|&b| char::from(b)).collect();
             let val = v.list(vec![v.str(&path), v.str(&text)]);
@@ -1668,10 +1671,7 @@ impl Build {
                 g.eng.push(unit, exec, args);
             }
         }
-        *g.ops
-            .defs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = defs.clone();
+        *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
         let nodes = g.push_text(unit, &as_file(document), &defs, doc);
         // the page builder's fold, after the text: one node choosing every

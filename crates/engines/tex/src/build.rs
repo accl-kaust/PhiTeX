@@ -1317,7 +1317,7 @@ impl Run<'_, '_> {
                 sid: 0,
                 depth: 0,
                 extra: Vec::new(),
-                    vm: 1,
+                vm: 1,
             });
         }
         let xs = list_of(v, k);
@@ -2109,7 +2109,13 @@ pub(crate) struct FoldState {
 /// One item appended to list `lid` folded into `out` (§1034's space
 /// factor transitions, §679's interline glue, deletions): the list as its
 /// reader sees it.
-pub(crate) fn fold_item(v: &Values, lid: i64, n: ValueId, st: &mut FoldState, out: &mut Vec<ValueId>) {
+pub(crate) fn fold_item(
+    v: &Values,
+    lid: i64,
+    n: ValueId,
+    st: &mut FoldState,
+    out: &mut Vec<ValueId>,
+) {
     let _ = lid;
     match nodes::tag(v, n) {
         T_DELETE => {
