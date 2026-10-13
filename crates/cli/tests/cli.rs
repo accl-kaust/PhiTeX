@@ -1237,3 +1237,109 @@ fn watch_tables_bounded() {
         assert!(b[0] <= a[0] * 11 / 10 && b[2] <= a[2] * 11 / 10, "grew: {a:?} -> {b:?}");
     }
 }
+
+/// `phitex watch --json` on `text` (as `file` in a scratch directory,
+/// `args` before it) over 50 edits alternating the word at `word` (five
+/// bytes, " the ") with " thy " and back: each build's "engine tables"
+/// note numbers (nodes, units, values, kB resident, us collecting, nodes
+/// freed) and wall, printed for builds 1, 2, 10, 25, 51.
+fn watch_gc_series(name: &str, file: &str, text: &str, args: &[&str], word: usize) {
+    let _one = one();
+    let dir = scratch(name);
+    std::fs::write(dir.join(file), text).expect("the document");
+    let mut a = vec!["watch", "--json", "--no-view"];
+    a.extend_from_slice(args);
+    a.push(file);
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(&a)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let row = |line: &serde_json::Value| -> (Vec<u64>, f64, String) {
+        let n = line["notes"]
+            .as_array()
+            .and_then(|a| {
+                a.iter()
+                    .filter_map(|n| n.as_str())
+                    .find(|n| n.starts_with("engine tables:"))
+            })
+            .unwrap_or_else(|| panic!("no tables note: {line}"))
+            .to_owned();
+        let runs = line["notes"][0].as_str().unwrap_or("").to_owned();
+        (
+            n.split(|c: char| !c.is_ascii_digit())
+                .filter_map(|w| w.parse().ok())
+                .collect(),
+            line["wall_ms"].as_f64().unwrap_or(0.0),
+            runs,
+        )
+    };
+    let first = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(first["ok"], true, "{first}");
+    let mut rows = vec![row(&first)];
+    for k in 0..50u64 {
+        let w = if k % 2 == 0 { " thy " } else { " the " };
+        let edited = format!("{}{w}{}", &text[..word], &text[word + 5..]);
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(dir.join(file), &edited).expect("the edit");
+        let line = until(&mut lines, "build", &(k + 2).into(), &mut seen);
+        rows.push(row(&line));
+    }
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let gc = std::env::var_os("PHITEX_NO_GC").is_none();
+    eprintln!("GCSERIES {name} gc={gc}: build | nodes units values | RSS kB | gc us (freed) | wall ms | notes");
+    for (k, (s, wall, runs)) in rows.iter().enumerate() {
+        eprintln!("GCROW {name} gc={gc} build {} {s:?} wall {wall:.1} | {runs}", k + 1);
+    }
+    let walls: Vec<f64> = rows[1..].iter().map(|r| r.1).collect();
+    let gcs: Vec<u64> = rows[1..].iter().map(|r| r.0[4]).collect();
+    eprintln!(
+        "GCSUM {name} gc={gc}: edit wall mean {:.1} ms, gc mean {:.0} us, max {} us",
+        walls.iter().sum::<f64>() / walls.len() as f64,
+        gcs.iter().sum::<u64>() as f64 / gcs.len() as f64,
+        gcs.iter().max().unwrap_or(&0)
+    );
+}
+
+/// The plain generated document `scratch/para400.tex` (not committed):
+/// the GC series under `--engine tex`.
+#[test]
+#[ignore = "heavy, measurement: needs scratch/para400.tex"]
+fn watch_gc_para400() {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/para400.tex");
+    let text = std::fs::read_to_string(p).expect("scratch/para400.tex");
+    let mid = text.len() / 2;
+    let word = text[mid..].find(" the ").expect("a word") + mid;
+    watch_gc_series("gc-para400", "para400.tex", &text, &["--engine", "tex", "-j", "8"], word);
+}
+
+/// LaTeX's hello with 30 paragraphs added: the GC series under
+/// `--engine pdflatex`.
+#[test]
+#[ignore = "heavy, measurement: the LaTeX format"]
+fn watch_gc_latex30() {
+    let para = "This is the paragraph of a long story about the printer, the reader and the galley proof, \
+                with enough words that it breaks into several lines of the page and keeps the line \
+                breaker busy for a while: the ruler, the hyphen, the kern, the ligature and the index.";
+    let mut text = "\\documentclass{article}\\begin{document}Hello world.\n\n".to_owned();
+    let mut word = 0;
+    for k in 1..=30 {
+        if k == 15 {
+            word = text.len() + "This is".len();
+        }
+        text += &format!("{k}. {para}\n\n");
+    }
+    text += "\\end{document}\n";
+    // (" the " right after "15. This is")
+    word += "15. ".len();
+    assert_eq!(&text[word..word + 5], " the ");
+    watch_gc_series("gc-latex30", "hello.tex", &text, &["--engine", "pdflatex", "-j", "8"], word);
+}
