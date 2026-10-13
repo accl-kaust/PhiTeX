@@ -679,7 +679,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let nest_len = self.nest.len();
         let conds = self.conds.clone();
         let codes = self.if_codes.clone();
-        let cur = self.cur.clone();
+        let cur = self.cur;
         let (eof, no_pull, claim) = (self.eof, self.no_pull, self.claim_rest);
         let effect = self.effect;
         self.eof = true;
@@ -987,7 +987,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// [`Self::set_cur`] without a `Result`: a halt is raised.
-    #[inline(always)]
+    #[inline]
     fn set_cur_flag(&mut self, tok: Tok) {
         if !tok.is_cs_or_active() {
             // (a character's meaning is its own: no meaning stored)
@@ -1529,7 +1529,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// `get_next` with the meaning (§357–§358).
-    #[inline(always)]
+    #[inline]
     pub(crate) fn get_next(&mut self) -> R<bool> {
         let b = self.fetch();
         match self.halt.take() {
@@ -1540,7 +1540,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// `get_next` without a `Result` (§341–§357): false at the end of all
     /// input; a halt is raised ([`Self::raise`]).
-    #[inline(always)]
+    #[inline]
     fn fetch(&mut self) -> bool {
         // (the common case: a token of the list on top that is not an
         // internal marker, and no alignment entry to watch for)
