@@ -1,8 +1,9 @@
 //! Alignment (§768–§812): `\halign` as groups. The whole alignment is a
 //! group whose list holds the rows; each entry is a group of its own
 //! whose kind carries the row so far. The preamble is the field
-//! `align:<id>`; `align_state` is the field `align:state`, kept only
-//! while an alignment is open (`align:open`).
+//! `align:<id>`; `align_state` (§309) and the alignments open are the
+//! run's own (`Run::astate`, `Run::aopen`): an alignment never crosses
+//! a node.
 //!
 //! The kinds' extras: the alignment `["align", spec code, size, saved
 //! align_state]`; an entry `["cell", column, first column of its span,
@@ -87,37 +88,29 @@ fn tab_glue(g: Glue) -> Node {
 impl Run<'_, '_> {
     // ---------------------------------------------------- align_state
 
-    fn align_open(&mut self) -> R<bool> {
-        Ok(self.int_loc(crate::fields::cell::ALIGN_OPEN)? > 0)
+    fn align_open(&self) -> bool {
+        self.aopen > 0
     }
 
-    fn astate(&mut self) -> R<i64> {
+    fn astate(&mut self) -> i64 {
         if let Some(s) = self.astate {
-            return Ok(s);
+            return s;
         }
-        let s = self
-            .get_loc(crate::fields::cell::ALIGN_STATE)?
-            .map_or(1_000_000, |x| int_of(self.v, x));
+        // (run-local: a node begins outside every alignment, §324)
+        let s = 1_000_000;
         self.astate = Some(s);
-        Ok(s)
+        s
     }
 
     pub(crate) fn set_astate(&mut self, s: i64) {
         self.astate = Some(s);
-        let x = self.v.int(s);
-        self.set_loc(
-            crate::fields::cell::ALIGN_STATE,
-            crate::runstate::Native::Raw(x),
-            true,
-        );
     }
 
     /// The end of a u template (§324): `align_state` becomes 0.
-    pub(crate) fn align_u_end(&mut self) -> R<()> {
-        if self.align_open()? && self.astate()? > 500_000 {
+    pub(crate) fn align_u_end(&mut self) {
+        if self.align_open() && self.astate() > 500_000 {
             self.set_astate(0);
         }
-        Ok(())
     }
 
     /// §342, §347, §357 for `cur`: braces count in `align_state`; a tab
@@ -128,10 +121,10 @@ impl Run<'_, '_> {
         let brace =
             !self.cur.tok.is_cs_or_active() && (c == cmd::LEFT_BRACE || c == cmd::RIGHT_BRACE);
         let tab = c == cmd::TAB_MARK || c == cmd::CAR_RET;
-        if !(brace || tab) || !self.align_open()? {
+        if !(brace || tab) || !self.align_open() {
             return Ok(false);
         }
-        let s = self.astate()?;
+        let s = self.astate();
         if brace {
             self.set_astate(if c == cmd::LEFT_BRACE { s + 1 } else { s - 1 });
             return Ok(false);
@@ -187,13 +180,12 @@ impl Run<'_, '_> {
     /// `init_align` (§774–§784) in vertical mode.
     pub(crate) fn init_align(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
-        let saved = if self.align_open()? {
-            self.astate()?
+        let saved = if self.align_open() {
+            self.astate()
         } else {
             1_000_000
         };
-        let open = self.cint(crate::fields::cell::ALIGN_OPEN)?;
-        self.set_cell(crate::fields::cell::ALIGN_OPEN, v.int(open + 1), true);
+        self.aopen += 1;
         self.set_astate(-1_000_000);
         let spec = if self.scan_keyword("to")? {
             (0, self.scan_normal_dimen()?)
@@ -232,7 +224,7 @@ impl Run<'_, '_> {
                 if c == cmd::MAC_PARAM {
                     break;
                 }
-                if (c == cmd::TAB_MARK || c == cmd::CAR_RET) && self.astate()? == -1_000_000 {
+                if (c == cmd::TAB_MARK || c == cmd::CAR_RET) && self.astate() == -1_000_000 {
                     if u.is_empty() && pre.looping < 0 && c == cmd::TAB_MARK {
                         pre.looping = i64::try_from(pre.cols.len()).unwrap_or(0);
                     } else {
@@ -249,7 +241,7 @@ impl Run<'_, '_> {
             loop {
                 self.get_preamble_token(&mut tab)?;
                 let c = self.cur.cmd;
-                if (c == cmd::TAB_MARK || c == cmd::CAR_RET) && self.astate()? == -1_000_000 {
+                if (c == cmd::TAB_MARK || c == cmd::CAR_RET) && self.astate() == -1_000_000 {
                     break;
                 }
                 if c == cmd::MAC_PARAM {
@@ -557,12 +549,7 @@ impl Run<'_, '_> {
         let out = set_alignment(list, &proto, true, 0, &view);
         let pd = self.prev_depth(md)?;
         let outer = self.close_group(md)?;
-        let open = self.cint(crate::fields::cell::ALIGN_OPEN)?;
-        self.set_cell(
-            crate::fields::cell::ALIGN_OPEN,
-            v.int((open - 1).max(0)),
-            true,
-        );
+        self.aopen = (self.aopen - 1).max(0);
         self.set_astate(saved);
         for n in &out {
             let y = nodes::encode(v, n, &side);

@@ -376,7 +376,7 @@ pub(crate) fn if_pdf_primitive(r: &mut Run<'_, '_>) -> R<bool> {
     let Some((n, _, _)) = crate::val::prim(&name) else {
         return Ok(false);
     };
-    Ok(matches!(&r.cur.mean, Mean::Prim(m, _, _) if *m == n))
+    Ok(matches!(&r.cur_mean()?, Mean::Prim(m, _, _) if *m == n))
 }
 
 // ------------------------------------------------------- the conversions
