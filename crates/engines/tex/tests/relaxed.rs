@@ -154,3 +154,29 @@ fn relaxed_threads() {
     }
     assert!(failed.is_empty(), "differ across threads: {failed:?}");
 }
+
+/// The font commands in relaxed mode (`\pdffontattr`,
+/// `\pdfincludechars`, `\pdffontobjnum`): `misc.tex` without
+/// `\pdffontname` (which stays exact) equals the exact build after
+/// renumbering.
+#[test]
+fn relaxed_font_commands() {
+    let _turn = turn();
+    let dir = pdf_fixtures();
+    let src = common::read(&dir.join("misc.tex")).replace(
+        "\\pdffontname\\r,\\pdffontobjnum\\r,\\pdffontsize\\r,\\pdffontname\\b,\\pdffontobjnum\\b",
+        "\\pdffontobjnum\\r,\\pdffontsize\\r,\\pdffontobjnum\\b",
+    );
+    assert!(!src.contains("\\pdffontname"));
+    let relaxed_b = common::build(relaxed("misc", &dir), None, &src);
+    assert_eq!(relaxed_b.pdf_exact_reason(), None, "relaxed mode expected");
+    let exact = Options {
+        epoch: Some(0),
+        ..common::options("./misc.tex", "misc", "", &dir)
+    };
+    let want = common::build(exact, None, &src).output().0;
+    let got = relaxed_b.output().0;
+    if let Some(d) = phitex_pdf::norm::first_difference(&got, &want) {
+        panic!("misc relaxed: {d}");
+    }
+}
