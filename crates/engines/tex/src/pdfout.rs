@@ -988,10 +988,10 @@ pub(crate) fn ship(
 }
 
 /// The PDF file: the state that reaches the end, finished.
-pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<ValueId, Stop> {
     let v = cx.values();
-    let k = cx
-        .use_field(v.field("pdf:state"))?
+    let k = fin
+        .get(cx, v.field("pdf:state"))?
         .map_or(0, |x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()));
     let Some(a) = states()
         .lock()
@@ -1003,8 +1003,8 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     };
     let mut st = a.st.clone();
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i32, Stop> {
-        Ok(cx
-            .use_field(v.field(f))?
+        Ok(fin
+            .get(cx, v.field(f))?
             .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
     };
     st.params_mut().info_omit_date = int(cx, "param:pdfinfoomitdate")?;

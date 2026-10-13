@@ -903,8 +903,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             *x = cur;
         }
     }
-    // inside a brace group or a `\begingroup` pair opened at depth 0:
-    // the slice goes on to its end (a group is never split between nodes)
+    // inside a brace group of the text opened at depth 0: the slice goes
+    // on to its end (a brace group of the text is never split)
     let mut inside = vec![false; n];
     for (k, a) in p.atoms.iter().enumerate() {
         // (a brace knows its mate's atom index; `p.braces` indexes tokens)
@@ -914,22 +914,11 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             }
         }
     }
-    for g in &p.groups {
-        // (the document environment: its `\\begin` opens the scope the
-        // body's regions run in, an engine scope, so its body is sliced
-        // like top-level text; `\\begin{document}` and `\\end{document}`
-        // are slices of their own)
-        if doc_scope() && matches!(&g.kind, pass::GroupKind::Env(e) if e == "document") {
-            continue;
-        }
-        if let (Some(o), Some(c)) = (g.open, g.close)
-            && depth.get(o) == Some(&0)
-        {
-            for x in inside.iter_mut().take(c + 1).skip(o + 1) {
-                *x = true;
-            }
-        }
-    }
+    // (a `\\begingroup`...`\\endgroup` pair or an environment is no
+    // bar to a cut: a paragraph end inside it at brace depth 0 of the
+    // text is one, the region that leaves the group open leaves it to the
+    // engine as a scope and the one that closes it closes that scope,
+    // `Run::run_all`, `Run::close_group`)
     // a control sequence at depth 0 and its `[...]`/`{...}` arguments
     // (with the spaces between): one slice; a loading command's are
     // never cut and end a paragraph before it
@@ -2495,23 +2484,10 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         {
             b.no_scope = true;
         }
-        // (`\\begin{document}`: its run leaves the environment's group
-        // open as the engine scope the body runs in, `Run::leave_scope`;
-        // what it defines is the document class's business: unbounded)
-        if kind == FileKind::Document && opens_document(&text[s..e]) {
-            let mut x = Hint::any("opens the document scope", &text[s..e]).encode();
-            x.push_str(OPENS_SCOPE);
-            slice_hints.push(Arc::from(x));
-            pending.clear();
-            continue;
-        }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         if t.pars[i] {
             if let Some(b) = &mut h.bound {
-                // (its paragraph begins by running `\\everypar`, §1091,
-                // which may set `\\everypar` again: LaTeX's paragraph
-                // hooks do at every paragraph)
-                add_heads(&mut b.state, Some(&["pg:", "param:everypar"]));
+                add_heads(&mut b.state, Some(&["pg:"]));
                 "region".clone_into(&mut h.cause);
             } else {
                 h.cause = format!("region: {}", h.cause);
@@ -2526,6 +2502,16 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // slice that may set one and ends no paragraph after it leaves
         // the reset pending, and the next slice ending a paragraph
         // declares it)
+        // (LaTeX's paragraph hooks assign `\\everypar` at every
+        // paragraph, the value it has: no definition. A heading's
+        // `\\@afterheading`, a list's `\\item` and an environment's
+        // end (`\\@doendpe`) set another, which the next paragraph
+        // consumes, §1091: a slice calling one declares it)
+        if sets_everypar(&text[s..e])
+            && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
+        {
+            add_head(&mut b.state, "param:everypar");
+        }
         let mut out = pending.clone();
         let mut ends = false;
         let k0 = t.starts.partition_point(|&x| x < s);
@@ -2970,27 +2956,26 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
-/// The mark a slice hint ends with when the slice opens the scope the
-/// rest of the document runs in (`\\begin{document}`).
-const OPENS_SCOPE: &str = "\x1eO";
-
-/// Whether the document environment's body is sliced into regions
-/// under the scope `\\begin{document}` leaves open (`PHITEX_DOC_SCOPE=1`;
-/// off until its PDF is byte-identical, test `latex_paragraph_nodes`).
-fn doc_scope() -> bool {
-    crate::exec::env_flag!("PHITEX_DOC_SCOPE")
-}
-
-fn opens_document(slice: &str) -> bool {
-    doc_scope() && slice.trim_start().starts_with("\\begin{document}")
-}
-
-/// Whether the node's slice opens the document's scope: its run leaves
-/// the one group it ends in open to the engine (`Run::leave_scope`).
-pub(crate) fn opens_scope(v: &Values, args: &[ValueId]) -> bool {
-    args.iter().skip(2).any(|&h| {
-        matches!(&*v.get(h), Value::Str(t) if t.starts_with("A\x1e") && t.ends_with(OPENS_SCOPE))
-    })
+/// Whether a slice calls a command that leaves `\\everypar` other
+/// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
+/// a list item, an environment's begin or end (`\\@doendpe`), a title.
+fn sets_everypar(slice: &str) -> bool {
+    const SETS: &[&str] = &[
+        "\\section",
+        "\\subsection",
+        "\\subsubsection",
+        "\\paragraph",
+        "\\subparagraph",
+        "\\chapter",
+        "\\part",
+        "\\@afterheading",
+        "\\@startsection",
+        "\\item",
+        "\\begin",
+        "\\end",
+        "\\maketitle",
+    ];
+    SETS.iter().any(|c| slice.contains(c))
 }
 
 /// Whether the node's text says its command opens and closes no scope.
@@ -3039,76 +3024,6 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
         eprintln!("hint {:?}: {answer} ({})", h.excerpt, h.cause);
     }
     h.may_define()
-}
-
-/// What a page step may define besides what its output routine's
-/// commands define: the marks (§1012), `\\box255` and the insertion
-/// boxes (§1018, §1021), `\\outputpenalty` (§1013), `\\deadcycles`
-/// (§1012, §638), `\\insertpenalties` (§1018), the page's whatsits at
-/// shipout (§1374, pdfTeX's), the output group's `normal_paragraph`
-/// (§1025, §1070).
-const PAGE_STEP: &[&str] = &[
-    "mark:",
-    "marks:",
-    "markclasses",
-    "box:",
-    "lvlfix",
-    "badness",
-    "param:outputpenalty",
-    "deadcycles",
-    "inspen",
-    "write:",
-    "wopen:",
-    "pdf:",
-    "param:looseness",
-    "param:hangindent",
-    "param:hangafter",
-    "param:interlinepenalties",
-    "parshape",
-];
-
-/// A page step's answer: [`PAGE_STEP`] and what the format's output
-/// routine (its last `\\output{…}`, the macros it calls, through the
-/// definitions) defines; anything when the pass cannot bound the
-/// routine. (A routine the document sets differently defines outside
-/// it: the engine reports the definition, never a wrong output.)
-pub(crate) fn page_step_may_define(defs: &Defs) -> MayDefine {
-    static C: OnceLock<Mutex<FxHashMap<usize, MayDefine>>> = OnceLock::new();
-    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
-        return MayDefine::Any;
-    }
-    let key = Arc::as_ptr(defs) as usize;
-    let c = C.get_or_init(|| Mutex::new(FxHashMap::default()));
-    if let Some(m) = c.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
-        return m.clone();
-    }
-    let an = Analysis::new("", FileKind::Document, defs.clone());
-    let mut b = Bound {
-        state: Some(Vec::new()),
-        ..Bound::default()
-    };
-    add_heads(&mut b.state, Some(PAGE_STEP));
-    let mut cause = String::new();
-    let ok = match defs.output_defines(defs) {
-        Some(set) => an.add_set(&set, &mut b, &mut cause),
-        None => true,
-    };
-    let m = if ok {
-        Hint {
-            bound: Some(b),
-            ..Hint::default()
-        }
-        .may_define()
-    } else {
-        MayDefine::Any
-    };
-    if crate::exec::env_flag!("PHITEX_HINTS") {
-        eprintln!("page step hint: {m:?} ({cause})");
-    }
-    c.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, m.clone());
-    m
 }
 
 /// The accumulators the nodes count into.

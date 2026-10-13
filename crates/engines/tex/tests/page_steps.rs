@@ -71,7 +71,9 @@ fn generated_documents() {
         let Ok(src) = std::fs::read_to_string(dir.join(format!("{name}.tex"))) else {
             continue;
         };
-        let opts = || common::options(&format!("./{name}.tex"), name, "", &dir);
+        let want = std::fs::read(dir.join(format!("{name}.dvi"))).ok();
+        let comment = want.as_deref().map(common::dvi_comment).unwrap_or_default();
+        let opts = || common::options(&format!("./{name}.tex"), name, &comment, &dir);
         for t in [1, 4, 8] {
             let o = phitex_tex::Options {
                 threads: Some(t),
@@ -84,6 +86,12 @@ fn generated_documents() {
             );
         }
         let mut b = common::build(opts(), Some(&common::plain()), &src);
+        if let Some(want) = &want {
+            eprintln!(
+                "{name} vs tex: {:?}",
+                common::first_difference(&b.output().0, want)
+            );
+        }
         let s = &b.stats;
         eprintln!(
             "{name} cold: pages {}, loop rounds {}, critical path {:?}, runs {}, nodes run {}, page steps {}",
@@ -100,6 +108,7 @@ fn generated_documents() {
                 *by.entry(format!("{kind} {field}")).or_default() += 1;
             }
             eprintln!("{name} chain by cause: {by:?}");
+            eprintln!("{name} refuted guesses: {:?}", s.refuted_guesses);
         }
         let (r0, l0, p0) = (s.runs, s.loop_rounds, s.page_steps);
         let mid = src.len() / 2;
@@ -154,5 +163,56 @@ fn generated_wall() {
         b.stats.runs,
         b.stats.loop_rounds,
         b.stats.page_steps
+    );
+}
+
+/// `selfdep.tex` in `PHITEX_GEN` (400 paragraphs, a routine that
+/// advances a count it reads): the page chain's delta depends on the
+/// previous one, one page per loop round; the DVI equals tex's
+/// (`selfdep.dvi`).
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn self_dependent_routine() {
+    let Ok(dir) = std::env::var("PHITEX_GEN") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let src = std::fs::read_to_string(dir.join("selfdep.tex")).expect("the document");
+    let want = std::fs::read(dir.join("selfdep.dvi")).expect("the oracle");
+    let opts = common::options(
+        "./selfdep.tex",
+        "selfdep",
+        &common::dvi_comment(&want),
+        &dir,
+    );
+    let mut b = common::build(opts.clone(), Some(&common::plain()), &src);
+    let s = &b.stats;
+    eprintln!(
+        "selfdep: pages {}, loop rounds {}, critical path {:?}, refuted guesses {}",
+        b.pages().len(),
+        s.loop_rounds,
+        s.critical_path,
+        s.refuted_guesses.len()
+    );
+    for r in s.refuted_guesses.iter().take(5) {
+        eprintln!("  {r}");
+    }
+    assert!(
+        common::first_difference(&b.output().0, &want).is_none(),
+        "selfdep.dvi differs: {:?}",
+        common::first_difference(&b.output().0, &want)
+    );
+    let mid = src.len() / 2;
+    let at = mid + src[mid..].find(" the ").expect("a word") + 1;
+    let new = format!("{}eht{}", &src[..at], &src[at + 3..]);
+    b.edit(&new);
+    eprintln!(
+        "selfdep edit: loop rounds {}, page steps re-run {}, refuted {:?}",
+        b.stats.loop_rounds, b.stats.page_steps, b.stats.refuted_guesses
+    );
+    let cold = common::build(opts, Some(&common::plain()), &new);
+    assert!(
+        common::first_difference(&b.output().0, &cold.output().0).is_none(),
+        "selfdep edit != cold"
     );
 }
