@@ -186,10 +186,15 @@ struct Absorb<'a> {
     edits: &'a EditSender,
     nodes: &'a mut Vec<(String, NodeId)>,
     exec: OpId,
-    dvi: NodeId,
+    /// The first node after the text's ([`Build::end`]).
+    end: NodeId,
     /// The document's units and their analyses (`None`: a format's
     /// text, one node).
     incr: Option<&'a mut Incr>,
+    /// The latest version taken whose text was the one the nodes have
+    /// already: nothing applied, so not reported to the engine (its
+    /// contract: `None` when nothing was applied); the result is for it.
+    unchanged: Option<u64>,
     /// The finder `\\input` files are sliced with, and the text applied.
     finder: Finder,
     text: &'a mut String,
@@ -198,17 +203,23 @@ struct Absorb<'a> {
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
-        apply_text(
+        let changed = apply_text(
             eng,
             self.exec,
-            self.dvi,
+            self.end,
             self.nodes,
             &text,
             self.incr.as_deref_mut(),
             Some(&self.finder),
         );
         *self.text = text;
-        Some(version)
+        if changed {
+            self.unchanged = None;
+            Some(version)
+        } else {
+            self.unchanged = Some(version);
+            None
+        }
     }
 }
 
@@ -287,18 +298,19 @@ fn slice_keys(
 
 /// Edits the document's nodes `nodes` to the text `text`: the slices
 /// both texts share at the start and the end stay, those between are
-/// replaced, removed or inserted.
+/// replaced, removed or inserted. Whether anything changed (a text
+/// whose slices are the nodes' already changes nothing).
 // one call site (Absorb::absorb), which passes its fields apart
 #[allow(clippy::too_many_arguments)]
 fn apply_text(
     eng: &mut Engine,
     exec: OpId,
-    dvi: NodeId,
+    end: NodeId,
     nodes_now: &mut Vec<(String, NodeId)>,
     text: &str,
     mut incr: Option<&mut Incr>,
     finder: Option<&Finder>,
-) {
+) -> bool {
     let t_all = std::time::Instant::now();
     let text = as_file(text);
     // (the units spliced, the chunks whose text or incoming definitions
@@ -312,6 +324,9 @@ fn apply_text(
     let new = slice_keys(eng.values(), &text, incr, finder, &mut read);
     let t_hints = t_all.elapsed();
     let old = &*nodes_now;
+    if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
+        return false;
+    }
     let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1);
     let (a, b) = common_ends(old, &new);
     let old_len = old.len();
@@ -337,7 +352,7 @@ fn apply_text(
             let n = if let Some(&(_, p)) = nodes.last() {
                 eng.insert_after(p, exec, args)
             } else {
-                let first = old.get(a + old_mid).map_or(dvi, |x| x.1);
+                let first = old.get(a + old_mid).map_or(end, |x| x.1);
                 eng.insert_before(first, exec, args)
             };
             declare_marks_before(eng, n);
@@ -359,6 +374,7 @@ fn apply_text(
             text.len(),
         ],
     );
+    true
 }
 
 impl Default for Options {
@@ -862,6 +878,9 @@ pub struct Stats {
     pub gated: u64,
     /// The version of the text the result is for ([`Build::version`]).
     pub version: u64,
+    /// The texts taken while the engine evaluated (the engine's
+    /// `edits_applied`): each one's version and the step it came before.
+    pub absorbed: Vec<(u64, u64)>,
     /// Scheduler steps, and the nodes run in them summed: `ready_mean`
     /// is the mean batch.
     pub steps: u64,
@@ -1014,6 +1033,7 @@ impl Stats {
         }
         self.env_provided += r.env_provided;
         self.version = r.version;
+        self.absorbed.extend_from_slice(&r.edits_applied);
         self.steps += r.steps;
         self.ready_total += r.ready_total;
         self.speculations += r.speculations;
@@ -2275,6 +2295,10 @@ pub struct Build {
     /// The nodes of the text, with their keys.
     nodes: Vec<(String, NodeId)>,
     dvi: NodeId,
+    /// The first node after the text's (the page plan, which folds the
+    /// list the text's nodes make): new text nodes go before it, also
+    /// when the text has none left.
+    end: NodeId,
     prelude: Arc<Cached>,
     /// What the last build or edit ran.
     pub stats: Stats,
@@ -2380,7 +2404,7 @@ impl Build {
         }
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
-        let _ = g.eng.push(unit, g.ops.pageplan, Vec::new());
+        let end = g.eng.push(unit, g.ops.pageplan, Vec::new());
         page_guesses(&mut g, &env);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
@@ -2394,6 +2418,7 @@ impl Build {
             opts,
             nodes,
             dvi,
+            end,
             prelude: cached,
             incr,
             stats: Stats::default(),
@@ -2484,8 +2509,9 @@ impl Build {
             edits: &self.edits,
             nodes: &mut self.nodes,
             exec: self.g.ops.exec,
-            dvi: self.dvi,
+            end: self.end,
             incr: self.doc.then_some(&mut self.incr),
+            unchanged: None,
             finder: self.g.input_finder(&self.opts.finder),
             text: &mut self.text,
         };
@@ -2500,6 +2526,10 @@ impl Build {
             self.opts.fixpoint,
             &mut absorb,
         );
+        // (a text taken last that changed nothing: the result is for it)
+        if let Some(v) = absorb.unchanged {
+            stats.version = stats.version.max(v);
+        }
         stats.live = self.g.eng.live_nodes();
         stats.page_steps_completed = self.g.take_steps_done();
         self.stats = stats;
