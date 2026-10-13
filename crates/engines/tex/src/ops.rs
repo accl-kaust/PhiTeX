@@ -55,7 +55,7 @@ pub(crate) fn run_node_parking(
     }
     let parks = parks && !crate::exec::env_flag!("PHITEX_NO_PARK");
     let parked = if parks { cx.parked() } else { None };
-    let mut r = match parked.map(Box::downcast::<crate::run::Parked>) {
+    let mut r = match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
         Some(Ok(p)) => match Run::from_parked(cx, o.clone(), *p) {
             Ok(r) => r,
             Err(cx) => {
