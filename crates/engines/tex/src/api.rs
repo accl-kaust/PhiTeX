@@ -1709,6 +1709,9 @@ impl Graph {
                 // the exact writer's pages cannot be written apart:
                 // the build again, with the pages in the `pdf:state` fold
                 if kind == "pdf:fold" && self.pdf_fold.is_none() {
+                    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                        eprintln!("pdf: the pages folded again: {why}");
+                    }
                     self.pdf_fold = Some(why.clone());
                     asked = true;
                 }

@@ -691,7 +691,8 @@ pub(crate) fn command<T: Default>(
     }
     if in_page_step(r) && !folding(r)? {
         // its state would be the pages' before it: stage B's loop-back
-        fold_back(r, "a PDF command in an output routine");
+        let what = r.v.render(input).chars().take(60).collect::<String>();
+        fold_back(r, &format!("a PDF command in an output routine: {what}"));
         return Ok(T::default());
     }
     let fs = fonts_for(r, fonts, false)?;
@@ -714,7 +715,8 @@ pub(crate) fn command_forms<T: Default>(
     }
     if in_page_step(r) && !folding(r)? {
         // its state would be the pages' before it: stage B's loop-back
-        fold_back(r, "a PDF command in an output routine");
+        let what = r.v.render(input).chars().take(60).collect::<String>();
+        fold_back(r, &format!("a PDF command in an output routine: {what}"));
         return Ok(T::default());
     }
     let fs = fonts_for(r, fonts, false)?;
