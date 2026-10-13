@@ -63,9 +63,12 @@ pub(crate) fn run_node(
             let u = ValueId::UNIT;
             Ok(r.stall("starve", u))
         }
+        // (§1335: the job ends there, its log written up to the error,
+        // as pdfTeX's close_files_and_terminate leaves it)
         Err(Halt::Fatal) => {
-            let u = ValueId::UNIT;
-            Ok(r.stall("fatal", u))
+            let _ = r.log("error", "*** (job aborted, no legal \\end found)");
+            r.end_open();
+            Ok(r.finish())
         }
     }
 }
