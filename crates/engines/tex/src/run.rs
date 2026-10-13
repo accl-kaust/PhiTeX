@@ -307,7 +307,8 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(t) = x.and_then(|x| crate::val::list_of(v, x).get(1).copied()) {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&str_of(v, t), &mut h);
-            self.fread.push((key.to_owned(), std::hash::Hasher::finish(&h)));
+            self.fread
+                .push((key.to_owned(), std::hash::Hasher::finish(&h)));
         }
         Ok(x)
     }
@@ -1160,32 +1161,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         out.push(node(std::mem::take(&mut run)));
                     }
                     if f.has_lines() && self.doc && self.doc_file(f) {
-                        let text = str_of(v, f.id);
-                        // analysed as the document's own text: once, with
-                        // the format's definitions, registered under the
-                        // file's name for its fragments' hints
-                        let defs = self
-                            .ops
-                            .defs
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone();
-                        let t = crate::hints::text_hints(
-                            &text,
-                            phitex_source::pass::FileKind::Document,
-                            &defs,
-                        );
-                        crate::hints::register_text(f.name, &t);
-                        for &(s, e) in &t.slices {
-                            if e <= f.off {
-                                continue;
-                            }
-                            let a = s.max(f.off);
-                            let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
-                            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
-                            args.push(crate::hints::hint_arg(v, &t, s));
-                            out.push(args);
-                        }
+                        out.extend(self.doc_file_regions(f));
                     } else if f.has_lines() {
                         let fr = v.list(vec![
                             tag_f,
@@ -1200,6 +1176,35 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if !run.is_empty() {
             out.push(node(run));
+        }
+        out
+    }
+
+    /// The region children of the rest of a document file `\input` by a
+    /// document node: the file analysed as the document's own text (once,
+    /// with the format's definitions, registered under the file's name
+    /// for its fragments' hints), each slice with its hint.
+    fn doc_file_regions(&self, f: &FileRest) -> Vec<Vec<ValueId>> {
+        let v = self.v;
+        let text = str_of(v, f.id);
+        let defs = self
+            .ops
+            .defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
+        crate::hints::register_text(f.name, &t);
+        let mut out = Vec::new();
+        for &(s, e) in &t.slices {
+            if e <= f.off {
+                continue;
+            }
+            let a = s.max(f.off);
+            let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
+            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
+            args.push(crate::hints::hint_arg(v, &t, s));
+            out.push(args);
         }
         out
     }
