@@ -55,8 +55,8 @@ fn savepos() {
 }
 
 /// The PDF documents not yet byte-identical, compared by their streams
-/// (PDF-BACKEND-GAP): bera and vf use virtual fonts.
-const BACKEND_GAPS: &[&str] = &["bera", "vf"];
+/// (PDF-BACKEND-GAP).
+const BACKEND_GAPS: &[&str] = &[];
 
 /// The `stream ... endstream` bodies of a PDF file.
 fn streams(b: &[u8]) -> Vec<Vec<u8>> {
@@ -78,8 +78,7 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 }
 
 /// The documents that do not pass yet: un-ignored as they are fixed.
-/// berasizes: virtual fonts.
-const PENDING: &[&str] = &["berasizes"];
+const PENDING: &[&str] = &[];
 
 /// Gate 1: `pdftex -ini` on `oracle/fixtures/pdf/*.tex` with a `.pdf`
 /// oracle: byte-identical; for the documents on a backend gap, whether
@@ -87,12 +86,6 @@ const PENDING: &[&str] = &["berasizes"];
 #[test]
 fn pdf_documents() {
     pdf_gate(false);
-}
-
-#[test]
-#[ignore = "berasizes: virtual fonts"]
-fn pdf_documents_pending() {
-    pdf_gate(true);
 }
 
 fn pdf_gate(pending: bool) {
