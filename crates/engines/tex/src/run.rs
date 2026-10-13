@@ -15,7 +15,7 @@ use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Va
 
 use crate::fields::Par;
 use crate::runstate::{Loc, Native};
-use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
+use crate::val::{Mean, Tok, cmd, int_at, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
 pub(crate) enum Halt {
@@ -611,7 +611,12 @@ impl<'c, 'a> Run<'c, 'a> {
                 None
             }
         } else if self.cx.is_loopback(w) {
-            self.cx.use_field(w)?
+            let x = self.cx.use_field(w)?;
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                let t = x.and_then(|x| list_of(v, x).get(1).map(|&t| str_of(v, t)));
+                eprintln!("aux-trace: read wfile {key}: {:?} bytes", t.map(|t| t.len()));
+            }
+            x
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
@@ -690,6 +695,13 @@ impl<'c, 'a> Run<'c, 'a> {
             let xs = list_of(v, x);
             if let [val, g] = xs.as_slice() {
                 let global = int_of(v, *g) != 0;
+                if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                    let was = self.get(&name)?.map(|x| crate::val::show_def(v, x));
+                    eprintln!(
+                        "aux-trace: read-back {key} {name} = {} (was {was:?})",
+                        crate::val::show_def(v, *val)
+                    );
+                }
                 self.set(&name, *val, global);
             }
         }
@@ -698,9 +710,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// A line written to a file whose read-back only defines, read as
     /// its read-back reads it (under `\makeatletter`), on scratch: the
-    /// definitions it makes, `[[field, value, global], ...]`; nothing of
-    /// it stays in this run (its input, lists, contributions and
-    /// definitions are restored).
+    /// definitions it makes, `[[field, value, global], ...]`. Nothing
+    /// else of it stays in this run (its input, lists, contributions and
+    /// definitions are restored), except what it writes to other files
+    /// (LaTeX's `\@writefile{toc}{...}`, which writes the `.toc` line as
+    /// `\enddocument` reads the `.aux` back): those `streams` entries
+    /// (and a document node's `T_WRITE_AT` markers for them) are kept.
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<ValueId> {
         let v = self.v;
         let frames = std::mem::take(&mut self.frames);
@@ -755,7 +770,22 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         self.frames = frames;
         self.st = st;
-        self.contribs.truncate(nc);
+        let streams = v.field("streams");
+        let items = v.field("items");
+        let written: Vec<(Field, ValueId)> = self
+            .contribs
+            .drain(nc..)
+            .filter(|&(f, x)| {
+                f == streams
+                    || f == items
+                        && v.seq_to_vec(x).iter().all(|&e| {
+                            list_of(v, e)
+                                .get(1)
+                                .is_some_and(|&n| int_at(v, n, 0) == crate::nodes::T_WRITE_AT)
+                        })
+            })
+            .collect();
+        self.contribs.extend(written);
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
         self.conds = conds;
