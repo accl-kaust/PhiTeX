@@ -590,6 +590,13 @@ fn short(s: &str) -> String {
     t.replace('\n', "\\n")
 }
 
+/// The text from byte `s`, at most 40 bytes, cut on a character
+/// boundary (the text is UTF-8: a cut inside a character is a panic).
+fn excerpt_at(text: &str, s: usize) -> &str {
+    let s = s.min(text.len());
+    &text[s..text.floor_char_boundary(s + 40)]
+}
+
 // ---------------------------------------------------------------------
 // From the pass.
 
@@ -1108,9 +1115,19 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
         let inside_if =
             ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
+        // (a token after a catcode change the pass could not read, a
+        // `\catcode` with a computed value, is tokenized by the run
+        // alone, under the table as the commands before it on the line
+        // left it (§343): the pass's reading of it, under the regime
+        // before the change, proposes no cut there; the text is one
+        // slice with the change until the pass reads for sure again)
+        let pending = p
+            .tokens
+            .get(a.tok)
+            .is_some_and(|t| t.tz == pass::Status::Pending);
         // (an operand a primitive reads never starts a slice; a macro's
         // operand range is the pass's guess and does not cut)
-        if !(inside_if || inside[k] || operand[k] || (ch && prev_char)) {
+        if !(inside_if || inside[k] || operand[k] || pending || (ch && prev_char)) {
             starts.push(a.start);
         }
         prev_char = ch;
@@ -1708,7 +1725,7 @@ impl Analysis<'_> {
         let Some(at) = atoms.get(a) else {
             return Hint::any("end of text", "");
         };
-        let excerpt = &self.text[at.start..self.text.len().min(at.start + 40)];
+        let excerpt = excerpt_at(self.text, at.start);
         if self.claimed[a] {
             return Hint::any(
                 "operand of an earlier command (claimed, never run)",
@@ -1763,7 +1780,7 @@ impl Analysis<'_> {
         let Some(at) = atoms.get(a) else {
             return Hint::any("end of text", "");
         };
-        let excerpt = &self.text[at.start..self.text.len().min(at.start + 40)];
+        let excerpt = excerpt_at(self.text, at.start);
         if at.kind == AtomKind::Cs && DEMOTED.contains(&at.name(self.text)) {
             return demoted(at.name(self.text), excerpt);
         }
@@ -2333,12 +2350,34 @@ impl Analysis<'_> {
         }
         match &it.hints.may_define {
             pass::MayDefine::Nothing => true,
-            pass::MayDefine::Names(ds) => {
-                add_defs_with(self, ds, false, b);
-                true
-            }
-            pass::MayDefine::Prefixes(ds) => {
-                add_defs_with(self, ds, true, b);
+            pass::MayDefine::Names(ds) | pass::MayDefine::Prefixes(ds) => {
+                add_defs_with(
+                    self,
+                    ds,
+                    matches!(it.hints.may_define, pass::MayDefine::Prefixes(_)),
+                    b,
+                );
+                // (a definer the format defines, `\newcommand`: the pass
+                // read its target from the call; what the format's bodies
+                // define besides, `\let\pr@tectedrel@x\relax`, is the
+                // catalogue's closure of the call, whose one computed
+                // target is that name)
+                if !self.defs.is_defined(name) && self.prelude.is_defined(name) {
+                    let set = self.defset(name);
+                    let other: Vec<&String> = set
+                        .unbounded
+                        .iter()
+                        .filter(|u| {
+                            !u.contains("with a computed name")
+                                && !u.contains("with a computed target")
+                        })
+                        .collect();
+                    if let Some(u) = other.first() {
+                        *cause = format!("\\{name}: {u}");
+                        return false;
+                    }
+                    self.add_set_parts(&set, b);
+                }
                 true
             }
             pass::MayDefine::Any
@@ -2569,7 +2608,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         {
             b.no_scope = true;
         }
-        let excerpt = short(&text[s..text.len().min(s + 40)]);
+        let excerpt = short(excerpt_at(text, s));
         // (a font selection, `\\bf`, that only an argument or a group
         // inside the slice makes is local to that group: the slice
         // declares it only when a command outside every brace group of
