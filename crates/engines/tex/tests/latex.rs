@@ -433,3 +433,18 @@ fn pdflatex_hello() {
     assert_eq!(b.pages().len(), 1);
     assert!(b.is_pdf());
 }
+
+/// `pdflatex` hello byte-identical to the oracle, cold and from the
+/// format: the format carries `\pdfglyphtounicode`'s table
+/// (`dumptounicode`/`undumptounicode`, pdfTeX §1502–§1503), so the
+/// font's `/ToUnicode` `CMap` is written after a format load too.
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn pdflatex_hello_tounicode() {
+    let want = std::fs::read(common::fixtures().join("latex/hello/hello.pdf")).expect("the oracle");
+    for _ in 0..2 {
+        let b = hello(true);
+        let (out, _) = b.output();
+        assert!(out == want, "{:?}", common::first_difference(&out, &want));
+    }
+}
