@@ -155,6 +155,20 @@ impl Run<'_, '_> {
             self.pop_level();
             return self.mode();
         }
+        // a group of this run below a paragraph begun inside it
+        // (`{\a text} more`): groups and the nest are apart in tex.web
+        // (`unsave` leaves `nest` alone, §1063), so the group closes and
+        // the paragraph goes on, the group's definitions undone
+        if let Some(k) = self.nest.iter().rposition(|l| l.group != 0) {
+            let above = self.nest.split_off(k + 1);
+            self.pop_level();
+            let floor = self.defs.len();
+            for mut l in above {
+                l.defs_len = l.defs_len.min(floor);
+                self.nest.push(l);
+            }
+            return self.mode();
+        }
         self.effect = Effect::Close;
         self.unsave_extras(md)?;
         self.kind_outer(md)
@@ -220,13 +234,6 @@ impl Run<'_, '_> {
             }
             None => Vec::new(),
         })
-    }
-
-    pub(crate) fn set_scope_list(&mut self, name: &str, md: &Mode, items: Vec<ValueId>) {
-        let v = self.v;
-        let mut xs = vec![v.int(md.sid)];
-        xs.extend(items);
-        self.set(name, v.list(xs), false);
     }
 
     // ------------------------------------------------------------ lists
