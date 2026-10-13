@@ -429,6 +429,8 @@ const READERS: &[&str] = &[
     // `\vskip`)
     "addpenalty",
     "addvspace",
+    // (the insertion's number, §1099)
+    "insert",
     "number",
     "romannumeral",
     "showthe",
