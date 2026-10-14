@@ -487,6 +487,7 @@ impl Run<'_, '_> {
                 v.list(
                     r.tdefs
                         .iter()
+                        .filter(|&&m| nodes::tag(v, m) == nodes::T_DEFS_AT)
                         .flat_map(|&m| list_of(v, m).into_iter().skip(2))
                         .collect(),
                 )
@@ -719,6 +720,19 @@ impl Run<'_, '_> {
         for &(f, x) in &inherited {
             let l = self.loc_of(f);
             self.st.preload(l, Some(x));
+        }
+        // the local bindings of the text's group the page fires in
+        // (§1025: eqtb as it stands), over the chain's and the text's
+        for (f, x) in fire_locals(v, args.get(4).copied()) {
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                let r: String = v.render(x).chars().take(80).collect();
+                eprintln!(
+                    "aux-trace: step {j} fire local {} = {r}",
+                    crate::val::field_name(v, f)
+                );
+            }
+            let l = self.loc_of(f);
+            self.st.preload(l, Some(x).filter(|&x| x != ValueId::UNIT));
         }
         self.st.watch_kinds();
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
@@ -1007,6 +1021,8 @@ impl Run<'_, '_> {
         // flush opens starts from (the writer's fold replaces its
         // running counts with them: the text's arithmetic since the
         // last flush, on the value fed back there)
+        // (the engine's own reads: no probe; the flush is read next)
+        self.probe_ok = true;
         let mut before = Vec::with_capacity(10);
         for c in 0..10 {
             before.push(v.int(i64::from(self.reg_int(0, c)?)));
@@ -1024,6 +1040,50 @@ impl Run<'_, '_> {
             i64::try_from(k).unwrap_or(0),
         ));
         Ok(())
+    }
+
+    /// The text reads `\\count0..9` where pages may have fired since it
+    /// last had them from the chain (the run's start, or an item it put
+    /// on the main list since): TeX's text reads them as the output
+    /// routines left them (§1025: `\\global` assignments to eqtb, which
+    /// the text sees at once). A probe on the main list there (a flush
+    /// point's marker with no page forced: `T_FLUSH_AT` with the ten
+    /// counts and a 1), read as a flush point is: the state after the
+    /// last page fired before it (`pgst:flushes`, the writer's; none in
+    /// round one or before the first page). amsmath's `\\savecounters@`
+    /// and `\\restorecounters@` in a display write `\\c@page` back
+    /// with the value they read.
+    pub(crate) fn count_probe(&mut self) -> R<()> {
+        self.probe_ok = true;
+        let op = self.cx.op();
+        if self.fed
+            || self.interp.is_some()
+            || self.pg.is_some()
+            || (op != self.ops.exec && op != self.ops.put)
+        {
+            return Ok(());
+        }
+        let v = self.v;
+        let node = self.cx.node().raw();
+        let k = self.flushes;
+        self.flushes += 1;
+        let mut before = Vec::with_capacity(11);
+        for c in 0..10 {
+            before.push(v.int(i64::from(self.reg_int(0, c)?)));
+        }
+        before.push(v.int(1));
+        let at = v.list(vec![
+            v.int(nodes::T_FLUSH_AT),
+            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+            v.int(i64::try_from(k).unwrap_or(0)),
+            v.list(before),
+        ]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        self.flush_pending = Some((
+            i64::from_ne_bytes(node.to_ne_bytes()),
+            i64::try_from(k).unwrap_or(0),
+        ));
+        self.flush_read_as(false)
     }
 
     /// The pending flush point withdrawn: nothing of this run read it
@@ -1068,6 +1128,14 @@ impl Run<'_, '_> {
         }
         let node = self.cx.node().raw();
         let id = self.flushes;
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: count_set node {} k {id}: count{k} := {n} line {:?} toks {:?}",
+                i64::from_ne_bytes(node.to_ne_bytes()),
+                self.input.debug_line(),
+                self.input.debug_toks(4)
+            );
+        }
         self.flushes += 1;
         let at = v.list(vec![
             v.int(nodes::T_FLUSH_AT),
@@ -1110,7 +1178,16 @@ impl Run<'_, '_> {
     /// [`FLUSHES`] (`[node, k, value]`), its fields read in place of the
     /// engine's from here on; none (round one) leaves the state as it is.
     pub(crate) fn flush_read(&mut self) -> R<()> {
+        self.flush_read_as(true)
+    }
+
+    /// [`Run::flush_read`]; a count probe's (`define` false) reads the
+    /// counts in place of the engine's, defining nothing (the text's
+    /// view of the chain's registers, not an assignment of its own).
+    fn flush_read_as(&mut self, define: bool) -> R<()> {
         let v = self.v;
+        // (the text has the chain's counts from here on)
+        self.probe_ok = true;
         // (pending until read: a stop here rewinds the command, which
         // reads it again)
         let Some((node, k)) = self.flush_pending else {
@@ -1135,7 +1212,11 @@ impl Run<'_, '_> {
         };
         let xs = list_of(v, x);
         if let Some(&cs) = xs.first() {
-            self.define_counts(cs)?;
+            if define {
+                self.define_counts(cs)?;
+            } else {
+                self.preload_counts(cs);
+            }
         }
         if let Some(&pairs) = xs.get(1) {
             for (g, y) in pgst_pairs(v, Some(pairs)) {
@@ -1718,7 +1799,9 @@ fn fold_page(
                 ));
                 continue;
             }
-            nodes::T_DEFS_AT => {
+            // (a run's local bindings, kept in order with the
+            // definition markers: `fire_nodes`)
+            nodes::T_DEFS_AT | nodes::T_LOCALS_AT => {
                 tdefs.push(x);
                 continue;
             }
@@ -2336,15 +2419,51 @@ fn mk_classes(v: &Values, mk: Option<&[ValueId]>) -> Option<Vec<ValueId>> {
 /// while none: the unit's start). A page step reads the text there:
 /// the state the text left when TeX fired the page (§1012), its later
 /// definitions unseen.
+///
+/// With a run's local bindings in force there (the last `T_LOCALS_AT`
+/// marker before the fire, not a clear one): `[node, bindings]`, the
+/// step reading those in place of the text's ([`fire_locals`]).
 fn fire_nodes(v: &Values, recs: &[std::sync::Arc<crate::planinc::PageRec>]) -> Vec<ValueId> {
     let mut cur = ValueId::UNIT;
+    let mut locals = ValueId::UNIT;
     recs.iter()
         .map(|r| {
-            if let Some(&m) = r.tdefs.last() {
-                cur = v.int(crate::val::int_at(v, m, 1));
+            for &m in &r.tdefs {
+                if nodes::tag(v, m) == nodes::T_LOCALS_AT {
+                    locals = if list_of(v, m).len() > 1 {
+                        m
+                    } else {
+                        ValueId::UNIT
+                    };
+                } else {
+                    cur = v.int(crate::val::int_at(v, m, 1));
+                }
             }
-            cur
+            if locals == ValueId::UNIT {
+                cur
+            } else {
+                v.list(vec![cur, locals])
+            }
         })
+        .collect()
+}
+
+/// The local bindings a fire value carries (`[node, [T_LOCALS_AT, f,
+/// x, …]]`, [`fire_nodes`]): `(field, value)` pairs, a UNIT value an
+/// absent one.
+pub(crate) fn fire_locals(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId)> {
+    let Some(x) = x.filter(|&x| x != ValueId::UNIT && v.as_int(x).is_none()) else {
+        return Vec::new();
+    };
+    let xs = list_of(v, x);
+    let Some(&m) = xs.get(1) else {
+        return Vec::new();
+    };
+    list_of(v, m)[1..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[f, x]| (Field(f), x))
         .collect()
 }
 
@@ -2352,6 +2471,15 @@ fn fire_nodes(v: &Values, recs: &[std::sync::Arc<crate::planinc::PageRec>]) -> V
 /// start.
 pub(crate) fn fire_node(v: &Values, x: Option<ValueId>) -> Option<phitex_defuse::NodeId> {
     let x = x.filter(|&x| x != ValueId::UNIT)?;
+    // (`[node, bindings]`: the node first)
+    let x = if v.as_int(x).is_some() {
+        x
+    } else {
+        list_of(v, x)
+            .first()
+            .copied()
+            .filter(|&y| y != ValueId::UNIT)?
+    };
     v.as_int(x)
         .map(|n| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())))
 }
@@ -2504,11 +2632,22 @@ impl FinalState {
             .collect();
         let ints =
             |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
+        // (each marker's place on the main list: a count probe reads the
+        // text's count sets before it in its page's part)
+        let order: phitex_defuse::FxHashMap<(i64, i64), usize> = marks
+            .iter()
+            .enumerate()
+            .map(|(i, m)| ((m.0, m.1), i))
+            .collect();
         // (a marker's payload: a flush point's ten counts, or a count
         // the text assigned, `[k, n]`, applied before page `p + 1`
         // fires)
         let (all_flushes, sets): (Vec<_>, Vec<_>) =
             marks.into_iter().partition(|m| list_of(v, m.3).len() == 10);
+        // (the text's count probes, `[counts…, 1]`: read as flush points
+        // are, never the chain's start; `Run::count_probe`)
+        let (probes, sets): (Vec<_>, Vec<_>) =
+            sets.into_iter().partition(|m| list_of(v, m.3).len() == 11);
         // (a flush point nothing read, withdrawn, `[k]`: the flush
         // before `\end`; `Run::withdraw_flush`)
         let (unread, sets): (Vec<_>, Vec<_>) =
@@ -2527,6 +2666,26 @@ impl FinalState {
         // `[f, x, 1]`)
         let (fsets, sets): (Vec<_>, Vec<_>) =
             sets.into_iter().partition(|m| list_of(v, m.3).len() == 3);
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            for s in &sets {
+                eprintln!(
+                    "aux-trace: text count set node {} k {} before page {}: {}",
+                    s.0,
+                    s.1,
+                    s.2 + 1,
+                    v.render(s.3)
+                );
+            }
+            for s in &fsets {
+                eprintln!(
+                    "aux-trace: text field set node {} k {} before page {}: {}",
+                    s.0,
+                    s.1,
+                    s.2 + 1,
+                    v.render(s.3).chars().take(120).collect::<String>()
+                );
+            }
+        }
         let sets_before = |page: usize, counts: &mut Vec<i64>| {
             for s in sets
                 .iter()
@@ -2724,12 +2883,32 @@ impl FinalState {
         Self::log_refuted(o, refuted);
         // the flush points' loop-backs: the state after their page,
         // UNIT before the first
-        let mut entries = Vec::with_capacity(flushes.len());
-        for &(n, k, p, _) in &flushes {
-            let x = usize::try_from(p)
+        let mut entries = Vec::with_capacity(flushes.len() + probes.len());
+        for &(n, k, p, _) in flushes.iter().chain(&probes) {
+            let mut x = usize::try_from(p)
                 .ok()
                 .and_then(|p| after.get(p))
                 .map_or(ValueId::UNIT, |&(cs, st)| v.list(vec![cs, st]));
+            // a probe: and the counts the text set since that page fired,
+            // before the probe (in TeX's order: the text's assignment
+            // after the routine's)
+            if x != ValueId::UNIT && probes.iter().any(|q| q.0 == n && q.1 == k) {
+                let at = order.get(&(n, k)).copied().unwrap_or(usize::MAX);
+                let xs = list_of(v, x);
+                let mut cs = ints(xs[0]);
+                for s in sets
+                    .iter()
+                    .filter(|s| s.2 == p && order.get(&(s.0, s.1)).is_some_and(|&i| i < at))
+                {
+                    let c = ints(s.3);
+                    if let (Some(&r), Some(&val)) = (c.first(), c.get(1))
+                        && let Some(slot) = usize::try_from(r).ok().and_then(|r| cs.get_mut(r))
+                    {
+                        *slot = val;
+                    }
+                }
+                x = v.list(vec![v.list(cs.iter().map(|&c| v.int(c)).collect()), xs[1]]);
+            }
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
                     "aux-trace: flush point {n}:{k} after page {p}: {} (chain end {counts:?})",

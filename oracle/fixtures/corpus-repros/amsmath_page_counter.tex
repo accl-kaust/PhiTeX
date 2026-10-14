@@ -1,0 +1,22 @@
+\documentclass{article}
+\usepackage{amsmath}
+\begin{document}
+\section{One}
+\newcount\n \n=0
+\loop\ifnum\n<40 \advance\n by 1
+Some words to fill the lines of this paragraph, again and again until the page is full.
+\repeat
+
+\begin{align}
+a&=b\\
+c&=d
+\end{align}
+\loop\ifnum\n<90 \advance\n by 1
+Some words to fill the lines of this paragraph, again and again until the page is full.
+\repeat
+
+\begin{gather}
+e=f
+\end{gather}
+More text.
+\end{document}
