@@ -716,19 +716,57 @@ impl State {
     }
 
     /// The definitions to publish: each location's definition at the base
-    /// level, encoded once; a local one equal to the engine's value the
-    /// run read is left out (the same binding).
-    pub(crate) fn published(&self, v: &Values) -> Vec<(Loc, ValueId, Locality)> {
+    /// level, encoded once; one equal to the engine's value the run read
+    /// is left out (the run's net effect: what it left as it found it is
+    /// no definition, the values between are its own). A global one only
+    /// when that leaves the scopes around the run as they were: the
+    /// binding read is a level-one one (a box register's value carries
+    /// its level, §1077), or `top` (no scope is open around the run).
+    /// Otherwise `\global` of the value an enclosing scope's local
+    /// binding holds outlives that scope's close (§283).
+    pub(crate) fn published(&self, v: &Values, top: bool) -> Vec<(Loc, ValueId, Locality)> {
         let mut out = Vec::with_capacity(self.metas.len());
         for m in &self.metas {
             let Some((val, l)) = &m.publ else { continue };
             let Some(x) = val.encode(v) else { continue };
-            if *l == Locality::Local && m.eng == Some(Some(x)) {
+            if m.eng == Some(Some(x))
+                && (*l == Locality::Local || top || level_one_box(v, m.loc, x))
+            {
                 continue;
             }
             out.push((m.loc, x, *l));
         }
         out
+    }
+
+    /// Whether the run defined `loc` at its base level without having
+    /// read the engine's value first, where reading it may show the
+    /// definition is none ([`State::published`]: a local one, or a box
+    /// register's).
+    pub(crate) fn defined_unread(&self, loc: Loc) -> bool {
+        self.slot_ref(loc).is_some_and(|s| {
+            s.meta != 0 && {
+                let m = &self.metas[s.meta as usize - 1];
+                m.eng.is_none()
+                    && m.publ
+                        .as_ref()
+                        .is_some_and(|(_, l)| *l == Locality::Local || is_box(loc))
+            }
+        })
+    }
+
+    /// The engine's value of `loc` before the run, read after the run
+    /// defined it ([`State::defined_unread`]): its net effect compares
+    /// with it.
+    pub(crate) fn note_engine(&mut self, loc: Loc, x: Option<ValueId>) {
+        if let Some(s) = self.slot_ref(loc)
+            && s.meta != 0
+        {
+            let mi = s.meta as usize - 1;
+            if self.metas[mi].eng.is_none() {
+                self.metas[mi].eng = Some(x);
+            }
+        }
     }
 
     /// Whether any of `locs` has a definition at the base level.
@@ -929,4 +967,16 @@ pub(crate) struct PState {
     kinds: Option<Vec<(PLoc, bool)>>,
     stamp: u64,
     next_gid: u32,
+}
+
+/// Whether `x` at `loc` is a box register's binding at level one
+/// (`[level, box]`, `crate::build` `set_box_reg`).
+fn level_one_box(v: &Values, loc: Loc, x: ValueId) -> bool {
+    is_box(loc) && crate::val::int_at(v, x, 0) == 0
+}
+
+/// Whether `loc` is one of the box registers 0..255.
+fn is_box(loc: Loc) -> bool {
+    let b = Loc::try_from(crate::fields::BOX0).unwrap_or(Loc::MAX - 256);
+    (b..b + 256).contains(&loc)
 }
