@@ -236,9 +236,15 @@ impl Operation for Exec {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
         let hint = crate::hints::hint_of_args(cx.values(), &args);
-        run_node_parking(cx, ops(&self.0), true, |r| {
+        // (a package load: its run recorded, `crate::pkgrec`)
+        let load = crate::pkgrec::is_load(cx.values(), &args);
+        let (node, t0) = (cx.node().raw(), std::time::Instant::now());
+        let o = ops(&self.0);
+        let log = o.pkg_log.clone();
+        let res = run_node_parking(cx, o, true, |r| {
             // (a resumed run has done this, and continues its commands)
             if !r.resumed {
+                r.rec_load = load;
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
                 let fs = decode_frames(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
@@ -274,7 +280,13 @@ impl Operation for Exec {
                 }
             }
             Ok(())
-        })
+        });
+        if load && res.is_ok() {
+            log.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((node, t0, std::time::Instant::now()));
+        }
+        res
     }
 }
 

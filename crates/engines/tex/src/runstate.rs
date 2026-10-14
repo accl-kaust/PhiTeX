@@ -624,6 +624,33 @@ impl State {
         self.stamp
     }
 
+    /// The locations whose value the run read from the engine: read
+    /// before the run defined them, or never defined (a value preloaded
+    /// in place of the engine's is not one).
+    pub(crate) fn read_locs(&self) -> Vec<Loc> {
+        let mut out: Vec<Loc> = self
+            .metas
+            .iter()
+            .filter(|m| m.eng.is_some())
+            .map(|m| m.loc)
+            .collect();
+        let has_meta: phitex_defuse::FxHashSet<Loc> = self.metas.iter().map(|m| m.loc).collect();
+        for &l in &self.touched {
+            if has_meta.contains(&l) {
+                continue;
+            }
+            if self
+                .slot_ref(l)
+                .is_some_and(|s| s.e.flags & LOADED != 0 && s.e.flags & PRELOADED == 0)
+            {
+                out.push(l);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// The locations with a definition at the base level.
     pub(crate) fn defined_locs(&self) -> impl Iterator<Item = Loc> + '_ {
         self.metas

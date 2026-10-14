@@ -107,6 +107,12 @@ pub struct Options {
     /// next), as [`Build::export_pgst`] gave them in an earlier session
     /// of the same document; empty: the cold guesses.
     pub pgst: Vec<u8>,
+    /// The package loads' records ([`Build::export_pkgrec`]): kept
+    /// machine-wide beside the format, keyed by the load and the files
+    /// it read, never by the document, so a new document's first build
+    /// uses what any earlier one learned (`crate::pkgrec`). Empty: none
+    /// (every load unbounded, or optimistic under speculation).
+    pub pkgrec: Vec<u8>,
     /// The loop-back rounds an evaluation may take before it ends with
     /// a no-fixpoint error naming the loop-back fields (a document whose
     /// written files oscillate), instead of running on.
@@ -208,6 +214,8 @@ struct Absorb<'a> {
     /// The finder `\\input` files are sliced with, and the text applied.
     finder: Finder,
     text: &'a mut String,
+    /// The package loads' hints (`crate::pkgrec`).
+    loads: Option<&'a crate::pkgrec::LoadHints>,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
@@ -221,6 +229,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             &text,
             self.incr.as_deref_mut(),
             Some(&self.finder),
+            self.loads,
         );
         *self.text = text;
         if changed {
@@ -320,6 +329,7 @@ fn apply_text(
     text: &str,
     mut incr: Option<&mut Incr>,
     finder: Option<&Finder>,
+    loads: Option<&crate::pkgrec::LoadHints>,
 ) -> bool {
     let t_all = std::time::Instant::now();
     let text = as_file(text);
@@ -337,7 +347,7 @@ fn apply_text(
     if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
         return false;
     }
-    let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1);
+    let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1, loads);
     let (a, b) = common_ends(old, &new);
     let old_len = old.len();
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
@@ -400,6 +410,7 @@ impl Default for Options {
             wkeys: Vec::new(),
             pagefx: Vec::new(),
             pgst: Vec::new(),
+            pkgrec: Vec::new(),
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
@@ -950,6 +961,21 @@ pub struct Stats {
     /// ran out of fuel.
     pub max_ready: usize,
     pub fuel_outs: u64,
+    /// Declared definition sets the engine refuted (a run defined
+    /// outside its node's hint): a package load's record among them.
+    pub declarations_refuted: u64,
+    /// The document's package loads (`crate::pkgrec`), those given a
+    /// record and those given the optimistic hint (since the build
+    /// began), their finished runs (speculative ones included), the
+    /// most at once, the span from the first's start to the last's
+    /// end, and how many are on the critical chain.
+    pub pkg_loads: u64,
+    pub pkg_recorded: u64,
+    pub pkg_optimistic: u64,
+    pub pkg_runs: u64,
+    pub pkg_max_concurrent: usize,
+    pub pkg_wall: std::time::Duration,
+    pub pkg_on_critical: u64,
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
@@ -1087,6 +1113,7 @@ impl Stats {
         self.raises += r.raises;
         self.max_ready = self.max_ready.max(r.max_ready);
         self.fuel_outs += r.fuel_outs;
+        self.declarations_refuted += r.declarations_refuted;
         self.page_steps +=
             Report::by_op(&r.runs_by_op, "pagestep") + Report::by_op(&r.runs_by_op, "pagestep_any");
         self.page_steps_any += Report::by_op(&r.runs_by_op, "pagestep_any");
@@ -1148,6 +1175,9 @@ struct Graph {
     /// over the finder's.
     inputs_read: Vec<String>,
     overrides: Overrides,
+    /// The package loads' records and hints (`crate::pkgrec`), once the
+    /// build has set them.
+    loads: Option<Arc<crate::pkgrec::LoadHints>>,
 }
 
 impl Graph {
@@ -1227,6 +1257,7 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
+            pkg_log: Arc::new(Mutex::new(Vec::new())),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -1253,6 +1284,7 @@ impl Graph {
             provided: Arc::default(),
             inputs_read: Vec::new(),
             overrides: Arc::default(),
+            loads: None,
         }
     }
 
@@ -1802,7 +1834,7 @@ impl Graph {
             if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 eprintln!("node {k:?}");
             }
-            let args = node_args(self.eng.values(), text, incr, n);
+            let args = node_args(self.eng.values(), text, incr, n, self.loads.as_deref());
             let id = self.eng.push(unit, self.ops.exec, args);
             declare_marks_before(&mut self.eng, id);
             out.push((*k, id, Src::of(n)));
@@ -1965,7 +1997,13 @@ fn doc_nodes(
 
 /// A document node's arguments: its text with its origin, and its hint;
 /// a format's (`incr` `None`): its text, and the format's hint.
-fn node_args(v: &Values, text: &str, incr: Option<&Incr>, n: &DocNode) -> Vec<ValueId> {
+fn node_args(
+    v: &Values,
+    text: &str,
+    incr: Option<&Incr>,
+    n: &DocNode,
+    loads: Option<&crate::pkgrec::LoadHints>,
+) -> Vec<ValueId> {
     match (n, incr) {
         (DocNode::File(p), _) => p.args(v, DOC_NAME),
         (&DocNode::Doc(s, e), Some(inc)) => {
@@ -1973,8 +2011,14 @@ fn node_args(v: &Values, text: &str, incr: Option<&Incr>, n: &DocNode) -> Vec<Va
             let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
             // (a document node is a top-level node)
             a[1] = v.int(3);
-            let (c, at) = inc.chunk_at(s);
-            a.push(crate::hints::hint_arg(v, &c.th, at));
+            // (a package load: its record's hint, or the optimistic one,
+            // `crate::pkgrec`)
+            if let Some(h) = loads.and_then(|l| l.hint_for(v, &text[s..e])) {
+                a.push(v.str(&h));
+            } else {
+                let (c, at) = inc.chunk_at(s);
+                a.push(crate::hints::hint_arg(v, &c.th, at));
+            }
             a
         }
         (&DocNode::Doc(s, e), None) => {
@@ -2512,6 +2556,7 @@ impl Build {
     ///
     /// If the engine reports an evaluation error (a cycle).
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn with(opts: Options, prelude: Option<&str>, document: &str) -> Build {
         let t0 = std::time::Instant::now();
         let cached = prelude_env(prelude, &opts);
@@ -2581,6 +2626,15 @@ impl Build {
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
         let inputs = g.input_finder(&opts.finder);
+        // the package loads' records (`crate::pkgrec`); a load never seen
+        // runs optimistically under speculation
+        let optimistic = opts.speculation != Speculation::Off
+            && std::env::var("PHITEX_PKG_OPTIMISTIC").map_or(true, |x| x != "0");
+        g.loads = Some(Arc::new(crate::pkgrec::LoadHints::new(
+            crate::pkgrec::parse(&opts.pkgrec),
+            inputs.clone(),
+            optimistic,
+        )));
         let (nodes, incr) = g.push_document(unit, document, defs, doc, Some(&inputs));
         // (the files sliced in are read: listed, and watched)
         for n in g.inputs_read.clone() {
@@ -2691,6 +2745,13 @@ impl Build {
             .map(|n| (n.clone(), true))
             .collect();
         self.g.queries.extend(sliced);
+        self.g
+            .ops
+            .pkg_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        let loads = self.g.loads.clone();
         let mut absorb = Absorb {
             edits: &self.edits,
             nodes: &mut self.nodes,
@@ -2700,6 +2761,7 @@ impl Build {
             unchanged: None,
             finder: self.g.input_finder(&self.opts.finder),
             text: &mut self.text,
+            loads: loads.as_deref(),
         };
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
@@ -2719,6 +2781,12 @@ impl Build {
         stats.live = self.g.eng.live_nodes();
         stats.page_steps_completed = self.g.take_steps_done();
         stats.refuted_guesses = self.g.take_refuted();
+        self.pkg_stats(&mut stats);
+        // the loads' records as this evaluation left them: a load
+        // inserted by a later edit uses them
+        if let Some(l) = &self.g.loads {
+            l.merge(self.fresh_records());
+        }
         // the chain's last values become its round-one guesses: an edit
         // whose rounds restart begins from them, not from the cold guess
         let kept = self.export_pgst();
@@ -2890,6 +2958,35 @@ impl Build {
             let t = self.text.clone();
             self.edits.send(&t);
         }
+        // a package load whose record lists the file: its key no longer
+        // matches, so its hint goes back to the unrecorded one
+        // (`crate::pkgrec`)
+        if let Some(l) = self.g.loads.clone() {
+            l.forget(name);
+            let text = as_file(&self.text);
+            let incr = self.doc.then_some(&self.incr);
+            let redo: Vec<(NodeId, Vec<ValueId>)> = self
+                .nodes
+                .iter()
+                .filter_map(|(_, n, src)| match *src {
+                    Src::Doc(s, e) if l.reads_file(src.text(&text), name) => Some((
+                        *n,
+                        node_args(
+                            self.g.eng.values(),
+                            &text,
+                            incr,
+                            &DocNode::Doc(s, e),
+                            Some(&l),
+                        ),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            for (n, args) in redo {
+                self.g.eng.replace(n, self.g.ops.exec, args);
+                declare_marks_before(&mut self.g.eng, n);
+            }
+        }
         self.g.absorb_provided();
         let env = self.g.environment(self.opts.fixpoint);
         self.g.eng.set_environment(env);
@@ -2926,6 +3023,95 @@ impl Build {
     #[must_use]
     pub fn export_prelude(&self) -> Option<Vec<u8>> {
         self.prelude_complete().then(|| serialise(&self.prelude))
+    }
+
+    /// The package loads' records ([`Options::pkgrec`]): those the build
+    /// was given, each load this build ran replacing its own
+    /// (`crate::pkgrec`). Kept machine-wide, beside the format.
+    #[must_use]
+    pub fn export_pkgrec(&self) -> Vec<u8> {
+        match &self.g.loads {
+            Some(l) => {
+                l.merge(self.fresh_records());
+                l.bytes()
+            }
+            None => self.opts.pkgrec.clone(),
+        }
+    }
+
+    /// The records the loads' last runs left (`pkgrecs`), by load key.
+    fn fresh_records(&self) -> Vec<(String, crate::pkgrec::Rec)> {
+        let v = self.g.eng.values();
+        let Some(acc) = self.g.eng.acc_value(self.unit, v.field("pkgrecs")) else {
+            return Vec::new();
+        };
+        let keys: FxHashMap<u64, String> = self
+            .nodes
+            .iter()
+            .filter_map(|(_, n, src)| {
+                Some((n.raw(), crate::pkgrec::load_key(src.text(&self.text))?))
+            })
+            .collect();
+        v.seq_to_vec(acc)
+            .into_iter()
+            .filter_map(|e| {
+                let (node, r) = crate::pkgrec::decode_entry(v, e)?;
+                Some((keys.get(&node)?.clone(), r))
+            })
+            .collect()
+    }
+
+    /// The package loads' counters ([`Stats::pkg_loads`] and the rest).
+    fn pkg_stats(&self, stats: &mut Stats) {
+        let loads: Vec<u64> = self
+            .nodes
+            .iter()
+            .filter(|(_, _, src)| crate::pkgrec::load_key(src.text(&self.text)).is_some())
+            .map(|(_, n, _)| n.raw())
+            .collect();
+        stats.pkg_loads = loads.len() as u64;
+        if let Some(l) = &self.g.loads {
+            stats.pkg_recorded = l.given[0].load(std::sync::atomic::Ordering::Relaxed);
+            stats.pkg_optimistic = l.given[1].load(std::sync::atomic::Ordering::Relaxed);
+        }
+        let log = self
+            .g
+            .ops
+            .pkg_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        stats.pkg_runs = log.len() as u64;
+        // the most load runs at once, and the span from the first's start
+        // to the last's end
+        let mut ev: Vec<(std::time::Instant, i64)> = Vec::with_capacity(2 * log.len());
+        for &(_, a, b) in &log {
+            ev.push((a, 1));
+            ev.push((b, -1));
+        }
+        ev.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)));
+        let (mut cur, mut max) = (0i64, 0i64);
+        for &(_, d) in &ev {
+            cur += d;
+            max = max.max(cur);
+        }
+        stats.pkg_max_concurrent = usize::try_from(max).unwrap_or(0);
+        stats.pkg_wall = match (ev.first(), ev.last()) {
+            (Some(a), Some(b)) => b.0.duration_since(a.0),
+            _ => std::time::Duration::ZERO,
+        };
+        // the loads on the critical chain (a walk of it: asked for)
+        if !crate::exec::env_flag!("PHITEX_PKG_STATS") {
+            return;
+        }
+        let on: phitex_defuse::FxHashSet<u64> = self
+            .g
+            .eng
+            .critical_chain()
+            .iter()
+            .map(|(n, _)| n.raw())
+            .collect();
+        stats.pkg_on_critical = loads.iter().filter(|n| on.contains(n)).count() as u64;
     }
 
     /// The files the document's runs opened for reading, with a hash of
@@ -3662,6 +3848,7 @@ fn declare_fields(eng: &mut Engine) {
         "pagefxs",
         "pgdeltas",
         "pgsts",
+        "pkgrecs",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
     ] {

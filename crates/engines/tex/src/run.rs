@@ -59,7 +59,13 @@ pub(crate) struct Ops {
     /// The page chain's loop-backs as read and published in the current
     /// evaluation: the refuted guesses ([`crate::Stats`]).
     pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The package loads' finished runs (`crate::pkgrec`): node, start,
+    /// end, for [`crate::Stats`] (concurrency, preamble wall).
+    pub pkg_log: std::sync::Arc<std::sync::Mutex<Vec<PkgRun>>>,
 }
+
+/// A package load's finished run: its node, when it began and ended.
+pub(crate) type PkgRun = (u64, std::time::Instant, std::time::Instant);
 
 /// A level of the input stack.
 #[derive(Clone, Debug)]
@@ -243,6 +249,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The files this run opened: name and a hash of the text read
     /// (flushed to the `fread` accumulator by [`Run::finish`]).
     pub fread: Vec<(String, u64)>,
+    /// The files this run looked for and did not find (a package load's
+    /// record keys on them, `crate::pkgrec`).
+    pub fmiss: Vec<String>,
+    /// Whether the node is a package load whose run is recorded
+    /// (`crate::pkgrec`).
+    pub rec_load: bool,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
@@ -339,6 +351,8 @@ impl<'c, 'a> Run<'c, 'a> {
             last_par: (0, 0),
             doc: false,
             fread: Vec::new(),
+            fmiss: Vec::new(),
+            rec_load: false,
             no_pull: false,
             st: crate::runstate::State::new(),
             cat_cache: [u8::MAX; 256],
@@ -634,6 +648,8 @@ impl<'c, 'a> Run<'c, 'a> {
         // or map's bytes are not copied and hashed again at every read)
         if let Some(t) = x.and_then(|x| crate::val::list_of(v, x).get(1).copied()) {
             self.fread.push((key.to_owned(), t.raw()));
+        } else if self.rec_load && !self.fmiss.iter().any(|n| n == key) {
+            self.fmiss.push(key.to_owned());
         }
         Ok(x)
     }
@@ -2080,6 +2096,9 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
+        if self.rec_load && op == self.ops.exec {
+            self.record_load(&published);
+        }
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
             crate::page::step_defs(&mut self, published);
         } else {
@@ -2175,6 +2194,32 @@ impl<'c, 'a> Run<'c, 'a> {
         self.cx.claim(n);
         self.cx.set_effect(self.effect);
         ValueId::UNIT
+    }
+
+    /// A package load's record (`crate::pkgrec`): the files it read (and
+    /// looked for in vain), the fields it defined (`published`) and read
+    /// from the engine, whether it opened no scope and took no sibling;
+    /// contributed to `pkgrecs`, and its run's times logged.
+    fn record_load(&mut self, published: &[(Field, ValueId, Locality)]) {
+        let v = self.v;
+        let mut files = self.fread.clone();
+        files.extend(self.fmiss.iter().map(|n| (n.clone(), 0)));
+        let writes: Vec<String> = published
+            .iter()
+            .map(|&(f, _, _)| crate::val::field_name(v, f))
+            .collect();
+        let reads: Vec<String> = self
+            .st
+            .read_locs()
+            .into_iter()
+            .map(|l| crate::val::field_name(v, self.loc_field(l)))
+            .filter(|n| !n.starts_with("file:"))
+            .collect();
+        let flags = i64::from(self.effect == Effect::None)
+            | (i64::from(self.pulled == 0 && !self.claim_rest) << 1);
+        let node = self.cx.node().raw();
+        let e = crate::pkgrec::entry(v, node, &files, &writes, &reads, flags);
+        self.contribute("pkgrecs", v.seq_unit(e));
     }
 
     /// Ends a run that cannot finish: nothing defined, and the need, for
@@ -2479,6 +2524,8 @@ pub(crate) struct Parked {
     last_par: (i64, i64),
     doc: bool,
     fread: Vec<(String, u64)>,
+    fmiss: Vec<String>,
+    rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
     contribs: Vec<(Field, ValueId)>,
@@ -2736,6 +2783,8 @@ impl Run<'_, '_> {
             last_par: self.last_par,
             doc: self.doc,
             fread: std::mem::take(&mut self.fread),
+            fmiss: std::mem::take(&mut self.fmiss),
+            rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
             contribs: std::mem::take(&mut self.contribs),
@@ -2801,6 +2850,8 @@ impl<'c, 'a> Run<'c, 'a> {
         r.last_par = p.last_par;
         r.doc = p.doc;
         r.fread = p.fread;
+        r.fmiss = p.fmiss;
+        r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
         r.st = crate::runstate::State::unpark(p.st);
         r.contribs = p.contribs;
