@@ -87,3 +87,39 @@ repro!(
     table_float_lost,
     "corpus (green since dev 301ef3af, pagechain's pgstfix): \\caption + \\centering + tabular in a table float lost the float ('Float(s) lost') on b7646c77, first cause in 8 of 136 arXiv papers"
 );
+repro!(
+    pagestyle_in_group,
+    "amsldoc (amscorrect): a page fired inside a group the text's run opens and closes runs its routine in that group's locals (§1025): \\cleardoublepage as amsldoc defines it, \\clearpage{\\pagestyle{empty}\\cleardouble@page}, printed the running head on the blank page"
+);
+repro!(
+    amsmath_page_counter,
+    "amsldoc (amscorrect): the text reads \\count0..9 as the output routines left them (§1025): amsmath's \\savecounters@/\\restorecounters@ in a display after a page break wrote a stale \\c@page back, and the page numbers after it restarted"
+);
+repro!(
+    multicol_partial,
+    "amsldoc (multicol): \\begin{multicols} forces a page whose routine ships nothing (multicol.dtx \\prepare@multicols: the partial page saved in \\partial@page) and \\end{multicols} balances the columns back onto the page (\\balance@columns@out); the partial page came out twice, then 2pt high (§1025)"
+);
+repro!(
+    multicol_pages,
+    "amsldoc (multicol): a multicols environment over several pages (multicol.dtx \\multi@column@out ships each page with the partial page on the first) and balanced at \\end{multicols} on the last"
+);
+repro!(
+    multicol_theindex,
+    "amsldoc (multicol): imakeidx's theindex is a multicols environment under a \\section* title (amsldoc's index, pdflatex's pages 36-40); it hung with '257 rounds without progress'"
+);
+repro!(
+    routine_global_local,
+    "multicol: TeX's state holds the younger assignment (§279): a routine's \\global made at an earlier page beats the text's local made before it (multicol's \\@colroom), and a local the text makes after it beats it, in the same group; after the group the global survives (§283)"
+);
+repro!(
+    routine_local_dies,
+    "multicol (TeX's assignment order): a routine's local assignment dies with its output group (§1025–§1026), its \\global one reaches the next page's routine"
+);
+repro!(
+    text_global_in_group,
+    "multicol (TeX's assignment order): a \\global in an inner group hides the outer group's save (§283): after both groups end, the page's routine reads the global"
+);
+repro!(
+    box_use_group,
+    "multicol (TeX's assignment order): a box register used in the text (\\box1) is voided in place, unsaved (§1079), at level one when a routine set it \\global: the next routine reads it void"
+);

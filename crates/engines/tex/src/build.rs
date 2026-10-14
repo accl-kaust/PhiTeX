@@ -172,6 +172,9 @@ impl Run<'_, '_> {
             return self.mode();
         }
         self.effect = Effect::Close;
+        // (the engine scope's end: `unsave` is the engine's, the page
+        // chain's fold restores its saves as TeX does, §283)
+        self.log_end(md.depth);
         self.unsave_extras(md)?;
         self.kind_outer(md)
     }
@@ -312,7 +315,16 @@ impl Run<'_, '_> {
             return;
         }
         if lid == 0 {
+            self.probe_ok = false;
             self.flush_text_defs();
+            // (the invariant the writer's fold rests on: a run's
+            // assignments go out before each item it puts on the main
+            // list, so a run spanning several fires has each in the page
+            // part where it made it)
+            debug_assert!(
+                self.tlog.is_empty() || !self.logs_defs(),
+                "text assignments left behind an item"
+            );
         }
         let e = v.list(vec![v.int(lid), node]);
         let s = v.seq_unit(e);
@@ -2376,6 +2388,7 @@ pub(crate) fn fold_item(
         | nodes::T_PDFW_AT
         | nodes::T_PDFQ_AT
         | nodes::T_DEFS_AT
+        | nodes::T_LOCALS_AT
         | nodes::T_FLUSH_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
@@ -2533,7 +2546,7 @@ pub(crate) fn fold_entries(
 
 /// Whether `x` is a marker for the page builder's fold
 /// (`T_PAGE_PARAMS`, `T_MARKS_AT`), not list material.
-fn is_marker(v: &Values, x: ValueId) -> bool {
+pub(crate) fn is_marker(v: &Values, x: ValueId) -> bool {
     matches!(
         nodes::tag(v, x),
         nodes::T_PAGE_PARAMS
@@ -2543,6 +2556,7 @@ fn is_marker(v: &Values, x: ValueId) -> bool {
             | nodes::T_PDFW_AT
             | nodes::T_PDFQ_AT
             | nodes::T_DEFS_AT
+            | nodes::T_LOCALS_AT
             | nodes::T_FLUSH_AT
     )
 }
