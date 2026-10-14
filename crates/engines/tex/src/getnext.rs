@@ -354,9 +354,10 @@ impl Run<'_, '_> {
         // (`PHITEX_GIVEBACK_TRACE`: a load's run, why a sibling it pulled
         // was not given back)
         let trace = crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && self.rec_load;
+        let pulled = self.pulled;
         let refuse = |why: &str| {
             if trace {
-                eprintln!("giveback: refused: {why}");
+                eprintln!("giveback: refused (pulled {pulled}): {why}");
             }
             Ok(false)
         };
