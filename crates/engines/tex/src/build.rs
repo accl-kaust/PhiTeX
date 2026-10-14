@@ -192,6 +192,26 @@ impl Run<'_, '_> {
         }
     }
 
+    /// The open lists at a fatal error (§1335): the main list keeps what
+    /// it holds, up to the end (`T_ABORT`); a list open inside it, a
+    /// paragraph's or a box's, ends with the job: none of it goes on the
+    /// main list.
+    pub(crate) fn end_fatal(&mut self) {
+        let nest = std::mem::take(&mut self.nest);
+        self.abandon_levels(&nest);
+        for l in nest {
+            if l.owns && l.lid == 0 {
+                for x in l.list {
+                    self.append(0, x);
+                }
+            }
+        }
+        if self.pg.is_none() {
+            let v = self.v;
+            self.append(0, v.list(vec![v.int(nodes::T_ABORT)]));
+        }
+    }
+
     /// Leaves the run's one open group (sharing the list it is in) to
     /// the engine as a scope (`new_save_level`, §274): its kind is
     /// `[group, sid, list, mode, depth, parent kind, extra…]`, the
@@ -540,7 +560,7 @@ impl Run<'_, '_> {
     /// The paragraph's level when groups opened inside the paragraph
     /// are still open above it (`abc{def\\par}`): the innermost level,
     /// under groups that share its list only.
-    fn par_level_under_groups(&self) -> Option<usize> {
+    pub(crate) fn par_level_under_groups(&self) -> Option<usize> {
         let k = self
             .nest
             .iter()
@@ -558,7 +578,7 @@ impl Run<'_, '_> {
     /// groups stay open, now in the vertical list the paragraph was in
     /// (their saved definitions restored at their own close, as ever).
     /// Returns the paragraph's list.
-    fn end_graf_under_groups(&mut self, k: usize) -> R<Vec<ValueId>> {
+    pub(crate) fn end_graf_under_groups(&mut self, k: usize) -> R<Vec<ValueId>> {
         let (mode, lid) = if let Some(b) = k.checked_sub(1) {
             (self.nest[b].mode, self.nest[b].lid)
         } else {
@@ -2341,9 +2361,13 @@ pub(crate) fn fold_item(
         }
         // the page builder's markers (page parameters, a marks read): kept
         // in place for its fold, invisible to the list's readers
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_DEFS_AT => {
-            out.push(n);
-        }
+        nodes::T_PAGE_PARAMS
+        | nodes::T_MARKS_AT
+        | nodes::T_WRITE_AT
+        | nodes::T_FONT_AT
+        | nodes::T_PDFW_AT
+        | nodes::T_PDFQ_AT
+        | nodes::T_DEFS_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2503,7 +2527,13 @@ pub(crate) fn fold_entries(
 fn is_marker(v: &Values, x: ValueId) -> bool {
     matches!(
         nodes::tag(v, x),
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_DEFS_AT
+        nodes::T_PAGE_PARAMS
+            | nodes::T_MARKS_AT
+            | nodes::T_WRITE_AT
+            | nodes::T_FONT_AT
+            | nodes::T_PDFW_AT
+            | nodes::T_PDFQ_AT
+            | nodes::T_DEFS_AT
     )
 }
 
