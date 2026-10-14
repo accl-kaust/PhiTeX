@@ -42,7 +42,8 @@ fn build(name: &str) -> (Vec<u8>, String) {
         .output()
         .expect("phitex runs");
     let pdf = std::fs::read(dir.join(format!("{name}.pdf"))).unwrap_or_default();
-    let term = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let term =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     (pdf, term)
 }
 
@@ -51,7 +52,11 @@ fn check(name: &str) {
     let (got, term) = build(name);
     if got != want {
         let n = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
-        let errors: Vec<&str> = term.lines().filter(|l| l.starts_with("error")).take(5).collect();
+        let errors: Vec<&str> = term
+            .lines()
+            .filter(|l| l.starts_with("error"))
+            .take(5)
+            .collect();
         panic!(
             "{name}: the PDF differs from pdflatex's at byte {n} ({} vs {} bytes); first errors: {errors:?}",
             got.len(),
