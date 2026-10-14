@@ -263,14 +263,20 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
     let f = eng
         .values()
         .field(&crate::etex::marks_before_field(n.raw()));
-    eng.declare_loopback(f, ValueId::UNIT);
+    {
+        decl_trace(eng, f, ValueId::UNIT);
+        eng.declare_loopback(f, ValueId::UNIT);
+    }
     // how many pages fired before the node's marker (the writer's
     // read-time writes after a `\shipout`, `etex::page_shipped_before`)
     let f = eng
         .values()
         .field(&crate::etex::fired_before_field(n.raw()));
     let zero = eng.values().int(0);
-    eng.declare_loopback(f, zero);
+    {
+        decl_trace(eng, f, zero);
+        eng.declare_loopback(f, zero);
+    }
 }
 
 /// Edited texts of `\\input` files by name: the text and its bytes.
@@ -1634,7 +1640,10 @@ impl Graph {
                     let v = self.eng.values();
                     let f = v.field(&format!("pagefx:{j}"));
                     let x = import(v, &t);
-                    self.eng.declare_loopback(f, x);
+                    {
+                        decl_trace(&self.eng, f, x);
+                        self.eng.declare_loopback(f, x);
+                    }
                 }
             }
         }
@@ -1681,7 +1690,10 @@ impl Graph {
                 .map_or(none, |(_, ks)| {
                     v.list(ks.iter().map(|k| v.str(k)).collect())
                 });
-            self.eng.declare_loopback(w, guess);
+            {
+                decl_trace(&self.eng, w, guess);
+                self.eng.declare_loopback(w, guess);
+            }
             // the guessed keys' `wdef:<field>` loop-backs declared with
             // it: a read-back of a guessed key never waits for them
             let keys: Vec<String> = self
@@ -1695,7 +1707,10 @@ impl Graph {
                     let v = self.eng.values();
                     let none = v.list(Vec::new());
                     let wd = v.field(&format!("wdef:{k}"));
-                    self.eng.declare_loopback(wd, none);
+                    {
+                        decl_trace(&self.eng, wd, none);
+                        self.eng.declare_loopback(wd, none);
+                    }
                     self.wdefs.push(k);
                 }
             }
@@ -1865,7 +1880,10 @@ impl Graph {
                 for f in new {
                     let none = self.eng.values().list(Vec::new());
                     let w = self.eng.values().field(&format!("wdef:{f}"));
-                    self.eng.declare_loopback(w, none);
+                    {
+                        decl_trace(&self.eng, w, none);
+                        self.eng.declare_loopback(w, none);
+                    }
                     self.wdefs.push(f);
                     asked = true;
                 }
@@ -1941,6 +1959,8 @@ impl Graph {
                 break;
             }
             let env = self.environment(fixpoint);
+            let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
+            env_trace(&self.eng, &env);
             self.eng.set_environment(env);
             self.eng.set_environment_absent(self.absent.clone());
         }
@@ -2589,6 +2609,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     if !known.is_empty() {
         g.absorb_provided();
         let env = g.environment(false);
+        let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
+        env_trace(&g.eng, &env);
         g.eng.set_environment(env);
         g.eng.set_environment_absent(g.absent.clone());
     }
@@ -2962,6 +2984,8 @@ impl Build {
         {
             g.absorb_provided();
             let env = g.environment(opts.fixpoint);
+            let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
+            env_trace(&g.eng, &env);
             g.eng.set_environment(env);
             g.eng.set_environment_absent(g.absent.clone());
         }
@@ -3365,6 +3389,8 @@ impl Build {
         }
         self.g.absorb_provided();
         let env = self.g.environment(self.opts.fixpoint);
+        let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
+        env_trace(&self.g.eng, &env);
         self.g.eng.set_environment(env);
         let absent = self.g.absent.clone();
         self.g.eng.set_environment_absent(absent);
@@ -4407,7 +4433,10 @@ fn chain_guesses(g: &mut Graph, bytes: &[u8]) {
             let name = if k == 0 { "pgst" } else { "pgdef" };
             let f = v.field(&format!("{name}:{j}"));
             let x = import(v, &t);
-            g.eng.declare_loopback(f, x);
+            {
+                decl_trace(&g.eng, f, x);
+                g.eng.declare_loopback(f, x);
+            }
             if k == 0 && last.is_none_or(|(l, _)| j > l) {
                 last = Some((j, x));
             }
@@ -4416,7 +4445,10 @@ fn chain_guesses(g: &mut Graph, bytes: &[u8]) {
     if let Some((l, x)) = last {
         for j in l + 1..crate::page::MAX_PAGES {
             let f = g.eng.values().field(&format!("pgst:{j}"));
-            g.eng.declare_loopback(f, x);
+            {
+                decl_trace(&g.eng, f, x);
+                g.eng.declare_loopback(f, x);
+            }
         }
     }
 }
@@ -4455,35 +4487,56 @@ fn declare_fields(eng: &mut Engine) {
     // engine's numbers (`pdfout::font_tags`), for `\pdffontname`
     let f = eng.values().field(crate::pdfout::FONT_TAGS);
     let none = eng.values().list(Vec::new());
-    eng.declare_loopback(f, none);
+    {
+        decl_trace(eng, f, none);
+        eng.declare_loopback(f, none);
+    }
     // what each page's output routine leaves for the next: a
     // loop-back the page builder's fold reads from the previous round
     // the state after the page each flush point opens, by flush point
     // (`[node, k, value]`, the writer's fold): one field, declared here,
     // so a flush point costs no declaration round
     let f = eng.values().field(crate::page::FLUSHES);
-    eng.declare_loopback(f, ValueId::UNIT);
+    {
+        decl_trace(eng, f, ValueId::UNIT);
+        eng.declare_loopback(f, ValueId::UNIT);
+    }
     // `\count0..9` as the first page's routine reads them, when the
     // text has a flush point (the writer's fold, `page::FinalState`)
     let f = eng.values().field("pgread0");
-    eng.declare_loopback(f, ValueId::UNIT);
+    {
+        decl_trace(eng, f, ValueId::UNIT);
+        eng.declare_loopback(f, ValueId::UNIT);
+    }
     for j in 0..crate::page::MAX_PAGES {
         let f = eng.values().field(&format!("pagefx:{j}"));
         let none = eng.values().list(Vec::new());
-        eng.declare_loopback(f, none);
+        {
+            decl_trace(eng, f, none);
+            eng.declare_loopback(f, none);
+        }
         // what `\count0..9` are after page j's step (the build's
         // guess in round one, `page_guesses`)
         let f = eng.values().field(&format!("pgdef:{j}"));
-        eng.declare_loopback(f, ValueId::UNIT);
+        {
+            decl_trace(eng, f, ValueId::UNIT);
+            eng.declare_loopback(f, ValueId::UNIT);
+        }
         // what the routines up to page j left changed, besides
         // `\count0..9` (the chain's cumulative delta, folded by the
         // writer; guess: none)
         let f = eng.values().field(&format!("pgst:{j}"));
-        eng.declare_loopback(f, ValueId::UNIT);
+        {
+            decl_trace(eng, f, ValueId::UNIT);
+            eng.declare_loopback(f, ValueId::UNIT);
+        }
         // whether page j's step shipped a page (guess: no)
         let f = eng.values().field(&crate::etex::shipped_field(j));
         let zero = eng.values().int(0);
-        eng.declare_loopback(f, zero);
+        {
+            decl_trace(eng, f, zero);
+            eng.declare_loopback(f, zero);
+        }
     }
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
@@ -4516,7 +4569,10 @@ fn page_guesses(g: &mut Graph, env: &Env) {
         decl.push((v.field(&format!("pgdef:{j}")), v.list(cs)));
     }
     for (f, x) in decl {
-        g.eng.declare_loopback(f, x);
+        {
+            decl_trace(&g.eng, f, x);
+            g.eng.declare_loopback(f, x);
+        }
     }
 }
 
@@ -4578,4 +4634,65 @@ mod prelude_tests {
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
     }
+}
+
+/// `PHITEX_DECL_TRACE`: a loop-back declaration, its family and whether
+/// its initial value is the one declared before.
+fn decl_trace(eng: &Engine, f: Field, init: ValueId) {
+    static LAST: std::sync::Mutex<Option<FxHashMap<Field, ValueId>>> = std::sync::Mutex::new(None);
+
+    if !crate::exec::env_flag!("PHITEX_DECL_TRACE") {
+        return;
+    }
+    let mut l = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let prev = l.get_or_insert_with(FxHashMap::default).insert(f, init);
+    let name = field_name(eng.values(), f);
+    let fam = name.split(':').next().unwrap_or("").to_owned();
+    let how = match prev {
+        None => "new",
+        Some(p) if p == init => "same init",
+        Some(_) => "other init",
+    };
+    eprintln!("decl-trace: declare_loopback {fam}: {how}");
+}
+
+/// `PHITEX_DECL_TRACE`: a full environment map, by family: fields new,
+/// changed, unchanged and dropped against the map supplied before.
+fn env_trace(eng: &Engine, env: &[(Field, ValueId)]) {
+    static LAST: std::sync::Mutex<Option<FxHashMap<Field, ValueId>>> = std::sync::Mutex::new(None);
+
+    if !crate::exec::env_flag!("PHITEX_DECL_TRACE") {
+        return;
+    }
+    let mut l = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let old = l.take().unwrap_or_default();
+    let new: FxHashMap<Field, ValueId> = env.iter().copied().collect();
+    let v = eng.values();
+    let fam = |f: Field| field_name(v, f).split(':').next().unwrap_or("").to_owned();
+    let mut c: std::collections::BTreeMap<String, [u32; 4]> = std::collections::BTreeMap::new();
+    for (&f, &x) in &new {
+        let k = match old.get(&f) {
+            None => 0,
+            Some(&y) if y != x => 1,
+            Some(_) => 2,
+        };
+        c.entry(fam(f)).or_default()[k] += 1;
+    }
+    for &f in old.keys().filter(|f| !new.contains_key(f)) {
+        c.entry(fam(f)).or_default()[3] += 1;
+    }
+    let s: Vec<String> = c
+        .iter()
+        .map(|(k, [a, b, d, e])| format!("{k}: {a} new {b} changed {d} same {e} dropped"))
+        .collect();
+    eprintln!(
+        "decl-trace: set_environment {} fields; {}",
+        new.len(),
+        s.join("; ")
+    );
+    *l = Some(new);
 }
