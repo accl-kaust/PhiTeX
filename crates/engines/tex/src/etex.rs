@@ -1299,7 +1299,13 @@ pub(crate) fn is_class_mark(v: &phitex_defuse::Values, m: Option<ValueId>) -> bo
 }
 
 /// `fire_up`'s marks of the classes other than 0 (pdfTeX §1012–§1014), the page's marks given as values.
-pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> R<()> {
+/// The marks before the page are `before`'s (the plan's, `[class, top,
+/// first, bot]` each: a class it does not list has none) when given.
+pub(crate) fn fire_marks_values(
+    r: &mut Run<'_, '_>,
+    page_marks: &[ValueId],
+    before: Option<&[ValueId]>,
+) -> R<()> {
     let v = r.v;
     let classes: Vec<i32> = r
         .get_loc(crate::fields::cell::MARKCLASSES)?
@@ -1309,15 +1315,22 @@ pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> 
         .map(|&x| i32::try_from(int_of(v, x)).unwrap_or(0))
         .collect();
     for c in classes {
-        let bot = r
-            .get(&mark_field("bot", c))?
-            .filter(|&x| x != ValueId::UNIT);
-        let mut top = r
-            .get(&mark_field("top", c))?
-            .filter(|&x| x != ValueId::UNIT);
-        let mut first = r
-            .get(&mark_field("first", c))?
-            .filter(|&x| x != ValueId::UNIT);
+        let some = |x: Option<ValueId>| x.filter(|&x| x != ValueId::UNIT);
+        let (bot, mut top, mut first) = if let Some(b) = before {
+            let e = b
+                .iter()
+                .map(|&e| list_of(v, e))
+                .find(|e| e.first().is_some_and(|&k| int_of(v, k) == i64::from(c)))
+                .unwrap_or_default();
+            let at = |i: usize| some(e.get(i).copied());
+            (at(3), at(1), at(2))
+        } else {
+            (
+                some(r.get(&mark_field("bot", c))?),
+                some(r.get(&mark_field("top", c))?),
+                some(r.get(&mark_field("first", c))?),
+            )
+        };
         if bot.is_some() {
             top = bot;
             first = None;
