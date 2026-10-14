@@ -239,7 +239,11 @@ impl Operation for Exec {
         let hint = crate::hints::hint_of_args(cx.values(), &args);
         // (a package load: its run recorded, `crate::pkgrec`)
         let load = crate::pkgrec::is_load(cx.values(), &args);
-        let (node, t0) = (cx.node().raw(), std::time::Instant::now());
+        let (node, t0, spec) = (
+            cx.node().raw(),
+            std::time::Instant::now(),
+            cx.is_speculative(),
+        );
         let o = ops(&self.0);
         let log = o.pkg_log.clone();
         let res = run_node_parking(cx, o, true, |r| {
@@ -285,7 +289,7 @@ impl Operation for Exec {
         if load && res.is_ok() {
             log.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((node, t0, std::time::Instant::now()));
+                .push((node, t0, std::time::Instant::now(), spec));
         }
         res
     }

@@ -3138,6 +3138,7 @@ impl Build {
     }
 
     /// The package loads' counters ([`Stats::pkg_loads`] and the rest).
+    #[allow(clippy::too_many_lines)]
     fn pkg_stats(&self, stats: &mut Stats) {
         let loads: Vec<u64> = self
             .nodes
@@ -3180,6 +3181,50 @@ impl Build {
                     n.raw()
                 );
             }
+            // per load: its runs (speculative ones), and the fields its
+            // record reads whose definition reaching it is another load's
+            let v = self.g.eng.values();
+            let keyed: Vec<(NodeId, String)> = self
+                .nodes
+                .iter()
+                .filter_map(|(_, n, src)| {
+                    Some((*n, crate::pkgrec::load_key(src.text(&self.text))?))
+                })
+                .collect();
+            let log = self
+                .g
+                .ops
+                .pkg_log
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            for (n, k) in &keyed {
+                let runs = log.iter().filter(|r| r.0 == n.raw()).count();
+                let spec = log.iter().filter(|r| r.0 == n.raw() && r.3).count();
+                let mut deps: Vec<String> = Vec::new();
+                if let Some((_, r)) = fresh.iter().find(|(f, _)| f == k) {
+                    for f in &r.reads {
+                        if let Some(p) = self.g.eng.reaching_def(*n, v.field(f))
+                            && let Some((_, pk)) = keyed.iter().find(|(m, _)| *m == p)
+                        {
+                            deps.push(format!("{f} <- {pk}"));
+                        }
+                    }
+                }
+                let nd = deps.len();
+                deps.truncate(12);
+                eprintln!(
+                    "pkgrec: runs of {k}: {runs} ({spec} speculative); reads {nd} fields another load defined: {deps:?}"
+                );
+            }
+            eprintln!(
+                "pkgrec: refuted by field {:?}; restarted by {:?}; speculations {} confirmed {} mispredicted {}",
+                stats.refuted_by_field.iter().take(20).collect::<Vec<_>>(),
+                stats.restarted_by,
+                stats.speculations,
+                stats.confirmations,
+                stats.mispredictions
+            );
         }
         if let Some(l) = &self.g.loads {
             stats.pkg_recorded = l.given[0].load(std::sync::atomic::Ordering::Relaxed);
@@ -3196,7 +3241,7 @@ impl Build {
         // the most load runs at once, and the span from the first's start
         // to the last's end
         let mut ev: Vec<(std::time::Instant, i64)> = Vec::with_capacity(2 * log.len());
-        for &(_, a, b) in &log {
+        for &(_, a, b, _) in &log {
             ev.push((a, 1));
             ev.push((b, -1));
         }

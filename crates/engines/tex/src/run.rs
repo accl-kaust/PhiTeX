@@ -65,8 +65,9 @@ pub(crate) struct Ops {
     pub pkg_log: std::sync::Arc<std::sync::Mutex<Vec<PkgRun>>>,
 }
 
-/// A package load's finished run: its node, when it began and ended.
-pub(crate) type PkgRun = (u64, std::time::Instant, std::time::Instant);
+/// A package load's finished run: its node, when it began and ended,
+/// and whether it ran speculatively.
+pub(crate) type PkgRun = (u64, std::time::Instant, std::time::Instant, bool);
 
 /// The lines of a file not reached yet: its text (a string value) and
 /// the byte offset of the next line. A line becomes a [`Line`] level
