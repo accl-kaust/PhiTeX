@@ -405,7 +405,14 @@ impl Run<'_, '_> {
                 plan.push(v.int(i64::try_from(j).unwrap_or(0)));
                 let [t, _, b] = marks.0.get(&0).copied().unwrap_or([None; 3]);
                 let u = |m: Option<ValueId>| m.unwrap_or(ValueId::UNIT);
-                before.push(v.list(vec![u(t), u(b)]));
+                let mut mk = vec![u(t), u(b)];
+                // (and the other classes' marks, e-TeX's `\\marks`: from
+                // the plan too, never from the step before)
+                let classes = marks.classes(v);
+                if !classes.is_empty() {
+                    mk.push(v.list(classes));
+                }
+                before.push(v.list(mk));
                 marks.fire_values(v, ms);
                 n_starts += 1;
                 start = end.clone();
@@ -800,8 +807,9 @@ impl Run<'_, '_> {
         }
         // §1012: marks
         // (the marks before the page, from the plan: `pp:mk:<j>`)
-        let (mut top, bot) = match mk.map(|x| list_of(v, x)) {
-            Some(xs) if xs.len() == 2 => {
+        let mkl = mk.map(|x| list_of(v, x));
+        let (mut top, bot) = match &mkl {
+            Some(xs) if xs.len() >= 2 => {
                 let m = |x: ValueId| Some(x).filter(|&x| x != ValueId::UNIT);
                 (m(xs[0]), m(xs[1]))
             }
@@ -817,7 +825,9 @@ impl Run<'_, '_> {
         if bot.is_some() {
             top = bot;
         }
-        crate::etex::fire_marks_values(self, &marks)?;
+        // (the other classes' marks before the page: the plan's)
+        let class_before = mk_classes(v, mkl.as_deref());
+        crate::etex::fire_marks_values(self, &marks, class_before.as_deref())?;
         for &m in &marks {
             if crate::etex::is_class_mark(v, Some(m)) {
                 continue;
@@ -1139,6 +1149,17 @@ impl MarksState {
                 *first = *top;
             }
         }
+    }
+
+    /// The marks of the classes other than 0 as they stand before the
+    /// next page fires: `[class, top, first, bot]` each (UNIT: null).
+    fn classes(&self, v: &Values) -> Vec<ValueId> {
+        let u = |m: Option<ValueId>| m.unwrap_or(ValueId::UNIT);
+        self.0
+            .iter()
+            .filter(|&(&c, _)| c != 0)
+            .map(|(&c, [t, f, b])| v.list(vec![v.int(i64::from(c)), u(*t), u(*f), u(*b)]))
+            .collect()
     }
 
     /// The `marks:before:<node>` value: UNIT before the first page.
@@ -2252,6 +2273,13 @@ fn count_entries(v: &Values, x: Option<ValueId>) -> Vec<(String, ValueId)> {
         .collect()
 }
 
+/// The other classes' marks before a page, from its `pp:mk:<j>`
+/// (`[top, bot, classes?]`): `None` when the plan gave no marks.
+fn mk_classes(v: &Values, mk: Option<&[ValueId]>) -> Option<Vec<ValueId>> {
+    let xs = mk.filter(|xs| xs.len() >= 2)?;
+    Some(xs.get(2).map(|&c| list_of(v, c)).unwrap_or_default())
+}
+
 /// `pgst:<j>`'s pairs `[field, value]` (UNIT: none).
 fn pgst_pairs(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId)> {
     x.map(|x| list_of(v, x))
@@ -2282,9 +2310,12 @@ fn step_input(name: &str) -> bool {
     matches!(
         name,
         "mark:top" | "mark:first" | "mark:bot" | "box:255" | "param:outputpenalty"
-    ) || name
-        .strip_prefix("count:")
-        .is_some_and(|k| k.len() == 1 && k.as_bytes()[0].is_ascii_digit())
+    ) || ["marks:top:", "marks:first:", "marks:bot:"]
+        .iter()
+        .any(|p| name.starts_with(p))
+        || name
+            .strip_prefix("count:")
+            .is_some_and(|k| k.len() == 1 && k.as_bytes()[0].is_ascii_digit())
 }
 
 /// Whether `x` is a field's value as TeX starts it (§222–§240: zero,
