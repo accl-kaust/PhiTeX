@@ -3713,6 +3713,10 @@ fn declare_fields(eng: &mut Engine) {
     eng.declare_accumulator(lines, Arc::new(SumMonoid));
     // what each page's output routine leaves for the next: a
     // loop-back the page builder's fold reads from the previous round
+    // `\count0..9` as the first page's routine reads them, when the
+    // text has a flush point (the writer's fold, `page::FinalState`)
+    let f = eng.values().field("pgread0");
+    eng.declare_loopback(f, ValueId::UNIT);
     for j in 0..crate::page::MAX_PAGES {
         let f = eng.values().field(&format!("pagefx:{j}"));
         let none = eng.values().list(Vec::new());

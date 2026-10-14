@@ -77,7 +77,9 @@ pub(crate) fn run_node_parking(
         None => Run::new(cx, o),
     };
     let t_body = std::time::Instant::now();
-    let res = body(&mut r);
+    // (a flush point the node's text did not read after: read at its
+    // end, so the nodes after it read the counts the routine left)
+    let res = body(&mut r).and_then(|()| r.flush_read());
     let t_body = t_body.elapsed();
     // (a long run, the format's: its commands' time, then its finish)
     let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");

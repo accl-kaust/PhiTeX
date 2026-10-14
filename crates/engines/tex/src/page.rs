@@ -584,6 +584,15 @@ impl Run<'_, '_> {
         let mut readst = ValueId::UNIT;
         let mut readdef = ValueId::UNIT;
         let mut inherited: Vec<(Field, ValueId)> = Vec::new();
+        if j == 0 {
+            // `\count0..9` as the first page's routine reads them (the
+            // text's at the first flush point; round one: the state)
+            let f = v.field("pgread0");
+            if let Some(x) = self.cx.use_field(f)?.filter(|&x| x != ValueId::UNIT) {
+                readdef = x;
+                self.preload_counts(x);
+            }
+        }
         if j > 0 && j < MAX_PAGES {
             // `\count0..9` as the step before this one left them
             // (`pgdef:<j-1>`, a loop-back: the build's guess in round one)
@@ -646,6 +655,29 @@ impl Run<'_, '_> {
 
     /// `\count0..9` read from `cs` (ten values) in place of the
     /// engine's.
+    /// `\count0..9` as the output routine left them (its `\global`
+    /// assignments, §1025): defined globally where they differ from
+    /// the text's, so the text after the flush, and the nodes after
+    /// this one, read them.
+    fn define_counts(&mut self, cs: ValueId) -> R<()> {
+        let v = self.v;
+        let xs = list_of(v, cs);
+        if xs.len() != 10 {
+            return Ok(());
+        }
+        for (k, &c) in xs.iter().enumerate() {
+            let k = i32::try_from(k).unwrap_or(0);
+            let Some(new) = v.as_int(c).and_then(|n| i32::try_from(n).ok()) else {
+                continue;
+            };
+            if self.reg_int(0, k)? != new {
+                let l = self.reg_loc(0, k);
+                self.set_loc(l, crate::runstate::Native::Int(new), true);
+            }
+        }
+        Ok(())
+    }
+
     fn preload_counts(&mut self, cs: ValueId) {
         let v = self.v;
         let xs = list_of(v, cs);
@@ -877,16 +909,20 @@ impl Run<'_, '_> {
     /// engine's from here on; UNIT (round one) leaves the state as it is.
     pub(crate) fn flush_read(&mut self) -> R<()> {
         let v = self.v;
-        let Some((decl, f)) = self.flush_pending.take() else {
+        // (pending until read: a stop here rewinds the command, which
+        // reads it again)
+        let Some((decl, f)) = self.flush_pending else {
             return Ok(());
         };
         if !self.cx.is_loopback(f) {
             self.cx.use_env(decl)?;
             if !self.cx.is_loopback(f) {
+                self.flush_pending = None;
                 return Ok(());
             }
         }
         let read = self.cx.use_field(f)?;
+        self.flush_pending = None;
         if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: flush point {} reads {}",
@@ -899,7 +935,7 @@ impl Run<'_, '_> {
         };
         let xs = list_of(v, x);
         if let Some(&cs) = xs.first() {
-            self.preload_counts(cs);
+            self.define_counts(cs)?;
         }
         if let Some(&pairs) = xs.get(1) {
             for (g, y) in pgst_pairs(v, Some(pairs)) {
@@ -1734,29 +1770,50 @@ impl FinalState {
             .collect();
         let ints =
             |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
-        let starts_at = |page: i64| -> Option<Vec<i64>> {
+        // the counts the routine of the page that fires at a flush point
+        // reads: the text's there (its arithmetic on the values fed back
+        // at the flush before)
+        let fires_at = |page: usize| -> Option<Vec<i64>> {
+            let page = i64::try_from(page).ok()?;
             flushes
                 .iter()
-                .filter(|f| f.2 + 1 == page)
+                .filter(|f| f.2 == page)
                 .map(|f| ints(f.3))
                 .find(|c| c.len() == 10)
         };
-        // `\\count0..9` before the chain, then as folded
-        let mut counts = match starts_at(0) {
+        // `\count0..9` before the chain: what the first page's routine
+        // reads (`pgread0`): the text's at the first flush point, the
+        // pages before it read them as the text left them there; with
+        // none, the text's final state
+        let start = fires_at(0).or_else(|| {
+            flushes
+                .iter()
+                .min_by_key(|f| f.2)
+                .map(|f| ints(f.3))
+                .filter(|c| c.len() == 10)
+        });
+        let pgread0 = v.field("pgread0");
+        if let Some(c) = &start
+            && cx.is_loopback(pgread0)
+        {
+            cx.publish(pgread0, v.list(c.iter().map(|&c| v.int(c)).collect()));
+        }
+        let mut counts = match start {
             Some(c) => c,
             None => Self::counts(cx)?,
         };
         for j in 0..steps {
-            if j > 0
-                && let Some(c) = starts_at(i64::try_from(j).unwrap_or(0))
-            {
-                counts = c;
-            }
             let Some(xs) = entries.get(&j) else { continue };
             let g = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
             // what step j read against what the steps before it left
             // (step 0 reads the state before the chain itself)
-            let read_counts = if j == 0 { counts.clone() } else { ints(g(4)) };
+            let read_counts = if g(4) != ValueId::UNIT {
+                ints(g(4))
+            } else if j == 0 {
+                Self::counts(cx)?
+            } else {
+                Vec::new()
+            };
             let read_pairs = pgst_pairs(v, Some(g(2)));
             if j > 0 {
                 if g(2) != cur {
@@ -1836,12 +1893,20 @@ impl FinalState {
                     v.seq_unit(v.list(vec![v.int(0), jj, cur])),
                 );
             }
+            // (the state after page j, as the text after a flush there
+            // reads it)
+            let done = v.list(counts.iter().map(|&c| v.int(c)).collect());
+            after.resize(j + 1, (ValueId::UNIT, ValueId::UNIT));
+            after[j] = (done, cur);
+            // what the next page's routine reads: the text's, when it
+            // fires at a flush point
+            if let Some(c) = fires_at(j + 1) {
+                counts = c;
+            }
             let cs = v.list(counts.iter().map(|&c| v.int(c)).collect());
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
             cx.publish(v.field(&format!("pgdef:{j}")), cs);
             cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
-            after.resize(j + 1, (ValueId::UNIT, ValueId::UNIT));
-            after[j] = (cs, cur);
         }
         Self::log_refuted(o, refuted);
         // the flush points' loop-backs: the state after their page,

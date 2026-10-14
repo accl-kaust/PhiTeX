@@ -90,7 +90,7 @@ fn equal_content_publishes_nothing_the_second_time() {
 /// A flush point in the text (`\penalty-10000` on the main list, as
 /// `\clearpage` makes one): the text after it reads `\count0` as the
 /// page chain leaves it after the page that breaks there (plain's
-/// routine advanced it to 2), so `\ifodd\count0` takes the even branch
+/// routine advanced it to 2), so `\ifodd\count0` takes the even branch (`ccc`)
 /// on the second page. Round one guesses nothing (the text's value, 1:
 /// odd); the fed-back value is the number the previous round read at
 /// this flush point, replaced, not added to, so a converged round reads
@@ -98,7 +98,7 @@ fn equal_content_publishes_nothing_the_second_time() {
 /// declaration.
 const FLUSH_DOC: &str = r"\count0=1
 Text one.\par\penalty-10000
-\ifodd\count0 odd\else even\fi
+\ifodd\count0 aaa\else ccc\fi
 \bye
 ";
 
@@ -121,7 +121,19 @@ fn a_flush_point_reads_the_page_number_after_its_page() {
     assert_eq!(b.pages().len(), 2);
     let (dvi, _) = b.output();
     let has = |w: &[u8]| dvi.windows(w.len()).any(|x| x == w);
-    assert!(has(b"even") && !has(b"odd"), "the branch after the flush");
+    // (words with no kerns or ligatures in cmr10: their bytes in a row)
+    assert!(
+        has(b"ccc") && !has(b"aaa"),
+        "the branch after the flush: {}",
+        String::from_utf8_lossy(&dvi)
+            .chars()
+            .filter(char::is_ascii_lowercase)
+            .collect::<String>()
+    );
+    // the pages' `\count0`, from their `bop`s (DVI: the postamble's
+    // pointer to the last, each to the one before): 1 and 2, as the
+    // routine numbered them
+    assert_eq!(bop_counts(&dvi), [1, 2]);
     // (one round declares the flush loop-back, one reads it: 2 beyond
     // the first)
     assert!(
@@ -157,4 +169,35 @@ fn immediate_before_a_macro_for_immediate_write() {
         .map(|(_, t)| t.as_str())
         .unwrap_or_default();
     assert_eq!(aux, "hi\nthere\n");
+}
+
+/// Each page's `\count0` in a DVI file, in order (the `bop` chain from
+/// the postamble).
+fn bop_counts(dvi: &[u8]) -> Vec<i32> {
+    let word = |i: usize| {
+        dvi.get(i..i + 4)
+            .map_or(-1, |b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let mut end = dvi.len();
+    while end > 0 && dvi[end - 1] == 223 {
+        end -= 1;
+    }
+    // (`post_post`, q, id, then the 223s)
+    let Some(q) = end
+        .checked_sub(5)
+        .and_then(|i| usize::try_from(word(i)).ok())
+    else {
+        return Vec::new();
+    };
+    let mut p = word(q + 1);
+    let mut cs = Vec::new();
+    while let Ok(i) = usize::try_from(p) {
+        if dvi.get(i) != Some(&139) {
+            break;
+        }
+        cs.push(word(i + 1));
+        p = word(i + 41);
+    }
+    cs.reverse();
+    cs
 }
