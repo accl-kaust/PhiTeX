@@ -575,6 +575,14 @@ impl<'c, 'a> Run<'c, 'a> {
             .flatten()
             .and_then(|x| self.v.as_int(x));
         if self.read_back_done && self.interp.is_none() {
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                let f = self.loc_field(loc);
+                eprintln!(
+                    "aux-trace: after read-back node {} defines {}",
+                    self.cx.node().raw(),
+                    crate::val::field_name(self.v, f)
+                );
+            }
             self.note_pre(loc);
         }
         let grp = self.innermost_group();
