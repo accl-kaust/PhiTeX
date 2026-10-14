@@ -347,7 +347,7 @@ struct Last {
     problems: Option<(Vec<String>, String)>,
     /// Its errors and warnings at their places, rendered, for `p` and `w`.
     placed: (Vec<String>, Vec<String>),
-    /// The last output written without errors.
+    /// The last output written (errors or not, as pdfTeX writes it).
     good: Option<PathBuf>,
     viewers: usize,
     /// The first good build's time (cold): what an edit is measured by.
@@ -645,10 +645,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let failed = !r.out.errors.is_empty();
         status.set("writing files");
         // (the watcher waits on the lock while the files are written, then
-        // knows them as the watch's own; a build with errors leaves the last
-        // good output in place)
+        // knows them as the watch's own)
         let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
-        let written = match s.write(&r, !failed) {
+        // (every build writes the output pdfTeX would for its input, errors
+        // or not: the pages shipped; none when nothing was shipped)
+        let written = match s.write(&r, true) {
             Ok(w) => {
                 let ours = &mut *mine;
                 for (p, h) in &w.files {
@@ -664,11 +665,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         };
         drop(mine);
         status.set("");
-        if !failed && let Some(out) = &written {
+        if let Some(out) = &written {
             last.borrow_mut().good = Some(out.clone());
         }
         if let Some(v) = &view {
-            if !failed {
+            {
                 last_pdf = match r.main_output() {
                     Some(("pdf", b)) => Some(session::shared(b)),
                     Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(
@@ -692,9 +693,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 .display()
                 .to_string();
             status.set("viewer");
-            if !failed {
-                last_hashes.clone_from(&r.out.page_hashes);
-            }
+            last_hashes.clone_from(&r.out.page_hashes);
             v.built(&Built {
                 pdf: last_pdf.clone(),
                 hashes: last_hashes.clone(),
@@ -749,9 +748,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         if failed {
             let n = r.out.errors.len();
             facts.push(st.red(&format!("{n} error{}", if n == 1 { "" } else { "s" })));
-            if last.borrow().good.is_some() {
-                facts.push("last good PDF kept".to_owned());
-            }
+            let n = r.pages();
+            facts.push(if n == 0 {
+                "no PDF".to_owned()
+            } else {
+                format!("{n} page{}", if n == 1 { "" } else { "s" })
+            });
         } else if noop {
             facts.push("unchanged".to_owned());
         } else {

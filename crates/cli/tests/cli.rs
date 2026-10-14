@@ -1034,7 +1034,9 @@ fn exit_statuses() {
 /// `phitex watch --json` on a plain document (`tex`): a word edited on
 /// disk is build 2, an edit of the line it is on, fewer nodes run than
 /// cold, and its DVI file is a cold build's of the edited text; an edit
-/// that makes an error is build 3, not ok, the last good DVI file kept.
+/// that makes an error is build 3, not ok, and its DVI file is written
+/// as pdfTeX writes it (the pages shipped despite the error): a cold
+/// build's of the broken text.
 #[test]
 fn watch_plain_edit() {
     let _one = one();
@@ -1078,11 +1080,7 @@ fn watch_plain_edit() {
     std::fs::write(dir.join("story.tex"), &broken).expect("the broken edit");
     let ev = until(&mut lines, "build", &3.into(), &mut seen);
     assert_eq!(ev["ok"], false, "{ev}");
-    assert_eq!(
-        std::fs::read(dir.join("story.dvi")).expect("the DVI"),
-        watched,
-        "the last good DVI file was not kept"
-    );
+    let failed = std::fs::read(dir.join("story.dvi")).expect("the failed build's DVI");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
     }
@@ -1103,6 +1101,19 @@ fn watch_plain_edit() {
         masked(&watched) == masked(&cold_dvi),
         "the watch's DVI after the edit is not the cold build's: {}",
         first_difference(&watched, &cold_dvi)
+    );
+    let broken_dir = scratch("watch-plain-broken");
+    std::fs::write(broken_dir.join("story.tex"), &broken).expect("the broken document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &broken_dir)
+        .args(["build", "--no-synctex", "--engine", "tex", "story.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(!out.status.success(), "the broken document built clean");
+    let broken_dvi = std::fs::read(broken_dir.join("story.dvi")).expect("build's failed DVI");
+    assert!(
+        masked(&failed) == masked(&broken_dvi),
+        "the watch's failed DVI is not phitex build's: {}",
+        first_difference(&failed, &broken_dvi)
     );
 }
 
