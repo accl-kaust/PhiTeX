@@ -387,7 +387,8 @@ pub fn show(ui: &Ui, errors: &[String], log: &str, main: &str) {
     let max = if ui.verbose > 0 { 100 } else { 10 };
     let problems = parse(log, main);
     let mut used = vec![false; problems.len()];
-    for e in errors.iter().take(max) {
+    // (the engine's failures are shown on their own lines before)
+    for e in errors.iter().filter(|e| e.starts_with("! ")).take(max) {
         let m = bare(e);
         let key = m.trim_end_matches('.');
         match (0..problems.len()).find(|&k| !used[k] && problems[k].message == key) {
@@ -414,6 +415,12 @@ pub fn rendered(
     r.diagnostics
         .iter()
         .filter(|d| (d.severity == phitex_tex::Severity::Error) != warnings)
+        // (an engine failure has no place: shown on its own line)
+        .filter(|d| {
+            !(d.severity == phitex_tex::Severity::Error
+                && d.range == (0, 0)
+                && d.context.is_empty())
+        })
         .map(|d| {
             render(
                 &from_diagnostic(d, s.source(&d.file).as_deref(), verbose),
