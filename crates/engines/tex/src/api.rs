@@ -921,18 +921,22 @@ pub struct Stats {
     pub threads: usize,
     /// The evaluate calls' wall time, summed (zero without a clock).
     pub wall: std::time::Duration,
-    /// The node runs' time, summed over every job (zero without a
-    /// clock): parallelism is `busy / wall`.
+    /// The operations' run time, summed over every run, timed inside
+    /// the run (zero without a clock): useful work, so `busy / wall`
+    /// is the parallelism achieved. A worker waiting for work counts
+    /// nothing.
     pub busy: std::time::Duration,
-    /// The most jobs that ran at once.
+    /// The most operation runs at once (not worker loops).
     pub peak_running: usize,
-    /// The longest chain of dependent waits among the live nodes after
-    /// the last evaluation (the engine's `critical_path`), in nodes.
-    /// The batches of runs the executor was given, those it ran on
-    /// the calling thread (one job, or one thread), and the largest.
+    /// The batches of tasks the executor was given, those it ran on
+    /// the calling thread (one task, or one thread), and the largest.
+    /// A task is a worker's loop over runs, so a batch's size is the
+    /// engine's task count, not the runs ready.
     pub batches: u64,
     pub batches_inline: u64,
     pub jobs_max_batch: usize,
+    /// The longest chain of dependent waits among the live nodes after
+    /// the last evaluation (the engine's `critical_path`), in nodes.
     pub critical_path: Option<usize>,
     /// The engine's realised critical path (`Report::realised_critical_path`:
     /// the longest chain of runs that waited for each other, counted from

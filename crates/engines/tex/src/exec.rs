@@ -219,14 +219,25 @@ pub(crate) fn note(op: u16, node: u64) {
     });
 }
 
-/// The executor of an evaluation, with its counters: the time its jobs
-/// ran (summed over jobs), and the most jobs running at once.
+/// What the operations of an evaluation did, counted where they run
+/// ([`NodeTimer`]), not where the executor's tasks run: a task is a
+/// worker's loop, which also waits while other workers hold work.
+#[derive(Default)]
+pub(crate) struct OpCounters {
+    /// the operations' run time, summed
+    busy: AtomicU64,
+    /// operations running now
+    running: AtomicUsize,
+    /// the most operations running at once
+    peak: AtomicUsize,
+}
+
+/// The executor of an evaluation, with its counters: the time its
+/// operations ran (summed over runs), and the most runs at once.
 pub(crate) struct Threads {
     pub n: usize,
     watch: Option<Watch>,
-    busy: AtomicU64,
-    running: AtomicUsize,
-    peak: AtomicUsize,
+    ops: std::sync::Arc<OpCounters>,
     batches: AtomicU64,
     batches_inline: AtomicU64,
     jobs_max_batch: AtomicUsize,
@@ -237,9 +248,7 @@ impl Threads {
         Threads {
             n,
             watch: None,
-            busy: AtomicU64::new(0),
-            running: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
+            ops: std::sync::Arc::default(),
             batches: AtomicU64::new(0),
             batches_inline: AtomicU64::new(0),
             jobs_max_batch: AtomicUsize::new(0),
@@ -269,9 +278,9 @@ impl Threads {
         r
     }
 
-    /// The jobs' summed run time (zero without a clock).
+    /// The operations' summed run time (zero without a clock).
     pub(crate) fn busy(&self) -> std::time::Duration {
-        std::time::Duration::from_nanos(self.busy.load(Ordering::Relaxed))
+        std::time::Duration::from_nanos(self.ops.busy.load(Ordering::Relaxed))
     }
 
     /// The batches of runs, those run inline, and the largest batch.
@@ -283,24 +292,20 @@ impl Threads {
         )
     }
 
-    /// The most jobs that ran at once.
+    /// The most operations that ran at once.
     pub(crate) fn peak(&self) -> usize {
-        self.peak.load(Ordering::Relaxed)
+        self.ops.peak.load(Ordering::Relaxed)
     }
 
-    /// Runs one job, counted.
+    /// Runs one job (a worker's loop over runs): the operations it runs
+    /// count on this executor's counters.
     fn job<R>(&self, f: impl FnOnce() -> R) -> R {
         let _run = widths::Run::begin();
-        let c = self.running.fetch_add(1, Ordering::Relaxed) + 1;
-        self.peak.fetch_max(c, Ordering::Relaxed);
-        let t0 = clock().now();
         let prev = JOB_THREADS.with(|c| c.replace(self.n));
+        let prev_ops = JOB_OPS.with(|c| c.replace(Some(self.ops.clone())));
         let r = f();
+        JOB_OPS.with(|c| *c.borrow_mut() = prev_ops);
         JOB_THREADS.with(|c| c.set(prev));
-        if let (Some(a), Some(b)) = (t0, clock().now()) {
-            self.busy.fetch_add(b.saturating_sub(a), Ordering::Relaxed);
-        }
-        self.running.fetch_sub(1, Ordering::Relaxed);
         r
     }
 }
@@ -309,6 +314,8 @@ thread_local! {
     /// The thread count of the executor whose job runs on this thread
     /// (1 outside a job).
     static JOB_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+    /// The counters of the executor whose job runs on this thread.
+    static JOB_OPS: RefCell<Option<std::sync::Arc<OpCounters>>> = const { RefCell::new(None) };
 }
 
 /// `f(i)` for every `i < n`, from inside a node's run: on the workers of
@@ -786,23 +793,35 @@ impl Drop for StepTrace {
     }
 }
 
-/// (measure) `PHITEX_TEX_TIME`: each node run's operation, node and
-/// wall time, printed when the run ends.
-pub(crate) struct NodeTimer(Option<(std::time::Instant, &'static str, u64)>);
+/// One operation's run, counted on the running executor's
+/// [`OpCounters`] (busy time, runs at once); with `PHITEX_TEX_TIME`
+/// also its operation, node and wall time, printed when the run ends.
+pub(crate) struct NodeTimer {
+    trace: Option<(std::time::Instant, &'static str, u64)>,
+    ops: Option<(std::sync::Arc<OpCounters>, Option<u64>)>,
+}
 
 impl NodeTimer {
     pub(crate) fn new(op: &'static str, node: u64) -> NodeTimer {
-        if env_flag!("PHITEX_TEX_TIME") {
-            NodeTimer(Some((std::time::Instant::now(), op, node)))
-        } else {
-            NodeTimer(None)
-        }
+        let ops = JOB_OPS.with(|c| c.borrow().clone()).map(|o| {
+            let c = o.running.fetch_add(1, Ordering::Relaxed) + 1;
+            o.peak.fetch_max(c, Ordering::Relaxed);
+            (o, clock().now())
+        });
+        let trace = env_flag!("PHITEX_TEX_TIME").then(|| (std::time::Instant::now(), op, node));
+        NodeTimer { trace, ops }
     }
 }
 
 impl Drop for NodeTimer {
     fn drop(&mut self) {
-        if let Some((t, op, node)) = self.0 {
+        if let Some((o, t0)) = self.ops.take() {
+            if let (Some(a), Some(b)) = (t0, clock().now()) {
+                o.busy.fetch_add(b.saturating_sub(a), Ordering::Relaxed);
+            }
+            o.running.fetch_sub(1, Ordering::Relaxed);
+        }
+        if let Some((t, op, node)) = self.trace {
             eprintln!(
                 "nodetime: {op} {node} {:.3}",
                 t.elapsed().as_secs_f64() * 1e3
