@@ -43,10 +43,26 @@ impl Engine {
         exec: &mut dyn Executor,
         src: &mut dyn EditSource,
     ) -> Result<Report, EvalError> {
+        #[cfg(feature = "observe")]
+        super::lock(&self.sh.selects).clear();
         let r = {
             crate::obs::span!(Evaluate);
+            #[cfg(feature = "observe")]
+            let _watch = super::watch::Watch::start(&self.sh);
             self.evaluate_inner(sched, exec, src)
         };
+        #[cfg(feature = "observe")]
+        if let Err(e) = &r
+            && matches!(
+                e,
+                EvalError::NoProgress { .. }
+                    | EvalError::Deadline { .. }
+                    | EvalError::RunawayNode { .. }
+                    | EvalError::RunawayCreation { .. }
+            )
+        {
+            super::watch::emit(&self.sh, &format!("error: {e}"));
+        }
         crate::obs::flush();
         // The next canonical window starts now: edits from here on count
         // toward the next evaluation.
@@ -239,6 +255,7 @@ impl Engine {
             rep.restarts = restarts;
             rep.version = self.version;
             self.fill_report(&mut rep, None);
+            rep.state_dump = Some(self.sh.dump());
             **report = rep;
         }
         e

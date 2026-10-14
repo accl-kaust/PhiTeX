@@ -272,6 +272,10 @@ impl Shared {
     /// Takes node `s` through validation, a run and its commit, letting
     /// it guess if the policy chose it for that.
     pub(crate) fn process(&self, s: Slot) {
+        #[cfg(feature = "observe")]
+        {
+            *super::lock(&self.selects).entry(s).or_default() += 1;
+        }
         let r = self.rec(s);
         let mode = self.spec.load(Ordering::Relaxed);
         // A job the scheduler chose speculatively always may guess; any

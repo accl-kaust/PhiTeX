@@ -5,12 +5,15 @@
 
 pub(crate) mod commit;
 pub(crate) mod ctx;
+pub(crate) mod dump;
 pub(crate) mod edit;
 pub(crate) mod eval;
 pub(crate) mod order;
 pub(crate) mod query;
 pub(crate) mod report;
 pub(crate) mod run;
+#[cfg(feature = "observe")]
+pub(crate) mod watch;
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -835,6 +838,9 @@ pub(crate) struct Shared {
     pub error: Mutex<Option<crate::api::EvalError>>,
     pub c: Counters,
     pub t: Mutex<Tallies>,
+    /// How often each node was taken to run this evaluation (`observe`).
+    #[cfg(feature = "observe")]
+    pub selects: Mutex<FxHashMap<Slot, u32>>,
     /// The canonical window (evaluation number).
     pub epoch: AtomicU64,
     pub spec: AtomicU8,

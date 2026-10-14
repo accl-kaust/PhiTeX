@@ -124,6 +124,8 @@ impl Shared {
             error: Mutex::new(None),
             c: super::Counters::default(),
             t: Mutex::new(super::Tallies::default()),
+            #[cfg(feature = "observe")]
+            selects: Mutex::new(crate::values::FxHashMap::default()),
             epoch: AtomicU64::new(1),
             spec: AtomicU8::new(0),
             fuel: AtomicU64::new(0),
@@ -857,6 +859,15 @@ impl Engine {
     #[must_use]
     pub fn record_sizes() -> (usize, usize) {
         (size_of::<super::Rec>(), size_of::<super::Sub>())
+    }
+
+    /// The scheduler's state as text: counters, workers, the ready queue,
+    /// node counts by state, and every node in work with its operation,
+    /// arguments, unit, depth, state and what it waits on (parked ones
+    /// first). Safe to call from another thread during an evaluation.
+    #[must_use]
+    pub fn state_dump(&self) -> String {
+        self.sh.dump()
     }
 
     /// Consistency checks of the committed state; empty when it holds.
