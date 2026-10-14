@@ -1007,6 +1007,18 @@ pub struct Stats {
 
 /// A round's counters (`PHITEX_TEX_TIME`).
 fn print_round(t: std::time::Duration, r: &Report) {
+    // (why nodes ran again, by kind: `Report::rerun_causes`)
+    let mut causes = std::collections::BTreeMap::<String, usize>::new();
+    for (_, c) in &r.rerun_causes {
+        let k = format!("{c:?}");
+        let k = k.split([' ', '(', '{']).next().unwrap_or("").to_owned();
+        *causes.entry(k).or_default() += 1;
+    }
+    eprintln!(
+        "round rerun causes: {} nodes, {causes:?}, realised cp {}",
+        r.rerun_causes.len(),
+        r.realised_critical_path
+    );
     eprintln!(
         "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} env_provided, {} raises, {} pending, {} pending sets ({} defining), {} created, {} freed, spec {}/{}/{}, by op {:?}",
         r.nodes_run,
