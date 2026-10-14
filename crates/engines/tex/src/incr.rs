@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use phitex_source::pass::{Definitions, FileKind};
 use phitex_source::{Paragraphs, Source, UnitId};
@@ -34,6 +34,8 @@ struct Entry {
     /// The definitions after it (its key and set): the incoming ones
     /// when it defines nothing.
     out: (u64, Defs),
+    /// Whether nothing stays open at its end ([`Open::closed`]).
+    closed: bool,
 }
 
 /// One chunk of the document as analysed: where it begins in the text,
@@ -87,6 +89,8 @@ pub(crate) struct Incr {
     pub analysed: usize,
     /// File ids for the definitions of the document's chunks.
     next_file: u32,
+    /// The workers its chunks are analysed on (`crate::exec::each`).
+    pub threads: usize,
 }
 
 impl Incr {
@@ -99,6 +103,7 @@ impl Incr {
             chunks: Vec::new(),
             analysed: 0,
             next_file: 2_000_000_000,
+            threads: 1,
         }
     }
 
@@ -163,77 +168,188 @@ impl Incr {
         let _ = self.src.edit(from, to, &text[p..b.len() - s]);
     }
 
-    fn walk(&mut self) {
-        let ids: Vec<UnitId> = self.src.units().collect();
-        let mut cache = std::mem::take(&mut self.cache);
-        let mut chunks = Vec::new();
-        let (mut key, mut defs) = (0u64, self.defs.clone());
-        let mut analysed = 0;
+    /// The chunks of the units `ids`, with the cached analyses of their
+    /// first units (taken from `cache`) where the units are the same.
+    fn parts(&self, ids: &[UnitId], cache: &mut HashMap<UnitId, Entry>) -> Vec<Part> {
+        let mut parts: Vec<Part> = Vec::new();
         let (mut i, mut off) = (0, 0);
         while i < ids.len() {
-            let reuse = cache
-                .remove(&ids[i])
-                .filter(|e| e.key == key && ids[i..].starts_with(&e.units));
-            let e = if let Some(e) = reuse {
-                e
+            // (a cached chunk of the same first unit is what a scan
+            // finds when its units follow and it closed or ends the text)
+            let cached = cache.remove(&ids[i]).filter(|e| {
+                ids[i..].starts_with(&e.units) && (e.closed || i + e.units.len() == ids.len())
+            });
+            let (j, closed) = if let Some(e) = &cached {
+                (i + e.units.len(), e.closed)
             } else {
-                analysed += 1;
                 let mut st = Open::default();
                 let mut j = i;
-                let mut text = String::new();
                 loop {
-                    let t = self.src.text(ids[j]);
-                    st.scan(t);
-                    text.push_str(t);
+                    st.scan(self.src.text(ids[j]));
                     j += 1;
                     if st.closed() || j == ids.len() {
                         break;
                     }
                 }
-                let th = crate::hints::text_hints(&text, FileKind::Document, &defs);
-                let out = if th.defines {
+                (j, st.closed())
+            };
+            let len: usize = ids[i..j].iter().map(|&u| self.src.text(u).len()).sum();
+            parts.push(Part {
+                units: i..j,
+                start: off,
+                len,
+                closed,
+                cached,
+            });
+            off += len;
+            i = j;
+        }
+        debug_assert_eq!(off, self.text.len(), "the units are the text");
+        parts
+    }
+
+    /// The chunks of the units, analysed where their text or incoming
+    /// definitions changed. In three passes: the chunks' bounds (what a
+    /// unit leaves open, the text alone) and, for the chunks not cached,
+    /// their own definitions, on the pool; the definitions in force
+    /// before each chunk, a chain through the chunks that define
+    /// anything (in order: each adds to the earlier ones'); the chunks'
+    /// analyses under them, on the pool.
+    fn walk(&mut self) {
+        let ids: Vec<UnitId> = self.src.units().collect();
+        let mut cache = std::mem::take(&mut self.cache);
+        let mut parts = self.parts(&ids, &mut cache);
+        let text = self.text.as_str();
+        let chunk_text = |p: &Part| &text[p.start..p.start + p.len];
+        let threads = self.threads;
+        // the own definitions of the chunks not cached (whether they
+        // define anything: what a cached one's analysis says)
+        let fresh: Vec<usize> = (0..parts.len())
+            .filter(|&k| parts[k].cached.is_none())
+            .collect();
+        let owns: Vec<Mutex<Option<Definitions>>> = crate::exec::map(threads, fresh.len(), &|x| {
+            Mutex::new(Some(crate::hints::own_definitions(
+                chunk_text(&parts[fresh[x]]),
+                FileKind::Document,
+            )))
+        });
+        let mut own_of: Vec<Option<usize>> = vec![None; parts.len()];
+        for (x, &k) in fresh.iter().enumerate() {
+            own_of[k] = Some(x);
+        }
+        // the definitions before each chunk, in order: a cached chunk
+        // under the same ones keeps its analysis
+        let mut ins: Vec<(u64, Defs)> = Vec::with_capacity(parts.len());
+        let mut todo: Vec<usize> = Vec::new();
+        let mut outs: Vec<Option<(u64, Defs)>> = Vec::with_capacity(parts.len());
+        let (mut key, mut defs) = (0u64, self.defs.clone());
+        for (k, p) in parts.iter_mut().enumerate() {
+            ins.push((key, defs.clone()));
+            // (whether it defines anything is its text's alone: a cached
+            // analysis under other definitions says it too)
+            let cached_defines = p.cached.as_ref().map(|e| e.th.defines);
+            if p.cached.as_ref().is_some_and(|e| e.key != key) {
+                p.cached = None;
+            }
+            let out = if let Some(e) = &p.cached {
+                e.out.clone()
+            } else {
+                todo.push(k);
+                let defines = cached_defines.unwrap_or_else(|| {
+                    own_of[k].is_some_and(|x| {
+                        owns[x]
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .as_ref()
+                            .is_some_and(crate::hints::defines_any)
+                    })
+                });
+                if defines {
+                    let t = chunk_text(p);
                     let mut d: Definitions = (*defs).clone();
-                    d.harvest(&text, FileKind::Document, self.next_file);
+                    d.harvest(t, FileKind::Document, self.next_file);
                     self.next_file = self.next_file.wrapping_add(1);
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     key.hash(&mut h);
-                    text.hash(&mut h);
+                    t.hash(&mut h);
                     (h.finish(), Arc::new(d))
                 } else {
                     (key, defs.clone())
-                };
-                let keys = th
-                    .slices
-                    .iter()
-                    .map(|&(s, e)| {
-                        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-                        crate::api::key(&text[s..e], starts)
-                    })
-                    .collect();
-                Entry {
-                    units: ids[i..j].to_vec(),
-                    key,
-                    th,
-                    keys,
-                    input: Input::of(&text),
-                    out,
                 }
             };
-            let len: usize = e.units.iter().map(|&u| self.src.text(u).len()).sum();
+            (key, defs) = (out.0, out.1.clone());
+            outs.push(Some(out));
+        }
+        // the analyses of the chunks not kept
+        let made: Vec<(Arc<TextHints>, Arc<[u64]>, Input)> =
+            crate::exec::map(threads, todo.len(), &|x| {
+                let k = todo[x];
+                let t = chunk_text(&parts[k]);
+                let own = own_of[k].and_then(|o| {
+                    owns[o]
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take()
+                });
+                analyse(t, &ins[k].1, own)
+            });
+        let analysed = todo.len();
+        let mut made = made.into_iter();
+        let mut chunks = Vec::with_capacity(parts.len());
+        for (k, p) in parts.into_iter().enumerate() {
+            let e = if let Some(e) = p.cached {
+                e
+            } else {
+                let (th, keys, input) = made.next().expect("every chunk analysed");
+                Entry {
+                    units: ids[p.units.clone()].to_vec(),
+                    key: ins[k].0,
+                    th,
+                    keys,
+                    input,
+                    out: outs[k].take().expect("the definitions after it"),
+                    closed: p.closed,
+                }
+            };
             chunks.push(Chunk {
-                start: off,
+                start: p.start,
                 th: e.th.clone(),
                 keys: e.keys.clone(),
                 input: e.input,
             });
-            (key, defs) = (e.out.0, e.out.1.clone());
-            off += len;
-            i += e.units.len();
             self.cache.insert(e.units[0], e);
         }
         self.chunks = chunks;
         self.analysed = analysed;
     }
+}
+
+/// A chunk's analysis under the definitions `defs` before it (given its
+/// own, [`crate::hints::own_definitions`], when harvested already): its
+/// hints, its slices' keys (a slice at its start taken as beginning a
+/// line), and what it does with `\\input`.
+fn analyse(t: &str, defs: &Defs, own: Option<Definitions>) -> (Arc<TextHints>, Arc<[u64]>, Input) {
+    let th = crate::hints::text_hints_with(t, FileKind::Document, defs, own);
+    let keys = th
+        .slices
+        .iter()
+        .map(|&(s, e)| {
+            let starts = s == 0 || t.as_bytes()[s - 1] == b'\n';
+            crate::api::key(&t[s..e], starts)
+        })
+        .collect();
+    (th, keys, Input::of(t))
+}
+
+/// A chunk of the units being walked: its units, where it begins and its
+/// length in bytes, whether nothing stays open at its end, and its cached
+/// analysis while that may be kept.
+struct Part {
+    units: std::ops::Range<usize>,
+    start: usize,
+    len: usize,
+    closed: bool,
+    cached: Option<Entry>,
 }
 
 /// The length of the prefix `a` and `b` share: block by block (a

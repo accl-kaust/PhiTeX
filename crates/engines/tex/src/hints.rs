@@ -1648,9 +1648,14 @@ impl Analysis<'_> {
         }
     }
 
+    #[cfg(test)]
     fn new(text: &str, kind: FileKind, prelude: Defs) -> Analysis<'_> {
-        let mut defs = Definitions::new();
-        defs.harvest(text, kind, 0);
+        Analysis::with_own(text, kind, prelude, own_definitions(text, kind))
+    }
+
+    /// [`Analysis::new`] given the text's own definitions
+    /// ([`own_definitions`]).
+    fn with_own(text: &str, kind: FileKind, prelude: Defs, defs: Definitions) -> Analysis<'_> {
         let scope = Scope {
             document: &defs,
             file: 0,
@@ -2661,11 +2666,17 @@ fn add_defs_with(an: &Analysis<'_>, ds: &[Def], prefixes: bool, b: &mut Bound) {
     }
 }
 
+#[cfg(test)]
+fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
+    analyse_with(text, kind, defs, own_definitions(text, kind))
+}
+
+/// [`analyse`] given the text's own definitions ([`own_definitions`]).
 // (one pass over the atoms, then one over the slices; splitting it
 // would only pass its tables around)
 #[allow(clippy::too_many_lines)]
-fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
-    let an = Analysis::new(text, kind, defs.clone());
+fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
+    let an = Analysis::with_own(text, kind, defs.clone(), own);
     let (slices, pars) = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<Hint>> = Vec::with_capacity(an.p.atoms.len());
@@ -2737,7 +2748,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         prev_char = ch;
     }
     let mut t = TextHints {
-        defines: !an.defs.is_empty() || an.defs.active_chars() != 0,
+        defines: defines_any(&an.defs),
         slices,
         starts,
         hints,
@@ -3004,6 +3015,35 @@ pub(crate) fn kind_of(text: &str, named: FileKind) -> FileKind {
 /// The analysis of a document's or prelude's text under the format's
 /// definitions `defs` (cached by the text and the definitions).
 pub(crate) fn text_hints(text: &str, kind: FileKind, defs: &Defs) -> Arc<TextHints> {
+    text_hints_with(text, kind, defs, None)
+}
+
+/// The definitions a text makes on its own (harvested from it alone,
+/// read in the regime `kind` names, [`kind_of`]): what its analysis sees
+/// as the text's, and whether it defines anything
+/// ([`TextHints::defines`], [`defines_any`]), without the definitions
+/// in force before it.
+pub(crate) fn own_definitions(text: &str, kind: FileKind) -> Definitions {
+    let mut d = Definitions::new();
+    d.harvest(text, kind_of(text, kind), 0);
+    d
+}
+
+/// Whether a text's own definitions ([`own_definitions`]) define
+/// anything: [`TextHints::defines`] of its analysis.
+pub(crate) fn defines_any(own: &Definitions) -> bool {
+    !own.is_empty() || own.active_chars() != 0
+}
+
+/// [`text_hints`], given the text's own definitions when they are
+/// harvested already ([`own_definitions`] of the same text and kind).
+pub(crate) fn text_hints_with(
+    text: &str,
+    kind: FileKind,
+    defs: &Defs,
+    own: Option<Definitions>,
+) -> Arc<TextHints> {
+    let named = kind;
     let kind = kind_of(text, kind);
     let key = (hash_str(text), kind as u8, Arc::as_ptr(defs) as usize);
     if let Some(t) = texts()
@@ -3013,7 +3053,8 @@ pub(crate) fn text_hints(text: &str, kind: FileKind, defs: &Defs) -> Arc<TextHin
     {
         return t.clone();
     }
-    let t = Arc::new(analyse(text, kind, defs));
+    let own = own.unwrap_or_else(|| own_definitions(text, named));
+    let t = Arc::new(analyse_with(text, kind, defs, own));
     let mut c = texts().lock().unwrap_or_else(PoisonError::into_inner);
     if c.len() > 256 {
         c.clear();
