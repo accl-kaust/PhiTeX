@@ -450,3 +450,27 @@ fn prediction_is_wrong_when_an_earlier_load_changed() {
         spec.stats.predictions_confirmed, spec.stats.predictions_refuted
     );
 }
+
+/// A load that peeks at the next line (`\futurelet`, as `\@ifnextchar`
+/// does) gives that line back to its own node; the line is counted once,
+/// so `\inputlineno` after the loads is the line's own number.
+#[test]
+fn given_back_line_is_counted_once() {
+    let d = dir(
+        "lineno",
+        &[("pa.sty", "\\def\\aa{A}\n"), ("pb.sty", "\\def\\bb{B}\n")],
+    );
+    let doc = "\\def\\usepackage#1{\\input #1.sty \\futurelet\\next\\relax}\n\\usepackage{pa}\n\\usepackage{pb}\n\\ifnum\\inputlineno=4 \\aa\\bb\\else\\errmessage{line \\the\\inputlineno}\\fi\n\\bye\n";
+    for spec in [Speculation::Off, Speculation::All] {
+        let b = build(&d, doc, spec, Vec::new());
+        note("lineno", &b);
+        let errs: Vec<String> = b
+            .diagnostics()
+            .into_iter()
+            .filter(|x| x.message.contains("line "))
+            .map(|x| x.message)
+            .collect();
+        assert!(errs.is_empty(), "{errs:?}");
+        same("lineno", &b.output().0, &sequential(&d, doc));
+    }
+}

@@ -556,14 +556,25 @@ impl Run<'_, '_> {
     fn drop_given_back(&mut self, at: usize) {
         // (its first line was counted as it began, §362: the sibling's
         // node counts it again)
-        if matches!(self.input.text.get(at), Some(Seg::Line(l)) if l.starts)
-            || matches!(
-                (self.input.text.get(at), self.input.text.get(at + 1)),
-                (Some(Seg::Toks(_)), Some(Seg::Line(l))) if l.starts && l.endch != -2
-            )
-        {
+        let begun = match (self.input.text.get(at), self.input.text.get(at + 1)) {
+            (Some(Seg::Line(l)), _) if l.starts => Some(l),
+            (Some(Seg::Toks(_)), Some(Seg::Line(l))) if l.starts && l.endch != -2 => Some(l),
+            _ => None,
+        };
+        if let Some(l) = begun {
             self.lines_entered -= 1;
             self.lines_read -= 1;
+            // (and in the lines the run contributes by file,
+            // `Run::doc_line_begun`, as §362 counted it there)
+            if l.lineno == 0 && !l.rescanned {
+                let name = l.origin.map_or(phitex_defuse::ValueId::UNIT, |o| o.0);
+                if let Some(k) = self.doc_lines.iter().position(|(n, _)| *n == name) {
+                    self.doc_lines[k].1 -= 1;
+                    if self.doc_lines[k].1 <= 0 {
+                        self.doc_lines.remove(k);
+                    }
+                }
+            }
         }
         while self.input.pop().is_some() {}
         self.input.text.truncate(at);
@@ -585,6 +596,7 @@ impl Run<'_, '_> {
         endch: i64,
     ) -> R<bool> {
         let counted = (self.lines_entered, self.lines_read);
+        let doc_lines = self.doc_lines.clone();
         let saved = std::mem::replace(&mut self.input, crate::input::Input::new());
         let (eof, no_pull) = (self.eof, self.no_pull);
         self.eof = true;
@@ -599,6 +611,7 @@ impl Run<'_, '_> {
                 .top_line()
                 .is_some_and(|x| x.loc == loc && x.state == state && x.endch == endch);
         (self.lines_entered, self.lines_read) = counted;
+        self.doc_lines = doc_lines;
         self.input = saved;
         self.eof = eof;
         self.no_pull = no_pull;
