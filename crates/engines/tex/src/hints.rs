@@ -2889,16 +2889,6 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // slice that may set one and ends no paragraph after it leaves
         // the reset pending, and the next slice ending a paragraph
         // declares it)
-        // (LaTeX's paragraph hooks assign `\\everypar` at every
-        // paragraph, the value it has: no definition. A heading's
-        // `\\@afterheading`, a list's `\\item` and an environment's
-        // end (`\\@doendpe`) set another, which the next paragraph
-        // consumes, §1091: a slice calling one declares it)
-        if sets_everypar(&text[s..e])
-            && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
-        {
-            add_head(&mut b.state, "param:everypar");
-        }
         let mut out = pending.clone();
         let mut ends = false;
         let k0 = t.starts.partition_point(|&x| x < s);
@@ -3554,28 +3544,6 @@ static OFF: AtomicBool = AtomicBool::new(false);
 /// same for a process.
 pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
-}
-
-/// Whether a slice calls a command that leaves `\\everypar` other
-/// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
-/// a list item, an environment's begin or end (`\\@doendpe`), a title.
-fn sets_everypar(slice: &str) -> bool {
-    const SETS: &[&str] = &[
-        "\\section",
-        "\\subsection",
-        "\\subsubsection",
-        "\\paragraph",
-        "\\subparagraph",
-        "\\chapter",
-        "\\part",
-        "\\@afterheading",
-        "\\@startsection",
-        "\\item",
-        "\\begin",
-        "\\end",
-        "\\maketitle",
-    ];
-    SETS.iter().any(|c| slice.contains(c))
 }
 
 /// Whether the node's text says its command opens and closes no scope.
