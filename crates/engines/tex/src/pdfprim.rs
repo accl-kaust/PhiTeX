@@ -1967,7 +1967,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             // where pdfTeX writes it; the pages are placed after every
             // read-time command, `pdfout::finish`)
             let later =
-                immediate && crate::pdfout::pages_apart(r)? && crate::etex::page_fired_before(r)?;
+                immediate && crate::pdfout::pages_apart(r)? && crate::etex::page_shipped_before(r)?;
             let got = crate::pdfout::command(r, input, &[], |st, _| {
                 let (n, refused) = st.obj(use_n, stream, attr_b, body);
                 let err = if immediate && !later {

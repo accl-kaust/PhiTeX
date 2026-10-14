@@ -1182,19 +1182,43 @@ fn marks_before(r: &mut Run<'_, '_>) -> R<Option<Option<ValueId>>> {
     Ok(Some(r.cx.use_field(f)?))
 }
 
-/// Whether the page builder fired a page before this point of a
-/// document node (its `marks:before:<node>` loop-back): a read-time
-/// write after a `\shipout` goes after that page ([`crate::pdfout`]).
+/// Whether a page shipped before this point of a document node (the
+/// pages fired before its marker, and their steps' `\shipout`s): a
+/// read-time write after a `\shipout` goes after that page
+/// ([`crate::pdfout`]).
 /// A page step's or a text paging inline: false (their writes are in
 /// TeX's order as they are made).
-pub(crate) fn page_fired_before(r: &mut Run<'_, '_>) -> R<bool> {
+pub(crate) fn page_shipped_before(r: &mut Run<'_, '_>) -> R<bool> {
     let op = r.cx.op();
     if op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
         return Ok(false);
     }
-    Ok(marks_before(r)?
-        .flatten()
-        .is_some_and(|x| x != ValueId::UNIT))
+    if marks_before(r)?.is_none() {
+        return Ok(false);
+    }
+    // the pages fired before (`fired:before:<node>`, published by the
+    // plan), and whether one of their steps shipped (`pdf:shipped:<k>`,
+    // published by the step: a routine may fire without shipping)
+    let v = r.v;
+    let f = v.field(&fired_before_field(r.cx.node().raw()));
+    let j = r.cx.use_field(f)?.map_or(0, |x| int_of(v, x));
+    for k in 0..usize::try_from(j).unwrap_or(0) {
+        let f = v.field(&shipped_field(k));
+        if r.cx.use_field(f)?.is_some_and(|x| int_of(v, x) != 0) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The loop-back of how many pages fired before node `node`'s marker.
+pub(crate) fn fired_before_field(node: u64) -> String {
+    format!("fired:before:{node}")
+}
+
+/// The loop-back of whether page `j`'s step shipped a page.
+pub(crate) fn shipped_field(j: usize) -> String {
+    format!("pdf:shipped:{j}")
 }
 
 /// `\topmark` and its kin as read by a run (§386): in a page step (the

@@ -271,6 +271,8 @@ pub(crate) struct Run<'c, 'a> {
     /// A page step whose output routine published leftovers
     /// (`pagefx:<j>`).
     pub pagefx_pub: bool,
+    /// A page step that shipped a page (`pdf:shipped:<j>`).
+    pub shipped: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -362,6 +364,7 @@ impl<'c, 'a> Run<'c, 'a> {
             contribs: Vec::new(),
             pg: None,
             pagefx_pub: false,
+            shipped: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -1612,6 +1615,11 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
+            let f = self.v.field(&crate::etex::shipped_field(self.page_index()));
+            if self.cx.is_loopback(f) {
+                let x = self.v.int(i64::from(self.shipped));
+                self.cx.publish(f, x);
+            }
             crate::page::step_defs(&mut self, published);
         } else {
             let (n, t_list) = (published.len(), t_pub.elapsed());
