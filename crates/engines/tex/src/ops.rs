@@ -146,11 +146,7 @@ pub(crate) fn run_node_parking(
             r.claim_rest = true;
             // (for the output: pdfTeX writes no PDF file after one)
             let _ = r.log("fatal", "");
-            if r.pg.is_none() {
-                let v = r.v;
-                r.append(0, v.list(vec![v.int(crate::nodes::T_ABORT)]));
-            }
-            r.end_open();
+            r.end_fatal();
             Ok(r.finish())
         }
     }
