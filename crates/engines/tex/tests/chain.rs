@@ -117,7 +117,7 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
         }
     }
     eprintln!(
-        "{name}: {} nodes run, {} runs, critical path {:?}, realised cp {}, peak running {}, ready mean {:.2}, page steps {} ({} any), chain {} links: {by:?}",
+        "{name}: {} nodes run, {} runs, critical path {:?}, realised cp {}, peak running {}, ready mean {:.2}, page steps {}, chain {} links: {by:?}",
         b.stats.nodes_run,
         b.stats.runs,
         b.stats.critical_path,
@@ -125,7 +125,6 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
         b.stats.peak_running,
         b.stats.ready_mean(),
         b.stats.page_steps,
-        b.stats.page_steps_any,
         c.len()
     );
     // the bar: the trace replay's critical path is 0.04-0.3% of the nodes
@@ -142,14 +141,7 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
         b.stats.par_boundary_violations,
         b.stats.if_depth_violations
     );
-    eprintln!(
-        "{name}: loop rounds {}, refuted guesses {}",
-        b.stats.loop_rounds,
-        b.stats.refuted_guesses.len()
-    );
-    for r in &b.stats.refuted_guesses {
-        eprintln!("  {name} {r}");
-    }
+    eprintln!("{name}: loop rounds {}", b.stats.loop_rounds);
     let fails = target_failures(name, &b);
     eprintln!(
         "{name}: height {:?}, {} token-frame nodes, {} target-graph failures",
@@ -265,7 +257,7 @@ fn structural(kind: &str, field: &str) -> bool {
     kind != "Changed"
         || field.is_empty()
         || [
-            "pagefx:", "font", "items", "pages", "lopen:", "scope", "kind",
+            "font", "items", "pages", "lopen:", "scope", "kind",
         ]
         .iter()
         .any(|p| field.starts_with(p))
@@ -401,63 +393,3 @@ fn census_plain() {
     common::assert_census(&rows);
 }
 
-#[test]
-fn pdf_exact_no_page_chain() {
-    use std::fmt::Write as _;
-    let dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate/pdfchain");
-    let _ = std::fs::create_dir_all(&dir);
-    let mut src = String::from("\\pdfoutput=1\n\\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
-    for k in 0..400 {
-        if k % 10 == 0 {
-            let _ = writeln!(
-                src,
-                "\\bigskip\\centerline{{\\bf Section {}}}\\medskip",
-                k / 10 + 1
-            );
-        }
-        for _ in 0..4 {
-            let _ = write!(
-                src,
-                "Paragraph {k} has some words in it, enough to fill a few lines of text set \
-                 with plain's macros, so that the paragraph builder has work to do and the \
-                 pages fill up one after another. "
-            );
-        }
-        if k % 20 == 19 {
-            let _ = write!(
-                src,
-                "\\footnote{{$^{{{}}}$}}{{A note on paragraph {k}.}}",
-                k / 20 + 1
-            );
-        }
-        src.push_str(".\n\n");
-    }
-    src.push_str("\\bye\n");
-    std::fs::write(dir.join("pdfchain.tex"), &src).expect("write");
-    let opts = common::options("./pdfchain.tex", "pdfchain", "", &dir);
-    let b = common::build(opts, Some(&common::plain()), &src);
-    assert!(b.is_pdf(), "not a PDF");
-    let links = b.page_step_links();
-    let mut by = BTreeMap::<String, usize>::new();
-    for (_, kind, field) in b.critical_chain() {
-        *by.entry(format!("{kind} {field}")).or_default() += 1;
-    }
-    eprintln!(
-        "pdfchain: {} pages, critical path {:?}, loop rounds {}, census {by:?}",
-        b.pages().len(),
-        b.stats.critical_path,
-        b.stats.loop_rounds
-    );
-    if std::env::var_os("PHITEX_CHAIN").is_some() {
-        for l in b.critical_chain_lines() {
-            eprintln!("  {l}");
-        }
-    }
-    for l in &links {
-        eprintln!("  page step <- page step: {l}");
-    }
-    assert!(links.is_empty(), "{} links between page steps", links.len());
-    let cp = b.stats.critical_path.unwrap_or(usize::MAX);
-    assert!(cp <= 6, "critical path {cp} > 6");
-}

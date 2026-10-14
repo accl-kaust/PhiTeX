@@ -101,17 +101,6 @@ pub struct Options {
     /// ([`guess_wkeys`]). A right guess saves the loop-back's second
     /// round; a wrong one costs nothing more than no guess.
     pub wkeys: Vec<(String, Vec<String>)>,
-    /// The round-one values of the page builder's loop-backs
-    /// (`pagefx:<j>`, what page `j`'s output routine leaves for the
-    /// next), as [`Build::export_pagefx`] gave them in an earlier
-    /// session of the same document; empty: none left (the declared
-    /// value).
-    pub pagefx: Vec<u8>,
-    /// The round-one values of the page chain's loop-backs (`pgst:<j>`
-    /// and `pgdef:<j>`, the state each page's routine leaves for the
-    /// next), as [`Build::export_pgst`] gave them in an earlier session
-    /// of the same document; empty: the cold guesses.
-    pub pgst: Vec<u8>,
     /// The package loads' records ([`Build::export_pkgrec`]): kept
     /// machine-wide beside the format, keyed by the load and the files
     /// it read, never by the document, so a new document's first build
@@ -262,28 +251,6 @@ impl phitex_defuse::EditSource for Absorb<'_> {
     }
 }
 
-/// Declares node `n`'s `marks:before:<n>` loop-back: the marks its
-/// `\topmark` and its kin read, which the page builder's fold
-/// publishes; UNIT (no page fired yet) until it does.
-fn declare_marks_before(eng: &mut Engine, n: NodeId) {
-    let f = eng
-        .values()
-        .field(&crate::etex::marks_before_field(n.raw()));
-    {
-        decl_trace(eng, f, ValueId::UNIT);
-        eng.declare_loopback(f, ValueId::UNIT);
-    }
-    // how many pages fired before the node's marker (the writer's
-    // read-time writes after a `\shipout`, `etex::page_shipped_before`)
-    let f = eng
-        .values()
-        .field(&crate::etex::fired_before_field(n.raw()));
-    let zero = eng.values().int(0);
-    {
-        decl_trace(eng, f, zero);
-        eng.declare_loopback(f, zero);
-    }
-}
 
 /// Edited texts of `\\input` files by name: the text and its bytes.
 type Overrides = Arc<Mutex<FxHashMap<String, (String, Vec<u8>)>>>;
@@ -398,7 +365,6 @@ fn apply_text(
             let n = old[i].1;
             let args = args_of(eng, i);
             eng.replace(n, exec, args);
-            declare_marks_before(eng, n);
             n
         } else {
             let args = args_of(eng, i);
@@ -408,7 +374,6 @@ fn apply_text(
                 let first = old.get(a + old_mid).map_or(end, |x| x.1);
                 eng.insert_before(first, exec, args)
             };
-            declare_marks_before(eng, n);
             n
         };
         nodes.push((new[i].0, n, Src::of(&new[i].1)));
@@ -441,8 +406,6 @@ impl Default for Options {
             epoch: None,
             fixpoint: false,
             wkeys: Vec::new(),
-            pagefx: Vec::new(),
-            pgst: Vec::new(),
             pkgrec: Vec::new(),
             pkg_predict: false,
             shell_escape: 2,
@@ -913,10 +876,6 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
 /// What the evaluations of one build or edit did.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
-    /// Page-step runs that reached their finish in this evaluation, by
-    /// page index (the attempts that stopped or were cut off are not
-    /// counted).
-    pub page_steps_completed: Vec<u64>,
     /// The engine's counters, summed over the evaluations.
     pub nodes_run: u64,
     pub runs: u64,
@@ -958,11 +917,6 @@ pub struct Stats {
     pub restarted_by: Vec<(&'static str, u64)>,
     /// Environment reads the engine's provider answered in place.
     pub env_provided: u64,
-    /// Finished runs that read at a gone position (`FieldAt::Gone`, the
-    /// node published nothing), and the live nodes whose last run did
-    /// when the build settled (always 0: such a node's output is stale).
-    pub gone_runs: u64,
-    pub gone_at_settle: u64,
     /// The executor's threads.
     pub threads: usize,
     /// The evaluate calls' wall time, summed (zero without a clock).
@@ -988,7 +942,6 @@ pub struct Stats {
     /// The light page steps run (OUTPUT.md §4.2a), and those of them
     /// with no output routine, which may define anything.
     pub page_steps: u64,
-    pub page_steps_any: u64,
     /// The engine's pending waits by kind, summed over the evaluations.
     pub waits_by_kind: Vec<(&'static str, u64)>,
     /// The nodes most waited on in the last evaluation (raw ids, waits).
@@ -1024,10 +977,6 @@ pub struct Stats {
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
-    /// The page chain's loop-back guesses the evaluation refuted, with
-    /// the fields that refuted them (`refuted: <fields> at page <n>
-    /// (<loop-back>)`).
-    pub refuted_guesses: Vec<String>,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed; and nodes
     /// re-done higher after running below a finished input (raises).
@@ -1276,10 +1225,6 @@ struct Graph {
     pdf_exact: Option<String>,
     /// Why the exact PDF writer folds the pages (`pdf:fold`), if it does.
     pdf_fold: Option<String>,
-    /// The `marks:before:<node>` loop-backs declared for nodes the graph
-    /// made (they asked through `marksdecl:<node>`), as the
-    /// environment's answers.
-    marks_decl: Vec<(Field, ValueId)>,
     /// The `wdef:<field>` loop-backs declared: the fields the read-back
     /// of a job-written file defines.
     wdefs: Vec<String>,
@@ -1304,21 +1249,7 @@ struct Graph {
 }
 
 impl Graph {
-    /// The page-step runs that reached their finish since the last call,
-    /// by page index ([`Stats::page_steps_completed`]).
-    fn take_refuted(&self) -> Vec<String> {
-        Vec::new()
-    }
 
-    fn take_steps_done(&self) -> Vec<u64> {
-        std::mem::take(
-            &mut *self
-                .ops
-                .steps_done
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
-    }
 }
 
 /// A file the environment provider answered: name, field, the value
@@ -1339,8 +1270,8 @@ impl Graph {
             time,
             ..phitex_defuse::Limits::default()
         });
-        // our loop-backs (pagefx, marks:before) have a unique fixpoint, so an
-        // edit starts from the last values
+        // our loop-backs (the read-back files) have a unique fixpoint, so
+        // an edit starts from the last values
         eng.set_loop_start(phitex_defuse::LoopStart::Previous);
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
@@ -1363,11 +1294,9 @@ impl Graph {
             resume,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
-            steps_done: Arc::new(Mutex::new(Vec::new())),
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
-            gone: Arc::new(crate::run::GoneLog::default()),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -1385,7 +1314,6 @@ impl Graph {
             threads: crate::exec::threads(threads),
             pdf_exact: None,
             pdf_fold: None,
-            marks_decl: Vec::new(),
             wdefs: Vec::new(),
             wkeys_guess: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
@@ -1696,7 +1624,6 @@ impl Graph {
     fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
         let v = self.eng.values();
         let mut env = self.files.clone();
-        env.extend(self.marks_decl.iter().copied());
         for n in &self.written {
             env.push((v.field(&format!("wfiledecl:{n}")), ValueId::UNIT));
         }
@@ -1771,11 +1698,8 @@ impl Graph {
             };
             t_eval += t0.elapsed();
             t_mark = std::time::Instant::now();
-            let gone = self.ops.gone.take_runs();
-            stats.gone_runs += gone;
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
-                eprintln!("round gone: {gone} runs");
                 eprintln!("  waits by kind {:?}", r.waits_by_kind);
                 for &(n, w) in &r.top_waited {
                     eprintln!("  waited on {w}x: {}", describe(&self.eng, n));
@@ -1798,24 +1722,6 @@ impl Graph {
                     self.written_file(name, fixpoint, finder);
                     asked = true;
                 }
-            }
-            // nodes made in the graph that read the marks: their
-            // `marks:before:<node>` loop-backs declared
-            let decl: Vec<(NodeId, Field)> = {
-                let v = self.eng.values();
-                r.env_waits
-                    .iter()
-                    .filter(|&&(_, f)| field_name(v, f).starts_with("marksdecl:"))
-                    .copied()
-                    .collect()
-            };
-            for (n, f) in decl {
-                if self.marks_decl.iter().any(|&(g, _)| g == f) {
-                    continue;
-                }
-                declare_marks_before(&mut self.eng, n);
-                self.marks_decl.push((f, ValueId::UNIT));
-                asked = true;
             }
             // files a run opened for writing: their `wfile:` loop-backs
             // declared (`wfiledecl:<name>`)
@@ -1938,26 +1844,6 @@ impl Graph {
             self.eng.set_environment(env);
             self.eng.set_environment_absent(self.absent.clone());
         }
-        // no node's last run read at a gone position: its output would be
-        // stale (a run that did published nothing, and its node runs again
-        // when the plan re-binds it)
-        let stale = self.ops.gone.stale(|n| self.eng.is_live(n));
-        stats.gone_at_settle += u64::try_from(stale.len()).unwrap_or(0);
-        if !stale.is_empty() {
-            eprintln!(
-                "phitex: gone at settle: {} nodes' last run read at a gone position: {}",
-                stale.len(),
-                stale
-                    .iter()
-                    .map(|&n| describe(&self.eng, n))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
-        }
-        debug_assert!(
-            stale.is_empty(),
-            "a node's last run read at a gone position"
-        );
         let v = self.eng.values();
         if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
             stats.if_depth_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
@@ -2038,9 +1924,6 @@ impl Graph {
             .map(|((k, n), id)| (*k, id, Src::of(n)))
             .collect();
         let t3 = t0.elapsed();
-        for &(_, id, _) in &out {
-            declare_marks_before(&mut self.eng, id);
-        }
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "push_text: slices {t1:?}, push {:?} (arguments {:?}, engine push {:?}, loop-back declarations {:?}), {} nodes",
@@ -3097,8 +2980,6 @@ impl Build {
         }
         self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
-        self.g.take_steps_done();
-        self.g.take_refuted();
         self.g.queries.clear();
         // (the files sliced into the document's regions were read)
         let sliced: Vec<(String, bool)> = self
@@ -3145,8 +3026,6 @@ impl Build {
             stats.version = stats.version.max(v);
         }
         stats.live = self.g.eng.live_nodes();
-        stats.page_steps_completed = self.g.take_steps_done();
-        stats.refuted_guesses = self.g.take_refuted();
         self.pkg_stats(&mut stats);
         // the loads' records as this evaluation left them: a load
         // inserted by a later edit uses them
@@ -3352,7 +3231,6 @@ impl Build {
                 .collect();
             for (n, args) in redo {
                 self.g.eng.replace(n, self.g.ops.exec, args);
-                declare_marks_before(&mut self.g.eng, n);
             }
         }
         self.g.absorb_provided();
@@ -3693,21 +3571,7 @@ impl Build {
             .collect()
     }
 
-    /// What each page's output routine left for the next as the last
-    /// build published it (`pagefx:<j>`), serialised: [`Options::pagefx`]
-    /// for a later session of the same document.
-    #[must_use]
-    pub fn export_pagefx(&self) -> Vec<u8> {
-        Vec::new()
-    }
 
-    /// The page chain's loop-backs as the last build's writer folded
-    /// them (`pgst:<j>`, `pgdef:<j>`), serialised: [`Options::pgst`] for
-    /// a later session of the same document.
-    #[must_use]
-    pub fn export_pgst(&self) -> Vec<u8> {
-        Vec::new()
-    }
 
     /// Whether the output is a PDF file (`\pdfoutput` at the first
     /// `\shipout`); else DVI.

@@ -329,12 +329,6 @@ impl State {
         (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
     }
 
-    /// Whether `loc` holds a value read in place of the engine's
-    /// ([`State::preload`]) that nothing in the run has replaced since.
-    pub(crate) fn is_preloaded(&self, loc: Loc) -> bool {
-        self.slot_ref(loc)
-            .is_some_and(|s| s.e.flags & PRELOADED != 0)
-    }
 
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
@@ -367,15 +361,6 @@ impl State {
         };
     }
 
-    /// [`State::preload`] of a value a routine assigned `\\global`ly
-    /// (the chain's, read at a flush point): the saves of `loc` the run's
-    /// groups hold before it are inert, so a group's end keeps it (§283).
-    pub(crate) fn preload_global(&mut self, loc: Loc, x: Option<ValueId>) {
-        self.preload(loc, x);
-        self.stamp += 1;
-        let st = self.stamp;
-        self.slot(loc).ginert = st;
-    }
 
     /// The loaded entry of `loc` (call [`State::is_loaded`] first).
     #[inline]
@@ -604,10 +589,6 @@ impl State {
         }
     }
 
-    /// Starts noting how each location is defined ([`State::note_kind`]).
-    pub(crate) fn watch_kinds(&mut self) {
-        self.kinds.get_or_insert_with(FxHashMap::default);
-    }
 
     /// Notes a definition of `loc`, an `\advance` or not, when watching.
     pub(crate) fn note_kind(&mut self, loc: Loc, advance: bool) {
@@ -618,18 +599,7 @@ impl State {
         }
     }
 
-    /// Whether every definition of `loc` noted was an `\advance`.
-    pub(crate) fn advanced_only(&self, loc: Loc) -> bool {
-        self.kinds
-            .as_ref()
-            .and_then(|k| k.get(&loc).copied())
-            .unwrap_or(false)
-    }
 
-    /// The locations defined at the base level since the last call.
-    pub(crate) fn take_base_defs(&mut self) -> Vec<Loc> {
-        std::mem::take(&mut self.base_defs)
-    }
 
     /// Whether a page parameter changed since the last call
     /// ([`State::set`], [`State::close`]).
@@ -848,13 +818,6 @@ impl State {
         })
     }
 
-    /// Whether any of `locs` has a definition at the base level.
-    pub(crate) fn defines_any(&self, locs: &[Loc]) -> bool {
-        locs.iter().any(|&l| {
-            self.slot_ref(l)
-                .is_some_and(|s| s.meta != 0 && self.metas[s.meta as usize - 1].publ.is_some())
-        })
-    }
 
     /// The table without `Rc`, for a parked run ([`PState`]): the slots
     /// that hold more than an engine read.

@@ -560,7 +560,7 @@ fn pdf_edit_reruns_one_page_step() {
         1,
     );
     b.edit(&text);
-    let steps: u64 = b.stats.page_steps_completed.iter().sum();
+    let steps: u64 = b.stats.page_steps;
     eprintln!(
         "p400 edit: {steps} page steps, {} nodes run, {} loop rounds, {} pages",
         b.stats.nodes_run,
@@ -607,7 +607,7 @@ fn pdf_para_edit_measure() {
         let t = std::time::Instant::now();
         b.edit(&text);
         let edit = t.elapsed();
-        let steps: u64 = b.stats.page_steps_completed.iter().sum();
+        let steps: u64 = b.stats.page_steps;
         eprintln!(
             "pdf para{n}: {} pages, cold {cold:?} (critical path {:?}), edit {edit:?}: {steps} page steps, {} nodes run",
             b.pages().len(),

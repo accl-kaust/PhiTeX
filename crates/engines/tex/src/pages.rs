@@ -370,12 +370,18 @@ pub(crate) fn settle(
     Err("pages: the breaks did not settle".to_owned())
 }
 
+/// Defined by a finisher that shipped its page: text after it reads it
+/// (a read-time PDF write after a `\\shipout`).
+pub(crate) const SHIPPED: &str = "pages:shipped";
+
 /// A page's finisher: TeX's output routine for page `j` (§1012–§1025)
 /// where the page finishes. Argument `[j]`; it reads page `j`'s items
 /// (`items[start..end]` of the last break, the driver's), and anything
 /// else as any piece does: what reaches its place (the text's values
 /// before it, earlier finishers' `\global`s). It defines its `\global`
-/// assignments; its output is the [`PageState`] the next break needs.
+/// assignments, the marks of its page (`mark:top`, `mark:first`,
+/// `mark:bot` and the classes', §1012) and [`SHIPPED`] if it shipped;
+/// its output is the [`PageState`] the next break needs.
 pub(crate) struct Finish;
 
 impl Operation for Finish {

@@ -1147,141 +1147,22 @@ fn mark_field(kind: &str, n: i32) -> String {
     }
 }
 
-/// The loop-back field holding the marks a document node sees
-/// (`marks:before:<node>`): the marks in force after the last page the
-/// page builder fired before the node's read, as `[[class, top, first,
-/// bot], ...]`, or UNIT while no page fired.
-pub(crate) fn marks_before_field(node: u64) -> String {
-    format!("marks:before:{node}")
-}
 
-/// Whether the node has its loop-backs (`marks:before:<node>`,
-/// `fired:before:<node>`): a node the client did not make (a document
-/// file's region, a display) asks the client to declare them
-/// (`marksdecl:<node>`, answered by `api::Graph::settle`) and waits;
-/// never seen inside a run already declared.
-fn node_loopbacks(r: &mut Run<'_, '_>) -> R<bool> {
-    let v = r.v;
-    let node = r.cx.node().raw();
-    let f = v.field(&marks_before_field(node));
-    if !r.cx.is_loopback(f) {
-        r.cx.use_env(r.keyed(crate::fields::Fam::Marksdecl, &node.to_string()))?;
-        return Ok(r.cx.is_loopback(f));
-    }
-    Ok(true)
-}
 
-/// The node's `marks:before:<node>` loop-back (UNIT while no page
-/// fired before it, or not yet known), its `T_MARKS_AT` item
-/// contributed; `None` where the node has none (a node the client did
-/// not declare it for).
-fn marks_before(r: &mut Run<'_, '_>) -> R<Option<ValueId>> {
-    let v = r.v;
-    let node = r.cx.node().raw();
-    let f = v.field(&marks_before_field(node));
-    if !node_loopbacks(r)? {
-        return Ok(None);
-    }
-    let at = v.list(vec![
-        v.int(nodes::T_MARKS_AT),
-        v.int(i64::from_ne_bytes(node.to_ne_bytes())),
-    ]);
-    let item = v.list(vec![v.int(0), at]);
-    let items = v.field("items");
-    let seen = r
-        .contribs
-        .iter()
-        .any(|&(g, s)| g == items && v.seq_to_vec(s).contains(&item));
-    if !seen {
-        r.contribute("items", v.seq_unit(item));
-    }
-    Ok(Some(r.cx.use_field(f)?.unwrap_or(ValueId::UNIT)))
-}
 
-/// Whether a page shipped before this point of a document node (the
-/// pages fired before its marker, and their steps' `\shipout`s): a
-/// read-time write after a `\shipout` goes after that page
-/// ([`crate::pdfout`]).
-/// A page step's or a text paging inline: false (their writes are in
-/// TeX's order as they are made).
+/// Whether a page shipped before this point: a finisher before it in
+/// the line defined [`crate::pages::SHIPPED`] (def-use, as any value).
 pub(crate) fn page_shipped_before(r: &mut Run<'_, '_>) -> R<bool> {
-    let op = r.cx.op();
-    if op == r.ops.finish {
-        return Ok(false);
-    }
-    if !node_loopbacks(r)? {
-        return Ok(false);
-    }
-    // the node's probe on the main list (`T_PDFQ_AT`): the plan
-    // publishes the pages fired before it (`fired:before:<node>`), and
-    // the steps whether they shipped (`pdf:shipped:<k>`, a routine may
-    // fire without shipping), only for a document that has one, so
-    // that no other document pays a loop round
-    let v = r.v;
-    let node = r.cx.node().raw();
-    let at = v.list(vec![
-        v.int(nodes::T_PDFQ_AT),
-        v.int(i64::from_ne_bytes(node.to_ne_bytes())),
-    ]);
-    let item = v.list(vec![v.int(0), at]);
-    let items = v.field("items");
-    if !r
-        .contribs
-        .iter()
-        .any(|&(g, s)| g == items && v.seq_to_vec(s).contains(&item))
-    {
-        r.contribute("items", v.seq_unit(item));
-    }
-    let f = v.field(&fired_before_field(node));
-    let j = r.cx.use_field(f)?.map_or(0, |x| int_of(v, x));
-    for k in 0..usize::try_from(j).unwrap_or(0) {
-        let f = v.field(&shipped_field(k));
-        if r.cx.use_field(f)?.is_some_and(|x| int_of(v, x) != 0) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(r.get(crate::pages::SHIPPED)?.is_some())
 }
 
-/// The loop-back of how many pages fired before node `node`'s marker.
-pub(crate) fn fired_before_field(node: u64) -> String {
-    format!("fired:before:{node}")
-}
 
-/// The loop-back of whether page `j`'s step shipped a page.
-pub(crate) fn shipped_field(j: usize) -> String {
-    format!("pdf:shipped:{j}")
-}
 
-/// `\topmark` and its kin as read by a run (§386): in a page step (the
-/// output routine) and for the split marks, the sequential value; in a
-/// document node, its `marks:before:<node>` loop-back, which the
-/// `Breaks` fold publishes at the point marked by a `T_MARKS_AT` item
-/// this read contributes to the main vertical list.
+/// `\topmark` and its kin as read by a run (§386): the marks a
+/// finisher defined where it stands (TeX's `cur_mark` after `fire_up`,
+/// §1012), read by def-use as any value; inside a finisher, its own.
 pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<ValueId>> {
-    let v = r.v;
-    let op = r.cx.op();
-    let split = kind.starts_with("split");
-    if split || op == r.ops.finish {
-        return r.get(&mark_field(kind, n));
-    }
-    let Some(state) = marks_before(r)? else {
-        return r.get(&mark_field(kind, n));
-    };
-    let Some(state) = Some(state).filter(|&x| x != ValueId::UNIT) else {
-        return Ok(None);
-    };
-    let k = match kind {
-        "top" => 1,
-        "first" => 2,
-        _ => 3,
-    };
-    Ok(list_of(v, state)
-        .into_iter()
-        .map(|e| list_of(v, e))
-        .find(|e| e.first().is_some_and(|&c| int_of(v, c) == i64::from(n)))
-        .and_then(|e| e.get(k).copied())
-        .filter(|&x| x != ValueId::UNIT))
+    r.get(&mark_field(kind, n))
 }
 
 /// A mark's class and text (a class mark is `[-1, class, text]`).

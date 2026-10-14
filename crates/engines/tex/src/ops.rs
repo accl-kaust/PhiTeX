@@ -90,7 +90,6 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => "stop",
                 Err(Halt::Starve) => "starve",
                 Err(Halt::Fatal) => "fatal",
-                Err(Halt::Gone) => "gone",
             },
             r.cx.is_speculative(),
             r.resumed,
@@ -105,12 +104,8 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => format!("stop (node {})", r.cx.node().raw()),
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
-                Err(Halt::Gone) => "gone".to_owned(),
             }
         );
-    }
-    if gone_out(&r, matches!(res, Err(Halt::Stop(_)))) {
-        return Ok(ValueId::UNIT);
     }
     match res {
         Ok(()) => {
@@ -135,7 +130,6 @@ pub(crate) fn run_node_parking(
             }
             Err(s)
         }
-        Err(Halt::Gone) => Ok(ValueId::UNIT),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
             Ok(r.stall("starve", u))
@@ -162,16 +156,6 @@ pub(crate) fn run_node_parking(
     }
 }
 
-/// A page step's finished run (not `stopped`): whether it read at a
-/// gone position, noted. One that did publishes nothing (`true`): its
-/// stale inputs never reach the engine, and the plan's re-run re-binds
-/// it.
-fn gone_out(r: &Run<'_, '_>, stopped: bool) -> bool {
-    if stopped {
-        return false;
-    }
-    r.saw_gone
-}
 
 /// One command (§1030) of the node's text: the first token decides; the
 /// command reads on into the siblings it claims; what it produced

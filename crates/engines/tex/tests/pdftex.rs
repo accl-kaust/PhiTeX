@@ -231,56 +231,6 @@ fn pdf_edits() {
     assert!(failed.is_empty(), "edits differing from cold: {failed:?}");
 }
 
-/// Page steps read nothing another page step made: an edit on page 1,
-/// whether it leaves page 1's PDF the same (a zero kern) or not, never
-/// runs page 2's step again, and the PDF equals a cold build.
-#[test]
-fn pdf_state_cutoff() {
-    let dir = common::fixtures().join("pdf");
-    // pageref.tex's catcodes as the prelude (a format), the rest as
-    // the document: a formatless job is one node (its whole text, paging
-    // inline), so only a document's regions can cut off an edit
-    let all = common::read(&dir.join("pageref.tex"));
-    let split = all.find("\\pdfoutput").unwrap_or(0);
-    let (prelude, src) = (all[..split].to_owned(), all[split..].to_owned());
-    let opts = || phitex_tex::Options {
-        epoch: Some(0),
-        ..common::options("./pageref.tex", "pageref", "", &dir)
-    };
-    let run = |to: &str| {
-        let mut b = common::build(opts(), Some(&prelude), &src);
-        let before = b.output().0;
-        let text = src.replacen("A\\a\\par", to, 1);
-        assert_ne!(text, src);
-        b.edit(&text);
-        let cold = common::build(opts(), Some(&prelude), &text);
-        let after = b.output().0;
-        assert_eq!(
-            common::first_difference(&after, &cold.output().0),
-            None,
-            "{to}: edit differs from cold"
-        );
-        let page2 = b.stats.page_steps_completed.get(1).copied().unwrap_or(0);
-        (after == before, page2)
-    };
-    // the same PDF state after page 1: page 2's step is cut off (it may
-    // start on its prediction, but never runs to its finish)
-    let (same_pdf, same_page2) = run("A\\kern0pt\\a\\par");
-    // a different page 1: page 2's step does not run again either (it
-    // reads nothing page 1's step made; the finish places the pages)
-    let (changed_pdf, changed_page2) = run("Z\\a\\par");
-    eprintln!("same state: page 2 completed {same_page2}; changed: {changed_page2}");
-    assert!(same_pdf, "\\kern0pt changed the PDF");
-    assert_eq!(
-        same_page2, 0,
-        "page 2 ran to its finish though page 1 left the same state"
-    );
-    assert!(!changed_pdf, "Z left the PDF unchanged");
-    assert_eq!(
-        changed_page2, 0,
-        "page 2 ran again though only page 1 changed"
-    );
-}
 
 /// The executor's counters on plain documents (story.tex, pages.tex)
 /// at 1, 4 and 16 threads, with the same output at each.

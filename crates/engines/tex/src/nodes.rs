@@ -62,10 +62,6 @@ pub(crate) const T_ABORT: i64 = 89;
 /// The page parameters a run changed, for the page builder's fold:
 /// `[tag, vsize, maxdepth, topskip, holdinginserts]` (§980).
 pub(crate) const T_PAGE_PARAMS: i64 = 92;
-/// Where a document node read the marks (§386): `[tag, node]`; the page
-/// builder's fold publishes the marks in force there as the node's
-/// `marks:before:<node>` loop-back.
-pub(crate) const T_MARKS_AT: i64 = 91;
 /// A document node's `\immediate\write` or `\immediate\openout` to a
 /// job-written file (§1370, §1374): `[tag, entry]`, the `streams` entry
 /// (`[name]` or `[name, text]`); the page builder's fold places it
@@ -81,10 +77,6 @@ pub(crate) const T_FONT_AT: i64 = 87;
 /// (pdfTeX §1355): `[tag, n]`; the page builder's fold tells the writer
 /// which page it follows (`oplan`), where the finish writes object `n`.
 pub(crate) const T_PDFW_AT: i64 = 85;
-/// Where a document node asks whether a page shipped before it (an
-/// `\immediate\pdfobj`, [`crate::etex::page_shipped_before`]):
-/// `[tag, node]`; the plan publishes the pages fired before it.
-pub(crate) const T_PDFQ_AT: i64 = 84;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]
@@ -341,19 +333,6 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
     }
 }
 
-/// [`decode`], a box's dimensions only (its list left empty): what the
-/// page builder's break arithmetic reads of it (§1001–§1008), for a
-/// prediction its real fold checks.
-pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
-    if tag(v, x) == T_BOX
-        && let Value::List(xs) = &*v.get(x)
-    {
-        let mut b = decode_box(v, &xs[..xs.len().min(9)], side);
-        b.list.clear();
-        return Some(Node::Box(b));
-    }
-    decode(v, x, side)
-}
 
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     if let Some(n) = crate::val::leaf_of(v, x) {

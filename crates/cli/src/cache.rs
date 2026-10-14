@@ -78,7 +78,7 @@ impl Cache {
     }
 
     /// A file kept beside format `name`: what documents built with it
-    /// learned (`ext`, e.g. `pgst1`: the page chain's first guesses).
+    /// learned (`ext` names what).
     pub fn format_file(&self, name: &str, ext: &str) -> PathBuf {
         self.dir.join("formats").join(format!("{name}.{ext}"))
     }

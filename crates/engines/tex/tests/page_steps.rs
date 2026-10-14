@@ -115,7 +115,6 @@ fn generated_documents() {
                     eprintln!("{name} wait: {l}");
                 }
             }
-            eprintln!("{name} refuted guesses: {:?}", s.refuted_guesses);
         }
         let (cold_runs, cold_steps) = (s.runs, s.page_steps);
         let mid = src.len() / 2;
@@ -198,15 +197,11 @@ fn self_dependent_routine() {
     let mut b = common::build(opts.clone(), Some(&common::plain()), &src);
     let s = &b.stats;
     eprintln!(
-        "selfdep: pages {}, loop rounds {}, critical path {:?}, refuted guesses {}",
+        "selfdep: pages {}, loop rounds {}, critical path {:?}",
         b.pages().len(),
         s.loop_rounds,
-        s.critical_path,
-        s.refuted_guesses.len()
+        s.critical_path
     );
-    for r in s.refuted_guesses.iter().take(5) {
-        eprintln!("  {r}");
-    }
     assert!(
         common::first_difference(&b.output().0, &want).is_none(),
         "selfdep.dvi differs: {:?}",
@@ -217,8 +212,8 @@ fn self_dependent_routine() {
     let new = format!("{}eht{}", &src[..at], &src[at + 3..]);
     b.edit(&new);
     eprintln!(
-        "selfdep edit: loop rounds {}, page steps re-run {}, refuted {:?}",
-        b.stats.loop_rounds, b.stats.page_steps, b.stats.refuted_guesses
+        "selfdep edit: loop rounds {}, page steps re-run {}",
+        b.stats.loop_rounds, b.stats.page_steps
     );
     let cold = common::build(opts, Some(&common::plain()), &new);
     assert!(
