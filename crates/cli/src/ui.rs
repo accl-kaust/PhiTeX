@@ -599,6 +599,9 @@ impl Ui {
         if o.warnings > 0 {
             facts.push(st.yellow(&plural(o.warnings, "warning", "warnings")));
         }
+        if o.diagnostics > 0 {
+            facts.push(st.dim(&plural(o.diagnostics, "diagnostic", "diagnostics")));
+        }
         let mut how = Vec::new();
         if let Some(e) = o.engine {
             how.push(e.to_owned());
@@ -632,6 +635,8 @@ pub struct Outcome<'a> {
     pub wall: Duration,
     pub errors: usize,
     pub warnings: usize,
+    /// The engine's own diagnostics (not TeX's errors).
+    pub diagnostics: usize,
     pub runs: usize,
     pub engine: Option<&'a str>,
 }
