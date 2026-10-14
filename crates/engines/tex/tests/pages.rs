@@ -120,3 +120,48 @@ fn fold_cost() {
         b.stats.restarted
     );
 }
+
+/// A long document's pages at 8 threads equal those at one thread
+/// (`PHITEX_PARAS` paragraphs, 1500 by default).
+#[test]
+#[ignore = "a long build"]
+fn parallel_pages_equal_serial() {
+    let n = std::env::var("PHITEX_PARAS").ok().and_then(|s| s.parse().ok()).unwrap_or(1500);
+    let (src, _) = common::plain_paragraphs(n, false);
+    // (`PHITEX_PDF=1`: the PDF file instead, relaxed objects unless
+    // `PHITEX_EXACT=1`)
+    let pdf = std::env::var("PHITEX_PDF").is_ok();
+    let src = if pdf { format!("\\pdfoutput=1 {src}") } else { src };
+    let dir = common::fixtures().join("plain/vsize");
+    let at = |t: usize| {
+        let mut o = common::options("./pp.tex", "pp", "", &dir);
+        o.threads = Some(t);
+        if pdf {
+            o.exact_objects = std::env::var("PHITEX_EXACT").is_ok();
+            let b = common::build(o, Some(&common::plain()), &src);
+            let out = b.output().0;
+            eprintln!("{t} threads: {} bytes, {} runs for {} nodes", out.len(), b.stats.runs, b.stats.nodes_run);
+            for d in b.diagnostics().iter().take(4) {
+                eprintln!("  diagnostic {}:{} {}", d.file, d.line, d.message.chars().take(300).collect::<String>());
+            }
+            vec![phitex_tex_hash(&out)]
+        } else {
+            common::build(o, Some(&common::plain()), &src).pages()
+        }
+    };
+    let one = at(1);
+    for rep in 0..3 {
+        let many = at(8);
+        assert_eq!(one.len(), many.len(), "rep {rep}: page count");
+        if let Some(j) = (0..one.len()).find(|&j| one[j] != many[j]) {
+            panic!("rep {rep}: page {} of {} differs at 8 threads", j + 1, one.len());
+        }
+    }
+}
+
+fn phitex_tex_hash(b: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.hash(&mut h);
+    h.finish()
+}
