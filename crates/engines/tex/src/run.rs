@@ -968,7 +968,12 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The fields the run publishes: its definitions at the base level
     /// but a local one equal to the value it read (the same binding).
     pub(crate) fn published_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self.st.published(self.v, false).into_iter().map(|x| x.0).collect();
+        let locs: Vec<Loc> = self
+            .st
+            .published(self.v, false)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
     }
 

@@ -117,6 +117,12 @@ pub struct Definitions {
     /// name, the set and every name looked up for it. Shared by clones;
     /// dropped (a fresh table) by any change.
     pub(crate) closures: ClosureCache,
+    /// The paragraph-start token lists in force when these definitions
+    /// end, from the state a format left (not its text): the primitive
+    /// `\everypar`'s, and the register's a format made `\everypar` a
+    /// name of (LaTeX's `\newtoks\everypar`, run by the primitive's
+    /// `\the\everypar`), if any. [`super::ParMachine`].
+    par_start: Option<(String, Option<String>)>,
 }
 
 /// [`Definitions::closures`].
@@ -196,6 +202,26 @@ impl Definitions {
     #[must_use]
     pub fn new() -> Definitions {
         Definitions::default()
+    }
+
+    /// Whether `name` has a definition here.
+    #[must_use]
+    pub fn knows(&self, name: &str) -> bool {
+        self.macros.contains_key(name)
+    }
+
+    /// Sets [`Definitions::par_start`]: the primitive list's text, and
+    /// the register list's when `\everypar` names a register.
+    pub fn set_par_start(&mut self, primitive: String, register: Option<String>) {
+        self.par_start = Some((primitive, register));
+    }
+
+    /// The paragraph-start lists in force at the end, when known.
+    #[must_use]
+    pub fn par_start(&self) -> Option<(&str, Option<&str>)> {
+        self.par_start
+            .as_ref()
+            .map(|(p, r)| (p.as_str(), r.as_deref()))
     }
 
     /// How many names are defined.

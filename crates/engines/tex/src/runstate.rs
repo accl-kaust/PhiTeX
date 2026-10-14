@@ -739,36 +739,6 @@ impl State {
         out
     }
 
-    /// Whether the run defined `loc` at its base level without having
-    /// read the engine's value first, where reading it may show the
-    /// definition is none ([`State::published`]: a local one, or a box
-    /// register's).
-    pub(crate) fn defined_unread(&self, loc: Loc) -> bool {
-        self.slot_ref(loc).is_some_and(|s| {
-            s.meta != 0 && {
-                let m = &self.metas[s.meta as usize - 1];
-                m.eng.is_none()
-                    && m.publ
-                        .as_ref()
-                        .is_some_and(|(_, l)| *l == Locality::Local || is_box(loc))
-            }
-        })
-    }
-
-    /// The engine's value of `loc` before the run, read after the run
-    /// defined it ([`State::defined_unread`]): its net effect compares
-    /// with it.
-    pub(crate) fn note_engine(&mut self, loc: Loc, x: Option<ValueId>) {
-        if let Some(s) = self.slot_ref(loc)
-            && s.meta != 0
-        {
-            let mi = s.meta as usize - 1;
-            if self.metas[mi].eng.is_none() {
-                self.metas[mi].eng = Some(x);
-            }
-        }
-    }
-
     /// Whether any of `locs` has a definition at the base level.
     pub(crate) fn defines_any(&self, locs: &[Loc]) -> bool {
         locs.iter().any(|&l| {
