@@ -172,9 +172,6 @@ impl Run<'_, '_> {
             return self.mode();
         }
         self.effect = Effect::Close;
-        // (the engine scope's end: `unsave` is the engine's, the page
-        // chain's fold restores its saves as TeX does, §283)
-        self.log_end(md.depth);
         self.unsave_extras(md)?;
         self.kind_outer(md)
     }
@@ -209,10 +206,8 @@ impl Run<'_, '_> {
                 }
             }
         }
-        if self.pg.is_none() {
-            let v = self.v;
-            self.append(0, v.list(vec![v.int(nodes::T_ABORT)]));
-        }
+        let v = self.v;
+        self.append(0, v.list(vec![v.int(nodes::T_ABORT)]));
     }
 
     /// Leaves the run's one open group (sharing the list it is in) to
@@ -315,16 +310,11 @@ impl Run<'_, '_> {
             return;
         }
         if lid == 0 {
-            self.probe_ok = false;
-            self.flush_text_defs();
-            // (the invariant the writer's fold rests on: a run's
-            // assignments go out before each item it puts on the main
-            // list, so a run spanning several fires has each in the page
-            // part where it made it)
-            debug_assert!(
-                self.tlog.is_empty() || !self.logs_defs(),
-                "text assignments left behind an item"
-            );
+            // (the page parameters as they stand when the item arrives,
+            // §987: for the breaker)
+            if self.st.take_page_params() {
+                self.put_page_params();
+            }
         }
         let e = v.list(vec![v.int(lid), node]);
         let s = v.seq_unit(e);
@@ -491,7 +481,7 @@ impl Run<'_, '_> {
         let ep = self.par(Par::everypar)?;
         let toks = crate::val::toks_of(v, ep);
         self.push_toks(toks);
-        self.build_page_par()
+        self.finish_candidate()
     }
 
     /// `\prevgraf` of the vertical list `md.vlid` (§1091, §1096): the
@@ -1044,7 +1034,7 @@ impl Run<'_, '_> {
             if md.m.abs() == 1 {
                 self.append_to_vlist(md, b)?;
                 if md.m > 0 {
-                    self.build_page_outer()?;
+                    self.finish_candidate()?;
                 }
             } else {
                 let b = if md.m.abs() == 102 {
@@ -1465,10 +1455,10 @@ impl Run<'_, '_> {
                 };
                 let y = nodes::encode(v, &node, &side);
                 self.append(outer.lid, y);
-                self.build_page_outer()
+                self.finish_candidate()
             }
             group::DISC => self.build_discretionary(md),
-            group::OUTPUT => crate::page::output_end(self, md),
+            group::OUTPUT => self.output_end(md),
             group::MATH => self.math_group_end(md),
             group::ALIGN => self.align_right_brace(md),
             group::NO_ALIGN => self.noalign_end(md),
@@ -2221,23 +2211,6 @@ impl Run<'_, '_> {
         };
         let g = nodes::glue_node(v, &fill, GlueKind::Normal);
         let p = nodes::penalty_node(v, -0o10000000000);
-        if self.pg.is_some() {
-            // a text paging inline: §1054 as tex.web has it
-            if self.all_over_inline()? {
-                self.claim_rest = true;
-                self.input = crate::input::Input::new();
-                return Ok(());
-            }
-            self.back_cur();
-            for x in [b, g, p] {
-                self.append(0, x);
-            }
-            return self.build_page();
-        }
-        // (nothing of the text reads the counts after the job's end: a
-        // flush before `\end`, plain's `\supereject`, is no flush point,
-        // and costs no round: its marker is withdrawn, before the end's)
-        self.withdraw_flush();
         let m = v.list(vec![v.int(nodes::T_END), b, g, p]);
         self.append(0, m);
         // nothing after `\end` is read
@@ -2386,10 +2359,7 @@ pub(crate) fn fold_item(
         | nodes::T_WRITE_AT
         | nodes::T_FONT_AT
         | nodes::T_PDFW_AT
-        | nodes::T_PDFQ_AT
-        | nodes::T_DEFS_AT
-        | nodes::T_LOCALS_AT
-        | nodes::T_FLUSH_AT => out.push(n),
+        | nodes::T_PDFQ_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2555,9 +2525,6 @@ pub(crate) fn is_marker(v: &Values, x: ValueId) -> bool {
             | nodes::T_FONT_AT
             | nodes::T_PDFW_AT
             | nodes::T_PDFQ_AT
-            | nodes::T_DEFS_AT
-            | nodes::T_LOCALS_AT
-            | nodes::T_FLUSH_AT
     )
 }
 
