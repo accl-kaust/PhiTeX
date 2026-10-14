@@ -84,21 +84,33 @@ pub(crate) fn run_node_parking(
     // finishing inside the piece is a cut: the run goes again from the
     // top, stopping at that candidate, and places the finisher and its
     // continuation
-    if matches!(res, Ok(()) | Err(Halt::Cut)) {
+    //
+    // (a restart drops the reads of the pass before: a second pass that
+    // reads another page state than the first finds the page finishing
+    // elsewhere, or not at all, and the run goes again, stopping where
+    // the state it now reads finishes it, or not stopping)
+    let mut passes = 1usize;
+    while matches!(res, Ok(()) | Err(Halt::Cut)) {
         res = r.page_fold();
-        if res.is_ok()
-            && let Some(k) = r.cut
-            && r.stop_at != Some(k)
-        {
-            let cx = r.cx;
-            cx.restart();
-            r = Run::new(cx, o.clone());
-            r.stop_at = Some(k);
-            res = body(&mut r);
-            if matches!(res, Ok(()) | Err(Halt::Cut)) {
-                res = r.page_fold();
-            }
+        let again = match (r.cut, r.stop_at) {
+            _ if res.is_err() => None,
+            (Some(k), s) if s != Some(k) => Some(Some(k)),
+            (None, Some(_)) => Some(None),
+            _ => None,
+        };
+        let Some(stop_at) = again else { break };
+        passes += 1;
+        // (the state a pass reads can change only as often as the nodes
+        // before it define it: the passes end; many of them is a sign
+        // worth seeing in the diagnostics)
+        if passes > 3 {
+            r.engine_diag(&format!("page fold: pass {passes} of this run"));
         }
+        let cx = r.cx;
+        cx.restart();
+        r = Run::new(cx, o.clone());
+        r.stop_at = stop_at;
+        res = body(&mut r);
     }
     let t_body = t_body.elapsed();
     // (a long run, the format's: its commands' time, then its finish)

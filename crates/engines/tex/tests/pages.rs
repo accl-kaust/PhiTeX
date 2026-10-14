@@ -40,8 +40,13 @@ fn vsize_document_pages() {
         common::log_excerpt(&log),
         diags.join("\n")
     );
+    // (`[j]`, or `[j.c1...]` when `\count1` and the others are set)
     for j in 1..=n {
-        assert!(log.contains(&format!("[{j}]")), "page {j} not in the log:\n{}", common::log_excerpt(&log));
+        assert!(
+            log.contains(&format!("[{j}]")) || log.contains(&format!("[{j}.")),
+            "page {j} not in the log:\n{}",
+            common::log_excerpt(&log)
+        );
     }
     eprintln!(
         "{n} pages; {} nodes run, {} runs, {} rounds, critical path {}, stops {} resumed {} restarted {}",
