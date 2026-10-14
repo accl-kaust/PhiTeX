@@ -141,7 +141,8 @@ fn aux_group_across_lines() {
 #[test]
 fn engine_diagnostics_do_not_fail_the_build() {
     let src = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../oracle/fixtures/latex/pdfdocs/envs.tex"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../oracle/fixtures/latex/pdfdocs/envs.tex"),
     )
     .unwrap();
     let (code, log) = build_latex("tikzman-envs", &src, &[]);
