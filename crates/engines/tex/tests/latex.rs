@@ -818,6 +818,64 @@ fn latex_write_file_ended() {
     }
 }
 
+/// `pdflatex` with hyperref on an article with a table of contents and
+/// fifteen cross-reference links: the `.aux` read-back defines only
+/// what reading the file defines (the labels, the contents' lines),
+/// never the writer's state the interpretation of a line touches
+/// (`pdf:lastlink`, `pdf:state`, `pg:`, `box:`, parameters); the build
+/// settles in at most two evaluations.
+#[test]
+fn latex_links_aux_defines_only() {
+    use std::fmt::Write as _;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-links-aux");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut src = String::from(
+        "\\documentclass{article}\n\\usepackage{hyperref}\n\\begin{document}\n\\tableofcontents\n",
+    );
+    for k in 0..15 {
+        let _ = writeln!(
+            src,
+            "\\section{{S{k}}}\\label{{s{k}}} See section~\\ref{{s{}}} on page~\\pageref{{s{}}}.\n",
+            (k + 1) % 15,
+            (k + 7) % 15
+        );
+    }
+    src.push_str("\\end{document}\n");
+    let opts = Options {
+        fixpoint: true,
+        ..pdf_opts("links", &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), &src);
+    eprintln!("links: {}", report("links", &b));
+    let keys: Vec<String> = b.wkeys().into_iter().flat_map(|(_, ks)| ks).collect();
+    let bad: Vec<&String> = keys
+        .iter()
+        .filter(|k| {
+            let f = k.rsplit('\u{1}').next().unwrap_or(k);
+            [
+                "pdf:",
+                "pg:",
+                "aftertoken",
+                "cat:",
+                "parshape",
+                "param:everypar",
+            ]
+            .iter()
+            .any(|p| f.starts_with(p))
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "read-back keys besides definitions: {bad:?}"
+    );
+    assert!(
+        b.stats.rounds <= 2,
+        "{} evaluations ({} loop rounds)",
+        b.stats.rounds,
+        b.stats.loop_rounds
+    );
+}
+
 /// `pdflatex` on a main file that `\input`s one chapter and
 /// `\include`s another (`pdfdocs/inputs.tex`, `chap1.tex`,
 /// `chap2.tex`; `\include` goes through `\@input` and its own `.aux`):

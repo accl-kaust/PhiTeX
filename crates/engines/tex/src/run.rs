@@ -1133,15 +1133,15 @@ impl<'c, 'a> Run<'c, 'a> {
         &mut self,
         base: u64,
         nested: &phitex_defuse::FxHashMap<String, String>,
-        pre: &mut crate::runstate::State,
+        gids: u32,
     ) -> Vec<ValueId> {
         let v = self.v;
         let mut made: Vec<ValueId> = self
             .st
-            .defined_since(v, base, pre)
+            .defined_since(v, base, gids)
             .into_iter()
             .filter_map(|(loc, x, l)| Some((self.loc_field(loc), x?, l)))
-            .filter(|d| !str_of(v, d.0.0).starts_with("cat:"))
+            .filter(|d| is_read_back_definition(&str_of(v, d.0.0)))
             .map(|(f, x, l)| {
                 // (a nested read-back's definition: its key only, naming
                 // the file whose loop-back holds the value)
@@ -1176,7 +1176,7 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<Option<ValueId>> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
-        let mut st = self.st.clone();
+        let st = self.st.clone();
         let (nc, nk) = (self.contribs.len(), self.kids.len());
         let nest_len = self.nest.len();
         let conds = self.conds.clone();
@@ -1194,6 +1194,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // an error's text, goes nowhere)
         self.push_list(-1, crate::val::group::VBOX, Vec::new());
         let base = self.st.stamp();
+        // (the groups the line opens are numbered after this one, the
+        // list's: what it defines at its own level is the line's)
+        let gids = self.st.gid_mark();
         self.interp_base = base;
         // (the text's lines: a final newline ends the last line, it does
         // not begin an empty one, which would be a `\par`)
@@ -1233,7 +1236,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.scanner = scanner;
         self.outer_call = false;
         let nested = std::mem::take(&mut self.interp_nested);
-        let made = self.made_since(base, &nested, &mut st);
+        let made = self.made_since(base, &nested, gids);
         self.interp = None;
         self.input = input;
         self.st = st;
@@ -2607,4 +2610,32 @@ impl Run<'_, '_> {
             None => self.doc_lines.push((name, 1)),
         }
     }
+}
+
+/// Whether a field the interpretation of a written line set is one of
+/// TeX's definitions (§222: the table of equivalents, the hash's
+/// meanings), what reading the file back defines. The writer's and the
+/// page builder's own state (`pdf:` objects and counters, `pg:` page
+/// contents, the streams, `\afterassignment`'s token, the dead cycles,
+/// ...) is never a read-back definition, nor are category codes (the
+/// read-back reads under `\makeatletter`).
+fn is_read_back_definition(name: &str) -> bool {
+    const NOT: [&str; 15] = [
+        "cat:",
+        "pdf:",
+        "pg:",
+        "pp:",
+        "write:",
+        "wopen:",
+        "wpre:",
+        "read:",
+        "aftertoken",
+        "deadcycles",
+        "lvlfix",
+        "badness",
+        "inspen",
+        "markclasses",
+        "marks",
+    ];
+    !NOT.iter().any(|p| name.starts_with(p))
 }
