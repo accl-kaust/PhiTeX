@@ -77,6 +77,13 @@ pub(crate) const T_FONT_AT: i64 = 87;
 /// (pdfTeX §1355): `[tag, n]`; the page builder's fold tells the writer
 /// which page it follows (`oplan`), where the finish writes object `n`.
 pub(crate) const T_PDFW_AT: i64 = 85;
+/// `\\pagegoal=` and its kin (§1245): `[tag, i, x]`, `page_so_far[i] := x`
+/// at the next candidate (the builder's state is as of the last one).
+pub(crate) const T_SET_PAGE: i64 = 91;
+/// The registers of an insertion class as the builder reads them at the
+/// candidate after the `\\insert` (§1008): `[tag, n, box h+d or -1, box
+/// is hbox, count, dimen, skip]`.
+pub(crate) const T_INS_PARAMS: i64 = 90;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]

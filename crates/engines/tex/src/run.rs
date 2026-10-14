@@ -29,6 +29,10 @@ pub(crate) enum Halt {
     /// The input ended for good inside a command (§360: in batch mode,
     /// "*** (job aborted, no legal \end found)").
     Fatal,
+    /// The run reached the candidate it stops at (`crate::pages`: its
+    /// second pass after a cut); it ends there, its continuation the
+    /// resume piece's.
+    Cut,
 }
 
 impl From<Stop> for Halt {
@@ -44,10 +48,9 @@ pub(crate) type R<T> = Result<T, Halt>;
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
-    /// A page's finisher and the rest of a split piece (`crate::pages`).
+    /// A page's finisher and the rest of a cut piece (`crate::pages`).
     pub finish: OpId,
     pub resume: OpId,
-    pub pagestate: OpId,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
     /// The format's definitions the build analyses document texts with
@@ -405,6 +408,16 @@ pub(crate) struct Run<'c, 'a> {
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
+    /// The pages (`crate::pages`): finish candidates passed so far, the
+    /// candidate the run stops at (its second pass after a cut), what it
+    /// had done at its last candidate, the insertion classes put on the
+    /// main list since, a finisher's page, and the cut its fold found.
+    pub cand: u32,
+    pub stop_at: Option<u32>,
+    pub cand_mark: Option<crate::pages::CandMark>,
+    pub ins_pending: Vec<u16>,
+    pub fin: Option<crate::pages::FinCtx>,
+    pub cut: Option<u32>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -495,6 +508,12 @@ impl<'c, 'a> Run<'c, 'a> {
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
             halt: None,
+            cand: 0,
+            stop_at: None,
+            cand_mark: None,
+            ins_pending: Vec::new(),
+            fin: None,
+            cut: None,
         }
     }
 
@@ -1687,7 +1706,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let epoch = self.cx.values_epoch();
         let tag = |n: &str| self.ops.fields.get_at(v, epoch, n).0;
-        let (tag_s, tag_f) = (tag("s"), tag("f"));
+        let tag_f = tag("f");
         let mut out: Vec<Vec<ValueId>> = Vec::new();
         let tag_t = tag("t");
         // (a document's leftovers stay a document's, [`Run::run_all`])
@@ -1713,35 +1732,9 @@ impl<'c, 'a> Run<'c, 'a> {
             run.extend(toks.iter().map(|&tok| crate::val::tok_id(v, epoch, tok)));
         };
         let line_left = |s: &Line, out: &mut Vec<Vec<ValueId>>| {
-            let end_due = s.ends && s.endch < -1;
-            if s.loc >= s.buf.len() && !end_due {
-                return;
+            if let Some(f) = crate::pages::line_frame(v, s) {
+                out.push(vec![v.list(vec![f]), v.int(kind)]);
             }
-            let text: String = s.buf[s.loc.min(s.buf.len())..]
-                .iter()
-                .map(|&c| char::from_u32(c).unwrap_or('?'))
-                .collect();
-            let starts = s.starts && s.endch == -2;
-            let mut xs = vec![
-                tag_s,
-                v.str(&text),
-                v.int(i64::from(s.state)),
-                v.int(-2),
-                v.int(
-                    i64::from(starts) | (i64::from(end_due) << 1) | (i64::from(s.rescanned) << 2),
-                ),
-            ];
-            if let Some((name, at)) = s.origin {
-                let at = at + s.loc.min(s.buf.len());
-                xs.push(name);
-                xs.push(v.int(i64::try_from(at).unwrap_or(0)));
-                // (a line of a file read here: its number; a document
-                // piece's is counted, never in the arguments)
-                if s.lineno > 0 {
-                    xs.push(v.int(i64::from(s.lineno)));
-                }
-            }
-            out.push(vec![v.list(vec![v.list(xs)]), v.int(kind)]);
         };
         let file_left = |f: &FileRest, out: &mut Vec<Vec<ValueId>>| {
             if f.has_lines() && self.doc && self.doc_file(f) {
@@ -2045,10 +2038,6 @@ impl<'c, 'a> Run<'c, 'a> {
             let m = lines_value(self.v, &self.doc_lines);
             self.contribute("lines", m);
         }
-        // a text piece's items, for its page-state node (`crate::pages`)
-        if self.cx.op() == self.ops.exec || self.cx.op() == self.ops.resume {
-            self.define_piece_items();
-        }
         // a page parameter this run set and no item of it carried
         if self.st.take_page_params() {
             self.put_page_params();
@@ -2221,7 +2210,14 @@ impl<'c, 'a> Run<'c, 'a> {
         for (op, args) in std::mem::take(&mut self.kids) {
             self.cx.child(op, args);
         }
-        for args in self.leftover() {
+        // (a run cut at a candidate: its input left is its continuation,
+        // the resume piece's, `crate::pages`)
+        let leftover = if self.cut.is_some() {
+            Vec::new()
+        } else {
+            self.leftover()
+        };
+        for args in leftover {
             if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 let v = self.v;
                 eprintln!(
@@ -2573,6 +2569,11 @@ pub(crate) struct Parked {
     irreversible: u64,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
+    cand: u32,
+    stop_at: Option<u32>,
+    cand_mark: Option<crate::pages::CandMark>,
+    ins_pending: Vec<u16>,
+    fin: Option<crate::pages::FinCtx>,
 }
 
 impl Run<'_, '_> {
@@ -2685,6 +2686,11 @@ impl Run<'_, '_> {
             irreversible: self.irreversible,
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
+            cand: self.cand,
+            stop_at: self.stop_at,
+            cand_mark: self.cand_mark,
+            ins_pending: std::mem::take(&mut self.ins_pending),
+            fin: self.fin.take(),
         })
     }
 }
@@ -2753,6 +2759,11 @@ impl<'c, 'a> Run<'c, 'a> {
         r.irreversible = p.irreversible;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
+        r.cand = p.cand;
+        r.stop_at = p.stop_at;
+        r.cand_mark = p.cand_mark;
+        r.ins_pending = p.ins_pending;
+        r.fin = p.fin;
         r.resumed = true;
         Ok(r)
     }

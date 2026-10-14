@@ -315,6 +315,12 @@ impl Run<'_, '_> {
             if self.st.take_page_params() {
                 self.put_page_params();
             }
+            // (an insertion's class: its registers are read at the next
+            // candidate, §1008, `Run::finish_candidate`)
+            if nodes::tag(v, node) == nodes::T_INS {
+                let n = u16::try_from(nodes::int_field(v, node, 1)).unwrap_or(0);
+                self.ins_pending.push(n);
+            }
         }
         let e = v.list(vec![v.int(lid), node]);
         let s = v.seq_unit(e);
@@ -1026,6 +1032,19 @@ impl Run<'_, '_> {
 
     /// `box_end` (§1075–§1078).
     pub(crate) fn box_end(&mut self, md: &Mode, ctx: i64, b: Option<ValueId>) -> R<()> {
+        self.box_end_in(md, ctx, b, true)
+    }
+
+    /// [`Run::box_end`]; without `candidate`, the caller looks for a
+    /// page after what it appends next (§1076: the box, then its
+    /// adjustments, then `build_page`).
+    pub(crate) fn box_end_in(
+        &mut self,
+        md: &Mode,
+        ctx: i64,
+        b: Option<ValueId>,
+        candidate: bool,
+    ) -> R<()> {
         let v = self.v;
         if ctx < BOX_FLAG {
             // §1076
@@ -1033,7 +1052,7 @@ impl Run<'_, '_> {
             let b = with_shift(v, b, i32::try_from(ctx).unwrap_or(0));
             if md.m.abs() == 1 {
                 self.append_to_vlist(md, b)?;
-                if md.m > 0 {
+                if md.m > 0 && candidate {
                     self.finish_candidate()?;
                 }
             } else {
@@ -1416,13 +1435,17 @@ impl Run<'_, '_> {
                     self.kid(put, vec![v.list(vec![def]), v.list(Vec::new())]);
                     let _ = SHIP_OUT_FLAG;
                 } else {
-                    self.box_end(&outer, ctx, Some(b))?;
+                    self.box_end_in(&outer, ctx, Some(b), false)?;
                 }
                 if adjusted {
                     for a in &packed.adjustments {
                         let y = nodes::encode(v, a, &side);
                         self.append(outer.vlid, y);
                     }
+                }
+                // §1076: `if mode>0 then build_page`, after the adjustments
+                if ctx < BOX_FLAG && outer.m > 0 && self.effect != Effect::Close {
+                    self.finish_candidate()?;
                 }
                 Ok(())
             }
@@ -2216,7 +2239,8 @@ impl Run<'_, '_> {
         // nothing after `\end` is read
         self.claim_rest = true;
         self.input = crate::input::Input::new();
-        Ok(())
+        // §1054: `build_page`
+        self.finish_candidate()
     }
 
     /// `\vsplit` (§977): the box split off register `n` at height `h`.
@@ -2358,7 +2382,8 @@ pub(crate) fn fold_item(
         | nodes::T_WRITE_AT
         | nodes::T_FONT_AT
         | nodes::T_PDFW_AT
-        => out.push(n),
+        | nodes::T_SET_PAGE
+        | nodes::T_INS_PARAMS => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2519,9 +2544,11 @@ pub(crate) fn is_marker(v: &Values, x: ValueId) -> bool {
     matches!(
         nodes::tag(v, x),
         nodes::T_PAGE_PARAMS
-                | nodes::T_WRITE_AT
+            | nodes::T_WRITE_AT
             | nodes::T_FONT_AT
             | nodes::T_PDFW_AT
+            | nodes::T_SET_PAGE
+            | nodes::T_INS_PARAMS
     )
 }
 

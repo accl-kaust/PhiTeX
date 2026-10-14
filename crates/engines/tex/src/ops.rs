@@ -25,7 +25,7 @@ pub(crate) fn ops(s: &Shared) -> Ops {
 pub(crate) fn run_node(
     cx: &mut Ctx<'_>,
     o: Ops,
-    body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
+    body: impl FnMut(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
     let op = cx.op();
@@ -46,7 +46,7 @@ pub(crate) fn run_node_parking(
     cx: &mut Ctx<'_>,
     o: Ops,
     parks: bool,
-    body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
+    mut body: impl FnMut(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
     let trace = crate::exec::env_flag!("PHITEX_TEX_TRACE");
     if trace {
@@ -68,17 +68,38 @@ pub(crate) fn run_node_parking(
             Ok(r) => r,
             Err(cx) => {
                 cx.restart();
-                Run::new(cx, o)
+                Run::new(cx, o.clone())
             }
         },
         Some(Err(_)) => {
             cx.restart();
-            Run::new(cx, o)
+            Run::new(cx, o.clone())
         }
-        None => Run::new(cx, o),
+        None => Run::new(cx, o.clone()),
     };
     let t_body = std::time::Instant::now();
-    let res = body(&mut r);
+    let mut res = body(&mut r);
+    // the run's end on the page (`crate::pages`): its items folded into
+    // the page state, a finisher placed where a page finishes; a page
+    // finishing inside the piece is a cut: the run goes again from the
+    // top, stopping at that candidate, and places the finisher and its
+    // continuation
+    if matches!(res, Ok(()) | Err(Halt::Cut)) {
+        res = r.page_fold();
+        if res.is_ok()
+            && let Some(k) = r.cut
+            && r.stop_at != Some(k)
+        {
+            let cx = r.cx;
+            cx.restart();
+            r = Run::new(cx, o.clone());
+            r.stop_at = Some(k);
+            res = body(&mut r);
+            if matches!(res, Ok(()) | Err(Halt::Cut)) {
+                res = r.page_fold();
+            }
+        }
+    }
     let t_body = t_body.elapsed();
     // (a long run, the format's: its commands' time, then its finish)
     let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
@@ -90,6 +111,7 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => "stop",
                 Err(Halt::Starve) => "starve",
                 Err(Halt::Fatal) => "fatal",
+                Err(Halt::Cut) => "cut",
             },
             r.cx.is_speculative(),
             r.resumed,
@@ -104,12 +126,17 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => format!("stop (node {})", r.cx.node().raw()),
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
+                Err(Halt::Cut) => "cut".to_owned(),
             }
         );
     }
     match res {
-        Ok(()) => {
-            r.end_open();
+        Ok(()) | Err(Halt::Cut) => {
+            // (a run cut at a candidate keeps its open groups and lists:
+            // they are its continuation's)
+            if r.cut.is_none() {
+                r.end_open();
+            }
             let t = std::time::Instant::now();
             let x = r.finish();
             if timed {
@@ -199,8 +226,14 @@ impl Operation for Exec {
     /// commands' rows, its calls' bodies); a wrong `false` is refuted
     /// by the engine, never wrong output.
     fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
-        client_only(v, f)
-            && crate::hints::hint_of_args(v, args).may_define_field(&crate::val::field_name(v, f))
+        if !client_only(v, f) {
+            return false;
+        }
+        let name = crate::val::field_name(v, f);
+        // (the page state a piece with items on the main list defines,
+        // and a `\shipout`'s mark: `crate::pages`)
+        crate::pages::is_page_field(&name)
+            || crate::hints::hint_of_args(v, args).may_define_field(&name)
     }
     /// The meanings and catcodes the text's hint rests on
     /// ([`crate::hints::reads`]): the node waits for them instead of
@@ -380,7 +413,7 @@ impl Operation for Put {
         }
         let mut fix = Vec::new();
         if !carry.is_empty() {
-            let mut r = Run::new(cx, o);
+            let mut r = Run::new(cx, o.clone());
             let res: R<Vec<ValueId>> = (|| {
                 let md = r.mode()?;
                 let mut fix = r.scope_list("lvlfix", &md)?;
@@ -446,10 +479,14 @@ impl Operation for Dvi {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
-        {
-            let _ = (cx, &o);
-            todo!("no DVI/PDF in the skeleton: the writer assembles the finishers' pages")
-        }
+        let _ = &o;
+        // (the file is not assembled yet: the pages the finishers ship
+        // are the `pages` accumulator's, in document order, which the
+        // writer takes from here later)
+        let v = cx.values();
+        let pages = v.field("pages");
+        let _ = cx.acc_range(pages, None)?;
+        Ok(ValueId::UNIT)
     }
 }
 
