@@ -253,8 +253,8 @@ pub(crate) struct Run<'c, 'a> {
     /// The files this run looked for and did not find (a package load's
     /// record keys on them, `crate::pkgrec`).
     pub fmiss: Vec<String>,
-    /// Whether the node is a package load whose run is recorded
-    /// (`crate::pkgrec`).
+    /// Whether the node is a package load at the unit's top level, whose
+    /// run is recorded (`crate::pkgrec`) and publishes its net effect.
     pub rec_load: bool,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
@@ -1043,7 +1043,12 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The fields the run publishes: its definitions at the base level
     /// but a local one equal to the value it read (the same binding).
     pub(crate) fn published_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self.st.published(self.v).into_iter().map(|x| x.0).collect();
+        let locs: Vec<Loc> = self
+            .st
+            .published(self.v, self.rec_load)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
     }
 
@@ -1620,10 +1625,38 @@ impl<'c, 'a> Run<'c, 'a> {
         let t_pub = std::time::Instant::now();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
-            .published(self.v)
+            .published(self.v, self.rec_load)
             .into_iter()
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
+        // (debug, `PHITEX_PUB_TRACE=<a>|<b>…`: the definitions of a run whose
+        // first text segment contains one of the texts)
+        if let Ok(pat) = std::env::var("PHITEX_PUB_TRACE") {
+            let v = self.v;
+            let first = self
+                .cx
+                .args()
+                .first()
+                .and_then(|&l| list_of(v, l).first().map(|&f| v.render(f)))
+                .unwrap_or_default();
+            if pat.split('|').any(|p| first.contains(p)) {
+                let node = self.cx.node().raw();
+                eprintln!(
+                    "pub: node {node} pulled {} claim_rest {} text {}",
+                    self.pulled,
+                    self.claim_rest,
+                    first.chars().take(80).collect::<String>()
+                );
+                for (f, x, l) in &published {
+                    eprintln!(
+                        "pub: node {node} {:?} {} = {}",
+                        l,
+                        crate::val::field_name(v, *f),
+                        v.render(*x).chars().take(160).collect::<String>()
+                    );
+                }
+            }
+        }
         // (a load whose run went on into its siblings is not one load:
         // no record of it)
         if self.rec_load && crate::exec::env_flag!("PHITEX_PKG_TRACE") {
@@ -1779,10 +1812,14 @@ impl<'c, 'a> Run<'c, 'a> {
             .iter()
             .map(|&(f, _, _)| crate::val::field_name(v, f))
             .collect();
+        // (a field the load put back as it found it is no read of its
+        // predecessor's either: only the net effect is recorded)
+        let restored = self.st.restored_locs(v);
         let reads: Vec<String> = self
             .st
             .read_locs()
             .into_iter()
+            .filter(|l| !restored.contains(l))
             .map(|l| crate::val::field_name(v, self.loc_field(l)))
             .filter(|n| !n.starts_with("file:"))
             .collect();

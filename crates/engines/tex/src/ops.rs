@@ -249,7 +249,10 @@ impl Operation for Exec {
         let res = run_node_parking(cx, o, true, |r| {
             // (a resumed run has done this, and continues its commands)
             if !r.resumed {
-                r.rec_load = load;
+                // (a load at the unit's top level only: there a global
+                // definition back to the value in force is no effect, and
+                // the run publishes its net effect, `State::published`)
+                r.rec_load = load && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
