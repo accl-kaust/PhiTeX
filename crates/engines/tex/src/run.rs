@@ -207,6 +207,10 @@ pub(crate) struct Run<'c, 'a> {
     /// `PHITEX_HEARTBEAT=1` (read once a process).
     pub heartbeat_on: bool,
     pub pulled: usize,
+    /// Where each pulled sibling's text begins in the input's text (its
+    /// first segment's index), or `None` when it joined the line before
+    /// it: [`Run::give_back_peeked`].
+    pub pull_at: Vec<Option<usize>>,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -321,6 +325,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
+            pull_at: Vec::new(),
             top: false,
             claim_rest: false,
             nest: Vec::new(),
@@ -1325,6 +1330,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         loop {
             while self.has_input() {
+                if self.give_back_peeked()? {
+                    return Ok(());
+                }
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
