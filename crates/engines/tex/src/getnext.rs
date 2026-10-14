@@ -223,6 +223,9 @@ impl Run<'_, '_> {
         loop {
             let Some(&top) = self.input.top() else {
                 if self.input.reach_text() {
+                    if self.pull_at.last() == Some(&Some(self.input.text_at - 1)) {
+                        self.pull_lev = Some(self.input.levels.len() - 1);
+                    }
                     continue;
                 }
                 if self.pull()? {
@@ -326,6 +329,8 @@ impl Run<'_, '_> {
                     );
                 if self.pull_at.len() == self.pulled {
                     self.pull_at.push((!joins).then_some(self.input.text.len()));
+                    self.pull_orig.push(None);
+                    self.pull_lev = None;
                 }
                 self.pulled += 1;
                 self.input.append_text(segs);
@@ -353,6 +358,7 @@ impl Run<'_, '_> {
     pub(crate) fn give_back_peeked(&mut self) -> R<bool> {
         if self.pulled == 0
             || self.pull_at.len() != self.pulled
+            || self.pull_orig.len() != self.pulled
             || self.open_span()
             || self.aopen != 0
             || self.pg.is_some()
@@ -363,6 +369,9 @@ impl Run<'_, '_> {
         let Some(at) = self.pull_at[self.pulled - 1] else {
             return Ok(false);
         };
+        if let Some(orig) = self.pull_orig.get(self.pulled - 1).cloned().flatten() {
+            return self.give_back_resumed(at, orig);
+        }
         // (only the sibling's first segment reached)
         if self.input.text_at != at + 1 {
             return Ok(false);
@@ -395,23 +404,71 @@ impl Run<'_, '_> {
                     return Ok(false);
                 }
                 let peeked = self.input.arena.at(back.a);
-                let (loc, state) = {
+                let (loc, state, endch) = {
                     let x = self.input.line(*line);
-                    (x.loc, x.state)
+                    (x.loc, x.state, x.endch)
                 };
-                self.same_first_token(orig.clone(), peeked, loc, state)?
+                self.same_first_token(orig.clone(), peeked, loc, state, endch)?
             }
             _ => false,
         };
         if !ok {
             return Ok(false);
         }
+        self.drop_given_back(at);
+        Ok(true)
+    }
+
+    /// [`Run::give_back_peeked`] after a park: the peeked token is the
+    /// text segment at `at`, the rest of the sibling's first line the one
+    /// after it, neither reached yet; `orig` is that line unread.
+    fn give_back_resumed(&mut self, at: usize, orig: crate::input::Line) -> R<bool> {
+        if self.input.text_at != at
+            || self.input.levels.iter().any(|l| match l.kind {
+                kind::TOKS => l.a < l.b,
+                kind::LINE => self.input.line(*l).has_more(),
+                _ => self.input.file(*l).has_lines(),
+            })
+        {
+            return Ok(false);
+        }
+        let (Some(Seg::Toks(t)), Some(Seg::Line(rest))) =
+            (self.input.text.get(at), self.input.text.get(at + 1))
+        else {
+            return Ok(false);
+        };
+        let ([tok], loc, state, endch) = (t.as_slice(), rest.loc, rest.state, rest.endch) else {
+            return Ok(false);
+        };
+        let tok = *tok;
+        if !self.same_first_token(orig, tok, loc, state, endch)? {
+            return Ok(false);
+        }
+        self.drop_given_back(at);
+        Ok(true)
+    }
+
+    /// Ends the run's hold on the last pulled sibling, whose text begins
+    /// at `at`: its levels popped, its text dropped, unclaimed.
+    fn drop_given_back(&mut self, at: usize) {
+        // (its first line was counted as it began, §362: the sibling's
+        // node counts it again)
+        if matches!(self.input.text.get(at), Some(Seg::Line(l)) if l.starts)
+            || matches!(
+                (self.input.text.get(at), self.input.text.get(at + 1)),
+                (Some(Seg::Toks(_)), Some(Seg::Line(l))) if l.starts && l.endch != -2
+            )
+        {
+            self.lines_entered -= 1;
+            self.lines_read -= 1;
+        }
         while self.input.pop().is_some() {}
         self.input.text.truncate(at);
         self.input.text_at = at;
         self.pulled -= 1;
         self.pull_at.pop();
-        Ok(true)
+        self.pull_orig.pop();
+        self.pull_lev = None;
     }
 
     /// Whether `line`, read from its start under the codes in force now,
@@ -422,18 +479,23 @@ impl Run<'_, '_> {
         tok: Tok,
         loc: usize,
         state: u8,
+        endch: i64,
     ) -> R<bool> {
+        let counted = (self.lines_entered, self.lines_read);
         let saved = std::mem::replace(&mut self.input, crate::input::Input::new());
         let (eof, no_pull) = (self.eof, self.no_pull);
         self.eof = true;
         self.no_pull = true;
         self.input.push_line(line);
         let got = self.next_tok();
+        // (the same token, the line where it was left, and the same
+        // `\endlinechar` after it, §360)
         let same = matches!(got, Ok(Some(t)) if t == tok)
             && self
                 .input
                 .top_line()
-                .is_some_and(|x| x.loc == loc && x.state == state);
+                .is_some_and(|x| x.loc == loc && x.state == state && x.endch == endch);
+        (self.lines_entered, self.lines_read) = counted;
         self.input = saved;
         self.eof = eof;
         self.no_pull = no_pull;

@@ -214,6 +214,14 @@ pub(crate) struct Run<'c, 'a> {
     /// The writer's state this run's last PDF step made, not yet where
     /// other nodes find it ([`crate::pdfout::publish`], at the run's end).
     pub pdf_fold: Option<(u64, std::sync::Arc<crate::pdfout::Fold>)>,
+    /// The input level that holds the last pulled sibling's first line,
+    /// once reached: where [`Run::park`] finds it.
+    pub pull_lev: Option<usize>,
+    /// For a resumed run, per pulled sibling: its first line as it was
+    /// before its first token was peeked, when the park left that token
+    /// and the rest of the line as two text segments
+    /// ([`Run::give_back_peeked`]).
+    pub pull_orig: Vec<Option<crate::input::Line>>,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -353,6 +361,8 @@ impl<'c, 'a> Run<'c, 'a> {
             pulled: 0,
             pull_at: Vec::new(),
             pdf_fold: None,
+            pull_lev: None,
+            pull_orig: Vec::new(),
             top: false,
             claim_rest: false,
             nest: Vec::new(),
@@ -1911,6 +1921,11 @@ pub(crate) struct Parked {
     /// The input left, top first: the levels' rests, then the text.
     segs: Vec<Seg>,
     pulled: usize,
+    /// Where each pulled sibling's text begins, as an index into `segs`'
+    /// text part: [`Run::pull_at`], kept so a resumed run can still give a
+    /// peeked sibling back.
+    pull_at: Vec<Option<usize>>,
+    pull_orig: Vec<Option<crate::input::Line>>,
     top: bool,
     claim_rest: bool,
     nest: Vec<PLevel>,
@@ -1955,6 +1970,37 @@ impl Run<'_, '_> {
                 _ => segs.push(Seg::File(input.file(*l).clone())),
             }
         }
+        // where each pulled sibling's text begins in the resumed run's
+        // text: the levels' rests come first, then the text not reached
+        let nlev = input.levels.len();
+        let last = self.pull_at.len().wrapping_sub(1);
+        let mut pull_at = Vec::with_capacity(self.pull_at.len());
+        let mut pull_orig = Vec::with_capacity(self.pull_at.len());
+        for (i, p) in self.pull_at.iter().enumerate() {
+            let (at, orig) = match *p {
+                Some(at) if at >= input.text_at => (Some(nlev + at - input.text_at), None),
+                // the last sibling's first line reached, its first token
+                // read and put back on top of it: the token and the rest
+                // of the line become two segments
+                Some(at) if i == last && at + 1 == input.text_at => {
+                    match (self.pull_lev, &input.text[at]) {
+                        (Some(j), Seg::Line(orig))
+                            if j + 1 < nlev
+                                && input.levels[j].kind == crate::input::kind::LINE
+                                && input.levels[j + 1].kind == crate::input::kind::TOKS
+                                && input.levels[j + 1].ty == crate::input::ty::BACKED_UP
+                                && input.levels[j + 1].b - input.levels[j + 1].a == 1 =>
+                        {
+                            (Some(nlev - 2 - j), Some(orig.clone()))
+                        }
+                        _ => (None, None),
+                    }
+                }
+                _ => (None, None),
+            };
+            pull_at.push(at);
+            pull_orig.push(orig);
+        }
         segs.extend(input.text_rest().iter().cloned());
         let nest = std::mem::take(&mut self.nest)
             .into_iter()
@@ -1979,6 +2025,8 @@ impl Run<'_, '_> {
             epoch: self.cx.values_epoch(),
             segs,
             pulled: self.pulled,
+            pull_at,
+            pull_orig,
             top: self.top,
             claim_rest: self.claim_rest,
             nest,
@@ -2039,6 +2087,8 @@ impl<'c, 'a> Run<'c, 'a> {
             })
             .collect();
         r.pulled = p.pulled;
+        r.pull_at = p.pull_at;
+        r.pull_orig = p.pull_orig;
         r.top = p.top;
         r.claim_rest = p.claim_rest;
         r.next_lid = p.next_lid;
