@@ -1727,6 +1727,37 @@ impl Graph {
             t_mark = std::time::Instant::now();
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
+                {
+                    // (the reruns by cause and field, most first)
+                    use phitex_defuse::Rerun as Rr;
+                    let v = self.eng.values();
+                    let mut by = FxHashMap::<String, usize>::default();
+                    let mut shown = 0;
+                    for (n, c) in &r.rerun_causes {
+                        if let Rr::Changed { field, old, new } = *c {
+                            if shown < 4 && std::env::var("PHITEX_RERUN_DIFF").is_ok() && crate::val::field_name(v, field) == "ps" {
+                                shown += 1;
+                                let (o, w) = (v.render(old), v.render(new));
+                                let i = o.bytes().zip(w.bytes()).take_while(|(a, b)| a == b).count();
+                                let cut = |x: &str| x.get(i.saturating_sub(80)..(i + 240).min(x.len())).unwrap_or("").to_owned();
+                                eprintln!("  changed ps at {} (len {} vs {}, first diff at {i}):\n    old ..{}\n    new ..{}", describe(&self.eng, *n), o.len(), w.len(), cut(&o), cut(&w));
+                            }
+                        }
+                        let (k, f) = match *c {
+                            Rr::Changed { field, .. } => ("Changed", Some(field)),
+                            Rr::Rebind { field } => ("Rebind", Some(field)),
+                            Rr::Refuted { field } => ("Refuted", field),
+                            Rr::Woken { field } => ("Woken", field),
+                            _ => ("other", None),
+                        };
+                        let name = f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
+                        *by.entry(format!("{k} {name}")).or_default() += 1;
+                    }
+                    let mut by: Vec<_> = by.into_iter().collect();
+                    by.sort_by(|a, b| b.1.cmp(&a.1));
+                    by.truncate(12);
+                    eprintln!("  reruns by field {by:?}");
+                }
                 eprintln!("  waits by kind {:?}", r.waits_by_kind);
                 for &(n, w) in &r.top_waited {
                     eprintln!("  waited on {w}x: {}", describe(&self.eng, n));

@@ -654,7 +654,9 @@ impl Run<'_, '_> {
         }
         self.begin_command();
         let f = self.ps_field();
-        let mut ps = PageState::decode(v, self.cx.use_field(f)?);
+        let ps_in = self.cx.use_field(f)?;
+        let mut timer = FoldTimer::new(raw.len());
+        let mut ps = timer.decode(|| PageState::decode(v, ps_in));
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
         if fin {
             // §1026: the held-over insertions and the routine's list,
@@ -666,7 +668,7 @@ impl Run<'_, '_> {
         }
         let fire = {
             let mut live = |n: u16| self.insert_class(n);
-            ps.fold_items(v, &raw, dead, &mut live)?
+            timer.fold(|| ps.fold_items(v, &raw, dead, &mut live))?
         };
         self.mark.active = false;
         let Some(fire) = fire else {
@@ -677,7 +679,8 @@ impl Run<'_, '_> {
             if self.stop_at.is_some() {
                 return Ok(());
             }
-            self.cx.define_with(f, ps.encode(v), Locality::Global);
+            let e = timer.encode(|| ps.encode(v));
+            self.cx.define_with(f, e, Locality::Global);
             return Ok(());
         };
         // (a second pass stopped at the candidate: the piece goes on
@@ -1463,5 +1466,60 @@ impl Operation for Resume {
             }
             r.run_all()
         })
+    }
+}
+
+/// (measure) `PHITEX_TEX_TIME`: one page fold's decode, fold and encode
+/// time and its item count, printed as `pagefold:` when the fold ends
+/// (a fold that fires prints no encode: the finisher defines the state).
+struct FoldTimer {
+    on: bool,
+    items: usize,
+    t: [std::time::Duration; 3],
+}
+
+impl FoldTimer {
+    fn new(items: usize) -> FoldTimer {
+        FoldTimer {
+            on: crate::exec::env_flag!("PHITEX_TEX_TIME"),
+            items,
+            t: [std::time::Duration::ZERO; 3],
+        }
+    }
+
+    fn timed<T>(&mut self, i: usize, f: impl FnOnce() -> T) -> T {
+        if !self.on {
+            return f();
+        }
+        let t0 = std::time::Instant::now();
+        let r = f();
+        self.t[i] += t0.elapsed();
+        r
+    }
+
+    fn decode<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        self.timed(0, f)
+    }
+
+    fn fold<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        self.timed(1, f)
+    }
+
+    fn encode<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        self.timed(2, f)
+    }
+}
+
+impl Drop for FoldTimer {
+    fn drop(&mut self) {
+        if self.on {
+            eprintln!(
+                "pagefold: items {} decode_us {} fold_us {} encode_us {}",
+                self.items,
+                self.t[0].as_micros(),
+                self.t[1].as_micros(),
+                self.t[2].as_micros()
+            );
+        }
     }
 }
