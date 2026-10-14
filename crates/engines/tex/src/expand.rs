@@ -83,8 +83,13 @@ impl Run<'_, '_> {
                     self.back_input(t);
                 }
                 cmd::NO_EXPAND => {
-                    // §369
-                    self.get_token()?;
+                    // §369: `scanner_status:=normal` while the token is
+                    // read (`\everyeof{\noexpand}`: a file's end met here
+                    // is no runaway, §336)
+                    let was = self.scanner.take();
+                    let r = self.get_token();
+                    self.scanner = was;
+                    r?;
                     let t = self.cur.tok;
                     let cs = t.is_cs_or_active();
                     self.back_input(t);
@@ -209,7 +214,12 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let mut bufs = std::mem::take(&mut self.mbufs);
+        // §389: `scanner_status:=matching; warning_index:=warning_index`
+        let was = self
+            .scanner
+            .replace((crate::run::SCAN_MATCHING, self.cur.tok));
         let r = self.macro_args(&m, &mut bufs);
+        self.scanner = was;
         if matches!(r, Ok(true)) {
             // §400: the body with its arguments substituted, written
             // straight into the arena as the macro's level
@@ -311,7 +321,11 @@ impl Run<'_, '_> {
                     }
                     r = s0;
                 }
-                if tok == par && !long_state {
+                if tok == par && (!long_state || self.outer_call) {
+                    // §392: the `\par` §338 inserted ends the call quietly
+                    if std::mem::take(&mut self.outer_call) {
+                        return Ok(false);
+                    }
                     // §396: a runaway argument; the \par is read again
                     self.runaway(name)?;
                     self.back_input(tok);
@@ -324,7 +338,10 @@ impl Run<'_, '_> {
                         args.push(tok);
                         loop {
                             let t2 = self.get_token_tok()?;
-                            if t2 == par && !long_state {
+                            if t2 == par && (!long_state || self.outer_call) {
+                                if std::mem::take(&mut self.outer_call) {
+                                    return Ok(false);
+                                }
                                 self.runaway(name)?;
                                 self.back_input(t2);
                                 return Ok(false);
@@ -428,6 +445,36 @@ impl Run<'_, '_> {
         Ok((c, h))
     }
 
+    /// §507: `\ifx`'s two tokens compared.
+    fn if_x(&mut self) -> R<bool> {
+        Ok(if self.get_next()? {
+            let m1 = self.cur_mean()?;
+            let t1 = self.cur.tok;
+            let (p, q) = self.cur_cmd_chr_for_ifx(t1, &m1);
+            if self.get_next()? {
+                let m2 = self.cur_mean()?;
+                let t2 = self.cur.tok;
+                let (c2, h2) = self.cur_cmd_chr_for_ifx(t2, &m2);
+                if c2 != p {
+                    false
+                } else if c2 < cmd::CALL {
+                    h2 == q
+                } else {
+                    match (&m1, &m2) {
+                        (Mean::Macro(a), Mean::Macro(b)) => {
+                            Rc::ptr_eq(a, b) || (a.params == b.params && a.body == b.body)
+                        }
+                        _ => false,
+                    }
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        })
+    }
+
     /// `conditional` (§498–§509).
     #[allow(clippy::too_many_lines)]
     pub(crate) fn conditional(&mut self) -> R<()> {
@@ -498,33 +545,12 @@ impl Run<'_, '_> {
                 }
             }
             12 => {
-                // §507
-                if self.get_next()? {
-                    let m1 = self.cur_mean()?;
-                    let t1 = self.cur.tok;
-                    let (p, q) = self.cur_cmd_chr_for_ifx(t1, &m1);
-                    if self.get_next()? {
-                        let m2 = self.cur_mean()?;
-                        let t2 = self.cur.tok;
-                        let (c2, h2) = self.cur_cmd_chr_for_ifx(t2, &m2);
-                        if c2 != p {
-                            false
-                        } else if c2 < cmd::CALL {
-                            h2 == q
-                        } else {
-                            match (&m1, &m2) {
-                                (Mean::Macro(a), Mean::Macro(b)) => {
-                                    Rc::ptr_eq(a, b) || (a.params == b.params && a.body == b.body)
-                                }
-                                _ => false,
-                            }
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
+                // §507: `scanner_status:=normal` while the two tokens are
+                // read (a file's end between them is no runaway, §336)
+                let was = self.scanner.take();
+                let r = self.if_x();
+                self.scanner = was;
+                r?
             }
             13 => {
                 let n = self.scan_four_bit_int()?;

@@ -1440,7 +1440,7 @@ impl Run<'_, '_> {
             {
                 // (a text the stream's earlier lines left open goes on
                 // with this one: the file is read back whole)
-                let text = match self.wpending.remove(&k) {
+                let text = match self.take_wpending(k)? {
                     Some(mut t) => {
                         t.push_str(&line);
                         t
@@ -1457,7 +1457,7 @@ impl Run<'_, '_> {
                 if let Some(made) = r {
                     v.list(vec![v.str(&name), v.str(&line), made])
                 } else {
-                    self.wpending.insert(k, text);
+                    self.set(&format!("write:pend:{k}"), v.str(&text), true);
                     v.list(vec![v.str(&name), v.str(&line)])
                 }
             } else {
@@ -1470,6 +1470,62 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// Stream `k`'s written text still incomplete (`\@writeckpt`'s
+    /// `\@setckpt{...}{` over several lines), continued by its next line:
+    /// TeX state (`write:pend:<k>`, global like the stream), so a line written
+    /// in another node goes on with it; taken (cleared) here.
+    fn take_wpending(&mut self, k: i32) -> R<Option<String>> {
+        let v = self.v;
+        let f = format!("write:pend:{k}");
+        let t = self
+            .get(&f)?
+            .filter(|&x| x != ValueId::UNIT)
+            .map(|x| str_of(v, x));
+        if t.is_some() {
+            self.set(&f, ValueId::UNIT, true);
+        }
+        Ok(t)
+    }
+
+    /// The text of stream `n`'s file left open by its last line, read
+    /// back to the file's end: what §338 inserts ends it, its errors
+    /// (`rberr:<name>`, given again at each read-back) and definitions go
+    /// with the file as a line's do.
+    fn file_end_read_back(&mut self, n: i32, text: &str) -> R<()> {
+        let v = self.v;
+        let name = self
+            .get(&format!("write:{n}"))?
+            .and_then(|x| list_of(v, x).first().map(|&m| str_of(v, m)))
+            .unwrap_or_default();
+        self.interp_eof = true;
+        self.interp_errs.clear();
+        let r = self.interpret_line(text);
+        self.interp_eof = false;
+        let errs = std::mem::take(&mut self.interp_errs);
+        let made = r?;
+        let mut ds = made.map(|m| list_of(v, m)).unwrap_or_default();
+        if made.is_none() {
+            // (nothing was being scanned, §336 at `normal`: TeX reads on
+            // past the file's end, which a read-back by fields cannot)
+            self.diag(
+                false,
+                &format!("{name}: the text written last is incomplete at its end; not read back"),
+            );
+        }
+        if !errs.is_empty() {
+            ds.push(v.list(vec![
+                v.str(&format!("rberr:{name}")),
+                v.list(errs.iter().map(|e| v.str(e)).collect()),
+                v.int(1),
+            ]));
+        }
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            eprintln!("aux-trace: {name} ends inside a command: {errs:?}");
+        }
+        self.contribute_stream(v.list(vec![v.str(&name), v.str(""), v.list(ds)]));
+        Ok(())
+    }
+
     /// `\closeout` done (§1374): in a page step or a text paging inline
     /// the stream is closed for what follows; in a document node the
     /// close is an event at its position (a `[name, "", "close"]` stream
@@ -1478,10 +1534,11 @@ impl Run<'_, '_> {
     /// writes fire.
     pub(crate) fn close_out(&mut self, n: i32) -> R<()> {
         let v = self.v;
-        // (a text the file's lines left open ends with the file: what
-        // TeX's `\input` of it reports, "File ended while scanning",
-        // defines nothing)
-        self.wpending.remove(&n);
+        // a text the file's lines left open ends with the file: read
+        // back as TeX's `\input` of it reads its end (§362, §336–§339)
+        if let Some(text) = self.take_wpending(n)? {
+            self.file_end_read_back(n, &text)?;
+        }
         let op = self.cx.op();
         if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
             self.set(&format!("write:{n}"), ValueId::UNIT, true);
