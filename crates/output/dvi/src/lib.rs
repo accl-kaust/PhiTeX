@@ -1085,6 +1085,14 @@ impl DviWriter {
         Ok(())
     }
 
+    /// Font `f` as defined before the next page, without its `fnt_def`:
+    /// a page written apart from the pages before it
+    /// ([`DviWriter::ship_out_kept`], then [`DviWriter::ship_kept`] in
+    /// the file, which checks the fonts it finds defined there).
+    pub fn assume_defined(&mut self, f: FontId, d: FontDef) {
+        self.fonts.insert(f, d);
+    }
+
     /// The buffer's state at the next byte.
     fn phase(&self) -> Phase {
         Phase {

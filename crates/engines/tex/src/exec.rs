@@ -294,13 +294,34 @@ impl Threads {
         let c = self.running.fetch_add(1, Ordering::Relaxed) + 1;
         self.peak.fetch_max(c, Ordering::Relaxed);
         let t0 = clock().now();
+        let prev = JOB_THREADS.with(|c| c.replace(self.n));
         let r = f();
+        JOB_THREADS.with(|c| c.set(prev));
         if let (Some(a), Some(b)) = (t0, clock().now()) {
             self.busy.fetch_add(b.saturating_sub(a), Ordering::Relaxed);
         }
         self.running.fetch_sub(1, Ordering::Relaxed);
         r
     }
+}
+
+thread_local! {
+    /// The thread count of the executor whose job runs on this thread
+    /// (1 outside a job).
+    static JOB_THREADS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+}
+
+/// `f(i)` for every `i < n`, from inside a node's run: on the workers of
+/// the executor running it (its pool, never other threads), in order
+/// where it has one thread or this target has none. A node's own
+/// parallel pass (the DVI writer's pages).
+pub(crate) fn par_each(n: usize, f: &(dyn Fn(usize) + Sync)) {
+    let t = JOB_THREADS.with(std::cell::Cell::get);
+    if t <= 1 || n < 2 || !threads_possible() {
+        (0..n).for_each(f);
+        return;
+    }
+    parallel(t, n, 1, f);
 }
 
 /// The thread count: `given`, else `PHITEX_THREADS`, else the available
