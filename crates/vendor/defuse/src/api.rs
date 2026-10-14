@@ -512,6 +512,13 @@ pub enum EvalError {
     },
     /// [`Limits::total_runs`] or [`Limits::time`] was reached with these
     /// nodes still waiting or queued.
+    /// An operation's run panicked: the node, its operation's name and
+    /// the panic message. The node runs again in the next evaluation.
+    OpPanicked {
+        node: NodeId,
+        op: String,
+        message: String,
+    },
     Deadline {
         runs: u64,
         waiters: Vec<Waiter>,
@@ -553,6 +560,9 @@ impl std::fmt::Display for EvalError {
                     f,
                     "node {node:?} read a field at {at:?}, which is not earlier in its unit"
                 )
+            }
+            EvalError::OpPanicked { node, op, message } => {
+                write!(f, "node {node:?} ({op}) panicked: {message}")
             }
             EvalError::Deadline { runs, waiters, .. } => write!(
                 f,
@@ -701,6 +711,13 @@ pub struct Report {
     /// with no such read counts 1, so a plain chain of `n` runs gives `n`
     /// (where [`Self::critical_path`], heights from 0, gives `n - 1`).
     pub realised_critical_path: u32,
+    /// [`Self::realised_critical_path`] by time: the longest chain of
+    /// runs that waited for each other, by the sum of their run times
+    /// (zero on wasm32).
+    pub realised_critical_time: std::time::Duration,
+    /// Each node's run time in this evaluation (all its attempts), longest
+    /// first (empty on wasm32).
+    pub run_times: Vec<(NodeId, std::time::Duration)>,
     /// Speculative runs that read a predicted value
     /// ([`Operation::predicted_defs`]) and were confirmed.
     pub predictions_confirmed: u64,

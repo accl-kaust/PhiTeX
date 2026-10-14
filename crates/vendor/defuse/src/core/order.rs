@@ -120,6 +120,7 @@ impl Shared {
             out: AtomicU64::new(0),
             lgen: AtomicU32::new(0),
             rdep: AtomicU64::new(0),
+            rtime: AtomicU64::new(0),
             park_seq: AtomicU32::new(0),
             claimed_by: AtomicU32::new(NIL),
             d: std::sync::Mutex::new(Box::new(data.take().expect("one record"))),

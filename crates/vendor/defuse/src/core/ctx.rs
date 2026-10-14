@@ -47,6 +47,8 @@ pub struct Ctx<'a> {
     pub(crate) env: Vec<(Field, ValueId)>,
     pub(crate) wait: Option<Wait>,
     pub(crate) token: Option<Box<dyn Any + Send>>,
+    /// How long the run took, in nanoseconds (0 on wasm32).
+    pub(crate) run_ns: u64,
     pub(crate) kept: Option<Box<dyn Any + Send>>,
     pub(crate) restart: bool,
     pub(crate) dup: FxHashMap<u64, u32>,
@@ -90,6 +92,7 @@ impl<'a> Ctx<'a> {
             env: Vec::new(),
             wait: None,
             token: None,
+            run_ns: 0,
             kept,
             restart: false,
             dup: FxHashMap::default(),

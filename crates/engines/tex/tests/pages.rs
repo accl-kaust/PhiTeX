@@ -49,11 +49,14 @@ fn vsize_document_pages() {
         );
     }
     eprintln!(
-        "{n} pages; {} nodes run, {} runs, {} rounds, critical path {}, stops {} resumed {} restarted {}",
+        "{n} pages; {} nodes run, {} runs, {} rounds, critical path {} nodes / realised {} nodes {:?}, wall {:?}, stops {} resumed {} restarted {}",
         b.stats.nodes_run,
         b.stats.runs,
         b.stats.rounds,
         b.stats.critical_path.unwrap_or(0),
+        b.stats.realised_critical_path,
+        b.stats.realised_critical_time,
+        b.stats.wall,
         b.stats.stops,
         b.stats.resumed,
         b.stats.restarted

@@ -136,6 +136,9 @@ pub(crate) struct Rec {
     /// Realised depth of its last run: the evaluation's epoch (high 32
     /// bits) and the depth (`Report::realised_critical_path`).
     pub rdep: AtomicU64,
+    /// Realised time of its last run: its run's duration plus the longest
+    /// realised time it read (ns; valid in `rdep`'s evaluation).
+    pub rtime: AtomicU64,
     pub park_seq: AtomicU32,
     pub claimed_by: AtomicU32,
     pub d: Mutex<Box<Data>>,
@@ -746,6 +749,7 @@ pub(crate) struct Counters {
     pub predictions_confirmed: AtomicU64,
     pub predictions_refuted: AtomicU64,
     pub realised: AtomicU64,
+    pub realised_ns: AtomicU64,
     pub env_provided: AtomicU64,
     pub commits: AtomicU64,
     pub scope_region: AtomicU64,
@@ -758,6 +762,8 @@ pub(crate) struct Counters {
 #[derive(Default)]
 pub(crate) struct Tallies {
     pub runs_by_op: FxHashMap<&'static str, u64>,
+    /// Each node's run time this evaluation, all attempts (ns).
+    pub run_ns: FxHashMap<Slot, u64>,
     pub waits_by_op: FxHashMap<&'static str, u64>,
     pub waits_by_kind: FxHashMap<&'static str, u64>,
     pub waited: FxHashMap<Slot, u64>,
