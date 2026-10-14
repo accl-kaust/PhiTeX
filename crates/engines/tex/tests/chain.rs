@@ -17,10 +17,11 @@ fn target_failures(name: &str, b: &phitex_tex::Build) -> Vec<String> {
         }
     }
     let pages = b.pages().len();
-    let bound = 6 + pages;
-    let height = b.stats.critical_path.unwrap_or(0);
-    if height > bound {
-        out.push(format!("{name}: height {height} > 6 + {pages} pages"));
+    // the page chain is the design (docs/TARGET_GRAPH.md, Heights): no
+    // bound on its height in nodes; a node runs once (a park resumes)
+    let (runs, nodes) = (b.stats.runs, b.stats.nodes_run);
+    if runs * 10 > nodes * 11 {
+        out.push(format!("{name}: {runs} runs for {nodes} nodes (> 1.1 a node)"));
     }
     // a region runs as one node: at most a few nodes per region (the
     // region, its breaks, its loop-back) plus one step per page
@@ -155,8 +156,9 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
     fails
 }
 
+/// The target graph's gate (docs/TARGET_GRAPH.md, The test), printing
+/// the critical chain by cause.
 #[test]
-#[ignore = "a measure: the critical chain by cause"]
 fn chains() {
     let fx = common::fixtures().join("plain");
     let mut fails = Vec::new();

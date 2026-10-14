@@ -40,6 +40,14 @@ fn vsize_document_pages() {
         common::log_excerpt(&log),
         diags.join("\n")
     );
+    // a node runs once: a piece waiting for the page state parks at its
+    // fold and resumes there (docs/TARGET_GRAPH.md, Heights)
+    assert!(
+        b.stats.runs * 10 <= b.stats.nodes_run * 11,
+        "{} runs for {} nodes (> 1.1 a node)",
+        b.stats.runs,
+        b.stats.nodes_run
+    );
     // (`[j]`, or `[j.c1...]` when `\count1` and the others are set)
     for j in 1..=n {
         assert!(
