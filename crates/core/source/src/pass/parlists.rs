@@ -756,3 +756,31 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod probe {
+    use super::*;
+    #[test]
+    #[ignore = "probe"]
+    fn probe_latex() {
+        let t = std::fs::read("/usr/share/texmf-dist/tex/latex/base/latex.ltx").unwrap();
+        let t: String = t.iter().map(|&b| char::from(b)).collect();
+        let mut p = Definitions::new();
+        let e = std::fs::read("/usr/share/texmf-dist/tex/latex/l3kernel/expl3-code.tex").unwrap();
+        let e: String = e.iter().map(|&b| char::from(b)).collect();
+        p.harvest(&e, FileKind::Package, 2);
+        p.harvest(&t, FileKind::Initex, 1);
+        let doc = Definitions::new();
+        for n in ["par", "@@par", "para_end:", "@setpar", "@par", "@tempswatrue"] {
+            println!("{n}: {:?}", p.shapes(n));
+            let mut c = Closure::new(&doc, &p);
+            let d = c.call(n);
+            println!("   call: names {:?} prefixes {:?} unbounded {:?}", d.names.keys().take(20).collect::<Vec<_>>(), d.prefixes, d.unbounded.iter().take(5).collect::<Vec<_>>());
+        }
+        for (n, b) in p.last_bodies() {
+            if b.contains("tex_everypar:D") || n.contains("standard_everypar") {
+                println!("BODY {n}: {:?}", b.chars().take(200).collect::<String>());
+            }
+        }
+    }
+}

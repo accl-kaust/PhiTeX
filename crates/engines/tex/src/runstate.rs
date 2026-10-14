@@ -675,19 +675,45 @@ impl State {
     }
 
     /// The definitions to publish: each location's definition at the base
-    /// level, encoded once; a local one equal to the engine's value the
-    /// run read is left out (the same binding).
+    /// level, encoded once; one equal to the engine's value the run read
+    /// is left out (the run's net effect: what it left as it found it is
+    /// no definition, the values between are its own).
     pub(crate) fn published(&self, v: &Values) -> Vec<(Loc, ValueId, Locality)> {
         let mut out = Vec::with_capacity(self.metas.len());
         for m in &self.metas {
             let Some((val, l)) = &m.publ else { continue };
             let Some(x) = val.encode(v) else { continue };
-            if *l == Locality::Local && m.eng == Some(Some(x)) {
+            if m.eng == Some(Some(x)) {
                 continue;
             }
             out.push((m.loc, x, *l));
         }
         out
+    }
+
+    /// Whether the run defined `loc` at its base level without having
+    /// read the engine's value first.
+    pub(crate) fn defined_unread(&self, loc: Loc) -> bool {
+        self.slot_ref(loc).is_some_and(|s| {
+            s.meta != 0 && {
+                let m = &self.metas[s.meta as usize - 1];
+                m.publ.is_some() && m.eng.is_none()
+            }
+        })
+    }
+
+    /// The engine's value of `loc` before the run, read after the run
+    /// defined it ([`State::defined_unread`]): its net effect compares
+    /// with it.
+    pub(crate) fn note_engine(&mut self, loc: Loc, x: Option<ValueId>) {
+        if let Some(s) = self.slot_ref(loc)
+            && s.meta != 0
+        {
+            let mi = s.meta as usize - 1;
+            if self.metas[mi].eng.is_none() {
+                self.metas[mi].eng = Some(x);
+            }
+        }
     }
 
     /// Whether any of `locs` has a definition at the base level.
