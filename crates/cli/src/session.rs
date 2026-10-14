@@ -654,7 +654,7 @@ impl Session {
             if std::env::var_os("PHITEX_PKG_STATS").is_some() {
                 let s = &b.stats;
                 eprintln!(
-                    "PKG loads {} claimed {} recorded {} optimistic {} runs {} at-once {} span {:.3} on-critical {} refuted {} undeclared {} critical-path {:?} threads {} engine-wall {:.3} speculations {} mispredictions {}",
+                    "PKG loads {} claimed {} recorded {} optimistic {} runs {} at-once {} span {:.3} on-critical {} refuted {} undeclared {} critical-path {:?} threads {} engine-wall {:.3} speculations {} confirmations {} mispredictions {}",
                     s.pkg_loads,
                     s.pkg_claimed,
                     s.pkg_recorded,
@@ -669,6 +669,7 @@ impl Session {
                     s.threads,
                     s.wall.as_secs_f64(),
                     s.speculations,
+                    s.confirmations,
                     s.mispredictions
                 );
             }

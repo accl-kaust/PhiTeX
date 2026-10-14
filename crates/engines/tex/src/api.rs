@@ -3178,6 +3178,7 @@ impl Build {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
+            let mut chain: FxHashMap<String, u64> = FxHashMap::default();
             for (n, k) in &keyed {
                 let runs = log.iter().filter(|r| r.0 == n.raw()).count();
                 let spec = log.iter().filter(|r| r.0 == n.raw() && r.3).count();
@@ -3187,6 +3188,7 @@ impl Build {
                         if let Some(p) = self.g.eng.reaching_def(*n, v.field(f))
                             && let Some((_, pk)) = keyed.iter().find(|(m, _)| *m == p)
                         {
+                            *chain.entry(f.clone()).or_default() += 1;
                             deps.push(format!("{f} <- {pk}"));
                         }
                     }
@@ -3197,6 +3199,15 @@ impl Build {
                     "pkgrec: runs of {k}: {runs} ({spec} speculative); reads {nd} fields another load defined: {deps:?}"
                 );
             }
+            // the fields that still chain loads, by the number of loads
+            // reading one from another
+            let mut chain: Vec<(String, u64)> = chain.into_iter().collect();
+            chain.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            eprintln!(
+                "pkgrec: chaining fields ({}): {:?}",
+                chain.len(),
+                chain.iter().take(40).collect::<Vec<_>>()
+            );
             eprintln!(
                 "pkgrec: refuted by field {:?}; restarted by {:?}; speculations {} confirmed {} mispredicted {}",
                 stats.refuted_by_field.iter().take(20).collect::<Vec<_>>(),
