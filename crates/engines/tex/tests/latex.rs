@@ -728,6 +728,22 @@ fn latex_environments() {
     edit_check("envs", &b, &cold, 4);
 }
 
+/// `pdflatex` on a book whose chapters and section are followed by
+/// paragraphs, right after the heading's line and after a blank line
+/// (`pdfdocs/headings.tex`, three pages, `\chapter{B}` on page 3 after
+/// the blank page `openright` leaves): the PDF equals pdfTeX's, with no
+/// undeclared definition (a heading's `\@afterheading` leaves a token
+/// list in `\everypar` that the next paragraph's start runs, §1091).
+#[test]
+#[ignore = "red: 2 pages instead of 3 (the openright blank page), PDF differs at byte 470; and undeclared cs:if@nobreak from \\everypar"]
+fn latex_heading_everypar() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("headings.tex"));
+    let (b, _) = cold_nodes("headings", &dir, &src);
+    assert_eq!(b.stats.undeclared_definitions, 0, "undeclared definitions");
+    assert_eq!(b.stats.regime_violations, 0, "regime violations");
+}
+
 /// `pdflatex` on a main file that `\input`s one chapter and
 /// `\include`s another (`pdfdocs/inputs.tex`, `chap1.tex`,
 /// `chap2.tex`; `\include` goes through `\@input` and its own `.aux`):
