@@ -92,7 +92,7 @@ impl Run<'_, '_> {
         self.aopen > 0
     }
 
-    fn astate(&mut self) -> i64 {
+    pub(crate) fn astate(&mut self) -> i64 {
         if let Some(s) = self.astate {
             return s;
         }
