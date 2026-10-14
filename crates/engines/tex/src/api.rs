@@ -4611,31 +4611,6 @@ impl phitex_defuse::Monoid for LinesMonoid {
     }
 }
 
-#[cfg(test)]
-mod prelude_tests {
-    use super::*;
-
-    #[test]
-    fn another_layout_or_engine_is_refused() {
-        let c = Cached {
-            key: [3; 32],
-            text_key: 5,
-            reads: vec![("a.tex".to_owned(), 9)],
-            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
-            errors: Vec::new(),
-            diags: Vec::new(),
-        };
-        let b = serialise(&c);
-        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
-        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
-        assert!(deserialise(&other).is_none());
-        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
-        assert!(deserialise(&other).is_none());
-        // the old layout, with no header
-        assert!(deserialise(&b[20..]).is_none());
-    }
-}
-
 /// `PHITEX_DECL_TRACE`: a loop-back declaration, its family and whether
 /// its initial value is the one declared before.
 fn decl_trace(eng: &Engine, f: Field, init: ValueId) {
@@ -4695,4 +4670,29 @@ fn env_trace(eng: &Engine, env: &[(Field, ValueId)]) {
         s.join("; ")
     );
     *l = Some(new);
+}
+
+#[cfg(test)]
+mod prelude_tests {
+    use super::*;
+
+    #[test]
+    fn another_layout_or_engine_is_refused() {
+        let c = Cached {
+            key: [3; 32],
+            text_key: 5,
+            reads: vec![("a.tex".to_owned(), 9)],
+            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
+            errors: Vec::new(),
+            diags: Vec::new(),
+        };
+        let b = serialise(&c);
+        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
+        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
+        assert!(deserialise(&other).is_none());
+        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
+        assert!(deserialise(&other).is_none());
+        // the old layout, with no header
+        assert!(deserialise(&b[20..]).is_none());
+    }
 }
