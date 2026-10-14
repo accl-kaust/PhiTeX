@@ -145,7 +145,10 @@ pub(crate) fn run_node_parking(
             r.input = crate::input::Input::new();
             r.claim_rest = true;
             // (for the output: pdfTeX writes no PDF file after one)
-            let _ = r.log("fatal", "");
+            // (`pdf`: pdfTeX says no PDF file was produced, §1335, pdfTeX
+            // `close_files_and_terminate`)
+            let pdf = r.param("pdfoutput").is_ok_and(|p| p > 0);
+            let _ = r.log("fatal", if pdf { "pdf" } else { "" });
             r.end_fatal();
             Ok(r.finish())
         }
