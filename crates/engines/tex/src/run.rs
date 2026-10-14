@@ -919,8 +919,17 @@ impl<'c, 'a> Run<'c, 'a> {
         self.read_back_done = self.read_back_at.is_some();
         if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
-                "aux-trace: read back {key} in node {}: levels {:?}",
+                "aux-trace: read back {key} in node {} ({:?}): levels {:?}",
                 self.cx.node().raw(),
+                self.input.text.first().map(|sg| match sg {
+                    Seg::Line(l) => l
+                        .buf
+                        .iter()
+                        .take(40)
+                        .filter_map(|&c| char::from_u32(c))
+                        .collect::<String>(),
+                    _ => String::new(),
+                }),
                 self.input
                     .levels
                     .iter()
