@@ -5,7 +5,7 @@
 set -u
 T="cargo test -q --profile fastdev"
 t0=$(date +%s)
-$T -p phitex-tex --test diagnostics --test tikzman_repros --test plain --test latex --test chain --no-run 2>&1 | tail -3
+$T -p phitex-tex --test diagnostics --test tikzman_repros --test plain --test latex --test chain --test page_steps --no-run 2>&1 | tail -3
 $T -p phitex-cli --bin phitex --test tikzman_repros --test ladder --no-run 2>&1 | tail -3
 echo "built in $(( $(date +%s) - t0 )) s"
 run() { local n=$1; shift; ( $T "$@" > $r/qg-$n.txt 2>&1; echo "EXIT $? $n" >> $r/qg-$n.txt ) & }
@@ -20,5 +20,9 @@ run envs -p phitex-tex --test latex latex_environments -- --exact
 run ladder08 -p phitex-cli --test ladder r08_hyperref -- --ignored --exact
 run para400 -p phitex-tex --test chain para400 -- --exact --ignored
 wait
+# page_steps' generated documents: para400 only (chain para400 wrote it),
+# cold then a one-word edit, the edit's stats printed as they are.
+mkdir -p target/gate/ps && cp target/gate/p400/para400.tex target/gate/ps/
+( PHITEX_GEN=$PWD/target/gate/ps $T -p phitex-tex --test page_steps generated_documents -- --ignored --exact --nocapture > $r/qg-pagesteps.txt 2>&1; echo "EXIT $? pagesteps" >> $r/qg-pagesteps.txt )
 for f in $r/qg-*.txt; do echo "== $(basename $f): $(grep -E 'test result' $f | tail -1) $(tail -1 $f)"; grep -E '^    [a-z_0-9]+$|panicked at' $f | head -4; done
 echo "gate wall $(( $(date +%s) - t0 )) s"
