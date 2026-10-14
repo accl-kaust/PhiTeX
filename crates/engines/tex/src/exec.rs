@@ -324,6 +324,18 @@ pub(crate) fn par_each(n: usize, f: &(dyn Fn(usize) + Sync)) {
     parallel(t, n, 1, f);
 }
 
+/// `f(i)` for every `i < n` through [`par_each`], in index order.
+pub(crate) fn par_map<T: Send + Sync>(n: usize, f: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+    let slots: Vec<OnceLock<T>> = (0..n).map(|_| OnceLock::new()).collect();
+    par_each(n, &|i| {
+        let _ = slots[i].set(f(i));
+    });
+    slots
+        .into_iter()
+        .map(|s| s.into_inner().expect("every item ran"))
+        .collect()
+}
+
 /// The thread count: `given`, else `PHITEX_THREADS`, else the available
 /// parallelism; 1 where this target cannot run threads.
 pub(crate) fn threads(given: Option<usize>) -> usize {
@@ -419,6 +431,36 @@ impl Threads {
         trace(n, self.n);
         parallel(self.n, n, grain, f);
     }
+}
+
+/// `f(i)` for every `i < n` on the pool of `threads` workers (inline
+/// with one worker, one job, or where this target runs no threads): the
+/// passes before an evaluation (a document's hint analysis per chunk,
+/// its nodes' arguments).
+pub(crate) fn each(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
+    if threads <= 1 || n < 2 || !threads_possible() {
+        (0..n).for_each(f);
+        return;
+    }
+    let grain = (n / (threads * 8)).max(1);
+    trace(n, threads);
+    parallel(threads, n, grain, f);
+}
+
+/// `f(i)` for every `i < n` ([`each`]), the results in order.
+pub(crate) fn map<T: Send + Sync>(
+    threads: usize,
+    n: usize,
+    f: &(dyn Fn(usize) -> T + Sync),
+) -> Vec<T> {
+    let slots: Vec<OnceLock<T>> = (0..n).map(|_| OnceLock::new()).collect();
+    each(threads, n, &|i| {
+        let _ = slots[i].set(f(i));
+    });
+    slots
+        .into_iter()
+        .map(|s| s.into_inner().expect("every job ran"))
+        .collect()
 }
 
 fn trace(n: usize, threads: usize) {

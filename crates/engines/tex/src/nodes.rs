@@ -328,6 +328,20 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
     }
 }
 
+/// [`decode`], a box's dimensions only (its list left empty): what the
+/// page builder's break arithmetic reads of it (§1001–§1008), for a
+/// prediction its real fold checks.
+pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
+    if tag(v, x) == T_BOX
+        && let Value::List(xs) = &*v.get(x)
+    {
+        let mut b = decode_box(v, &xs[..xs.len().min(9)], side);
+        b.list.clear();
+        return Some(Node::Box(b));
+    }
+    decode(v, x, side)
+}
+
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     if let Some(n) = crate::val::leaf_of(v, x) {
         return Some(n);
