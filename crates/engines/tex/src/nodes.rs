@@ -72,10 +72,12 @@ pub(crate) const T_MARKS_AT: i64 = 91;
 /// among the shipped pages, so the writer assembles the file in TeX's
 /// order.
 pub(crate) const T_WRITE_AT: i64 = 88;
-/// `[T_DEFS_AT, field…]`: a marker on the main list, where the text
-/// defined these fields at its base level (since the item before): the
-/// page builder's fold tells each page step which fields the text
-/// defined since the break before it (the routines' deltas give way).
+/// `[T_DEFS_AT, node, field…]`: a marker on the main list, where the
+/// text (document node `node`) defined these fields at its base level
+/// (since the item before): the page builder's fold tells each page
+/// step which fields the text defined since the break before it (the
+/// routines' deltas give way), and the last marker before a page's fire
+/// is where its step reads the text's state (`pp:fire:<j>`).
 pub(crate) const T_DEFS_AT: i64 = 86;
 /// A font a document node loaded (`read_font_info`, §1257): `[tag, f]`;
 /// the page builder's fold tells the writer which page shipped first

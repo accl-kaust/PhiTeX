@@ -83,8 +83,8 @@ pub(crate) struct Plan {
     pub table: ValueId,
     pub marker: ValueId,
     pub pages: Vec<Arc<PageRec>>,
-    /// `pp:items:<j>`, `pp:start:<j>`, `pp:mk:<j>`.
-    pub fields: Vec<[Field; 3]>,
+    /// `pp:items:<j>`, `pp:start:<j>`, `pp:mk:<j>`, `pp:fire:<j>`.
+    pub fields: Vec<[Field; 4]>,
     pub by_idx: FxHashMap<usize, Vec<usize>>,
     pub epoch: u64,
     pub spec: bool,

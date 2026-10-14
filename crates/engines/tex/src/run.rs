@@ -219,6 +219,11 @@ impl Cur {
 /// A decoded scope kind: `(group, sid, lid, mode, depth, extra)`.
 pub(crate) type KindFields = (i64, i64, i64, i32, i64, Vec<ValueId>);
 
+/// Where a page step reads the text ([`Run::fire_at`]): after this node,
+/// or (`None`) at the unit's start.
+#[derive(Clone, Copy)]
+pub(crate) struct FireAt(pub Option<phitex_defuse::NodeId>);
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
     /// Encodings through the worker's cache at this run's values epoch
@@ -341,6 +346,10 @@ pub(crate) struct Run<'c, 'a> {
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
+    /// A page step's fire node (`pp:fire:<j>`, `None` inside: the unit's
+    /// start): the text's fields are read as they stand after it, the
+    /// state TeX's `fire_up` sees (§1012); `None` for every other run.
+    pub(crate) fire_at: Option<FireAt>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -411,6 +420,7 @@ impl<'c, 'a> Run<'c, 'a> {
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
             halt: None,
+            fire_at: None,
         }
     }
 
@@ -454,13 +464,30 @@ impl<'c, 'a> Run<'c, 'a> {
     #[inline(never)]
     fn load_slow(&mut self, loc: Loc) -> R<()> {
         let f = self.loc_field(loc);
-        let r = self.cx.use_field(f);
+        let r = match self.fire_at {
+            Some(FireAt(at)) if self.at_fire(f) => {
+                self.cx.use_field_at(f, at).map(|x| x.map(|(x, _)| x))
+            }
+            _ => self.cx.use_field(f),
+        };
         crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
         self.st.fill(loc, r?);
         Ok(())
+    }
+
+    /// Whether a page step reads `f` where its page fires
+    /// ([`Run::fire_at`]): a field the text defines. The chain's own
+    /// fields (the plan's `pp:`, the exact PDF fold's state) and the
+    /// loop-backs are read as any node reads them.
+    fn at_fire(&self, f: Field) -> bool {
+        if self.cx.is_loopback(f) {
+            return false;
+        }
+        let name = crate::val::field_name(self.v, f);
+        !crate::page::chain_field(&name)
     }
 
     /// The engine value of location `loc` in the run's view.
@@ -746,8 +773,11 @@ impl<'c, 'a> Run<'c, 'a> {
         locs.sort_unstable();
         locs.dedup();
         let v = self.v;
-        let mut xs = Vec::with_capacity(locs.len() + 1);
+        let mut xs = Vec::with_capacity(locs.len() + 2);
         xs.push(v.int(crate::nodes::T_DEFS_AT));
+        // (the defining node: a page firing after this marker reads the
+        // text's state after it, `Run::step_fire`)
+        xs.push(v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes())));
         for l in locs {
             xs.push(self.loc_field(l).0);
         }
