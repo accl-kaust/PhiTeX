@@ -318,8 +318,20 @@ impl Run<'_, '_> {
                     self.head_for_vmode(&md);
                 } else if c == cmd::HALIGN && v {
                     self.init_align(&md)?;
+                } else if c == cmd::HALIGN && md.m == 203 {
+                    // §1130: `mmode+halign`: privileged (a display), and
+                    // only at the display's own level
+                    if md.group == crate::val::group::MATH_SHIFT {
+                        self.init_align(&md)?;
+                    } else {
+                        self.off_save(&md)?;
+                    }
+                } else if c == cmd::HALIGN {
+                    // §1130 `privileged`: "You can't use \halign in math
+                    // mode" (§1049, report_illegal_case)
+                    self.log("error", "illegal command")?;
                 } else {
-                    // REDUCE-GAP: \valign and alignments in displays
+                    // REDUCE-GAP: \valign
                     self.log("error", "this alignment is not supported")?;
                 }
             }

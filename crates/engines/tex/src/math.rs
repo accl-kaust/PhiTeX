@@ -949,7 +949,6 @@ impl Run<'_, '_> {
         let v = self.v;
         let x = |i: usize| dmd.extra.get(i).map_or(0, |&y| int_of(v, y));
         let vlid = x(1);
-        let vkm = i32::try_from(x(2)).unwrap_or(1);
         let danger = self.insufficient_fonts()?;
         let p = self.formula_hlist(dmd, Style::DISPLAY, false)?;
         let view = self.font_view(&p)?;
@@ -1001,11 +1000,7 @@ impl Run<'_, '_> {
             }
         }
         // §1203
-        let mut vm = dmd.clone();
-        vm.m = vkm;
-        vm.km = vkm;
-        vm.lid = vlid;
-        vm.vlid = vlid;
+        let vm = self.display_outer(dmd);
         let side = Side::default();
         let pen = |r: &mut Self, n: i32| {
             let y = nodes::penalty_node(r.v, n);
@@ -1075,10 +1070,29 @@ impl Run<'_, '_> {
         if g2 > 0 {
             skip(self, g2)?;
         }
-        // §1200 resume_after_display
+        self.resume_after_display(dmd, &vm)
+    }
+
+    /// The vertical list around the display `dmd` (its level's extra
+    /// `[1, list, mode]`), as a mode.
+    pub(crate) fn display_outer(&self, dmd: &Mode) -> Mode {
+        let x = |i: usize| dmd.extra.get(i).map_or(0, |&y| int_of(self.v, y));
+        let vlid = x(1);
+        let vkm = i32::try_from(x(2)).unwrap_or(1);
+        let mut vm = dmd.clone();
+        vm.m = vkm;
+        vm.km = vkm;
+        vm.lid = vlid;
+        vm.vlid = vlid;
+        vm
+    }
+
+    /// `resume_after_display` (§1200): the display's group ends, the
+    /// paragraph goes on in a new list.
+    pub(crate) fn resume_after_display(&mut self, dmd: &Mode, vm: &Mode) -> R<()> {
         self.close_group(dmd)?;
-        let pg = self.prev_graf(&vm)?;
-        self.set_prev_graf(&vm, pg + 3);
+        let pg = self.prev_graf(vm)?;
+        self.set_prev_graf(vm, pg + 3);
         let lang = i64::from(phitex_typeset::hyph::cur_lang(self.ipar(Par::language)?));
         let lhm = Self::norm_min(self.ipar(Par::lefthyphenmin)?);
         let rhm = Self::norm_min(self.ipar(Par::righthyphenmin)?);
