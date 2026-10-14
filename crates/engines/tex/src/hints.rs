@@ -3627,6 +3627,9 @@ pub(crate) fn check_defs(
     let names_have = |b: &Bound, name: &str| {
         b.names.iter().any(|n| n == name) || b.prefixes.iter().any(|p| name.starts_with(p.as_str()))
     };
+    // (a bound's names as a set: a package load's record lists
+    // thousands, and its run publishes as many)
+    let own: phitex_defuse::FxHashSet<&str> = b.names.iter().map(String::as_str).collect();
     // (a local definition of the value the run read is no definition:
     // `\\everypar` set back to what it was, the binding unchanged)
     for f in r.published_fields() {
@@ -3634,7 +3637,7 @@ pub(crate) fn check_defs(
             Value::Str(s) => s.to_string(),
             _ => continue,
         };
-        if b.names.contains(&name) {
+        if own.contains(name.as_str()) {
             continue;
         }
         if !is_cs_field(&name) {
