@@ -2186,7 +2186,7 @@ impl Run<'_, '_> {
             // a text paging inline: §1054 as tex.web has it
             if self.all_over_inline()? {
                 self.claim_rest = true;
-                self.frames.clear();
+                self.input = crate::input::Input::new();
                 return Ok(());
             }
             self.back_cur();
@@ -2199,7 +2199,7 @@ impl Run<'_, '_> {
         self.append(0, m);
         // nothing after `\end` is read
         self.claim_rest = true;
-        self.frames.clear();
+        self.input = crate::input::Input::new();
         Ok(())
     }
 
@@ -2338,7 +2338,9 @@ pub(crate) fn fold_item(
         }
         // the page builder's markers (page parameters, a marks read): kept
         // in place for its fold, invisible to the list's readers
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT => out.push(n),
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_FLUSH_AT => {
+            out.push(n);
+        }
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2498,7 +2500,7 @@ pub(crate) fn fold_entries(
 fn is_marker(v: &Values, x: ValueId) -> bool {
     matches!(
         nodes::tag(v, x),
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_FLUSH_AT
     )
 }
 

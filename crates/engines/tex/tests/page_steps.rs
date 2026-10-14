@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::fmt::Write as _;
+
 fn vsize_doc() -> (std::path::PathBuf, String, Vec<u8>) {
     let dir = common::fixtures().join("plain/vsize");
     let src = common::read(&dir.join("vs.tex"));
@@ -250,6 +252,17 @@ fn generated_edit_wall() {
         b.stats.nodes_run,
         b.stats.page_steps
     );
+    let at2 = at + 40 + word[at + 40..].find(" the ").expect("a word") + 1;
+    let word2 = format!("{}eht{}", &word[..at2], &word[at2 + 3..]);
+    let t = std::time::Instant::now();
+    b.edit(&word2);
+    eprintln!(
+        "EDITWALL {name} word2 wall_ms={:.1} nodes={} page_steps={}",
+        t.elapsed().as_secs_f64() * 1000.0,
+        b.stats.nodes_run,
+        b.stats.page_steps
+    );
+    let word = word2;
     let par = mid + word[mid..].find("\n\n").expect("a paragraph end") + 2;
     let ins = format!(
         "{}{}\n\n{}",
@@ -271,4 +284,46 @@ fn generated_edit_wall() {
         panic!("{name}: the edits differ from a cold build: {d}");
     }
     eprintln!("EDITWALL {name} edits equal cold");
+}
+
+/// The DVI writer keeps each page's bytes between runs (§640): an edit
+/// that uses a font for the first time on page 300 defines it there
+/// (§621), so a later page that defined it no longer does; and an
+/// inserted paragraph moves every later page in the file. Both equal a
+/// cold build.
+#[test]
+fn a_new_font_on_page_300_equals_cold() {
+    let dir = common::fixtures().join("plain/vsize");
+    let mut src = String::from("\\hsize=200pt \\vsize=30pt \\parindent=0pt\n");
+    for k in 0..400 {
+        let bold = if k == 380 { "{\\bf bold} " } else { "" };
+        let _ = write!(
+            src,
+            "Paragraph {k}: {bold}the quick brown fox jumps over the lazy dog.\n\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let opts = || common::options("./fonts.tex", "fonts", "", &dir);
+    let mut b = common::build(opts(), Some(&common::plain()), &src);
+    assert!(b.pages().len() > 350, "{} pages", b.pages().len());
+    let at = src.find("Paragraph 300: ").expect("paragraph 300") + 15;
+    let edits = [
+        format!("{}{{\\bf new}} {}", &src[..at], &src[at..]),
+        format!("{}{{\\bf new}} {}", &src[..at + 2], &src[at + 2..]),
+        format!("{}{}", &src[..at], &src[at..]),
+    ];
+    for (n, new) in edits.iter().enumerate() {
+        b.edit(new);
+        let cold = common::build(opts(), Some(&common::plain()), new);
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("edit {n}: {d}");
+        }
+    }
+    let at = src.find("Paragraph 200: ").expect("paragraph 200");
+    let ins = format!("{}An inserted paragraph.\n\n{}", &src[..at], &src[at..]);
+    b.edit(&ins);
+    let cold = common::build(opts(), Some(&common::plain()), &ins);
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("insert: {d}");
+    }
 }
