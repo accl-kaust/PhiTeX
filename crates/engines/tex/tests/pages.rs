@@ -89,3 +89,26 @@ fn an_edit_on_the_last_page_keeps_the_earlier_pages() {
         b.stats.runs
     );
 }
+
+/// (measure) 400 paragraphs: the stats, and with `PHITEX_TEX_TIME` the
+/// page folds' cost (`pagefold:` lines) beside the runs' (`nodetime:`).
+#[test]
+#[ignore = "a measure"]
+fn fold_cost() {
+    let (src, _) = common::plain_paragraphs(400, false);
+    let dir = common::fixtures().join("plain/vsize");
+    let b = common::build(common::options("./pp.tex", "pp", "", &dir), Some(&common::plain()), &src);
+    eprintln!(
+        "{} pages; {} nodes run, {} runs, realised cp {} nodes {:?}, wall {:?}, busy {:?}, peak {}, stops {} restarted {}",
+        b.pages().len(),
+        b.stats.nodes_run,
+        b.stats.runs,
+        b.stats.realised_critical_path,
+        b.stats.realised_critical_time,
+        b.stats.wall,
+        b.stats.busy,
+        b.stats.peak_running,
+        b.stats.stops,
+        b.stats.restarted
+    );
+}
