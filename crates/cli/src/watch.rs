@@ -643,12 +643,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         };
         let failed = !r.out.errors.is_empty();
+        // (a build with errors leaves the last good output in place; with
+        // none yet, its own output is written and shown, as `phitex build`
+        // writes it)
+        let keep = failed && last.borrow().good.is_some();
         status.set("writing files");
         // (the watcher waits on the lock while the files are written, then
-        // knows them as the watch's own; a build with errors leaves the last
-        // good output in place)
+        // knows them as the watch's own)
         let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
-        let written = match s.write(&r, !failed) {
+        let written = match s.write(&r, !keep) {
             Ok(w) => {
                 let ours = &mut *mine;
                 for (p, h) in &w.files {
@@ -668,7 +671,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             last.borrow_mut().good = Some(out.clone());
         }
         if let Some(v) = &view {
-            if !failed {
+            if !keep {
                 last_pdf = match r.main_output() {
                     Some(("pdf", b)) => Some(session::shared(b)),
                     Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(
@@ -692,7 +695,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 .display()
                 .to_string();
             status.set("viewer");
-            if !failed {
+            if !keep {
                 last_hashes.clone_from(&r.out.page_hashes);
             }
             v.built(&Built {
