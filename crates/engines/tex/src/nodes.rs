@@ -77,6 +77,10 @@ pub(crate) const T_WRITE_AT: i64 = 88;
 /// after it, as pdfTeX numbers the fonts a page's virtual fonts load
 /// after the fonts loaded before that `\shipout` (`fplan`).
 pub(crate) const T_FONT_AT: i64 = 87;
+/// An `\immediate\pdfobj` a document node wrote after a page fired
+/// (pdfTeX §1355): `[tag, n]`; the page builder's fold tells the writer
+/// which page it follows (`oplan`), where the finish writes object `n`.
+pub(crate) const T_PDFW_AT: i64 = 85;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]

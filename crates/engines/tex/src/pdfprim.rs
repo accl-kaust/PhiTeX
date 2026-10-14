@@ -1963,15 +1963,27 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 fv,
                 v.int(i64::from(immediate)),
             ]);
+            // (written after a page fired: by the finish, after that page,
+            // where pdfTeX writes it; the pages are placed after every
+            // read-time command, `pdfout::finish`)
+            let later =
+                immediate && crate::pdfout::pages_apart(r)? && crate::etex::page_fired_before(r)?;
             let got = crate::pdfout::command(r, input, &[], |st, _| {
                 let (n, refused) = st.obj(use_n, stream, attr_b, body);
-                let err = if immediate {
+                let err = if immediate && !later {
                     st.write_obj(n).err()
                 } else {
                     None
                 };
                 Some((n, refused, err))
             })?;
+            if later && let Some((n, false, _)) = got {
+                let at = v.list(vec![
+                    v.int(crate::nodes::T_PDFW_AT),
+                    v.int(i64::try_from(n).unwrap_or(0)),
+                ]);
+                r.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+            }
             let n = match got {
                 Some((n, refused, err)) => {
                     if refused {
