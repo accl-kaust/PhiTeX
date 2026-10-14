@@ -246,6 +246,8 @@ pub(crate) struct Run<'c, 'a> {
     /// A page step whose output routine published leftovers
     /// (`pagefx:<j>`).
     pub pagefx_pub: bool,
+    /// Set while `\advance` defines its register ([`State::note_kind`]).
+    pub in_advance: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -335,6 +337,7 @@ impl<'c, 'a> Run<'c, 'a> {
             contribs: Vec::new(),
             pg: None,
             pagefx_pub: false,
+            in_advance: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -452,6 +455,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
         let grp = self.innermost_group();
+        self.st.note_kind(loc, self.in_advance);
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
     }

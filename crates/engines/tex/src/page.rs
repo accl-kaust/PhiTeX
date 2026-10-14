@@ -595,6 +595,7 @@ impl Run<'_, '_> {
             let l = self.loc_of(f);
             self.st.preload(l, Some(x));
         }
+        self.st.watch_kinds();
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
         if self.fire_page(d, args.get(2).copied())? {
             self.run_all()?;
@@ -611,11 +612,17 @@ impl Run<'_, '_> {
             // the step's own delta, for the writer's fold (`pgdeltas`)
             let mut own: std::collections::BTreeMap<String, (Field, ValueId)> =
                 std::collections::BTreeMap::new();
+            // (the count registers it only advanced: the writer folds
+            // them by their change, the others by their value)
+            let mut advanced = Vec::new();
             for (loc, x, _) in self.st.published(v) {
                 let f = self.loc_field(loc);
                 let name = crate::val::field_name(v, f);
                 if name == "pdf:state" || step_input(&name) {
                     continue;
+                }
+                if name.starts_with("count:") && self.st.advanced_only(loc) {
+                    advanced.push(f.0);
                 }
                 own.insert(name, (f, x));
             }
@@ -626,6 +633,7 @@ impl Run<'_, '_> {
                 readst,
                 counts,
                 readdef,
+                v.list(advanced),
             ]);
             self.contribute("pgdeltas", v.seq_unit(e));
         }
@@ -2036,7 +2044,7 @@ impl FinalState {
             .map_or(0, |x| usize::try_from(int_of(v, x)).unwrap_or(0))
             .min(MAX_PAGES);
         // each step's entry: [j, own pairs, pgst read, counts, pgdef
-        // read] (`Run::page_step`)
+        // read, the count registers only advanced] (`Run::page_step`)
         let entries = Self::entries(v, all);
         // the fields the text defined in page k's part, before break k
         // (k = steps: after the last)
@@ -2111,12 +2119,16 @@ impl FinalState {
                     );
                 }
             }
+            let advanced: Vec<ValueId> = list_of(v, g(5));
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
                 let pre = cx.use_field(f)?;
-                // a count register by the step's change, as `\\count0..9`
-                // (a routine's counter of pages or shipouts it advances)
-                let x = if name.starts_with("count:") {
+                // a count register the step only advanced, by its change,
+                // as `\\count0..9` (a routine's counter of pages or
+                // shipouts); one it set, by its value (`\\@topnum`
+                // set at each column's start: by its change, a stale
+                // read would feed back its error)
+                let x = if name.starts_with("count:") && advanced.contains(&f.0) {
                     let as_int = |y: Option<ValueId>| y.map_or(0, |y| int_of(v, y));
                     let had = as_int(read_pairs.iter().find(|p| p.0 == f).map(|p| p.1).or(pre));
                     let now = as_int(state.get(&name).map(|p| p.1).or(pre));
