@@ -316,8 +316,18 @@ impl Run<'_, '_> {
         }
         match self.cx.following(self.pulled) {
             Some((op, args)) if op == self.ops.exec => {
-                self.pulled += 1;
                 let segs = crate::run::decode_segs(self.v, &args);
+                // (where the sibling's text begins, unless its first
+                // segment continues the line before it)
+                let joins = self.input.text.len() > self.input.text_at
+                    && matches!(
+                        (self.input.text.last(), segs.first()),
+                        (Some(Seg::Line(last)), Some(Seg::Line(next))) if !last.ends && !next.starts
+                    );
+                if self.pull_at.len() == self.pulled {
+                    self.pull_at.push((!joins).then_some(self.input.text.len()));
+                }
+                self.pulled += 1;
                 self.input.append_text(segs);
                 Ok(true)
             }
@@ -330,6 +340,104 @@ impl Run<'_, '_> {
                 }
             }
         }
+    }
+
+    /// At a command's start: when all that is left is the last sibling
+    /// pulled, of which only its first token was read and put back
+    /// (`\futurelet`, `\@ifnextchar` looking for an optional argument
+    /// after a load), and that token is what the sibling's text gives
+    /// under the codes in force now, the sibling is given back: unclaimed,
+    /// it runs as its own node on the state this run leaves. True when
+    /// the run is to end here. (A preamble's loads each end their run so,
+    /// instead of every later load joining the first.)
+    pub(crate) fn give_back_peeked(&mut self) -> R<bool> {
+        if self.pulled == 0
+            || self.pull_at.len() != self.pulled
+            || self.open_span()
+            || self.aopen != 0
+            || self.pg.is_some()
+            || self.claim_rest
+        {
+            return Ok(false);
+        }
+        let Some(at) = self.pull_at[self.pulled - 1] else {
+            return Ok(false);
+        };
+        // (only the sibling's first segment reached)
+        if self.input.text_at != at + 1 {
+            return Ok(false);
+        }
+        // the levels left, spent ones aside: the sibling's
+        let left: Vec<crate::input::Level> = self
+            .input
+            .levels
+            .iter()
+            .copied()
+            .filter(|l| match l.kind {
+                kind::TOKS => l.a < l.b,
+                kind::LINE => self.input.line(*l).has_more(),
+                _ => self.input.file(*l).has_lines(),
+            })
+            .collect();
+        let first = self.input.text[at].clone();
+        let ok = match (&first, left.as_slice()) {
+            // a token list read not at all (the token stepped back)
+            (Seg::Toks(t), [l]) => {
+                l.kind == kind::TOKS && self.input.arena.get(l.rest()) == t.as_slice()
+            }
+            // a line of which one token was read and put back
+            (Seg::Line(orig), [line, back]) => {
+                if line.kind != kind::LINE
+                    || back.kind != kind::TOKS
+                    || back.ty != crate::input::ty::BACKED_UP
+                    || back.b - back.a != 1
+                {
+                    return Ok(false);
+                }
+                let peeked = self.input.arena.at(back.a);
+                let (loc, state) = {
+                    let x = self.input.line(*line);
+                    (x.loc, x.state)
+                };
+                self.same_first_token(orig.clone(), peeked, loc, state)?
+            }
+            _ => false,
+        };
+        if !ok {
+            return Ok(false);
+        }
+        while self.input.pop().is_some() {}
+        self.input.text.truncate(at);
+        self.input.text_at = at;
+        self.pulled -= 1;
+        self.pull_at.pop();
+        Ok(true)
+    }
+
+    /// Whether `line`, read from its start under the codes in force now,
+    /// gives `tok` first and stands at `loc`/`state` after it.
+    fn same_first_token(
+        &mut self,
+        line: crate::input::Line,
+        tok: Tok,
+        loc: usize,
+        state: u8,
+    ) -> R<bool> {
+        let saved = std::mem::replace(&mut self.input, crate::input::Input::new());
+        let (eof, no_pull) = (self.eof, self.no_pull);
+        self.eof = true;
+        self.no_pull = true;
+        self.input.push_line(line);
+        let got = self.next_tok();
+        let same = matches!(got, Ok(Some(t)) if t == tok)
+            && self
+                .input
+                .top_line()
+                .is_some_and(|x| x.loc == loc && x.state == state);
+        self.input = saved;
+        self.eof = eof;
+        self.no_pull = no_pull;
+        got.map(|_| same)
     }
 
     /// Whether the input is down to one line that a node boundary cut
@@ -570,6 +678,14 @@ impl Run<'_, '_> {
         let Seg::Line(next) = self.input.text.remove(at) else {
             return Ok(());
         };
+        // (a sibling whose text began here now continues the line on top)
+        for p in &mut self.pull_at {
+            *p = match *p {
+                Some(x) if x == at => None,
+                Some(x) if x > at => Some(x - 1),
+                q => q,
+            };
+        }
         let line = self.input.line_mut(top);
         line.buf.extend_from_slice(&next.buf);
         line.ends = next.ends;
