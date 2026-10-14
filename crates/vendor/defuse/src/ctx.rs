@@ -5,8 +5,9 @@ use std::sync::PoisonError;
 use crate::MayDefine;
 
 use crate::engine::{
-    AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_ENV, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
-    ProjId, RunResult, Slot, State, StreamRange, Suspended, Until, Use, WaitKind, WalkResult, eff_code, eff_kind,
+    AssumeKind, Effect, End, Engine, EvalError, K_AT, K_ATPOS, K_CHAIN, K_ENV, K_FIELD, K_LOOP, K_OUTPUT, Locality,
+    NIL, NodeId, OpId, ProjId, RunResult, Slot, State, StreamRange, Suspended, Until, Use, WaitKind, WalkResult,
+    eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
 use crate::value::{Field, Value, ValueId, Values};
@@ -300,19 +301,24 @@ impl<'a> Ctx<'a> {
         }
         let tn = e.n(t);
         if self.spec
-            && !tn.has_ran()
             && tn.in_work()
             && let AssumeKind::Def(f) | AssumeKind::Proj(f, _) = kind
             && let Some(p) = e.statics(tn.op, tn.args).predicted(f)
         {
-            // Predicted by the text: run on it; the node's run confirms
-            // or refutes it like any guess.
+            // Predicted by the text (ahead of its previous run's value):
+            // run on it; the node's run confirms or refutes it like any
+            // guess.
             self.read_predicted = true;
             self.assumptions.push((t, kind, assumed(e, kind, Some(p))));
             return Ok(Some(p));
         }
         if self.spec && tn.has_ran() {
             if tn.in_work() {
+                // Its previous run's definition, as the prediction of the
+                // run to come.
+                if matches!(kind, AssumeKind::Def(_) | AssumeKind::Proj(..)) {
+                    self.read_predicted = true;
+                }
                 self.assumptions.push((t, kind, assumed(e, kind, val)));
             } else {
                 self.read_unsettled = true;
@@ -343,6 +349,73 @@ impl<'a> Ctx<'a> {
     /// known yet.
     pub fn use_field(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         self.use_field_as(f, 0)
+    }
+
+    /// The definition of `f` reaching the position just after node `at`
+    /// (what it unfolded or claims included): the value and its defining
+    /// node (`None`: the unit's start value). `at` `None` is the unit's
+    /// start: its start value. The run re-runs when the definition reaching
+    /// that position changes (another one reaches it, or its value
+    /// changes) or `at` goes. Waiting and guessing are as for a field read
+    /// there. An `at` not earlier in this node's unit is an error
+    /// ([`EvalError::BadPosition`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] while the definition (or structure before it) is in work.
+    pub fn use_field_at(&mut self, f: Field, at: Option<NodeId>) -> Result<Option<(ValueId, Option<NodeId>)>, Stop> {
+        self.check()?;
+        let e = self.eng;
+        let n = e.n(self.slot);
+        let key = f.0.raw();
+        let Some(at_id) = at else {
+            let v = e.start_value(n.unit, f);
+            self.uses.push(Use {
+                key,
+                site: NIL,
+                kind: K_AT,
+                proj: 0,
+            });
+            self.uses.push(Use {
+                key: NIL.pack(),
+                site: NIL,
+                kind: K_ATPOS,
+                proj: 0,
+            });
+            self.sig_add(K_AT, key, NIL, v);
+            return Ok(v.map(|v| (v, None)));
+        };
+        let a = match e.slot_by_id(at_id) {
+            Some(a) if e.n(a).unit == n.unit && e.n(a).label < n.label => a,
+            _ => {
+                self.error = Some(EvalError::BadPosition { node: n.id, at: at_id });
+                return Ok(None);
+            }
+        };
+        let w = e.walk(n.unit, e.at_pos(self.slot, a), f);
+        if w.pending != NIL {
+            return self.stop(End::Wait(w.pending, w.pending_kind, Some(f)));
+        }
+        let v = if w.site == NIL {
+            e.start_value(n.unit, f)
+        } else {
+            self.read_node(w.site, e.n(w.site).def_value(f), AssumeKind::Def(f))?
+        };
+        self.uses.push(Use {
+            key,
+            site: w.site,
+            kind: K_AT,
+            proj: 0,
+        });
+        self.uses.push(Use {
+            key: a.pack(),
+            site: NIL,
+            kind: K_ATPOS,
+            proj: 0,
+        });
+        self.sig_add(K_AT, key, w.site, v);
+        let by = (w.site != NIL).then(|| e.n(w.site).id);
+        Ok(v.map(|v| (v, by)))
     }
 
     /// Uses field `f` through projection `p`: returns the projected value
@@ -828,13 +901,13 @@ impl<'a> Ctx<'a> {
                 Until::No => false,
                 Until::Yes => true,
                 Until::Read(f) => {
-                    let v = self.use_field_at(c, f)?;
+                    let v = self.field_at_node(c, f)?;
                     op.until_value(&args, vals, cn.op, &cargs, v)
                 }
                 Until::ReadEach(fs) => {
                     let mut vs = Vec::with_capacity(fs.len());
                     for f in fs {
-                        vs.push(self.use_field_at(c, f)?);
+                        vs.push(self.field_at_node(c, f)?);
                     }
                     op.until_values(&args, vals, cn.op, &cargs, &vs)
                 }
@@ -858,7 +931,7 @@ impl<'a> Ctx<'a> {
 
     /// The value field `f` has at node `at`'s position (a binding there;
     /// re-read on any change, like a contribution chain link).
-    fn use_field_at(&mut self, at: Slot, f: Field) -> Result<Option<ValueId>, Stop> {
+    fn field_at_node(&mut self, at: Slot, f: Field) -> Result<Option<ValueId>, Stop> {
         let e = self.eng;
         let an = e.n(at);
         let w = e.walk(an.unit, an.label, f);
