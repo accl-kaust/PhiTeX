@@ -1,11 +1,13 @@
 //! Gates for LaTeX: the format made from `latex.ini` (`latex.ltx` with
 //! `texsys.cfg`, `hyphen.cfg`, the font configuration) as the prelude,
 //! then the documents of `oracle/fixtures/latex/docs` run as `latex`
-//! runs them: the DVI file (its preamble's date masked) and the files
-//! written (`NAME.writes`) equal TeX Live's, on the first run from
-//! nothing (`NAME.dvi`) and at the fixpoint of the files read back
-//! (`NAME.fix.dvi`); then `pdflatex` on the same documents through the
-//! PDF writer (`oracle/fixtures/latex/pdf`), and one-word edits.
+//! runs them: the DVI file (its preamble's date masked) equal to TeX
+//! Live's, on the first run from nothing (`NAME.dvi`) and at the
+//! fixpoint of the files read back (`NAME.fix.dvi`); then `pdflatex` on
+//! the same documents through the PDF writer
+//! (`oracle/fixtures/latex/pdf`), and one-word edits. The files a job
+//! writes and reads back (`.aux`, `.toc`, ...) live in memory: the
+//! gates compare the output file, never their bytes.
 //!
 //! Heavy (the format is evaluated once per process): ignored by default;
 //! run with `--ignored`, one test at a time, `PHITEX_GATE=name` for one
@@ -33,25 +35,6 @@ fn masked(dvi: &[u8]) -> Vec<u8> {
         }
     }
     d
-}
-
-/// `=== name length` headers, each before the file's text.
-fn parse_writes(s: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut rest = s;
-    while let Some(head) = rest.strip_prefix("=== ") {
-        let Some((line, after)) = head.split_once('\n') else {
-            break;
-        };
-        let Some((name, n)) = line.rsplit_once(' ') else {
-            break;
-        };
-        let n: usize = n.parse().unwrap_or(0);
-        let end = after.char_indices().nth(n).map_or(after.len(), |(i, _)| i);
-        out.push((name.to_string(), after[..end].to_string()));
-        rest = &after[end..];
-    }
-    out
 }
 
 /// `latex.ini` (or `pdflatex.ini`) as `-ini` reads it.
@@ -149,18 +132,6 @@ fn latex_gate(name: &str, fix: bool) -> Result<String, String> {
     if let Some(d) = common::first_difference(&masked(&dvi), &masked(&want)) {
         bad.push(format!("dvi {d}"));
     }
-    let writes = common::read(&dir.join(format!("{name}{suffix}.writes")));
-    let files = b.files();
-    for (n, w) in parse_writes(&writes) {
-        let got = files
-            .iter()
-            .find(|(m, _)| *m == n)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default();
-        if let Some(d) = common::first_difference(got.as_bytes(), w.as_bytes()) {
-            bad.push(format!("{n} {d}"));
-        }
-    }
     if bad.is_empty() {
         Ok(r)
     } else {
@@ -205,8 +176,8 @@ fn latex_fixpoint() {
     run_all(true);
 }
 
-/// `pdflatex` on the documents with a PDF oracle: the PDF file and the
-/// written files byte for byte.
+/// `pdflatex` on the documents with a PDF oracle: the PDF file byte for
+/// byte.
 #[test]
 #[ignore = "heavy: the LaTeX format"]
 fn pdflatex() {
@@ -244,18 +215,6 @@ fn pdflatex() {
         let mut bad = Vec::new();
         if let Some(d) = common::first_difference(&pdf, &want) {
             bad.push(format!("pdf {d}"));
-        }
-        let writes = common::read(&oracles.join(format!("{name}.writes")));
-        let files = b.files();
-        for (n, w) in parse_writes(&writes) {
-            let got = files
-                .iter()
-                .find(|(m, _)| *m == n)
-                .map(|(_, t)| t.clone())
-                .unwrap_or_default();
-            if let Some(d) = common::first_difference(got.as_bytes(), w.as_bytes()) {
-                bad.push(format!("{n} {d}"));
-            }
         }
         let r = report(&name, &b);
         if bad.is_empty() {
@@ -338,7 +297,7 @@ fn sections_edits() {
         );
         text = new;
         let cold = common::build(opts(), Some(&pre), &text);
-        let same = b.output().0 == cold.output().0 && b.files() == cold.files();
+        let same = b.output().0 == cold.output().0;
         if same {
             eprintln!("  edit {k}: equals cold");
         } else {
@@ -495,7 +454,6 @@ fn latex_loop_rounds() {
                     b3.stats.loop_rounds, b3.stats.rounds, b3.stats.nodes_run
                 );
                 assert_eq!(b.output().0, b3.output().0, "the guess changed the output");
-                assert_eq!(b.files(), b3.files(), "the guess changed the files");
                 let (out, log) = b.output();
                 eprintln!(
                     "fixpoint {name}: {} bytes out, {:?}, log tail {:?}",
