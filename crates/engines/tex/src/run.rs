@@ -60,6 +60,8 @@ pub(crate) struct Ops {
     /// The page chain's loop-backs as read and published in the current
     /// evaluation: the refuted guesses ([`crate::Stats`]).
     pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
+    pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
 }
 
 /// The lines of a file not reached yet: its text (a string value) and

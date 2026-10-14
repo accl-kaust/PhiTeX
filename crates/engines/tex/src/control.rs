@@ -1454,6 +1454,22 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
+        // (web2c §1374: `kpse_out_name_ok` refuses the name, and
+        // `prompt_file_name` ends a nonstop job, §530)
+        let ok = self
+            .ops
+            .out_ok
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let allowed = match ok {
+            Some(f) => f(&name),
+            None => phitex_kpse::name_ok(b"p", name.as_bytes(), name.as_bytes(), |_| false),
+        };
+        if !allowed {
+            self.log("error", &format!("I can't write on file `{name}'."))?;
+            return self.fatal("*** (job aborted, file error in nonstop mode)");
+        }
         self.written_decl(&name)?;
         self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
         self.set(&format!("wopen:{name}"), v.int(1), true);

@@ -26,6 +26,11 @@ use crate::val::{field_name, int_of, list_of, str_of};
 /// bytes.
 pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 
+/// Whether the job may write a file under a name (`\openout`): the
+/// client's `kpse_out_name_ok` (its `openout_any`, its output
+/// directories).
+pub type OutNameOk = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// How a document is run.
 #[derive(Clone)]
 pub struct Options {
@@ -111,6 +116,11 @@ pub struct Options {
     /// a no-fixpoint error naming the loop-back fields (a document whose
     /// written files oscillate), instead of running on.
     pub max_rounds: u64,
+    /// Whether `\openout` may write a file under a name (pdfTeX asks
+    /// kpathsea, §1374; a refused name ends a nonstop job); `None`:
+    /// TeX Live's default, `openout_any = p` with no output directory
+    /// ([`phitex_kpse::name_ok`]).
+    pub out_name_ok: Option<OutNameOk>,
 }
 
 /// When the engine speculates ([`Options::speculation`]).
@@ -421,6 +431,7 @@ impl Default for Options {
             speculation: Speculation::Predicted,
             speculation_budget: 256,
             max_rounds: 64,
+            out_name_ok: None,
         }
     }
 }
@@ -1236,6 +1247,7 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
+            out_ok: Arc::new(Mutex::new(None)),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -2602,6 +2614,8 @@ impl Build {
         }
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.eng.set_max_rounds(opts.max_rounds);
+        (*g.ops.out_ok.lock().unwrap_or_else(PoisonError::into_inner))
+            .clone_from(&opts.out_name_ok);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
