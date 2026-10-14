@@ -134,6 +134,10 @@ impl Run<'_, '_> {
         if !self.get_next()? {
             if self.eof {
                 if self.interp.is_some() {
+                    // §362: the file ends; §336 checks what it ended in
+                    if self.interp_eof && self.file_ended()? {
+                        return self.get_next_or_end();
+                    }
                     self.interp_short = true;
                 }
                 return Err(Halt::Fatal);
@@ -145,6 +149,37 @@ impl Run<'_, '_> {
             };
         }
         Ok(())
+    }
+
+    /// §336–§339 at the end of a file (§362), or of an interpreted one: a token list being
+    /// scanned is a runaway, "File ended while scanning ... of \\x", and
+    /// what ends it is inserted (`}` for a definition or a text, `\\par`
+    /// for an argument, which then ends without "Paragraph ended",
+    /// §392). False if nothing was being scanned (`normal`: no error).
+    pub(crate) fn file_ended(&mut self) -> R<bool> {
+        let Some((status, w)) = self.scanner else {
+            return Ok(false);
+        };
+        let (what, ins) = match status {
+            crate::run::SCAN_DEFINING => ("definition", Tok::ch(2, u32::from(b'}'))),
+            crate::run::SCAN_MATCHING => {
+                self.outer_call = true;
+                ("use", crate::expand::par_tok())
+            }
+            _ => ("text", Tok::ch(2, u32::from(b'}'))),
+        };
+        let mut cs = String::new();
+        self.show_toks_into(&mut cs, std::slice::from_ref(&w))?;
+        let msg = format!("File ended while scanning {what} of {}", cs.trim_end());
+        if self.interp.is_some() {
+            // (a written file's text read as its read-back will read it:
+            // the error is the read-back's, [`Run::read_back`])
+            self.interp_errs.push(msg);
+        } else {
+            self.log("error", &msg)?;
+        }
+        self.push_toks([ins]);
+        Ok(true)
     }
 
     /// The token `get_r_token` reads (§1215): a control sequence's

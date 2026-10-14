@@ -894,6 +894,8 @@ pub(crate) fn end_of_file(r: &mut Run<'_, '_>, marker: &str) -> R<()> {
     if !pseudo {
         r.log("close", ")")?;
     }
+    // §362: `end_file_reading; check_outer_validity`
+    r.file_ended()?;
     Ok(())
 }
 

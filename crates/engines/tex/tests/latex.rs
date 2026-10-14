@@ -832,6 +832,46 @@ fn latex_write_continued_lines() {
     }
 }
 
+/// `pdflatex` on an article whose part file's last line leaves an
+/// argument open (`pdfdocs/wopen.tex`: `\@setckpt{wopen-a}{` and a
+/// `\setcounter` line, no `}`): each read-back of the file ends inside
+/// it, §338 "File ended while scanning ..." with what it inserts (at
+/// `\begin{document}` a `}`, the definition made; at `\enddocument` a
+/// `\par`, the call dropped): pdflatex's two errors of its later passes;
+/// the PDF equals pdfTeX's.
+#[test]
+fn latex_write_file_ended() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("wopen.tex"));
+    let want = std::fs::read(common::fixtures().join("latex/pdf/wopen.pdf")).expect("the oracle");
+    let opts = Options {
+        fixpoint: true,
+        ..pdf_opts("wopen", &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), &src);
+    eprintln!("wopen: {}", report("wopen", &b));
+    let mut errors: Vec<String> = b
+        .diagnostics()
+        .iter()
+        .filter(|d| d.severity == phitex_tex::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect();
+    // (pdflatex's later passes: `\begin{document}`'s read-back ends in
+    // `\@setckpt`'s definition, `\enddocument`'s in its use)
+    errors.sort();
+    assert_eq!(
+        errors,
+        [
+            "File ended while scanning definition of \\cp@wopen-a",
+            "File ended while scanning use of \\@setckpt",
+        ],
+        "pdflatex's two errors"
+    );
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("wopen.pdf: {d}");
+    }
+}
+
 /// `pdflatex` on a main file that `\input`s one chapter and
 /// `\include`s another (`pdfdocs/inputs.tex`, `chap1.tex`,
 /// `chap2.tex`; `\include` goes through `\@input` and its own `.aux`):

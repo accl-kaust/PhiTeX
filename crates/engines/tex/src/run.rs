@@ -305,9 +305,20 @@ pub(crate) struct Run<'c, 'a> {
     /// written `\@input{part.aux}`): the part file's definitions, which
     /// that file's own lines publish; the line lists them as keys only.
     pub interp_nested: phitex_defuse::FxHashSet<String>,
-    /// A stream's written text still incomplete (`\@writeckpt`'s
-    /// `\@setckpt{...}{` over several lines): continued by its next line.
-    pub wpending: phitex_defuse::FxHashMap<i32, String>,
+    /// The interpreted text is a whole file whose end has come (its
+    /// stream closed): running out of it is §362's end of file, which
+    /// §336 checks ([`Run::file_ended`]), not "needs more".
+    pub interp_eof: bool,
+    /// The errors §338 gave as the interpreted file ended.
+    pub interp_errs: Vec<String>,
+    /// `scanner_status` and `warning_index` (§305): what a token list
+    /// being scanned is (`SCAN_DEFINING`, `SCAN_MATCHING`,
+    /// `SCAN_ABSORBING`) and whose; `None` is `normal`. Kept only for
+    /// §338 at the end of an interpreted file.
+    pub scanner: Option<(u8, Tok)>,
+    /// §339's `long_state:=outer_call`: the `\par` §338 inserted ends
+    /// the argument being matched without an error (§392).
+    pub outer_call: bool,
     /// The state's stamp as the line's interpretation began: a field the
     /// line defined since is not reverted (`\@writefile` sets
     /// `\@temptokena` and writes `\the\@temptokena`).
@@ -416,7 +427,10 @@ impl<'c, 'a> Run<'c, 'a> {
             interp: None,
             interp_short: false,
             interp_nested: phitex_defuse::FxHashSet::default(),
-            wpending: phitex_defuse::FxHashMap::default(),
+            interp_eof: false,
+            interp_errs: Vec::new(),
+            scanner: None,
+            outer_call: false,
             interp_base: 0,
             closed: Vec::new(),
             flushes: 0,
@@ -935,6 +949,29 @@ impl<'c, 'a> Run<'c, 'a> {
                 continue;
             };
             let xs = list_of(v, x);
+            // (the errors the file's text gives as it ends inside a
+            // command, §338: given again at every read-back, as TeX
+            // gives them at every `\input` of the file)
+            if name.starts_with("rberr:") {
+                // (a file read as its text here, one this run writes,
+                // gives them as its text ends, §362)
+                if self.interp.is_some() {
+                    self.interp_nested.insert(name);
+                } else if self.get(&format!("wopen:{key}"))?.is_none()
+                    && let Some(&ms) = xs.first()
+                {
+                    if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                        eprintln!(
+                            "aux-trace: read-back {key} gives {name} in node {}",
+                            self.cx.node().raw()
+                        );
+                    }
+                    for m in list_of(v, ms) {
+                        self.log("error", &str_of(v, m))?;
+                    }
+                }
+                continue;
+            }
             if let [val, g] = xs.as_slice() {
                 let global = int_of(v, *g) != 0;
                 // the value the read-back replaces, for the lines
@@ -988,6 +1025,39 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(true)
     }
 
+    /// The definitions an interpreted text made since stamp `base`,
+    /// `[field, value, global]` each; a read-back nested in it (`nested`)
+    /// gives its fields as keys only, `[field]`.
+    fn made_since(&mut self, base: u64, nested: &phitex_defuse::FxHashSet<String>) -> Vec<ValueId> {
+        let v = self.v;
+        let mut made: Vec<ValueId> = self
+            .st
+            .defined_since(v, base)
+            .into_iter()
+            .filter_map(|(loc, x, l)| Some((self.loc_field(loc), x?, l)))
+            .filter(|d| !str_of(v, d.0.0).starts_with("cat:"))
+            .map(|(f, x, l)| {
+                // (a nested read-back's definition: its key only)
+                if nested.contains(&str_of(v, f.0)) {
+                    return v.list(vec![f.0]);
+                }
+                v.list(vec![
+                    f.0,
+                    x,
+                    v.int(i64::from(matches!(l, Locality::Global))),
+                ])
+            })
+            .collect();
+        // (a nested read-back's errors: its key only, as its fields)
+        made.extend(
+            nested
+                .iter()
+                .filter(|n| n.starts_with("rberr:"))
+                .map(|n| v.list(vec![v.str(n)])),
+        );
+        made
+    }
+
     /// A line written to a file whose read-back only defines, read as
     /// its read-back reads it (under `\makeatletter`), on scratch: the
     /// definitions it makes, `[[field, value, global], ...]`. Nothing
@@ -1018,7 +1088,9 @@ impl<'c, 'a> Run<'c, 'a> {
         self.push_list(-1, crate::val::group::VBOX, Vec::new());
         let base = self.st.stamp();
         self.interp_base = base;
-        for l in line.split('\n') {
+        // (the text's lines: a final newline ends the last line, it does
+        // not begin an empty one, which would be a `\par`)
+        for l in line.strip_suffix('\n').unwrap_or(line).split('\n') {
             let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
             while buf.last() == Some(&32) {
                 buf.pop();
@@ -1037,6 +1109,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let mut res = Ok(());
         self.interp_short = false;
         self.interp_nested.clear();
+        let scanner = self.scanner.take();
         while self.has_input() {
             if let Err(h) = self.command() {
                 res = Err(h);
@@ -1049,25 +1122,10 @@ impl<'c, 'a> Run<'c, 'a> {
         if short {
             res = Ok(());
         }
+        self.scanner = scanner;
+        self.outer_call = false;
         let nested = std::mem::take(&mut self.interp_nested);
-        let made: Vec<ValueId> = self
-            .st
-            .defined_since(v, base)
-            .into_iter()
-            .filter_map(|(loc, x, l)| Some((self.loc_field(loc), x?, l)))
-            .filter(|d| !str_of(v, d.0.0).starts_with("cat:"))
-            .map(|(f, x, l)| {
-                // (a nested read-back's definition: its key only)
-                if nested.contains(&str_of(v, f.0)) {
-                    return v.list(vec![f.0]);
-                }
-                v.list(vec![
-                    f.0,
-                    x,
-                    v.int(i64::from(matches!(l, Locality::Global))),
-                ])
-            })
-            .collect();
+        let made = self.made_since(base, &nested);
         self.interp = None;
         self.input = input;
         self.st = st;
@@ -2222,7 +2280,6 @@ pub(crate) struct Parked {
     flush_fields: phitex_defuse::FxHashSet<Field>,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
-    wpending: phitex_defuse::FxHashMap<i32, String>,
 }
 
 impl Run<'_, '_> {
@@ -2297,7 +2354,6 @@ impl Run<'_, '_> {
             flush_fields: self.flush_fields.clone(),
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
-            wpending: self.wpending.clone(),
         })
     }
 }
@@ -2363,8 +2419,12 @@ impl<'c, 'a> Run<'c, 'a> {
         r.flush_fields = p.flush_fields;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
-        r.wpending = p.wpending;
         r.resumed = true;
         Ok(r)
     }
 }
+
+/// `scanner_status` (§305) values kept in [`Run::scanner`].
+pub(crate) const SCAN_DEFINING: u8 = 2;
+pub(crate) const SCAN_MATCHING: u8 = 3;
+pub(crate) const SCAN_ABSORBING: u8 = 5;

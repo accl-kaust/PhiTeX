@@ -77,7 +77,7 @@ pub(crate) const T_WRITE_AT: i64 = 88;
 /// k]`, the node's k-th; the writer publishes the state the page chain
 /// leaves after the page that breaks there as the node's
 /// entry in the `pgst:flushes` loop-back, which the node reads on from.
-pub(crate) const T_FLUSH_AT: i64 = 86;
+pub(crate) const T_FLUSH_AT: i64 = 90;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]
