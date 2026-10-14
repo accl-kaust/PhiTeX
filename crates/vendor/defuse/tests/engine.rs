@@ -926,14 +926,23 @@ fn add(t: &mut Report, r: &Report) {
 
 #[test]
 fn wrong_prediction_is_corrected() {
-    let (mut eng, mut prog) = Program::load(lines(&["a = 1", "b = a + 1", "c = b + 1", "d = c + 1"]));
+    // `c` is guessed from its last inputs: the edit to `a` is three
+    // reads away (nearer, the guess would wait for the input to run).
+    let (mut eng, mut prog) = Program::load(lines(&[
+        "a = 1",
+        "x = a",
+        "y = x",
+        "b = y + 1",
+        "c = b + 1",
+        "d = c + 1",
+    ]));
     eng.evaluate_sequential().unwrap();
     prog.set_line(&mut eng, 0, "a = 5".into());
-    prog.set_line(&mut eng, 2, "c = b + 1 + 0".into());
+    prog.set_line(&mut eng, 4, "c = b + 1 + 0".into());
     let r = eng
         .evaluate(&mut Greedy::speculative(Speculation::Predicted, 64), &mut Sequential)
         .unwrap_or_else(|e| panic!("{e:?}"));
-    assert_eq!(&prog.render(&eng)[..4], ["5", "6", "7", "8"]);
+    assert_eq!(&prog.render(&eng)[..6], ["5", "5", "5", "6", "7", "8"]);
     assert!(r.mispredictions > 0, "{r:?}");
     // The refutations are counted by the field whose assumed definition
     // changed, and per node.
@@ -1848,10 +1857,17 @@ fn rounds_that_apply_nothing_end_the_evaluation_listing_the_waiters() {
     let e = eng
         .evaluate(&mut Greedy::default(), &mut Lossy)
         .expect_err("nothing is ever applied");
-    let EvalError::NoProgress { rounds, waiters } = e else {
+    let EvalError::NoProgress {
+        rounds,
+        waiters,
+        report,
+    } = e
+    else {
         panic!("{e}");
     };
     assert_eq!(rounds, 6);
+    // The counters come with the error.
+    assert!(report.steps >= 6, "{report:?}");
     let ids = prog.node_ids(&eng);
     assert!(
         !waiters.is_empty() && waiters.iter().all(|w| ids.contains(&w.node)),
@@ -1868,11 +1884,13 @@ fn a_deadline_ends_the_evaluation_with_the_nodes_still_to_run() {
         ..Limits::default()
     });
     let e = eng.evaluate_sequential().expect_err("five runs allowed");
-    let EvalError::Deadline { runs, waiters } = e else {
+    let EvalError::Deadline { runs, waiters, report } = e else {
         panic!("{e}");
     };
     // The limit is checked between rounds: the first round ran its batch.
     assert!(runs >= 5, "{runs}");
+    // The counters come with the error.
+    assert_eq!(report.runs, runs, "{report:?}");
     let ids = prog.node_ids(&eng);
     assert!(!waiters.is_empty() && waiters.iter().all(|w| ids.contains(&w.node)));
     // Lifting the limit finishes the rest.
@@ -2644,4 +2662,132 @@ fn a_range_reader_whose_anchor_is_replaced_re_anchors() {
     prog.set_line(&mut eng, 1, "s = fold.state".into());
     eval(&mut eng, &prog);
     assert_eq!(out(&eng, &prog, 2), "[1 0]");
+}
+
+/// `["set", k]` defines `p` as `k` (declared by its text); `["clr"]`
+/// defines `p` as unit; `["w"]` may define `c` (a dynamic set bounded by
+/// its text), reads `p`, and when `p` is unit narrows its set to nothing,
+/// then outputs `c`; otherwise it defines `c` as `p`.
+struct Narrowing;
+
+impl defuse::Operation for Narrowing {
+    fn defs(&self, a: &[ValueId], v: &defuse::Values) -> Option<Vec<(Field, defuse::Locality)>> {
+        match narrowing_tag(v, a).as_str() {
+            "set" | "clr" => Some(vec![(v.field("p"), defuse::Locality::Local)]),
+            _ => None,
+        }
+    }
+    fn may_define(&self, _: &[ValueId], v: &defuse::Values) -> defuse::MayDefine {
+        defuse::MayDefine::Names(vec![v.field("c")])
+    }
+    fn run(&self, cx: &mut defuse::Ctx<'_>) -> Result<ValueId, defuse::Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match narrowing_tag(v, &a).as_str() {
+            "set" => {
+                cx.define(v.field("p"), a[1]);
+                Ok(a[1])
+            }
+            "clr" => {
+                cx.define(v.field("p"), ValueId::UNIT);
+                Ok(ValueId::UNIT)
+            }
+            _ => {
+                let p = cx.use_field(v.field("p"))?.unwrap_or(ValueId::UNIT);
+                if p == ValueId::UNIT {
+                    cx.narrow(defuse::MayDefine::Nothing);
+                    Ok(cx.use_field(v.field("c"))?.unwrap_or(ValueId::UNIT))
+                } else {
+                    cx.define(v.field("c"), p);
+                    Ok(p)
+                }
+            }
+        }
+    }
+}
+
+fn narrowing_tag(v: &defuse::Values, a: &[ValueId]) -> String {
+    match a.first().map(|&x| v.get(x)).as_deref() {
+        Some(defuse::Value::Str(s)) => s.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// A node that learns from its first read that it defines nothing narrows
+/// its declared set: the readers after it stop waiting on it. 400 nodes,
+/// `p` set by every 10th and cleared by the next: without narrowing every
+/// `w` waits on the one before; with it the critical path is constant,
+/// with no refutation, and the results are those of every schedule.
+#[test]
+fn a_run_narrowing_its_definition_set_releases_the_readers_after_it() {
+    let build = || {
+        let mut eng = Engine::new();
+        let op = eng.register(std::sync::Arc::new(Narrowing));
+        let u = eng.new_unit();
+        let mut ids = Vec::new();
+        for i in 0..400i64 {
+            let v = eng.values();
+            let a = match i % 10 {
+                0 => vec![v.str("set"), v.int(i)],
+                1 => vec![v.str("clr")],
+                _ => vec![v.str("w")],
+            };
+            ids.push(eng.push(u, op, a));
+        }
+        (eng, op, ids)
+    };
+    let mut outs = Vec::new();
+    for sched in 0..4 {
+        let (mut eng, op, ids) = build();
+        let r = match sched {
+            0 => eng.evaluate_sequential(),
+            1 => eng.evaluate(&mut RandomScheduler::new(7, true), &mut Sequential),
+            2 => eng.evaluate(&mut Greedy::speculative(Speculation::All, 64), &mut Threads(3)),
+            _ => eng.evaluate(&mut Greedy::default(), &mut Threads(4)),
+        }
+        .expect("evaluate");
+        assert_eq!(r.declarations_refuted, 0, "schedule {sched}: {r:?}");
+        if sched == 0 {
+            assert!(eng.critical_path() <= 6, "critical path {}", eng.critical_path());
+        }
+        // An edit: a `w` sees `p` set and defines `c`; the readers after it
+        // in its group read it.
+        let v = eng.values();
+        let a = vec![v.str("set"), v.int(1000)];
+        eng.replace(ids[51], op, a);
+        let r2 = match sched {
+            0 => eng.evaluate_sequential(),
+            1 => eng.evaluate(&mut RandomScheduler::new(8, true), &mut Sequential),
+            2 => eng.evaluate(&mut Greedy::speculative(Speculation::All, 64), &mut Threads(3)),
+            _ => eng.evaluate(&mut Greedy::default(), &mut Threads(4)),
+        }
+        .expect("evaluate");
+        assert_eq!(r2.declarations_refuted, 0, "schedule {sched} after the edit: {r2:?}");
+        outs.push(ids.iter().map(|&i| eng.output(i)).collect::<Vec<_>>());
+    }
+    assert!(outs.windows(2).all(|w| w[0] == w[1]), "schedules differ");
+    let v = build().0.values().int(1000);
+    assert_eq!(outs[0][55], Some(v), "a w after the new set reads its c");
+}
+
+/// Each node that runs again reports why: its own text, or the value it
+/// read changing (with the old and new values).
+#[test]
+fn rerun_causes_name_the_text_and_the_changed_value() {
+    let (mut eng, mut prog) = Program::load(lines(&["a = 1", "b = a + 1", "c = b"]));
+    eng.evaluate_sequential().unwrap();
+    prog.set_line(&mut eng, 0, "a = 5".into());
+    let r = eng.evaluate_sequential().unwrap();
+    let why = |i: usize| r.rerun_causes.iter().find(|c| c.0 == prog.nodes[i]).map(|c| c.1);
+    assert_eq!(why(0), Some(defuse::Rerun::Text), "{:?}", r.rerun_causes);
+    let Some(defuse::Rerun::Changed { old, new, .. }) = why(1) else {
+        panic!("{:?}", r.rerun_causes)
+    };
+    let v = eng.values();
+    assert_eq!((v.as_int(old), v.as_int(new)), (Some(1), Some(5)));
+    assert!(
+        matches!(why(2), Some(defuse::Rerun::Changed { .. })),
+        "{:?}",
+        r.rerun_causes
+    );
 }
