@@ -551,62 +551,6 @@ fn past_group(atoms: &[Atom], p: usize) -> usize {
     }
 }
 
-/// Whether `name` defines a macro (TeX's definers, LaTeX's).
-pub(crate) fn is_definer(name: &str) -> bool {
-    DEFINERS.contains(&name) || LATEX_DEFINERS.contains(&name)
-}
-
-/// Past the definition whose definer is the atom before `p`: its
-/// target, parameter text and body (`\def\x#1{…}`, `\let\x=\y`,
-/// `\newcommand*{\x}[1][d]{…}`).
-pub(crate) fn past_definition(atoms: &[Atom], p: usize, text: &str) -> usize {
-    let Some(d) = p.checked_sub(1).and_then(|q| atoms.get(q)) else {
-        return p;
-    };
-    let name = if d.kind == AtomKind::Cs {
-        d.name(text)
-    } else {
-        ""
-    };
-    if LATEX_DEFINERS.contains(&name) {
-        let mut j = skip(atoms, p);
-        if atoms.get(j).map(|a| a.kind) == Some(AtomKind::Char('*')) {
-            j = skip(atoms, j + 1);
-        }
-        // (the name: a group or a control sequence)
-        j = match atoms.get(j) {
-            Some(a) if a.kind == AtomKind::Open && a.mate != usize::MAX => a.mate + 1,
-            Some(_) => j + 1,
-            None => return atoms.len(),
-        };
-        // (the argument count and default, `[1][d]`)
-        loop {
-            let q = skip(atoms, j);
-            if atoms.get(q).map(|a| a.kind) != Some(AtomKind::Char('[')) {
-                break;
-            }
-            j = atoms[q..]
-                .iter()
-                .position(|a| a.kind == AtomKind::Char(']'))
-                .map_or(atoms.len(), |x| q + x + 1);
-        }
-        return past_group(atoms, j);
-    }
-    match name {
-        "let" | "futurelet" | "chardef" | "mathchardef" | "countdef" | "dimendef" | "skipdef"
-        | "muskipdef" | "toksdef" | "font" | "read" | "readline" => {
-            // (the target, `=`, the value: a token)
-            let mut j = skip(atoms, p) + 1;
-            let q = skip(atoms, j);
-            if atoms.get(q).map(|a| a.kind) == Some(AtomKind::Char('=')) {
-                j = q + 1;
-            }
-            (skip(atoms, j) + 1).min(atoms.len())
-        }
-        _ => past_body(atoms, p),
-    }
-}
-
 /// Past a definition's parameter text and body from `p`.
 fn past_body(atoms: &[Atom], mut p: usize) -> usize {
     while let Some(a) = atoms.get(p) {
@@ -1416,7 +1360,7 @@ pub struct DefSet {
 }
 
 impl DefSet {
-    pub(crate) fn add(&mut self, o: &DefSet) {
+    fn add(&mut self, o: &DefSet) {
         for r in &o.relied {
             if !self.relied.contains(r) {
                 self.relied.push(r.clone());

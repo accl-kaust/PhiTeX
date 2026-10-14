@@ -321,21 +321,6 @@ impl Definitions {
         self.bodies.contains_key(OUTPUT).then(|| c.call(OUTPUT))
     }
 
-    /// Every name with a visible body, and its last body's text.
-    pub(crate) fn last_bodies(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.bodies
-            .iter()
-            .filter_map(|(n, v)| v.last().map(|b| (n.as_str(), b.what.text.as_str())))
-    }
-
-    /// Whether a body these definitions give assigns `\everypar` (a
-    /// paragraph-start list's setter, [`super::ParMachine`]).
-    #[must_use]
-    pub fn assigns_everypar(&self) -> bool {
-        self.last_bodies()
-            .any(|(n, t)| !n.starts_with('\0') && t.contains("\\everypar"))
-    }
-
     /// What calling `name` may define (through `self`, then `prelude`).
     #[must_use]
     pub fn call_defines(&self, prelude: &Definitions, name: &str) -> DefSet {
@@ -650,15 +635,6 @@ impl Definitions {
                 if matches!(body_catcodes(text, atoms, open, false).kind.0, 1 | 2) {
                     self.env_catcoders.insert(env.clone());
                 }
-                // (`\X` and `\endX` are macros with these bodies, as
-                // `\newenvironment` defines them)
-                if atoms[open].mate != usize::MAX {
-                    self.body(&env, text, atoms, open, file, pos);
-                    let end = skip(atoms, atoms[open].mate + 1);
-                    if atoms.get(end).map(|x| x.kind) == Some(AtomKind::Open) {
-                        self.body(&format!("end{env}"), text, atoms, end, file, pos);
-                    }
-                }
                 self.envs.entry(env).or_default().push(At {
                     file,
                     pos,
@@ -751,77 +727,10 @@ impl Definitions {
                 self.add(&format!("c@{c}"), file, pos, Shape::Quantity('i'));
                 self.add(&format!("the{c}"), file, pos, Shape::Macro(Vec::new()));
             }
-            _ => self.toks_use(name, text, atoms, a, file, pos),
+            _ => {}
         }
-    }
-
-    /// A use of a token register these definitions declare
-    /// (`\newtoks`): `\X={…}` or `\X{…}` keeps the list it assigns;
-    /// any other use but `\the\X` and `\everypar\X` (one that may
-    /// change it: `\X\expandafter{…}`, `\addto@hook\X`) keeps
-    /// [`TOKS_UNKNOWN`]. [`Definitions::toks_lists`] reads them.
-    fn toks_use(
-        &mut self,
-        name: &str,
-        text: &str,
-        atoms: &[Atom],
-        a: usize,
-        file: u32,
-        pos: usize,
-    ) {
-        if !self
-            .macros
-            .get(name)
-            .and_then(|v| v.last())
-            .is_some_and(|d| d.what == Shape::Quantity('t'))
-        {
-            return;
-        }
-        let before = atoms[..a]
-            .iter()
-            .rposition(|x| !matches!(x.kind, AtomKind::Space))
-            .map(|b| &atoms[b]);
-        if before.is_some_and(|b| {
-            b.kind == AtomKind::Cs
-                && matches!(b.name(text), "the" | "everypar" | "newtoks" | "toksdef")
-        }) {
-            return;
-        }
-        let key = format!("{TOKS}{name}");
-        let mut j = skip(atoms, a + 1);
-        if atoms.get(j).map(|x| x.kind) == Some(AtomKind::Char('=')) {
-            j = skip(atoms, j + 1);
-        }
-        if atoms.get(j).map(|x| x.kind) == Some(AtomKind::Open) && atoms[j].mate != usize::MAX {
-            self.body(&key, text, atoms, j, file, pos);
-        } else {
-            self.bodies.entry(key).or_default().push(At {
-                file,
-                pos,
-                what: Body {
-                    text: TOKS_UNKNOWN.to_owned(),
-                    effects: Effects::default(),
-                },
-            });
-        }
-    }
-
-    /// The lists assigned to the token register `name` (`\newtoks`)
-    /// anywhere in these definitions: `None` when none is seen, `Some`
-    /// with [`TOKS_UNKNOWN`] among them when a use may change it
-    /// otherwise.
-    pub(crate) fn toks_lists(&self, name: &str) -> Option<Vec<&str>> {
-        self.bodies
-            .get(&format!("{TOKS}{name}"))
-            .map(|v| v.iter().map(|d| d.what.text.as_str()).collect())
     }
 }
-
-/// The key prefix the lists a token register is assigned are kept under.
-const TOKS: &str = "\0toks:";
-
-/// A token register's list when a use may change it unseen.
-pub(crate) const TOKS_UNKNOWN: &str = "\0";
 
 /// Past the spaces from `j`.
 pub(crate) fn skip(atoms: &[Atom], mut j: usize) -> usize {
