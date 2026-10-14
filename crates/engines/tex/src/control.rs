@@ -1705,6 +1705,9 @@ impl Run<'_, '_> {
             Some(crate::run::FileLine::Piece(name)) => {
                 let v = self.v;
                 let lines = v.field("lines");
+                if std::env::var_os("PHITEX_NO_LINES_RANGE").is_some() {
+                    return Ok(0);
+                }
                 let x = self.cx.acc_range(lines, None);
                 if x.is_err() {
                     self.trace_stop("range lines");
