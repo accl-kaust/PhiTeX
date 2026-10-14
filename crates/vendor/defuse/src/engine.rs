@@ -793,10 +793,13 @@ pub(crate) enum HeightFrom {
 struct Origin {
     /// The run that made it (`NIL` for a pushed node).
     creator: Slot,
-    /// The hinted read that set its starting height.
-    hint: Option<(Field, Slot)>,
-    /// The node it last waited on when its floor rose (`NIL`: none).
+    /// The hinted read that set its starting height, with the site's id
+    /// (kept when the site goes).
+    hint: Option<(Field, Slot, NodeId)>,
+    /// The node it last waited on when its floor rose (`NIL`: none), and
+    /// its id (kept when that node goes).
     waited: Slot,
+    waited_id: Option<NodeId>,
     /// The field it last parked for (`None`: an output or a claim).
     waited_field: Option<Field>,
     /// The level it was last re-done at after reading above its level.
@@ -812,6 +815,7 @@ impl Origin {
         creator: NIL,
         hint: None,
         waited: NIL,
+        waited_id: None,
         waited_field: None,
         raised: 0,
         raised_from: NIL,
@@ -3211,14 +3215,30 @@ impl Engine {
                     // there (above what made it and its hinted reads), or
                     // a wait raised its floor. The walk goes on from there.
                     let live = |t: Slot| (t != NIL && self.live(t)).then_some(t);
+                    // Where a field read at `x` binds now (a node gone from
+                    // a record: the walk goes on from the one there now).
+                    let now_at = |f: Field| {
+                        let w = self.walk(n.unit, n.label, f);
+                        live(w.site).or_else(|| live(w.pending))
+                    };
                     let woken = |o: &Origin| {
-                        let by = live(o.waited)?;
+                        if let Some(by) = live(o.waited)
+                            && o.waited_id.is_none_or(|id| self.n(by).id == id)
+                        {
+                            let cause = Cause::Woken {
+                                by: self.n(by).id,
+                                field: o.waited_field,
+                                prefix: self.matched_prefix(by, o.waited_field),
+                            };
+                            return Some((cause, Some(by)));
+                        }
+                        let id = o.waited_id?;
                         let cause = Cause::Woken {
-                            by: self.n(by).id,
+                            by: id,
                             field: o.waited_field,
-                            prefix: self.matched_prefix(by, o.waited_field),
+                            prefix: None,
                         };
-                        Some((cause, Some(by)))
+                        Some((cause, o.waited_field.and_then(now_at)))
                     };
                     let raised = |o: &Origin| {
                         (o.raised == h && h > 0).then(|| {
@@ -3247,16 +3267,19 @@ impl Engine {
                         }
                         (None, Some(o)) => {
                             let by = live(o.creator);
-                            let hint = o.hint.filter(|&(_, t)| live(t).is_some());
                             chain.push((
                                 n.id,
                                 h,
                                 Cause::Created {
                                     by: by.map(|t| self.n(t).id),
-                                    from_hint: hint.map(|(f, t)| (f, self.n(t).id)),
+                                    from_hint: o.hint.map(|(f, _, id)| (f, id)),
                                 },
                             ));
-                            hint.map(|(_, t)| t).or(by)
+                            let hinted = o.hint.and_then(|(f, t, id)| match live(t) {
+                                Some(t) if self.n(t).id == id => Some(t),
+                                _ => now_at(f),
+                            });
+                            hinted.or(by)
                         }
                         (None, None) => {
                             chain.push((
@@ -4103,7 +4126,7 @@ impl Engine {
         }
         if creator != NIL || !matches!(from, HeightFrom::Start) {
             let hint = match from {
-                HeightFrom::Hint(f, t) => Some((f, t)),
+                HeightFrom::Hint(f, t) => Some((f, t, self.n(t).id)),
                 HeightFrom::Start | HeightFrom::Creator => None,
             };
             self.origins.insert(
@@ -4112,6 +4135,7 @@ impl Engine {
                     creator,
                     hint,
                     waited: NIL,
+                    waited_id: None,
                     waited_field: None,
                     raised: 0,
                     raised_from: NIL,
@@ -6473,6 +6497,7 @@ impl Engine {
             o.raised = 0;
             o.raised_from = NIL;
             o.waited = NIL;
+            o.waited_id = None;
         }
         // New information: a stopped speculation may be tried again.
         self.set_flag(x, F_NOSPEC, false);
@@ -6708,7 +6733,10 @@ impl Engine {
             if h > self.n(w).floor {
                 // It finishes above what it waited on, read or not.
                 self.nm(w).floor = h;
-                self.origins.entry_or(w, || Origin::NONE).waited = x;
+                let id = self.n(x).id;
+                let o = self.origins.entry_or(w, || Origin::NONE);
+                o.waited = x;
+                o.waited_id = Some(id);
             }
             let hw = self.n(w).height.max(h);
             self.lift(w, hw);
