@@ -109,7 +109,10 @@ fn compare(dir: &Path, odir: &Path, name: &str) -> Vec<String> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(odir).expect("the oracle").flatten() {
         let f = e.file_name().to_string_lossy().into_owned();
-        if !f.ends_with(".pdf") {
+        if !std::path::Path::new(&f)
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("pdf"))
+        {
             continue;
         }
         let want = std::fs::read(e.path()).expect("an oracle file");
