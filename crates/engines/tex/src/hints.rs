@@ -2750,7 +2750,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
     let mut pending: Vec<&'static str> = Vec::new();
-    let mut after_sets = 0u8;
+    let mut after_sets = Sets::default();
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         // (whether the run reads on into the next slice: a scan for a
@@ -2853,7 +2853,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // end (`\\@doendpe`) set another, which the next paragraph
         // consumes, §1091: a slice calling one declares it)
         let sets = sets_everypar(&text[s..e]);
-        if (sets || after_sets > 0)
+        if (sets.after > 0 || after_sets.after > 0)
             && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
         {
             add_head(&mut b.state, "param:everypar");
@@ -2862,7 +2862,10 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             add_head(&mut b.state, "toks:");
             // (what the `\\everypar` of a list item or a heading sets
             // when the paragraph consumes it, latex.ltx `\\@item`,
-            // `\\@afterheading`)
+            // `\\@afterheading`; a list's `\\@setpar` in the slice
+            // itself, and after it `\\@doendpe`'s `\\par` only after an
+            // environment's end)
+            let par = sets.after > 0 || after_sets.par;
             for n in [
                 "cs:if@minipage",
                 "cs:if@newlist",
@@ -2872,22 +2875,26 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
                 "cs:if@endpe",
                 "cs:par",
             ] {
+                if !par && (n == "cs:par" || n == "cs:if@endpe") {
+                    continue;
+                }
                 if !b.names.iter().any(|x| x == n) {
                     b.names.push(n.to_owned());
                 }
             }
         }
-        // (the next slice's first paragraph consumes what this one set
-        // and resets `\\everypar`: it declares it too)
-        // (`\\@afterheading` is consumed over two paragraphs: the first
-        // keeps `\\everypar` and sets `\\clubpenalty`, the second resets
-        // both; a heading's own slice may end before the first)
-        after_sets = if sets {
-            3
-        } else if text[s..e].trim().is_empty() {
+        // (the slices after it consume what this one set and reset
+        // `\\everypar`: they declare it too, [`Sets`]; blank slices
+        // don't count)
+        after_sets = if sets.after > 0 {
+            sets
+        } else if text[s..e].trim().is_empty() || after_sets.after == 0 {
             after_sets
         } else {
-            after_sets.saturating_sub(1)
+            Sets {
+                after: after_sets.after - 1,
+                par: after_sets.par,
+            }
         };
         let mut out = pending.clone();
         let mut ends = false;
@@ -3372,11 +3379,24 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
-/// Whether a slice calls a command that leaves `\\everypar` other
-/// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
-/// a list item, an environment's begin or end (`\\@doendpe`), a title.
-pub(crate) fn sets_everypar(slice: &str) -> bool {
-    const SETS: &[&str] = &[
+/// What a slice leaves for the paragraphs after it to consume, beyond
+/// LaTeX's paragraph hooks (§1091: the next paragraph runs `\\everypar`):
+/// how many non-blank slices after it consume it (0: it sets nothing),
+/// and whether it may leave `\\par` redefined for them (`\\@doendpe` at
+/// an environment's end, latex.ltx). A heading's `\\@afterheading` is consumed over two
+/// paragraphs, and a heading's own slice may end before the first; a
+/// list item's `\\everypar` and an environment's `\\@doendpe` by the
+/// first. An environment that is no list (`document`, a float, an
+/// alignment, display math) leaves nothing: neither its begin nor its
+/// end touches `\\everypar` or `\\if@endpe`.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct Sets {
+    pub(crate) after: u8,
+    pub(crate) par: bool,
+}
+
+pub(crate) fn sets_everypar(slice: &str) -> Sets {
+    const HEADINGS: &[&str] = &[
         "\\section",
         "\\subsection",
         "\\subsubsection",
@@ -3386,12 +3406,64 @@ pub(crate) fn sets_everypar(slice: &str) -> bool {
         "\\part",
         "\\@afterheading",
         "\\@startsection",
-        "\\item",
-        "\\begin",
-        "\\end",
         "\\maketitle",
     ];
-    SETS.iter().any(|c| slice.contains(c))
+    // (environments whose begin and end set neither `\\everypar` nor
+    // `\\@endpetrue`: no `\\list`, `\\trivlist` or `\\@endparenv`)
+    const PLAIN_ENVS: &[&str] = &[
+        "document",
+        "figure",
+        "figure*",
+        "table",
+        "table*",
+        "tabular",
+        "tabular*",
+        "array",
+        "equation",
+        "equation*",
+        "math",
+        "displaymath",
+        "picture",
+        "tikzpicture",
+        "align",
+        "align*",
+        "gather",
+        "gather*",
+        "multline",
+        "multline*",
+        "flalign",
+        "flalign*",
+        "alignat",
+        "alignat*",
+    ];
+    let mut out = Sets::default();
+    if HEADINGS.iter().any(|c| slice.contains(c)) {
+        out.after = 3;
+    }
+    if slice.contains("\\item") {
+        out.after = out.after.max(1);
+    }
+    for (cmd, par) in [("\\begin", false), ("\\end", true)] {
+        let mut rest = slice;
+        while let Some(k) = rest.find(cmd) {
+            rest = &rest[k + cmd.len()..];
+            // (`\\endgroup`, `\\beginL`: another command)
+            if rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '@') {
+                continue;
+            }
+            let name = rest
+                .trim_start()
+                .strip_prefix('{')
+                .and_then(|r| r.split_once('}'))
+                .map(|(n, _)| n.trim());
+            if name.is_some_and(|n| PLAIN_ENVS.contains(&n)) {
+                continue;
+            }
+            out.after = out.after.max(1);
+            out.par |= par;
+        }
+    }
+    out
 }
 
 /// Whether the node's text says its command opens and closes no scope.
