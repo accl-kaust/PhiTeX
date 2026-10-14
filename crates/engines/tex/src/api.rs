@@ -3990,6 +3990,39 @@ impl Build {
             .collect()
     }
 
+    /// Every document node's declaration (a measure): its text's start,
+    /// what it may define (`Any`, or the kind and size of its bound),
+    /// its hint's cause, and how many reads it declares.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn node_declarations(&self) -> Vec<(String, String, String, usize)> {
+        let v = self.g.eng.values();
+        self.nodes
+            .iter()
+            .filter_map(|(_, n, _)| {
+                let i = self.g.eng.node_info(*n)?;
+                if i.op != "exec" {
+                    return None;
+                }
+                let text: String = i
+                    .args
+                    .first()
+                    .map(|&x| v.render(x))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(60)
+                    .collect();
+                let md = match crate::hints::may_define(v, &i.args) {
+                    phitex_defuse::MayDefine::Any => "Any".to_owned(),
+                    other => format!("{other:?}").chars().take(12).collect(),
+                };
+                let h = crate::hints::hint_of_args(v, &i.args);
+                let reads = crate::hints::reads(v, &i.args).map_or(0, |r| r.len());
+                Some((text, md, h.cause.clone(), reads))
+            })
+            .collect()
+    }
+
     /// The critical chain's waits in detail (a measure): for each
     /// `Woken` link, the waiter and the node it waited on (text, the
     /// hint's class and cause, `may_define`, effect, the hinted reads);

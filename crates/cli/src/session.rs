@@ -661,6 +661,9 @@ impl Session {
                 for l in b.chain_waits() {
                     eprintln!("WAIT {}", l.replace('\n', " | "));
                 }
+                for (t, md, cause, reads) in b.node_declarations() {
+                    eprintln!("DECL\t{md}\t{cause}\t{reads}\t{t}");
+                }
             }
             // (the package loads' counters, for measurements)
             if std::env::var_os("PHITEX_PKG_STATS").is_some() {
