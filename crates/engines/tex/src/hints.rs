@@ -3112,6 +3112,9 @@ fn par_machine(own: &Definitions, prelude: &Defs) -> Option<Arc<pass::ParMachine
         return x.clone();
     }
     let x = pass::ParMachine::new(&Definitions::new(), prelude).map(Arc::new);
+    if crate::exec::env_flag!("PHITEX_PARLISTS_TRACE") {
+        eprintln!("parlists: machine {x:?}");
+    }
     let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
     if g.len() > 64 {
         g.clear();
@@ -3158,6 +3161,14 @@ impl ParLists {
             return None;
         }
         let ran = p.machine.slice(&p.ops[k], &self.states);
+        if crate::exec::env_flag!("PHITEX_PARLISTS_TRACE") {
+            eprintln!(
+                "parlists: slice at {s}: ops {:?}; {} states after; defines {:?}",
+                p.ops[k],
+                ran.states.len(),
+                ran.defines.names.keys().collect::<Vec<_>>()
+            );
+        }
         self.states = ran.states;
         let d = ran.defines;
         if d.names.is_empty()

@@ -441,7 +441,11 @@ impl Compiler<'_, '_> {
                     continue;
                 }
                 AtomKind::Char(c) => {
-                    if self.top && depth == 0 && implicit_of_char(c) == Implicit::StartsParagraph {
+                    if self.top
+                        && depth == 0
+                        && implicit_of_char(c) == Implicit::StartsParagraph
+                        && out.last() != Some(&Op::Start)
+                    {
                         out.push(Op::Start);
                     }
                     k += 1;
@@ -535,12 +539,15 @@ impl Compiler<'_, '_> {
             }
             // (a macro: the setters it may run, the flags it may set)
             let set = self.closure.call(n);
-            let ms: Vec<String> = set
+            let mut ms: Vec<String> = set
                 .relied
                 .iter()
+                .chain(&set.calls)
                 .filter(|r| self.setters.contains(r.as_str()))
                 .cloned()
                 .collect();
+            ms.sort();
+            ms.dedup();
             let flags: Vec<String> = set
                 .names
                 .keys()
