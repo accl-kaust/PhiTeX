@@ -353,7 +353,11 @@ impl Run<'_, '_> {
     pub(crate) fn give_back_peeked(&mut self) -> R<bool> {
         // (`PHITEX_GIVEBACK_TRACE`: a load's run, why a sibling it pulled
         // was not given back)
-        let trace = crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && self.rec_load;
+        // (`=all`: every run's)
+        static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let all =
+            *ALL.get_or_init(|| std::env::var("PHITEX_GIVEBACK_TRACE").is_ok_and(|x| x == "all"));
+        let trace = crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && (self.rec_load || all);
         let pulled = self.pulled;
         let refuse = |why: &str| {
             if trace {
@@ -443,7 +447,16 @@ impl Run<'_, '_> {
             return refuse("the first token or its position differs re-read now");
         }
         if trace {
-            eprintln!("giveback: given back");
+            let sib = self
+                .cx
+                .following(self.pulled - 1)
+                .and_then(|(_, a)| a.first().map(|&x| self.v.render(x)))
+                .unwrap_or_default();
+            eprintln!(
+                "giveback: given back by node {}: {}",
+                self.cx.node().raw(),
+                sib.chars().take(100).collect::<String>()
+            );
         }
         while self.input.pop().is_some() {}
         self.input.text.truncate(at);
