@@ -138,6 +138,8 @@ fn scratch_unit() -> Unit {
         accs: FxHashMap::default(),
         watches: BTreeMap::new(),
         max_span: 0,
+        scans: std::collections::BTreeSet::new(),
+        scan_span: 0,
         live: false,
         shifts: Vec::new(),
     }
@@ -162,11 +164,13 @@ impl Aux {
             assume_left: self.assume_left,
             watch: self.watch,
             watch_to: self.watch_to,
+            scan: self.scan,
             reach1: self.reach1,
             stream: self.stream,
             diagnostics: self.diagnostics.clone(),
             kind_pending: self.kind_pending,
             decl_refuted: self.decl_refuted,
+            narrowed: self.narrowed.clone(),
             suspended: Mutex::new(None),
         }
     }
@@ -198,6 +202,8 @@ impl RunResult {
             publishes: self.publishes.clone(),
             contribs: self.contribs.clone(),
             watch: self.watch,
+            scan: self.scan,
+            narrow: self.narrow.clone(),
             effect: self.effect,
             kind: self.kind,
             claim: self.claim,
