@@ -11,8 +11,10 @@
 //! cross-thread contention to what they measure. On `wasm32` spans are
 //! counted but not timed (there is no clock).
 
+use std::fmt;
+
 /// What a counter counts.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Counter {
     /// Binding walks (reaching-definition lookups).
@@ -48,8 +50,6 @@ pub enum Counter {
     RevalidateOk,
     /// Re-bound nodes that had to run after all.
     RevalidateMiss,
-    ProjKept,
-    AtRebind,
     /// Claims recomputed.
     ClaimRecompute,
     /// Nodes created.
@@ -70,16 +70,10 @@ pub enum Counter {
     UseRecord,
     /// Slices of a wide batch that aborted (applied whole instead).
     SliceAbort,
-    /// Results applied in slices of a wide batch.
-    SlicedResult,
-    /// Results of a wide batch applied whole, after its slices.
-    WholeResult,
-    /// Results of batches too narrow to slice.
-    NarrowResult,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 31] = [
+    pub const ALL: [Counter; 26] = [
         Counter::Walk,
         Counter::WalkLevel,
         Counter::Step,
@@ -96,8 +90,6 @@ impl Counter {
         Counter::StateResult,
         Counter::RevalidateOk,
         Counter::RevalidateMiss,
-        Counter::ProjKept,
-        Counter::AtRebind,
         Counter::ClaimRecompute,
         Counter::Create,
         Counter::Free,
@@ -108,9 +100,6 @@ impl Counter {
         Counter::Tail,
         Counter::UseRecord,
         Counter::SliceAbort,
-        Counter::SlicedResult,
-        Counter::WholeResult,
-        Counter::NarrowResult,
     ];
 
     #[must_use]
@@ -132,8 +121,6 @@ impl Counter {
             Counter::StateResult => "state_result",
             Counter::RevalidateOk => "revalidate_ok",
             Counter::RevalidateMiss => "revalidate_miss",
-            Counter::ProjKept => "proj_kept",
-            Counter::AtRebind => "at_rebind",
             Counter::ClaimRecompute => "claim_recompute",
             Counter::Create => "create",
             Counter::Free => "free",
@@ -144,15 +131,12 @@ impl Counter {
             Counter::Tail => "tail",
             Counter::UseRecord => "use_record",
             Counter::SliceAbort => "slice_abort",
-            Counter::SlicedResult => "sliced_result",
-            Counter::WholeResult => "whole_result",
-            Counter::NarrowResult => "narrow_result",
         }
     }
 }
 
 /// A timed region.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Span {
     /// A whole `evaluate` call.
@@ -273,8 +257,8 @@ pub struct Snapshot {
     pub spans: Vec<(&'static str, u64, u64)>,
 }
 
-impl std::fmt::Display for Snapshot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Snapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (name, n) in &self.counters {
             if *n > 0 {
                 writeln!(f, "  {name:<18} {n:>12}")?;
@@ -296,213 +280,164 @@ impl std::fmt::Display for Snapshot {
 pub const fn enabled() -> bool {
     cfg!(feature = "profile")
 }
-
 #[cfg(feature = "profile")]
 mod imp {
-    use super::{Counter, Snapshot, Span};
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
 
-    const NC: usize = Counter::ALL.len();
-    const NS: usize = Span::ALL.len();
-    /// Trace events kept at most (later ones are dropped and counted).
-    const MAX_EVENTS: usize = 4_000_000;
-
-    #[derive(Clone, Copy)]
-    struct Event {
-        span: Span,
-        tid: u32,
-        start_ns: u64,
-        dur_ns: u64,
+    #[derive(Default)]
+    struct Local {
+        counters: BTreeMap<&'static str, u64>,
+        spans: BTreeMap<&'static str, (u64, u64)>,
+        events: Vec<(&'static str, u64, u64)>,
     }
 
     struct Global {
-        counters: [AtomicU64; NC],
-        span_n: [AtomicU64; NS],
-        span_ns: [AtomicU64; NS],
-        events: Mutex<Vec<Event>>,
-        dropped: AtomicU64,
+        counters: BTreeMap<&'static str, u64>,
+        spans: BTreeMap<&'static str, (u64, u64)>,
+        events: Vec<(&'static str, u64, u64, u64)>,
     }
 
-    static GLOBAL: Global = Global {
-        counters: [const { AtomicU64::new(0) }; NC],
-        span_n: [const { AtomicU64::new(0) }; NS],
-        span_ns: [const { AtomicU64::new(0) }; NS],
-        events: Mutex::new(Vec::new()),
-        dropped: AtomicU64::new(0),
-    };
+    static GLOBAL: Mutex<Global> = Mutex::new(Global {
+        counters: BTreeMap::new(),
+        spans: BTreeMap::new(),
+        events: Vec::new(),
+    });
     static TRACING: AtomicBool = AtomicBool::new(false);
-    static NEXT_TID: AtomicU64 = AtomicU64::new(0);
-
-    struct Local {
-        tid: u32,
-        counters: [u64; NC],
-        span_n: [u64; NS],
-        span_ns: [u64; NS],
-        events: Vec<Event>,
-    }
-
-    impl Local {
-        fn flush(&mut self) {
-            for (g, l) in GLOBAL.counters.iter().zip(&mut self.counters) {
-                g.fetch_add(std::mem::take(l), Ordering::Relaxed);
-            }
-            for (g, l) in GLOBAL.span_n.iter().zip(&mut self.span_n) {
-                g.fetch_add(std::mem::take(l), Ordering::Relaxed);
-            }
-            for (g, l) in GLOBAL.span_ns.iter().zip(&mut self.span_ns) {
-                g.fetch_add(std::mem::take(l), Ordering::Relaxed);
-            }
-            if !self.events.is_empty() {
-                let mut ev = GLOBAL.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let room = MAX_EVENTS.saturating_sub(ev.len());
-                let n = self.events.len();
-                ev.extend(self.events.drain(..n.min(room)));
-                GLOBAL.dropped.fetch_add(self.events.len() as u64, Ordering::Relaxed);
-                self.events.clear();
-            }
-        }
-    }
-
-    impl Drop for Local {
-        fn drop(&mut self) {
-            self.flush();
-        }
-    }
 
     thread_local! {
-        static LOCAL: RefCell<Local> = RefCell::new(Local {
-            tid: u32::try_from(NEXT_TID.fetch_add(1, Ordering::Relaxed)).unwrap_or(u32::MAX),
-            counters: [0; NC],
-            span_n: [0; NS],
-            span_ns: [0; NS],
-            events: Vec::new(),
-        });
+        static LOCAL: RefCell<Local> = RefCell::new(Local::default());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn now_ns() -> u64 {
-        use std::sync::OnceLock;
-        use std::time::Instant;
-        static EPOCH: OnceLock<Instant> = OnceLock::new();
-        u64::try_from(EPOCH.get_or_init(Instant::now).elapsed().as_nanos()).unwrap_or(u64::MAX)
+    fn epoch() -> &'static Instant {
+        static E: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        E.get_or_init(Instant::now)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn now_ns() -> u64 {
-        0
-    }
-
-    #[inline]
-    pub fn count(c: Counter, n: u64) {
-        LOCAL.with(|l| l.borrow_mut().counters[c as usize] += n);
+    pub fn count(c: super::Counter, n: u64) {
+        LOCAL.with(|l| *l.borrow_mut().counters.entry(c.name()).or_default() += n);
     }
 
     /// Records a span when dropped.
     pub struct Guard {
-        span: Span,
-        start: u64,
+        name: &'static str,
+        t: Instant,
     }
 
-    #[inline]
     #[must_use]
-    pub fn enter(span: Span) -> Guard {
-        Guard { span, start: now_ns() }
+    pub fn enter(span: super::Span) -> Guard {
+        Guard {
+            name: span.name(),
+            t: Instant::now(),
+        }
     }
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            let dur = now_ns().saturating_sub(self.start);
-            let trace = TRACING.load(Ordering::Relaxed);
+            #[allow(clippy::cast_possible_truncation)]
+            let ns = self.t.elapsed().as_nanos() as u64;
+            #[allow(clippy::cast_possible_truncation)]
+            let start = self.t.duration_since(*epoch()).as_nanos() as u64;
             LOCAL.with(|l| {
                 let mut l = l.borrow_mut();
-                l.span_n[self.span as usize] += 1;
-                l.span_ns[self.span as usize] += dur;
-                if trace {
-                    let tid = l.tid;
-                    l.events.push(Event {
-                        span: self.span,
-                        tid,
-                        start_ns: self.start,
-                        dur_ns: dur,
-                    });
+                let e = l.spans.entry(self.name).or_default();
+                e.0 += ns;
+                e.1 += 1;
+                if TRACING.load(Ordering::Relaxed) {
+                    l.events.push((self.name, start, ns));
                 }
             });
+            flush();
         }
+    }
+
+    pub fn flush() {
+        let tid = thread_id();
+        LOCAL.with(|l| {
+            let mut l = l.borrow_mut();
+            if l.counters.is_empty() && l.spans.is_empty() && l.events.is_empty() {
+                return;
+            }
+            let mut g = GLOBAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (k, v) in std::mem::take(&mut l.counters) {
+                *g.counters.entry(k).or_default() += v;
+            }
+            for (k, (a, b)) in std::mem::take(&mut l.spans) {
+                let e = g.spans.entry(k).or_default();
+                e.0 += a;
+                e.1 += b;
+            }
+            for (n, s, d) in std::mem::take(&mut l.events) {
+                g.events.push((n, s, d, tid));
+            }
+        });
+    }
+
+    fn thread_id() -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::thread::current().id().hash(&mut h);
+        h.finish() % 1000
+    }
+
+    pub fn reset_totals() {
+        flush();
+        let mut g = GLOBAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.counters.clear();
+        g.spans.clear();
+    }
+
+    pub fn snapshot() -> super::Snapshot {
+        flush();
+        let g = GLOBAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::Snapshot {
+            counters: super::Counter::ALL
+                .iter()
+                .map(|c| (c.name(), g.counters.get(c.name()).copied().unwrap_or(0)))
+                .collect(),
+            spans: super::Span::ALL
+                .iter()
+                .map(|sp| {
+                    let (ns, n) = g.spans.get(sp.name()).copied().unwrap_or((0, 0));
+                    (sp.name(), n, ns)
+                })
+                .collect(),
+        }
+    }
+
+    pub fn clear_trace() {
+        flush();
+        GLOBAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .events
+            .clear();
     }
 
     pub fn set_tracing(on: bool) {
         TRACING.store(on, Ordering::Relaxed);
     }
 
-    pub fn flush_here() {
-        LOCAL.with(|l| l.borrow_mut().flush());
-    }
-
-    pub fn snapshot() -> Snapshot {
-        flush_here();
-        Snapshot {
-            counters: Counter::ALL
-                .iter()
-                .map(|&c| (c.name(), GLOBAL.counters[c as usize].load(Ordering::Relaxed)))
-                .collect(),
-            spans: Span::ALL
-                .iter()
-                .map(|&s| {
-                    (
-                        s.name(),
-                        GLOBAL.span_n[s as usize].load(Ordering::Relaxed),
-                        GLOBAL.span_ns[s as usize].load(Ordering::Relaxed),
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    pub fn reset() {
-        flush_here();
-        for a in GLOBAL.counters.iter().chain(&GLOBAL.span_n).chain(&GLOBAL.span_ns) {
-            a.store(0, Ordering::Relaxed);
-        }
-    }
-
-    pub fn clear_trace() {
-        flush_here();
-        GLOBAL
-            .events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        GLOBAL.dropped.store(0, Ordering::Relaxed);
-    }
-
     pub fn chrome_trace() -> String {
-        use std::fmt::Write;
-        flush_here();
-        let ev = GLOBAL.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        use std::fmt::Write as _;
+        flush();
+        let g = GLOBAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut s = String::from("{\"traceEvents\":[");
-        for (i, e) in ev.iter().enumerate() {
+        for (i, (n, st, d, tid)) in g.events.iter().enumerate() {
             if i > 0 {
                 s.push(',');
             }
-            // Chrome trace times are in microseconds.
             let _ = write!(
                 s,
-                "{{\"name\":\"{}\",\"ph\":\"X\",\"pid\":1,\"tid\":{},\"ts\":{}.{:03},\"dur\":{}.{:03}}}",
-                e.span.name(),
-                e.tid,
-                e.start_ns / 1000,
-                e.start_ns % 1000,
-                e.dur_ns / 1000,
-                e.dur_ns % 1000
+                "{{\"name\":\"{n}\",\"ph\":\"X\",\"ts\":{},\"dur\":{},\"pid\":1,\"tid\":{tid}}}",
+                st / 1000,
+                d / 1000
             );
         }
-        let _ = write!(
-            s,
-            "],\"displayTimeUnit\":\"ms\",\"otherData\":{{\"dropped_events\":{}}}}}",
-            GLOBAL.dropped.load(Ordering::Relaxed)
-        );
+        s.push_str("]}");
         s
     }
 }
@@ -526,13 +461,13 @@ pub fn snapshot() -> Snapshot {
 /// [`snapshot`] to cover their jobs.
 pub fn flush() {
     #[cfg(feature = "profile")]
-    imp::flush_here();
+    imp::flush();
 }
 
 /// Zeroes all counters and span totals (recorded trace events are kept).
 pub fn reset() {
     #[cfg(feature = "profile")]
-    imp::reset();
+    imp::reset_totals();
 }
 
 /// Drops recorded trace events.
@@ -559,7 +494,7 @@ pub fn chrome_trace() -> String {
     }
     #[cfg(not(feature = "profile"))]
     {
-        String::from("{\"traceEvents\":[]}")
+        "{\"traceEvents\":[]}".into()
     }
 }
 
@@ -579,7 +514,7 @@ macro_rules! count {
 }
 
 /// Times the rest of the enclosing block (profile builds only):
-/// `span!(Apply);`
+/// `span!(Evaluate);`
 macro_rules! span {
     ($s:ident) => {
         #[cfg(feature = "profile")]

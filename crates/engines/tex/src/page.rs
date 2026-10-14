@@ -2474,7 +2474,11 @@ impl FinalState {
         // text's final state, the writer's)
         let text_at = |cx: &mut Ctx<'_>, f: Field, k: usize| -> Result<Option<ValueId>, Stop> {
             match fires.get(k) {
-                Some(&at) if k < steps => Ok(cx.use_field_at(f, at)?.map(|(x, _)| x)),
+                // gone: the plan re-runs with the new position, and this step after it
+                Some(&at) if k < steps => Ok(match cx.use_field_at(f, at)? {
+                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
+                    phitex_defuse::FieldAt::Unset | phitex_defuse::FieldAt::Gone => None,
+                }),
                 _ => cx.use_field(f),
             }
         };

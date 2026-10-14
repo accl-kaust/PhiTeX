@@ -1,67 +1,26 @@
-//! An incremental, parallel, field-level def-use graph evaluator.
+//! defuse: an incremental, parallel, field-level def-use evaluator.
 //!
-//! Programs are units of ordered nodes: pure applications of client
-//! [`Operation`]s. A node uses fields, defines fields, produces an output,
-//! may unfold into child nodes (spliced in at its position), may claim the
-//! nodes that follow it as its argument text, and may open or close scopes.
-//!
-//! The static order is only for binding, never for execution. A use binds to
-//! its reaching definition (the nearest earlier visible definition), found in
-//! O(log n) from bracket summaries; a node waits only for the value of that
-//! definition, or for pending structure (a definition set, claim or scope
-//! effect that depends on a value) that its own binding walk crosses.
-//! Structure that can be read from the text (claim extents, scope brackets)
-//! comes from client hooks before anything runs.
-//!
-//! Edits re-bind exactly the affected uses and mark exactly the affected
-//! nodes; evaluation re-runs those with early cutoff. Scheduling
-//! ([`Scheduler`]) and execution ([`Executor`]) are pluggable; speculative
-//! runs read predictions, may change program shape provisionally, and are
-//! confirmed in bulk when the structure or value they assumed resolves.
-//!
-//! Node ids and value ids are content hashes, so results, ids and the
-//! canonical report counters are the same under every schedule.
-//!
-//! No dependencies and no threads of its own: builds for
-//! `wasm32-unknown-unknown`. `unsafe` lives in one module (`par`), for the
-//! overlays a wide batch's slices are applied through in parallel.
-//!
-//! Profiling builds (`--features profile`) add counters, timed spans and a
-//! Chrome trace ([`obs`]); without the feature they compile to nothing.
+//! Rewritten from `docs/linear-core.md`, the toy language in `examples/common`
+//! and the test suites in `tests/`, without reference to the previous core.
+
+// Engine code keeps short local names (s: slot, u: unit, f: field, r:
+// record) and long state machines in one function each.
 #![deny(unsafe_code)]
-// Treap and graph code reads best with the conventional short names
-// (t, l, r, x, s, ...).
-#![allow(clippy::many_single_char_names)]
+#![allow(clippy::many_single_char_names, clippy::too_many_lines)]
 
-mod ctx;
-mod engine;
-mod hash;
-mod ix;
+mod api;
+mod core;
 pub mod obs;
-mod ov;
 #[allow(unsafe_code)]
-mod par;
-mod sched;
-mod tree;
-mod value;
+mod sync;
+mod values;
 
-pub use ctx::{Ctx, Stop};
-pub use engine::{
-    Brackets, Cause, Claim, Edit, EditQueue, EditSource, Effect, Engine, EnvProvider, EvalError, Lifted, Limits,
-    Locality, LoopStart, MayDefine, Monoid, NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, ProjId, Projection,
-    Report, Rerun, RunResult, SeqMonoid, Settled, SumMonoid, UnitId, Until, WaitKind, WaitOn, Waiter,
+pub use api::{
+    Brackets, Candidate, Cause, Claim, Edit, EditQueue, EditSource, Effect, EnvProvider, EvalError, Executor, FieldAt,
+    Greedy, Job, Lifted, Limits, Locality, LoopStart, MayDefine, Monoid, NoEdits, NodeId, NodeInfo, NodeState, OpId,
+    Operation, ProjId, Projection, RandomScheduler, Report, Rerun, RunResult, Scheduler, SeqMonoid, Sequential,
+    Settled, Speculation, Stop, SumMonoid, UnitId, Until, WaitKind, WaitOn, Waiter,
 };
-pub use hash::{FxHashMap, FxHashSet, FxHasher, hash_bytes, hash_words};
-pub use sched::{Candidate, Executor, Greedy, Job, RandomScheduler, Rng, Scheduler, Sequential, Speculation};
-pub use value::{Field, SeqNode, Value, ValueId, Values};
-
-impl Engine {
-    /// Evaluates with every ready node run in order, without speculation.
-    ///
-    /// # Errors
-    ///
-    /// See [`Engine::evaluate`].
-    pub fn evaluate_sequential(&mut self) -> Result<Report, EvalError> {
-        self.evaluate(&mut Greedy::default(), &mut Sequential)
-    }
-}
+pub use core::ctx::Ctx;
+pub use core::edit::Engine;
+pub use values::{Field, FxHashMap, FxHashSet, FxHasher, Rng, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};
