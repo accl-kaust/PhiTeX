@@ -1426,8 +1426,28 @@ impl Run<'_, '_> {
                 .cx
                 .is_loopback(self.keyed(crate::fields::Fam::Wkeys, &name))
             {
-                let made = self.interpret_line(&line)?;
-                v.list(vec![v.str(&name), v.str(&line), made])
+                // (a text the stream's earlier lines left open goes on
+                // with this one: the file is read back whole)
+                let text = match self.wpending.remove(&k) {
+                    Some(mut t) => {
+                        t.push_str(&line);
+                        t
+                    }
+                    None => line.clone(),
+                };
+                let r = self.interpret_line(&text)?;
+                if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                    eprintln!(
+                        "aux-trace: interpreted {name} {text:?}: {}",
+                        r.map_or_else(|| "needs more".to_owned(), |x| crate::val::show_def(v, x))
+                    );
+                }
+                if let Some(made) = r {
+                    v.list(vec![v.str(&name), v.str(&line), made])
+                } else {
+                    self.wpending.insert(k, text);
+                    v.list(vec![v.str(&name), v.str(&line)])
+                }
             } else {
                 v.list(vec![v.str(&name), v.str(&line)])
             };
@@ -1446,6 +1466,10 @@ impl Run<'_, '_> {
     /// writes fire.
     pub(crate) fn close_out(&mut self, n: i32) -> R<()> {
         let v = self.v;
+        // (a text the file's lines left open ends with the file: what
+        // TeX's `\input` of it reports, "File ended while scanning",
+        // defines nothing)
+        self.wpending.remove(&n);
         let op = self.cx.op();
         if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
             self.set(&format!("write:{n}"), ValueId::UNIT, true);

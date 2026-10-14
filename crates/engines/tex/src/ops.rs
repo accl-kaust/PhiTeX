@@ -461,8 +461,12 @@ impl Operation for Files {
             for (f, val) in ds {
                 let w = v.field(&format!("wdef:{f}"));
                 if cx.is_loopback(w) {
-                    crate::page::lb_pub(cx, w, *val);
                     keys.push(v.str(f));
+                    // (a key whose value another file's lines publish)
+                    if *val == ValueId::UNIT {
+                        continue;
+                    }
+                    crate::page::lb_pub(cx, w, *val);
                     if trace {
                         let xs = list_of(v, *val);
                         let shown = xs

@@ -133,6 +133,9 @@ impl Run<'_, '_> {
     pub(crate) fn get_next_or_end(&mut self) -> R<()> {
         if !self.get_next()? {
             if self.eof {
+                if self.interp.is_some() {
+                    self.interp_short = true;
+                }
                 return Err(Halt::Fatal);
             }
             self.cur = Cur {

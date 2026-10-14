@@ -744,6 +744,39 @@ fn latex_heading_everypar() {
     assert_eq!(b.stats.regime_violations, 0, "regime violations");
 }
 
+/// `pdflatex` on an article that writes a part file the way
+/// `\include`'s `\@writeckpt` does, one `\@setckpt{i1-a}{` line, a
+/// `\setcounter` line, a `}` line (`pdfdocs/writecont.tex`), and puts
+/// `\@input{i1-a.aux}` in the main `.aux`: the file is read back whole,
+/// its first line's argument going on in the next lines, and the next
+/// run's `\@input` defines `\cp@i1-a`; the PDF equals pdfTeX's.
+#[test]
+fn latex_write_continued_lines() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("writecont.tex"));
+    let want =
+        std::fs::read(common::fixtures().join("latex/pdf/writecont.pdf")).expect("the oracle");
+    let opts = Options {
+        fixpoint: true,
+        ..pdf_opts("writecont", &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), &src);
+    eprintln!("writecont: {}", report("writecont", &b));
+    if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+        let _ = std::fs::write(format!("{d}/writecont.pdf"), b.output().0);
+    }
+    let errors: Vec<String> = b
+        .diagnostics()
+        .iter()
+        .filter(|d| d.severity == phitex_tex::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("writecont.pdf: {d}");
+    }
+}
+
 /// `pdflatex` on a main file that `\input`s one chapter and
 /// `\include`s another (`pdfdocs/inputs.tex`, `chap1.tex`,
 /// `chap2.tex`; `\include` goes through `\@input` and its own `.aux`):
