@@ -1627,6 +1627,7 @@ fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str) -> R<i64> {
     };
     let nf = r.cint(crate::fields::cell::FONTCOUNT)? + 1;
     r.set_cell(crate::fields::cell::FONTCOUNT, v.int(nf), true);
+    r.font_loaded(nf);
     let mut xs = vec![
         v.str(&format!("{}{suffix}", i.name)),
         v.int(i64::from(i.size)),

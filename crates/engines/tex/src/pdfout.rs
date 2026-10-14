@@ -52,6 +52,12 @@ pub(crate) struct PagePiece {
     rec: phitex_pdf::PageRecord,
     /// The fonts used on the state the step wrote it on.
     base: BTreeSet<FontId>,
+    /// The page's index in the page chain and the fonts loaded when it
+    /// shipped (`fontcount`: the step's own, an output routine's and its
+    /// virtual fonts', numbered after the text's), for
+    /// [`font_tags`].
+    pj: i64,
+    fcount: i64,
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
@@ -1171,6 +1177,8 @@ fn ship_apart(
         fonts,
         rec: phitex_pdf::PageRecord::default(),
         base: BTreeSet::new(),
+        pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
+        fcount: r.cint(crate::fields::cell::FONTCOUNT)?,
     };
     // the key: what the piece is made of, by the values' identities
     // (interned: equal values, equal ids), not by their bytes
@@ -1185,6 +1193,8 @@ fn ship_apart(
         maps,
         pdfmap,
         u64::from(pc.fonts.space.is_some()),
+        pc.pj.cast_unsigned(),
+        pc.fcount.cast_unsigned(),
     ];
     words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
     let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
@@ -1274,6 +1284,25 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
     let t0 = std::time::Instant::now();
     let mut st = a.st.clone();
     let mut bytes = a.bytes.clone();
+    // the fonts' names (`/F<n>`) as pdfTeX numbers them
+    let mut placed_pieces = Vec::new();
+    for &x in &xpages {
+        if v.as_int(x).is_some() {
+            let pk = u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
+            let pc = pieces()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&pk)
+                .cloned();
+            if let Some(pc) = pc {
+                placed_pieces.push((pc.pj, pc.fcount));
+            }
+        }
+    }
+    let fplan = v.seq_to_vec(cx.acc_range(v.field("fplan"), None)?);
+    if let Some(tags) = font_tags(v, fplan.last().copied(), &placed_pieces) {
+        st.set_font_tags(tags);
+    }
     let (mut replayed, mut shipped) = (0usize, 0usize);
     // the variables' key after the page placed last (none after a page
     // shipped again or an operation on the state)
@@ -1359,4 +1388,65 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         eprintln!("pdf finish: {:?}, {} bytes", t0.elapsed(), bytes.len());
     }
     Ok(out)
+}
+
+/// The fonts' numbers as pdfTeX gives them, where they differ from the
+/// engine's (`None`: nowhere). The text numbers its fonts in its own
+/// order, `1..=t`; a page step numbers the fonts it loads (an output
+/// routine's, its virtual fonts' local fonts, `do_vf`) after the
+/// text's and the steps' before it. pdfTeX numbers each in the order it
+/// loads it: the text's fonts loaded before a `\shipout` (the
+/// `T_FONT_AT` markers the page builder's fold met before that page
+/// fired, `fplan`), then the fonts of that shipout, and so on.
+/// `pages` is each placed page's index in the chain and the font count
+/// its step left, in order.
+pub(crate) fn font_tags(
+    v: &Values,
+    fplan: Option<ValueId>,
+    pages: &[(i64, i64)],
+) -> Option<std::collections::HashMap<FontId, FontId>> {
+    let plan = list_of(v, fplan?);
+    let t = int_of(v, *plan.first()?);
+    let per_page: Vec<Vec<i64>> = plan[1..]
+        .iter()
+        .map(|&l| list_of(v, l).iter().map(|&x| int_of(v, x)).collect())
+        .collect();
+    // the text's fonts loaded before page j fires: those before the
+    // first one a later page's fold met
+    let before = |j: i64| -> i64 {
+        per_page
+            .iter()
+            .enumerate()
+            .filter(|&(k, _)| i64::try_from(k).unwrap_or(i64::MAX) > j)
+            .flat_map(|(_, l)| l.iter().copied())
+            .min()
+            .map_or(t, |m| (m - 1).min(t))
+    };
+    let mut map = std::collections::HashMap::new();
+    let mut next: i64 = 0;
+    let mut text = 0i64;
+    let mut steps = t;
+    let mut put = |map: &mut std::collections::HashMap<FontId, FontId>, f: i64, next: &mut i64| {
+        *next += 1;
+        if f != *next
+            && let (Ok(a), Ok(b)) = (FontId::try_from(f), FontId::try_from(*next))
+        {
+            map.insert(a, b);
+        }
+    };
+    for &(j, fcount) in pages {
+        let c = before(j).max(text);
+        for f in text + 1..=c {
+            put(&mut map, f, &mut next);
+        }
+        text = c;
+        for f in steps + 1..=fcount {
+            put(&mut map, f, &mut next);
+        }
+        steps = steps.max(fcount);
+    }
+    for f in text + 1..=t {
+        put(&mut map, f, &mut next);
+    }
+    (!map.is_empty()).then_some(map)
 }
