@@ -1,0 +1,24 @@
+[package]
+name = "engine-toys-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Engine toys built against the core engine (../../target/core-9f924a8).
+[dependencies]
+defuse = { path = "../../target/core-9f924a8" }
+
+[workspace]
+
+[[test]]
+name = "edit_storm_remade_node"
+path = "../tests/edit_storm_remade_node.rs"
+
+[[test]]
+name = "range_readers_mixed"
+path = "../tests/range_readers_mixed.rs"
+
+[[test]]
+name = "loopback_converges"
+path = "../tests/loopback_converges.rs"
+

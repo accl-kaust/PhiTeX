@@ -1,0 +1,24 @@
+[package]
+name = "engine-toys-master"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Engine toys built against the master engine (../../crates/vendor/defuse).
+[dependencies]
+defuse = { path = "../../crates/vendor/defuse" }
+
+[workspace]
+
+[[test]]
+name = "edit_storm_remade_node"
+path = "../tests/edit_storm_remade_node.rs"
+
+[[test]]
+name = "range_readers_mixed"
+path = "../tests/range_readers_mixed.rs"
+
+[[test]]
+name = "loopback_converges"
+path = "../tests/loopback_converges.rs"
+
