@@ -89,3 +89,32 @@ fn engine_diagnostics_are_not_errors() {
     assert!(!pdf.is_empty(), "no PDF");
     eprintln!("{} engine diagnostics", b.engine_diagnostics());
 }
+
+/// The other side of the split: an engine failure that means the result
+/// is not the document's (here no fixpoint after `max_rounds`) stays an
+/// error (the CLI's "failed", exit 1), never a diagnostic.
+#[test]
+fn engine_failures_stay_errors() {
+    let dir = scratch("tikzman-nofixpoint");
+    let _ = std::fs::remove_file(dir.join("main.aux"));
+    let doc = "\\newread\\r \\openin\\r=\\jobname.aux \\ifeof\\r \\def\\ref{??}\\else\\closein\\r \\input \\jobname.aux \\fi\n\\newwrite\\w \\immediate\\openout\\w=\\jobname.aux \\immediate\\write\\w{\\relax}\n\nRef: \\ref.\\par\n\\write\\w{\\string\\def\\string\\ref{\\if1\\ref 2\\else 1\\fi}}\n\n\\end\n";
+    let opts = phitex_tex::Options {
+        fixpoint: true,
+        max_rounds: 8,
+        ..common::options("./main.tex", "main", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), doc);
+    let ds = b.diagnostics();
+    let nofix: Vec<_> = ds
+        .iter()
+        .filter(|d| d.message.contains("no fixpoint"))
+        .collect();
+    assert!(!nofix.is_empty(), "{ds:#?}");
+    assert!(
+        nofix
+            .iter()
+            .all(|d| d.severity == phitex_tex::Severity::Error),
+        "{nofix:#?}"
+    );
+    assert_eq!(b.engine_diagnostics(), 0, "{ds:#?}");
+}
