@@ -1028,3 +1028,181 @@ fn is_page_param(loc: Loc) -> bool {
     ]
     .contains(&loc)
 }
+
+// ---------------------------------------------------- continuations
+
+/// A slot of the table for a continuation (`crate::pages`, a run cut at
+/// a candidate): a location bound locally in a group still open, or
+/// saved by one, or defined globally in the run.
+pub(crate) struct ContSlot {
+    pub loc: Loc,
+    /// The current binding (`None`: absent); the resume keeps it only when
+    /// `loaded`, else it reads the engine.
+    pub cur: Option<ValueId>,
+    /// Whether the binding is an open group's of the run.
+    pub loaded: bool,
+    pub save_gid: u32,
+    pub save_stamp: u64,
+    pub ginert: u64,
+    /// The latest definition: its stamp, whether local, its group.
+    pub ldef: Option<(u64, bool, Option<u32>)>,
+    /// For a group-local binding: the value at the run's base level (its
+    /// own definition there, or the engine's value it read; `Some(None)`
+    /// absent); `None` when the run never read it.
+    #[allow(clippy::option_option)]
+    pub base: Option<Option<ValueId>>,
+    pub group_local: bool,
+}
+
+/// A save of the table for a continuation.
+pub(crate) struct ContSaved {
+    pub loc: Loc,
+    pub prev: Option<ValueId>,
+    pub prev_loaded: bool,
+    pub gid: u32,
+    pub stamp: u64,
+    pub at: u64,
+}
+
+/// The table's groups for a continuation: what the run's open groups
+/// bound and saved, nothing of its base level (published by the run) or
+/// of its engine reads (the resume reads again, after the finisher).
+pub(crate) struct ContState {
+    pub slots: Vec<ContSlot>,
+    pub save: Vec<ContSaved>,
+    pub defined: Vec<Loc>,
+    pub stamp: u64,
+    pub next_gid: u32,
+}
+
+impl State {
+    pub(crate) fn cont(&self, v: &Values) -> ContState {
+        let ent = |e: &Entry| -> (Option<ValueId>, bool) {
+            let id = if e.flags & HAS_ID != 0 {
+                e.id
+            } else {
+                e.val.encode(v)
+            };
+            (id, e.flags & LOADED != 0)
+        };
+        let mut slots = Vec::new();
+        for &l in &self.touched {
+            let Some(s) = self.slot_ref(l) else { continue };
+            let m = usize::try_from(s.meta)
+                .ok()
+                .filter(|&m| m > 0)
+                .and_then(|m| self.metas.get(m - 1));
+            let group_local = m.is_some_and(|m| m.ldef_local && m.ldef_gid.is_some());
+            if s.save_gid == 0 && s.ginert == 0 && !group_local {
+                continue;
+            }
+            let (cur, loaded) = ent(&s.e);
+            let base = m.and_then(|m| match &m.publ {
+                Some((val, _)) => Some(val.encode(v)),
+                None => m.eng,
+            });
+            slots.push(ContSlot {
+                loc: l,
+                cur,
+                loaded: group_local && loaded,
+                save_gid: s.save_gid,
+                save_stamp: s.save_stamp,
+                ginert: s.ginert,
+                ldef: m.map(|m| (m.ldef_stamp, m.ldef_local, m.ldef_gid)),
+                base,
+                group_local,
+            });
+        }
+        let save = self
+            .save
+            .iter()
+            .map(|s| {
+                let (prev, prev_loaded) = ent(&s.prev);
+                ContSaved {
+                    loc: s.loc,
+                    prev,
+                    prev_loaded,
+                    gid: s.gid,
+                    stamp: s.stamp,
+                    at: s.at,
+                }
+            })
+            .collect();
+        ContState {
+            slots,
+            save,
+            defined: self.defined.clone(),
+            stamp: self.stamp,
+            next_gid: self.next_gid,
+        }
+    }
+
+    /// The table of a resume piece ([`State::cont`]).
+    pub(crate) fn from_cont(c: ContState) -> State {
+        let mut st = State::new();
+        let ent = |x: Option<ValueId>, loaded: bool| Entry {
+            val: x.map_or(Native::Absent, Native::Raw),
+            id: x,
+            flags: if loaded { LOADED | HAS_ID } else { 0 },
+            cmd: 0,
+            chr: 0,
+        };
+        for s in c.slots {
+            let meta = s.ldef.map(|(stamp, local, gid)| {
+                st.metas.push(Meta {
+                    loc: s.loc,
+                    eng: None,
+                    publ: None,
+                    ldef_stamp: stamp,
+                    ldef_local: local,
+                    ldef_gid: gid,
+                });
+                u32::try_from(st.metas.len()).unwrap_or(0)
+            });
+            let slot = st.slot(s.loc);
+            slot.e = ent(s.cur, s.loaded);
+            slot.save_gid = s.save_gid;
+            slot.save_stamp = s.save_stamp;
+            slot.ginert = s.ginert;
+            slot.meta = meta.unwrap_or(0);
+        }
+        for s in c.save {
+            st.save.push(Saved {
+                loc: s.loc,
+                prev: ent(s.prev, s.prev_loaded),
+                gid: s.gid,
+                stamp: s.stamp,
+                at: s.at,
+            });
+        }
+        st.defined = c.defined;
+        st.stamp = c.stamp;
+        st.next_gid = c.next_gid;
+        st
+    }
+
+    /// A global definition made between a cut and its resume (the
+    /// finisher's) stands (§283): the binding is the engine's value now,
+    /// and the open groups' saves of it are inert.
+    pub(crate) fn override_global(&mut self, loc: Loc, x: Option<ValueId>) {
+        if is_cat(loc) {
+            self.cat_gen = new_cat_gen();
+        }
+        let mi = self.meta(loc);
+        self.stamp += 1;
+        let st = self.stamp;
+        let s = self.slot(loc);
+        s.e = Entry {
+            val: x.map_or(Native::Absent, Native::Raw),
+            id: x,
+            flags: LOADED | HAS_ID,
+            cmd: 0,
+            chr: 0,
+        };
+        s.ginert = st;
+        let m = &mut self.metas[mi];
+        m.ldef_stamp = st;
+        m.ldef_local = false;
+        m.ldef_gid = None;
+    }
+}

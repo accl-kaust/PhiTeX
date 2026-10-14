@@ -293,17 +293,17 @@ pub struct PageParams {
 
 /// A page insertion record (§981).
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PageIns {
-    n: u16,
-    split_up: bool,
-    height: Scaled,
+pub struct PageIns {
+    pub n: u16,
+    pub split_up: bool,
+    pub height: Scaled,
     /// Where the insertion `broken_ins` would break (index in its list),
     /// `None` at its end.
-    broken_ptr: Option<usize>,
+    pub broken_ptr: Option<usize>,
     /// The page index of the insertion that was tentatively split.
-    broken_ins: Option<usize>,
-    last_ins: Option<usize>,
-    best_ins: Option<usize>,
+    pub broken_ins: Option<usize>,
+    pub last_ins: Option<usize>,
+    pub best_ins: Option<usize>,
 }
 
 /// The errors `build_page` would report.
@@ -366,10 +366,10 @@ pub struct PageBuilder {
     pub so_far: [Scaled; 8],
     /// `page_max_depth`.
     pub max_depth: Scaled,
-    best_break: Option<usize>,
+    pub best_break: Option<usize>,
     /// `least_page_cost`.
     pub least_cost: i32,
-    best_size: Scaled,
+    pub best_size: Scaled,
     /// `\lastskip` (`None` is `max_halfword`).
     pub last_glue: Option<Glue>,
     /// `\lastpenalty`.
@@ -380,7 +380,7 @@ pub struct PageBuilder {
     pub last_node_type: i32,
     /// `\insertpenalties`.
     pub insert_penalties: i32,
-    ins: Vec<PageIns>,
+    pub ins: Vec<PageIns>,
     /// e-TeX's `\pagediscards`.
     pub discards: List,
     /// What `build_page` complained about.

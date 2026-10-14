@@ -745,11 +745,18 @@ impl Run<'_, '_> {
                 }
             }
             cmd::SET_PAGE_DIMEN => {
-                // §1245
-                // REDUCE-GAP: resumable fold: the page so far is not a
-                // binding while the document runs; the value is dropped.
+                // §1245: `page_so_far[c] := x`, on the main list for the
+                // page fold (applied at the next candidate, where the
+                // builder's state is the one this command changes)
+                let c = self.cur.chr;
                 self.scan_optional_equals()?;
-                let _ = self.scan_normal_dimen()?;
+                let d = self.scan_normal_dimen()?;
+                let m = v.list(vec![
+                    v.int(crate::nodes::T_SET_PAGE),
+                    v.int(i64::from(c)),
+                    v.int(i64::from(d)),
+                ]);
+                self.append(0, m);
             }
             cmd::SET_PAGE_INT => {
                 // §1246
