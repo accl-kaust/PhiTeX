@@ -214,6 +214,11 @@ pub(crate) struct Line {
     /// Where `buf[0]` is in a file: the file's name (a string value) and
     /// byte position, for diagnostics.
     pub origin: Option<(phitex_defuse::ValueId, usize)>,
+    /// Its line number in its file (`line`, §304), where the node knows
+    /// it: a line of a file read here (its text at hand) or a pseudo
+    /// file's; 0 for a document's piece, whose number is the lines of
+    /// its file before the node ([`crate::run::Run::input_line_no`]).
+    pub lineno: u32,
     /// Text read under the catcodes in force when it is read, which no
     /// analysis of a file saw: a pseudo file's lines (pdfTeX §1766) and
     /// a `\read` line (§483).
@@ -254,6 +259,7 @@ impl Line {
             starts: true,
             ends: true,
             origin: None,
+            lineno: 0,
             rescanned,
         }
     }

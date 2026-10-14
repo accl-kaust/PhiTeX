@@ -858,7 +858,8 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
         lines.push(cur);
     }
     r.push_toks([Tok::cs(EOF_PSEUDO)]);
-    for mut buf in lines.into_iter().rev() {
+    // (`pseudo_start` sets `line` to 0, each line read adds one)
+    for (k, mut buf) in lines.into_iter().enumerate().rev() {
         // `pseudo_input`: trailing spaces go
         while buf.last() == Some(&32) {
             buf.pop();
@@ -871,6 +872,7 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
             starts: false,
             ends: true,
             origin: None,
+            lineno: u32::try_from(k + 1).unwrap_or(u32::MAX),
             rescanned: true,
         });
     }
