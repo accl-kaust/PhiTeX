@@ -84,13 +84,15 @@ impl Shared {
         })
     }
 
-    fn stamp_depth(&self, s: Slot, log: &[Pred]) {
+    fn stamp_depth(&self, s: Slot, log: &[Pred], run_ns: u64) {
         let ep = self.epoch.load(Ordering::Relaxed) & 0xffff_ffff;
         let dep = |n: Slot| {
             let x = self.rec(n).rdep.load(Ordering::Acquire);
             if x >> 32 == ep { x & 0xffff_ffff } else { 0 }
         };
+        let time = |n: Slot| if dep(n) > 0 { self.rec(n).rtime.load(Ordering::Acquire) } else { 0 };
         let mut m = 0;
+        let mut tm = 0;
         for p in log {
             let n = match p {
                 // A prediction did not wait (a previous value's guess
@@ -125,11 +127,15 @@ impl Shared {
             };
             if n != s {
                 m = m.max(dep(n));
+                tm = tm.max(time(n));
             }
         }
         let d = m + 1;
+        let t = tm.saturating_add(run_ns);
+        self.rec(s).rtime.store(t, Ordering::Release);
         self.rec(s).rdep.store((ep << 32) | d, Ordering::Release);
         self.c.realised.fetch_max(d, Ordering::Relaxed);
+        self.c.realised_ns.fetch_max(t, Ordering::Relaxed);
     }
 
     /// Commits a finished run; `false`: a read broke, run again.
@@ -247,7 +253,7 @@ impl Shared {
                 self.confirm_guess(s);
             }
         }
-        self.stamp_depth(s, &cx.log);
+        self.stamp_depth(s, &cx.log, cx.run_ns);
         r.data().runs += 1;
         // Its read hints: the definers they name now (the critical
         // path orders it after them).

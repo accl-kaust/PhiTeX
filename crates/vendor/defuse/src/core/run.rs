@@ -691,9 +691,37 @@ impl Shared {
         let res = {
             crate::obs::span!(Job);
             Self::set_in_run(true);
-            let res = o.run(&mut cx);
+            #[cfg(not(target_arch = "wasm32"))]
+            let t0 = std::time::Instant::now();
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| o.run(&mut cx)));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                cx.run_ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                *lock(&self.t).run_ns.entry(s).or_default() += cx.run_ns;
+            }
             Self::set_in_run(false);
-            res
+            match res {
+                Ok(res) => res,
+                Err(p) => {
+                    // The evaluation fails, naming the node; the node runs
+                    // again in the next one.
+                    let message = p
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| p.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "(non-string panic)".into());
+                    self.fail(EvalError::OpPanicked {
+                        node: self.node_id(s),
+                        op: name.to_string(),
+                        message,
+                    });
+                    drop(cx);
+                    r.set(F_NEEDS_RUN);
+                    r.status.store(S_DIRTY, Ordering::Release);
+                    self.enqueue(s);
+                    return;
+                }
+            }
         };
         cx.flush_side();
         if let Some(m) = cx.narrowed.take() {

@@ -479,6 +479,7 @@ impl Engine {
             &c.predictions_confirmed,
             &c.predictions_refuted,
             &c.realised,
+            &c.realised_ns,
             &c.env_provided,
             &c.commits,
             &c.scope_region,

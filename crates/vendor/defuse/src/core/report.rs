@@ -77,6 +77,7 @@ impl Engine {
         rep.predictions_confirmed = c.predictions_confirmed.load(Ordering::Relaxed);
         rep.predictions_refuted = c.predictions_refuted.load(Ordering::Relaxed);
         rep.realised_critical_path = u32::try_from(c.realised.load(Ordering::Relaxed)).unwrap_or(u32::MAX);
+        rep.realised_critical_time = std::time::Duration::from_nanos(c.realised_ns.load(Ordering::Relaxed));
         {
             // The last reason per node that ran in this evaluation.
             let reruns = std::mem::take(&mut *lock(&sh.reruns));
@@ -119,6 +120,13 @@ impl Engine {
         {
             let t = lock(&sh.t);
             rep.runs_by_op = sorted(&t.runs_by_op);
+            let mut times: Vec<(NodeId, std::time::Duration)> = t
+                .run_ns
+                .iter()
+                .map(|(&s, &ns)| (sh.node_id(s), std::time::Duration::from_nanos(ns)))
+                .collect();
+            times.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            rep.run_times = times;
             rep.waits_by_op = sorted(&t.waits_by_op);
             rep.waits_by_kind = sorted(&t.waits_by_kind);
             rep.restarted_by = sorted(&t.restarted_by);

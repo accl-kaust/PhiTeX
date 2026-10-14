@@ -939,6 +939,13 @@ pub struct Stats {
     /// 1; reads a guess or a prediction answered are no link), the most
     /// over this build's evaluations.
     pub realised_critical_path: u32,
+    /// The engine's realised critical path by time
+    /// (`Report::realised_critical_time`: the same chain, summed by run
+    /// time), the most over this build's evaluations, and that
+    /// evaluation's run times by node (`Report::run_times`, longest
+    /// first, the first ten): where the chain's time goes.
+    pub realised_critical_time: std::time::Duration,
+    pub run_times: Vec<(u64, std::time::Duration)>,
     /// The light page steps run (OUTPUT.md §4.2a), and those of them
     /// with no output routine, which may define anything.
     pub page_steps: u64,
@@ -1182,6 +1189,15 @@ impl Stats {
         self.predictions_confirmed += r.predictions_confirmed;
         self.predictions_refuted += r.predictions_refuted;
         self.realised_critical_path = self.realised_critical_path.max(r.realised_critical_path);
+        if r.realised_critical_time >= self.realised_critical_time {
+            self.realised_critical_time = r.realised_critical_time;
+            self.run_times = r
+                .run_times
+                .iter()
+                .take(10)
+                .map(|&(n, t)| (n.raw(), t))
+                .collect();
+        }
         self.spec_stops += r.spec_stops;
         self.spec_shape_changes += r.spec_shape_changes;
         self.raises += r.raises;
@@ -1335,7 +1351,8 @@ impl Graph {
             E::Cycle(ns) => ids.extend(ns.iter().copied()),
             E::RunawayNode { node, .. }
             | E::RunawayCreation { node, .. }
-            | E::UndeclaredDefinition { node, .. } => ids.push(*node),
+            | E::UndeclaredDefinition { node, .. }
+            | E::OpPanicked { node, .. } => ids.push(*node),
             E::NoProgress { waiters, .. } | E::Deadline { waiters, .. } => {
                 ids.extend(waiters.iter().take(20).map(|w| w.node));
             }
