@@ -1054,9 +1054,15 @@ fn print_round(t: std::time::Duration, r: &Report) {
         *causes.entry(k).or_default() += 1;
     }
     eprintln!(
-        "round rerun causes: {} nodes, {causes:?}, realised cp {}",
+        "round rerun causes: {} nodes, {causes:?}, realised cp {} nodes {:?}, longest runs {:?}",
         r.rerun_causes.len(),
-        r.realised_critical_path
+        r.realised_critical_path,
+        r.realised_critical_time,
+        r.run_times
+            .iter()
+            .take(5)
+            .map(|&(n, t)| (n.raw(), t))
+            .collect::<Vec<_>>()
     );
     eprintln!(
         "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} env_provided, {} raises, {} pending, {} pending sets ({} defining), {} created, {} freed, spec {}/{}/{}, by op {:?}",
