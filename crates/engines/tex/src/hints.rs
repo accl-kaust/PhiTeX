@@ -1140,6 +1140,19 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         }
         if loader {
             loaders.push(k);
+            // (a package load's slice takes the blanks after it, its
+            // line's end: `\@ifnextchar[` skips them looking for an
+            // optional argument, so a node of their own would be taken
+            // by the load's run, `crate::pkgrec`)
+            if !matches!(name, "input" | "include") {
+                while p
+                    .atoms
+                    .get(last + 1)
+                    .is_some_and(|x| x.kind == AtomKind::Space)
+                {
+                    last += 1;
+                }
+            }
         }
         for x in inside.iter_mut().take(last + 1).skip(k + 1) {
             *x = true;
