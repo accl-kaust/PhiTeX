@@ -166,9 +166,18 @@ impl Run<'_, '_> {
             };
             // §1000: only a kern looks at what follows it
             let next = if matches!(p, Node::Kern(..)) {
-                pg.queue
-                    .front()
-                    .and_then(|&y| nodes::decode(v, y, &mut Side::default()))
+                // (the fold's markers are none of TeX's nodes)
+                let Some(n) = pg.queue.iter().find_map(|&y| {
+                    (!crate::build::is_marker(v, y) && nodes::tag(v, y) != nodes::T_END)
+                        .then(|| nodes::decode(v, y, &mut Side::default()))
+                        .flatten()
+                }) else {
+                    // §1000: a kern at the end of the contributions
+                    // waits there for what follows it
+                    pg.queue.push_front(x);
+                    return Ok(());
+                };
+                Some(n)
             } else {
                 None
             };
