@@ -642,7 +642,7 @@ impl Run<'_, '_> {
             cmd::SET_AUX => {
                 // §418
                 let md = self.mode()?;
-                if md.m.abs() != m {
+                if self.mode_zero || md.m.abs() != m {
                     // "Improper \spacefactor"
                     if level == 5 {
                         IVal::Int(0)
@@ -657,8 +657,12 @@ impl Run<'_, '_> {
             }
             cmd::SET_PREV_GRAF => {
                 // §422
-                let md = self.mode()?;
-                IVal::Int(self.int32(&format!("pg:{}", md.vlid))?)
+                if self.mode_zero {
+                    IVal::Int(0)
+                } else {
+                    let md = self.mode()?;
+                    IVal::Int(self.int32(&format!("pg:{}", md.vlid))?)
+                }
             }
             cmd::SET_PAGE_INT | cmd::SET_SHAPE | cmd::ASSIGN_FONT_INT
                 if crate::etex::is_internal(c, m) =>

@@ -553,19 +553,33 @@ impl PdfState {
         (round_tenth(s), s_out)
     }
 
-    /// `pdf_set_rule` (pdfTeX §693).
+    /// `pdf_set_rule` (pdfTeX §693). Its `(h + 1)/2` is Pascal's `/`, a
+    /// real division: the position is `y - (h + 1)/2.0` truncated
+    /// toward zero when it is passed as a scaled (a thin rule of even
+    /// thickness sits half a point lower than an integer halving puts
+    /// it).
     pub(crate) fn set_rule(&mut self, x: Scaled, y: Scaled, w: Scaled, h: Scaled) {
+        // (truncated toward zero, as C converts a double argument)
+        #[allow(clippy::cast_possible_truncation)]
+        let real_half = |a: Scaled, d: Scaled, plus: bool| -> Scaled {
+            let half = f64::from(d + 1) / 2.0;
+            (if plus {
+                f64::from(a) + half
+            } else {
+                f64::from(a) - half
+            }) as Scaled
+        };
         self.end_text();
         self.print_ln(b"q");
         if h <= ONE_BP {
-            self.set_origin_temp(x, y - (h + 1) / 2);
+            self.set_origin_temp(x, real_half(y, h, false));
             self.print(b"[]0 d 0 J ");
             self.print_bp(h);
             self.print(b" w 0 0 m ");
             self.print_bp(w);
             self.print_ln(b" 0 l S");
         } else if w <= ONE_BP {
-            self.set_origin_temp(x + (w + 1) / 2, y);
+            self.set_origin_temp(real_half(x, w, true), y);
             self.print(b"[]0 d 0 J ");
             self.print_bp(w);
             self.print(b" w 0 0 m 0 ");
