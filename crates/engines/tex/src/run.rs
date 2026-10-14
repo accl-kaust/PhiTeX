@@ -308,6 +308,9 @@ pub(crate) struct Run<'c, 'a> {
     /// first) on the run's next read of a count register,
     /// so a flush nothing reads after (plain's `\bye`) costs no round.
     pub flush_pending: Option<(i64, i64)>,
+    /// The run read a job-written file back ([`Run::read_back`]): what
+    /// it defines from then on keeps its value there ([`Run::note_pre`]).
+    pub read_back_done: bool,
     /// Defining the counts a flush point fed back ([`Run::flush_read`]):
     /// not the text's own assignment.
     pub fed: bool,
@@ -389,6 +392,7 @@ impl<'c, 'a> Run<'c, 'a> {
             flushes: 0,
             flush_pending: None,
             fed: false,
+            read_back_done: false,
             pre_memo: phitex_defuse::FxHashMap::default(),
             error_count: 0,
             fatal_logged: false,
@@ -443,6 +447,8 @@ impl<'c, 'a> Run<'c, 'a> {
     /// it: in the state before this round's read-back took effect. The
     /// first read of a read-back field in the line gets the value the
     /// read-back replaced (`wpre:<field>`, left by [`Run::read_back`]),
+    /// and of a field the reading run defined after it, its value there
+    /// ([`Run::note_pre`]),
     /// so a line whose effect depends on the field (biblatex's
     /// `\xifinlist`-guarded `\listxadd`, `\ifcsundef`-guarded
     /// `\csgdef`) defines it as the reading run will, not as this run,
@@ -463,13 +469,12 @@ impl<'c, 'a> Run<'c, 'a> {
         } else {
             let f = self.loc_field(loc);
             let name = crate::val::field_name(self.v, f);
-            let p = if self
-                .cx
-                .is_loopback(self.keyed(crate::fields::Fam::Wdef, &name))
-            {
-                self.get(&format!("wpre:{name}"))?
-            } else {
+            // (a read-back field, or one the reading run defined after
+            // the read-back: [`Run::note_pre`])
+            let p = if name.starts_with("wpre:") {
                 None
+            } else {
+                self.get(&format!("wpre:{name}"))?
             };
             self.pre_memo.insert(loc, p);
             p
@@ -564,12 +569,42 @@ impl<'c, 'a> Run<'c, 'a> {
             .then(|| val.encode(self.v))
             .flatten()
             .and_then(|x| self.v.as_int(x));
+        if self.read_back_done && self.interp.is_none() {
+            self.note_pre(loc);
+        }
         let grp = self.innermost_group();
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
         if let Some(n) = set {
             self.count_set(loc, n);
         }
+    }
+
+    /// A field this run defines after reading a job-written file back:
+    /// its value at the read-back point (`wpre:<field>`, once), which a
+    /// line written later reads as the read-back does
+    /// ([`Run::revert_read_back`]). LaTeX's `\document` disables the
+    /// preamble commands (`\@newl@bel` among them) right after it reads
+    /// the `.aux`; a `\newlabel` line is read before that.
+    fn note_pre(&mut self, loc: Loc) {
+        let v = self.v;
+        let f = self.loc_field(loc);
+        let name = crate::val::field_name(v, f);
+        if name.starts_with("wpre:") || name.starts_with("cat:") {
+            return;
+        }
+        let pre = v.field(&format!("wpre:{name}"));
+        let pl = self.loc_of(pre);
+        if self.st.defined_after(pl, 0) {
+            return;
+        }
+        // (a stop here stops the run: it runs again from its start)
+        if self.load(loc).is_err() {
+            return;
+        }
+        let old = self.st.id_of(loc, v).unwrap_or(ValueId::UNIT);
+        let grp = self.innermost_group();
+        self.st.set(pl, Native::Raw(old), true, grp);
     }
 
     /// The parameter `p`.
@@ -833,6 +868,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.set(&name, *val, global);
             }
         }
+        self.read_back_done = true;
         Ok(true)
     }
 
@@ -1940,6 +1976,7 @@ pub(crate) struct Parked {
     irreversible: u64,
     flushes: usize,
     flush_pending: Option<(i64, i64)>,
+    read_back_done: bool,
 }
 
 impl Run<'_, '_> {
@@ -2009,6 +2046,7 @@ impl Run<'_, '_> {
             irreversible: self.irreversible,
             flushes: self.flushes,
             flush_pending: self.flush_pending,
+            read_back_done: self.read_back_done,
         })
     }
 }
@@ -2070,6 +2108,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.irreversible = p.irreversible;
         r.flushes = p.flushes;
         r.flush_pending = p.flush_pending;
+        r.read_back_done = p.read_back_done;
         r.resumed = true;
         Ok(r)
     }
