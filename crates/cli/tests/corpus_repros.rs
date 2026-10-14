@@ -87,3 +87,15 @@ repro!(
     table_float_lost,
     "corpus (green since dev 301ef3af, pagechain's pgstfix): \\caption + \\centering + tabular in a table float lost the float ('Float(s) lost') on b7646c77, first cause in 8 of 136 arXiv papers"
 );
+repro!(
+    pagestyle_in_group,
+    "amsldoc (amscorrect): a page fired inside a group the text's run opens and closes runs its routine in that group's locals (§1025): \\cleardoublepage as amsldoc defines it, \\clearpage{\\pagestyle{empty}\\cleardouble@page}, printed the running head on the blank page"
+);
+repro!(
+    amsmath_page_counter,
+    "amsldoc (amscorrect): the text reads \\count0..9 as the output routines left them (§1025): amsmath's \\savecounters@/\\restorecounters@ in a display after a page break wrote a stale \\c@page back, and the page numbers after it restarted"
+);
+repro!(
+    imakeidx_index,
+    "amsldoc (amscorrect): imakeidx's \\printindex runs \\write18{makeindex ...} under TeX Live's restricted shell escape (\\pdfshellescape 2) and inputs the .ind at once; our makeindex runs in process on the .idx the job wrote"
+);

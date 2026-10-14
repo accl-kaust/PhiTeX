@@ -504,6 +504,10 @@ impl Operation for Files {
         let all = cx.acc_range(v.field("streams"), None)?;
         let texts = crate::api::written_texts(v, Some(plan), Some(all));
         let defs = crate::api::written_defs(v, Some(plan), Some(all));
+        // the in-process makeindex runs `\\write18` asked for
+        // (`Run::shell_command`): each `.ind` made from the `.idx` text
+        // this round wrote, published as that file's text
+        let made = makeindex_runs(cx, &texts)?;
         for name in &names {
             let k = v.field(&format!("wkeys:{name}"));
             if !cx.is_loopback(k) {
@@ -559,10 +563,14 @@ impl Operation for Files {
                 continue;
             }
             // a file the job did not write this round is absent next round
-            let x = texts.iter().find(|(n, _)| *n == name).map_or_else(
-                || v.list(Vec::new()),
-                |(_, t)| v.list(vec![v.str(&format!("./{name}")), v.str(t)]),
-            );
+            let x = texts
+                .iter()
+                .chain(&made)
+                .find(|(n, _)| *n == name)
+                .map_or_else(
+                    || v.list(Vec::new()),
+                    |(_, t)| v.list(vec![v.str(&format!("./{name}")), v.str(t)]),
+                );
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 let t = texts
                     .iter()
@@ -573,5 +581,109 @@ impl Operation for Files {
             crate::page::lb_pub(cx, f, x);
         }
         Ok(ValueId::UNIT)
+    }
+}
+
+/// The makeindex runs of this round (`tools`: `[ind, [args…]]`), each in
+/// process on the files the job wrote (`texts`, TeX's characters) and
+/// the styles found as the job finds files: `(ind name, its text)`; a
+/// run that writes no `.ind` makes nothing (the file stays absent).
+fn makeindex_runs(
+    cx: &mut Ctx<'_>,
+    texts: &[(String, String)],
+) -> Result<Vec<(String, String)>, Stop> {
+    let v = cx.values();
+    let runs = cx.acc_range(v.field("tools"), None)?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for e in v.seq_to_vec(runs) {
+        let xs = list_of(v, e);
+        let (Some(&ind), Some(&args)) = (xs.first(), xs.get(1)) else {
+            continue;
+        };
+        let ind = str_of(v, ind);
+        let args: Vec<String> = list_of(v, args).iter().map(|&a| str_of(v, a)).collect();
+        // (a style named with -s: read first, as the job reads a file)
+        let mut styles = Vec::new();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            if a == "-s"
+                && let Some(s) = it.next()
+            {
+                let name = if s.contains('.') {
+                    s.clone()
+                } else {
+                    format!("{s}.ist")
+                };
+                let f = v.field(&format!("file:{name}"));
+                let x = cx.use_env(f)?;
+                let text = x
+                    .and_then(|x| list_of(v, x).get(1).copied())
+                    .map(|t| str_of(v, t));
+                styles.push((s.clone(), name, text));
+            }
+        }
+        let mut files = MiFiles {
+            texts,
+            styles: &styles,
+        };
+        let mi_args: Vec<Vec<u8>> = args.iter().map(|a| latin1_bytes(a)).collect();
+        let o = phitex_makeindex::run(
+            &mi_args,
+            b"version 2.18 [TeX Live 2026] (kpathsea + Thai support)",
+            &mut files,
+        );
+        if let Some(f) = o.ind {
+            let text: String = f.contents.iter().map(|&b| char::from(b)).collect();
+            out.retain(|(n, _)| *n != ind);
+            out.push((ind, text));
+        }
+    }
+    Ok(out)
+}
+
+/// TeX's characters as bytes (Latin-1; a character past 255 as `?`).
+fn latin1_bytes(s: &str) -> Vec<u8> {
+    s.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect()
+}
+
+/// makeindex's files: the job's written files, and the styles read.
+struct MiFiles<'a> {
+    texts: &'a [(String, String)],
+    styles: &'a [(String, String, Option<String>)],
+}
+
+impl MiFiles<'_> {
+    fn text(&self, name: &[u8]) -> Option<&str> {
+        let n: String = name.iter().map(|&b| char::from(b)).collect();
+        let n = n.strip_prefix("./").unwrap_or(&n).to_owned();
+        self.texts
+            .iter()
+            .find(|(m, _)| *m == n)
+            .map(|(_, t)| t.as_str())
+    }
+}
+
+impl phitex_makeindex::Files for MiFiles<'_> {
+    fn read(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        self.text(name).map(latin1_bytes)
+    }
+    fn readable(&mut self, name: &[u8]) -> bool {
+        self.text(name).is_some()
+    }
+    fn style(&mut self, name: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+        let n: String = name.iter().map(|&b| char::from(b)).collect();
+        self.styles
+            .iter()
+            .find(|(s, f, _)| *s == n || *f == n)
+            .and_then(|(_, f, t)| {
+                t.as_ref()
+                    .map(|t| (latin1_bytes(&format!("./{f}")), Some(latin1_bytes(t))))
+            })
+    }
+    fn out_name_ok(&mut self, _name: &[u8]) -> Result<(), Vec<u8>> {
+        Ok(())
+    }
+    fn stdin(&mut self) -> Vec<u8> {
+        Vec::new()
     }
 }

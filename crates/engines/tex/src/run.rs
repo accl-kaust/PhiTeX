@@ -414,6 +414,14 @@ pub(crate) struct Run<'c, 'a> {
     pub closed: Vec<i32>,
     /// Flush points met by this run so far ([`Run::flush_point`]).
     pub flushes: usize,
+    /// The last `T_LOCALS_AT` marker this run put on the main list
+    /// (UNIT: none, or a clear one): [`Run::mark_locals`].
+    pub locals_out: ValueId,
+    /// Whether this run's text has the page chain's `\\count0..9` as
+    /// they stand here: read at a count probe ([`Run::count_probe`])
+    /// with no item put on the main list since (a page fires only as an
+    /// item arrives, §994).
+    pub probe_ok: bool,
     /// The last flush point's loop-back, not read yet: read (declared
     /// first) on the run's next read of a count register,
     /// so a flush nothing reads after (plain's `\bye`) costs no round.
@@ -534,6 +542,8 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_base: 0,
             closed: Vec::new(),
             flushes: 0,
+            locals_out: ValueId::UNIT,
+            probe_ok: false,
             flush_pending: None,
             fed: false,
             flush_fields: phitex_defuse::FxHashSet::default(),
@@ -583,6 +593,8 @@ impl<'c, 'a> Run<'c, 'a> {
             self.revert_read_back(loc)?;
         } else if self.flush_pending.is_some() && crate::fields::is_count_slot(loc) {
             self.flush_read()?;
+        } else if !self.probe_ok && crate::fields::is_chain_count_slot(loc) {
+            self.count_probe()?;
         }
         if self.st.is_loaded(loc) {
             return Ok(());
@@ -755,7 +767,10 @@ impl<'c, 'a> Run<'c, 'a> {
         self.st.note_kind(loc, self.in_advance);
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
-        if let Some(n) = set {
+        // (a local assignment inside a group of this run is undone at
+        // its close, §283: no set for the pages after; one firing inside
+        // the group reads it from the run's `T_LOCALS_AT` marker)
+        if let Some(n) = set.filter(|_| global || grp.is_none()) {
             self.count_set(loc, n);
         }
         if let Some((f, x)) = field_set {
@@ -1076,6 +1091,47 @@ impl<'c, 'a> Run<'c, 'a> {
             let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);
             self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
         }
+    }
+
+    /// The local bindings of this run's open groups, before an item it
+    /// puts on the main list: a `T_LOCALS_AT` marker when they differ
+    /// from the last one it put there (a clear one when none are left;
+    /// `end` at the run's end). A page firing at the item runs its
+    /// routine in them (§1025). Only a document node's.
+    pub(crate) fn mark_locals(&mut self, end: bool) {
+        let op = self.cx.op();
+        if self.pg.is_some() || (op != self.ops.exec && op != self.ops.put) {
+            return;
+        }
+        let v = self.v;
+        let locs = if end {
+            Vec::new()
+        } else {
+            self.st.saved_locs()
+        };
+        let mut xs = Vec::with_capacity(2 * locs.len() + 1);
+        xs.push(v.int(crate::nodes::T_LOCALS_AT));
+        for l in locs {
+            let f = self.loc_field(l);
+            let x = self.st.id_of(l, v).unwrap_or(ValueId::UNIT);
+            xs.push(f.0);
+            xs.push(x);
+        }
+        let m = if xs.len() == 1 {
+            ValueId::UNIT
+        } else {
+            v.list(xs)
+        };
+        if m == self.locals_out {
+            return;
+        }
+        self.locals_out = m;
+        let item = if m == ValueId::UNIT {
+            v.list(vec![v.int(crate::nodes::T_LOCALS_AT)])
+        } else {
+            m
+        };
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), item])));
     }
 
     /// The fields the text defined at its base level since the last item
@@ -2184,6 +2240,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.contribute("lines", m);
         }
         crate::pageinline::finish(&mut self);
+        self.mark_locals(true);
         // a page parameter this run set reaches the page fold as a
         // marker in the main list (page.rs `breaks`): a document node's
         // where it set it (`flush_text_defs`), another run's here
@@ -2724,6 +2781,8 @@ pub(crate) struct Parked {
     pdf_occ: usize,
     irreversible: u64,
     flushes: usize,
+    locals_out: ValueId,
+    probe_ok: bool,
     flush_pending: Option<(i64, i64)>,
     flush_fields: phitex_defuse::FxHashSet<Field>,
     read_back_done: bool,
@@ -2839,6 +2898,8 @@ impl Run<'_, '_> {
             pdf_occ: self.pdf_occ,
             irreversible: self.irreversible,
             flushes: self.flushes,
+            locals_out: self.locals_out,
+            probe_ok: self.probe_ok,
             flush_pending: self.flush_pending,
             flush_fields: self.flush_fields.clone(),
             read_back_done: self.read_back_done,
@@ -2910,6 +2971,8 @@ impl<'c, 'a> Run<'c, 'a> {
         r.pdf_occ = p.pdf_occ;
         r.irreversible = p.irreversible;
         r.flushes = p.flushes;
+        r.locals_out = p.locals_out;
+        r.probe_ok = p.probe_ok;
         r.flush_pending = p.flush_pending;
         r.flush_fields = p.flush_fields;
         r.read_back_done = p.read_back_done;

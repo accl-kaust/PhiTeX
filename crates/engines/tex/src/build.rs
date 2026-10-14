@@ -312,6 +312,8 @@ impl Run<'_, '_> {
             return;
         }
         if lid == 0 {
+            self.probe_ok = false;
+            self.mark_locals(false);
             self.flush_text_defs();
         }
         let e = v.list(vec![v.int(lid), node]);
@@ -2376,6 +2378,7 @@ pub(crate) fn fold_item(
         | nodes::T_PDFW_AT
         | nodes::T_PDFQ_AT
         | nodes::T_DEFS_AT
+        | nodes::T_LOCALS_AT
         | nodes::T_FLUSH_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
@@ -2543,6 +2546,7 @@ fn is_marker(v: &Values, x: ValueId) -> bool {
             | nodes::T_PDFW_AT
             | nodes::T_PDFQ_AT
             | nodes::T_DEFS_AT
+            | nodes::T_LOCALS_AT
             | nodes::T_FLUSH_AT
     )
 }

@@ -21,6 +21,13 @@ pub(crate) fn is_count_slot(loc: crate::runstate::Loc) -> bool {
     (REG0..REG0 + 256).contains(&(loc as usize))
 }
 
+/// Whether `loc` is `\\count0..9`, the registers the page chain
+/// carries (`pgdef:<j>`).
+#[inline]
+pub(crate) fn is_chain_count_slot(loc: crate::runstate::Loc) -> bool {
+    (loc as usize).wrapping_sub(REG0) < 10
+}
+
 pub(crate) fn reg_slot(r: usize, n: i32) -> Option<usize> {
     usize::try_from(n)
         .ok()
