@@ -246,6 +246,20 @@ pub struct PageRecord {
 }
 
 impl PageRecord {
+    /// The fonts the page's walk read in (`do_vf` on a virtual font:
+    /// `(true, f)`; `load_font`: `(false, f)`), in order.
+    #[must_use]
+    pub fn font_loads(&self) -> Vec<(bool, FontId)> {
+        self.events
+            .iter()
+            .filter_map(|e| match *e {
+                FontEv::DoVf(f) => Some((true, f)),
+                FontEv::Load(f) => Some((false, f)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The variables' key after the page placed, for the next page's
     /// [`PdfState::replay_page`] (`known`): none while a link is open
     /// (its object numbers are the document's after placing).
