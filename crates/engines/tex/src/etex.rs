@@ -525,6 +525,10 @@ pub(crate) fn char_dims(r: &mut Run<'_, '_>, f: i64, c: i32) -> R<Option<phitex_
 
 /// `\lastnodetype` (pdfTeX §424): the type of the current list's tail.
 fn last_node_type(r: &mut Run<'_, '_>) -> R<i32> {
+    // (`mode = 0` in a `\write`, §1370)
+    if r.mode_zero {
+        return Ok(-1);
+    }
     let md = r.mode()?;
     let (items, since_bp) = r.list_items(md.lid)?;
     let v = r.v;

@@ -1524,7 +1524,11 @@ impl Run<'_, '_> {
         toks.push(Tok::ch(2, u32::from(b'}')));
         toks.push(Tok::cs("\u{10FFFE}endwrite"));
         self.push_toks(toks);
-        let (_, expanded) = self.scan_toks(false, true)?;
+        // §1370: `mode:=0` while the list is expanded
+        let old = std::mem::replace(&mut self.mode_zero, true);
+        let r = self.scan_toks(false, true);
+        self.mode_zero = old;
+        let (_, expanded) = r?;
         self.get_token()?;
         let mut s = String::new();
         self.show_toks_into(&mut s, &expanded)?;

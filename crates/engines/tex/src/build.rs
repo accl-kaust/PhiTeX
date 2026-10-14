@@ -2155,9 +2155,13 @@ impl Run<'_, '_> {
             }));
         }
         let md = self.mode()?;
-        let (items, _) = self.list_items(md.lid)?;
+        // (`mode = 0` in a `\write`, §1370: no tail)
+        let last = if self.mode_zero {
+            None
+        } else {
+            self.list_items(md.lid)?.0.last().copied()
+        };
         let v = self.v;
-        let last = items.last().copied();
         let tag = last.map_or(-1, |x| nodes::tag(v, x));
         Ok(match m {
             0 => IVal::Int(if tag == nodes::T_PENALTY {
