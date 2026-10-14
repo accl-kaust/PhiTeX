@@ -1620,7 +1620,24 @@ impl<'c, 'a> Run<'c, 'a> {
                 .first()
                 .and_then(|&l| list_of(v, l).first().map(|&f| v.render(f)))
                 .unwrap_or_default();
-            crate::rerun::finish(self.cx.node().raw(), &format!("{:?}", self.cx.op()), &text);
+            let published: Vec<String> = self
+                .st
+                .published(v, false)
+                .into_iter()
+                .map(|(l, _, _)| l)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|l| {
+                    let f = self.loc_field(l);
+                    crate::val::field_name(v, f)
+                })
+                .collect();
+            crate::rerun::finish(
+                self.cx.node().raw(),
+                &format!("{:?}", self.cx.op()),
+                &text,
+                published,
+            );
         }
         crate::pdfout::publish(self.pdf_fold.take());
         if self.lines_read != 0 {

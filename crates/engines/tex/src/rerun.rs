@@ -11,6 +11,9 @@ type Reads = Vec<(String, Option<ValueId>, String)>;
 struct Log {
     cur: FxHashMap<u64, Reads>,
     prev: FxHashMap<u64, Reads>,
+    /// The fields each node that ran again published, in the order
+    /// they ran again.
+    again: Vec<(String, Vec<String>)>,
 }
 
 fn log() -> &'static Mutex<Log> {
@@ -19,6 +22,7 @@ fn log() -> &'static Mutex<Log> {
         Mutex::new(Log {
             cur: FxHashMap::default(),
             prev: FxHashMap::default(),
+            again: Vec::new(),
         })
     })
 }
@@ -42,10 +46,23 @@ pub(crate) fn read(v: &Values, node: u64, f: Field, x: Option<ValueId>) {
 }
 
 /// Node `node` (its text `text`) finished a run.
-pub(crate) fn finish(node: u64, op: &str, text: &str) {
+pub(crate) fn finish(node: u64, op: &str, text: &str, published: Vec<String>) {
     let mut g = log().lock().unwrap_or_else(PoisonError::into_inner);
     let cur = g.cur.remove(&node).unwrap_or_default();
     if let Some(prev) = g.prev.get(&node) {
+        // (the fields it read that a node run again before it published)
+        let mut from = Vec::new();
+        for (who, p) in &g.again {
+            let hit: Vec<&str> = cur
+                .iter()
+                .filter(|(n, _, _)| p.contains(n))
+                .map(|(n, _, _)| n.as_str())
+                .take(6)
+                .collect();
+            if !hit.is_empty() {
+                from.push(format!("{who}: {hit:?}"));
+            }
+        }
         let mut changed = Vec::new();
         for (n, x, s) in &cur {
             match prev.iter().find(|(m, _, _)| m == n) {
@@ -68,9 +85,15 @@ pub(crate) fn finish(node: u64, op: &str, text: &str) {
         if !other.is_empty() {
             eprintln!("rerun:   also read {other:?}");
         }
+        for f in from.iter().rev().take(3) {
+            eprintln!("rerun:   read what {}", f.chars().take(300).collect::<String>());
+        }
         for c in changed.iter().take(12) {
             eprintln!("rerun:   {}", c.chars().take(260).collect::<String>());
         }
+    }
+    if g.prev.contains_key(&node) {
+        g.again.push((text.chars().take(40).collect(), published));
     }
     g.prev.insert(node, cur);
 }
