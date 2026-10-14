@@ -482,7 +482,7 @@ fn given_back_line_is_counted_once() {
 #[test]
 fn base_definition_outlives_a_group_left_open() {
     let d = dir("baselocal", &[]);
-    let doc = "\\def\\x{a}\\begingroup\\def\\y{b}\n\\message{in}\n\n\\endgroup\n\n\\def\\t{a}\\ifx\\x\\t \\else\\errmessage{lost x}\\fi\n\\ifx\\y\\undefined \\else\\errmessage{kept y}\\fi\n\\bye\n";
+    let doc = "\\def\\begin#1{\\begingroup\\csname#1\\endcsname}\\def\\end#1{\\csname end#1\\endcsname\\endgroup}\n\\def\\document{\\endgroup\\def\\x{a}\\ignorespaces}\\def\\abs{\\def\\y{b}}\\def\\endabs{}\n\n\\begin{document}\n\\begin{abs}\n\\message{in}\n\\end{abs}\n\n\\def\\t{a}\\ifx\\x\\t \\else\\errmessage{lost x}\\fi\n\\ifx\\y\\undefined \\else\\errmessage{kept y}\\fi\n\\bye\n";
     for spec in [Speculation::Off, Speculation::All] {
         let b = build(&d, doc, spec, Vec::new());
         note("baselocal", &b);
