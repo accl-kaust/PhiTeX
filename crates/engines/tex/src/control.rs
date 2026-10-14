@@ -343,7 +343,7 @@ impl Run<'_, '_> {
                 if md.m == 1 {
                     self.build_page_outer()?;
                     if n <= -10000 && md.lid == 0 {
-                        self.flush_point();
+                        self.flush_point()?;
                     }
                 }
             }
