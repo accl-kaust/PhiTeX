@@ -893,7 +893,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The fields the run publishes: its definitions at the base level
     /// but a local one equal to the value it read (the same binding).
     pub(crate) fn published_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self.st.published(self.v).into_iter().map(|x| x.0).collect();
+        let locs: Vec<Loc> = self.st.published(self.v, false).into_iter().map(|x| x.0).collect();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
     }
 
@@ -910,7 +910,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// [`Run::def_fields`]' locations, as the state table publishes them.
     fn defined_now(&self) -> Vec<Loc> {
         self.st
-            .published(self.v)
+            .published(self.v, false)
             .into_iter()
             .map(|(l, _, _)| l)
             .collect()
@@ -1569,7 +1569,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let t_pub = std::time::Instant::now();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
-            .published(self.v)
+            .published(self.v, false)
             .into_iter()
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
