@@ -87,10 +87,11 @@ pub(crate) struct Incr {
     pub chunks: Vec<Chunk>,
     /// How many chunks the last text analysed again.
     pub analysed: usize,
-    /// File ids for the definitions of the document's chunks.
-    next_file: u32,
     /// The workers its chunks are analysed on (`crate::exec::each`).
     pub threads: usize,
+    /// Where the files its text loads are found (their definitions join
+    /// the chunks', [`crate::api::harvest_loads`]).
+    pub finder: Option<crate::api::Finder>,
 }
 
 impl Incr {
@@ -102,8 +103,8 @@ impl Incr {
             cache: HashMap::new(),
             chunks: Vec::new(),
             analysed: 0,
-            next_file: 2_000_000_000,
             threads: 1,
+            finder: None,
         }
     }
 
@@ -225,7 +226,7 @@ impl Incr {
     fn chain(
         text: &str,
         base: &Defs,
-        next_file: &mut u32,
+        finder: Option<&crate::api::Finder>,
         parts: &mut [Part],
         defines: &dyn Fn(usize) -> bool,
     ) -> (Vec<(u64, Defs)>, Vec<usize>, Vec<Option<(u64, Defs)>>) {
@@ -248,15 +249,30 @@ impl Incr {
             } else {
                 todo.push(k);
                 let defines = cached_defines.unwrap_or_else(|| defines(k));
-                if defines {
-                    let t = &text[p.start..p.start + p.len];
-                    let mut d: Definitions = (*defs).clone();
-                    d.harvest(t, FileKind::Document, *next_file);
-                    *next_file = next_file.wrapping_add(1);
+                let t = &text[p.start..p.start + p.len];
+                // (what it loads, `\\documentclass`, `\\usepackage`: the
+                // files' definitions, read as the format's are)
+                let loads = finder.filter(|_| !crate::api::loaded_names(t).is_empty());
+                if defines || loads.is_some() {
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     key.hash(&mut h);
                     t.hash(&mut h);
-                    (h.finish(), Arc::new(d))
+                    let out = h.finish();
+                    // (file ids from the key: the same in every build of
+                    // the process, whichever made the definitions first)
+                    let mut id =
+                        0x8000_0000 | (u32::try_from(out >> 40).unwrap_or(0) & 0x7fff_ff00);
+                    let d = loaded_defs(base, out, || {
+                        let mut d: Definitions = (*defs).clone();
+                        if let Some(f) = loads {
+                            crate::api::harvest_loads(t, f, &mut d, &mut id);
+                        }
+                        if defines {
+                            d.harvest(t, FileKind::Document, id);
+                        }
+                        d
+                    });
+                    (out, d)
                 } else {
                     (key, defs.clone())
                 }
@@ -300,7 +316,7 @@ impl Incr {
             own_of[k] = Some(x);
         }
         let (ins, todo, mut outs) =
-            Self::chain(text, &self.defs, &mut self.next_file, &mut parts, &|k| {
+            Self::chain(text, &self.defs, self.finder.as_ref(), &mut parts, &|k| {
                 own_of[k].is_some_and(|x| {
                     owns[x]
                         .lock()
@@ -369,6 +385,28 @@ impl Incr {
             std::time::Duration::from_nanos(busy.load(std::sync::atomic::Ordering::Relaxed)),
         );
     }
+}
+
+/// The definitions after a chunk that defines or loads anything, keyed
+/// by the format's definitions `base` and the chain's key after it
+/// (`key`: the texts of the defining chunks so far): made once per
+/// process (`make`), the files it loads read once.
+fn loaded_defs(base: &Defs, key: u64, make: impl FnOnce() -> Definitions) -> Defs {
+    type Made = Mutex<HashMap<(usize, u64), (Defs, Defs)>>;
+    static M: std::sync::OnceLock<Made> = std::sync::OnceLock::new();
+    let m = M.get_or_init(Made::default);
+    let k = (Arc::as_ptr(base) as usize, key);
+    if let Some((_, d)) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&k) {
+        return d.clone();
+    }
+    let d = Arc::new(make());
+    let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
+    if g.len() > 4096 {
+        g.clear();
+    }
+    // (the format's definitions kept with it: their address is the key)
+    g.insert(k, (base.clone(), d.clone()));
+    d
 }
 
 /// `PHITEX_TEX_TIME`: a walk's chunks, those analysed, and its phases'

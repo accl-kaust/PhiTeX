@@ -1827,6 +1827,7 @@ impl Graph {
     ) -> (Vec<(u64, NodeId, Src)>, Incr) {
         let mut incr = Incr::new(defs);
         incr.threads = self.threads;
+        incr.finder = finder.cloned();
         let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr), finder);
         (nodes, incr)
     }
@@ -2145,7 +2146,7 @@ fn is_tex_text(name: &str) -> bool {
 /// The names a text loads (`\\input name`, `\\input{name}`,
 /// `\\RequirePackage{a,b}`, `\\LoadClass{c}`, `\\documentclass{c}`),
 /// each with the extensions to try.
-fn loaded_names(text: &str) -> Vec<String> {
+pub(crate) fn loaded_names(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for (cmd, ext) in [
         ("\\input", ""),
@@ -2227,6 +2228,21 @@ fn harvest_inputs(
         defs.harvest(&t, kind, id);
         order.push(id);
     }
+}
+
+/// Harvests into `defs` the files a document's `text` loads
+/// (`\\documentclass`, `\\usepackage`, …, [`loaded_names`]) that the
+/// finder resolves, then theirs, as the format's are ([`prelude_defs`]):
+/// file ids from `next_id`.
+pub(crate) fn harvest_loads(
+    text: &str,
+    finder: &Finder,
+    defs: &mut pass::Definitions,
+    next_id: &mut u32,
+) {
+    let mut order = Vec::new();
+    let mut seen = phitex_defuse::FxHashSet::default();
+    harvest_inputs(text, 0, finder, defs, &mut order, &mut seen, next_id);
 }
 
 fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
