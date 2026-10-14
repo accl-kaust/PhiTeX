@@ -594,7 +594,7 @@ impl Compiler<'_, '_> {
                 continue;
             }
             if let Some((f, v)) = self.flag_set(n) {
-                self.flush(text, atoms, seg, k + 1, &mut out);
+                self.flush(text, atoms, seg, k, &mut out);
                 // (`\newif`'s setters `\let` the flag, §1221)
                 if !self.top {
                     let mut d = DefSet::default();
