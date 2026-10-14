@@ -128,7 +128,7 @@ fn endinput_ends_only_the_nested_file() {
 
 /// A file read by `\input` whose bytes are not UTF-8 (koi8-r, Latin-1:
 /// ruhyphen's `catkoi.tex`) is read one byte per character (§31), as the
-/// main file is: `\catcode`\<0xC1>=12` sets the catcode of character 193.
+/// main file is: the catcode assignment to byte 0xC1 sets character 193's.
 /// (Each byte past 127 was read as two characters, its UTF-8 encoding's:
 /// an undefined control symbol, then typeset text, and a LaTeX format
 /// built with the Russian patterns lost the kernel's last lines.)
