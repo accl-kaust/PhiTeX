@@ -58,6 +58,23 @@ fn note(what: &str, b: &Build) {
         s.declarations_refuted,
         s.undeclared_definitions
     );
+    for l in b.critical_chain_lines() {
+        eprintln!("  {l}");
+    }
+}
+
+/// Whether the record of load `key` in `recs` defines `field`.
+fn writes(recs: &[u8], key: &str, field: &str) -> bool {
+    phitex_tex::pkgrec_summary(recs)
+        .iter()
+        .any(|(k, w, _)| k == key && w.iter().any(|f| f == field))
+}
+
+/// Whether the record of load `key` reads `field`.
+fn reads(recs: &[u8], key: &str, field: &str) -> bool {
+    phitex_tex::pkgrec_summary(recs)
+        .iter()
+        .any(|(k, _, r)| k == key && r.iter().any(|f| f == field))
 }
 
 fn same(what: &str, got: &[u8], want: &[u8]) {
@@ -130,7 +147,7 @@ fn dependent_loads_keep_their_order() {
     same("first", &first.output().0, &want);
     let recs = first.export_pkgrec();
     assert!(
-        String::from_utf8_lossy(&recs).contains("cs:aa"),
+        reads(&recs, "\\usepackage{pb}", "cs:aa"),
         "B's record reads \\aa"
     );
     for spec in [Speculation::Off, Speculation::All] {
@@ -151,8 +168,8 @@ fn changed_file_falls_back() {
     let d = dir(
         "changed",
         &[
-            ("pa.sty", "\\def\\aa{A}\\input pa.cfg \n"),
-            ("pa.cfg", "\\def\\ac{C}\n"),
+            ("pa.sty", "\\def\\aa{A}\\input pa.def \n"),
+            ("pa.def", "\\def\\ac{C}\n"),
             ("pb.sty", "\\def\\bb{B}\n"),
         ],
     );
@@ -163,7 +180,7 @@ fn changed_file_falls_back() {
     // the package file
     std::fs::write(
         d.join("pa.sty"),
-        "\\def\\aa{AA}\\def\\cc{}\\input pa.cfg \n",
+        "\\def\\aa{AA}\\def\\cc{}\\input pa.def \n",
     )
     .unwrap();
     let second = build(&d, &doc, Speculation::Off, recs.clone());
@@ -175,13 +192,13 @@ fn changed_file_falls_back() {
     same("package changed", &second.output().0, &sequential(&d, &doc));
     let again = second.export_pkgrec();
     assert!(
-        String::from_utf8_lossy(&again).contains("cs:cc"),
+        writes(&again, "\\usepackage{pa}", "cs:cc"),
         "record replaced"
     );
     // a file the package reads
     let third = build(&d, &doc, Speculation::Off, again.clone());
     assert_eq!(third.stats.pkg_recorded, 2);
-    std::fs::write(d.join("pa.cfg"), "\\def\\ac{CC}\\def\\cd{}\n").unwrap();
+    std::fs::write(d.join("pa.def"), "\\def\\ac{CC}\\def\\cd{}\n").unwrap();
     let fourth = build(&d, &doc, Speculation::Off, again.clone());
     note("read file changed", &fourth);
     assert_eq!(fourth.stats.pkg_recorded, 1);
@@ -190,16 +207,16 @@ fn changed_file_falls_back() {
         &fourth.output().0,
         &sequential(&d, &doc),
     );
-    assert!(String::from_utf8_lossy(&fourth.export_pkgrec()).contains("cs:cd"));
+    assert!(writes(&fourth.export_pkgrec(), "\\usepackage{pa}", "cs:cd"));
     // in a session: the file edited, the load re-run unbounded
     let mut s = build(&d, &doc, Speculation::Off, fourth.export_pkgrec());
     assert_eq!(s.stats.pkg_recorded, 2);
     let cfg = "\\def\\ac{CCC}\\def\\ce{}\n";
-    s.edit_file("pa.cfg", Some(cfg.as_bytes()));
+    s.edit_file("pa.def", Some(cfg.as_bytes()));
     note("edited in session", &s);
-    std::fs::write(d.join("pa.cfg"), cfg).unwrap();
+    std::fs::write(d.join("pa.def"), cfg).unwrap();
     same("edited in session", &s.output().0, &sequential(&d, &doc));
-    assert!(String::from_utf8_lossy(&s.export_pkgrec()).contains("cs:ce"));
+    assert!(writes(&s.export_pkgrec(), "\\usepackage{pa}", "cs:ce"));
 }
 
 /// A load whose key matches but whose behaviour differs (it reads a
@@ -224,7 +241,8 @@ fn defining_outside_the_record_is_refuted() {
     let first = build(&d, &doc(0), Speculation::Off, Vec::new());
     note("first", &first);
     let recs = first.export_pkgrec();
-    assert!(!String::from_utf8_lossy(&recs).contains("cs:extra"));
+    assert!(writes(&recs, "\\usepackage{pa}", "cs:aa"));
+    assert!(!writes(&recs, "\\usepackage{pa}", "cs:extra"));
     for spec in [Speculation::Off, Speculation::All] {
         let second = build(&d, &doc(1), spec, recs.clone());
         note("behaviour changed", &second);
@@ -239,7 +257,7 @@ fn defining_outside_the_record_is_refuted() {
             &sequential(&d, &doc(1)),
         );
         assert!(
-            String::from_utf8_lossy(&second.export_pkgrec()).contains("cs:extra"),
+            writes(&second.export_pkgrec(), "\\usepackage{pa}", "cs:extra"),
             "record replaced"
         );
     }

@@ -650,6 +650,27 @@ impl Session {
         if let Some(b) = &self.build {
             self.store_wkeys(b);
             self.store_pkgrec(b);
+            // (the package loads' counters, for measurements)
+            if std::env::var_os("PHITEX_PKG_STATS").is_some() {
+                let s = &b.stats;
+                eprintln!(
+                    "PKG loads {} recorded {} optimistic {} runs {} at-once {} span {:.3} on-critical {} refuted {} undeclared {} critical-path {:?} threads {} engine-wall {:.3} speculations {} mispredictions {}",
+                    s.pkg_loads,
+                    s.pkg_recorded,
+                    s.pkg_optimistic,
+                    s.pkg_runs,
+                    s.pkg_max_concurrent,
+                    s.pkg_wall.as_secs_f64(),
+                    s.pkg_on_critical,
+                    s.declarations_refuted,
+                    s.undeclared_definitions,
+                    s.critical_path,
+                    s.threads,
+                    s.wall.as_secs_f64(),
+                    s.speculations,
+                    s.mispredictions
+                );
+            }
         }
         // (a long session: what the old texts' runs memoized and nothing
         // reaches any more goes, so the tables stay bounded)
