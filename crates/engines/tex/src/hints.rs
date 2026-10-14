@@ -482,12 +482,14 @@ fn add_head_dyn(st: &mut Option<Vec<&'static str>>, h: &str) {
 /// families and cells, the parameters' fields), so each distinct one
 /// made at run time is leaked once and a bound holds no strings.
 fn head(h: &str) -> &'static str {
-    type Heads = Mutex<phitex_defuse::FxHashSet<&'static str>>;
+    type Heads = std::sync::RwLock<phitex_defuse::FxHashSet<&'static str>>;
     static H: OnceLock<Heads> = OnceLock::new();
-    let mut set = H
-        .get_or_init(Heads::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let heads = H.get_or_init(Heads::default);
+    // (read shared: the chunks of a document are analysed on the pool)
+    if let Some(&x) = heads.read().unwrap_or_else(PoisonError::into_inner).get(h) {
+        return x;
+    }
+    let mut set = heads.write().unwrap_or_else(PoisonError::into_inner);
     if let Some(&x) = set.get(h) {
         return x;
     }
@@ -1648,9 +1650,14 @@ impl Analysis<'_> {
         }
     }
 
+    #[cfg(test)]
     fn new(text: &str, kind: FileKind, prelude: Defs) -> Analysis<'_> {
-        let mut defs = Definitions::new();
-        defs.harvest(text, kind, 0);
+        Analysis::with_own(text, kind, prelude, own_definitions(text, kind))
+    }
+
+    /// [`Analysis::new`] given the text's own definitions
+    /// ([`own_definitions`]).
+    fn with_own(text: &str, kind: FileKind, prelude: Defs, defs: Definitions) -> Analysis<'_> {
         let scope = Scope {
             document: &defs,
             file: 0,
@@ -2661,11 +2668,17 @@ fn add_defs_with(an: &Analysis<'_>, ds: &[Def], prefixes: bool, b: &mut Bound) {
     }
 }
 
+#[cfg(test)]
+fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
+    analyse_with(text, kind, defs, own_definitions(text, kind))
+}
+
+/// [`analyse`] given the text's own definitions ([`own_definitions`]).
 // (one pass over the atoms, then one over the slices; splitting it
 // would only pass its tables around)
 #[allow(clippy::too_many_lines)]
-fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
-    let an = Analysis::new(text, kind, defs.clone());
+fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
+    let an = Analysis::with_own(text, kind, defs.clone(), own);
     let (slices, pars) = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<Hint>> = Vec::with_capacity(an.p.atoms.len());
@@ -2737,7 +2750,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         prev_char = ch;
     }
     let mut t = TextHints {
-        defines: !an.defs.is_empty() || an.defs.active_chars() != 0,
+        defines: defines_any(&an.defs),
         slices,
         starts,
         hints,
@@ -2750,7 +2763,6 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
     let mut pending: Vec<&'static str> = Vec::new();
-    let mut after_sets = Sets::default();
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         // (whether the run reads on into the next slice: a scan for a
@@ -2852,50 +2864,11 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // `\\@afterheading`, a list's `\\item` and an environment's
         // end (`\\@doendpe`) set another, which the next paragraph
         // consumes, §1091: a slice calling one declares it)
-        let sets = sets_everypar(&text[s..e]);
-        if (sets.after > 0 || after_sets.after > 0)
+        if sets_everypar(&text[s..e])
             && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
         {
             add_head(&mut b.state, "param:everypar");
-            add_head(&mut b.state, "param:clubpenalty");
-            // (LaTeX's own `\\everypar`, a `\\newtoks` register)
-            add_head(&mut b.state, "toks:");
-            // (what the `\\everypar` of a list item or a heading sets
-            // when the paragraph consumes it, latex.ltx `\\@item`,
-            // `\\@afterheading`; a list's `\\@setpar` in the slice
-            // itself, and after it `\\@doendpe`'s `\\par` only after an
-            // environment's end)
-            let par = sets.after > 0 || after_sets.par;
-            for n in [
-                "cs:if@minipage",
-                "cs:if@newlist",
-                "cs:if@inlabel",
-                "cs:if@nobreak",
-                "cs:if@noskipsec",
-                "cs:if@endpe",
-                "cs:par",
-            ] {
-                if !par && (n == "cs:par" || n == "cs:if@endpe") {
-                    continue;
-                }
-                if !b.names.iter().any(|x| x == n) {
-                    b.names.push(n.to_owned());
-                }
-            }
         }
-        // (the slices after it consume what this one set and reset
-        // `\\everypar`: they declare it too, [`Sets`]; blank slices
-        // don't count)
-        after_sets = if sets.after > 0 {
-            sets
-        } else if text[s..e].trim().is_empty() || after_sets.after == 0 {
-            after_sets
-        } else {
-            Sets {
-                after: after_sets.after - 1,
-                par: after_sets.par,
-            }
-        };
         let mut out = pending.clone();
         let mut ends = false;
         let k0 = t.starts.partition_point(|&x| x < s);
@@ -3044,6 +3017,35 @@ pub(crate) fn kind_of(text: &str, named: FileKind) -> FileKind {
 /// The analysis of a document's or prelude's text under the format's
 /// definitions `defs` (cached by the text and the definitions).
 pub(crate) fn text_hints(text: &str, kind: FileKind, defs: &Defs) -> Arc<TextHints> {
+    text_hints_with(text, kind, defs, None)
+}
+
+/// The definitions a text makes on its own (harvested from it alone,
+/// read in the regime `kind` names, [`kind_of`]): what its analysis sees
+/// as the text's, and whether it defines anything
+/// ([`TextHints::defines`], [`defines_any`]), without the definitions
+/// in force before it.
+pub(crate) fn own_definitions(text: &str, kind: FileKind) -> Definitions {
+    let mut d = Definitions::new();
+    d.harvest(text, kind_of(text, kind), 0);
+    d
+}
+
+/// Whether a text's own definitions ([`own_definitions`]) define
+/// anything: [`TextHints::defines`] of its analysis.
+pub(crate) fn defines_any(own: &Definitions) -> bool {
+    !own.is_empty() || own.active_chars() != 0
+}
+
+/// [`text_hints`], given the text's own definitions when they are
+/// harvested already ([`own_definitions`] of the same text and kind).
+pub(crate) fn text_hints_with(
+    text: &str,
+    kind: FileKind,
+    defs: &Defs,
+    own: Option<Definitions>,
+) -> Arc<TextHints> {
+    let named = kind;
     let kind = kind_of(text, kind);
     let key = (hash_str(text), kind as u8, Arc::as_ptr(defs) as usize);
     if let Some(t) = texts()
@@ -3053,7 +3055,8 @@ pub(crate) fn text_hints(text: &str, kind: FileKind, defs: &Defs) -> Arc<TextHin
     {
         return t.clone();
     }
-    let t = Arc::new(analyse(text, kind, defs));
+    let own = own.unwrap_or_else(|| own_definitions(text, named));
+    let t = Arc::new(analyse_with(text, kind, defs, own));
     let mut c = texts().lock().unwrap_or_else(PoisonError::into_inner);
     if c.len() > 256 {
         c.clear();
@@ -3379,24 +3382,11 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
-/// What a slice leaves for the paragraphs after it to consume, beyond
-/// LaTeX's paragraph hooks (§1091: the next paragraph runs `\\everypar`):
-/// how many non-blank slices after it consume it (0: it sets nothing),
-/// and whether it may leave `\\par` redefined for them (`\\@doendpe` at
-/// an environment's end, latex.ltx). A heading's `\\@afterheading` is consumed over two
-/// paragraphs, and a heading's own slice may end before the first; a
-/// list item's `\\everypar` and an environment's `\\@doendpe` by the
-/// first. An environment that is no list (`document`, a float, an
-/// alignment, display math) leaves nothing: neither its begin nor its
-/// end touches `\\everypar` or `\\if@endpe`.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub(crate) struct Sets {
-    pub(crate) after: u8,
-    pub(crate) par: bool,
-}
-
-pub(crate) fn sets_everypar(slice: &str) -> Sets {
-    const HEADINGS: &[&str] = &[
+/// Whether a slice calls a command that leaves `\\everypar` other
+/// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
+/// a list item, an environment's begin or end (`\\@doendpe`), a title.
+fn sets_everypar(slice: &str) -> bool {
+    const SETS: &[&str] = &[
         "\\section",
         "\\subsection",
         "\\subsubsection",
@@ -3406,64 +3396,12 @@ pub(crate) fn sets_everypar(slice: &str) -> Sets {
         "\\part",
         "\\@afterheading",
         "\\@startsection",
+        "\\item",
+        "\\begin",
+        "\\end",
         "\\maketitle",
     ];
-    // (environments whose begin and end set neither `\\everypar` nor
-    // `\\@endpetrue`: no `\\list`, `\\trivlist` or `\\@endparenv`)
-    const PLAIN_ENVS: &[&str] = &[
-        "document",
-        "figure",
-        "figure*",
-        "table",
-        "table*",
-        "tabular",
-        "tabular*",
-        "array",
-        "equation",
-        "equation*",
-        "math",
-        "displaymath",
-        "picture",
-        "tikzpicture",
-        "align",
-        "align*",
-        "gather",
-        "gather*",
-        "multline",
-        "multline*",
-        "flalign",
-        "flalign*",
-        "alignat",
-        "alignat*",
-    ];
-    let mut out = Sets::default();
-    if HEADINGS.iter().any(|c| slice.contains(c)) {
-        out.after = 3;
-    }
-    if slice.contains("\\item") {
-        out.after = out.after.max(1);
-    }
-    for (cmd, par) in [("\\begin", false), ("\\end", true)] {
-        let mut rest = slice;
-        while let Some(k) = rest.find(cmd) {
-            rest = &rest[k + cmd.len()..];
-            // (`\\endgroup`, `\\beginL`: another command)
-            if rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '@') {
-                continue;
-            }
-            let name = rest
-                .trim_start()
-                .strip_prefix('{')
-                .and_then(|r| r.split_once('}'))
-                .map(|(n, _)| n.trim());
-            if name.is_some_and(|n| PLAIN_ENVS.contains(&n)) {
-                continue;
-            }
-            out.after = out.after.max(1);
-            out.par |= par;
-        }
-    }
-    out
+    SETS.iter().any(|c| slice.contains(c))
 }
 
 /// Whether the node's text says its command opens and closes no scope.

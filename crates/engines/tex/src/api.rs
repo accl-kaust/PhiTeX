@@ -1786,6 +1786,7 @@ impl Graph {
         finder: Option<&Finder>,
     ) -> (Vec<(u64, NodeId, Src)>, Incr) {
         let mut incr = Incr::new(defs);
+        incr.threads = self.threads;
         let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr), finder);
         (nodes, incr)
     }
@@ -1820,20 +1821,38 @@ impl Graph {
             None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
         };
         let t1 = t0.elapsed();
-        let mut out = Vec::with_capacity(nodes.len());
-        for (k, n) in &nodes {
-            if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+        // (the nodes' arguments made on the pool: values are named by
+        // their content, whichever worker makes them)
+        let args = {
+            let v = self.eng.values();
+            crate::exec::map(self.threads, nodes.len(), &|k| {
+                node_args(v, text, incr, &nodes[k].1)
+            })
+        };
+        let t2 = t0.elapsed();
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+            for (k, _) in &nodes {
                 eprintln!("node {k:?}");
             }
-            let args = node_args(self.eng.values(), text, incr, n);
-            let id = self.eng.push(unit, self.ops.exec, args);
+        }
+        // (one append of every node, in order)
+        let ids = self.eng.push_many(unit, self.ops.exec, args);
+        let out: Vec<(u64, NodeId, Src)> = nodes
+            .iter()
+            .zip(ids)
+            .map(|((k, n), id)| (*k, id, Src::of(n)))
+            .collect();
+        let t3 = t0.elapsed();
+        for &(_, id, _) in &out {
             declare_marks_before(&mut self.eng, id);
-            out.push((*k, id, Src::of(n)));
         }
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
-                "push_text: slices {t1:?}, push {:?}, {} nodes",
+                "push_text: slices {t1:?}, push {:?} (arguments {:?}, engine push {:?}, loop-back declarations {:?}), {} nodes",
                 t0.elapsed().checked_sub(t1).unwrap(),
+                t2.checked_sub(t1).unwrap(),
+                t3.checked_sub(t2).unwrap(),
+                t0.elapsed().checked_sub(t3).unwrap(),
                 out.len()
             );
         }
