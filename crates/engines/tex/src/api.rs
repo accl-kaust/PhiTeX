@@ -1425,6 +1425,28 @@ impl Graph {
         if let E::UndeclaredDefinition { field, .. } | E::ConflictingPublication { field } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
+        // (a runaway node's causes, their fields named)
+        if let E::RunawayNode { causes, .. } = e {
+            use phitex_defuse::Cause as C;
+            let named: Vec<String> = causes
+                .iter()
+                .map(|c| match c {
+                    C::Rebind { field, .. } => format!("Rebind {}", field_name(v, *field)),
+                    C::Changed { field, site } => {
+                        format!("Changed {} at {site:?}", field_name(v, *field))
+                    }
+                    C::Loop { field } => format!("Loop {}", field_name(v, *field)),
+                    C::Environment { field } => format!("Environment {}", field_name(v, *field)),
+                    C::Range { field, .. } => format!("Range {}", field_name(v, *field)),
+                    C::Woken { field, .. } => format!(
+                        "Woken {}",
+                        field.map_or_else(|| "-".to_owned(), |f| field_name(v, f))
+                    ),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            let _ = write!(out, "\n  causes named: {}", named.join(", "));
+        }
         // (the engine does not say which loop-backs kept changing: the
         // job's read-back fields are the candidates)
         if let E::NonConvergence { .. } = e {
