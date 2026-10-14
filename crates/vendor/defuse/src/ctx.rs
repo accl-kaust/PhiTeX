@@ -54,7 +54,7 @@ pub struct Ctx<'a> {
     env_found: Vec<(Field, Option<ValueId>)>,
     publishes: Vec<(Field, ValueId)>,
     contribs: Vec<(Field, ValueId)>,
-    watch: Option<(Field, Slot, ValueId)>,
+    watch: Option<(Field, Slot, Slot, ValueId)>,
     effect: Option<u8>,
     kind: Option<ValueId>,
     claim: Option<usize>,
@@ -909,23 +909,42 @@ impl<'a> Ctx<'a> {
     ///
     /// [`Stop`] until every node in the range has finished.
     pub fn acc_range(&mut self, f: Field, from: Option<NodeId>) -> Result<ValueId, Stop> {
+        self.acc_range_to(f, from, None)
+    }
+
+    /// The fold of accumulator `f` over the window `(from, to]`: the nodes
+    /// after `from` (the unit start if `None`) up to and including `to`
+    /// (this node, exclusive, if `None`; a `to` at or after this node ends
+    /// the window here). This node re-runs only when a contribution inside
+    /// the window changes, the window's structure changes, or `to` goes.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] until every node in the window has finished.
+    pub fn acc_range_to(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
         self.check()?;
         let e = self.eng;
         let n = e.n(self.slot);
         let anchor = from.and_then(|id| e.slot_by_id(id)).unwrap_or(NIL);
+        let end = to
+            .and_then(|id| e.slot_by_id(id))
+            .filter(|&t| e.n(t).unit == n.unit && e.n(t).label < n.label)
+            .unwrap_or(NIL);
         let lo = if anchor == NIL { 0 } else { e.n(anchor).label + 1 };
-        let s = e.order_fold(n.unit, lo, n.label);
+        let hi = if end == NIL { n.label } else { e.n(end).label + 1 };
+        let s = e.order_fold(n.unit, lo, hi);
         if s.0 > 0 {
-            return self.stop(End::WaitRange(f, anchor));
+            return self.stop(End::WaitRange(f, anchor, end));
         }
         if s.1 >= e.level && !self.spec && s.1 + 1 > self.raise {
             self.raise = s.1 + 1;
             self.raise_from = NIL;
         }
-        let v = e.acc_fold(n.unit, f, lo, n.label);
-        self.watch = Some((f, anchor, v));
+        let v = e.acc_fold(n.unit, f, lo, hi);
+        self.watch = Some((f, anchor, end, v));
         let aid = if anchor == NIL { 0 } else { e.n(anchor).id.raw() };
-        self.sig = self.sig.wrapping_add(hash_words(21, &[f.0.raw(), aid, v.raw()]));
+        let tid = if end == NIL { 0 } else { e.n(end).id.raw() };
+        self.sig = self.sig.wrapping_add(hash_words(21, &[f.0.raw(), aid, tid, v.raw()]));
         Ok(v)
     }
 

@@ -524,6 +524,12 @@ impl<I: Copy, S: Copy, P: Copy> Arena<I, S, P> {
     /// Inserts a run of new keys (`items` sorted by key, none of them
     /// present).
     pub(crate) fn insert_run<A: Aug<I, S, P>>(&mut self, a: &A, root: u32, items: &[(u64, I)]) -> u32 {
+        if items.len() >= 2 * LCAP && !self.special && self.last(root).is_none_or(|(k, _)| k < items[0].0) {
+            // An append: built as a tree of its own and joined on, with no
+            // path re-summed per item.
+            let m = self.build(a, items);
+            return self.join(a, root, m);
+        }
         let mut root = root;
         for &(k, i) in items {
             root = self.insert(a, root, k, i);
@@ -1594,6 +1600,32 @@ impl<I: Copy, S: Copy, P: Copy> Arena<I, S, P> {
         self.free(l);
         self.free(r);
         self.pack(a, lo, &entries)
+    }
+
+    /// A tree of `items` (sorted by key, at least one), its leaves and
+    /// inner nodes filled evenly.
+    fn build(&mut self, a: &impl Aug<I, S, P>, items: &[(u64, I)]) -> u32 {
+        let total = items.len();
+        let parts = total.div_ceil(LCAP);
+        let mut list = Vec::with_capacity(parts);
+        let mut at = 0;
+        for p in 0..parts {
+            let take = (total - at) / (parts - p);
+            let t = self.new_leaf(a, items[at].1);
+            let n = self.leaf_mut(t);
+            for (j, &(k, i)) in items[at..at + take].iter().enumerate() {
+                n.keys[j] = k;
+                n.items[j] = i;
+            }
+            n.len = len32(take);
+            self.resum(a, t);
+            list.push((items[at].0, t));
+            at += take;
+        }
+        while list.len() > 1 {
+            list = self.pack(a, list[0].0, &list);
+        }
+        list[0].1
     }
 
     /// Packs children (with least keys) evenly into new inner nodes.
