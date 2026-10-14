@@ -696,16 +696,22 @@ const PRELUDE_MAGIC: &[u8; 8] = b"PHITEXPR";
 fn engine_identity() -> u64 {
     static ID: OnceLock<u64> = OnceLock::new();
     *ID.get_or_init(|| {
-        let srcs: [&[u8]; 9] = [
+        let srcs: [&[u8]; 15] = [
             include_bytes!("../../../vendor/defuse/Cargo.toml"),
+            include_bytes!("../../../vendor/defuse/src/api.rs"),
             include_bytes!("../../../vendor/defuse/src/lib.rs"),
-            include_bytes!("../../../vendor/defuse/src/engine.rs"),
-            include_bytes!("../../../vendor/defuse/src/value.rs"),
-            include_bytes!("../../../vendor/defuse/src/ctx.rs"),
-            include_bytes!("../../../vendor/defuse/src/sched.rs"),
-            include_bytes!("../../../vendor/defuse/src/tree.rs"),
-            include_bytes!("../../../vendor/defuse/src/hash.rs"),
             include_bytes!("../../../vendor/defuse/src/obs.rs"),
+            include_bytes!("../../../vendor/defuse/src/sync.rs"),
+            include_bytes!("../../../vendor/defuse/src/values.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/commit.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/ctx.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/edit.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/eval.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/mod.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/order.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/query.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/report.rs"),
+            include_bytes!("../../../vendor/defuse/src/core/run.rs"),
         ];
         let mut h = 0u64;
         for s in srcs {
