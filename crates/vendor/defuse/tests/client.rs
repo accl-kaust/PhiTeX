@@ -2412,3 +2412,665 @@ fn a_claimer_stopped_before_claiming_resumes_while_the_siblings_it_read_hold() {
     assert_eq!((rep.resumed, rep.restarted), (0, 1), "{rep:?}");
     assert!(rep.restarted_by.iter().any(|r| r.0 == "following: changed"), "{rep:?}");
 }
+
+/// `["c", i, d]`: defines `x<i>` (its set unknown until it runs) from `b`
+/// and, when `d >= 0`, `x<d>`; `["b"]` defines `b`.
+struct SpecChain;
+
+impl Operation for SpecChain {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        (tag(v, a) == "b").then(|| vec![(v.field("b"), Locality::Local)])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let int = |i: usize| match a.get(i).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Int(k)) => *k,
+            _ => -1,
+        };
+        if tag(v, &a) == "b" {
+            cx.define(v.field("b"), v.int(1));
+            return Ok(ValueId::UNIT);
+        }
+        let (i, d) = (int(1), int(2));
+        let mut s = match cx.use_field(v.field("b"))?.map(|x| v.get(x)).as_deref() {
+            Some(Value::Int(k)) => *k,
+            _ => 0,
+        };
+        if d >= 0
+            && let Some(Value::Int(k)) = cx.use_field(v.field(&format!("x{d}")))?.map(|x| v.get(x)).as_deref()
+        {
+            s += *k;
+        }
+        let out = v.int(s + i);
+        cx.define(v.field(&format!("x{i}")), out);
+        Ok(out)
+    }
+}
+
+/// A chain of operations that may define anything, most reading only a
+/// field defined before the chain: under `Speculation::All` each guess
+/// that its predecessors leave `b` alone is applied and confirmed by
+/// value when they finish, not dropped for defining fields its pending
+/// set did not list. Only the operations that read a predecessor re-run.
+#[test]
+fn speculative_runs_with_unknown_definition_sets_are_kept_when_their_reads_hold() {
+    let build = || {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(SpecChain));
+        let u = eng.new_unit();
+        let v = eng.values();
+        eng.push(u, op, vec![v.str("b")]);
+        let mut ns = Vec::new();
+        for i in 0..30i64 {
+            let d = if i > 0 && (i + 1) % 6 == 0 { i - 1 } else { -1 };
+            let v = eng.values();
+            ns.push(eng.push(u, op, vec![v.str("c"), v.int(i), v.int(d)]));
+        }
+        (eng, ns)
+    };
+    let (mut plain, pn) = build();
+    plain.evaluate_sequential().expect("evaluate");
+    let (mut eng, ns) = build();
+    let r = eng
+        .evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 64),
+            &mut defuse::Sequential,
+        )
+        .expect("evaluate");
+    for (a, b) in pn.iter().zip(&ns) {
+        assert_eq!(plain.output(*a), eng.output(*b));
+    }
+    assert_eq!(r.spec_shape_changes, 0, "{r:?}");
+    assert!(r.mispredictions <= 5, "{r:?}");
+    assert!(r.steps <= 8, "{r:?}");
+}
+
+/// `["ap", k]` contributes `k`; `["end"]` marks a window's end; `["rw"]`
+/// reads the contributions up to and including the nearest `end` before
+/// it (to itself if none), counting its runs.
+struct WinOps;
+
+thread_local! {
+    /// Runs of `rw` on this thread (the tests evaluate sequentially).
+    static WIN_RUNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+impl Operation for WinOps {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "ap" => {
+                cx.contribute(v.field("acc"), v.seq_unit(a[1]));
+                Ok(ValueId::UNIT)
+            }
+            "rw" => {
+                WIN_RUNS.with(|c| c.set(c.get() + 1));
+                let end = cx.prev_sibling_where(&|_, a| tag(v, a) == "end");
+                cx.acc_range_to(v.field("acc"), None, end)
+            }
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+/// A windowed range read `(from, to]` sees only the contributions inside
+/// its window. A change to a sibling its scan for the window's end passed
+/// over re-runs it; a change neither in the window nor passed over does
+/// not.
+#[test]
+fn a_windowed_range_reader_is_not_rerun_by_a_change_after_its_window() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(WinOps));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let ap = |eng: &mut Engine, k: i64| {
+        let v = eng.values();
+        eng.push(u, op, vec![v.str("ap"), v.int(k)])
+    };
+    let a1 = ap(&mut eng, 1);
+    ap(&mut eng, 2);
+    let end = {
+        let v = eng.values();
+        eng.push(u, op, vec![v.str("end")])
+    };
+    let a3 = ap(&mut eng, 3);
+    ap(&mut eng, 4);
+    let rw = {
+        let v = eng.values();
+        eng.push(u, op, vec![v.str("rw")])
+    };
+    let a5 = ap(&mut eng, 5);
+    eng.evaluate_sequential().expect("evaluate");
+    let items = |eng: &Engine| -> Vec<i64> {
+        let v = eng.values();
+        v.seq_to_vec(eng.output(rw).expect("rw output"))
+            .into_iter()
+            .filter_map(|x| v.as_int(x))
+            .collect()
+    };
+    let replace = |eng: &mut Engine, n: NodeId, k: i64| {
+        let v = eng.values();
+        let a = vec![v.str("ap"), v.int(k)];
+        eng.replace(n, op, a);
+        eng.evaluate_sequential().expect("evaluate");
+    };
+    assert_eq!(items(&eng), vec![1, 2], "up to and including the end marker");
+    // Neither in the window nor passed over: not re-run.
+    let runs = WIN_RUNS.with(std::cell::Cell::get);
+    replace(&mut eng, a5, 50);
+    assert_eq!(
+        WIN_RUNS.with(std::cell::Cell::get),
+        runs,
+        "a change after the reader re-ran it"
+    );
+    assert_eq!(items(&eng), vec![1, 2]);
+    // Passed over by the scan for the end: re-run, same window.
+    replace(&mut eng, a3, 30);
+    assert!(
+        WIN_RUNS.with(std::cell::Cell::get) > runs,
+        "a passed-over sibling changed"
+    );
+    assert_eq!(items(&eng), vec![1, 2]);
+    // Inside the window: re-run, with the new contribution.
+    let runs = WIN_RUNS.with(std::cell::Cell::get);
+    replace(&mut eng, a1, 9);
+    assert!(WIN_RUNS.with(std::cell::Cell::get) > runs);
+    assert_eq!(items(&eng), vec![9, 2]);
+    // The end goes: the reader reads up to itself.
+    eng.remove(end);
+    eng.evaluate_sequential().expect("end removed");
+    assert_eq!(items(&eng), vec![9, 2, 30, 4]);
+}
+
+/// A passed-over sibling becoming the nearest match moves the window: the
+/// edit gives what a cold build of the edited text gives.
+#[test]
+fn a_passed_over_sibling_that_becomes_the_window_end_moves_the_window() {
+    let build = |texts: &[&str]| {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(WinOps));
+        let acc = eng.values().field("acc");
+        eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+        let u = eng.new_unit();
+        let mut ids = Vec::new();
+        for (i, t) in texts.iter().enumerate() {
+            let v = eng.values();
+            let a = if *t == "ap" {
+                vec![v.str("ap"), v.int(i64::try_from(i).unwrap_or(0) + 1)]
+            } else {
+                vec![v.str(t)]
+            };
+            ids.push(eng.push(u, op, a));
+        }
+        (eng, op, ids)
+    };
+    let items = |eng: &Engine, rw: NodeId| -> Vec<i64> {
+        let v = eng.values();
+        v.seq_to_vec(eng.output(rw).expect("rw output"))
+            .into_iter()
+            .filter_map(|x| v.as_int(x))
+            .collect()
+    };
+    // ap1 ap2 end ap4 ap5 rw; then ap5 becomes an end.
+    let (mut eng, op, ids) = build(&["ap", "ap", "end", "ap", "ap", "rw"]);
+    eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(items(&eng, ids[5]), vec![1, 2]);
+    let a = vec![eng.values().str("end")];
+    eng.replace(ids[4], op, a);
+    eng.evaluate_sequential().expect("evaluate");
+    let (mut cold, _, cids) = build(&["ap", "ap", "end", "ap", "end", "rw"]);
+    cold.evaluate_sequential().expect("evaluate");
+    assert_eq!(items(&cold, cids[5]), vec![1, 2, 4]);
+    assert_eq!(items(&eng, ids[5]), items(&cold, cids[5]), "edit differs from cold");
+}
+
+/// `["d", x, k]` defines `x` as `k`; `["r", x]` outputs `x`; `["o"]` and
+/// `["c"]` open and close a scope.
+struct Appends;
+
+impl Operation for Appends {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "d" {
+            vec![(Field(a[1]), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> defuse::Effect {
+        match tag(v, a).as_str() {
+            "o" => defuse::Effect::Open,
+            "c" => defuse::Effect::Close,
+            _ => defuse::Effect::None,
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "d" => {
+                cx.define(Field(a[1]), a[2]);
+                Ok(a[2])
+            }
+            "r" => Ok(cx.use_field(Field(a[1]))?.unwrap_or(ValueId::UNIT)),
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+/// `Engine::push_many` gives the nodes, results and later edits that the
+/// same number of single pushes give, for balanced and unbalanced
+/// brackets, into an empty unit and after an evaluated one.
+#[test]
+fn push_many_is_the_same_as_single_pushes() {
+    let texts = |v: &Values, seed: u64, n: usize| -> Vec<Vec<ValueId>> {
+        let mut x = seed;
+        (0..n)
+            .map(|i| {
+                x = x
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let name = v.str(["a", "b", "c"][(x >> 40) as usize % 3]);
+                match (x >> 33) % 7 {
+                    0 => vec![v.str("o")],
+                    1 => vec![v.str("c")],
+                    2 | 3 => vec![v.str("d"), name, v.int(i64::try_from(i).unwrap_or(0))],
+                    _ => vec![v.str("r"), name],
+                }
+            })
+            .collect()
+    };
+    for (seed, warm) in [(1, false), (2, false), (3, true), (4, true), (5, true)] {
+        let mut one = Engine::new();
+        let mut many = Engine::new();
+        let op1 = one.register(Arc::new(Appends));
+        let opm = many.register(Arc::new(Appends));
+        let (u1, um) = (one.new_unit(), many.new_unit());
+        let mut ids_one = Vec::new();
+        let mut ids_many = Vec::new();
+        if warm {
+            for t in texts(one.values(), seed + 100, 40) {
+                ids_one.push(one.push(u1, op1, t));
+            }
+            ids_many.extend(many.push_many(um, opm, texts(many.values(), seed + 100, 40)));
+            one.evaluate_sequential().expect("evaluate");
+            many.evaluate_sequential().expect("evaluate");
+        }
+        for t in texts(one.values(), seed, 200) {
+            ids_one.push(one.push(u1, op1, t));
+        }
+        ids_many.extend(many.push_many(um, opm, texts(many.values(), seed, 200)));
+        assert_eq!(ids_one, ids_many, "node ids");
+        one.evaluate_sequential().expect("evaluate");
+        many.evaluate_sequential().expect("evaluate");
+        let outs = |e: &Engine, ids: &[NodeId]| ids.iter().map(|&i| e.output(i)).collect::<Vec<_>>();
+        assert_eq!(outs(&one, &ids_one), outs(&many, &ids_many), "seed {seed}");
+        // An edit afterwards behaves the same.
+        one.remove(ids_one[7]);
+        many.remove(ids_many[7]);
+        one.evaluate_sequential().expect("evaluate");
+        many.evaluate_sequential().expect("evaluate");
+        assert_eq!(
+            outs(&one, &ids_one[8..]),
+            outs(&many, &ids_many[8..]),
+            "seed {seed} after an edit"
+        );
+    }
+}
+
+/// `["c", k, d]` contributes `k` and declares `d` as its contribution;
+/// `["r"]` folds the contributions before it.
+struct StaticAcc;
+
+impl Operation for StaticAcc {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn static_contribs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        (tag(v, a) == "c").then(|| vec![(v.field("acc"), a[2])])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if tag(v, &a) == "r" {
+            return cx.acc_range(v.field("acc"), None);
+        }
+        cx.contribute(v.field("acc"), a[1]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// Declared contributions are folded before their nodes run; a run that
+/// contributes otherwise is refuted and its readers run again; a new text
+/// declares afresh.
+#[test]
+fn a_range_reader_folds_declared_contributions_and_a_wrong_one_is_refuted() {
+    for sched in 0..3 {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(StaticAcc));
+        let acc = eng.values().field("acc");
+        eng.declare_accumulator(acc, Arc::new(defuse::SumMonoid));
+        let u = eng.new_unit();
+        let c = |eng: &mut Engine, k: i64, d: i64| {
+            let v = eng.values();
+            vec![v.str("c"), v.int(k), v.int(d)]
+        };
+        let a = c(&mut eng, 1, 1);
+        eng.push(u, op, a);
+        let a = c(&mut eng, 2, 20);
+        let wrong = eng.push(u, op, a);
+        let r = {
+            let v = eng.values();
+            eng.push(u, op, vec![v.str("r")])
+        };
+        let eval = |eng: &mut Engine| {
+            match sched {
+                0 => eng.evaluate_sequential(),
+                1 => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 64),
+                    &mut defuse::Sequential,
+                ),
+                _ => eng.evaluate(&mut defuse::RandomScheduler::new(3, true), &mut defuse::Sequential),
+            }
+            .expect("evaluate")
+        };
+        let rep = eval(&mut eng);
+        let out = |eng: &Engine| eng.values().as_int(eng.output(r).expect("output"));
+        assert_eq!(out(&eng), Some(3), "{sched}");
+        assert_eq!(rep.static_contribs_refuted, 1, "{sched}");
+        let a = c(&mut eng, 5, 5);
+        eng.replace(wrong, op, a);
+        let rep = eval(&mut eng);
+        assert_eq!(out(&eng), Some(6), "{sched}");
+        assert_eq!(rep.static_contribs_refuted, 0, "{sched}");
+    }
+}
+
+/// `[i]`: node `i` of a chain reads `a{i-1}` and `b{i-1}` and defines
+/// `a{i}` and `b{i}`; `predict` holds the values each node predicts.
+struct PredChain {
+    predict: Option<Vec<(i64, i64)>>,
+    runs: std::sync::atomic::AtomicU64,
+}
+
+fn pred_step(i: i64, (a, b): (i64, i64)) -> (i64, i64) {
+    ((a + b + i) % 1_000_003, (a * 3 + i) % 1_000_033)
+}
+
+fn pred_truth(n: usize) -> Vec<(i64, i64)> {
+    let mut p = (1, 2);
+    (0..n)
+        .map(|i| {
+            p = pred_step(i64::try_from(i).unwrap(), p);
+            p
+        })
+        .collect()
+}
+
+fn pred_fields(v: &Values, i: i64) -> (Field, Field) {
+    (v.field(&format!("a{i}")), v.field(&format!("b{i}")))
+}
+
+impl Operation for PredChain {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        let (fa, fb) = pred_fields(v, v.as_int(a[0]).unwrap());
+        Some(vec![(fa, Locality::Local), (fb, Locality::Local)])
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        let i = v.as_int(a[0]).unwrap();
+        Some(if i == 0 {
+            Vec::new()
+        } else {
+            let (fa, fb) = pred_fields(v, i - 1);
+            vec![fa, fb]
+        })
+    }
+    fn predicted_defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        let i = v.as_int(a[0]).unwrap();
+        let &(pa, pb) = self.predict.as_ref()?.get(usize::try_from(i).unwrap())?;
+        let (fa, fb) = pred_fields(v, i);
+        Some(vec![(fa, v.int(pa)), (fb, v.int(pb))])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let i = v.as_int(cx.args()[0]).unwrap();
+        let prev = if i == 0 {
+            (1, 2)
+        } else {
+            let (fa, fb) = pred_fields(v, i - 1);
+            let pa = cx.use_field(fa)?.and_then(|x| v.as_int(x)).unwrap_or(0);
+            let pb = cx.use_field(fb)?.and_then(|x| v.as_int(x)).unwrap_or(0);
+            (pa, pb)
+        };
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (na, nb) = pred_step(i, prev);
+        let (fa, fb) = pred_fields(v, i);
+        cx.define(fa, v.int(na));
+        cx.define(fb, v.int(nb));
+        Ok(v.int(na))
+    }
+}
+
+/// Jobs on scoped threads.
+struct PredThreads;
+
+impl defuse::Executor for PredThreads {
+    fn parallelism(&self) -> usize {
+        4
+    }
+    fn execute(
+        &mut self,
+        n: usize,
+        run: &(dyn Fn(usize) -> defuse::RunResult + Sync),
+        out: &mut Vec<defuse::RunResult>,
+    ) {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::OnceLock<defuse::RunResult>> = (0..n).map(|_| std::sync::OnceLock::new()).collect();
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        let _ = slots[i].set(run(i));
+                    }
+                });
+            }
+        });
+        out.extend(slots.into_iter().map(|s| s.into_inner().expect("every job ran")));
+    }
+}
+
+/// Predicted definitions: a 50-node chain whose readers run on the
+/// predictions overlaps in one step; a wrong prediction re-runs only the
+/// node that read it; the output never depends on the predictions, under
+/// any schedule; an edit asks the new text again.
+#[test]
+fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers() {
+    const N: usize = 50;
+    let wrong = {
+        let mut p = pred_truth(N);
+        p[25].0 += 1;
+        p
+    };
+    let build = |predict: Option<Vec<(i64, i64)>>| {
+        let mut eng = Engine::new();
+        let op = Arc::new(PredChain {
+            predict,
+            runs: std::sync::atomic::AtomicU64::new(0),
+        });
+        let id = eng.register(op.clone());
+        let u = eng.new_unit();
+        let ids: Vec<NodeId> = (0..N)
+            .map(|i| {
+                let a = vec![eng.values().int(i64::try_from(i).unwrap())];
+                eng.push(u, id, a)
+            })
+            .collect();
+        (eng, op, ids, id)
+    };
+    let outs = |eng: &Engine, ids: &[NodeId]| -> Vec<Option<i64>> {
+        ids.iter()
+            .map(|&i| eng.output(i).and_then(|x| eng.values().as_int(x)))
+            .collect()
+    };
+    let (mut plain, _, pids, _) = build(None);
+    let r = plain
+        .evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut defuse::Sequential,
+        )
+        .expect("evaluate");
+    // No predictions: the chain waits link by link.
+    assert_eq!(r.realised_critical_path, u32::try_from(N).unwrap(), "{r:?}");
+    let reference = outs(&plain, &pids);
+    for sched in ["seq", "spec", "random", "par"] {
+        for predict in [Some(pred_truth(N)), Some(wrong.clone())] {
+            let is_wrong = predict.as_ref().is_some_and(|p| p[25] != pred_truth(N)[25]);
+            let (mut eng, op, ids, opid) = build(predict);
+            let r = match sched {
+                "seq" => eng.evaluate_sequential(),
+                "spec" => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                    &mut defuse::Sequential,
+                ),
+                "random" => eng.evaluate(&mut defuse::RandomScheduler::new(5, true), &mut defuse::Sequential),
+                _ => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                    &mut PredThreads,
+                ),
+            }
+            .expect("evaluate");
+            assert_eq!(outs(&eng, &ids), reference, "{sched} wrong={is_wrong}");
+            let runs = op.runs.load(std::sync::atomic::Ordering::Relaxed);
+            if sched == "spec" || sched == "par" {
+                if is_wrong {
+                    // Node 26 read the wrong value; nothing else re-runs.
+                    assert_eq!(runs, N as u64 + 1, "{sched}: {r:?}");
+                    assert_eq!(r.predictions_refuted, 1, "{sched}");
+                    assert!(r.steps <= 2, "{sched}: {r:?}");
+                } else {
+                    assert_eq!(runs, N as u64, "{sched}: {r:?}");
+                    assert_eq!(r.steps, 1, "{sched}: {r:?}");
+                    assert_eq!(r.predictions_refuted, 0, "{sched}");
+                    assert_eq!(r.predictions_confirmed, N as u64 - 1, "{sched}");
+                }
+            }
+            if sched == "spec" || sched == "par" {
+                let want = if is_wrong { 2..=3 } else { 1..=2 };
+                assert!(want.contains(&r.realised_critical_path), "{sched}: {r:?}");
+            }
+            if sched == "seq" {
+                // Off: every node waited for the one before it.
+                assert_eq!(r.realised_critical_path, u32::try_from(N).unwrap(), "{sched}");
+                assert_eq!(r.realised_critical_path, r.critical_path + 1, "{sched}");
+                assert_eq!(runs, N as u64, "{sched}");
+                assert_eq!(r.predictions_confirmed + r.predictions_refuted, 0);
+            }
+            // An edit after the build: node 10 re-texted (the same index
+            // plus a marker, so its hooks are asked again) keeps the
+            // output equal to the plain build's.
+            let a = {
+                let v = eng.values();
+                vec![v.int(10), v.str("again")]
+            };
+            eng.replace(ids[10], opid, a);
+            eng.evaluate(
+                &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                &mut defuse::Sequential,
+            )
+            .expect("edit");
+            assert_eq!(outs(&eng, &ids), reference, "{sched} wrong={is_wrong} after an edit");
+        }
+    }
+}
+
+/// `["d", i]` reads `x{i-1}` and defines `x{i}`; `["r", i]` declares a
+/// read of `x{i}` but reads nothing.
+struct HintChain;
+
+impl Operation for HintChain {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "d" {
+            vec![(v.field(&format!("x{}", v.as_int(a[1]).unwrap())), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        let i = v.as_int(a[1]).unwrap();
+        Some(match tag(v, a).as_str() {
+            "r" => vec![v.field(&format!("x{i}"))],
+            _ => Vec::new(),
+        })
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let i = v.as_int(a[1]).unwrap();
+        if tag(v, &a) == "r" {
+            return Ok(ValueId::UNIT);
+        }
+        let p = if i > 0 {
+            cx.use_field(v.field(&format!("x{}", i - 1)))?
+                .and_then(|x| v.as_int(x))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        cx.define(v.field(&format!("x{i}")), v.int(p + 1));
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A node whose height comes only from a declared read: the critical
+/// chain goes on from it to the read's definer and down the chain, also
+/// when that definer has since been freed and replaced.
+#[test]
+fn the_critical_chain_follows_a_declared_read_to_its_definer() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(HintChain));
+    let u = eng.new_unit();
+    let mut ds = Vec::new();
+    for i in 0..100 {
+        let a = {
+            let v = eng.values();
+            vec![v.str("d"), v.int(i)]
+        };
+        ds.push(eng.push(u, op, a));
+    }
+    let a = {
+        let v = eng.values();
+        vec![v.str("r"), v.int(99)]
+    };
+    let r = eng.push(u, op, a);
+    eng.evaluate_sequential().expect("evaluate");
+    let chain = eng.critical_chain();
+    assert_eq!(chain.first().map(|c| c.0), Some(r), "{chain:?}");
+    assert!(chain.iter().any(|c| c.0 == ds[99]), "{chain:?}");
+    assert!(chain.len() >= 100, "{} links: {chain:?}", chain.len());
+    // The definer it waited on goes and another takes its place: the walk
+    // names the one that went and goes on from the one there now.
+    eng.remove(ds[99]);
+    let a = {
+        let v = eng.values();
+        vec![v.str("d"), v.int(99), v.str("again")]
+    };
+    let d99 = eng.insert_before(r, op, a);
+    eng.evaluate_sequential().expect("evaluate");
+    let chain = eng.critical_chain();
+    assert_eq!(chain.first().map(|c| c.0), Some(r), "{chain:?}");
+    assert!(
+        matches!(chain[0].1, defuse::Cause::Woken { by, .. } if by == ds[99]),
+        "{chain:?}"
+    );
+    assert!(chain.iter().any(|c| c.0 == d99), "{chain:?}");
+    assert!(chain.len() >= 100, "{} links: {chain:?}", chain.len());
+}

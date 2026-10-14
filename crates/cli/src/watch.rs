@@ -135,11 +135,12 @@ fn diagnostics(s: &Session, r: &session::Report, log: &str) -> Vec<Value> {
                 let p = crate::problems::from_diagnostic(d, s.source(&d.file).as_deref(), false);
                 let chars = |b: usize| p.text.get(..b.min(p.text.len())).map_or(0, |t| t.chars().count());
                 let error = d.severity == phitex_tex::Severity::Error;
+                let engine = d.severity == phitex_tex::Severity::Diagnostic;
                 let excerpt = (!p.text.is_empty()).then(|| {
                     json!({"text": p.text, "start": chars(p.start), "len": chars(p.end).saturating_sub(chars(p.start))})
                 });
                 json!({
-                    "severity": if error { "error" } else { "warning" },
+                    "severity": if error { "error" } else if engine { "diagnostic" } else { "warning" },
                     "code": "tex",
                     "message": d.message,
                     "notes": p.label.iter().collect::<Vec<_>>(),
@@ -964,6 +965,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": r.out.errors,
+            "diagnostics": r.engine_diagnostics(),
         }));
         modern::report(
             t,
