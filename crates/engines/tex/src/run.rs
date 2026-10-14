@@ -311,10 +311,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The run read a job-written file back ([`Run::read_back`]): what
     /// it defines from then on keeps its value there ([`Run::note_pre`]).
     pub read_back_done: bool,
-    /// Where the run's own text stood at the read-back
-    /// ([`Run::source_pos`]): the command that read the file back is
-    /// still running while it stands there.
-    pub read_back_at: (usize, usize, u32),
+    /// The outermost macro being expanded at the read-back (its input
+    /// level): what the run defines while it is still on the input
+    /// stack keeps its value at the read-back ([`Run::note_pre`]).
+    pub read_back_at: Option<crate::input::Level>,
     /// Defining the counts a flush point fed back ([`Run::flush_read`]):
     /// not the text's own assignment.
     pub fed: bool,
@@ -397,7 +397,7 @@ impl<'c, 'a> Run<'c, 'a> {
             flush_pending: None,
             fed: false,
             read_back_done: false,
-            read_back_at: (0, 0, 0),
+            read_back_at: None,
             pre_memo: phitex_defuse::FxHashMap::default(),
             error_count: 0,
             fatal_logged: false,
@@ -593,9 +593,17 @@ impl<'c, 'a> Run<'c, 'a> {
     /// the `.aux`; a `\newlabel` line is read before that.
     fn note_pre(&mut self, loc: Loc) {
         let v = self.v;
-        // (only while the command that read the file back runs:
+        // (only while the macro that read the file back runs:
         // `\document`'s rest, not the text after it)
-        if self.source_pos() != self.read_back_at {
+        // (a level's position moves as it is read; its start and end
+        // stay)
+        let still = self.read_back_at.is_some_and(|m| {
+            self.input
+                .levels
+                .iter()
+                .any(|l| l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b)
+        });
+        if !still {
             self.read_back_done = false;
             return;
         }
@@ -623,17 +631,6 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let grp = self.innermost_group();
         self.st.set(pl, Native::Raw(old), true, grp);
-    }
-
-    /// Where the run reads its own text: the next segment, and the
-    /// position in the bottom level (a line's character, a file's rest).
-    fn source_pos(&self) -> (usize, usize, u32) {
-        let i = &self.input;
-        match i.levels.first() {
-            Some(&l) if l.kind == crate::input::kind::LINE => (i.text_at, i.line(l).loc, l.a),
-            Some(&l) => (i.text_at, usize::MAX, l.a ^ l.b.rotate_left(16)),
-            None => (i.text_at, 0, 0),
-        }
     }
 
     /// The parameter `p`.
@@ -897,8 +894,13 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.set(&name, *val, global);
             }
         }
-        self.read_back_done = true;
-        self.read_back_at = self.source_pos();
+        self.read_back_at = self
+            .input
+            .levels
+            .iter()
+            .find(|l| l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO)
+            .copied();
+        self.read_back_done = self.read_back_at.is_some();
         Ok(true)
     }
 
@@ -2007,7 +2009,7 @@ pub(crate) struct Parked {
     flushes: usize,
     flush_pending: Option<(i64, i64)>,
     read_back_done: bool,
-    read_back_at: (usize, usize, u32),
+    read_back_at: Option<crate::input::Level>,
 }
 
 impl Run<'_, '_> {
