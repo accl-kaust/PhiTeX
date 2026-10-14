@@ -1065,7 +1065,7 @@ impl Kpse {
     }
 
     /// `tex-file.c`, `kpathsea_out_name_ok` (TeX Live 2026, not
-    /// extended): whether a file may be written as `name`, under
+    /// extended; the rules: [`name_ok`]): whether a file may be written as `name`, under
     /// `openout_any` (default `p`). `Err` holds the `openout_any` value
     /// for the refusal's message (`Not writing to NAME (openout_any = p;
     /// no extended check).`). Reading is never checked: as of 2026
@@ -1078,45 +1078,23 @@ impl Kpse {
             .var_value("openout_any")
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| b"p".to_vec());
-        if matches!(choice[0], b'a' | b'y' | b'1') {
-            return Ok(());
-        }
         let expanded = self.expand(name);
-        // no `.rhosts`, `.ssh/`, `..x`: a dot at the start or after a
-        // `/` must begin `./` or `../`
-        for (i, &c) in name.iter().enumerate() {
-            if c != b'.' || i > 0 && name[i - 1] != b'/' {
-                continue;
-            }
-            let next = name.get(i + 1).copied();
-            let dot_slash = next == Some(b'/');
-            let dot_dot_slash = next == Some(b'.') && name.get(i + 2) == Some(&b'/');
-            if !dot_slash && !dot_dot_slash {
-                return Err(choice);
-            }
+        let texmfoutput = self.var_value("TEXMFOUTPUT");
+        // (`abs_fname_ok`: inside TEXMF_OUTPUT_DIRECTORY, from the
+        // environment only, or TEXMFOUTPUT)
+        let outdir = std::env::var_os("TEXMF_OUTPUT_DIRECTORY").map(OsStringExt::into_vec);
+        let inside = |e: &[u8]| {
+            [outdir.as_deref(), texmfoutput.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|d| !d.is_empty())
+                .any(|d| e.starts_with(d) && (e.get(d.len()) == Some(&b'/') || e.len() == d.len()))
+        };
+        if name_ok(&choice, name, &expanded, inside) {
+            Ok(())
+        } else {
+            Err(choice)
         }
-        if matches!(choice[0], b'r' | b'n' | b'0') {
-            return Ok(());
-        }
-        if expanded.first() == Some(&b'/') {
-            // (`abs_fname_ok`: inside TEXMF_OUTPUT_DIRECTORY, from the
-            // environment only, or TEXMFOUTPUT)
-            let inside = |dir: Option<Bytes>| {
-                dir.filter(|d| !d.is_empty()).is_some_and(|d| {
-                    expanded.starts_with(&d)
-                        && (expanded.get(d.len()) == Some(&b'/') || expanded.len() == d.len())
-                })
-            };
-            let outdir = std::env::var_os("TEXMF_OUTPUT_DIRECTORY").map(OsStringExt::into_vec);
-            if !inside(outdir) && !inside(self.var_value("TEXMFOUTPUT")) {
-                return Err(choice);
-            }
-        }
-        // no `../` at the start, no `/../` anywhere
-        if name.starts_with(b"../") || name.windows(4).any(|w| w == b"/../") {
-            return Err(choice);
-        }
-        Ok(())
     }
 
     fn finish_search(&mut self, mut ret: Vec<Bytes>) -> Vec<Bytes> {
@@ -1585,4 +1563,42 @@ mod tests {
         assert_eq!(casefold_readable_file(&name("none/texgyre.fontspec")), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+/// `kpathsea_out_name_ok`'s rules (`tex-file.c`, TeX Live 2026, not
+/// extended), with no environment: `choice` is `openout_any` (`a`, `y`,
+/// `1`: anything; `r`, `n`, `0`: no dot files; else paranoid: no dot
+/// files, no absolute name outside an output directory (`abs_ok` of the
+/// expanded name), no `..` component), `expanded` the name with its
+/// variables expanded. A dot at the start or after a `/` must begin
+/// `./` or `../`.
+#[must_use]
+pub fn name_ok(
+    choice: &[u8],
+    name: &[u8],
+    expanded: &[u8],
+    abs_ok: impl Fn(&[u8]) -> bool,
+) -> bool {
+    if matches!(choice.first(), Some(b'a' | b'y' | b'1')) {
+        return true;
+    }
+    for (i, &c) in name.iter().enumerate() {
+        if c != b'.' || i > 0 && name[i - 1] != b'/' {
+            continue;
+        }
+        let next = name.get(i + 1).copied();
+        let dot_slash = next == Some(b'/');
+        let dot_dot_slash = next == Some(b'.') && name.get(i + 2) == Some(&b'/');
+        if !dot_slash && !dot_dot_slash {
+            return false;
+        }
+    }
+    if matches!(choice.first(), Some(b'r' | b'n' | b'0')) {
+        return true;
+    }
+    if expanded.first() == Some(&b'/') && !abs_ok(expanded) {
+        return false;
+    }
+    // no `../` at the start, no `/../` anywhere
+    !(name.starts_with(b"../") || name.windows(4).any(|w| w == b"/../"))
 }
