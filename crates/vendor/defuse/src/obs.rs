@@ -275,6 +275,18 @@ impl fmt::Display for Snapshot {
     }
 }
 
+/// Adds the time since `.1` to the span `.0` when dropped (profiling).
+#[cfg(feature = "profile")]
+pub struct Ticked(pub &'static str, pub std::time::Instant);
+
+#[cfg(feature = "profile")]
+impl Drop for Ticked {
+    fn drop(&mut self) {
+        #[allow(clippy::cast_possible_truncation)]
+        add_impl(self.0, self.1.elapsed().as_nanos() as u64);
+    }
+}
+
 /// Whether probes are compiled in.
 #[must_use]
 pub const fn enabled() -> bool {
@@ -309,6 +321,7 @@ mod imp {
     static TRACING: AtomicBool = AtomicBool::new(false);
 
     thread_local! {
+        static LAST_FLUSH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static LOCAL: RefCell<Local> = RefCell::new(Local::default());
     }
 
@@ -350,8 +363,37 @@ mod imp {
                     l.events.push((self.name, start, ns));
                 }
             });
-            flush();
+            // Merged every millisecond or so, not per span: a global lock
+            // per span would add the contention it measures (workers
+            // flush when they leave, `snapshot` flushes its own thread).
+            let now = start + ns;
+            if LAST_FLUSH.with(|c| now.saturating_sub(c.get()) >= 1_000_000) {
+                LAST_FLUSH.with(|c| c.set(now));
+                flush();
+            }
         }
+    }
+
+    /// Adds `ns` to the span named `name` (flushed with the next span).
+    pub fn add(name: &'static str, ns: u64) {
+        LOCAL.with(|l| {
+            let mut l = l.borrow_mut();
+            let e = l.spans.entry(name).or_default();
+            e.0 += ns;
+            e.1 += 1;
+        });
+    }
+
+    /// Records a blocked lock acquisition at `loc` as the span
+    /// `lock <file>:<line>`.
+    pub fn lock_wait(loc: &'static std::panic::Location<'static>, ns: u64) {
+        static NAMES: Mutex<BTreeMap<(&'static str, u32), &'static str>> = Mutex::new(BTreeMap::new());
+        let name = *NAMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry((loc.file(), loc.line()))
+            .or_insert_with(|| Box::leak(format!("lock {}:{}", loc.file(), loc.line()).into_boxed_str()));
+        add(name, ns);
     }
 
     pub fn flush() {
@@ -393,7 +435,16 @@ mod imp {
     pub fn snapshot() -> super::Snapshot {
         flush();
         let g = GLOBAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        super::Snapshot {
+        // Spans outside `Span::ALL` (lock waits by call site, worker
+        // idling), largest first.
+        let mut extra: Vec<(&'static str, u64, u64)> = g
+            .spans
+            .iter()
+            .filter(|(k, _)| !super::Span::ALL.iter().any(|sp| sp.name() == **k))
+            .map(|(k, (ns, n))| (*k, *n, *ns))
+            .collect();
+        extra.sort_by_key(|e| std::cmp::Reverse(e.2));
+        let mut snap = super::Snapshot {
             counters: super::Counter::ALL
                 .iter()
                 .map(|c| (c.name(), g.counters.get(c.name()).copied().unwrap_or(0)))
@@ -405,7 +456,9 @@ mod imp {
                     (sp.name(), n, ns)
                 })
                 .collect(),
-        }
+        };
+        snap.spans.extend(extra);
+        snap
     }
 
     pub fn clear_trace() {
@@ -500,7 +553,7 @@ pub fn chrome_trace() -> String {
 
 #[cfg(feature = "profile")]
 #[doc(hidden)]
-pub use imp::{Guard, count as count_impl, enter as enter_impl};
+pub use imp::{Guard, add as add_impl, count as count_impl, enter as enter_impl, lock_wait};
 
 /// Adds to a counter (profile builds only).
 macro_rules! count {

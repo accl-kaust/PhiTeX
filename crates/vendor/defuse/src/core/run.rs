@@ -14,6 +14,11 @@ use super::{
 };
 use crate::api::{Cause, EvalError};
 
+thread_local! {
+    /// This worker's queue shard index.
+    static WORKER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// What validating a log found.
 pub(crate) enum Check {
     Holds,
@@ -22,7 +27,54 @@ pub(crate) enum Check {
 }
 
 impl Shared {
+    /// Queues a ready node while running free: on this worker's shard
+    /// (what a worker makes ready, it likely runs next).
+    #[allow(clippy::modulo_one)] // `QSHARDS` may be 1
+    pub(crate) fn push_ready(&self, s: Slot) {
+        let i = WORKER.with(std::cell::Cell::get);
+        self.qlen.fetch_add(1, Ordering::SeqCst);
+        self.push_to(i % super::QSHARDS, s);
+    }
+
+    /// Moves an already counted ready node to a shard by its slot.
+    #[allow(clippy::modulo_one)] // `QSHARDS` may be 1
+    pub(crate) fn push_shard(&self, s: Slot) {
+        self.push_to(s as usize % super::QSHARDS, s);
+    }
+
+    fn push_to(&self, i: usize, s: Slot) {
+        let mut h = lock(&self.shards[i]);
+        h.push(std::cmp::Reverse((self.rec(s).lab(), s)));
+    }
+
+    #[allow(clippy::modulo_one)] // `QSHARDS` may be 1
     fn pop(&self) -> Option<Slot> {
+        // Idle workers poll: an empty queue is seen without its lock.
+        if self.qlen.load(Ordering::SeqCst) == 0 {
+            return None;
+        }
+        if !self.stepped() {
+            let me = WORKER.with(std::cell::Cell::get);
+            for k in 0..super::QSHARDS {
+                let m = &self.shards[(me + k) % super::QSHARDS];
+                let mut h = if k == 0 {
+                    lock(m)
+                } else {
+                    // Others' shards: skip one being worked on.
+                    match m.try_lock() {
+                        Ok(h) => h,
+                        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                        Err(std::sync::TryLockError::WouldBlock) => continue,
+                    }
+                };
+                if let Some(std::cmp::Reverse((_, s))) = h.pop() {
+                    self.busy.fetch_add(1, Ordering::SeqCst);
+                    self.qlen.fetch_sub(1, Ordering::SeqCst);
+                    return Some(s);
+                }
+            }
+            return None;
+        }
         let mut q = lock(&self.q);
         let std::cmp::Reverse((_, s)) = q.cur.pop()?;
         self.busy.fetch_add(1, Ordering::SeqCst);
@@ -32,23 +84,50 @@ impl Shared {
 
     /// Whether the evaluation is quiescent: nothing queued, nobody busy.
     fn quiet(&self) -> bool {
+        if !self.stepped() {
+            // Queued or in process: a processed node's count goes after
+            // what it queued.
+            return self.work.load(Ordering::SeqCst) == 0;
+        }
+        // In steps the next step's nodes count in `qlen`: the step is
+        // over when its own queue is empty and nobody is busy.
+        if self.busy.load(Ordering::SeqCst) != 0 {
+            return false;
+        }
         let q = lock(&self.q);
         q.cur.is_empty() && self.busy.load(Ordering::SeqCst) == 0
     }
 
     /// One worker: processes nodes until the evaluation is quiescent.
     pub(crate) fn work(&self) {
+        WORKER.with(|c| c.set(self.next_worker.fetch_add(1, Ordering::Relaxed)));
+        #[cfg(feature = "profile")]
+        let _flush = FlushOnExit;
         let mut idle = 0u32;
+        #[cfg(feature = "profile")]
+        let mut idle_t: Option<std::time::Instant> = None;
+        #[cfg(feature = "profile")]
+        let idle_end = |t: &mut Option<std::time::Instant>| {
+            if let Some(t0) = t.take() {
+                #[allow(clippy::cast_possible_truncation)]
+                crate::obs::add_impl("worker_idle", t0.elapsed().as_nanos() as u64);
+            }
+        };
         loop {
             if self.abort.load(Ordering::Relaxed) {
+                #[cfg(feature = "profile")]
+                idle_end(&mut idle_t);
                 return;
             }
             if let Some(s) = self.pop() {
+                #[cfg(feature = "profile")]
+                idle_end(&mut idle_t);
                 idle = 0;
                 {
                     crate::obs::span!(RunBatch);
                     self.process(s);
                 }
+                self.work.fetch_sub(1, Ordering::SeqCst);
                 if self.busy.fetch_sub(1, Ordering::SeqCst) == 1 && self.qlen.load(Ordering::SeqCst) == 0 {
                     // Perhaps quiescent: the sleepers look.
                     self.wake_idle(true);
@@ -56,7 +135,15 @@ impl Shared {
                 continue;
             }
             if self.quiet() {
+                #[cfg(feature = "profile")]
+                idle_end(&mut idle_t);
                 return;
+            }
+            #[cfg(feature = "profile")]
+            if idle_t.is_none() {
+                idle_t = Some(std::time::Instant::now());
+                crate::obs::add_impl("idle_busy_others", self.busy.load(Ordering::Relaxed) as u64);
+                crate::obs::add_impl("idle_parked", lock(&self.parked).len() as u64);
             }
             idle += 1;
             if idle == 2_000_000 {
@@ -107,6 +194,10 @@ impl Shared {
     /// An in-work pending claimer before `s` whose claim may cover it.
     pub(crate) fn held_by(&self, s: Slot) -> Option<Slot> {
         let u = self.unit_of(s);
+        // No pending claimer: nothing to read (and no writer to wait out).
+        if super::rlock(&self.unit(u).pclaim).is_empty() {
+            return None;
+        }
         self.sread(u, || self.held_by_in(s))
     }
 
@@ -122,7 +213,7 @@ impl Shared {
             if c == s || self.rec(c).lab() >= ls || !in_work(self.rec(c).st()) || !self.rec(c).has(super::F_IN_PCLAIM) {
                 continue;
             }
-            let limit = self.rec(c).data().stat.limit;
+            let limit = self.rec(c).data().stat.limit();
             // `s` is in `c`'s following view only if its parent is an
             // ancestor-or-self of `c`'s parent.
             let ps = self.rec(s).parent.load(Ordering::Acquire);
@@ -223,7 +314,7 @@ impl Shared {
             // committed log it has not been told to drop validates it
             // when woken.
             let run = r.has(F_NEEDS_RUN) || r.data().res.is_none();
-            let kept = r.data().kept.take();
+            let kept = r.data().kept.take().map(|k| *k);
             self.park_with(s, w, kept, 1, run);
             return;
         }
@@ -245,7 +336,7 @@ impl Shared {
                     // Still waiting where it stopped: park again unrun.
                     let ask = r.data().x.as_ref().and_then(|e| e.ask);
                     if let Some(w) = ask.and_then(|a| self.reask(s, a)) {
-                        let kept = r.data().kept.take();
+                        let kept = r.data().kept.take().map(|k| *k);
                         self.park(s, w, kept, 1);
                         return;
                     }
@@ -286,7 +377,7 @@ impl Shared {
                 self.defer_step(s, "gated");
                 return;
             }
-            let kept = r.data().kept.take();
+            let kept = r.data().kept.take().map(|k| *k);
             self.park(s, w, kept, 1);
             return;
         }
@@ -328,12 +419,15 @@ impl Shared {
     /// without running.
     pub(crate) fn gate(&self, s: Slot) -> Option<Wait> {
         let u = self.unit_of(s);
+        if self.rec(s).data().stat.reads().is_none_or(Vec::is_empty) {
+            return None;
+        }
         self.sread(u, || self.gate_in(s))
     }
 
     fn gate_in(&self, s: Slot) -> Option<Wait> {
         // The hint is the text's: analysed once, not per attempt.
-        let fields = self.rec(s).data().stat.reads.clone()?;
+        let fields = self.rec(s).data().stat.reads().cloned()?;
         for f in fields {
             if rlock(&self.loop_vals).contains_key(&f) {
                 continue;
@@ -483,12 +577,11 @@ impl Shared {
             if matches!(ans, super::DAns::Loop(_)) {
                 return;
             }
-            let q = match mode {
-                super::DMode::Use => self.q_def(*at, *f, false, s),
-                m => self.q_seq(*at, *f, *m, false, s),
-            };
-            if let super::query::Q::Ans(o) = q {
-                *sites = o.sites;
+            if *mode == super::DMode::Use {
+                return;
+            }
+            if let super::query::Q::Ans(o) = self.q_seq(*at, *f, *mode, false, s) {
+                *sites = o.sites.into_boxed_slice();
             }
         }
     }
@@ -506,18 +599,19 @@ impl Shared {
                 d.runs = 0;
                 d.causes.retain(|_| false);
             }
-            d.runs += 1;
+            // (Completed runs count, counted at commit: an attempt that
+            // stops is not one.)
             if d.res.is_some() {
                 lock(&self.reruns).push((s, None));
             }
-            d.runs
+            d.runs + 1
         };
         let limits = rlock(&self.limits).clone();
-        if runs > u64::from(limits.runs_per_node) {
+        if runs > limits.runs_per_node {
             let causes = r.data().causes.clone();
             self.fail(EvalError::RunawayNode {
                 node: self.node_id(s),
-                runs: u32::try_from(runs).unwrap_or(u32::MAX),
+                runs,
                 causes,
             });
             self.park(
@@ -553,7 +647,7 @@ impl Shared {
         }
         let (op, kept) = {
             let mut d = r.data();
-            (d.op, d.kept.take())
+            (d.op, d.kept.take().map(|k| *k))
         };
         let (prior, token) = match kept {
             Some(k) if k.token.is_some() => (k.log, k.token),
@@ -703,7 +797,7 @@ impl Shared {
         r.park_seq.store(seq, Ordering::Release);
         {
             let mut d = r.data();
-            d.kept = kept;
+            d.kept = kept.map(Box::new);
             d.ex().wait_on = Some(w.clone());
             // (Only the waits a committed result keeps: see `commit`.)
             if let Subj::Node(x) = w.on
@@ -786,5 +880,16 @@ impl Shared {
         }
         self.dispatch(&mut notes, s);
         let _ = Cause::Structure;
+    }
+}
+
+/// Merges a worker's probe totals when it leaves (profiling builds).
+#[cfg(feature = "profile")]
+struct FlushOnExit;
+
+#[cfg(feature = "profile")]
+impl Drop for FlushOnExit {
+    fn drop(&mut self) {
+        crate::obs::flush();
     }
 }

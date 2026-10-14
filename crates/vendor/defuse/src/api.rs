@@ -918,10 +918,18 @@ pub trait Executor {
     /// Runs `run(i)` for `i < n`, appending the results in index order.
     fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> RunResult + Sync), out: &mut Vec<RunResult>);
 
-    /// How many jobs it may run at once: 1 for one thread (the evaluation
-    /// then runs in steps, a scheduling policy with identical results).
+    /// How many jobs it may run at once: 1 for one thread.
     fn parallelism(&self) -> usize {
         1
+    }
+
+    /// Whether an evaluation on one thread goes in steps (a scheduling
+    /// policy with identical results): each step's batch is chosen by the
+    /// [`Scheduler`], and its commits are seen by the next step. `false`
+    /// (the default): the one worker runs free, in text order, each
+    /// commit seen at once. [`Sequential`] steps.
+    fn steps(&self) -> bool {
+        false
     }
 
     /// Runs `f(i)` for `i < n`, possibly in parallel.
@@ -945,6 +953,10 @@ pub struct Sequential;
 impl Executor for Sequential {
     fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> RunResult + Sync), out: &mut Vec<RunResult>) {
         out.extend((0..n).map(run));
+    }
+
+    fn steps(&self) -> bool {
+        true
     }
 }
 

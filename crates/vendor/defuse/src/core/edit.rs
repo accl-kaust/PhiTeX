@@ -95,6 +95,11 @@ impl Shared {
             pubs_dirty: Mutex::new(crate::values::FxHashSet::default()),
             undeclared: Mutex::new(FxHashMap::default()),
             q: Mutex::new(super::QueueInner::default()),
+            shards: (0..super::QSHARDS)
+                .map(|_| Mutex::new(std::collections::BinaryHeap::new()))
+                .collect(),
+            next_worker: AtomicUsize::new(0),
+            work: AtomicUsize::new(0),
             qlen: AtomicUsize::new(0),
             sleepers: AtomicUsize::new(0),
             idle_mx: Mutex::new(()),
@@ -104,6 +109,7 @@ impl Shared {
             step_done: Mutex::new(Vec::new()),
             parked: Mutex::new(Vec::new()),
             touched: Mutex::new(Vec::new()),
+            snaps: Mutex::new(FxHashMap::default()),
             reruns: Mutex::new(Vec::new()),
             any_preds: AtomicBool::new(false),
             any_proj: AtomicBool::new(false),

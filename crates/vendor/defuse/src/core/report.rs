@@ -28,6 +28,9 @@ pub(crate) struct Heights {
 /// A node on the height walk's stack: its reads and how many are done.
 type Frame = (Slot, Vec<(Slot, Cause)>, usize);
 
+/// A node and its reads (gathered ahead of the height walk).
+type NodeDeps = (Slot, Vec<(Slot, Cause)>);
+
 fn rank(c: &Cause) -> u8 {
     match c {
         Cause::Changed { .. } => 0,
@@ -39,7 +42,7 @@ fn rank(c: &Cause) -> u8 {
 }
 
 impl Engine {
-    pub(crate) fn fill_report(&mut self, rep: &mut Report) {
+    pub(crate) fn fill_report(&mut self, rep: &mut Report, exec: Option<&mut dyn crate::api::Executor>) {
         let sh = &self.sh;
         let c = &sh.c;
         // Executions: complete runs (a stopped attempt is not one).
@@ -120,6 +123,7 @@ impl Engine {
         }
         // Canonical counters: the snapshots against the state now.
         let touched = std::mem::take(&mut *lock(&sh.touched));
+        let mut snaps = std::mem::take(&mut *lock(&sh.snaps));
         let mut ran: Vec<Slot> = Vec::new();
         let mut seen = crate::values::FxHashSet::default();
         for s in touched {
@@ -136,7 +140,12 @@ impl Engine {
                 }
             }
             let d = r.data();
-            let Some(snap) = d.snap else { continue };
+            let snap = snaps.remove(&s).unwrap_or(super::Snap {
+                done: false,
+                sig: 0,
+                out: None,
+                binds: 0,
+            });
             let st = r.st();
             let done = st != S_FREE && st != S_INERT && r.has(F_DONE) && d.res.is_some();
             if !done {
@@ -155,7 +164,12 @@ impl Engine {
             }
         }
         rep.pending_sets = rep.pending_waits;
-        self.update_heights();
+        #[cfg(feature = "profile")]
+        let th = std::time::Instant::now();
+        self.update_heights(exec);
+        #[cfg(feature = "profile")]
+        #[allow(clippy::cast_possible_truncation)]
+        crate::obs::add_impl("report_heights", th.elapsed().as_nanos() as u64);
         let path = self.heights.lev.keys().next_back().copied().unwrap_or(0);
         rep.critical_path = path;
         let hs = &self.heights.of;
@@ -214,7 +228,7 @@ impl Engine {
     /// Brings the kept heights up to date from the nodes that changed
     /// since the last report (all of them the first time): a node's height
     /// is recomputed from its reads, and a change passes to its readers.
-    fn update_heights(&mut self) {
+    fn update_heights(&mut self, exec: Option<&mut dyn crate::api::Executor>) {
         let sh = &self.sh;
         let mut seeds = std::mem::take(&mut *lock(&sh.hdirty));
         if !self.heights.init {
@@ -228,6 +242,11 @@ impl Engine {
             }
         }
         let deps = |s: Slot| -> Vec<(Slot, Cause)> {
+            #[cfg(feature = "profile")]
+            let t0 = std::time::Instant::now();
+            #[cfg(feature = "profile")]
+            #[allow(clippy::cast_possible_truncation)]
+            let _g = Tick(t0);
             let r = sh.rec(s);
             let d = r.data();
             let mut out = Vec::new();
@@ -344,12 +363,33 @@ impl Engine {
                 h.rev.remove(&x);
             }
         }
+        // The region's reads, gathered on the executor's threads when it
+        // is large (the walk below takes them from here).
+        let mut pre: FxHashMap<Slot, Vec<(Slot, Cause)>> = FxHashMap::default();
+        if let Some(exec) = exec
+            && exec.parallelism() > 1
+            && order.len() >= 1 << 13
+        {
+            const CHUNK: usize = 1024;
+            let chunks: Vec<&[Slot]> = order.chunks(CHUNK).collect();
+            let out: Vec<std::sync::Mutex<Vec<NodeDeps>>> =
+                chunks.iter().map(|_| std::sync::Mutex::new(Vec::new())).collect();
+            exec.for_each(chunks.len(), &|i| {
+                let v: Vec<NodeDeps> = chunks[i].iter().map(|&x| (x, deps(x))).collect();
+                *lock(&out[i]) = v;
+            });
+            pre.reserve(order.len());
+            for m in out {
+                pre.extend(m.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
+            }
+        }
+        let mut deps_of = |x: Slot| pre.remove(&x).unwrap_or_else(|| deps(x));
         for &root in &order {
             if h.of.contains_key(&root) {
                 continue;
             }
             // Iterative DFS.
-            let mut stack: Vec<Frame> = vec![(root, deps(root), 0)];
+            let mut stack: Vec<Frame> = vec![(root, deps_of(root), 0)];
             let mut on: crate::values::FxHashSet<Slot> = crate::values::FxHashSet::default();
             on.insert(root);
             while let Some(top) = stack.last_mut() {
@@ -359,7 +399,7 @@ impl Engine {
                     top.2 += 1;
                     if !h.of.contains_key(&x) && !on.contains(&x) {
                         on.insert(x);
-                        let dx = deps(x);
+                        let dx = deps_of(x);
                         stack.push((x, dx, 0));
                     }
                     continue;
@@ -420,5 +460,16 @@ impl Engine {
             .into_iter()
             .map(|(s, h, c, _)| (self.sh.node_id(s), h, c))
             .collect()
+    }
+}
+
+#[cfg(feature = "profile")]
+struct Tick(std::time::Instant);
+
+#[cfg(feature = "profile")]
+impl Drop for Tick {
+    fn drop(&mut self) {
+        #[allow(clippy::cast_possible_truncation)]
+        crate::obs::add_impl("report_deps", self.0.elapsed().as_nanos() as u64);
     }
 }

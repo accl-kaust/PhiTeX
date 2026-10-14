@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use super::{
     Br, ClaimS, Data, DefE, DefVal, F_APP, F_DONE, F_HAS_OUT, F_IN_PCLAIM, F_IN_PEFF, F_IN_WILD, F_NEEDS_RUN, F_PCLAIM,
     F_PEFF, F_PSET, F_QUEUED, F_SCLAIM, F_WILD, Frame, K_NONE, K_PENDING, K_VALUE, Kind, MayDefineS, NIL, Rec, Role,
-    S_CLEAN, S_DIRTY, S_FREE, S_INERT, S_MARKER, S_NEW, S_PARK, S_RUN, S_STEP, Shared, Slot, Static, Unit, lock, wlock,
+    S_CLEAN, S_DIRTY, S_FREE, S_INERT, S_MARKER, S_NEW, S_PARK, S_RUN, S_STEP, Shared, Slot, Static, StaticRare, Unit,
+    lock, wlock,
 };
 use crate::api::{Cause, Effect, Locality, OpId};
 use crate::values::{Field, ValueId};
@@ -51,6 +52,9 @@ pub(crate) struct Notes {
     pub frames_from: Vec<Slot>,
     /// Nodes to enqueue (new or released).
     pub enqueue: Vec<Slot>,
+    /// Static facts of texts about to be created, by node id, found
+    /// before the structural lock (`register` adds the claim).
+    pub pre: crate::values::FxHashMap<u64, Static>,
 }
 
 impl Shared {
@@ -75,6 +79,8 @@ impl Shared {
             live: AtomicBool::new(true),
             s: std::sync::RwLock::new(()),
             sv: AtomicU64::new(0),
+            wflag: AtomicBool::new(false),
+            stripes: std::sync::OnceLock::new(),
             label_epoch: AtomicU64::new(0),
             frame_epoch: AtomicU64::new(0),
             env: std::sync::RwLock::new(crate::values::FxHashMap::default()),
@@ -726,25 +732,42 @@ impl Shared {
     /// Runs the operation's static hooks on `s`'s text.
     pub(crate) fn analyze(&self, s: Slot) -> Static {
         let (op, args) = self.text(s);
-        let o = self.ops[op.0 as usize].clone();
+        let mut st = self.analyze_text(op, &args);
+        self.analyze_claim(s, op, &args, &mut st);
+        st
+    }
+
+    /// The claim hooks on `s`'s text (they look at its following siblings).
+    fn analyze_claim(&self, s: Slot, op: OpId, args: &[ValueId], st: &mut Static) {
+        let o = &self.ops[op.0 as usize];
         let v = &self.values;
-        let defs = o.defs(&args, v);
-        let may = if defs.is_some() {
-            MayDefineS::Nothing
-        } else {
-            o.may_define(&args, v).into()
-        };
-        let effect = o.effect(&args, v);
         let mut it = self.following_texts(s);
-        let claim: ClaimS = o.claim(&args, v, &mut it).into();
-        let limit = if claim == ClaimS::Pending {
+        st.claim = o.claim(args, v, &mut it).into();
+        let limit = if st.claim == ClaimS::Pending {
             let mut it = self.following_texts(s);
-            o.claim_limit(&args, v, &mut it)
+            o.claim_limit(args, v, &mut it)
         } else {
             None
         };
-        let reads = o.reads(&args, v);
-        let contribs = o.static_contribs(&args, v).map(|mut cs| {
+        if limit.is_some() || st.limit().is_some() {
+            st.rare.get_or_insert_with(Box::default).limit = limit;
+        }
+    }
+
+    /// The static hooks that read the text alone (no claim): what a
+    /// commit can find before it takes its unit's structural lock.
+    pub(crate) fn analyze_text(&self, op: OpId, args: &[ValueId]) -> Static {
+        let o = self.ops[op.0 as usize].clone();
+        let v = &self.values;
+        let defs = o.defs(args, v);
+        let may = if defs.is_some() {
+            MayDefineS::Nothing
+        } else {
+            o.may_define(args, v).into()
+        };
+        let effect = o.effect(args, v);
+        let reads = o.reads(args, v);
+        let contribs = o.static_contribs(args, v).map(|mut cs| {
             // One per field (later ones combine as a run's would).
             let mut out: Vec<(Field, ValueId)> = Vec::new();
             for (f, x) in cs.drain(..) {
@@ -756,19 +779,22 @@ impl Shared {
             }
             out
         });
-        let preds = o.predicted_defs(&args, v).map(Vec::into_boxed_slice);
+        let preds = o.predicted_defs(args, v).map(Vec::into_boxed_slice);
         if preds.is_some() {
             self.any_preds.store(true, Ordering::Relaxed);
         }
+        let rare = StaticRare {
+            limit: None,
+            reads,
+            contribs,
+            preds,
+        };
         Static {
             defs,
             may,
             effect,
-            claim,
-            limit,
-            reads,
-            contribs,
-            preds,
+            claim: ClaimS::None,
+            rare: (rare != StaticRare::default()).then(|| Box::new(rare)),
         }
     }
 
@@ -810,7 +836,15 @@ impl Shared {
         if r.data().kind != Kind::Node {
             return;
         }
-        let stat = self.analyze(s);
+        let id = r.id.load(Ordering::Acquire);
+        let stat = match notes.pre.remove(&id) {
+            Some(mut st) => {
+                let (op, args) = self.text(s);
+                self.analyze_claim(s, op, &args, &mut st);
+                st
+            }
+            None => self.analyze(s),
+        };
         let mut fl = 0;
         if stat.defs.is_none() {
             fl |= F_PSET;
@@ -826,14 +860,14 @@ impl Shared {
             ClaimS::Count(_) => fl |= F_SCLAIM,
             ClaimS::None => {}
         }
-        if stat.contribs.is_some() {
+        if stat.contribs().is_some() {
             fl |= super::F_SCONTRIB;
         }
         r.clear(F_PSET | F_WILD | F_PEFF | F_PCLAIM | F_SCLAIM | super::F_SCONTRIB);
         r.set(fl);
         // Declared contributions go in before the run (unless a committed
         // run's already stand).
-        if let Some(cs) = &stat.contribs
+        if let Some(cs) = stat.contribs()
             && r.data().res.is_none()
         {
             for &(f, x) in cs {
@@ -1380,7 +1414,7 @@ impl Shared {
                 d.take_claimed(),
                 std::mem::take(&mut d.waiters),
                 std::mem::take(&mut d.out_users),
-                (d.stat.defs.clone(), d.stat.contribs.clone()),
+                (d.stat.defs.clone(), d.stat.contribs().cloned()),
             )
         };
         let (stat_defs, stat_contribs) = stat_defs;
@@ -1584,18 +1618,24 @@ impl Shared {
         let ep = self.epoch.load(Ordering::Relaxed);
         let r = self.rec(s);
         let mut d = r.data();
-        if d.snap_epoch == ep {
+        #[allow(clippy::cast_possible_truncation)]
+        let ep32 = ep as u32;
+        if d.snap_epoch == ep32 {
             return;
         }
-        d.snap_epoch = ep;
-        let done = r.has(F_DONE) && d.res.is_some();
-        d.snap = Some(super::Snap {
-            done,
+        d.snap_epoch = ep32;
+        // (Only a node with a committed run keeps one: a new node compares
+        // as not done.)
+        let snap = d.res.is_some().then(|| super::Snap {
+            done: r.has(F_DONE),
             sig: d.res.as_ref().map_or(0, |c| c.sig),
             out: d.res.as_ref().map(|c| c.output),
             binds: d.res.as_ref().map_or(0, |c| c.binds),
         });
         drop(d);
+        if let Some(sn) = snap {
+            lock(&self.snaps).insert(s, sn);
+        }
         lock(&self.touched).push(s);
         lock(&self.hdirty).push(s);
     }
@@ -1946,7 +1986,7 @@ impl Shared {
     pub(crate) fn settle_predictions(&self, s: Slot) {
         let preds = {
             let d = self.rec(s).data();
-            match &d.stat.preds {
+            match d.stat.preds() {
                 Some(p) => p.to_vec(),
                 None => return,
             }
@@ -2170,14 +2210,14 @@ impl Shared {
         if r.flags.fetch_or(F_QUEUED, Ordering::AcqRel) & F_QUEUED != 0 {
             return;
         }
-        let mut q = lock(&self.q);
+        self.work.fetch_add(1, Ordering::SeqCst);
         if self.stepped() {
+            let mut q = lock(&self.q);
             q.next.push(s);
+            self.qlen.fetch_add(1, Ordering::SeqCst);
         } else {
-            q.cur.push(std::cmp::Reverse((r.lab(), s)));
+            self.push_ready(s);
         }
-        self.qlen.fetch_add(1, Ordering::SeqCst);
-        drop(q);
         self.wake_idle(false);
     }
 

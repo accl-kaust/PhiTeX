@@ -199,7 +199,7 @@ impl<'a> Ctx<'a> {
                 mode: DMode::Use,
                 ans: DAns::Loop(lv),
                 sens: false,
-                sites: Vec::new(),
+                sites: Box::default(),
                 spec: None,
                 proj: 0,
             });
@@ -229,7 +229,7 @@ impl<'a> Ctx<'a> {
                     mode: DMode::Use,
                     ans: o.ans,
                     sens: o.sens,
-                    sites: o.sites,
+                    sites: Box::default(),
                     spec: o.guess,
                     proj: 0,
                 });
@@ -274,7 +274,7 @@ impl<'a> Ctx<'a> {
                     mode,
                     ans: o.ans,
                     sens: true,
-                    sites: o.sites,
+                    sites: o.sites.into_boxed_slice(),
                     spec: o.guess,
                     proj: 0,
                 });
