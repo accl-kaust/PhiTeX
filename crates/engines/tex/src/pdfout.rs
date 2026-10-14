@@ -587,12 +587,29 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
 /// one.
 fn before(r: &mut Run<'_, '_>) -> R<(u64, Option<Arc<Fold>>)> {
     let k0 = u64::from_ne_bytes(r.cint(crate::fields::cell::PDF_STATE)?.to_ne_bytes());
+    if let Some((k, a)) = &r.pdf_fold
+        && *k == k0
+    {
+        return Ok((k0, Some(a.clone())));
+    }
     let a = states()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&k0)
         .cloned();
     Ok((k0, a))
+}
+
+/// The writer's state a run's last step made, where other nodes find
+/// it: the run ends (finishes or parks) with `pdf:state` naming it.
+pub(crate) fn publish(fold: Option<(u64, Arc<Fold>)>) {
+    if let Some((k, a)) = fold {
+        states()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(k)
+            .or_insert(a);
+    }
 }
 
 /// The forms' part of the fold's state where this node is.
@@ -622,9 +639,22 @@ pub(crate) fn step_forms<T>(
     // the inputs were read where they were made; the key is the state
     let _ = input;
     let v = r.v;
-    let (_, before) = before(r)?;
+    let (k0, before) = before(r)?;
+    // (the state this run's previous step left is the run's own: taken,
+    // not copied, when nothing else holds it)
+    let before = before.map(|a| {
+        if r.pdf_fold.as_ref().is_some_and(|(k, _)| *k == k0) {
+            r.pdf_fold = None;
+        }
+        Arc::try_unwrap(a).unwrap_or_else(|a| Fold {
+            st: a.st.clone(),
+            bytes: a.bytes.clone(),
+            forms: a.forms.clone(),
+            bytes_hash: a.bytes_hash,
+        })
+    });
     let (mut st, mut bytes, mut forms, bytes_hash) = if let Some(a) = before {
-        (a.st.clone(), a.bytes.clone(), a.forms.clone(), a.bytes_hash)
+        (a.st, a.bytes, a.forms, a.bytes_hash)
     } else {
         let date = r
             .get_loc(crate::fields::cell::PDFDATE)?
@@ -673,18 +703,19 @@ pub(crate) fn step_forms<T>(
     }
     let fh = phitex_defuse::hash_bytes(0, format!("{:?}", (&forms.whats, &forms.fonts)).as_bytes());
     let k1 = phitex_defuse::hash_words(st.digest(), &[bytes_hash, fh]).max(1);
-    states()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(k1)
-        .or_insert_with(|| {
-            Arc::new(Fold {
-                st,
-                bytes,
-                forms,
-                bytes_hash,
-            })
-        });
+    // (kept in the run: only the state the run ends with can be read
+    // elsewhere, [`publish`]; a run of a thousand writer commands, a
+    // format's `\pdfglyphtounicode` table, keeps one state, not a
+    // thousand copies)
+    r.pdf_fold = Some((
+        k1,
+        Arc::new(Fold {
+            st,
+            bytes,
+            forms,
+            bytes_hash,
+        }),
+    ));
     r.set(
         "pdf:state",
         v.int(i64::from_ne_bytes(k1.to_ne_bytes())),
