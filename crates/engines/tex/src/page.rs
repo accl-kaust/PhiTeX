@@ -444,7 +444,9 @@ impl Run<'_, '_> {
                 self.cx.publish(f, v.int(i64::try_from(j).unwrap_or(0)));
             }
         }
-        self.set("pp:probe", v.int(i64::from(!probes.is_empty())), true);
+        if !probes.is_empty() {
+            self.set("pp:probe", v.int(1), true);
+        }
         // how many steps the chain has: the writer folds their deltas
         // up to here ([`FinalState`])
         self.set("pp:steps", v.int(i64::try_from(pages).unwrap_or(0)), true);
