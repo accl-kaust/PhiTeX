@@ -165,6 +165,25 @@ impl Operation for Exec {
     fn name(&self) -> &'static str {
         "exec"
     }
+
+    /// A package load whose record matches (and predictions on,
+    /// [`crate::Options::pkg_predict`]): the values its last run defined,
+    /// so later loads run on them, confirmed by value when it runs.
+    fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        if !crate::pkgrec::is_load(v, args) {
+            return None;
+        }
+        let loads = ops(&self.0)
+            .pkg_loads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let &fr = args.first()?;
+        let &f = list_of(v, fr).first()?;
+        let text = str_of(v, *list_of(v, f).get(1)?);
+        let p = loads.prediction(v, &text)?;
+        Some(p.into_iter().map(|(n, _, x)| (v.field(&n), x)).collect())
+    }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
     }

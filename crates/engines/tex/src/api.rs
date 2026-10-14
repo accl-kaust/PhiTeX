@@ -982,6 +982,10 @@ pub struct Stats {
     pub speculations: u64,
     pub confirmations: u64,
     pub mispredictions: u64,
+    /// Predicted definitions ([`Options::pkg_predict`]) the runs
+    /// confirmed, and refuted (their readers re-ran).
+    pub predictions_confirmed: u64,
+    pub predictions_refuted: u64,
     /// Speculative runs dropped at a stop (their guess is then blocked
     /// until its node leaves work).
     pub spec_stops: u64,
@@ -1162,6 +1166,8 @@ impl Stats {
         self.speculations += r.speculations;
         self.confirmations += r.confirmations;
         self.mispredictions += r.mispredictions;
+        self.predictions_confirmed += r.predictions_confirmed;
+        self.predictions_refuted += r.predictions_refuted;
         self.spec_stops += r.spec_stops;
         self.spec_shape_changes += r.spec_shape_changes;
         self.raises += r.raises;
@@ -1312,6 +1318,7 @@ impl Graph {
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
             pkg_log: Arc::new(Mutex::new(Vec::new())),
+            pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
         };
         let _ = shared.set(ops.clone());
@@ -2855,6 +2862,12 @@ impl Build {
             optimistic,
             predict,
         )));
+        // (the loads' predictions, asked by the engine per load node)
+        g.ops
+            .pkg_loads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone_from(&g.loads);
         let (nodes, incr) = g.push_document(unit, document, defs, doc, Some(&inputs));
         // (the files sliced in are read: listed, and watched)
         for n in g.inputs_read.clone() {

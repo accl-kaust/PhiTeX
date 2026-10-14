@@ -330,9 +330,13 @@ fn latex_loads_are_runs_of_their_own() {
 }
 
 fn build_predicting(d: &Path, doc: &str, recs: Vec<u8>) -> Build {
+    build_predicting_with(d, doc, recs, Speculation::Off)
+}
+
+fn build_predicting_with(d: &Path, doc: &str, recs: Vec<u8>, spec: Speculation) -> Build {
     let o = Options {
         pkg_predict: true,
-        ..opts(d, Speculation::Off, recs)
+        ..opts(d, spec, recs)
     };
     common::build(o, Some(&common::plain()), doc)
 }
@@ -382,6 +386,16 @@ fn prediction_is_right_when_nothing_changed() {
         "wrong: {:?}",
         second.stats.pkg_predict_wrong
     );
+    // under speculation the engine runs readers on the predictions:
+    // confirmed, none refuted, the same output
+    let spec = build_predicting_with(&d, &doc, second.export_pkgrec(), Speculation::All);
+    note("predicted, speculating", &spec);
+    same("predicted, speculating", &spec.output().0, &want);
+    eprintln!(
+        "predictions confirmed {} refuted {}",
+        spec.stats.predictions_confirmed, spec.stats.predictions_refuted
+    );
+    assert_eq!(spec.stats.predictions_refuted, 0);
 }
 
 /// An earlier load changed (its file did: its key no longer matches),
@@ -417,5 +431,22 @@ fn prediction_is_wrong_when_an_earlier_load_changed() {
         second.stats.pkg_predict_wrong,
         vec!["\\usepackage{pb}: cs:bb".to_owned()],
         "only \\bb, which reads \\aa, is predicted wrong"
+    );
+    // under speculation: the wrong prediction is refuted by value, the
+    // output is the sequential build's
+    std::fs::write(d.join("pa.sty"), "\\def\\aa{A}\n").unwrap();
+    let first = build_predicting(&d, &doc, Vec::new());
+    let recs = first.export_pkgrec();
+    std::fs::write(d.join("pa.sty"), "\\def\\aa{Z}\n").unwrap();
+    let spec = build_predicting_with(&d, &doc, recs, Speculation::All);
+    note("predicted wrong, speculating", &spec);
+    same(
+        "predicted wrong, speculating",
+        &spec.output().0,
+        &sequential(&d, &doc),
+    );
+    eprintln!(
+        "predictions confirmed {} refuted {}",
+        spec.stats.predictions_confirmed, spec.stats.predictions_refuted
     );
 }
