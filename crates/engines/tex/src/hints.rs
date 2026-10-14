@@ -482,12 +482,14 @@ fn add_head_dyn(st: &mut Option<Vec<&'static str>>, h: &str) {
 /// families and cells, the parameters' fields), so each distinct one
 /// made at run time is leaked once and a bound holds no strings.
 fn head(h: &str) -> &'static str {
-    type Heads = Mutex<phitex_defuse::FxHashSet<&'static str>>;
+    type Heads = std::sync::RwLock<phitex_defuse::FxHashSet<&'static str>>;
     static H: OnceLock<Heads> = OnceLock::new();
-    let mut set = H
-        .get_or_init(Heads::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let heads = H.get_or_init(Heads::default);
+    // (read shared: the chunks of a document are analysed on the pool)
+    if let Some(&x) = heads.read().unwrap_or_else(PoisonError::into_inner).get(h) {
+        return x;
+    }
+    let mut set = heads.write().unwrap_or_else(PoisonError::into_inner);
     if let Some(&x) = set.get(h) {
         return x;
     }
