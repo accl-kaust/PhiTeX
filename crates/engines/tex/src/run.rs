@@ -590,6 +590,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
+        if let Ok(x) = r
+            && crate::rerun::on()
+        {
+            crate::rerun::read(self.v, self.cx.node().raw(), f, x);
+        }
         self.st.fill(loc, r?);
         Ok(())
     }
@@ -1366,7 +1371,12 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The fields the run publishes: its definitions at the base level
     /// but a local one equal to the value it read (the same binding).
     pub(crate) fn published_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self.st.published(self.v).into_iter().map(|x| x.0).collect();
+        let locs: Vec<Loc> = self
+            .st
+            .published(self.v, false)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
     }
 
@@ -1383,7 +1393,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// [`Run::def_fields`]' locations, as the state table publishes them.
     fn defined_now(&self) -> Vec<Loc> {
         self.st
-            .published(self.v)
+            .published(self.v, false)
             .into_iter()
             .map(|(l, _, _)| l)
             .collect()
@@ -1826,6 +1836,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
         crate::hints::register_text(f.name, &t);
         let mut out = Vec::new();
+        // (a list some text before the file assigned may be in force at
+        // its start, §1091)
+        let mut lists = crate::hints::ParLists::unknown();
         for &(s, e) in &t.slices {
             if e <= f.off {
                 continue;
@@ -1833,7 +1846,8 @@ impl<'c, 'a> Run<'c, 'a> {
             let a = s.max(f.off);
             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
             let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
-            args.push(crate::hints::hint_arg(v, &t, s));
+            let lists = lists.step(&t, s);
+            args.push(crate::hints::hint_arg_in(v, &t, s, lists.as_deref()));
             out.push(args);
         }
         out
@@ -1844,6 +1858,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let r = self.cx.scope_kind();
         if r.is_err() {
             self.trace_stop("scope kind");
+        }
+        if let Ok(x) = r
+            && crate::rerun::on()
+        {
+            crate::rerun::note(self.v, self.cx.node().raw(), "(scope kind)", x);
         }
         Ok(r?)
     }
@@ -2035,6 +2054,33 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        if crate::rerun::on() {
+            let v = self.v;
+            let text = self
+                .cx
+                .args()
+                .first()
+                .and_then(|&l| list_of(v, l).first().map(|&f| v.render(f)))
+                .unwrap_or_default();
+            let published: Vec<String> = self
+                .st
+                .published(v, false)
+                .into_iter()
+                .map(|(l, _, _)| l)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|l| {
+                    let f = self.loc_field(l);
+                    crate::val::field_name(v, f)
+                })
+                .collect();
+            crate::rerun::finish(
+                self.cx.node().raw(),
+                &format!("{:?}", self.cx.op()),
+                &text,
+                published,
+            );
+        }
         crate::pdfout::publish(self.pdf_fold.take());
         // (a command node's, empty too: what its text declares,
         // `Exec::static_contribs`)
@@ -2056,7 +2102,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let t_pub = std::time::Instant::now();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
-            .published(self.v)
+            .published(self.v, false)
             .into_iter()
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
