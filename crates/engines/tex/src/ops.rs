@@ -9,7 +9,7 @@ use phitex_defuse::{
     Claim, Ctx, Effect, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
 };
 
-use crate::run::{Halt, Ops, R, Run, decode_frames};
+use crate::run::{Halt, Ops, R, Run};
 use crate::val::{int_of, list_of, str_of};
 
 /// The operations' ids, known once all are registered.
@@ -142,7 +142,7 @@ pub(crate) fn run_node_parking(
             // nothing after the error is read: the rest of the input is
             // claimed, and the main list ends here for the page builder
             // (the page it holds is not shipped)
-            r.frames.clear();
+            r.input = crate::input::Input::new();
             r.claim_rest = true;
             // (for the output: pdfTeX writes no PDF file after one)
             let _ = r.log("fatal", "");
@@ -234,16 +234,17 @@ impl Operation for Exec {
             .and_then(|b| b.claim)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         let hint = crate::hints::hint_of_args(cx.values(), &args);
         run_node_parking(cx, ops(&self.0), true, |r| {
             // (a resumed run has done this, and continues its commands)
             if !r.resumed {
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
-                let fs = decode_frames(r.v, &args);
-                let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
+                let fs = crate::run::decode_segs(r.v, &args);
+                let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
                 crate::hints::count(r, if tokens { 5 } else { 6 });
-                r.frames.extend(fs);
+                r.input.append_text(fs);
                 if let Some((c, k)) = crate::run::carried_conds(r.v, &args) {
                     r.conds = c;
                     r.if_codes = k;
@@ -309,6 +310,7 @@ impl Operation for Put {
         Some(out)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         let o = ops(&self.0);
         let v = cx.values();
@@ -385,6 +387,7 @@ impl Operation for Dvi {
         Some(Vec::new())
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
         crate::page::dvi(cx, &o)
     }
@@ -428,6 +431,7 @@ impl Operation for Files {
         Some(Vec::new())
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
         let names: Vec<String> = cx
             .use_field(v.field("loopfiles"))?
@@ -454,12 +458,35 @@ impl Operation for Files {
                 .map(|(_, d)| d.as_slice())
                 .unwrap_or_default();
             let mut keys = Vec::new();
+            let trace = crate::exec::env_flag!("PHITEX_AUX_TRACE");
             for (f, val) in ds {
                 let w = v.field(&format!("wdef:{f}"));
                 if cx.is_loopback(w) {
                     cx.publish(w, *val);
                     keys.push(v.str(f));
+                    if trace {
+                        let xs = list_of(v, *val);
+                        let shown = xs
+                            .first()
+                            .map(|&x| crate::val::show_def(v, x))
+                            .unwrap_or_default();
+                        eprintln!(
+                            "aux-trace: publish {name} {f} = {shown} (id {:?})",
+                            val.raw()
+                        );
+                    }
                 }
+            }
+            if trace {
+                let t = texts
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map_or("", |(_, t)| t.as_str());
+                eprintln!(
+                    "aux-trace: publish {name}: {} keys, text {} bytes:\n{t}",
+                    keys.len(),
+                    t.len()
+                );
             }
             cx.publish(k, v.list(keys));
         }
@@ -473,6 +500,13 @@ impl Operation for Files {
                 || v.list(Vec::new()),
                 |(_, t)| v.list(vec![v.str(&format!("./{name}")), v.str(t)]),
             );
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                let t = texts
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or("", |(_, t)| t.as_str());
+                eprintln!("aux-trace: publish wfile {name}: {} bytes:\n{t}", t.len());
+            }
             cx.publish(f, x);
         }
         Ok(ValueId::UNIT)

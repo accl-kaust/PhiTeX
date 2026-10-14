@@ -483,21 +483,38 @@ fn file_hash(f: Option<&(String, Vec<u8>)>) -> u64 {
 }
 
 /// The texts of the files written: the `streams` entries (`[name]` opens
-/// a file empty, `[name, text]` adds to it), in the order first opened.
+/// a file empty, `[name, text]` adds to it, `[name, "", "close"]` closes
+/// it: what is written to it until it is opened again goes nowhere, as
+/// TeX's §1370 sends a closed stream's writes to the log), in the order
+/// first opened.
 pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut closed: Vec<String> = Vec::new();
     for &e in entries {
         let xs = list_of(v, stream_entry(v, e));
         let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
         let k = if let Some(k) = out.iter().position(|(n, _)| *n == name) {
             k
         } else {
-            out.push((name, String::new()));
+            out.push((name.clone(), String::new()));
             out.len() - 1
         };
-        match xs.get(1) {
-            Some(&t) => out[k].1.push_str(&str_of(v, t)),
-            None => out[k].1.clear(),
+        if xs
+            .get(2)
+            .is_some_and(|&c| v.as_str(c).as_deref() == Some("close"))
+        {
+            if !closed.contains(&name) {
+                closed.push(name);
+            }
+            continue;
+        }
+        if let Some(&t) = xs.get(1) {
+            if !closed.contains(&name) {
+                out[k].1.push_str(&str_of(v, t));
+            }
+        } else {
+            closed.retain(|n| *n != name);
+            out[k].1.clear();
         }
     }
     out
@@ -691,11 +708,13 @@ pub const PRELUDE_LAYOUT: u32 = 3;
 /// identity.
 const PRELUDE_MAGIC: &[u8; 8] = b"PHITEXPR";
 
-/// The vendored engine's identity: a hash of its sources, so vendoring
-/// another engine invalidates every exported prelude.
+/// The vendored engine's identity: a hash of its sources and of this
+/// crate's (`build.rs`), so vendoring another engine or changing how
+/// this crate encodes its state invalidates every exported prelude.
 fn engine_identity() -> u64 {
     static ID: OnceLock<u64> = OnceLock::new();
     *ID.get_or_init(|| {
+        let own = u64::from_str_radix(env!("PHITEX_TEX_SRC_HASH"), 16).unwrap_or(0);
         let srcs: [&[u8]; 9] = [
             include_bytes!("../../../vendor/defuse/Cargo.toml"),
             include_bytes!("../../../vendor/defuse/src/lib.rs"),
@@ -707,7 +726,7 @@ fn engine_identity() -> u64 {
             include_bytes!("../../../vendor/defuse/src/hash.rs"),
             include_bytes!("../../../vendor/defuse/src/obs.rs"),
         ];
-        let mut h = 0u64;
+        let mut h = own;
         for s in srcs {
             h = phitex_defuse::hash_bytes(h ^ 0x9e37_79b9, s);
         }
@@ -1275,7 +1294,7 @@ impl Graph {
         // head of the message; the error's full form last)
         let mut out = format!("evaluation: {e}");
         let v = self.eng.values();
-        if let E::UndeclaredDefinition { field, .. } = e {
+        if let E::UndeclaredDefinition { field, .. } | E::ConflictingPublication { field } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
         // (the engine does not say which loop-backs kept changing: the
@@ -1572,10 +1591,20 @@ impl Graph {
         edits: &mut dyn phitex_defuse::EditSource,
     ) {
         let needs_f = self.eng.values().field("needs");
+        let tm = crate::exec::env_flag!("PHITEX_TEX_TIME");
+        let (mut t_prov, mut t_eval, mut t_after) = (
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        );
+        let mut t_mark = std::time::Instant::now();
         loop {
+            t_after += t_mark.elapsed();
+            let tp = std::time::Instant::now();
             if !crate::exec::env_flag!("PHITEX_NO_PROVIDER") {
                 self.provide(finder);
             }
+            t_prov += tp.elapsed();
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
@@ -1592,6 +1621,8 @@ impl Graph {
                     return;
                 }
             };
+            t_eval += t0.elapsed();
+            t_mark = std::time::Instant::now();
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
                 eprintln!("  waits by kind {:?}", r.waits_by_kind);
@@ -1632,6 +1663,29 @@ impl Graph {
                     continue;
                 }
                 declare_marks_before(&mut self.eng, n);
+                self.marks_decl.push((f, ValueId::UNIT));
+                asked = true;
+            }
+            // a document node's flush points: their `pgst:at:<node>:<k>`
+            // loop-backs declared (`flushdecl:<node>:<k>`), UNIT (the
+            // state as it is) in round one
+            let fdecl: Vec<(Field, String)> = {
+                let v = self.eng.values();
+                r.env_waits
+                    .iter()
+                    .filter_map(|&(_, f)| {
+                        field_name(v, f)
+                            .strip_prefix("flushdecl:")
+                            .map(|k| (f, k.to_owned()))
+                    })
+                    .collect()
+            };
+            for (f, key) in fdecl {
+                if self.marks_decl.iter().any(|&(g, _)| g == f) {
+                    continue;
+                }
+                let lb = self.eng.values().field(&format!("pgst:at:{key}"));
+                self.eng.declare_loopback(lb, ValueId::UNIT);
                 self.marks_decl.push((f, ValueId::UNIT));
                 asked = true;
             }
@@ -1715,6 +1769,9 @@ impl Graph {
                 // the exact writer's pages cannot be written apart:
                 // the build again, with the pages in the `pdf:state` fold
                 if kind == "pdf:fold" && self.pdf_fold.is_none() {
+                    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                        eprintln!("pdf: the pages folded again: {why}");
+                    }
                     self.pdf_fold = Some(why.clone());
                     asked = true;
                 }
@@ -1740,6 +1797,7 @@ impl Graph {
             // whether or not this round asked for more
             self.absorb_provided();
             if !asked {
+                t_after += t_mark.elapsed();
                 break;
             }
             let env = self.environment(fixpoint);
@@ -1749,6 +1807,11 @@ impl Graph {
         let v = self.eng.values();
         if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
             stats.if_depth_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
+        }
+        if tm {
+            eprintln!(
+                "settle phases: provider {t_prov:?}, evaluate (rounds, the writer's nodes among them) {t_eval:?}, after the rounds (files, loop-backs, stats) {t_after:?}"
+            );
         }
     }
 
@@ -2697,6 +2760,7 @@ impl Build {
     }
 
     fn settle(&mut self) {
+        let t_all = std::time::Instant::now();
         // the text nodes' offsets in the document, for the progress
         let mut offsets = FxHashMap::default();
         let mut off = 0u64;
@@ -2727,10 +2791,12 @@ impl Build {
             finder: self.g.input_finder(&self.opts.finder),
             text: &mut self.text,
         };
+        let t_before = t_all.elapsed();
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
             self.g.eng.set_version(v);
         }
+        let t_apply = t_all.elapsed();
         self.g.settle(
             self.unit,
             &self.opts.finder,
@@ -2739,6 +2805,7 @@ impl Build {
             &mut absorb,
         );
         // (a text taken last that changed nothing: the result is for it)
+        let t_settle = t_all.elapsed();
         if let Some(v) = absorb.unchanged {
             stats.version = stats.version.max(v);
         }
@@ -2751,6 +2818,12 @@ impl Build {
         chain_guesses(&mut self.g, &kept);
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "edit phases: before the apply (offsets, inputs) {t_before:?}, apply (intake, hint pass, slice-key diff, engine replace/insert/remove: `edit apply`) {:?}, settle (`settle phases`) {:?}, after (stats, guesses kept) {:?}",
+                t_apply.saturating_sub(t_before),
+                t_settle.saturating_sub(t_apply),
+                t_all.elapsed().saturating_sub(t_settle)
+            );
             let (nodes, units, values) = self.sizes();
             let (node, use_) = Engine::record_sizes();
             let rss = std::fs::read_to_string("/proc/self/status")
@@ -3684,6 +3757,7 @@ fn declare_fields(eng: &mut Engine) {
         "ifviol",
         "streams",
         "wplan",
+        "flushplan",
         "fread",
         "pagefxs",
         "pgdeltas",
