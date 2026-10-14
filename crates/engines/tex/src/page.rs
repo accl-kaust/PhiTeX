@@ -2174,17 +2174,7 @@ impl FinalState {
             // before the next break (step j+1's) is the text's again
             if let Some(ds) = tdefs.get(j + 1) {
                 for &f in ds {
-                    let name = crate::val::field_name(v, f);
-                    // (`\\count0..9` too: the text's `\\setcounter{page}`
-                    // after a break is what the next step starts from)
-                    if let Some(k) = name
-                        .strip_prefix("count:")
-                        .and_then(|k| k.parse::<usize>().ok())
-                        .filter(|&k| k < 10)
-                    {
-                        counts[k] = cx.use_field(f)?.map_or(0, |x| int_of(v, x));
-                    }
-                    state.remove(&name);
+                    state.remove(&crate::val::field_name(v, f));
                 }
             }
             cur = if state.is_empty() {
