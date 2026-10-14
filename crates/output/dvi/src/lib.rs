@@ -248,6 +248,137 @@ pub struct DviWriter {
     dvi_f: Option<FontId>,
     cur_s: i32,
     doing_leaders: bool,
+    /// While [`DviWriter::ship_out_kept`] ships a page: its first byte,
+    /// the buffer-dependent decisions so far and the fonts it uses.
+    rec: Option<Recording>,
+}
+
+/// The output buffer's state at a byte (§595–§598): `dvi_ptr`,
+/// `dvi_limit` and how many bytes back `dvi_gone` is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Phase {
+    ptr: usize,
+    limit: usize,
+    back: usize,
+}
+
+/// A decision of the writer that reads the buffer's state, at a byte
+/// counted from the page's first: a cancelled `push` (§601, `dvi_ptr>0`),
+/// a `pop` that could not cancel its `push` because the buffer had just
+/// been emptied (`dvi_ptr=0`), and whether a movement's entry was gone
+/// (§611).
+#[derive(Clone, Copy, Debug)]
+enum Ev {
+    Cancel(usize),
+    Zero(usize),
+    Gone { at: usize, e: usize, gone: bool },
+}
+
+struct Recording {
+    start: usize,
+    tape: Vec<Ev>,
+    used: Vec<FontId>,
+    new: Vec<FontId>,
+}
+
+/// A font a kept page uses: its number, `font_check`, `font_size`,
+/// `font_dsize`, area and name.
+type UsedFont = (FontId, [u8; 4], Scaled, Scaled, Vec<u8>, Vec<u8>);
+
+/// A page's bytes as [`DviWriter::ship_out_kept`] wrote them, with what
+/// they depend on outside the page: the buffer's state at its first byte
+/// (and the decisions that read it), the fonts it used and which of them
+/// it defined, the margins; and what the postamble needs of it.
+#[derive(Debug)]
+pub struct PageBytes {
+    bytes: Vec<u8>,
+    start: Phase,
+    end: Phase,
+    tape: Vec<Ev>,
+    used: Vec<UsedFont>,
+    new: Vec<(FontId, FontDef)>,
+    offsets: (Scaled, Scaled),
+    max_v: Scaled,
+    max_h: Scaled,
+    max_push: i32,
+}
+
+impl PageBytes {
+    /// The page's bytes, `bop` to `eop`.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// Whether the entry at `e` is gone at `location` (§611), noted for the
+/// page being recorded.
+fn is_gone(rec: &mut Option<Recording>, location: usize, e: usize, gone: usize) -> bool {
+    if let Some(r) = rec {
+        r.tape.push(Ev::Gone {
+            at: location - r.start,
+            e: e - r.start,
+            gone: e < gone,
+        });
+    }
+    e < gone
+}
+
+/// The buffer's state after `len` bytes from `p` with the page's
+/// decisions `tape`, when every decision comes out as it did; `None`
+/// when one does not (§598, §601, §611).
+fn replay(size: usize, p: Phase, tape: &[Ev], len: usize) -> Option<Phase> {
+    let half = size / 2;
+    let (mut ptr, mut limit, mut loc) = (p.ptr, p.limit, 0usize);
+    let mut gone = -isize::try_from(p.back).ok()?;
+    let to = |at: usize, ptr: &mut usize, limit: &mut usize, loc: &mut usize, gone: &mut isize| {
+        let mut n = at - *loc;
+        while n > 0 {
+            let step = n.min(*limit - *ptr);
+            *ptr += step;
+            n -= step;
+            if *ptr == *limit {
+                if *limit == size {
+                    *limit = half;
+                    *ptr = 0;
+                } else {
+                    *limit = size;
+                }
+                *gone += isize::try_from(half).unwrap_or(isize::MAX);
+            }
+        }
+        *loc = at;
+    };
+    for &ev in tape {
+        match ev {
+            Ev::Cancel(at) => {
+                to(at, &mut ptr, &mut limit, &mut loc, &mut gone);
+                if ptr == 0 {
+                    return None;
+                }
+                ptr -= 1;
+                loc -= 1;
+            }
+            Ev::Zero(at) => {
+                to(at, &mut ptr, &mut limit, &mut loc, &mut gone);
+                if ptr != 0 {
+                    return None;
+                }
+            }
+            Ev::Gone { at, e, gone: g } => {
+                to(at, &mut ptr, &mut limit, &mut loc, &mut gone);
+                if (isize::try_from(e).ok()? < gone) != g {
+                    return None;
+                }
+            }
+        }
+    }
+    to(len, &mut ptr, &mut limit, &mut loc, &mut gone);
+    Some(Phase {
+        ptr,
+        limit,
+        back: usize::try_from(isize::try_from(len).ok()? - gone).ok()?,
+    })
 }
 
 /// A whatsit's handle and whether leaders are being output; the answer
@@ -293,6 +424,7 @@ impl DviWriter {
             dvi_f: None,
             cur_s: -1,
             doing_leaders: false,
+            rec: None,
         };
         // §617
         w.dvi_out(op::PRE);
@@ -348,6 +480,16 @@ impl DviWriter {
     /// `dvi_pop(l)` (§601): a `pop`, or cancel the `push` at `l-1` when
     /// nothing followed it and it is still in the buffer.
     pub fn dvi_pop(&mut self, l: usize) {
+        if l == self.dvi_offset + self.dvi_ptr
+            && let Some(r) = &mut self.rec
+        {
+            let at = l - r.start;
+            r.tape.push(if self.dvi_ptr > 0 {
+                Ev::Cancel(at)
+            } else {
+                Ev::Zero(at)
+            });
+        }
         if l == self.dvi_offset + self.dvi_ptr && self.dvi_ptr > 0 {
             self.dvi_ptr -= 1;
             self.out.pop();
@@ -410,7 +552,7 @@ impl DviWriter {
                         || s == Z_SEEN + YZ_OK
                         || s == Z_SEEN + Y_OK =>
                     {
-                        if e.location < gone {
+                        if is_gone(&mut self.rec, location, e.location, gone) {
                             break;
                         }
                         // §613
@@ -420,7 +562,7 @@ impl DviWriter {
                         break;
                     }
                     s if s == NONE_SEEN + Z_OK || s == Y_SEEN + YZ_OK || s == Y_SEEN + Z_OK => {
-                        if e.location < gone {
+                        if is_gone(&mut self.rec, location, e.location, gone) {
                             break;
                         }
                         // §614
@@ -565,6 +707,14 @@ impl DviWriter {
         self.synch_h();
         self.synch_v();
         if self.dvi_f != Some(f) {
+            if let Some(r) = &mut self.rec
+                && !r.used.contains(&f)
+            {
+                r.used.push(f);
+                if !self.fonts.contains_key(&f) {
+                    r.new.push(f);
+                }
+            }
             // §621
             if let std::collections::btree_map::Entry::Vacant(e) = self.fonts.entry(f) {
                 e.insert(fonts(f));
@@ -933,6 +1083,135 @@ impl DviWriter {
         self.total_pages += 1;
         self.cur_s = -1;
         Ok(())
+    }
+
+    /// The buffer's state at the next byte.
+    fn phase(&self) -> Phase {
+        Phase {
+            ptr: self.dvi_ptr,
+            limit: self.dvi_limit,
+            back: self.location() - self.dvi_gone,
+        }
+    }
+
+    /// [`DviWriter::ship_out`], keeping the page's bytes and what they
+    /// depend on for [`DviWriter::ship_kept`].
+    ///
+    /// # Errors
+    /// As [`DviWriter::ship_out`].
+    pub fn ship_out_kept(
+        &mut self,
+        page: &BoxNode,
+        counts: [i32; 10],
+        fonts: &dyn Fn(FontId) -> FontDef,
+        whatsits: &mut Whatsits<'_>,
+    ) -> Result<PageBytes, ShipError> {
+        let start = self.location();
+        let phase = self.phase();
+        let max_push = std::mem::take(&mut self.max_push);
+        self.rec = Some(Recording {
+            start,
+            tape: Vec::new(),
+            used: Vec::new(),
+            new: Vec::new(),
+        });
+        let r = self.ship_out(page, counts, fonts, whatsits);
+        let rec = self.rec.take();
+        let page_push = self.max_push;
+        self.max_push = max_push.max(page_push);
+        r?;
+        let rec = rec.unwrap_or(Recording {
+            start,
+            tape: Vec::new(),
+            used: Vec::new(),
+            new: Vec::new(),
+        });
+        let used = rec
+            .used
+            .iter()
+            .map(|f| {
+                let d = &self.fonts[f];
+                (
+                    *f,
+                    d.checksum,
+                    d.size,
+                    d.design_size,
+                    d.area.clone(),
+                    d.name.clone(),
+                )
+            })
+            .collect();
+        let new = rec
+            .new
+            .iter()
+            .map(|f| (*f, self.fonts[f].clone()))
+            .collect();
+        Ok(PageBytes {
+            bytes: self.out[start..].to_vec(),
+            start: phase,
+            end: self.phase(),
+            tape: rec.tape,
+            used,
+            new,
+            offsets: (self.h_offset, self.v_offset),
+            max_v: page.height + page.depth + self.v_offset,
+            max_h: page.width + self.h_offset,
+            max_push: page_push,
+        })
+    }
+
+    /// Ships a page [`DviWriter::ship_out_kept`] wrote earlier, its bytes
+    /// as they were but for the pointer to the previous `bop` (§640),
+    /// when they are what `ship_out` would write here: the same margins,
+    /// the same fonts defined before it of those it uses, and every
+    /// decision that reads the buffer's state (§601, §611) coming out as
+    /// it did. False, and nothing written, otherwise.
+    pub fn ship_kept(&mut self, p: &PageBytes) -> bool {
+        if p.offsets != (self.h_offset, self.v_offset) || p.bytes.len() < 45 {
+            return false;
+        }
+        for (f, ck, sz, ds, area, name) in &p.used {
+            let new = p.new.iter().any(|(g, _)| g == f);
+            match self.fonts.get(f) {
+                None if new => {}
+                Some(d)
+                    if !new
+                        && d.checksum == *ck
+                        && d.size == *sz
+                        && d.design_size == *ds
+                        && d.area == *area
+                        && d.name == *name => {}
+                _ => return false,
+            }
+        }
+        let phase = self.phase();
+        let end = if phase == p.start {
+            p.end
+        } else {
+            match replay(self.buf_size, phase, &p.tape, p.bytes.len()) {
+                Some(e) => e,
+                None => return false,
+            }
+        };
+        let page_loc = self.location();
+        self.out.extend_from_slice(&p.bytes);
+        let back = i32::try_from(page_loc).unwrap_or(i32::MAX);
+        self.out[page_loc + 41..page_loc + 45].copy_from_slice(&self.last_bop.to_be_bytes());
+        self.last_bop = back;
+        let loc = self.location();
+        self.dvi_ptr = end.ptr;
+        self.dvi_limit = end.limit;
+        self.dvi_offset = loc - end.ptr;
+        self.dvi_gone = loc - end.back;
+        for (f, d) in &p.new {
+            self.fonts.insert(*f, d.clone());
+        }
+        self.max_v = self.max_v.max(p.max_v);
+        self.max_h = self.max_h.max(p.max_h);
+        self.max_push = self.max_push.max(p.max_push);
+        self.total_pages += 1;
+        self.cur_s = -1;
+        true
     }
 
     /// The postamble (§642–§643); no file at all without pages.

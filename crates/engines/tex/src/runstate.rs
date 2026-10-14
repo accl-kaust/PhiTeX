@@ -297,7 +297,17 @@ impl State {
         self.slot(loc).field = Some(f);
     }
 
+    /// The command code and modifier of `loc` when it is loaded and
+    /// decoded (one slot access, one flag test); `None` otherwise.
     #[inline]
+    pub(crate) fn cmd_chr_fast(&self, loc: Loc) -> Option<(u8, i32)> {
+        if loc & SPILL != 0 {
+            return None;
+        }
+        let s = self.eq.get(loc as usize)?;
+        (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
+    }
+
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }
@@ -385,6 +395,19 @@ impl State {
                 let x = self.id_of(loc, v);
                 crate::val::glue_of(v, x)
             }
+        }
+    }
+
+    /// The macro in loaded `loc`, when it holds one already decoded.
+    #[inline]
+    pub(crate) fn macro_at(&self, loc: Loc) -> Option<Rc<crate::val::Macro>> {
+        let s = self.slot_ref(loc)?;
+        if s.e.flags & LOADED == 0 {
+            return None;
+        }
+        match &s.e.val {
+            Native::Mean(Mean::Macro(m)) => Some(m.clone()),
+            _ => None,
         }
     }
 
@@ -622,6 +645,14 @@ impl State {
     /// The clock.
     pub(crate) fn stamp(&self) -> u64 {
         self.stamp
+    }
+
+    /// Whether `loc` was defined after stamp `since`.
+    pub(crate) fn defined_after(&self, loc: Loc, since: u64) -> bool {
+        self.slot_ref(loc)
+            .and_then(|s| usize::try_from(s.meta).ok().filter(|&m| m > 0))
+            .and_then(|m| self.metas.get(m - 1))
+            .is_some_and(|m| m.ldef_stamp > since)
     }
 
     /// The locations with a definition at the base level.
