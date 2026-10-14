@@ -322,8 +322,9 @@ impl Open {
     }
 
     fn scan(&mut self, t: &str) {
-        if crate::hints::sets_everypar(t) {
-            self.after_sets = 3;
+        let sets = crate::hints::sets_everypar(t);
+        if sets.after > 0 {
+            self.after_sets = sets.after;
         } else if !t.trim().is_empty() {
             self.after_sets = self.after_sets.saturating_sub(1);
         }
