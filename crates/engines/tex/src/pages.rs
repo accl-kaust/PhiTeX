@@ -769,14 +769,7 @@ impl Run<'_, '_> {
         );
         if let Some(cont) = cont {
             let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
-            // (the siblings it will take: those the first pass pulled
-            // beyond this one's, its text being the rest of the same; a
-            // prediction the engine checks, `Resume::claim_limit`)
-            let predicted = self
-                .first_pulled
-                .map_or(-1, |n| i64::try_from(n.saturating_sub(self.pulled)).unwrap_or(-1));
-            self.cx
-                .follow(self.ops.resume, vec![cont, v.int(flags), v.int(predicted)]);
+            self.cx.follow(self.ops.resume, vec![cont, v.int(flags)]);
         }
         Ok(())
     }
@@ -1516,19 +1509,6 @@ impl Operation for Resume {
         _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Claim {
         Claim::Pending
-    }
-    /// The siblings the cut run's first pass pulled beyond its second:
-    /// the rest of the same text takes them again, unless the finisher
-    /// changed how it reads (a global catcode); the engine checks the
-    /// claim the run makes against it and repairs a wrong one.
-    fn claim_limit(
-        &self,
-        args: &[ValueId],
-        v: &Values,
-        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
-    ) -> Option<usize> {
-        let n = args.get(2).map(|&x| crate::val::int_of(v, x))?;
-        usize::try_from(n).ok()
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
