@@ -366,6 +366,10 @@ impl Run<'_, '_> {
                     if self.cx.is_loopback(f) {
                         self.cx.publish(f, marks.value(v, j > 0));
                     }
+                    let f = v.field(&crate::etex::fired_before_field(n));
+                    if self.cx.is_loopback(f) {
+                        self.cx.publish(f, v.int(i64::try_from(j).unwrap_or(0)));
+                    }
                 }
             }
             if let Some((ms, end)) = &rec.fired {

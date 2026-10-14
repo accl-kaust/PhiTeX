@@ -241,6 +241,13 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
         .values()
         .field(&crate::etex::marks_before_field(n.raw()));
     eng.declare_loopback(f, ValueId::UNIT);
+    // how many pages fired before the node's marker (the writer's
+    // read-time writes after a `\shipout`, `etex::page_shipped_before`)
+    let f = eng
+        .values()
+        .field(&crate::etex::fired_before_field(n.raw()));
+    let zero = eng.values().int(0);
+    eng.declare_loopback(f, zero);
 }
 
 /// Edited texts of `\\input` files by name: the text and its bytes.
@@ -3765,6 +3772,10 @@ fn declare_fields(eng: &mut Engine) {
         // writer; guess: none)
         let f = eng.values().field(&format!("pgst:{j}"));
         eng.declare_loopback(f, ValueId::UNIT);
+        // whether page j's step shipped a page (guess: no)
+        let f = eng.values().field(&crate::etex::shipped_field(j));
+        let zero = eng.values().int(0);
+        eng.declare_loopback(f, zero);
     }
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);

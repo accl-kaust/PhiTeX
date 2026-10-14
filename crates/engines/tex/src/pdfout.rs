@@ -1003,6 +1003,7 @@ pub(crate) fn ship(
     ids: &[u32],
 ) -> R<u64> {
     let v = r.v;
+    r.shipped = true;
     let xs = list_of(v, page);
     let p = xs.get(3).map(|&l| list_of(v, l)).unwrap_or_default();
     let mut resolved: FxHashMap<u32, ValueId> = FxHashMap::default();
