@@ -756,6 +756,20 @@ impl Run<'_, '_> {
     /// body.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn scan_toks(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
+        // §473: `scanner_status:=defining` or `absorbing`;
+        // `warning_index:=cur_cs`
+        let status = if macro_def {
+            crate::run::SCAN_DEFINING
+        } else {
+            crate::run::SCAN_ABSORBING
+        };
+        let was = self.scanner.replace((status, self.cur.tok));
+        let r = self.scan_toks_in(macro_def, xpand);
+        self.scanner = was;
+        r
+    }
+
+    fn scan_toks_in(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
         let mut params: Vec<Tok> = Vec::new();
         let mut body: Vec<Tok> = Vec::with_capacity(32);
         let mut hash_brace: Option<Tok> = None;

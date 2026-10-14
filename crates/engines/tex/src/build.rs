@@ -2220,6 +2220,9 @@ impl Run<'_, '_> {
         }
         let m = v.list(vec![v.int(nodes::T_END), b, g, p]);
         self.append(0, m);
+        // (nothing of the text reads the counts after the job's end: a
+        // flush before `\end`, plain's `\supereject`, costs no round)
+        self.flush_pending = None;
         // nothing after `\end` is read
         self.claim_rest = true;
         self.input = crate::input::Input::new();
@@ -2367,7 +2370,8 @@ pub(crate) fn fold_item(
         | nodes::T_FONT_AT
         | nodes::T_PDFW_AT
         | nodes::T_PDFQ_AT
-        | nodes::T_DEFS_AT => out.push(n),
+        | nodes::T_DEFS_AT
+        | nodes::T_FLUSH_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2534,6 +2538,7 @@ fn is_marker(v: &Values, x: ValueId) -> bool {
             | nodes::T_PDFW_AT
             | nodes::T_PDFQ_AT
             | nodes::T_DEFS_AT
+            | nodes::T_FLUSH_AT
     )
 }
 

@@ -77,7 +77,9 @@ pub(crate) fn run_node_parking(
         None => Run::new(cx, o),
     };
     let t_body = std::time::Instant::now();
-    let res = body(&mut r);
+    // (a flush point the node's text did not read after: read at its
+    // end, so the nodes after it read the counts the routine left)
+    let res = body(&mut r).and_then(|()| r.flush_read());
     let t_body = t_body.elapsed();
     // (a long run, the format's: its commands' time, then its finish)
     let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
@@ -472,14 +474,43 @@ impl Operation for Files {
                 .map(|(_, d)| d.as_slice())
                 .unwrap_or_default();
             let mut keys = Vec::new();
+            let trace = crate::exec::env_flag!("PHITEX_AUX_TRACE");
             for (f, val) in ds {
-                let w = v.field(&format!("wdef:{f}"));
+                let id = crate::api::wdef_id(name, f);
+                let w = v.field(&format!("wdef:{id}"));
                 if cx.is_loopback(w) {
-                    cx.publish(w, *val);
-                    keys.push(v.str(f));
+                    // (a nested file's key names that file)
+                    keys.push(v.str(if *val == ValueId::UNIT { &id } else { f }));
+                    // (a key whose value another file's lines publish)
+                    if *val == ValueId::UNIT {
+                        continue;
+                    }
+                    crate::page::lb_pub(cx, w, *val);
+                    if trace {
+                        let xs = list_of(v, *val);
+                        let shown = xs
+                            .first()
+                            .map(|&x| crate::val::show_def(v, x))
+                            .unwrap_or_default();
+                        eprintln!(
+                            "aux-trace: publish {name} {f} = {shown} (id {:?})",
+                            val.raw()
+                        );
+                    }
                 }
             }
-            cx.publish(k, v.list(keys));
+            if trace {
+                let t = texts
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map_or("", |(_, t)| t.as_str());
+                eprintln!(
+                    "aux-trace: publish {name}: {} keys, text {} bytes:\n{t}",
+                    keys.len(),
+                    t.len()
+                );
+            }
+            crate::page::lb_pub(cx, k, v.list(keys));
         }
         for name in names {
             let f = v.field(&format!("wfile:{name}"));
@@ -491,7 +522,14 @@ impl Operation for Files {
                 || v.list(Vec::new()),
                 |(_, t)| v.list(vec![v.str(&format!("./{name}")), v.str(t)]),
             );
-            cx.publish(f, x);
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                let t = texts
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or("", |(_, t)| t.as_str());
+                eprintln!("aux-trace: publish wfile {name}: {} bytes:\n{t}", t.len());
+            }
+            crate::page::lb_pub(cx, f, x);
         }
         Ok(ValueId::UNIT)
     }
