@@ -1100,6 +1100,7 @@ impl<'a> Ctx<'a> {
             env: self.env,
             env_found: self.env_found,
             publishes: self.publishes,
+            contrib_folds: (!self.contribs.is_empty()).then(|| self.eng.contrib_folds(&self.contribs)),
             contribs: self.contribs,
             watch: self.watch,
             scan: self.scan.get(),

@@ -16,7 +16,7 @@
 //! node, renumbering labels, changing a scope boundary, ...) aborts: what
 //! it wrote is dropped and its results are applied whole.
 
-use super::{Aux, Engine, FxHashMap, NO_AUX, Node, OItem, OrderOp, Report, RunResult, Slot, State, TNIL, Unit};
+use super::{Aux, Engine, FxHashMap, NO_AUX, Node, OItem, OrderOp, Report, Rerun, RunResult, Slot, State, TNIL, Unit};
 use crate::ix::{LabelIx, SlotCounts, SlotMap};
 use crate::obs::{count, span};
 use crate::ov::{OvMap, OvSet};
@@ -155,6 +155,7 @@ impl Aux {
             out_readers: self.out_readers.clone(),
             publishes: self.publishes.clone(),
             contribs: self.contribs.clone(),
+            folds: self.folds.clone(),
             static_contribs: self.static_contribs,
             decl_mask: self.decl_mask,
             claimed: self.claimed.clone(),
@@ -203,6 +204,7 @@ impl RunResult {
             env_found: self.env_found.clone(),
             publishes: self.publishes.clone(),
             contribs: self.contribs.clone(),
+            contrib_folds: self.contrib_folds.clone(),
             watch: self.watch,
             scan: self.scan,
             narrow: self.narrow.clone(),
@@ -266,6 +268,7 @@ impl Report {
             refuted_nodes,
             refutations_max,
             declarations_refuted,
+            rerun_causes,
             static_contribs_refuted,
             fuel_outs,
             steps,
@@ -327,6 +330,7 @@ impl Report {
         self.refuted_nodes += refuted_nodes;
         self.refutations_max = self.refutations_max.max(refutations_max);
         self.declarations_refuted += declarations_refuted;
+        self.rerun_causes.extend(rerun_causes);
         self.static_contribs_refuted += static_contribs_refuted;
         self.fuel_outs += fuel_outs;
         self.steps += steps;
@@ -523,6 +527,10 @@ impl Engine {
             runs_in_eval: SlotCounts::over(&self.runs_in_eval),
             causes: OvMap::over(&self.causes),
             tracing: self.tracing,
+            why: Rerun::Other,
+            batch_defined: crate::hash::FxHashSet::default(),
+            definer_due: std::sync::Mutex::default(),
+            changed_from: ValueId::NONE,
             created_in_eval: OvMap::over(&self.created_in_eval),
             run_depths: Vec::new(),
             idle_rounds: 0,
