@@ -1604,6 +1604,15 @@ impl Graph {
                     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                         eprintln!("{m}");
                     }
+                    // (what the evaluation did before it ended counts: its
+                    // runs, its wall and busy time, the round; a deadline's
+                    // stats were all zero, as if nothing had run)
+                    if let phitex_defuse::EvalError::Deadline { runs, .. } = &e {
+                        stats.runs += *runs;
+                    }
+                    stats.rounds += 1;
+                    stats.add_exec(&ex, c0, &self.eng);
+                    stats.live = self.eng.live_nodes();
                     self.eval_errors.push(m);
                     stats.add_hints(&self.eng, unit, &self.eval_errors);
                     return;
