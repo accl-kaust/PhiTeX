@@ -164,7 +164,7 @@ fn pdf_error(t: &str, p: &str) -> PdfError {
 /// The parameters pdfTeX reads when it writes: `\pdf...` registers and
 /// token lists, `\hoffset`, `\voffset`, `\mag`, and what the system
 /// gives (the date, the banner, the file name).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PdfParams {
     /// `\pdfcompresslevel` (0–9).
     pub compress_level: i32,
@@ -1083,7 +1083,7 @@ impl PdfState {
 /// write each page ahead, in parallel, before the finish writes it in
 /// order) is not compressed again. A pure function's memo, keyed by
 /// two independent hashes of the data, its length and the level.
-fn compress_memo(data: &[u8], level: i32) -> Vec<u8> {
+pub(crate) fn compress_memo(data: &[u8], level: i32) -> Vec<u8> {
     use std::hash::{Hash, Hasher};
     use std::sync::{Mutex, OnceLock, PoisonError};
     type Memo = Mutex<(
