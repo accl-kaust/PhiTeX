@@ -2096,7 +2096,9 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
-        if self.rec_load && op == self.ops.exec {
+        // (a load whose run went on into its siblings is not one load:
+        // no record of it)
+        if self.rec_load && op == self.ops.exec && self.pulled == 0 && !self.claim_rest {
             self.record_load(&published);
         }
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
@@ -2202,8 +2204,21 @@ impl<'c, 'a> Run<'c, 'a> {
     /// contributed to `pkgrecs`, and its run's times logged.
     fn record_load(&mut self, published: &[(Field, ValueId, Locality)]) {
         let v = self.v;
-        let mut files = self.fread.clone();
-        files.extend(self.fmiss.iter().map(|n| (n.clone(), 0)));
+        // (the files the job writes and reads back are the document's,
+        // never part of a load's key)
+        let mut files: Vec<(String, u64)> = self
+            .fread
+            .iter()
+            .filter(|(n, _)| !self.written_known(n))
+            .cloned()
+            .collect();
+        files.extend(
+            self.fmiss
+                .iter()
+                .filter(|n| !self.written_known(n))
+                .map(|n| (n.clone(), 0)),
+        );
+        files.dedup();
         let writes: Vec<String> = published
             .iter()
             .map(|&(f, _, _)| crate::val::field_name(v, f))
@@ -2215,8 +2230,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|l| crate::val::field_name(v, self.loc_field(l)))
             .filter(|n| !n.starts_with("file:"))
             .collect();
-        let flags = i64::from(self.effect == Effect::None)
-            | (i64::from(self.pulled == 0 && !self.claim_rest) << 1);
+        let flags = i64::from(self.effect == Effect::None) | 2;
         let node = self.cx.node().raw();
         let e = crate::pkgrec::entry(v, node, &files, &writes, &reads, flags);
         self.contribute("pkgrecs", v.seq_unit(e));
