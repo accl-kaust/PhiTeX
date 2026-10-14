@@ -192,6 +192,26 @@ impl Run<'_, '_> {
         }
     }
 
+    /// The open lists at a fatal error (§1335): the main list keeps what
+    /// it holds, up to the end (`T_ABORT`); a list open inside it, a
+    /// paragraph's or a box's, ends with the job: none of it goes on the
+    /// main list.
+    pub(crate) fn end_fatal(&mut self) {
+        let nest = std::mem::take(&mut self.nest);
+        self.abandon_levels(&nest);
+        for l in nest {
+            if l.owns && l.lid == 0 {
+                for x in l.list {
+                    self.append(0, x);
+                }
+            }
+        }
+        if self.pg.is_none() {
+            let v = self.v;
+            self.append(0, v.list(vec![v.int(nodes::T_ABORT)]));
+        }
+    }
+
     /// Leaves the run's one open group (sharing the list it is in) to
     /// the engine as a scope (`new_save_level`, §274): its kind is
     /// `[group, sid, list, mode, depth, parent kind, extra…]`, the
