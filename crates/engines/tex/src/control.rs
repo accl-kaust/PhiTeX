@@ -349,9 +349,8 @@ impl Run<'_, '_> {
                         self.off_save(&md)?;
                     }
                 } else if c == cmd::HALIGN {
-                    // §1130 `privileged`: "You can't use \halign in math
-                    // mode" (§1049, report_illegal_case)
-                    self.log("error", "illegal command")?;
+                    // §1130 `privileged` (§1051)
+                    self.report_illegal_case(&md)?;
                 } else {
                     // REDUCE-GAP: \valign
                     self.log("error", "this alignment is not supported")?;
