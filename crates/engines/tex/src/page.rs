@@ -379,7 +379,7 @@ impl Run<'_, '_> {
                     let n = u64::from_ne_bytes(node.to_ne_bytes());
                     let f = v.field(&crate::etex::marks_before_field(n));
                     if self.cx.is_loopback(f) {
-                        self.cx.publish(f, marks.value(v, j > 0));
+                        lb_pub(self.cx, f, marks.value(v, j > 0));
                     }
                 }
             }
@@ -833,7 +833,8 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         let j = r.page_index();
         if j < MAX_PAGES {
             let x = v.list(left);
-            r.cx.publish(r.keyed(crate::fields::Fam::Pagefx, &j.to_string()), x);
+            let f = r.keyed(crate::fields::Fam::Pagefx, &j.to_string());
+            lb_pub(r.cx, f, x);
             log_pub(&r.ops, "pagefx", j, vec![("pagefx".to_owned(), x)]);
             r.pagefx_pub = true;
             // (kept for the client: the next session's round-one guess)
@@ -1989,7 +1990,7 @@ impl FinalState {
         sets_before(0, &mut counts);
         let pgread0 = v.field("pgread0");
         if (!flushes.is_empty() || !sets.is_empty()) && cx.is_loopback(pgread0) {
-            cx.publish(pgread0, v.list(counts.iter().map(|&c| v.int(c)).collect()));
+            lb_pub(cx, pgread0, v.list(counts.iter().map(|&c| v.int(c)).collect()));
         }
         for j in 0..steps {
             let Some(xs) = entries.get(&j) else { continue };
@@ -2075,7 +2076,7 @@ impl FinalState {
             log_pub(o, "pgst", j, e);
             let jj = v.int(i64::try_from(j).unwrap_or(0));
             if cur != ValueId::UNIT {
-                cx.publish(v.field(&format!("pgst:{j}")), cur);
+                lb_pub(cx, v.field(&format!("pgst:{j}")), cur);
                 // (kept for the client: the next session's guess)
                 cx.contribute(
                     v.field("pgsts"),
@@ -2092,7 +2093,7 @@ impl FinalState {
             sets_before(j + 1, &mut counts);
             let cs = v.list(counts.iter().map(|&c| v.int(c)).collect());
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
-            cx.publish(v.field(&format!("pgdef:{j}")), cs);
+            lb_pub(cx, v.field(&format!("pgdef:{j}")), cs);
             cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
         }
         Self::log_refuted(o, refuted);
@@ -2115,7 +2116,7 @@ impl FinalState {
                     v.render(x)
                 );
             }
-            cx.publish(f, x);
+            lb_pub(cx, f, x);
         }
         Ok(FinalState {
             map: state.into_values().collect(),
@@ -2253,4 +2254,26 @@ impl LbLog {
         }
         out
     }
+}
+
+/// Publishes loop-back `f`'s value for the next round; `PHITEX_LOOP_TRACE`
+/// prints each publication (which keys keep changing round to round).
+pub(crate) fn lb_pub(cx: &mut Ctx<'_>, f: Field, x: ValueId) {
+    if crate::exec::env_flag!("PHITEX_LOOP_TRACE") {
+        let v = cx.values();
+        let mut shown = v.render(x);
+        if shown.len() > 160 {
+            let mut i = 160;
+            while !shown.is_char_boundary(i) {
+                i -= 1;
+            }
+            shown.truncate(i);
+        }
+        eprintln!(
+            "lb-pub {} {:x} {shown}",
+            crate::val::field_name(v, f),
+            x.raw()
+        );
+    }
+    cx.publish(f, x);
 }
