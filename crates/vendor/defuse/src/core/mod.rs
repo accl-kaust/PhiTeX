@@ -157,8 +157,9 @@ impl Rec {
     pub(crate) fn lab(&self) -> u64 {
         self.label.load(Ordering::Acquire)
     }
+    #[track_caller]
     pub(crate) fn data(&self) -> MutexGuard<'_, Box<Data>> {
-        self.d.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.d)
     }
 }
 
@@ -188,6 +189,12 @@ pub(crate) struct Static {
     pub may: MayDefineS,
     pub effect: Effect,
     pub claim: ClaimS,
+    /// What few texts declare (boxed: most declare none of it).
+    pub rare: Option<Box<StaticRare>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StaticRare {
     pub limit: Option<usize>,
     /// The operation's read hint for the text.
     pub reads: Option<Vec<Field>>,
@@ -198,6 +205,21 @@ pub(crate) struct Static {
     pub preds: Option<Box<[(Field, ValueId)]>>,
 }
 
+impl Static {
+    pub(crate) fn limit(&self) -> Option<usize> {
+        self.rare.as_ref().and_then(|r| r.limit)
+    }
+    pub(crate) fn reads(&self) -> Option<&Vec<Field>> {
+        self.rare.as_ref().and_then(|r| r.reads.as_ref())
+    }
+    pub(crate) fn contribs(&self) -> Option<&Vec<(Field, ValueId)>> {
+        self.rare.as_ref().and_then(|r| r.contribs.as_ref())
+    }
+    pub(crate) fn preds(&self) -> Option<&[(Field, ValueId)]> {
+        self.rare.as_ref().and_then(|r| r.preds.as_deref())
+    }
+}
+
 impl Default for Static {
     fn default() -> Self {
         Static {
@@ -205,10 +227,7 @@ impl Default for Static {
             may: MayDefineS::default(),
             effect: Effect::None,
             claim: ClaimS::default(),
-            limit: None,
-            reads: None,
-            contribs: None,
-            preds: None,
+            rare: None,
         }
     }
 }
@@ -304,7 +323,8 @@ pub(crate) enum Pred {
         /// Visibility depended on frames.
         sens: bool,
         /// Definition entries consulted (for value-change subscriptions).
-        sites: Vec<(Slot, u32)>,
+        /// (A sequence read's; a use's is its answer's site.)
+        sites: Box<[(Slot, u32)]>,
         /// Answered from a subject in work (speculation).
         spec: Option<Slot>,
         /// Read through this projection (0: in full).
@@ -427,7 +447,7 @@ pub(crate) struct Data {
     pub kids: Vec<Slot>,
     pub conts: Vec<Slot>,
     pub res: Option<Box<Committed>>,
-    pub kept: Option<Kept>,
+    pub kept: Option<Box<Kept>>,
     /// Nodes parked on this one (`seq` `u32::MAX`: a speculation to
     /// validate).
     pub waiters: Vec<(Slot, u32)>,
@@ -436,11 +456,11 @@ pub(crate) struct Data {
     /// The key of the last committed run's diagnostics in `Shared::diags`
     /// (0: none).
     pub diag: u64,
-    pub runs: u64,
+    /// Completed runs in this evaluation (`Limits::runs_per_node`).
+    pub runs: u32,
     pub run_epoch: u64,
     pub causes: Vec<Cause>,
-    pub snap_epoch: u64,
-    pub snap: Option<Snap>,
+    pub snap_epoch: u32,
     pub born: u64,
     /// The committed kind of a kind-pending opener.
     pub kind_val: Option<ValueId>,
@@ -544,8 +564,7 @@ impl Data {
             runs: 0,
             run_epoch: 0,
             causes: Vec::new(),
-            snap_epoch: 0,
-            snap: None,
+            snap_epoch: u32::MAX,
             born: 0,
             kind_val: None,
             x: None,
@@ -582,6 +601,10 @@ pub(crate) struct Unit {
     pub s: RwLock<()>,
     /// Odd while a writer holds `s`: lock-free readers retry when it moved.
     pub sv: AtomicU64,
+    /// A writer holds or waits for `s` (committing readers stay out).
+    pub wflag: AtomicBool,
+    /// Committing readers in, by thread stripe (made at the first).
+    pub stripes: std::sync::OnceLock<Box<[Pad]>>,
     /// Odd while labels are being rewritten.
     pub label_epoch: AtomicU64,
     /// Bumped when existing entries' frames change.
@@ -679,6 +702,16 @@ impl EnvState {
 /// An environment provider.
 pub(crate) type Provider = Box<crate::api::EnvProvider>;
 
+/// Ready nodes, lowest label first.
+pub(crate) type ReadyHeap = std::collections::BinaryHeap<std::cmp::Reverse<(u64, Slot)>>;
+
+/// Ready-queue shards when running free. One: a worker takes the lowest
+/// label overall. With 8 (a worker's own first) the queue's lock was
+/// cheaper, but nodes ran far out of text order, and under
+/// `Speculation::All` readers guessed past definers that had not run
+/// (loader client at 12 workers: 5.5k runs became 21k, 0.35 s 1.4 s).
+pub(crate) const QSHARDS: usize = 1;
+
 /// The work queue: the current step's nodes and the next step's.
 #[derive(Default)]
 pub(crate) struct QueueInner {
@@ -755,6 +788,13 @@ pub(crate) struct Shared {
     pub pubs_dirty: Mutex<crate::values::FxHashSet<Field>>,
     pub undeclared: Mutex<FxHashMap<Slot, Field>>,
     pub q: Mutex<QueueInner>,
+    /// Free running: the ready nodes, in `QSHARDS` heaps (a worker takes
+    /// from its own first), each lowest label first.
+    pub shards: Box<[Mutex<ReadyHeap>]>,
+    /// Workers handed shard indexes so far.
+    pub next_worker: AtomicUsize,
+    /// Nodes queued or being processed (zero: free running is quiet).
+    pub work: AtomicUsize,
     pub qlen: AtomicUsize,
     /// Idle workers asleep on `idle_cv`.
     pub sleepers: AtomicUsize,
@@ -766,6 +806,8 @@ pub(crate) struct Shared {
     pub step_done: Mutex<Vec<Slot>>,
     pub parked: Mutex<Vec<Slot>>,
     pub touched: Mutex<Vec<Slot>>,
+    /// The finished nodes' state as the evaluation found them.
+    pub snaps: Mutex<FxHashMap<Slot, Snap>>,
     /// Why nodes were made dirty, in order (for `Report::rerun_causes`).
     /// Some text has predicted definitions.
     pub any_preds: AtomicBool,
@@ -857,12 +899,41 @@ impl Shared {
 /// A unit's writer: excludes other writers; readers that overlap it retry.
 pub(crate) struct UnitW<'a> {
     _g: std::sync::RwLockWriteGuard<'a, ()>,
-    sv: &'a AtomicU64,
+    un: &'a Unit,
 }
 
 impl Drop for UnitW<'_> {
     fn drop(&mut self) {
-        self.sv.fetch_add(1, Ordering::Release);
+        self.un.sv.fetch_add(1, Ordering::Release);
+        self.un.wflag.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A counter on a cache line of its own.
+#[repr(align(64))]
+#[derive(Default)]
+pub(crate) struct Pad(pub AtomicU32);
+
+/// Stripes of a unit's committing readers.
+pub(crate) const STRIPES: usize = 32;
+
+thread_local! {
+    /// This thread's stripe of the committing-reader counters.
+    static STRIPE: usize = {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed) % STRIPES
+    };
+}
+
+/// A commit that changes no structure of its unit: excludes its writers
+/// (`UnitW`) without the readers sharing a lock word.
+pub(crate) struct UnitR<'a> {
+    c: &'a AtomicU32,
+}
+
+impl Drop for UnitR<'_> {
+    fn drop(&mut self) {
+        self.c.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -870,21 +941,78 @@ impl Shared {
     pub(crate) fn wunit(&self, u: u32) -> UnitW<'_> {
         let un = self.unit(u);
         let g = wlock(&un.s);
+        // Committing readers come in only while no writer is flagged; wait
+        // out those already in.
+        un.wflag.store(true, Ordering::SeqCst);
+        if let Some(st) = un.stripes.get() {
+            for p in st {
+                let mut spins = 0u32;
+                while p.0.load(Ordering::SeqCst) != 0 {
+                    spins += 1;
+                    if spins < 128 {
+                        std::hint::spin_loop();
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
+            }
+        }
         un.sv.fetch_add(1, Ordering::AcqRel);
-        UnitW { _g: g, sv: &un.sv }
+        UnitW { _g: g, un }
+    }
+
+    /// Enters a commit that changes no structure of unit `u` (see `UnitR`).
+    #[track_caller]
+    pub(crate) fn runit(&self, u: u32) -> UnitR<'_> {
+        let un = self.unit(u);
+        let st = un
+            .stripes
+            .get_or_init(|| (0..STRIPES).map(|_| Pad::default()).collect());
+        let c = &st[STRIPE.with(|s| *s)].0;
+        #[cfg(feature = "profile")]
+        let t0 = std::time::Instant::now();
+        let mut spins = 0u32;
+        loop {
+            c.fetch_add(1, Ordering::SeqCst);
+            if !un.wflag.load(Ordering::SeqCst) {
+                #[cfg(feature = "profile")]
+                if spins > 0 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    crate::obs::lock_wait(std::panic::Location::caller(), t0.elapsed().as_nanos() as u64);
+                }
+                return UnitR { c };
+            }
+            c.fetch_sub(1, Ordering::SeqCst);
+            while un.wflag.load(Ordering::SeqCst) {
+                spins += 1;
+                if spins < 128 {
+                    std::hint::spin_loop();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        }
     }
 
     /// Runs a read of unit `u`'s structure without blocking: again while a
     /// writer overlapped it.
+    #[track_caller]
     pub(crate) fn sread<T>(&self, u: u32, mut f: impl FnMut() -> T) -> T {
         let sv = &self.unit(u).sv;
         let mut spins = 0u32;
+        #[cfg(feature = "profile")]
+        let t0 = std::time::Instant::now();
         loop {
             let v = sv.load(Ordering::Acquire);
             if v & 1 == 0 {
                 let r = f();
                 std::sync::atomic::fence(Ordering::Acquire);
                 if sv.load(Ordering::Acquire) == v {
+                    #[cfg(feature = "profile")]
+                    if spins > 0 {
+                        #[allow(clippy::cast_possible_truncation)]
+                        crate::obs::lock_wait(std::panic::Location::caller(), t0.elapsed().as_nanos() as u64);
+                    }
                     return r;
                 }
             }
@@ -898,16 +1026,42 @@ impl Shared {
     }
 }
 
+/// Takes a lock; profiling builds time a blocked acquisition by call site.
+macro_rules! take_lock {
+    ($try:expr, $block:expr) => {{
+        #[cfg(feature = "profile")]
+        {
+            match $try {
+                Ok(g) => return g,
+                Err(std::sync::TryLockError::Poisoned(p)) => return p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+            let t = std::time::Instant::now();
+            let g = $block.unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[allow(clippy::cast_possible_truncation)]
+            crate::obs::lock_wait(std::panic::Location::caller(), t.elapsed().as_nanos() as u64);
+            g
+        }
+        #[cfg(not(feature = "profile"))]
+        {
+            $block.unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }};
+}
+
+#[track_caller]
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    take_lock!(m.try_lock(), m.lock())
 }
 
+#[track_caller]
 pub(crate) fn rlock<T>(m: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    m.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    take_lock!(m.try_read(), m.read())
 }
 
+#[track_caller]
 pub(crate) fn wlock<T>(m: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    m.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    take_lock!(m.try_write(), m.write())
 }
 
 /// Brackets split into before and after the entry.

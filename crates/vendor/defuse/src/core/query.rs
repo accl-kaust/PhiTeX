@@ -58,6 +58,9 @@ fn wait_node(n: Slot, field: Option<Field>, kind: &'static str, has_prev: bool) 
     }
 }
 
+/// See `Shared::optimistic_pset`.
+const PSET_FEW: usize = 2;
+
 thread_local! {
     /// Whether the run on this thread may guess, and the guesses left.
     static SPEC_RUN: std::cell::Cell<(bool, u64)> = const { std::cell::Cell::new((false, 0)) };
@@ -137,7 +140,7 @@ impl Shared {
     /// The value `q`'s text predicts it defines for `f`.
     pub(crate) fn predicted(&self, q: Slot, f: Field) -> Option<ValueId> {
         let d = self.rec(q).data();
-        d.stat.preds.as_ref()?.iter().find(|p| p.0 == f).map(|p| p.1)
+        d.stat.preds()?.iter().find(|p| p.0 == f).map(|p| p.1)
     }
 
     /// Whether `q` ran in this evaluation.
@@ -203,8 +206,12 @@ impl Shared {
         SPEC_RUN.with(|c| c.get().0)
     }
 
-    fn optimistic_pset(&self) -> bool {
-        if self.spec.load(Ordering::Relaxed) == 2 {
+    /// A pending set found by `pset_between` among at most `PSET_FEW`
+    /// candidates in the reader's span (a definition set narrow enough to
+    /// name the field, or a prefix few nodes declare) is likely to
+    /// define the field: the read waits for it rather than guess past it.
+    fn optimistic_pset(&self, cands: usize) -> bool {
+        if self.spec.load(Ordering::Relaxed) == 2 && cands > PSET_FEW {
             self.c.speculations.fetch_add(1, Ordering::Relaxed);
             true
         } else {
@@ -288,14 +295,15 @@ impl Shared {
         lo: u64,
         hi: u64,
         me: Slot,
-    ) -> Option<(Slot, Option<String>)> {
-        let mut best: Option<(u64, Slot, Option<String>)> = None;
+    ) -> Option<(Slot, Option<String>, usize)> {
+        let mut best: Option<(u64, Slot, Option<String>, usize)> = None;
         if let Some(named) = named {
-            for &x in self.span(named, lo, hi).iter().rev() {
+            let sp = self.span(named, lo, hi);
+            for &x in sp.iter().rev() {
                 if self.busy(x, me)
                     && let Some(p) = self.may_cover(x, f)
                 {
-                    best = Some((self.rec(x).lab(), x, p));
+                    best = Some((self.rec(x).lab(), x, p, sp.len()));
                     break;
                 }
             }
@@ -311,7 +319,7 @@ impl Shared {
                     && self.busy(x, me)
                     && let Some(p) = self.may_cover(x, f)
                 {
-                    best = Some((l, x, p));
+                    best = Some((l, x, p, usize::MAX));
                     break;
                 }
             }
@@ -326,7 +334,8 @@ impl Shared {
             for &n in lens.iter() {
                 let Some(p) = name.get(..n) else { continue };
                 let Some(v) = m.get(p) else { continue };
-                for &x in self.span(v, lo, hi).iter().rev() {
+                let sp = self.span(v, lo, hi);
+                for &x in sp.iter().rev() {
                     let l = self.rec(x).lab();
                     if best.as_ref().is_some_and(|b| b.0 >= l) {
                         break;
@@ -335,13 +344,13 @@ impl Shared {
                         && self.busy(x, me)
                         && let Some(p) = self.may_cover(x, f)
                     {
-                        best = Some((l, x, p));
+                        best = Some((l, x, p, sp.len()));
                         break;
                     }
                 }
             }
         }
-        best.map(|b| (b.1, b.2))
+        best.map(|b| (b.1, b.2, b.3))
     }
 
     /// The environment value a definer read falls back to.
@@ -448,8 +457,8 @@ impl Shared {
                 return Q::Wait(wait_node(x, Some(f), "scope effect", self.rec(x).has(super::F_DONE)));
             }
             let lo = site.map_or(0, |e| self.rec(e.node).lab());
-            if let Some((x, prefix)) = self.pset_between(u, idx.map(|i| i.named.as_slice()), f, lo, pl, me)
-                && !self.optimistic_pset()
+            if let Some((x, prefix, cands)) = self.pset_between(u, idx.map(|i| i.named.as_slice()), f, lo, pl, me)
+                && !self.optimistic_pset(cands)
             {
                 return Q::Wait(Wait {
                     on: Subj::Node(x),
@@ -529,7 +538,8 @@ impl Shared {
         }
         let sh = rlock(self.shard(u, f));
         let idx = sh.get(&(u, f));
-        if strict && let Some((x, prefix)) = self.pset_between(u, idx.map(|i| i.named.as_slice()), f, start, pl, me) {
+        if strict && let Some((x, prefix, _)) = self.pset_between(u, idx.map(|i| i.named.as_slice()), f, start, pl, me)
+        {
             return Q::Wait(Wait {
                 on: Subj::Node(x),
                 field: Some(f),

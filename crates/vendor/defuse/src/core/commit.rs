@@ -246,10 +246,11 @@ impl Shared {
             }
         }
         self.stamp_depth(s, &cx.log);
+        r.data().runs += 1;
         // Its read hints: the definers they name now (the critical
         // path orders it after them).
         let mut hint_waits: Vec<super::WaitRec> = Vec::new();
-        let hints = r.data().stat.reads.clone();
+        let hints = r.data().stat.reads().cloned();
         if let Some(fs) = hints {
             for f in fs {
                 // (A field it read orders it by that read.)
@@ -287,16 +288,29 @@ impl Shared {
                 || (cx.effect.is_some() && d.res.as_ref().is_none_or(|c| c.effect != cx.effect))
                 || d.kind_val != cx.kind
         };
+        if structural {
+            // The new children's static facts: their hooks read only
+            // their texts, so they run before the structural lock.
+            for sp in cx.kids.iter().chain(&cx.conts) {
+                if let super::order::Spec::Node { id, op, args } = sp
+                    && self.slot_of(*id).is_none()
+                {
+                    notes.pre.insert(*id, self.analyze_text(*op, args));
+                }
+            }
+        }
         {
             let guard = if structural {
                 Ok(self.wunit(u))
             } else {
-                Err(super::rlock(&self.unit(u).s))
+                Err(self.runit(u))
             };
             if r.st() != S_RUN || r.has(super::F_DOOM_FREE | super::F_DOOM_INERT) {
                 drop(guard);
                 return self.doomed(s) || r.st() != S_RUN;
             }
+            #[cfg(feature = "profile")]
+            let held = std::time::Instant::now();
             self.snapshot(s);
             self.c.commits.fetch_add(1, Ordering::Relaxed);
             let limits = super::rlock(&self.limits).clone();
@@ -416,7 +430,7 @@ impl Shared {
                     self.set_contrib(u, s, f, None, &mut notes);
                 }
             }
-            let declared = r.data().stat.contribs.clone();
+            let declared = r.data().stat.contribs().cloned();
             if let Some(dc) = declared {
                 for &(f, _) in &dc {
                     if !cx.contribs.iter().any(|c| c.0 == f) {
@@ -486,7 +500,12 @@ impl Shared {
                 w
             };
             let res = Committed {
-                log: std::mem::take(&mut cx.log),
+                log: {
+                    // (Kept for the node's life: no growth slack.)
+                    let mut l = std::mem::take(&mut cx.log);
+                    l.shrink_to_fit();
+                    l
+                },
                 defs: cx.defs.clone(),
                 contribs: cx.contribs.clone(),
                 pubs: cx.pubs.clone(),
@@ -535,6 +554,8 @@ impl Shared {
             if restructured {
                 notes.frames_from.push(s);
             }
+            #[cfg(feature = "profile")]
+            let st0 = std::time::Instant::now();
             // Claims.
             if claim_kind == ClaimS::Pending {
                 let n = cx.claim.unwrap_or(0);
@@ -554,6 +575,11 @@ impl Shared {
             let kids = std::mem::take(&mut cx.kids);
             let conts = std::mem::take(&mut cx.conts);
             self.set_unfolding(s, &kids, &conts, &mut notes);
+            #[cfg(feature = "profile")]
+            #[allow(clippy::cast_possible_truncation)]
+            if structural {
+                crate::obs::add_impl("commit_w_struct", st0.elapsed().as_nanos() as u64);
+            }
             // Output.
             let old_out = r
                 .has(F_HAS_OUT)
@@ -582,7 +608,20 @@ impl Shared {
                 self.leave_work_lists(s);
             }
             waiters = std::mem::take(&mut r.data().waiters);
+            #[cfg(feature = "profile")]
+            let st1 = std::time::Instant::now();
             self.settle_structure(u, &mut notes);
+            #[cfg(feature = "profile")]
+            #[allow(clippy::cast_possible_truncation)]
+            if structural {
+                crate::obs::add_impl("commit_w_settle", st1.elapsed().as_nanos() as u64);
+            }
+            #[cfg(feature = "profile")]
+            #[allow(clippy::cast_possible_truncation)]
+            crate::obs::add_impl(
+                if structural { "commit_hold_w" } else { "commit_hold_r" },
+                held.elapsed().as_nanos() as u64,
+            );
         }
         self.dispatch(&mut notes, s);
         if self.any_preds.load(Ordering::Relaxed) && !self.pred_open(s) {
@@ -677,7 +716,11 @@ impl Shared {
                         let fp = self.frame_of(*at);
                         self.ins_sub(idx.sreaders.entry(fp).or_default(), sub);
                     }
-                    for &(node, _) in sites {
+                    let one = match ans {
+                        DAns::Site { node, .. } if *mode == DMode::Use => Some(*node),
+                        _ => None,
+                    };
+                    for node in sites.iter().map(|x| x.0).chain(one) {
                         if let Some(i) = self.def_pos(idx, node) {
                             idx.defs[i].users.push((s, gn));
                         }

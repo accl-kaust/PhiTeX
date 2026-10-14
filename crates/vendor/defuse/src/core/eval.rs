@@ -55,6 +55,7 @@ impl Engine {
         sh.c.created.store(0, Ordering::Relaxed);
         sh.c.freed.store(0, Ordering::Relaxed);
         lock(&sh.touched).clear();
+        lock(&sh.snaps).clear();
         r
     }
 
@@ -78,9 +79,9 @@ impl Engine {
         if self.loop_start == LoopStart::Initial && self.sh.qlen.load(Ordering::Acquire) > 0 && self.reset_loops() {
             restarts += 1;
         }
-        // An executor that runs every job on one thread evaluates in steps:
-        // what a step commits is seen by the next step.
-        self.set_stepped(exec.parallelism() <= 1);
+        // An executor that runs every job on one thread may ask for steps
+        // (`Executor::steps`): what a step commits is seen by the next.
+        self.set_stepped(exec.parallelism() <= 1 && exec.steps());
         let limits = self.limits().clone();
         *lock(&self.sh.deadline) = limits.time.map(|d| t0 + d);
         let result = loop {
@@ -93,6 +94,10 @@ impl Engine {
                 // The workers' loops go through `execute`, the hook an
                 // executor counts and instruments node runs by.
                 let mut done = Vec::with_capacity(64);
+                #[cfg(feature = "profile")]
+                let tx = std::time::Instant::now();
+                #[cfg(feature = "profile")]
+                let _tx = crate::obs::Ticked("exec_wall", tx);
                 exec.execute(
                     64,
                     &|_| {
@@ -104,7 +109,12 @@ impl Engine {
             }
             rep.steps += 1;
             crate::obs::count!(Step);
+            #[cfg(feature = "profile")]
+            let te = std::time::Instant::now();
             self.end_step();
+            #[cfg(feature = "profile")]
+            #[allow(clippy::cast_possible_truncation)]
+            crate::obs::add_impl("end_step", te.elapsed().as_nanos() as u64);
             let err = lock(&self.sh.error).take();
             if let Some(e) = err {
                 break Err(self.finish_error(e));
@@ -142,6 +152,8 @@ impl Engine {
             // Loop-back rounds.
             match self.next_round() {
                 Err(e) => break Err(e),
+                // (A round only when a changed value has a reader to run.)
+                Ok(true) if self.sh.qlen.load(Ordering::Acquire) == 0 => continue,
                 Ok(true) => {
                     rounds += 1;
                     if rounds > self.max_rounds {
@@ -174,6 +186,16 @@ impl Engine {
             break Ok(());
         };
         self.sh.abort.store(false, Ordering::Relaxed);
+        #[cfg(feature = "profile")]
+        let tail = std::time::Instant::now();
+        #[cfg(feature = "profile")]
+        #[allow(clippy::cast_possible_truncation)]
+        let tick = |name: &'static str, t: &mut std::time::Instant| {
+            crate::obs::add_impl(name, t.elapsed().as_nanos() as u64);
+            *t = std::time::Instant::now();
+        };
+        #[cfg(feature = "profile")]
+        let mut tt = tail;
         if let Err(e) = result {
             return Err(self.with_report(e, rep, rounds, restarts));
         }
@@ -190,15 +212,23 @@ impl Engine {
             });
         }
         let _ = stalled;
+        #[cfg(feature = "profile")]
+        tick("tail_classify", &mut tt);
         rep.rounds = rounds;
         rep.restarts = restarts;
         rep.version = self.version;
         if self.sh.c.mispredictions.load(Ordering::Relaxed) > 0 || self.sh.c.speculations.load(Ordering::Relaxed) > 0 {
             self.collect_apps(true);
         }
+        #[cfg(feature = "profile")]
+        tick("tail_collect", &mut tt);
         self.sh.values.reclaim();
         self.sh.diags.reclaim();
-        self.fill_report(&mut rep);
+        #[cfg(feature = "profile")]
+        tick("tail_reclaim", &mut tt);
+        self.fill_report(&mut rep, Some(exec));
+        #[cfg(feature = "profile")]
+        tick("tail_report", &mut tt);
         Ok(rep)
     }
 
@@ -208,7 +238,7 @@ impl Engine {
             rep.rounds = rounds;
             rep.restarts = restarts;
             rep.version = self.version;
-            self.fill_report(&mut rep);
+            self.fill_report(&mut rep, None);
             **report = rep;
         }
         e
@@ -222,6 +252,9 @@ impl Engine {
         if on {
             let cur: Vec<Slot> = std::mem::take(&mut q.cur).into_iter().map(|r| r.0.1).collect();
             q.next.extend(cur);
+            for m in &sh.shards {
+                q.next.extend(std::mem::take(&mut *lock(m)).into_iter().map(|r| r.0.1));
+            }
         }
         Self::start_step(sh, &mut q);
     }
@@ -230,8 +263,9 @@ impl Engine {
         // In steps the scheduler picks each batch (`plan_step`); free
         // running takes everything.
         if !sh.stepped() {
-            for s in std::mem::take(&mut q.next) {
-                q.cur.push(std::cmp::Reverse((sh.rec(s).lab(), s)));
+            let cur: Vec<Slot> = std::mem::take(&mut q.cur).into_iter().map(|r| r.0.1).collect();
+            for s in std::mem::take(&mut q.next).into_iter().chain(cur) {
+                sh.push_shard(s);
             }
         }
     }
@@ -252,7 +286,14 @@ impl Engine {
                 if cands.len() >= budget {
                     break;
                 }
-                if sh.rec(s).st() == S_PARK {
+                // (Not one waiting on the environment: nothing it can
+                // guess changes until the environment does.)
+                if sh.rec(s).st() == S_PARK
+                    && !matches!(
+                        sh.rec(s).data().wait_on().map(|w| &w.on),
+                        Some(super::query::Subj::Env(_))
+                    )
+                {
                     cands.push(s);
                 }
             }
@@ -298,6 +339,7 @@ impl Engine {
                     && r.flags.fetch_or(super::F_QUEUED, Ordering::AcqRel) & super::F_QUEUED == 0
                 {
                     q.cur.push(std::cmp::Reverse((r.lab(), s)));
+                    sh.work.fetch_add(1, Ordering::SeqCst);
                     sh.qlen.fetch_add(1, Ordering::Release);
                 } else {
                     r.clear(super::F_SPECJOB);
@@ -498,11 +540,18 @@ impl Engine {
 
     fn queued_waiters(&self) -> Vec<Waiter> {
         let q = lock(&self.sh.q);
+        let sharded: Vec<Slot> = self
+            .sh
+            .shards
+            .iter()
+            .flat_map(|m| lock(m).iter().map(|r| r.0.1).collect::<Vec<_>>())
+            .collect();
         let mut out: Vec<Waiter> = q
             .cur
             .iter()
             .map(|r| r.0.1)
             .chain(q.next.iter().copied())
+            .chain(sharded)
             .filter(|&s| self.sh.rec(s).st() != S_FREE)
             .map(|s| Waiter {
                 node: self.sh.node_id(s),
