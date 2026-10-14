@@ -1750,19 +1750,25 @@ impl Analysis<'_> {
     fn param_field(&self, f: &str) -> Option<Option<String>> {
         let n = f.strip_prefix("param:")?;
         let n = n.strip_prefix('\\').unwrap_or(n);
+        // (a name the definitions made a register is that register, as
+        // LaTeX's `\newtoks\everypar` over the primitive)
+        let reg = match self.shape(n) {
+            Some(pass::Shape::Quantity('i')) => Some("count:"),
+            Some(pass::Shape::Quantity('d')) => Some("dimen:"),
+            Some(pass::Shape::Quantity('g')) => Some("skip:"),
+            Some(pass::Shape::Quantity('t')) => Some("toks:"),
+            _ => None,
+        };
+        if let Some(r) = reg {
+            return Some(Some(r.to_owned()));
+        }
         if table_param(n) {
             return Some(Some(format!("param:{n}")));
         }
         if matches!(n, "spacefactor" | "prevdepth") {
             return Some(None);
         }
-        match self.shape(n) {
-            Some(pass::Shape::Quantity('i')) => Some(Some("count:".to_owned())),
-            Some(pass::Shape::Quantity('d')) => Some(Some("dimen:".to_owned())),
-            Some(pass::Shape::Quantity('g')) => Some(Some("skip:".to_owned())),
-            Some(pass::Shape::Quantity('t')) => Some(Some("toks:".to_owned())),
-            _ => None,
-        }
+        None
     }
 
     fn shape(&self, name: &str) -> Option<pass::Shape> {
@@ -3717,7 +3723,12 @@ pub(crate) fn check_defs(
         if !r.st.defined_unread(loc) {
             return Ok(Some(m));
         }
-        let x = r.cx.use_field(f)?;
+        let mut x = r.cx.use_field(f)?;
+        // (a box register never defined is void, §230: as `\setbox`
+        // leaves a void one at the base level)
+        if x.is_none() && crate::val::field_name(r.v, f).starts_with("box:") {
+            x = Some(r.v.list(vec![r.v.int(0), ValueId::UNIT]));
+        }
         r.st.note_engine(loc, x);
     }
 }
