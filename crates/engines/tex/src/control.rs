@@ -153,6 +153,28 @@ impl Run<'_, '_> {
         );
     }
 
+    /// `report_illegal_case` (§1050): "You can't use" the command "in"
+    /// the mode (§211 `print_mode`, §298 `print_cmd_chr`).
+    pub(crate) fn report_illegal_case(&mut self, md: &crate::build::Mode) -> R<()> {
+        let what = crate::val::prim_name(self.cur.cmd, self.cur.chr).map_or_else(
+            || match self.cur.tok.as_cs() {
+                Some(n) => format!("\\{n}"),
+                None => char::from_u32(self.cur.tok.chr()).map_or_else(String::new, String::from),
+            },
+            |n| format!("\\{n}"),
+        );
+        let mode = match md.m {
+            1 => "vertical",
+            102 => "horizontal",
+            203 => "display math",
+            -1 => "internal vertical",
+            -102 => "restricted horizontal",
+            -203 => "math",
+            _ => "no",
+        };
+        self.log("error", &format!("You can't use `{what}' in {mode} mode"))
+    }
+
     /// `reswitch` (§1045): the case for `cur` in the current mode.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn dispatch(&mut self) -> R<()> {
@@ -465,7 +487,7 @@ impl Run<'_, '_> {
             _ => {
                 // forbidden cases, alignment errors, math in non-math
                 // modes (§1046–§1048): errors
-                self.log("error", "illegal command")?;
+                self.report_illegal_case(&md)?;
             }
         }
         Ok(())
