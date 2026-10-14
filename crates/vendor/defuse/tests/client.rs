@@ -2922,7 +2922,14 @@ fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers(
             .collect()
     };
     let (mut plain, _, pids, _) = build(None);
-    plain.evaluate_sequential().expect("evaluate");
+    let r = plain
+        .evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut defuse::Sequential,
+        )
+        .expect("evaluate");
+    // No predictions: the chain waits link by link.
+    assert_eq!(r.realised_critical_path, u32::try_from(N).unwrap(), "{r:?}");
     let reference = outs(&plain, &pids);
     for sched in ["seq", "spec", "random", "par"] {
         for predict in [Some(pred_truth(N)), Some(wrong.clone())] {
@@ -2956,8 +2963,14 @@ fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers(
                     assert_eq!(r.predictions_confirmed, N as u64 - 1, "{sched}");
                 }
             }
+            if sched == "spec" || sched == "par" {
+                let want = if is_wrong { 2..=3 } else { 1..=2 };
+                assert!(want.contains(&r.realised_critical_path), "{sched}: {r:?}");
+            }
             if sched == "seq" {
-                // Off: no guess at all.
+                // Off: every node waited for the one before it.
+                assert_eq!(r.realised_critical_path, u32::try_from(N).unwrap(), "{sched}");
+                assert_eq!(r.realised_critical_path, r.critical_path + 1, "{sched}");
                 assert_eq!(runs, N as u64, "{sched}");
                 assert_eq!(r.predictions_confirmed + r.predictions_refuted, 0);
             }
@@ -2977,4 +2990,87 @@ fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers(
             assert_eq!(outs(&eng, &ids), reference, "{sched} wrong={is_wrong} after an edit");
         }
     }
+}
+
+/// `["d", i]` reads `x{i-1}` and defines `x{i}`; `["r", i]` declares a
+/// read of `x{i}` but reads nothing.
+struct HintChain;
+
+impl Operation for HintChain {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "d" {
+            vec![(v.field(&format!("x{}", v.as_int(a[1]).unwrap())), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        let i = v.as_int(a[1]).unwrap();
+        Some(match tag(v, a).as_str() {
+            "r" => vec![v.field(&format!("x{i}"))],
+            _ => Vec::new(),
+        })
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let i = v.as_int(a[1]).unwrap();
+        if tag(v, &a) == "r" {
+            return Ok(ValueId::UNIT);
+        }
+        let p = if i > 0 {
+            cx.use_field(v.field(&format!("x{}", i - 1)))?
+                .and_then(|x| v.as_int(x))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        cx.define(v.field(&format!("x{i}")), v.int(p + 1));
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A node whose height comes only from a declared read: the critical
+/// chain goes on from it to the read's definer and down the chain, also
+/// when that definer has since been freed and replaced.
+#[test]
+fn the_critical_chain_follows_a_declared_read_to_its_definer() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(HintChain));
+    let u = eng.new_unit();
+    let mut ds = Vec::new();
+    for i in 0..100 {
+        let a = {
+            let v = eng.values();
+            vec![v.str("d"), v.int(i)]
+        };
+        ds.push(eng.push(u, op, a));
+    }
+    let a = {
+        let v = eng.values();
+        vec![v.str("r"), v.int(99)]
+    };
+    let r = eng.push(u, op, a);
+    eng.evaluate_sequential().expect("evaluate");
+    let chain = eng.critical_chain();
+    assert_eq!(chain.first().map(|c| c.0), Some(r), "{chain:?}");
+    assert!(chain.iter().any(|c| c.0 == ds[99]), "{chain:?}");
+    assert!(chain.len() >= 100, "{} links: {chain:?}", chain.len());
+    // The definer it waited on goes and another takes its place: the walk
+    // names the one that went and goes on from the one there now.
+    eng.remove(ds[99]);
+    let a = {
+        let v = eng.values();
+        vec![v.str("d"), v.int(99), v.str("again")]
+    };
+    let d99 = eng.insert_before(r, op, a);
+    eng.evaluate_sequential().expect("evaluate");
+    let chain = eng.critical_chain();
+    assert_eq!(chain.first().map(|c| c.0), Some(r), "{chain:?}");
+    assert!(
+        matches!(chain[0].1, defuse::Cause::Woken { by, .. } if by == ds[99]),
+        "{chain:?}"
+    );
+    assert!(chain.iter().any(|c| c.0 == d99), "{chain:?}");
+    assert!(chain.len() >= 100, "{} links: {chain:?}", chain.len());
 }

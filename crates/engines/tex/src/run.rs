@@ -1075,10 +1075,24 @@ impl<'c, 'a> Run<'c, 'a> {
         Err(Halt::Fatal)
     }
 
+    /// The engine's own diagnostic (a hint's regime violated, an
+    /// undeclared definition): for [`crate::Build::diagnostics`] only.
+    /// It is not TeX's error: not in the log, not in the error count
+    /// (§76's hundred), and it decides neither the output nor the exit.
+    pub(crate) fn engine_diag(&mut self, msg: &str) {
+        self.diag_kind(2, msg);
+    }
+
     /// A diagnostic for [`crate::Build::diagnostics`]: where the input is
     /// (the current line of a file, or the node's own text), and the
     /// message. `error` false: a warning.
     pub(crate) fn diag(&mut self, error: bool, msg: &str) {
+        self.diag_kind(i64::from(error), msg);
+    }
+
+    /// [`Self::diag`] of kind `kind`: 0 a warning, 1 TeX's error, 2 the
+    /// engine's diagnostic.
+    fn diag_kind(&mut self, kind: i64, msg: &str) {
         let v = self.v;
         let src = self
             .input
@@ -1113,7 +1127,7 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let node = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         let e = v.list(vec![
-            v.int(i64::from(error)),
+            v.int(kind),
             v.str(msg),
             file,
             v.int(at),
@@ -1689,19 +1703,10 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         crate::pdfout::publish(self.pdf_fold.take());
-        if !self.doc_lines.is_empty() {
-            let v = self.v;
-            let mut xs: Vec<(String, ValueId, i64)> = self
-                .doc_lines
-                .iter()
-                .map(|&(n, k)| (str_of(v, n), n, k))
-                .collect();
-            xs.sort_by(|a, b| a.0.cmp(&b.0));
-            let m = v.list(
-                xs.into_iter()
-                    .map(|(_, n, k)| v.list(vec![n, v.int(k)]))
-                    .collect(),
-            );
+        // (a command node's, empty too: what its text declares,
+        // `Exec::static_contribs`)
+        if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
+            let m = lines_value(self.v, &self.doc_lines);
             self.contribute("lines", m);
         }
         crate::pageinline::finish(&mut self);
@@ -2258,4 +2263,41 @@ impl Run<'_, '_> {
             None => self.doc_lines.push((name, 1)),
         }
     }
+}
+
+/// A `lines` contribution: the lines begun by file name, sorted by name.
+pub(crate) fn lines_value(v: &Values, lines: &[(ValueId, i64)]) -> ValueId {
+    let mut xs: Vec<(String, ValueId, i64)> =
+        lines.iter().map(|&(n, k)| (str_of(v, n), n, k)).collect();
+    xs.sort_by(|a, b| a.0.cmp(&b.0));
+    v.list(
+        xs.into_iter()
+            .map(|(_, n, k)| v.list(vec![n, v.int(k)]))
+            .collect(),
+    )
+}
+
+/// The lines a node's own text begins, by file, as its run counts them
+/// ([`Run::doc_line_begun`]): its segments not reached yet that begin a
+/// line, are no `\read` line and carry no number of their own.
+pub(crate) fn text_lines(v: &Values, args: &[ValueId]) -> ValueId {
+    let mut lines: Vec<(ValueId, i64)> = Vec::new();
+    for f in args.first().map(|&a| list_of(v, a)).unwrap_or_default() {
+        let xs = list_of(v, f);
+        if xs.first().map(|&t| str_of(v, t)).as_deref() != Some("s") {
+            continue;
+        }
+        let flags = xs.get(4).map_or(3, |&x| int_of(v, x));
+        let unread = xs.get(3).map_or(-2, |&x| int_of(v, x)) == -2;
+        let lineno = xs.get(7).map_or(0, |&x| int_of(v, x));
+        if !unread || flags & 1 == 0 || flags & 4 != 0 || lineno != 0 {
+            continue;
+        }
+        let name = if xs.len() >= 7 { xs[5] } else { ValueId::UNIT };
+        match lines.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, k)) => *k += 1,
+            None => lines.push((name, 1)),
+        }
+    }
+    lines_value(v, &lines)
 }

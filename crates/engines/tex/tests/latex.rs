@@ -546,8 +546,9 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     let everypar = chain.iter().filter(|c| c.2 == "param:everypar").count();
     let s = &b.stats;
     eprintln!(
-        "chains {name}: critical path {:?}, {} nodes run, {} regions, {} rounds, {} loop rounds, {} undeclared, {} violations, {} mispredictions, everypar links {everypar}, chain {} links {by:?}",
+        "chains {name}: critical path {:?}, realised cp {}, {} nodes run, {} regions, {} rounds, {} loop rounds, {} undeclared, {} violations, {} mispredictions, everypar links {everypar}, chain {} links {by:?}",
         s.critical_path,
+        s.realised_critical_path,
         s.nodes_run,
         s.nodes_text_frames,
         s.rounds,
