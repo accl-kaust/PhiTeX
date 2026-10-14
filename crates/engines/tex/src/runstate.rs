@@ -127,6 +127,9 @@ struct Meta {
     /// The stamp of the latest definition, and whether it was local.
     ldef_stamp: u64,
     ldef_local: bool,
+    /// The group of the run the latest local definition was made in
+    /// ([`State::open`]'s number; `None`: the base level, or unknown).
+    ldef_gid: Option<u32>,
 }
 
 /// A value saved by a group, restored at its close.
@@ -509,6 +512,7 @@ impl State {
             publ: None,
             ldef_stamp: 0,
             ldef_local: false,
+            ldef_gid: None,
         });
         i
     }
@@ -562,6 +566,7 @@ impl State {
         let m = &mut self.metas[mi];
         m.ldef_stamp = st;
         m.ldef_local = !global;
+        m.ldef_gid = if global { None } else { grp };
         if global {
             m.publ = Some((val, Locality::Global));
         } else if grp.is_none() {
@@ -624,6 +629,7 @@ impl State {
         let m = &mut self.metas[mi];
         m.ldef_stamp = st;
         m.ldef_local = true;
+        m.ldef_gid = None;
         if base {
             let l = if global {
                 Locality::Global
@@ -696,37 +702,39 @@ impl State {
             .is_some_and(|m| m.ldef_stamp > since)
     }
 
+    /// The groups opened so far: a group [`State::open`] opens after
+    /// this has a greater number.
+    pub(crate) fn gid_mark(&self) -> u32 {
+        self.next_gid
+    }
+
     /// The definitions made after stamp `since`, at any level (a line
     /// read back is interpreted wherever the run is): the location, the
     /// value in force and the locality of the latest one. A local one
-    /// whose group has ended since (§282: the value it hid restored) is
-    /// left out: the value in force is what it was in `pre`, the table
-    /// as it was at `since` (or, unread there, the engine's value the
-    /// first definition hid).
+    /// made in a group opened after `gids` (see [`State::gid_mark`]) is
+    /// left out: that group has ended (§282), its value restored.
     pub(crate) fn defined_since(
         &mut self,
         v: &Values,
         since: u64,
-        pre: &mut State,
+        gids: u32,
     ) -> Vec<(Loc, Option<ValueId>, Locality)> {
-        let hits: Vec<(Loc, bool, Option<Option<ValueId>>)> = self
+        let hits: Vec<(Loc, bool)> = self
             .metas
             .iter()
             .filter(|m| m.ldef_stamp > since)
-            .map(|m| (m.loc, m.ldef_local, m.eng))
+            .filter(|m| !(m.ldef_local && m.ldef_gid.is_some_and(|g| g > gids)))
+            .map(|m| (m.loc, m.ldef_local))
             .collect();
         hits.into_iter()
-            .filter_map(|(loc, local, eng)| {
+            .map(|(loc, local)| {
                 let x = self.id_of(loc, v);
-                if !local {
-                    return Some((loc, x, Locality::Global));
-                }
-                let before = if pre.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0) {
-                    Some(pre.id_of(loc, v))
+                let l = if local {
+                    Locality::Local
                 } else {
-                    eng
+                    Locality::Global
                 };
-                (before != Some(x)).then_some((loc, x, Locality::Local))
+                (loc, x, l)
             })
             .collect()
     }
@@ -789,6 +797,7 @@ impl State {
                     publ: m.publ.as_ref().map(|(x, l)| (x.encode(v), *l)),
                     ldef_stamp: m.ldef_stamp,
                     ldef_local: m.ldef_local,
+                    ldef_gid: m.ldef_gid,
                 }
             });
             slots.push(PSlot {
@@ -855,6 +864,7 @@ impl State {
                         .map(|(x, lc)| (x.map_or(Native::Absent, Native::Raw), lc)),
                     ldef_stamp: m.ldef_stamp,
                     ldef_local: m.ldef_local,
+                    ldef_gid: m.ldef_gid,
                 });
                 u32::try_from(st.metas.len()).unwrap_or(0)
             });
@@ -917,6 +927,7 @@ struct PMeta {
     publ: Option<(Option<ValueId>, Locality)>,
     ldef_stamp: u64,
     ldef_local: bool,
+    ldef_gid: Option<u32>,
 }
 
 struct PSlot {
