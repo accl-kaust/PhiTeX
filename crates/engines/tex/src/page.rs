@@ -689,6 +689,7 @@ impl Run<'_, '_> {
         let mut readst = ValueId::UNIT;
         let mut readdef = ValueId::UNIT;
         let mut inherited: Vec<(Field, ValueId)> = Vec::new();
+        let mut made = phitex_defuse::FxHashMap::default();
         if j == 0 {
             // `\count0..9` as the first page's routine reads them (the
             // text's at the first flush point; round one: the state)
@@ -715,6 +716,7 @@ impl Run<'_, '_> {
             let x = self.cx.use_field(f)?;
             readst = x.unwrap_or(ValueId::UNIT);
             inherited = pgst_pairs(v, x);
+            made = pgst_made(v, x);
             log_read(&self.ops, "pgst", j - 1, named(v, &inherited));
         }
         for &(f, x) in &inherited {
@@ -722,8 +724,15 @@ impl Run<'_, '_> {
             self.st.preload(l, Some(x));
         }
         // the local bindings of the text's group the page fires in
-        // (§1025: eqtb as it stands), over the chain's and the text's
-        for (f, x) in fire_locals(v, args.get(4).copied()) {
+        // (§1025: eqtb as it stands), over the text's, and over the
+        // chain's made before them: TeX's state holds the younger
+        // assignment, a routine's `\\global` at fire `m` beating a
+        // local made before it (`k <= m`, §279) and losing to one made
+        // after it
+        for (f, x, k) in fire_locals(v, args.get(4).copied()) {
+            if made.get(&f).is_some_and(|&m| m >= k) {
+                continue;
+            }
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 let r: String = v.render(x).chars().take(80).collect();
                 eprintln!(
@@ -1246,7 +1255,7 @@ impl Run<'_, '_> {
         for (g, y) in pairs {
             self.flush_fields.insert(g);
             let l = self.loc_of(g);
-            self.st.preload(l, Some(y));
+            self.st.preload_global(l, Some(y));
         }
         Ok(())
     }
@@ -2467,18 +2476,33 @@ fn mk_classes(v: &Values, mk: Option<&[ValueId]>) -> Option<Vec<ValueId>> {
 /// With a run's local bindings in force there (the last `T_LOCALS_AT`
 /// marker before the fire, not a clear one): `[node, bindings]`, the
 /// step reading those in place of the text's ([`fire_locals`]).
+///
+/// Each binding with the page whose part of the list made it (`k`: the
+/// binding is older than fire `k`, newer than fire `k-1`), `[node,
+/// bindings, [k, …]]`: a routine's `\\global` at fire `m >= k` is
+/// younger and wins over it (§279), an older one loses ([`Run::page_step`]).
 fn fire_nodes(v: &Values, recs: &[std::sync::Arc<crate::planinc::PageRec>]) -> Vec<ValueId> {
     let mut cur = ValueId::UNIT;
     let mut locals = ValueId::UNIT;
+    // (each binding in force: its value and the page part that made it)
+    let mut made: phitex_defuse::FxHashMap<ValueId, (ValueId, usize)> =
+        phitex_defuse::FxHashMap::default();
     recs.iter()
-        .map(|r| {
+        .enumerate()
+        .map(|(j, r)| {
             for &m in &r.tdefs {
                 if nodes::tag(v, m) == nodes::T_LOCALS_AT {
-                    locals = if list_of(v, m).len() > 1 {
-                        m
-                    } else {
-                        ValueId::UNIT
-                    };
+                    let xs = list_of(v, m);
+                    let mut now = phitex_defuse::FxHashMap::default();
+                    for &[f, x] in xs[1..].as_chunks::<2>().0 {
+                        let k = match made.get(&f) {
+                            Some(&(y, k)) if y == x => k,
+                            _ => j,
+                        };
+                        now.insert(f, (x, k));
+                    }
+                    made = now;
+                    locals = if xs.len() > 1 { m } else { ValueId::UNIT };
                 } else {
                     cur = v.int(crate::val::int_at(v, m, 1));
                 }
@@ -2486,7 +2510,16 @@ fn fire_nodes(v: &Values, recs: &[std::sync::Arc<crate::planinc::PageRec>]) -> V
             if locals == ValueId::UNIT {
                 cur
             } else {
-                v.list(vec![cur, locals])
+                let ks = list_of(v, locals)[1..]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&[f, _]| {
+                        let k = made.get(&f).map_or(j, |p| p.1);
+                        v.int(i64::try_from(k).unwrap_or(0))
+                    })
+                    .collect();
+                v.list(vec![cur, locals, v.list(ks)])
             }
         })
         .collect()
@@ -2495,7 +2528,7 @@ fn fire_nodes(v: &Values, recs: &[std::sync::Arc<crate::planinc::PageRec>]) -> V
 /// The local bindings a fire value carries (`[node, [T_LOCALS_AT, f,
 /// x, …]]`, [`fire_nodes`]): `(field, value)` pairs, a UNIT value an
 /// absent one.
-pub(crate) fn fire_locals(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId)> {
+pub(crate) fn fire_locals(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId, usize)> {
     let Some(x) = x.filter(|&x| x != ValueId::UNIT && v.as_int(x).is_none()) else {
         return Vec::new();
     };
@@ -2503,11 +2536,19 @@ pub(crate) fn fire_locals(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId
     let Some(&m) = xs.get(1) else {
         return Vec::new();
     };
+    let ks = xs.get(2).map(|&k| list_of(v, k)).unwrap_or_default();
     list_of(v, m)[1..]
         .as_chunks::<2>()
         .0
         .iter()
-        .map(|&[f, x]| (Field(f), x))
+        .enumerate()
+        .map(|(i, &[f, x])| {
+            let k = ks
+                .get(i)
+                .and_then(|&k| usize::try_from(int_of(v, k)).ok())
+                .unwrap_or(0);
+            (Field(f), x, k)
+        })
         .collect()
 }
 
@@ -2528,7 +2569,9 @@ pub(crate) fn fire_node(v: &Values, x: Option<ValueId>) -> Option<phitex_defuse:
         .map(|n| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())))
 }
 
-/// `pgst:<j>`'s pairs `[field, value]` (UNIT: none).
+/// `pgst:<j>`'s pairs `[field, value]` (UNIT: none); the chain's
+/// state carries a third, the step that made the value
+/// ([`pgst_made`]).
 fn pgst_pairs(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId)> {
     x.map(|x| list_of(v, x))
         .unwrap_or_default()
@@ -2536,7 +2579,23 @@ fn pgst_pairs(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId)> {
         .filter_map(|e| {
             let xs = list_of(v, e);
             match xs[..] {
-                [f, x] => Some((Field(f), x)),
+                [f, x] | [f, x, _] => Some((Field(f), x)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The step (fire index) whose routine made each value of the chain's
+/// state `pgst:<j>`.
+fn pgst_made(v: &Values, x: Option<ValueId>) -> phitex_defuse::FxHashMap<Field, usize> {
+    x.map(|x| list_of(v, x))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| {
+            let xs = list_of(v, e);
+            match xs[..] {
+                [f, _, m] => Some((Field(f), usize::try_from(int_of(v, m)).ok()?)),
                 _ => None,
             }
         })
@@ -2635,13 +2694,12 @@ impl FinalState {
         // where each step read the text (`pp:fires`, the plan's): the
         // text's state when page `j` fired, for the fields its routine's
         // delta does not carry
-        let fires: Vec<Option<phitex_defuse::NodeId>> = cx
+        let fire_vals: Vec<ValueId> = cx
             .use_field(v.field("pp:fires"))?
             .map(|x| list_of(v, x))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|x| fire_node(v, Some(x)))
-            .collect();
+            .unwrap_or_default();
+        let fires: Vec<Option<phitex_defuse::NodeId>> =
+            fire_vals.iter().map(|&x| fire_node(v, Some(x))).collect();
         // the text's `f` as step `k` reads it (after the last step: the
         // text's final state, the writer's)
         let text_at = |cx: &mut Ctx<'_>, f: Field, k: usize| -> Result<Option<ValueId>, Stop> {
@@ -2651,7 +2709,7 @@ impl FinalState {
             }
         };
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
+        let mut state: std::collections::BTreeMap<String, (Field, ValueId, usize)> =
             std::collections::BTreeMap::new();
         let mut cur = ValueId::UNIT;
         // the state after each page, for the flush points' loop-backs
@@ -2795,7 +2853,7 @@ impl FinalState {
                 if g(2) != cur {
                     let read = named(v, &read_pairs);
                     let want: Vec<(String, ValueId)> =
-                        state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
+                        state.iter().map(|(n, &(_, x, _))| (n.clone(), x)).collect();
                     for n in differing(&read, &want) {
                         if crate::exec::env_flag!("PHITEX_PGST") {
                             let r = |e: &[(String, ValueId)]| {
@@ -2864,17 +2922,30 @@ impl FinalState {
                 } else {
                     x
                 };
-                if same_as_before(v, &name, pre, x) {
+                // (the text's value, unless the next fire has a local
+                // binding of the field older than this step: then the
+                // step's value is what TeX holds there, §279)
+                let local = fire_locals(v, fire_vals.get(j + 1).copied())
+                    .into_iter()
+                    .any(|(g, y, k)| g == f && k <= j && y != x);
+                if same_as_before(v, &name, pre, x) && !local {
                     state.remove(&name);
                 } else {
-                    state.insert(name, (f, x));
+                    state.insert(name, (f, x, j));
                 }
             }
-            let as_pairs = |state: &std::collections::BTreeMap<String, (Field, ValueId)>| {
+            let as_pairs = |state: &std::collections::BTreeMap<String, (Field, ValueId, usize)>| {
                 if state.is_empty() {
                     ValueId::UNIT
                 } else {
-                    v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
+                    v.list(
+                        state
+                            .values()
+                            .map(|&(f, x, m)| {
+                                v.list(vec![f.0, x, v.int(i64::try_from(m).unwrap_or(0))])
+                            })
+                            .collect(),
+                    )
                 }
             };
             // a routine's delta holds at a later step only while the text
@@ -2896,11 +2967,11 @@ impl FinalState {
             {
                 let xs = list_of(v, s.3);
                 let (f, x) = (Field(xs[0]), xs[1]);
-                state.insert(crate::val::field_name(v, f), (f, x));
+                state.insert(crate::val::field_name(v, f), (f, x, j));
             }
             cur = as_pairs(&state);
             let e: Vec<(String, ValueId)> =
-                state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
+                state.iter().map(|(n, &(_, x, _))| (n.clone(), x)).collect();
             log_pub(o, "pgst", j, e);
             let jj = v.int(i64::try_from(j).unwrap_or(0));
             if cur != ValueId::UNIT {
@@ -2976,7 +3047,7 @@ impl FinalState {
             }
         }
         Ok(FinalState {
-            map: state.into_values().collect(),
+            map: state.into_values().map(|(f, x, _)| (f, x)).collect(),
         })
     }
 
