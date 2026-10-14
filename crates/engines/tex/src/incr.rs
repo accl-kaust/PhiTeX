@@ -311,17 +311,27 @@ impl Incr {
             });
         let t_chain = t0.elapsed();
         // the analyses of the chunks not kept
+        let analyse_todo = |x: usize| {
+            let k = todo[x];
+            let own = own_of[k].and_then(|o| {
+                owns[o]
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take()
+            });
+            analyse(chunk_text(&parts[k]), &ins[k].1, own)
+        };
+        // (the analyses' summed time, for `PHITEX_TEX_TIME`)
+        let busy = std::sync::atomic::AtomicU64::new(0);
         let made: Vec<(Arc<TextHints>, Arc<[u64]>, Input)> =
             crate::exec::map(threads, todo.len(), &|x| {
-                let k = todo[x];
-                let t = chunk_text(&parts[k]);
-                let own = own_of[k].and_then(|o| {
-                    owns[o]
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take()
-                });
-                analyse(t, &ins[k].1, own)
+                let t = std::time::Instant::now();
+                let r = analyse_todo(x);
+                busy.fetch_add(
+                    u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                r
             });
         let t_made = t0.elapsed();
         let analysed = todo.len();
@@ -356,17 +366,24 @@ impl Incr {
             self.chunks.len(),
             analysed,
             [t_parts, t_owns, t_chain, t_made, t0.elapsed()],
+            std::time::Duration::from_nanos(busy.load(std::sync::atomic::Ordering::Relaxed)),
         );
     }
 }
 
 /// `PHITEX_TEX_TIME`: a walk's chunks, those analysed, and its phases'
-/// ends `t` (bounds, own definitions, chain, analyses, assembled).
-fn walk_note(chunks: usize, analysed: usize, t: [std::time::Duration; 5]) {
+/// ends `t` (bounds, own definitions, chain, analyses, assembled), the
+/// analyses' summed time `busy`.
+fn walk_note(
+    chunks: usize,
+    analysed: usize,
+    t: [std::time::Duration; 5],
+    busy: std::time::Duration,
+) {
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         let d = |k: usize| t[k].saturating_sub(t[k - 1]);
         eprintln!(
-            "incr walk: {chunks} chunks ({analysed} analysed), bounds {:?}, own definitions {:?}, chain {:?}, analyses {:?}, assembled {:?}",
+            "incr walk: {chunks} chunks ({analysed} analysed), bounds {:?}, own definitions {:?}, chain {:?}, analyses {:?} (busy {busy:?}), assembled {:?}",
             t[0],
             d(1),
             d(2),
@@ -486,6 +503,10 @@ impl Open {
     }
 
     fn scan(&mut self, t: &str) {
+        // (only control sequences open or close anything)
+        if !t.contains('\\') {
+            return;
+        }
         let b = t.as_bytes();
         let mut k = 0;
         let mut prev = String::new();
