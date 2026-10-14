@@ -323,6 +323,9 @@ pub(crate) struct Run<'c, 'a> {
     /// first, `flushdecl:`) on the run's next read of a count register,
     /// so a flush nothing reads after (plain's `\bye`) costs no round.
     pub flush_pending: Option<(Field, Field)>,
+    /// Defining the counts a flush point fed back ([`Run::flush_read`]):
+    /// not the text's own assignment.
+    pub fed: bool,
     pub pre_memo: phitex_defuse::FxHashMap<Loc, Option<ValueId>>,
     /// Errors since the last paragraph ended (§76 `error_count`, reset by
     /// `end_graf`, §1096): at 100 the job stops (§82).
@@ -396,6 +399,7 @@ impl<'c, 'a> Run<'c, 'a> {
             closed: Vec::new(),
             flushes: 0,
             flush_pending: None,
+            fed: false,
             pre_memo: phitex_defuse::FxHashMap::default(),
             error_count: 0,
             fatal_logged: false,
@@ -567,9 +571,16 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cx.op()
             );
         }
+        let set = crate::fields::is_count_slot(loc)
+            .then(|| val.encode(self.v))
+            .flatten()
+            .and_then(|x| self.v.as_int(x));
         let grp = self.innermost_group();
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
+        if let Some(n) = set {
+            self.count_set(loc, n);
+        }
     }
 
     /// The parameter `p`.

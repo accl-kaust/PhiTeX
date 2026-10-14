@@ -672,7 +672,9 @@ impl Run<'_, '_> {
             };
             if self.reg_int(0, k)? != new {
                 let l = self.reg_loc(0, k);
+                self.fed = true;
                 self.set_loc(l, crate::runstate::Native::Int(new), true);
+                self.fed = false;
             }
         }
         Ok(())
@@ -901,6 +903,37 @@ impl Run<'_, '_> {
         // (read on the next count-register read, [`Run::flush_read`])
         self.flush_pending = Some((decl, f));
         Ok(())
+    }
+
+    /// The text assigned `\count<k>` (0–9) the value `n`: a document
+    /// node marks it on the main list (`T_FLUSH_AT` with `[k, n]`), so
+    /// the page that fires after it starts its routine from it (the
+    /// writer's fold); a definition of the counts a flush point fed back
+    /// is none.
+    pub(crate) fn count_set(&mut self, loc: crate::runstate::Loc, n: i64) {
+        let v = self.v;
+        let Some(k) = (0..10).find(|&k| self.reg_loc(0, k) == loc) else {
+            return;
+        };
+        let op = self.cx.op();
+        if self.fed
+            || self.interp.is_some()
+            || op == self.ops.pagestep
+            || op == self.ops.pagestep_any
+            || self.pg.is_some()
+        {
+            return;
+        }
+        let node = self.cx.node().raw();
+        let id = self.flushes;
+        self.flushes += 1;
+        let at = v.list(vec![
+            v.int(nodes::T_FLUSH_AT),
+            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+            v.int(i64::try_from(id).unwrap_or(0)),
+            v.list(vec![v.int(i64::from(k)), v.int(n)]),
+        ]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
     }
 
     /// The pending flush point's loop-back read: declared by the client
@@ -1756,7 +1789,7 @@ impl FinalState {
         // before, on the value fed back there); the first, before any
         // page, is the chain's start
         let fp = cx.acc_range(v.field("flushplan"), None)?;
-        let flushes: Vec<(i64, i64, i64, ValueId)> = v
+        let marks: Vec<(i64, i64, i64, ValueId)> = v
             .seq_to_vec(fp)
             .iter()
             .flat_map(|&e| list_of(v, e))
@@ -1770,6 +1803,24 @@ impl FinalState {
             .collect();
         let ints =
             |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
+        // (a marker's payload: a flush point's ten counts, or a count
+        // the text assigned, `[k, n]`, applied before page `p + 1`
+        // fires)
+        let (flushes, sets): (Vec<_>, Vec<_>) =
+            marks.into_iter().partition(|m| list_of(v, m.3).len() == 10);
+        let sets_before = |page: usize, counts: &mut Vec<i64>| {
+            for s in sets
+                .iter()
+                .filter(|s| s.2 + 1 == i64::try_from(page).unwrap_or(-1))
+            {
+                let c = ints(s.3);
+                if let (Some(&k), Some(&n)) = (c.first(), c.get(1))
+                    && let Some(x) = usize::try_from(k).ok().and_then(|k| counts.get_mut(k))
+                {
+                    *x = n;
+                }
+            }
+        };
         // the counts the routine of the page that fires at a flush point
         // reads: the text's there (its arithmetic on the values fed back
         // at the flush before)
@@ -1792,16 +1843,15 @@ impl FinalState {
                 .map(|f| ints(f.3))
                 .filter(|c| c.len() == 10)
         });
-        let pgread0 = v.field("pgread0");
-        if let Some(c) = &start
-            && cx.is_loopback(pgread0)
-        {
-            cx.publish(pgread0, v.list(c.iter().map(|&c| v.int(c)).collect()));
-        }
         let mut counts = match start {
             Some(c) => c,
             None => Self::counts(cx)?,
         };
+        sets_before(0, &mut counts);
+        let pgread0 = v.field("pgread0");
+        if (!flushes.is_empty() || !sets.is_empty()) && cx.is_loopback(pgread0) {
+            cx.publish(pgread0, v.list(counts.iter().map(|&c| v.int(c)).collect()));
+        }
         for j in 0..steps {
             let Some(xs) = entries.get(&j) else { continue };
             let g = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -1898,11 +1948,9 @@ impl FinalState {
             let done = v.list(counts.iter().map(|&c| v.int(c)).collect());
             after.resize(j + 1, (ValueId::UNIT, ValueId::UNIT));
             after[j] = (done, cur);
-            // what the next page's routine reads: the text's, when it
-            // fires at a flush point
-            if let Some(c) = fires_at(j + 1) {
-                counts = c;
-            }
+            // what the next page's routine reads: the counts the text
+            // assigned before it fires
+            sets_before(j + 1, &mut counts);
             let cs = v.list(counts.iter().map(|&c| v.int(c)).collect());
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
             cx.publish(v.field(&format!("pgdef:{j}")), cs);
