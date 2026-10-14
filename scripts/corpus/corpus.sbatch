@@ -79,7 +79,7 @@ while IFS=$'\t' read -r id kind src main threads flags; do
       target)
         [ -f "$R/$id/oracle/oracle.pdf" ] && cp "$R/$id/oracle/oracle.pdf" "$w/in/oracle.pdf"
         tools=; [ "$kind" = manual ] && tools=--tools
-        box target --doc /w/doc --main "$main" --out /w/out --threads 8 --timeout 900 $tools > "$w/work/out/target-term.txt" 2>&1 || status=$? ;;
+        box target --doc /w/doc --main "$main" --out /w/out --threads "${TARGET_J:-8}" --timeout 900 $tools > "$w/work/out/target-term.txt" 2>&1 || status=$? ;;
       diag)
         [ -f "$R/$id/oracle/oracle.pdf" ] && cp "$R/$id/oracle/oracle.pdf" "$w/in/oracle.pdf"
         box diag --doc /w/doc --main "$main" --out /w/out --timeout 900 --threads "${DIAG_J:-1}" > "$w/work/out/diag-run.txt" 2>&1 || status=$? ;;

@@ -632,7 +632,7 @@ def cmd_diag(a):
     fresh_run(doc, job)
     shutil.rmtree("/w/cache/docs", ignore_errors=True)
     r = common.run([a.binary, "build", "-v", "--exact-pdf", "-j", str(a.threads), a.main], RUN,
-                   phitex_env({"COLUMNS": "200"}), a.timeout, out=out / "diag-term.txt",
+                   phitex_env({"COLUMNS": "200", "RUST_BACKTRACE": "1"}), a.timeout, out=out / "diag-term.txt",
                    cpu_s=int(4 * a.timeout + 60))
     term = (out / "diag-term.txt").read_bytes()[:400000]
     (out / "diag-term.txt").write_bytes(term)
@@ -742,6 +742,15 @@ def cmd_target(a):
             shutil.copy2(RUN / f"{job}.pdf", out / "edit-oracle.pdf")
             if (out / "edit.pdf").exists():
                 res["edit_diff"] = pdfdiff(str(out / "edit-oracle.pdf"), str(out / "edit.pdf"), "edit")
+    # the counters (PHITEX_TEX_TIME: rounds, loop rounds) from a second cold build
+    fresh_run(doc, job)
+    t = watch(a.binary, a.threads, a.main, a.timeout, tex_time=True, exact=True, tag="stats")
+    st = summarize_stderr(out / "stderr-stats.txt")
+    (out / "stderr-stats.txt").unlink(missing_ok=True)
+    loops = sum(int(m.group(1)) for l in st.get("rounds", []) for m in [re.search(r"(\d+) loop rounds", l)] if m)
+    res["stats"] = {"rounds": len(st.get("rounds", [])), "loop_rounds": loops, "round_lines": st.get("rounds", [])[:20],
+                    "ops": st.get("ops"), "cold_s_with_timers": t.get("cold_process_s"),
+                    "parallel": ((t.get("builds") or [{}])[0]).get("parallel")}
     jdump(out / "target.json", res)
     b = r["builds"]
     print(json.dumps({"cold_s": r.get("cold_process_s"), "edit_s": r.get("edit_process_s"),
