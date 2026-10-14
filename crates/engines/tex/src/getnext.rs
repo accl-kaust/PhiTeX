@@ -350,6 +350,7 @@ impl Run<'_, '_> {
     /// it runs as its own node on the state this run leaves. True when
     /// the run is to end here. (A preamble's loads each end their run so,
     /// instead of every later load joining the first.)
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn give_back_peeked(&mut self) -> R<bool> {
         // (`PHITEX_GIVEBACK_TRACE`: a load's run, why a sibling it pulled
         // was not given back)
