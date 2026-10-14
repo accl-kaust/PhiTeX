@@ -1323,6 +1323,7 @@ impl Graph {
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
+            page_states: Arc::default(),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
