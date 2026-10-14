@@ -191,7 +191,7 @@ impl Incr {
                     }
                 }
                 let th = crate::hints::text_hints(&text, FileKind::Document, &defs);
-                let out = if defines(&text) {
+                let out = if th.defines {
                     let mut d: Definitions = (*defs).clone();
                     d.harvest(&text, FileKind::Document, self.next_file);
                     self.next_file = self.next_file.wrapping_add(1);
@@ -268,14 +268,6 @@ fn common_suffix(a: &[u8], b: &[u8]) -> usize {
         .zip(b[..n - i].iter().rev())
         .take_while(|(x, y)| x == y)
         .count()
-}
-
-/// Whether a text defines anything the pass harvests (a macro, an
-/// active character).
-fn defines(text: &str) -> bool {
-    let mut d = Definitions::new();
-    d.harvest(text, FileKind::Document, 0);
-    !d.is_empty() || d.active_chars() != 0
 }
 
 /// The conditionals of TeX, e-TeX and pdfTeX (a document's `\newif`s
