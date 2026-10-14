@@ -1990,11 +1990,7 @@ impl FinalState {
         sets_before(0, &mut counts);
         let pgread0 = v.field("pgread0");
         if (!flushes.is_empty() || !sets.is_empty()) && cx.is_loopback(pgread0) {
-            lb_pub(
-                cx,
-                pgread0,
-                v.list(counts.iter().map(|&c| v.int(c)).collect()),
-            );
+            lb_pub(cx, pgread0, v.list(counts.iter().map(|&c| v.int(c)).collect()));
         }
         for j in 0..steps {
             let Some(xs) = entries.get(&j) else { continue };
@@ -2108,11 +2104,7 @@ impl FinalState {
             let node = u64::from_ne_bytes(n.to_ne_bytes());
             let f = v.field(&format!("pgst:at:{node}:{k}"));
             if !cx.is_loopback(f) {
-                // (declared after this evaluation: then published)
-                cx.use_env(v.field(&format!("flushdecl:{node}:{k}")))?;
-                if !cx.is_loopback(f) {
-                    continue;
-                }
+                continue;
             }
             let x = usize::try_from(p)
                 .ok()
