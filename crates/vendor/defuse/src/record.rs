@@ -79,6 +79,8 @@ impl Recorder {
         let mut g = crate::core::lock(&self.out);
         let (w, seen, lines) = &mut *g;
         if once && !lines.insert(hash_of(&text)) {
+            // Skipped: the values named so far still go out with the next line.
+            NAMED.with(|n| n.borrow_mut().extend(names));
             return;
         }
         for raw in names {
