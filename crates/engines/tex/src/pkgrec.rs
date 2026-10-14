@@ -100,7 +100,14 @@ impl Rec {
             } else {
                 &self.reads
             };
-            crate::hints::record_hint(&self.writes, reads, self.no_scope, self.claim0)
+            // (`PHITEX_PKG_NOSCOPE=1`, `PHITEX_PKG_NOCLAIM=1`: the record's
+            // effect, its claim left to the run, for comparison)
+            crate::hints::record_hint(
+                &self.writes,
+                reads,
+                self.no_scope && !crate::exec::env_flag!("PHITEX_PKG_NOSCOPE"),
+                self.claim0 && !crate::exec::env_flag!("PHITEX_PKG_NOCLAIM"),
+            )
         })
     }
 
