@@ -1575,6 +1575,14 @@ impl<'a> Closure<'a> {
         let doc = self.document.effects(name);
         let pre = self.prelude.effects(name);
         let bodies: Vec<Effects> = match (doc, pre) {
+            // (the token lists of `\everypar`: any one assigned may be in
+            // force, the format's and the document's)
+            (d, p) if name == super::defs::EVERYPAR => d
+                .into_iter()
+                .flatten()
+                .chain(p.into_iter().flatten())
+                .cloned()
+                .collect(),
             (Some(d), _) => d.into_iter().cloned().collect(),
             (None, Some(p)) => p.last().into_iter().copied().cloned().collect(),
             (None, None) => Vec::new(),

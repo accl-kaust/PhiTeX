@@ -142,6 +142,11 @@ pub(crate) struct Catcoder {
 /// The key the `\output` routine's text is kept under.
 pub const OUTPUT: &str = "\0output";
 
+/// The key the token lists assigned to `\everypar` are kept under,
+/// every one the texts assign (any may be in force when a paragraph
+/// starts, §1091).
+pub const EVERYPAR: &str = "\0everypar";
+
 /// A definition's body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Body {
@@ -319,6 +324,16 @@ impl Definitions {
     pub fn output_defines(&self, prelude: &Definitions) -> Option<DefSet> {
         let mut c = Closure::new(self, prelude);
         self.bodies.contains_key(OUTPUT).then(|| c.call(OUTPUT))
+    }
+
+    /// What running the token lists assigned to `\everypar` may define
+    /// (every one `self` and `prelude` assign, and every macro they
+    /// call): what a paragraph's start runs, §1091. `None` when neither
+    /// assigns one.
+    #[must_use]
+    pub fn everypar_defines(&self, prelude: &Definitions) -> Option<DefSet> {
+        (self.bodies.contains_key(EVERYPAR) || prelude.bodies.contains_key(EVERYPAR))
+            .then(|| Closure::new(self, prelude).call(EVERYPAR))
     }
 
     /// What calling `name` may define (through `self`, then `prelude`).
@@ -560,14 +575,16 @@ impl Definitions {
                 self.add(&target, file, pos, Shape::Macro(args));
                 self.body(&target, text, atoms, open, file, pos);
             }
-            "output" => {
-                // (the output routine: `\output{…}` or `\output={…}`)
+            "output" | "everypar" => {
+                // (the output routine, `\output{…}` or `\output={…}`;
+                // a paragraph-start token list, `\everypar{…}`)
                 let mut j = skip(atoms, a + 1);
                 if atoms.get(j).map(|x| x.kind) == Some(AtomKind::Char('=')) {
                     j = skip(atoms, j + 1);
                 }
                 if atoms.get(j).map(|x| x.kind) == Some(AtomKind::Open) {
-                    self.body(OUTPUT, text, atoms, j, file, pos);
+                    let key = if name == "output" { OUTPUT } else { EVERYPAR };
+                    self.body(key, text, atoms, j, file, pos);
                 }
             }
             "cs_new:Npn"

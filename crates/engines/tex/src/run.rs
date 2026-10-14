@@ -1433,6 +1433,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
         crate::hints::register_text(f.name, &t);
         let mut out = Vec::new();
+        // (a list some text before the file assigned may be in force at
+        // its start, §1091)
+        let mut lists = crate::hints::ParLists { in_force: true };
         for &(s, e) in &t.slices {
             if e <= f.off {
                 continue;
@@ -1440,7 +1443,8 @@ impl<'c, 'a> Run<'c, 'a> {
             let a = s.max(f.off);
             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
             let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
-            args.push(crate::hints::hint_arg(v, &t, s));
+            let takes = lists.step(&t, s);
+            args.push(crate::hints::hint_arg_in(v, &t, s, takes));
             out.push(args);
         }
         out

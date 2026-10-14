@@ -833,6 +833,15 @@ pub(crate) struct TextHints {
     pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
+    /// Per slice: whether its run may assign a paragraph-start token
+    /// list (`\\everypar`: its hint may define `param:everypar`, or
+    /// anything), and whether a paragraph may start in it (`pg:`).
+    par_sets: Vec<bool>,
+    par_starts: Vec<bool>,
+    /// What running the paragraph-start token lists the definitions
+    /// assign may define (§1091), as a hint; `None` when they assign
+    /// none.
+    par_lists: Option<Hint>,
     /// Whether the text defines anything the pass harvests (a macro, an
     /// active character).
     pub defines: bool,
@@ -1764,6 +1773,29 @@ impl Analysis<'_> {
 
     fn shape(&self, name: &str) -> Option<pass::Shape> {
         self.defs.shape(name).or_else(|| self.prelude.shape(name))
+    }
+
+    /// What running the paragraph-start token lists the text and the
+    /// format assign to `\\everypar` may define (§1091: a paragraph's
+    /// start inserts the list in force), as a hint: `None` when they
+    /// assign none, unbounded when a list's closure is.
+    fn par_lists(&self) -> Option<Hint> {
+        let set = self.defs.everypar_defines(&self.prelude)?;
+        let mut b = Bound {
+            state: Some(Vec::new()),
+            ..Bound::default()
+        };
+        let mut cause = String::new();
+        Some(if self.add_set(&set, &mut b, &mut cause) {
+            Hint {
+                bound: Some(b),
+                cause: "paragraph-start token lists".to_owned(),
+                excerpt: String::new(),
+                guess: None,
+            }
+        } else {
+            Hint::any(format!("\\everypar: {cause}"), "")
+        })
     }
 
     /// What calling `name` (as the text, then the format, defines it)
@@ -2757,11 +2789,18 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         skip,
         pars,
         slice_hints: Vec::new(),
+        par_sets: Vec::new(),
+        par_starts: Vec::new(),
+        par_lists: an.par_lists(),
     };
     // each slice's hint: the union of its commands' bounds (a run
     // executes the whole slice); a paragraph's region also defines
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
+    let (mut par_sets, mut par_starts) = (
+        Vec::with_capacity(t.slices.len()),
+        Vec::with_capacity(t.slices.len()),
+    );
     let mut pending: Vec<&'static str> = Vec::new();
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
@@ -2907,6 +2946,8 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         {
             b.claim = (!reads_on && an.slice_claims_nothing(k0, e)).then_some(0);
         }
+        par_sets.push(may_set_par_lists(&h));
+        par_starts.push(may_start_paragraph(&h));
         slice_hints.push(intern(&h));
     }
     // (`PHITEX_HINTS_DIGEST`: one line per text, a hash of every hint
@@ -2950,6 +2991,8 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         }
     }
     t.slice_hints = slice_hints;
+    t.par_sets = par_sets;
+    t.par_starts = par_starts;
     t
 }
 
@@ -3063,6 +3106,71 @@ pub(crate) fn text_hints_with(
     }
     c.insert(key, t.clone());
     t
+}
+
+/// Whether a slice's hint lets its run assign a paragraph-start token
+/// list: `param:everypar` among what it may define, or anything.
+fn may_set_par_lists(h: &Hint) -> bool {
+    h.bound.as_ref().is_none_or(|b| {
+        b.state
+            .as_ref()
+            .is_none_or(|st| st.iter().any(|x| "param:everypar".starts_with(x)))
+    })
+}
+
+/// Whether a paragraph may start in a slice: its hint names the
+/// paragraph's head (`pg:`), or it may define anything.
+fn may_start_paragraph(h: &Hint) -> bool {
+    h.bound.as_ref().is_none_or(|b| {
+        b.state
+            .as_ref()
+            .is_none_or(|st| st.iter().any(|x| "pg:".starts_with(x)))
+    })
+}
+
+/// The paragraph-start token lists along a run of slices, in order
+/// (§1091: a paragraph's start runs the `\\everypar` list in force):
+/// whether a list some earlier slice assigned may be in force.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ParLists {
+    pub in_force: bool,
+}
+
+impl ParLists {
+    /// The slice of `t` at byte `s` follows: whether its hint takes
+    /// what the lists may define (a list in force, or one it assigns
+    /// itself, and a paragraph that may start in it). A list it assigns
+    /// is in force after it.
+    pub(crate) fn step(&mut self, t: &TextHints, s: usize) -> bool {
+        let k = t.slices.partition_point(|&(a, _)| a < s);
+        if t.slices.get(k).map(|x| x.0) != Some(s) {
+            return false;
+        }
+        let sets = t.par_sets[k];
+        let takes = (self.in_force || sets) && t.par_starts[k] && t.par_lists.is_some();
+        self.in_force |= sets;
+        takes
+    }
+}
+
+/// [`hint_arg`], with what the paragraph-start token lists may define
+/// added when `lists` ([`ParLists::step`]).
+pub(crate) fn hint_arg_in(v: &Values, t: &TextHints, s: usize, lists: bool) -> ValueId {
+    let (true, Some(l), Some(h)) = (lists, &t.par_lists, t.slice_hint(s)) else {
+        return hint_arg(v, t, s);
+    };
+    let mut h = Hint::decode(h);
+    match (&mut h.bound, &l.bound) {
+        (Some(b), Some(lb)) => {
+            let no_scope = b.no_scope;
+            let claim = b.claim;
+            union(b, lb);
+            (b.no_scope, b.claim) = (no_scope, claim);
+        }
+        (Some(_), None) => h = Hint::any(l.cause.clone(), &h.excerpt),
+        (None, _) => {}
+    }
+    v.str(&h.encode())
 }
 
 /// The hint of the document slice beginning at byte `s` of the text `t`
