@@ -3,8 +3,8 @@
 //! built by `phitex build --exact-pdf` and compared byte for byte with
 //! `NAME.pdf`, pdflatex's (pdfTeX 1.40.29 in the CI image, to its
 //! fixpoint, `SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 TZ=UTC`, as
-//! scripts/ci/common.py pins them). Each test is ignored with its cause and
-//! how many corpus documents it stops; un-ignore it with the fix.
+//! scripts/ci/common.py pins them). A test that fails is ignored with its cause
+//! and how many corpus documents it stops; the passing ones guard the fix.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,8 +67,8 @@ fn check(name: &str) {
 
 macro_rules! repro {
     ($name:ident, $why:literal) => {
+        #[doc = $why]
         #[test]
-        #[ignore = $why]
         fn $name() {
             check(stringify!($name));
         }
@@ -77,13 +77,13 @@ macro_rules! repro {
 
 repro!(
     display_align,
-    "corpus: \\halign in a display ($$\\halign$$: amsmath align/gather, eqnarray) is 'this alignment is not supported' (control.rs REDUCE-GAP), the first cause in 27 of 136 arXiv papers; ported on cuts"
+    "corpus (green since dev f3463b9a, cuts): \\halign in a display ($$\\halign$$: amsmath align/gather, eqnarray) is 'this alignment is not supported' (control.rs REDUCE-GAP), the first cause in 27 of 136 arXiv papers; ported on cuts"
 );
 repro!(
     row_starts_with_amp,
-    "corpus: a tabular row that starts with & (an empty first cell) gives 'illegal command' / 'You can't use \\cr in restricted horizontal mode' and Extra alignment tab; amsldoc.tex:1211, arXiv a-2409.03762v1; owner cuts"
+    "corpus (green on dev 4ce434f1, cuts): a tabular row that starts with & (an empty first cell) gives 'illegal command' / 'You can't use \\cr in restricted horizontal mode' and Extra alignment tab; amsldoc.tex:1211, arXiv a-2409.03762v1; owner cuts"
 );
 repro!(
     table_float_lost,
-    "corpus (green on dev since 301ef3af, pagechain's pgstfix; kept as a heavy regression check): \\caption + \\centering + tabular in a table float lost the float ('Float(s) lost') on b7646c77, first cause in 8 of 136 arXiv papers"
+    "corpus (green since dev 301ef3af, pagechain's pgstfix): \\caption + \\centering + tabular in a table float lost the float ('Float(s) lost') on b7646c77, first cause in 8 of 136 arXiv papers"
 );
