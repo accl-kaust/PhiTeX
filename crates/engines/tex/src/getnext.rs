@@ -507,13 +507,10 @@ impl Run<'_, '_> {
         let mut seen = SEEN
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let i = match seen.iter().position(|x| *x == sib) {
-            Some(i) => i,
-            None => {
-                seen.push(sib.clone());
-                seen.len() - 1
-            }
-        };
+        let i = seen.iter().position(|x| *x == sib).unwrap_or_else(|| {
+            seen.push(sib.clone());
+            seen.len() - 1
+        });
         if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") {
             eprintln!(
                 "giveback-only: candidate {} (allowed {}): {}",

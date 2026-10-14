@@ -161,6 +161,7 @@ impl Aux {
             assumers: self.assumers.clone(),
             assume_left: self.assume_left,
             watch: self.watch,
+            watch_to: self.watch_to,
             reach1: self.reach1,
             stream: self.stream,
             diagnostics: self.diagnostics.clone(),
@@ -789,6 +790,8 @@ impl Engine {
             ids.push(p_ids);
             touched.push(p_touched);
             slots.push((origins, runs_in_eval));
+            let mut small = small;
+            self.spec_blocked.extend(std::mem::take(&mut small.spec_blocked));
             maps.push(small);
             logs.push(p_logs);
         }
@@ -1111,6 +1114,7 @@ struct SmallMaps {
     batch_lift: OvMap<Slot, super::Lifted>,
     marks: OvMap<Slot, Option<(u64, ValueId)>>,
     mispredicted: OvMap<Slot, u32>,
+    spec_blocked: FxHashMap<Slot, (Slot, super::NodeId)>,
     user_max: OvMap<(u32, Field), u64>,
     wait_counts: FxHashMap<Slot, u64>,
 }
@@ -1199,6 +1203,7 @@ impl Parts {
             marks,
             settle_heap,
             mispredicted,
+            spec_blocked,
             ov,
             ..
         } = e;
@@ -1233,6 +1238,7 @@ impl Parts {
                 batch_lift,
                 marks,
                 mispredicted,
+                spec_blocked,
                 user_max,
                 wait_counts,
             },

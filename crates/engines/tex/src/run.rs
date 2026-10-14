@@ -16,7 +16,7 @@ use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Va
 
 use crate::fields::Par;
 use crate::runstate::{Loc, Native};
-use crate::val::{Mean, Tok, cmd, int_at, int_of, list_of, str_of};
+use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
 pub(crate) enum Halt {
@@ -314,29 +314,6 @@ pub(crate) struct Run<'c, 'a> {
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
     pub irreversible: u64,
-    /// While a job-written line is interpreted ([`Run::interpret_line`]):
-    /// the read-back fields reverted so far in that line, to the value
-    /// they had before this round's read-back (`wpre:<field>`), and
-    /// what each location's pre-value is (memoized for the run).
-    pub interp: Option<phitex_defuse::FxHashSet<Loc>>,
-    /// The state's stamp as the line's interpretation began: a field the
-    /// line defined since is not reverted (`\@writefile` sets
-    /// `\@temptokena` and writes `\the\@temptokena`).
-    pub interp_base: u64,
-    /// The streams a document node closed with `\immediate\closeout`:
-    /// closed for this run's later writes, and for the writer from the
-    /// close's position (a stream entry), never for the page steps: the
-    /// steps run on the state at the end of the text, and TeX's deferred
-    /// writes fire before a close that follows their page
-    /// (`\enddocument` closes the `.aux` after `\clearpage`).
-    pub closed: Vec<i32>,
-    /// Flush points met by this run so far ([`Run::flush_point`]).
-    pub flushes: usize,
-    /// The last flush point's loop-back, not read yet: read (declared
-    /// first, `flushdecl:`) on the run's next read of a count register,
-    /// so a flush nothing reads after (plain's `\bye`) costs no round.
-    pub flush_pending: Option<(Field, Field)>,
-    pub pre_memo: phitex_defuse::FxHashMap<Loc, Option<ValueId>>,
     /// Errors since the last paragraph ended (§76 `error_count`, reset by
     /// `end_graf`, §1096): at 100 the job stops (§82).
     pub error_count: u32,
@@ -414,12 +391,6 @@ impl<'c, 'a> Run<'c, 'a> {
             pdf_occ: 0,
             resumed: false,
             irreversible: 0,
-            interp: None,
-            interp_base: 0,
-            closed: Vec::new(),
-            flushes: 0,
-            flush_pending: None,
-            pre_memo: phitex_defuse::FxHashMap::default(),
             error_count: 0,
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
@@ -458,63 +429,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Location `loc` read: from the engine on its first read in the run.
     #[inline]
     pub(crate) fn load(&mut self, loc: Loc) -> R<()> {
-        if self.interp.is_some() {
-            self.revert_read_back(loc)?;
-        } else if self.flush_pending.is_some() && crate::fields::is_count_slot(loc) {
-            self.flush_read()?;
-        }
         if self.st.is_loaded(loc) {
             return Ok(());
         }
         self.load_slow(loc)
-    }
-
-    /// A job-written line is read as the next round's read-back reads
-    /// it: in the state before this round's read-back took effect. The
-    /// first read of a read-back field in the line gets the value the
-    /// read-back replaced (`wpre:<field>`, left by [`Run::read_back`]),
-    /// so a line whose effect depends on the field (biblatex's
-    /// `\xifinlist`-guarded `\listxadd`, `\ifcsundef`-guarded
-    /// `\csgdef`) defines it as the reading run will, not as this run,
-    /// which already holds the previous round's value, would.
-    #[inline(never)]
-    fn revert_read_back(&mut self, loc: Loc) -> R<()> {
-        let Some(done) = &mut self.interp else {
-            return Ok(());
-        };
-        if !done.insert(loc) {
-            return Ok(());
-        }
-        if self.st.defined_after(loc, self.interp_base) {
-            return Ok(());
-        }
-        let pre = if let Some(&p) = self.pre_memo.get(&loc) {
-            p
-        } else {
-            let f = self.loc_field(loc);
-            let name = crate::val::field_name(self.v, f);
-            let p = if self
-                .cx
-                .is_loopback(self.keyed(crate::fields::Fam::Wdef, &name))
-            {
-                self.get(&format!("wpre:{name}"))?
-            } else {
-                None
-            };
-            self.pre_memo.insert(loc, p);
-            p
-        };
-        if let Some(p) = pre {
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                let name = crate::val::field_name(self.v, self.loc_field(loc));
-                eprintln!("aux-trace: revert {name} for the line's read");
-            }
-            // (read in place of the value, not a definition of the line:
-            // only what the line defines on it is published)
-            self.st
-                .preload(loc, if p == ValueId::UNIT { None } else { Some(p) });
-        }
-        Ok(())
     }
 
     #[inline(never)]
@@ -567,20 +485,6 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE")
-            && self.interp.is_none()
-            && loc == self.reg_loc(0, 0)
-        {
-            let x = match &val {
-                Native::Raw(x) => self.v.render(*x),
-                _ => "?".to_owned(),
-            };
-            eprintln!(
-                "aux-trace: count0 := {x} global={global} by node {} op {:?}",
-                self.cx.node().raw(),
-                self.cx.op()
-            );
-        }
         let grp = self.innermost_group();
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
@@ -742,15 +646,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 None
             }
         } else if self.cx.is_loopback(w) {
-            let x = self.cx.use_field(w)?;
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                let t = x.and_then(|x| list_of(v, x).get(1).map(|&t| str_of(v, t)));
-                eprintln!(
-                    "aux-trace: read wfile {key}: {:?} bytes",
-                    t.map(|t| t.len())
-                );
-            }
-            x
+            self.cx.use_field(w)?
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
@@ -831,21 +727,6 @@ impl<'c, 'a> Run<'c, 'a> {
             let xs = list_of(v, x);
             if let [val, g] = xs.as_slice() {
                 let global = int_of(v, *g) != 0;
-                // the value the read-back replaces, for the lines
-                // written this round ([`Run::revert_read_back`]): once
-                // per run (LaTeX reads the `.aux` again at `\enddocument`)
-                let pre = format!("wpre:{name}");
-                if self.get(&pre)?.is_none() {
-                    let was = self.get(&name)?;
-                    if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                        eprintln!(
-                            "aux-trace: read-back {key} {name} = {} (was {:?})",
-                            crate::val::show_def(v, *val),
-                            was.map(|x| crate::val::show_def(v, x))
-                        );
-                    }
-                    self.set(&pre, was.unwrap_or(ValueId::UNIT), true);
-                }
                 self.set(&name, *val, global);
             }
         }
@@ -854,12 +735,9 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// A line written to a file whose read-back only defines, read as
     /// its read-back reads it (under `\makeatletter`), on scratch: the
-    /// definitions it makes, `[[field, value, global], ...]`. Nothing
-    /// else of it stays in this run (its input, lists, contributions and
-    /// definitions are restored), except what it writes to other files
-    /// (LaTeX's `\@writefile{toc}{...}`, which writes the `.toc` line as
-    /// `\enddocument` reads the `.aux` back): those `streams` entries
-    /// (and a document node's `T_WRITE_AT` markers for them) are kept.
+    /// definitions it makes, `[[field, value, global], ...]`; nothing of
+    /// it stays in this run (its input, lists, contributions and
+    /// definitions are restored).
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<ValueId> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
@@ -875,8 +753,6 @@ impl<'c, 'a> Run<'c, 'a> {
         self.no_pull = true;
         self.set("cat:64", v.int(11), false);
         let base = self.st.stamp();
-        self.interp = Some(phitex_defuse::FxHashSet::default());
-        self.interp_base = base;
         for l in line.split('\n') {
             let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
             while buf.last() == Some(&32) {
@@ -914,25 +790,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 ])
             })
             .collect();
-        self.interp = None;
         self.input = input;
         self.st = st;
-        let streams = v.field("streams");
-        let items = v.field("items");
-        let written: Vec<(Field, ValueId)> = self
-            .contribs
-            .drain(nc..)
-            .filter(|&(f, x)| {
-                f == streams
-                    || f == items
-                        && v.seq_to_vec(x).iter().all(|&e| {
-                            list_of(v, e)
-                                .get(1)
-                                .is_some_and(|&n| int_at(v, n, 0) == crate::nodes::T_WRITE_AT)
-                        })
-            })
-            .collect();
-        self.contribs.extend(written);
+        self.contribs.truncate(nc);
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
         self.conds = conds;
@@ -1162,20 +1022,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The location of token `t`'s meaning, if it has one.
     #[inline]
     pub(crate) fn mean_loc(&mut self, t: Tok) -> Option<Loc> {
-        let l = if let Some(l) = crate::fields::mean_loc(t) {
-            Loc::try_from(l).ok()?
-        } else {
-            let f = self
-                .ops
-                .fields
-                .meaning_at(self.v, self.cx.values_epoch(), t)?;
-            self.loc_of(f)
-        };
-        if self.interp.is_some() {
-            // (a meaning read bypasses `load` once the slot is loaded)
-            let _ = self.revert_read_back(l);
+        if let Some(l) = crate::fields::mean_loc(t) {
+            return Loc::try_from(l).ok();
         }
-        Some(l)
+        let f = self
+            .ops
+            .fields
+            .meaning_at(self.v, self.cx.values_epoch(), t)?;
+        Some(self.loc_of(f))
     }
 
     #[inline]

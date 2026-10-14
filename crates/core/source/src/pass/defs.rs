@@ -121,7 +121,7 @@ pub struct Definitions {
 
 /// [`Definitions::closures`].
 pub(crate) type ClosureCache =
-    std::sync::Arc<std::sync::Mutex<HashMap<String, (DefSet, std::sync::Arc<Vec<String>>)>>>;
+    std::sync::Arc<std::sync::RwLock<HashMap<String, (DefSet, std::sync::Arc<Vec<String>>)>>>;
 
 /// What a definition's body does to catcodes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

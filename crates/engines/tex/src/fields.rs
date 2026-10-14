@@ -16,11 +16,6 @@ use crate::val::{COUNT_BASE, MU_SKIP_BASE, SCALED_BASE, SKIP_BASE, TOKS_BASE, To
 const REGS: [&str; 5] = ["count", "dimen", "skip", "muskip", "toks"];
 
 /// The slot of register `n` of kind `r` (0 count … 4 toks), if 0–255.
-/// Whether `loc` is a count register's slot (`\count0..255`).
-pub(crate) fn is_count_slot(loc: crate::runstate::Loc) -> bool {
-    (REG0..REG0 + 256).contains(&(loc as usize))
-}
-
 pub(crate) fn reg_slot(r: usize, n: i32) -> Option<usize> {
     usize::try_from(n)
         .ok()
