@@ -676,10 +676,17 @@ impl Run<'_, '_> {
         if piece && raw.is_empty() {
             return Ok(());
         }
-        // (its input read out: the siblings it takes are known; a park
-        // at the page state's read below holds no other)
+        // (its input read out: the siblings it takes are known, and so
+        // are the fields it defines: what its state publishes and the
+        // page state; a park at the page state's read below holds no
+        // other sibling and no reader of another field, a finisher's
+        // `MayDefine::Any` and a piece's hint bound narrowed to them)
         let n = self.claim_count();
         self.cx.claim(n);
+        let mut defs = self.published_fields();
+        defs.push(v.field(PS));
+        defs.push(v.field(SHIPPED));
+        self.cx.narrow(MayDefine::Names(defs));
         self.begin_command();
         let f = self.ps_field();
         let ps_in = self.cx.use_field(f)?;
