@@ -186,6 +186,16 @@ pub(crate) struct Static {
     may_define: Arc<MayDefine>,
     predict: bool,
     contribs: Option<Vec<(Field, ValueId)>>,
+    /// [`Operation::predicted_defs`], sorted by field.
+    pub(crate) predicted: Option<Vec<(Field, ValueId)>>,
+}
+
+impl Static {
+    /// The predicted value of `f`, if the text predicts one.
+    pub(crate) fn predicted(&self, f: Field) -> Option<ValueId> {
+        let p = self.predicted.as_ref()?;
+        p.binary_search_by_key(&f, |x| x.0).ok().map(|i| p[i].1)
+    }
 }
 
 /// Where a pending node is indexed: `pending` (an unbounded definition
@@ -254,6 +264,19 @@ pub trait Operation: Send + Sync {
     /// node claimed by another contributes nothing (its claimer does, in
     /// its place); a new text asks again.
     fn static_contribs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
+        None
+    }
+
+    /// Predicted values for some of the fields the node defines, known
+    /// before it runs (for example from an earlier run on the same
+    /// inputs). Under any speculation but [`crate::Speculation::Off`], a
+    /// reader may run on a prediction instead of waiting for the node.
+    /// When the node runs, each predicted field is compared by value with
+    /// what it defined: equal, the readers stand; different (or predicted
+    /// and not defined), exactly the readers of that field run again.
+    /// Predictions change speed, never results. Asked once per text: a
+    /// new text asks again.
+    fn predicted_defs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
         None
     }
 
@@ -519,6 +542,11 @@ pub struct Report {
     /// ([`Operation::static_contribs`]): the run's stand, and the range
     /// readers that folded the declared ones run again.
     pub static_contribs_refuted: u64,
+    /// Speculative runs that read a predicted value
+    /// ([`Operation::predicted_defs`]) and were confirmed.
+    pub predictions_confirmed: u64,
+    /// Speculative runs that read a predicted value and were refuted.
+    pub predictions_refuted: u64,
     /// Speculative runs that ran out of fuel.
     pub fuel_outs: u64,
     /// Scheduler steps.
@@ -1064,7 +1092,7 @@ impl Node {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AssumeKind {
     Def(Field),
     Output,
@@ -1079,6 +1107,7 @@ pub(crate) struct Assume {
     value: ValueId,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 pub(crate) struct Aux {
     pub(crate) children: Vec<Slot>,
@@ -1102,6 +1131,9 @@ pub(crate) struct Aux {
     pub(crate) body: Option<u32>,
     assumers: Vec<Assume>,
     assume_left: u32,
+    /// The kept guess read a predicted value (counted when it is
+    /// confirmed or refuted).
+    read_predicted: bool,
     watch: Option<(Field, Slot)>,
     /// The last node of a bounded range read ([`Ctx::acc_range_to`]):
     /// the range is `(anchor, to]`; `None`: up to the reader.
@@ -1837,6 +1869,8 @@ pub struct Engine {
     pub(crate) text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
     /// The text-only hooks of each (operation, text), computed once.
     statics: RwLock<FxHashMap<(OpId, ValueId), Arc<Static>>>,
+    /// Some text predicted values ([`Operation::predicted_defs`]).
+    predictions_seen: std::sync::atomic::AtomicBool,
     /// Dirty demanded nodes by height (a bucket queue: entries are removed
     /// lazily, an entry is live iff its node is `F_QUEUED` at that height).
     queue: Vec<Vec<(NodeId, Slot)>>,
@@ -2084,6 +2118,7 @@ impl Engine {
             memo: OvMap::default(),
             text_memo: RwLock::new(FxHashMap::default()),
             statics: RwLock::new(FxHashMap::default()),
+            predictions_seen: std::sync::atomic::AtomicBool::new(false),
             queue: Vec::new(),
             queue_min: 0,
             queue_len: 0,
@@ -2217,6 +2252,12 @@ impl Engine {
             claim: opr.claim(&av, v, &mut std::iter::empty()),
             reads: opr.reads(&av, v),
             contribs: opr.static_contribs(&av, v),
+            predicted: opr.predicted_defs(&av, v).map(|mut p| {
+                p.sort_by_key(|x| x.0);
+                p.dedup_by_key(|x| x.0);
+                self.predictions_seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                p
+            }),
             predict: opr.until_predict(&av, v, &mut std::iter::empty()).is_some(),
         });
         self.statics
@@ -2243,7 +2284,7 @@ impl Engine {
             if let MayDefine::Names(fs) = &*x.may_define {
                 live.extend(fs.iter().map(|f| f.0));
             }
-            for &(f, v) in x.contribs.iter().flatten() {
+            for &(f, v) in x.contribs.iter().flatten().chain(x.predicted.iter().flatten()) {
                 live.extend([f.0, v]);
             }
         }
@@ -2911,6 +2952,24 @@ impl Engine {
     fn mispredicted(&mut self, x: Slot) {
         self.report.mispredictions += 1;
         *self.mispredicted.entry_or(x, || 0) += 1;
+    }
+
+    /// Whether a hinted read of `s` ([`Operation::reads`]) reaches a node in
+    /// work that has not run and predicts the field
+    /// ([`Operation::predicted_defs`]): a guess has a value to run on.
+    fn reads_predicted(&self, s: Slot) -> bool {
+        if !self.predictions_seen.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        let n = self.n(s);
+        let st = self.statics(n.op, n.args);
+        st.reads.iter().flatten().any(|&f| {
+            let w = self.walk(n.unit, n.label, f);
+            w.pending == NIL && w.site != NIL && {
+                let t = self.n(w.site);
+                t.in_work() && !t.has(F_RAN) && self.statics(t.op, t.args).predicted(f).is_some()
+            }
+        })
     }
 
     /// Whether an input `s` read on its last run is itself due to run
@@ -6435,7 +6494,25 @@ impl Engine {
 
     fn dirty_field_users_inner(&mut self, site: u64, f: Field, cause: &Cause) {
         let users: Vec<Slot> = self.users.range(&(site, f), 0..).map(|(_, u)| u).collect();
+        let site_slot = Slot::unpack(site);
+        let now = (site_slot != NIL && self.live(site_slot)).then(|| self.n(site_slot).def_value(f));
         for u in users {
+            let n = self.n(u);
+            if n.state == State::Spec
+                && let Some(now) = now
+                && self.aux_of(site_slot).is_some_and(|a| {
+                    a.assumers.iter().any(|x| {
+                        x.node == u
+                            && x.epoch == n.epoch
+                            && x.kind == AssumeKind::Def(f)
+                            && x.value == now.unwrap_or(ValueId::NONE)
+                    })
+                })
+            {
+                // A guess on this very value (a prediction it read): its
+                // assumption confirms it.
+                continue;
+            }
             if self.tracing > 0 {
                 self.note(u, cause.clone());
             }
@@ -8000,7 +8077,15 @@ impl Engine {
         if r.uses.iter().any(|u| {
             (u.kind == K_FIELD || u.kind == K_CHAIN)
                 && u.site != NIL
-                && (!self.live(u.site) || self.n(u.site).def_value(Field(ValueId(u.key))).is_none())
+                && (!self.live(u.site)
+                    || self.n(u.site).def_value(Field(ValueId(u.key))).is_none()
+                        // A predicted value of a node still in work: its
+                        // run confirms or refutes it.
+                        && !(r.read_predicted
+                            && self.n(u.site).in_work()
+                            && r.assumptions.iter().any(|&(t, k, _)| {
+                                t == u.site && k == AssumeKind::Def(Field(ValueId(u.key)))
+                            })))
         }) {
             count!(StaleSite);
             if r.speculative {
@@ -8101,6 +8186,9 @@ impl Engine {
             if !self.stale_assumptions_hold(x, &r) {
                 // A target finished earlier in this batch, against the
                 // prediction: the run is discarded and the node runs again.
+                if r.read_predicted {
+                    self.report.predictions_refuted += 1;
+                }
                 self.mispredicted(x);
                 return;
             }
@@ -8415,10 +8503,15 @@ impl Engine {
             self.set_state(x, State::Spec);
             self.spec_live += 1;
             self.ax(x).assume_left = pending_assumptions;
+            self.ax(x).read_predicted = r.read_predicted;
             let h = self.target_height_mut(x).max(self.n(x).height);
             self.lift(x, h);
             self.sync_order_lazy(x);
         } else {
+            if r.speculative && r.read_predicted {
+                // Every predicted value it read was already confirmed.
+                self.report.predictions_confirmed += 1;
+            }
             let h = self.target_height_mut(x);
             self.finish(x, h);
             if r.raise > 0 {
@@ -8757,6 +8850,9 @@ impl Engine {
                     };
                     if left == 0 {
                         self.report.confirmations += 1;
+                        if std::mem::take(&mut self.ax(a.node).read_predicted) {
+                            self.report.predictions_confirmed += 1;
+                        }
                         let h = self.target_height_mut(a.node);
                         work.push((a.node, h));
                     }
@@ -8768,6 +8864,9 @@ impl Engine {
                         }
                         AssumeKind::Output => None,
                     };
+                    if std::mem::take(&mut self.ax(a.node).read_predicted) {
+                        self.report.predictions_refuted += 1;
+                    }
                     self.dirty_for(a.node, Rerun::Refuted { field });
                 }
             }
@@ -9634,7 +9733,7 @@ impl Engine {
                     cands.push(Candidate {
                         node: n.id,
                         slot: s,
-                        has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
+                        has_prediction: n.has(F_RAN) || n.has(F_PREDICT) || self.reads_predicted(s),
                         waiting: false,
                     });
                 }
@@ -9651,10 +9750,18 @@ impl Engine {
             }
             let n = self.n(s);
             if !n.has(F_NOSPEC) && n.on != NIL && self.may_speculate(s) {
+                let on_predicted = self.predictions_seen.load(std::sync::atomic::Ordering::Relaxed)
+                    && self.live(n.on)
+                    && self.n(n.on).in_work()
+                    && !self.n(n.on).has(F_RAN)
+                    && self.origins.get(s).and_then(|o| o.waited_field).is_some_and(|f| {
+                        let t = self.n(n.on);
+                        self.statics(t.op, t.args).predicted(f).is_some()
+                    });
                 cands.push(Candidate {
                     node: n.id,
                     slot: s,
-                    has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
+                    has_prediction: n.has(F_RAN) || n.has(F_PREDICT) || on_predicted || self.reads_predicted(s),
                     waiting: true,
                 });
             }
@@ -9894,6 +10001,7 @@ pub(crate) enum End {
 }
 
 /// What one run of a node reported. Opaque to clients.
+#[allow(clippy::struct_excessive_bools)]
 pub struct RunResult {
     pub(crate) node: NodeId,
     pub(crate) slot: Slot,
@@ -9905,6 +10013,8 @@ pub struct RunResult {
     pub(crate) raise: u32,
     /// A speculative run read a finished node not yet settled.
     pub(crate) read_unsettled: bool,
+    /// A speculative run read a predicted value ([`Operation::predicted_defs`]).
+    pub(crate) read_predicted: bool,
     pub(crate) raise_from: Slot,
     pub(crate) uses: Vec<Use>,
     pub(crate) defs: Vec<(Field, ValueId, bool)>,
