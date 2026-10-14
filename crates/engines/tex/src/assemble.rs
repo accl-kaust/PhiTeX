@@ -54,7 +54,7 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     } else if relaxed_mode(cx)? {
         pdf_relaxed(cx, &pages)
     } else {
-        pdf_exact(cx, &pages)
+        pdf_exact(cx)
     };
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -321,30 +321,39 @@ fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
 /// left (`pdf:state`, a fold the commands thread by def-use, with the
 /// objects they wrote), in the order the accumulator gives.
 ///
-/// To write (the old finish, `git show 7453a3d4:crates/engines/tex/src/pdfout.rs`
-/// lines 1298–1520, is the template; it took the pages' order and the
-/// read-time objects' places from loop-backs that are gone):
-/// 1. Every read-time command that writes an object (`crate::pdfout::command`,
-///    `step`) contributes `[obj, n]` to `XPAGES` where it runs, so the
-///    accumulator alone says which objects pdfTeX wrote between two
-///    pages (what `oplan` used to say).
-/// 2. Fold `XPAGES` on the state: a page key places its `PagePiece`'s
-///    record (its content stream already compressed by the finisher) with
-///    `PdfState`'s placing of a page written apart; an `[obj, n]` entry
-///    writes object `n` from the state; a document-level command applies
-///    as `apply_doc_op` does.
-/// 3. The fonts' resource names (`/F<n>`) in pdfTeX's order of first use
-///    (`font_tags`, read by `\pdffontname` as the `pdf:ftags` loop-back).
-/// 4. `PdfState::finish` for the fonts, the page tree, the catalog and
+/// 1. A read-time `\immediate\pdfobj` run after a page shipped
+///    (`crate::pdfprim`) is allocated on the state and contributes
+///    `["obj", n]` to `XPAGES` where it runs, so the accumulator alone
+///    says which objects pdfTeX wrote between two pages.
+/// 2. `crate::pdfout::finish_exact` folds `XPAGES` on the state: a page
+///    key places its `PagePiece`'s record (its content stream already
+///    compressed by the finisher), an `["obj", n]` entry writes object
+///    `n`, a document-level command applies; the fonts' resource names
+///    (`/F<n>`) in pdfTeX's order of first use (`font_tags`); then
+///    `phitex_pdf::finish` for the fonts, the page tree, the catalog and
 ///    the trailer.
 ///
 /// Example: pages `k1 k2`, with `\immediate\pdfobj` run by the text
 /// between them: `XPAGES = [k1, [obj, 7], k2]`; the file numbers page
 /// 1's objects, then object 7, then page 2's.
-fn pdf_exact(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
+fn pdf_exact(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     let v = cx.values();
     let xpages = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
-    let state = field(cx, "pdf:state")?;
-    let _ = (pages, xpages, state);
-    todo!("exact PDF: place the pages written apart on the read-time commands' state, in XPAGES order")
+    let state = field(cx, "pdf:state")?.map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()));
+    let date = field(cx, "pdfdate")?.map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
+    let jobname = field(cx, "jobname")?
+        .map(|x| str_of(v, x))
+        .unwrap_or_default();
+    let g2u = field(cx, "pdf:glyphtounicode")?;
+    let f = crate::pdfout::EndFields {
+        state,
+        date,
+        jobname,
+        g2u,
+        fonts: int_field(cx, "fontcount")?,
+        info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
+        suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
+    };
+    let bytes = crate::pdfout::finish_exact(v, &f, &xpages);
+    Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
 }
