@@ -1325,6 +1325,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         loop {
             while self.has_input() {
+                if self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT) {
+                    self.input.compact();
+                }
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
