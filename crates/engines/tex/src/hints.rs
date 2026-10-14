@@ -3707,6 +3707,14 @@ pub(crate) fn check_defs(
     }
 }
 
+/// Whether a hint bounds a run's definitions loosely: none (`Any`), or
+/// by prefixes or every state head (the run narrows at its end).
+pub(crate) fn is_wide(h: &Hint) -> bool {
+    h.bound
+        .as_ref()
+        .is_none_or(|b| !b.prefixes.is_empty() || b.state.is_none())
+}
+
 /// The first definition the run made outside its bound (and the
 /// claimed siblings'), if any.
 fn undeclared(
