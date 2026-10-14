@@ -1,0 +1,708 @@
+%
+% Copyright (C) 1995, 2000, 2013 American Mathematical Society.
+% Copyright (C) 2016-2025 LaTeX Project and American Mathematical Society.
+%
+% This work may be distributed and/or modified under the
+% conditions of the LaTeX Project Public License, either version 1.3c
+% of this license or (at your option) any later version.
+% The latest version of this license is in
+%   https://www.latex-project.org/lppl.txt
+% and version 1.3c or later is part of all distributions of LaTeX
+% version 2005/12/01 or later.
+%
+% This work has the LPPL maintenance status `maintained'.
+%
+% The Current Maintainer of this work is the LaTeX Project.
+%
+\documentclass[leqno,titlepage,openany]{amsldoc}[1999/12/13]
+
+\def\MaintainedByLaTeXTeam#1{%
+\begin{center}%
+\fbox{\fbox{\begin{tabular}{@{}l@{}}%
+This file is maintained by the \LaTeX{} Project team.\\%
+Bug reports can be opened (category \texttt{#1}) at\\%
+\url{https://latex-project.org/bugs/}.\end{tabular}}}\end{center}}
+
+\ifx\UndEfiNed\url
+  \ClassError{amsldoc}{%
+    This version of amsldoc.tex must be processed\MessageBreak
+    with a newer version of amsldoc.cls (2.02 or later).}{}
+\fi
+
+\renewcommand\bibname{References}
+
+%    Definitions that should be moved to amsldoc.cls
+%    when it is next updated
+\makeatletter
+\let\cleardouble@page\cleardoublepage
+\AtBeginDocument{%
+  \ifx\cleardouble@page\cleardoublepage
+    \def\cleardoublepage{\clearpage{\pagestyle{empty}\cleardouble@page}}
+  \fi
+}
+
+% #1 is empty or one of class, environment, option, package
+% could use different font in each case
+\makeatletter
+\def\@category@index#1#2{%
+    \autoindex{%
+        #2\actualchar\string\index#1font{#2}%
+        \ifx\@nil#1\@nil\else\space#1\fi
+    }%
+}
+
+\let\indexpackagefont\textsf
+\let\indexclassfont\textsf
+\let\indexoptionfont\texttt
+\let\indexenvironmentfont\texttt
+\let\indexfont\texttt
+\makeatother
+%    For a package that won't be indexed, i.e. amsmath
+\newcommand{\nipkg}{\textsf}
+\def\tikz/{Ti\textit{k}Z}
+%    End definitions for amsldoc.cls
+
+\title{User's Guide for the \nipkg{amsmath} Package (Version~2.1)}
+\author{American Mathematical Society, \LaTeX\ Project}
+\date{1999-12-13\\(revised 2002-02-25, 2016-11-14, 2018-04-05, 2019-10-14, 2020-02-18)}
+\makeatletter
+\def\@thanks{\bigskip\MaintainedByLaTeXTeam{amslatex}}
+\makeatother
+
+% Very minor changes are not listed in the \date above:
+%
+% 2021-08-22: reported typo fixed mathools -> mathtools
+% 2025-05-23: drop spurious option list
+
+
+%    Use the amsmath package and amscd package in order to print
+%    examples.
+\usepackage{amsmath}
+\usepackage{amscd}
+
+\usepackage{imakeidx}
+%    Need alternate coding for vertical bar to get it into index.
+%    Based on \qcbang and \cnbang in amsldoc.cls, refined by David Carlisle.
+%    Give it a sort field that will be at the end of the symbols;
+%    must avoid " and | which have special meanings.
+\DeclareRobustCommand{\qcvert}{\qc\|\index{{z1}@{\ntt\char'174}}}
+\DeclareRobustCommand{\cnvert}{%
+  \ncn{\|}\index{{z0}@{\ntt\bslchar\char'174}}}
+%    Need alternate index sort field for bang to allow & to sort first
+\DeclareRobustCommand{\altcnbang}{%
+  \ncn{\!}\index{"!b@{\ntt\bslchar\qcbang}}}
+\DeclareRobustCommand{\cnamp}{%
+  \index{"!a@\texttt{\&}}}
+
+\makeindex[intoc] % generate index data
+\providecommand{\see}[2]{\textit{see} #1}
+
+%    The amsldoc class includes a number of features useful for
+%    documentation about TeX, including:
+%
+%    ---Commands \tex/, \amstex/, \latex/, ... for uniform treatment
+%    of the various logos and easy handling of following spaces.
+%
+%    ---Commands for printing various common elements: \cn for command
+%    names, \fn for file names (including font-file names), \env for
+%    environments, \pkg and \cls for packages and classes, etc.
+
+%    Many of the command names used here are rather long and will
+%    contribute to poor linebreaking if we follow the \latex/ practice
+%    of not hyphenating anything set in tt font; instead we selectively
+%    allow some hyphenation.
+\allowtthyphens % defined in amsldoc.cls
+
+\hyphenation{ac-cent-ed-sym-bol add-to-counter add-to-length align-at
+  aligned-at allow-dis-play-breaks ams-art ams-cd ams-la-tex amsl-doc
+  ams-symb ams-tex ams-text ams-xtra bmatrix bold-sym-bol cen-ter-tags
+  eqn-ar-ray idots-int int-lim-its latex med-space neg-med-space
+  neg-thick-space neg-thin-space no-int-lim-its no-name-lim-its
+  over-left-arrow over-left-right-arrow over-right-arrow pmatrix
+  qed-sym-bol set-length side-set small-er tbinom the-equa-tion
+  thick-space thin-space un-der-left-arrow un-der-left-right-arrow
+  un-der-right-arrow use-pack-age var-inj-lim var-proj-lim vmatrix
+  xalign-at xx-align-at}
+
+%    Prepare for illustrating the \vec example
+\newcommand{\vect}[1]{\mathbf{#1}}
+
+\newcommand{\booktitle}[1]{\textit{#1}}
+\newcommand{\journalname}[1]{\textit{#1}}
+\newcommand{\seriesname}[1]{\textit{#1}}
+
+%    Command to insert and index a particular phrase. Doesn't work for
+%    certain kinds of special characters in the argument.
+\newcommand{\ii}[1]{#1\index{#1}}
+
+\newcommand{\vstrut}[1]{\vrule width0pt height#1\relax}
+
+%    An environment for presenting comprehensive address information:
+\newenvironment{infoaddress}{%
+  \par\topsep\medskipamount
+  \trivlist\centering
+  \item[]%
+  \begin{minipage}{.7\columnwidth}%
+  \raggedright
+}{%
+  \end{minipage}%
+  \endtrivlist
+}
+
+\newenvironment{eqxample}{%
+  \par\addvspace\medskipamount
+  \noindent\begin{minipage}{.5\columnwidth}%
+  \def\producing{\end{minipage}\begin{minipage}{.5\columnwidth}%
+    \hbox\bgroup\kern-.2pt\vrule width.2pt%
+      \vbox\bgroup\parindent0pt\relax
+%    The 3pt is to cancel the -\lineskip from \displ@y
+    \abovedisplayskip3pt \abovedisplayshortskip\abovedisplayskip
+    \belowdisplayskip0pt \belowdisplayshortskip\belowdisplayskip
+    \noindent}
+}{%
+  \par
+%    Ensure that a lonely \[\] structure doesn't take up width less than
+%    \hsize.
+  \hrule height0pt width\hsize
+  \egroup\vrule width.2pt\kern-.2pt\egroup
+  \end{minipage}%
+  \par\addvspace\medskipamount
+}
+
+%    Errors in output shouldn't be \texttt, and they may also be longer
+%    than one line, but they should be identified by the "errorbullet".
+%    (They were formerly labeled as aubsections.)
+\newenvironment{erroro}[1]{%
+  \par\addvspace\medskipamount
+  \noindent\hangindent\parindent
+  \hbox to\parindent{\errorbullet\hfil}\ignorespaces
+  #1\par\vspace{\smallskipamount}
+}{%
+  \par\addvspace\medskipamount
+}
+
+%    The chapters are so short, perhaps we shouldn't call them by the
+%    name `Chapter'. We make \chaptername read an argument in order to
+%    remove a following \space or "{} " (both possibilities are present
+%    in book.cls).
+
+\renewcommand{\chaptername}[1]{}
+\newcommand{\chapnum}[1]{\mdash #1\mdash }
+\makeatletter
+\def\@makechapterhead#1{%
+  \vspace{1.5\baselineskip}%
+  {\parindent \z@ \raggedright \reset@font
+    \ifnum \c@secnumdepth >\m@ne
+      \large\bfseries \chapnum{\thechapter}%
+      \par\nobreak
+      \vskip.5\baselineskip\relax
+    \fi
+    #1\par\nobreak
+    \vskip\baselineskip
+  }}
+\makeatother
+
+%    A command for ragged-right parbox in a tabular.
+\newcommand{\rp}{\let\PBS\\\raggedright\let\\\PBS}
+
+%    Non-indexed file name
+\newcommand{\nfn}[1]{\texttt{#1}}
+
+%    For the examples in the math spacing table.
+%%\newcommand{\lspx}{\mbox{\rule{5pt}{.6pt}\rule{.6pt}{6pt}}}
+%%\newcommand{\rspx}{\mbox{\rule[-1pt]{.6pt}{7pt}%
+%%  \rule[-1pt]{5pt}{.6pt}}}
+\newcommand{\lspx}{\mathord{\Rightarrow\mkern-1mu}}
+\newcommand{\rspx}{\mathord{\mkern-1mu\Leftarrow}}
+\newcommand{\spx}[1]{$\lspx #1\rspx$}
+
+%    For a list of characters representing document input.
+\newcommand{\clist}[1]{%
+  \mbox{\ntt\spaceskip.2em plus.1em \xspaceskip\spaceskip#1}}
+
+%    Fix weird \latex/ definition of rightmark.
+\makeatletter
+\def\rightmark{\expandafter\@rightmark\botmark{}{}}
+%    Also turn off section marks.
+\let\sectionmark\@gobble
+\renewcommand{\chaptermark}[1]{%
+  \uppercase{\markboth{\rhcn#1}{\rhcn#1}}}
+\newcommand{\rhcn}{\thechapter. }
+\makeatother
+
+%    Include down to \section but not \subsection, in toc:
+\setcounter{tocdepth}{1}
+
+%    Subheadings for the bibliography
+\newif\iffirstbibsubhead \firstbibsubheadtrue
+\newcommand{\bibsubhead}[1]{%
+  \iffirstbibsubhead \firstbibsubheadfalse
+  \else \addvspace{\medskipamount}
+  \fi
+  \item[]\hspace*{-\leftmargin}\textbf{#1}\par
+  \vspace{\smallskipamount}
+}
+
+\DeclareMathOperator{\ix}{ix}
+\DeclareMathOperator{\nul}{nul}
+\DeclareMathOperator{\End}{End}
+\DeclareMathOperator{\xxx}{xxx}
+
+\usepackage{hyperref}
+\hypersetup{pdfborder=0 0 0}
+\makeatletter
+\let\oldcs\cs
+\def\cs#1{\texorpdfstring{\oldcs{#1}}{\@backslashchar\@backslashchar#1}}
+\let\cn\cs
+\makeatother
+\begin{document}
+\section{Error messages}
+
+\begin{error}{\begin{split} won't work here.}
+\errexa
+\begin{verbatim}
+! Package amsmath Error: \begin{split} won't work here.
+ ...
+
+l.8 \begin{split}
+
+? h
+\Did you forget a preceding \begin{equation}?
+If not, perhaps the `aligned' environment is what you want.
+?
+\end{verbatim}
+\errexpl
+The \env{split} environment does not construct a stand-alone displayed
+equation; it needs to be used within some other environment such as
+\env{equation} or \env{gather}.
+
+\end{error}
+
+\begin{error}{Erroneous nesting of equation structures}
+\errexa
+\begin{verbatim}
+! Package amsmath Error: Erroneous nesting of equation structures;
+(amsmath)                trying to recover with `aligned'.
+
+See the amsmath package documentation for explanation.
+Type  H <return>  for immediate help.
+ ...
+
+l.260 \end{alignat*}
+                    \end{equation*}
+\end{verbatim}
+\errexpl
+The structures \env{align}, \env{alignat}, etc., are designed
+for top-level use and for the most part cannot be nested inside some
+other displayed equation structure. The chief exception is that
+\env{align} and most of its variants can be used inside the
+\env{gather} environment.
+\end{error}
+
+\begin{error}{Extra & on this line}
+\errexa
+\begin{verbatim}
+! Package amsmath Error: Extra & on this line.
+
+See the amsmath package documentation for explanation.
+Type  H <return>  for immediate help.
+ ...
+
+l.9 \end{alignat}
+
+? h
+\An extra & here is so disastrous that you should probably exit
+ and fix things up.
+?
+\end{verbatim}
+\errexpl
+In an \env{alignat} structure the number of alignment points per line
+is dictated by the numeric argument given after |\begin{alignat}|.
+If you use more alignment points in a line it is assumed that you
+accidentally left out a newline command \cn{\\} and the above error is
+issued.
+\end{error}
+
+%% **********
+\enlargethispage{1.5\baselineskip}
+
+\begin{error}{Font OMX/cmex/m/n/7=cmex7 not loadable ...}
+\errexa
+\begin{verbatim}
+! Font OMX/cmex/m/n/7=cmex7 not loadable: Metric (TFM) file not found.
+<to be read again>
+                   relax
+l.8 $a
+      b+b^2$
+? h
+I wasn't able to read the size data for this font,
+so I will ignore the font specification.
+[Wizards can fix TFM files using TFtoPL/PLtoTF.]
+You might try inserting a different font spec;
+e.g., type `I\font<same font id>=<substitute font name>'.
+?
+\end{verbatim}
+\errexpl
+Certain extra sizes of some Computer Modern fonts that were formerly
+available mainly through the AMSFonts\index{amsfont@AMSFonts collection}
+distribution are considered part of standard \latex/ (as of June 1994):
+\fn{cmex7}\ndash \texttt{9}, \fn{cmmib5}\ndash \texttt{9}, and
+\fn{cmbsy5}\ndash \texttt{9}. If these extra sizes are missing on your
+system, you should try first to get them from the source where you
+obtained \latex/. If that fails, you could try getting the fonts from
+CTAN (e.g., in the form of Metafont\index{Metafont source files} source
+files, directory \nfn{/tex-archive/fonts/latex/mf}, or in PostScript
+Type 1 format, directory
+\nfn{/tex-archive/fonts/cm/ps-type1/bakoma}\index{BaKoMa fonts}\relax
+\index{PostScript fonts}).
+
+If the font name begins with \fn{cmex}, there is a special option%
+\index{options!behavior of particular options}
+\opt{cmex10} for the \nipkg{amsmath} package that provides a temporary
+workaround. I.e., change the \cn{usepackage} to
+\begin{verbatim}
+\usepackage[cmex10]{amsmath}
+\end{verbatim}
+This will force the use of the 10-point size of the \fn{cmex} font in
+all cases. Depending on the contents of your document this may be
+adequate.
+\end{error}
+
+\enlargethispage{1\baselineskip}
+\begin{error}{Improper argument for math accent}
+\errexa
+\begin{verbatim}
+! Package amsmath Error: Improper argument for math accent:
+(amsmath)                Extra braces must be added to
+(amsmath)                prevent wrong output.
+
+See the amsmath package documentation for explanation.
+Type  H <return>  for immediate help.
+ ...
+
+l.415 \tilde k_{\lambda_j} = P_{\tilde \mathcal
+                                               {M}}
+?
+\end{verbatim}
+\errexpl
+Non-simple arguments for any \LaTeX{} command should be enclosed in
+braces. In this example extra braces are needed as follows:
+\begin{verbatim}
+... P_{\tilde{\mathcal{M}}}
+\end{verbatim}
+\end{error}
+
+\begin{error}{Math formula deleted: Insufficient extension fonts}
+\errexa
+\begin{verbatim}
+! Math formula deleted: Insufficient extension fonts.
+l.8 $ab+b^2$
+
+?
+\end{verbatim}
+\errexpl
+This usually follows a previous error |Font ... not loadable|; see the
+discussion of that error (above) for solutions.
+\end{error}
+
+\enlargethispage{1\baselineskip}
+\begin{error}{Missing number, treated as zero}
+\errexa
+\begin{verbatim}
+! Missing number, treated as zero.
+<to be read again>
+                   a
+l.100 \end{alignat}
+
+? h
+A number should have been here; I inserted `0'.
+(If you can't figure out why I needed to see a number,
+look up `weird error' in the index to The TeXbook.)
+
+?
+\end{verbatim}
+\errexpl
+There are many possibilities that can lead to this error. However, one
+possibility that is relevant for the \nipkg{amsmath} package is that you
+forgot to give the number argument of an \env{alignat} environment, as
+in:
+\begin{verbatim}
+\begin{alignat}
+ a&  =b&    c& =d\\
+a'& =b'&   c'& =d'
+\end{alignat}
+\end{verbatim}
+where the first line should read instead
+\begin{verbatim}
+\begin{alignat}{2}
+\end{verbatim}
+
+Another possibility is that you have a left bracket character |[|
+following a line break\index{line break} command \cn{\\} in a multiline
+construction such as \env{array}, \env{tabular}, or \env{eqnarray}.
+This will be interpreted by \latex/ as the beginning of an `additional
+vertical space request \cite[\S C.1.6]{lamport}, even if it occurs on the
+following line and is intended to be part of the contents. For example,
+\begin{verbatim}
+\begin{array}{c}
+a+b\\
+[f,g]\\
+m+n
+\end{array}
+\end{verbatim}
+To prevent the error message in such a case, you can
+add braces as discussed in the \latex/ manual \cite[\S C.1.1]{lamport}:
+\begin{verbatim}
+\begin{array}{c}
+a+b\\
+{[f,g]}\\
+m+n
+\end{array}
+\end{verbatim}
+or precede the bracketed expression by \cn{relax}.
+\end{error}
+
+\goodbreak
+
+\begin{error}{Missing \right. inserted}
+\errexa
+\begin{verbatim}
+! Missing \right. inserted.
+<inserted text>
+                \right .
+l.10 \end{multline}
+
+? h
+I've inserted something that you may have forgotten.
+(See the <inserted text> above.)
+With luck, this will get me unwedged. But if you
+really didn't forget anything, try typing `2' now; then
+my insertion and my current dilemma will both disappear.
+\end{verbatim}
+\errexpl
+This error typically arises when you try to insert a
+line break\index{line break} or |&|\cnamp\ between a
+\cn{left}-\cn{right} pair of delimiters\index{delimiters} in any
+multiline environment, including \env{split}.
+\begin{verbatim}
+\begin{multline}
+AAA\left(BBB\\
+  CCC\right)
+\end{multline}
+\end{verbatim}
+There are two possible solutions: (1)~instead of using \cn{left} and
+\cn{right}, use `big' delimiters\index{delimiters!fixed size} of fixed
+size (\cn{bigl} \cn{bigr} \cn{biggl} \cn{biggr} \dots; see
+\secref{bigdel}); or (2)~use null delimiters\index{delimiters!null} to
+break up the \cn{left}-\cn{right} pair into parts for each line (or cell):
+\begin{verbatim}
+AAA\left(BBB\right.\\
+  \left.CCC\right)
+\end{verbatim}
+The latter solution may result in mismatched
+delimiter\index{delimiters!mismatched sizes} sizes;
+ensuring that they match requires using \cn{vphantom} in the segment
+that has the smaller delimiter (or possibly \cn{smash} in the segment
+that has the larger delimiter). In the argument of \cn{vphantom} put a
+copy of the tallest element that occurs in the other segment, e.g.,
+\begin{verbatim}
+xxx \left(\int_t yyy\right.\\
+  \left.\vphantom{\int_t} zzz ... \right)
+\end{verbatim}
+\end{error}
+
+\goodbreak
+
+\begingroup
+\lccode`M=`M
+\lccode`@=`\}
+\lowercase{\endgroup
+\begin{error}{Missing @ inserted}}
+
+\errexa
+\begin{verbatim}
+! Missing } inserted.
+<inserted text>
+                \right .
+l.10 \end{multline}
+
+? h
+I've inserted something that you may have forgotten.
+(See the <inserted text> above.)
+With luck, this will get me unwedged. But if you
+really didn't forget anything, try typing `2' now; then
+my insertion and my current dilemma will both disappear.
+\end{verbatim}
+\errexpl
+This error is often the result of using \verb+$+ within a multiline
+display environment.  Remove such \verb+$+ signs (except when they
+appear within \verb+\text{...}+).
+\end{error}
+
+\begin{error}{Old form `\pmatrix' should be \begin{pmatrix}.}
+\errexa
+\begin{verbatim}
+! Package amsmath Error: Old form `\pmatrix' should be
+                         \begin{pmatrix}.
+
+See the amsmath package documentation for explanation.
+Type  H <return>  for immediate help.
+ ...
+
+\pmatrix ->\left (\matrix@check \pmatrix
+                                         \env@matrix
+l.16 \pmatrix
+             {a&b\cr c&d\cr}
+? h
+`\pmatrix{...}' is old Plain-TeX syntax whose use is
+ill-advised in LaTeX.
+?
+\end{verbatim}
+\errexpl
+When the \nipkg{amsmath} package is used, the old forms of \cn{pmatrix},
+\cn{matrix}, and \cn{cases} cannot be used any longer because of naming
+conflicts. Their syntax did not conform with standard \LaTeX{} syntax
+in any case.
+\end{error}
+
+\enlargethispage{2\baselineskip}
+\begin{error}{Paragraph ended before \xxx was complete}
+\errexa
+\begin{verbatim}
+Runaway argument?
+
+! Paragraph ended before \multline was complete.
+<to be read again>
+                   \par
+l.100
+
+? h
+I suspect you've forgotten a `}', causing me to apply this
+control sequence to too much text. How can we recover?
+My plan is to forget the whole thing and hope for the best.
+?
+\end{verbatim}
+\errexpl
+This might be produced by a blank line between the |\begin| and |\end|.
+Another possibility is a misspelling in the |\end{multline}| command,
+e.g.,
+\begin{verbatim}
+\begin{multline}
+...
+\end{multiline}
+\end{verbatim}
+or by using abbreviations for certain environments, such as |\bal| and
+|\eal| for |\begin{align}| and |\end{align}|:
+\begin{verbatim}
+\bal
+...
+\eal
+\end{verbatim}
+For technical reasons that kind of abbreviation does not work with
+the more complex displayed equation environments of the \nipkg{amsmath} package
+(\env{gather}, \env{align}, \env{split}, etc.; cf.\ \fn{technote.tex}).
+\end{error}
+
+\begin{error}{Runaway argument?}
+See the discussion for the error message
+\texttt{Paragraph ended before \ncn{xxx} was complete}.
+\end{error}
+
+\begin{error}{Unknown option `xxx' for package `yyy'}
+\errexa
+\begin{verbatim}
+! LaTeX Error: Unknown option `intlim' for package `amsmath'.
+...
+? h
+The option `intlim' was not declared in package `amsmath', perhaps you
+misspelled its name. Try typing  <return>  to proceed.
+?
+\end{verbatim}
+\errexpl
+This means that you misspelled the option\index{options!unknown}
+name, or the package simply does not have an option that you expected
+it to have. Consult the documentation for the given package.
+\end{error}
+
+%% ------------------------------------------------------------------ %%
+
+\section{Warning messages}
+
+\begin{error}{Cannot use `split' here}
+\errexa
+\begin{verbatim}
+Package amsmath Warning: Cannot use `split' here;
+(amsmath)                trying to recover with `aligned'
+\end{verbatim}
+\errexpl The \env{split} environment is designed to serve as the entire
+body of an equation, or an entire line of an \env{align} or \env{gather}
+environment. There cannot be any printed material before or
+after it within the same enclosing structure:
+\begin{verbatim}
+\begin{equation}
+\left\{ % <-- Not allowed
+\begin{split}
+...
+\end{split}
+\right. % <-- Not allowed
+\end{equation}
+\end{verbatim}
+\end{error}
+
+\begin{error}{Foreign command \over [or \atop or \above]}
+\errexa
+\begin{verbatim}
+Package amsmath Warning: Foreign command \over; \frac or \genfrac
+(amsmath)                should be used instead.
+\end{verbatim}
+\errexpl The primitive generalized fraction commands of \tex/\mdash
+\cs{over}, \cs{atop}, \cs{above}\mdash are deprecated when the
+\nipkg{amsmath} package is used because their syntax is foreign to \latex/
+and \nipkg{amsmath} provides native \latex/ equivalents. See
+\fn{technote.tex} for further information.
+\end{error}
+
+%% ------------------------------------------------------------------ %%
+
+\section{Wrong output}
+
+\begin{erroro}{Section numbers 0.1, 5.1, 8.1 instead of 1, 2, 3}
+%
+This most likely means that you have the arguments for \cn{numberwithin}
+in reverse order:
+\begin{verbatim}
+\numberwithin{section}{equation}
+\end{verbatim}
+That means `print the section number as \textit{equation
+number}.\textit{section number} and reset to 1 every time an equation
+occurs' when what you probably wanted was the inverse
+\begin{verbatim}
+\numberwithin{equation}{section}
+\end{verbatim}
+\end{erroro}
+
+\begin{erroro}{The \cn{numberwithin} command had no effect on equation
+  numbers}
+%
+Are you looking at the first section in your document? Check the section
+numbers elsewhere to see if the problem is the one described in the
+previous item.
+\end{erroro}
+
+\begin{erroro}{Bracketed material disappears at the beginning of
+  \env{aligned} or \env{gathered}}
+%
+For most multiline equation environments, \nipkg{amsmath} disables the
+\latex/ convention to recognize a [bracketed] expression as an option%
+\index{ed env@\texttt{-ed} environments}%
+\index{options!positioning of \texttt{-ed} environments}%
+\index{options!space before \texttt{[}}
+when it occurs at the beginning of an environment or immediately
+following \cn{\\}, provided a space intervenes.  This fails at the
+beginning of \env{aligned} and \env{gathered}, and is a bug.  Insert
+\cn{relax} before the opening brace to restore the desired result.
+\end{erroro}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\end{document}

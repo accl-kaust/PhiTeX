@@ -1,0 +1,453 @@
+%
+% Copyright (C) 1995, 2000, 2013 American Mathematical Society.
+% Copyright (C) 2016-2025 LaTeX Project and American Mathematical Society.
+%
+% This work may be distributed and/or modified under the
+% conditions of the LaTeX Project Public License, either version 1.3c
+% of this license or (at your option) any later version.
+% The latest version of this license is in
+%   https://www.latex-project.org/lppl.txt
+% and version 1.3c or later is part of all distributions of LaTeX
+% version 2005/12/01 or later.
+%
+% This work has the LPPL maintenance status `maintained'.
+%
+% The Current Maintainer of this work is the LaTeX Project.
+%
+\documentclass[leqno,titlepage,openany]{amsldoc}[1999/12/13]
+
+\def\MaintainedByLaTeXTeam#1{%
+\begin{center}%
+\fbox{\fbox{\begin{tabular}{@{}l@{}}%
+This file is maintained by the \LaTeX{} Project team.\\%
+Bug reports can be opened (category \texttt{#1}) at\\%
+\url{https://latex-project.org/bugs/}.\end{tabular}}}\end{center}}
+
+\ifx\UndEfiNed\url
+  \ClassError{amsldoc}{%
+    This version of amsldoc.tex must be processed\MessageBreak
+    with a newer version of amsldoc.cls (2.02 or later).}{}
+\fi
+
+\renewcommand\bibname{References}
+
+%    Definitions that should be moved to amsldoc.cls
+%    when it is next updated
+\makeatletter
+\let\cleardouble@page\cleardoublepage
+\AtBeginDocument{%
+  \ifx\cleardouble@page\cleardoublepage
+    \def\cleardoublepage{\clearpage{\pagestyle{empty}\cleardouble@page}}
+  \fi
+}
+
+% #1 is empty or one of class, environment, option, package
+% could use different font in each case
+\makeatletter
+\def\@category@index#1#2{%
+    \autoindex{%
+        #2\actualchar\string\index#1font{#2}%
+        \ifx\@nil#1\@nil\else\space#1\fi
+    }%
+}
+
+\let\indexpackagefont\textsf
+\let\indexclassfont\textsf
+\let\indexoptionfont\texttt
+\let\indexenvironmentfont\texttt
+\let\indexfont\texttt
+\makeatother
+%    For a package that won't be indexed, i.e. amsmath
+\newcommand{\nipkg}{\textsf}
+\def\tikz/{Ti\textit{k}Z}
+%    End definitions for amsldoc.cls
+
+\title{User's Guide for the \nipkg{amsmath} Package (Version~2.1)}
+\author{American Mathematical Society, \LaTeX\ Project}
+\date{1999-12-13\\(revised 2002-02-25, 2016-11-14, 2018-04-05, 2019-10-14, 2020-02-18)}
+\makeatletter
+\def\@thanks{\bigskip\MaintainedByLaTeXTeam{amslatex}}
+\makeatother
+
+% Very minor changes are not listed in the \date above:
+%
+% 2021-08-22: reported typo fixed mathools -> mathtools
+% 2025-05-23: drop spurious option list
+
+
+%    Use the amsmath package and amscd package in order to print
+%    examples.
+\usepackage{amsmath}
+\usepackage{amscd}
+
+\usepackage{imakeidx}
+%    Need alternate coding for vertical bar to get it into index.
+%    Based on \qcbang and \cnbang in amsldoc.cls, refined by David Carlisle.
+%    Give it a sort field that will be at the end of the symbols;
+%    must avoid " and | which have special meanings.
+\DeclareRobustCommand{\qcvert}{\qc\|\index{{z1}@{\ntt\char'174}}}
+\DeclareRobustCommand{\cnvert}{%
+  \ncn{\|}\index{{z0}@{\ntt\bslchar\char'174}}}
+%    Need alternate index sort field for bang to allow & to sort first
+\DeclareRobustCommand{\altcnbang}{%
+  \ncn{\!}\index{"!b@{\ntt\bslchar\qcbang}}}
+\DeclareRobustCommand{\cnamp}{%
+  \index{"!a@\texttt{\&}}}
+
+\makeindex[intoc] % generate index data
+\providecommand{\see}[2]{\textit{see} #1}
+
+%    The amsldoc class includes a number of features useful for
+%    documentation about TeX, including:
+%
+%    ---Commands \tex/, \amstex/, \latex/, ... for uniform treatment
+%    of the various logos and easy handling of following spaces.
+%
+%    ---Commands for printing various common elements: \cn for command
+%    names, \fn for file names (including font-file names), \env for
+%    environments, \pkg and \cls for packages and classes, etc.
+
+%    Many of the command names used here are rather long and will
+%    contribute to poor linebreaking if we follow the \latex/ practice
+%    of not hyphenating anything set in tt font; instead we selectively
+%    allow some hyphenation.
+\allowtthyphens % defined in amsldoc.cls
+
+\hyphenation{ac-cent-ed-sym-bol add-to-counter add-to-length align-at
+  aligned-at allow-dis-play-breaks ams-art ams-cd ams-la-tex amsl-doc
+  ams-symb ams-tex ams-text ams-xtra bmatrix bold-sym-bol cen-ter-tags
+  eqn-ar-ray idots-int int-lim-its latex med-space neg-med-space
+  neg-thick-space neg-thin-space no-int-lim-its no-name-lim-its
+  over-left-arrow over-left-right-arrow over-right-arrow pmatrix
+  qed-sym-bol set-length side-set small-er tbinom the-equa-tion
+  thick-space thin-space un-der-left-arrow un-der-left-right-arrow
+  un-der-right-arrow use-pack-age var-inj-lim var-proj-lim vmatrix
+  xalign-at xx-align-at}
+
+%    Prepare for illustrating the \vec example
+\newcommand{\vect}[1]{\mathbf{#1}}
+
+\newcommand{\booktitle}[1]{\textit{#1}}
+\newcommand{\journalname}[1]{\textit{#1}}
+\newcommand{\seriesname}[1]{\textit{#1}}
+
+%    Command to insert and index a particular phrase. Doesn't work for
+%    certain kinds of special characters in the argument.
+\newcommand{\ii}[1]{#1\index{#1}}
+
+\newcommand{\vstrut}[1]{\vrule width0pt height#1\relax}
+
+%    An environment for presenting comprehensive address information:
+\newenvironment{infoaddress}{%
+  \par\topsep\medskipamount
+  \trivlist\centering
+  \item[]%
+  \begin{minipage}{.7\columnwidth}%
+  \raggedright
+}{%
+  \end{minipage}%
+  \endtrivlist
+}
+
+\newenvironment{eqxample}{%
+  \par\addvspace\medskipamount
+  \noindent\begin{minipage}{.5\columnwidth}%
+  \def\producing{\end{minipage}\begin{minipage}{.5\columnwidth}%
+    \hbox\bgroup\kern-.2pt\vrule width.2pt%
+      \vbox\bgroup\parindent0pt\relax
+%    The 3pt is to cancel the -\lineskip from \displ@y
+    \abovedisplayskip3pt \abovedisplayshortskip\abovedisplayskip
+    \belowdisplayskip0pt \belowdisplayshortskip\belowdisplayskip
+    \noindent}
+}{%
+  \par
+%    Ensure that a lonely \[\] structure doesn't take up width less than
+%    \hsize.
+  \hrule height0pt width\hsize
+  \egroup\vrule width.2pt\kern-.2pt\egroup
+  \end{minipage}%
+  \par\addvspace\medskipamount
+}
+
+%    Errors in output shouldn't be \texttt, and they may also be longer
+%    than one line, but they should be identified by the "errorbullet".
+%    (They were formerly labeled as aubsections.)
+\newenvironment{erroro}[1]{%
+  \par\addvspace\medskipamount
+  \noindent\hangindent\parindent
+  \hbox to\parindent{\errorbullet\hfil}\ignorespaces
+  #1\par\vspace{\smallskipamount}
+}{%
+  \par\addvspace\medskipamount
+}
+
+%    The chapters are so short, perhaps we shouldn't call them by the
+%    name `Chapter'. We make \chaptername read an argument in order to
+%    remove a following \space or "{} " (both possibilities are present
+%    in book.cls).
+
+\renewcommand{\chaptername}[1]{}
+\newcommand{\chapnum}[1]{\mdash #1\mdash }
+\makeatletter
+\def\@makechapterhead#1{%
+  \vspace{1.5\baselineskip}%
+  {\parindent \z@ \raggedright \reset@font
+    \ifnum \c@secnumdepth >\m@ne
+      \large\bfseries \chapnum{\thechapter}%
+      \par\nobreak
+      \vskip.5\baselineskip\relax
+    \fi
+    #1\par\nobreak
+    \vskip\baselineskip
+  }}
+\makeatother
+
+%    A command for ragged-right parbox in a tabular.
+\newcommand{\rp}{\let\PBS\\\raggedright\let\\\PBS}
+
+%    Non-indexed file name
+\newcommand{\nfn}[1]{\texttt{#1}}
+
+%    For the examples in the math spacing table.
+%%\newcommand{\lspx}{\mbox{\rule{5pt}{.6pt}\rule{.6pt}{6pt}}}
+%%\newcommand{\rspx}{\mbox{\rule[-1pt]{.6pt}{7pt}%
+%%  \rule[-1pt]{5pt}{.6pt}}}
+\newcommand{\lspx}{\mathord{\Rightarrow\mkern-1mu}}
+\newcommand{\rspx}{\mathord{\mkern-1mu\Leftarrow}}
+\newcommand{\spx}[1]{$\lspx #1\rspx$}
+
+%    For a list of characters representing document input.
+\newcommand{\clist}[1]{%
+  \mbox{\ntt\spaceskip.2em plus.1em \xspaceskip\spaceskip#1}}
+
+%    Fix weird \latex/ definition of rightmark.
+\makeatletter
+\def\rightmark{\expandafter\@rightmark\botmark{}{}}
+%    Also turn off section marks.
+\let\sectionmark\@gobble
+\renewcommand{\chaptermark}[1]{%
+  \uppercase{\markboth{\rhcn#1}{\rhcn#1}}}
+\newcommand{\rhcn}{\thechapter. }
+\makeatother
+
+%    Include down to \section but not \subsection, in toc:
+\setcounter{tocdepth}{1}
+
+%    Subheadings for the bibliography
+\newif\iffirstbibsubhead \firstbibsubheadtrue
+\newcommand{\bibsubhead}[1]{%
+  \iffirstbibsubhead \firstbibsubheadfalse
+  \else \addvspace{\medskipamount}
+  \fi
+  \item[]\hspace*{-\leftmargin}\textbf{#1}\par
+  \vspace{\smallskipamount}
+}
+
+\DeclareMathOperator{\ix}{ix}
+\DeclareMathOperator{\nul}{nul}
+\DeclareMathOperator{\End}{End}
+\DeclareMathOperator{\xxx}{xxx}
+
+\usepackage{hyperref}
+\hypersetup{pdfborder=0 0 0}
+\makeatletter
+\let\oldcs\cs
+\def\cs#1{\texorpdfstring{\oldcs{#1}}{\@backslashchar\@backslashchar#1}}
+\let\cn\cs
+\makeatother
+\begin{document}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\frontmatter
+
+\maketitle
+
+\pagestyle{headings}
+\tableofcontents
+\cleardoublepage % for better page number placement
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\mainmatter
+\chapter{Introduction}
+
+\index{amsmath@\texttt{amsmath} package|(}
+
+The \nipkg{amsmath} package is a \LaTeX{} package that provides
+miscellaneous enhancements for improving the information structure and
+printed output of documents that contain mathematical formulas. Readers
+unfamiliar with \LaTeX{} should refer to \cite{lamport}. If you have an
+up-to-date version of \LaTeX{}, the \nipkg{amsmath} package is normally
+provided along with it. Upgrading when a newer version of the
+\nipkg{amsmath} package is released can be done via
+\url{http://mirror.ctan.org/macros/latex/required/amsmath.zip}.
+
+This documentation describes the features of the \nipkg{amsmath} package
+and discusses how they are intended to be used. It also covers some
+ancillary packages:
+\begin{ctab}{lll}
+\pkg{amsbsy}& \pkg{amsopn}& \pkg{amsxtra}\\
+\pkg{amscd}& \pkg{amstext}\\
+\end{ctab}
+These all have something to do with the contents of math formulas. For
+information on extra math symbols and math fonts, see \cite{amsfonts}
+and \url{https://www.ams.org/tex/amsfonts.html}. For documentation of the
+\pkg{amsthm} package or AMS document classes (\cls{amsart},
+\cls{amsbook}, etc.\@) see \cite{amsthdoc} or \cite{amshandbk} and
+\url{https://www.ams.org/tex/author-info.html}.
+
+If you are a long-time \latex/ user and have lots of mathematics in what
+you write, then you may recognize solutions for some familiar problems
+in this list of \nipkg{amsmath} features:
+\begin{itemize}
+
+\item A convenient way to define new `operator name' commands analogous
+to \cn{sin} and \cn{lim}, including proper side spacing and automatic
+selection of the correct font style and size (even when used in
+sub- or superscripts).
+
+\item Multiple substitutes for the \env{eqnarray} environment to make
+various kinds of equation arrangements easier to write.
+
+\item Equation numbers automatically adjust up or down to avoid
+overprinting on the equation contents (unlike \env{eqnarray}).
+
+\item Spacing around equals signs matches the normal spacing in the
+\env{equation} environment (unlike \env{eqnarray}).
+
+\item A way to produce multiline subscripts as are often used with
+summation or product symbols.
+
+\item An easy way to substitute a variant equation number for a given
+equation instead of the automatically supplied number.
+
+\item An easy way to produce subordinate equation numbers of the form
+(1.3a) (1.3b) (1.3c) for selected groups of equations.
+
+\end{itemize}
+
+The \nipkg{amsmath} package is distributed together with some small
+auxiliary packages:
+\begin{description}
+\item[\nipkg{amsmath}] Primary package, provides various features for
+  displayed equations and other mathematical constructs.
+
+\item[\pkg{amstext}] Provides a \cn{text} command for
+  typesetting a fragment of text inside a display.
+
+\item[\pkg{amsopn}] Provides \cn{DeclareMathOperator} for defining new
+  `operator names' like \cn{sin} and \cn{lim}.
+
+\item[\pkg{amsbsy}] For backward compatibility this package continues
+to exist but use of the newer \pkg{bm} package that comes with \LaTeX{}
+is recommended instead.
+
+\item[\pkg{amscd}] Provides a \env{CD} environment for simple
+  commutative diagrams (no support for diagonal arrows).
+
+\item[\pkg{amsxtra}] Provides certain odds and ends such as
+  \cn{fracwithdelims} and \cn{accentedsymbol}, for compatibility with
+  documents created using version 1.1.
+
+\end{description}
+
+The \nipkg{amsmath} package incorporates \pkg{amstext}, \pkg{amsopn}, and
+\pkg{amsbsy}. The features of \pkg{amscd} and \pkg{amsxtra}, however,
+are available only by invoking those packages separately.
+
+The independent \pkg{mathtools} package \cite{mt} provides some
+enhancements to \nipkg{amsmath}; \pkg{mathtools} loads \nipkg{amsmath}
+automatically, so there is no need to separately load \nipkg{amsmath}
+if \pkg{mathtools} is used.  Some \pkg{mathtools} facilities
+will be noted below as appropriate.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\chapter{Options for the \nipkg{amsmath} package}\label{options}
+
+The \nipkg{amsmath} package has the following options:
+\index{options!amsmath@\texttt{amsmath} package options|(}
+\begin{description}
+
+\item[\opt{centertags}] (default) For an equation containing a
+\env{split} environment, place equation
+numbers\index{equationn@equation numbers!vertical placement}
+vertically centered on the total height of the equation.
+
+\item[\opt{tbtags}] `Top-or-bottom tags': For an equation containing
+a \env{split} environment, place equation
+numbers\index{equationn@equation numbers!vertical placement} level with the last
+(resp.\ first) line, if numbers are on the right (resp.\ left).
+
+\item[\opt{sumlimits}] (default) Place the subscripts and
+superscripts\index{subscripts and superscripts!placement}\relax
+\index{limits|see{subscripts and superscripts}} of summation symbols
+above and below, in displayed equations. This option also affects other
+symbols of the same type\mdash $\prod$, $\coprod$, $\bigotimes$,
+$\bigoplus$, and so forth\mdash but excluding integrals (see below).
+
+\item[\opt{nosumlimits}] Always place the subscripts and superscripts of
+summation-type symbols to the side, even in displayed equations.
+
+\item[\opt{intlimits}] Like \opt{sumlimits}, but for
+integral\index{integrals!placement of limits} symbols.
+
+\item[\opt{nointlimits}] (default) Opposite of \opt{intlimits}.
+
+\item[\opt{namelimits}] (default) Like \opt{sumlimits}, but for certain
+`operator names' such as $\det$, $\inf$, $\lim$, $\max$, $\min$, that
+traditionally have subscripts%
+\index{subscripts and superscripts!placement} placed underneath when
+they occur in a displayed equation.
+
+\item[\opt{nonamelimits}] Opposite of \opt{namelimits}.
+
+\end{description}
+
+\goodbreak
+
+To use one of these package options, put the option name in the optional
+argument of the \cn{usepackage} command\mdash e.g.,
+\verb"\usepackage[intlimits]{amsmath}".
+For AMS document classes and any other classes that preload \nipkg{amsmath}
+desired options must be specified with the \cn{documentclass}\mdash
+e.g.,\\
+\verb+\documentclass[intlimits,tbtags,reqno]{amsart}+.
+
+The \nipkg{amsmath} package also recognizes the following options which
+are normally selected (implicitly or explicitly) through the
+\cn{documentclass} command, and thus need not be repeated in the option
+list of the \cn{usepackage}|{amsmath}| statement.
+\begin{description}
+
+\item[\opt{leqno}] Place equation numbers on the left.%
+\index{equationn@equation numbers!left or right placement}
+
+\item[\opt{reqno}] Place equation numbers on the right.
+
+\item[\opt{fleqn}] Position equations at a fixed indent from the left
+margin rather than centered in the text column.%
+\index{displayed equations!centering}
+
+\end{description}
+
+Three options have been added to control the space to the left of
+\env{aligned} and \env{gathered} environments. Prior to the 2017 release
+a thin space was added to the left but not the right of these constructs.
+This appears to have been an accidental feature of the implementation and
+was typically corrected by prefixing the environments with \altcnbang.
+
+The new default behavior is aimed to ensure that the environments do
+not have a thin space added in most cases, and that existing documents
+using |\!\begin{aligned}| continue to work as before.
+
+\begin{description}
+\item[\opt{alignedleftspaceyes}] Always add \cn{\,} to the left of \env{aligned} and \env{gathered}.
+\item[\opt{alignedleftspaceno}] Never add \cn{\,} to the left of \env{aligned} and \env{gathered}.
+\item[\opt{alignedleftspaceyesifneg}] Only add \cn{\,} if the environment is prefixed by negative space. (New default behavior.)
+\end{description}
+
+\index{options!amsmath@\texttt{amsmath} package options|)}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\end{document}

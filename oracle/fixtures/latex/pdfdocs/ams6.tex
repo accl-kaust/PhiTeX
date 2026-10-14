@@ -1,0 +1,599 @@
+%
+% Copyright (C) 1995, 2000, 2013 American Mathematical Society.
+% Copyright (C) 2016-2025 LaTeX Project and American Mathematical Society.
+%
+% This work may be distributed and/or modified under the
+% conditions of the LaTeX Project Public License, either version 1.3c
+% of this license or (at your option) any later version.
+% The latest version of this license is in
+%   https://www.latex-project.org/lppl.txt
+% and version 1.3c or later is part of all distributions of LaTeX
+% version 2005/12/01 or later.
+%
+% This work has the LPPL maintenance status `maintained'.
+%
+% The Current Maintainer of this work is the LaTeX Project.
+%
+\documentclass[leqno,titlepage,openany]{amsldoc}[1999/12/13]
+
+\def\MaintainedByLaTeXTeam#1{%
+\begin{center}%
+\fbox{\fbox{\begin{tabular}{@{}l@{}}%
+This file is maintained by the \LaTeX{} Project team.\\%
+Bug reports can be opened (category \texttt{#1}) at\\%
+\url{https://latex-project.org/bugs/}.\end{tabular}}}\end{center}}
+
+\ifx\UndEfiNed\url
+  \ClassError{amsldoc}{%
+    This version of amsldoc.tex must be processed\MessageBreak
+    with a newer version of amsldoc.cls (2.02 or later).}{}
+\fi
+
+\renewcommand\bibname{References}
+
+%    Definitions that should be moved to amsldoc.cls
+%    when it is next updated
+\makeatletter
+\let\cleardouble@page\cleardoublepage
+\AtBeginDocument{%
+  \ifx\cleardouble@page\cleardoublepage
+    \def\cleardoublepage{\clearpage{\pagestyle{empty}\cleardouble@page}}
+  \fi
+}
+
+% #1 is empty or one of class, environment, option, package
+% could use different font in each case
+\makeatletter
+\def\@category@index#1#2{%
+    \autoindex{%
+        #2\actualchar\string\index#1font{#2}%
+        \ifx\@nil#1\@nil\else\space#1\fi
+    }%
+}
+
+\let\indexpackagefont\textsf
+\let\indexclassfont\textsf
+\let\indexoptionfont\texttt
+\let\indexenvironmentfont\texttt
+\let\indexfont\texttt
+\makeatother
+%    For a package that won't be indexed, i.e. amsmath
+\newcommand{\nipkg}{\textsf}
+\def\tikz/{Ti\textit{k}Z}
+%    End definitions for amsldoc.cls
+
+\title{User's Guide for the \nipkg{amsmath} Package (Version~2.1)}
+\author{American Mathematical Society, \LaTeX\ Project}
+\date{1999-12-13\\(revised 2002-02-25, 2016-11-14, 2018-04-05, 2019-10-14, 2020-02-18)}
+\makeatletter
+\def\@thanks{\bigskip\MaintainedByLaTeXTeam{amslatex}}
+\makeatother
+
+% Very minor changes are not listed in the \date above:
+%
+% 2021-08-22: reported typo fixed mathools -> mathtools
+% 2025-05-23: drop spurious option list
+
+
+%    Use the amsmath package and amscd package in order to print
+%    examples.
+\usepackage{amsmath}
+\usepackage{amscd}
+
+\usepackage{imakeidx}
+%    Need alternate coding for vertical bar to get it into index.
+%    Based on \qcbang and \cnbang in amsldoc.cls, refined by David Carlisle.
+%    Give it a sort field that will be at the end of the symbols;
+%    must avoid " and | which have special meanings.
+\DeclareRobustCommand{\qcvert}{\qc\|\index{{z1}@{\ntt\char'174}}}
+\DeclareRobustCommand{\cnvert}{%
+  \ncn{\|}\index{{z0}@{\ntt\bslchar\char'174}}}
+%    Need alternate index sort field for bang to allow & to sort first
+\DeclareRobustCommand{\altcnbang}{%
+  \ncn{\!}\index{"!b@{\ntt\bslchar\qcbang}}}
+\DeclareRobustCommand{\cnamp}{%
+  \index{"!a@\texttt{\&}}}
+
+\makeindex[intoc] % generate index data
+\providecommand{\see}[2]{\textit{see} #1}
+
+%    The amsldoc class includes a number of features useful for
+%    documentation about TeX, including:
+%
+%    ---Commands \tex/, \amstex/, \latex/, ... for uniform treatment
+%    of the various logos and easy handling of following spaces.
+%
+%    ---Commands for printing various common elements: \cn for command
+%    names, \fn for file names (including font-file names), \env for
+%    environments, \pkg and \cls for packages and classes, etc.
+
+%    Many of the command names used here are rather long and will
+%    contribute to poor linebreaking if we follow the \latex/ practice
+%    of not hyphenating anything set in tt font; instead we selectively
+%    allow some hyphenation.
+\allowtthyphens % defined in amsldoc.cls
+
+\hyphenation{ac-cent-ed-sym-bol add-to-counter add-to-length align-at
+  aligned-at allow-dis-play-breaks ams-art ams-cd ams-la-tex amsl-doc
+  ams-symb ams-tex ams-text ams-xtra bmatrix bold-sym-bol cen-ter-tags
+  eqn-ar-ray idots-int int-lim-its latex med-space neg-med-space
+  neg-thick-space neg-thin-space no-int-lim-its no-name-lim-its
+  over-left-arrow over-left-right-arrow over-right-arrow pmatrix
+  qed-sym-bol set-length side-set small-er tbinom the-equa-tion
+  thick-space thin-space un-der-left-arrow un-der-left-right-arrow
+  un-der-right-arrow use-pack-age var-inj-lim var-proj-lim vmatrix
+  xalign-at xx-align-at}
+
+%    Prepare for illustrating the \vec example
+\newcommand{\vect}[1]{\mathbf{#1}}
+
+\newcommand{\booktitle}[1]{\textit{#1}}
+\newcommand{\journalname}[1]{\textit{#1}}
+\newcommand{\seriesname}[1]{\textit{#1}}
+
+%    Command to insert and index a particular phrase. Doesn't work for
+%    certain kinds of special characters in the argument.
+\newcommand{\ii}[1]{#1\index{#1}}
+
+\newcommand{\vstrut}[1]{\vrule width0pt height#1\relax}
+
+%    An environment for presenting comprehensive address information:
+\newenvironment{infoaddress}{%
+  \par\topsep\medskipamount
+  \trivlist\centering
+  \item[]%
+  \begin{minipage}{.7\columnwidth}%
+  \raggedright
+}{%
+  \end{minipage}%
+  \endtrivlist
+}
+
+\newenvironment{eqxample}{%
+  \par\addvspace\medskipamount
+  \noindent\begin{minipage}{.5\columnwidth}%
+  \def\producing{\end{minipage}\begin{minipage}{.5\columnwidth}%
+    \hbox\bgroup\kern-.2pt\vrule width.2pt%
+      \vbox\bgroup\parindent0pt\relax
+%    The 3pt is to cancel the -\lineskip from \displ@y
+    \abovedisplayskip3pt \abovedisplayshortskip\abovedisplayskip
+    \belowdisplayskip0pt \belowdisplayshortskip\belowdisplayskip
+    \noindent}
+}{%
+  \par
+%    Ensure that a lonely \[\] structure doesn't take up width less than
+%    \hsize.
+  \hrule height0pt width\hsize
+  \egroup\vrule width.2pt\kern-.2pt\egroup
+  \end{minipage}%
+  \par\addvspace\medskipamount
+}
+
+%    Errors in output shouldn't be \texttt, and they may also be longer
+%    than one line, but they should be identified by the "errorbullet".
+%    (They were formerly labeled as aubsections.)
+\newenvironment{erroro}[1]{%
+  \par\addvspace\medskipamount
+  \noindent\hangindent\parindent
+  \hbox to\parindent{\errorbullet\hfil}\ignorespaces
+  #1\par\vspace{\smallskipamount}
+}{%
+  \par\addvspace\medskipamount
+}
+
+%    The chapters are so short, perhaps we shouldn't call them by the
+%    name `Chapter'. We make \chaptername read an argument in order to
+%    remove a following \space or "{} " (both possibilities are present
+%    in book.cls).
+
+\renewcommand{\chaptername}[1]{}
+\newcommand{\chapnum}[1]{\mdash #1\mdash }
+\makeatletter
+\def\@makechapterhead#1{%
+  \vspace{1.5\baselineskip}%
+  {\parindent \z@ \raggedright \reset@font
+    \ifnum \c@secnumdepth >\m@ne
+      \large\bfseries \chapnum{\thechapter}%
+      \par\nobreak
+      \vskip.5\baselineskip\relax
+    \fi
+    #1\par\nobreak
+    \vskip\baselineskip
+  }}
+\makeatother
+
+%    A command for ragged-right parbox in a tabular.
+\newcommand{\rp}{\let\PBS\\\raggedright\let\\\PBS}
+
+%    Non-indexed file name
+\newcommand{\nfn}[1]{\texttt{#1}}
+
+%    For the examples in the math spacing table.
+%%\newcommand{\lspx}{\mbox{\rule{5pt}{.6pt}\rule{.6pt}{6pt}}}
+%%\newcommand{\rspx}{\mbox{\rule[-1pt]{.6pt}{7pt}%
+%%  \rule[-1pt]{5pt}{.6pt}}}
+\newcommand{\lspx}{\mathord{\Rightarrow\mkern-1mu}}
+\newcommand{\rspx}{\mathord{\mkern-1mu\Leftarrow}}
+\newcommand{\spx}[1]{$\lspx #1\rspx$}
+
+%    For a list of characters representing document input.
+\newcommand{\clist}[1]{%
+  \mbox{\ntt\spaceskip.2em plus.1em \xspaceskip\spaceskip#1}}
+
+%    Fix weird \latex/ definition of rightmark.
+\makeatletter
+\def\rightmark{\expandafter\@rightmark\botmark{}{}}
+%    Also turn off section marks.
+\let\sectionmark\@gobble
+\renewcommand{\chaptermark}[1]{%
+  \uppercase{\markboth{\rhcn#1}{\rhcn#1}}}
+\newcommand{\rhcn}{\thechapter. }
+\makeatother
+
+%    Include down to \section but not \subsection, in toc:
+\setcounter{tocdepth}{1}
+
+%    Subheadings for the bibliography
+\newif\iffirstbibsubhead \firstbibsubheadtrue
+\newcommand{\bibsubhead}[1]{%
+  \iffirstbibsubhead \firstbibsubheadfalse
+  \else \addvspace{\medskipamount}
+  \fi
+  \item[]\hspace*{-\leftmargin}\textbf{#1}\par
+  \vspace{\smallskipamount}
+}
+
+\DeclareMathOperator{\ix}{ix}
+\DeclareMathOperator{\nul}{nul}
+\DeclareMathOperator{\End}{End}
+\DeclareMathOperator{\xxx}{xxx}
+
+\usepackage{hyperref}
+\hypersetup{pdfborder=0 0 0}
+\makeatletter
+\let\oldcs\cs
+\def\cs#1{\texorpdfstring{\oldcs{#1}}{\@backslashchar\@backslashchar#1}}
+\let\cn\cs
+\makeatother
+\begin{document}
+\chapter{Integrals and sums}
+
+\section{Multiline subscripts and superscripts}
+
+The \cn{substack} command can be used to produce a multiline subscript
+or superscript:\index{subscripts and superscripts!multiline}\relax
+\index{superscripts|see{subscripts and superscripts}} for example
+\begin{ctab}{ll}
+\begin{minipage}[t]{.6\columnwidth}
+\begin{verbatim}
+\sum_{\substack{
+         0\le i\le m\\
+         0<j<n}}
+  P(i,j)
+\end{verbatim}
+\end{minipage}
+&
+$\displaystyle
+\sum_{\substack{0\le i\le m\\ 0<j<n}} P(i,j)$
+\end{ctab}
+A slightly more generalized form is the \env{subarray} environment which
+allows you to specify that each line should be left-aligned instead of
+centered, as here:
+\begin{ctab}{ll}
+\begin{minipage}[t]{.6\columnwidth}
+\begin{verbatim}
+\sum_{\begin{subarray}{l}
+        i\in\Lambda\\ 0<j<n
+      \end{subarray}}
+ P(i,j)
+\end{verbatim}
+\end{minipage}
+&
+$\displaystyle
+  \sum_{\begin{subarray}{l}
+        i\in \Lambda\\ 0<j<n
+      \end{subarray}}
+ P(i,j)$
+\end{ctab}
+
+%% ------------------------------------------------------------------ %%
+
+\section{The \cn{sideset} command}\label{sideset}
+
+There's also a command called \cn{sideset}, for a rather special
+purpose: putting symbols at the subscript and
+superscript\index{subscripts and superscripts!on sums} corners of a
+large operator symbol such as $\sum$ or $\prod$. \emph{Note: this
+command is not designed to be applied to anything other than sum-class
+symbols.} The prime
+example is the case when you want to put a prime on a sum symbol. If
+there are no limits above or below the sum, you could just use
+\cn{nolimits}: here's
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+|\sum\nolimits' E_n| in display mode:
+\begin{equation}
+\sum\nolimits' E_n
+\end{equation}
+If, however, you want not only the prime but also something below or
+above the sum symbol, it's not so easy\mdash indeed, without
+\cn{sideset}, it would be downright difficult. With \cn{sideset}, you
+can write
+\begin{ctab}{ll}
+\begin{minipage}[t]{.6\columnwidth}
+\begin{verbatim}
+\sideset{}{'}
+  \sum_{n<k,\;\text{$n$ odd}} nE_n
+\end{verbatim}
+\end{minipage}
+&$\displaystyle
+\sideset{}{'}\sum_{n<k,\;\text{$n$ odd}} nE_n
+$
+\end{ctab}
+The extra pair of empty braces is explained by the fact that
+\cn{sideset} has the capability of putting an extra symbol or symbols at
+each corner of a large operator; to put an asterisk at each corner of a
+product symbol, you would type
+\begin{ctab}{ll}
+\begin{minipage}[t]{.6\columnwidth}
+\begin{verbatim}
+\sideset{_*^*}{_*^*}\prod
+\end{verbatim}
+\end{minipage}
+&$\displaystyle
+\sideset{_*^*}{_*^*}\prod
+$
+\end{ctab}
+
+%% ------------------------------------------------------------------ %%
+
+\section{Placement of subscripts and limits}\label{subplace}
+
+The default positioning for subscripts depends on the
+base symbol involved. The default for sum-class symbols is
+`displaylimits' positioning: When a sum-class symbol appears
+in a displayed formula, subscript and superscript are placed in `limits'
+position above and below, but in an inline formula, they are placed to
+the side, to avoid unsightly and wasteful spreading of the
+surrounding text lines.
+The default for integral-class symbols is to have sub- and
+superscripts always to the side, even in displayed formulas.
+(See the discussion of the \opt{intlimits} and related
+options\index{options!behavior of particular options} in
+Section~\ref{options}.)
+
+Operator names such as $\sin$ or $\lim$ may have either `displaylimits'
+or `limits' positioning depending on how they were defined. The standard
+operator names are defined according to normal mathematical usage.
+
+The commands \cn{limits} and \cn{nolimits} can be used to override the
+normal behavior of a base symbol:
+\begin{equation*}
+\sum\nolimits_X,\qquad \iint\limits_{A},
+\qquad\varliminf\nolimits_{n\to \infty}
+\end{equation*}
+To define a command whose subscripts follow the
+same `displaylimits' behavior as \cn{sum}, put
+\cn{displaylimits} at the tail end of the definition. When multiple
+instances of \cn{limits}, \cn{nolimits}, or \cn{displaylimits} occur
+consecutively, the last one takes precedence.
+
+%% ------------------------------------------------------------------ %%
+
+\section{Multiple integral signs}
+
+\cn{iint}, \cn{iiint}, and \cn{iiiint} give multiple integral
+signs\index{integrals!multiple} with the spacing between them nicely
+adjusted, in both text and display style. \cn{idotsint} is an extension
+of the same idea that gives two integral signs with dots between them.
+\begin{gather}
+\iint\limits_A f(x,y)\,dx\,dy\qquad\iiint\limits_A
+f(x,y,z)\,dx\,dy\,dz\\
+\iiiint\limits_A
+f(w,x,y,z)\,dw\,dx\,dy\,dz\qquad\idotsint\limits_A f(x_1,\dots,x_k)
+\end{gather}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\chapter{Commutative diagrams}\label{s:commdiag}
+\index{commutative diagrams}
+
+Some commutative diagram commands like the ones in \amstex/ are
+available as a separate package, \pkg{amscd}. For complex commutative
+diagrams authors will need to turn to more comprehensive packages like
+\tikz/\index{TikZ@\tikz/ package} (in particular, \pkg{tikz-cd})
+or \xypic/\index{XY-pic@\xypic/ package},
+but for simple diagrams without diagonal
+arrows\index{arrows!in commutative diagrams} the \pkg{amscd} commands
+may be more convenient. Here is one example.
+\begin{equation*}
+\begin{CD}
+S^{\mathcal{W}_\Lambda}\otimes T   @>j>>   T\\
+@VVV                                    @VV{\End P}V\\
+(S\otimes T)/I                  @=      (Z\otimes T)/J
+\end{CD}
+\end{equation*}
+\begin{verbatim}
+\begin{CD}
+S^{\mathcal{W}_\Lambda}\otimes T   @>j>>   T\\
+@VVV                                    @VV{\End P}V\\
+(S\otimes T)/I                  @=      (Z\otimes T)/J
+\end{CD}
+\end{verbatim}
+In the \env{CD} environment the commands |@>>>|,
+|@<<<|, |@VVV|, and |@AAA| give respectively right, left, down, and up
+arrows. For the horizontal arrows, material between the first and second
+|>| or |<| symbols will be typeset as a superscript, and material
+between the second and third will be typeset as a subscript. Similarly,
+material between the first and second or second and third |A|s or |V|s
+of vertical arrows will be typeset as left or right \qq{sidescripts}.
+The commands |@=| and \verb'@|' give horizontal and vertical double lines.
+A \qq{null arrow} command |@.| can be used instead of a visible arrow
+to fill out an array where needed.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\chapter{Using math fonts}
+
+\section{Introduction}
+
+For more comprehensive information on font use in \latex/, see the
+\latex/ font guide (\fn{fntguide.tex}) or \booktitle{The \latex/
+Companion} \cite{tlc2}. The basic set of math font commands\index{math
+fonts}\relax \index{math symbols|see{math fonts}} in \latex/ includes
+\cn{mathbf}, \cn{mathrm}, \cn{mathcal}, \cn{mathsf}, \cn{mathtt},
+\cn{mathit}. Additional math alphabet commands such as
+\cn{mathbb} for blackboard bold, \cn{mathfrak} for Fraktur, and
+\cn{mathscr} for Euler script are available through the packages
+\pkg{amsfonts} and \pkg{euscript} (distributed separately).
+
+%% ------------------------------------------------------------------ %%
+\enlargethispage{1\baselineskip}
+
+\section{Recommended use of math font commands}
+
+If you find yourself employing math font commands frequently in your
+document, you might wish that they had shorter names, such as \ncn{mb}
+instead of \cn{mathbf}. Of course, there is nothing to keep you from
+providing such abbreviations for yourself by suitable \cn{newcommand}
+statements. But for \latex/ to provide shorter names would actually be a
+disservice to authors, as that would obscure a much better alternative:
+defining custom command names derived from the names of the underlying
+mathematical objects, rather than from the names of the fonts used to
+distinguish the objects. For example, if you are using bold to indicate
+vectors, then you will be better served in the long run if you define a
+`vector' command instead of a `math-bold' command:
+\begin{verbatim}
+  \newcommand{\vect}[1]{\mathbf{#1}}
+\end{verbatim}
+you can write |\vect{a} + \vect{b}| to produce $\vect{a} +
+\vect{b}$.
+If you decide several months down the road that you want to use the bold
+font for some other purpose, and mark vectors by a small over-arrow
+instead, then you can put the change into effect merely by changing the
+definition of \ncn{vect}; otherwise you would have to replace all
+occurrences of \cn{mathbf} throughout your document, perhaps even
+needing to inspect each one to see whether it is indeed
+an instance of a vector.
+
+It can also be useful to assign distinct
+command names for different letters of a particular font:
+\begin{verbatim}
+\DeclareSymbolFont{AMSb}{U}{msb}{m}{n}% or use amsfonts package
+\DeclareMathSymbol{\C}{\mathalpha}{AMSb}{"43}
+\DeclareMathSymbol{\R}{\mathalpha}{AMSb}{"52}
+\end{verbatim}
+These statements would define the commands \cn{C} and \cn{R} to produce
+blackboard-bold letters from the `AMSb' math symbols font. If you refer
+often to the\break complex numbers or real numbers in your document, you
+might find this method more convenient than (let's say) defining a
+\ncn{field} command and writing\break |\field{C}|, |\field{R}|. But for
+maximum flexibility and control, define such a \ncn{field} command and
+then define \ncn{C} and \ncn{R} in terms of that
+command:\indexcs{mathbb}
+\begin{verbatim}
+\usepackage{amsfonts}% to get the \mathbb alphabet
+\newcommand{\field}[1]{\mathbb{#1}}
+\newcommand{\C}{\field{C}}
+\newcommand{\R}{\field{R}}
+\end{verbatim}
+
+%% ------------------------------------------------------------------ %%
+\enlargethispage{3\baselineskip}
+
+\section{Bold math symbols}
+
+The \cn{mathbf} command is commonly used to obtain bold Latin letters in
+math, but for most other kinds of math symbols it has no effect, or its
+effects depend unreliably on the set of math fonts that are in use. For
+example, writing
+\begin{verbatim}
+\Delta \mathbf{\Delta}\mathbf{+}\delta \mathbf{\delta}
+\end{verbatim}
+produces $\Delta \mathbf{\Delta}\mathbf{+}\delta
+\mathbf{\delta}$; the \cn{mathbf} has no effect on the plus
+sign or the small delta.
+% should be paragraph break; avoid overfull box on next line
+The \nipkg{amsmath} package therefore provides two additional commands,
+\cn{boldsymbol} and \cn{pmb}, that can be applied to other kinds of math
+symbols. \cn{boldsymbol} can be used for a math symbol that remains
+unaffected by \cn{mathbf} if (and only if) your current math font set
+includes a bold version of that symbol. \cn{pmb} can be used as a last
+resort for any math symbols that do not have a true bold version
+provided by your set of math fonts; \qq{pmb} stands for \qq{poor man's
+bold} and the command works by typesetting multiple copies of the symbol
+with slight offsets. The quality of the output is inferior, especially
+for symbols that contain any hairline strokes. When the standard default set of
+\latex/ math fonts are in use (Computer Modern), the only symbols that
+are likely to require \cn{pmb} are large operator symbols like \cn{sum},
+extended delimiter\index{delimiters} symbols, or the extra math symbols
+provided by the \pkg{amssymb} package \cite{amsfonts}.
+
+The following formula shows some of the results that are possible:
+\begin{verbatim}
+A_\infty + \pi A_0
+\sim \mathbf{A}_{\boldsymbol{\infty}} \boldsymbol{+}
+  \boldsymbol{\pi} \mathbf{A}_{\boldsymbol{0}}
+\sim\pmb{A}_{\pmb{\infty}} \pmb{+}\pmb{\pi} \pmb{A}_{\pmb{0}}
+\end{verbatim}
+\begin{equation*}
+A_\infty + \pi A_0
+\sim \mathbf{A}_{\boldsymbol{\infty}} \boldsymbol{+}
+  \boldsymbol{\pi} \mathbf{A}_{\boldsymbol{0}}
+\sim\pmb{A}_{\pmb{\infty}} \pmb{+}\pmb{\pi} \pmb{A}_{\pmb{0}}
+\end{equation*}
+If you want to use only the \cn{boldsymbol} command without loading the
+whole \nipkg{amsmath} package, the \pkg{bm} package is recommended (this
+is a standard \latex/ package, not an AMS package; you probably have it
+already if you have a 1997 or newer version of \latex/).
+
+%% ------------------------------------------------------------------ %%
+
+\section{Italic Greek letters}
+
+For italic versions of the capital Greek letters, the following commands
+are provided:
+\begin{ctab}{rlrl}
+\cn{varGamma}& $\varGamma$& \cn{varSigma}& $\varSigma$\\
+\cn{varDelta}& $\varDelta$& \cn{varUpsilon}& $\varUpsilon$\\
+\cn{varTheta}& $\varTheta$& \cn{varPhi}& $\varPhi$\\
+\cn{varLambda}& $\varLambda$& \cn{varPsi}& $\varPsi$\\
+\cn{varXi}& $\varXi$& \cn{varOmega}& $\varOmega$\\
+\cn{varPi}& $\varPi$
+\end{ctab}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\chapter{Error messages and output problems}
+
+\section{General remarks}
+
+This is a supplement to Chapter~8 of the \latex/ manual \cite{lamport}
+(first edition: Chapter~6). Appendix~B of the
+\textit{Companion}~\cite{tlc2} lists all \latex/ errors including those
+for \nipkg{amsmath} with likely causes for each.  For the reader's
+convenience, the set of error messages discussed here overlaps
+somewhat with the set in those references,
+but please be aware that we don't provide exhaustive coverage here.
+The error messages are arranged in alphabetical order, disregarding
+unimportant text such as |! LaTeX Error:| at the beginning, and
+nonalphabetical characters such as \qc{\\}. Where examples are given, we
+show also the help messages that appear on screen when you respond to an
+error message prompt by entering |h|.
+
+Remember that the important error message is the first for a given line.
+When running in nonstop mode, errors accumulate, and the first error
+may create a further error condition from which it is impossible to
+recover.  In such a situation processing will stop after 100~errors,
+so the reporting of genuine errors may not be complete, and it may be
+impossible to determine which reported errors are genuine and which
+are not.
+
+A final section discusses some output errors, i.e., instances where
+the printed document has something wrong but there was no \latex/
+error during typesetting.
+
+%% ------------------------------------------------------------------ %%
+%% **********
+\enlargethispage{-2\baselineskip}
+
+\end{document}
