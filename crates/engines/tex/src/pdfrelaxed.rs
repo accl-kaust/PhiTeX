@@ -12,8 +12,8 @@
 use phitex_defuse::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
-use phitex_pdf::relaxed::{self, Carry, DocCmd, PageEnv, Piece};
+use phitex_defuse::{ValueId, Values};
+use phitex_pdf::relaxed::{self, Carry, PageEnv, Piece};
 use phitex_pdf::{PdfParams, Whatsit};
 use phitex_typeset::node::BoxNode;
 

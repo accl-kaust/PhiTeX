@@ -16,18 +16,6 @@ use crate::val::{COUNT_BASE, MU_SKIP_BASE, SCALED_BASE, SKIP_BASE, TOKS_BASE, To
 const REGS: [&str; 5] = ["count", "dimen", "skip", "muskip", "toks"];
 
 /// The slot of register `n` of kind `r` (0 count … 4 toks), if 0–255.
-/// Whether `loc` is a count register's slot (`\count0..255`).
-pub(crate) fn is_count_slot(loc: crate::runstate::Loc) -> bool {
-    (REG0..REG0 + 256).contains(&(loc as usize))
-}
-
-/// Whether `loc` is `\\count0..9`, the registers the page chain
-/// carries (`pgdef:<j>`).
-#[inline]
-pub(crate) fn is_chain_count_slot(loc: crate::runstate::Loc) -> bool {
-    (loc as usize).wrapping_sub(REG0) < 10
-}
-
 pub(crate) fn reg_slot(r: usize, n: i32) -> Option<usize> {
     usize::try_from(n)
         .ok()
@@ -582,8 +570,6 @@ pub(crate) enum Fam {
     Wdef,
     Wfiledecl,
     Wdefdecl,
-    Pagefx,
-    Marksdecl,
 }
 
 const FAMS: usize = 8;
@@ -597,8 +583,6 @@ impl Fam {
             Fam::Wdef => "wdef",
             Fam::Wfiledecl => "wfiledecl",
             Fam::Wdefdecl => "wdefdecl",
-            Fam::Pagefx => "pagefx",
-            Fam::Marksdecl => "marksdecl",
         }
     }
 }

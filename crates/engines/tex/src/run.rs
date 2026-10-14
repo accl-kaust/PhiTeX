@@ -29,10 +29,6 @@ pub(crate) enum Halt {
     /// The input ended for good inside a command (§360: in batch mode,
     /// "*** (job aborted, no legal \end found)").
     Fatal,
-    /// A page step's fire position is gone (removed or re-made,
-    /// `FieldAt::Gone`): its inputs are stale, so the run publishes
-    /// nothing; the plan's re-run re-binds the step, which runs again.
-    Gone,
 }
 
 impl From<Stop> for Halt {
@@ -57,9 +53,6 @@ pub(crate) struct Ops {
     /// (set by `api::Build::with`; none while a format is built): a
     /// document file `\input` is sliced with them ([`Run::leftover`]).
     pub defs: std::sync::Arc<std::sync::Mutex<crate::hints::Defs>>,
-    /// Page-step runs that reached their finish, by page index (not
-    /// the attempts that stopped or were cut off): [`crate::Stats`].
-    pub steps_done: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
     /// The package loads' finished runs (`crate::pkgrec`): node, start,
     /// end, for [`crate::Stats`] (concurrency, preamble wall).
     pub pkg_log: std::sync::Arc<std::sync::Mutex<Vec<PkgRun>>>,
@@ -69,55 +62,9 @@ pub(crate) struct Ops {
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
-    /// The runs that read at a gone position ([`Halt::Gone`]).
-    pub gone: std::sync::Arc<GoneLog>,
 }
 
-/// The runs that read at a position that was gone (`FieldAt::Gone`):
-/// counted per round, and the nodes whose last finished run saw one
-/// (none may be left when the build settles: such a run published
-/// nothing).
-#[derive(Default)]
-pub(crate) struct GoneLog {
-    runs: std::sync::atomic::AtomicU64,
-    last: std::sync::Mutex<phitex_defuse::FxHashSet<phitex_defuse::NodeId>>,
-}
 
-impl GoneLog {
-    /// A finished run of `node` (not one that stopped): whether it saw a
-    /// gone position.
-    pub(crate) fn note(&self, node: phitex_defuse::NodeId, gone: bool) {
-        let mut l = self
-            .last
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if gone {
-            self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            l.insert(node);
-        } else if !l.is_empty() {
-            l.remove(&node);
-        }
-    }
-
-    /// The runs that saw a gone position since the last call.
-    pub(crate) fn take_runs(&self) -> u64 {
-        self.runs.swap(0, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// The live nodes whose last finished run saw a gone position (the
-    /// others forgotten).
-    pub(crate) fn stale(
-        &self,
-        live: impl Fn(phitex_defuse::NodeId) -> bool,
-    ) -> Vec<phitex_defuse::NodeId> {
-        let mut l = self
-            .last
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        l.retain(|&n| live(n));
-        l.iter().copied().collect()
-    }
-}
 
 /// A package load's finished run: its node, when it began and ended,
 /// and whether it ran speculatively.
@@ -249,14 +196,6 @@ fn heartbeat_enabled() -> bool {
 /// The size of a run's control-sequence name cache ([`Run::cs_cache`]).
 pub(crate) const CS_CACHE: usize = 1024;
 
-/// The page builder's parameters (§980), which a `T_PAGE_PARAMS` marker
-/// carries.
-const PAGE_PARAMS: [Loc; 4] = [
-    Par::vsize as Loc,
-    Par::maxdepth as Loc,
-    Par::topskip as Loc,
-    Par::holdinginserts as Loc,
-];
 
 /// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`, §297).
 /// Its meaning is read from its slot when a command needs it
@@ -370,8 +309,6 @@ pub(crate) struct Run<'c, 'a> {
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
-    /// A page step that shipped a page (`pdf:shipped:<j>`).
-    pub shipped: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -467,9 +404,6 @@ pub(crate) struct Run<'c, 'a> {
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
-    /// A read at the fire position found it gone ([`Halt::Gone`]): the
-    /// run publishes nothing, even if a caller swallowed the halt.
-    pub(crate) saw_gone: bool,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -522,7 +456,6 @@ impl<'c, 'a> Run<'c, 'a> {
             cat_gen: u64::MAX,
             contribs: Vec::new(),
             in_advance: false,
-            shipped: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -561,7 +494,6 @@ impl<'c, 'a> Run<'c, 'a> {
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
             halt: None,
-            saw_gone: false,
         }
     }
 

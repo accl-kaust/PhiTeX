@@ -78,8 +78,8 @@ fn report(name: &str, b: &Build) -> String {
     let _ = std::fmt::Write::write_fmt(
         &mut out,
         format_args!(
-            "\n  critical path {:?}, page steps {}, refuted guesses {:?}",
-            s.critical_path, s.page_steps, s.refuted_guesses
+            "\n  critical path {:?}, page steps {}",
+            s.critical_path, s.page_steps
         ),
     );
     {
@@ -439,7 +439,6 @@ fn latex_loop_rounds() {
             }
             let cold = (b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run);
             let keys = b.wkeys();
-            let fx = b.export_pagefx();
             if fixpoint {
                 // the same without the key-set guess (an empty guess)
                 let o3 = Options {
@@ -462,22 +461,6 @@ fn latex_loop_rounds() {
                     &log[log.len().saturating_sub(400)..]
                 );
             }
-            // a second session from the first one's loop-back values
-            let opts2 = Options {
-                prelude_bytes: std::fs::read(&cache).ok(),
-                time_limit: None,
-                wkeys: keys.clone(),
-                pagefx: fx.clone(),
-                ..options("hello", &dir, "", fixpoint, false)
-            };
-            let b2 = common::build(opts2, Some(&prelude(false)), src);
-            assert_eq!(b2.output().0, b.output().0, "second session differs");
-            eprintln!(
-                "rounds {name} fixpoint={fixpoint} second session: {} loop rounds / {} nodes run (pagefx {} bytes)",
-                b2.stats.loop_rounds,
-                b2.stats.nodes_run,
-                fx.len()
-            );
             b.edit(&src.replacen("\\begin{document}", "\\begin{document}Hi ", 1));
             eprintln!(
                 "rounds {name} fixpoint={fixpoint}: cold {} loop rounds / {} evaluations / {} nodes run, edit {} / {} / {}; wkeys {keys:?}; guess {:?}",
@@ -616,62 +599,6 @@ fn edit_check(name: &str, b: &Build, cold: &Build, k: u64) {
     );
 }
 
-/// `hello.tex` cold, then a second session given the first's page
-/// guesses (`export_pagefx`, `export_pgst`): loop rounds and the
-/// refuted guesses of each (a measure; the second must be one round).
-#[test]
-#[ignore = "heavy: the LaTeX format"]
-fn latex_hello_warm() {
-    let dir = common::fixtures().join("latex/hello");
-    let src = common::read(&dir.join("hello.tex"));
-    let want = std::fs::read(dir.join("hello.dvi")).expect("the oracle");
-    let comment = common::dvi_comment(&want);
-    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/latex.fmt");
-    let opts = || Options {
-        prelude_bytes: std::fs::read(&cache).ok(),
-        time_limit: None,
-        ..options("hello", &dir, &comment, false, false)
-    };
-    let b = common::build(opts(), Some(&prelude(false)), &src);
-    eprintln!(
-        "hello cold: loop rounds {}, critical path {:?}, nodes run {}, refuted {:?}",
-        b.stats.loop_rounds, b.stats.critical_path, b.stats.nodes_run, b.stats.refuted_guesses
-    );
-    let o = Options {
-        pagefx: b.export_pagefx(),
-        pgst: b.export_pgst(),
-        ..opts()
-    };
-    let w = common::build(o, Some(&prelude(false)), &src);
-    eprintln!(
-        "hello warm: loop rounds {}, critical path {:?}, nodes run {}, refuted {:?}",
-        w.stats.loop_rounds, w.stats.critical_path, w.stats.nodes_run, w.stats.refuted_guesses
-    );
-    // another document with the same format, given what the first
-    // learned (the CLI's format-scope guesses): page 1's delta is the
-    // format's
-    let other = "\\documentclass{article}\\begin{document}\\section{One}\\label{one}See section~\\ref{one} on page~\\pageref{one}.\\end{document}\n";
-    let o2 = Options {
-        pgst: b.export_pgst(),
-        ..opts()
-    };
-    let d = common::build(o2, Some(&prelude(false)), other);
-    let cold2 = common::build(opts(), Some(&prelude(false)), other);
-    eprintln!(
-        "second document learned: loop rounds {}, refuted {:?}; unlearned: loop rounds {}",
-        d.stats.loop_rounds, d.stats.refuted_guesses, cold2.stats.loop_rounds
-    );
-    assert_eq!(
-        d.output().0,
-        cold2.output().0,
-        "learned guess changed the output"
-    );
-    assert_eq!(w.output().0, b.output().0, "warm output differs");
-    assert!(
-        common::first_difference(&w.output().0, &want).is_none(),
-        "differs from latex"
-    );
-}
 
 /// The paragraphs of a LaTeX body: its blank-line-separated chunks
 /// between `\begin{document}` and `\end{document}`.

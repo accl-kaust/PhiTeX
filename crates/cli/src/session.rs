@@ -599,21 +599,6 @@ impl Session {
                         _ => Options::default().speculation,
                     },
                     wkeys: self.load_wkeys(),
-                    pagefx: self
-                        .wkeys_path()
-                        .and_then(|p| self.cache.as_ref()?.get(&p.with_file_name("pagefx")))
-                        .unwrap_or_default(),
-                    // (the document's own last values, else what the first
-                    // document built with this format learned)
-                    pgst: self
-                        .wkeys_path()
-                        .and_then(|p| self.cache.as_ref()?.get(&p.with_file_name("pgst")))
-                        .or_else(|| {
-                            let c = self.cache.as_ref()?;
-                            let name = self.format_name(prelude.as_deref()?);
-                            c.get(&c.format_file(&name, "pgst1"))
-                        })
-                        .unwrap_or_default(),
                     // (the package loads' records: machine-wide, beside the
                     // format, from every document built with it)
                     pkgrec: self
@@ -910,8 +895,7 @@ impl Session {
     /// The prelude's evaluated state stored, unless the cache has it
     /// under the same key.
     /// The cache's file of the document's read-back key sets
-    /// ([`Build::wkeys`]): the next session's round-one guesses (beside
-    /// it, `pagefx`: [`Build::export_pagefx`]).
+    /// ([`Build::wkeys`]): the next session's round-one guesses.
     fn wkeys_path(&self) -> Option<PathBuf> {
         Some(self.cache.as_ref()?.doc_dir(&self.job.path).join("wkeys"))
     }
@@ -949,16 +933,6 @@ impl Session {
         }
         if c.get(&p).as_deref() != Some(out.as_bytes()) {
             let _ = c.put(&p, out.as_bytes(), &[]);
-        }
-        let fx = b.export_pagefx();
-        let p = p.with_file_name("pagefx");
-        if c.get(&p).as_deref() != Some(fx.as_slice()) {
-            let _ = c.put(&p, &fx, &[]);
-        }
-        let st = b.export_pgst();
-        let p = p.with_file_name("pgst");
-        if c.get(&p).as_deref() != Some(st.as_slice()) {
-            let _ = c.put(&p, &st, &[]);
         }
     }
 
@@ -1004,15 +978,6 @@ impl Session {
                     t.elapsed().saturating_sub(exported),
                     bytes.len()
                 );
-            }
-        }
-        // the page chain's values of the first document built with this
-        // format: a later document's round-one guesses
-        let p = c.format_file(&self.format_name(text), "pgst1");
-        if c.get(&p).is_none() {
-            let st = b.export_pgst();
-            if !st.is_empty() {
-                let _ = c.put(&p, &st, &[]);
             }
         }
     }

@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use phitex_defuse::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
+use phitex_defuse::{ValueId, Values};
 use phitex_pdf::map::{MapEntry, parse_line, parse_map, parse_map_ps};
 use phitex_pdf::{
     Action, ColorStackCmd, DestKind, FontSource, Ident, LiteralMode, PdfBytes, PdfParams, PdfState,
@@ -1033,7 +1033,6 @@ pub(crate) fn ship(
     ids: &[u32],
 ) -> R<u64> {
     let v = r.v;
-    r.shipped = true;
     let xs = list_of(v, page);
     let p = xs.get(3).map(|&l| list_of(v, l)).unwrap_or_default();
     let mut resolved: FxHashMap<u32, ValueId> = FxHashMap::default();
