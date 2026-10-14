@@ -1014,10 +1014,24 @@ impl<'c, 'a> Run<'c, 'a> {
         Err(Halt::Fatal)
     }
 
+    /// The engine's own diagnostic (a hint's regime violated, an
+    /// undeclared definition): for [`crate::Build::diagnostics`] only.
+    /// It is not TeX's error: not in the log, not in the error count
+    /// (§76's hundred), and it decides neither the output nor the exit.
+    pub(crate) fn engine_diag(&mut self, msg: &str) {
+        self.diag_kind(2, msg);
+    }
+
     /// A diagnostic for [`crate::Build::diagnostics`]: where the input is
     /// (the current line of a file, or the node's own text), and the
     /// message. `error` false: a warning.
     pub(crate) fn diag(&mut self, error: bool, msg: &str) {
+        self.diag_kind(i64::from(error), msg);
+    }
+
+    /// [`Self::diag`] of kind `kind`: 0 a warning, 1 TeX's error, 2 the
+    /// engine's diagnostic.
+    fn diag_kind(&mut self, kind: i64, msg: &str) {
         let v = self.v;
         let src = self
             .input
@@ -1052,7 +1066,7 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let node = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         let e = v.list(vec![
-            v.int(i64::from(error)),
+            v.int(kind),
             v.str(msg),
             file,
             v.int(at),

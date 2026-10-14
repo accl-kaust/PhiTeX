@@ -251,7 +251,7 @@ impl Operation for Exec {
                 }
                 // the hint's assumptions, against what is in force here
                 if let Some(m) = crate::hints::verify(r, &hint)? {
-                    r.log("error", &format!("hint regime violated: {m}"))?;
+                    r.engine_diag(&format!("hint regime violated: {m}"));
                     crate::hints::count(r, 2);
                     r.hint_void = true;
                 }
@@ -274,7 +274,7 @@ impl Operation for Exec {
                 .collect();
             if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
                 if let Some(m) = crate::hints::check_defs(r, &hint, &claimed) {
-                    r.log("error", &m)?;
+                    r.engine_diag(&m);
                     crate::hints::count(r, 3);
                 }
                 crate::hints::count(r, 0);
