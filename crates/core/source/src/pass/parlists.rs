@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use super::FileKind;
 use super::atoms::{self, Atom, AtomKind};
-use super::defs::{Definitions, skip};
+use super::defs::{Definitions, TOKS_UNKNOWN, skip};
 use super::hints::{Closure, DefSet, effects, implicit_of, implicit_of_char};
 use super::lex;
 use super::{Implicit, Shape};
@@ -304,6 +304,24 @@ fn hand_flag(body: &str) -> Option<(String, bool)> {
     (tail.is_empty() || tail == "%" || tail == "\\relax").then(|| (flag.to_owned(), v.1))
 }
 
+/// The states merged by list, mode and `\par`: a flag stays known
+/// where all the merged states agree on it.
+fn join(states: Vec<ParState>) -> Vec<ParState> {
+    let mut out: Vec<ParState> = Vec::new();
+    for s in states {
+        match out
+            .iter_mut()
+            .find(|o| o.list == s.list && o.horizontal == s.horizontal && o.par == s.par)
+        {
+            Some(o) => o.flags.retain(|f, v| s.flags.get(f) == Some(v)),
+            None => out.push(s),
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// What a program defines in every branch.
 fn defines_of(ops: &[Op], out: &mut DefSet) {
     for op in ops {
@@ -348,7 +366,12 @@ impl Cx<'_> {
                 }
             }
             if next.len() > CAP {
-                // (too many: the lists' every definition from here on)
+                // (too many: states alike but for flags merge, the flags
+                // they disagree on unknown)
+                next = join(next);
+            }
+            if next.len() > CAP {
+                // (still too many: the lists' every definition from here on)
                 self.defines.add(&self.m.all);
                 next = vec![ParState::top()];
             }
@@ -503,6 +526,15 @@ impl Compiler<'_, '_> {
                 _ => false,
             })
         })
+    }
+
+    /// The one list the token register `name` is ever assigned, when no
+    /// use may change it otherwise.
+    fn toks_list(&self, name: &str) -> Option<Arc<str>> {
+        let mut v = self.closure.prelude.toks_lists(name).unwrap_or_default();
+        v.extend(self.closure.document.toks_lists(name).unwrap_or_default());
+        let first = *v.first()?;
+        (first != TOKS_UNKNOWN && v.iter().all(|t| *t == first)).then(|| Arc::from(first))
     }
 
     /// The flag a name sets: `@nobreaktrue` sets `if@nobreak`.
@@ -669,6 +701,18 @@ impl Compiler<'_, '_> {
                         out.push(Op::Assign(Some(t)));
                         k = o.mate + 1;
                     }
+                    Some(o)
+                        if let Some(t) = (o.kind == AtomKind::Cs)
+                            .then(|| self.toks_list(o.name(text)))
+                            .flatten() =>
+                    {
+                        // (`\everypar\X`, a token register assigned one
+                        // list only: that list)
+                        self.flush(text, atoms, seg, j + 1, &mut out);
+                        self.lists.push(t.clone());
+                        out.push(Op::Assign(Some(t)));
+                        k = j + 1;
+                    }
                     _ => {
                         self.flush(text, atoms, seg, k + 1, &mut out);
                         out.push(Op::Assign(None));
@@ -690,24 +734,40 @@ impl Compiler<'_, '_> {
                 Implicit::EndsParagraph if self.top && depth == 0 => out.push(Op::End),
                 _ => {}
             }
-            // (a macro: the setters it may run, the flags it may set)
-            let set = self.closure.call(n);
-            let mut ms: Vec<String> = set
-                .relied
+            // (a macro: the setters it may run, the flags it may set; for
+            // LaTeX's `\begin{X}` and `\end{X}`, `\X`'s or `\endX`'s too)
+            let mut sets = vec![self.closure.call(n)];
+            if matches!(n, "begin" | "end") {
+                let o = skip(atoms, k + 1);
+                if let Some(o) = atoms.get(o).filter(|o| {
+                    o.kind == AtomKind::Open && o.mate != usize::MAX && o.mate < atoms.len()
+                }) {
+                    let e = text[o.end..atoms[o.mate].start].trim();
+                    let m = if n == "end" {
+                        format!("end{e}")
+                    } else {
+                        e.to_owned()
+                    };
+                    sets.push(self.closure.call(&m));
+                }
+            }
+            let mut ms: Vec<String> = sets
                 .iter()
-                .chain(&set.calls)
+                .flat_map(|set| set.relied.iter().chain(&set.calls))
                 .filter(|r| self.setters.contains(r.as_str()))
                 .cloned()
                 .collect();
             ms.sort();
             ms.dedup();
-            let flags: Vec<String> = set
-                .names
-                .keys()
+            let mut flags: Vec<String> = sets
+                .iter()
+                .flat_map(|set| set.names.keys())
                 .filter_map(|f| f.strip_prefix("cs:\\"))
                 .filter(|f| self.is_flag(f))
                 .map(str::to_owned)
                 .collect();
+            flags.sort();
+            flags.dedup();
             if !flags.is_empty() {
                 out.push(Op::Unknown(flags));
             }
@@ -716,10 +776,11 @@ impl Compiler<'_, '_> {
             }
             if self.top
                 && depth == 0
-                && set
-                    .calls
-                    .iter()
-                    .any(|c| implicit_of(c, false) == Implicit::StartsParagraph)
+                && sets.iter().any(|set| {
+                    set.calls
+                        .iter()
+                        .any(|c| implicit_of(c, false) == Implicit::StartsParagraph)
+                })
             {
                 out.push(Op::MayStart);
             }
@@ -828,5 +889,57 @@ mod tests {
         }
         assert!(got[1].iter().any(|n| n == "cs:\\par"), "{got:?}");
         assert!(!got[2].iter().any(|n| n == "cs:\\par"), "{got:?}");
+    }
+
+    /// A setter assigns a token register (amsthm's `\everypar
+    /// \dth@everypar`): the list is the register's one assignment, and it
+    /// runs out like a literal one.
+    #[test]
+    fn a_list_from_a_token_register_runs_out() {
+        let prelude_text = "\\newif\\if@inlabel\n\
+            \\newtoks\\dth@everypar\n\
+            \\dth@everypar={\\if@inlabel\\global\\@inlabelfalse\\fi\\clubpenalty\\@clubpenalty\\everypar{}}\n\
+            \\def\\thmhead{\\global\\@inlabeltrue\\everypar\\dth@everypar}\n";
+        let mut prelude = Definitions::new();
+        prelude.harvest(prelude_text, FileKind::Package, 1);
+        let doc = Definitions::new();
+        let m = ParMachine::new(&doc, &prelude).expect("a setter");
+        let slices = ["\\thmhead\n", "Text.\n\n", "More.\n\n"];
+        let mut states = vec![ParState::start()];
+        let mut got = Vec::new();
+        for t in slices {
+            let lexed = lex::lex(t, FileKind::Document, None);
+            let atoms = atoms::atoms(t, &lexed.tokens);
+            let ops = m.slice_ops(t, &atoms, 0, atoms.len(), &doc, &prelude);
+            let r = m.slice(&ops, &states);
+            states = r.states;
+            got.push(r.defines.names.keys().cloned().collect::<Vec<_>>());
+        }
+        assert!(got[1].iter().any(|n| n.contains("clubpenalty")), "{got:?}");
+        assert!(got[2].is_empty(), "{got:?}");
+        assert!(
+            states.iter().all(|s| s.list.as_deref() == Some("")),
+            "{states:?}"
+        );
+    }
+
+    /// A register some use may change unseen (`\X\expandafter{…}`) gives
+    /// no list.
+    #[test]
+    fn a_token_register_changed_unseen_gives_no_list() {
+        let prelude_text = "\\newtoks\\X\n\
+            \\X={\\clubpenalty0 \\everypar{}}\n\
+            \\def\\more{\\X\\expandafter{\\the\\X\\relax}}\n\
+            \\def\\thmhead{\\everypar\\X}\n";
+        let mut prelude = Definitions::new();
+        prelude.harvest(prelude_text, FileKind::Package, 1);
+        let doc = Definitions::new();
+        let m = ParMachine::new(&doc, &prelude).expect("a setter");
+        let t = "\\thmhead\n";
+        let lexed = lex::lex(t, FileKind::Document, None);
+        let atoms = atoms::atoms(t, &lexed.tokens);
+        let ops = m.slice_ops(t, &atoms, 0, atoms.len(), &doc, &prelude);
+        let r = m.slice(&ops, &[ParState::start()]);
+        assert!(r.states.iter().any(|s| s.list.is_none()), "{:?}", r.states);
     }
 }
