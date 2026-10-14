@@ -2087,6 +2087,7 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         crate::pdfout::publish(self.pdf_fold.take());
+        self.withdraw_flush();
         // (a command node's, empty too: what its text declares,
         // `Exec::static_contribs`)
         if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
