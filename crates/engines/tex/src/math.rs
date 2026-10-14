@@ -882,12 +882,15 @@ impl Run<'_, '_> {
         match code {
             1 => {
                 self.check_dollar()?;
-                self.finish_display(md, None, false)
+                self.finish_display(md, None, false, Side::default())
             }
             2 | 3 => {
                 // the end of an equation number: then of the display
                 self.check_dollar()?;
-                let hl = self.formula_hlist(md, Style::TEXT, false)?;
+                // (the number's marks and whatsits, numbered with the
+                // display's: one side table for the box holding both)
+                let mut side = Side::default();
+                let hl = self.formula_hlist(md, Style::TEXT, false, &mut side)?;
                 let view = self.font_view(&hl)?;
                 let a = phitex_typeset::pack::hpack(
                     hl,
@@ -898,7 +901,7 @@ impl Run<'_, '_> {
                 )
                 .node;
                 let dmd = self.close_group(md)?;
-                self.finish_display(&dmd, Some(a), code == 3)
+                self.finish_display(&dmd, Some(a), code == 3, side)
             }
             _ => self.finish_text_math(md),
         }
@@ -915,15 +918,20 @@ impl Run<'_, '_> {
     }
 
     /// The formula of the math list `md.lid` as an hlist (§1194–§1195).
-    fn formula_hlist(&mut self, md: &Mode, style: Style, penalties: bool) -> R<Vec<Node>> {
+    fn formula_hlist(
+        &mut self,
+        md: &Mode,
+        style: Style,
+        penalties: bool,
+        side: &mut Side,
+    ) -> R<Vec<Node>> {
         let v = self.v;
         let mut list = self.fin_mlist(md.lid, None)?;
         if self.insufficient_fonts()? {
             self.log("error", "Math formula deleted: Insufficient symbol fonts")?;
             list.clear();
         }
-        let mut side = Side::default();
-        let mlist = decode_mlist(v, &list, &mut side);
+        let mlist = decode_mlist(v, &list, side);
         self.mlist_to_hlist(mlist, style, penalties)
     }
 
@@ -932,9 +940,9 @@ impl Run<'_, '_> {
         let v = self.v;
         let surround = self.ipar(Par::mathsurround)?;
         let outer = self.outer_mode(md)?;
-        let hl = self.formula_hlist(md, Style::TEXT, outer.m > 0)?;
+        let mut side = Side::default();
+        let hl = self.formula_hlist(md, Style::TEXT, outer.m > 0, &mut side)?;
         let outer = self.close_group(md)?;
-        let side = Side::default();
         let mut out = vec![Node::Math(MathKind::Before, surround)];
         out.extend(hl);
         out.push(Node::Math(MathKind::After, surround));
@@ -949,12 +957,18 @@ impl Run<'_, '_> {
     /// §1199–§1205: the display `dmd` (with the equation number `a`, at
     /// the left if `left`) goes to the vertical list; then §1200.
     #[allow(clippy::too_many_lines)]
-    fn finish_display(&mut self, dmd: &Mode, a: Option<BoxNode>, left: bool) -> R<()> {
+    fn finish_display(
+        &mut self,
+        dmd: &Mode,
+        a: Option<BoxNode>,
+        left: bool,
+        mut side: Side,
+    ) -> R<()> {
         let v = self.v;
         let x = |i: usize| dmd.extra.get(i).map_or(0, |&y| int_of(v, y));
         let vlid = x(1);
         let danger = self.insufficient_fonts()?;
-        let p = self.formula_hlist(dmd, Style::DISPLAY, false)?;
+        let p = self.formula_hlist(dmd, Style::DISPLAY, false, &mut side)?;
         let view = self.font_view(&p)?;
         let pp = PackParams::default();
         let natural = phitex_typeset::pack::hpack(p.clone(), Spec::Additional(0), &view, &pp, true);
@@ -1005,7 +1019,6 @@ impl Run<'_, '_> {
         }
         // §1203
         let vm = self.display_outer(dmd);
-        let side = Side::default();
         let pen = |r: &mut Self, n: i32| {
             let y = nodes::penalty_node(r.v, n);
             r.append(vlid, y);
