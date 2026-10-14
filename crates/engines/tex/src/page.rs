@@ -542,6 +542,9 @@ impl Run<'_, '_> {
             Some(x) if !xs.is_empty() => vec![("pagefx".to_owned(), x)],
             _ => Vec::new(),
         };
+        if crate::exec::env_flag!("PHITEX_PGST") {
+            eprintln!("pagefx read {j}: {} items", xs.len());
+        }
         log_read(&self.ops, "pagefx", j, e);
         Ok(xs)
     }
@@ -707,11 +710,11 @@ impl Run<'_, '_> {
         let (b255, inserts, marks, held) =
             (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+        if crate::exec::env_flag!("PHITEX_PGST") {
             eprintln!(
-                "aux-trace: fire page step {} outputpenalty {output_penalty} count0 {:?}",
+                "fire page {}: outputpenalty {output_penalty}, {} inserts",
                 self.page_index(),
-                self.reg_int(0, 0).ok()
+                inserts.len()
             );
         }
         // §1012: marks
@@ -837,6 +840,10 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         let j = r.page_index();
         if j < MAX_PAGES {
             let x = v.list(left);
+            if crate::exec::env_flag!("PHITEX_PGST") {
+                let s: String = v.render(x).chars().take(300).collect();
+                eprintln!("pagefx publish {j}: {s}");
+            }
             let f = r.keyed(crate::fields::Fam::Pagefx, &j.to_string());
             lb_pub(r.cx, f, x);
             log_pub(&r.ops, "pagefx", j, vec![("pagefx".to_owned(), x)]);
@@ -2369,6 +2376,19 @@ impl FinalState {
                     out_counts.first(),
                     counts[0]
                 );
+            }
+            if crate::exec::env_flag!("PHITEX_PGST") {
+                for (f, x) in pgst_pairs(v, Some(g(1))) {
+                    let r: String = v.render(x).chars().take(160).collect();
+                    eprintln!("pgst step {j} own: {} = {r}", crate::val::field_name(v, f));
+                }
+                for (f, x) in &read_pairs {
+                    let r: String = v.render(*x).chars().take(80).collect();
+                    eprintln!(
+                        "pgst step {j} read: {} = {r}",
+                        crate::val::field_name(v, *f)
+                    );
+                }
             }
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
