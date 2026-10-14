@@ -224,10 +224,13 @@ fn pdflatex() {
         .collect();
     ns.sort();
     for name in ns {
-        let dir = if docs().join(format!("{name}.tex")).exists() {
-            docs()
+        // (the PDF oracles' own sources first: `docs/` holds the DVI
+        // oracles' documents, and a name in both is two documents)
+        let pdfdocs = common::fixtures().join("latex/pdfdocs");
+        let dir = if pdfdocs.join(format!("{name}.tex")).exists() {
+            pdfdocs
         } else {
-            common::fixtures().join("latex/pdfdocs")
+            docs()
         };
         let want = std::fs::read(oracles.join(format!("{name}.pdf"))).expect("the oracle");
         let src = common::read(&dir.join(format!("{name}.tex")));
