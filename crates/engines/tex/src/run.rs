@@ -654,9 +654,16 @@ impl<'c, 'a> Run<'c, 'a> {
             let bt = std::backtrace::Backtrace::force_capture().to_string();
             let frames: Vec<&str> = bt
                 .lines()
-                .filter(|l| l.contains("phitex_tex::") && !l.contains("trace_read"))
                 .map(str::trim)
-                .take(12)
+                .filter(|l| {
+                    l.starts_with("at ")
+                        || l.split(':')
+                            .next()
+                            .is_some_and(|n| n.parse::<u32>().is_ok())
+                })
+                .map(|l| if l.len() > 90 { &l[..90] } else { l })
+                .skip(2)
+                .take(30)
                 .collect();
             eprintln!(
                 "reads: node {} {name} at {} (pulled {}) | {} | bt {}",
