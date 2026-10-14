@@ -367,6 +367,9 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn new(cx: &'c mut Ctx<'a>, ops: Ops) -> Self {
         let v = cx.values();
         let op = cx.op();
+        if crate::exec::env_flag!("PHITEX_LOOP_TRACE") {
+            eprintln!("lb-run node {:x} op {op:?}", cx.node().raw());
+        }
         let code = if op == ops.exec {
             1
         } else if op == ops.put {
