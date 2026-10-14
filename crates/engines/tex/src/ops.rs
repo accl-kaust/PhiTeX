@@ -56,7 +56,7 @@ pub(crate) fn run_node_parking(
             .unwrap_or_default();
         eprintln!(
             "run {} {}",
-            cx.node().raw() % 100_000,
+            cx.node().raw(),
             a.chars().take(70).collect::<String>()
         );
     }
@@ -100,7 +100,7 @@ pub(crate) fn run_node_parking(
             "  -> {}",
             match &res {
                 Ok(()) => "ok".to_owned(),
-                Err(Halt::Stop(_)) => "stop".to_owned(),
+                Err(Halt::Stop(_)) => format!("stop (node {})", r.cx.node().raw()),
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
             }

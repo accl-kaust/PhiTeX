@@ -599,6 +599,25 @@ impl<'c, 'a> Run<'c, 'a> {
     /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
     /// writes and reads back is a loop-back field: the previous round's.
     pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
+        let r = self.file_inner(key);
+        if r.is_err() {
+            self.trace_stop(&format!("file {key}"));
+        }
+        r
+    }
+
+    /// (measure) `PHITEX_READS`: a stop that is not a field read's.
+    pub(crate) fn trace_stop(&self, what: &str) {
+        if crate::exec::env_flag!("PHITEX_READS") {
+            eprintln!(
+                "reads: node {} op {:?} {what} PARKED",
+                self.cx.node().raw(),
+                self.cx.op()
+            );
+        }
+    }
+
+    fn file_inner(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
         // a file the job writes: its in-memory value (`wfile:<key>`, a
         // loop-back the writer publishes), never the client's file
@@ -1318,7 +1337,11 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// The scope kind the node runs in: the engine's.
     pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
-        Ok(self.cx.scope_kind()?)
+        let r = self.cx.scope_kind();
+        if r.is_err() {
+            self.trace_stop("scope kind");
+        }
+        Ok(r?)
     }
 
     /// Runs the node's input to its end (§1030's loop): every command of

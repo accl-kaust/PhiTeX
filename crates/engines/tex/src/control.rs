@@ -1438,7 +1438,11 @@ impl Run<'_, '_> {
             return self.file(key);
         }
         let f = v.field("streams");
-        let before = self.cx.acc_range(f, None)?;
+        let before = self.cx.acc_range(f, None);
+        if before.is_err() {
+            self.trace_stop("range streams");
+        }
+        let before = before?;
         let mut all = v.seq_to_vec(before);
         all.extend(
             self.contribs
@@ -1478,7 +1482,11 @@ impl Run<'_, '_> {
     /// The input left as one source line, for `\inputlineno`.
     pub(crate) fn input_line_no(&mut self) -> R<i32> {
         let lines = self.v.field("lines");
-        let x = self.cx.acc_range(lines, None)?;
+        let x = self.cx.acc_range(lines, None);
+        if x.is_err() {
+            self.trace_stop("range lines");
+        }
+        let x = x?;
         Ok(i32::try_from(int_of(self.v, x) + self.lines_entered).unwrap_or(0))
     }
 }

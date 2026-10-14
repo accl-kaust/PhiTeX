@@ -1900,7 +1900,10 @@ impl FinalState {
                 }
                 for (f, x) in &read_pairs {
                     let r: String = v.render(*x).chars().take(80).collect();
-                    eprintln!("pgst step {j} read: {} = {r}", crate::val::field_name(v, *f));
+                    eprintln!(
+                        "pgst step {j} read: {} = {r}",
+                        crate::val::field_name(v, *f)
+                    );
                 }
             }
             for (f, x) in pgst_pairs(v, Some(g(1))) {
