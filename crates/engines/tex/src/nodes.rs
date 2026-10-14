@@ -77,6 +77,13 @@ pub(crate) const T_WRITE_AT: i64 = 88;
 /// page builder's fold tells each page step which fields the text
 /// defined since the break before it (the routines' deltas give way).
 pub(crate) const T_DEFS_AT: i64 = 86;
+/// `[T_RT_AT, node, k, field]`: a marker on the main list, where
+/// document node `node` read `field`, one an output routine may define
+/// globally (its `k`-th such read): the page builder's fold answers it
+/// in the node's `rtbefore:<node>` loop-back with the routine's value
+/// in force there, when a routine's definition is the latest (§1012,
+/// §1025: the routine runs between the text's commands).
+pub(crate) const T_RT_AT: i64 = 84;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]

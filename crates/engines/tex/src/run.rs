@@ -60,6 +60,12 @@ pub(crate) struct Ops {
     /// The page chain's loop-backs as read and published in the current
     /// evaluation: the refuted guesses ([`crate::Stats`]).
     pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The fields the output routine may define globally (set by
+    /// `api::Build::with`): a document node's read of one is answered
+    /// by the page chain ([`Run::rt_read`]).
+    pub rt: std::sync::Arc<
+        std::sync::Mutex<std::sync::Arc<phitex_defuse::FxHashSet<phitex_defuse::Field>>>,
+    >,
 }
 
 /// The lines of a file not reached yet: its text (a string value) and
@@ -218,6 +224,16 @@ pub(crate) struct Run<'c, 'a> {
     /// `PHITEX_HEARTBEAT=1` (read once a process).
     pub heartbeat_on: bool,
     pub pulled: usize,
+    /// The fields an output routine may define globally, when this run
+    /// is a document node's (empty otherwise): its reads of them are
+    /// answered by the page chain ([`Run::rt_read`]).
+    pub rt_set: std::sync::Arc<phitex_defuse::FxHashSet<Field>>,
+    /// The number of such reads so far (each one's `k`).
+    pub rt_k: i64,
+    /// The locations of such fields read or defined since the last item
+    /// the run put on the main list: read again after the next item, a
+    /// routine may have defined them there ([`Run::rt_after_item`]).
+    pub rt_live: Vec<Loc>,
     /// The writer's state this run's last PDF step made, not yet where
     /// other nodes find it ([`crate::pdfout::publish`], at the run's end).
     pub pdf_fold: Option<(u64, std::sync::Arc<crate::pdfout::Fold>)>,
@@ -328,6 +344,14 @@ impl<'c, 'a> Run<'c, 'a> {
             0
         };
         crate::exec::note(code, cx.node().raw());
+        let rt_set = if code != 0 {
+            ops.rt
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        } else {
+            std::sync::Arc::default()
+        };
         Run {
             _scope: crate::val::EpochScope::enter(v, cx.values_epoch()),
             cx,
@@ -339,6 +363,9 @@ impl<'c, 'a> Run<'c, 'a> {
             mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
+            rt_set,
+            rt_k: 0,
+            rt_live: Vec::new(),
             pdf_fold: None,
             top: false,
             claim_rest: false,
@@ -424,6 +451,11 @@ impl<'c, 'a> Run<'c, 'a> {
 
     #[inline(never)]
     fn load_slow(&mut self, loc: Loc) -> R<()> {
+        // (a read again, after an item, of what a routine may define:
+        // the value the run has, unless a routine's is later)
+        if self.st.rt_unstale(loc) {
+            return self.rt_read(loc);
+        }
         let f = self.loc_field(loc);
         let r = self.cx.use_field(f);
         crate::exec::widths::read(f);
@@ -431,7 +463,79 @@ impl<'c, 'a> Run<'c, 'a> {
             self.trace_read(f, r.is_err());
         }
         self.st.fill(loc, r?);
+        if !self.rt_set.is_empty() && self.rt_set.contains(&f) {
+            self.rt_read(loc)?;
+        }
         Ok(())
+    }
+
+    /// A document node's read of `loc`, a field an output routine may
+    /// define globally: a `T_RT_AT` marker on the main list where it
+    /// reads (after the definitions it made before, `T_DEFS_AT`), which
+    /// the page chain answers in the node's `rtbefore:<node>` loop-back
+    /// with the routine's value when a routine defined the field there
+    /// after the text did (§1012: the routine runs between the text's
+    /// commands, its global definitions in force after it, §1026). The
+    /// value read then is the routine's (cold: the text's own).
+    #[inline(never)]
+    fn rt_read(&mut self, loc: Loc) -> R<()> {
+        if self.pg.is_some() {
+            return Ok(());
+        }
+        let v = self.v;
+        let node = self.cx.node().raw();
+        let lf = v.field(&crate::etex::rt_before_field(node));
+        if !self.cx.is_loopback(lf) {
+            // (declared by the client on asking, as `marks:before`)
+            self.cx
+                .use_env(self.keyed(crate::fields::Fam::Marksdecl, &node.to_string()))?;
+            if !self.cx.is_loopback(lf) {
+                return Ok(());
+            }
+        }
+        self.flush_text_defs();
+        let f = self.loc_field(loc);
+        let k = self.rt_k;
+        self.rt_k += 1;
+        let at = v.list(vec![
+            v.int(crate::nodes::T_RT_AT),
+            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+            v.int(k),
+            f.0,
+        ]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        if !self.rt_live.contains(&loc) {
+            self.rt_live.push(loc);
+        }
+        if let Some(x) = self.cx.use_field(lf)?.filter(|&x| x != ValueId::UNIT) {
+            for e in list_of(v, x) {
+                let xs = list_of(v, e);
+                if let [n, y] = xs.as_slice()
+                    && int_of(v, *n) == k
+                {
+                    if crate::exec::env_flag!("PHITEX_PGST") {
+                        eprintln!(
+                            "rt read {node}:{k} {}: the routine's {}",
+                            crate::val::field_name(v, f),
+                            v.render(*y).chars().take(120).collect::<String>()
+                        );
+                    }
+                    self.st.preload(loc, Some(*y));
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An item put on the main list: the fields a routine may define
+    /// that the run read or defined are read again after it (a routine
+    /// may fire there).
+    #[inline]
+    pub(crate) fn rt_after_item(&mut self) {
+        for l in std::mem::take(&mut self.rt_live) {
+            self.st.rt_stale(l);
+        }
     }
 
     /// The engine value of location `loc` in the run's view.
@@ -472,6 +576,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
+        if !self.rt_set.is_empty() && !self.rt_live.contains(&loc) {
+            let f = self.loc_field(loc);
+            if self.rt_set.contains(&f) {
+                self.rt_live.push(loc);
+            }
+        }
         let grp = self.innermost_group();
         self.st.note_kind(loc, self.in_advance);
         self.st.set(loc, val, global, grp);
@@ -1935,6 +2045,8 @@ pub(crate) struct Parked {
     /// The input left, top first: the levels' rests, then the text.
     segs: Vec<Seg>,
     pulled: usize,
+    rt_k: i64,
+    rt_live: Vec<Field>,
     top: bool,
     claim_rest: bool,
     hint_void: bool,
@@ -2004,6 +2116,11 @@ impl Run<'_, '_> {
             epoch: self.cx.values_epoch(),
             segs,
             pulled: self.pulled,
+            rt_k: self.rt_k,
+            rt_live: std::mem::take(&mut self.rt_live)
+                .into_iter()
+                .map(|l| self.loc_field(l))
+                .collect(),
             top: self.top,
             claim_rest: self.claim_rest,
             hint_void: self.hint_void,
@@ -2065,6 +2182,8 @@ impl<'c, 'a> Run<'c, 'a> {
             })
             .collect();
         r.pulled = p.pulled;
+        r.rt_k = p.rt_k;
+        r.rt_live = p.rt_live.into_iter().map(|f| r.loc_of(f)).collect();
         r.top = p.top;
         r.claim_rest = p.claim_rest;
         r.hint_void = p.hint_void;

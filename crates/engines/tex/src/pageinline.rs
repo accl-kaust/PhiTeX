@@ -79,7 +79,11 @@ fn drain(r: &mut Run<'_, '_>, pg: &mut Inline) {
     pg.queue.extend(out.into_iter().filter(|&x| {
         !matches!(
             nodes::tag(v, x),
-            nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_DEFS_AT
+            nodes::T_PAGE_PARAMS
+                | nodes::T_MARKS_AT
+                | nodes::T_WRITE_AT
+                | nodes::T_DEFS_AT
+                | nodes::T_RT_AT
         )
     }));
     let pd = v.list(vec![v.int(nodes::T_PD), v.int(i64::from(pg.fold.pd))]);
@@ -144,7 +148,7 @@ impl Run<'_, '_> {
         while let Some(x) = pg.queue.pop_front() {
             if matches!(
                 nodes::tag(v, x),
-                nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_END
+                nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_END | nodes::T_RT_AT
             ) {
                 continue;
             }

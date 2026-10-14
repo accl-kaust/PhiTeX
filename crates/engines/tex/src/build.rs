@@ -297,6 +297,9 @@ impl Run<'_, '_> {
         let e = v.list(vec![v.int(lid), node]);
         let s = v.seq_unit(e);
         self.contribute("items", s);
+        if lid == 0 {
+            self.rt_after_item();
+        }
     }
 
     /// The contents of list `lid` so far, and how many of them are
@@ -2341,7 +2344,11 @@ pub(crate) fn fold_item(
         }
         // the page builder's markers (page parameters, a marks read): kept
         // in place for its fold, invisible to the list's readers
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_DEFS_AT => {
+        nodes::T_PAGE_PARAMS
+        | nodes::T_MARKS_AT
+        | nodes::T_WRITE_AT
+        | nodes::T_DEFS_AT
+        | nodes::T_RT_AT => {
             out.push(n);
         }
         T_BUILD_PAGE => {
@@ -2503,7 +2510,11 @@ pub(crate) fn fold_entries(
 fn is_marker(v: &Values, x: ValueId) -> bool {
     matches!(
         nodes::tag(v, x),
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_DEFS_AT
+        nodes::T_PAGE_PARAMS
+            | nodes::T_MARKS_AT
+            | nodes::T_WRITE_AT
+            | nodes::T_DEFS_AT
+            | nodes::T_RT_AT
     )
 }
 

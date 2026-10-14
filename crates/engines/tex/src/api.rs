@@ -241,6 +241,10 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
         .values()
         .field(&crate::etex::marks_before_field(n.raw()));
     eng.declare_loopback(f, ValueId::UNIT);
+    // (and the answers to its reads of what a routine may define,
+    // `rtbefore:<node>`, asked the same way)
+    let f = eng.values().field(&crate::etex::rt_before_field(n.raw()));
+    eng.declare_loopback(f, ValueId::UNIT);
 }
 
 /// Edited texts of `\\input` files by name: the text and its bytes.
@@ -1229,6 +1233,7 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
+            rt: Arc::new(Mutex::new(Arc::default())),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -1534,6 +1539,43 @@ impl Graph {
             }
         }
         self.written.push(name.to_owned());
+    }
+
+    /// What the output routine may define globally (the format's
+    /// `\\output` closure, `hints::output_globals`): a document node's
+    /// reads of it are answered by the page chain (`T_RT_AT`).
+    fn output_globals(&mut self, defs: &pass::Definitions, env: &Env) {
+        // SCRATCH (never landed): R from latex.ltx read as a package
+        let scratch = std::env::var("PHITEX_RT_PKG").ok().map(|p| {
+            let t = std::fs::read(p).unwrap_or_default();
+            let t: String = t.iter().map(|&b| char::from(b)).collect();
+            let mut d = pass::Definitions::new();
+            d.harvest(&t, pass::FileKind::Package, 0);
+            d
+        });
+        let defs = scratch.as_ref().unwrap_or(defs);
+        let rt: Vec<String> = {
+            let v = self.eng.values();
+            crate::hints::output_globals(defs, |cs| {
+                let (_, t) = env.iter().find(|(k, _)| k == cs)?;
+                match crate::val::Mean::decode(v, Some(import(v, t))) {
+                    crate::val::Mean::Reg(c, h) => Some(crate::val::reg_field_of(c, h)),
+                    _ => None,
+                }
+            })
+        };
+        if crate::exec::env_flag!("PHITEX_PGST") {
+            eprintln!("rt fields ({}): {}", rt.len(), rt.join(" "));
+        }
+        let rt: phitex_defuse::FxHashSet<Field> = rt
+            .iter()
+            .map(|n| {
+                let f = self.eng.values().field(n);
+                self.eng.pin(f.0);
+                f
+            })
+            .collect();
+        *self.ops.rt.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(rt);
     }
 
     /// The environment: the files supplied, and the loop-back files.
@@ -2647,6 +2689,7 @@ impl Build {
             }
         }
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
+        g.output_globals(&defs, &env);
         let doc = is_doc(prelude, document);
         let inputs = g.input_finder(&opts.finder);
         let (nodes, incr) = g.push_document(unit, document, defs, doc, Some(&inputs));

@@ -1088,6 +1088,13 @@ fn remember_macro(v: &Values, m: &Rc<Macro>, id: ValueId) {
     });
 }
 
+/// The field of the register a `\\countdef`-like meaning names
+/// (`Mean::Reg`): `count:192`.
+pub(crate) fn reg_field_of(c: u8, h: i32) -> String {
+    let (tag, base) = reg_tag(c);
+    format!("{}:{}", tag.trim_end_matches("def"), h - base)
+}
+
 fn reg_tag(c: u8) -> (&'static str, i32) {
     match c {
         cmd::ASSIGN_INT => ("countdef", COUNT_BASE),

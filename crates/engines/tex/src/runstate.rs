@@ -64,6 +64,10 @@ const PRELOADED: u8 = 4;
 /// `cmd` and `chr` hold the meaning's command code and modifier
 /// (`eq_type`, `equiv`, §221).
 const CC: u8 = 8;
+/// Loaded once, to be read again (a field an output routine may define,
+/// after an item: `Run::rt_read`); `LOADED` is off meanwhile, so the
+/// next read takes the slow path.
+const RTSTALE: u8 = 16;
 
 /// A slot's value and what is known of it.
 #[derive(Clone, Debug)]
@@ -319,6 +323,25 @@ impl State {
         (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
     }
 
+    /// Marks loaded `loc` to be read again ([`RTSTALE`]).
+    pub(crate) fn rt_stale(&mut self, loc: Loc) {
+        let e = &mut self.slot(loc).e;
+        if e.flags & LOADED != 0 {
+            e.flags = (e.flags & !LOADED) | RTSTALE;
+        }
+    }
+
+    /// Whether `loc` was marked to be read again: loaded again, its
+    /// value kept.
+    pub(crate) fn rt_unstale(&mut self, loc: Loc) -> bool {
+        if self.slot_ref(loc).is_none_or(|s| s.e.flags & RTSTALE == 0) {
+            return false;
+        }
+        let e = &mut self.slot(loc).e;
+        e.flags = (e.flags & !RTSTALE) | LOADED;
+        true
+    }
+
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }
@@ -500,7 +523,7 @@ impl State {
         }
         let s = self.slot(loc);
         let e = &s.e;
-        let eng = (e.flags & LOADED != 0 && e.flags & PRELOADED == 0).then_some(e.id);
+        let eng = (e.flags & (LOADED | RTSTALE) != 0 && e.flags & PRELOADED == 0).then_some(e.id);
         let i = self.metas.len();
         self.slot(loc).meta = u32::try_from(i + 1).unwrap_or(0);
         self.metas.push(Meta {

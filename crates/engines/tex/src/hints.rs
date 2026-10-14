@@ -737,6 +737,61 @@ fn excerpts() -> bool {
 /// The pass's field names as the engine's: `cs:\name` is `cs:name`, an
 /// active character `cs:c` is `act:code`; a field of another family is
 /// the engine's state (covered by the prefixes).
+/// What the format's output routine may define globally, as engine
+/// fields (the text's reads of them are answered by the page chain,
+/// `T_RT_AT`): the global names of `\\output`'s closure (through the
+/// format's definitions), a register assigned by a name resolved by
+/// `meaning` (the name's `\\countdef` etc. in the format: its register's
+/// field). A local definition in the routine ends with its group (§1026).
+pub(crate) fn output_globals(
+    prelude: &pass::Definitions,
+    meaning: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let Some(set) = prelude.output_defines(&pass::Definitions::new()) else {
+        if crate::exec::env_flag!("PHITEX_PGST") {
+            eprintln!("rt fields: the format's definitions have no \\output");
+        }
+        return Vec::new();
+    };
+    if crate::exec::env_flag!("PHITEX_PGST") {
+        eprintln!(
+            "rt fields: \\output's closure: {} names ({} global)",
+            set.names.len(),
+            set.names.values().filter(|g| **g).count()
+        );
+    }
+    let mut out = Vec::new();
+    for (name, &global) in &set.names {
+        if !global {
+            continue;
+        }
+        let f = if let Some(f) = engine_field(name) {
+            Some(f)
+        } else if let Some(n) = name.strip_prefix("param:") {
+            let n = n.strip_prefix('\\').unwrap_or(n);
+            if table_param(n) {
+                Some(format!("param:{n}"))
+            } else {
+                Tok::cs(n).field_name().and_then(|cs| meaning(&cs))
+            }
+        } else {
+            // (a register by its number: `count:0`)
+            name.split_once(':')
+                .filter(|(fam, n)| {
+                    matches!(*fam, "count" | "dimen" | "skip" | "muskip" | "toks")
+                        && n.parse::<u32>().is_ok()
+                })
+                .map(|_| name.clone())
+        };
+        if let Some(f) = f
+            && !out.contains(&f)
+        {
+            out.push(f);
+        }
+    }
+    out
+}
+
 fn engine_field(f: &str) -> Option<String> {
     let rest = f.strip_prefix("cs:")?;
     if let Some(name) = rest.strip_prefix('\\') {

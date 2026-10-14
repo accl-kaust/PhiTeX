@@ -410,12 +410,43 @@ impl Run<'_, '_> {
                 v.list(
                     r.tdefs
                         .iter()
+                        .filter(|&&m| nodes::tag(v, m) == nodes::T_DEFS_AT)
                         .flat_map(|&m| list_of(v, m).into_iter().skip(1))
                         .collect(),
                 )
             })
             .collect();
         let tdefs = v.list(tdefs);
+        // the text's reads of what a routine may define, among its
+        // definitions in their order, by page part (UNIT for a part
+        // without a read): what `FinalState::load` answers them from
+        let rtev: Vec<ValueId> = recs
+            .iter()
+            .map(|r| {
+                if r.tdefs.iter().any(|&m| nodes::tag(v, m) == nodes::T_RT_AT) {
+                    v.list(r.tdefs.clone())
+                } else {
+                    ValueId::UNIT
+                }
+            })
+            .collect();
+        self.set("pp:rtev", v.list(rtev), true);
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            let reads: Vec<i64> = recs
+                .iter()
+                .flat_map(|r| r.tdefs.iter())
+                .filter(|&&m| nodes::tag(v, m) == nodes::T_RT_AT)
+                .map(|&m| crate::val::int_at(v, m, 1))
+                .collect();
+            let mut nodes_: Vec<i64> = reads.clone();
+            nodes_.sort_unstable();
+            nodes_.dedup();
+            eprintln!(
+                "plan: {} reads of what a routine may define, by {} document nodes",
+                reads.len(),
+                nodes_.len()
+            );
+        }
         if crate::exec::env_flag!("PHITEX_LOOP_TRACE") {
             let per: Vec<String> = list_of(v, tdefs)
                 .iter()
@@ -1387,7 +1418,10 @@ fn fold_page(
                 passed.push(crate::val::int_at(v, x, 1));
                 continue;
             }
-            nodes::T_DEFS_AT => {
+            // (a text's definitions and its reads of what a routine may
+            // define, in their order: `FinalState::load` answers the
+            // reads)
+            nodes::T_DEFS_AT | nodes::T_RT_AT => {
                 tdefs.push(x);
                 continue;
             }
@@ -2049,6 +2083,65 @@ pub(crate) fn lb_pub(cx: &mut Ctx<'_>, f: Field, x: ValueId) {
     cx.publish(f, x);
 }
 
+/// The answers to the text's reads of what an output routine may
+/// define (`T_RT_AT`): the routine values in force (`live`: what the
+/// routines defined last, unless the text defined it since), and per
+/// document node its reads' answers (`rtbefore:<node>`, `[[k, value],
+/// ...]`; a read the routines' values do not reach is the text's own).
+#[derive(Default)]
+struct RtAnswers {
+    live: std::collections::BTreeMap<String, ValueId>,
+    by_node: std::collections::BTreeMap<u64, Vec<ValueId>>,
+}
+
+impl RtAnswers {
+    /// One part's events in their order.
+    fn part(&mut self, v: &Values, events: ValueId) {
+        for m in list_of(v, events) {
+            let xs = list_of(v, m);
+            match xs.first().map(|&t| int_of(v, t)) {
+                Some(nodes::T_DEFS_AT) => {
+                    for &f in &xs[1..] {
+                        self.live.remove(&crate::val::field_name(v, Field(f)));
+                    }
+                }
+                Some(nodes::T_RT_AT) => {
+                    let [_, n, k, f] = xs.as_slice() else {
+                        continue;
+                    };
+                    let node = u64::from_ne_bytes(int_of(v, *n).to_ne_bytes());
+                    let answers = self.by_node.entry(node).or_default();
+                    let name = crate::val::field_name(v, Field(*f));
+                    if let Some(&x) = self.live.get(&name) {
+                        answers.push(v.list(vec![*k, x]));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Each reading node's answers, as its loop-back.
+    fn publish(&self, cx: &mut Ctx<'_>) {
+        for (&node, answers) in &self.by_node {
+            let v = cx.values();
+            let f = v.field(&crate::etex::rt_before_field(node));
+            if !cx.is_loopback(f) {
+                continue;
+            }
+            let x = if answers.is_empty() {
+                ValueId::UNIT
+            } else {
+                v.list(answers.clone())
+            };
+            if crate::exec::env_flag!("PHITEX_PGST") {
+                eprintln!("rtbefore {node}: {}", v.render(x));
+            }
+            lb_pub(cx, f, x);
+        }
+    }
+}
+
 /// The TeX state after the page chain, for the writer (§4 of the
 /// chain's design): the fields the steps' deltas leave changed, read in
 /// place of their reaching definitions (the state before the chain).
@@ -2083,6 +2176,16 @@ impl FinalState {
                     .collect()
             })
             .unwrap_or_default();
+        // the text's reads of what a routine may define, among its
+        // definitions, by part (`T_RT_AT`, `T_DEFS_AT`; UNIT: no read)
+        let rtev: Vec<ValueId> = cx
+            .use_field(v.field("pp:rtev"))?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
+        let mut rt = RtAnswers::default();
+        if let Some(&e) = rtev.first() {
+            rt.part(v, e);
+        }
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
@@ -2162,6 +2265,7 @@ impl FinalState {
                 } else {
                     x
                 };
+                rt.live.insert(name.clone(), x);
                 if same_as_before(v, &name, pre, x) {
                     state.remove(&name);
                 } else {
@@ -2174,6 +2278,18 @@ impl FinalState {
             if let Some(ds) = tdefs.get(j + 1) {
                 for &f in ds {
                     state.remove(&crate::val::field_name(v, f));
+                }
+            }
+            // the text's reads in the part after this page's routine, in
+            // their order among its definitions (each answered with the
+            // routine values in force there); the routine values the
+            // part's text defines again are the text's after it
+            match rtev.get(j + 1) {
+                Some(&e) if e != ValueId::UNIT => rt.part(v, e),
+                _ => {
+                    for &f in tdefs.get(j + 1).map_or(&[][..], Vec::as_slice) {
+                        rt.live.remove(&crate::val::field_name(v, f));
+                    }
                 }
             }
             cur = if state.is_empty() {
@@ -2199,6 +2315,7 @@ impl FinalState {
             cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
         }
         Self::log_refuted(o, refuted);
+        rt.publish(cx);
         // (the text's definitions after the last break: its own)
         if steps > 0
             && let Some(ds) = tdefs.get(steps)

@@ -1147,6 +1147,12 @@ pub(crate) fn marks_before_field(node: u64) -> String {
     format!("marks:before:{node}")
 }
 
+/// The loop-back field answering a document node's reads of what an
+/// output routine may define (`rtbefore:<node>`, `T_RT_AT`).
+pub(crate) fn rt_before_field(node: u64) -> String {
+    format!("rtbefore:{node}")
+}
+
 /// `\topmark` and its kin as read by a run (§386): in a page step (the
 /// output routine) and for the split marks, the sequential value; in a
 /// document node, its `marks:before:<node>` loop-back, which the
