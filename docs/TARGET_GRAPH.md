@@ -43,16 +43,21 @@ its macro bodies bound the hints of document slices that call them. A
 group still open at the format's end is an error ("format: group left
 open at end").
 
-Besides the text: one `breaks` node after it (the page builder's fold),
-its children the `pagestep`s (one per page, the output routine run
-inline), and the `dvi`/PDF writer. So a node is a paragraph region, a
-display, an alignment, a page step, `breaks` or the writer; the nest
-(`nest.rs`) is local to its run.
+Besides the text (`pages.rs`, whose module doc is the spec): a
+**finisher** per page, placed by the piece in whose items the page
+ends (`follow(finish, [j, data, carried, locals])`): it runs the output
+routine and ships the page; a **resume** piece after a page that ends
+inside a piece (a cut: the piece runs again stopped at that candidate
+and the resume carries on from there with the continuation value); and
+the end node that writes the DVI or PDF (`assemble.rs`). So a node is a
+paragraph region, a display, an alignment, a finisher, a resume or the
+end node; the nest (`nest.rs`) is local to its run.
 
 Nothing else is a node. Expansion runs inline in the node that reads the
 token; a macro body, a conditional, `\the`, `\csname` never become
-nodes. There are no token-frame children, no trials, no page-state
-cells, no paragraph cells, no condition-level cells.
+nodes. There are no token-frame children, no trials, no paragraph cells, no
+condition-level cells. The page builder's state is ONE field, `ps`
+(global): its versions are the SSA chain of the page.
 
 ## What a region's run leaves
 
@@ -67,6 +72,13 @@ cells, no paragraph cells, no condition-level cells.
   bounds of the commands in the region.
 - A `T_PAGE_PARAMS` item when it changed `\vsize`, `\maxdepth`,
   `\topskip` or `\holdinginserts`, so the fold uses them from there.
+- At its end, when it has items for the main list: the next version of
+  `ps`. The run reads `ps` as its last command (a stop there parks the
+  run with its paragraph built), folds its own items candidate by
+  candidate, and defines `ps'`; where a page finishes it places the
+  finisher. Every bounded piece declares `ps` and `pages:shipped` in its
+  `may_define` (`hints.rs`): a reader past an undeclared definer reads an
+  older page state, finishes on it, and runs again from the top.
 
 A group opened and closed inside the region restores its locals at its
 close (`nest.rs`: saved bindings, globals retained, §283) and nothing of
@@ -79,12 +91,10 @@ Writing `A <- B` for "A reads what B defined".
 | reader | may read | from |
 |---|---|---|
 | region R | regime cells (`cat:`, `cs:`, `font`, `param:`, `count:`, …) | the last node before R that changed them: a fan-out from the format and the preamble, not a chain |
-| `breaks` | `items` (the whole main list), the page parameters, the insert classes | every region (one fan-in) |
-| `pagestep` j | its page's material (its argument), the marks (`pp:mk:<j>`), `\output`, the state before the chain | `breaks` and the regions; never another step: `\count0..9` from `pgdef:<j-1>` and everything else the routines changed from `pgst:<j-1>` (loop-backs, previous round; the writer folds the steps' deltas into `pgst`) |
-| `dvi` | `pages` | every `pagestep` |
-| `breaks` (round 2) | `pagefx:<j>` | what routine j left (loop-back, previous round): held inserts, the leftover list; planned (branch para-vsize): page parameters the routine set |
-| region R (planned, branch para-marks) | `marks:before:<N>` | the marks in force before node N (a per-node loop-back from the page chain) |
-| region R | `pgst:at:<N>:<k>` | the state the page chain leaves after the page that breaks at R's k-th flush point (a penalty of -10000 or less on the main list: `\clearpage`): `\count0..9` and the fields the routines changed, read from there on (the shipout count `\enddocument` writes to the `.aux`); a per-node loop-back the writer publishes, UNIT in round one. Not yet: `\count0..9` there (LaTeX's `\ifodd\c@page` after `\cleardoublepage` still reads the text's value) |
+| region R, at its end | `ps` | the last piece or finisher before it with main-list items: the page chain, one link per piece |
+| finisher j | its page (its argument), `\output`, the registers and fields the routine reads | the piece that placed it, and whatever the text before it defined; what the routine defines (`\count0`, marks, `\global`s) reaches the text after it like any definition |
+| resume | its continuation (argument) | the finisher before it |
+| end node | `pages`, `pdf:pieces`, `pdf:xpages`, the document-level fields | every finisher |
 | region R (`\begin{document}`) | `wkeys:<file>`, `wdef:<field>` | the files the job writes and reads back, per field: the previous round's publication by the writer (`files`); a written line is interpreted in the reading state (the field's value before this round's read-back, `wpre:<field>`), and what it writes to another file (`\@writefile{toc}`) goes to that file's text (`wfile:<file>`) |
 
 Forbidden, and asserted by the test:
@@ -92,7 +102,9 @@ Forbidden, and asserted by the test:
 - any link through a `par:` or `if:` field (there are none);
 - a region waiting on another region for anything but a regime cell it
   changed;
-- an `items` read by anything but `breaks` or a box end;
+- an `items` read by anything but a box end;
+- a rerun caused by a change of `ps` or `pages:shipped` (an undeclared
+  definer, above);
 - a page step reading a stream's close (`\immediate\closeout` in the text
   is an event at its position, applied by the writer in the pages'
   order: TeX's deferred writes fire before a close that follows their
@@ -100,15 +112,23 @@ Forbidden, and asserted by the test:
 
 ## Heights
 
-Critical path: the format's definition chain (cached) + one region (1)
-+ `breaks` (1) + `brk:<j>` (1) + one page step (1) + `dvi` (1),
-independent of the page count: a page step defines nothing to the
-engine. The exact PDF writer's page steps write their pages apart
-(`pdfout::ship_apart`) and the `dvi` node ships them in order; only a
-document whose output routine runs a PDF command folds the pages
-through `pdf:state` (`pdf:fold`). The test asserts `height <= 6 +
-pages` per fixture, and `chain.rs::pdf_exact_no_page_chain` height
-<= 6 with no step-to-step link in exact PDF mode.
+In nodes, the critical path is the page chain: one link per piece with
+main-list items and one per finisher, so it grows with the document.
+That is TeX's page builder, which is ordered; it is not the bound that
+matters. What runs on the chain is each piece's FOLD only (its read of
+`ps` is its last command; it parks there with its paragraph built), so
+the chain's length in time is the sum of the folds and finishers plus
+one wake per link. The paragraphs run in parallel beside it.
+
+The measures, per build: runs per node (1.0 when nothing reran; parks
+resume, they do not rerun), the realised critical path in time
+(`Stats::realised_critical_time`) against the wall, and the folds'
+cost (`PHITEX_TEX_TIME`, `pagefold:` lines). Measured 2026-10-14 on 400
+plain paragraphs (66 pages, release, 12-core machine, loaded): one
+thread 658 runs, operation time 0.59 s, folds 0.14 s of it (decode and
+encode of the page state 0.09 s); eight threads 658 runs, operation
+time 1.6 s (every run about 2.5x slower than at one thread), realised
+critical path 0.93 s of 1.43 s wall.
 
 ## Why this shape
 
@@ -129,8 +149,8 @@ pages` per fixture, and `chain.rs::pdf_exact_no_page_chain` height
 
 `chains` prints, per fixture, every link with its cause and the two
 nodes' source positions; it fails on any forbidden link above, on any
-`par:` or `if:` field, on `height > 6 + pages`, and on an evaluation
-with no page step. Bytes identical to pdfTeX remain necessary; they are
+`par:` or `if:` field, and on more than 1.1 runs per node. The pages
+test asserts the same runs-per-node bound on the vsize document. Bytes identical to pdfTeX remain necessary; they are
 not the acceptance.
 
 ## Status (measured, accl jobs 8557/8586, tex-paragraph 879f11a8/951dafc0)
@@ -139,12 +159,17 @@ not the acceptance.
   after `no_scope`.
 - Plain format: 52 ms (release), one node.
 - Catcode stops 697 -> 20; attempts per run 3.9 -> 2.1.
-- Pages: height 22 for 4 pages, still a chain (census pending).
+- Pages (2026-10-14, `pages.rs`): the page chain is the design; runs per
+  node 3.3 -> 1.05 on the vsize document once pieces declared `ps`.
 
 ## Not yet
 
-- An output routine that leaves material or changes `\vsize` costs a
-  second round (loop-back `pagefx:<j>`); a cold prediction for the page
-  starts (the engine's prediction source for a field) would let page
-  steps start before `breaks` finishes.
-- `\pagegoal` read from the text answers the empty page's values.
+- The page state is decoded and encoded whole at every fold: a
+  persistent value (the page so far shared, not rebuilt) shortens the
+  chain.
+- The paragraph after a page that ends inside a piece is typeset twice
+  (the cut's second pass); a light resume reusing the first pass's
+  items when nothing interacted removes it.
+- Per-run slowdown at 8 threads (2.5x on the local machine): not yet
+  separated into machine (SMT, clocks) and ours (allocation, shared
+  values).
