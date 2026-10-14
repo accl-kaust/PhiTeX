@@ -60,9 +60,20 @@ pub(crate) struct Ops {
     /// The page chain's loop-backs as read and published in the current
     /// evaluation: the refuted guesses ([`crate::Stats`]).
     pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The package loads' finished runs (`crate::pkgrec`): node, start,
+    /// end, for [`crate::Stats`] (concurrency, preamble wall).
+    pub pkg_log: std::sync::Arc<std::sync::Mutex<Vec<PkgRun>>>,
+    /// The build's package records, for the engine's predicted
+    /// definitions ([`crate::pkgrec::LoadHints::prediction`]).
+    pub pkg_loads:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
 }
+
+/// A package load's finished run: its node, when it began and ended,
+/// and whether it ran speculatively.
+pub(crate) type PkgRun = (u64, std::time::Instant, std::time::Instant, bool);
 
 /// The lines of a file not reached yet: its text (a string value) and
 /// the byte offset of the next line. A line becomes a [`Line`] level
@@ -247,9 +258,21 @@ pub(crate) struct Run<'c, 'a> {
     /// `PHITEX_HEARTBEAT=1` (read once a process).
     pub heartbeat_on: bool,
     pub pulled: usize,
+    /// Where each pulled sibling's text begins in the input's text (its
+    /// first segment's index), or `None` when it joined the line before
+    /// it: [`Run::give_back_peeked`].
+    pub pull_at: Vec<Option<usize>>,
     /// The writer's state this run's last PDF step made, not yet where
     /// other nodes find it ([`crate::pdfout::publish`], at the run's end).
     pub pdf_fold: Option<(u64, std::sync::Arc<crate::pdfout::Fold>)>,
+    /// The input level that holds the last pulled sibling's first line,
+    /// once reached: where [`Run::park`] finds it.
+    pub pull_lev: Option<usize>,
+    /// For a resumed run, per pulled sibling: its first line as it was
+    /// before its first token was peeked, when the park left that token
+    /// and the rest of the line as two text segments
+    /// ([`Run::give_back_peeked`]).
+    pub pull_orig: Vec<Option<crate::input::Line>>,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -273,6 +296,18 @@ pub(crate) struct Run<'c, 'a> {
     /// The files this run opened: name and a hash of the text read
     /// (flushed to the `fread` accumulator by [`Run::finish`]).
     pub fread: Vec<(String, u64)>,
+    /// The files this run looked for and did not find (a package load's
+    /// record keys on them, `crate::pkgrec`).
+    pub fmiss: Vec<String>,
+    /// Inside `pass_text` (§494): a skipped text's tokens are read only
+    /// to classify them (conditional, `\fi`/`\else`, or neither).
+    pub in_skip: bool,
+    /// The locations a load's run first read from the engine while
+    /// skipping (`PHITEX_PKG_TRACE`: which chaining reads are skips).
+    pub skip_first: Vec<Loc>,
+    /// Whether the node is a package load at the unit's top level, whose
+    /// run is recorded (`crate::pkgrec`) and publishes its net effect.
+    pub rec_load: bool,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
@@ -433,7 +468,10 @@ impl<'c, 'a> Run<'c, 'a> {
             mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
+            pull_at: Vec::new(),
             pdf_fold: None,
+            pull_lev: None,
+            pull_orig: Vec::new(),
             top: false,
             claim_rest: false,
             hint_void: false,
@@ -442,6 +480,10 @@ impl<'c, 'a> Run<'c, 'a> {
             last_par: (0, 0),
             doc: false,
             fread: Vec::new(),
+            fmiss: Vec::new(),
+            in_skip: false,
+            skip_first: Vec::new(),
+            rec_load: false,
             no_pull: false,
             st: crate::runstate::State::new(),
             cat_cache: [u8::MAX; 256],
@@ -590,6 +632,9 @@ impl<'c, 'a> Run<'c, 'a> {
     #[inline(never)]
     fn load_slow(&mut self, loc: Loc) -> R<()> {
         let f = self.loc_field(loc);
+        if self.in_skip && self.rec_load {
+            self.skip_first.push(loc);
+        }
         let r = self.cx.use_field(f);
         crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
@@ -864,6 +909,51 @@ impl<'c, 'a> Run<'c, 'a> {
             "markclasses",
         ];
         let name = crate::val::field_name(self.v, f);
+        // (`PHITEX_READS=<field>`: that field's reads, with the current
+        // token and the token lists being read)
+        if let Ok(want) = std::env::var("PHITEX_READS")
+            && want == name
+        {
+            let v = self.v;
+            let mut ctx = Vec::new();
+            for l in self.input.levels.iter().rev().take(6) {
+                if l.kind == crate::input::kind::TOKS {
+                    let toks: Vec<String> = self
+                        .input
+                        .arena
+                        .get(l.rest())
+                        .iter()
+                        .take(8)
+                        .map(|t| v.render(t.encode(v)))
+                        .collect();
+                    ctx.push(format!("t{}:{}", l.ty, toks.join(" ")));
+                } else {
+                    ctx.push(format!("k{}", l.kind));
+                }
+            }
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let frames: Vec<&str> = bt
+                .lines()
+                .map(str::trim)
+                .filter(|l| {
+                    l.starts_with("at ")
+                        || l.split(':')
+                            .next()
+                            .is_some_and(|n| n.parse::<u32>().is_ok())
+                })
+                .map(|l| if l.len() > 90 { &l[..90] } else { l })
+                .skip(2)
+                .take(30)
+                .collect();
+            eprintln!(
+                "reads: node {} {name} at {} (pulled {}) | {} | bt {}",
+                self.cx.node().raw(),
+                v.render(self.cur.tok.encode(v)),
+                self.pulled,
+                ctx.join(" | "),
+                frames.join(" < ")
+            );
+        }
         if parked || HEADS.iter().any(|h| name.starts_with(h)) {
             eprintln!(
                 "reads: node {} op {:?} {name}{}",
@@ -933,6 +1023,8 @@ impl<'c, 'a> Run<'c, 'a> {
         // or map's bytes are not copied and hashed again at every read)
         if let Some(t) = x.and_then(|x| crate::val::list_of(v, x).get(1).copied()) {
             self.fread.push((key.to_owned(), t.raw()));
+        } else if self.rec_load && !self.fmiss.iter().any(|n| n == key) {
+            self.fmiss.push(key.to_owned());
         }
         Ok(x)
     }
@@ -1371,11 +1463,15 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The fields the run publishes: its definitions at the base level
     /// but a local one equal to the value it read (the same binding).
     pub(crate) fn published_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self.st.published(self.v).into_iter().map(|x| x.0).collect();
+        let locs: Vec<Loc> = self
+            .st
+            .published(self.v, self.rec_load)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
     }
 
-    /// The fields the run defines at its base level.
     /// The fields the run defines: those whose value at its end differs
     /// from the one it loaded, or that it never loaded (a local
     /// assignment that ends where it began defines nothing, as LaTeX's
@@ -1388,7 +1484,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// [`Run::def_fields`]' locations, as the state table publishes them.
     fn defined_now(&self) -> Vec<Loc> {
         self.st
-            .published(self.v)
+            .published(self.v, self.rec_load)
             .into_iter()
             .map(|(l, _, _)| l)
             .collect()
@@ -1873,6 +1969,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         loop {
             while self.has_input() {
+                if self.give_back_peeked()? {
+                    return Ok(());
+                }
                 if self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT) {
                     self.input.compact();
                 }
@@ -1942,6 +2041,12 @@ impl<'c, 'a> Run<'c, 'a> {
             )
             && !crate::hints::effect_none(self.v, &self.cx.args())
             && self.text_opens_group()
+            // (the scope's definitions are all the run's, `before` it:
+            // a local one the run made at its base level before the
+            // group opened, as `\document`'s before the `\begin` it
+            // reads on into, lies outside the group and outlives it,
+            // so the run reads on with the group open instead)
+            && !self.st.has_base_local_def(self.v)
     }
 
     /// Whether the node's own text opens a group it does not close (an
@@ -2062,10 +2167,98 @@ impl<'c, 'a> Run<'c, 'a> {
         let t_pub = std::time::Instant::now();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
-            .published(self.v)
+            .published(self.v, self.rec_load)
             .into_iter()
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
+        // (debug, `PHITEX_PUB_TRACE=<a>|<b>…`: the definitions of a run whose
+        // first text segment contains one of the texts)
+        if let Ok(pat) = std::env::var("PHITEX_PUB_TRACE") {
+            let v = self.v;
+            let first = self
+                .cx
+                .args()
+                .first()
+                .and_then(|&l| list_of(v, l).first().map(|&f| v.render(f)))
+                .unwrap_or_default();
+            if pat.split('|').any(|p| first.contains(p)) {
+                let node = self.cx.node().raw();
+                eprintln!(
+                    "pub: node {node} pulled {} claim_rest {} text {}",
+                    self.pulled,
+                    self.claim_rest,
+                    first.chars().take(400).collect::<String>()
+                );
+                for (f, x, l) in &published {
+                    eprintln!(
+                        "pub: node {node} {:?} {} = {}",
+                        l,
+                        crate::val::field_name(v, *f),
+                        v.render(*x).chars().take(160).collect::<String>()
+                    );
+                }
+                for (f, x) in &self.contribs {
+                    eprintln!(
+                        "pub: node {node} contrib {} += {}",
+                        crate::val::field_name(v, *f),
+                        v.render(*x).chars().take(300).collect::<String>()
+                    );
+                }
+                eprintln!(
+                    "pub: node {node} effect {:?} kids {} follow {}",
+                    self.effect,
+                    self.kids.len(),
+                    self.leftover().len()
+                );
+            }
+        }
+        // (debug, `PHITEX_ITEMS_TRACE=1`: every run's items, after its
+        // text's first segment and its claim)
+        if crate::exec::env_flag!("PHITEX_ITEMS_TRACE") {
+            let v = self.v;
+            let first = self
+                .cx
+                .args()
+                .first()
+                .and_then(|&l| list_of(v, l).first().map(|&f| v.render(f)))
+                .unwrap_or_default();
+            let items = v.field("items");
+            let mut out = format!(
+                "items: node {} op {:?} pulled {} rest {} effect {:?} text {}\n",
+                self.cx.node().raw(),
+                op,
+                self.pulled,
+                self.claim_rest,
+                self.effect,
+                first.chars().take(120).collect::<String>()
+            );
+            for (f, x) in &self.contribs {
+                if *f == items {
+                    for e in v.seq_to_vec(*x) {
+                        out.push_str("items:   ");
+                        out.extend(v.render(e).chars().take(400));
+                        out.push('\n');
+                    }
+                }
+            }
+            eprint!("{out}");
+        }
+        // (a load whose run went on into its siblings is not one load:
+        // no record of it)
+        if self.rec_load && crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+            eprintln!(
+                "pkgrec: load run {} finishes: pulled {} (blanks only {}), rest claimed {}, effect {:?}, {} definitions",
+                self.cx.node().raw(),
+                self.pulled,
+                self.pulled_only_blanks(),
+                self.claim_rest,
+                self.effect,
+                published.len()
+            );
+        }
+        if self.rec_load && op == self.ops.exec && !self.claim_rest && self.pulled_only_blanks() {
+            self.record_load(&published);
+        }
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
             let f = self.v.field(&crate::etex::shipped_field(self.page_index()));
             let asked = self
@@ -2171,6 +2364,80 @@ impl<'c, 'a> Run<'c, 'a> {
         self.cx.claim(n);
         self.cx.set_effect(self.effect);
         ValueId::UNIT
+    }
+
+    /// Whether every sibling the run took is blank text (a line's end
+    /// left as a node of its own): the run is still its load's alone.
+    fn pulled_only_blanks(&self) -> bool {
+        (0..self.pulled).all(|i| match self.cx.following(i) {
+            Some((op, args)) if op == self.ops.exec => args.first().is_some_and(|&fr| {
+                list_of(self.v, fr).into_iter().all(|f| {
+                    let xs = list_of(self.v, f);
+                    xs.first().map(|&t| str_of(self.v, t)).as_deref() == Some("s")
+                        && xs
+                            .get(1)
+                            .is_some_and(|&t| str_of(self.v, t).trim().is_empty())
+                })
+            }),
+            _ => false,
+        })
+    }
+
+    /// A package load's record (`crate::pkgrec`): the files it read (and
+    /// looked for in vain), the fields it defined (`published`) and read
+    /// from the engine, whether it opened no scope and took no sibling;
+    /// contributed to `pkgrecs`, and its run's times logged.
+    fn record_load(&mut self, published: &[(Field, ValueId, Locality)]) {
+        let v = self.v;
+        // (the files the job writes and reads back are the document's,
+        // never part of a load's key)
+        let mut files: Vec<(String, u64)> = self
+            .fread
+            .iter()
+            .filter(|(n, _)| !self.written_known(n))
+            .cloned()
+            .collect();
+        files.extend(
+            self.fmiss
+                .iter()
+                .filter(|n| !self.written_known(n))
+                .map(|n| (n.clone(), 0)),
+        );
+        files.dedup();
+        let writes: Vec<String> = published
+            .iter()
+            .map(|&(f, _, _)| crate::val::field_name(v, f))
+            .collect();
+        // (a field the load put back as it found it is no read of its
+        // predecessor's either: only the net effect is recorded)
+        let restored = self.st.restored_locs(v);
+        let reads: Vec<String> = self
+            .st
+            .read_locs()
+            .into_iter()
+            .filter(|l| !restored.contains(l))
+            .map(|l| crate::val::field_name(v, self.loc_field(l)))
+            .filter(|n| !n.starts_with("file:"))
+            .collect();
+        let flags = i64::from(self.effect == Effect::None) | 2;
+        let node = self.cx.node().raw();
+        // (the values published: a later build's prediction of this
+        // load's outputs, `crate::pkgrec::LoadHints::prediction`)
+        let values: Vec<(String, bool, ValueId)> = published
+            .iter()
+            .map(|&(f, x, l)| (crate::val::field_name(v, f), l == Locality::Global, x))
+            .collect();
+        if crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+            let skips: Vec<String> = self
+                .skip_first
+                .clone()
+                .into_iter()
+                .map(|l| crate::val::field_name(v, self.loc_field(l)))
+                .collect();
+            eprintln!("pkgrec: skip reads of node {node}: {skips:?}");
+        }
+        let e = crate::pkgrec::entry(v, node, &files, &writes, &reads, flags, &values);
+        self.contribute("pkgrecs", v.seq_unit(e));
     }
 
     /// Ends a run that cannot finish: nothing defined, and the need, for
@@ -2393,6 +2660,11 @@ pub(crate) struct Parked {
     /// The input left, top first: the levels' rests, then the text.
     segs: Vec<Seg>,
     pulled: usize,
+    /// Where each pulled sibling's text begins, as an index into `segs`'
+    /// text part: [`Run::pull_at`], kept so a resumed run can still give a
+    /// peeked sibling back.
+    pull_at: Vec<Option<usize>>,
+    pull_orig: Vec<Option<crate::input::Line>>,
     top: bool,
     claim_rest: bool,
     hint_void: bool,
@@ -2401,6 +2673,9 @@ pub(crate) struct Parked {
     last_par: (i64, i64),
     doc: bool,
     fread: Vec<(String, u64)>,
+    fmiss: Vec<String>,
+    skip_first: Vec<Field>,
+    rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
     contribs: Vec<(Field, ValueId)>,
@@ -2428,6 +2703,7 @@ pub(crate) struct Parked {
 impl Run<'_, '_> {
     /// The run's state for [`phitex_defuse::Ctx::park`] after a stop:
     /// `None` if the stopped command cannot be rewound.
+    #[allow(clippy::too_many_lines, reason = "one state field a line")]
     pub(crate) fn park(&mut self) -> Option<Parked> {
         if !self.rewind() {
             return None;
@@ -2443,6 +2719,37 @@ impl Run<'_, '_> {
                 crate::input::kind::LINE => segs.push(Seg::Line(input.line(*l).clone())),
                 _ => segs.push(Seg::File(input.file(*l).clone())),
             }
+        }
+        // where each pulled sibling's text begins in the resumed run's
+        // text: the levels' rests come first, then the text not reached
+        let nlev = input.levels.len();
+        let last = self.pull_at.len().wrapping_sub(1);
+        let mut pull_at = Vec::with_capacity(self.pull_at.len());
+        let mut pull_orig = Vec::with_capacity(self.pull_at.len());
+        for (i, p) in self.pull_at.iter().enumerate() {
+            let (at, orig) = match *p {
+                Some(at) if at >= input.text_at => (Some(nlev + at - input.text_at), None),
+                // the last sibling's first line reached, its first token
+                // read and put back on top of it: the token and the rest
+                // of the line become two segments
+                Some(at) if i == last && at + 1 == input.text_at => {
+                    match (self.pull_lev, &input.text[at]) {
+                        (Some(j), Seg::Line(orig))
+                            if j + 1 < nlev
+                                && input.levels[j].kind == crate::input::kind::LINE
+                                && input.levels[j + 1].kind == crate::input::kind::TOKS
+                                && input.levels[j + 1].ty == crate::input::ty::BACKED_UP
+                                && input.levels[j + 1].b - input.levels[j + 1].a == 1 =>
+                        {
+                            (Some(nlev - 2 - j), Some(orig.clone()))
+                        }
+                        _ => (None, None),
+                    }
+                }
+                _ => (None, None),
+            };
+            pull_at.push(at);
+            pull_orig.push(orig);
         }
         segs.extend(input.text_rest().iter().cloned());
         let nest = std::mem::take(&mut self.nest)
@@ -2468,6 +2775,8 @@ impl Run<'_, '_> {
             epoch: self.cx.values_epoch(),
             segs,
             pulled: self.pulled,
+            pull_at,
+            pull_orig,
             top: self.top,
             claim_rest: self.claim_rest,
             hint_void: self.hint_void,
@@ -2476,6 +2785,12 @@ impl Run<'_, '_> {
             last_par: self.last_par,
             doc: self.doc,
             fread: std::mem::take(&mut self.fread),
+            fmiss: std::mem::take(&mut self.fmiss),
+            skip_first: std::mem::take(&mut self.skip_first)
+                .into_iter()
+                .map(|l| self.loc_field(l))
+                .collect(),
+            rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
             contribs: std::mem::take(&mut self.contribs),
@@ -2535,6 +2850,8 @@ impl<'c, 'a> Run<'c, 'a> {
             })
             .collect();
         r.pulled = p.pulled;
+        r.pull_at = p.pull_at;
+        r.pull_orig = p.pull_orig;
         r.top = p.top;
         r.claim_rest = p.claim_rest;
         r.hint_void = p.hint_void;
@@ -2542,6 +2859,9 @@ impl<'c, 'a> Run<'c, 'a> {
         r.last_par = p.last_par;
         r.doc = p.doc;
         r.fread = p.fread;
+        r.fmiss = p.fmiss;
+        r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
+        r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
         r.st = crate::runstate::State::unpark(p.st);
         r.contribs = p.contribs;

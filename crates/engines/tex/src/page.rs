@@ -723,7 +723,7 @@ impl Run<'_, '_> {
             // (the count registers it only advanced: the writer folds
             // them by their change, the others by their value)
             let mut advanced = Vec::new();
-            for (loc, x, _) in self.st.published(v) {
+            for (loc, x, _) in self.st.published(v, false) {
                 let f = self.loc_field(loc);
                 let name = crate::val::field_name(v, f);
                 if name == "pdf:state" || step_input(&name) {

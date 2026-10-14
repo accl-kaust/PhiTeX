@@ -415,6 +415,13 @@ impl Run<'_, '_> {
 
     /// `pass_text` (§494): to the `\or`, `\else` or `\fi` at this level.
     pub(crate) fn pass_text(&mut self) -> R<()> {
+        self.in_skip = true;
+        let r = self.pass_text_in();
+        self.in_skip = false;
+        r
+    }
+
+    fn pass_text_in(&mut self) -> R<()> {
         let mut l = 0;
         loop {
             if !self.get_next()? {

@@ -167,6 +167,25 @@ impl Operation for Exec {
     fn name(&self) -> &'static str {
         "exec"
     }
+
+    /// A package load whose record matches (and predictions on,
+    /// [`crate::Options::pkg_predict`]): the values its last run defined,
+    /// so later loads run on them, confirmed by value when it runs.
+    fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        if !crate::pkgrec::is_load(v, args) {
+            return None;
+        }
+        let loads = ops(&self.0)
+            .pkg_loads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let &fr = args.first()?;
+        let &f = list_of(v, fr).first()?;
+        let text = str_of(v, *list_of(v, f).get(1)?);
+        let p = loads.prediction(v, &text)?;
+        Some(p.into_iter().map(|(n, _, x)| (v.field(&n), x)).collect())
+    }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
     }
@@ -246,9 +265,25 @@ impl Operation for Exec {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         let hint = crate::hints::hint_of_args(cx.values(), &args);
-        run_node_parking(cx, ops(&self.0), true, |r| {
+        // (a package load: its run recorded, `crate::pkgrec`)
+        let load = crate::pkgrec::is_load(cx.values(), &args);
+        let (node, t0, spec) = (
+            cx.node().raw(),
+            std::time::Instant::now(),
+            cx.is_speculative(),
+        );
+        let o = ops(&self.0);
+        let log = o.pkg_log.clone();
+        let res = run_node_parking(cx, o, true, |r| {
             // (a resumed run has done this, and continues its commands)
             if !r.resumed {
+                // (a load at the unit's top level only: there a global
+                // definition back to the value in force is no effect, and
+                // the run publishes its net effect, `State::published`)
+                // (`PHITEX_PKG_NONET=1`: no load recorded, for comparison)
+                r.rec_load = load
+                    && !crate::exec::env_flag!("PHITEX_PKG_NONET")
+                    && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
@@ -294,7 +329,13 @@ impl Operation for Exec {
                 }
             }
             Ok(())
-        })
+        });
+        if load && res.is_ok() {
+            log.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((node, t0, std::time::Instant::now(), spec));
+        }
+        res
     }
 }
 
