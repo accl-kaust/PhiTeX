@@ -1813,15 +1813,19 @@ impl Graph {
                 eprintln!("node {k:?}");
             }
             let id = self.eng.push(unit, self.ops.exec, args);
-            declare_marks_before(&mut self.eng, id);
             out.push((*k, id, Src::of(n)));
+        }
+        let t3 = t0.elapsed();
+        for &(_, id, _) in &out {
+            declare_marks_before(&mut self.eng, id);
         }
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
-                "push_text: slices {t1:?}, push {:?} (arguments {:?}, engine push {:?}), {} nodes",
+                "push_text: slices {t1:?}, push {:?} (arguments {:?}, engine push {:?}, loop-back declarations {:?}), {} nodes",
                 t0.elapsed().checked_sub(t1).unwrap(),
                 t2.checked_sub(t1).unwrap(),
-                t0.elapsed().checked_sub(t2).unwrap(),
+                t3.checked_sub(t2).unwrap(),
+                t0.elapsed().checked_sub(t3).unwrap(),
                 out.len()
             );
         }

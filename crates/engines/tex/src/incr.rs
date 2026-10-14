@@ -135,6 +135,7 @@ impl Incr {
     /// The document is now `text`: the units are spliced and the chunks
     /// analysed again where their text or incoming definitions changed.
     pub(crate) fn set_text(&mut self, text: &str) {
+        let t0 = std::time::Instant::now();
         if text != self.text {
             self.splice(text);
             text.clone_into(&mut self.text);
@@ -142,7 +143,14 @@ impl Incr {
             self.analysed = 0;
             return;
         }
+        let t1 = t0.elapsed();
         self.walk();
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "incr: units spliced {t1:?}, walked {:?}",
+                t0.elapsed().saturating_sub(t1)
+            );
+        }
     }
 
     fn splice(&mut self, text: &str) {
@@ -208,6 +216,57 @@ impl Incr {
         parts
     }
 
+    /// The definitions before each chunk of `parts` (key and set) and
+    /// after it, in order; the chunks to analyse again (the cached ones
+    /// under other definitions dropped). The chunks are of `text`, after
+    /// the format's definitions `base`; a chunk that defines anything
+    /// (whether one not cached does: `defines`) takes the next file id.
+    #[allow(clippy::type_complexity)]
+    fn chain(
+        text: &str,
+        base: &Defs,
+        next_file: &mut u32,
+        parts: &mut [Part],
+        defines: &dyn Fn(usize) -> bool,
+    ) -> (Vec<(u64, Defs)>, Vec<usize>, Vec<Option<(u64, Defs)>>) {
+        // the definitions before each chunk, in order: a cached chunk
+        // under the same ones keeps its analysis
+        let mut ins: Vec<(u64, Defs)> = Vec::with_capacity(parts.len());
+        let mut todo: Vec<usize> = Vec::new();
+        let mut outs: Vec<Option<(u64, Defs)>> = Vec::with_capacity(parts.len());
+        let (mut key, mut defs) = (0u64, base.clone());
+        for (k, p) in parts.iter_mut().enumerate() {
+            ins.push((key, defs.clone()));
+            // (whether it defines anything is its text's alone: a cached
+            // analysis under other definitions says it too)
+            let cached_defines = p.cached.as_ref().map(|e| e.th.defines);
+            if p.cached.as_ref().is_some_and(|e| e.key != key) {
+                p.cached = None;
+            }
+            let out = if let Some(e) = &p.cached {
+                e.out.clone()
+            } else {
+                todo.push(k);
+                let defines = cached_defines.unwrap_or_else(|| defines(k));
+                if defines {
+                    let t = &text[p.start..p.start + p.len];
+                    let mut d: Definitions = (*defs).clone();
+                    d.harvest(t, FileKind::Document, *next_file);
+                    *next_file = next_file.wrapping_add(1);
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    key.hash(&mut h);
+                    t.hash(&mut h);
+                    (h.finish(), Arc::new(d))
+                } else {
+                    (key, defs.clone())
+                }
+            };
+            (key, defs) = (out.0, out.1.clone());
+            outs.push(Some(out));
+        }
+        (ins, todo, outs)
+    }
+
     /// The chunks of the units, analysed where their text or incoming
     /// definitions changed. In three passes: the chunks' bounds (what a
     /// unit leaves open, the text alone) and, for the chunks not cached,
@@ -216,9 +275,11 @@ impl Incr {
     /// anything (in order: each adds to the earlier ones'); the chunks'
     /// analyses under them, on the pool.
     fn walk(&mut self) {
+        let t0 = std::time::Instant::now();
         let ids: Vec<UnitId> = self.src.units().collect();
         let mut cache = std::mem::take(&mut self.cache);
         let mut parts = self.parts(&ids, &mut cache);
+        let t_parts = t0.elapsed();
         let text = self.text.as_str();
         let chunk_text = |p: &Part| &text[p.start..p.start + p.len];
         let threads = self.threads;
@@ -233,53 +294,22 @@ impl Incr {
                 FileKind::Document,
             )))
         });
+        let t_owns = t0.elapsed();
         let mut own_of: Vec<Option<usize>> = vec![None; parts.len()];
         for (x, &k) in fresh.iter().enumerate() {
             own_of[k] = Some(x);
         }
-        // the definitions before each chunk, in order: a cached chunk
-        // under the same ones keeps its analysis
-        let mut ins: Vec<(u64, Defs)> = Vec::with_capacity(parts.len());
-        let mut todo: Vec<usize> = Vec::new();
-        let mut outs: Vec<Option<(u64, Defs)>> = Vec::with_capacity(parts.len());
-        let (mut key, mut defs) = (0u64, self.defs.clone());
-        for (k, p) in parts.iter_mut().enumerate() {
-            ins.push((key, defs.clone()));
-            // (whether it defines anything is its text's alone: a cached
-            // analysis under other definitions says it too)
-            let cached_defines = p.cached.as_ref().map(|e| e.th.defines);
-            if p.cached.as_ref().is_some_and(|e| e.key != key) {
-                p.cached = None;
-            }
-            let out = if let Some(e) = &p.cached {
-                e.out.clone()
-            } else {
-                todo.push(k);
-                let defines = cached_defines.unwrap_or_else(|| {
-                    own_of[k].is_some_and(|x| {
-                        owns[x]
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .as_ref()
-                            .is_some_and(crate::hints::defines_any)
-                    })
-                });
-                if defines {
-                    let t = chunk_text(p);
-                    let mut d: Definitions = (*defs).clone();
-                    d.harvest(t, FileKind::Document, self.next_file);
-                    self.next_file = self.next_file.wrapping_add(1);
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    key.hash(&mut h);
-                    t.hash(&mut h);
-                    (h.finish(), Arc::new(d))
-                } else {
-                    (key, defs.clone())
-                }
-            };
-            (key, defs) = (out.0, out.1.clone());
-            outs.push(Some(out));
-        }
+        let (ins, todo, mut outs) =
+            Self::chain(text, &self.defs, &mut self.next_file, &mut parts, &|k| {
+                own_of[k].is_some_and(|x| {
+                    owns[x]
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .as_ref()
+                        .is_some_and(crate::hints::defines_any)
+                })
+            });
+        let t_chain = t0.elapsed();
         // the analyses of the chunks not kept
         let made: Vec<(Arc<TextHints>, Arc<[u64]>, Input)> =
             crate::exec::map(threads, todo.len(), &|x| {
@@ -293,6 +323,7 @@ impl Incr {
                 });
                 analyse(t, &ins[k].1, own)
             });
+        let t_made = t0.elapsed();
         let analysed = todo.len();
         let mut made = made.into_iter();
         let mut chunks = Vec::with_capacity(parts.len());
@@ -321,6 +352,27 @@ impl Incr {
         }
         self.chunks = chunks;
         self.analysed = analysed;
+        walk_note(
+            self.chunks.len(),
+            analysed,
+            [t_parts, t_owns, t_chain, t_made, t0.elapsed()],
+        );
+    }
+}
+
+/// `PHITEX_TEX_TIME`: a walk's chunks, those analysed, and its phases'
+/// ends `t` (bounds, own definitions, chain, analyses, assembled).
+fn walk_note(chunks: usize, analysed: usize, t: [std::time::Duration; 5]) {
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        let d = |k: usize| t[k].saturating_sub(t[k - 1]);
+        eprintln!(
+            "incr walk: {chunks} chunks ({analysed} analysed), bounds {:?}, own definitions {:?}, chain {:?}, analyses {:?}, assembled {:?}",
+            t[0],
+            d(1),
+            d(2),
+            d(3),
+            d(4)
+        );
     }
 }
 
