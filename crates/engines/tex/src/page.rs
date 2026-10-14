@@ -350,7 +350,7 @@ impl Run<'_, '_> {
                     let n = u64::from_ne_bytes(node.to_ne_bytes());
                     let f = v.field(&crate::etex::marks_before_field(n));
                     if self.cx.is_loopback(f) {
-                        self.cx.publish(f, marks.value(v, j > 0));
+                        lb_pub(self.cx, f, marks.value(v, j > 0));
                     }
                 }
             }
@@ -415,7 +415,22 @@ impl Run<'_, '_> {
                 )
             })
             .collect();
-        self.set("pp:tdefs", v.list(tdefs), true);
+        let tdefs = v.list(tdefs);
+        if crate::exec::env_flag!("PHITEX_LOOP_TRACE") {
+            let per: Vec<String> = list_of(v, tdefs)
+                .iter()
+                .enumerate()
+                .map(|(j, &p)| {
+                    let names: Vec<String> = list_of(v, p)
+                        .into_iter()
+                        .map(|f| crate::val::field_name(v, Field(f)))
+                        .collect();
+                    format!("{j}:{}", names.join(","))
+                })
+                .collect();
+            eprintln!("lb-pub pp:tdefs {:x} {}", tdefs.raw(), per.join(" "));
+        }
+        self.set("pp:tdefs", tdefs, true);
         self.set("pp:classes", table_v, true);
         self.set("pp:any", v.int(i64::from(any)), true);
         self.set("pp:marker", marker, true);
@@ -799,7 +814,8 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
                 let s: String = v.render(x).chars().take(300).collect();
                 eprintln!("pagefx publish {j}: {s}");
             }
-            r.cx.publish(r.keyed(crate::fields::Fam::Pagefx, &j.to_string()), x);
+            let f = r.keyed(crate::fields::Fam::Pagefx, &j.to_string());
+            lb_pub(r.cx, f, x);
             log_pub(&r.ops, "pagefx", j, vec![("pagefx".to_owned(), x)]);
             r.pagefx_pub = true;
             // (kept for the client: the next session's round-one guess)
@@ -2023,6 +2039,16 @@ pub(crate) fn step_defs(r: &mut Run<'_, '_>, defs: Vec<(Field, ValueId, Locality
     }
 }
 
+/// A loop-back published (`PHITEX_LOOP_TRACE`: printed, its value's
+/// hash, for which keys change round to round).
+pub(crate) fn lb_pub(cx: &mut Ctx<'_>, f: Field, x: ValueId) {
+    if crate::exec::env_flag!("PHITEX_LOOP_TRACE") {
+        let v = cx.values();
+        eprintln!("lb-pub {} {:x}", crate::val::field_name(v, f), x.raw());
+    }
+    cx.publish(f, x);
+}
+
 /// The TeX state after the page chain, for the writer (§4 of the
 /// chain's design): the fields the steps' deltas leave changed, read in
 /// place of their reaching definitions (the state before the chain).
@@ -2050,6 +2076,7 @@ impl FinalState {
         // (k = steps: after the last)
         let tdefs: Vec<Vec<Field>> = cx
             .use_field(v.field("pp:tdefs"))?
+            .filter(|_| !crate::exec::env_flag!("PHITEX_NO_TDEFS"))
             .map(|x| {
                 list_of(v, x)
                     .into_iter()
@@ -2170,7 +2197,7 @@ impl FinalState {
             log_pub(o, "pgst", j, e);
             let jj = v.int(i64::try_from(j).unwrap_or(0));
             if cur != ValueId::UNIT {
-                cx.publish(v.field(&format!("pgst:{j}")), cur);
+                lb_pub(cx, v.field(&format!("pgst:{j}")), cur);
                 // (kept for the client: the next session's guess)
                 cx.contribute(
                     v.field("pgsts"),
@@ -2179,7 +2206,7 @@ impl FinalState {
             }
             let cs = v.list(counts.iter().map(|&c| v.int(c)).collect());
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
-            cx.publish(v.field(&format!("pgdef:{j}")), cs);
+            lb_pub(cx, v.field(&format!("pgdef:{j}")), cs);
             cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
         }
         Self::log_refuted(o, refuted);
