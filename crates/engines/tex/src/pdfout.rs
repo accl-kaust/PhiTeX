@@ -52,6 +52,12 @@ pub(crate) struct PagePiece {
     rec: phitex_pdf::PageRecord,
     /// The fonts used on the state the step wrote it on.
     base: BTreeSet<FontId>,
+    /// The page's index in the page chain and the fonts loaded when it
+    /// shipped (`fontcount`: the step's own, an output routine's and its
+    /// virtual fonts', numbered after the text's), for
+    /// [`font_tags`].
+    pj: i64,
+    fcount: i64,
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
@@ -66,6 +72,13 @@ fn pieces() -> &'static PieceMemo {
 /// whose output routine runs a PDF command.
 fn folding(r: &mut Run<'_, '_>) -> R<bool> {
     Ok(r.cint(crate::fields::cell::PDF_FOLD)? != 0)
+}
+
+/// Whether the pages are written apart and placed by the finish after
+/// every read-time command (exact mode, not folding): a read-time write
+/// after a page then waits for the finish (`oplan`).
+pub(crate) fn pages_apart(r: &mut Run<'_, '_>) -> R<bool> {
+    Ok(r.param("pdfoutput")? > 0 && !crate::pdfrelaxed::on(r)? && !folding(r)?)
 }
 
 /// Whether this run is a page step.
@@ -512,12 +525,18 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         }
     }
     if space && let Some(x) = r.file("pdftexspace.tfm")? {
-        // REDUCE-GAP: pdfTeX loads the space font at the shipout that
-        // first needs it, as the next internal font number; here the
-        // number after the fonts so far (the engine's `fontcount` does
-        // not count it)
-        let n = r.cint(crate::fields::cell::FONTCOUNT)?;
-        let id = u32::try_from(n + 1).unwrap_or(u32::MAX - 1);
+        // pdfTeX loads the space font at the shipout that first needs
+        // it, as the next internal font number (the engine's
+        // `fontcount` does not count it)
+        let id = if in_page_step(r) && !folding(r)? && !crate::pdfrelaxed::on(r)? {
+            // a page written apart: one id for every page, outside the
+            // fonts' range, numbered by the finish where it is first
+            // loaded ([`font_tags`])
+            SPACE_FONT
+        } else {
+            let n = r.cint(crate::fields::cell::FONTCOUNT)?;
+            u32::try_from(n + 1).unwrap_or(u32::MAX - 1)
+        };
         wanted.push((id, "pdftexspace".to_owned(), x, -1000));
         out.space = Some(id);
     }
@@ -1015,6 +1034,7 @@ pub(crate) fn ship(
     ids: &[u32],
 ) -> R<u64> {
     let v = r.v;
+    r.shipped = true;
     let xs = list_of(v, page);
     let p = xs.get(3).map(|&l| list_of(v, l)).unwrap_or_default();
     let mut resolved: FxHashMap<u32, ValueId> = FxHashMap::default();
@@ -1202,6 +1222,8 @@ fn ship_apart(
         fonts,
         rec: phitex_pdf::PageRecord::default(),
         base: BTreeSet::new(),
+        pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
+        fcount: r.cint(crate::fields::cell::FONTCOUNT)?,
     };
     // the key: what the piece is made of, by the values' identities
     // (interned: equal values, equal ids), not by their bytes
@@ -1216,6 +1238,8 @@ fn ship_apart(
         maps,
         pdfmap,
         u64::from(pc.fonts.space.is_some()),
+        pc.pj.cast_unsigned(),
+        pc.fcount.cast_unsigned(),
     ];
     words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
     let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
@@ -1305,6 +1329,73 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
     let t0 = std::time::Instant::now();
     let mut st = a.st.clone();
     let mut bytes = a.bytes.clone();
+    // the fonts' names (`/F<n>`) as pdfTeX numbers them
+    let mut placed_pieces = Vec::new();
+    for &x in &xpages {
+        if v.as_int(x).is_some() {
+            let pk = u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
+            let pc = pieces()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&pk)
+                .cloned();
+            if let Some(pc) = pc {
+                placed_pieces.push(pc);
+            }
+        }
+    }
+    let fplan = v.seq_to_vec(cx.acc_range(v.field("fplan"), None)?);
+    let tags = font_tags(v, fplan.last().copied(), &placed_pieces);
+    // (`\pdffontname` reads them: a loop-back, a reader of a number
+    // that changed runs again)
+    let mut pairs: Vec<(FontId, FontId)> = tags
+        .as_ref()
+        .map(|m| m.iter().map(|(&a, &b)| (a, b)).collect())
+        .unwrap_or_default();
+    pairs.sort_unstable();
+    let ft = v.field(FONT_TAGS);
+    if cx.is_loopback(ft) {
+        cx.publish(
+            ft,
+            v.list(
+                pairs
+                    .iter()
+                    .map(|&(a, b)| v.list(vec![v.int(i64::from(a)), v.int(i64::from(b))]))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(tags) = tags {
+        st.set_font_tags(tags);
+    }
+    // the objects read-time commands wrote after a page fired: after
+    // that page (`oplan`: per page, those before it fires; the last,
+    // after every page)
+    let oplan: Vec<Vec<usize>> = v
+        .seq_to_vec(cx.acc_range(v.field("oplan"), None)?)
+        .last()
+        .map(|&p| {
+            list_of(v, p)
+                .iter()
+                .map(|&l| {
+                    list_of(v, l)
+                        .iter()
+                        .filter_map(|&x| usize::try_from(int_of(v, x)).ok())
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut owed = 0usize;
+    let write_owed = |st: &mut PdfState, upto: usize, owed: &mut usize| {
+        while *owed < oplan.len().min(upto) {
+            for &n in &oplan[*owed] {
+                // (the step logged the writer's error)
+                let _ = st.write_obj(n);
+            }
+            *owed += 1;
+        }
+    };
     let (mut replayed, mut shipped) = (0usize, 0usize);
     // the variables' key after the page placed last (none after a page
     // shipped again or an operation on the state)
@@ -1324,6 +1415,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         else {
             return Ok(v.str(""));
         };
+        write_owed(&mut st, usize::try_from(pc.pj).unwrap_or(0) + 1, &mut owed);
         set_page_params(v, &mut st, &pc.params, pc.margins);
         let placed = st.replay_page(&pc.rec, &pc.fonts, &pc.base, known.as_deref());
         known = placed
@@ -1356,6 +1448,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
             }
         }
     }
+    write_owed(&mut st, usize::MAX, &mut owed);
     st.flush(&mut bytes);
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -1390,4 +1483,125 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         eprintln!("pdf finish: {:?}, {} bytes", t0.elapsed(), bytes.len());
     }
     Ok(out)
+}
+
+/// The loop-back of the fonts' names the finish gave
+/// ([`font_tags`]): `[[engine number, name number], ...]` where they
+/// differ.
+pub(crate) const FONT_TAGS: &str = "pdf:ftags";
+
+/// Font `n`'s name number as the finish gives it (`\pdffontname`):
+/// the previous round's, a loop-back (exact mode).
+pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
+    let v = r.v;
+    let f = v.field(FONT_TAGS);
+    if !r.cx.is_loopback(f) || crate::pdfrelaxed::on(r)? {
+        return Ok(n);
+    }
+    let x = r.cx.use_field(f)?;
+    Ok(x.map(|x| list_of(v, x))
+        .unwrap_or_default()
+        .iter()
+        .map(|&e| list_of(v, e))
+        .find(|e| e.first().is_some_and(|&a| int_of(v, a) == n))
+        .and_then(|e| e.get(1).map(|&b| int_of(v, b)))
+        .unwrap_or(n))
+}
+
+/// The id of `pdftexspace` in the pages written apart (none of the
+/// engine's: its fonts are numbered from 1 by `fontcount`).
+pub(crate) const SPACE_FONT: FontId = FontId::MAX - 15;
+
+/// The fonts' numbers as pdfTeX gives them, where they differ from the
+/// engine's (`None`: nowhere). The text numbers its fonts in its own
+/// order, `1..=t`; a page step numbers the fonts it loads (an output
+/// routine's, its virtual fonts' local fonts, `do_vf`) after the
+/// text's and the steps' before it; `pdftexspace` is [`SPACE_FONT`].
+/// pdfTeX numbers each in the order it loads it: the text's fonts
+/// loaded before a `\shipout` (the `T_FONT_AT` markers the page
+/// builder's fold met before that page fired, `fplan`), then that
+/// shipout's: the output routine's, then as its walk reads them in (a
+/// virtual font's local fonts at its `do_vf`, the space font where a
+/// faked space first needs it), and so on. `pages` are the placed
+/// pages, in order.
+fn font_tags(
+    v: &Values,
+    fplan: Option<ValueId>,
+    pages: &[Arc<PagePiece>],
+) -> Option<std::collections::HashMap<FontId, FontId>> {
+    // (no plan: no text font loaded after a shipout is known)
+    let plan = fplan.map(|p| list_of(v, p)).unwrap_or_default();
+    let t = plan.first().map_or(0, |&x| int_of(v, x));
+    let per_page: Vec<Vec<i64>> = plan
+        .iter()
+        .skip(1)
+        .map(|&l| list_of(v, l).iter().map(|&x| int_of(v, x)).collect())
+        .collect();
+    // the text's fonts loaded before page j fires: those before the
+    // first one a later page's fold met
+    let before = |j: i64| -> i64 {
+        per_page
+            .iter()
+            .enumerate()
+            .filter(|&(k, _)| i64::try_from(k).unwrap_or(i64::MAX) > j)
+            .flat_map(|(_, l)| l.iter().copied())
+            .min()
+            .map_or(t, |m| (m - 1).min(t))
+    };
+    let mut map = std::collections::HashMap::new();
+    let mut done: BTreeSet<FontId> = BTreeSet::new();
+    let mut next: FontId = 0;
+    let mut put = |f: FontId| {
+        if done.insert(f) {
+            next += 1;
+            if f != next {
+                map.insert(f, next);
+            }
+        }
+    };
+    let id = |f: i64| FontId::try_from(f).unwrap_or(0);
+    let mut text = 0i64;
+    let mut steps = t;
+    for pc in pages {
+        let c = before(pc.pj).max(text);
+        for f in text + 1..=c {
+            put(id(f));
+        }
+        text = c;
+        let mine = |f: FontId| i64::from(f) > steps && i64::from(f) <= pc.fcount;
+        // the step's fonts no virtual font loads (its output routine's)
+        let locals: BTreeSet<FontId> = pc
+            .fonts
+            .vfs
+            .values()
+            .flat_map(|vf| vf.fonts.iter().map(|&(_, g)| g))
+            .collect();
+        for f in steps + 1..=pc.fcount {
+            if !locals.contains(&id(f)) {
+                put(id(f));
+            }
+        }
+        // then as the walk reads them in
+        for (vf, f) in pc.rec.font_loads() {
+            if vf {
+                if let Some(x) = pc.fonts.vfs.get(&f) {
+                    for &(_, g) in &x.fonts {
+                        if mine(g) {
+                            put(g);
+                        }
+                    }
+                }
+            } else if f == SPACE_FONT {
+                put(f);
+            }
+        }
+        for f in steps + 1..=pc.fcount {
+            put(id(f));
+        }
+        steps = steps.max(pc.fcount);
+    }
+    for f in text + 1..=t {
+        put(id(f));
+    }
+    (!map.is_empty()).then_some(map)
 }

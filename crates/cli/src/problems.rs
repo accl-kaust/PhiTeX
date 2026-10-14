@@ -50,7 +50,7 @@ pub fn from_diagnostic(
             .flat_map(|h| h.lines())
             .map(str::to_owned)
             .collect(),
-        warning: d.severity == phitex_tex::Severity::Warning,
+        warning: d.severity != phitex_tex::Severity::Error,
         ..Problem::default()
     };
     // (TeX's help for an undefined name speaks to its prompt, `type I`:
@@ -387,7 +387,8 @@ pub fn show(ui: &Ui, errors: &[String], log: &str, main: &str) {
     let max = if ui.verbose > 0 { 100 } else { 10 };
     let problems = parse(log, main);
     let mut used = vec![false; problems.len()];
-    for e in errors.iter().take(max) {
+    // (the engine's failures are shown on their own lines before)
+    for e in errors.iter().filter(|e| e.starts_with("! ")).take(max) {
         let m = bare(e);
         let key = m.trim_end_matches('.');
         match (0..problems.len()).find(|&k| !used[k] && problems[k].message == key) {
@@ -409,14 +410,17 @@ pub fn rendered(
     color: bool,
     verbose: bool,
 ) -> Vec<String> {
-    let want = if warnings {
-        phitex_tex::Severity::Warning
-    } else {
-        phitex_tex::Severity::Error
-    };
+    // (the engine's own diagnostics are shown with the warnings: they
+    // are not TeX's errors)
     r.diagnostics
         .iter()
-        .filter(|d| d.severity == want)
+        .filter(|d| (d.severity == phitex_tex::Severity::Error) != warnings)
+        // (an engine failure has no place: shown on its own line)
+        .filter(|d| {
+            !(d.severity == phitex_tex::Severity::Error
+                && d.range == (0, 0)
+                && d.context.is_empty())
+        })
         .map(|d| {
             render(
                 &from_diagnostic(d, s.source(&d.file).as_deref(), verbose),

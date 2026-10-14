@@ -16,7 +16,7 @@
 //! node, renumbering labels, changing a scope boundary, ...) aborts: what
 //! it wrote is dropped and its results are applied whole.
 
-use super::{Aux, Engine, FxHashMap, NO_AUX, Node, OItem, OrderOp, Report, RunResult, Slot, State, TNIL, Unit};
+use super::{Aux, Engine, FxHashMap, NO_AUX, Node, OItem, OrderOp, Report, Rerun, RunResult, Slot, State, TNIL, Unit};
 use crate::ix::{LabelIx, SlotCounts, SlotMap};
 use crate::obs::{count, span};
 use crate::ov::{OvMap, OvSet};
@@ -125,6 +125,7 @@ fn scratch_node() -> Node {
         effect: 0,
         bound: 0,
         flags: 0,
+        rdepth: 0,
         uses: Box::new([]),
         defs: Box::new([]),
     }
@@ -155,6 +156,9 @@ impl Aux {
             out_readers: self.out_readers.clone(),
             publishes: self.publishes.clone(),
             contribs: self.contribs.clone(),
+            folds: self.folds.clone(),
+            static_contribs: self.static_contribs,
+            decl_mask: self.decl_mask,
             claimed: self.claimed.clone(),
             pend_fields: self.pend_fields.clone(),
             claimed_by: self.claimed_by,
@@ -162,6 +166,7 @@ impl Aux {
             body: self.body,
             assumers: self.assumers.clone(),
             assume_left: self.assume_left,
+            read_predicted: self.read_predicted,
             watch: self.watch,
             watch_to: self.watch_to,
             scan: self.scan,
@@ -187,6 +192,7 @@ impl RunResult {
             epoch: self.epoch,
             speculative: self.speculative,
             read_unsettled: self.read_unsettled,
+            read_predicted: self.read_predicted,
             end: self.end.clone(),
             raise: self.raise,
             raise_from: self.raise_from,
@@ -201,6 +207,7 @@ impl RunResult {
             env_found: self.env_found.clone(),
             publishes: self.publishes.clone(),
             contribs: self.contribs.clone(),
+            contrib_folds: self.contrib_folds.clone(),
             watch: self.watch,
             scan: self.scan,
             narrow: self.narrow.clone(),
@@ -264,6 +271,10 @@ impl Report {
             refuted_nodes,
             refutations_max,
             declarations_refuted,
+            rerun_causes,
+            static_contribs_refuted,
+            predictions_confirmed,
+            predictions_refuted,
             fuel_outs,
             steps,
             values_freed,
@@ -278,8 +289,10 @@ impl Report {
             spec_stops,
             waits_by_op,
             critical_path: _,
+            realised_critical_path,
             max_ready,
         } = d;
+        self.realised_critical_path = self.realised_critical_path.max(realised_critical_path);
         self.nodes_run += nodes_run;
         self.cutoffs += cutoffs;
         self.rebinds += rebinds;
@@ -324,6 +337,10 @@ impl Report {
         self.refuted_nodes += refuted_nodes;
         self.refutations_max = self.refutations_max.max(refutations_max);
         self.declarations_refuted += declarations_refuted;
+        self.rerun_causes.extend(rerun_causes);
+        self.static_contribs_refuted += static_contribs_refuted;
+        self.predictions_confirmed += predictions_confirmed;
+        self.predictions_refuted += predictions_refuted;
         self.fuel_outs += fuel_outs;
         self.steps += steps;
         self.values_freed += values_freed;
@@ -519,6 +536,10 @@ impl Engine {
             runs_in_eval: SlotCounts::over(&self.runs_in_eval),
             causes: OvMap::over(&self.causes),
             tracing: self.tracing,
+            why: Rerun::Other,
+            batch_defined: crate::hash::FxHashSet::default(),
+            definer_due: std::sync::Mutex::default(),
+            changed_from: ValueId::NONE,
             created_in_eval: OvMap::over(&self.created_in_eval),
             run_depths: Vec::new(),
             idle_rounds: 0,
@@ -541,6 +562,10 @@ impl Engine {
             memo: OvMap::over(&self.memo),
             text_memo: RwLock::new(FxHashMap::default()),
             statics: RwLock::new(FxHashMap::default()),
+            rtag: self.rtag,
+            predictions_seen: std::sync::atomic::AtomicBool::new(
+                self.predictions_seen.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             queue: Vec::new(),
             queue_min: usize::MAX,
             queue_len: 0,

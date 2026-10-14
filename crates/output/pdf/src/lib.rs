@@ -685,6 +685,9 @@ pub struct PdfState {
     running_link: bool,
     /// `pdf_dummy_font`.
     dummy_font: FontId,
+    /// The fonts' numbers in their names (`/F<n>`) where they are not
+    /// the engine's ([`PdfState::set_font_tags`]).
+    font_tags: Option<Arc<std::collections::HashMap<FontId, FontId>>>,
     /// The first fatal error met while walking a list.
     error: Option<PdfError>,
     stacks: color::Stacks,
@@ -813,6 +816,7 @@ impl PdfState {
             faked_space: false,
             running_link: true,
             dummy_font: 0,
+            font_tags: None,
             error: None,
             stacks: color::Stacks::default(),
             epdf_fds: digest::TMap::new("epdf_fds"),

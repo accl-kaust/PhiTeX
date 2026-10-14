@@ -145,12 +145,11 @@ pub(crate) fn run_node_parking(
             r.input = crate::input::Input::new();
             r.claim_rest = true;
             // (for the output: pdfTeX writes no PDF file after one)
-            let _ = r.log("fatal", "");
-            if r.pg.is_none() {
-                let v = r.v;
-                r.append(0, v.list(vec![v.int(crate::nodes::T_ABORT)]));
-            }
-            r.end_open();
+            // (`pdf`: pdfTeX says no PDF file was produced, §1335, pdfTeX
+            // `close_files_and_terminate`)
+            let pdf = r.param("pdfoutput").is_ok_and(|p| p > 0);
+            let _ = r.log("fatal", if pdf { "pdf" } else { "" });
+            r.end_fatal();
             Ok(r.finish())
         }
     }
@@ -187,6 +186,14 @@ impl Operation for Exec {
     /// starting and stopping.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         crate::hints::reads(v, args)
+    }
+    /// The lines of its own text the node begins (`lines`, by file:
+    /// [`crate::run::Run::doc_lines`]): readers of `\inputlineno` fold
+    /// them without waiting for its run. (A node that claims a sibling
+    /// begins the sibling's lines too: its run refutes this, and the
+    /// readers after it run again.)
+    fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(vec![(v.field("lines"), crate::run::text_lines(v, args))])
     }
     /// No scope effect where the text says the command opens and closes
     /// nothing ([`crate::hints`]); otherwise known when it runs (the
@@ -251,7 +258,7 @@ impl Operation for Exec {
                 }
                 // the hint's assumptions, against what is in force here
                 if let Some(m) = crate::hints::verify(r, &hint)? {
-                    r.log("error", &format!("hint regime violated: {m}"))?;
+                    r.engine_diag(&format!("hint regime violated: {m}"));
                     crate::hints::count(r, 2);
                     r.hint_void = true;
                 }
@@ -274,7 +281,7 @@ impl Operation for Exec {
                 .collect();
             if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
                 if let Some(m) = crate::hints::check_defs(r, &hint, &claimed) {
-                    r.log("error", &m)?;
+                    r.engine_diag(&m);
                     crate::hints::count(r, 3);
                 }
                 crate::hints::count(r, 0);

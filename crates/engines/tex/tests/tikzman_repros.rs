@@ -45,3 +45,77 @@ fn prelude_errors_are_reported_at_the_prelude() {
         "the prelude's error placed in the document"
     );
 }
+
+/// The engine's own diagnostics (an undeclared definition, a hint's
+/// regime violated) are not TeX's errors: not in the log, not counted
+/// with them (TeX's hundred), and the PDF is written. `envs.tex` (the
+/// LaTeX fixtures) had undeclared definitions of `cs:if@minipage`,
+/// `param:clubpenalty` and `toks:12` logged as `! ...` errors; the
+/// corpus saw clsguide/usrguide end without a PDF on such diagnostics.
+#[test]
+fn engine_diagnostics_are_not_errors() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("envs.tex"));
+    let opts = phitex_tex::Options {
+        epoch: Some(0),
+        prelude_jobname: "pdflatex".to_owned(),
+        ..common::options("./envs.tex", "envs", "", &dir)
+    };
+    let b = common::build(opts, Some("\\input pdflatex.ini\n"), &src);
+    let (pdf, log) = b.output();
+    let ds = b.diagnostics();
+    for d in ds
+        .iter()
+        .filter(|d| d.severity == phitex_tex::Severity::Diagnostic)
+    {
+        eprintln!("diagnostic {}:{}: {}", d.file, d.line, d.message);
+        assert!(
+            !log.contains(&format!("! {}", d.message)),
+            "the engine's diagnostic in the log as TeX's error: {}",
+            d.message
+        );
+    }
+    for d in &ds {
+        let engine = d.message.starts_with("undeclared definition")
+            || d.message.starts_with("hint regime violated");
+        assert!(
+            !engine || d.severity == phitex_tex::Severity::Diagnostic,
+            "an engine check as {:?}: {}",
+            d.severity,
+            d.message
+        );
+    }
+    // (TeX's own errors in envs.tex, "Float(s) lost" on dev at the time,
+    // are another defect's: not asserted here)
+    assert!(!pdf.is_empty(), "no PDF");
+    eprintln!("{} engine diagnostics", b.engine_diagnostics());
+}
+
+/// The other side of the split: an engine failure that means the result
+/// is not the document's (here no fixpoint after `max_rounds`) stays an
+/// error (the CLI's "failed", exit 1), never a diagnostic.
+#[test]
+fn engine_failures_stay_errors() {
+    let dir = scratch("tikzman-nofixpoint");
+    let _ = std::fs::remove_file(dir.join("main.aux"));
+    let doc = "\\newread\\r \\openin\\r=\\jobname.aux \\ifeof\\r \\def\\ref{??}\\else\\closein\\r \\input \\jobname.aux \\fi\n\\newwrite\\w \\immediate\\openout\\w=\\jobname.aux \\immediate\\write\\w{\\relax}\n\nRef: \\ref.\\par\n\\write\\w{\\string\\def\\string\\ref{\\if1\\ref 2\\else 1\\fi}}\n\n\\end\n";
+    let opts = phitex_tex::Options {
+        fixpoint: true,
+        max_rounds: 8,
+        ..common::options("./main.tex", "main", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), doc);
+    let ds = b.diagnostics();
+    let nofix: Vec<_> = ds
+        .iter()
+        .filter(|d| d.message.contains("no fixpoint"))
+        .collect();
+    assert!(!nofix.is_empty(), "{ds:#?}");
+    assert!(
+        nofix
+            .iter()
+            .all(|d| d.severity == phitex_tex::Severity::Error),
+        "{nofix:#?}"
+    );
+    assert_eq!(b.engine_diagnostics(), 0, "{ds:#?}");
+}
