@@ -4,9 +4,9 @@
 //! (`edit-word/`, `edit-para/`) built as edits in one `phitex watch`
 //! session and as fresh cold builds. Every PDF is compared byte for byte
 //! with the oracle's (`<variant>/oracle/`, from `scripts/bless-ladder.sh`:
-//! the installed pdflatex, bibtex, makeindex, biber), and the files the job
-//! reads back (`.aux`, `.toc`, `.bbl`, `.ind`, ...) too; the watch's PDF
-//! with the cold build's. One row per rung on standard error (`ROW ...`).
+//! the installed pdflatex, bibtex, makeindex, biber); the files the job
+//! reads back (`.aux`, `.toc`, `.bbl`, `.ind`, ...) live in memory and are
+//! not compared. The watch's PDF is compared with the cold build's. One row per rung on standard error (`ROW ...`).
 //! Run once with `PHITEX_DOC_SCOPE` unset and once with `=1`.
 
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -102,13 +102,14 @@ fn diff(a: &[u8], b: &[u8]) -> Option<String> {
     ))
 }
 
-/// Compares `dir`'s outputs with the oracle `odir`: the PDF and each file
-/// read back the oracle has. The differences, empty if identical.
+/// Compares `dir`'s PDF with the oracle `odir`'s. The files read back
+/// (`.aux`, `.toc`, `.out`, ...) live in memory and are not outputs: the
+/// PDF is the only bar. The differences, empty if identical.
 fn compare(dir: &Path, odir: &Path, name: &str) -> Vec<String> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(odir).expect("the oracle").flatten() {
         let f = e.file_name().to_string_lossy().into_owned();
-        if f == "stats" {
+        if !f.ends_with(".pdf") {
             continue;
         }
         let want = std::fs::read(e.path()).expect("an oracle file");
