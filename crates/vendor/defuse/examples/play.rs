@@ -82,7 +82,9 @@ impl PlayOp {
         {
             Some(r) => de(r),
             None => {
-                MISSES.fetch_add(1, Ordering::Relaxed);
+                if MISSES.fetch_add(1, Ordering::Relaxed) < 20 {
+                    eprintln!("play: no recorded {m} of {} {args:?} {x}", self.name);
+                }
                 dflt
             }
         }
@@ -96,7 +98,9 @@ impl PlayOp {
         dflt: T,
     ) -> T {
         let Some(list) = self.book.takes.get(&key(&[&json!(self.id), &json!(m), &json!(args)])) else {
-            MISSES.fetch_add(1, Ordering::Relaxed);
+            if MISSES.fetch_add(1, Ordering::Relaxed) < 20 {
+                eprintln!("play: no recorded {m} of {} {args:?}", self.name);
+            }
             return dflt;
         };
         let mut got: Vec<(OpId, Vec<ValueId>)> = Vec::new();
@@ -274,15 +278,14 @@ impl Operation for PlayOp {
             }
             if live.is_empty() {
                 DIVERGED.fetch_add(1, Ordering::Relaxed);
+                let want: Vec<String> = runs.iter().filter(|r| r.0.len() > i).map(|r| r.0[i][2].to_string()).collect();
                 eprintln!(
-                    "play: {} {:?} diverged at call {i} ({m} {a}): got {ans}",
+                    "play: {} {:?} diverged at call {i} ({m} {a}): got {ans}, recorded {}",
                     self.name,
-                    cx.args()
+                    cx.args(),
+                    want.join(" | ")
                 );
-                return match &runs[0].1 {
-                    J::Object(o) => Ok(de(&o["ok"])),
-                    _ => Ok(ValueId::UNIT),
-                };
+                return Ok(ValueId::UNIT);
             }
             i += 1;
         }
@@ -301,7 +304,7 @@ impl Monoid for PlayMonoid {
             .get(&key(&[&self.field, &json!("empty"), &J::Null]))
             .map_or(ValueId::NIL, de)
     }
-    fn combine(&self, _: &Values, a: ValueId, b: ValueId) -> ValueId {
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
         if let Some(r) = self
             .book
             .monoid
@@ -309,8 +312,13 @@ impl Monoid for PlayMonoid {
         {
             return de(r);
         }
-        MISSES.fetch_add(1, Ordering::Relaxed);
-        a
+        // Not recorded (the engine grouped the fold another way): the
+        // recorded accumulators are sequences, sums and list concatenations.
+        match (&*v.get(a), &*v.get(b)) {
+            (Value::Int(x), Value::Int(y)) => v.int(x + y),
+            (Value::List(x), Value::List(y)) => v.list(x.iter().chain(y.iter()).copied().collect()),
+            _ => v.seq_concat(a, b),
+        }
     }
 }
 
@@ -416,7 +424,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
     }
 }
 
-fn intern(vals: &Values, l: &J) {
+fn intern(vals: &Values, l: &J) -> ValueId {
     let x = &l["x"];
     let ids = |x: &J| -> Vec<ValueId> { de(x) };
     let got = match l["t"].as_str().unwrap_or("") {
@@ -433,6 +441,7 @@ fn intern(vals: &Values, l: &J) {
     };
     let want: ValueId = de(&l["id"]);
     assert_eq!(got, want, "play: value {l} interned to a different id");
+    got
 }
 
 #[allow(clippy::too_many_lines)]
@@ -515,7 +524,10 @@ fn main() {
         let l = &lines[i];
         i += 1;
         match l["k"].as_str().unwrap_or("") {
-            "val" => intern(eng.values(), l),
+            "val" => {
+                let v = intern(eng.values(), l);
+                eng.pin(v);
+            }
             "api" if l["f"] == "evaluate_begin" => {
                 // Gather this evaluation's absorbed batches.
                 let mut batches = std::collections::VecDeque::new();
@@ -525,7 +537,8 @@ fn main() {
                     let l = &lines[i];
                     i += 1;
                     if l["k"] == "val" {
-                        intern(eng.values(), l);
+                        let v = intern(eng.values(), l);
+                        eng.pin(v);
                     } else if l["k"] == "absorb" && l["phase"] == "begin" {
                         cur = Some(Vec::new());
                     } else if l["k"] == "absorb" && l["phase"] == "end" {
