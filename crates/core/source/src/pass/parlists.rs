@@ -17,6 +17,7 @@
 //! ([`ParState::top`]: any list, every list's definitions).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::FileKind;
@@ -200,7 +201,9 @@ impl ParMachine {
             .map(|s| {
                 format!(
                     "{:?} {:?}{}",
-                    s.list.as_deref().map(|l| l.chars().take(30).collect::<String>()),
+                    s.list
+                        .as_deref()
+                        .map(|l| l.chars().take(30).collect::<String>()),
                     s.flags,
                     if s.horizontal { " h" } else { "" }
                 )
@@ -215,10 +218,14 @@ impl ParMachine {
         n.sort();
         let mut out = format!("{} lists, setters {n:?}", self.lists.len());
         for k in n {
-            out.push_str(&format!("\n  setter {k}: {:?}", self.setters[k]));
+            let _ = write!(out, "\n  setter {k}: {:?}", self.setters[k]);
         }
         for (l, ops) in &self.lists {
-            out.push_str(&format!("\n  list {:?}: {ops:?}", l.chars().take(40).collect::<String>()));
+            let _ = write!(
+                out,
+                "\n  list {:?}: {ops:?}",
+                l.chars().take(40).collect::<String>()
+            );
         }
         out
     }
@@ -321,7 +328,14 @@ impl Cx<'_> {
             if next.len() > CAP && std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
                 eprintln!("parlists: {} states at {op:?}", next.len());
                 for st in next.iter().take(20) {
-                    eprintln!("  state {:?} {:?} h{}", st.list.as_deref().map(|l| l.chars().take(40).collect::<String>()), st.flags, st.horizontal);
+                    eprintln!(
+                        "  state {:?} {:?} h{}",
+                        st.list
+                            .as_deref()
+                            .map(|l| l.chars().take(40).collect::<String>()),
+                        st.flags,
+                        st.horizontal
+                    );
                 }
             }
             if next.len() > CAP {
@@ -408,7 +422,10 @@ impl Cx<'_> {
         }
         let Some(ops) = self.m.lists.get(&l) else {
             if std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
-                eprintln!("parlists: unknown list {:?}", l.chars().take(60).collect::<String>());
+                eprintln!(
+                    "parlists: unknown list {:?}",
+                    l.chars().take(60).collect::<String>()
+                );
             }
             self.defines.add(&self.m.all);
             return vec![ParState { list: None, ..s }];
@@ -718,7 +735,10 @@ mod tests {
         assert!(got[2].iter().any(|n| n.contains("everypar")), "{got:?}");
         assert!(got[3].is_empty(), "{got:?}");
         // (the list ran out in every state)
-        assert!(states.iter().all(|s| s.list.as_deref() == Some("")), "{states:?}");
+        assert!(
+            states.iter().all(|s| s.list.as_deref() == Some("")),
+            "{states:?}"
+        );
     }
 
     #[test]

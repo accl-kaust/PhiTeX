@@ -409,8 +409,19 @@ fn hex_upper(b: &[u8]) -> String {
 }
 
 /// A file's bytes, or the need for it.
+/// pdfTeX's `kpse_find_tex` (pdfTeX §1752 `\\pdffilesize` and the
+/// other file conversions): a name without a suffix is looked up with
+/// `.tex` first, then as given (kpathsea's `tex` format).
 fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
-    let Some(x) = r.file(name)? else {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let mut found = None;
+    if !base.contains('.') {
+        found = r.file(&format!("{name}.tex"))?;
+    }
+    if found.is_none() {
+        found = r.file(name)?;
+    }
+    let Some(x) = found else {
         return Ok(None);
     };
     let xs = list_of(r.v, x);
@@ -1822,14 +1833,7 @@ fn or_alloc(r: &mut Run<'_, '_>, n: Option<usize>) -> R<i64> {
 /// `\pdfxform` and `\pdfximage` are written now; the others are as
 /// without it.
 pub(crate) fn immediate(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
-    if matches!(r.cur.chr, ex::OBJ | ex::XFORM | ex::XIMAGE) {
-        ext(r, md, true)
-    } else {
-        // (`othercases back_input`: another extension, `\immediate`
-        // itself among them, runs as itself)
-        r.back_cur();
-        Ok(())
-    }
+    ext(r, md, true)
 }
 
 /// Whether the file is PDF (the writer's steps run).

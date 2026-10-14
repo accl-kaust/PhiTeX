@@ -72,12 +72,6 @@ pub(crate) const T_MARKS_AT: i64 = 91;
 /// among the shipped pages, so the writer assembles the file in TeX's
 /// order.
 pub(crate) const T_WRITE_AT: i64 = 88;
-/// Where a document node forced the page out (a penalty of -10000 or
-/// less on the main vertical list, §1005: `\clearpage`): `[tag, node,
-/// k]`, the node's k-th; the writer publishes the state the page chain
-/// leaves after the page that breaks there as the node's
-/// `pgst:at:<node>:<k>` loop-back, which the node reads on from.
-pub(crate) const T_FLUSH_AT: i64 = 87;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]
@@ -332,6 +326,20 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
             .get(9)
             .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
     }
+}
+
+/// [`decode`], a box's dimensions only (its list left empty): what the
+/// page builder's break arithmetic reads of it (§1001–§1008), for a
+/// prediction its real fold checks.
+pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
+    if tag(v, x) == T_BOX
+        && let Value::List(xs) = &*v.get(x)
+    {
+        let mut b = decode_box(v, &xs[..xs.len().min(9)], side);
+        b.list.clear();
+        return Some(Node::Box(b));
+    }
+    decode(v, x, side)
 }
 
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {

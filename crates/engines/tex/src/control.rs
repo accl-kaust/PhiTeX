@@ -345,9 +345,6 @@ impl Run<'_, '_> {
                 self.append(md.lid, node);
                 if md.m == 1 {
                     self.build_page_outer()?;
-                    if n <= -10000 && md.lid == 0 {
-                        self.flush_point();
-                    }
                 }
             }
             cmd::REMOVE_ITEM => self.delete_last(&md)?,
@@ -395,10 +392,22 @@ impl Run<'_, '_> {
                 // §1271
                 self.get_token()?;
                 let t = self.cur.tok;
-                // the innermost group's level keeps the tokens; at the
-                // bottom level they are dropped (§1271 `cur_level>level_one`)
+                // the innermost group's level keeps the tokens: one of
+                // this run's, else the engine scope the node runs in (its
+                // `ag` list, run at its close, `Run::unsave_extras`); at
+                // the bottom level they are dropped (§1271
+                // `cur_level>level_one`)
                 if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
                     l.ag.push(t);
+                } else {
+                    let base = self.base_mode()?;
+                    if base.depth > 0 {
+                        let v = self.v;
+                        let mut xs = vec![v.int(base.sid)];
+                        xs.extend(self.scope_list("ag", &base)?);
+                        xs.push(t.encode(v));
+                        self.set("ag", v.list(xs), false);
+                    }
                 }
             }
             cmd::IN_STREAM => self.open_or_close_in()?,
@@ -1332,7 +1341,7 @@ impl Run<'_, '_> {
                         }
                         _ => {
                             let n = self.scan_four_bit_int()?;
-                            self.close_out(n)?;
+                            self.set(&format!("write:{n}"), ValueId::UNIT, true);
                         }
                     }
                 } else {
@@ -1355,48 +1364,9 @@ impl Run<'_, '_> {
     pub(crate) fn write_out(&mut self, k: i32, body: &[Tok]) -> R<()> {
         let s = self.expand_late(body)?;
         let open = (0..16).contains(&k)
-            && !self.closed.contains(&k)
             && self
                 .get(&format!("write:{k}"))?
                 .is_some_and(|x| x != ValueId::UNIT);
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") && s.is_empty() && self.interp.is_some() {
-            let mut shown = String::new();
-            self.show_toks_into(&mut shown, body)?;
-            let t = self.get("toks:11")?.map(|x| self.v.render(x));
-            eprintln!("aux-trace: empty write: body {shown:?}, toks:11 = {t:?}");
-        }
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") && s.contains("@writefile{toc}") {
-            let tf = self
-                .get("cs:tf@toc")?
-                .map(|x| crate::val::show_def(self.v, x));
-            let w3 = self.get("write:3")?.map(|x| self.v.render(x));
-            let pct = self
-                .get("cs:protected@file@percent")?
-                .map(|x| crate::val::show_def(self.v, x));
-            eprintln!(
-                "aux-trace: at a toc line: tf@toc = {tf:?}, write:3 = {w3:?}, protected@file@percent = {pct:?}"
-            );
-        }
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-            let w = self
-                .get(&format!("write:{k}"))?
-                .map(|x| crate::val::show_def(self.v, x));
-            if k == 3 {
-                let mut shown = String::new();
-                self.show_toks_into(&mut shown, body)?;
-                let t = self.get("toks:11")?.map(|x| self.v.render(x));
-                eprintln!(
-                    "aux-trace: stream 3 write: interp={} body {shown:?} toks:11 {t:?} frames {}",
-                    self.interp.is_some(),
-                    self.input.depth()
-                );
-            }
-            eprintln!(
-                "aux-trace: write_out stream {k} open={open} ({w:?}) node {} op {:?}: {s}",
-                self.cx.node().raw(),
-                self.cx.op()
-            );
-        }
         if open {
             let v = self.v;
             let e = v.list(vec![v.int(i64::from(k)), v.str(&s)]);
@@ -1438,31 +1408,6 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// `\closeout` done (§1374): in a page step or a text paging inline
-    /// the stream is closed for what follows; in a document node the
-    /// close is an event at its position (a `[name, "", "close"]` stream
-    /// entry the writer applies in the pages' order, [`Run::closed`]),
-    /// not a definition the page steps would see before their deferred
-    /// writes fire.
-    pub(crate) fn close_out(&mut self, n: i32) -> R<()> {
-        let v = self.v;
-        let op = self.cx.op();
-        if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
-            self.set(&format!("write:{n}"), ValueId::UNIT, true);
-            return Ok(());
-        }
-        let name = self
-            .get(&format!("write:{n}"))?
-            .and_then(|x| list_of(v, x).first().map(|&m| str_of(v, m)));
-        if !self.closed.contains(&n) {
-            self.closed.push(n);
-        }
-        if let Some(name) = name {
-            self.contribute_stream(v.list(vec![v.str(&name), v.str(""), v.str("close")]));
-        }
-        Ok(())
-    }
-
     /// `\openout` done (§1374): the stream names the file (`.tex` if it
     /// has no extension), which starts empty: its text accumulates in
     /// the `streams` sequence, and `wopen:<name>` tells later readers
@@ -1493,7 +1438,11 @@ impl Run<'_, '_> {
             return self.file(key);
         }
         let f = v.field("streams");
-        let before = self.cx.acc_range(f, None)?;
+        let before = self.cx.acc_range(f, None);
+        if before.is_err() {
+            self.trace_stop("range streams");
+        }
+        let before = before?;
         let mut all = v.seq_to_vec(before);
         all.extend(
             self.contribs
@@ -1501,11 +1450,17 @@ impl Run<'_, '_> {
                 .filter(|(g, _)| *g == f)
                 .flat_map(|(_, x)| v.seq_to_vec(*x)),
         );
-        let text = crate::api::stream_texts(v, &all)
-            .into_iter()
-            .find(|(n, _)| n == key)
-            .map(|(_, t)| t)
-            .unwrap_or_default();
+        let mut text = String::new();
+        for e in all {
+            let xs = list_of(v, crate::api::stream_entry(v, e));
+            if xs.first().map(|&n| str_of(v, n)).as_deref() != Some(key) {
+                continue;
+            }
+            match xs.get(1) {
+                Some(&t) => text.push_str(&str_of(v, t)),
+                None => text.clear(),
+            }
+        }
         Ok(Some(v.list(vec![v.str(&format!("./{key}")), v.str(&text)])))
     }
 
@@ -1527,7 +1482,11 @@ impl Run<'_, '_> {
     /// The input left as one source line, for `\inputlineno`.
     pub(crate) fn input_line_no(&mut self) -> R<i32> {
         let lines = self.v.field("lines");
-        let x = self.cx.acc_range(lines, None)?;
+        let x = self.cx.acc_range(lines, None);
+        if x.is_err() {
+            self.trace_stop("range lines");
+        }
+        let x = x?;
         Ok(i32::try_from(int_of(self.v, x) + self.lines_entered).unwrap_or(0))
     }
 }

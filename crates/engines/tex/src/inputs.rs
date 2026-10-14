@@ -123,7 +123,7 @@ fn plain_input(text: &str) -> bool {
 }
 
 /// Whether a found file is a document's, sliceable into regions.
-fn document_file(path: &str, text: &str) -> bool {
+pub(crate) fn document_file(path: &str, text: &str) -> bool {
     !path.contains("texmf")
         && crate::hints::kind_of(text, FileKind::from_path(path)) == FileKind::Document
         && !["\\endinput", "\\inputlineno", "\\everyeof"]
