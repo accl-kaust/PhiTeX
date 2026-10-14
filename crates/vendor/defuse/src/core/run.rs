@@ -158,7 +158,7 @@ impl Shared {
             }
             if idle < 64 {
                 std::hint::spin_loop();
-            } else if idle < 4096 {
+            } else if idle < 128 {
                 std::thread::yield_now();
             } else {
                 // Asleep until work is queued or the evaluation ends (a
