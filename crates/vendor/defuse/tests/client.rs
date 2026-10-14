@@ -2922,7 +2922,14 @@ fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers(
             .collect()
     };
     let (mut plain, _, pids, _) = build(None);
-    plain.evaluate_sequential().expect("evaluate");
+    let r = plain
+        .evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut defuse::Sequential,
+        )
+        .expect("evaluate");
+    // No predictions: the chain waits link by link.
+    assert_eq!(r.realised_critical_path, u32::try_from(N).unwrap(), "{r:?}");
     let reference = outs(&plain, &pids);
     for sched in ["seq", "spec", "random", "par"] {
         for predict in [Some(pred_truth(N)), Some(wrong.clone())] {
@@ -2956,8 +2963,14 @@ fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers(
                     assert_eq!(r.predictions_confirmed, N as u64 - 1, "{sched}");
                 }
             }
+            if sched == "spec" || sched == "par" {
+                let want = if is_wrong { 2..=3 } else { 1..=2 };
+                assert!(want.contains(&r.realised_critical_path), "{sched}: {r:?}");
+            }
             if sched == "seq" {
-                // Off: no guess at all.
+                // Off: every node waited for the one before it.
+                assert_eq!(r.realised_critical_path, u32::try_from(N).unwrap(), "{sched}");
+                assert_eq!(r.realised_critical_path, r.critical_path + 1, "{sched}");
                 assert_eq!(runs, N as u64, "{sched}");
                 assert_eq!(r.predictions_confirmed + r.predictions_refuted, 0);
             }
