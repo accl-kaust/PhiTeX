@@ -1494,6 +1494,11 @@ impl Run<'_, '_> {
         if before.is_err() {
             self.trace_stop("range streams");
         }
+        if let Ok(x) = before
+            && crate::rerun::on()
+        {
+            crate::rerun::note(self.v, self.cx.node().raw(), "(range streams)", Some(x));
+        }
         let before = before?;
         let mut all = v.seq_to_vec(before);
         all.extend(
@@ -1564,6 +1569,11 @@ impl Run<'_, '_> {
                 let v = self.v;
                 let lines = v.field("lines");
                 let x = self.cx.acc_range(lines, None);
+                if let Ok(y) = x
+                    && crate::rerun::on()
+                {
+                    crate::rerun::note(v, self.cx.node().raw(), "(range lines)", Some(y));
+                }
                 if x.is_err() {
                     self.trace_stop("range lines");
                 }
