@@ -692,10 +692,17 @@ impl Session {
         let diagnostics = b.diagnostics();
         // (and the evaluation's own errors — no fixpoint, a stop — which
         // the log does not have: errors at no place, without context)
-        let errors = log
-            .lines()
-            .filter(|l| l.starts_with("! "))
-            .map(str::to_owned)
+        // (the format's own errors first, with their places: a format
+        // that stopped on them is not the oracle's, whatever follows)
+        let errors = b
+            .prelude_diagnostics()
+            .iter()
+            .map(|d| format!("! {} ({}:{})", d.message, d.file, d.line))
+            .chain(
+                log.lines()
+                    .filter(|l| l.starts_with("! "))
+                    .map(str::to_owned),
+            )
             .chain(
                 diagnostics
                     .iter()

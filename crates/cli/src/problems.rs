@@ -70,17 +70,19 @@ pub fn from_diagnostic(
             .position(|&c| c == b'\n' || c == b'\r')
             .map_or(src.len(), |k| a + k);
         let line = &src[start..end];
-        // (the text as UTF-8 when it is, else a character a byte: the
-        // underline's bytes then counted in the text shown)
+        // (the text as UTF-8 when it is, else a byte at a time, those
+        // past 127 as TeX prints them (§49, `^^d2`): the renderer counts
+        // columns in characters and slices at them, so the text shown is
+        // one byte a character; the underline's bytes are counted in it)
         let lossy = std::str::from_utf8(line).is_err();
         let text = if lossy {
-            crate::tex::chars(line)
+            printable(line)
         } else {
             String::from_utf8_lossy(line).into_owned()
         };
         let pos = |k: usize| {
             if lossy {
-                crate::tex::chars(&line[..k]).len()
+                printable(&line[..k]).len()
             } else {
                 k
             }
@@ -110,6 +112,20 @@ pub fn from_diagnostic(
         p.text = text;
     }
     p
+}
+
+/// Bytes as TeX prints them (§49): those past 127 as `^^` and two
+/// lowercase hex digits, the rest as they are.
+fn printable(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len());
+    for &c in b {
+        if c < 128 {
+            s.push(char::from(c));
+        } else {
+            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("^^{c:02x}"));
+        }
+    }
+    s
 }
 
 /// The file names `line` opens with `(` and closes with `)`, as TeX
@@ -273,6 +289,43 @@ pub fn parse(log: &str, main: &str) -> Vec<Problem> {
     out
 }
 
+/// The underline `start..end` (bytes of `text`) on whole characters:
+/// the renderer slices `text` at both ends, and a line held a character
+/// a byte (Latin-1 text, not UTF-8) has characters of two bytes, so a
+/// byte count from the transcript or a `+ 1` can fall inside one. The
+/// start goes back to its character's first byte, the end on to the
+/// next boundary, and the span covers one character at least.
+fn span(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let floor = |mut k: usize| {
+        k = k.min(text.len());
+        while !text.is_char_boundary(k) {
+            k -= 1;
+        }
+        k
+    };
+    let ceil = |mut k: usize| {
+        k = k.min(text.len());
+        while !text.is_char_boundary(k) {
+            k += 1;
+        }
+        k
+    };
+    let mut a = floor(start);
+    let mut b = ceil(end.max(a));
+    if a == b {
+        match text[a..].chars().next() {
+            Some(c) => b = a + c.len_utf8(),
+            None => {
+                a = text[..a]
+                    .chars()
+                    .next_back()
+                    .map_or(a, |c| a - c.len_utf8());
+            }
+        }
+    }
+    (a, b)
+}
+
 /// The problem as a compiler's report.
 pub fn render(p: &Problem, color: bool) -> String {
     let origin = p.file.clone().unwrap_or_default();
@@ -299,8 +352,7 @@ pub fn render(p: &Problem, color: bool) -> String {
     };
     let mut m = level.title(&p.message);
     if let Some(n) = p.line.filter(|_| !p.text.is_empty()) {
-        let end = p.end.min(p.text.len()).max(1);
-        let start = p.start.min(end - 1);
+        let (start, end) = span(&p.text, p.start, p.end);
         m = m.snippet(
             Snippet::source(&p.text)
                 .line_start(n)
@@ -425,6 +477,54 @@ mod tests {
         assert_eq!(q.text, "word _x");
         assert_eq!(&q.text[q.start..q.end], "_");
         assert_eq!(q.context, ["<inserted text> ‸ $"]);
+    }
+
+    /// A line held a character a byte (koi8-r, not UTF-8): its bytes
+    /// past 127 shown as `^^xx`, the underline on the control symbol, and
+    /// the renderer never slices inside a character (it panicked: "end
+    /// byte index 7 is not a char boundary; it is inside 'Ò'").
+    #[test]
+    fn latin1_line_renders() {
+        let src = b"\\catcode `\\\xd2=12 \\lccode `\\\xd2=240\n";
+        let d = phitex_tex::Diagnostic {
+            file: "./k7in.tex".to_owned(),
+            range: (10, 10),
+            line: 1,
+            severity: phitex_tex::Severity::Error,
+            message: "Undefined control sequence".to_owned(),
+            context: String::new(),
+            help: None,
+        };
+        let p = from_diagnostic(&d, Some(src), false);
+        assert_eq!(p.text, "\\catcode `\\^^d2=12 \\lccode `\\^^d2=240");
+        assert_eq!(&p.text[p.start..p.end], "\\^^d2");
+        let r = render(&p, false);
+        assert!(r.contains("k7in.tex:1"), "{r}");
+    }
+
+    /// Underlines on whole characters, whatever the offsets say: inside a
+    /// two-byte character, empty, at the end.
+    #[test]
+    fn spans_on_char_boundaries() {
+        let t = "\u{d2}\u{d2}\u{d2}\\x";
+        assert_eq!(span(t, 1, 1), (0, 2));
+        assert_eq!(span(t, 3, 5), (2, 6));
+        assert_eq!(span(t, 7, 7), (7, 8));
+        assert_eq!(span(t, 8, 8), (7, 8));
+        for (a, b) in [(0, 1), (1, 3), (5, 7), (7, 8), (2, 2)] {
+            let mut p = Problem {
+                message: "x".to_owned(),
+                file: Some("u.tex".to_owned()),
+                line: Some(1),
+                text: t.to_owned(),
+                start: a,
+                end: b,
+                ..Problem::default()
+            };
+            let _ = render(&p, false);
+            p.text = format!("\u{e9}\u{e9} {t}");
+            let _ = render(&p, false);
+        }
     }
 
     #[test]
