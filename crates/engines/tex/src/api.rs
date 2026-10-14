@@ -1666,29 +1666,6 @@ impl Graph {
                 self.marks_decl.push((f, ValueId::UNIT));
                 asked = true;
             }
-            // a document node's flush points: their `pgst:at:<node>:<k>`
-            // loop-backs declared (`flushdecl:<node>:<k>`), UNIT (the
-            // state as it is) in round one
-            let fdecl: Vec<(Field, String)> = {
-                let v = self.eng.values();
-                r.env_waits
-                    .iter()
-                    .filter_map(|&(_, f)| {
-                        field_name(v, f)
-                            .strip_prefix("flushdecl:")
-                            .map(|k| (f, k.to_owned()))
-                    })
-                    .collect()
-            };
-            for (f, key) in fdecl {
-                if self.marks_decl.iter().any(|&(g, _)| g == f) {
-                    continue;
-                }
-                let lb = self.eng.values().field(&format!("pgst:at:{key}"));
-                self.eng.declare_loopback(lb, ValueId::UNIT);
-                self.marks_decl.push((f, ValueId::UNIT));
-                asked = true;
-            }
             // files a run opened for writing: their `wfile:` loop-backs
             // declared (`wfiledecl:<name>`)
             let wdecl: Vec<String> = {
@@ -3746,6 +3723,11 @@ fn declare_fields(eng: &mut Engine) {
     eng.declare_accumulator(lines, Arc::new(SumMonoid));
     // what each page's output routine leaves for the next: a
     // loop-back the page builder's fold reads from the previous round
+    // the state after the page each flush point opens, by flush point
+    // (`[node, k, value]`, the writer's fold): one field, declared here,
+    // so a flush point costs no declaration round
+    let f = eng.values().field(crate::page::FLUSHES);
+    eng.declare_loopback(f, ValueId::UNIT);
     // `\count0..9` as the first page's routine reads them, when the
     // text has a flush point (the writer's fold, `page::FinalState`)
     let f = eng.values().field("pgread0");
