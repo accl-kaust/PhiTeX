@@ -155,6 +155,8 @@ impl Aux {
             out_readers: self.out_readers.clone(),
             publishes: self.publishes.clone(),
             contribs: self.contribs.clone(),
+            static_contribs: self.static_contribs,
+            decl_mask: self.decl_mask,
             claimed: self.claimed.clone(),
             pend_fields: self.pend_fields.clone(),
             claimed_by: self.claimed_by,
@@ -264,6 +266,7 @@ impl Report {
             refuted_nodes,
             refutations_max,
             declarations_refuted,
+            static_contribs_refuted,
             fuel_outs,
             steps,
             values_freed,
@@ -324,6 +327,7 @@ impl Report {
         self.refuted_nodes += refuted_nodes;
         self.refutations_max = self.refutations_max.max(refutations_max);
         self.declarations_refuted += declarations_refuted;
+        self.static_contribs_refuted += static_contribs_refuted;
         self.fuel_outs += fuel_outs;
         self.steps += steps;
         self.values_freed += values_freed;
