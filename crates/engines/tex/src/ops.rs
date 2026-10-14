@@ -189,6 +189,14 @@ impl Operation for Exec {
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         crate::hints::reads(v, args)
     }
+    /// The lines of its own text the node begins (`lines`, by file:
+    /// [`crate::run::Run::doc_lines`]): readers of `\inputlineno` fold
+    /// them without waiting for its run. (A node that claims a sibling
+    /// begins the sibling's lines too: its run refutes this, and the
+    /// readers after it run again.)
+    fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(vec![(v.field("lines"), crate::run::text_lines(v, args))])
+    }
     /// No scope effect where the text says the command opens and closes
     /// nothing ([`crate::hints`]); otherwise known when it runs (the
     /// scope's kind comes from the run).
