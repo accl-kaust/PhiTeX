@@ -85,5 +85,5 @@ repro!(
 );
 repro!(
     table_float_lost,
-    "corpus: \\caption + \\centering + tabular in a table float: 'Float(s) lost' (b7646c77), first cause in 8 of 136 arXiv papers; owner pagechain (pgstfix on dev 301ef3af)"
+    "corpus (green on dev since 301ef3af, pagechain's pgstfix; kept as a heavy regression check): \\caption + \\centering + tabular in a table float lost the float ('Float(s) lost') on b7646c77, first cause in 8 of 136 arXiv papers"
 );
