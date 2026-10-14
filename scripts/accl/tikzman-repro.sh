@@ -8,10 +8,10 @@ bin=$1 dir=$2
 export SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 \
   shell_escape=f openout_any=p openin_any=p NO_COLOR=1 HOME=$w/home PHITEX_CACHE_DIR=$w/cache
 mkdir -p $HOME
-for f in "$dir"/*.ini.tex "$dir"/[!k]*.tex; do [ -f "$f" ] || continue; case $f in *in.tex) continue;; esac
+for f in "$dir"/*.ini.tex "$dir"/[!k]*.tex; do [ -f "$f" ] || continue; case $(basename $f) in *in.tex|*-*.tex) continue;; esac
   n=$(basename "$f" .tex)
   d=$w/repro/$n; rm -rf $d; mkdir -p $d/o $d/p
-  cp "$f" $d/o/; cp "$f" $d/p/; for x in "$dir"/${n%.ini}in.tex; do [ -f "$x" ] && cp "$x" $d/o/ && cp "$x" $d/p/; done
+  cp "$f" $d/o/; cp "$f" $d/p/; for x in "$dir"/${n%.ini}in.tex "$dir"/${n%.ini}-*.tex; do [ -f "$x" ] && cp "$x" $d/o/ && cp "$x" $d/p/; done
   case $n in
     *.ini) # (an -ini job: pdfTeX's -ini -etex on both sides)
       (cd $d/o && timeout 300 pdftex -ini -etex -interaction=nonstopmode $n.tex > term.txt 2>&1)

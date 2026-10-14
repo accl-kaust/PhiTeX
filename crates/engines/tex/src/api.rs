@@ -463,6 +463,10 @@ struct Cached {
     env: Env,
     /// The prelude's evaluation errors: such a prelude is not cached.
     errors: Vec<String>,
+    /// TeX's errors in the prelude (a format whose text stops on them),
+    /// at their places in its files: reported with every build on it,
+    /// and such a prelude is never exported.
+    diags: Vec<Diagnostic>,
 }
 
 /// Prelude environments by the hash of the prelude's text; each is good
@@ -799,6 +803,7 @@ fn deserialise_as(b: &[u8], layout: u32, engine: u64) -> Option<Cached> {
         reads,
         env: Arc::new(env),
         errors: Vec::new(),
+        diags: Vec::new(),
     })
 }
 
@@ -2364,6 +2369,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let m_supply = mem_mb();
     let mut m_settle = m_supply;
     let mut t_settle = t_supply;
+    let mut diags = Vec::new();
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
         let f = g.eng.values().field(name);
@@ -2385,6 +2391,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         if time {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
+        diags = prelude_diagnostics(&g, unit, &as_file(p), finder);
         t_settle = t_start.elapsed();
         m_settle = mem_mb();
         env = final_bindings(&g, unit, end, env);
@@ -2417,6 +2424,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         reads: g.reads.clone(),
         env: e,
         errors: g.eval_errors.clone(),
+        diags,
     });
     if c.errors.is_empty() {
         env_cache()
@@ -2427,6 +2435,97 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             .push(c.clone());
     }
     c
+}
+
+/// The name a diagnostic in the prelude's own text carries (its
+/// `\\input`s carry their files' names).
+pub const PRELUDE_NAME: &str = "(format)";
+
+/// TeX's errors in the prelude (`text`, its own text) at their places:
+/// the file and line, TeX's context (§318), as [`Build::diagnostics`]
+/// places a document's.
+fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> Vec<Diagnostic> {
+    let v = g.eng.values();
+    let entries = g
+        .eng
+        .acc_value(unit, v.field("diags"))
+        .map(|s| v.seq_to_vec(s))
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for e in entries {
+        let xs = list_of(v, e);
+        let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
+        if int(0) == 0 {
+            continue;
+        }
+        let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
+        let loc = usize::try_from(int(6)).unwrap_or(0);
+        let name = xs
+            .get(2)
+            .filter(|&&n| n != ValueId::UNIT)
+            .map(|&n| str_of(v, n));
+        // (the file's characters are its bytes; the prelude's own text
+        // is its characters)
+        let (file, chars, at): (String, Vec<char>, usize) = match name {
+            Some(n) if n != DOC_NAME && int(3) >= 0 => {
+                let bytes = finder(n.trim_start_matches("./"))
+                    .map(|(_, b)| b)
+                    .unwrap_or_default();
+                let at = usize::try_from(int(3)).unwrap_or(0) + loc;
+                (n, bytes.iter().map(|&b| char::from(b)).collect(), at)
+            }
+            _ => {
+                let chars: Vec<char> = text.chars().collect();
+                let at = if int(3) >= 0 {
+                    let b = usize::try_from(int(3)).unwrap_or(0);
+                    text.get(..b.min(text.len()))
+                        .map_or(0, |t| t.chars().count())
+                        + loc
+                } else {
+                    0
+                };
+                (PRELUDE_NAME.to_owned(), chars, at)
+            }
+        };
+        let ci = at.min(chars.len());
+        let line = chars[..ci].iter().filter(|&&c| c == '\n').count() + 1;
+        let ls = chars[..ci]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |k| k + 1);
+        let le = chars[ci..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(chars.len(), |k| ci + k);
+        let before: String = chars[ls..ci].iter().collect();
+        let after: String = chars[ci..le]
+            .iter()
+            .collect::<String>()
+            .trim_end_matches('\r')
+            .to_owned();
+        let start = if message == "Undefined control sequence" {
+            before
+                .rfind('\\')
+                .map_or(ci, |k| ls + before[..k].chars().count())
+        } else {
+            ci
+        };
+        let lead = format!("l.{line} ");
+        let context = format!(
+            "{lead}{before}\n{}{after}",
+            " ".repeat(lead.len() + before.chars().count())
+        );
+        out.push(Diagnostic {
+            file,
+            range: (start, ci),
+            line,
+            severity: Severity::Error,
+            message,
+            context,
+            help: None,
+        });
+    }
+    out
 }
 
 /// The prelude's bindings at its end (`end`, the mark after its text):
@@ -2994,7 +3093,14 @@ impl Build {
     /// one).
     #[must_use]
     pub fn prelude_complete(&self) -> bool {
-        self.prelude.errors.is_empty()
+        self.prelude.errors.is_empty() && self.prelude.diags.is_empty()
+    }
+
+    /// TeX's errors in the prelude, at their places in its files (a
+    /// format that stopped on them): every build on it reports them.
+    #[must_use]
+    pub fn prelude_diagnostics(&self) -> &[Diagnostic] {
+        &self.prelude.diags
     }
 
     /// The prelude's environment, serialised, for
@@ -3370,6 +3476,7 @@ impl Build {
                 help,
             });
         }
+        out.extend(self.prelude.diags.iter().cloned());
         for m in self.prelude.errors.iter().chain(&self.g.eval_errors) {
             out.push(Diagnostic {
                 file: docname.clone(),
@@ -3811,6 +3918,7 @@ mod prelude_tests {
             reads: vec![("a.tex".to_owned(), 9)],
             env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
             errors: Vec::new(),
+            diags: Vec::new(),
         };
         let b = serialise(&c);
         assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());

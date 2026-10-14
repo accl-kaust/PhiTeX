@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ci"))
 import common  # noqa: E402
 
-DOC = Path("/usr/share/doc/texlive")
+DOC = Path(os.environ.get("TIKZMAN_DOC", "/usr/share/doc/texlive"))
 REL = "generic/pgf"
 MAIN = "pgfmanual.tex"
 ID = "generic_pgf_pgfmanual"
@@ -251,8 +251,8 @@ def one(binary, oracle, n, cache, format_cold, do_edit, tag):
 
 def run(args):
     # ("-": the binary and oracle the job copied in: $w/course, $w/aux)
-    binary = W / "course" / "phitex" if args[0] == "-" else Path(args[0])
-    oracle = W / "aux" / "oracle" if args[1] == "-" else Path(args[1])
+    binary = W / "course" / "phitex" if args[0] == "-" else Path(args[0]).resolve()
+    oracle = W / "aux" / "oracle" if args[1] == "-" else Path(args[1]).resolve()
     ns = [int(x) for x in args[2].split(",")]
     format_cold = "--format-cold" in args
     do_edit = "--no-edit" not in args
