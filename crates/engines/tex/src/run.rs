@@ -651,12 +651,20 @@ impl<'c, 'a> Run<'c, 'a> {
                     ctx.push(format!("k{}", l.kind));
                 }
             }
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let frames: Vec<&str> = bt
+                .lines()
+                .filter(|l| l.contains("phitex_tex::") && !l.contains("trace_read"))
+                .map(str::trim)
+                .take(12)
+                .collect();
             eprintln!(
-                "reads: node {} {name} at {} (pulled {}) | {}",
+                "reads: node {} {name} at {} (pulled {}) | {} | bt {}",
                 self.cx.node().raw(),
                 v.render(self.cur.tok.encode(v)),
                 self.pulled,
-                ctx.join(" | ")
+                ctx.join(" | "),
+                frames.join(" < ")
             );
         }
         if parked || HEADS.iter().any(|h| name.starts_with(h)) {
