@@ -1310,7 +1310,7 @@ impl Graph {
                 let _ = write!(out, "\n  written file {name}");
             }
             for f in &self.wdefs {
-                let _ = write!(out, "\n  read-back field {f}");
+                let _ = write!(out, "\n  read-back field {}", f.replace('\u{1}', " "));
             }
         }
         for id in ids {
@@ -1544,7 +1544,7 @@ impl Graph {
                 .wkeys_guess
                 .iter()
                 .filter(|(n, _)| n == name && defines_only(name))
-                .flat_map(|(_, ks)| ks.iter().cloned())
+                .flat_map(|(_, ks)| ks.iter().map(|k| wdef_id(name, k)))
                 .collect();
             for k in keys {
                 if !self.wdefs.contains(&k) {
@@ -1698,8 +1698,9 @@ impl Graph {
                 let acc = |n: &str| self.eng.acc_value(unit, v.field(n));
                 let defs = written_defs(v, acc("wplan"), acc("streams"));
                 let mut new = Vec::new();
-                for (_, ds) in defs {
+                for (name, ds) in defs {
                     for (f, _) in ds {
+                        let f = wdef_id(&name, &f);
                         if !self.wdefs.contains(&f) && !new.contains(&f) {
                             new.push(f);
                         }
@@ -1931,6 +1932,25 @@ pub fn guess_wkeys(text: &str) -> Vec<String> {
     }
     add("cs:@abspage@last".to_owned());
     keys
+}
+
+/// The id of file `file`'s read-back definition of field `f`
+/// (`wdef:<id>`): per file, as two files that define one field (LaTeX's
+/// scratch macros, `\reserved@a`) each give their own value, the last
+/// file read the one in force.
+/// A key already naming its file (a read-back nested in another file's
+/// line, [`crate::run::Run::read_back`]) is its own id.
+pub(crate) fn wdef_id(file: &str, f: &str) -> String {
+    if f.contains('\u{1}') {
+        f.to_owned()
+    } else {
+        format!("{file}\u{1}{f}")
+    }
+}
+
+/// The field a read-back key defines (a key naming its file: after it).
+pub(crate) fn wdef_field(k: &str) -> &str {
+    k.rsplit('\u{1}').next().unwrap_or(k)
 }
 
 fn defines_only(name: &str) -> bool {
