@@ -2076,7 +2076,6 @@ impl FinalState {
         // (k = steps: after the last)
         let tdefs: Vec<Vec<Field>> = cx
             .use_field(v.field("pp:tdefs"))?
-            .filter(|_| !crate::exec::env_flag!("PHITEX_NO_TDEFS"))
             .map(|x| {
                 list_of(v, x)
                     .into_iter()
