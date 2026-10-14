@@ -537,7 +537,7 @@ impl Run<'_, '_> {
     /// The paragraph's level when groups opened inside the paragraph
     /// are still open above it (`abc{def\\par}`): the innermost level,
     /// under groups that share its list only.
-    fn par_level_under_groups(&self) -> Option<usize> {
+    pub(crate) fn par_level_under_groups(&self) -> Option<usize> {
         let k = self
             .nest
             .iter()
@@ -555,7 +555,7 @@ impl Run<'_, '_> {
     /// groups stay open, now in the vertical list the paragraph was in
     /// (their saved definitions restored at their own close, as ever).
     /// Returns the paragraph's list.
-    fn end_graf_under_groups(&mut self, k: usize) -> R<Vec<ValueId>> {
+    pub(crate) fn end_graf_under_groups(&mut self, k: usize) -> R<Vec<ValueId>> {
         let (mode, lid) = if let Some(b) = k.checked_sub(1) {
             (self.nest[b].mode, self.nest[b].lid)
         } else {
