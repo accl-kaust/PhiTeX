@@ -603,6 +603,13 @@ impl<'c, 'a> Run<'c, 'a> {
             return;
         }
         let old = self.st.id_of(loc, v).unwrap_or(ValueId::UNIT);
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: wpre {name} = {} (node {})",
+                crate::val::show_def(v, old),
+                self.cx.node().raw()
+            );
+        }
         let grp = self.innermost_group();
         self.st.set(pl, Native::Raw(old), true, grp);
     }
