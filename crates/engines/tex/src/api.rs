@@ -1162,6 +1162,10 @@ struct Graph {
     /// (name, field, value, hash), merged into `files`/`absent`/`reads`
     /// before the environment is set again (`Graph::provide`).
     provided: Arc<std::sync::Mutex<Vec<Provided>>>,
+    /// The flush points the runs met with no loop-back declared yet
+    /// (`flushdecl:<node>:<k>`, answered absent by the provider): all
+    /// declared after the evaluation, at once.
+    flush_asked: Arc<std::sync::Mutex<Vec<String>>>,
     /// The document files sliced into the document's regions
     /// (`crate::inputs`), and their texts as edited (`Build::edit_file`)
     /// over the finder's.
@@ -1270,6 +1274,7 @@ impl Graph {
             sched: phitex_defuse::Greedy::default(),
             eval_errors: Vec::new(),
             provided: Arc::default(),
+            flush_asked: Arc::default(),
             inputs_read: Vec::new(),
             overrides: Arc::default(),
         }
@@ -1377,8 +1382,18 @@ impl Graph {
         // say) is answered from here, not read and converted again
         let answered: std::sync::Mutex<FxHashMap<String, Option<ValueId>>> =
             std::sync::Mutex::new(FxHashMap::default());
+        let flush_asked = Arc::clone(&self.flush_asked);
         self.eng.set_env_provider(Box::new(move |v, f| {
             let name = v.as_str(f.0)?;
+            // a flush point's loop-back, not declared yet: the run goes on
+            // with none (round one's value), and every one met in the
+            // evaluation is declared after it at once (`settle`)
+            if let Some(key) = name.strip_prefix("flushdecl:") {
+                if let Ok(mut l) = flush_asked.lock() {
+                    l.push(key.to_owned());
+                }
+                return Some(None);
+            }
             let name = name.strip_prefix("file:")?;
             if written.iter().any(|w| w == name) {
                 return None;
@@ -1680,6 +1695,19 @@ impl Graph {
                     })
                     .collect()
             };
+            let asked_now: Vec<String> = self
+                .flush_asked
+                .lock()
+                .map(|mut l| std::mem::take(&mut *l))
+                .unwrap_or_default();
+            let fdecl: Vec<(Field, String)> = fdecl
+                .into_iter()
+                .chain(
+                    asked_now
+                        .into_iter()
+                        .map(|k| (self.eng.values().field(&format!("flushdecl:{k}")), k)),
+                )
+                .collect();
             for (f, key) in fdecl {
                 if self.marks_decl.iter().any(|&(g, _)| g == f) {
                     continue;
