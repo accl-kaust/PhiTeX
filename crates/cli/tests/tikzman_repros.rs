@@ -134,3 +134,26 @@ fn aux_group_across_lines() {
     );
     assert_eq!(code, Some(0), "{log}");
 }
+
+/// Hint-quality diagnostics (undeclared definitions, a hint's regime
+/// violated) never fail a build: `envs.tex` of the LaTeX fixtures, whose
+/// runs report undeclared definitions, exits 0 with its PDF.
+#[test]
+fn engine_diagnostics_do_not_fail_the_build() {
+    let src = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../oracle/fixtures/latex/docs/envs.tex"),
+    )
+    .unwrap();
+    let (code, log) = build_latex("tikzman-envs", &src, &[]);
+    assert!(
+        !log.contains("\n! undeclared"),
+        "diagnostics in the log:\n{log}"
+    );
+    assert!(
+        !log.contains("\n! hint regime"),
+        "diagnostics in the log:\n{log}"
+    );
+    assert_eq!(code, Some(0), "{log}");
+    let pdf = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tikzman-envs/main.pdf");
+    assert!(pdf.is_file(), "no PDF");
+}
