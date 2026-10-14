@@ -604,6 +604,14 @@ impl<'c, 'a> Run<'c, 'a> {
                 .any(|l| l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b)
         });
         if !still {
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                eprintln!(
+                    "aux-trace: read-back macro gone at {}: had {:?}, levels {:?}",
+                    crate::val::field_name(v, self.loc_field(loc)),
+                    self.read_back_at,
+                    self.input.levels
+                );
+            }
             self.read_back_done = false;
             return;
         }
