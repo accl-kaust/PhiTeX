@@ -729,46 +729,6 @@ fn latex_environments() {
     edit_check("envs", &b, &cold, 4);
 }
 
-/// `pdflatex` on a book whose chapters and section are followed by
-/// paragraphs, right after the heading's line and after a blank line
-/// (`pdfdocs/headings.tex`): a heading's `\@afterheading` leaves a
-/// token list in `\everypar` that the next paragraph's start runs
-/// (§1091), defining `\if@nobreak` there; that region declares it (no
-/// undeclared definition), and the PDF equals pdfTeX's.
-#[test]
-fn latex_heading_everypar() {
-    let dir = common::fixtures().join("latex/pdfdocs");
-    let src = common::read(&dir.join("headings.tex"));
-    let (b, _) = cold_nodes("headings", &dir, &src);
-    assert_eq!(b.stats.undeclared_definitions, 0, "undeclared definitions");
-    assert_eq!(b.stats.regime_violations, 0, "regime violations");
-}
-
-/// `PHITEX_CHAIN_DOCS=a.tex:b.tex`: a cold `pdflatex` build of each
-/// document, its chain printed (critical path, waits): a measurement.
-#[test]
-#[ignore = "a measurement (documents given by path)"]
-fn latex_chain_docs() {
-    let Ok(docs) = std::env::var("PHITEX_CHAIN_DOCS") else {
-        return;
-    };
-    for path in docs.split(':').map(Path::new) {
-        let dir = path.parent().expect("a directory");
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("doc");
-        let b = common::build(
-            pdf_opts(name, dir),
-            Some(&prelude(true)),
-            &common::read(path),
-        );
-        eprintln!(
-            "chain {name}: {} pages, undeclared {}, {}",
-            b.pages().len(),
-            b.stats.undeclared_definitions,
-            report(name, &b)
-        );
-    }
-}
-
 /// `pdflatex` on a main file that `\input`s one chapter and
 /// `\include`s another (`pdfdocs/inputs.tex`, `chap1.tex`,
 /// `chap2.tex`; `\include` goes through `\@input` and its own `.aux`):

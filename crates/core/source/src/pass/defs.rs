@@ -321,21 +321,6 @@ impl Definitions {
         self.bodies.contains_key(OUTPUT).then(|| c.call(OUTPUT))
     }
 
-    /// Every name with a visible body, and its last body's text.
-    pub(crate) fn last_bodies(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.bodies
-            .iter()
-            .filter_map(|(n, v)| v.last().map(|b| (n.as_str(), b.what.text.as_str())))
-    }
-
-    /// Whether a body these definitions give assigns `\everypar` (a
-    /// paragraph-start list's setter, [`super::ParMachine`]).
-    #[must_use]
-    pub fn assigns_everypar(&self) -> bool {
-        self.last_bodies()
-            .any(|(n, t)| !n.starts_with('\0') && t.contains("\\everypar"))
-    }
-
     /// What calling `name` may define (through `self`, then `prelude`).
     #[must_use]
     pub fn call_defines(&self, prelude: &Definitions, name: &str) -> DefSet {

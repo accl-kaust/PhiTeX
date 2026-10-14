@@ -319,7 +319,7 @@ fn slice_keys(
             doc_nodes(v, text, inc, finder, read)
         }
         None if text.is_empty() => Vec::new(),
-        None => vec![(key(text, true), DocNode::Doc(0, text.len(), None))],
+        None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
     }
 }
 
@@ -1811,7 +1811,6 @@ impl Graph {
     ) -> (Vec<(u64, NodeId, Src)>, Incr) {
         let mut incr = Incr::new(defs);
         incr.threads = self.threads;
-        incr.finder = finder.cloned();
         let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr), finder);
         (nodes, incr)
     }
@@ -1843,7 +1842,7 @@ impl Graph {
                 n
             }
             None if text.is_empty() => Vec::new(),
-            None => vec![(key(text, true), DocNode::Doc(0, text.len(), None))],
+            None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
         };
         let t1 = t0.elapsed();
         // (the nodes' arguments made on the pool: values are named by
@@ -1972,9 +1971,7 @@ fn register_doc(v: &Values, inc: &Incr) {
 /// A document node's text: a slice of the document (its bytes), or one
 /// of an `\\input` file sliced in its place (`crate::inputs`).
 enum DocNode {
-    /// Its bytes, and what the paragraph-start token lists its paragraph
-    /// starts run may define, added to its hint ([`crate::hints::ParLists`]).
-    Doc(usize, usize, Option<Arc<crate::hints::Hint>>),
+    Doc(usize, usize),
     File(crate::inputs::Piece),
 }
 
@@ -2006,7 +2003,7 @@ fn doc_nodes(
             } else {
                 k
             };
-            (k, DocNode::Doc(s, e, None))
+            (k, DocNode::Doc(s, e))
         };
         let Some(f) = finder.filter(|_| c.input.names) else {
             out.extend(slices.map(doc_slice));
@@ -2029,22 +2026,6 @@ fn doc_nodes(
             }
         }
     }
-    // (the paragraph-start token lists along the nodes, in order: a
-    // node whose hint takes what they may define is keyed apart)
-    let mut lists = crate::hints::ParLists::new();
-    for (k, n) in &mut out {
-        let delta = match n {
-            DocNode::Doc(s, _, l) => {
-                let (c, at) = inc.chunk_at(*s);
-                *l = lists.step(&c.th, at);
-                l.clone()
-            }
-            DocNode::File(p) => p.par_lists(&mut lists),
-        };
-        if let Some(d) = delta {
-            *k = phitex_defuse::hash_bytes(*k, d.encode().as_bytes());
-        }
-    }
     out
 }
 
@@ -2053,17 +2034,16 @@ fn doc_nodes(
 fn node_args(v: &Values, text: &str, incr: Option<&Incr>, n: &DocNode) -> Vec<ValueId> {
     match (n, incr) {
         (DocNode::File(p), _) => p.args(v, DOC_NAME),
-        (DocNode::Doc(s, e, lists), Some(inc)) => {
-            let (s, e) = (*s, *e);
+        (&DocNode::Doc(s, e), Some(inc)) => {
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
             // (a document node is a top-level node)
             a[1] = v.int(3);
             let (c, at) = inc.chunk_at(s);
-            a.push(crate::hints::hint_arg_in(v, &c.th, at, lists.as_deref()));
+            a.push(crate::hints::hint_arg(v, &c.th, at));
             a
         }
-        (&DocNode::Doc(s, e, _), None) => {
+        (&DocNode::Doc(s, e), None) => {
             let mut a = slice_args(v, &text[s..e], true);
             a.push(v.str(FORMAT_HINT));
             a
@@ -2082,7 +2062,7 @@ enum Src {
 impl Src {
     fn of(n: &DocNode) -> Src {
         match n {
-            &DocNode::Doc(s, e, _) => Src::Doc(s, e),
+            &DocNode::Doc(s, e) => Src::Doc(s, e),
             DocNode::File(p) => {
                 let (t, s, e) = p.span();
                 Src::File(t, s, e)
@@ -2134,7 +2114,7 @@ fn is_tex_text(name: &str) -> bool {
 /// The names a text loads (`\\input name`, `\\input{name}`,
 /// `\\RequirePackage{a,b}`, `\\LoadClass{c}`, `\\documentclass{c}`),
 /// each with the extensions to try.
-pub(crate) fn loaded_names(text: &str) -> Vec<String> {
+fn loaded_names(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for (cmd, ext) in [
         ("\\input", ""),
@@ -2227,21 +2207,6 @@ fn harvest_inputs(
         defs.harvest(&t, kind, id);
         order.push(id);
     }
-}
-
-/// Harvests into `defs` the files a document's `text` loads
-/// (`\\documentclass`, `\\usepackage`, …, [`loaded_names`]) that the
-/// finder resolves, then theirs, as the format's are ([`prelude_defs`]):
-/// file ids from `next_id`.
-pub(crate) fn harvest_loads(
-    text: &str,
-    finder: &Finder,
-    defs: &mut pass::Definitions,
-    next_id: &mut u32,
-) {
-    let mut order = Vec::new();
-    let mut seen = phitex_defuse::FxHashSet::default();
-    harvest_inputs(text, 0, finder, &[], defs, &mut order, &mut seen, next_id);
 }
 
 fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
