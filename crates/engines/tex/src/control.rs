@@ -1467,7 +1467,7 @@ impl Run<'_, '_> {
             None => out_name_ok_p(&name),
         };
         if !allowed {
-            self.log("error", &format!("I can't write on file `{name}'."))?;
+            self.log("error", &format!("I can't write on file `{name}'"))?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         }
         self.written_decl(&name)?;
