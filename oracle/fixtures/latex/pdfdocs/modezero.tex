@@ -1,0 +1,11 @@
+\documentclass{article}
+\makeatletter
+\def\mzl{\pdfliteral shipout{\@percentchar[\the\lastpenalty][\the\lastnodetype][\the\lastskip][\the\lastkern][\the\prevgraf]}}
+\makeatother
+\begin{document}
+\noindent\vbox{\hsize=100pt \vskip5pt\penalty7 \mzl
+\vskip3pt plus 1pt\mzl \kern2pt \mzl
+\noindent One two.\par \mzl}
+\setbox0\vbox{\vskip5pt\penalty7 \edef\x{[\the\lastpenalty][\the\lastnodetype]}\global\let\y\x}
+Text: \y
+\end{document}
