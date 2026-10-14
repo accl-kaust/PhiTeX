@@ -474,3 +474,24 @@ fn given_back_line_is_counted_once() {
         same("lineno", &b.output().0, &sequential(&d, doc));
     }
 }
+
+/// A text that defines at its base level and then opens a group it
+/// leaves open (as `\begin{document}` does before the `\begin` its
+/// `\ignorespaces` reads on into): the base-level definition outlives
+/// the group, the one inside it does not.
+#[test]
+fn base_definition_outlives_a_group_left_open() {
+    let d = dir("baselocal", &[]);
+    let doc = "\\def\\x{a}\\begingroup\\def\\y{b}\n\\message{in}\n\n\\endgroup\n\n\\def\\t{a}\\ifx\\x\\t \\else\\errmessage{lost x}\\fi\n\\ifx\\y\\undefined \\else\\errmessage{kept y}\\fi\n\\bye\n";
+    for spec in [Speculation::Off, Speculation::All] {
+        let b = build(&d, doc, spec, Vec::new());
+        note("baselocal", &b);
+        let errs: Vec<String> = b
+            .diagnostics()
+            .into_iter()
+            .filter(|x| x.message.contains("lost x") || x.message.contains("kept y"))
+            .map(|x| x.message)
+            .collect();
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+}
