@@ -65,14 +65,6 @@ impl Run<'_, '_> {
             }
         }
         self.log("ship", &s)?;
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-            eprintln!(
-                "aux-trace: ship {s} in page step {} node {} op {:?}",
-                self.page_index(),
-                self.cx.node().raw(),
-                self.cx.op()
-            );
-        }
         let mut side = Side::default();
         let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
             return Ok(());
@@ -287,8 +279,6 @@ impl Run<'_, '_> {
         let mut before: Vec<ValueId> = Vec::new();
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
-        let mut flushplan: Vec<ValueId> = Vec::new();
-        let mut flushed = phitex_defuse::FxHashSet::default();
         let mut folds = 0usize;
         let (mut tfx, mut tfold) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let mut j = 0;
@@ -341,7 +331,6 @@ impl Run<'_, '_> {
                     passed: out.passed,
                     writes: out.writes,
                     stuck: out.stuck,
-                    flushes: out.flushes,
                     items_v: v.list(items[a..b.max(a)].to_vec()),
                     start_v: PageStart {
                         idx: 0,
@@ -353,27 +342,6 @@ impl Run<'_, '_> {
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
             plan.extend(rec.writes.iter().copied());
-            // the flush points met folding this page: each follows the
-            // penalty the page before broke at (§1005 fires there, so
-            // the marker after it opens this page): the state after
-            // page j-1 (none before the first page: UNIT)
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                eprintln!(
-                    "aux-trace: plan page {j}: fired {} flushes {:?} stuck {}",
-                    rec.fired.is_some(),
-                    rec.flushes,
-                    rec.stuck
-                );
-            }
-            // (once each: a fold that read past the penalty may hand the
-            // marker to the next page's fold too)
-            for &(n, k) in &rec.flushes {
-                if !flushed.insert((n, k)) {
-                    continue;
-                }
-                let after = i64::try_from(j).unwrap_or(0) - 1;
-                flushplan.push(v.list(vec![v.int(n), v.int(k), v.int(after)]));
-            }
             for &node in &rec.passed {
                 if published.insert(node) {
                     let n = u64::from_ne_bytes(node.to_ne_bytes());
@@ -408,9 +376,6 @@ impl Run<'_, '_> {
         let pages = n_starts - 1;
         let wp = v.seq_unit(v.list(plan));
         self.contribute("wplan", wp);
-        if !flushplan.is_empty() {
-            self.contribute("flushplan", v.seq_unit(v.list(flushplan)));
-        }
         // each page's own material (`pp:items:<j>`, its start rebased to
         // it): a `brk` reads only its page, so an edit elsewhere on the
         // list wakes no other page's `brk`
@@ -669,13 +634,6 @@ impl Run<'_, '_> {
         let (b255, inserts, marks, held) =
             (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-            eprintln!(
-                "aux-trace: fire page step {} outputpenalty {output_penalty} count0 {:?}",
-                self.page_index(),
-                self.reg_int(0, 0).ok()
-            );
-        }
         // §1012: marks
         // (the marks before the page, from the plan: `pp:mk:<j>`)
         let (mut top, bot) = match mk.map(|x| list_of(v, x)) {
@@ -830,82 +788,6 @@ impl Run<'_, '_> {
     }
 
     /// Which page this step is (its first argument), or `MAX_PAGES`.
-    /// A document node forced the page out (§1005, a penalty of -10000
-    /// or less on the main vertical list: `\clearpage`): TeX's output
-    /// routine runs here, so what the text reads next of the state the
-    /// routines change (`\count0`, LaTeX's shipout counter at
-    /// `\enddocument`) is the state after the page that breaks here.
-    /// The node marks the point on the list (`T_FLUSH_AT`) and reads its
-    /// loop-back `pgst:at:<node>:<k>` (the writer publishes it from the
-    /// chain: `[counts, pairs]`), its fields read in place of the
-    /// engine's from here on; UNIT (the first round) leaves the state as
-    /// it is.
-    pub(crate) fn flush_point(&mut self) {
-        let v = self.v;
-        let op = self.cx.op();
-        if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
-            return;
-        }
-        let node = self.cx.node().raw();
-        let k = self.flushes;
-        self.flushes += 1;
-        let f = v.field(&format!("pgst:at:{node}:{k}"));
-        let decl = v.field(&format!("flushdecl:{node}:{k}"));
-        let at = v.list(vec![
-            v.int(nodes::T_FLUSH_AT),
-            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
-            v.int(i64::try_from(k).unwrap_or(0)),
-        ]);
-        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
-        // (read on the next count-register read, [`Run::flush_read`])
-        self.flush_pending = Some((decl, f));
-    }
-
-    /// The pending flush point's loop-back read: declared by the client
-    /// first (`flushdecl:<node>:<k>`, answered by `api::Graph::settle`;
-    /// the node then runs again), then its fields read in place of the
-    /// engine's from here on; UNIT (round one) leaves the state as it is.
-    pub(crate) fn flush_read(&mut self) -> R<()> {
-        let v = self.v;
-        let Some((decl, f)) = self.flush_pending.take() else {
-            return Ok(());
-        };
-        if !self.cx.is_loopback(f) {
-            self.cx.use_env(decl)?;
-            if !self.cx.is_loopback(f) {
-                return Ok(());
-            }
-        }
-        let read = self.cx.use_field(f)?;
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-            eprintln!(
-                "aux-trace: flush point {} reads {}",
-                crate::val::field_name(v, f),
-                read.map_or("none".to_owned(), |x| v.render(x))
-            );
-        }
-        let Some(x) = read.filter(|&x| x != ValueId::UNIT) else {
-            return Ok(());
-        };
-        let xs = list_of(v, x);
-        // (`\count0..9` after the page: not yet; read through, the
-        // chain's page number fed back here grows by one a round on
-        // LaTeX's `\enddocument` (its `\clearpage` + `\end` pages);
-        // `PHITEX_FLUSH_COUNTS=1` tries it)
-        if let Some(&cs) = xs.first()
-            && crate::exec::env_flag!("PHITEX_FLUSH_COUNTS")
-        {
-            self.preload_counts(cs);
-        }
-        if let Some(&pairs) = xs.get(1) {
-            for (g, y) in pgst_pairs(v, Some(pairs)) {
-                let l = self.loc_of(g);
-                self.st.preload(l, Some(y));
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn page_index(&self) -> usize {
         self.cx
             .args()
@@ -1036,8 +918,6 @@ fn set_params(v: &Values, p: &mut PageParams, x: ValueId) {
 struct PageFold {
     fired: Option<(Box<phitex_typeset::page::Fired>, Side, PageStart)>,
     passed: Vec<i64>,
-    /// The flush points met (`T_FLUSH_AT`): `[node, k]`.
-    flushes: Vec<(i64, i64)>,
     /// The immediate writes' entries met (`T_WRITE_AT`), in order.
     writes: Vec<ValueId>,
     stuck: bool,
@@ -1055,8 +935,6 @@ struct PlanPage {
     fired: Option<(Vec<ValueId>, PageStart)>,
     passed: Vec<i64>,
     writes: Vec<ValueId>,
-    /// The flush points met (`T_FLUSH_AT`): `[node, k]`.
-    flushes: Vec<(i64, i64)>,
     stuck: bool,
 }
 
@@ -1071,7 +949,6 @@ struct PlanMemo {
     fired: Option<(Vec<ValueId>, usize, Vec<crate::api::Tree>, PageStart)>,
     passed: Vec<i64>,
     writes: Vec<ValueId>,
-    flushes: Vec<(i64, i64)>,
     stuck: bool,
 }
 
@@ -1139,7 +1016,6 @@ fn plan_fold(
             }),
             passed: m.passed.clone(),
             writes: m.writes.clone(),
-            flushes: m.flushes.clone(),
             stuck: m.stuck,
         };
     }
@@ -1173,7 +1049,6 @@ fn plan_fold(
         }),
         passed: out.passed.clone(),
         writes: out.writes.clone(),
-        flushes: out.flushes.clone(),
         stuck: out.stuck,
     };
     {
@@ -1191,7 +1066,6 @@ fn plan_fold(
         fired,
         passed: out.passed,
         writes: out.writes,
-        flushes: out.flushes,
         stuck: out.stuck,
     }
 }
@@ -1229,7 +1103,6 @@ fn fold_page(
     let mut deadcycles = start.deadcycles;
     let mut passed = Vec::new();
     let mut writes = Vec::new();
-    let mut flushes = Vec::new();
     let mut class = |n: u16| -> InsertClass {
         for &c in classes {
             let xs = list_of(v, c);
@@ -1292,7 +1165,6 @@ fn fold_page(
                     fired: None,
                     passed,
                     writes,
-                    flushes,
                     stuck: false,
                     reach,
                 };
@@ -1304,10 +1176,6 @@ fn fold_page(
             }
             nodes::T_MARKS_AT => {
                 passed.push(crate::val::int_at(v, x, 1));
-                continue;
-            }
-            nodes::T_FLUSH_AT => {
-                flushes.push((crate::val::int_at(v, x, 1), crate::val::int_at(v, x, 2)));
                 continue;
             }
             nodes::T_WRITE_AT => {
@@ -1359,7 +1227,6 @@ fn fold_page(
                 fired: Some((f, side, end)),
                 passed,
                 writes,
-                flushes,
                 stuck: false,
                 reach,
             };
@@ -1369,7 +1236,6 @@ fn fold_page(
         fired: None,
         passed,
         writes,
-        flushes,
         stuck: ending.is_some() && !pb.page.is_empty(),
         reach,
     }
@@ -1843,8 +1709,6 @@ impl FinalState {
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
         let mut cur = ValueId::UNIT;
-        // the state after each page, for the flush points' loop-backs
-        let mut after: Vec<(ValueId, ValueId)> = Vec::new();
         // `\\count0..9` before the chain, then as folded
         let mut counts = Self::counts(cx)?;
         let ints =
@@ -1890,14 +1754,6 @@ impl FinalState {
                     counts[k] += out_counts[k] - read_counts[k];
                 }
             }
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                eprintln!(
-                    "aux-trace: fold step {j}: read count0 {:?} out {:?} -> {}",
-                    read_counts.first(),
-                    out_counts.first(),
-                    counts[0]
-                );
-            }
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
                 let pre = cx.use_field(f)?;
@@ -1938,36 +1794,8 @@ impl FinalState {
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
             cx.publish(v.field(&format!("pgdef:{j}")), cs);
             cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
-            after.resize(j + 1, (ValueId::UNIT, ValueId::UNIT));
-            after[j] = (cs, cur);
         }
         Self::log_refuted(o, refuted);
-        // the flush points (`flushplan`: `[node, k, page]`): the state
-        // after that page, UNIT before the first
-        let fp = cx.acc_range(v.field("flushplan"), None)?;
-        for e in v.seq_to_vec(fp).iter().flat_map(|&e| list_of(v, e)) {
-            let xs = list_of(v, e);
-            let [n, k, p] = xs.as_slice() else { continue };
-            // (the node id as the marker carries it: a signed value)
-            let node = u64::from_ne_bytes(int_of(v, *n).to_ne_bytes());
-            let f = v.field(&format!("pgst:at:{node}:{}", int_of(v, *k)));
-            if !cx.is_loopback(f) {
-                continue;
-            }
-            let x = usize::try_from(int_of(v, *p))
-                .ok()
-                .and_then(|p| after.get(p))
-                .map_or(ValueId::UNIT, |&(cs, st)| v.list(vec![cs, st]));
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                eprintln!(
-                    "aux-trace: flush point {node}:{} after page {}: {} (before the chain {counts:?})",
-                    int_of(v, *k),
-                    int_of(v, *p),
-                    v.render(x)
-                );
-            }
-            cx.publish(f, x);
-        }
         Ok(FinalState {
             map: state.into_values().collect(),
         })
