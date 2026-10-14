@@ -576,16 +576,14 @@ def cmd_phitex(a):
             res["runs"].append(r)
             if r["timeout"]:
                 break
-        if any(r["timeout"] for r in res["runs"]):
-            break
     # the timed session: PHITEX_TEX_TIME on, the cold build then one edit
-    if a.edit and not any(r["timeout"] for r in res["runs"]):
+    if a.edit and not any(r["timeout"] for r in res["runs"] if r["mode"] == "relaxed"):
         e = pick_edit(doc, a.main)
         n = threads[-1]
         fresh_run(doc, job)
         if e:
             res["edit"] = {k: v for k, v in e.items() if k != "new"}
-            r = watch(binary, n, a.main, timeout + 600, edit=(e["file"], None, e["new"]), tex_time=True, tag="timed")
+            r = watch(binary, n, a.main, 2 * timeout, edit=(e["file"], None, e["new"]), tex_time=True, tag="timed")
             pdf = RUN / f"{job}.pdf"
             if pdf.exists():
                 r["edited_pdf_sha256"] = common.sha256_file(pdf)

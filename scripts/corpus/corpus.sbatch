@@ -79,7 +79,7 @@ while IFS=$'\t' read -r id kind src main threads flags; do
       phitex)
         opdf=; [ -f "$R/$id/oracle/oracle.pdf" ] && { cp "$R/$id/oracle/oracle.pdf" "$w/in/oracle.pdf"; opdf="--oracle-pdf /in/oracle.pdf"; }
         to=$(python3 -c 'import json,sys
-try: print(int(min(3600, max(600, 20*json.load(open(sys.argv[1]))["wall_s"]))))
+try: print(int(max(120, 20*json.load(open(sys.argv[1]))["wall_s"])))
 except Exception: print(900)' "$R/$id/oracle/oracle.json")
         box phitex --doc /w/doc --main "$main" --out /w/out --threads "$threads" --timeout "$to" --edit $opdf \
           > "$w/work/out/phitex-term.txt" 2>&1 || status=$? ;;
