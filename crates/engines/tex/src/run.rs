@@ -647,7 +647,12 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let r = match self.fire_at {
             Some(FireAt(at)) if self.at_fire(f) => {
-                self.cx.use_field_at(f, at).map(|x| x.map(|(x, _)| x))
+                // gone: the position was removed or re-made; the producer re-binds
+                // on its re-run and this run re-runs then
+                self.cx.use_field_at(f, at).map(|x| match x {
+                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
+                    phitex_defuse::FieldAt::Unset | phitex_defuse::FieldAt::Gone => None,
+                })
             }
             _ => self.cx.use_field(f),
         };

@@ -3418,6 +3418,7 @@ fn an_edit_that_keeps_a_chains_values_reruns_only_the_real_readers() {
 struct AtOps {
     ids: std::sync::Mutex<Vec<NodeId>>,
     runs: std::sync::Mutex<Vec<(i64, u64)>>,
+    gone: std::sync::atomic::AtomicU64,
 }
 
 impl Operation for AtOps {
@@ -3448,12 +3449,19 @@ impl Operation for AtOps {
                     }
                 }
                 let ids = self.ids.lock().unwrap();
-                let (val, by) = got.map_or((-1, -1), |(x, by)| {
-                    let i = by
-                        .and_then(|b| ids.iter().position(|&i| i == b))
-                        .map_or(-1, |p| i64::try_from(p).unwrap());
-                    (v.as_int(x).unwrap_or(-2), i)
-                });
+                let (val, by) = match got {
+                    defuse::FieldAt::Def(x, by) => {
+                        let i = by
+                            .and_then(|b| ids.iter().position(|&i| i == b))
+                            .map_or(-1, |p| i64::try_from(p).unwrap());
+                        (v.as_int(x).unwrap_or(-2), i)
+                    }
+                    defuse::FieldAt::Unset => (-1, -1),
+                    defuse::FieldAt::Gone => {
+                        self.gone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        (-1, -1)
+                    }
+                };
                 Ok(v.list(vec![v.int(val), v.int(by)]))
             }
             _ => Ok(ValueId::UNIT),
@@ -3473,6 +3481,7 @@ fn a_field_read_at_another_nodes_position() {
         let ops = Arc::new(AtOps {
             ids: std::sync::Mutex::new(Vec::new()),
             runs: std::sync::Mutex::new(Vec::new()),
+            gone: std::sync::atomic::AtomicU64::new(0),
         });
         let op = eng.register(ops.clone());
         let u = eng.new_unit();
@@ -3583,12 +3592,14 @@ fn a_field_read_at_another_nodes_position() {
         eng.set_environment([(f, eight)]);
         ev(&mut eng).expect("start value");
         assert_eq!(rerun(&ops, &before), vec![-1, 50], "{sched}");
-        // `at` goes: its reader runs again (and reports the position).
+        // `at` goes: its reader runs again and finds it gone (the
+        // evaluation goes on).
         let before = ops.runs.lock().unwrap().clone();
         eng.remove(ids[650]);
-        let r = ev(&mut eng);
-        assert!(matches!(r, Err(EvalError::BadPosition { .. })), "{sched}: {r:?}");
+        ev(&mut eng).expect("at gone");
         assert_eq!(rerun(&ops, &before), vec![650], "{sched}");
+        assert_eq!(ops.gone.load(Relaxed), 1, "{sched}: FieldAt::Gone");
+        assert_eq!(outs(&eng, &rs)[6], vec![-1, -1], "{sched}");
     }
     assert_eq!(ran.load(Relaxed), 20);
 }
