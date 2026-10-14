@@ -6,7 +6,7 @@ use crate::MayDefine;
 
 use crate::engine::{
     AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_ENV, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
-    RunResult, Slot, State, StreamRange, Suspended, Until, Use, WaitKind, WalkResult, eff_code, eff_kind,
+    ProjId, RunResult, Slot, State, StreamRange, Suspended, Until, Use, WaitKind, WalkResult, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
 use crate::value::{Field, Value, ValueId, Values};
@@ -302,18 +302,18 @@ impl<'a> Ctx<'a> {
         if self.spec
             && !tn.has_ran()
             && tn.in_work()
-            && let AssumeKind::Def(f) = kind
+            && let AssumeKind::Def(f) | AssumeKind::Proj(f, _) = kind
             && let Some(p) = e.statics(tn.op, tn.args).predicted(f)
         {
             // Predicted by the text: run on it; the node's run confirms
             // or refutes it like any guess.
             self.read_predicted = true;
-            self.assumptions.push((t, kind, p));
+            self.assumptions.push((t, kind, assumed(e, kind, Some(p))));
             return Ok(Some(p));
         }
         if self.spec && tn.has_ran() {
             if tn.in_work() {
-                self.assumptions.push((t, kind, val.unwrap_or(ValueId::NONE)));
+                self.assumptions.push((t, kind, assumed(e, kind, val)));
             } else {
                 self.read_unsettled = true;
             }
@@ -321,7 +321,7 @@ impl<'a> Ctx<'a> {
         }
         if tn.in_work() {
             let field = match kind {
-                AssumeKind::Def(f) | AssumeKind::Structure(f) => Some(f),
+                AssumeKind::Def(f) | AssumeKind::Proj(f, _) | AssumeKind::Structure(f) => Some(f),
                 AssumeKind::Output => None,
             };
             self.stop(End::Wait(t, WaitKind::Value, field))
@@ -342,6 +342,24 @@ impl<'a> Ctx<'a> {
     /// [`Stop`] if the value (or the structure the binding crosses) is not
     /// known yet.
     pub fn use_field(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
+        self.use_field_as(f, 0)
+    }
+
+    /// Uses field `f` through projection `p`: returns the projected value
+    /// (`None` if nothing defines it), and the run depends only on it. A
+    /// change of the definition that projects equal leaves the run
+    /// standing, and a guess on it holds while it projects equal. A run
+    /// that also reads `f` in full depends on the full value.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] as for [`Ctx::use_field`].
+    pub fn use_field_proj(&mut self, f: Field, p: ProjId) -> Result<Option<ValueId>, Stop> {
+        self.use_field_as(f, p.0)
+    }
+
+    /// A field read made in full (`proj` 0) or through a projection.
+    fn use_field_as(&mut self, f: Field, proj: u16) -> Result<Option<ValueId>, Stop> {
         self.check()?;
         let e = self.eng;
         let key = f.0.raw();
@@ -355,12 +373,21 @@ impl<'a> Ctx<'a> {
                 key,
                 site: NIL,
                 kind: K_LOOP,
+                proj: 0,
             });
             self.sig_add(K_LOOP, key, NIL, v);
             return Ok(v);
         }
         if let Some(&v) = self.cache.get(&(K_FIELD, key)) {
-            return Ok(v);
+            if let Some(i) = self.uses.iter().position(|u| u.kind == K_FIELD && u.key == key)
+                && self.uses[i].proj != proj
+                && self.uses[i].proj != 0
+            {
+                // Read again in full (or through another projection): the
+                // run depends on the full value.
+                self.unproject(i, v);
+            }
+            return Ok(e.project(proj, v));
         }
         let n = e.n(self.slot);
         if n.is_app() {
@@ -376,10 +403,15 @@ impl<'a> Ctx<'a> {
         if crossed != NIL && !self.spec {
             return self.stop(End::Wait(crossed, w.pending_kind, Some(f)));
         }
+        let kind = if proj == 0 {
+            AssumeKind::Def(f)
+        } else {
+            AssumeKind::Proj(f, proj)
+        };
         let v = if w.site == NIL {
             e.start_value(n.unit, f)
         } else {
-            self.read_node(w.site, e.n(w.site).def_value(f), AssumeKind::Def(f))?
+            self.read_node(w.site, e.n(w.site).def_value(f), kind)?
         };
         if crossed != NIL {
             // Predicted: the pending structure does not affect this use.
@@ -391,9 +423,38 @@ impl<'a> Ctx<'a> {
             key,
             site: w.site,
             kind: K_FIELD,
+            proj,
         });
-        self.sig_add(K_FIELD, key, w.site, v);
-        Ok(v)
+        let pv = e.project(proj, v);
+        self.sig_add(K_FIELD | proj_tag(proj), key, w.site, pv);
+        Ok(pv)
+    }
+
+    /// Turns the projected read `self.uses[i]` (full value `v`) into a full
+    /// one: its signature term and its guesses now use the full value.
+    fn unproject(&mut self, i: usize, v: Option<ValueId>) {
+        let e = self.eng;
+        let u = self.uses[i];
+        let f = Field(ValueId(u.key));
+        let sid = if u.site == NIL { 0 } else { e.n(u.site).id.raw() };
+        let pv = e.project(u.proj, v);
+        self.sig = self.sig.wrapping_sub(hash_words(
+            20,
+            &[
+                u64::from(K_FIELD | proj_tag(u.proj)),
+                u.key,
+                sid,
+                pv.map_or(0, ValueId::raw),
+            ],
+        ));
+        self.sig_add(K_FIELD, u.key, u.site, v);
+        for a in &mut self.assumptions {
+            if a.1 == AssumeKind::Proj(f, u.proj) {
+                // The guess read `v` (the projection was taken from it).
+                *a = (a.0, AssumeKind::Def(f), v.unwrap_or(ValueId::NONE));
+            }
+        }
+        self.uses[i].proj = 0;
     }
 
     /// Reads the environment's `f` (what the client supplied with
@@ -430,6 +491,7 @@ impl<'a> Ctx<'a> {
             key,
             site: NIL,
             kind: K_ENV,
+            proj: 0,
         });
         self.sig_add(K_ENV, key, NIL, v);
         Ok(v)
@@ -597,6 +659,7 @@ impl<'a> Ctx<'a> {
                 key,
                 site,
                 kind: K_CHAIN,
+                proj: 0,
             });
             self.sig_add(K_CHAIN, key, site, val);
         }
@@ -812,6 +875,7 @@ impl<'a> Ctx<'a> {
             key,
             site: w.site,
             kind: K_CHAIN,
+            proj: 0,
         });
         self.sig_add(K_CHAIN, key, w.site, v);
         Ok(v)
@@ -920,6 +984,7 @@ impl<'a> Ctx<'a> {
             key,
             site: NIL,
             kind: K_OUTPUT,
+            proj: 0,
         });
         self.sig_add(K_OUTPUT, self.eng.n(t).id.raw(), NIL, v);
         Ok(v.unwrap_or(ValueId::UNIT))
@@ -1140,4 +1205,15 @@ impl<'a> Ctx<'a> {
             memo: self.memo.map(std::cell::Cell::into_inner),
         }
     }
+}
+
+/// The value a guess of `kind` records: projected for a projected read.
+fn assumed(e: &Engine, kind: AssumeKind, v: Option<ValueId>) -> ValueId {
+    let p = if let AssumeKind::Proj(_, p) = kind { p } else { 0 };
+    e.project(p, v).unwrap_or(ValueId::NONE)
+}
+
+/// The signature tag of a projected read (0 for a full one).
+pub(crate) fn proj_tag(p: u16) -> u8 {
+    if p == 0 { 0 } else { 0x80 }
 }

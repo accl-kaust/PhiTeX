@@ -1839,7 +1839,14 @@ fn or_alloc(r: &mut Run<'_, '_>, n: Option<usize>) -> R<i64> {
 /// `\pdfxform` and `\pdfximage` are written now; the others are as
 /// without it.
 pub(crate) fn immediate(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
-    ext(r, md, true)
+    if matches!(r.cur.chr, ex::OBJ | ex::XFORM | ex::XIMAGE) {
+        ext(r, md, true)
+    } else {
+        // (`othercases back_input`: another extension, `\immediate`
+        // itself among them, runs as itself)
+        r.back_cur();
+        Ok(())
+    }
 }
 
 /// Whether the file is PDF (the writer's steps run).

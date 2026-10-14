@@ -561,6 +561,7 @@ impl Engine {
             loop_pubs: OvMap::over(&self.loop_pubs),
             memo: OvMap::over(&self.memo),
             text_memo: RwLock::new(FxHashMap::default()),
+            projections: self.projections.clone(),
             statics: RwLock::new(FxHashMap::default()),
             rtag: self.rtag,
             predictions_seen: std::sync::atomic::AtomicBool::new(
