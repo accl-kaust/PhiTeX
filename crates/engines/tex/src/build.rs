@@ -312,7 +312,7 @@ impl Run<'_, '_> {
             return;
         }
         if lid == 0 {
-            self.flush_page_params();
+            self.flush_text_defs();
         }
         let e = v.list(vec![v.int(lid), node]);
         let s = v.seq_unit(e);
@@ -2366,7 +2366,8 @@ pub(crate) fn fold_item(
         | nodes::T_WRITE_AT
         | nodes::T_FONT_AT
         | nodes::T_PDFW_AT
-        | nodes::T_PDFQ_AT => out.push(n),
+        | nodes::T_PDFQ_AT
+        | nodes::T_DEFS_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2532,6 +2533,7 @@ fn is_marker(v: &Values, x: ValueId) -> bool {
             | nodes::T_FONT_AT
             | nodes::T_PDFW_AT
             | nodes::T_PDFQ_AT
+            | nodes::T_DEFS_AT
     )
 }
 

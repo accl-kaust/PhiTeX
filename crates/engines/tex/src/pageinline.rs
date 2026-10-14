@@ -85,6 +85,7 @@ fn drain(r: &mut Run<'_, '_>, pg: &mut Inline) {
                 | nodes::T_FONT_AT
                 | nodes::T_PDFW_AT
                 | nodes::T_PDFQ_AT
+                | nodes::T_DEFS_AT
         )
     }));
     let pd = v.list(vec![v.int(nodes::T_PD), v.int(i64::from(pg.fold.pd))]);

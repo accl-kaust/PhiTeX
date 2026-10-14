@@ -926,7 +926,9 @@ impl Run<'_, '_> {
                 return Ok(());
             };
             let l = self.loc_of(field);
+            self.in_advance = q == cmd::ADVANCE;
             self.set_loc(l, Native::Int(r), global);
+            self.in_advance = false;
         } else {
             let s = glue_of(v, old);
             let r: Option<Glue> = if q < cmd::MULTIPLY {
