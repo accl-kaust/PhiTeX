@@ -401,6 +401,21 @@ impl Run<'_, '_> {
             .map_or(items.len(), |r| r.start.idx)
             .min(items.len());
         self.set("pp:tail", v.list(items[last..].to_vec()), true);
+        // the fields the text defined in each page's part, before its
+        // break (and after the last): the writer's fold lets them win
+        // over the routines' earlier deltas (`FinalState::load`)
+        let tdefs: Vec<ValueId> = recs
+            .iter()
+            .map(|r| {
+                v.list(
+                    r.tdefs
+                        .iter()
+                        .flat_map(|&m| list_of(v, m).into_iter().skip(1))
+                        .collect(),
+                )
+            })
+            .collect();
+        self.set("pp:tdefs", v.list(tdefs), true);
         self.set("pp:classes", table_v, true);
         self.set("pp:any", v.int(i64::from(any)), true);
         self.set("pp:marker", marker, true);
@@ -939,6 +954,8 @@ struct PageFold {
     passed: Vec<i64>,
     /// The immediate writes' entries met (`T_WRITE_AT`), in order.
     writes: Vec<ValueId>,
+    /// The text's definition markers met (`T_DEFS_AT`), in order.
+    tdefs: Vec<ValueId>,
     stuck: bool,
     /// The end of the list's items the fold read (its cursor, or one
     /// past it where a kern looked at what follows).
@@ -954,6 +971,7 @@ struct PlanPage {
     fired: Option<(Vec<ValueId>, PageStart)>,
     passed: Vec<i64>,
     writes: Vec<ValueId>,
+    tdefs: Vec<ValueId>,
     stuck: bool,
 }
 
@@ -973,6 +991,7 @@ fn page_rec(
         fired: out.fired,
         passed: out.passed,
         writes: out.writes,
+        tdefs: out.tdefs,
         stuck: out.stuck,
         items_v: v.list(items[a..b.max(a)].to_vec()),
         start_v: PageStart {
@@ -1088,6 +1107,7 @@ struct PlanMemo {
     fired: Option<(Vec<ValueId>, usize, Vec<crate::api::Tree>, PageStart)>,
     passed: Vec<i64>,
     writes: Vec<ValueId>,
+    tdefs: Vec<ValueId>,
     stuck: bool,
 }
 
@@ -1155,6 +1175,7 @@ fn plan_fold(
             }),
             passed: m.passed.clone(),
             writes: m.writes.clone(),
+            tdefs: m.tdefs.clone(),
             stuck: m.stuck,
         };
     }
@@ -1192,6 +1213,7 @@ fn plan_fold(
         }),
         passed: out.passed.clone(),
         writes: out.writes.clone(),
+        tdefs: out.tdefs.clone(),
         stuck: out.stuck,
     };
     {
@@ -1209,6 +1231,7 @@ fn plan_fold(
         fired,
         passed: out.passed,
         writes: out.writes,
+        tdefs: out.tdefs,
         stuck: out.stuck,
     }
 }
@@ -1257,6 +1280,7 @@ fn fold_page(
     let mut deadcycles = start.deadcycles;
     let mut passed = Vec::new();
     let mut writes = Vec::new();
+    let mut tdefs = Vec::new();
     let mut class = |n: u16| -> InsertClass {
         for &c in classes {
             let xs = list_of(v, c);
@@ -1325,6 +1349,7 @@ fn fold_page(
                     fired: None,
                     passed,
                     writes,
+                    tdefs,
                     stuck: false,
                     reach,
                 };
@@ -1336,6 +1361,10 @@ fn fold_page(
             }
             nodes::T_MARKS_AT => {
                 passed.push(crate::val::int_at(v, x, 1));
+                continue;
+            }
+            nodes::T_DEFS_AT => {
+                tdefs.push(x);
                 continue;
             }
             nodes::T_WRITE_AT => {
@@ -1404,6 +1433,7 @@ fn fold_page(
                 fired: Some((f, side, end)),
                 passed,
                 writes,
+                tdefs,
                 stuck: false,
                 reach,
             };
@@ -1413,6 +1443,7 @@ fn fold_page(
         fired: None,
         passed,
         writes,
+        tdefs,
         stuck: ending.is_some() && !pb.page.is_empty(),
         reach,
     }
@@ -2007,6 +2038,17 @@ impl FinalState {
         // each step's entry: [j, own pairs, pgst read, counts, pgdef
         // read] (`Run::page_step`)
         let entries = Self::entries(v, all);
+        // the fields the text defined in page k's part, before break k
+        // (k = steps: after the last)
+        let tdefs: Vec<Vec<Field>> = cx
+            .use_field(v.field("pp:tdefs"))?
+            .map(|x| {
+                list_of(v, x)
+                    .into_iter()
+                    .map(|p| list_of(v, p).into_iter().map(Field).collect())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
@@ -2063,7 +2105,10 @@ impl FinalState {
                 }
                 for (f, x) in &read_pairs {
                     let r: String = v.render(*x).chars().take(80).collect();
-                    eprintln!("pgst step {j} read: {} = {r}", crate::val::field_name(v, *f));
+                    eprintln!(
+                        "pgst step {j} read: {} = {r}",
+                        crate::val::field_name(v, *f)
+                    );
                 }
             }
             for (f, x) in pgst_pairs(v, Some(g(1))) {
@@ -2083,6 +2128,14 @@ impl FinalState {
                     state.remove(&name);
                 } else {
                     state.insert(name, (f, x));
+                }
+            }
+            // a routine's delta holds at a later step only while the text
+            // has not defined the field since: what the text defined
+            // before the next break (step j+1's) is the text's again
+            if let Some(ds) = tdefs.get(j + 1) {
+                for &f in ds {
+                    state.remove(&crate::val::field_name(v, f));
                 }
             }
             cur = if state.is_empty() {
@@ -2108,6 +2161,14 @@ impl FinalState {
             cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
         }
         Self::log_refuted(o, refuted);
+        // (the text's definitions after the last break: its own)
+        if steps > 0
+            && let Some(ds) = tdefs.get(steps)
+        {
+            for &f in ds {
+                state.remove(&crate::val::field_name(v, f));
+            }
+        }
         Ok(FinalState {
             map: state.into_values().collect(),
         })

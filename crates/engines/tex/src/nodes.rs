@@ -72,6 +72,11 @@ pub(crate) const T_MARKS_AT: i64 = 91;
 /// among the shipped pages, so the writer assembles the file in TeX's
 /// order.
 pub(crate) const T_WRITE_AT: i64 = 88;
+/// `[T_DEFS_AT, field…]`: a marker on the main list, where the text
+/// defined these fields at its base level (since the item before): the
+/// page builder's fold tells each page step which fields the text
+/// defined since the break before it (the routines' deltas give way).
+pub(crate) const T_DEFS_AT: i64 = 87;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]
