@@ -3628,6 +3628,21 @@ pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
 /// `PHITEX_HINTS=2`: the node's definitions, for learning the state
 /// each command sets.
 pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
+    // (`PHITEX_HINTS=3`: each node's published fields, against its bound)
+    if std::env::var("PHITEX_HINTS").is_ok_and(|x| x == "3") {
+        let fs: Vec<String> = r
+            .published_fields()
+            .into_iter()
+            .map(|f| crate::val::field_name(r.v, f))
+            .collect();
+        let ex: String = h.excerpt.chars().take(40).collect();
+        eprintln!(
+            "pubs {ex:?} void {} state {:?}: {}",
+            r.hint_void,
+            h.bound.as_ref().map(|b| b.state.clone()),
+            fs.join(",")
+        );
+    }
     if std::env::var("PHITEX_HINTS").is_ok_and(|x| x == "2") {
         let mut fs: Vec<String> = r
             .def_fields()
