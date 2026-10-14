@@ -456,12 +456,18 @@ impl Run<'_, '_> {
         let mut fields = prev.map(|p| p.fields).unwrap_or_default();
         for j in fields.len()..pages {
             let f = |k: &str| self.ops.fields.get_at(v, epoch, &format!("pp:{k}:{j}"));
-            fields.push([f("items"), f("start"), f("mk")]);
+            fields.push([f("items"), f("start"), f("mk"), f("fire")]);
         }
+        // where each page's step reads the text's state (`pp:fire:<j>`):
+        // after the node of the text's last definition marker before
+        // the page fires (UNIT: none, the unit's start)
+        let fires = fire_nodes(v, &recs[..pages.min(recs.len())]);
         for (j, rec) in recs.iter().enumerate().take(pages) {
             self.set_f(fields[j][0], rec.items_v, true);
             self.set_f(fields[j][1], rec.start_v, true);
+            self.set_f(fields[j][3], fires[j], true);
         }
+        self.set("pp:fires", v.list(fires), true);
         for (j, &m) in before.iter().enumerate().take(pages) {
             self.set_f(fields[j][2], m, true);
         }
@@ -481,7 +487,7 @@ impl Run<'_, '_> {
                 v.list(
                     r.tdefs
                         .iter()
-                        .flat_map(|&m| list_of(v, m).into_iter().skip(1))
+                        .flat_map(|&m| list_of(v, m).into_iter().skip(2))
                         .collect(),
                 )
             })
@@ -598,9 +604,16 @@ impl Run<'_, '_> {
             // whether the exact PDF writer folds the pages (`pdf:fold`):
             // only then does a step define anything (`pdf:state`)
             let fold = self.cint(crate::fields::cell::PDF_FOLD)?;
+            let fire = self.get(&format!("pp:fire:{j}"))?.unwrap_or(ValueId::UNIT);
             self.kid(
                 op,
-                vec![v.int(i64::try_from(j).unwrap_or(0)), data, mk, v.int(fold)],
+                vec![
+                    v.int(i64::try_from(j).unwrap_or(0)),
+                    data,
+                    mk,
+                    v.int(fold),
+                    fire,
+                ],
             );
         }
         Ok(())
@@ -668,6 +681,10 @@ impl Run<'_, '_> {
     pub(crate) fn page_step(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let j = self.page_index();
+        // the text's fields as TeX's state holds them when this page
+        // fires (§1012): read after the page's fire node, never the
+        // text's later definitions (`Run::load_slow`)
+        self.fire_at = Some(crate::run::FireAt(fire_node(v, args.get(4).copied())));
         let mut readst = ValueId::UNIT;
         let mut readdef = ValueId::UNIT;
         let mut inherited: Vec<(Field, ValueId)> = Vec::new();
@@ -1806,7 +1823,7 @@ impl Operation for PagePlan {
         None
     }
     fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
-        MayDefine::Prefixes(vec!["pp:".to_owned()])
+        MayDefine::Prefixes(vec![PLAN_PREFIX.to_owned()])
     }
     fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
         client_only(v, f)
@@ -1844,6 +1861,19 @@ impl Operation for Brk {
     }
 }
 
+/// The prefix of the fields the plan defines ([`PagePlan`]).
+const PLAN_PREFIX: &str = "pp:";
+/// The exact PDF fold's state, the one field a step defines
+/// ([`PageStep::may_define`]).
+const PDF_STATE: &str = "pdf:state";
+
+/// Whether field `name` is the chain's own: one the plan or a step
+/// defines, which a step reads as any node does, not where its page
+/// fires ([`Run::fire_at`]).
+pub(crate) fn chain_field(name: &str) -> bool {
+    name.starts_with(PLAN_PREFIX) || name == PDF_STATE
+}
+
 /// One page's step: the output routine run, the page shipped (§1023
 /// without one). It defines nothing to the engine: what the routine
 /// defines at its base level goes to the chain's delta (`pgdeltas`,
@@ -1865,7 +1895,7 @@ impl Operation for PageStep {
     /// the writer folds the pages (the fourth argument).
     fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
         if args.get(3).and_then(|&x| v.as_int(x)).unwrap_or(0) != 0 {
-            MayDefine::Prefixes(vec!["pdf:state".to_owned()])
+            MayDefine::Prefixes(vec![PDF_STATE.to_owned()])
         } else {
             MayDefine::Nothing
         }
@@ -1876,7 +1906,7 @@ impl Operation for PageStep {
     /// Never the plan's fields (`pp:`), which the `brk` nodes after a
     /// step read: their walk does not wait on the step for them.
     fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
-        client_only(v, f) && !matches!(&*v.get(f.0), Value::Str(s) if s.starts_with("pp:"))
+        client_only(v, f) && !matches!(&*v.get(f.0), Value::Str(s) if s.starts_with(PLAN_PREFIX))
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
@@ -2301,6 +2331,31 @@ fn mk_classes(v: &Values, mk: Option<&[ValueId]>) -> Option<Vec<ValueId>> {
     Some(xs.get(2).map(|&c| list_of(v, c)).unwrap_or_default())
 }
 
+/// Each page's fire node (`pp:fire:<j>`): the node of the text's last
+/// `T_DEFS_AT` marker met up to the page's fire, as an integer (UNIT
+/// while none: the unit's start). A page step reads the text there:
+/// the state the text left when TeX fired the page (§1012), its later
+/// definitions unseen.
+fn fire_nodes(v: &Values, recs: &[std::sync::Arc<crate::planinc::PageRec>]) -> Vec<ValueId> {
+    let mut cur = ValueId::UNIT;
+    recs.iter()
+        .map(|r| {
+            if let Some(&m) = r.tdefs.last() {
+                cur = v.int(crate::val::int_at(v, m, 1));
+            }
+            cur
+        })
+        .collect()
+}
+
+/// The node a fire value names (`pp:fire:<j>`): `None` for the unit's
+/// start.
+pub(crate) fn fire_node(v: &Values, x: Option<ValueId>) -> Option<phitex_defuse::NodeId> {
+    let x = x.filter(|&x| x != ValueId::UNIT)?;
+    v.as_int(x)
+        .map(|n| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())))
+}
+
 /// `pgst:<j>`'s pairs `[field, value]` (UNIT: none).
 fn pgst_pairs(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId)> {
     x.map(|x| list_of(v, x))
@@ -2405,6 +2460,24 @@ impl FinalState {
                     .collect()
             })
             .unwrap_or_default();
+        // where each step read the text (`pp:fires`, the plan's): the
+        // text's state when page `j` fired, for the fields its routine's
+        // delta does not carry
+        let fires: Vec<Option<phitex_defuse::NodeId>> = cx
+            .use_field(v.field("pp:fires"))?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|x| fire_node(v, Some(x)))
+            .collect();
+        // the text's `f` as step `k` reads it (after the last step: the
+        // text's final state, the writer's)
+        let text_at = |cx: &mut Ctx<'_>, f: Field, k: usize| -> Result<Option<ValueId>, Stop> {
+            match fires.get(k) {
+                Some(&at) if k < steps => Ok(cx.use_field_at(f, at)?.map(|(x, _)| x)),
+                _ => cx.use_field(f),
+            }
+        };
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
@@ -2481,7 +2554,7 @@ impl FinalState {
         // `\count0..9` before the chain: what the first page's routine
         // reads (`pgread0`): the text's at the first flush point, the
         // pages before it read them as the text left them there; with
-        // none, the text's final state
+        // none, the text's where the first page fires
         let start = fires_at(0).or_else(|| {
             all_flushes
                 .iter()
@@ -2491,7 +2564,7 @@ impl FinalState {
         });
         let mut counts = match start {
             Some(c) => c,
-            None => Self::counts(cx)?,
+            None => Self::counts(cx, &|cx: &mut Ctx<'_>, f| text_at(cx, f, 0))?,
         };
         sets_before(0, &mut counts);
         let pgread0 = v.field("pgread0");
@@ -2510,7 +2583,7 @@ impl FinalState {
             let read_counts = if g(4) != ValueId::UNIT {
                 ints(g(4))
             } else if j == 0 {
-                Self::counts(cx)?
+                Self::counts(cx, &|cx: &mut Ctx<'_>, f| text_at(cx, f, 0))?
             } else {
                 Vec::new()
             };
@@ -2573,7 +2646,8 @@ impl FinalState {
             let advanced: Vec<ValueId> = list_of(v, g(5));
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
-                let pre = cx.use_field(f)?;
+                // (the text's value where the next step reads it)
+                let pre = text_at(cx, f, j + 1)?;
                 // a count register the step only advanced, by its change,
                 // as `\\count0..9` (a routine's counter of pages or
                 // shipouts); one it set, by its value (`\\@topnum`
@@ -2694,15 +2768,17 @@ impl FinalState {
         entries
     }
 
-    /// `\\count0..9` before the chain.
-    fn counts(cx: &mut Ctx<'_>) -> Result<Vec<i64>, Stop> {
+    /// `\\count0..9` as `read` gives them (the text's, where the first
+    /// page fires).
+    #[allow(clippy::type_complexity)]
+    fn counts(
+        cx: &mut Ctx<'_>,
+        read: &dyn Fn(&mut Ctx<'_>, Field) -> Result<Option<ValueId>, Stop>,
+    ) -> Result<Vec<i64>, Stop> {
         let v = cx.values();
         let mut counts: Vec<i64> = Vec::with_capacity(10);
         for k in 0..10 {
-            counts.push(
-                cx.use_field(v.field(&format!("count:{k}")))?
-                    .map_or(0, |x| int_of(v, x)),
-            );
+            counts.push(read(cx, v.field(&format!("count:{k}")))?.map_or(0, |x| int_of(v, x)));
         }
         Ok(counts)
     }
