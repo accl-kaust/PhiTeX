@@ -272,6 +272,15 @@ impl Operation for Exec {
             // until it is closed (`Run::run_all`)
             r.run_all()?;
             crate::hints::debug_defs(r, &hint);
+            // (a text whose hint bounds little: at its end the run knows
+            // what it defines, and narrows its set to it, so that readers
+            // of the rest bind past it, `Ctx::narrow`)
+            if crate::hints::is_wide(&hint) && std::env::var_os("PHITEX_NO_NARROW").is_none() {
+                let mut fs = r.published_fields();
+                fs.sort_unstable_by_key(|f| f.0.raw());
+                fs.dedup();
+                r.cx.narrow(phitex_defuse::MayDefine::Names(fs));
+            }
             // (a hint whose regime the run found violated bounds nothing:
             // its definitions are not checked against it)
             // (a run that claimed siblings ran their texts too: it is
@@ -282,7 +291,10 @@ impl Operation for Exec {
                 .map(|(_, a)| crate::hints::hint_of_args(r.v, &a))
                 .collect();
             if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
-                if let Some(m) = crate::hints::check_defs(r, &hint, &claimed) {
+                if let Some(m) = crate::hints::check_defs(r, &hint, &claimed)? {
+                    if std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
+                        eprintln!("parlists: {}", m.chars().take(600).collect::<String>());
+                    }
                     r.engine_diag(&m);
                     crate::hints::count(r, 3);
                 }
