@@ -1699,6 +1699,7 @@ dependencies = [
  "phitex-tfm",
  "phitex-typeset",
  "rayon",
+ "tikv-jemallocator",
 ]
 
 [[package]]

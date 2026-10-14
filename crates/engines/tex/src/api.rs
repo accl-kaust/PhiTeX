@@ -1357,48 +1357,48 @@ impl Graph {
         let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let spent = Arc::new(std::sync::atomic::AtomicU64::new(0));
         // a file asked for again in the evaluation (by every page step,
-        // say) is answered from here, not read and converted again
-        let answered: std::sync::Mutex<FxHashMap<String, Option<ValueId>>> =
-            std::sync::Mutex::new(FxHashMap::default());
+        // say) is answered from here, not read and converted again; its
+        // first asker reads it, concurrent askers wait for that answer
+        let answered: std::sync::Mutex<
+            FxHashMap<String, Arc<std::sync::OnceLock<Option<ValueId>>>>,
+        > = std::sync::Mutex::new(FxHashMap::default());
         self.eng.set_env_provider(Box::new(move |v, f| {
             let name = v.as_str(f.0)?;
             let name = name.strip_prefix("file:")?;
             if written.iter().any(|w| w == name) {
                 return None;
             }
-            if let Some(&val) = answered
+            let cell = answered
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(name)
-            {
-                return Some(val);
-            }
-            let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            let t1 = std::time::Instant::now();
-            let found = finder(name);
-            let hash = file_hash(found.as_ref());
-            let val = found.map(|(path, bytes)| {
-                let text: String = bytes.iter().map(|&b| char::from(b)).collect();
-                v.list(vec![v.str(&path), v.str(&text)])
-            });
-            answered
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(name.to_owned(), val);
-            if let Ok(mut l) = log.lock() {
-                l.push((name.to_owned(), f, val, hash));
-            }
-            let ns = u64::try_from(t1.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            let all = spent.fetch_add(ns, std::sync::atomic::Ordering::Relaxed) + ns;
-            if crate::exec::env_flag!("PHITEX_TEX_TIME") {
-                #[allow(clippy::cast_precision_loss)]
-                let all = all as f64 / 1e9;
-                eprintln!(
-                    "provider: at {:.1} s, {n} answers, {all:.3} s in the provider, last {name}",
-                    t0.elapsed().as_secs_f64()
-                );
-            }
-            Some(val)
+                .entry(name.to_owned())
+                .or_default()
+                .clone();
+            let answer = || {
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let t1 = std::time::Instant::now();
+                let found = finder(name);
+                let hash = file_hash(found.as_ref());
+                let val = found.map(|(path, bytes)| {
+                    let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                    v.list(vec![v.str(&path), v.str(&text)])
+                });
+                if let Ok(mut l) = log.lock() {
+                    l.push((name.to_owned(), f, val, hash));
+                }
+                let ns = u64::try_from(t1.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let all = spent.fetch_add(ns, std::sync::atomic::Ordering::Relaxed) + ns;
+                if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                    #[allow(clippy::cast_precision_loss)]
+                    let all = all as f64 / 1e9;
+                    eprintln!(
+                        "provider: at {:.1} s, {n} answers, {all:.3} s in the provider, last {name}",
+                        t0.elapsed().as_secs_f64()
+                    );
+                }
+                val
+            };
+            Some(*cell.get_or_init(answer))
         }));
     }
 
