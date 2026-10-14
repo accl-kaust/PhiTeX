@@ -174,6 +174,17 @@ impl Run<'_, '_> {
             // §442
             self.get_token()?;
             let t = self.cur.tok;
+            // (a brace taken as a constant does not count in
+            // `align_state`: get_next counted it)
+            if self.aopen != 0 && !t.is_cs_or_active() {
+                if self.cur.cmd == cmd::RIGHT_BRACE {
+                    let a = self.astate();
+                    self.set_astate(a + 1);
+                } else if self.cur.cmd == cmd::LEFT_BRACE {
+                    let a = self.astate();
+                    self.set_astate(a - 1);
+                }
+            }
             val = match t.as_cs() {
                 Some(n) => {
                     let mut cs = n.chars();
