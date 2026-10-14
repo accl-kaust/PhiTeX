@@ -3074,3 +3074,209 @@ fn the_critical_chain_follows_a_declared_read_to_its_definer() {
     assert!(chain.iter().any(|c| c.0 == d99), "{chain:?}");
     assert!(chain.len() >= 100, "{} links: {chain:?}", chain.len());
 }
+
+/// `[i, ver, class]`: reads `f` through the 3-way class projection (node 0
+/// reads nothing), outputs `i * 10 + class read`, and defines `f` as
+/// `3 * (i * 1000 + ver) + class`.
+struct ProjChain {
+    proj: std::sync::OnceLock<defuse::ProjId>,
+    full: bool,
+    runs: std::sync::atomic::AtomicU64,
+}
+
+fn proj_args(v: &Values, a: &[ValueId]) -> (i64, i64, i64) {
+    let g = |k: usize| v.as_int(a[k]).unwrap_or(0);
+    (g(0), g(1), g(2))
+}
+
+impl Operation for ProjChain {
+    fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(vec![(v.field("f"), Locality::Local)])
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(if proj_args(v, a).0 == 0 {
+            Vec::new()
+        } else {
+            vec![v.field("f")]
+        })
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let (i, ver, class) = proj_args(v, &a);
+        let f = v.field("f");
+        let seen = if i == 0 {
+            0
+        } else if self.full {
+            cx.use_field(f)?.and_then(|x| v.as_int(x)).map_or(9, |x| x % 3)
+        } else {
+            let p = *self.proj.get().expect("registered");
+            cx.use_field_proj(f, p)?.and_then(|x| v.as_int(x)).unwrap_or(9)
+        };
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        cx.define(f, v.int(3 * (i * 1000 + ver) + class));
+        Ok(v.int(i * 10 + seen))
+    }
+}
+
+/// A read through a projection depends on the projected value only: an
+/// edit that keeps every class leaves readers standing (and guesses on the
+/// old values confirmed), and a class change re-runs exactly its readers.
+#[test]
+fn projected_reads_depend_on_the_projection_only() {
+    use std::sync::atomic::Ordering::Relaxed;
+    const N: i64 = 200;
+    let build = |full: bool, ver: i64| {
+        let mut eng = Engine::new();
+        let op = Arc::new(ProjChain {
+            proj: std::sync::OnceLock::new(),
+            full,
+            runs: std::sync::atomic::AtomicU64::new(0),
+        });
+        let p = eng.register_projection(Arc::new(|x: ValueId, v: &Values| {
+            v.int(v.as_int(x).map_or(9, |k| k % 3))
+        }));
+        op.proj.set(p).expect("once");
+        let id = eng.register(op.clone());
+        let u = eng.new_unit();
+        let ids: Vec<NodeId> = (0..N)
+            .map(|i| {
+                let v = eng.values();
+                let a = vec![v.int(i), v.int(ver), v.int(1)];
+                eng.push(u, id, a)
+            })
+            .collect();
+        (eng, op, ids, id)
+    };
+    let outs = |eng: &Engine, ids: &[NodeId]| -> Vec<Option<i64>> {
+        ids.iter()
+            .map(|&i| eng.output(i).and_then(|x| eng.values().as_int(x)))
+            .collect()
+    };
+    let reference = {
+        let (mut eng, _, ids, _) = build(true, 1);
+        eng.evaluate_sequential().expect("reference");
+        outs(&eng, &ids)
+    };
+    for sched in ["seq", "spec", "random", "par"] {
+        for full in [false, true] {
+            let (mut eng, op, ids, opid) = build(full, 0);
+            eng.evaluate_sequential().expect("cold");
+            // Every text changes its value, none its class.
+            for (i, &n) in ids.iter().enumerate() {
+                let v = eng.values();
+                let a = vec![v.int(i64::try_from(i).unwrap()), v.int(1), v.int(1)];
+                eng.replace(n, opid, a);
+            }
+            let r = match sched {
+                "seq" => eng.evaluate_sequential(),
+                "spec" => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 4096),
+                    &mut defuse::Sequential,
+                ),
+                "random" => eng.evaluate(&mut defuse::RandomScheduler::new(7, true), &mut defuse::Sequential),
+                _ => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 4096),
+                    &mut PredThreads,
+                ),
+            }
+            .expect("edit");
+            assert_eq!(outs(&eng, &ids), reference, "{sched} full={full}");
+            let f = eng.values().field("f");
+            let refuted = r.refuted_by_field.iter().find(|c| c.0 == f).map_or(0, |c| c.1);
+            if (sched == "spec" || sched == "par") && !full {
+                assert_eq!(refuted, 0, "{sched}: {r:?}");
+                assert!(r.realised_critical_path <= 2, "{sched}: {r:?}");
+                eprintln!(
+                    "projected {sched}: runs {} realised {} refuted {refuted}",
+                    r.runs, r.realised_critical_path
+                );
+            }
+            if (sched == "spec" || sched == "par") && full {
+                eprintln!(
+                    "full {sched}: runs {} realised {} refuted {refuted}",
+                    r.runs, r.realised_critical_path
+                );
+            }
+            if !full {
+                // A value change in one class: only that node runs.
+                let before = op.runs.load(Relaxed);
+                let v = eng.values();
+                let a = vec![v.int(50), v.int(7), v.int(1)];
+                eng.replace(ids[50], opid, a);
+                eng.evaluate_sequential().expect("same class");
+                assert_eq!(op.runs.load(Relaxed) - before, 1, "{sched}: same class");
+                // A class change: that node and the reader that saw it.
+                let before = op.runs.load(Relaxed);
+                let v = eng.values();
+                let a = vec![v.int(50), v.int(7), v.int(2)];
+                eng.replace(ids[50], opid, a);
+                eng.evaluate_sequential().expect("other class");
+                assert_eq!(op.runs.load(Relaxed) - before, 2, "{sched}: other class");
+                assert_eq!(eng.output(ids[51]).and_then(|x| eng.values().as_int(x)), Some(512));
+            }
+        }
+    }
+}
+
+/// `ProjId::IS_EMPTY` projects empty, zero, nil and unit values to `true`.
+#[test]
+fn the_is_empty_projection() {
+    struct R;
+    impl Operation for R {
+        fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+            Some(if v.as_str(a[0]).as_deref() == Some("d") {
+                vec![(v.field("e"), Locality::Local)]
+            } else {
+                Vec::new()
+            })
+        }
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            let a = cx.args();
+            if v.as_str(a[0]).as_deref() == Some("d") {
+                cx.define(v.field("e"), a[1]);
+                return Ok(ValueId::UNIT);
+            }
+            let e = cx.use_field_proj(v.field("e"), defuse::ProjId::IS_EMPTY)?;
+            Ok(e.unwrap_or(v.str("absent")))
+        }
+    }
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(R));
+    let v = eng.values();
+    let cases = [
+        (v.int(0), true),
+        (v.int(3), false),
+        (v.str(""), true),
+        (v.str("x"), false),
+        (ValueId::UNIT, true),
+        (ValueId::NIL, true),
+        (v.list(Vec::new()), true),
+        (v.list(vec![v.int(1)]), false),
+        (v.seq_unit(v.int(1)), false),
+        (v.bool(false), false),
+    ];
+    for (val, want) in cases {
+        let u = eng.new_unit();
+        let a = vec![eng.values().str("d"), val];
+        eng.push(u, op, a);
+        let a = vec![eng.values().str("r")];
+        let r = eng.push(u, op, a);
+        eng.evaluate_sequential().expect("evaluate");
+        assert_eq!(
+            eng.output(r).and_then(|x| eng.values().as_bool(x)),
+            Some(want),
+            "{}",
+            eng.values().render(val)
+        );
+    }
+    let u = eng.new_unit();
+    let a = vec![eng.values().str("r")];
+    let r = eng.push(u, op, a);
+    eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(
+        eng.output(r).and_then(|x| eng.values().as_str(x)).as_deref(),
+        Some("absent")
+    );
+}
