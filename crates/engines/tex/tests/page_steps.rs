@@ -117,20 +117,23 @@ fn generated_documents() {
             }
             eprintln!("{name} refuted guesses: {:?}", s.refuted_guesses);
         }
-        let (r0, l0, p0) = (s.runs, s.loop_rounds, s.page_steps);
+        let (cold_runs, cold_steps) = (s.runs, s.page_steps);
         let mid = src.len() / 2;
         let at = mid + src[mid..].find(" the ").expect("a word") + 1;
         let new = format!("{}eht{}", &src[..at], &src[at + 3..]);
         b.edit(&new);
+        // `stats` is what the last build or edit ran: the edit's own
+        // counts, not a running total.
         let s = &b.stats;
         eprintln!(
-            "{name} edit: loop rounds {}, critical path {:?}, runs {} (cumulative {}), nodes run {}, page steps {} (cumulative {})",
-            s.loop_rounds - l0,
-            s.critical_path,
-            s.runs - r0,
+            "{name} edit: loop rounds {}, critical path {:?}, runs {}, nodes run {}, page steps {}",
+            s.loop_rounds, s.critical_path, s.runs, s.nodes_run, s.page_steps
+        );
+        assert!(
+            s.runs <= cold_runs && s.page_steps <= cold_steps,
+            "{name}: a one-word edit ran more than the cold build \
+             (runs {} vs {cold_runs}, page steps {} vs {cold_steps})",
             s.runs,
-            s.nodes_run,
-            s.page_steps - p0,
             s.page_steps
         );
         if name == "para400" {
