@@ -494,6 +494,10 @@ pub(crate) struct Extra {
     pub wait_on: Option<query::Wait>,
     /// The read it stopped at, asked again before it runs.
     pub ask: Option<Ask>,
+    /// A pending claimer's claim set by a run that then stopped: that
+    /// attempt's answer, so siblings past it are not held (cleared when it
+    /// runs again from the start).
+    pub early_claim: Option<usize>,
 }
 
 impl Data {

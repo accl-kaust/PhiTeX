@@ -47,6 +47,10 @@ pub struct Ctx<'a> {
     pub(crate) env: Vec<(Field, ValueId)>,
     pub(crate) wait: Option<Wait>,
     pub(crate) token: Option<Box<dyn Any + Send>>,
+    /// The last sibling `following` answered: (index, slot, generation).
+    pub(crate) sib_cur: std::cell::Cell<Option<(usize, Slot, u32)>>,
+    /// The sibling indexes already in the log (filled on first use).
+    pub(crate) sib_logged: std::cell::RefCell<Option<crate::values::FxHashSet<u32>>>,
     /// How long the run took, in nanoseconds (0 on wasm32).
     pub(crate) run_ns: u64,
     pub(crate) kept: Option<Box<dyn Any + Send>>,
@@ -92,6 +96,8 @@ impl<'a> Ctx<'a> {
             env: Vec::new(),
             wait: None,
             token: None,
+            sib_cur: std::cell::Cell::new(None),
+            sib_logged: std::cell::RefCell::new(None),
             run_ns: 0,
             kept,
             restart: false,
@@ -870,12 +876,34 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn following_inner(&self, i: usize) -> Option<(OpId, Vec<ValueId>)> {
+        // Asked in order (0, 1, 2, ...), the walk resumes where the last
+        // answer was; anything else walks from the start. (A changed
+        // structure is caught when the log is checked.)
+        let cur = self.sib_cur.get().filter(|&(j, x, gn)| {
+            j < i && self.sh.rec(x).gn.load(std::sync::atomic::Ordering::Acquire) == gn
+        });
         let got = {
             let (sh, me) = (self.sh, self.me);
-            sh.sread(self.unit, || sh.q_sib(me, i).0)
+            sh.sread(self.unit, || match cur {
+                Some((j, x, _)) => sh.q_sib_from(me, x, j + 1, i).0,
+                None => sh.q_sib(me, i).0,
+            })
         };
-        let seen = |p: &Pred| matches!(p, Pred::Sib { i: j, .. } if *j as usize == i);
-        if !self.log.iter().any(seen) && !self.side.borrow().iter().any(seen) {
+        if let Some((x, gn, _)) = got {
+            self.sib_cur.set(Some((i, x, gn)));
+        }
+        let mut logged = self.sib_logged.borrow_mut();
+        if logged.is_none() {
+            let mut set = crate::values::FxHashSet::default();
+            for p in self.log.iter().chain(self.side.borrow().iter()) {
+                if let Pred::Sib { i: j, .. } = p {
+                    set.insert(*j);
+                }
+            }
+            *logged = Some(set);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        if logged.as_mut().is_some_and(|set| set.insert(i as u32)) {
             #[allow(clippy::cast_possible_truncation)]
             self.side.borrow_mut().push(Pred::Sib { i: i as u32, ans: got });
         }

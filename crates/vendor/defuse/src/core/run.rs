@@ -181,7 +181,22 @@ impl Shared {
 
     #[inline(never)]
     pub(crate) fn check_log_in(&self, me: Slot, log: &[Pred]) -> Check {
+        // Following-sibling reads in order share one walk.
+        let mut cur: Option<(usize, Slot)> = None;
         for p in log {
+            if let Pred::Sib { i, ans } = p {
+                let i = *i as usize;
+                let (got, _) = match cur {
+                    Some((j, x)) if j < i => self.q_sib_from(me, x, j + 1, i),
+                    _ => self.q_sib(me, i),
+                };
+                cur = got.map(|g| (i, g.0));
+                match (got, ans) {
+                    (a, b) if a == *b => continue,
+                    (Some(a), Some(b)) if a.0 == b.0 && a.1 == b.1 => return Check::Broke("following: changed"),
+                    _ => return Check::Broke("following: gone"),
+                }
+            }
             match self.recheck(me, p, true) {
                 Err(w) => return Check::Wait(w),
                 Ok(Err(why)) => return Check::Broke(why),
@@ -216,7 +231,10 @@ impl Shared {
             if c == s || !in_work(self.rec(c).st()) || !self.rec(c).has(super::F_IN_PCLAIM) {
                 continue;
             }
-            let limit = self.rec(c).data().stat.limit();
+            let limit = {
+                let d = self.rec(c).data();
+                d.x.as_ref().and_then(|e| e.early_claim).or_else(|| d.stat.limit())
+            };
             // `s` is in `c`'s following view only if its parent is an
             // ancestor-or-self of `c`'s parent.
             let ps = self.rec(s).parent.load(Ordering::Acquire);
@@ -531,6 +549,7 @@ impl Shared {
             }
         };
         let ok = self.sread(u, || {
+            super::query::sib_cursor_reset();
             log.iter_mut().all(|p| {
                 let ok = matches!(self.recheck(s, p, false), Ok(Ok(())));
                 if ok {
@@ -547,6 +566,7 @@ impl Shared {
         r.lgen.store(lgen, Ordering::Release);
         self.subscribe(s, u, lgen, &log);
         let ok = self.sread(u, || {
+            super::query::sib_cursor_reset();
             log.iter().all(|p| matches!(self.recheck(s, p, false), Ok(Ok(()))))
         });
         restore(log);
@@ -684,9 +704,21 @@ impl Shared {
             r.clear(super::F_PREDRUN);
         }
         let o = self.ops[op.0 as usize].clone();
+        if token.is_none()
+            && let Some(e) = r.data().x.as_mut()
+        {
+            e.early_claim = None;
+        }
         let mut cx = Ctx::new(self, s, token);
         // A resumed run keeps the reads its earlier attempts made.
         cx.log = prior;
+        // Its in-order sibling walk goes on where the earlier attempts left it.
+        if let Some((i, x, gn)) = cx.log.iter().rev().find_map(|p| match p {
+            Pred::Sib { i, ans: Some((x, gn, _)) } => Some((*i as usize, *x, *gn)),
+            _ => None,
+        }) {
+            cx.sib_cur.set(Some((i, x, gn)));
+        }
         crate::obs::count!(Job);
         let res = {
             crate::obs::span!(Job);
@@ -747,6 +779,20 @@ impl Shared {
                 }
             }
         } else {
+            // A pending claimer that set its claim before it stopped:
+            // siblings past the claim go on now.
+            if let Some(n) = cx.claim
+                && !Self::spec_run()
+                && r.has(super::F_PCLAIM)
+            {
+                let old = r.data().ex().early_claim.replace(n);
+                if old != Some(n) {
+                    let w = std::mem::take(&mut r.data().waiters);
+                    for (x, q) in w {
+                        self.wake(x, q);
+                    }
+                }
+            }
             let w = cx.wait.take().unwrap_or(Wait {
                 on: Subj::Child(0),
                 field: None,

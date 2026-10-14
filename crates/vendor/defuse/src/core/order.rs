@@ -597,7 +597,13 @@ impl Shared {
     /// later children, then (crossing up) its ancestors' later siblings,
     /// skipping descendants and nodes claimed by others; ends at a scope
     /// marker. Calls `f(entry, skipped)` until it returns false.
-    pub(crate) fn following(&self, s: Slot, claimer: Slot, mut f: impl FnMut(Slot, bool) -> bool) {
+    pub(crate) fn following(&self, s: Slot, claimer: Slot, f: impl FnMut(Slot, bool) -> bool) {
+        self.following_from(s, claimer, f);
+    }
+
+    /// `following`, starting after `s` (the claimer itself or one of the
+    /// siblings it sees).
+    pub(crate) fn following_from(&self, s: Slot, claimer: Slot, mut f: impl FnMut(Slot, bool) -> bool) {
         let mut level = self.depth(s);
         let mut x = self.next(s);
         while x != NIL {
