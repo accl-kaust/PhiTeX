@@ -260,6 +260,19 @@ impl LoadHints {
     }
 }
 
+/// The records in `bytes` ([`crate::Build::export_pkgrec`]), for
+/// inspection: per load key, the fields it defined and read.
+#[doc(hidden)]
+#[must_use]
+pub fn summary(bytes: &[u8]) -> Vec<(String, Vec<String>, Vec<String>)> {
+    let mut out: Vec<_> = parse(bytes)
+        .into_iter()
+        .map(|(k, r)| (k, r.writes, r.reads))
+        .collect();
+    out.sort();
+    out
+}
+
 // ---------------------------------------------------------------------
 // Bytes: a magic, then per record its key, files, writes, reads, flags;
 // strings and counts length-prefixed (u32 little-endian).
