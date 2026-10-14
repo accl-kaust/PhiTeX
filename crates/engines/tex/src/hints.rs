@@ -558,7 +558,7 @@ impl Hint {
 
     /// `A` or `B`, the cause, the excerpt, then the bound's parts;
     /// records by `\x1e`, items by `\x1f`, pairs by `\x1d`.
-    pub(crate) fn encode(&self) -> String {
+    fn encode(&self) -> String {
         let mut o = String::new();
         match &self.bound {
             None => {
@@ -833,9 +833,6 @@ pub(crate) struct TextHints {
     pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
-    /// The paragraph-start token lists' program of each slice
-    /// ([`pass::ParMachine`]), when the definitions assign any.
-    par: Option<ParText>,
     /// Whether the text defines anything the pass harvests (a macro, an
     /// active character).
     pub defines: bool,
@@ -1750,49 +1747,23 @@ impl Analysis<'_> {
     fn param_field(&self, f: &str) -> Option<Option<String>> {
         let n = f.strip_prefix("param:")?;
         let n = n.strip_prefix('\\').unwrap_or(n);
-        // (a name the definitions made a register is that register, as
-        // LaTeX's `\newtoks\everypar` over the primitive)
-        let reg = match self.shape(n) {
-            Some(pass::Shape::Quantity('i')) => Some("count:"),
-            Some(pass::Shape::Quantity('d')) => Some("dimen:"),
-            Some(pass::Shape::Quantity('g')) => Some("skip:"),
-            Some(pass::Shape::Quantity('t')) => Some("toks:"),
-            _ => None,
-        };
-        if let Some(r) = reg {
-            return Some(Some(r.to_owned()));
-        }
         if table_param(n) {
             return Some(Some(format!("param:{n}")));
         }
         if matches!(n, "spacefactor" | "prevdepth") {
             return Some(None);
         }
-        None
+        match self.shape(n) {
+            Some(pass::Shape::Quantity('i')) => Some(Some("count:".to_owned())),
+            Some(pass::Shape::Quantity('d')) => Some(Some("dimen:".to_owned())),
+            Some(pass::Shape::Quantity('g')) => Some(Some("skip:".to_owned())),
+            Some(pass::Shape::Quantity('t')) => Some(Some("toks:".to_owned())),
+            _ => None,
+        }
     }
 
     fn shape(&self, name: &str) -> Option<pass::Shape> {
         self.defs.shape(name).or_else(|| self.prelude.shape(name))
-    }
-
-    /// The paragraph-start token lists' program of each of the slices
-    /// (`None` when the definitions assign no list).
-    fn par_text(&self, slices: &[(usize, usize)]) -> Option<ParText> {
-        let machine = par_machine(&self.defs, &self.prelude)?;
-        let atoms = self.atoms();
-        let ops = slices
-            .iter()
-            .map(|&(s, e)| {
-                let lo = atoms.partition_point(|a| a.start < s);
-                let hi = atoms.partition_point(|a| a.start < e);
-                Arc::from(machine.slice_ops(self.text, atoms, lo, hi, &self.defs, &self.prelude))
-            })
-            .collect();
-        Some(ParText {
-            machine,
-            ops,
-            prelude: self.prelude.clone(),
-        })
     }
 
     /// What calling `name` (as the text, then the format, defines it)
@@ -2786,7 +2757,6 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         skip,
         pars,
         slice_hints: Vec::new(),
-        par: None,
     };
     // each slice's hint: the union of its commands' bounds (a run
     // executes the whole slice); a paragraph's region also defines
@@ -2889,6 +2859,16 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // slice that may set one and ends no paragraph after it leaves
         // the reset pending, and the next slice ending a paragraph
         // declares it)
+        // (LaTeX's paragraph hooks assign `\\everypar` at every
+        // paragraph, the value it has: no definition. A heading's
+        // `\\@afterheading`, a list's `\\item` and an environment's
+        // end (`\\@doendpe`) set another, which the next paragraph
+        // consumes, §1091: a slice calling one declares it)
+        if sets_everypar(&text[s..e])
+            && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
+        {
+            add_head(&mut b.state, "param:everypar");
+        }
         let mut out = pending.clone();
         let mut ends = false;
         let k0 = t.starts.partition_point(|&x| x < s);
@@ -2970,7 +2950,6 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         }
     }
     t.slice_hints = slice_hints;
-    t.par = an.par_text(&t.slices);
     t
 }
 
@@ -3084,149 +3063,6 @@ pub(crate) fn text_hints_with(
     }
     c.insert(key, t.clone());
     t
-}
-
-/// A text's paragraph-start token lists: the machine of its
-/// definitions, each slice's program, and the definitions before it.
-struct ParText {
-    machine: Arc<pass::ParMachine>,
-    ops: Vec<Arc<[pass::ParOp]>>,
-    prelude: Defs,
-}
-
-/// The machine of the definitions `own` over `prelude`: by the prelude,
-/// once (a text that assigns `\\everypar` itself gets its own).
-fn par_machine(own: &Definitions, prelude: &Defs) -> Option<Arc<pass::ParMachine>> {
-    type Machines = Mutex<FxHashMap<usize, (Defs, Option<Arc<pass::ParMachine>>)>>;
-    static M: OnceLock<Machines> = OnceLock::new();
-    if own.assigns_everypar() {
-        return pass::ParMachine::new(own, prelude).map(Arc::new);
-    }
-    let key = Arc::as_ptr(prelude) as usize;
-    let m = M.get_or_init(Machines::default);
-    if let Some((_, x)) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
-        return x.clone();
-    }
-    let x = pass::ParMachine::new(&Definitions::new(), prelude).map(Arc::new);
-    if crate::exec::env_flag!("PHITEX_PARLISTS_TRACE") {
-        eprintln!("parlists: machine {:?}", x.as_ref().map(|m| m.describe()));
-    }
-    let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
-    if g.len() > 64 {
-        g.clear();
-    }
-    // (the definitions kept with it: their address is the key)
-    g.insert(key, (prelude.clone(), x.clone()));
-    x
-}
-
-/// The paragraph-start token lists along a run of slices, in order
-/// (§1091: a paragraph's start runs the `\\everypar` list in force):
-/// the abstract states ([`pass::ParState`]) after the slices so far.
-pub(crate) struct ParLists {
-    states: Vec<pass::ParState>,
-    /// What the lists' definitions bound, by the definitions and the set.
-    bounds: FxHashMap<(usize, String), Arc<Hint>>,
-}
-
-impl ParLists {
-    /// From a document's start: no list in force.
-    pub(crate) fn new() -> ParLists {
-        ParLists::from(pass::ParState::start())
-    }
-
-    /// From an unknown state: a file read where any list may be in force.
-    pub(crate) fn unknown() -> ParLists {
-        ParLists::from(pass::ParState::top())
-    }
-
-    fn from(s: pass::ParState) -> ParLists {
-        ParLists {
-            states: vec![s],
-            bounds: FxHashMap::default(),
-        }
-    }
-
-    /// The slice of `t` at byte `s` follows: what the lists its paragraph
-    /// starts run may define, as a hint to add to its own (`None`:
-    /// nothing).
-    pub(crate) fn step(&mut self, t: &TextHints, s: usize) -> Option<Arc<Hint>> {
-        let p = t.par.as_ref()?;
-        let k = t.slices.partition_point(|&(a, _)| a < s);
-        if t.slices.get(k).map(|x| x.0) != Some(s) {
-            return None;
-        }
-        let ran = p.machine.slice(&p.ops[k], &self.states);
-        if crate::exec::env_flag!("PHITEX_PARLISTS_TRACE") {
-            eprintln!(
-                "parlists: slice at {s}: ops {:?}; {} states after; defines {:?}",
-                p.ops[k],
-                ran.states.len(),
-                ran.defines.names.keys().collect::<Vec<_>>()
-            );
-            for d in pass::ParMachine::describe_states(&ran.states) {
-                eprintln!("parlists:   {d}");
-            }
-        }
-        self.states = ran.states;
-        let d = ran.defines;
-        if d.names.is_empty()
-            && d.prefixes.is_empty()
-            && d.unbounded.is_empty()
-            && d.calls.is_empty()
-        {
-            return None;
-        }
-        let key = (Arc::as_ptr(&p.prelude) as usize, format!("{d:?}"));
-        if let Some(h) = self.bounds.get(&key) {
-            return Some(h.clone());
-        }
-        // (the set's fields and its calls' state, as a hint: read with the
-        // definitions before the text)
-        let an = Analysis::with_own(
-            "",
-            FileKind::Document,
-            p.prelude.clone(),
-            Definitions::new(),
-        );
-        let mut b = Bound {
-            state: Some(Vec::new()),
-            ..Bound::default()
-        };
-        let mut cause = String::new();
-        let h = Arc::new(if an.add_set(&d, &mut b, &mut cause) {
-            Hint {
-                bound: Some(b),
-                cause: "paragraph-start token lists".to_owned(),
-                excerpt: String::new(),
-                guess: None,
-            }
-        } else {
-            Hint::any(format!("\\everypar: {cause}"), "")
-        });
-        self.bounds.insert(key, h.clone());
-        Some(h)
-    }
-}
-
-/// [`hint_arg`], with what the paragraph-start token lists may define
-/// (`lists`, [`ParLists::step`]) added.
-pub(crate) fn hint_arg_in(v: &Values, t: &TextHints, s: usize, lists: Option<&Hint>) -> ValueId {
-    let (Some(l), Some(h)) = (lists, t.slice_hint(s)) else {
-        return hint_arg(v, t, s);
-    };
-    let mut h = Hint::decode(h);
-    match (&mut h.bound, &l.bound) {
-        (Some(b), Some(lb)) => {
-            let no_scope = b.no_scope;
-            let claim = b.claim;
-            union(b, lb);
-            (b.no_scope, b.claim) = (no_scope, claim);
-        }
-        (Some(_), None) => h = Hint::any(l.cause.clone(), &h.excerpt),
-        (None, _) => {}
-    }
-    v.str(&h.encode())
 }
 
 /// The hint of the document slice beginning at byte `s` of the text `t`
@@ -3546,6 +3382,28 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
+/// Whether a slice calls a command that leaves `\\everypar` other
+/// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
+/// a list item, an environment's begin or end (`\\@doendpe`), a title.
+fn sets_everypar(slice: &str) -> bool {
+    const SETS: &[&str] = &[
+        "\\section",
+        "\\subsection",
+        "\\subsubsection",
+        "\\paragraph",
+        "\\subparagraph",
+        "\\chapter",
+        "\\part",
+        "\\@afterheading",
+        "\\@startsection",
+        "\\item",
+        "\\begin",
+        "\\end",
+        "\\maketitle",
+    ];
+    SETS.iter().any(|c| slice.contains(c))
+}
+
 /// Whether the node's text says its command opens and closes no scope.
 pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
@@ -3678,36 +3536,7 @@ pub(crate) fn check_defs(
     r: &mut Run<'_, '_>,
     h: &Hint,
     claimed: &[std::sync::Arc<Hint>],
-) -> R<Option<String>> {
-    // (a definition outside the bound the run made without reading the
-    // field first may leave it as it was, `\g_para_indent_box` void to
-    // void at every LaTeX paragraph: the value before the run decides,
-    // read only for these)
-    loop {
-        let Some((f, m)) = undeclared(r, h, claimed) else {
-            return Ok(None);
-        };
-        let loc = r.loc_of(f);
-        if !r.st.defined_unread(loc) {
-            return Ok(Some(m));
-        }
-        let mut x = r.cx.use_field(f)?;
-        // (a box register never defined is void, §230: as `\setbox`
-        // leaves a void one at the base level)
-        if x.is_none() && crate::val::field_name(r.v, f).starts_with("box:") {
-            x = Some(r.v.list(vec![r.v.int(0), ValueId::UNIT]));
-        }
-        r.st.note_engine(loc, x);
-    }
-}
-
-/// The first definition the run made outside its bound (and the
-/// claimed siblings'), if any.
-fn undeclared(
-    r: &mut Run<'_, '_>,
-    h: &Hint,
-    claimed: &[std::sync::Arc<Hint>],
-) -> Option<(Field, String)> {
+) -> Option<String> {
     let b = h.bound.as_ref()?;
     let others: Vec<&Bound> = claimed.iter().filter_map(|c| c.bound.as_ref()).collect();
     let state_has = |b: &Bound, name: &str| match &b.state {
@@ -3728,25 +3557,19 @@ fn undeclared(
             if state_has(b, &name) || others.iter().any(|o| state_has(o, &name)) {
                 continue;
             }
-            return Some((
-                f,
-                format!(
-                    "undeclared definition of {name} by {:?} (state {:?}, {})",
-                    h.excerpt,
-                    b.state.clone().unwrap_or_default(),
-                    h.cause
-                ),
+            return Some(format!(
+                "undeclared definition of {name} by {:?} (state {:?}, {})",
+                h.excerpt,
+                b.state.clone().unwrap_or_default(),
+                h.cause
             ));
         }
         if names_have(b, &name) || others.iter().any(|o| names_have(o, &name)) {
             continue;
         }
-        return Some((
-            f,
-            format!(
-                "undeclared definition of {name} by {:?} (bound {:?} {:?}, {})",
-                h.excerpt, b.names, b.prefixes, h.cause
-            ),
+        return Some(format!(
+            "undeclared definition of {name} by {:?} (bound {:?} {:?}, {})",
+            h.excerpt, b.names, b.prefixes, h.cause
         ));
     }
     None
