@@ -578,6 +578,13 @@ pub struct Report {
     /// greatest height of a finished node): the runs that could not
     /// overlap, whatever the thread count. See [`Engine::critical_chain`].
     pub critical_path: u32,
+    /// The longest chain of runs in this evaluation that had to wait for
+    /// each other: a run counts 1 more than the deepest run of this
+    /// evaluation whose result it read, not counting reads answered by a
+    /// guess (a previous value or a prediction) that was confirmed. A run
+    /// with no such read counts 1, so a plain chain of `n` runs gives `n`
+    /// (where [`Self::critical_path`], heights from 0, gives `n - 1`).
+    pub realised_critical_path: u32,
     /// The largest batch of jobs handed to the executor in one step: the
     /// most that could run at once.
     pub max_ready: usize,
@@ -1055,6 +1062,9 @@ pub(crate) struct Node {
     /// pending effect is decided).
     bound: u8,
     flags: u16,
+    /// Realised depth (see [`Report::realised_critical_path`]): the low
+    /// 24 bits, tagged in the high 8 with the evaluation that set it.
+    rdepth: u32,
     pub(crate) uses: Box<[Use]>,
     pub(crate) defs: Box<[Def]>,
 }
@@ -1869,6 +1879,8 @@ pub struct Engine {
     pub(crate) text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
     /// The text-only hooks of each (operation, text), computed once.
     statics: RwLock<FxHashMap<(OpId, ValueId), Arc<Static>>>,
+    /// The tag of the current evaluation for `Node::rdepth`.
+    rtag: u32,
     /// Some text predicted values ([`Operation::predicted_defs`]).
     predictions_seen: std::sync::atomic::AtomicBool,
     /// Dirty demanded nodes by height (a bucket queue: entries are removed
@@ -2118,6 +2130,7 @@ impl Engine {
             memo: OvMap::default(),
             text_memo: RwLock::new(FxHashMap::default()),
             statics: RwLock::new(FxHashMap::default()),
+            rtag: 1,
             predictions_seen: std::sync::atomic::AtomicBool::new(false),
             queue: Vec::new(),
             queue_min: 0,
@@ -3871,6 +3884,7 @@ impl Engine {
             eff_code(eff)
         };
         let node = Node {
+            rdepth: 0,
             id,
             args,
             output: ValueId::UNIT,
@@ -4125,6 +4139,7 @@ impl Engine {
             flags |= F_HINT;
         }
         let node = Node {
+            rdepth: 0,
             id,
             args,
             output: ValueId::UNIT,
@@ -8467,6 +8482,7 @@ impl Engine {
             self.enqueue(x);
             return;
         }
+        self.note_realised(x, &r.assumptions);
         let mut pending_assumptions = 0;
         for &(t0, kind, value) in &r.assumptions {
             let mut t = t0;
@@ -8534,6 +8550,33 @@ impl Engine {
 
     /// Checks the assumptions of a speculative run whose targets are no
     /// longer in work (they finished earlier in the same batch).
+    /// The realised depth of a run of this evaluation (0: none).
+    fn realised(&self, t: Slot) -> u32 {
+        let d = self.n(t).rdepth;
+        if d >> 24 == self.rtag { d & 0x00ff_ffff } else { 0 }
+    }
+
+    /// Sets `x`'s realised depth from the result it applies: 1 + the
+    /// deepest run of this evaluation it read, guesses excluded (an
+    /// assumption still open is confirmed or the run is redone).
+    fn note_realised(&mut self, x: Slot, assumptions: &[(Slot, AssumeKind, ValueId)]) {
+        let mut d = 0;
+        for u in &self.n(x).uses {
+            let t = match u.kind {
+                K_FIELD | K_CHAIN if u.site != NIL => u.site,
+                K_OUTPUT => Slot::unpack(u.key),
+                _ => continue,
+            };
+            if t == x || !self.live(t) || assumptions.iter().any(|a| a.0 == t) {
+                continue;
+            }
+            d = d.max(self.realised(t));
+        }
+        let d = (d + 1).min(0x00ff_ffff);
+        self.nm(x).rdepth = (self.rtag << 24) | d;
+        self.report.realised_critical_path = self.report.realised_critical_path.max(d);
+    }
+
     fn stale_assumptions_hold(&self, x: Slot, r: &RunResult) -> bool {
         let xn = self.n(x);
         for &(t, kind, value) in &r.assumptions {
@@ -9262,6 +9305,8 @@ impl Engine {
 
     fn finalize_report(&mut self) {
         self.report.critical_path = self.critical_path();
+        // The next evaluation's realised depths start over.
+        self.rtag = (self.rtag + 1) & 0xff;
         // One entry per node: its last reason, at its first position.
         let mut at: FxHashMap<NodeId, usize> = FxHashMap::default();
         let mut causes: Vec<(NodeId, Rerun)> = Vec::new();
