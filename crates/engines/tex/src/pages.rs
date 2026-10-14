@@ -1,221 +1,69 @@
-//! Pages: where the document's pages break and where their output
-//! routines run, as pieces of the graph.
+//! Pages: where the document's pages finish and their output routines,
+//! as nodes of the graph, values by def-use only.
 //!
-//! Text pieces (`exec`) run whole and in parallel. Each item a piece puts
-//! on the outer vertical list carries a [`Cand`]: the piece, and the
-//! index `k` of that moment among the piece's finish candidates (the
-//! moments TeX looks for a full page: a paragraph's start and end, an item
-//! between paragraphs, after a display, §1091 §1096 §1100 §1103 §1200).
+//! - Text pieces (`exec`) typeset in parallel. Each item a piece puts on
+//!   the outer vertical list carries its finish candidate ([`Cand`]: the
+//!   piece and the index `k` of the moment TeX looks for a full page,
+//!   §1091 §1096 §1100 §1103 §1200); at its end the piece defines its
+//!   items ([`items_field`]).
+//! - A page-state node ([`PageStateOp`]) stands after each piece: the
+//!   page builder in SSA form. It reads the version of the page state
+//!   reaching it ([`PS`]) and its piece's items, applies Knuth's rules
+//!   (§980–§1010) item by item, defines the next version, and outputs
+//!   where a page finishes ([`Fin`]) if one does: it stops there.
+//! - A finisher ([`Finish`]) stands where a page finishes. Its page is
+//!   its argument; it reads what reaches it, runs the output routine,
+//!   defines its `\global`s, the marks, [`SHIPPED`], and a fresh version
+//!   of the page state (the next page's start, the material it put back
+//!   pending). A drain node (a page-state node with no piece) follows
+//!   each finisher: a page the put-back material fills finishes at the
+//!   same moment.
+//! - A page finishing inside a piece cuts it: the piece stops after
+//!   candidate `k` ([`stop_arg`]) and defines its continuation
+//!   ([`cont_field`]); after the finishers a [`Resume`] piece runs the
+//!   rest, with its own page-state node.
+//! - The driver ([`Driver`]) changes structure only, during the
+//!   evaluation: the engine reports a page-state node's output when it is
+//!   final (`Engine::mark`, `EditSource::settled`); between steps
+//!   (`EditSource::absorb`) the driver places, moves or removes
+//!   finishers and cuts, diffed against what stands, so node identities
+//!   stay and unchanged readers never run again.
 //!
-//! The driver ([`settle`]) evaluates the graph, breaks the whole item
-//! list into pages ([`break_pages`], a pure function: Knuth's cost rule,
-//! §980–§1008), and places one finisher piece ([`Finish`]) per page where
-//! TeX finishes it ([`plan`], [`place_finishers`]):
-//!
-//! - at a piece's last candidate: the finishers right after the piece;
-//! - inside a piece, at candidate `k`: the piece re-run with
-//!   [`stop_arg`]`(k)` (it stops after its k-th candidate and defines its
-//!   continuation, [`cont_field`]), the finishers, then a [`Resume`]
-//!   piece that reads the continuation and runs the rest.
-//!
-//! A finisher runs the output routine on its page's items and defines
-//! its `\global` assignments where it stands (its local ones end with the
-//! routine's group, §1025). Every value moves by def-use: text before a
-//! finisher never sees it, text after it reads what it set. Nothing reads
-//! "the state after a whole piece", nothing is fed back to a later round,
-//! nothing is replayed.
-//!
-//! Before the first placement no finisher exists: a piece reading page
-//! state (`\c@page`, the float lists) gets what reaches it, the
-//! preamble's values; once the finishers stand, the readers whose
-//! reaching value changed run again, and only those. The driver repeats
-//! until the breaks stop moving (a re-run reader changed a height, or a
-//! finisher changed what the next page's break needs: `\vsize`, held
-//! insertions).
+//! Nothing reads the state after a whole piece, nothing is fed back to a
+//! later round, nothing is replayed; the page chain is the document's own
+//! (one addition per piece, one finisher per page), overlapped with the
+//! typesetting.
+
+use std::sync::{Arc, Mutex, PoisonError};
 
 use phitex_defuse::{
-    Ctx, Engine, Field, FxHashMap, Locality, MayDefine, NodeId, OpId, Operation, Stop, UnitId, ValueId, Values,
+    Ctx, EditSource, Engine, Field, FxHashMap, Locality, MayDefine, NodeId, OpId, Operation, Settled, Stop,
+    ValueId, Values,
 };
-use std::collections::BTreeMap;
 
 use crate::run::{R, Run};
+use crate::val::list_of;
 
-/// A finish candidate: the piece that made it and its index among that
-/// piece's candidates (in the piece's own text: a resume piece goes on
-/// counting where the piece it resumes stopped).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub(crate) struct Cand {
-    pub piece: NodeId,
-    pub k: u32,
+/// The page state's versions: defined by every page-state node and
+/// finisher, read where it reaches.
+pub(crate) const PS: &str = "ps";
+
+/// Defined by a finisher that shipped its page: text after it reads it
+/// (a read-time PDF write after a `\\shipout`).
+pub(crate) const SHIPPED: &str = "pages:shipped";
+
+/// The items a piece put on the outer vertical list, tagged with their
+/// candidates, which its page-state node reads.
+pub(crate) fn items_field(v: &Values, piece: NodeId) -> Field {
+    v.field(&format!("pitems:{:x}", piece.raw()))
 }
 
-/// One item on the outer vertical list, as the breaker sees it.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct Item {
-    /// The candidate it arrived with: the page builder looks at the page
-    /// right after it.
-    pub at: Cand,
-    pub kind: ItemKind,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) enum ItemKind {
-    Box { height: i32, depth: i32 },
-    Glue { width: i32, stretch: i32, shrink: i32 },
-    Kern(i32),
-    Penalty(i32),
-    Insert { class: u16, height: i32 },
-    Mark { class: u16, text: ValueId },
-    Other,
-}
-
-/// What the next page's break needs that a finisher may change: the
-/// page parameters as it left them (§980) and what it put back on the
-/// list (held insertions, a float it deferred).
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub(crate) struct PageState {
-    pub vsize: i32,
-    pub max_depth: i32,
-    pub put_back: Vec<Item>,
-}
-
-/// One page as the breaker found it.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct PageBreak {
-    /// The page's items: `items[start..end]`.
-    pub start: usize,
-    pub end: usize,
-    /// Where TeX finishes it: the candidate after which the page builder
-    /// found the page full, or met a penalty of -10000 or less.
-    pub finish: Cand,
-}
-
-/// Knuth's page breaking over the whole item list: each page from where
-/// the last one ended, under what page `j-1`'s finisher left
-/// (`states[j-1]`, from the last settle; the text's parameters `first`
-/// for page 0 and for a page whose finisher has not run yet).
-pub(crate) fn break_pages(items: &[Item], first: &PageState, states: &[PageState]) -> Vec<PageBreak> {
-    let mut pages = Vec::new();
-    let mut start = 0;
-    let mut st = first;
-    while start < items.len() {
-        let Some((len, finish)) = break_one(&items[start..], st) else {
-            break;
-        };
-        pages.push(PageBreak {
-            start,
-            end: start + len,
-            finish,
-        });
-        start += len.max(1);
-        st = states.get(pages.len() - 1).unwrap_or(first);
-    }
-    pages
-}
-
-/// One page from `items[0]`: how many items it takes and where it
-/// finishes (`None`: the items run out before the page is full and no
-/// end of the job forces it).
-fn break_one(items: &[Item], st: &PageState) -> Option<(usize, Cand)> {
-    let _ = (items, st);
-    todo!(
-        "§980–§1008 with phitex_typeset::page::PageBuilder: insertions charged, \
-         the best break kept; the page ends at the best break, it finishes at the \
-         candidate of the item at which the cost became awful_bad or a penalty <= -10000 \
-         arrived; st.put_back goes first"
-    )
-}
-
-impl Run<'_, '_> {
-    /// A finish candidate: TeX looks for a full page here (`build_page`
-    /// at the outer level, §1091 §1096 §1100 §1103 §1200). The run counts
-    /// it (the items it puts on the outer list from here on carry
-    /// `[piece, k]`); at its stop ([`stop_of`] of its arguments, or the
-    /// resume piece's) it defines its continuation ([`cont_field`]) and
-    /// ends.
-    pub(crate) fn finish_candidate(&mut self) -> R<()> {
-        todo!("k += 1; tag the next items [piece, k]; at the stop: define cont:<piece> (the pending input relative to the piece's region, the open groups) and end the run")
-    }
-
-    /// `\\shipout` (§1023, §638): in a finisher, the page value it
-    /// outputs; anywhere else the same, a page of its own.
-    pub(crate) fn ship_out(&mut self, b: ValueId) -> R<()> {
-        let _ = b;
-        todo!("the shipped box as a page value of the finisher (no PDF in the skeleton)")
-    }
-
-    /// `\\pagegoal`, `\\pagetotal`, … (§421, §982): the page builder's
-    /// totals as they stand at this candidate.
-    pub(crate) fn page_dimen<M>(&mut self, m: M) -> R<i32> {
-        let _ = m;
-        todo!("the totals of the page open at this candidate: from the last break, by Cand (a read the driver re-runs when the break moves)")
-    }
-
-    /// The output routine's group ends (§1100): in a finisher, its
-    /// `\\global`s stand, its locals end; the page's leftovers go back.
-    pub(crate) fn output_end<M>(&mut self, md: M) -> R<()> {
-        let _ = md;
-        todo!("§1100: check \\box255 is void, the routine's put-back material to the finisher's output, end the run")
-    }
-
-    /// The page a finisher finishes (its argument `[j]`).
-    pub(crate) fn page_index(&self) -> usize {
-        todo!("a finisher's argument j")
-    }
-}
-
-/// Where the finishers stand, by text piece: the candidates inside it
-/// at which pages finish and how many pages finish at each (in order).
-/// A candidate equal to the piece's last means after the piece.
-pub(crate) type Plan = BTreeMap<NodeId, Vec<(u32, Vec<usize>)>>;
-
-/// The plan for `pages`.
-pub(crate) fn plan(pages: &[PageBreak]) -> Plan {
-    let mut p: Plan = BTreeMap::new();
-    for (j, pg) in pages.iter().enumerate() {
-        let at = p.entry(pg.finish.piece).or_default();
-        match at.last_mut() {
-            Some((k, js)) if *k == pg.finish.k => js.push(j),
-            _ => at.push((pg.finish.k, vec![j])),
-        }
-    }
-    p
-}
-
-/// The last candidate of each piece on the list (a page finishing there
-/// needs no split).
-pub(crate) fn last_cands(items: &[Item]) -> FxHashMap<NodeId, u32> {
-    let mut last = FxHashMap::default();
-    for it in items {
-        let e = last.entry(it.at.piece).or_insert(it.at.k);
-        *e = (*e).max(it.at.k);
-    }
-    last
-}
-
-/// The operations the driver places.
-#[derive(Clone, Copy)]
-pub(crate) struct PageOps {
-    pub exec: OpId,
-    pub finish: OpId,
-    pub resume: OpId,
-}
-
-/// What the driver placed for one text piece: its full text (its `exec`
-/// arguments, no stop), the plan it placed, and the pieces it added
-/// after it (finishers and resume pieces, in line order).
-struct Placed {
-    text: Vec<ValueId>,
-    at: Vec<(u32, Vec<usize>)>,
-    added: Vec<NodeId>,
-}
-
-/// The finishers in the line, by the text piece they follow or split.
-#[derive(Default)]
-pub(crate) struct Placement {
-    placed: FxHashMap<NodeId, Placed>,
-    /// Page `j`'s finisher.
-    finisher: BTreeMap<usize, NodeId>,
+/// What a piece stopped at a candidate defines: its continuation (the
+/// text still to run, relative to its own region, and the groups still
+/// open: a stop can fall inside a macro), which the resume piece after it
+/// reads.
+pub(crate) fn cont_field(v: &Values, piece: NodeId) -> Field {
+    v.field(&format!("cont:{:x}", piece.raw()))
 }
 
 /// The last argument of a piece that stops after its `k`-th candidate.
@@ -225,163 +73,243 @@ pub(crate) fn stop_arg(v: &Values, k: u32) -> ValueId {
 
 /// The candidate a piece stops after (its last argument, [`stop_arg`]).
 pub(crate) fn stop_of(v: &Values, args: &[ValueId]) -> Option<u32> {
-    let xs = crate::val::list_of(v, *args.last()?);
+    let xs = list_of(v, *args.last()?);
     match xs[..] {
         [t, k] if v.as_str(t).as_deref() == Some("stop") => v.as_int(k).and_then(|k| u32::try_from(k).ok()),
         _ => None,
     }
 }
 
-/// The field a piece stopped at a candidate defines: its continuation
-/// (the text still to run, relative to its own region, and the groups
-/// still open), which the resume piece after it reads.
-pub(crate) fn cont_field(v: &Values, piece: NodeId) -> Field {
-    v.field(&format!("cont:{:x}", piece.raw()))
+fn node_int(v: &Values, n: NodeId) -> ValueId {
+    v.int(i64::from_ne_bytes(n.raw().to_ne_bytes()))
 }
 
-/// The line brought to `p` (between settles): a piece whose plan
-/// changed is put back whole and its added pieces removed, then placed
-/// again. Text pieces of an unchanged plan are not touched.
-pub(crate) fn place_finishers(
-    eng: &mut Engine,
-    pl: &mut Placement,
-    p: &Plan,
-    last: &FxHashMap<NodeId, u32>,
-    ops: PageOps,
-) {
-    // pieces no longer split or followed: whole again
-    let gone: Vec<NodeId> = pl.placed.keys().filter(|n| !p.contains_key(n)).copied().collect();
-    for n in gone {
-        unplace(eng, pl, n, ops);
-    }
-    for (&piece, at) in p {
-        if pl.placed.get(&piece).is_some_and(|x| &x.at == at) {
-            continue;
-        }
-        let text = if pl.placed.contains_key(&piece) {
-            unplace(eng, pl, piece, ops)
-        } else {
-            todo!("the piece's exec arguments, from the incremental layer's region table")
-        };
-        let mut added = Vec::new();
-        let mut after = piece;
-        let end = last.get(&piece).copied().unwrap_or(0);
-        for (i, (k, js)) in at.iter().enumerate() {
-            let split = *k < end;
-            if i == 0 && split {
-                // the piece stops after its k-th candidate
-                let mut args = text.clone();
-                args.push(stop_arg(eng.values(), *k));
-                eng.replace(piece, ops.exec, args);
-            }
-            for &j in js {
-                let a = vec![eng.values().int(j as i64)];
-                let f = eng.insert_after(after, ops.finish, a);
-                pl.finisher.insert(j, f);
-                added.push(f);
-                after = f;
-            }
-            if split {
-                // the rest of the piece, up to its next stop if any
-                let v = eng.values();
-                let mut args = vec![v.int(i64::from_ne_bytes(piece.raw().to_ne_bytes()))];
-                if let Some((k2, _)) = at.get(i + 1)
-                    && *k2 < end
-                {
-                    args.push(stop_arg(v, *k2));
-                }
-                let _ = v;
-                let r = eng.insert_after(after, ops.resume, args);
-                added.push(r);
-                after = r;
-            }
-        }
-        pl.placed.insert(
-            piece,
-            Placed {
-                text,
-                at: at.clone(),
-                added,
-            },
-        );
-    }
+fn int_node(v: &Values, x: ValueId) -> Option<NodeId> {
+    v.as_int(x).map(|i| NodeId::from_raw(u64::from_ne_bytes(i.to_ne_bytes())))
 }
 
-/// `piece` whole again, what was added after it removed: its text.
-fn unplace(eng: &mut Engine, pl: &mut Placement, piece: NodeId, ops: PageOps) -> Vec<ValueId> {
-    let Some(x) = pl.placed.remove(&piece) else {
-        return Vec::new();
-    };
-    for n in x.added {
-        eng.remove(n);
-    }
-    pl.finisher.retain(|_, f| eng.is_live(*f));
-    eng.replace(piece, ops.exec, x.text.clone());
-    x.text
+/// A finish candidate: the piece that made it and its index among that
+/// piece's candidates (in the piece's own text: a resume piece goes on
+/// counting where the one before it stopped).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct Cand {
+    pub piece: NodeId,
+    pub k: u32,
 }
 
-/// The items on the outer vertical list after a settle, with their
-/// candidates.
-pub(crate) fn collect_items(eng: &Engine, unit: UnitId) -> Vec<Item> {
-    let _ = (eng, unit);
-    todo!("the `items` sequence of `unit`, each entry tagged [piece, k] by the run that put it there")
+/// One item on the outer vertical list.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Item {
+    pub at: Cand,
+    pub kind: ItemKind,
+    /// The item itself, as the finisher's `\box255` gets it.
+    pub node: ValueId,
 }
 
-/// What each placed finisher left for the next page's break (its
-/// output), by page.
-pub(crate) fn finisher_states(eng: &Engine, pl: &Placement) -> Vec<PageState> {
-    pl.finisher
-        .values()
-        .map(|&f| eng.output(f).map(|x| page_state(eng.values(), x)).unwrap_or_default())
-        .collect()
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum ItemKind {
+    Box { height: i32, depth: i32 },
+    Glue { width: i32, stretch: [i32; 4], shrink: i32 },
+    Kern(i32),
+    Penalty(i32),
+    Insert { class: u16, height: i32, depth: i32 },
+    Mark { class: u16, text: ValueId },
+    /// `\pagegoal=` and its kin (§1245): `page_so_far[i] := x`.
+    SetPage { i: u8, x: i32 },
+    /// The page parameters as they stand when the item after arrives (§987).
+    Params { vsize: i32, max_depth: i32 },
+    Other,
 }
 
-fn page_state(v: &Values, x: ValueId) -> PageState {
+fn decode_items(v: &Values, x: Option<ValueId>) -> Vec<Item> {
     let _ = (v, x);
-    todo!("decode a finisher's output: [vsize, max_depth, put-back items]")
+    todo!("a piece's `pitems:` value: [[piece, k, item], ...] decoded to Items (crate::nodes)")
 }
 
-/// The most times the driver breaks and places before giving up.
-const MAX_SETTLES: usize = 16;
+/// One insertion class on the current page (§981).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(crate) struct InsState {
+    pub class: u16,
+    pub height: i32,
+    /// Split on this page (§1010): later ones of the class wait.
+    pub split: bool,
+}
 
-/// The document's pages settled: evaluate, break, place the finishers,
-/// until the breaks stop moving. `evaluate` is one engine evaluation
-/// (incremental: only what changed runs).
-pub(crate) fn settle(
-    eng: &mut Engine,
-    unit: UnitId,
-    pl: &mut Placement,
-    first: &PageState,
-    ops: PageOps,
-    evaluate: &mut dyn FnMut(&mut Engine) -> Result<(), String>,
-) -> Result<Vec<PageBreak>, String> {
-    let mut last_pages: Option<Vec<PageBreak>> = None;
-    for _ in 0..MAX_SETTLES {
-        evaluate(eng)?;
-        let items = collect_items(eng, unit);
-        let states = finisher_states(eng, pl);
-        let pages = break_pages(&items, first, &states);
-        if last_pages.as_ref() == Some(&pages) {
-            return Ok(pages);
-        }
-        place_finishers(eng, pl, &plan(&pages), &last_cands(&items), ops);
-        last_pages = Some(pages);
+/// A version of the page builder's state (§980–§982).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(crate) struct PageState {
+    /// Pages finished before.
+    pub page: i64,
+    /// The current page's items so far.
+    pub contents: Vec<Item>,
+    /// Material a finisher put back, not on the page yet (§1017, §1023).
+    pub pending: Vec<Item>,
+    pub goal: i32,
+    /// Height, the four stretch orders, shrink (§982).
+    pub total: [i32; 6],
+    pub depth: i32,
+    pub max_depth: i32,
+    pub inserts: Vec<InsState>,
+    pub insert_penalties: i32,
+    /// The best break so far: its index in `contents` and its cost.
+    pub best: Option<(usize, i32)>,
+}
+
+impl PageState {
+    fn decode(v: &Values, x: Option<ValueId>) -> PageState {
+        let _ = (v, x);
+        todo!("a `ps` version as a value: the fields above; None: the empty page of the preamble's parameters")
     }
-    Err("pages: the breaks did not settle".to_owned())
+
+    fn encode(&self, v: &Values) -> ValueId {
+        let _ = v;
+        todo!("the fields above as a value")
+    }
+
+    /// TeX's page builder over the pending material, then `items`, item
+    /// by item (§980–§1010: the page's top discards, insertions charged
+    /// or split by the room left, the cost of each break, the best kept),
+    /// stopping where the page finishes: at the candidate whose item made
+    /// the cost `awful_bad` or brought a penalty of -10000 or less.
+    fn add(&mut self, items: &[Item]) -> Option<(Cand, Vec<Item>, Vec<Item>)> {
+        let _ = items;
+        todo!("§980–§1010; at a finish: the page's items up to the best break, and the rest put back")
+    }
 }
 
-/// Defined by a finisher that shipped its page: text after it reads it
-/// (a read-time PDF write after a `\\shipout`).
-pub(crate) const SHIPPED: &str = "pages:shipped";
+/// A page finishing, as a page-state node outputs it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Fin {
+    pub at: Cand,
+    /// At the last candidate of the piece the node follows (no cut).
+    pub at_end: bool,
+    /// The page's index.
+    pub page: i64,
+    /// The page's items, as the finisher's argument.
+    pub content: ValueId,
+    /// What goes back to the next page.
+    pub carried: ValueId,
+}
 
-/// A page's finisher: TeX's output routine for page `j` (§1012–§1025)
-/// where the page finishes. Argument `[j]`; it reads page `j`'s items
-/// (`items[start..end]` of the last break, the driver's), and anything
-/// else as any piece does: what reaches its place (the text's values
-/// before it, earlier finishers' `\global`s). It defines its `\global`
-/// assignments, the marks of its page (`mark:top`, `mark:first`,
-/// `mark:bot` and the classes', §1012) and [`SHIPPED`] if it shipped;
-/// its output is the [`PageState`] the next break needs.
+impl Fin {
+    fn encode(&self, v: &Values) -> ValueId {
+        v.list(vec![
+            node_int(v, self.at.piece),
+            v.int(i64::from(self.at.k)),
+            v.int(i64::from(self.at_end)),
+            v.int(self.page),
+            self.content,
+            self.carried,
+        ])
+    }
+
+    fn decode(v: &Values, x: ValueId) -> Option<Fin> {
+        let xs = list_of(v, x);
+        let [p, k, e, j, content, carried] = xs[..] else {
+            return None;
+        };
+        Some(Fin {
+            at: Cand {
+                piece: int_node(v, p)?,
+                k: u32::try_from(v.as_int(k)?).ok()?,
+            },
+            at_end: v.as_int(e)? != 0,
+            page: v.as_int(j)?,
+            content,
+            carried,
+        })
+    }
+
+    /// The finisher's arguments.
+    fn finisher_args(&self, v: &Values) -> Vec<ValueId> {
+        vec![v.int(self.page), self.content, self.carried]
+    }
+}
+
+/// What a page-state node follows: a piece (its items), or a finisher
+/// at candidate `Cand` (no items: the material put back drains).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Source {
+    Piece(NodeId),
+    Drain(Cand),
+}
+
+fn source_args(v: &Values, s: Source) -> Vec<ValueId> {
+    match s {
+        Source::Piece(n) => vec![v.str("piece"), node_int(v, n)],
+        Source::Drain(c) => vec![v.str("drain"), node_int(v, c.piece), v.int(i64::from(c.k))],
+    }
+}
+
+fn source_of(v: &Values, args: &[ValueId]) -> Option<Source> {
+    let kind = v.as_str(*args.first()?)?;
+    let n = int_node(v, *args.get(1)?)?;
+    match &*kind {
+        "piece" => Some(Source::Piece(n)),
+        "drain" => Some(Source::Drain(Cand {
+            piece: n,
+            k: u32::try_from(v.as_int(*args.get(2)?)?).ok()?,
+        })),
+        _ => None,
+    }
+}
+
+/// The page builder in SSA form: the next version of [`PS`] from the one
+/// reaching it and its piece's items; its output the [`Fin`] where a page
+/// finishes (UNIT: none).
+pub(crate) struct PageStateOp;
+
+impl Operation for PageStateOp {
+    fn name(&self) -> &'static str {
+        "pagestate"
+    }
+    fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(vec![(v.field(PS), Locality::Global)])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let args = cx.args();
+        let Some(src) = source_of(v, &args) else {
+            return Ok(ValueId::UNIT);
+        };
+        let ps = v.field(PS);
+        let mut st = PageState::decode(v, cx.use_field(ps)?);
+        let (items, last) = match src {
+            Source::Piece(n) => {
+                let items = decode_items(v, cx.use_field(items_field(v, n))?);
+                let last = items.iter().map(|i| i.at.k).max();
+                (items, last)
+            }
+            Source::Drain(_) => (Vec::new(), None),
+        };
+        let fin = st.add(&items).map(|(at, page, rest)| {
+            let (at, at_end) = match src {
+                Source::Drain(c) => (c, true),
+                Source::Piece(_) => (at, Some(at.k) == last),
+            };
+            let enc = |xs: Vec<Item>| v.list(xs.into_iter().map(|i| i.node).collect());
+            Fin {
+                at,
+                at_end,
+                page: st.page,
+                content: enc(page),
+                carried: enc(rest),
+            }
+        });
+        cx.define(ps, st.encode(v));
+        Ok(fin.map_or(ValueId::UNIT, |f| f.encode(v)))
+    }
+}
+
+/// A page's finisher: TeX's output routine for one page (§1012–§1025)
+/// where the page finishes. Arguments `[j, content, carried]`. It reads
+/// what reaches its place as any node does; it defines its `\global`
+/// assignments (its local ones end with the routine's group), the marks
+/// of its page for the text after it (`mark:top`, `mark:first`,
+/// `mark:bot` and the classes'), `\outputpenalty`, `\deadcycles`,
+/// [`SHIPPED`] if it shipped, and a fresh [`PS`]: page `j+1`'s start,
+/// `carried` and what the routine put back pending. Its output is its
+/// page.
 pub(crate) struct Finish;
 
 impl Operation for Finish {
@@ -397,16 +325,16 @@ impl Operation for Finish {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _ = cx;
         todo!(
-            "box255 from page j's items, marks and insertions (§1012–§1022); the output \
-             routine run in a group (§1025): its \\global assignments published, its local \
-             ones dropped; \\shipout a page value; output [vsize, max_depth, put-back items]"
+            "\\box255, marks and insertion boxes from the content (§1012–§1022); the output \
+             routine run in a group (§1025); its \\globals, the marks, \\outputpenalty, \
+             \\deadcycles, pages:shipped and the fresh ps defined; the page value output"
         )
     }
 }
 
-/// The rest of a piece after it stopped: argument `[piece, stop?]`; it
-/// reads the piece's continuation ([`cont_field`]) and runs it, counting
-/// candidates on from there, stopping too if it has a stop.
+/// The rest of a piece after it stopped: arguments `[from, stop?]`, the
+/// node whose continuation ([`cont_field`]) it reads; it runs it, counting
+/// candidates on from there, and stops in turn if it has a stop.
 pub(crate) struct Resume;
 
 impl Operation for Resume {
@@ -421,7 +349,340 @@ impl Operation for Resume {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _ = cx;
-        todo!("read cont:<piece>, run the pending text in its open groups; at a stop define cont:<self's piece> again")
+        todo!("read cont:<from>, run its pending text in its open groups; define pitems:<self>; at a stop define cont:<self>")
+    }
+}
+
+impl Run<'_, '_> {
+    /// A finish candidate: TeX looks for a full page here (`build_page`
+    /// at the outer level). The run counts it, tags the items it puts on
+    /// the outer list from here with `[piece, k]`; at its stop it defines
+    /// its continuation ([`cont_field`]) and its items, and ends.
+    pub(crate) fn finish_candidate(&mut self) -> R<()> {
+        todo!("k += 1; tag the next items [piece, k]; at the stop: define cont:<node> and pitems:<node>, end the run")
+    }
+
+    /// The items this piece put on the outer list, defined at its end
+    /// ([`items_field`]) for its page-state node.
+    pub(crate) fn define_piece_items(&mut self) {
+        todo!("pitems:<node> = the tagged items, in order")
+    }
+
+    /// `\\shipout` (§1023, §638): in a finisher, its page value.
+    pub(crate) fn ship_out(&mut self, b: ValueId) -> R<()> {
+        let _ = b;
+        todo!("the shipped box as the finisher's page value (no PDF in the skeleton)")
+    }
+
+    /// `\\pagegoal`, `\\pagetotal`, … (§421, §982): the version of the
+    /// page state reaching this piece ([`PS`], def-use), with this piece's
+    /// items up to here added.
+    pub(crate) fn page_dimen<M>(&mut self, m: M) -> R<i32> {
+        let reaching = self.get(PS)?;
+        let _ = (m, reaching);
+        todo!("PageState::decode(reaching), add this piece's items so far, the field m")
+    }
+
+    /// The output routine's group ends (§1100): in a finisher, its
+    /// `\\global`s stand, its locals end, what it put back goes to its
+    /// fresh page state.
+    pub(crate) fn output_end<M>(&mut self, md: M) -> R<()> {
+        let _ = md;
+        todo!("§1100: \\box255 void checked, the put-back material pending in the fresh ps, the run ends")
+    }
+
+    /// The page a finisher finishes (its first argument).
+    pub(crate) fn page_index(&self) -> usize {
+        todo!("a finisher's argument j")
+    }
+}
+
+/// The operations the driver places.
+#[derive(Clone, Copy)]
+pub(crate) struct PageOps {
+    pub exec: OpId,
+    pub finish: OpId,
+    pub resume: OpId,
+    pub pagestate: OpId,
+}
+
+/// The text pieces after an edit applied to the line, for the driver
+/// ([`Driver::place`]); set by the text's edit source.
+pub(crate) type PieceInbox = Arc<Mutex<Option<Vec<NodeId>>>>;
+
+/// One finisher placed, and the drain node after it.
+struct Placed {
+    finisher: NodeId,
+    drain: NodeId,
+    args: Vec<ValueId>,
+}
+
+/// A run of a piece's text: the piece itself (`segs[0]`) or a resume
+/// piece, its stop, its page-state node, the finishers after it.
+struct Seg {
+    node: NodeId,
+    stop: Option<u32>,
+    ps: NodeId,
+    pages: Vec<Placed>,
+}
+
+/// A text piece and what stands after it.
+struct Group {
+    /// The piece's arguments, no stop.
+    text: Vec<ValueId>,
+    segs: Vec<Seg>,
+}
+
+#[derive(Clone, Copy)]
+enum Slot {
+    Ps,
+    Drain(usize),
+}
+
+/// The structure the pages need, kept in step with the page-state nodes'
+/// outputs as they become final.
+pub(crate) struct Driver {
+    ops: PageOps,
+    groups: FxHashMap<NodeId, Group>,
+    /// A page-state or drain node: its piece, segment and place.
+    by_node: FxHashMap<NodeId, (NodeId, usize, Slot)>,
+    /// Final outputs reported, not acted on yet.
+    reports: Vec<(NodeId, ValueId)>,
+    inbox: PieceInbox,
+}
+
+impl Driver {
+    pub(crate) fn new(ops: PageOps, inbox: PieceInbox) -> Driver {
+        Driver {
+            ops,
+            groups: FxHashMap::default(),
+            by_node: FxHashMap::default(),
+            reports: Vec::new(),
+            inbox,
+        }
+    }
+
+    /// Every text piece followed by its page-state node; the groups of
+    /// pieces gone removed.
+    pub(crate) fn sync_pieces(&mut self, eng: &mut Engine, pieces: &[NodeId]) {
+        let live: phitex_defuse::FxHashSet<NodeId> = pieces.iter().copied().collect();
+        let gone: Vec<NodeId> = self.groups.keys().filter(|n| !live.contains(n)).copied().collect();
+        for p in gone {
+            if let Some(g) = self.groups.remove(&p) {
+                for (i, s) in g.segs.into_iter().enumerate() {
+                    self.drop_seg(eng, s, i > 0);
+                }
+            }
+        }
+        for &p in pieces {
+            if self.groups.contains_key(&p) {
+                continue;
+            }
+            let text = eng.node_info(p).map(|i| i.args).unwrap_or_default();
+            let ps = self.page_state_after(eng, p, Source::Piece(p));
+            self.by_node.insert(ps, (p, 0, Slot::Ps));
+            self.groups.insert(
+                p,
+                Group {
+                    text,
+                    segs: vec![Seg {
+                        node: p,
+                        stop: None,
+                        ps,
+                        pages: Vec::new(),
+                    }],
+                },
+            );
+        }
+    }
+
+    fn page_state_after(&self, eng: &mut Engine, after: NodeId, s: Source) -> NodeId {
+        let args = source_args(eng.values(), s);
+        let n = eng.insert_after(after, self.ops.pagestate, args);
+        eng.mark(n);
+        n
+    }
+
+    /// A segment's nodes removed (its own node too when `own`).
+    fn drop_seg(&mut self, eng: &mut Engine, s: Seg, own: bool) {
+        for p in s.pages {
+            self.by_node.remove(&p.drain);
+            eng.remove(p.drain);
+            eng.remove(p.finisher);
+        }
+        self.by_node.remove(&s.ps);
+        eng.remove(s.ps);
+        if own {
+            eng.remove(s.node);
+        }
+    }
+
+    /// The final outputs of the page-state nodes among `items`, kept for
+    /// [`Driver::place`] (the reports stay the engine's too).
+    pub(crate) fn record(&mut self, items: &[Settled]) {
+        for s in items {
+            if self.by_node.contains_key(&s.node) {
+                self.reports.push((s.node, s.output));
+            }
+        }
+    }
+
+    /// Between steps: the pieces an edit changed synced, then each report
+    /// acted on.
+    pub(crate) fn place(&mut self, eng: &mut Engine) {
+        let pieces = self.inbox.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(pieces) = pieces {
+            self.sync_pieces(eng, &pieces);
+        }
+        for (n, out) in std::mem::take(&mut self.reports) {
+            let Some(&(piece, s, slot)) = self.by_node.get(&n) else {
+                continue;
+            };
+            let fin = Fin::decode(eng.values(), out);
+            match (slot, fin) {
+                (Slot::Ps, None) => self.no_finish(eng, piece, s),
+                (Slot::Ps, Some(f)) if !f.at_end => self.cut(eng, piece, s, f.at.k),
+                (Slot::Ps, Some(f)) => self.set_page(eng, piece, s, 0, &f),
+                (Slot::Drain(i), None) => self.truncate(eng, piece, s, i + 1),
+                (Slot::Drain(i), Some(f)) => self.set_page(eng, piece, s, i + 1, &f),
+            }
+        }
+    }
+
+    /// The arguments of segment `s` of `g` with stop `stop`.
+    fn seg_args(v: &Values, g: &Group, s: usize, stop: Option<u32>) -> Vec<ValueId> {
+        let mut args = if s == 0 {
+            g.text.clone()
+        } else {
+            vec![node_int(v, g.segs[s - 1].node)]
+        };
+        if let Some(k) = stop {
+            args.push(stop_arg(v, k));
+        }
+        args
+    }
+
+    /// No page finishes in segment `s`: its finishers and the segments
+    /// after it go, and it runs to the end of the text.
+    fn no_finish(&mut self, eng: &mut Engine, piece: NodeId, s: usize) {
+        self.truncate(eng, piece, s, 0);
+        let Some(mut g) = self.groups.remove(&piece) else { return };
+        for later in g.segs.drain(s + 1..).collect::<Vec<_>>() {
+            self.drop_seg(eng, later, true);
+        }
+        if g.segs[s].stop.is_some() {
+            g.segs[s].stop = None;
+            let op = if s == 0 { self.ops.exec } else { self.ops.resume };
+            let args = Self::seg_args(eng.values(), &g, s, None);
+            eng.replace(g.segs[s].node, op, args);
+        }
+        self.groups.insert(piece, g);
+    }
+
+    /// Segment `s` stops after candidate `k`: a resume segment after it
+    /// takes the rest (and the stop it had).
+    fn cut(&mut self, eng: &mut Engine, piece: NodeId, s: usize, k: u32) {
+        self.truncate(eng, piece, s, 0);
+        let Some(mut g) = self.groups.remove(&piece) else { return };
+        let old_stop = g.segs[s].stop;
+        g.segs[s].stop = Some(k);
+        let op = if s == 0 { self.ops.exec } else { self.ops.resume };
+        let args = Self::seg_args(eng.values(), &g, s, Some(k));
+        eng.replace(g.segs[s].node, op, args);
+        let v = eng.values();
+        let mut rargs = vec![node_int(v, g.segs[s].node)];
+        if let Some(k2) = old_stop {
+            rargs.push(stop_arg(v, k2));
+        }
+        let r = eng.insert_after(g.segs[s].ps, self.ops.resume, rargs);
+        let ps = self.page_state_after(eng, r, Source::Piece(r));
+        g.segs.insert(
+            s + 1,
+            Seg {
+                node: r,
+                stop: old_stop,
+                ps,
+                pages: Vec::new(),
+            },
+        );
+        // (the segment after it reads the new one's continuation now)
+        if let Some(next) = g.segs.get(s + 2) {
+            let args = Self::seg_args(eng.values(), &g, s + 2, next.stop);
+            eng.replace(next.node, self.ops.resume, args);
+        }
+        self.reindex(&g, piece);
+        self.groups.insert(piece, g);
+    }
+
+    /// Page `i` after segment `s` is `f`: its finisher's arguments
+    /// replaced if they differ, or the finisher and its drain placed.
+    fn set_page(&mut self, eng: &mut Engine, piece: NodeId, s: usize, i: usize, f: &Fin) {
+        let args = f.finisher_args(eng.values());
+        let Some(g) = self.groups.get_mut(&piece) else { return };
+        let seg = &mut g.segs[s];
+        if let Some(p) = seg.pages.get_mut(i) {
+            if p.args != args {
+                eng.replace(p.finisher, self.ops.finish, args.clone());
+                p.args = args;
+            }
+            return;
+        }
+        let after = seg.pages.last().map_or(seg.ps, |p| p.drain);
+        let fin = eng.insert_after(after, self.ops.finish, args.clone());
+        let src = source_args(eng.values(), Source::Drain(f.at));
+        let drain = eng.insert_after(fin, self.ops.pagestate, src);
+        eng.mark(drain);
+        seg.pages.push(Placed {
+            finisher: fin,
+            drain,
+            args,
+        });
+        self.by_node.insert(drain, (piece, s, Slot::Drain(i)));
+    }
+
+    /// Segment `s` keeps its first `n` pages.
+    fn truncate(&mut self, eng: &mut Engine, piece: NodeId, s: usize, n: usize) {
+        let Some(g) = self.groups.get_mut(&piece) else { return };
+        let seg = &mut g.segs[s];
+        if seg.pages.len() <= n {
+            return;
+        }
+        for p in seg.pages.drain(n..) {
+            self.by_node.remove(&p.drain);
+            eng.remove(p.drain);
+            eng.remove(p.finisher);
+        }
+    }
+
+    /// The page-state and drain nodes of `g` indexed by their segment.
+    fn reindex(&mut self, g: &Group, piece: NodeId) {
+        for (s, seg) in g.segs.iter().enumerate() {
+            self.by_node.insert(seg.ps, (piece, s, Slot::Ps));
+            for (i, p) in seg.pages.iter().enumerate() {
+                self.by_node.insert(p.drain, (piece, s, Slot::Drain(i)));
+            }
+        }
+    }
+}
+
+/// The evaluation's edit source with the pages' driver: the text's edits
+/// first, then the structure the pages need; the final outputs of the
+/// page-state nodes noted on the way.
+pub(crate) struct WithPages<'a> {
+    pub inner: &'a mut dyn EditSource,
+    pub pages: &'a mut Driver,
+}
+
+impl EditSource for WithPages<'_> {
+    fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
+        let version = self.inner.absorb(eng);
+        self.pages.place(eng);
+        version
+    }
+
+    fn settled(&mut self, eng: &Engine, items: &[Settled]) -> bool {
+        self.pages.record(items);
+        self.inner.settled(eng, items)
     }
 }
 
@@ -429,80 +690,110 @@ impl Operation for Resume {
 mod tests {
     use super::*;
 
-    fn n(x: u64) -> NodeId {
-        NodeId::from_raw(x)
-    }
-    fn it(piece: u64, k: u32, kind: ItemKind) -> Item {
-        Item {
-            at: Cand { piece: n(piece), k },
-            kind,
+    /// An operation that runs nothing (the test drives the structure
+    /// only).
+    struct Nop(&'static str);
+
+    impl Operation for Nop {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+            Some(Vec::new())
+        }
+        fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(ValueId::UNIT)
         }
     }
 
     /// Three pieces:
     ///
     /// ```tex
-    /// Paragraph A ... (fills page 1 nearly to the bottom)    % piece 1
+    /// Paragraph A ... (fills page 1 nearly to the bottom)     % piece a
     ///
-    /// \newpage Paragraph B: we are on page \thepage.         % piece 2
+    /// \newpage Paragraph B: we are on page \thepage.          % piece b
     ///
-    /// Paragraph C: this is page \thepage.                    % piece 3
+    /// Paragraph C: this is page \thepage.                     % piece c
     /// \end{document}
     /// ```
     ///
-    /// Page 1 finishes at the `\newpage` penalty, candidate 0 of piece 2:
-    /// piece 2 splits there (stop at 0, finisher of page 0, resume), so
-    /// B's `\thepage` runs after the finisher and reads 2, as does C's.
-    /// Page 2 finishes at the end of the job, piece 3's last candidate:
-    /// its finisher follows piece 3, no split.
+    /// Page 0 finishes at b's `\newpage`, candidate 0 of 2: b is cut
+    /// there (b stops at 0, a resume piece takes the rest), the finisher
+    /// stands between, so B's `\thepage` runs after it. Page 1 finishes
+    /// at the end of the job, c's last candidate: its finisher follows c.
     #[test]
-    #[ignore = "skeleton: break_one is todo"]
-    fn three_paragraphs() {
-        let line = || ItemKind::Box {
-            height: 10 << 16,
-            depth: 0,
+    fn three_paragraphs_structure() {
+        let mut eng = Engine::new();
+        let exec = eng.register(Arc::new(Nop("exec")));
+        let ops = PageOps {
+            exec,
+            finish: eng.register(Arc::new(Nop("finish"))),
+            resume: eng.register(Arc::new(Nop("resume"))),
+            pagestate: eng.register(Arc::new(Nop("pagestate"))),
         };
-        let items = vec![
-            it(1, 0, ItemKind::Glue {
-                width: 0,
-                stretch: 0,
-                shrink: 0,
-            }),
-            it(1, 1, line()),
-            it(2, 0, ItemKind::Penalty(-10000)),
-            it(2, 1, ItemKind::Glue {
-                width: 0,
-                stretch: 1 << 16,
-                shrink: 0,
-            }),
-            it(2, 2, line()),
-            it(3, 0, ItemKind::Glue {
-                width: 0,
-                stretch: 1 << 16,
-                shrink: 0,
-            }),
-            it(3, 1, line()),
-            it(3, 2, ItemKind::Penalty(-0o10000000000)),
-        ];
-        let first = PageState {
-            vsize: 100 << 16,
-            max_depth: 2 << 16,
-            put_back: Vec::new(),
+        let unit = eng.new_unit();
+        let v = eng.values();
+        let (ta, tb, tc) = (v.str("A"), v.str("B"), v.str("C"));
+        let a = eng.push(unit, exec, vec![ta]);
+        let b = eng.push(unit, exec, vec![tb]);
+        let c = eng.push(unit, exec, vec![tc]);
+        let mut d = Driver::new(ops, Arc::default());
+        d.sync_pieces(&mut eng, &[a, b, c]);
+        let ps = |d: &Driver, p: NodeId, s: usize| d.groups[&p].segs[s].ps;
+        let none = ValueId::UNIT;
+        let fin = |eng: &Engine, piece: NodeId, k: u32, at_end: bool, page: i64| {
+            let v = eng.values();
+            Fin {
+                at: Cand { piece, k },
+                at_end,
+                page,
+                content: v.list(Vec::new()),
+                carried: v.list(Vec::new()),
+            }
+            .encode(v)
         };
-        let pages = break_pages(&items, &first, &[]);
-        assert_eq!(pages.len(), 2);
-        assert_eq!(pages[0].finish, Cand { piece: n(2), k: 0 });
-        assert_eq!(pages[1].finish, Cand { piece: n(3), k: 2 });
-        let p = plan(&pages);
-        let last = last_cands(&items);
-        // piece 2: split after candidate 0 (not its last), page 0's
-        // finisher between the halves
-        assert_eq!(p[&n(2)], vec![(0, vec![0])]);
-        assert!(p[&n(2)][0].0 < last[&n(2)]);
-        // piece 3: page 1's finisher after it, no split
-        assert_eq!(p[&n(3)], vec![(2, vec![1])]);
-        assert_eq!(last[&n(3)], 2);
-        // (the page numbers B and C print, 2 and 2, need the engine run:
-        // the end-to-end test once Finish and Resume run)
+        // a: no page finishes; b: page 0 finishes at candidate 0, not its last
+        let (pa, pb) = (ps(&d, a, 0), ps(&d, b, 0));
+        let fb = fin(&eng, b, 0, false, 0);
+        d.reports = vec![(pa, none), (pb, fb)];
+        d.place(&mut eng);
+        let g = &d.groups[&b];
+        assert_eq!(g.segs.len(), 2, "b cut in two");
+        assert_eq!(g.segs[0].stop, Some(0));
+        assert_eq!(stop_of(eng.values(), &eng.node_info(b).expect("b").args), Some(0));
+        // b, stopped, now ends at candidate 0: the finisher follows it
+        let fb = fin(&eng, b, 0, true, 0);
+        d.reports = vec![(pb, fb)];
+        d.place(&mut eng);
+        let g = &d.groups[&b];
+        assert_eq!(g.segs[0].pages.len(), 1, "page 0's finisher after b's first half");
+        // its drain: nothing more finishes there; the rest of b, none
+        let (drain, rest) = (g.segs[0].pages[0].drain, g.segs[1].ps);
+        d.reports = vec![(drain, none), (rest, none)];
+        d.place(&mut eng);
+        // c: page 1 at its last candidate, no cut
+        let pc = ps(&d, c, 0);
+        let fc = fin(&eng, c, 2, true, 1);
+        d.reports = vec![(pc, fc)];
+        d.place(&mut eng);
+        let g = &d.groups[&c];
+        assert_eq!(g.segs.len(), 1, "c not cut");
+        assert_eq!(g.segs[0].pages.len(), 1, "page 1's finisher after c");
+        // an edit moves page 1's content: the same finisher, new arguments
+        let f1 = g.segs[0].pages[0].finisher;
+        let fc2 = {
+            let v = eng.values();
+            Fin {
+                at: Cand { piece: c, k: 2 },
+                at_end: true,
+                page: 1,
+                content: v.list(vec![v.int(1)]),
+                carried: v.list(Vec::new()),
+            }
+            .encode(v)
+        };
+        d.reports = vec![(pc, fc2)];
+        d.place(&mut eng);
+        assert_eq!(d.groups[&c].segs[0].pages[0].finisher, f1, "the finisher kept its identity");
     }
 }

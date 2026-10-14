@@ -47,6 +47,7 @@ pub(crate) struct Ops {
     /// A page's finisher and the rest of a split piece (`crate::pages`).
     pub finish: OpId,
     pub resume: OpId,
+    pub pagestate: OpId,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
     /// The format's definitions the build analyses document texts with
@@ -2043,6 +2044,10 @@ impl<'c, 'a> Run<'c, 'a> {
         if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
             let m = lines_value(self.v, &self.doc_lines);
             self.contribute("lines", m);
+        }
+        // a text piece's items, for its page-state node (`crate::pages`)
+        if self.cx.op() == self.ops.exec || self.cx.op() == self.ops.resume {
+            self.define_piece_items();
         }
         // a page parameter this run set and no item of it carried
         if self.st.take_page_params() {

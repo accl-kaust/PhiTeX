@@ -225,6 +225,8 @@ struct Absorb<'a> {
     text: &'a mut String,
     /// The package loads' hints (`crate::pkgrec`).
     loads: Option<&'a crate::pkgrec::LoadHints>,
+    /// The pieces after an edit, for the pages' driver.
+    pieces: crate::pages::PieceInbox,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
@@ -242,6 +244,10 @@ impl phitex_defuse::EditSource for Absorb<'_> {
         );
         *self.text = text;
         if changed {
+            *self
+                .pieces
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(self.nodes.iter().map(|x| x.1).collect());
             self.unchanged = None;
             Some(version)
         } else {
@@ -1203,6 +1209,11 @@ impl Stats {
 /// An engine with the operations registered.
 struct Graph {
     eng: Engine,
+    /// The pages' structure (`crate::pages`): finishers and cuts placed
+    /// as the page-state nodes' outputs become final.
+    pages: crate::pages::Driver,
+    /// The text pieces after an edit, for [`Graph::pages`].
+    page_inbox: crate::pages::PieceInbox,
     /// The evaluation errors met (the engine's), as messages.
     eval_errors: Vec<String>,
     ops: Ops,
@@ -1278,6 +1289,17 @@ impl Graph {
         let put = eng.register(Arc::new(Put(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish));
         let resume = eng.register(Arc::new(crate::pages::Resume));
+        let pagestate = eng.register(Arc::new(crate::pages::PageStateOp));
+        let page_inbox: crate::pages::PieceInbox = Arc::default();
+        let pages = crate::pages::Driver::new(
+            crate::pages::PageOps {
+                exec,
+                finish,
+                resume,
+                pagestate,
+            },
+            page_inbox.clone(),
+        );
         let dvi = eng.register(Arc::new(Dvi(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -1292,6 +1314,7 @@ impl Graph {
             put,
             finish,
             resume,
+            pagestate,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             pkg_log: Arc::new(Mutex::new(Vec::new())),
@@ -1303,6 +1326,8 @@ impl Graph {
         Graph {
             eng,
             ops,
+            pages,
+            page_inbox,
             mark,
             dvi,
             files_op,
@@ -1674,7 +1699,11 @@ impl Graph {
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
-            let r = match self.eng.evaluate_absorbing(&mut self.sched, &mut ex, edits) {
+            let mut src = crate::pages::WithPages {
+                inner: &mut *edits,
+                pages: &mut self.pages,
+            };
+            let r = match self.eng.evaluate_absorbing(&mut self.sched, &mut ex, &mut src) {
                 Ok(r) => r,
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
@@ -2911,6 +2940,8 @@ impl Build {
             doc,
             text: document.to_owned(),
         };
+        let pieces: Vec<NodeId> = b.nodes.iter().map(|x| x.1).collect();
+        b.g.pages.sync_pieces(&mut b.g.eng, &pieces);
         b.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -3006,6 +3037,7 @@ impl Build {
             finder: self.g.input_finder(&self.opts.finder),
             text: &mut self.text,
             loads: loads.as_deref(),
+            pieces: self.g.page_inbox.clone(),
         };
         let t_before = t_all.elapsed();
         // a text sent before the evaluation starts is the one it is for
