@@ -1149,20 +1149,11 @@ pub(crate) fn marks_before_field(node: u64) -> String {
     format!("marks:before:{node}")
 }
 
-/// `\topmark` and its kin as read by a run (§386): in a page step (the
-/// output routine) and for the split marks, the sequential value; in a
-/// document node, its `marks:before:<node>` loop-back, which the
-/// `Breaks` fold publishes at the point marked by a `T_MARKS_AT` item
-/// this read contributes to the main vertical list.
-pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<ValueId>> {
+/// The node's `marks:before:<node>` loop-back (UNIT while no page
+/// fired before it), its `T_MARKS_AT` item contributed; `None` where the
+/// node has none (a node the client did not declare it for).
+fn marks_before(r: &mut Run<'_, '_>) -> R<Option<Option<ValueId>>> {
     let v = r.v;
-    let op = r.cx.op();
-    let split = kind.starts_with("split");
-    // (a text paging inline, `pageinline.rs`, has its marks in force
-    // sequentially, as a page step does)
-    if split || op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
-        return r.get(&mark_field(kind, n));
-    }
     let node = r.cx.node().raw();
     let f = v.field(&marks_before_field(node));
     if !r.cx.is_loopback(f) {
@@ -1172,7 +1163,7 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
         // waits; never seen inside a run already declared
         r.cx.use_env(r.keyed(crate::fields::Fam::Marksdecl, &node.to_string()))?;
         if !r.cx.is_loopback(f) {
-            return r.get(&mark_field(kind, n));
+            return Ok(None);
         }
     }
     let at = v.list(vec![
@@ -1188,7 +1179,42 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
     if !seen {
         r.contribute("items", v.seq_unit(item));
     }
-    let Some(state) = r.cx.use_field(f)?.filter(|&x| x != ValueId::UNIT) else {
+    Ok(Some(r.cx.use_field(f)?))
+}
+
+/// Whether the page builder fired a page before this point of a
+/// document node (its `marks:before:<node>` loop-back): a read-time
+/// write after a `\shipout` goes after that page ([`crate::pdfout`]).
+/// A page step's or a text paging inline: false (their writes are in
+/// TeX's order as they are made).
+pub(crate) fn page_fired_before(r: &mut Run<'_, '_>) -> R<bool> {
+    let op = r.cx.op();
+    if op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
+        return Ok(false);
+    }
+    Ok(marks_before(r)?
+        .flatten()
+        .is_some_and(|x| x != ValueId::UNIT))
+}
+
+/// `\topmark` and its kin as read by a run (§386): in a page step (the
+/// output routine) and for the split marks, the sequential value; in a
+/// document node, its `marks:before:<node>` loop-back, which the
+/// `Breaks` fold publishes at the point marked by a `T_MARKS_AT` item
+/// this read contributes to the main vertical list.
+pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<ValueId>> {
+    let v = r.v;
+    let op = r.cx.op();
+    let split = kind.starts_with("split");
+    // (a text paging inline, `pageinline.rs`, has its marks in force
+    // sequentially, as a page step does)
+    if split || op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
+        return r.get(&mark_field(kind, n));
+    }
+    let Some(state) = marks_before(r)? else {
+        return r.get(&mark_field(kind, n));
+    };
+    let Some(state) = state.filter(|&x| x != ValueId::UNIT) else {
         return Ok(None);
     };
     let k = match kind {

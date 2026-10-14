@@ -74,6 +74,13 @@ fn folding(r: &mut Run<'_, '_>) -> R<bool> {
     Ok(r.cint(crate::fields::cell::PDF_FOLD)? != 0)
 }
 
+/// Whether the pages are written apart and placed by the finish after
+/// every read-time command (exact mode, not folding): a read-time write
+/// after a page then waits for the finish (`oplan`).
+pub(crate) fn pages_apart(r: &mut Run<'_, '_>) -> R<bool> {
+    Ok(r.param("pdfoutput")? > 0 && !crate::pdfrelaxed::on(r)? && !folding(r)?)
+}
+
 /// Whether this run is a page step.
 fn in_page_step(r: &Run<'_, '_>) -> bool {
     let op = r.cx.op();
@@ -1309,6 +1316,34 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
     if let Some(tags) = font_tags(v, fplan.last().copied(), &placed_pieces) {
         st.set_font_tags(tags);
     }
+    // the objects read-time commands wrote after a page fired: after
+    // that page (`oplan`: per page, those before it fires; the last,
+    // after every page)
+    let oplan: Vec<Vec<usize>> = v
+        .seq_to_vec(cx.acc_range(v.field("oplan"), None)?)
+        .last()
+        .map(|&p| {
+            list_of(v, p)
+                .iter()
+                .map(|&l| {
+                    list_of(v, l)
+                        .iter()
+                        .filter_map(|&x| usize::try_from(int_of(v, x)).ok())
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut owed = 0usize;
+    let mut write_owed = |st: &mut PdfState, upto: usize, owed: &mut usize| {
+        while *owed < oplan.len().min(upto) {
+            for &n in &oplan[*owed] {
+                // (the step logged the writer's error)
+                let _ = st.write_obj(n);
+            }
+            *owed += 1;
+        }
+    };
     let (mut replayed, mut shipped) = (0usize, 0usize);
     // the variables' key after the page placed last (none after a page
     // shipped again or an operation on the state)
@@ -1328,6 +1363,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         else {
             return Ok(v.str(""));
         };
+        write_owed(&mut st, usize::try_from(pc.pj).unwrap_or(0) + 1, &mut owed);
         set_page_params(v, &mut st, &pc.params, pc.margins);
         let placed = st.replay_page(&pc.rec, &pc.fonts, &pc.base, known.as_deref());
         known = placed
@@ -1360,6 +1396,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
             }
         }
     }
+    write_owed(&mut st, usize::MAX, &mut owed);
     st.flush(&mut bytes);
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(

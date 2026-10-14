@@ -3737,6 +3737,7 @@ fn declare_fields(eng: &mut Engine) {
         "streams",
         "wplan",
         "fplan",
+        "oplan",
         "fread",
         "pagefxs",
         "pgdeltas",
