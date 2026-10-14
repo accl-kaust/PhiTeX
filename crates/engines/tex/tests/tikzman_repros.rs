@@ -54,7 +54,7 @@ fn prelude_errors_are_reported_at_the_prelude() {
 /// corpus saw clsguide/usrguide end without a PDF on such diagnostics.
 #[test]
 fn engine_diagnostics_are_not_errors() {
-    let dir = common::fixtures().join("latex/docs");
+    let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("envs.tex"));
     let opts = phitex_tex::Options {
         epoch: Some(0),
