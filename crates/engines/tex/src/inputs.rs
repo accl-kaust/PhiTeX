@@ -36,17 +36,20 @@ pub(crate) struct Piece {
     /// The file's path (`None`: the document).
     file: Option<Arc<str>>,
     hints: Arc<TextHints>,
-    /// Whether its hint takes what the paragraph-start token lists may
-    /// define ([`crate::hints::ParLists`]).
-    lists: bool,
+    /// What the paragraph-start token lists its paragraph starts run
+    /// may define, added to its hint ([`crate::hints::ParLists`]).
+    lists: Option<Arc<crate::hints::Hint>>,
 }
 
 impl Piece {
-    /// The piece follows along `lists`: whether its hint takes what the
-    /// paragraph-start token lists may define ([`crate::hints::ParLists::step`]).
-    pub(crate) fn par_lists(&mut self, lists: &mut crate::hints::ParLists) -> bool {
+    /// The piece follows along `lists`: what the paragraph-start token
+    /// lists may define in it ([`crate::hints::ParLists::step`]).
+    pub(crate) fn par_lists(
+        &mut self,
+        lists: &mut crate::hints::ParLists,
+    ) -> Option<Arc<crate::hints::Hint>> {
         self.lists = lists.step(&self.hints, self.s);
-        self.lists
+        self.lists.clone()
     }
 
     /// Whether it is a slice of a file the document inputs.
@@ -73,7 +76,7 @@ impl Piece {
             v,
             &self.hints,
             self.s,
-            self.lists,
+            self.lists.as_deref(),
         ));
         a
     }
@@ -220,7 +223,7 @@ fn add(
             e,
             file: file.cloned(),
             hints: hints.clone(),
-            lists: false,
+            lists: None,
         });
     }
 }

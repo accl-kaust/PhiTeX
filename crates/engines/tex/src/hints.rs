@@ -558,7 +558,7 @@ impl Hint {
 
     /// `A` or `B`, the cause, the excerpt, then the bound's parts;
     /// records by `\x1e`, items by `\x1f`, pairs by `\x1d`.
-    fn encode(&self) -> String {
+    pub(crate) fn encode(&self) -> String {
         let mut o = String::new();
         match &self.bound {
             None => {
@@ -833,15 +833,9 @@ pub(crate) struct TextHints {
     pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
-    /// Per slice: whether its run may assign a paragraph-start token
-    /// list (`\\everypar`: its hint may define `param:everypar`, or
-    /// anything), and whether a paragraph may start in it (`pg:`).
-    par_sets: Vec<bool>,
-    par_starts: Vec<bool>,
-    /// What running the paragraph-start token lists the definitions
-    /// assign may define (§1091), as a hint; `None` when they assign
-    /// none.
-    par_lists: Option<Hint>,
+    /// The paragraph-start token lists' program of each slice
+    /// ([`pass::ParMachine`]), when the definitions assign any.
+    par: Option<ParText>,
     /// Whether the text defines anything the pass harvests (a macro, an
     /// active character).
     pub defines: bool,
@@ -1775,26 +1769,23 @@ impl Analysis<'_> {
         self.defs.shape(name).or_else(|| self.prelude.shape(name))
     }
 
-    /// What running the paragraph-start token lists the text and the
-    /// format assign to `\\everypar` may define (§1091: a paragraph's
-    /// start inserts the list in force), as a hint: `None` when they
-    /// assign none, unbounded when a list's closure is.
-    fn par_lists(&self) -> Option<Hint> {
-        let set = self.defs.everypar_defines(&self.prelude)?;
-        let mut b = Bound {
-            state: Some(Vec::new()),
-            ..Bound::default()
-        };
-        let mut cause = String::new();
-        Some(if self.add_set(&set, &mut b, &mut cause) {
-            Hint {
-                bound: Some(b),
-                cause: "paragraph-start token lists".to_owned(),
-                excerpt: String::new(),
-                guess: None,
-            }
-        } else {
-            Hint::any(format!("\\everypar: {cause}"), "")
+    /// The paragraph-start token lists' program of each of the slices
+    /// (`None` when the definitions assign no list).
+    fn par_text(&self, slices: &[(usize, usize)]) -> Option<ParText> {
+        let machine = par_machine(&self.defs, &self.prelude)?;
+        let atoms = self.atoms();
+        let ops = slices
+            .iter()
+            .map(|&(s, e)| {
+                let lo = atoms.partition_point(|a| a.start < s);
+                let hi = atoms.partition_point(|a| a.start < e);
+                Arc::from(machine.slice_ops(self.text, atoms, lo, hi, &self.defs, &self.prelude))
+            })
+            .collect();
+        Some(ParText {
+            machine,
+            ops,
+            prelude: self.prelude.clone(),
         })
     }
 
@@ -2789,18 +2780,12 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         skip,
         pars,
         slice_hints: Vec::new(),
-        par_sets: Vec::new(),
-        par_starts: Vec::new(),
-        par_lists: an.par_lists(),
+        par: None,
     };
     // each slice's hint: the union of its commands' bounds (a run
     // executes the whole slice); a paragraph's region also defines
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
-    let (mut par_sets, mut par_starts) = (
-        Vec::with_capacity(t.slices.len()),
-        Vec::with_capacity(t.slices.len()),
-    );
     let mut pending: Vec<&'static str> = Vec::new();
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
@@ -2946,8 +2931,6 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         {
             b.claim = (!reads_on && an.slice_claims_nothing(k0, e)).then_some(0);
         }
-        par_sets.push(may_set_par_lists(&h));
-        par_starts.push(may_start_paragraph(&h));
         slice_hints.push(intern(&h));
     }
     // (`PHITEX_HINTS_DIGEST`: one line per text, a hash of every hint
@@ -2991,8 +2974,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         }
     }
     t.slice_hints = slice_hints;
-    t.par_sets = par_sets;
-    t.par_starts = par_starts;
+    t.par = an.par_text(&t.slices);
     t
 }
 
@@ -3108,55 +3090,119 @@ pub(crate) fn text_hints_with(
     t
 }
 
-/// Whether a slice's hint lets its run assign a paragraph-start token
-/// list: `param:everypar` among what it may define, or anything.
-fn may_set_par_lists(h: &Hint) -> bool {
-    h.bound.as_ref().is_none_or(|b| {
-        b.state
-            .as_ref()
-            .is_none_or(|st| st.iter().any(|x| "param:everypar".starts_with(x)))
-    })
+/// A text's paragraph-start token lists: the machine of its
+/// definitions, each slice's program, and the definitions before it.
+struct ParText {
+    machine: Arc<pass::ParMachine>,
+    ops: Vec<Arc<[pass::ParOp]>>,
+    prelude: Defs,
 }
 
-/// Whether a paragraph may start in a slice: its hint names the
-/// paragraph's head (`pg:`), or it may define anything.
-fn may_start_paragraph(h: &Hint) -> bool {
-    h.bound.as_ref().is_none_or(|b| {
-        b.state
-            .as_ref()
-            .is_none_or(|st| st.iter().any(|x| "pg:".starts_with(x)))
-    })
+/// The machine of the definitions `own` over `prelude`: by the prelude,
+/// once (a text that assigns `\\everypar` itself gets its own).
+fn par_machine(own: &Definitions, prelude: &Defs) -> Option<Arc<pass::ParMachine>> {
+    type Machines = Mutex<FxHashMap<usize, (Defs, Option<Arc<pass::ParMachine>>)>>;
+    static M: OnceLock<Machines> = OnceLock::new();
+    if own.assigns_everypar() {
+        return pass::ParMachine::new(own, prelude).map(Arc::new);
+    }
+    let key = Arc::as_ptr(prelude) as usize;
+    let m = M.get_or_init(Machines::default);
+    if let Some((_, x)) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return x.clone();
+    }
+    let x = pass::ParMachine::new(&Definitions::new(), prelude).map(Arc::new);
+    let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
+    if g.len() > 64 {
+        g.clear();
+    }
+    // (the definitions kept with it: their address is the key)
+    g.insert(key, (prelude.clone(), x.clone()));
+    x
 }
 
 /// The paragraph-start token lists along a run of slices, in order
 /// (§1091: a paragraph's start runs the `\\everypar` list in force):
-/// whether a list some earlier slice assigned may be in force.
-#[derive(Clone, Copy, Default)]
+/// the abstract states ([`pass::ParState`]) after the slices so far.
 pub(crate) struct ParLists {
-    pub in_force: bool,
+    states: Vec<pass::ParState>,
+    /// What the lists' definitions bound, by the definitions and the set.
+    bounds: FxHashMap<(usize, String), Arc<Hint>>,
 }
 
 impl ParLists {
-    /// The slice of `t` at byte `s` follows: whether its hint takes
-    /// what the lists may define (a list in force, or one it assigns
-    /// itself, and a paragraph that may start in it). A list it assigns
-    /// is in force after it.
-    pub(crate) fn step(&mut self, t: &TextHints, s: usize) -> bool {
+    /// From a document's start: no list in force.
+    pub(crate) fn new() -> ParLists {
+        ParLists::from(pass::ParState::start())
+    }
+
+    /// From an unknown state: a file read where any list may be in force.
+    pub(crate) fn unknown() -> ParLists {
+        ParLists::from(pass::ParState::top())
+    }
+
+    fn from(s: pass::ParState) -> ParLists {
+        ParLists {
+            states: vec![s],
+            bounds: FxHashMap::default(),
+        }
+    }
+
+    /// The slice of `t` at byte `s` follows: what the lists its paragraph
+    /// starts run may define, as a hint to add to its own (`None`:
+    /// nothing).
+    pub(crate) fn step(&mut self, t: &TextHints, s: usize) -> Option<Arc<Hint>> {
+        let p = t.par.as_ref()?;
         let k = t.slices.partition_point(|&(a, _)| a < s);
         if t.slices.get(k).map(|x| x.0) != Some(s) {
-            return false;
+            return None;
         }
-        let sets = t.par_sets[k];
-        let takes = (self.in_force || sets) && t.par_starts[k] && t.par_lists.is_some();
-        self.in_force |= sets;
-        takes
+        let ran = p.machine.slice(&p.ops[k], &self.states);
+        self.states = ran.states;
+        let d = ran.defines;
+        if d.names.is_empty()
+            && d.prefixes.is_empty()
+            && d.unbounded.is_empty()
+            && d.calls.is_empty()
+        {
+            return None;
+        }
+        let key = (Arc::as_ptr(&p.prelude) as usize, format!("{d:?}"));
+        if let Some(h) = self.bounds.get(&key) {
+            return Some(h.clone());
+        }
+        // (the set's fields and its calls' state, as a hint: read with the
+        // definitions before the text)
+        let an = Analysis::with_own(
+            "",
+            FileKind::Document,
+            p.prelude.clone(),
+            Definitions::new(),
+        );
+        let mut b = Bound {
+            state: Some(Vec::new()),
+            ..Bound::default()
+        };
+        let mut cause = String::new();
+        let h = Arc::new(if an.add_set(&d, &mut b, &mut cause) {
+            Hint {
+                bound: Some(b),
+                cause: "paragraph-start token lists".to_owned(),
+                excerpt: String::new(),
+                guess: None,
+            }
+        } else {
+            Hint::any(format!("\\everypar: {cause}"), "")
+        });
+        self.bounds.insert(key, h.clone());
+        Some(h)
     }
 }
 
 /// [`hint_arg`], with what the paragraph-start token lists may define
-/// added when `lists` ([`ParLists::step`]).
-pub(crate) fn hint_arg_in(v: &Values, t: &TextHints, s: usize, lists: bool) -> ValueId {
-    let (true, Some(l), Some(h)) = (lists, &t.par_lists, t.slice_hint(s)) else {
+/// (`lists`, [`ParLists::step`]) added.
+pub(crate) fn hint_arg_in(v: &Values, t: &TextHints, s: usize, lists: Option<&Hint>) -> ValueId {
+    let (Some(l), Some(h)) = (lists, t.slice_hint(s)) else {
         return hint_arg(v, t, s);
     };
     let mut h = Hint::decode(h);

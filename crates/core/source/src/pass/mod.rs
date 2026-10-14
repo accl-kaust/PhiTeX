@@ -39,6 +39,7 @@ mod classify;
 mod defs;
 mod hints;
 mod lex;
+mod parlists;
 mod report;
 mod table;
 #[cfg(test)]
@@ -46,12 +47,13 @@ mod tests;
 
 use crate::syntax::Catcodes;
 pub use atoms::{Atom, AtomKind};
-pub use defs::{Arg, Definitions, EVERYPAR, Lit, OUTPUT, Shape};
+pub use defs::{Arg, Definitions, Lit, OUTPUT, Shape};
 pub use hints::{
     Assumption, Claim, Def, DefSet, Effect, Hints, Implicit, Mark, MayDefine, MeaningShape,
     ScopeHint, ScopeKind,
 };
 pub use lex::{Hazard, TokKind, Token};
+pub use parlists::{Op as ParOp, ParMachine, ParState, Ran as ParRan};
 pub use report::Stats;
 
 /// How far a piece of structure is known from the text.
