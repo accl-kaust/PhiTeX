@@ -362,6 +362,63 @@ impl<T> Drop for Arena<T> {
     }
 }
 
+/// A borrowed `&T` handed to a watcher thread that the borrower joins
+/// before the borrow ends (`observe` builds only).
+#[cfg(feature = "observe")]
+pub(crate) struct Lent<T: Sync>(*const T);
+
+#[cfg(feature = "observe")]
+// SAFETY: `T: Sync`, and the lender joins the thread before `T` goes
+// away (`observe::Watch` joins on drop and borrows `T` for its lifetime).
+unsafe impl<T: Sync> Send for Lent<T> {}
+
+#[cfg(feature = "observe")]
+impl<T: Sync> Lent<T> {
+    pub(crate) fn new(t: &T) -> Self {
+        Lent(t)
+    }
+    pub(crate) fn get(&self) -> &T {
+        // SAFETY: see the `Send` impl: the referent outlives the thread.
+        unsafe { &*self.0 }
+    }
+}
+
+/// SIGINT / SIGTERM set a flag the watcher polls (`observe`, unix).
+#[cfg(all(feature = "observe", unix))]
+pub(crate) mod signals {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    pub(crate) static CAUGHT: AtomicI32 = AtomicI32::new(0);
+
+    unsafe extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+
+    extern "C" fn on_signal(sig: i32) {
+        CAUGHT.store(sig, Ordering::SeqCst);
+    }
+
+    pub(crate) const SIGINT: i32 = 2;
+    pub(crate) const SIGTERM: i32 = 15;
+
+    /// Installs the handlers; returns the previous ones.
+    pub(crate) fn install() -> [usize; 2] {
+        let h = on_signal as extern "C" fn(i32) as usize;
+        // SAFETY: `signal` is async-signal-safe to install, and the handler
+        // only stores to an atomic.
+        unsafe { [signal(SIGINT, h), signal(SIGTERM, h)] }
+    }
+
+    /// Puts back what `install` replaced.
+    pub(crate) fn restore(prev: [usize; 2]) {
+        // SAFETY: restores the handlers `install` returned.
+        unsafe {
+            signal(SIGINT, prev[0]);
+            signal(SIGTERM, prev[1]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

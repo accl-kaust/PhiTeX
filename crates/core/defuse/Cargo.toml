@@ -12,6 +12,8 @@ defuse = { path = "../../vendor/defuse" }
 [features]
 # the engine's probes (defuse::obs): spans and counters, profiling only
 profile = ["defuse/profile"]
+# the engine's scheduler dumps (DEFUSE_DUMP, DEFUSE_DUMP_EVERY, on SIGTERM and on NoProgress)
+observe = ["defuse/observe"]
 
 [lints]
 workspace = true

@@ -633,6 +633,10 @@ pub enum NodeState {
 /// equal under every schedule.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Report {
+    /// On [`EvalError::NoProgress`] and [`EvalError::Deadline`]: the
+    /// scheduler's state when the evaluation gave up (the queue, the nodes
+    /// in work and what each waits on; see [`crate::Engine::state_dump`]).
+    pub state_dump: Option<String>,
     /// Nodes whose run inputs (text and read answers) changed.
     pub nodes_run: u64,
     /// Of those, nodes whose output did not change.
