@@ -123,12 +123,6 @@ impl ParState {
 pub struct ParMachine {
     setters: HashMap<String, Vec<Op>>,
     lists: HashMap<Arc<str>, Vec<Op>>,
-    /// The program the primitive list runs at every paragraph start
-    /// before the tracked one, when a format made `\everypar` a register
-    /// that the primitive list runs (LaTeX's paragraph hooks).
-    base: Option<Vec<Op>>,
-    /// The tracked list in force at the definitions' end.
-    initial: Arc<str>,
     /// The flags set by macros made by hand (`\def\@nobreaktrue{\global
     /// \let\if@nobreak\iftrue}`): the macro, the flag and its value.
     hand: HashMap<String, (String, bool)>,
@@ -157,8 +151,7 @@ impl ParMachine {
             .filter(|(n, t)| !n.starts_with('\0') && t.contains("\\everypar"))
             .map(|(n, _)| (*n).to_owned())
             .collect();
-        let start = prelude.par_start();
-        if setter_names.is_empty() && start.is_none() {
+        if setter_names.is_empty() {
             return None;
         }
         let hand: HashMap<String, (String, bool)> = bodies
@@ -177,14 +170,6 @@ impl ParMachine {
             let ops = c.compile_text(bodies[n.as_str()]);
             setters.insert(n.clone(), ops);
         }
-        // (the lists the format left: the primitive's runs first at every
-        // start when `\everypar` is a register, whose list it runs)
-        let (base, initial): (Option<Vec<Op>>, Arc<str>) = match start {
-            Some((prim, Some(reg))) => (Some(c.compile_text(prim)), Arc::from(reg)),
-            Some((prim, None)) => (None, Arc::from(prim)),
-            None => (None, Arc::from("")),
-        };
-        c.lists.push(initial.clone());
         let mut lists: HashMap<Arc<str>, Vec<Op>> = HashMap::new();
         let mut k = 0;
         while k < c.lists.len() {
@@ -200,28 +185,12 @@ impl ParMachine {
         for ops in lists.values() {
             defines_of(ops, &mut all);
         }
-        if let Some(b) = &base {
-            defines_of(b, &mut all);
-        }
         Some(ParMachine {
             setters,
             lists,
-            base,
-            initial,
             hand,
             all,
         })
-    }
-
-    /// A document's start under these definitions: the list the format
-    /// left, the flags unknown, vertical mode.
-    #[must_use]
-    pub fn start_state(&self) -> ParState {
-        ParState {
-            list: Some(self.initial.clone()),
-            flags: BTreeMap::new(),
-            horizontal: false,
-        }
     }
 
     /// The states, for traces: each list's start and the flags.
@@ -444,25 +413,6 @@ impl Cx<'_> {
             return vec![s];
         }
         s.horizontal = true;
-        if let Some(base) = &self.m.base {
-            if depth >= DEPTH {
-                self.defines.add(&self.m.all);
-                return vec![ParState { list: None, ..s }];
-            }
-            let collect = std::mem::replace(&mut self.collect, true);
-            let after = self.run_all(base, vec![s], depth + 1);
-            self.collect = collect;
-            let mut out = Vec::new();
-            for s in after {
-                out.extend(self.tracked(s, depth));
-            }
-            return out;
-        }
-        self.tracked(s, depth)
-    }
-
-    /// The tracked list in force runs.
-    fn tracked(&mut self, s: ParState, depth: u8) -> Vec<ParState> {
         let Some(l) = s.list.clone() else {
             self.defines.add(&self.m.all);
             return vec![s];
@@ -821,23 +771,11 @@ mod probe {
         p.harvest(&e, FileKind::Package, 2);
         p.harvest(&t, FileKind::Initex, 1);
         let doc = Definitions::new();
-        for n in [
-            "par",
-            "@@par",
-            "para_end:",
-            "@setpar",
-            "@par",
-            "@tempswatrue",
-        ] {
+        for n in ["par", "@@par", "para_end:", "@setpar", "@par", "@tempswatrue"] {
             println!("{n}: {:?}", p.shapes(n));
             let mut c = Closure::new(&doc, &p);
             let d = c.call(n);
-            println!(
-                "   call: names {:?} prefixes {:?} unbounded {:?}",
-                d.names.keys().take(20).collect::<Vec<_>>(),
-                d.prefixes,
-                d.unbounded.iter().take(5).collect::<Vec<_>>()
-            );
+            println!("   call: names {:?} prefixes {:?} unbounded {:?}", d.names.keys().take(20).collect::<Vec<_>>(), d.prefixes, d.unbounded.iter().take(5).collect::<Vec<_>>());
         }
         for (n, b) in p.last_bodies() {
             if b.contains("tex_everypar:D") || n.contains("standard_everypar") {

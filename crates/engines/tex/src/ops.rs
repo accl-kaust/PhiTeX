@@ -273,7 +273,7 @@ impl Operation for Exec {
                 .map(|(_, a)| crate::hints::hint_of_args(r.v, &a))
                 .collect();
             if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
-                if let Some(m) = crate::hints::check_defs(r, &hint, &claimed) {
+                if let Some(m) = crate::hints::check_defs(r, &hint, &claimed)? {
                     if std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
                         eprintln!("parlists: {}", m.chars().take(600).collect::<String>());
                     }
