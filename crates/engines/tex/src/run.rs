@@ -266,6 +266,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The files this run looked for and did not find (a package load's
     /// record keys on them, `crate::pkgrec`).
     pub fmiss: Vec<String>,
+    /// Inside `pass_text` (§494): a skipped text's tokens are read only
+    /// to classify them (conditional, `\fi`/`\else`, or neither).
+    pub in_skip: bool,
+    /// The locations a load's run first read from the engine while
+    /// skipping (`PHITEX_PKG_TRACE`: which chaining reads are skips).
+    pub skip_first: Vec<Loc>,
     /// Whether the node is a package load at the unit's top level, whose
     /// run is recorded (`crate::pkgrec`) and publishes its net effect.
     pub rec_load: bool,
@@ -375,6 +381,8 @@ impl<'c, 'a> Run<'c, 'a> {
             doc: false,
             fread: Vec::new(),
             fmiss: Vec::new(),
+            in_skip: false,
+            skip_first: Vec::new(),
             rec_load: false,
             no_pull: false,
             st: crate::runstate::State::new(),
@@ -452,6 +460,9 @@ impl<'c, 'a> Run<'c, 'a> {
     #[inline(never)]
     fn load_slow(&mut self, loc: Loc) -> R<()> {
         let f = self.loc_field(loc);
+        if self.in_skip && self.rec_load {
+            self.skip_first.push(loc);
+        }
         let r = self.cx.use_field(f);
         crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
@@ -1930,6 +1941,15 @@ impl<'c, 'a> Run<'c, 'a> {
             .iter()
             .map(|&(f, x, l)| (crate::val::field_name(v, f), l == Locality::Global, x))
             .collect();
+        if crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+            let skips: Vec<String> = self
+                .skip_first
+                .clone()
+                .into_iter()
+                .map(|l| crate::val::field_name(v, self.loc_field(l)))
+                .collect();
+            eprintln!("pkgrec: skip reads of node {node}: {skips:?}");
+        }
         let e = crate::pkgrec::entry(v, node, &files, &writes, &reads, flags, &values);
         self.contribute("pkgrecs", v.seq_unit(e));
     }
@@ -2165,6 +2185,7 @@ pub(crate) struct Parked {
     doc: bool,
     fread: Vec<(String, u64)>,
     fmiss: Vec<String>,
+    skip_first: Vec<Field>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -2269,6 +2290,10 @@ impl Run<'_, '_> {
             doc: self.doc,
             fread: std::mem::take(&mut self.fread),
             fmiss: std::mem::take(&mut self.fmiss),
+            skip_first: std::mem::take(&mut self.skip_first)
+                .into_iter()
+                .map(|l| self.loc_field(l))
+                .collect(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -2333,6 +2358,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.doc = p.doc;
         r.fread = p.fread;
         r.fmiss = p.fmiss;
+        r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
         r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
         r.st = crate::runstate::State::unpark(p.st);
