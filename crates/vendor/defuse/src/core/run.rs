@@ -209,8 +209,11 @@ impl Shared {
             return None;
         }
         let ls = self.rec(s).lab();
-        for &c in list.iter().rev() {
-            if c == s || self.rec(c).lab() >= ls || !in_work(self.rec(c).st()) || !self.rec(c).has(super::F_IN_PCLAIM) {
+        // The list is sorted by label: only the claimers before `s`.
+        let end = list.partition_point(|&c| self.rec(c).lab() < ls);
+        let lo = self.unit(u).pclaim_lo.load(Ordering::Acquire).min(end);
+        for &c in list[lo..end].iter().rev() {
+            if c == s || !in_work(self.rec(c).st()) || !self.rec(c).has(super::F_IN_PCLAIM) {
                 continue;
             }
             let limit = self.rec(c).data().stat.limit();

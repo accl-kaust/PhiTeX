@@ -621,6 +621,9 @@ pub(crate) struct Unit {
     pub peff: RwLock<Vec<Slot>>,
     /// In-work pending claimers.
     pub pclaim: RwLock<Vec<Slot>>,
+    /// Every entry of `pclaim` below this index has left (they leave
+    /// mostly in label order, so a scan starts here, not at 0).
+    pub pclaim_lo: std::sync::atomic::AtomicUsize,
     /// Guards the lists; holds how many entries in them have left.
     pub lists: Mutex<usize>,
 }
