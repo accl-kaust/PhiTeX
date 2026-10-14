@@ -1178,9 +1178,9 @@ impl<'c, 'a> Run<'c, 'a> {
     // ------------------------------------------------------------ the end
 
     /// What is left of the node's own and claimed text, and the tokens a
-    /// command put back or an expansion produced, as child nodes: one per
-    /// token (a run of characters is one node), and the text not yet read
-    /// as one node per segment.
+    /// command put back or an expansion produced, as child nodes: the
+    /// token levels between two texts as one node, and the text not yet
+    /// read as one node per segment.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
         // a run reads everything of its own (expansion tokens run inline,
@@ -1201,18 +1201,11 @@ impl<'c, 'a> Run<'c, 'a> {
             let l = v.list(toks);
             vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(kind)]
         };
-        let toks_left = |toks: &[Tok], out: &mut Vec<Vec<ValueId>>, run: &mut Vec<ValueId>| {
-            for tok in toks {
-                let ch = matches!(tok.cat(), Some(10..=12));
-                if ch {
-                    run.push(crate::val::tok_id(v, epoch, *tok));
-                    continue;
-                }
-                if !run.is_empty() {
-                    out.push(node(std::mem::take(run)));
-                }
-                out.push(node(vec![crate::val::tok_id(v, epoch, *tok)]));
-            }
+        // (the token levels left, in reading order, are one node: TeX
+        // reads them one after the other, and a brace or a group they
+        // open and close stays inside one run, waiting on no scope)
+        let toks_left = |toks: &[Tok], _: &mut Vec<Vec<ValueId>>, run: &mut Vec<ValueId>| {
+            run.extend(toks.iter().map(|&tok| crate::val::tok_id(v, epoch, tok)));
         };
         let line_left = |s: &Line, out: &mut Vec<Vec<ValueId>>| {
             let end_due = s.ends && s.endch < -1;
