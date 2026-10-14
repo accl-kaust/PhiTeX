@@ -940,7 +940,7 @@ impl<'a> Ctx<'a> {
             .unwrap_or(NIL);
         let lo = if anchor == NIL { 0 } else { e.n(anchor).label + 1 };
         let hi = if end == NIL { n.label } else { e.n(end).label + 1 };
-        let s = e.order_fold(n.unit, lo, hi);
+        let s = e.order_fold(n.unit, f, lo, hi);
         if s.0 > 0 {
             return self.stop(End::WaitRange(f, anchor, end));
         }
