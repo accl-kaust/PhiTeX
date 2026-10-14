@@ -1,0 +1,14 @@
+\documentclass{article}
+\usepackage{multicol}
+\newcount\n
+\def\para{Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
+eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim
+veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea
+commodo consequat.\par}
+\begin{document}
+Some text before the columns.
+\begin{multicols}{2}
+\n=0 \loop \the\n. \para \advance\n 1 \ifnum\n<90 \repeat
+\end{multicols}
+Some text after the columns.
+\end{document}

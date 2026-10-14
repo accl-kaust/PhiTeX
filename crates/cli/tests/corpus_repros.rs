@@ -103,3 +103,11 @@ repro!(
     multicol_theindex,
     "amsldoc (multicol): imakeidx's theindex is a multicols environment under a \\section* title (amsldoc's index, pdflatex's pages 36-40); it hung with '257 rounds without progress'"
 );
+repro!(
+    routine_global_local,
+    "multicol: TeX's state holds the younger assignment (§279): a routine's \\global made at an earlier page beats the text's local made before it (multicol's \\@colroom), and a local the text makes after it beats it, in the same group; after the group the global survives (§283)"
+);
+repro!(
+    multicol_pages,
+    "amsldoc (multicol): a multicols environment over several pages (multicol.dtx \\multi@column@out ships each page with the partial page on the first, its \\vsize set inside the environment's group, §987) and balanced at \\end{multicols} on the last"
+);

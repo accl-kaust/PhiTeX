@@ -1154,12 +1154,14 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.pg.is_some() || (op != self.ops.exec && op != self.ops.put) {
             return false;
         }
+        // (a page parameter set in a group, or restored at its end,
+        // too: the page builder reads eqtb as it stands, §987)
+        if self.st.take_page_params() {
+            self.put_page_params();
+        }
         let mut locs = self.st.take_base_defs();
         if locs.is_empty() {
             return true;
-        }
-        if locs.iter().any(|l| PAGE_PARAMS.contains(l)) {
-            self.put_page_params();
         }
         locs.sort_unstable();
         locs.dedup();
