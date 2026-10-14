@@ -315,6 +315,10 @@ pub(crate) struct Run<'c, 'a> {
     /// level): what the run defines while it is still on the input
     /// stack keeps its value at the read-back ([`Run::note_pre`]).
     pub read_back_at: Option<crate::input::Level>,
+    /// The fields the routines changed, as a flush point fed them back
+    /// ([`Run::flush_read`]): the text's own definitions of them after
+    /// it mark the main list ([`Run::count_set`]).
+    pub flush_fields: phitex_defuse::FxHashSet<Field>,
     /// Defining the counts a flush point fed back ([`Run::flush_read`]):
     /// not the text's own assignment.
     pub fed: bool,
@@ -396,6 +400,7 @@ impl<'c, 'a> Run<'c, 'a> {
             flushes: 0,
             flush_pending: None,
             fed: false,
+            flush_fields: phitex_defuse::FxHashSet::default(),
             read_back_done: false,
             read_back_at: None,
             pre_memo: phitex_defuse::FxHashMap::default(),
@@ -574,6 +579,10 @@ impl<'c, 'a> Run<'c, 'a> {
             .then(|| val.encode(self.v))
             .flatten()
             .and_then(|x| self.v.as_int(x));
+        let field_set = (!self.flush_fields.is_empty())
+            .then(|| self.loc_field(loc))
+            .filter(|f| self.flush_fields.contains(f))
+            .map(|f| (f, val.encode(self.v).unwrap_or(ValueId::UNIT)));
         if self.read_back_done && self.interp.is_none() {
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 let f = self.loc_field(loc);
@@ -590,6 +599,9 @@ impl<'c, 'a> Run<'c, 'a> {
         self.irreversible += 1;
         if let Some(n) = set {
             self.count_set(loc, n);
+        }
+        if let Some((f, x)) = field_set {
+            self.field_set(f, x);
         }
     }
 
@@ -2041,6 +2053,7 @@ pub(crate) struct Parked {
     irreversible: u64,
     flushes: usize,
     flush_pending: Option<(i64, i64)>,
+    flush_fields: phitex_defuse::FxHashSet<Field>,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
 }
@@ -2112,6 +2125,7 @@ impl Run<'_, '_> {
             irreversible: self.irreversible,
             flushes: self.flushes,
             flush_pending: self.flush_pending,
+            flush_fields: self.flush_fields.clone(),
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
         })
@@ -2175,6 +2189,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.irreversible = p.irreversible;
         r.flushes = p.flushes;
         r.flush_pending = p.flush_pending;
+        r.flush_fields = p.flush_fields;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
         r.resumed = true;
