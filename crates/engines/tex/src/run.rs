@@ -66,6 +66,8 @@ pub(crate) struct Ops {
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
+    /// The page states folds hand on (`crate::pages::PageStates`).
+    pub page_states: std::sync::Arc<crate::pages::PageStates>,
 }
 
 
@@ -2229,15 +2231,25 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             self.cx.follow(self.ops.exec, args);
         }
+        let n = self.claim_count();
+        self.cx.claim(n);
+        self.cx.set_effect(self.effect);
+        ValueId::UNIT
+    }
+
+    /// The following siblings this run takes, once its input is read
+    /// out: those it pulled, and with `\end` inside groups every text
+    /// after them. Declared at the commit, and before the page fold's
+    /// read of the page state (`crate::pages`), so that a run parked
+    /// there holds no sibling it does not take.
+    pub(crate) fn claim_count(&self) -> usize {
         let mut n = self.pulled;
         if self.claim_rest {
             while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec) {
                 n += 1;
             }
         }
-        self.cx.claim(n);
-        self.cx.set_effect(self.effect);
-        ValueId::UNIT
+        n
     }
 
     /// Whether every sibling the run took is blank text (a line's end

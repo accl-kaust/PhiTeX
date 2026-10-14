@@ -117,6 +117,12 @@ pub(crate) struct PageState {
     /// Contributions after the last candidate: folded items and markers,
     /// in order; the next candidate takes them first (§994).
     pub pending: Vec<ValueId>,
+    /// The encoded nodes of `pb.page` and `pb.discards` up to their
+    /// lengths here: the nodes on the page are never changed until the
+    /// page fires (`build` then starts a new builder and clears these),
+    /// so an encode re-encodes only the nodes after them.
+    pub page_ids: Vec<ValueId>,
+    pub discard_ids: Vec<ValueId>,
 }
 
 /// A page finishing: at candidate `k`, the finisher's page data, and the
@@ -152,6 +158,8 @@ impl PageState {
             },
             params: None,
             pending: Vec::new(),
+            page_ids: Vec::new(),
+            discard_ids: Vec::new(),
         }
     }
 
@@ -168,14 +176,23 @@ impl PageState {
         let n = |i: usize| int_of(v, xs[i]);
         let n32 = |i: usize| i32::try_from(n(i)).unwrap_or(0);
         let mut side = Side::default();
-        let page: List = list_of(v, xs[20])
-            .into_iter()
-            .filter_map(|y| nodes::decode(v, y, &mut side))
+        let mut page_ids = list_of(v, xs[20]);
+        let page: List = page_ids
+            .iter()
+            .filter_map(|&y| nodes::decode(v, y, &mut side))
             .collect();
-        let discards: List = list_of(v, xs[21])
-            .into_iter()
-            .filter_map(|y| nodes::decode(v, y, &mut side))
+        let mut discard_ids = list_of(v, xs[21]);
+        let discards: List = discard_ids
+            .iter()
+            .filter_map(|&y| nodes::decode(v, y, &mut side))
             .collect();
+        // (a node the decoder skipped: no reuse, the encode does it all)
+        if page.len() != page_ids.len() {
+            page_ids.clear();
+        }
+        if discards.len() != discard_ids.len() {
+            discard_ids.clear();
+        }
         let mut pb = PageBuilder::new();
         pb.page = page;
         pb.contents = match n(1) {
@@ -223,10 +240,25 @@ impl PageState {
             },
             params: some(xs[25]),
             pending: list_of(v, xs[26]),
+            page_ids,
+            discard_ids,
         }
     }
 
-    pub(crate) fn encode(&self, v: &Values) -> ValueId {
+    /// The state as a value. The page's nodes up to `page_ids` are
+    /// taken as encoded (they did not change: [`PageState::page_ids`]),
+    /// the rest encoded, and the ids kept for the next encode.
+    pub(crate) fn encode(&mut self, v: &Values) -> ValueId {
+        let ids = |nodes: &List, known: &mut Vec<ValueId>, side: &Side| {
+            if known.len() > nodes.len() {
+                known.clear();
+            }
+            let from = known.len();
+            known.extend(nodes[from..].iter().map(|n| nodes::encode(v, n, side)));
+            v.list(known.clone())
+        };
+        let page = ids(&self.pb.page, &mut self.page_ids, &self.side);
+        let discards = ids(&self.pb.discards, &mut self.discard_ids, &self.side);
         let i = |x: i64| v.int(x);
         let pb = &self.pb;
         let mut xs = vec![
@@ -267,18 +299,8 @@ impl PageState {
                 })
                 .collect(),
         ));
-        xs.push(v.list(
-            pb.page
-                .iter()
-                .map(|n| nodes::encode(v, n, &self.side))
-                .collect(),
-        ));
-        xs.push(v.list(
-            pb.discards
-                .iter()
-                .map(|n| nodes::encode(v, n, &self.side))
-                .collect(),
-        ));
+        xs.push(page);
+        xs.push(discards);
         xs.push(i(i64::from(self.fold.sf)));
         xs.push(i(i64::from(self.fold.pd)));
         xs.push(i(i64::try_from(self.fold.since_bp).unwrap_or(0)));
@@ -453,6 +475,8 @@ impl PageState {
                     let data = page_data(v, &f, &self.side);
                     self.pb = PageBuilder::new();
                     self.side = Side::default();
+                    self.page_ids.clear();
+                    self.discard_ids.clear();
                     self.j += 1;
                     self.fold.since_bp = 0;
                     buf.clear();
@@ -652,12 +676,23 @@ impl Run<'_, '_> {
         if piece && raw.is_empty() {
             return Ok(());
         }
+        // (its input read out: the siblings it takes are known; a park
+        // at the page state's read below holds no other)
+        let n = self.claim_count();
+        self.cx.claim(n);
         self.begin_command();
         let f = self.ps_field();
         let ps_in = self.cx.use_field(f)?;
-        let mut timer = FoldTimer::new(raw.len());
-        let mut ps = timer.decode(|| PageState::decode(v, ps_in));
+        // (before the state is taken: a stop here leaves it for the
+        // attempt that resumes)
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        let mut timer = FoldTimer::new(raw.len());
+        let cache = self.ops.page_states.clone();
+        let mut ps = timer.decode(|| {
+            ps_in
+                .and_then(|x| cache.take(x))
+                .unwrap_or_else(|| PageState::decode(v, ps_in))
+        });
         if fin {
             // §1026: the held-over insertions and the routine's list,
             // then the contributions put back, and the page built again
@@ -681,6 +716,7 @@ impl Run<'_, '_> {
             }
             let e = timer.encode(|| ps.encode(v));
             self.cx.define_with(f, e, Locality::Global);
+            cache.put(e, ps);
             return Ok(());
         };
         // (a second pass stopped at the candidate: the piece goes on
@@ -701,14 +737,16 @@ impl Run<'_, '_> {
                 return Ok(());
             }
         }
-        self.cx.define_with(f, ps.encode(v), Locality::Global);
+        let e = ps.encode(v);
+        self.cx.define_with(f, e, Locality::Global);
+        let j = ps.j - 1;
+        cache.put(e, ps);
         let (cont, locals) = if at_end {
             (None, Vec::new())
         } else {
             let (c, l) = self.cont_encode()?;
             (Some(c), l)
         };
-        let j = ps.j - 1;
         self.cx.follow(
             self.ops.finish,
             vec![v.int(j), fire.data, v.list(fire.carried), v.list(locals)],
@@ -1520,6 +1558,33 @@ impl Drop for FoldTimer {
                 self.t[1].as_micros(),
                 self.t[2].as_micros()
             );
+        }
+    }
+}
+
+/// A build's page states handed from the fold that defines one to the
+/// fold that reads it ([`Run::page_fold`]): keyed by the value, so the
+/// reader takes exactly the state that value encodes and skips the
+/// decode; a reader that finds nothing (taken already, or never put)
+/// decodes the value.
+#[derive(Default)]
+pub(crate) struct PageStates(std::sync::Mutex<phitex_defuse::FxHashMap<ValueId, PageState>>);
+
+impl PageStates {
+    /// At most this many states wait to be taken (a state no fold
+    /// takes, after a rerun, is dropped with the rest).
+    const MAX: usize = 256;
+
+    fn take(&self, x: ValueId) -> Option<PageState> {
+        self.0.lock().ok()?.remove(&x)
+    }
+
+    fn put(&self, x: ValueId, ps: PageState) {
+        if let Ok(mut m) = self.0.lock() {
+            if m.len() >= Self::MAX {
+                m.clear();
+            }
+            m.insert(x, ps);
         }
     }
 }
