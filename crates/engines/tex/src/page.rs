@@ -392,9 +392,12 @@ impl Run<'_, '_> {
         // the fonts the text loaded, by the page that fired after them,
         // and how many fonts the text loaded in all: the writer numbers
         // the fonts as pdfTeX does (`pdfout::font_tags`)
-        let mut fp = vec![v.int(self.cint(crate::fields::cell::FONTCOUNT)?)];
-        fp.extend(fonts_at.iter().copied().take(pages));
-        self.contribute("fplan", v.seq_unit(v.list(fp)));
+        // (exact mode only: in relaxed mode the names are free)
+        if !crate::pdfrelaxed::on(self)? {
+            let mut fp = vec![v.int(self.cint(crate::fields::cell::FONTCOUNT)?)];
+            fp.extend(fonts_at.iter().copied().take(pages));
+            self.contribute("fplan", v.seq_unit(v.list(fp)));
+        }
         // each page's own material (`pp:items:<j>`, its start rebased to
         // it): a `brk` reads only its page, so an edit elsewhere on the
         // list wakes no other page's `brk`

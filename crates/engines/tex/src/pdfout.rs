@@ -521,7 +521,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         // pdfTeX loads the space font at the shipout that first needs
         // it, as the next internal font number (the engine's
         // `fontcount` does not count it)
-        let id = if in_page_step(r) && !folding(r)? {
+        let id = if in_page_step(r) && !folding(r)? && !crate::pdfrelaxed::on(r)? {
             // a page written apart: one id for every page, outside the
             // fonts' range, numbered by the finish where it is first
             // loaded ([`font_tags`])
