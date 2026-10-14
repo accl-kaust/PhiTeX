@@ -649,6 +649,32 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// The fields the text defined at its base level since the last item
+    /// it put on the main list: a `T_DEFS_AT` marker there, which tells
+    /// the page fold that a routine's earlier delta of these fields gives
+    /// way to the text's (`page::FinalState`). Only a document node's
+    /// (a page step's definitions are the chain's delta).
+    pub(crate) fn flush_text_defs(&mut self) {
+        let op = self.cx.op();
+        if self.pg.is_some() || (op != self.ops.exec && op != self.ops.put) {
+            return;
+        }
+        let mut locs = self.st.take_base_defs();
+        if locs.is_empty() {
+            return;
+        }
+        locs.sort_unstable();
+        locs.dedup();
+        let v = self.v;
+        let mut xs = Vec::with_capacity(locs.len() + 1);
+        xs.push(v.int(crate::nodes::T_DEFS_AT));
+        for l in locs {
+            xs.push(self.loc_field(l).0);
+        }
+        let at = v.list(xs);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+    }
+
     /// Whether file `name` is one the job writes and reads back, with its
     /// loop-backs declared.
     pub(crate) fn written_known(&self, name: &str) -> bool {
@@ -1400,6 +1426,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.contribute("lines", n);
         }
         crate::pageinline::finish(&mut self);
+        self.flush_text_defs();
         // a page parameter this run set reaches the page fold as a
         // marker in the main list (page.rs `breaks`)
         if self.st.defines_any(&[

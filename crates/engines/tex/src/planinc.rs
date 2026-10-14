@@ -53,6 +53,8 @@ pub(crate) struct PageRec {
     pub fired: Option<(Vec<ValueId>, PageStart)>,
     pub passed: Vec<i64>,
     pub writes: Vec<ValueId>,
+    /// The text's definition markers met (`T_DEFS_AT`), in order.
+    pub tdefs: Vec<ValueId>,
     pub stuck: bool,
     /// `pp:items:<j>` and `pp:start:<j>` as that run set them.
     pub items_v: ValueId,
