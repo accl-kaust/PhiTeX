@@ -1,0 +1,10 @@
+\documentclass{article}
+\begin{document}
+\newwrite\w
+\immediate\openout\w=\jobname.mz
+\setbox0\vbox{\vskip5pt\penalty7 \immediate\write\w{[\the\lastpenalty][\the\lastnodetype][\the\prevgraf]}%
+\vskip3pt plus 1pt\immediate\write\w{[\the\lastskip]}\kern2pt \immediate\write\w{[\the\lastkern]}}
+\setbox0\vbox{\vskip5pt\penalty7 \edef\x{[\the\lastpenalty][\the\lastnodetype]}\immediate\write\w{\x}}
+\immediate\closeout\w
+Text: \input{\jobname.mz}
+\end{document}

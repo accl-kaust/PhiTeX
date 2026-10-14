@@ -238,6 +238,10 @@ pub(crate) struct Run<'c, 'a> {
     /// number of their own, `Line::lineno`), by file name: the `lines`
     /// accumulator, contributed once at the end.
     pub doc_lines: Vec<(ValueId, i64)>,
+    /// `mode = 0` (§1370): a `\write` (or a literal at `\shipout`)
+    /// being expanded, which disables `\prevdepth`, `\spacefactor`,
+    /// `\lastskip`, `\prevgraf`.
+    pub mode_zero: bool,
     /// `macro_call`'s buffers, kept between calls.
     pub mbufs: crate::expand::MacroBufs,
     /// `PHITEX_HEARTBEAT=1` (read once a process).
@@ -364,6 +368,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cs_cache: vec![(0, Tok::c(0)); CS_CACHE].into_boxed_slice(),
             lines_read: 0,
             doc_lines: Vec::new(),
+            mode_zero: false,
             mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
