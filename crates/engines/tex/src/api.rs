@@ -1629,6 +1629,15 @@ impl Graph {
                     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                         eprintln!("{m}");
                     }
+                    // (what the evaluation did before it ended counts: its
+                    // runs, its wall and busy time, the round; a deadline's
+                    // stats were all zero, as if nothing had run)
+                    if let phitex_defuse::EvalError::Deadline { runs, .. } = &e {
+                        stats.runs += *runs;
+                    }
+                    stats.rounds += 1;
+                    stats.add_exec(&ex, c0, &self.eng);
+                    stats.live = self.eng.live_nodes();
                     self.eval_errors.push(m);
                     stats.add_hints(&self.eng, unit, &self.eval_errors);
                     return;
@@ -2480,7 +2489,8 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
     for e in entries {
         let xs = list_of(v, e);
         let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
-        if int(0) == 0 {
+        // (TeX's errors only: the engine's own checks are not the format's)
+        if int(0) != 1 {
             continue;
         }
         let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
@@ -2642,8 +2652,13 @@ pub(crate) fn mem_mb() -> (u64, u64) {
 /// How bad a [`Diagnostic`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
+    /// TeX's error (`! ...` in the log, in TeX's error count).
     Error,
     Warning,
+    /// The engine's own check (a hint's regime violated, an undeclared
+    /// definition): not TeX's error, counted apart; it decides neither
+    /// the output nor the exit status.
+    Diagnostic,
 }
 
 /// A message about the document, at a place in one of its files.
@@ -3123,6 +3138,17 @@ impl Build {
         self.prelude.errors.is_empty() && self.prelude.diags.is_empty()
     }
 
+    /// The engine's own diagnostics (an undeclared definition, a hint's
+    /// regime violated), counted apart from TeX's errors: they are not in
+    /// the log, and decide neither the output nor the history.
+    #[must_use]
+    pub fn engine_diagnostics(&self) -> usize {
+        self.diagnostics()
+            .iter()
+            .filter(|d| d.severity == Severity::Diagnostic)
+            .count()
+    }
+
     /// TeX's errors in the prelude, at their places in its files (a
     /// format that stopped on them): every build on it reports them.
     #[must_use]
@@ -3416,7 +3442,7 @@ impl Build {
         for e in entries {
             let xs = list_of(v, e);
             let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
-            let error = int(0) != 0;
+            let kind = int(0);
             let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
             let seg = xs.get(5).map(|&x| str_of(v, x)).unwrap_or_default();
             let loc = usize::try_from(int(6)).unwrap_or(0);
@@ -3509,10 +3535,10 @@ impl Build {
                 file,
                 range: (start, at),
                 line,
-                severity: if error {
-                    Severity::Error
-                } else {
-                    Severity::Warning
+                severity: match kind {
+                    0 => Severity::Warning,
+                    1 => Severity::Error,
+                    _ => Severity::Diagnostic,
                 },
                 message,
                 context,
