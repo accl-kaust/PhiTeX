@@ -1417,6 +1417,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if r.is_err() {
             self.trace_stop("scope kind");
         }
+        if let Ok(x) = r
+            && crate::rerun::on()
+        {
+            crate::rerun::note(self.v, self.cx.node().raw(), "(scope kind)", x);
+        }
         Ok(r?)
     }
 
