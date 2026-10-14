@@ -31,7 +31,7 @@ mkdir -p "$w"/{work,in,tool,noresolve} "$R"
 trap 'rm -rf "$w"' EXIT
 head_ip=10.0.0.1
 echo "stage $stage run $run node $(hostname) job ${SLURM_JOB_ID} task ${SLURM_ARRAY_TASK_ID:-0}/${SLURM_ARRAY_TASK_COUNT:-1} cpus $SLURM_CPUS_ON_NODE image $(basename "$sif") $(date -Is)"
-if [ "$stage" = phitex ]; then
+if [ "$stage" = phitex ] || [ "$stage" = diag ] || [ "$stage" = target ]; then
   cp "$bin/phitex" "$w/tool/phitex"
   cp "$bin/pdf-relaxed-eq" "$w/tool/pdf-relaxed-eq" 2>/dev/null || echo "no pdf-relaxed-eq in $bin"
   cp "$bin/commit" "$w/tool/commit" 2>/dev/null || true
@@ -67,12 +67,22 @@ while IFS=$'\t' read -r id kind src main threads flags; do
   if [ "$kind" = arxiv ]; then
     cp "$C/arxiv/$src" "$w/in/src"
     box prepare --src /in/src --doc /w/doc --out /w/out > "$w/work/out/prepare.txt" 2>&1 || status=$?
+  elif [ "$kind" = local ]; then
+    cp -a "$C/$src" "$w/in/doc"
+    box prepare-local --main "$main" --doc /w/doc --out /w/out > "$w/work/out/prepare.txt" 2>&1 || status=$?
   else
     box prepare-manual --dir "$src" --main "$main" --doc /w/doc --out /w/out > "$w/work/out/prepare.txt" 2>&1 || status=$?
   fi
   if [ $status -eq 0 ] && grep -q '"status": "ok"' "$w/work/out/prep.json"; then
     main=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["main"])' "$w/work/out/prep.json")
     case $stage in
+      target)
+        [ -f "$R/$id/oracle/oracle.pdf" ] && cp "$R/$id/oracle/oracle.pdf" "$w/in/oracle.pdf"
+        tools=; [ "$kind" = manual ] && tools=--tools
+        box target --doc /w/doc --main "$main" --out /w/out --threads 8 --timeout 900 $tools > "$w/work/out/target-term.txt" 2>&1 || status=$? ;;
+      diag)
+        [ -f "$R/$id/oracle/oracle.pdf" ] && cp "$R/$id/oracle/oracle.pdf" "$w/in/oracle.pdf"
+        box diag --doc /w/doc --main "$main" --out /w/out --timeout 900 --threads "${DIAG_J:-1}" > "$w/work/out/diag-run.txt" 2>&1 || status=$? ;;
       oracle)
         tools=; [ "$kind" = manual ] && tools=--tools
         box oracle --doc /w/doc --main "$main" --out /w/out $tools > "$w/work/out/oracle-term.txt" 2>&1 || status=$? ;;

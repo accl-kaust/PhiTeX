@@ -1,0 +1,26 @@
+#!/bin/bash
+# Wait for github dev to move past $1 (a commit), then build phitex at the
+# new head on accl, run the target document (amsldoc) in the box, print
+# the result line and exit. Usage: scripts/corpus/follow LAST_COMMIT [LIST]
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
+last=$1 list=${2:-$repo/target/corpus/target-amsldoc.tsv}
+H=acclhead1
+while :; do
+  head=$(git -C "$repo" ls-remote github refs/heads/dev | cut -c1-40)
+  [ -n "$head" ] && [ "${head:0:8}" != "${last:0:8}" ] && break
+  sleep 120
+done
+echo "dev moved: $head" >&2
+j=$(cd "$repo" && ACCL_COMMIT=$head ACCL_OPTS="-c 16 --mem=32G -t 01:30:00" scripts/accl/accl submit cmd bash -c 'cargo build -q --release -p phitex-cli && cp target/release/phitex $r/phitex && git rev-parse HEAD > $r/commit' 2>/dev/null | tail -1)
+"$repo/scripts/accl/accl" wait "$j" >/dev/null 2>&1 || true
+ssh $H "set -e; t=shared-cache/phitex-corpus/bin/$head; mkdir -p \$t; cp code/flinner/phitex-runs/cmd-$j/phitex code/flinner/phitex-runs/cmd-$j/commit \$t/"
+run=t-${head:0:8}
+while IFS=$'\t' read -r id kind src main threads flags; do
+  o=m1; [ "$kind" = arxiv ] && o=a1
+  ssh $H "cd shared-cache/phitex-corpus/results && mkdir -p $run/$id && rm -rf $run/$id/target && cp -r $o/$id/oracle $run/$id/"
+done < "$list"
+t=$("$here/run" submit target "$run" "$list" 1 -p build --qos=build4 -c 10 --mem=32G -t 01:00:00 --export=ALL,CORPUS_BIN=\$HOME/shared-cache/phitex-corpus/bin/$head | tail -1)
+until ssh $H "export PATH=/opt/slurm/current/bin:\$PATH; sacct -j $t -X -n -o State" 2>/dev/null | grep -qE 'COMPLETED|FAILED|CANCELLED|TIMEOUT|OUT_OF'; do sleep 30; done
+echo "RESULT $head build-job $j target-job $t run $run"

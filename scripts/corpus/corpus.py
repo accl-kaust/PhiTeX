@@ -253,6 +253,16 @@ def cmd_prepare(a):
     print(json.dumps(res))
 
 
+def cmd_prepare_local(a):
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    require_no_net(out)
+    shutil.copytree("/in/doc", a.doc, symlinks=False)
+    res = {"status": "ok", "kind": "local", "main": a.main, "input_hash": common.tree_hash(Path(a.doc))}
+    jdump(out / "prep.json", res)
+    print(json.dumps(res))
+
+
 def cmd_prepare_manual(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -388,7 +398,7 @@ def summarize_stderr(path):
             "rounds": rounds, "lines": other}
 
 
-def watch(binary, threads, main, timeout, edit=None, tex_time=False, tag="run", exact=False):
+def watch(binary, threads, main, timeout, edit=None, tex_time=False, tag="run", exact=False, save_cold=None):
     """One `phitex watch` session in RUN: the cold build, and with `edit`
     (file, old, new) an edit of that file after it. Returns the events
     and timings."""
@@ -434,6 +444,10 @@ def watch(binary, threads, main, timeout, edit=None, tex_time=False, tag="run", 
                 builds.append(ev)
                 if len(builds) == 1:
                     res["cold_process_s"] = ev["_t"]
+                    if save_cold and ev.get("output"):
+                        jp = RUN / ev["output"] if not str(ev["output"]).startswith("/") else Path(ev["output"])
+                        if jp.exists():
+                            shutil.copy2(jp, save_cold)
                     if edit and ev.get("event") == "build":
                         f, old, new = edit
                         time.sleep(0.5)
@@ -606,12 +620,161 @@ def cmd_phitex(a):
                                 "exit": r["exit"], "timeout": r["timeout"]} for r in res["runs"]]}))
 
 
+def cmd_diag(a):
+    """`phitex build -v` once (exact, one thread): its terminal output
+    (the errors at their file:line with TeX's context), and the source
+    lines around the first error places, for the ranking's repros."""
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    require_no_net(out)
+    doc = Path(a.doc)
+    job = Path(a.main).stem
+    fresh_run(doc, job)
+    shutil.rmtree("/w/cache/docs", ignore_errors=True)
+    r = common.run([a.binary, "build", "-v", "--exact-pdf", "-j", str(a.threads), a.main], RUN,
+                   phitex_env({"COLUMNS": "200"}), a.timeout, out=out / "diag-term.txt",
+                   cpu_s=int(4 * a.timeout + 60))
+    term = (out / "diag-term.txt").read_bytes()[:400000]
+    (out / "diag-term.txt").write_bytes(term)
+    text = term.decode("utf-8", errors="replace")
+    places = []
+    for m in re.finditer(r"([\w./-]+\.(?:tex|sty|cls|bbl|def|cfg|clo|ltx)):(\d+)", text):
+        k = (m.group(1), int(m.group(2)))
+        if k not in places:
+            places.append(k)
+    snips = []
+    for f, line in places[:6]:
+        p = RUN / f
+        if not p.is_file():
+            continue
+        ls = p.read_bytes().decode("utf-8", errors="replace").split("\n")
+        lo, hi = max(0, line - 9), min(len(ls), line + 4)
+        snips.append(f"--- {f}:{line}\n" + "\n".join(f"{i + 1:6d}  {ls[i][:300]}" for i in range(lo, hi)))
+    (out / "diag-snippets.txt").write_text("\n".join(snips))
+    pdf = RUN / f"{job}.pdf"
+    if pdf.exists():
+        shutil.copy2(pdf, out / "diag.pdf")
+        if Path("/in/oracle.pdf").exists():
+            r["first_diff"] = first_diff("/in/oracle.pdf", pdf)
+    r["errors"] = [l for l in text.splitlines() if l.startswith("error: ")][:30]
+    jdump(out / "diag.json", {**r, "places": places[:20]})
+    print(json.dumps({**r, "places": places[:6]}))
+
+
+def qdf_lines(p, out):
+    r = subprocess.run(["qpdf", "--qdf", "--object-streams=disable", "--decode-level=generalized", p, out],
+                       capture_output=True)
+    if not Path(out).exists():
+        return None
+    return Path(out).read_bytes().split(b"\n")
+
+
+def pdfdiff(want, got, tag):
+    """The first difference of two PDFs: the byte, and in qpdf's QDF form
+    of both, the first differing line with its object and page."""
+    res = {"first_byte": first_diff(want, got)}
+    if res["first_byte"] in (-1, None):
+        return res
+    a = qdf_lines(want, f"/w/qdf-{tag}-want.pdf")
+    b = qdf_lines(got, f"/w/qdf-{tag}-got.pdf")
+    if a is None or b is None:
+        res["qdf"] = "qpdf failed"
+        return res
+    i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), len(b)))
+    res["qdf_line"] = i + 1
+    res["want"] = a[i][:300].decode("latin-1") if i < len(a) else "<end>"
+    res["got"] = b[i][:300].decode("latin-1") if i < len(b) else "<end>"
+    obj = page = None
+    for k in range(min(i, len(a) - 1), -1, -1):
+        line = a[k]
+        if obj is None and re.match(rb"^\d+ 0 obj", line):
+            obj = line.decode("latin-1")
+        if page is None and line.startswith(b"%% ") and b"age" in line:
+            page = line.decode("latin-1")
+        if obj and page:
+            break
+    res["object"] = obj
+    res["page_comment"] = page
+    lo = max(0, i - 6)
+    res["want_context"] = [x[:200].decode("latin-1") for x in a[lo:i + 4]]
+    res["got_context"] = [x[:200].decode("latin-1") for x in b[lo:i + 4]]
+    res["lines_want_got"] = [len(a), len(b)]
+    return res
+
+
+def cmd_target(a):
+    """One document, the iteration target: a cold build and a one-word
+    edit in one exact-mode watch session; each PDF compared with
+    pdflatex's (the edit's: pdflatex on the edited text) and the first
+    difference located."""
+    import manuals
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    require_no_net(out)
+    doc = Path(a.doc)
+    job = Path(a.main).stem
+    e = pick_edit(doc, a.main)
+    res = {"edit": {k: v for k, v in (e or {}).items() if k != "new"}}
+    fresh_run(doc, job)
+    r = watch(a.binary, a.threads, a.main, a.timeout, edit=(e["file"], None, e["new"]) if e else None,
+              exact=True, tag="target", save_cold=str(out / "cold.pdf"))
+    if (RUN / f"{job}.pdf").exists() and e:
+        shutil.copy2(RUN / f"{job}.pdf", out / "edit.pdf")
+    if (RUN / f"{job}.log").exists():
+        shutil.copy2(RUN / f"{job}.log", out / "phitex.log")
+    res["watch"] = r
+    if Path("/in/oracle.pdf").exists() and (out / "cold.pdf").exists():
+        res["cold_diff"] = pdfdiff("/in/oracle.pdf", str(out / "cold.pdf"), "cold")
+    if e:
+        # pdflatex on the edited text
+        ed = Path("/w/doc-edited")
+        shutil.rmtree(ed, ignore_errors=True)
+        shutil.copytree(doc, ed)
+        (ed / e["file"]).write_bytes(e["new"])
+        fresh_run(ed, job)
+        base = {rel: common.sha256_file(RUN / rel) for rel in common.tree_files(RUN)}
+        env = common.env({"HOME": "/w/home", "TEXMFVAR": "/w/texmf-var"})
+        lr = manuals.loop(RUN, ["pdflatex", "-no-shell-escape", "-interaction=nonstopmode", a.main],
+                          manuals.Tools() if a.tools else NoTools(), env, job, base,
+                          {k for k in base if k.endswith(".ist")}, [])
+        res["edit_oracle"] = {k: lr.get(k) for k in ("passes", "wall_s", "settled", "status")}
+        if (RUN / f"{job}.pdf").exists():
+            shutil.copy2(RUN / f"{job}.pdf", out / "edit-oracle.pdf")
+            if (out / "edit.pdf").exists():
+                res["edit_diff"] = pdfdiff(str(out / "edit-oracle.pdf"), str(out / "edit.pdf"), "edit")
+    jdump(out / "target.json", res)
+    b = r["builds"]
+    print(json.dumps({"cold_s": r.get("cold_process_s"), "edit_s": r.get("edit_process_s"),
+                      "builds": [(x.get("why"), x.get("pages"), round(x.get("wall_ms") or 0), len(x.get("errors") or [])) for x in b],
+                      "cold_diff": (res.get("cold_diff") or {}).get("first_byte"),
+                      "edit_diff": (res.get("edit_diff") or {}).get("first_byte")}))
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("netcheck")
     p = sub.add_parser("prepare")
     p.add_argument("--src", required=True)
+    p.add_argument("--doc", required=True)
+    p.add_argument("--out", required=True)
+    p = sub.add_parser("target")
+    p.add_argument("--doc", required=True)
+    p.add_argument("--main", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--binary", default="/t/phitex")
+    p.add_argument("--threads", type=int, default=8)
+    p.add_argument("--timeout", type=float, default=600)
+    p.add_argument("--tools", action="store_true")
+    p = sub.add_parser("diag")
+    p.add_argument("--doc", required=True)
+    p.add_argument("--main", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--binary", default="/t/phitex")
+    p.add_argument("--timeout", type=float, default=600)
+    p.add_argument("--threads", type=int, default=1)
+    p = sub.add_parser("prepare-local")
+    p.add_argument("--main", required=True)
     p.add_argument("--doc", required=True)
     p.add_argument("--out", required=True)
     p = sub.add_parser("prepare-manual")
@@ -639,7 +802,7 @@ def main():
         n = netcheck()
         print(json.dumps(n))
         sys.exit(0 if n["ok"] else 90)
-    {"prepare": cmd_prepare, "prepare-manual": cmd_prepare_manual, "oracle": cmd_oracle, "phitex": cmd_phitex}[a.cmd](a)
+    {"prepare": cmd_prepare, "prepare-manual": cmd_prepare_manual, "prepare-local": cmd_prepare_local, "diag": cmd_diag, "target": cmd_target, "oracle": cmd_oracle, "phitex": cmd_phitex}[a.cmd](a)
 
 
 if __name__ == "__main__":

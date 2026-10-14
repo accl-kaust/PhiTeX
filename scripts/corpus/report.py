@@ -41,7 +41,7 @@ def q(v, p):
     return v[lo] + (v[hi] - v[lo]) * (k - lo)
 
 
-def doc_row(d):
+def doc_row(d, flagged=False):
     r = {"id": d.name, "kind": "manual" if d.name.startswith("m-") else "arxiv"}
     prep = load(d / "oracle" / "prep.json") or load(d / "phitex" / "prep.json")
     o = load(d / "oracle" / "oracle.json")
@@ -51,10 +51,16 @@ def doc_row(d):
     if not o:
         r.update(state="pending")
         return r
-    if o.get("status") != "ok":
+    if o.get("status") != "ok" and not (flagged and Path(d / "oracle" / "oracle.pdf").exists() or flagged):
         r.update(state="excluded", reason=o.get("reason", "?"))
         return r
+    r["flagged"] = flagged
+    r["oracle_errors"] = o.get("errors")
     r.update(oracle_s=o["wall_s"], pages=o.get("pages"), passes=o.get("passes"), pass_walls=o.get("pass_walls"))
+    here = load(d / "phitex" / "oracle-here.json")
+    if here and here.get("wall_s"):
+        r["oracle_s_first"] = r["oracle_s"]
+        r["oracle_s"] = here["wall_s"]
     p = load(d / "phitex" / "phitex.json")
     if not p:
         r.update(state="no-phitex")
@@ -78,8 +84,12 @@ def doc_row(d):
             st, cause = "failing", "timeout"
         elif not bb.get("output") or rs[0].get("exit") not in (0, 1):
             st = "failing"
-            cause = norm(r["tex_errors"][0]) if r["tex_errors"] else (
-                norm(r["diagnostics"][0]) if r["diagnostics"] else f"no PDF, exit {rs[0].get('exit')}")
+            if r["tex_errors"]:
+                cause = "no PDF written; first TeX error: " + norm(r["tex_errors"][0])
+            elif r["diagnostics"]:
+                cause = "no PDF written; diagnostics only: " + norm(r["diagnostics"][0])
+            else:
+                cause = f"no PDF written; no error reported, exit {rs[0].get('exit')}"
         elif mode == "exact" and all(x.get("first_diff") == -1 for x in rs):
             st, cause = "identical", None
         elif mode == "relaxed" and all(x.get("relaxed_eq") == "equal" for x in rs):
@@ -176,9 +186,39 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("results")
     ap.add_argument("--json")
+    ap.add_argument("--list", help="only the documents of this list (its 6th column `flagged` marks oracle-with-errors rows)")
+    ap.add_argument("--manifest", help="arXiv manifest (strata)")
     a = ap.parse_args()
-    rows = [doc_row(d) for d in sorted(Path(a.results).iterdir()) if d.is_dir()]
-    lines = []
+    keep, flagged = None, set()
+    if a.list:
+        keep = set()
+        for line in Path(a.list).read_text().splitlines():
+            f = line.split("\t")
+            keep.add(f[0])
+            if len(f) > 5 and f[5] == "flagged":
+                flagged.add(f[0])
+    strata = {}
+    if a.manifest:
+        for m in json.loads(Path(a.manifest).read_text()):
+            strata[f"a-{m['id']}{m['version']}"] = m["stratum"]
+    rows = []
+    for d in sorted(Path(a.results).iterdir()):
+        if not d.is_dir() or (keep is not None and d.name not in keep):
+            continue
+        r = doc_row(d, d.name in flagged)
+        r["stratum"] = strata.get(d.name, "manuals" if d.name.startswith("m-") else "?")
+        rows.append(r)
+    lines = ["## headline: byte-identical (--exact-pdf) / relaxed-equivalent, of the documents pdflatex builds cleanly"]
+    by = defaultdict(list)
+    for r in rows:
+        if r["state"] not in ("excluded",) and not r.get("flagged"):
+            by[r["stratum"]].append(r)
+    for st_, rs in sorted(by.items(), key=lambda kv: -len(kv[1])):
+        m = len(rs)
+        ex = sum(1 for r in rs if r.get("exact_state") == "identical")
+        rl = sum(1 for r in rs if r.get("relaxed_state") == "identical")
+        pend = sum(1 for r in rs if r["state"] in ("pending", "no-phitex"))
+        lines.append(f"  {st_:20s} {ex} of {m} byte-identical, {rl} of {m} relaxed-equivalent" + (f" ({pend} not yet run)" if pend else ""))
     for kind in ("arxiv", "manual"):
         rs = [r for r in rows if r["kind"] == kind]
         if rs:
