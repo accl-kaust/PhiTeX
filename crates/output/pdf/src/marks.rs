@@ -273,11 +273,9 @@ impl PdfState {
             self.fail(pdf_error("ext1", "invalid object number being reused"));
             return;
         }
-        let objnum = if self.is_scheduled(objnum) {
-            self.new_objnum_()
-        } else {
-            objnum
-        };
+        let was = self.is_scheduled(objnum);
+        self.rec_font(crate::replay::FontEv::Sched(objnum, was));
+        let objnum = if was { self.new_objnum_() } else { objnum };
         let rect = self.set_rect_dimens(fr, x, y, whd, 0);
         self.aux.marks.insert(
             objnum,
@@ -288,6 +286,7 @@ impl PdfState {
             },
         );
         self.annot_list.push(objnum);
+        self.rec_font(crate::replay::FontEv::Scheduled(objnum));
         self.set_scheduled(objnum);
     }
 
@@ -317,11 +316,9 @@ impl PdfState {
             self.fail(pdf_error("ext1", "invalid object number being reused"));
             return;
         }
-        let objnum = if self.is_scheduled(objnum) {
-            self.new_objnum_()
-        } else {
-            objnum
-        };
+        let was = self.is_scheduled(objnum);
+        self.rec_font(crate::replay::FontEv::Sched(objnum, was));
+        let objnum = if was { self.new_objnum_() } else { objnum };
         if self.link_stack.len() >= PDF_MAX_LINK_LEVEL {
             self.fail(pdf_error(
                 "",
@@ -348,6 +345,7 @@ impl PdfState {
             },
         );
         self.link_list.push(objnum);
+        self.rec_font(crate::replay::FontEv::Scheduled(objnum));
         self.set_scheduled(objnum);
     }
 
