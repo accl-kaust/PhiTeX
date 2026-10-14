@@ -139,8 +139,10 @@ impl FileRest {
         while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
             end -= 1;
         }
+        // (the text holds one character per byte of the file, §31: a byte
+        // past 127 is one character, never its UTF-8 encoding's bytes)
         let mut buf = Vec::with_capacity(end + 1);
-        buf.extend(bytes[..end].iter().map(|&b| u32::from(b)));
+        buf.extend(line[..end].chars().map(u32::from));
         let chars = line.chars().count();
         self.pos += chars;
         self.off += n;
@@ -165,6 +167,15 @@ fn heartbeat_enabled() -> bool {
 
 /// The size of a run's control-sequence name cache ([`Run::cs_cache`]).
 pub(crate) const CS_CACHE: usize = 1024;
+
+/// The page builder's parameters (§980), which a `T_PAGE_PARAMS` marker
+/// carries.
+const PAGE_PARAMS: [Loc; 4] = [
+    Par::vsize as Loc,
+    Par::maxdepth as Loc,
+    Par::topskip as Loc,
+    Par::holdinginserts as Loc,
+];
 
 /// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`, §297).
 /// Its meaning is read from its slot when a command needs it
@@ -251,6 +262,8 @@ pub(crate) struct Run<'c, 'a> {
     /// A page step whose output routine published leftovers
     /// (`pagefx:<j>`).
     pub pagefx_pub: bool,
+    /// Set while `\advance` defines its register ([`State::note_kind`]).
+    pub in_advance: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -342,6 +355,7 @@ impl<'c, 'a> Run<'c, 'a> {
             contribs: Vec::new(),
             pg: None,
             pagefx_pub: false,
+            in_advance: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -459,6 +473,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
         let grp = self.innermost_group();
+        self.st.note_kind(loc, self.in_advance);
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
     }
@@ -673,6 +688,61 @@ impl<'c, 'a> Run<'c, 'a> {
             let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);
             self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
         }
+    }
+
+    /// The fields the text defined at its base level since the last item
+    /// it put on the main list: a `T_DEFS_AT` marker there, which tells
+    /// the page fold that a routine's earlier delta of these fields gives
+    /// way to the text's (`page::FinalState`). Only a document node's
+    /// (a page step's definitions are the chain's delta).
+    ///
+    /// A page parameter among them (`\\vsize`, `\\maxdepth`, `\\topskip`,
+    /// `\\holdinginserts`) goes out there too, as a `T_PAGE_PARAMS` marker
+    /// with the values in force: the page builder reads them when a page's
+    /// first item arrives (§987), so the marker stands before the next item
+    /// wherever the run that set them ends (where the scheduler splits runs
+    /// changes nothing). Whether this run is one that marks so.
+    pub(crate) fn flush_text_defs(&mut self) -> bool {
+        let op = self.cx.op();
+        if self.pg.is_some() || (op != self.ops.exec && op != self.ops.put) {
+            return false;
+        }
+        let mut locs = self.st.take_base_defs();
+        if locs.is_empty() {
+            return true;
+        }
+        if locs.iter().any(|l| PAGE_PARAMS.contains(l)) {
+            self.put_page_params();
+        }
+        locs.sort_unstable();
+        locs.dedup();
+        let v = self.v;
+        let mut xs = Vec::with_capacity(locs.len() + 1);
+        xs.push(v.int(crate::nodes::T_DEFS_AT));
+        for l in locs {
+            xs.push(self.loc_field(l).0);
+        }
+        let at = v.list(xs);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        true
+    }
+
+    /// The page parameters in force, as a `T_PAGE_PARAMS` marker on the
+    /// main list (page.rs `breaks`, §980).
+    fn put_page_params(&mut self) {
+        let v = self.v;
+        let vsize = self.ipar(Par::vsize).unwrap_or(0);
+        let maxdepth = self.ipar(Par::maxdepth).unwrap_or(0);
+        let topskip = self.gpar(Par::topskip).unwrap_or_default();
+        let holding = self.ipar(Par::holdinginserts).unwrap_or(0);
+        let marker = v.list(vec![
+            v.int(crate::nodes::T_PAGE_PARAMS),
+            v.int(i64::from(vsize)),
+            v.int(i64::from(maxdepth)),
+            crate::val::glue_value(v, &topskip),
+            v.int(i64::from(holding)),
+        ]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), marker])));
     }
 
     /// Whether file `name` is one the job writes and reads back, with its
@@ -1539,28 +1609,10 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         crate::pageinline::finish(&mut self);
         // a page parameter this run set reaches the page fold as a
-        // marker in the main list (page.rs `breaks`)
-        if self.st.defines_any(&[
-            Par::vsize as Loc,
-            Par::maxdepth as Loc,
-            Par::topskip as Loc,
-            Par::holdinginserts as Loc,
-        ]) {
-            let v = self.v;
-            let vsize = self.ipar(Par::vsize).unwrap_or(0);
-            let maxdepth = self.ipar(Par::maxdepth).unwrap_or(0);
-            let topskip = self.gpar(Par::topskip).unwrap_or_default();
-            let holding = self.ipar(Par::holdinginserts).unwrap_or(0);
-            let marker = v.list(vec![
-                v.int(crate::nodes::T_PAGE_PARAMS),
-                v.int(i64::from(vsize)),
-                v.int(i64::from(maxdepth)),
-                crate::val::glue_value(v, &topskip),
-                v.int(i64::from(holding)),
-            ]);
-            let item = v.list(vec![v.int(0), marker]);
-            let s = v.seq_unit(item);
-            self.contribute("items", s);
+        // marker in the main list (page.rs `breaks`): a document node's
+        // where it set it (`flush_text_defs`), another run's here
+        if !self.flush_text_defs() && self.st.defines_any(&PAGE_PARAMS) {
+            self.put_page_params();
         }
         // a page step defines nothing to the engine: its definitions are
         // the page chain's delta (`page::step_defs`), so no step reads
