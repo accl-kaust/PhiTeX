@@ -207,6 +207,9 @@ pub(crate) struct Run<'c, 'a> {
     /// `PHITEX_HEARTBEAT=1` (read once a process).
     pub heartbeat_on: bool,
     pub pulled: usize,
+    /// The writer's state this run's last PDF step made, not yet where
+    /// other nodes find it ([`crate::pdfout::publish`], at the run's end).
+    pub pdf_fold: Option<(u64, std::sync::Arc<crate::pdfout::Fold>)>,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -323,6 +326,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
+            pdf_fold: None,
             top: false,
             claim_rest: false,
             hint_void: false,
@@ -1357,6 +1361,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         loop {
             while self.has_input() {
+                if self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT) {
+                    self.input.compact();
+                }
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
@@ -1521,6 +1528,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        crate::pdfout::publish(self.pdf_fold.take());
         if self.lines_read != 0 {
             let n = self.v.int(i64::try_from(self.lines_read).unwrap_or(0));
             self.contribute("lines", n);
@@ -1908,6 +1916,7 @@ impl Run<'_, '_> {
         if !self.rewind() {
             return None;
         }
+        crate::pdfout::publish(self.pdf_fold.take());
         let mut segs = Vec::new();
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         for l in input.levels.iter().rev() {
