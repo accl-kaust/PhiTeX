@@ -89,6 +89,7 @@ impl Shared {
             pfx_lens: std::sync::RwLock::new(Vec::new()),
             peff: std::sync::RwLock::new(Vec::new()),
             pclaim: std::sync::RwLock::new(Vec::new()),
+            pclaim_lo: std::sync::atomic::AtomicUsize::new(0),
             lists: std::sync::Mutex::new(0),
         });
         #[allow(clippy::cast_possible_truncation)]
@@ -999,10 +1000,18 @@ impl Shared {
                 if fl & at != 0 {
                     // Still there from before: counts again.
                     *dead = dead.saturating_sub(1);
+                    if want == F_PCLAIM {
+                        let v = super::rlock(list);
+                        let pos = self.sorted_pos(&v, s);
+                        u.pclaim_lo.fetch_min(pos, Ordering::AcqRel);
+                    }
                 } else {
                     let mut v = wlock(list);
                     let pos = self.sorted_pos(&v, s);
                     v.insert(pos, s);
+                    if want == F_PCLAIM {
+                        u.pclaim_lo.fetch_min(pos, Ordering::AcqRel);
+                    }
                     r.set(at);
                 }
                 r.set(have);
@@ -1025,6 +1034,14 @@ impl Shared {
                 r.clear(have);
                 *dead += 1;
             }
+        }
+        if fl & F_IN_PCLAIM != 0 {
+            let v = super::rlock(&u.pclaim);
+            let mut lo = u.pclaim_lo.load(Ordering::Acquire);
+            while lo < v.len() && !self.rec(v[lo]).has(F_IN_PCLAIM) {
+                lo += 1;
+            }
+            u.pclaim_lo.store(lo, Ordering::Release);
         }
         // Compacted once the entries that left outnumber the rest.
         let total = super::rlock(&u.wild).len() + super::rlock(&u.peff).len() + super::rlock(&u.pclaim).len();
@@ -1055,6 +1072,7 @@ impl Shared {
                 });
             }
             m.retain(|_, v| !v.is_empty());
+            u.pclaim_lo.store(0, Ordering::Release);
             for x in gone {
                 self.rec(x).clear(super::F_AT_PFX);
             }
@@ -1085,6 +1103,9 @@ impl Shared {
         ] {
             if r.fl() & at != 0 {
                 wlock(list).retain(|&x| x != s);
+                if at == super::F_AT_PCLAIM {
+                    u.pclaim_lo.store(0, Ordering::Release);
+                }
                 r.clear(at);
                 *dead = dead.saturating_sub(1);
             }
