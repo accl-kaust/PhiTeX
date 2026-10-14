@@ -303,5 +303,74 @@ def run(args):
                   f"identical {b['compare'] is None} relaxed {b.get('compare_relaxed')} notes {b.get('notes')}", flush=True)
 
 
+def phases(args):
+    """Any document, timed by phase: `phases BIN DOCDIR MAIN FILE LINE OLD
+    NEW N`: phitex watch -j N on a copy of DOCDIR, cold, then OLD -> NEW
+    on FILE's LINE; every stderr line (PHITEX_TEX_TIME, PHITEX_OBS) and
+    every stdout event stamped with seconds since the start."""
+    binary, src, main, f, line, old, new, n = args[:8]
+    binary = Path(binary).resolve()
+    R.mkdir(parents=True, exist_ok=True)
+    m = W / "phases" / "m"
+    if m.exists():
+        shutil.rmtree(m)
+    shutil.copytree(src, m, symlinks=True)
+    env = common.env({"HOME": str(W / "home"), "TEXMFVAR": str(W / "texmf-var"),
+                      "PHITEX_CACHE_DIR": str(W / "pcache"), "NO_COLOR": "1",
+                      "PHITEX_TEX_TIME": "1", "PHITEX_OBS": "1"})
+    (W / "home").mkdir(exist_ok=True)
+    import threading
+    t0 = time.monotonic()
+    p = subprocess.Popen([str(binary), "watch", "--no-view", "--json", "-j", n, main], cwd=m, env=env,
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    errf = open(R / "phases-stderr.txt", "w")
+
+    def drain():
+        for l in p.stderr:
+            if l.startswith(b"nodetime: "):
+                continue
+            errf.write(f"{time.monotonic() - t0:9.3f} {l.decode('utf-8', 'replace').rstrip()}\n")
+            errf.flush()
+    th = threading.Thread(target=drain)
+    th.start()
+    dog = threading.Timer(40 * 60, p.kill)
+    dog.start()
+    builds = 0
+    out = open(R / "phases-stdout.jsonl", "w")
+    for l in p.stdout:
+        now = time.monotonic() - t0
+        out.write(f"{now:9.3f} {l.decode('utf-8', 'replace')}")
+        out.flush()
+        try:
+            e = json.loads(l)
+        except ValueError:
+            continue
+        if e.get("event") != "build":
+            continue
+        builds += 1
+        errf.write(f"{now:9.3f} ===== build {builds} event: wall_ms {e.get('wall_ms')} nodes_run {e.get('nodes_run')} pages {e.get('pages')}\n")
+        if builds == 1:
+            time.sleep(1)
+            q = m / f
+            ls = q.read_bytes().split(b"\n")
+            k = int(line) - 1
+            assert old.encode() in ls[k], (k, ls[k])
+            ls[k] = ls[k].replace(old.encode(), new.encode(), 1)
+            errf.write(f"{time.monotonic() - t0:9.3f} ===== edit {f}:{line} {old} -> {new}\n")
+            q.write_bytes(b"\n".join(ls))
+        else:
+            break
+    try:
+        p.stdin.write(b"q\n")
+        p.stdin.close()
+    except OSError:
+        pass
+    p.wait()
+    dog.cancel()
+    th.join()
+    errf.write(f"{time.monotonic() - t0:9.3f} ===== exit {p.returncode}\n")
+    errf.close()
+
+
 if __name__ == "__main__":
-    {"build": lambda a: build(), "oracle": lambda a: oracle(), "run": run}[sys.argv[1]](sys.argv[2:])
+    {"build": lambda a: build(), "oracle": lambda a: oracle(), "run": run, "phases": phases}[sys.argv[1]](sys.argv[2:])

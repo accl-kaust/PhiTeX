@@ -45,3 +45,47 @@ fn prelude_errors_are_reported_at_the_prelude() {
         "the prelude's error placed in the document"
     );
 }
+
+/// The engine's own diagnostics (an undeclared definition, a hint's
+/// regime violated) are not TeX's errors: not in the log, not counted
+/// with them (TeX's hundred), and the PDF is written. `envs.tex` (the
+/// LaTeX fixtures) had undeclared definitions of `cs:if@minipage`,
+/// `param:clubpenalty` and `toks:12` logged as `! ...` errors; the
+/// corpus saw clsguide/usrguide end without a PDF on such diagnostics.
+#[test]
+fn engine_diagnostics_are_not_errors() {
+    let dir = common::fixtures().join("latex/docs");
+    let src = common::read(&dir.join("envs.tex"));
+    let opts = phitex_tex::Options {
+        epoch: Some(0),
+        prelude_jobname: "pdflatex".to_owned(),
+        ..common::options("./envs.tex", "envs", "", &dir)
+    };
+    let b = common::build(opts, Some("\\input pdflatex.ini\n"), &src);
+    let (pdf, log) = b.output();
+    let ds = b.diagnostics();
+    for d in ds
+        .iter()
+        .filter(|d| d.severity == phitex_tex::Severity::Diagnostic)
+    {
+        eprintln!("diagnostic {}:{}: {}", d.file, d.line, d.message);
+        assert!(
+            !log.contains(&format!("! {}", d.message)),
+            "the engine's diagnostic in the log as TeX's error: {}",
+            d.message
+        );
+    }
+    for d in &ds {
+        let engine = d.message.starts_with("undeclared definition")
+            || d.message.starts_with("hint regime violated");
+        assert!(
+            !engine || d.severity == phitex_tex::Severity::Diagnostic,
+            "an engine check as {:?}: {}",
+            d.severity,
+            d.message
+        );
+    }
+    assert!(!log.contains("\n! "), "TeX errors in envs.tex:\n{log}");
+    assert!(!pdf.is_empty(), "no PDF");
+    eprintln!("{} engine diagnostics", b.engine_diagnostics());
+}

@@ -50,7 +50,7 @@ pub fn from_diagnostic(
             .flat_map(|h| h.lines())
             .map(str::to_owned)
             .collect(),
-        warning: d.severity == phitex_tex::Severity::Warning,
+        warning: d.severity != phitex_tex::Severity::Error,
         ..Problem::default()
     };
     // (TeX's help for an undefined name speaks to its prompt, `type I`:
@@ -409,14 +409,11 @@ pub fn rendered(
     color: bool,
     verbose: bool,
 ) -> Vec<String> {
-    let want = if warnings {
-        phitex_tex::Severity::Warning
-    } else {
-        phitex_tex::Severity::Error
-    };
+    // (the engine's own diagnostics are shown with the warnings: they
+    // are not TeX's errors)
     r.diagnostics
         .iter()
-        .filter(|d| d.severity == want)
+        .filter(|d| (d.severity == phitex_tex::Severity::Error) != warnings)
         .map(|d| {
             render(
                 &from_diagnostic(d, s.source(&d.file).as_deref(), verbose),

@@ -301,6 +301,16 @@ impl Report {
         self.out.pages
     }
 
+    /// The engine's own diagnostics (an undeclared definition, a hint's
+    /// regime violated): counted apart from TeX's errors, never part of
+    /// the history or the exit status.
+    pub fn engine_diagnostics(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Diagnostic)
+            .count()
+    }
+
     /// TeX's history: 0 spotless, 1 warnings, 2 errors.
     pub fn history(&self) -> i32 {
         if !self.out.errors.is_empty() {

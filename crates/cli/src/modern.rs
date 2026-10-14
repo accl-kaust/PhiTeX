@@ -513,6 +513,7 @@ pub fn report(
         "nodes_run": run.commands_run,
         "errors": r.out.errors,
         "warnings": warnings,
+        "diagnostics": r.engine_diagnostics(),
         "log": log.display().to_string(),
         }));
     }
@@ -543,6 +544,7 @@ pub fn report(
         wall: r.wall,
         errors: r.out.errors.len(),
         warnings,
+        diagnostics: r.engine_diagnostics(),
         runs: r.runs.len(),
         engine: (!job.ini).then_some(t.engine.name),
     });
