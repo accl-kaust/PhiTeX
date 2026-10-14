@@ -1314,7 +1314,27 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         }
     }
     let fplan = v.seq_to_vec(cx.acc_range(v.field("fplan"), None)?);
-    if let Some(tags) = font_tags(v, fplan.last().copied(), &placed_pieces) {
+    let tags = font_tags(v, fplan.last().copied(), &placed_pieces);
+    // (`\pdffontname` reads them: a loop-back, a reader of a number
+    // that changed runs again)
+    let mut pairs: Vec<(FontId, FontId)> = tags
+        .as_ref()
+        .map(|m| m.iter().map(|(&a, &b)| (a, b)).collect())
+        .unwrap_or_default();
+    pairs.sort_unstable();
+    let ft = v.field(FONT_TAGS);
+    if cx.is_loopback(ft) {
+        cx.publish(
+            ft,
+            v.list(
+                pairs
+                    .iter()
+                    .map(|&(a, b)| v.list(vec![v.int(i64::from(a)), v.int(i64::from(b))]))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(tags) = tags {
         st.set_font_tags(tags);
     }
     // the objects read-time commands wrote after a page fired: after
@@ -1432,6 +1452,29 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         eprintln!("pdf finish: {:?}, {} bytes", t0.elapsed(), bytes.len());
     }
     Ok(out)
+}
+
+/// The loop-back of the fonts' names the finish gave
+/// ([`font_tags`]): `[[engine number, name number], ...]` where they
+/// differ.
+pub(crate) const FONT_TAGS: &str = "pdf:ftags";
+
+/// Font `n`'s name number as the finish gives it (`\pdffontname`):
+/// the previous round's, a loop-back (exact mode).
+pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
+    let v = r.v;
+    let f = v.field(FONT_TAGS);
+    if !r.cx.is_loopback(f) || crate::pdfrelaxed::on(r)? {
+        return Ok(n);
+    }
+    let x = r.cx.use_field(f)?;
+    Ok(x.map(|x| list_of(v, x))
+        .unwrap_or_default()
+        .iter()
+        .map(|&e| list_of(v, e))
+        .find(|e| e.first().is_some_and(|&a| int_of(v, a) == n))
+        .and_then(|e| e.get(1).map(|&b| int_of(v, b)))
+        .unwrap_or(n))
 }
 
 /// The id of `pdftexspace` in the pages written apart (none of the

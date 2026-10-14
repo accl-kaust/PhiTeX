@@ -454,7 +454,12 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                     Some((n, o))
                 })?;
                 let (name, obj) = got.unwrap_or((name, obj));
-                (if c == cv::FONT_NAME { name } else { obj }).to_string()
+                if c == cv::FONT_NAME {
+                    // (the name the finish gives it, pdfTeX's number)
+                    crate::pdfout::font_tag_read(r, name)?.to_string()
+                } else {
+                    obj.to_string()
+                }
             }
         }
         cv::FONT_SIZE => {

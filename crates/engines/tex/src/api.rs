@@ -3757,6 +3757,11 @@ fn declare_fields(eng: &mut Engine) {
     }
     let lines = eng.values().field("lines");
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
+    // the fonts' names as the writer gives them where they are not the
+    // engine's numbers (`pdfout::font_tags`), for `\pdffontname`
+    let f = eng.values().field(crate::pdfout::FONT_TAGS);
+    let none = eng.values().list(Vec::new());
+    eng.declare_loopback(f, none);
     // what each page's output routine leaves for the next: a
     // loop-back the page builder's fold reads from the previous round
     for j in 0..crate::page::MAX_PAGES {
