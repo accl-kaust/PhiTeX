@@ -30,21 +30,61 @@ pub const HANDLE_BASE: usize = 1 << 30;
 const READ_BASE: usize = HANDLE_BASE + (1 << 29);
 /// Objects per page.
 pub const PAGE_SLOTS: usize = 1 << 12;
-/// Pages (the read-time half begins past them).
+/// Page slots (the read-time half begins past them): a page's handles
+/// are its slot's, never its number's, which the finish gives it.
 pub const MAX_PAGES: usize = (1 << 17) - 1;
+/// The pages one page step may ship.
+pub const STEP_PAGES: usize = 16;
+/// The page steps with slots of their own; the other pages (shipped by
+/// the text, or past these steps) have slots by their owner key, past
+/// them.
+const SLOT_STEPS: usize = 4096;
 /// Objects per read-time owner.
 const READ_SLOTS: usize = 64;
 /// The finishing state's own objects (never seen by TeX).
 const FINISH_BASE: usize = 1 << 31;
+/// Page `m`'s page object, by its number (`\\pdfpageref`, a goto
+/// page): the finish makes it the `m`-th page's.
+const PAGENUM_BASE: usize = FINISH_BASE + (1 << 30);
+/// A page's pages-tree node, by the page's slot: the finish makes it
+/// the leaf over the page's number.
+const PARENT_BASE: usize = PAGENUM_BASE + (1 << 28);
+/// The number a page's writer gives its own page object (`total_pages
+/// + 1`, ship.rs): no page number, and not the first of a leaf's six.
+const OWN_PAGE: i32 = i32::MAX - 1;
 
-/// The handle of page `n`'s `i`-th object (`i` 0: the page object).
+/// The slot of the `k`-th page page step `j` ships (`None`: past the
+/// steps with slots, or `k` past [`STEP_PAGES`]).
+#[must_use]
+pub fn step_page_slot(j: usize, k: usize) -> Option<usize> {
+    (j < SLOT_STEPS && k < STEP_PAGES).then_some(1 + j * STEP_PAGES + k)
+}
+
+/// The slot of a page shipped elsewhere, by its owner key ([`owner_key`]).
+#[must_use]
+pub fn key_page_slot(key: u64) -> usize {
+    let first = 1 + SLOT_STEPS * STEP_PAGES;
+    let room = u64::try_from(MAX_PAGES + 1 - first).unwrap_or(1);
+    first + usize::try_from(key % room).unwrap_or(0)
+}
+
+fn page_num_handle(m: usize) -> usize {
+    PAGENUM_BASE + m
+}
+
+fn parent_handle(slot: usize) -> usize {
+    PARENT_BASE + slot
+}
+
+/// The handle of the `i`-th object of the page in slot `n` (`i` 0: the
+/// page object).
 ///
 /// # Errors
-/// Past `MAX_PAGES` pages or `PAGE_SLOTS` objects on a page.
+/// Past `MAX_PAGES` slots or `PAGE_SLOTS` objects on a page.
 pub fn page_handle(n: usize, i: usize) -> Result<usize, PdfError> {
     if n == 0 || n > MAX_PAGES || i >= PAGE_SLOTS {
         return Err(PdfError::Unsupported(format!(
-            "relaxed mode: page {n}, object {i} past the handles' room"
+            "relaxed mode: page slot {n}, object {i} past the handles' room"
         )));
     }
     Ok(HANDLE_BASE + (n - 1) * PAGE_SLOTS + i)
@@ -157,6 +197,8 @@ pub struct Piece {
     made: Option<(usize, Made)>,
     /// Why the document cannot be written in relaxed mode, if it cannot.
     fallback: Option<String>,
+    /// A page's slot.
+    slot: Option<usize>,
     /// A page's `cur_page_height`; for a form written before the page
     /// that references it, the one it was written under (a form's
     /// origin is the page's: pdfTeX writes it after that page).
@@ -225,8 +267,9 @@ impl Piece {
 
 /// What persists from page to page outside the objects: the colour
 /// stacks, the links still open, `\pdfinterwordspaceon` and
-/// `\pdfrunninglinkoff`. The page builder's fold carries it
-/// ([`carry_after`]); given it, the pages are independent.
+/// `\pdfrunninglinkoff`. The page chain's fold computes it at every
+/// page from the pages' [`CarryDelta`]s; given it, the pages are
+/// independent.
 #[derive(Clone, Debug, Default)]
 pub struct Carry {
     stacks: Stacks,
@@ -268,42 +311,125 @@ impl Carry {
     }
 }
 
-/// The carry after page `page` (the writer's effect on the colour
-/// stacks, the link stack and the two switches, without writing):
-/// `wh` gives the page's whatsits as the writer sees them.
-#[must_use]
-pub fn carry_after(prev: &Carry, page: &BoxNode, wh: &mut WhatsitSource<'_>) -> Carry {
-    let mut c = prev.clone();
-    c.stacks.ship_begin(true);
-    walk(&mut c, page, 0, wh);
-    c
+/// A page's effect on the carry, recorded without reading it.
+#[derive(Clone, Debug)]
+enum CarryOp {
+    Color(usize, ColorStackCmd),
+    StartLink(LinkLevel),
+    EndLink,
+    SpaceOn,
+    SpaceOff,
+    LinkOff,
+    LinkOn,
 }
 
-fn walk(c: &mut Carry, b: &BoxNode, level: i32, wh: &mut WhatsitSource<'_>) {
-    for n in &b.list {
-        match n {
-            Node::Box(x) => walk(c, x, level + 1, wh),
-            Node::Whatsit(h, _) => {
-                let Some(w) = wh(*h, false) else { continue };
-                match w {
-                    Whatsit::ColorStack(i, cmd) => {
-                        if i < c.stacks.used() {
+/// What some pages do to the carry (the colour stack commands, the
+/// links begun and ended, the two switches, the fonts set, the number
+/// of pages), recorded from the pages alone: a page step publishes its
+/// own, and the page chain's fold applies them in page order, giving
+/// every page the carry at its start ([`CarryDelta::apply`]) without
+/// a page reading another.
+#[derive(Clone, Debug, Default)]
+pub struct CarryDelta {
+    /// Per page shipped: the colour stacks `\pdfcolorstackinit` had
+    /// made when it was shipped (page, direct, initial text), and its
+    /// commands in the writer's order.
+    pages: Vec<(Vec<(bool, bool, Vec<u8>)>, Vec<CarryOp>)>,
+    used: BTreeSet<FontId>,
+}
+
+impl CarryDelta {
+    /// Page `page` added, shipped with the colour stacks `inits`; `wh`
+    /// gives its whatsits as the writer sees them.
+    pub fn page(
+        &mut self,
+        inits: &[(bool, bool, Vec<u8>)],
+        page: &BoxNode,
+        wh: &mut WhatsitSource<'_>,
+    ) {
+        let mut ops = Vec::new();
+        walk(&mut ops, &mut self.used, page, 0, wh);
+        self.pages.push((inits.to_vec(), ops));
+    }
+
+    /// `other`'s pages after these.
+    pub fn extend(&mut self, other: &CarryDelta) {
+        self.pages.extend(other.pages.iter().cloned());
+        self.used.extend(other.used.iter().copied());
+    }
+
+    /// The pages recorded.
+    #[must_use]
+    pub fn pages(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// The carry after these pages, from the carry before them.
+    #[must_use]
+    pub fn apply(&self, prev: &Carry) -> Carry {
+        let mut c = prev.clone();
+        for (inits, ops) in &self.pages {
+            c.sync_stacks(inits);
+            c.stacks.ship_begin(true);
+            for op in ops {
+                match op {
+                    CarryOp::Color(i, cmd) => {
+                        if *i < c.stacks.used() {
                             match cmd {
                                 ColorStackCmd::Set(d) => {
-                                    c.stacks.set(i, &d);
+                                    c.stacks.set(*i, d);
                                 }
                                 ColorStackCmd::Push(d) => {
-                                    c.stacks.push(i, &d);
+                                    c.stacks.push(*i, d);
                                 }
                                 ColorStackCmd::Pop => {
-                                    c.stacks.pop(i);
+                                    c.stacks.pop(*i);
                                 }
                                 ColorStackCmd::Current => {
-                                    c.stacks.current(i);
+                                    c.stacks.current(*i);
                                 }
                             }
                         }
                     }
+                    CarryOp::StartLink(l) => c.links.push(l.clone()),
+                    CarryOp::EndLink => {
+                        c.links.pop();
+                    }
+                    CarryOp::SpaceOn => {
+                        c.faked_space = true;
+                        c.faked_ever = true;
+                    }
+                    CarryOp::SpaceOff => c.faked_space = false,
+                    CarryOp::LinkOff => c.running_link_off = true,
+                    CarryOp::LinkOn => c.running_link_off = false,
+                }
+            }
+        }
+        c.used.extend(self.used.iter().copied());
+        c
+    }
+
+    /// A digest for the caller's memo keys.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        key_of("carry delta", format!("{self:?}").as_bytes())
+    }
+}
+
+fn walk(
+    ops: &mut Vec<CarryOp>,
+    used: &mut BTreeSet<FontId>,
+    b: &BoxNode,
+    level: i32,
+    wh: &mut WhatsitSource<'_>,
+) {
+    for n in &b.list {
+        match n {
+            Node::Box(x) => walk(ops, used, x, level + 1, wh),
+            Node::Whatsit(h, _) => {
+                let Some(w) = wh(*h, false) else { continue };
+                match w {
+                    Whatsit::ColorStack(i, cmd) => ops.push(CarryOp::Color(i, cmd)),
                     Whatsit::StartLink {
                         width,
                         height,
@@ -311,33 +437,31 @@ fn walk(c: &mut Carry, b: &BoxNode, level: i32, wh: &mut WhatsitSource<'_>) {
                         attr,
                         action,
                         ..
-                    } => c
-                        .links
-                        .push(LinkLevel::new(level, [width, height, depth], attr, action)),
-                    Whatsit::EndLink => {
-                        c.links.pop();
-                    }
-                    Whatsit::InterwordSpaceOn => {
-                        c.faked_space = true;
-                        c.faked_ever = true;
-                    }
-                    Whatsit::InterwordSpaceOff => c.faked_space = false,
-                    Whatsit::RunningLinkOff => c.running_link_off = true,
-                    Whatsit::RunningLinkOn => c.running_link_off = false,
+                    } => ops.push(CarryOp::StartLink(LinkLevel::new(
+                        level,
+                        [width, height, depth],
+                        attr,
+                        action,
+                    ))),
+                    Whatsit::EndLink => ops.push(CarryOp::EndLink),
+                    Whatsit::InterwordSpaceOn => ops.push(CarryOp::SpaceOn),
+                    Whatsit::InterwordSpaceOff => ops.push(CarryOp::SpaceOff),
+                    Whatsit::RunningLinkOff => ops.push(CarryOp::LinkOff),
+                    Whatsit::RunningLinkOn => ops.push(CarryOp::LinkOn),
                     _ => {}
                 }
             }
             Node::Char { font, .. } => {
-                c.used.insert(*font);
+                used.insert(*font);
             }
             Node::Lig(l) => {
-                c.used.insert(l.font);
+                used.insert(l.font);
             }
             Node::Glue(g) => {
                 if let Some(l) = &g.leader
                     && let Node::Box(x) = &**l
                 {
-                    walk(c, x, level + 1, wh);
+                    walk(ops, used, x, level + 1, wh);
                 }
             }
             _ => {}
@@ -596,13 +720,15 @@ pub struct PageEnv<'a> {
     pub carry: &'a Carry,
 }
 
-/// Page `n` written on its own.
+/// A page written on its own, under the handles of slot `slot`
+/// ([`step_page_slot`], [`key_page_slot`]): its number, and so its
+/// pages-tree node, are the finish's.
 ///
 /// # Errors
-/// What the writer stops at, or a page past the handles' room.
+/// What the writer stops at, or a slot past the handles' room.
 pub fn page(
     params: &PdfParams,
-    n: usize,
+    slot: usize,
     page: &BoxNode,
     fonts: &dyn FontSource,
     wh: &mut WhatsitSource<'_>,
@@ -631,12 +757,11 @@ pub fn page(
         }
     }
     st.running_link = !c.running_link_off;
-    st.total_pages = i64::try_from(n - 1).unwrap_or(0);
-    let mut leaves = Vec::new();
-    if !(n - 1).is_multiple_of(KIDS) {
-        st.last_pages = st.create_obj(OBJ_TYPE_PAGES, PAGES_TREE_KIDS_MAX);
-        leaves.push(st.last_pages);
-    }
+    // the page's own number is none a document has, and its pages-tree
+    // node one made here, both given by the finish
+    st.total_pages = i64::from(OWN_PAGE) - 1;
+    st.last_pages = st.create_obj(OBJ_TYPE_PAGES, PAGES_TREE_KIDS_MAX);
+    let leaf = st.last_pages;
     let mut im = Imports::default();
     let mut fallback = None;
     // the open links go on here with new objects
@@ -658,27 +783,20 @@ pub fn page(
         .map(|(h, w)| (h, translate(&mut st, w, env.pieces, &mut im, &mut fallback)))
         .collect();
     st.ship_out_with(page, fonts, &mut |h, _| ws.get(&h).cloned())?;
-    if st.total_pages % PAGES_TREE_KIDS_MAX == 1 {
-        leaves.push(st.last_pages);
+    let mut fixed = HashMap::from([(leaf, parent_handle(slot))]);
+    if let Some(&k) = st.index.get(&(OBJ_TYPE_PAGE, Ident::Num(OWN_PAGE))) {
+        fixed.insert(k, page_handle(slot, 0)?);
     }
-    let owner = format!("page {n}");
+    let owner = format!("page in slot {slot}");
     let mut next = 1;
     let mut other = |_: usize| -> Result<usize, PdfError> {
-        let h = page_handle(n, next)?;
+        let h = page_handle(slot, next)?;
         next += 1;
         Ok(h)
     };
-    let leaf = leaf_handle((n - 1) / KIDS);
-    let mut p = piece(
-        &st,
-        owner,
-        &im,
-        &leaves.iter().map(|&k| (k, leaf)).collect(),
-        &mut other,
-        None,
-        fallback,
-    )?;
+    let mut p = piece(&st, owner, &im, &fixed, &mut other, None, fallback)?;
     p.height = Some(ph);
+    p.slot = Some(slot);
     Ok(p)
 }
 
@@ -710,8 +828,10 @@ fn piece(
     let mut dest_refs = BTreeSet::new();
     for ((t, id), &k) in st.index.iter() {
         let h = match *t {
+            // (a page object by number; a page's own is fixed)
             OBJ_TYPE_PAGE => match id {
-                Ident::Num(m) => page_handle(usize::try_from(*m).unwrap_or(0), 0)?,
+                _ if map.contains_key(&k) => continue,
+                Ident::Num(m) => page_num_handle(usize::try_from(*m).unwrap_or(0)),
                 Ident::Name(_) => continue,
             },
             OBJ_TYPE_DEST => {
@@ -790,6 +910,7 @@ fn piece(
             .collect(),
         made,
         fallback,
+        slot: None,
         height: None,
     })
 }
@@ -1302,15 +1423,24 @@ pub fn finish_relaxed(
         next += 1;
         Ok(FINISH_BASE + next)
     };
-    // the finish's own objects: pages stubs as the pages' handles
+    // the finish's own objects: pages stubs as the pages' handles, the
+    // `m`-th page's by its slot; a page referred to by its number, and
+    // a page's pages-tree node, as the finish numbers the pages
+    let mut alias: HashMap<usize, usize> = HashMap::new();
+    for (m, p) in pages.iter().enumerate() {
+        let Some(slot) = p.slot else {
+            return Err(format!("{}: a page without a slot", p.owner));
+        };
+        let own = page_handle(slot, 0).map_err(|e| e.to_string())?;
+        alias.insert(page_num_handle(m + 1), own);
+        alias.insert(parent_handle(slot), leaf_handle(m / KIDS));
+    }
     for ((t, id), &k) in f.index.iter() {
         if *t == OBJ_TYPE_PAGE
             && let Ident::Num(m) = id
         {
-            fixed.insert(
-                k,
-                page_handle(usize::try_from(*m).unwrap_or(0), 0).map_err(|e| e.to_string())?,
-            );
+            let h = page_num_handle(usize::try_from(*m).unwrap_or(0));
+            fixed.insert(k, alias.get(&h).copied().unwrap_or(h));
         }
     }
     let mut map: HashMap<usize, usize> = fixed;
@@ -1349,6 +1479,7 @@ pub fn finish_relaxed(
             if h < HANDLE_BASE {
                 return None;
             }
+            let h = alias.get(&h).copied().unwrap_or(h);
             if let Some(&n) = number.get(&h) {
                 Some(n)
             } else {

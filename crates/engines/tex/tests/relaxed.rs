@@ -180,3 +180,66 @@ fn relaxed_font_commands() {
         panic!("misc relaxed: {d}");
     }
 }
+
+/// No page step reads another in relaxed mode either: the carry (a
+/// colour pushed on one page and popped pages later, a link across a
+/// page break, the page numbers) reaches every page from the chain's
+/// fold of the steps' own deltas, so a cold build of a dozen plain
+/// pages settles in two loop rounds, not one page per round; the file
+/// equals the exact build after renumbering; an edit on page 1 re-runs
+/// that page's step only.
+#[test]
+fn relaxed_pages_read_no_other_step() {
+    let _turn = turn();
+    let dir = pdf_fixtures();
+    let mut src = String::from(
+        "\\pdfoutput=1 \\pdfcompresslevel=0 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n",
+    );
+    for k in 0..240 {
+        let extra = match k {
+            20 => "\\pdfcolorstack0 push{1 0 0 rg}",
+            200 => "\\pdfcolorstack0 pop",
+            60 => "\\pdfstartlink user{/Subtype/Link/A<</S/URI/URI(x)>>}",
+            75 => "\\pdfendlink",
+            _ => "",
+        };
+        let _ = writeln!(
+            src,
+            "{extra}Paragraph {k} has some words in it, enough to fill a few lines of text set \
+             with plain's macros, so that the paragraph builder has work to do and the \
+             pages fill up one after another.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let mut b = common::build(relaxed("carry", &dir), Some(&prelude), &src);
+    assert_eq!(b.pdf_exact_reason(), None, "relaxed mode expected");
+    let rounds = b.stats.loop_rounds;
+    let pages = b.pages().len();
+    eprintln!("carry cold: {rounds} loop rounds, {pages} pages");
+    assert!(pages >= 8, "{pages} pages");
+    let exact = Options {
+        epoch: Some(0),
+        ..common::options("./carry.tex", "carry", "", &dir)
+    };
+    let want = common::build(exact, Some(&prelude), &src).output().0;
+    if let Some(d) = phitex_pdf::norm::first_difference(&b.output().0, &want) {
+        panic!("carry relaxed: {d}");
+    }
+    assert!(rounds <= 2, "{rounds} loop rounds");
+    let text = src.replacen(
+        "Paragraph 3 has some words",
+        "Paragraph 3 has some wordz",
+        1,
+    );
+    b.edit(&text);
+    let steps: u64 = b.stats.page_steps_completed.iter().sum();
+    let cold = common::build(relaxed("carry", &dir), Some(&prelude), &text);
+    assert_eq!(
+        common::first_difference(&b.output().0, &cold.output().0),
+        None,
+        "the edit differs from the relaxed cold build"
+    );
+    eprintln!("carry edit: {steps} page steps");
+    assert!(steps <= 1, "{steps} page steps re-run");
+}

@@ -1143,7 +1143,9 @@ impl Job {
             };
             let piece =
                 relaxed::page(p, n + 1, b, &self.src, &mut |h, _| ws[&h].clone(), &env).unwrap();
-            carry = relaxed::carry_after(&carry, b, &mut |h, _| ws[&h].clone());
+            let mut d = relaxed::CarryDelta::default();
+            d.page(&[], b, &mut |h, _| ws[&h].clone());
+            carry = d.apply(&carry);
             pieces.push(std::sync::Arc::new(piece));
         }
         let p = self.pages.last().map(|x| x.1.clone()).unwrap_or_default();

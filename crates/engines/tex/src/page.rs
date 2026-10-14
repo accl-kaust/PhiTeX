@@ -719,7 +719,9 @@ impl Run<'_, '_> {
             for (loc, x, _) in self.st.published(v) {
                 let f = self.loc_field(loc);
                 let name = crate::val::field_name(v, f);
-                if name == "pdf:state" || step_input(&name) {
+                // (`pdf:carry`, the relaxed writer's carry after the
+                // step's pages: the fold derives it from `pdf:carryd`)
+                if name == "pdf:state" || name == "pdf:carry" || step_input(&name) {
                     continue;
                 }
                 if name.starts_with("count:") && self.st.advanced_only(loc) {
@@ -2542,6 +2544,22 @@ impl FinalState {
             let advanced: Vec<ValueId> = list_of(v, g(5));
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
+                if name == crate::pdfrelaxed::CARRY_DELTA {
+                    // the relaxed writer's carry: the step's pages'
+                    // effect applied to the carry at its start (the
+                    // chain's, never what the step read)
+                    let cf = v.field("pdf:carry");
+                    let pre = cx.use_field(cf)?;
+                    let prev = state.get("pdf:carry").map(|p| p.1).or(pre);
+                    if let Some(c) = crate::pdfrelaxed::fold_carry(v, prev, x) {
+                        if same_as_before(v, "pdf:carry", pre, c) {
+                            state.remove("pdf:carry");
+                        } else {
+                            state.insert("pdf:carry".to_owned(), (cf, c));
+                        }
+                    }
+                    continue;
+                }
                 let pre = cx.use_field(f)?;
                 // a count register the step only advanced, by its change,
                 // as `\\count0..9` (a routine's counter of pages or

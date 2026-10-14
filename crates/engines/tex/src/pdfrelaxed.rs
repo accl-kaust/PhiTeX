@@ -3,7 +3,11 @@
 //! own by `phitex_pdf::relaxed`, under handles; the `Dvi` node merges
 //! the pieces and numbers the objects. No `pdf:state` fold: what passes
 //! from page to page is the carry (`pdf:carry`: the colour stacks, the
-//! open links, the two switches, the fonts used), and what TeX reads
+//! open links, the two switches, the fonts used),
+//! which no page step passes to the next: each publishes what its pages
+//! do to it (`pdf:carryd`, a [`CarryDelta`]) and the page chain's fold
+//! gives every step the carry at its start (`pgst:<j>`, as the rest of
+//! the state; [`fold_carry`]). What TeX reads
 //! back (`\pdflastobj`, `\pdfpageref`, ...) is a handle.
 //!
 //! Whatever the mode does not cover asks for exact mode (a `pdf:exact`
@@ -13,7 +17,7 @@ use phitex_defuse::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
-use phitex_pdf::relaxed::{self, Carry, DocCmd, PageEnv, Piece};
+use phitex_pdf::relaxed::{self, Carry, CarryDelta, DocCmd, PageEnv, Piece};
 use phitex_pdf::{PdfParams, Whatsit};
 use phitex_typeset::node::BoxNode;
 
@@ -34,10 +38,52 @@ fn pieces() -> &'static Memo<Piece> {
     P.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
-/// The carry and the pages shipped before it, by digest.
-fn carries() -> &'static Memo<(Carry, usize)> {
-    static C: OnceLock<Memo<(Carry, usize)>> = OnceLock::new();
+/// The carries, by digest.
+fn carries() -> &'static Memo<Carry> {
+    static C: OnceLock<Memo<Carry>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// The page steps' carry deltas, by digest.
+fn deltas() -> &'static Memo<CarryDelta> {
+    static D: OnceLock<Memo<CarryDelta>> = OnceLock::new();
+    D.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// A page step's own effect on the carry (its pages'), for the fold.
+pub(crate) const CARRY_DELTA: &str = "pdf:carryd";
+
+/// The key of the carry `c`, kept.
+fn keep_carry(c: Carry) -> u64 {
+    let ck = c.digest();
+    carries()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(ck)
+        .or_insert_with(|| Arc::new(c));
+    ck
+}
+
+/// The page chain's fold of the carry: the carry `prev` (a
+/// `pdf:carry` value; none: the document's start) with a step's delta
+/// `d` (its `pdf:carryd`) applied: the carry at the next step's start.
+pub(crate) fn fold_carry(v: &Values, prev: Option<ValueId>, d: ValueId) -> Option<ValueId> {
+    let delta = deltas()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&int_key(v, d))
+        .cloned()?;
+    let before = prev.map_or_else(
+        || Some(Arc::new(Carry::default())),
+        |x| {
+            carries()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&int_key(v, x))
+                .cloned()
+        },
+    )?;
+    Some(key_int(v, keep_carry(delta.apply(&before))))
 }
 
 /// The pages written, by the digest of their inputs.
@@ -230,8 +276,8 @@ fn keep(r: &mut Run<'_, '_>, page: bool, p: Piece) -> u64 {
     k
 }
 
-/// The carry where this node is, with the pages shipped before.
-fn carry_here(r: &mut Run<'_, '_>) -> R<(Carry, usize)> {
+/// The carry where this node is.
+fn carry_here(r: &mut Run<'_, '_>) -> R<Carry> {
     let v = r.v;
     let got = r.get_loc(crate::fields::cell::PDF_CARRY)?.and_then(|x| {
         carries()
@@ -240,9 +286,16 @@ fn carry_here(r: &mut Run<'_, '_>) -> R<(Carry, usize)> {
             .get(&int_key(v, x))
             .cloned()
     });
-    let (mut c, n) = got.map(|a| (*a).clone()).unwrap_or_default();
-    // the colour stacks `\pdfcolorstackinit` made so far
-    let inits: Vec<(bool, bool, Vec<u8>)> = r
+    let mut c = got.map(|a| (*a).clone()).unwrap_or_default();
+    c.sync_stacks(&stack_inits(r)?);
+    Ok(c)
+}
+
+/// The colour stacks `\pdfcolorstackinit` made so far: page, direct,
+/// initial text.
+fn stack_inits(r: &mut Run<'_, '_>) -> R<Vec<(bool, bool, Vec<u8>)>> {
+    let v = r.v;
+    Ok(r
         .get_loc(crate::fields::cell::PDF_COLORSTACKS)?
         .map(|x| list_of(v, x))
         .unwrap_or_default()
@@ -256,13 +309,12 @@ fn carry_here(r: &mut Run<'_, '_>) -> R<(Carry, usize)> {
                 .unwrap_or_default();
             (g(0) != 0, g(1) == 2, t)
         })
-        .collect();
-    c.sync_stacks(&inits);
-    Ok((c, n))
+        .collect())
 }
 
-/// `pdf_ship_out` in relaxed mode: page `n` written on its own, the
-/// carry folded on. `p` is the page's parameters as `\shipout` read
+/// `pdf_ship_out` in relaxed mode: the page written on its own, under
+/// its slot's handles (the step's and its place in it, never its
+/// number: the finish numbers the pages), the carry folded on. `p` is the page's parameters as `\shipout` read
 /// them; the result is the page's hash for `pagehash`.
 pub(crate) fn ship(
     r: &mut Run<'_, '_>,
@@ -278,7 +330,29 @@ pub(crate) fn ship(
     pm.dest_margin = r.param("pdfdestmargin")?;
     pm.thread_margin = r.param("pdfthreadmargin")?;
     let pm = fix(r, &pm)?;
-    let (carry, n) = carry_here(r)?;
+    let carry = carry_here(r)?;
+    // the page's slot: in a page step, by the step and the pages it
+    // shipped before (its delta's); else by its owner key
+    let before = if crate::pdfout::in_page_step(r) {
+        match r.get(CARRY_DELTA)? {
+            Some(x) => deltas()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&int_key(v, x))
+                .cloned(),
+            None => Some(Arc::new(CarryDelta::default())),
+        }
+    } else {
+        None
+    };
+    let slot = match &before {
+        Some(d) => relaxed::step_page_slot(r.page_index(), d.pages()),
+        None => Some(relaxed::key_page_slot(next_key(r))),
+    };
+    let Some(slot) = slot else {
+        fall_back(r, "a page step shipping more pages than relaxed mode has slots for");
+        return Ok(0);
+    };
     // the whatsits once, for the objects they refer to
     let mut seen: FxHashMap<u32, Option<Whatsit>> = FxHashMap::default();
     let mut look = |h: u32| -> Option<Whatsit> { seen.entry(h).or_insert_with(|| wh(h)).clone() };
@@ -302,7 +376,7 @@ pub(crate) fn ship(
     let input = phitex_defuse::hash_bytes(
         phitex_defuse::hash_words(
             fonts.digest(),
-            &[carry.digest(), u64::try_from(n).unwrap_or(0)],
+            &[carry.digest(), u64::try_from(slot).unwrap_or(0)],
         ),
         format!("{pm:?}|{bx:?}|{whats:?}|{maps:?}|{ref_keys:?}").as_bytes(),
     );
@@ -315,7 +389,7 @@ pub(crate) fn ship(
         (*p).clone()
     } else {
         PAGES_WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match relaxed::page(&pm, n + 1, bx, fonts, &mut whf, &env) {
+        match relaxed::page(&pm, slot, bx, fonts, &mut whf, &env) {
             Ok(p) => {
                 written()
                     .lock()
@@ -324,19 +398,29 @@ pub(crate) fn ship(
                 p
             }
             Err(e) => {
-                fall_back(r, &format!("page {}: {e}", n + 1));
+                fall_back(r, &format!("page in slot {slot}: {e}"));
                 return Ok(0);
             }
         }
     };
-    let next = relaxed::carry_after(&carry, bx, &mut whf);
-    let ck = phitex_defuse::hash_words(next.digest(), &[u64::try_from(n + 1).unwrap_or(0)]);
-    carries()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(ck)
-        .or_insert_with(|| Arc::new((next, n + 1)));
+    // the carry after it: within a page step, the next page's here; the
+    // page's own effect also goes to the step's delta, which the
+    // chain's fold applies for the steps after this one
+    let mut d = CarryDelta::default();
+    d.page(&stack_inits(r)?, bx, &mut whf);
+    let ck = keep_carry(d.apply(&carry));
     r.set_cell(crate::fields::cell::PDF_CARRY, key_int(v, ck), true);
+    if let Some(b) = before {
+        let mut all = (*b).clone();
+        all.extend(&d);
+        let dk = all.digest();
+        deltas()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(dk)
+            .or_insert_with(|| Arc::new(all));
+        r.set(CARRY_DELTA, key_int(v, dk), true);
+    }
     if let Some(h) = piece.page_height()
         && i64::from(h) != r.cint(crate::fields::cell::PDF_LASTPH)?
     {

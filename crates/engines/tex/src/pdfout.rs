@@ -82,7 +82,7 @@ pub(crate) fn pages_apart(r: &mut Run<'_, '_>) -> R<bool> {
 }
 
 /// Whether this run is a page step.
-fn in_page_step(r: &Run<'_, '_>) -> bool {
+pub(crate) fn in_page_step(r: &Run<'_, '_>) -> bool {
     let op = r.cx.op();
     op == r.ops.pagestep || op == r.ops.pagestep_any
 }
