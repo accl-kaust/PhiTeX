@@ -970,6 +970,12 @@ pub struct Stats {
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
+    /// (measure) why nodes ran again, by the kind of their cause.
+    pub rerun_by_kind: Vec<(String, u64)>,
+    /// (measure) the fields of `Range` and `Changed` re-runs, with counts.
+    pub rerun_fields: Vec<(String, phitex_defuse::Field, u64)>,
+    /// (measure) the re-run nodes and their causes (the first 400).
+    pub rerun_nodes: Vec<(phitex_defuse::NodeId, phitex_defuse::Rerun)>,
     /// The page chain's loop-back guesses the evaluation refuted, with
     /// the fields that refuted them (`refuted: <fields> at page <n>
     /// (<loop-back>)`).
@@ -1108,6 +1114,33 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
+        for (_, c) in &r.rerun_causes {
+            let d = format!("{c:?}");
+            let k = d.split([' ', '{', '(']).next().unwrap_or("").to_owned();
+            match self.rerun_by_kind.iter_mut().find(|e| e.0 == k) {
+                Some(e) => e.1 += 1,
+                None => self.rerun_by_kind.push((k, 1)),
+            }
+        }
+        self.rerun_by_kind.sort_by_key(|e| std::cmp::Reverse(e.1));
+        for &(n, c) in &r.rerun_causes {
+            if self.rerun_nodes.len() < 400 {
+                self.rerun_nodes.push((n, c));
+            }
+        }
+        for (_, c) in &r.rerun_causes {
+            let (k, f) = match c {
+                phitex_defuse::Rerun::Range { field: Some(f) } => ("Range", *f),
+                phitex_defuse::Rerun::Changed { field, .. } => ("Changed", *field),
+                phitex_defuse::Rerun::Loop { field } => ("Loop", *field),
+                phitex_defuse::Rerun::Woken { field: Some(f) } => ("Woken", *f),
+                _ => continue,
+            };
+            match self.rerun_fields.iter_mut().find(|e| e.0 == k && e.1 == f) {
+                Some(e) => e.2 += 1,
+                None => self.rerun_fields.push((k.to_owned(), f, 1)),
+            }
+        }
         self.nodes_run += r.nodes_run;
         self.runs += r.runs;
         self.cutoffs += r.cutoffs;
@@ -2979,6 +3012,45 @@ impl Build {
         // whose rounds restart begins from them, not from the cold guess
         let kept = self.export_pgst();
         chain_guesses(&mut self.g, &kept);
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "measure: runs {} nodes_run {} rounds {} loop_rounds {} stops {} resumed {} restarted {} restarted_by {:?}; rerun causes {:?}; waits {:?}",
+                stats.runs,
+                stats.nodes_run,
+                stats.rounds,
+                stats.loop_rounds,
+                stats.stops,
+                stats.resumed,
+                stats.restarted,
+                stats.restarted_by,
+                stats.rerun_by_kind,
+                stats.waits_by_kind
+            );
+        }
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            let v = self.g.eng.values();
+            let mut xs: Vec<(String, String, u64)> = stats
+                .rerun_fields
+                .iter()
+                .map(|(k, f, n)| (k.clone(), field_name(v, *f), *n))
+                .collect();
+            xs.sort_by_key(|e| std::cmp::Reverse(e.2));
+            xs.truncate(40);
+            eprintln!("measure fields: {xs:?}");
+            if std::env::var_os("PHITEX_T_RERUNS").is_some() {
+                for (n, c) in &stats.rerun_nodes {
+                    let c = match c {
+                        phitex_defuse::Rerun::Range { field: Some(f) } => format!("Range {}", field_name(v, *f)),
+                        phitex_defuse::Rerun::Changed { field, .. } => format!("Changed {}", field_name(v, *field)),
+                        phitex_defuse::Rerun::Woken { field: Some(f) } => format!("Woken {}", field_name(v, *f)),
+                        phitex_defuse::Rerun::Loop { field } => format!("Loop {}", field_name(v, *field)),
+                        other => format!("{other:?}"),
+                    };
+                    let d: String = describe(&self.g.eng, *n).chars().take(160).collect();
+                    eprintln!("rerun: {} {c} | {d}", n.raw());
+                }
+            }
+        }
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(

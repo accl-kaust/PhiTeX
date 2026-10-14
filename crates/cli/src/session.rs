@@ -626,6 +626,23 @@ impl Session {
                     ..opts
                 };
                 let b = Build::with(opts, prelude.as_deref(), &text);
+                if std::env::var_os("PHITEX_T_CHAIN").is_some() {
+                    // (measure only: the cold build's critical chain)
+                    let mut by = std::collections::BTreeMap::<String, usize>::new();
+                    for (_, kind, field) in b.critical_chain() {
+                        let f = field.split(':').next().unwrap_or("").to_owned();
+                        *by.entry(format!("{kind} {f}")).or_default() += 1;
+                    }
+                    let mut by: Vec<_> = by.into_iter().collect();
+                    by.sort_by_key(|e| std::cmp::Reverse(e.1));
+                    eprintln!("chain by cause: {by:?}");
+                    for l in b.critical_chain_lines() {
+                        eprintln!("chain: {}", l.replace('\n', " | "));
+                    }
+                    for l in b.chain_waits().iter().take(40) {
+                        eprintln!("chainwait: {}", l.replace('\n', " | "));
+                    }
+                }
                 self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
                 self.build = Some(b);
             }
