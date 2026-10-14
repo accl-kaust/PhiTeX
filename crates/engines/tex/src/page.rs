@@ -1262,6 +1262,7 @@ impl Operation for PagePlan {
     }
     #[allow(clippy::redundant_closure_for_method_calls)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         run_node(cx, ops(&self.0), |r| r.page_plan())
     }
 }
@@ -1283,6 +1284,7 @@ impl Operation for Brk {
         Effect::None
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         run_node(cx, ops(&self.0), |r| r.brk(&args))
     }
@@ -1326,6 +1328,7 @@ impl Operation for PageStep {
         Effect::None
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         let o = ops(&self.shared);
         let done = o.steps_done.clone();
