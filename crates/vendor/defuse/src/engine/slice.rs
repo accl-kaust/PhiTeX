@@ -125,6 +125,7 @@ fn scratch_node() -> Node {
         effect: 0,
         bound: 0,
         flags: 0,
+        rdepth: 0,
         uses: Box::new([]),
         defs: Box::new([]),
     }
@@ -288,8 +289,10 @@ impl Report {
             spec_stops,
             waits_by_op,
             critical_path: _,
+            realised_critical_path,
             max_ready,
         } = d;
+        self.realised_critical_path = self.realised_critical_path.max(realised_critical_path);
         self.nodes_run += nodes_run;
         self.cutoffs += cutoffs;
         self.rebinds += rebinds;
@@ -559,6 +562,7 @@ impl Engine {
             memo: OvMap::over(&self.memo),
             text_memo: RwLock::new(FxHashMap::default()),
             statics: RwLock::new(FxHashMap::default()),
+            rtag: self.rtag,
             predictions_seen: std::sync::atomic::AtomicBool::new(
                 self.predictions_seen.load(std::sync::atomic::Ordering::Relaxed),
             ),
