@@ -92,7 +92,7 @@ impl Run<'_, '_> {
         self.aopen > 0
     }
 
-    fn astate(&mut self) -> i64 {
+    pub(crate) fn astate(&mut self) -> i64 {
         if let Some(s) = self.astate {
             return s;
         }
@@ -177,9 +177,24 @@ impl Run<'_, '_> {
 
     // ------------------------------------------------------ init_align
 
-    /// `init_align` (§774–§784) in vertical mode.
+    /// `init_align` (§774–§784): in vertical mode, or in a display
+    /// (§775: the rows go to the vertical list around it, §1206).
     pub(crate) fn init_align(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
+        let display = md.m == 203;
+        // §776: an alignment in a display must come first in it
+        if display {
+            let open = self.level_of(md.lid).is_some_and(|l| !l.list.is_empty())
+                || self.incs.iter().any(|(l, _)| *l == md.lid);
+            if open {
+                self.log("error", "Improper \\halign inside $$'s")?;
+                // §719 flush_math
+                if let Some(l) = self.level_of(md.lid) {
+                    l.list.clear();
+                }
+                self.incs.retain(|(l, _)| *l != md.lid);
+            }
+        }
         let saved = if self.align_open() {
             self.astate()
         } else {
@@ -202,6 +217,7 @@ impl Run<'_, '_> {
             v.int(spec.0),
             v.int(i64::from(spec.1)),
             v.int(saved),
+            v.int(i64::from(display)),
         ];
         // the alignment: a level of the nest owning the rows' list
         let asid = self.push_list(-1, group::ALIGN, extra);
@@ -544,13 +560,21 @@ impl Run<'_, '_> {
         let view = self.font_view(&list)?;
         let pp = self.pack_params(true)?;
         let proto = prototype(&widths, &tabs, spec, true, &view, &pp).node;
-        // REDUCE-GAP: alignments in displays (§1206) are not in this
-        // slice; the offset is 0
-        let out = set_alignment(list, &proto, true, 0, &view);
         let pd = self.prev_depth(md)?;
         let outer = self.close_group(md)?;
         self.aopen = (self.aopen - 1).max(0);
         self.set_astate(saved);
+        // §800: in a display the rows are shifted by `\\displayindent`
+        let display = x(4) != 0;
+        let o = if display {
+            self.ipar(Par::displayindent)?
+        } else {
+            0
+        };
+        let out = set_alignment(list, &proto, true, o, &view);
+        if display {
+            return self.fin_display_align(&outer, &out, &side, pd);
+        }
         for n in &out {
             let y = nodes::encode(v, n, &side);
             self.append(outer.lid, y);
@@ -561,5 +585,49 @@ impl Run<'_, '_> {
             self.build_page_outer()?;
         }
         Ok(())
+    }
+
+    /// §1206: the end of a display that is an alignment: what follows is
+    /// assignments and `$$`; the display's level ends, and the rows go to
+    /// the vertical list between the display penalties and skips; then
+    /// `resume_after_display` (§1200).
+    fn fin_display_align(&mut self, dmd: &Mode, rows: &[Node], side: &Side, pd: i32) -> R<()> {
+        let v = self.v;
+        self.do_assignments()?;
+        if self.cur.cmd == cmd::MATH_SHIFT {
+            // §1197
+            self.get_x_token()?;
+            if self.cur.cmd != cmd::MATH_SHIFT {
+                self.back_cur();
+                self.log("error", "Display math should end with $$")?;
+            }
+        } else {
+            self.back_cur();
+            self.log("error", "Missing $$ inserted")?;
+        }
+        let vm = self.display_outer(dmd);
+        let vlid = vm.vlid;
+        let pen = |r: &mut Self, n: i32| {
+            let y = nodes::penalty_node(r.v, n);
+            r.append(vlid, y);
+        };
+        let skip = |r: &mut Self, c: u8, name: &str| -> R<()> {
+            let g = r.glue_param(name)?;
+            let y = nodes::encode(r.v, &Node::param_glue(c, g), &Side::default());
+            r.append(vlid, y);
+            Ok(())
+        };
+        let pre = self.ipar(Par::predisplaypenalty)?;
+        pen(self, pre);
+        skip(self, 3, "abovedisplayskip")?;
+        for n in rows {
+            let y = nodes::encode(v, n, side);
+            self.append(vlid, y);
+        }
+        let post = self.ipar(Par::postdisplaypenalty)?;
+        pen(self, post);
+        skip(self, 4, "belowdisplayskip")?;
+        self.set_prev_depth(&vm, pd);
+        self.resume_after_display(dmd, &vm)
     }
 }

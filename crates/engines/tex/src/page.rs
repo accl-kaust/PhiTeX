@@ -279,6 +279,9 @@ impl Run<'_, '_> {
         let mut before: Vec<ValueId> = Vec::new();
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
+        let mut fonts_at: Vec<ValueId> = Vec::new();
+        let mut objs_at: Vec<ValueId> = Vec::new();
+        let mut probes: Vec<(i64, usize)> = Vec::new();
         let mut folds = 0usize;
         let (mut tfx, mut tfold) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         // nothing to reuse: the pages folded in parallel from predicted
@@ -344,7 +347,20 @@ impl Run<'_, '_> {
             };
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
-            plan.extend(rec.writes.iter().copied());
+            // (and the fonts loaded before page `j` fires: `fplan`)
+            // (and the objects written after the page before it:
+            // `oplan`)
+            let (mut fl, mut ol) = (Vec::new(), Vec::new());
+            for &w in &rec.writes {
+                match nodes::tag(v, w) {
+                    nodes::T_FONT_AT => fl.push(v.int(crate::val::int_at(v, w, 1))),
+                    nodes::T_PDFW_AT => ol.push(v.int(crate::val::int_at(v, w, 1))),
+                    nodes::T_PDFQ_AT => probes.push((crate::val::int_at(v, w, 1), j)),
+                    _ => plan.push(w),
+                }
+            }
+            fonts_at.push(v.list(fl));
+            objs_at.push(v.list(ol));
             for &node in &rec.passed {
                 if published.insert(node) {
                     let n = u64::from_ne_bytes(node.to_ne_bytes());
@@ -379,6 +395,20 @@ impl Run<'_, '_> {
         let pages = n_starts - 1;
         let wp = v.seq_unit(v.list(plan));
         self.contribute("wplan", wp);
+        // the fonts the text loaded, by the page that fired after them,
+        // and how many fonts the text loaded in all: the writer numbers
+        // the fonts as pdfTeX does (`pdfout::font_tags`)
+        // (exact mode only: in relaxed mode the names are free)
+        if !crate::pdfrelaxed::on(self)? {
+            let mut fp = vec![v.int(self.cint(crate::fields::cell::FONTCOUNT)?)];
+            fp.extend(fonts_at.iter().copied().take(pages));
+            self.contribute("fplan", v.seq_unit(v.list(fp)));
+            // the objects written after page j-1 fired, before page j
+            // (the last list: after every page)
+            if objs_at.iter().any(|&l| !list_of(v, l).is_empty()) {
+                self.contribute("oplan", v.seq_unit(v.list(objs_at.clone())));
+            }
+        }
         // each page's own material (`pp:items:<j>`, its start rebased to
         // it): a `brk` reads only its page, so an edit elsewhere on the
         // list wakes no other page's `brk`
@@ -434,6 +464,19 @@ impl Run<'_, '_> {
         self.set("pp:classes", table_v, true);
         self.set("pp:any", v.int(i64::from(any)), true);
         self.set("pp:marker", marker, true);
+        // the nodes that asked whether a page shipped before them
+        // (`T_PDFQ_AT`): the pages fired before each, and the steps
+        // told to say whether they ship (`pdf:shipped:<j>`)
+        for &(node, j) in &probes {
+            let n = u64::from_ne_bytes(node.to_ne_bytes());
+            let f = v.field(&crate::etex::fired_before_field(n));
+            if self.cx.is_loopback(f) {
+                self.cx.publish(f, v.int(i64::try_from(j).unwrap_or(0)));
+            }
+        }
+        if !probes.is_empty() {
+            self.set("pp:probe", v.int(1), true);
+        }
         // how many steps the chain has: the writer folds their deltas
         // up to here ([`FinalState`])
         self.set("pp:steps", v.int(i64::try_from(pages).unwrap_or(0)), true);
@@ -1395,6 +1438,12 @@ fn fold_page(
                 if let Some(&e) = list_of(v, x).get(1) {
                     writes.push(e);
                 }
+                continue;
+            }
+            // (a font load: kept with the writes, the marker itself, for
+            // the writer's numbering, `fplan`)
+            nodes::T_FONT_AT | nodes::T_PDFW_AT | nodes::T_PDFQ_AT => {
+                writes.push(x);
                 continue;
             }
             _ => {}

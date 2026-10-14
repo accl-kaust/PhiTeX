@@ -1,0 +1,17 @@
+ini /usr/share/texmf-dist/tex/latex/tex-ini-files/pdflatex.ini
+input /usr/share/texmf-dist/tex/latex/tex-ini-files
+input /etc/texmf/tex/generic/tex-ini-files
+input /usr/share/texmf-dist/tex/latex/base
+font /usr/share/texmf-dist/fonts/tfm/jknappen/ec
+input /usr/share/texmf-dist/tex/latex/psnfss
+font /usr/share/texmf-dist/fonts/tfm/adobe/times
+input /usr/share/texmf-dist/tex/latex/l3backend
+input /usr/share/texmf-dist/fonts/vf/adobe/times
+input /usr/share/texmf-dist/fonts/enc/dvips/base
+font /usr/share/texmf-dist/fonts/tfm/adobe/helvetic
+font /usr/share/texmf-dist/fonts/tfm/adobe/courier
+input /usr/share/texmf-dist/fonts/vf/adobe/helvetic
+input /usr/share/texmf-dist/fonts/vf/adobe/courier
+input /usr/share/texmf-dist/fonts/type1/urw/courier
+input /usr/share/texmf-dist/fonts/type1/urw/helvetic
+input /usr/share/texmf-dist/fonts/type1/urw/times
