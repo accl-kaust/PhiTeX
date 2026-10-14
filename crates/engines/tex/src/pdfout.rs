@@ -131,7 +131,24 @@ pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29
 /// A font map by TFM name.
 type Map = BTreeMap<Vec<u8>, MapEntry>;
 
-type MapCache = Mutex<FxHashMap<u64, Arc<Map>>>;
+/// A pure function's memo by a value's id, computed once: a key's
+/// first caller computes it, concurrent callers of the same key wait for
+/// that result instead of computing it again (every page step asks for
+/// `pdftex.map` at once in a cold build).
+type Once<V> = Mutex<FxHashMap<u64, Arc<OnceLock<V>>>>;
+
+/// The memo's value for `key`, `f` run only by the key's first caller.
+fn once<V: Clone>(m: &Once<V>, key: u64, f: impl FnOnce() -> V) -> V {
+    let cell = m
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(key)
+        .or_default()
+        .clone();
+    cell.get_or_init(f).clone()
+}
+
+type MapCache = Once<Arc<Map>>;
 
 /// Parsed map files: a pure function's memo by the file's value.
 fn maps() -> &'static MapCache {
@@ -233,7 +250,7 @@ impl Fonts {
 /// `pdftex.map`'s `ps_tree`.
 type PsMap = BTreeMap<(Vec<u8>, i32, i32), MapEntry>;
 
-type PsCache = Mutex<FxHashMap<u64, Arc<PsMap>>>;
+type PsCache = Once<Arc<PsMap>>;
 
 fn ps_maps() -> &'static PsCache {
     static C: OnceLock<PsCache> = OnceLock::new();
@@ -249,20 +266,9 @@ pub(crate) fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
     let Some(&m) = list_of(v, x).get(1) else {
         return Ok(None);
     };
-    let key = m.raw();
-    if let Some(c) = ps_maps()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return Ok(Some(c.clone()));
-    }
-    let parsed = Arc::new(parse_map_ps(&bytes_of(&str_of(v, m))));
-    ps_maps()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, parsed.clone());
-    Ok(Some(parsed))
+    Ok(Some(once(ps_maps(), m.raw(), || {
+        Arc::new(parse_map_ps(&bytes_of(&str_of(v, m))))
+    })))
 }
 
 impl FontSource for Fonts {
@@ -429,26 +435,14 @@ pub(crate) fn vf_for(r: &mut Run<'_, '_>, b: &BoxNode) -> R<()> {
 
 /// A file's bytes, `None` if absent.
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
-    type Memo = Mutex<FxHashMap<u64, Arc<[u8]>>>;
-    static M: OnceLock<Memo> = OnceLock::new();
+    static M: OnceLock<Once<Arc<[u8]>>> = OnceLock::new();
     let v = r.v;
     Ok(r.file(name)?.and_then(|x| {
         let &t = list_of(v, x).get(1)?;
         // (a pure function's memo by the text's value: every page step
         // asks for its fonts' files)
         let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-        if let Some(b) = m
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&t.raw())
-        {
-            return Some(b.clone());
-        }
-        let b: Arc<[u8]> = Arc::from(bytes_of(&str_of(v, t)));
-        m.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(t.raw(), b.clone());
-        Some(b)
+        Some(once(m, t.raw(), || Arc::from(bytes_of(&str_of(v, t)))))
     }))
 }
 
@@ -461,20 +455,9 @@ fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
     let Some(&m) = list_of(v, x).get(1) else {
         return Ok(None);
     };
-    let key = m.raw();
-    if let Some(c) = maps()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return Ok(Some(c.clone()));
-    }
-    let parsed = Arc::new(parse_map(&bytes_of(&str_of(v, m))));
-    maps()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, parsed.clone());
-    Ok(Some(parsed))
+    Ok(Some(once(maps(), m.raw(), || {
+        Arc::new(parse_map(&bytes_of(&str_of(v, m))))
+    })))
 }
 
 /// The fonts `ids` as the writer asks for them, with the files of the
