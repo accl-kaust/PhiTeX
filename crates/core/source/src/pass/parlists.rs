@@ -183,6 +183,14 @@ impl ParMachine {
         })
     }
 
+    /// Its setters' names and its lists' count (for traces).
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut n: Vec<&String> = self.setters.keys().collect();
+        n.sort();
+        format!("{} lists, setters {n:?}", self.lists.len())
+    }
+
     /// The program of a slice (atoms `lo..hi` of `text`, read with the
     /// definitions `document` over `prelude`): its paragraph starts and
     /// ends, the setters and flags its calls may run or set.
@@ -555,14 +563,6 @@ impl Compiler<'_, '_> {
                 .filter(|f| self.is_flag(f))
                 .map(str::to_owned)
                 .collect();
-            if self.top && std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
-                eprintln!(
-                    "parlists: call \\{n}: setters {ms:?}, flags {flags:?}, {} calls (afterheading {}), unbounded {:?}",
-                    set.calls.len(),
-                    set.calls.iter().any(|c| c == "@afterheading"),
-                    set.unbounded.first()
-                );
-            }
             if !flags.is_empty() {
                 out.push(Op::Unknown(flags));
             }

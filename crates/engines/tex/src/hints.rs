@@ -3113,7 +3113,7 @@ fn par_machine(own: &Definitions, prelude: &Defs) -> Option<Arc<pass::ParMachine
     }
     let x = pass::ParMachine::new(&Definitions::new(), prelude).map(Arc::new);
     if crate::exec::env_flag!("PHITEX_PARLISTS_TRACE") {
-        eprintln!("parlists: machine {x:?}");
+        eprintln!("parlists: machine {:?}", x.as_ref().map(|m| m.describe()));
     }
     let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
     if g.len() > 64 {
