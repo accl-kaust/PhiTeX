@@ -63,6 +63,10 @@ pub(crate) struct Ops {
     /// The package loads' finished runs (`crate::pkgrec`): node, start,
     /// end, for [`crate::Stats`] (concurrency, preamble wall).
     pub pkg_log: std::sync::Arc<std::sync::Mutex<Vec<PkgRun>>>,
+    /// The build's package records, for the engine's predicted
+    /// definitions ([`crate::pkgrec::LoadHints::prediction`]).
+    pub pkg_loads:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
 }
