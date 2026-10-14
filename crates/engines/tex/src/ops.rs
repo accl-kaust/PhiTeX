@@ -461,7 +461,7 @@ impl Operation for Files {
             for (f, val) in ds {
                 let w = v.field(&format!("wdef:{f}"));
                 if cx.is_loopback(w) {
-                    cx.publish(w, *val);
+                    crate::page::lb_pub(cx, w, *val);
                     keys.push(v.str(f));
                     if trace {
                         let xs = list_of(v, *val);
@@ -487,7 +487,7 @@ impl Operation for Files {
                     t.len()
                 );
             }
-            cx.publish(k, v.list(keys));
+            crate::page::lb_pub(cx, k, v.list(keys));
         }
         for name in names {
             let f = v.field(&format!("wfile:{name}"));
@@ -506,7 +506,7 @@ impl Operation for Files {
                     .map_or("", |(_, t)| t.as_str());
                 eprintln!("aux-trace: publish wfile {name}: {} bytes:\n{t}", t.len());
             }
-            cx.publish(f, x);
+            crate::page::lb_pub(cx, f, x);
         }
         Ok(ValueId::UNIT)
     }
