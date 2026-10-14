@@ -1,0 +1,31 @@
+#!/bin/bash
+# Drive the corpus runner on accl (from the worktree, locally):
+#
+#   scripts/corpus/run sync                 the harness to accl
+#   scripts/corpus/run submit STAGE RUN LIST.tsv SHARDS [sbatch opts...]
+#   scripts/corpus/run bin JOBDIR           install a build job's binaries as bin/current
+#
+# The harness (corpus.py, corpus.sbatch, scripts/ci/*.py) goes to
+# ~/code/flinner/phitex-corpus-harness on accl; documents, results and
+# binaries live under ~/shared-cache/phitex-corpus (never in a repo).
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
+H=acclhead1
+slurm='export PATH=/opt/slurm/current/bin:$PATH;'
+case ${1:-} in
+  sync)
+    ssh $H "mkdir -p code/flinner/phitex-corpus-harness/ci shared-cache/phitex-corpus/{arxiv,results,lists,bin}"
+    rsync -a "$here/corpus.py" "$here/corpus.sbatch" "$H:code/flinner/phitex-corpus-harness/"
+    rsync -a --delete --exclude=__pycache__ "$repo/scripts/ci/" "$H:code/flinner/phitex-corpus-harness/ci/" ;;
+  submit)
+    stage=$2 run=$3 list=$4 shards=$5; shift 5
+    "$0" sync
+    l=lists/$run-$stage-$(basename "$list")
+    scp -q "$list" "$H:shared-cache/phitex-corpus/$l"
+    ssh $H "$slurm mkdir -p code/flinner/phitex-runs/corpus && cd code/flinner/phitex-runs/corpus && sbatch --parsable --array=0-$((shards - 1))${CONC:+%$CONC} $* \$HOME/code/flinner/phitex-corpus-harness/corpus.sbatch $stage $run \$HOME/shared-cache/phitex-corpus/$l" ;;
+  bin)
+    d=$2
+    ssh $H "set -e; c=\$(cat code/flinner/phitex-runs/$d/commit); t=shared-cache/phitex-corpus/bin/\$c; mkdir -p \$t; cp code/flinner/phitex-runs/$d/phitex code/flinner/phitex-runs/$d/phitex-prof code/flinner/phitex-runs/$d/commit \$t/; cp code/flinner/phitex-runs/$d/pdf-relaxed-eq \$t/ 2>/dev/null || true; ln -sfn \$c shared-cache/phitex-corpus/bin/current; ls -la \$t" ;;
+  *) sed -n '2,10p' "$0"; exit 2 ;;
+esac
