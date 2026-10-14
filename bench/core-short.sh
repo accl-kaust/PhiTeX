@@ -33,4 +33,10 @@ for k in a b; do run $k 8 > /dev/null; done
 for j in 1 8 12; do for i in 1 2; do for k in a b; do echo "$k j$j r$i para4000: $(run $k $j)"; done; done; done
 echo "=== para4000 j12, b's profiling build, PHITEX_OBS probes"
 [ -x $L/p/phitex ] && { echo "p j12: $(run b 12 p)"; sed -n '/^probes/,$p' $R/w2-p-j12.log | head -120; }
+echo "=== suites chain + pdftex (fastdev, fresh formats), full output of failures"
+for k in a b; do t=$here; [ $k = a ] && t=$here/target/awt
+  (cd $t && export PHITEX_CACHE_DIR=$t/target/pcache && rm -rf $PHITEX_CACHE_DIR && mkdir -p $PHITEX_CACHE_DIR
+   for s in chain pdftex; do timeout 1200 cargo test -q -p phitex-tex --profile fastdev --test $s > $R/suite-$k-$s.txt 2>&1; echo "$k $s: exit $? $(grep -E '^test result' $R/suite-$k-$s.txt | tail -1)"
+     grep -E "^test .*FAILED|panicked at|^---- " $R/suite-$k-$s.txt | head -8; done)
+done
 echo done
