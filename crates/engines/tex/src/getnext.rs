@@ -374,7 +374,15 @@ impl Run<'_, '_> {
                 self.input.append_text(segs);
                 Ok(true)
             }
-            _ => {
+            other => {
+                if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+                    eprintln!(
+                        "  pull {} stops: sibling {} is {:?}",
+                        self.cx.node().raw(),
+                        self.pulled,
+                        other.map(|(op, _)| op)
+                    );
+                }
                 if self.top {
                     self.eof = true;
                     Ok(false)
