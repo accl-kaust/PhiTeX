@@ -415,6 +415,25 @@ impl Run<'_, '_> {
                 kind = CR_CODE;
             }
         }
+        if kind == SPAN_CODE && self.level_of(md.lid).is_some() {
+            // §791: the entry goes on into the next column, in the same
+            // list and the same group (no `unsave`, no `pop_nest`)
+            let omit = self.next_col(asid, col + 1)?;
+            let extra = vec![
+                v.str("cell"),
+                v.int(i64::try_from(col + 1).unwrap_or(0)),
+                v.int(first),
+                v.list(prefix),
+                v.list(row),
+                v.list(adjust),
+                v.int(i64::from(omit)),
+                v.int(asid),
+            ];
+            if let Some(l) = self.level_of(md.lid) {
+                l.extra = extra;
+            }
+            return Ok(());
+        }
         let (items, _) = self.list_items(md.lid)?;
         prefix.extend(items);
         // the entry's level closes (its items read above) and the next
@@ -425,9 +444,8 @@ impl Run<'_, '_> {
             Ok(())
         };
         if kind == SPAN_CODE {
-            // the entry goes on into the next column
-            // REDUCE-GAP: tex.web keeps the entry's save level across
-            // \span; here the next column is a group of its own
+            // (an entry whose list is not this run's: its items go on in
+            // a level of their own)
             let omit = self.next_col(asid, col + 1)?;
             let extra = vec![
                 v.str("cell"),
