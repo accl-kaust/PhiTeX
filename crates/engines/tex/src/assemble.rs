@@ -40,6 +40,12 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     let _ = o;
     let t0 = std::time::Instant::now();
     let v = cx.values();
+    // the last page state first: every piece and finisher before this
+    // node may define it, so the read waits, parked, until the last fold
+    // has run and placed the last finisher; read first, the pages are
+    // all there (a node started before would assemble the pages so far
+    // and run again at each page added)
+    cx.use_field(v.field(crate::pages::PS))?;
     let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
     // the format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`):
     // a page entry is `[box, counts, fonts, pdf params, pdf data]`, the
