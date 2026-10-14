@@ -505,21 +505,38 @@ fn file_hash(f: Option<&(String, Vec<u8>)>) -> u64 {
 }
 
 /// The texts of the files written: the `streams` entries (`[name]` opens
-/// a file empty, `[name, text]` adds to it), in the order first opened.
+/// a file empty, `[name, text]` adds to it, `[name, "", "close"]` closes
+/// it: what is written to it until it is opened again goes nowhere, as
+/// TeX's §1370 sends a closed stream's writes to the log), in the order
+/// first opened.
 pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut closed: Vec<String> = Vec::new();
     for &e in entries {
         let xs = list_of(v, stream_entry(v, e));
         let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
         let k = if let Some(k) = out.iter().position(|(n, _)| *n == name) {
             k
         } else {
-            out.push((name, String::new()));
+            out.push((name.clone(), String::new()));
             out.len() - 1
         };
-        match xs.get(1) {
-            Some(&t) => out[k].1.push_str(&str_of(v, t)),
-            None => out[k].1.clear(),
+        if xs
+            .get(2)
+            .is_some_and(|&c| v.as_str(c).as_deref() == Some("close"))
+        {
+            if !closed.contains(&name) {
+                closed.push(name);
+            }
+            continue;
+        }
+        if let Some(&t) = xs.get(1) {
+            if !closed.contains(&name) {
+                out[k].1.push_str(&str_of(v, t));
+            }
+        } else {
+            closed.retain(|n| *n != name);
+            out[k].1.clear();
         }
     }
     out
@@ -617,11 +634,17 @@ pub(crate) fn written_defs(
         };
         for d in list_of(v, made) {
             let ds = list_of(v, d);
-            let [f, x, g] = ds.as_slice() else { continue };
-            let f = str_of(v, *f);
-            let val = v.list(vec![*x, *g]);
+            // (`[field]`: a definition a read-back nested in the line
+            // made, the other file's: a key of this file whose value that
+            // file publishes, `UNIT` here)
+            let (f, val) = match ds.as_slice() {
+                [f, x, g] => (str_of(v, *f), v.list(vec![*x, *g])),
+                [f] => (str_of(v, *f), ValueId::UNIT),
+                _ => continue,
+            };
             match out[k].1.iter_mut().find(|(n, _)| *n == f) {
-                Some(slot) => slot.1 = val,
+                Some(slot) if val != ValueId::UNIT => slot.1 = val,
+                Some(_) => {}
                 None => out[k].1.push((f, val)),
             }
         }
@@ -1307,7 +1330,7 @@ impl Graph {
         // head of the message; the error's full form last)
         let mut out = format!("evaluation: {e}");
         let v = self.eng.values();
-        if let E::UndeclaredDefinition { field, .. } = e {
+        if let E::UndeclaredDefinition { field, .. } | E::ConflictingPublication { field } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
         // (the engine does not say which loop-backs kept changing: the
@@ -1317,7 +1340,7 @@ impl Graph {
                 let _ = write!(out, "\n  written file {name}");
             }
             for f in &self.wdefs {
-                let _ = write!(out, "\n  read-back field {f}");
+                let _ = write!(out, "\n  read-back field {}", f.replace('\u{1}', " "));
             }
         }
         for id in ids {
@@ -1551,7 +1574,7 @@ impl Graph {
                 .wkeys_guess
                 .iter()
                 .filter(|(n, _)| n == name && defines_only(name))
-                .flat_map(|(_, ks)| ks.iter().cloned())
+                .flat_map(|(_, ks)| ks.iter().map(|k| wdef_id(name, k)))
                 .collect();
             for k in keys {
                 if !self.wdefs.contains(&k) {
@@ -1714,8 +1737,9 @@ impl Graph {
                 let acc = |n: &str| self.eng.acc_value(unit, v.field(n));
                 let defs = written_defs(v, acc("wplan"), acc("streams"));
                 let mut new = Vec::new();
-                for (_, ds) in defs {
+                for (name, ds) in defs {
                     for (f, _) in ds {
+                        let f = wdef_id(&name, &f);
                         if !self.wdefs.contains(&f) && !new.contains(&f) {
                             new.push(f);
                         }
@@ -1948,6 +1972,25 @@ pub fn guess_wkeys(text: &str) -> Vec<String> {
     }
     add("cs:@abspage@last".to_owned());
     keys
+}
+
+/// The id of file `file`'s read-back definition of field `f`
+/// (`wdef:<id>`): per file, as two files that define one field (LaTeX's
+/// scratch macros, `\reserved@a`) each give their own value, the last
+/// file read the one in force.
+/// A key already naming its file (a read-back nested in another file's
+/// line, [`crate::run::Run::read_back`]) is its own id.
+pub(crate) fn wdef_id(file: &str, f: &str) -> String {
+    if f.contains('\u{1}') {
+        f.to_owned()
+    } else {
+        format!("{file}\u{1}{f}")
+    }
+}
+
+/// The field a read-back key defines (a key naming its file: after it).
+pub(crate) fn wdef_field(k: &str) -> &str {
+    k.rsplit('\u{1}').next().unwrap_or(k)
 }
 
 fn defines_only(name: &str) -> bool {
@@ -3947,6 +3990,7 @@ fn declare_fields(eng: &mut Engine) {
         "ifviol",
         "streams",
         "wplan",
+        "flushplan",
         "fplan",
         "oplan",
         "fread",
@@ -3968,6 +4012,15 @@ fn declare_fields(eng: &mut Engine) {
     eng.declare_loopback(f, none);
     // what each page's output routine leaves for the next: a
     // loop-back the page builder's fold reads from the previous round
+    // the state after the page each flush point opens, by flush point
+    // (`[node, k, value]`, the writer's fold): one field, declared here,
+    // so a flush point costs no declaration round
+    let f = eng.values().field(crate::page::FLUSHES);
+    eng.declare_loopback(f, ValueId::UNIT);
+    // `\count0..9` as the first page's routine reads them, when the
+    // text has a flush point (the writer's fold, `page::FinalState`)
+    let f = eng.values().field("pgread0");
+    eng.declare_loopback(f, ValueId::UNIT);
     for j in 0..crate::page::MAX_PAGES {
         let f = eng.values().field(&format!("pagefx:{j}"));
         let none = eng.values().list(Vec::new());

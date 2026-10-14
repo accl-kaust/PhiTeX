@@ -977,6 +977,22 @@ pub(crate) struct Suspended {
     pub(crate) token: Mutex<Box<dyn std::any::Any + Send>>,
 }
 
+/// A projection of a field's value, registered with
+/// [`Engine::register_projection`] and read with [`Ctx::use_field_proj`]:
+/// a reader depends only on the projected value, so a change that projects
+/// equal leaves it standing.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ProjId(pub(crate) u16);
+
+impl ProjId {
+    /// `true` for an empty, zero, nil or unit value, `false` otherwise
+    /// (an absent definition stays absent).
+    pub const IS_EMPTY: ProjId = ProjId(1);
+}
+
+/// A client projection: pure, from a value to a small value.
+pub type Projection = Arc<dyn Fn(ValueId, &Values) -> ValueId + Send + Sync>;
+
 /// A recorded read: 16 bytes.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Use {
@@ -985,6 +1001,8 @@ pub(crate) struct Use {
     /// Def node (field reads); `NIL`: the unit's environment.
     pub(crate) site: Slot,
     pub(crate) kind: u8,
+    /// A field read through a projection ([`ProjId`]; 0: the full value).
+    pub(crate) proj: u16,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -1109,6 +1127,9 @@ impl Node {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AssumeKind {
     Def(Field),
+    /// A definition read through a projection: the assumed value is the
+    /// projected one.
+    Proj(Field, u16),
     Output,
     Structure(Field),
 }
@@ -1881,6 +1902,8 @@ pub struct Engine {
     loop_pubs: OvMap<Field, BTreeMap<NodeId, ValueId>>,
     pub(crate) memo: OvMap<(OpId, ValueId), Slot>,
     pub(crate) text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
+    /// Client projections, from id 2 ([`ProjId`]).
+    projections: Vec<Projection>,
     /// The text-only hooks of each (operation, text), computed once.
     statics: RwLock<FxHashMap<(OpId, ValueId), Arc<Static>>>,
     /// The tag of the current evaluation for `Node::rdepth`.
@@ -2133,6 +2156,7 @@ impl Engine {
             loop_pubs: OvMap::default(),
             memo: OvMap::default(),
             text_memo: RwLock::new(FxHashMap::default()),
+            projections: Vec::new(),
             statics: RwLock::new(FxHashMap::default()),
             rtag: 1,
             predictions_seen: std::sync::atomic::AtomicBool::new(false),
@@ -2344,6 +2368,39 @@ impl Engine {
     pub fn register(&mut self, op: Arc<dyn Operation>) -> OpId {
         self.ops.push(op);
         OpId(u32::try_from(self.ops.len() - 1).expect("too many ops"))
+    }
+
+    /// Registers a projection for [`Ctx::use_field_proj`]. It must be pure:
+    /// the engine applies it again to decide whether a changed value still
+    /// projects equal.
+    ///
+    /// # Panics
+    ///
+    /// If more than 65,533 projections are registered.
+    pub fn register_projection(&mut self, p: Projection) -> ProjId {
+        self.projections.push(p);
+        ProjId(u16::try_from(self.projections.len() + 1).expect("too many projections"))
+    }
+
+    /// `v` through projection `p` (0: `v` itself; an absent value stays
+    /// absent).
+    pub(crate) fn project(&self, p: u16, v: Option<ValueId>) -> Option<ValueId> {
+        let v = v?;
+        Some(match p {
+            0 => v,
+            1 => {
+                let empty = v == ValueId::NONE
+                    || match &*self.values.get(v) {
+                        Value::Unit | Value::Nil => true,
+                        Value::Int(i) => *i == 0,
+                        Value::Str(s) => s.is_empty(),
+                        Value::List(l) => l.is_empty(),
+                        Value::Bool(_) | Value::Seq(_) => false,
+                    };
+                self.values.bool(empty)
+            }
+            _ => (self.projections[usize::from(p) - 2])(v, &self.values),
+        })
     }
 
     /// The built-in operation that opens a scope.
@@ -3062,6 +3119,9 @@ impl Engine {
     fn inputs_due_at(&self, s: Slot, depth: u32) -> bool {
         self.n(s).uses.iter().any(|u| {
             let t = match u.kind {
+                // A projected read: its input changing seldom changes the
+                // projection, so a guess on it is likely to hold.
+                K_FIELD if u.proj != 0 => return false,
                 K_FIELD if u.site != NIL => u.site,
                 K_OUTPUT => Slot::unpack(u.key),
                 _ => return false,
@@ -6544,13 +6604,34 @@ impl Engine {
                     a.assumers.iter().any(|x| {
                         x.node == u
                             && x.epoch == n.epoch
-                            && x.kind == AssumeKind::Def(f)
-                            && x.value == now.unwrap_or(ValueId::NONE)
+                            && match x.kind {
+                                AssumeKind::Def(g) => g == f && x.value == now.unwrap_or(ValueId::NONE),
+                                AssumeKind::Proj(g, p) => {
+                                    g == f && x.value == self.project(p, now).unwrap_or(ValueId::NONE)
+                                }
+                                _ => false,
+                            }
                     })
                 })
             {
                 // A guess on this very value (a prediction it read): its
                 // assumption confirms it.
+                continue;
+            }
+            if n.state != State::Spec
+                && let Some(now) = now
+                && let Some(p) = n
+                    .uses
+                    .iter()
+                    .find(|x| x.kind == K_FIELD && x.key == f.0.0 && x.site == site_slot)
+                    .map(|x| x.proj)
+                && p != 0
+                && !matches!(cause, Cause::Environment { .. })
+                && self.project(p, now) == self.project(p, Some(self.changed_from).filter(|v| *v != ValueId::NONE))
+            {
+                // It read the definition through a projection, and the
+                // change projects equal.
+                count!(ProjKept);
                 continue;
             }
             if self.tracing > 0 {
@@ -7920,9 +8001,15 @@ impl Engine {
                 }
                 _ => return false,
             };
+            let v = self.project(u.proj, v);
             sig = sig.wrapping_add(hash_words(
                 20,
-                &[u64::from(u.kind), u.key, sid, v.map_or(0, ValueId::raw)],
+                &[
+                    u64::from(u.kind | crate::ctx::proj_tag(u.proj)),
+                    u.key,
+                    sid,
+                    v.map_or(0, ValueId::raw),
+                ],
             ));
         }
         if sig != n.sig {
@@ -8127,7 +8214,9 @@ impl Engine {
                         && !(r.read_predicted
                             && self.n(u.site).in_work()
                             && r.assumptions.iter().any(|&(t, k, _)| {
-                                t == u.site && k == AssumeKind::Def(Field(ValueId(u.key)))
+                                t == u.site
+                                    && matches!(k, AssumeKind::Def(g) | AssumeKind::Proj(g, _)
+                                        if g == Field(ValueId(u.key)))
                             })))
         }) {
             count!(StaleSite);
@@ -8616,6 +8705,7 @@ impl Engine {
             }
             let ok = match kind {
                 AssumeKind::Def(f) => self.n(t).def_value(f).unwrap_or(ValueId::NONE) == value,
+                AssumeKind::Proj(f, p) => self.project(p, self.n(t).def_value(f)).unwrap_or(ValueId::NONE) == value,
                 AssumeKind::Output => self.n(t).output == value,
                 AssumeKind::Structure(f) => {
                     let w = self.walk(xn.unit, xn.label, f);
@@ -8873,6 +8963,9 @@ impl Engine {
                 }
                 let holds = match a.kind {
                     AssumeKind::Def(f) => self.n(y).def_value(f).unwrap_or(ValueId::NONE) == a.value,
+                    AssumeKind::Proj(f, p) => {
+                        self.project(p, self.n(y).def_value(f)).unwrap_or(ValueId::NONE) == a.value
+                    }
                     AssumeKind::Output => self.n(y).output == a.value,
                     AssumeKind::Structure(f) => {
                         // The pending structure resolved without re-binding
@@ -8929,7 +9022,7 @@ impl Engine {
                     }
                 } else {
                     let field = match a.kind {
-                        AssumeKind::Structure(f) | AssumeKind::Def(f) => {
+                        AssumeKind::Structure(f) | AssumeKind::Def(f) | AssumeKind::Proj(f, _) => {
                             self.count_refuted(f);
                             Some(f)
                         }
