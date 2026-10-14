@@ -542,8 +542,9 @@ pub struct Report {
     /// ([`Operation::static_contribs`]): the run's stand, and the range
     /// readers that folded the declared ones run again.
     pub static_contribs_refuted: u64,
-    /// Speculative runs that read a predicted value
-    /// ([`Operation::predicted_defs`]) and were confirmed.
+    /// Speculative runs that read a predicted value and were confirmed: a
+    /// node's [`Operation::predicted_defs`] answer, or, for a node about to
+    /// run again, its previous run's definition.
     pub predictions_confirmed: u64,
     /// Speculative runs that read a predicted value and were refuted.
     pub predictions_refuted: u64,
@@ -654,6 +655,12 @@ pub enum EvalError {
         waiters: Vec<Waiter>,
         /// The evaluation's counters up to the deadline.
         report: Box<Report>,
+    },
+    /// [`Ctx::use_field_at`] named a node that is not earlier in the
+    /// reader's unit (or no longer exists).
+    BadPosition {
+        node: NodeId,
+        at: NodeId,
     },
 }
 
@@ -924,6 +931,12 @@ impl fmt::Display for EvalError {
                     waiters.len()
                 )
             }
+            EvalError::BadPosition { node, at } => {
+                write!(
+                    f,
+                    "node {node:?} read a field at {at:?}, which is not earlier in its unit"
+                )
+            }
         }
     }
 }
@@ -950,6 +963,10 @@ pub(crate) const K_LOOP: u8 = 2;
 pub(crate) const K_CHAIN: u8 = 3;
 /// A read of the environment ([`Ctx::use_env`]): `key` is the field.
 pub(crate) const K_ENV: u8 = 4;
+/// A field read at another node's position ([`Ctx::use_field_at`]); the
+/// next use (`K_ATPOS`) holds that node.
+pub(crate) const K_AT: u8 = 5;
+pub(crate) const K_ATPOS: u8 = 6;
 
 /// A stopped run's state, kept for a resume at its blocked read (see
 /// [`Ctx::park`]): the reads so far with their values, what the run made
@@ -1904,6 +1921,8 @@ pub struct Engine {
     pub(crate) text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
     /// Client projections, from id 2 ([`ProjId`]).
     projections: Vec<Projection>,
+    /// Nodes whose result read a field at another node's position.
+    at_readers: FxHashSet<Slot>,
     /// The text-only hooks of each (operation, text), computed once.
     statics: RwLock<FxHashMap<(OpId, ValueId), Arc<Static>>>,
     /// The tag of the current evaluation for `Node::rdepth`.
@@ -2157,6 +2176,7 @@ impl Engine {
             memo: OvMap::default(),
             text_memo: RwLock::new(FxHashMap::default()),
             projections: Vec::new(),
+            at_readers: FxHashSet::default(),
             statics: RwLock::new(FxHashMap::default()),
             rtag: 1,
             predictions_seen: std::sync::atomic::AtomicBool::new(false),
@@ -4353,7 +4373,7 @@ impl Engine {
         }
     }
 
-    fn subtree_end(&self, mut x: Slot) -> Slot {
+    pub(crate) fn subtree_end(&self, mut x: Slot) -> Slot {
         loop {
             let mut best = x;
             let mut best_l = self.n(x).label;
@@ -6475,6 +6495,62 @@ impl Engine {
         Ok(())
     }
 
+    /// The position a read at `at` stands at for `reader`: just after
+    /// `at` and what it unfolded or claims.
+    pub(crate) fn at_pos(&self, reader: Slot, at: Slot) -> u64 {
+        (self.n(self.subtree_end(at)).label + 1).min(self.n(reader).label)
+    }
+
+    /// Re-runs every reader of a field at another node's position whose
+    /// binding there changed (another definition reaches it, pending
+    /// structure lies before it, or the node went). Value changes of the
+    /// definition it read are dirtied with the definition's other users.
+    fn recheck_at_reads(&mut self) {
+        if self.at_readers.is_empty() {
+            return;
+        }
+        let mut readers: Vec<Slot> = self.at_readers.iter().copied().collect();
+        readers.sort_unstable();
+        for r in readers {
+            if !self.live(r) {
+                self.at_readers.remove(&r);
+                continue;
+            }
+            if matches!(self.n(r).state, State::Dirty | State::Inert) {
+                continue;
+            }
+            let unit = self.n(r).unit;
+            let uses = self.n(r).uses.to_vec();
+            let mut changed = None;
+            for (i, u) in uses.iter().enumerate() {
+                if u.kind != K_AT {
+                    continue;
+                }
+                let f = Field(ValueId(u.key));
+                let Some(at) = uses.get(i + 1).map(|p| Slot::unpack(p.key)) else {
+                    continue;
+                };
+                if at == NIL {
+                    // The unit's start: nothing precedes it.
+                    continue;
+                }
+                if !self.live(at) || self.n(at).unit != unit {
+                    changed = Some(f);
+                    break;
+                }
+                let w = self.walk(unit, self.at_pos(r, at), f);
+                if w.site != u.site || w.pending != NIL {
+                    changed = Some(f);
+                    break;
+                }
+            }
+            if let Some(field) = changed {
+                count!(AtRebind);
+                self.dirty_for(r, Rerun::Rebind { field });
+            }
+        }
+    }
+
     /// Marks `x` as needing a re-run.
     /// `make_dirty_quiet` for the reason `why`.
     fn dirty_quiet_for(&mut self, x: Slot, why: Rerun) {
@@ -6593,8 +6669,25 @@ impl Engine {
     }
 
     fn dirty_field_users_inner(&mut self, site: u64, f: Field, cause: &Cause) {
-        let users: Vec<Slot> = self.users.range(&(site, f), 0..).map(|(_, u)| u).collect();
+        let mut users: Vec<Slot> = self.users.range(&(site, f), 0..).map(|(_, u)| u).collect();
         let site_slot = Slot::unpack(site);
+        if !self.at_readers.is_empty() {
+            let mut at: Vec<Slot> = self
+                .at_readers
+                .iter()
+                .copied()
+                .filter(|&r| {
+                    self.live(r) && {
+                        let n = self.n(r);
+                        n.uses
+                            .iter()
+                            .any(|u| u.kind == K_AT && u.key == f.0.0 && site_key(n.unit, u.site) == site)
+                    }
+                })
+                .collect();
+            at.sort_unstable();
+            users.extend(at);
+        }
         let now = (site_slot != NIL && self.live(site_slot)).then(|| self.n(site_slot).def_value(f));
         for u in users {
             let n = self.n(u);
@@ -7600,6 +7693,11 @@ impl Engine {
             }
         }
         let new: Vec<Use> = self.n(x).uses.to_vec();
+        if new.iter().any(|u| u.kind == K_AT) {
+            self.at_readers.insert(x);
+        } else if !self.at_readers.is_empty() {
+            self.at_readers.remove(&x);
+        }
         for u in new {
             match u.kind {
                 K_FIELD | K_CHAIN | K_ENV if has_label => {
@@ -8884,7 +8982,8 @@ impl Engine {
                 .aux_of(r.slot)
                 .is_some_and(|a| a.watch.is_some() || a.stream.is_some() || !a.publishes.is_empty())
             || !r.publishes.is_empty()
-            || r.uses.iter().any(|u| u.kind == K_LOOP)
+            || r.uses.iter().any(|u| u.kind == K_LOOP || u.kind == K_AT)
+            || self.at_readers.contains(&r.slot)
             || !r.assumptions.is_empty()
             || r.error.is_some()
             || !r.env.is_empty()
@@ -9249,7 +9348,10 @@ impl Engine {
                 }
             }
             EvalError::NoProgress { waiters, .. } | EvalError::Deadline { waiters, .. } => waiter_fields(waiters, live),
-            EvalError::Cycle(_) | EvalError::NonConvergence { .. } | EvalError::RunawayCreation { .. } => {}
+            EvalError::Cycle(_)
+            | EvalError::NonConvergence { .. }
+            | EvalError::RunawayCreation { .. }
+            | EvalError::BadPosition { .. } => {}
         }
     }
 
@@ -9511,6 +9613,7 @@ impl Engine {
         edits: &mut dyn EditSource,
     ) -> Result<(), EvalError> {
         self.in_eval = true;
+        self.recheck_at_reads();
         let r = self.rounds(sched, exec, edits);
         self.in_eval = false;
         self.touch_log.clear();
@@ -10028,6 +10131,7 @@ impl Engine {
             }
             let runs_before = self.report.runs;
             self.apply_results(&mut results, exec);
+            self.recheck_at_reads();
             self.batch_lift.plain_mut().clear();
             self.batch_defined.clear();
             self.settle_deferred();
@@ -10066,15 +10170,23 @@ impl Engine {
 
     fn sanitize(ready: &[(NodeId, Slot)], cands: &[Candidate], batch: &mut Vec<Job>) {
         let is_ready = |x: &NodeId| ready.binary_search_by_key(x, |r| r.0).is_ok();
-        batch.retain(|j| is_ready(&j.node) || (j.speculative && cands.iter().any(|c| c.node == j.node)));
+        // Candidates by id (the first of equal ids wins, as a scan would):
+        // a batch of thousands is checked against thousands of candidates.
+        let mut by_id: Vec<(NodeId, usize, Slot)> =
+            cands.iter().enumerate().map(|(i, c)| (c.node, i, c.slot)).collect();
+        by_id.sort_unstable();
+        let cand = |x: NodeId| {
+            let i = by_id.partition_point(|c| c.0 < x);
+            by_id.get(i).filter(|c| c.0 == x).map(|c| c.2)
+        };
+        batch.retain(|j| is_ready(&j.node) || (j.speculative && cand(j.node).is_some()));
         batch.sort_by_key(|j| (j.node, j.speculative));
         batch.dedup_by_key(|j| j.node);
         for j in batch.iter_mut() {
             if j.slot == NIL {
-                j.slot = ready.binary_search_by_key(&j.node, |r| r.0).map_or_else(
-                    |_| cands.iter().find(|c| c.node == j.node).map_or(NIL, |c| c.slot),
-                    |i| ready[i].1,
-                );
+                j.slot = ready
+                    .binary_search_by_key(&j.node, |r| r.0)
+                    .map_or_else(|_| cand(j.node).unwrap_or(NIL), |i| ready[i].1);
             }
         }
         if !batch.iter().any(|j| !j.speculative && is_ready(&j.node))
