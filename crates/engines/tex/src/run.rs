@@ -591,7 +591,10 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn load(&mut self, loc: Loc) -> R<()> {
         if self.interp.is_some() {
             self.revert_read_back(loc)?;
-        } else if self.flush_pending.is_some() && crate::fields::is_count_slot(loc) {
+        } else if self.flush_pending.is_some() {
+            // (the text's first read after a flush point reads the state
+            // the routines left: any field, \\partial@page as multicol's
+            // `\\endmulticols` unboxes it, not only the counts)
             self.flush_read()?;
         } else if !self.probe_ok && crate::fields::is_chain_count_slot(loc) {
             self.count_probe()?;
@@ -1170,6 +1173,16 @@ impl<'c, 'a> Run<'c, 'a> {
             xs.push(self.loc_field(l).0);
         }
         let at = v.list(xs);
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            let names: Vec<String> = list_of(v, at)[2..]
+                .iter()
+                .map(|&f| crate::val::field_name(v, Field(f)))
+                .filter(|n| n.contains("special") || n == "count:0")
+                .collect();
+            if !names.is_empty() {
+                eprintln!("aux-trace: defs marker node {} {names:?}", self.cx.node().raw());
+            }
+        }
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
         true
     }

@@ -1,0 +1,12 @@
+\documentclass{article}
+\begin{document}
+\makeatletter
+\typeout{AMSC FREE: \meaning\@freelist}
+\typeout{AMSC BXA: \meaning\bx@A}
+\begin{table}[p]
+x\caption{c}
+\typeout{AMSC CURBOX: \meaning\@currbox\space count=\the\count\@currbox\space page=\the\c@page}
+\end{table}
+\typeout{AMSC AFTER FREE: \meaning\@freelist}
+Text.
+\end{document}

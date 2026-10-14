@@ -322,6 +322,13 @@ impl State {
         (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
     }
 
+    /// Whether `loc` holds a value read in place of the engine's
+    /// ([`State::preload`]) that nothing in the run has replaced since.
+    pub(crate) fn is_preloaded(&self, loc: Loc) -> bool {
+        self.slot_ref(loc)
+            .is_some_and(|s| s.e.flags & PRELOADED != 0)
+    }
+
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }

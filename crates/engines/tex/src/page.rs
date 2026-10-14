@@ -735,6 +735,14 @@ impl Run<'_, '_> {
             self.st.preload(l, Some(x).filter(|&x| x != ValueId::UNIT));
         }
         self.st.watch_kinds();
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            let sp = self.get("cs:if@specialpage")?.map(|x| v.render(x));
+            let ss = self.get("cs:@specialstyle")?.map(|x| v.render(x));
+            eprintln!(
+                "aux-trace: step {j} fire {:?} specialpage {sp:?} specialstyle {ss:?}",
+                args.get(4).map(|&x| v.render(x).chars().take(60).collect::<String>())
+            );
+        }
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
         if self.fire_page(d, args.get(2).copied())? {
             self.run_all()?;
@@ -1186,31 +1194,53 @@ impl Run<'_, '_> {
     /// view of the chain's registers, not an assignment of its own).
     fn flush_read_as(&mut self, define: bool) -> R<()> {
         let v = self.v;
-        // (the text has the chain's counts from here on)
-        self.probe_ok = true;
         // (pending until read: a stop here rewinds the command, which
         // reads it again)
         let Some((node, k)) = self.flush_pending else {
             return Ok(());
         };
         let all = self.cx.use_field(v.field(FLUSHES))?;
-        self.flush_pending = None;
         let read = all.and_then(|all| {
             list_of(v, all).into_iter().find_map(|e| {
                 let xs = list_of(v, e);
                 (xs.len() == 3 && int_of(v, xs[0]) == node && int_of(v, xs[1]) == k).then(|| xs[2])
             })
         });
+        let xs = read
+            .filter(|&x| x != ValueId::UNIT)
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
+        let pairs = pgst_pairs(v, xs.get(1).copied());
+        // a field an earlier flush point fed back that the routines no
+        // longer leave changed here is the text's own again (multicol's
+        // `\\partial@page`, voided by the routine that unboxed it)
+        let mut stale = Vec::new();
+        if !xs.is_empty() {
+            let gs: Vec<Field> = self
+                .flush_fields
+                .iter()
+                .copied()
+                .filter(|g| !pairs.iter().any(|p| p.0 == *g))
+                .collect();
+            for g in gs {
+                let l = self.loc_of(g);
+                if self.st.is_preloaded(l) {
+                    stale.push((l, self.cx.use_field(g)?));
+                }
+            }
+        }
+        self.flush_pending = None;
+        // (the text has the chain's counts from here on)
+        self.probe_ok = true;
         if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: flush point {node}:{k} reads {}",
                 read.map_or("none".to_owned(), |x| v.render(x))
             );
         }
-        let Some(x) = read.filter(|&x| x != ValueId::UNIT) else {
+        if xs.is_empty() {
             return Ok(());
-        };
-        let xs = list_of(v, x);
+        }
         if let Some(&cs) = xs.first() {
             if define {
                 self.define_counts(cs)?;
@@ -1218,12 +1248,13 @@ impl Run<'_, '_> {
                 self.preload_counts(cs);
             }
         }
-        if let Some(&pairs) = xs.get(1) {
-            for (g, y) in pgst_pairs(v, Some(pairs)) {
-                self.flush_fields.insert(g);
-                let l = self.loc_of(g);
-                self.st.preload(l, Some(y));
-            }
+        for (l, x) in stale {
+            self.st.fill(l, x);
+        }
+        for (g, y) in pairs {
+            self.flush_fields.insert(g);
+            let l = self.loc_of(g);
+            self.st.preload(l, Some(y));
         }
         Ok(())
     }
