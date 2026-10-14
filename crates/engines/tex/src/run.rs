@@ -291,6 +291,16 @@ pub(crate) struct Run<'c, 'a> {
     /// they had before this round's read-back (`wpre:<field>`), and
     /// what each location's pre-value is (memoized for the run).
     pub interp: Option<phitex_defuse::FxHashSet<Loc>>,
+    /// The interpreted text ran out inside a command: it needs the next
+    /// line written to its stream ([`Run::interpret_line`]).
+    pub interp_short: bool,
+    /// The fields a read-back nested in a line's interpretation set (a
+    /// written `\@input{part.aux}`): the part file's definitions, which
+    /// that file's own lines publish; the line lists them as keys only.
+    pub interp_nested: phitex_defuse::FxHashSet<String>,
+    /// A stream's written text still incomplete (`\@writeckpt`'s
+    /// `\@setckpt{...}{` over several lines): continued by its next line.
+    pub wpending: phitex_defuse::FxHashMap<i32, String>,
     /// The state's stamp as the line's interpretation began: a field the
     /// line defined since is not reverted (`\@writefile` sets
     /// `\@temptokena` and writes `\the\@temptokena`).
@@ -395,6 +405,9 @@ impl<'c, 'a> Run<'c, 'a> {
             resumed: false,
             irreversible: 0,
             interp: None,
+            interp_short: false,
+            interp_nested: phitex_defuse::FxHashSet::default(),
+            wpending: phitex_defuse::FxHashMap::default(),
             interp_base: 0,
             closed: Vec::new(),
             flushes: 0,
@@ -912,6 +925,9 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.set(&pre, was.unwrap_or(ValueId::UNIT), true);
                 }
                 self.set(&name, *val, global);
+                if self.interp.is_some() {
+                    self.interp_nested.insert(name);
+                }
             }
         }
         self.read_back_at = self
@@ -952,7 +968,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// (LaTeX's `\@writefile{toc}{...}`, which writes the `.toc` line as
     /// `\enddocument` reads the `.aux` back): those `streams` entries
     /// (and a document node's `T_WRITE_AT` markers for them) are kept.
-    pub(crate) fn interpret_line(&mut self, line: &str) -> R<ValueId> {
+    pub(crate) fn interpret_line(&mut self, line: &str) -> R<Option<ValueId>> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         let st = self.st.clone();
@@ -991,12 +1007,21 @@ impl<'c, 'a> Run<'c, 'a> {
             }));
         }
         let mut res = Ok(());
+        self.interp_short = false;
+        self.interp_nested.clear();
         while self.has_input() {
             if let Err(h) = self.command() {
                 res = Err(h);
                 break;
             }
         }
+        // (the text ended inside a command: as `\input` of the file
+        // would, the next line written goes on with it)
+        let short = std::mem::take(&mut self.interp_short) && matches!(res, Err(Halt::Fatal));
+        if short {
+            res = Ok(());
+        }
+        let nested = std::mem::take(&mut self.interp_nested);
         let made: Vec<ValueId> = self
             .st
             .defined_since(v, base)
@@ -1004,6 +1029,10 @@ impl<'c, 'a> Run<'c, 'a> {
             .filter_map(|(loc, x, l)| Some((self.loc_field(loc), x?, l)))
             .filter(|d| !str_of(v, d.0.0).starts_with("cat:"))
             .map(|(f, x, l)| {
+                // (a nested read-back's definition: its key only)
+                if nested.contains(&str_of(v, f.0)) {
+                    return v.list(vec![f.0]);
+                }
                 v.list(vec![
                     f.0,
                     x,
@@ -1041,7 +1070,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.effect = effect;
         self.kind_memo = None;
         res?;
-        Ok(v.list(made))
+        Ok((!short).then(|| v.list(made)))
     }
 
     /// File `name` is opened for writing: unless its `wfile:<name>`
@@ -2056,6 +2085,7 @@ pub(crate) struct Parked {
     flush_fields: phitex_defuse::FxHashSet<Field>,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
+    wpending: phitex_defuse::FxHashMap<i32, String>,
 }
 
 impl Run<'_, '_> {
@@ -2128,6 +2158,7 @@ impl Run<'_, '_> {
             flush_fields: self.flush_fields.clone(),
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
+            wpending: self.wpending.clone(),
         })
     }
 }
@@ -2192,6 +2223,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.flush_fields = p.flush_fields;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
+        r.wpending = p.wpending;
         r.resumed = true;
         Ok(r)
     }

@@ -612,11 +612,17 @@ pub(crate) fn written_defs(
         };
         for d in list_of(v, made) {
             let ds = list_of(v, d);
-            let [f, x, g] = ds.as_slice() else { continue };
-            let f = str_of(v, *f);
-            let val = v.list(vec![*x, *g]);
+            // (`[field]`: a definition a read-back nested in the line
+            // made, the other file's: a key of this file whose value that
+            // file publishes, `UNIT` here)
+            let (f, val) = match ds.as_slice() {
+                [f, x, g] => (str_of(v, *f), v.list(vec![*x, *g])),
+                [f] => (str_of(v, *f), ValueId::UNIT),
+                _ => continue,
+            };
             match out[k].1.iter_mut().find(|(n, _)| *n == f) {
-                Some(slot) => slot.1 = val,
+                Some(slot) if val != ValueId::UNIT => slot.1 = val,
+                Some(_) => {}
                 None => out[k].1.push((f, val)),
             }
         }
