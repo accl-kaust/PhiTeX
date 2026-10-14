@@ -32,7 +32,10 @@ pub(crate) fn on() -> bool {
 }
 
 fn show(v: &Values, x: Option<ValueId>) -> String {
-    x.map_or_else(|| "(none)".to_owned(), |x| v.render(x).chars().take(100).collect())
+    x.map_or_else(
+        || "(none)".to_owned(),
+        |x| v.render(x).chars().take(100).collect(),
+    )
 }
 
 /// Node `node` read field `f` as `x`.
@@ -86,7 +89,10 @@ pub(crate) fn finish(node: u64, op: &str, text: &str, published: Vec<String>) {
             eprintln!("rerun:   also read {other:?}");
         }
         for f in from.iter().rev().take(3) {
-            eprintln!("rerun:   read what {}", f.chars().take(300).collect::<String>());
+            eprintln!(
+                "rerun:   read what {}",
+                f.chars().take(300).collect::<String>()
+            );
         }
         for c in changed.iter().take(12) {
             eprintln!("rerun:   {}", c.chars().take(260).collect::<String>());

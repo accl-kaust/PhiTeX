@@ -3135,6 +3135,9 @@ fn par_machine(own: &Definitions, prelude: &Defs) -> Option<Arc<pass::ParMachine
 /// the abstract states ([`pass::ParState`]) after the slices so far.
 pub(crate) struct ParLists {
     states: Vec<pass::ParState>,
+    /// At a document's start: the machine's start state replaces
+    /// `states` at the first slice (the list the format left).
+    fresh: bool,
     /// What the lists' definitions bound, by the definitions and the set.
     bounds: FxHashMap<(usize, String), Arc<Hint>>,
 }
@@ -3142,7 +3145,10 @@ pub(crate) struct ParLists {
 impl ParLists {
     /// From a document's start: no list in force.
     pub(crate) fn new() -> ParLists {
-        ParLists::from(pass::ParState::start())
+        ParLists {
+            fresh: true,
+            ..ParLists::from(pass::ParState::start())
+        }
     }
 
     /// From an unknown state: a file read where any list may be in force.
@@ -3153,6 +3159,7 @@ impl ParLists {
     fn from(s: pass::ParState) -> ParLists {
         ParLists {
             states: vec![s],
+            fresh: false,
             bounds: FxHashMap::default(),
         }
     }
@@ -3165,6 +3172,9 @@ impl ParLists {
         let k = t.slices.partition_point(|&(a, _)| a < s);
         if t.slices.get(k).map(|x| x.0) != Some(s) {
             return None;
+        }
+        if std::mem::replace(&mut self.fresh, false) {
+            self.states = vec![p.machine.start_state()];
         }
         let ran = p.machine.slice(&p.ops[k], &self.states);
         if crate::exec::env_flag!("PHITEX_PARLISTS_TRACE") {
@@ -3710,27 +3720,8 @@ pub(crate) fn check_defs(
     r: &mut Run<'_, '_>,
     h: &Hint,
     claimed: &[std::sync::Arc<Hint>],
-) -> R<Option<String>> {
-    // (a definition outside the bound the run made without reading the
-    // field first may leave it as it was, `\g_para_indent_box` void to
-    // void at every LaTeX paragraph: the value before the run decides,
-    // read only for these)
-    loop {
-        let Some((f, m)) = undeclared(r, h, claimed) else {
-            return Ok(None);
-        };
-        let loc = r.loc_of(f);
-        if !r.st.defined_unread(loc) {
-            return Ok(Some(m));
-        }
-        let mut x = r.cx.use_field(f)?;
-        // (a box register never defined is void, §230: as `\setbox`
-        // leaves a void one at the base level)
-        if x.is_none() && crate::val::field_name(r.v, f).starts_with("box:") {
-            x = Some(r.v.list(vec![r.v.int(0), ValueId::UNIT]));
-        }
-        r.st.note_engine(loc, x);
-    }
+) -> Option<String> {
+    undeclared(r, h, claimed).map(|(_, m)| m)
 }
 
 /// The first definition the run made outside its bound (and the
