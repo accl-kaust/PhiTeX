@@ -183,8 +183,9 @@ pub(crate) struct Static {
     eff: Effect,
     claim: Claim,
     reads: Option<Vec<Field>>,
-    may_define: MayDefine,
+    may_define: Arc<MayDefine>,
     predict: bool,
+    contribs: Option<Vec<(Field, ValueId)>>,
 }
 
 /// Where a pending node is indexed: `pending` (an unbounded definition
@@ -195,7 +196,7 @@ struct PendIx {
     effect: bool,
     /// A static opener whose kind the run sets: pending for the kind field.
     kind: bool,
-    bound: MayDefine,
+    bound: Arc<MayDefine>,
 }
 
 /// What a node with a dynamic definition set may define, from its text.
@@ -243,6 +244,17 @@ pub trait Operation: Send + Sync {
     /// fields it can never define do not wait on it.
     fn may_define_field(&self, _args: &[ValueId], _values: &Values, _f: Field) -> bool {
         true
+    }
+
+    /// The node's contributions to accumulators, if known from its text:
+    /// all of them (a field not listed gets nothing). Range readers fold
+    /// them without waiting for the node's run, which must contribute
+    /// exactly the same: a run that differs is applied like any change
+    /// to a contribution (the readers whose range holds it run again). A
+    /// node claimed by another contributes nothing (its claimer does, in
+    /// its place); a new text asks again.
+    fn static_contribs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
+        None
     }
 
     /// The node's scope effect, from its text.
@@ -344,6 +356,24 @@ pub trait Monoid: Send + Sync {
 /// ([`Engine::set_env_provider`]), with the value table to name the field
 /// (`values.get(field.0)` is its name) and to intern the answer.
 pub type EnvProvider = dyn Fn(&Values, Field) -> Option<Option<ValueId>> + Send + Sync;
+
+/// A field's bit in a declared-contributions mask.
+fn field_bit(f: Field) -> u64 {
+    1 << (hash_words(23, &[f.0.raw()]) % 64)
+}
+
+/// What a range reader of `f` waits on in a range: nodes in work whose
+/// contributions are unknown, or declared without `f` (as far as the
+/// masks tell: a node declaring another field with `f`'s bit is not
+/// waited on, and its run refutes the readers it misled). Their count and
+/// greatest height.
+fn acc_wait(s: &OSum, f: Field) -> (u32, u32) {
+    if s.decl_work > 0 && s.decl_and & field_bit(f) == 0 {
+        (s.acc_work + s.decl_work, s.acc_maxh.max(s.decl_maxh))
+    } else {
+        (s.acc_work, s.acc_maxh)
+    }
+}
 
 /// Sequence concatenation (structurally shared, see [`Values::seq_concat`]).
 pub struct SeqMonoid;
@@ -481,6 +511,14 @@ pub struct Report {
     /// declaration, checked afresh). A static definition list that a run
     /// contradicts is an error instead.
     pub declarations_refuted: u64,
+    /// Every node made to run again, with the reason that made it dirty
+    /// (the last one when it was made dirty more than once; edits before
+    /// the evaluation included).
+    pub rerun_causes: Vec<(NodeId, Rerun)>,
+    /// Runs whose contributions differed from what their text declared
+    /// ([`Operation::static_contribs`]): the run's stand, and the range
+    /// readers that folded the declared ones run again.
+    pub static_contribs_refuted: u64,
     /// Speculative runs that ran out of fuel.
     pub fuel_outs: u64,
     /// Scheduler steps.
@@ -571,12 +609,16 @@ pub enum EvalError {
     NoProgress {
         rounds: u32,
         waiters: Vec<Waiter>,
+        /// The evaluation's counters up to the error.
+        report: Box<Report>,
     },
     /// [`Limits::total_runs`] or [`Limits::time`] was reached with these
     /// nodes still waiting or queued.
     Deadline {
         runs: u64,
         waiters: Vec<Waiter>,
+        /// The evaluation's counters up to the deadline.
+        report: Box<Report>,
     },
 }
 
@@ -650,6 +692,42 @@ pub enum Cause {
     /// or waited for stands at the level below (for
     /// [`Engine::critical_chain`], which goes on from `by`; `None`: gone).
     Raised { to: u32, by: Option<NodeId>, how: Lifted },
+}
+
+/// Why a node was last made to run again ([`Report::rerun_causes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rerun {
+    /// Its text was replaced.
+    Text,
+    /// The definition of `field` it read changed value (`old` is
+    /// `ValueId::NONE` when the field had none).
+    Changed { field: Field, old: ValueId, new: ValueId },
+    /// A use of `field` now reaches another definition.
+    Rebind { field: Field },
+    /// A speculative run's assumption on `field` failed (`None`: on an
+    /// output, or a read that a node of its own batch had re-bound).
+    Refuted { field: Option<Field> },
+    /// It stopped, and what it waited for finished (`field`: `None` for
+    /// an output or a claim).
+    Woken { field: Option<Field> },
+    /// A loop-back field's value for the next round.
+    Loop { field: Field },
+    /// The environment's `field` changed.
+    Environment { field: Field },
+    /// The output of `of`, which it reads, changed or went.
+    Output { of: NodeId },
+    /// Its claim (or a claim stream's following siblings) changed: a
+    /// sibling came, went, changed or was claimed by another.
+    Claim,
+    /// A sibling its `prev_sibling_where` scan passed over changed.
+    SiblingScan,
+    /// An accumulator range it reads changed (a contribution or the
+    /// range's structure).
+    Range { field: Option<Field> },
+    /// A scope effect around it changed.
+    Scope,
+    /// Anything else.
+    Other,
 }
 
 /// How a finished node put another above it ([`Cause::Raised`]).
@@ -793,14 +871,14 @@ impl fmt::Display for EvalError {
                 f,
                 "node {node:?} created {created} children at depth {depth}; last: {last:?}"
             ),
-            EvalError::NoProgress { rounds, waiters } => {
+            EvalError::NoProgress { rounds, waiters, .. } => {
                 write!(
                     f,
                     "{rounds} rounds without progress; {} nodes waiting: {waiters:?}",
                     waiters.len()
                 )
             }
-            EvalError::Deadline { runs, waiters } => {
+            EvalError::Deadline { runs, waiters, .. } => {
                 write!(
                     f,
                     "deadline after {runs} runs; {} nodes waiting: {waiters:?}",
@@ -1008,6 +1086,13 @@ pub(crate) struct Aux {
     out_readers: Vec<Slot>,
     publishes: Vec<(Field, ValueId)>,
     contribs: Vec<(Field, ValueId)>,
+    /// `contribs` folded per field.
+    folds: Vec<(Field, ValueId)>,
+    /// Whether `contribs` is known from the text before the run
+    /// ([`Operation::static_contribs`]): range readers do not wait on it.
+    static_contribs: bool,
+    /// The fields declared, as a mask (see `field_bit`).
+    decl_mask: u64,
     pub(crate) claimed: Vec<Slot>,
     /// What a pending node is indexed under.
     pend_fields: Option<PendIx>,
@@ -1072,6 +1157,15 @@ pub(crate) struct OItem {
     ld: bool,
     /// 1 when the node reads a loop-back field, directly or not.
     taint: u8,
+    /// In work with contributions not known before its run: what a range
+    /// reader waits on (and its height, else 0).
+    acc_work: u8,
+    acc_h: u32,
+    /// In work with declared contributions: the fields declared (a
+    /// one-bit-per-field mask, see `field_bit`), and its height.
+    decl_work: u8,
+    decl_mask: u64,
+    decl_h: u32,
 }
 
 impl From<OItem> for Slot {
@@ -1095,6 +1189,14 @@ pub(crate) struct OSum {
     ld: u32,
     /// Nodes tainted by a loop-back field.
     taint: u32,
+    /// Nodes a range reader waits on, and their greatest height.
+    acc_work: u32,
+    acc_maxh: u32,
+    /// Nodes in work with declared contributions, the fields all of them
+    /// declare (mask intersection), and their greatest height.
+    decl_work: u32,
+    decl_and: u64,
+    decl_maxh: u32,
 }
 
 struct OAug;
@@ -1111,7 +1213,10 @@ pub(crate) struct Br {
 
 impl Aug<OItem, OSum, Br> for OAug {
     fn empty(&self) -> OSum {
-        OSum::default()
+        OSum {
+            decl_and: u64::MAX,
+            ..OSum::default()
+        }
     }
 
     fn leaf(&self, i: &OItem) -> OSum {
@@ -1126,6 +1231,11 @@ impl Aug<OItem, OSum, Br> for OAug {
             maxs: i.sreach,
             ld: u32::from(i.ld),
             taint: u32::from(i.taint),
+            acc_work: u32::from(i.acc_work),
+            acc_maxh: i.acc_h,
+            decl_work: u32::from(i.decl_work),
+            decl_and: if i.decl_work > 0 { i.decl_mask } else { u64::MAX },
+            decl_maxh: i.decl_h,
         }
     }
 
@@ -1141,6 +1251,11 @@ impl Aug<OItem, OSum, Br> for OAug {
             maxs: a.maxs.max(b.maxs),
             ld: a.ld + b.ld,
             taint: a.taint + b.taint,
+            acc_work: a.acc_work + b.acc_work,
+            acc_maxh: a.acc_maxh.max(b.acc_maxh),
+            decl_work: a.decl_work + b.decl_work,
+            decl_and: a.decl_and & b.decl_and,
+            decl_maxh: a.decl_maxh.max(b.decl_maxh),
         }
     }
 
@@ -1587,7 +1702,7 @@ impl OrderOp {
 #[derive(Clone, Copy, Debug)]
 enum Tail {
     /// `make_dirty_quiet` of the node.
-    Dirty(Slot),
+    Dirty(Slot, Rerun),
     /// `raise(node, height, origin)`.
     Raise(Slot, u32, Slot),
     /// The first node parked on the second: it joins the waiters.
@@ -1612,7 +1727,7 @@ fn slice_params() -> (usize, usize) {
     static P: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
     *P.get_or_init(|| {
         let get = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-        (get("DEFUSE_SLICE", 0), get("DEFUSE_SLICE_MIN", 256))
+        (get("DEFUSE_SLICE", 0), get("DEFUSE_SLICE_MIN", 1024))
     })
 }
 
@@ -1677,6 +1792,15 @@ pub struct Engine {
     causes: OvMap<Slot, Vec<Cause>>,
     /// Nodes past half their run budget (`> 0`: causes are recorded).
     tracing: u32,
+    /// The reason recorded for the next `make_dirty` ([`Rerun`]).
+    why: Rerun,
+    /// Fields the results applied so far in this batch defined.
+    batch_defined: FxHashSet<Field>,
+    /// Nodes not yet guessed because of a likely definer that has not run
+    /// (see `likely_definer_due`), with that definer.
+    definer_due: Mutex<FxHashMap<Slot, Slot>>,
+    /// The value a definition had before the change being propagated.
+    changed_from: ValueId,
     created_in_eval: OvMap<Slot, (u32, Vec<(OpId, ValueId)>)>,
     /// While a run of fresh siblings is bound: (label, effect in the order,
     /// scope depth before it), sorted by label. Their definitions' depths
@@ -1934,6 +2058,10 @@ impl Engine {
             runs_in_eval: SlotCounts::default(),
             causes: OvMap::default(),
             tracing: 0,
+            why: Rerun::Other,
+            batch_defined: FxHashSet::default(),
+            definer_due: Mutex::default(),
+            changed_from: ValueId::NONE,
             created_in_eval: OvMap::default(),
             run_depths: Vec::new(),
             idle_rounds: 0,
@@ -2079,15 +2207,16 @@ impl Engine {
         let v = &self.values;
         let decl = opr.defs(&av, v);
         let st = Arc::new(Static {
-            may_define: if decl.is_none() {
+            may_define: Arc::new(if decl.is_none() {
                 opr.may_define(&av, v)
             } else {
                 MayDefine::Nothing
-            },
+            }),
             decl,
             eff: opr.effect(&av, v),
             claim: opr.claim(&av, v, &mut std::iter::empty()),
             reads: opr.reads(&av, v),
+            contribs: opr.static_contribs(&av, v),
             predict: opr.until_predict(&av, v, &mut std::iter::empty()).is_some(),
         });
         self.statics
@@ -2111,8 +2240,11 @@ impl Engine {
                 .map(|d| d.0)
                 .chain(x.reads.iter().flatten().copied());
             live.extend(fields.map(|f| f.0));
-            if let MayDefine::Names(fs) = &x.may_define {
+            if let MayDefine::Names(fs) = &*x.may_define {
                 live.extend(fs.iter().map(|f| f.0));
+            }
+            for &(f, v) in x.contribs.iter().flatten() {
+                live.extend([f.0, v]);
             }
         }
     }
@@ -2781,6 +2913,89 @@ impl Engine {
         *self.mispredicted.entry_or(x, || 0) += 1;
     }
 
+    /// Whether an input `s` read on its last run is itself due to run
+    /// again: a guess now would read the value about to change (and be
+    /// refuted when it does), so `s` is guessed after it instead.
+    fn inputs_due(&self, s: Slot) -> bool {
+        if !self.n(s).has(F_RAN) {
+            return self.likely_definer_due(s);
+        }
+        self.inputs_due_at(s, 2)
+    }
+
+    /// For a node that has not run: whether a hinted read's nearest
+    /// pending node has not run either and is a likely definer of it (it
+    /// names the field, or declares a prefix of it few nodes share). A
+    /// guess past it would read the field as undefined and be refuted
+    /// when it runs.
+    fn likely_definer_due(&self, s: Slot) -> bool {
+        let unrun = |t: Slot| self.live(t) && self.n(t).state == State::Dirty && !self.n(t).has(F_RAN);
+        let memo = self
+            .definer_due
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&s)
+            .copied();
+        // A node found without one is not looked at again (a heuristic:
+        // a nearer definer is unlikely to appear).
+        match memo {
+            Some(NIL) => return false,
+            Some(t) if unrun(t) => return true,
+            _ => {}
+        }
+        let t = self.likely_definer(s);
+        self.definer_due
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(s, t.unwrap_or(NIL));
+        t.is_some()
+    }
+
+    /// The pending node `likely_definer_due` finds, if any.
+    fn likely_definer(&self, s: Slot) -> Option<Slot> {
+        let n = self.n(s);
+        let st = self.statics(n.op, n.args);
+        let Some(reads) = &st.reads else {
+            return None;
+        };
+        reads.iter().find_map(|&f| {
+            let f = self.canon(f);
+            let w = self.walk(n.unit, n.label, f);
+            let t = w.pending;
+            if t == NIL || t == s || self.n(t).state != State::Dirty || self.n(t).has(F_RAN) {
+                return None;
+            }
+            let ix = self.aux_of(t).and_then(|a| a.pend_fields.as_ref())?;
+            let likely = match &*ix.bound {
+                MayDefine::Names(fs) => fs.iter().any(|&g| self.canon(g) == f),
+                MayDefine::Prefixes(ps) => match &*self.values.get(self.client_name(f).0) {
+                    Value::Str(text) => ps.iter().any(|p| {
+                        text.starts_with(p.as_str()) && {
+                            let key = (n.unit, hash_bytes(PREFIX_SEED, p.as_bytes()));
+                            self.pending_p.range(&key, 0..u64::MAX).take(3).count() <= 2
+                        }
+                    }),
+                    _ => false,
+                },
+                MayDefine::Nothing | MayDefine::Any => false,
+            };
+            likely.then_some(t)
+        })
+    }
+
+    fn inputs_due_at(&self, s: Slot, depth: u32) -> bool {
+        self.n(s).uses.iter().any(|u| {
+            let t = match u.kind {
+                K_FIELD if u.site != NIL => u.site,
+                K_OUTPUT => Slot::unpack(u.key),
+                _ => return false,
+            };
+            t != s
+                && self.live(t)
+                && (self.n(t).state == State::Dirty || (depth > 1 && self.inputs_due_at(t, depth - 1)))
+        })
+    }
+
     /// Whether `s` may still be run speculatively this evaluation: not
     /// refuted too often, and not stopped on a node still in work.
     fn may_speculate(&self, s: Slot) -> bool {
@@ -3136,7 +3351,7 @@ impl Engine {
         self.free_node(s);
         if let Some(c) = by.filter(|&c| self.live(c)) {
             self.claim_dirty.insert(c);
-            self.make_dirty(c);
+            self.dirty_for(c, Rerun::Claim);
         }
         if let Some(p) = prev {
             self.claimer_near(p);
@@ -3217,7 +3432,7 @@ impl Engine {
         let claim_hook = st.claim;
         let hint = st.reads.is_some();
         let inert = self.n(s).state == State::Inert;
-        let maybe = decl.is_none() && st.may_define != MayDefine::Any;
+        let maybe = decl.is_none() && *st.may_define != MayDefine::Any;
         self.set_flag(s, F_MAYBE, maybe);
         if let Some(a) = self.aux_mut_opt(s) {
             a.decl_refuted = false;
@@ -3236,7 +3451,7 @@ impl Engine {
             self.set_flag(s, F_DYN, decl.is_none());
             if let Some(c) = self.aux_of(s).and_then(|a| a.claimed_by) {
                 self.claim_dirty.insert(c);
-                self.make_dirty(c);
+                self.dirty_for(c, Rerun::Claim);
             }
         } else {
             match decl {
@@ -3256,8 +3471,9 @@ impl Engine {
                 self.set_static_kind(s, eff);
             }
             self.change_effect(s, new_eff);
-            self.make_dirty(s);
+            self.dirty_for(s, Rerun::Text);
             self.sync_pending(s);
+            self.sync_static_contribs(s);
             if self.n(s).has(F_CLAIMER) || self.aux_of(s).is_some_and(|a| !a.claimed.is_empty()) {
                 self.claim_dirty.insert(s);
             }
@@ -3382,7 +3598,7 @@ impl Engine {
         // Runs that waited for it (the provider could not answer them).
         for x in self.env_waiters.remove(&f).unwrap_or_default() {
             if self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL {
-                self.make_dirty(x);
+                self.dirty_for(x, Rerun::Environment { field: f });
             }
         }
         if was_unknown {
@@ -3431,7 +3647,7 @@ impl Engine {
         for &f in &changed {
             for x in self.env_waiters.remove(&f).unwrap_or_default() {
                 if self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL {
-                    self.make_dirty(x);
+                    self.dirty_for(x, Rerun::Environment { field: f });
                 }
             }
         }
@@ -3582,7 +3798,7 @@ impl Engine {
         if st.predict {
             flags |= F_PREDICT;
         }
-        if st.decl.is_none() && st.may_define != MayDefine::Any {
+        if st.decl.is_none() && *st.may_define != MayDefine::Any {
             flags |= F_MAYBE;
         }
         if provisional {
@@ -3756,7 +3972,7 @@ impl Engine {
                 self.settle_pending.push((unit, self.watch_hi(r).saturating_sub(1)));
                 continue;
             }
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Scope);
         }
     }
 
@@ -3764,7 +3980,6 @@ impl Engine {
     fn bind_created(&mut self, s: Slot, height: Option<(u32, HeightFrom)>, creator: Slot) {
         let (unit, label) = (self.n(s).unit, self.n(s).label);
         let st = self.statics(self.n(s).op, self.n(s).args);
-        let hints = st.reads.clone();
         if let Some(d) = &st.decl {
             for &(f, l) in d {
                 let f = self.canon(f);
@@ -3772,6 +3987,9 @@ impl Engine {
             }
         }
         self.sync_pending(s);
+        if st.contribs.is_some() {
+            self.sync_static_contribs(s);
+        }
         let (h, from) = if let Some(h) = height {
             // Precomputed in the parallel phase.
             h
@@ -3784,7 +4002,20 @@ impl Engine {
             } else {
                 (self.n(creator).height + 1, HeightFrom::Creator)
             };
-            for f in hints.into_iter().flatten() {
+            // Nothing unbounded, no pending effect and no prefix set before
+            // the node (the common case of an append): a hinted field with
+            // no definition and no declared definer before it has no
+            // input, found with two lookups instead of a walk.
+            let quiet = self.pending.range(&unit, 0..label).next_back().is_none()
+                && self.pending_eff.range(&unit, 0..label).next_back().is_none()
+                && self.pending_p_lens.is_empty();
+            for &f in st.reads.iter().flatten() {
+                if quiet
+                    && self.defs_ix.range(&(unit, f), 0..label).next_back().is_none()
+                    && self.pending_f.range(&(unit, f), 0..label).next_back().is_none()
+                {
+                    continue;
+                }
                 let w = self.walk(unit, label, f);
                 for t in [w.site, w.pending] {
                     if t != NIL && self.n(t).height + 1 > height.0 {
@@ -3912,6 +4143,7 @@ impl Engine {
     fn oitem(&self, s: Slot) -> OItem {
         let n = self.n(s);
         let inert = n.state == State::Inert;
+        let decl = self.aux_of(s).filter(|a| a.static_contribs).map(|a| a.decl_mask);
         let reach = if !inert && n.has(F_INPEND) && n.has(F_CLAIM_DYN) {
             self.aux_of(s)
                 .map_or(u64::MAX, |a| a.reach1.checked_sub(1).unwrap_or(u64::MAX))
@@ -3932,6 +4164,11 @@ impl Engine {
                 .map_or(0, |r| self.stream_labels(s, r).1),
             ld: n.defs.iter().any(|d| !d.global),
             taint: u8::from(n.has(F_TAINT)),
+            acc_work: u8::from(n.in_work() && decl.is_none()),
+            acc_h: if decl.is_some() { 0 } else { n.height },
+            decl_work: u8::from(n.in_work() && decl.is_some()),
+            decl_mask: decl.unwrap_or(0),
+            decl_h: if n.in_work() && decl.is_some() { n.height } else { 0 },
         }
     }
 
@@ -4380,6 +4617,10 @@ impl Engine {
     /// (`NIL`, 0: none), without the pending nodes `walk` also finds.
     pub(crate) fn walk_site(&self, unit: u32, label: u64, f: Field) -> (Slot, u64) {
         count!(Walk);
+        if self.defs_ix.range(&(unit, f), 0..label).next_back().is_none() {
+            // Nothing before the use defines the field at any depth.
+            return (NIL, 0);
+        }
         let root = self.root(unit);
         let mut local: Option<(u64, Slot, u32)> = None;
         // Brackets up to `bhi` (exclusive) enclose the use: a node whose
@@ -4632,9 +4873,9 @@ impl Engine {
             .filter(|m| *m != MayDefine::Any);
         let bounded = n.has(F_DYN) && (n.has(F_MAYBE) || narrowed.is_some()) && !refuted;
         let bound = if bounded {
-            narrowed.unwrap_or_else(|| self.statics(n.op, n.args).may_define.clone())
+            narrowed.map_or_else(|| self.statics(n.op, n.args).may_define.clone(), Arc::new)
         } else {
-            MayDefine::Nothing
+            Arc::new(MayDefine::Nothing)
         };
         PendIx {
             unbounded: n.has(F_DYN) && !bounded,
@@ -4667,7 +4908,7 @@ impl Engine {
                 }
             }
         }
-        match ix.bound {
+        match &*ix.bound {
             MayDefine::Nothing | MayDefine::Any => {}
             MayDefine::Prefixes(ps) => {
                 for p in ps {
@@ -4687,7 +4928,7 @@ impl Engine {
             }
             MayDefine::Names(fs) => {
                 for f in fs {
-                    let f = self.canon(f);
+                    let f = self.canon(*f);
                     if insert {
                         self.pending_f.insert((unit, f), label, s);
                     } else {
@@ -4720,7 +4961,7 @@ impl Engine {
         }
         self.pending_index(s, want);
         self.set_flag(s, F_INPEND, want);
-        self.sync_order(s);
+        self.sync_order_lazy(s);
     }
 
     /// Makes `x`'s registered definitions equal `new`, re-binding uses.
@@ -4797,7 +5038,7 @@ impl Engine {
         }
         let st = self.n(u).state;
         let only_rebind = st == State::Done || (st == State::Dirty && self.n(u).has(F_REBIND));
-        self.make_dirty(u);
+        self.dirty_for(u, Rerun::Rebind { field: f });
         if only_rebind && self.n(u).has(F_RAN) && self.n(u).state == State::Dirty {
             self.set_flag(u, F_REBIND, true);
         }
@@ -4952,7 +5193,7 @@ impl Engine {
                         }
                     });
                 if !same {
-                    self.make_dirty(s);
+                    self.dirty_for(s, Rerun::Scope);
                 }
                 link.push((u.key, u.site));
                 continue;
@@ -5281,7 +5522,7 @@ impl Engine {
                 .copied()
                 .collect();
             if reads.iter().any(|x| x.kind == K_CHAIN) {
-                self.make_dirty(u);
+                self.dirty_for(u, Rerun::Scope);
                 continue;
             }
             for use_ in reads {
@@ -5418,7 +5659,7 @@ impl Engine {
                 }
                 if marker && f != self.kind_field && self.declares(s, f) {
                     self.add_def(s, f, false);
-                    self.make_dirty(s);
+                    self.dirty_for(s, Rerun::Scope);
                 }
                 continue;
             }
@@ -5426,6 +5667,7 @@ impl Engine {
                 self.add_def(s, f, false);
             }
             if self.n(s).def_value(f) != Some(v) {
+                self.changed_from = self.n(s).def_value(f).unwrap_or(ValueId::NONE);
                 self.nm(s).set_def_value(f, v);
                 let cause = Cause::Changed {
                     field: f,
@@ -5445,7 +5687,7 @@ impl Engine {
         }
         if let Some(c) = self.aux_of(p).and_then(|a| a.claimed_by) {
             self.claim_dirty.insert(c);
-            self.make_dirty(c);
+            self.dirty_for(c, Rerun::Claim);
         } else if self.n(p).has(F_CLAIMER) {
             self.claim_dirty.insert(p);
         }
@@ -5620,7 +5862,7 @@ impl Engine {
                     let mut l = self.aux_of(other).map_or_else(Default::default, |a| a.claimed.clone());
                     l.retain(|&x| x != s);
                     self.ax(other).claimed = l;
-                    self.make_dirty(other);
+                    self.dirty_for(other, Rerun::Claim);
                 }
                 self.make_inert(s, c);
             }
@@ -5629,7 +5871,7 @@ impl Engine {
         // edit) changes what the run sees: it runs again. Its own run's
         // claim does not: the run made it from the text it saw.
         if !own_run {
-            self.make_dirty(c);
+            self.dirty_for(c, Rerun::Claim);
         }
     }
 
@@ -5704,7 +5946,8 @@ impl Engine {
                     if self.tracing > 0 {
                         self.note(w, self.woken_by(w, x));
                     }
-                    self.make_dirty_quiet(w);
+                    let field = self.origins.get(w).and_then(|o| o.waited_field);
+                    self.dirty_quiet_for(w, Rerun::Woken { field });
                 }
             }
         }
@@ -5739,6 +5982,9 @@ impl Engine {
         }
         self.set_uses(s, Vec::new());
         self.clear_contribs(s);
+        if let Some(a) = self.aux_mut_opt(s) {
+            a.static_contribs = false;
+        }
         // Not a sibling for anyone now: a reader anchored on it re-anchors.
         self.unanchor_watches(s);
         self.set_publishes(s, Vec::new());
@@ -5746,7 +5992,7 @@ impl Engine {
         self.drop_scan(s);
         let readers = self.aux_of(s).map_or_else(Default::default, |a| a.out_readers.clone());
         for r in readers {
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Claim);
         }
         self.leave_spec(s);
         self.dequeue(s);
@@ -5791,6 +6037,7 @@ impl Engine {
         };
         self.sync_pending(s);
         self.sync_order(s);
+        self.sync_static_contribs(s);
         if self.eff_now(s) != EFF_NONE {
             self.effect_region_changed(s, EFF_NONE);
         }
@@ -6071,6 +6318,20 @@ impl Engine {
     }
 
     /// Marks `x` as needing a re-run.
+    /// `make_dirty_quiet` for the reason `why`.
+    fn dirty_quiet_for(&mut self, x: Slot, why: Rerun) {
+        let old = std::mem::replace(&mut self.why, why);
+        self.make_dirty_quiet(x);
+        self.why = old;
+    }
+
+    /// `make_dirty` for the reason `why`.
+    fn dirty_for(&mut self, x: Slot, why: Rerun) {
+        let old = std::mem::replace(&mut self.why, why);
+        self.make_dirty(x);
+        self.why = old;
+    }
+
     pub(crate) fn make_dirty(&mut self, x: Slot) {
         if self.tracing > 0 {
             self.note(x, Cause::Structure);
@@ -6105,7 +6366,7 @@ impl Engine {
             return;
         }
         if !self.owned(x) {
-            self.defer(Tail::Dirty(x));
+            self.defer(Tail::Dirty(x, self.why));
             return;
         }
         self.node_errors.remove(&x);
@@ -6130,6 +6391,8 @@ impl Engine {
             _ => {}
         }
         count!(Dirty);
+        let id = self.n(x).id;
+        self.report.rerun_causes.push((id, self.why));
         self.set_state(x, State::Dirty);
         self.nm(x).floor = 0;
         if let Some(o) = self.origins.get_mut(x) {
@@ -6145,6 +6408,32 @@ impl Engine {
     }
 
     fn dirty_field_users(&mut self, site: u64, f: Field, cause: &Cause) {
+        let why = match cause {
+            Cause::Environment { field } => Rerun::Environment { field: *field },
+            _ => Rerun::Changed {
+                field: f,
+                old: self.changed_from,
+                new: ValueId::NONE,
+            },
+        };
+        let why = match why {
+            Rerun::Changed { field, old, .. } => {
+                let site_slot = Slot::unpack(site);
+                let new = if site_slot != NIL && self.live(site_slot) {
+                    self.n(site_slot).def_value(f).unwrap_or(ValueId::NONE)
+                } else {
+                    ValueId::NONE
+                };
+                Rerun::Changed { field, old, new }
+            }
+            w => w,
+        };
+        let old_why = std::mem::replace(&mut self.why, why);
+        self.dirty_field_users_inner(site, f, cause);
+        self.why = old_why;
+    }
+
+    fn dirty_field_users_inner(&mut self, site: u64, f: Field, cause: &Cause) {
         let users: Vec<Slot> = self.users.range(&(site, f), 0..).map(|(_, u)| u).collect();
         for u in users {
             if self.tracing > 0 {
@@ -6178,7 +6467,7 @@ impl Engine {
             }
         }
         for u in users {
-            self.make_dirty_quiet(u);
+            self.dirty_quiet_for(u, Rerun::Loop { field: f });
         }
     }
 
@@ -6198,7 +6487,7 @@ impl Engine {
         let f = f?;
         let n = self.n(on);
         let st = self.statics(n.op, n.args);
-        let MayDefine::Prefixes(ps) = &st.may_define else {
+        let MayDefine::Prefixes(ps) = &*st.may_define else {
             return None;
         };
         let name = self.client_name(f);
@@ -6356,7 +6645,7 @@ impl Engine {
         let tail = std::mem::take(&mut self.tail);
         for t in &tail {
             match *t {
-                Tail::Dirty(x) => self.make_dirty_quiet(x),
+                Tail::Dirty(x, why) => self.dirty_for(x, why),
                 Tail::Raise(y, h, origin) => self.raise(y, h, origin),
                 Tail::ParkOn(x, on) => {
                     if !self.live(x) || self.n(x).state != State::Parked || self.n(x).on != on || !self.live(on) {
@@ -6378,7 +6667,7 @@ impl Engine {
                             a.out_readers.push(x);
                         }
                         if self.tail_out_changed.contains(&t) {
-                            self.make_dirty(x);
+                            self.dirty_for(x, Rerun::Output { of: self.n(t).id });
                         }
                     }
                 }
@@ -6453,7 +6742,7 @@ impl Engine {
             })
             .collect();
         for x in hit {
-            self.make_dirty(x);
+            self.dirty_for(x, Rerun::Claim);
         }
     }
 
@@ -6528,7 +6817,7 @@ impl Engine {
         self.ax(x).assumers.clear();
         for a in assumers {
             if self.live(a.node) && self.n(a.node).epoch == a.epoch && self.n(a.node).state == State::Spec {
-                self.make_dirty(a.node);
+                self.dirty_for(a.node, Rerun::Refuted { field: None });
             }
         }
     }
@@ -6588,7 +6877,7 @@ impl Engine {
                     .collect();
                 n.uses = uses.into_boxed_slice();
             }
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Output { of: self.n(x).id });
         }
     }
 
@@ -6624,7 +6913,7 @@ impl Engine {
             // The claimed text is one of the claimer's inputs: it runs
             // again (and its claim is recomputed) whatever freed `x`.
             self.claim_dirty.insert(by);
-            self.make_dirty(by);
+            self.dirty_for(by, Rerun::Claim);
         }
         let defs: Vec<Field> = self.n(x).defs.iter().map(|d| d.field).collect();
         for f in defs {
@@ -6745,9 +7034,13 @@ impl Engine {
     }
 
     fn node_contrib_folds(&self, x: Slot) -> Vec<(Field, ValueId)> {
-        let Some(a) = self.aux_of(x) else { return Vec::new() };
+        self.aux_of(x).map_or_else(Vec::new, |a| a.folds.clone())
+    }
+
+    /// The contributions folded per field (in first-contribution order).
+    pub(crate) fn contrib_folds(&self, contribs: &[(Field, ValueId)]) -> Vec<(Field, ValueId)> {
         let mut out: Vec<(Field, ValueId)> = Vec::new();
-        for &(f, v) in &a.contribs {
+        for &(f, v) in contribs {
             if let Some(e) = out.iter_mut().find(|e| e.0 == f) {
                 if let Some(m) = self.monoids.get(&f) {
                     e.1 = m.combine(&self.values, e.1, v);
@@ -6760,13 +7053,19 @@ impl Engine {
     }
 
     fn set_contribs(&mut self, x: Slot, new: Vec<(Field, ValueId)>) {
-        let old = self.aux_of(x).map_or_else(Default::default, |a| a.contribs.clone());
-        if old == new {
+        self.set_contribs_folded(x, new, None);
+    }
+
+    /// `set_contribs` with the folds of `new` if the run computed them.
+    fn set_contribs_folded(&mut self, x: Slot, new: Vec<(Field, ValueId)>, folds: Option<Vec<(Field, ValueId)>>) {
+        if self.aux_of(x).map_or(new.is_empty(), |a| a.contribs == new) {
             return;
         }
         let old_folds = self.node_contrib_folds(x);
-        self.ax(x).contribs = new;
-        let new_folds = self.node_contrib_folds(x);
+        let new_folds = folds.unwrap_or_else(|| self.contrib_folds(&new));
+        let a = self.ax(x);
+        a.contribs = new;
+        a.folds.clone_from(&new_folds);
         let (unit, label) = (self.n(x).unit, self.n(x).label);
         let mut fields: Vec<Field> = old_folds.iter().chain(&new_folds).map(|e| e.0).collect();
         fields.sort_unstable();
@@ -6778,6 +7077,30 @@ impl Engine {
                 self.acc_set(unit, f, label, n);
                 self.stab_contrib(unit, label, f);
             }
+        }
+    }
+
+    /// Sets `x`'s contributions to what its text declares, if it does
+    /// ([`Operation::static_contribs`]) and nothing claims it.
+    fn sync_static_contribs(&mut self, x: Slot) {
+        let n = self.n(x);
+        let st = self.statics(n.op, n.args);
+        let on = st.contribs.is_some() && n.state != State::Inert && !n.has(F_APP);
+        if on {
+            self.set_contribs(x, st.contribs.clone().unwrap_or_default());
+        }
+        let mask = if on {
+            st.contribs.iter().flatten().fold(0, |m, &(f, _)| m | field_bit(f))
+        } else {
+            0
+        };
+        if on != self.aux_of(x).is_some_and(|a| a.static_contribs)
+            || self.aux_of(x).is_some_and(|a| a.decl_mask != mask)
+        {
+            let a = self.ax(x);
+            a.static_contribs = on;
+            a.decl_mask = mask;
+            self.sync_order(x);
         }
     }
 
@@ -6890,7 +7213,7 @@ impl Engine {
             .filter(|&r| self.live(r) && label < self.n(r).label)
             .collect();
         for r in hit {
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::SiblingScan);
         }
     }
 
@@ -6937,7 +7260,7 @@ impl Engine {
             let lo = self.watch_key(r, w.anchor).0;
             let now = self.acc_fold(unit, f, lo, self.watch_hi(r));
             if now != w.seen {
-                self.make_dirty(r);
+                self.dirty_for(r, Rerun::Range { field: Some(f) });
             }
         }
     }
@@ -6956,7 +7279,7 @@ impl Engine {
                 self.settle_pending.push((unit, self.watch_hi(r).saturating_sub(1)));
                 continue;
             }
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Range { field: None });
         }
     }
 
@@ -6980,7 +7303,7 @@ impl Engine {
             .map(|((_, r), _)| *r)
             .collect();
         for r in readers.into_iter().chain(ending) {
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Range { field: None });
         }
     }
 
@@ -7016,12 +7339,15 @@ impl Engine {
         }
         self.flush_order();
         let lo = self.watch_key(r, anchor).0;
-        let s = self.ord_fold(unit, lo, self.watch_hi(r));
-        if s.work == 0 {
+        let Some((f, _)) = self.aux_of(r).and_then(|a| a.watch) else {
+            return;
+        };
+        let (work, maxh) = acc_wait(&self.ord_fold(unit, lo, self.watch_hi(r)), f);
+        if work == 0 {
             self.drop_watch(r);
             self.dequeue(r);
             self.set_state(r, State::Dirty);
-            let h = self.n(r).height.max(s.maxh + 1);
+            let h = self.n(r).height.max(maxh + 1);
             self.lift(r, h);
             self.enqueue(r);
         }
@@ -7317,6 +7643,7 @@ impl Engine {
 
     /// Applies a run's definitions; returns whether any value changed.
     fn set_defs(&mut self, x: Slot, defs: &[(Field, ValueId, bool)]) -> bool {
+        self.batch_defined.extend(defs.iter().map(|d| d.0));
         if self.n(x).has(F_DYN) {
             // A dynamic definition set is bounded by the text's answer: a
             // definition outside it would have left readers bound past the
@@ -7326,7 +7653,7 @@ impl Engine {
             let bound = self
                 .aux_of(x)
                 .and_then(|a| a.narrowed.clone())
-                .unwrap_or_else(|| st.may_define.clone());
+                .unwrap_or_else(|| (*st.may_define).clone());
             let av = self.args_vec(args);
             let mut undeclared = Vec::new();
             let refuted = self.aux_of(x).is_some_and(|a| a.decl_refuted);
@@ -7404,6 +7731,7 @@ impl Engine {
                     field: f,
                     site: Some(self.n(x).id),
                 };
+                self.changed_from = old.unwrap_or(ValueId::NONE);
                 self.dirty_field_users(x.pack(), f, &cause);
             }
         }
@@ -7507,10 +7835,10 @@ impl Engine {
                 h = h.max(self.n(t).height + 1);
             }
         }
-        if let Some((_, anchor)) = self.aux_of(x).and_then(|a| a.watch) {
+        if let Some((f, anchor)) = self.aux_of(x).and_then(|a| a.watch) {
             let lo = self.watch_key(x, anchor).0;
             let s = self.ord_fold(n.unit, lo, self.watch_hi(x));
-            h = h.max(s.maxh + 1);
+            h = h.max(acc_wait(&s, f).1 + 1);
         }
         h
     }
@@ -7856,7 +8184,7 @@ impl Engine {
                 let (u, l) = (self.n(x).unit, self.watch_hi(x));
                 let lo = self.watch_key(x, anchor).0;
                 self.flush_order();
-                if self.work_in(u, lo, l) == 0 {
+                if acc_wait(&self.ord_fold(u, lo, l), field).0 == 0 {
                     self.stab_settle(u, lo);
                 }
                 return;
@@ -7966,14 +8294,41 @@ impl Engine {
                 if self.tracing > 0 {
                     self.note(rd, Cause::Output { of: self.n(x).id });
                 }
-                self.make_dirty_quiet(rd);
+                let of = self.n(x).id;
+                self.dirty_quiet_for(rd, Rerun::Output { of });
             }
         }
         let _ = changed;
         self.set_publishes(x, r.publishes);
-        self.set_contribs(x, r.contribs);
+        if self.aux_of(x).is_some_and(|a| a.static_contribs) {
+            let st = self.statics(self.n(x).op, self.n(x).args);
+            if let Some(c) = &st.contribs {
+                // By fold: a declared empty value matches no contribution.
+                let fold = |l: &[(Field, ValueId)], f: Field| -> Option<ValueId> {
+                    let (m, empty) = self.monoid_aug(f)?;
+                    Some(
+                        l.iter()
+                            .filter(|e| e.0 == f)
+                            .fold(empty, |a, e| m.combine(&self.values, a, e.1)),
+                    )
+                };
+                if c.iter().any(|&(f, _)| fold(c, f) != fold(&r.contribs, f)) {
+                    self.report.static_contribs_refuted += 1;
+                }
+            }
+        }
+        self.set_contribs_folded(x, r.contribs, r.contrib_folds);
+        // A contribution in the window that changed after the run folded
+        // it (a node whose run refuted its declared contributions, applied
+        // in the same batch) leaves the fold stale.
+        let mut stale_fold = false;
         match r.watch {
-            Some((f, anchor, to, seen)) => self.set_watch(x, Some((f, anchor, to, seen, false))),
+            Some((f, anchor, to, seen)) => {
+                self.set_watch(x, Some((f, anchor, to, seen, false)));
+                let unit = self.n(x).unit;
+                let lo = self.watch_key(x, anchor).0;
+                stale_fold = self.acc_fold(unit, f, lo, self.watch_hi(x)) != seen;
+            }
             None => self.drop_watch(x),
         }
         self.set_scan(x, r.scan);
@@ -7992,9 +8347,30 @@ impl Engine {
             }
         }
         self.update_taint(x);
-        if read_freed {
+        // A guess applied after a definition its read now reaches (a
+        // node before it in the same batch defined the field): stale at
+        // once, not when the nodes between finish.
+        if r.speculative && !read_freed && !stale_fold {
+            let (unit, label) = (self.n(x).unit, self.n(x).label);
+            let fields: Vec<(Field, Slot)> = self
+                .n(x)
+                .uses
+                .iter()
+                .filter(|u| u.kind == K_FIELD && self.batch_defined.contains(&Field(ValueId(u.key))))
+                .map(|u| (Field(ValueId(u.key)), u.site))
+                .collect();
+            stale_fold = fields
+                .into_iter()
+                .any(|(f, site)| self.walk_site(unit, label, f).0 != site);
+        }
+        if read_freed || stale_fold {
             count!(StaleSite);
-            self.make_dirty(x);
+            let why = if stale_fold {
+                Rerun::Refuted { field: None }
+            } else {
+                Rerun::Other
+            };
+            self.dirty_for(x, why);
         }
         // The run's own epoch bump (from rebinding during apply) must not
         // invalidate it.
@@ -8058,7 +8434,7 @@ impl Engine {
                 && self.n(x).has(F_CLAIM_DYN)
                 && self.following_slots(x, k) != self.aux_of(x).map_or_else(Vec::new, |a| a.claimed.clone())
             {
-                self.make_dirty(x);
+                self.dirty_for(x, Rerun::Claim);
             }
         }
     }
@@ -8167,6 +8543,7 @@ impl Engine {
         let (s_fixed, t) = slice_params();
         let n = results.len();
         if n < t.max(1) {
+            count!(NarrowResult, n);
             for r in results.drain(..) {
                 self.apply(r);
             }
@@ -8222,6 +8599,8 @@ impl Engine {
             self.slice = None;
         }
         drop(items);
+        count!(WholeResult, wholes.len());
+        count!(SlicedResult, n - wholes.len());
         if overlays {
             self.apply_sliced(slices, wholes, exec);
             return;
@@ -8382,10 +8761,14 @@ impl Engine {
                         work.push((a.node, h));
                     }
                 } else {
-                    if let AssumeKind::Structure(f) | AssumeKind::Def(f) = a.kind {
-                        self.count_refuted(f);
-                    }
-                    self.make_dirty(a.node);
+                    let field = match a.kind {
+                        AssumeKind::Structure(f) | AssumeKind::Def(f) => {
+                            self.count_refuted(f);
+                            Some(f)
+                        }
+                        AssumeKind::Output => None,
+                    };
+                    self.dirty_for(a.node, Rerun::Refuted { field });
                 }
             }
         }
@@ -8689,7 +9072,13 @@ impl Engine {
         self.sweep_all_shifts(50_000);
         self.finalize_report();
         let report = std::mem::take(&mut self.report);
-        result.map(|()| report)
+        result.map_err(|mut e| {
+            if let EvalError::NoProgress { report: r, .. } | EvalError::Deadline { report: r, .. } = &mut e {
+                **r = report.clone();
+            }
+            e
+        })?;
+        Ok(report)
     }
 
     fn has_feedback(&self) -> bool {
@@ -8774,6 +9163,18 @@ impl Engine {
 
     fn finalize_report(&mut self) {
         self.report.critical_path = self.critical_path();
+        // One entry per node: its last reason, at its first position.
+        let mut at: FxHashMap<NodeId, usize> = FxHashMap::default();
+        let mut causes: Vec<(NodeId, Rerun)> = Vec::new();
+        for (id, why) in std::mem::take(&mut self.report.rerun_causes) {
+            if let Some(&i) = at.get(&id) {
+                causes[i].1 = why;
+            } else {
+                at.insert(id, causes.len());
+                causes.push((id, why));
+            }
+        }
+        self.report.rerun_causes = causes;
         self.report
             .refuted_by_field
             .sort_by_key(|&(f, c)| (std::cmp::Reverse(c), f.0.raw()));
@@ -8848,6 +9249,10 @@ impl Engine {
         let r = self.rounds(sched, exec, edits);
         self.in_eval = false;
         self.touch_log.clear();
+        self.definer_due
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         r
     }
 
@@ -9220,7 +9625,12 @@ impl Engine {
                 let n = self.n(s);
                 // Re-bound nodes are revalidated at their level instead
                 // (cheaper than any run).
-                if n.state == State::Dirty && !n.has(F_NOSPEC) && !n.has(F_REBIND) && self.may_speculate(s) {
+                if n.state == State::Dirty
+                    && !n.has(F_NOSPEC)
+                    && !n.has(F_REBIND)
+                    && self.may_speculate(s)
+                    && !self.inputs_due(s)
+                {
                     cands.push(Candidate {
                         node: n.id,
                         slot: s,
@@ -9282,6 +9692,7 @@ impl Engine {
                 return Err(EvalError::Deadline {
                     runs: self.eval_runs,
                     waiters: self.waiters_with_held(),
+                    report: Box::default(),
                 });
             }
             self.level = level;
@@ -9345,6 +9756,7 @@ impl Engine {
             let runs_before = self.report.runs;
             self.apply_results(&mut results, exec);
             self.batch_lift.plain_mut().clear();
+            self.batch_defined.clear();
             self.settle_deferred();
             let applied = self.report.runs - runs_before;
             if applied > 0 {
@@ -9360,6 +9772,7 @@ impl Engine {
                     return Err(EvalError::NoProgress {
                         rounds: self.idle_rounds,
                         waiters: self.waiters_with_held(),
+                        report: Box::default(),
                     });
                 }
             } else {
@@ -9512,6 +9925,8 @@ pub struct RunResult {
     pub(crate) env_found: Vec<(Field, Option<ValueId>)>,
     pub(crate) publishes: Vec<(Field, ValueId)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
+    /// `contribs` folded per field, by the run.
+    pub(crate) contrib_folds: Option<Vec<(Field, ValueId)>>,
     pub(crate) watch: Option<(Field, Slot, Slot, ValueId)>,
     /// Where a backward sibling scan stopped (`NIL`: the unit start).
     pub(crate) scan: Option<Slot>,
@@ -9578,9 +9993,8 @@ impl Engine {
     }
 
     /// (in-work count, max height) over `[lo, hi)` of a unit.
-    pub(crate) fn order_fold(&self, unit: u32, lo: u64, hi: u64) -> (u32, u32) {
-        let s = self.ord_fold(unit, lo, hi);
-        (s.work, s.maxh)
+    pub(crate) fn order_fold(&self, unit: u32, f: Field, lo: u64, hi: u64) -> (u32, u32) {
+        acc_wait(&self.ord_fold(unit, lo, hi), f)
     }
 
     /// The nearest preceding sibling of `x` whose text satisfies `pred`,

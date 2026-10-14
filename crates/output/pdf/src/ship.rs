@@ -236,6 +236,23 @@ impl PdfState {
     }
 
     /// `set_ff`.
+    /// The fonts' numbers in their names (`/F<n>`) from here on, where
+    /// they are not the engine's: pdfTeX numbers fonts in the order it
+    /// loads them, the virtual fonts' local fonts at the `\shipout`
+    /// that first uses them, which a writer shipping the pages apart
+    /// knows only at the end.
+    pub fn set_font_tags(&mut self, tags: std::collections::HashMap<FontId, FontId>) {
+        self.font_tags = Some(std::sync::Arc::new(tags));
+    }
+
+    /// Font `k`'s number in its name (`/F<n>`).
+    pub(crate) fn font_tag(&self, k: FontId) -> FontId {
+        self.font_tags
+            .as_ref()
+            .and_then(|m| m.get(&k).copied())
+            .unwrap_or(k)
+    }
+
     pub(crate) fn ff(&self, f: FontId) -> FontId {
         let n = self.font(f).num;
         if n < 0 {
@@ -331,7 +348,7 @@ impl PdfState {
             return;
         }
         self.print(b"/F");
-        self.print_int(i64::from(k));
+        self.print_int(i64::from(self.font_tag(k)));
         self.pdf_out(b' ');
         let q = divide_scaled(size, ONE_HUNDRED_BP, 6).0;
         self.print_real(q, 4);
@@ -1489,7 +1506,7 @@ impl PdfState {
             for f in self.font_list.clone() {
                 let k = self.ff(f);
                 self.print(b"/F");
-                self.print_int(i64::from(k));
+                self.print_int(i64::from(self.font_tag(k)));
                 self.pdf_out(b' ');
                 self.print_int(self.font(k).num);
                 self.print(b" 0 R ");

@@ -155,6 +155,10 @@ pub(crate) struct State {
     /// The locations defined at the base level (or globally) since the
     /// last [`State::take_base_defs`].
     base_defs: Vec<Loc>,
+    /// In a page step: each location it defined, and whether only by
+    /// `\advance` (its value then the one it read plus a change), for
+    /// the writer's fold of the chain ([`State::advanced_only`]).
+    kinds: Option<FxHashMap<Loc, bool>>,
     next_gid: u32,
     /// Bumped whenever a category code below 256 may have changed
     /// ([`State::cat_gen`]); unique across tables of a thread, so a
@@ -201,6 +205,7 @@ impl Clone for State {
             defined: self.defined.clone(),
             stamp: self.stamp,
             base_defs: self.base_defs.clone(),
+            kinds: self.kinds.clone(),
             next_gid: self.next_gid,
             cat_gen: new_cat_gen(),
         }
@@ -238,6 +243,7 @@ impl State {
             defined: Vec::new(),
             stamp: 0,
             base_defs: Vec::new(),
+            kinds: None,
             next_gid: 0,
             cat_gen: new_cat_gen(),
         }
@@ -566,6 +572,28 @@ impl State {
         }
     }
 
+    /// Starts noting how each location is defined ([`State::note_kind`]).
+    pub(crate) fn watch_kinds(&mut self) {
+        self.kinds.get_or_insert_with(FxHashMap::default);
+    }
+
+    /// Notes a definition of `loc`, an `\advance` or not, when watching.
+    pub(crate) fn note_kind(&mut self, loc: Loc, advance: bool) {
+        if let Some(k) = &mut self.kinds {
+            k.entry(loc)
+                .and_modify(|a| *a &= advance)
+                .or_insert(advance);
+        }
+    }
+
+    /// Whether every definition of `loc` noted was an `\advance`.
+    pub(crate) fn advanced_only(&self, loc: Loc) -> bool {
+        self.kinds
+            .as_ref()
+            .and_then(|k| k.get(&loc).copied())
+            .unwrap_or(false)
+    }
+
     /// The locations defined at the base level since the last call.
     pub(crate) fn take_base_defs(&mut self) -> Vec<Loc> {
         std::mem::take(&mut self.base_defs)
@@ -729,22 +757,57 @@ impl State {
     }
 
     /// The definitions to publish: each location's definition at the base
-    /// level, encoded once; a local one equal to the engine's value the
-    /// run read is left out (the same binding). `net`: a global one too
-    /// (a run at the unit's top level, where a global definition equal
-    /// to the value in force changes nothing: only the run's net effect
-    /// is published).
-    pub(crate) fn published(&self, v: &Values, net: bool) -> Vec<(Loc, ValueId, Locality)> {
+    /// level, encoded once; one equal to the engine's value the run read
+    /// is left out (the run's net effect: what it left as it found it is
+    /// no definition, the values between are its own). A global one only
+    /// when that leaves the scopes around the run as they were: the
+    /// binding read is a level-one one (a box register's value carries
+    /// its level, §1077), or `top` (no scope is open around the run).
+    /// Otherwise `\global` of the value an enclosing scope's local
+    /// binding holds outlives that scope's close (§283).
+    pub(crate) fn published(&self, v: &Values, top: bool) -> Vec<(Loc, ValueId, Locality)> {
         let mut out = Vec::with_capacity(self.metas.len());
         for m in &self.metas {
             let Some((val, l)) = &m.publ else { continue };
             let Some(x) = val.encode(v) else { continue };
-            if (net || *l == Locality::Local) && m.eng == Some(Some(x)) {
+            if m.eng == Some(Some(x))
+                && (*l == Locality::Local || top || level_one_box(v, m.loc, x))
+            {
                 continue;
             }
             out.push((m.loc, x, *l));
         }
         out
+    }
+
+    /// Whether the run defined `loc` at its base level without having
+    /// read the engine's value first, where reading it may show the
+    /// definition is none ([`State::published`]: a local one, or a box
+    /// register's).
+    pub(crate) fn defined_unread(&self, loc: Loc) -> bool {
+        self.slot_ref(loc).is_some_and(|s| {
+            s.meta != 0 && {
+                let m = &self.metas[s.meta as usize - 1];
+                m.eng.is_none()
+                    && m.publ
+                        .as_ref()
+                        .is_some_and(|(_, l)| *l == Locality::Local || is_box(loc))
+            }
+        })
+    }
+
+    /// The engine's value of `loc` before the run, read after the run
+    /// defined it ([`State::defined_unread`]): its net effect compares
+    /// with it.
+    pub(crate) fn note_engine(&mut self, loc: Loc, x: Option<ValueId>) {
+        if let Some(s) = self.slot_ref(loc)
+            && s.meta != 0
+        {
+            let mi = s.meta as usize - 1;
+            if self.metas[mi].eng.is_none() {
+                self.metas[mi].eng = Some(x);
+            }
+        }
     }
 
     /// Whether any of `locs` has a definition at the base level.
@@ -813,11 +876,16 @@ impl State {
             .collect();
         let defined = self.defined.iter().map(|&l| ploc(self, l)).collect();
         let base_defs = self.base_defs.iter().map(|&l| ploc(self, l)).collect();
+        let kinds = self
+            .kinds
+            .as_ref()
+            .map(|k| k.iter().map(|(&l, &a)| (ploc(self, l), a)).collect());
         PState {
             slots,
             save,
             defined,
             base_defs,
+            kinds,
             stamp: self.stamp,
             next_gid: self.next_gid,
         }
@@ -878,6 +946,14 @@ impl State {
             let l = loc(&mut st, d);
             st.base_defs.push(l);
         }
+        if let Some(ks) = p.kinds {
+            let mut m = FxHashMap::default();
+            for (d, a) in ks {
+                let l = loc(&mut st, d);
+                m.insert(l, a);
+            }
+            st.kinds = Some(m);
+        }
         st.stamp = p.stamp;
         st.next_gid = p.next_gid;
         st.cat_gen = new_cat_gen();
@@ -929,6 +1005,19 @@ pub(crate) struct PState {
     save: Vec<PSaved>,
     defined: Vec<PLoc>,
     base_defs: Vec<PLoc>,
+    kinds: Option<Vec<(PLoc, bool)>>,
     stamp: u64,
     next_gid: u32,
+}
+
+/// Whether `x` at `loc` is a box register's binding at level one
+/// (`[level, box]`, `crate::build` `set_box_reg`).
+fn level_one_box(v: &Values, loc: Loc, x: ValueId) -> bool {
+    is_box(loc) && crate::val::int_at(v, x, 0) == 0
+}
+
+/// Whether `loc` is one of the box registers 0..255.
+fn is_box(loc: Loc) -> bool {
+    let b = Loc::try_from(crate::fields::BOX0).unwrap_or(Loc::MAX - 256);
+    (b..b + 256).contains(&loc)
 }
