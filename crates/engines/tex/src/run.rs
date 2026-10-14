@@ -139,8 +139,10 @@ impl FileRest {
         while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
             end -= 1;
         }
+        // (the text holds one character per byte of the file, §31: a byte
+        // past 127 is one character, never its UTF-8 encoding's bytes)
         let mut buf = Vec::with_capacity(end + 1);
-        buf.extend(bytes[..end].iter().map(|&b| u32::from(b)));
+        buf.extend(line[..end].chars().map(u32::from));
         let chars = line.chars().count();
         self.pos += chars;
         self.off += n;
