@@ -423,8 +423,8 @@ impl Run<'_, '_> {
                 self.aopen
             ));
         }
-        if self.pg.is_some() || self.claim_rest {
-            return refuse("paging inline, or the rest claimed");
+        if self.claim_rest {
+            return refuse("the rest claimed");
         }
         let Some(at) = self.pull_at[self.pulled - 1] else {
             return refuse("the sibling's text joined a continuation line");
@@ -1299,7 +1299,6 @@ impl Run<'_, '_> {
     /// else, or the input in a way not recorded.
     pub(crate) fn rewind(&mut self) -> bool {
         if !self.mark.active
-            || self.pg.is_some()
             || self.state_sig() != self.mark.sig
             || Some(self.effect) != self.mark.effect
         {

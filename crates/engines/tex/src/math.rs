@@ -1125,7 +1125,7 @@ impl Run<'_, '_> {
             self.back_cur();
         }
         // §1200: `if nest_ptr=1 then build_page`
-        self.build_page_par()?;
+        self.finish_candidate()?;
         Ok(())
     }
 

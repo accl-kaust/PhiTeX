@@ -78,9 +78,7 @@ pub(crate) fn run_node_parking(
         None => Run::new(cx, o),
     };
     let t_body = std::time::Instant::now();
-    // (a flush point the node's text did not read after: read at its
-    // end, so the nodes after it read the counts the routine left)
-    let res = body(&mut r).and_then(|()| r.flush_read());
+    let res = body(&mut r);
     let t_body = t_body.elapsed();
     // (a long run, the format's: its commands' time, then its finish)
     let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
@@ -171,9 +169,6 @@ pub(crate) fn run_node_parking(
 fn gone_out(r: &Run<'_, '_>, stopped: bool) -> bool {
     if stopped {
         return false;
-    }
-    if r.fire_at.is_some() {
-        r.ops.gone.note(r.cx.node(), r.saw_gone);
     }
     r.saw_gone
 }
@@ -467,7 +462,10 @@ impl Operation for Dvi {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
-        crate::page::dvi(cx, &o)
+        {
+            let _ = (cx, &o);
+            todo!("no DVI/PDF in the skeleton: the writer assembles the finishers' pages")
+        }
     }
 }
 
@@ -551,7 +549,7 @@ impl Operation for Files {
                     if *val == ValueId::UNIT {
                         continue;
                     }
-                    crate::page::lb_pub(cx, w, *val);
+                    cx.publish(w, *val);
                     if trace {
                         let xs = list_of(v, *val);
                         let shown = xs
@@ -576,7 +574,7 @@ impl Operation for Files {
                     t.len()
                 );
             }
-            crate::page::lb_pub(cx, k, v.list(keys));
+            cx.publish(k, v.list(keys));
         }
         for name in names {
             let f = v.field(&format!("wfile:{name}"));
@@ -599,7 +597,7 @@ impl Operation for Files {
                     .map_or("", |(_, t)| t.as_str());
                 eprintln!("aux-trace: publish wfile {name}: {} bytes:\n{t}", t.len());
             }
-            crate::page::lb_pub(cx, f, x);
+            cx.publish(f, x);
         }
         Ok(ValueId::UNIT)
     }

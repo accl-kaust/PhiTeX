@@ -1239,9 +1239,7 @@ impl Stats {
         self.max_ready = self.max_ready.max(r.max_ready);
         self.fuel_outs += r.fuel_outs;
         self.declarations_refuted += r.declarations_refuted;
-        self.page_steps +=
-            Report::by_op(&r.runs_by_op, "pagestep") + Report::by_op(&r.runs_by_op, "pagestep_any");
-        self.page_steps_any += Report::by_op(&r.runs_by_op, "pagestep_any");
+        self.page_steps += Report::by_op(&r.runs_by_op, "finish");
         self.gated += r.gated;
         self.top_waited = r.top_waited.iter().map(|&(n, w)| (n.raw(), w)).collect();
         for &(k, n) in &r.waits_by_kind {
@@ -1309,14 +1307,7 @@ impl Graph {
     /// The page-step runs that reached their finish since the last call,
     /// by page index ([`Stats::page_steps_completed`]).
     fn take_refuted(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .ops
-                .lblog
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
-        .refuted()
+        Vec::new()
     }
 
     fn take_steps_done(&self) -> Vec<u64> {
@@ -1354,14 +1345,8 @@ impl Graph {
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
-        let [pagestep, pagestep_any] = [false, true].map(|any| {
-            eng.register(Arc::new(crate::page::PageStep {
-                shared: shared.clone(),
-                any,
-            }))
-        });
-        let pageplan = eng.register(Arc::new(crate::page::PagePlan(shared.clone())));
-        let brk = eng.register(Arc::new(crate::page::Brk(shared.clone())));
+        let finish = eng.register(Arc::new(crate::pages::Finish));
+        let resume = eng.register(Arc::new(crate::pages::Resume));
         let dvi = eng.register(Arc::new(Dvi(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -1374,14 +1359,11 @@ impl Graph {
         let ops = Ops {
             exec,
             put,
-            pagestep,
-            pagestep_any,
-            pageplan,
-            brk,
+            finish,
+            resume,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
-            lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
@@ -1639,21 +1621,6 @@ impl Graph {
     /// Round one's guesses for the loop-backs: the last session's
     /// (`opts`), else from the text `document`.
     fn guesses(&mut self, opts: &Options, document: &str) {
-        // the last session's page-builder loop-backs, round one's guess
-        {
-            let mut rd = Rd(&opts.pagefx);
-            while let (Some(j), Some(t)) = (rd.u64(), rd.tree()) {
-                if usize::try_from(j).is_ok_and(|j| j < crate::page::MAX_PAGES) {
-                    let v = self.eng.values();
-                    let f = v.field(&format!("pagefx:{j}"));
-                    let x = import(v, &t);
-                    {
-                        decl_trace(&self.eng, f, x);
-                        self.eng.declare_loopback(f, x);
-                    }
-                }
-            }
-        }
         let aux = format!("{}.aux", opts.jobname);
         self.wkeys_guess.clone_from(&opts.wkeys);
         if !self.wkeys_guess.iter().any(|(n, _)| *n == aux) {
@@ -2908,9 +2875,8 @@ pub struct Build {
     /// The nodes of the text, with their keys.
     nodes: Vec<(u64, NodeId, Src)>,
     dvi: NodeId,
-    /// The first node after the text's (the page plan, which folds the
-    /// list the text's nodes make): new text nodes go before it, also
-    /// when the text has none left.
+    /// The first node after the text's (the writer): new text nodes go
+    /// before it, also when the text has none left.
     end: NodeId,
     prelude: Arc<Cached>,
     /// What the last build or edit ran.
@@ -3037,13 +3003,12 @@ impl Build {
         for n in g.inputs_read.clone() {
             g.supply(&opts.finder, &n);
         }
-        // the page builder's fold, after the text: one node choosing every
-        // page break, its children the pages
-        let end = g.eng.push(unit, g.ops.pageplan, Vec::new());
-        page_guesses(&mut g, &env);
-        chain_guesses(&mut g, &opts.pgst);
+        // (the pages: `crate::pages::settle` places the finishers between
+        // evaluations; nothing of them is pushed here)
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
+        // (new text pieces go before the writer)
+        let end = dvi;
         let files_op = g.files_op;
         let files = g.eng.push(unit, files_op, Vec::new());
         g.eng.add_root(files);
@@ -3188,10 +3153,6 @@ impl Build {
         if let Some(l) = &self.g.loads {
             l.merge(self.fresh_records());
         }
-        // the chain's last values become its round-one guesses: an edit
-        // whose rounds restart begins from them, not from the cold guess
-        let kept = self.export_pgst();
-        chain_guesses(&mut self.g, &kept);
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -3737,27 +3698,7 @@ impl Build {
     /// for a later session of the same document.
     #[must_use]
     pub fn export_pagefx(&self) -> Vec<u8> {
-        let v = self.g.eng.values();
-        let mut last: Vec<(u64, ValueId)> = Vec::new();
-        if let Some(s) = self.g.eng.acc_value(self.unit, v.field("pagefxs")) {
-            for e in v.seq_to_vec(s) {
-                let xs = list_of(v, e);
-                let (Some(&j), Some(&x)) = (xs.first(), xs.get(1)) else {
-                    continue;
-                };
-                let j = u64::try_from(crate::val::int_of(v, j)).unwrap_or(0);
-                match last.iter_mut().find(|(k, _)| *k == j) {
-                    Some(slot) => slot.1 = x,
-                    None => last.push((j, x)),
-                }
-            }
-        }
-        let mut out = Vec::new();
-        for (j, x) in last {
-            out.extend_from_slice(&j.to_le_bytes());
-            put_tree(&mut out, &export(v, x));
-        }
-        out
+        Vec::new()
     }
 
     /// The page chain's loop-backs as the last build's writer folded
@@ -3765,29 +3706,7 @@ impl Build {
     /// a later session of the same document.
     #[must_use]
     pub fn export_pgst(&self) -> Vec<u8> {
-        let v = self.g.eng.values();
-        let mut last: Vec<((u64, u64), ValueId)> = Vec::new();
-        if let Some(s) = self.g.eng.acc_value(self.unit, v.field("pgsts")) {
-            for e in v.seq_to_vec(s) {
-                let xs = list_of(v, e);
-                let (Some(&k), Some(&j), Some(&x)) = (xs.first(), xs.get(1), xs.get(2)) else {
-                    continue;
-                };
-                let n = |y| u64::try_from(crate::val::int_of(v, y)).unwrap_or(0);
-                let key = (n(k), n(j));
-                match last.iter_mut().find(|(q, _)| *q == key) {
-                    Some(slot) => slot.1 = x,
-                    None => last.push((key, x)),
-                }
-            }
-        }
-        let mut out = Vec::new();
-        for ((k, j), x) in last {
-            out.extend_from_slice(&k.to_le_bytes());
-            out.extend_from_slice(&j.to_le_bytes());
-            put_tree(&mut out, &export(v, x));
-        }
-        out
+        Vec::new()
     }
 
     /// Whether the output is a PDF file (`\pdfoutput` at the first
@@ -4246,7 +4165,7 @@ impl Build {
         let v = eng.values();
         let step = |n: phitex_defuse::NodeId| {
             eng.node_info(n)
-                .is_some_and(|i| i.op.starts_with("pagestep"))
+                .is_some_and(|i| i.op == "finish")
         };
         let mut out = Vec::new();
         for (n, c) in eng.critical_chain() {
@@ -4425,41 +4344,6 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     }
 }
 
-/// The last session's page-chain loop-backs ([`Build::export_pgst`]):
-/// `[kind, j, value]`, kind 0 `pgst:<j>`, 1 `pgdef:<j>`; declared after
-/// the cold guesses, which they replace.
-///
-/// A page past the last one given guesses the last `pgst` (the state a
-/// routine left settles: a first-page hook clears itself once).
-fn chain_guesses(g: &mut Graph, bytes: &[u8]) {
-    let mut rd = Rd(bytes);
-    let mut last: Option<(usize, ValueId)> = None;
-    while let (Some(k), Some(j), Some(t)) = (rd.u64(), rd.u64(), rd.tree()) {
-        let Ok(j) = usize::try_from(j) else { continue };
-        if j < crate::page::MAX_PAGES {
-            let v = g.eng.values();
-            let name = if k == 0 { "pgst" } else { "pgdef" };
-            let f = v.field(&format!("{name}:{j}"));
-            let x = import(v, &t);
-            {
-                decl_trace(&g.eng, f, x);
-                g.eng.declare_loopback(f, x);
-            }
-            if k == 0 && last.is_none_or(|(l, _)| j > l) {
-                last = Some((j, x));
-            }
-        }
-    }
-    if let Some((l, x)) = last {
-        for j in l + 1..crate::page::MAX_PAGES {
-            let f = g.eng.values().field(&format!("pgst:{j}"));
-            {
-                decl_trace(&g.eng, f, x);
-                g.eng.declare_loopback(f, x);
-            }
-        }
-    }
-}
 
 /// The graph's accumulators and loop-backs (their round-one values).
 fn declare_fields(eng: &mut Engine) {
@@ -4475,13 +4359,9 @@ fn declare_fields(eng: &mut Engine) {
         "ifviol",
         "streams",
         "wplan",
-        "flushplan",
         "fplan",
         "oplan",
         "fread",
-        "pagefxs",
-        "pgdeltas",
-        "pgsts",
         "tools",
         "pkgrecs",
         crate::pdfrelaxed::PIECES,
@@ -4500,90 +4380,12 @@ fn declare_fields(eng: &mut Engine) {
         decl_trace(eng, f, none);
         eng.declare_loopback(f, none);
     }
-    // what each page's output routine leaves for the next: a
-    // loop-back the page builder's fold reads from the previous round
-    // the state after the page each flush point opens, by flush point
-    // (`[node, k, value]`, the writer's fold): one field, declared here,
-    // so a flush point costs no declaration round
-    let f = eng.values().field(crate::page::FLUSHES);
-    {
-        decl_trace(eng, f, ValueId::UNIT);
-        eng.declare_loopback(f, ValueId::UNIT);
-    }
-    // `\count0..9` as the first page's routine reads them, when the
-    // text has a flush point (the writer's fold, `page::FinalState`)
-    let f = eng.values().field("pgread0");
-    {
-        decl_trace(eng, f, ValueId::UNIT);
-        eng.declare_loopback(f, ValueId::UNIT);
-    }
-    for j in 0..crate::page::MAX_PAGES {
-        let f = eng.values().field(&format!("pagefx:{j}"));
-        let none = eng.values().list(Vec::new());
-        {
-            decl_trace(eng, f, none);
-            eng.declare_loopback(f, none);
-        }
-        // what `\count0..9` are after page j's step (the build's
-        // guess in round one, `page_guesses`)
-        let f = eng.values().field(&format!("pgdef:{j}"));
-        {
-            decl_trace(eng, f, ValueId::UNIT);
-            eng.declare_loopback(f, ValueId::UNIT);
-        }
-        // what the routines up to page j left changed, besides
-        // `\count0..9` (the chain's cumulative delta, folded by the
-        // writer; guess: none)
-        let f = eng.values().field(&format!("pgst:{j}"));
-        {
-            decl_trace(eng, f, ValueId::UNIT);
-            eng.declare_loopback(f, ValueId::UNIT);
-        }
-        // whether page j's step shipped a page (guess: no)
-        let f = eng.values().field(&crate::etex::shipped_field(j));
-        let zero = eng.values().int(0);
-        {
-            decl_trace(eng, f, zero);
-            eng.declare_loopback(f, zero);
-        }
-    }
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));
     }
 }
 
-/// The cold guess of the page steps' loop-back `pgdef:<j>` (`\count0..9`
-/// after page j's step), declared as its round-one value before the
-/// first evaluation: `\count0` advanced by one per page (plain's and
-/// LaTeX's routines), the others as the format left them. A right guess
-/// costs nothing; a wrong one re-runs the steps after it.
-fn page_guesses(g: &mut Graph, env: &Env) {
-    let v = g.eng.values();
-    let int = |k: &str| {
-        env.iter()
-            .find(|(n, _)| n == k)
-            .map_or(0, |(_, t)| crate::val::int_of(v, import(v, t)))
-    };
-    let base: Vec<i64> = (0..10).map(|k| int(&format!("count:{k}"))).collect();
-    let mut decl = Vec::new();
-    for j in 0..crate::page::MAX_PAGES {
-        let d = i64::try_from(j).unwrap_or(0) + 1;
-        let mut cs: Vec<ValueId> = base.iter().map(|&c| v.int(c)).collect();
-        cs[0] = v.int(if base[0] >= 0 {
-            base[0] + d
-        } else {
-            base[0] - d
-        });
-        decl.push((v.field(&format!("pgdef:{j}")), v.list(cs)));
-    }
-    for (f, x) in decl {
-        {
-            decl_trace(&g.eng, f, x);
-            g.eng.declare_loopback(f, x);
-        }
-    }
-}
 
 /// The `lines` accumulator: the lines of documents' pieces begun, by
 /// file name, as `[[name, count], ...]` sorted by name

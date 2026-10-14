@@ -310,11 +310,11 @@ impl Run<'_, '_> {
                 if v {
                     self.normal_paragraph()?;
                     if md.m > 0 {
-                        self.build_page_outer()?;
+                        self.finish_candidate()?;
                     }
                 } else if h {
                     self.end_graf(&md)?;
-                    self.build_page_outer()?;
+                    self.finish_candidate()?;
                 }
             }
             cmd::UN_HBOX => {
@@ -377,10 +377,7 @@ impl Run<'_, '_> {
                 let node = crate::nodes::penalty_node(self.v, n);
                 self.append(md.lid, node);
                 if md.m == 1 {
-                    self.build_page_outer()?;
-                    if n <= -10000 && md.lid == 0 {
-                        self.flush_point()?;
-                    }
+                    self.finish_candidate()?;
                 }
             }
             cmd::REMOVE_ITEM => self.delete_last(&md)?,
@@ -1633,7 +1630,7 @@ impl Run<'_, '_> {
             self.file_end_read_back(n, &text)?;
         }
         let op = self.cx.op();
-        if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
+        if op == self.ops.finish {
             self.set(&format!("write:{n}"), ValueId::UNIT, true);
             return Ok(());
         }
@@ -1741,10 +1738,7 @@ impl Run<'_, '_> {
     /// (Exact mode only: in relaxed mode the fonts' names are free.)
     pub(crate) fn font_loaded(&mut self, f: i64) -> R<()> {
         let op = self.cx.op();
-        if op == self.ops.pagestep
-            || op == self.ops.pagestep_any
-            || self.pg.is_some()
-            || crate::pdfrelaxed::on(self)?
+        if op == self.ops.finish || crate::pdfrelaxed::on(self)?
         {
             return Ok(());
         }

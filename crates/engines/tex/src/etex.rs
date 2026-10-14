@@ -1206,7 +1206,7 @@ fn marks_before(r: &mut Run<'_, '_>) -> R<Option<ValueId>> {
 /// TeX's order as they are made).
 pub(crate) fn page_shipped_before(r: &mut Run<'_, '_>) -> R<bool> {
     let op = r.cx.op();
-    if op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
+    if op == r.ops.finish {
         return Ok(false);
     }
     if !node_loopbacks(r)? {
@@ -1262,9 +1262,7 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
     let v = r.v;
     let op = r.cx.op();
     let split = kind.starts_with("split");
-    // (a text paging inline, `pageinline.rs`, has its marks in force
-    // sequentially, as a page step does)
-    if split || op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
+    if split || op == r.ops.finish {
         return r.get(&mark_field(kind, n));
     }
     let Some(state) = marks_before(r)? else {
