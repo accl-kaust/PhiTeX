@@ -2,7 +2,7 @@
 //! minimal standalone document: `oracle/fixtures/corpus-repros/NAME.tex`,
 //! built by `phitex build --exact-pdf` and compared byte for byte with
 //! `NAME.pdf`, pdflatex's (pdfTeX 1.40.29 in the CI image, to its
-//! fixpoint, SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 TZ=UTC, as
+//! fixpoint, `SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 TZ=UTC`, as
 //! scripts/ci/common.py pins them). Each test is ignored with its cause and
 //! how many corpus documents it stops; un-ignore it with the fix.
 
