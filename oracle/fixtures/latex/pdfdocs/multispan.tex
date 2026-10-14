@@ -1,0 +1,15 @@
+\documentclass{article}
+\usepackage{amsmath}
+\begin{document}
+\noindent\vbox{\halign{#\tabskip3pt&#&#&#\cr aaa&bbb&ccc&ddd\cr e&\multispan3\hrulefill\cr
+f&\multispan2\hrulefill&g\cr}}
+
+\begin{tabular}{|c|c|c|c|}a&b&c&d\\ e&\multicolumn{3}{c|}{\hrulefill x\hrulefill}\\\end{tabular}
+
+\noindent$\begin{matrix} a&b&c&d\\
+e&\hdotsfor{3} \end{matrix}$
+\[\begin{pmatrix} D_1t&-a_{12}t_2&\dots&-a_{1n}t_n\\
+-a_{21}t_1&D_2t&\dots&-a_{2n}t_n\\
+\hdotsfor[2]{4}\\
+-a_{n1}t_1&-a_{n2}t_2&\dots&D_nt\end{pmatrix}\]
+\end{document}
