@@ -1387,7 +1387,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         })
         .unwrap_or_default();
     let mut owed = 0usize;
-    let mut write_owed = |st: &mut PdfState, upto: usize, owed: &mut usize| {
+    let write_owed = |st: &mut PdfState, upto: usize, owed: &mut usize| {
         while *owed < oplan.len().min(upto) {
             for &n in &oplan[*owed] {
                 // (the step logged the writer's error)

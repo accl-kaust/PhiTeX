@@ -1464,7 +1464,7 @@ impl Run<'_, '_> {
             .clone();
         let allowed = match ok {
             Some(f) => f(&name),
-            None => phitex_kpse::name_ok(b"p", name.as_bytes(), name.as_bytes(), |_| false),
+            None => out_name_ok_p(&name),
         };
         if !allowed {
             self.log("error", &format!("I can't write on file `{name}'."))?;
@@ -1606,4 +1606,27 @@ pub(crate) fn add_glue(q: &Glue, r: &Glue) -> Glue {
         g.shrink_order = r.shrink_order;
     }
     g
+}
+
+/// kpathsea's `kpse_out_name_ok` (`tex-file.c`, TeX Live 2026, not
+/// extended) as TeX Live runs it by default, `openout_any = p` with no
+/// output directory: no dot file (a dot at the start or after a `/`
+/// begins `./` or `../`), no absolute name, no `..` component. (The
+/// client's check, with its `openout_any` and output directories, is
+/// [`crate::Options::out_name_ok`]; `phitex_kpse::Kpse::out_name_ok` is
+/// the CLI's.)
+fn out_name_ok_p(name: &str) -> bool {
+    let b = name.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        if c != b'.' || i > 0 && b[i - 1] != b'/' {
+            continue;
+        }
+        let next = b.get(i + 1).copied();
+        let dot_slash = next == Some(b'/');
+        let dot_dot_slash = next == Some(b'.') && b.get(i + 2) == Some(&b'/');
+        if !dot_slash && !dot_dot_slash {
+            return false;
+        }
+    }
+    !(b.first() == Some(&b'/') || b.starts_with(b"../") || b.windows(4).any(|w| w == b"/../"))
 }

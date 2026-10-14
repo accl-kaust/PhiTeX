@@ -119,7 +119,7 @@ pub struct Options {
     /// Whether `\openout` may write a file under a name (pdfTeX asks
     /// kpathsea, §1374; a refused name ends a nonstop job); `None`:
     /// TeX Live's default, `openout_any = p` with no output directory
-    /// ([`phitex_kpse::name_ok`]).
+    /// (`control::out_name_ok_p`).
     pub out_name_ok: Option<OutNameOk>,
 }
 
@@ -3831,30 +3831,6 @@ fn page_guesses(g: &mut Graph, env: &Env) {
     }
 }
 
-#[cfg(test)]
-mod prelude_tests {
-    use super::*;
-
-    #[test]
-    fn another_layout_or_engine_is_refused() {
-        let c = Cached {
-            key: [3; 32],
-            text_key: 5,
-            reads: vec![("a.tex".to_owned(), 9)],
-            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
-            errors: Vec::new(),
-        };
-        let b = serialise(&c);
-        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
-        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
-        assert!(deserialise(&other).is_none());
-        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
-        assert!(deserialise(&other).is_none());
-        // the old layout, with no header
-        assert!(deserialise(&b[20..]).is_none());
-    }
-}
-
 /// The `lines` accumulator: the lines of documents' pieces begun, by
 /// file name, as `[[name, count], ...]` sorted by name
 /// ([`crate::run::Run::doc_lines`]).
@@ -3887,5 +3863,29 @@ impl phitex_defuse::Monoid for LinesMonoid {
                 .map(|(n, k)| v.list(vec![n, v.int(k)]))
                 .collect(),
         )
+    }
+}
+
+#[cfg(test)]
+mod prelude_tests {
+    use super::*;
+
+    #[test]
+    fn another_layout_or_engine_is_refused() {
+        let c = Cached {
+            key: [3; 32],
+            text_key: 5,
+            reads: vec![("a.tex".to_owned(), 9)],
+            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
+            errors: Vec::new(),
+        };
+        let b = serialise(&c);
+        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
+        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
+        assert!(deserialise(&other).is_none());
+        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
+        assert!(deserialise(&other).is_none());
+        // the old layout, with no header
+        assert!(deserialise(&b[20..]).is_none());
     }
 }

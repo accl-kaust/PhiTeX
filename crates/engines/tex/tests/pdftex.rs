@@ -412,26 +412,23 @@ fn openout_refused() {
         let opts = common::options("./t.tex", "t", "", &dir);
         let b = common::build(opts, None, &doc(open));
         let (pdf, log) = b.output();
-        match refused {
-            Some(name) => {
-                assert!(pdf.is_empty(), "{name}: a PDF file was written");
-                assert!(b.fatal(), "{name}: the job did not end");
-                for want in [
-                    format!("! I can't write on file `{name}'."),
-                    "*** (job aborted, file error in nonstop mode)".to_owned(),
-                    "no output PDF file produced".to_owned(),
-                ] {
-                    assert!(
-                        log.contains(&want),
-                        "{name}: no {want:?} in the log:\n{log}"
-                    );
-                }
-                assert!(b.files().iter().all(|(n, _)| n != name), "{name}: written");
+        if let Some(name) = refused {
+            assert!(pdf.is_empty(), "{name}: a PDF file was written");
+            assert!(b.fatal(), "{name}: the job did not end");
+            for want in [
+                format!("! I can't write on file `{name}'."),
+                "*** (job aborted, file error in nonstop mode)".to_owned(),
+                "no output PDF file produced".to_owned(),
+            ] {
+                assert!(
+                    log.contains(&want),
+                    "{name}: no {want:?} in the log:\n{log}"
+                );
             }
-            None => {
-                assert!(pdf.starts_with(b"%PDF"), "ok.txt: no PDF file\n{log}");
-                assert!(!b.fatal(), "ok.txt: the job ended\n{log}");
-            }
+            assert!(b.files().iter().all(|(n, _)| n != name), "{name}: written");
+        } else {
+            assert!(pdf.starts_with(b"%PDF"), "ok.txt: no PDF file\n{log}");
+            assert!(!b.fatal(), "ok.txt: the job ended\n{log}");
         }
     }
 }
