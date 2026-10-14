@@ -379,6 +379,27 @@ fn node_state(params: &PdfParams) -> PdfState {
 struct Imports {
     by_handle: HashMap<usize, usize>,
     local: HashMap<usize, usize>,
+    /// The transparency groups of the images shown, by handle, and
+    /// whether each is an included page's.
+    groups: BTreeMap<usize, bool>,
+}
+
+impl Imports {
+    /// Why the groups shown cannot be written apart: pdfTeX gives a
+    /// page the group of the first image it shows, and an included
+    /// page first shown after it takes that group as its own
+    /// (`out_image`, `write_epdf`), which depends on the pages before;
+    /// a form's is written under the group of the page that writes it.
+    fn group_fallback(&self, form: bool) -> Option<&'static str> {
+        let pdf = self.groups.values().any(|&p| p);
+        if form && pdf {
+            Some("a form showing an included PDF page with a transparency group")
+        } else if pdf && self.groups.len() > 1 {
+            Some("a page showing two images with different transparency groups")
+        } else {
+            None
+        }
+    }
 }
 
 impl Imports {
@@ -539,7 +560,14 @@ fn translate(
                         fallback.get_or_insert_with(|| {
                             "an included PDF page with a transparency group".to_owned()
                         });
+                    } else if x.group_ref > 0 && x.is_pdf() {
+                        // its page's group, the image's own object: the
+                        // group of the pages that show it (`out_image`)
+                        let g = usize::try_from(x.group_ref).unwrap_or(0);
+                        im.groups.insert(g, true);
+                        x.group_ref = i32::try_from(st.import_obj(g, im)).unwrap_or(0);
                     } else if x.group_ref > 0 {
+                        im.groups.insert(png_group_handle(), false);
                         // a PNG's: the document's one group object
                         x.group_ref = i32::try_from(st.png_group_here(im)).unwrap_or(0);
                     }
@@ -657,6 +685,9 @@ pub fn page(
         .into_iter()
         .map(|(h, w)| (h, translate(&mut st, w, env.pieces, &mut im, &mut fallback)))
         .collect();
+    if let Some(why) = im.group_fallback(false) {
+        fallback.get_or_insert_with(|| why.to_owned());
+    }
     st.ship_out_with(page, fonts, &mut |h, _| ws.get(&h).cloned())?;
     if st.total_pages % PAGES_TREE_KIDS_MAX == 1 {
         leaves.push(st.last_pages);
@@ -970,6 +1001,9 @@ pub fn xform(
         .into_iter()
         .map(|(h, w)| (h, translate(&mut st, w, env.pieces, &mut im, &mut fallback)))
         .collect();
+    if let Some(why) = im.group_fallback(true) {
+        fallback.get_or_insert_with(|| why.to_owned());
+    }
     let k = st.xform(attr, resources, b.clone());
     let made = st.aux.xforms.get(&k).cloned();
     st.objs[k].info = form_name(read_handle(key, 0));
@@ -997,6 +1031,14 @@ pub fn xform(
 
 /// `\pdfximage` made on its own: the image read and written now.
 ///
+/// An included page's transparency group is the image's own object
+/// (its second handle): pdfTeX numbers it on the first page that shows
+/// the image, which then has it as its `/Group`, and writes it with the
+/// image at that page's end (pdfTeX `out_image`, `write_epdf`); every
+/// later page that shows the image has it too. An `\immediate` image
+/// is written before any page shows it, under the group of the page
+/// before: exact mode.
+///
 /// # Errors
 /// What the writer stops at.
 pub fn ximage(
@@ -1004,26 +1046,39 @@ pub fn ximage(
     key: u64,
     spec: crate::ImageSpec,
     fonts: &dyn FontSource,
+    immediate: bool,
 ) -> Result<Piece, PdfError> {
     let mut st = node_state(params);
     let mut im = Imports::default();
     st.png_group_here(&mut im);
     let k = st.ximage(spec)?;
     st.objs[k].info = form_name(read_handle(key, 0));
+    let mut fixed = HashMap::from([(k, read_handle(key, 0))]);
+    let mut fallback = None;
+    let mut next = 1;
+    if let Some(x) = st.aux.ximages.get_mut(&k)
+        && x.group_ref < 0
+    {
+        if immediate {
+            fallback = Some("an immediate included PDF page with a transparency group".to_owned());
+        } else {
+            let gh = read_handle(key, next);
+            next += 1;
+            x.group_ref = i32::try_from(gh).unwrap_or(0);
+            let g = st.new_objnum_();
+            st.page_group_val = g;
+            fixed.insert(g, gh);
+        }
+    }
     let made = st.aux.ximages.get(&k).cloned();
     st.write_ximage(k, fonts)?;
-    let mut fallback = None;
-    if made.as_ref().is_some_and(|x| x.group_ref < 0) {
-        fallback = Some("an included PDF page with a transparency group".to_owned());
-    }
+    st.page_group_val = 0;
     let made = made.map(|x| (k, Made::Image(x)));
-    let mut next = 1;
     let mut other = |_: usize| -> Result<usize, PdfError> {
         let h = read_handle(key, next);
         next += 1;
         Ok(h)
     };
-    let fixed = HashMap::from([(k, read_handle(key, 0))]);
     piece(
         &st,
         format!("image {} (owner key {key:016x})", read_handle(key, 0)),

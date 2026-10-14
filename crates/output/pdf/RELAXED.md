@@ -117,13 +117,15 @@ A document the relaxed mode does not cover is built in exact mode
 | a form without `\immediate` when `\pdfpageheight` is 0 | pdfTeX writes it under the height of the first page that references it (its origin); the page is not known when the form is made | rare (LaTeX sets `\pdfpageheight`) | permanent |
 | `\pdfobj useobjnum` with a literal number | the number was not given by the mode, so it is not a handle | rare | permanent |
 | fonts of included PDF files replaced (`\pdfinclusioncopyfonts` 0) | the replacements are the document's fonts, merged across pieces | uncommon | permanent for now |
-| a transparency group of an included PDF page | the group is numbered by the page that first shows the image | uncommon | permanent for now |
+| an included PDF page with a transparency group: `\immediate`, in a form, or on a page with another image's group | pdfTeX writes the group under the page group in force when it writes the image, which the pages before decide | rare | permanent |
 | `\pdffontname` | its number names a resource of the page that shows the font, which each page names on its own | rare | permanent |
 | `\pdffontattr`, `\pdfincludechars`, `\pdfnobuiltintounicode`, `\pdffontobjnum` on a font no page shows | the finish writes only the fonts the pages show | rare | permanent for now |
 
 Brought in: PNG transparency groups (the document's one group object
 has its own handle; the finish writes it once when a piece refers to
-it); `\pdffontattr`, `\pdfincludechars`, `\pdfnobuiltintounicode`
+it); an included PDF page's transparency group (the image's second
+handle, written by the image's piece; each page that shows it has it
+as its `/Group`); `\pdffontattr`, `\pdfincludechars`, `\pdfnobuiltintounicode`
 (replayed into the finish from what TeX keeps) and `\pdffontobjnum`
 (the handle of the font's PDF font).
 

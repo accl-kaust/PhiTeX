@@ -454,6 +454,7 @@ pub(crate) fn ximage(
     r: &mut Run<'_, '_>,
     spec: phitex_pdf::ImageSpec,
     ps: &[i32],
+    immediate: bool,
 ) -> R<Option<(usize, phitex_pdf::XImageInfo)>> {
     let key = next_key(r);
     let mut p = params(r)?;
@@ -467,13 +468,13 @@ pub(crate) fn ximage(
     // asks for, read now
     let mut fonts = Fonts::default();
     fonts.ps = crate::pdfout::default_ps_map(r)?;
-    let _ = relaxed::ximage(&p, key, spec.clone(), &fonts);
+    let _ = relaxed::ximage(&p, key, spec.clone(), &fonts, immediate);
     for n in std::mem::take(&mut *fonts.missed.lock().unwrap_or_else(PoisonError::into_inner)) {
         if let Some(b) = crate::pdfout::file_bytes(r, &String::from_utf8_lossy(&n))? {
             fonts.files.insert(n, b);
         }
     }
-    match relaxed::ximage(&p, key, spec, &fonts) {
+    match relaxed::ximage(&p, key, spec, &fonts, immediate) {
         Ok(piece) => {
             let got = piece.handle().zip(piece.ximage_info());
             keep(r, false, piece);

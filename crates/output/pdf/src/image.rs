@@ -177,6 +177,13 @@ pub(crate) struct XImage {
 }
 
 impl XImage {
+    /// Whether the image is a page of an included PDF file.
+    pub(crate) fn is_pdf(&self) -> bool {
+        self.image
+            .as_ref()
+            .is_some_and(|i| matches!(i.kind, Kind::Pdf(_)))
+    }
+
     /// What TeX reads of the image.
     pub(crate) fn info(&self) -> XImageInfo {
         XImageInfo {

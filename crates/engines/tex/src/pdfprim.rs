@@ -2671,7 +2671,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<Option<(usize, phitex_pd
         inclusion_errorlevel: ps[1],
     };
     if crate::pdfrelaxed::on(r)? {
-        return crate::pdfrelaxed::ximage(r, spec, &ps);
+        return crate::pdfrelaxed::ximage(r, spec, &ps, x.immediate);
     }
     let immediate = x.immediate;
     let got = crate::pdfout::command(r, input, &[], |st, fs| {
