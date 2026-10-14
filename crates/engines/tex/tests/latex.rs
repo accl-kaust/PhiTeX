@@ -596,6 +596,11 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64, Vec<String>) {
         s.mispredictions,
         chain.len()
     );
+    if std::env::var_os("PHITEX_CHAIN").is_some() {
+        for l in b.critical_chain_lines() {
+            eprintln!("  chain {name}: {l}");
+        }
+    }
     for d in b.diagnostics() {
         eprintln!("{d:?}");
     }
