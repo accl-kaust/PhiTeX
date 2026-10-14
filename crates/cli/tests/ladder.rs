@@ -2,7 +2,7 @@
 //! documents of rising complexity, each built by `phitex build` (the
 //! CLI's own fixpoint) at 1 and at 8 threads, and its two edits
 //! (`edit-word/`, `edit-para/`) built as edits in one `phitex watch`
-//! session and as fresh cold builds. Every PDF is compared byte for byte
+//! session and as fresh cold builds. Every PDF (`--exact-pdf`) is compared byte for byte
 //! with the oracle's (`<variant>/oracle/`, from `scripts/bless-ladder.sh`:
 //! the installed pdflatex, bibtex, makeindex, biber); the files the job
 //! reads back (`.aux`, `.toc`, `.bbl`, `.ind`, ...) live in memory and are
@@ -146,6 +146,7 @@ fn cold(rung: &Path, name: &str, variant: &str, threads: usize, tag: &str) -> (C
         .args([
             "build",
             "--json",
+            "--exact-pdf",
             "-j",
             &threads.to_string(),
             &format!("{name}.tex"),
@@ -220,6 +221,7 @@ fn run(nn: &str) -> Vec<String> {
         .args([
             "watch",
             "--json",
+            "--exact-pdf",
             "--no-view",
             "-j",
             "8",
