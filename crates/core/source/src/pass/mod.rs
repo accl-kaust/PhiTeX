@@ -39,6 +39,7 @@ mod classify;
 mod defs;
 mod hints;
 mod lex;
+mod parlists;
 mod report;
 mod table;
 #[cfg(test)]
@@ -52,6 +53,7 @@ pub use hints::{
     ScopeHint, ScopeKind,
 };
 pub use lex::{Hazard, TokKind, Token};
+pub use parlists::{Op as ParOp, ParMachine, ParState, Ran as ParRan};
 pub use report::Stats;
 
 /// How far a piece of structure is known from the text.

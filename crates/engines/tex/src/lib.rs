@@ -51,6 +51,7 @@ mod pdfrelaxed;
 mod planinc;
 mod prims;
 mod print;
+mod rerun;
 mod run;
 mod runstate;
 mod scan;
