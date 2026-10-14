@@ -657,6 +657,23 @@ pub(crate) struct EnvState {
     pub absent: FxHashSet<Field>,
     /// Fields the provider did not know, this evaluation.
     pub unknown: FxHashSet<Field>,
+    /// The provider's answers (`None`: absent), kept apart from what the
+    /// client sets so that setting the environment again keeps them.
+    pub provided: FxHashMap<Field, Option<ValueId>>,
+}
+
+impl EnvState {
+    /// What a read of `f` finds: `Some(answer)`, or `None` unknown.
+    #[allow(clippy::option_option)]
+    pub(crate) fn get(&self, f: Field) -> Option<Option<ValueId>> {
+        if let Some(&x) = self.known.get(&f) {
+            return Some(Some(x));
+        }
+        if self.absent.contains(&f) {
+            return Some(None);
+        }
+        self.provided.get(&f).copied()
+    }
 }
 
 /// An environment provider.

@@ -353,7 +353,7 @@ impl Shared {
         if let Some(&x) = rlock(&un.env).get(&f) {
             return Some(x);
         }
-        rlock(&self.env).known.get(&f).copied()
+        rlock(&self.env).get(f).flatten()
     }
 
     /// The nearest earlier definition of `f` in scope at `at`.
@@ -946,11 +946,8 @@ impl Shared {
     pub(crate) fn q_env(&self, f: Field) -> Option<Option<ValueId>> {
         {
             let e = rlock(&self.env);
-            if let Some(&x) = e.known.get(&f) {
-                return Some(Some(x));
-            }
-            if e.absent.contains(&f) {
-                return Some(None);
+            if let Some(a) = e.get(f) {
+                return Some(a);
             }
             if e.unknown.contains(&f) {
                 return None;
@@ -961,15 +958,7 @@ impl Shared {
             super::wlock(&self.env).unknown.insert(f);
             return None;
         };
-        let mut e = super::wlock(&self.env);
-        match got {
-            Some(x) => {
-                e.known.insert(f, x);
-            }
-            None => {
-                e.absent.insert(f);
-            }
-        }
+        super::wlock(&self.env).provided.insert(f, got);
         self.c.env_provided.fetch_add(1, Ordering::Relaxed);
         Some(got)
     }

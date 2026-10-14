@@ -496,6 +496,9 @@ impl Shared {
     fn run_node(&self, s: Slot) {
         let r = self.rec(s);
         let ep = self.epoch.load(Ordering::Relaxed);
+        // A run this evaluation counts in its report however the node came
+        // to run (an edit, a wake, a node new since the last report).
+        self.snapshot(s);
         let runs = {
             let mut d = r.data();
             if d.run_epoch != ep {
