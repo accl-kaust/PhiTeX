@@ -106,10 +106,12 @@ pub(crate) fn run_node_parking(
         if passes > 3 {
             r.engine_diag(&format!("page fold: pass {passes} of this run"));
         }
+        let first_pulled = r.first_pulled.unwrap_or(r.pulled);
         let cx = r.cx;
         cx.restart();
         r = Run::new(cx, o.clone());
         r.stop_at = stop_at;
+        r.first_pulled = Some(first_pulled);
         res = body(&mut r);
     }
     let t_body = t_body.elapsed();
