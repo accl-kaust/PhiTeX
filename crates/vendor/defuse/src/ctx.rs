@@ -300,19 +300,24 @@ impl<'a> Ctx<'a> {
         }
         let tn = e.n(t);
         if self.spec
-            && !tn.has_ran()
             && tn.in_work()
             && let AssumeKind::Def(f) | AssumeKind::Proj(f, _) = kind
             && let Some(p) = e.statics(tn.op, tn.args).predicted(f)
         {
-            // Predicted by the text: run on it; the node's run confirms
-            // or refutes it like any guess.
+            // Predicted by the text (ahead of its previous run's value):
+            // run on it; the node's run confirms or refutes it like any
+            // guess.
             self.read_predicted = true;
             self.assumptions.push((t, kind, assumed(e, kind, Some(p))));
             return Ok(Some(p));
         }
         if self.spec && tn.has_ran() {
             if tn.in_work() {
+                // Its previous run's definition, as the prediction of the
+                // run to come.
+                if matches!(kind, AssumeKind::Def(_) | AssumeKind::Proj(..)) {
+                    self.read_predicted = true;
+                }
                 self.assumptions.push((t, kind, assumed(e, kind, val)));
             } else {
                 self.read_unsettled = true;
