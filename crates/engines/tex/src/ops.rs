@@ -262,6 +262,15 @@ impl Operation for Exec {
             // until it is closed (`Run::run_all`)
             r.run_all()?;
             crate::hints::debug_defs(r, &hint);
+            // (a text whose hint bounds little: at its end the run knows
+            // what it defines, and narrows its set to it, so that readers
+            // of the rest bind past it, `Ctx::narrow`)
+            if crate::hints::is_wide(&hint) && std::env::var_os("PHITEX_NO_NARROW").is_none() {
+                let mut fs = r.published_fields();
+                fs.sort_unstable_by_key(|f| f.0.raw());
+                fs.dedup();
+                r.cx.narrow(phitex_defuse::MayDefine::Names(fs));
+            }
             // (a hint whose regime the run found violated bounds nothing:
             // its definitions are not checked against it)
             // (a run that claimed siblings ran their texts too: it is
