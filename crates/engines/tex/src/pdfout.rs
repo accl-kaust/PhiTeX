@@ -131,7 +131,24 @@ pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29
 /// A font map by TFM name.
 type Map = BTreeMap<Vec<u8>, MapEntry>;
 
-type MapCache = Mutex<FxHashMap<u64, Arc<Map>>>;
+/// A pure function's memo by a value's id, computed once: a key's
+/// first caller computes it, concurrent callers of the same key wait for
+/// that result instead of computing it again (every page step asks for
+/// `pdftex.map` at once in a cold build).
+type Once<V> = Mutex<FxHashMap<u64, Arc<OnceLock<V>>>>;
+
+/// The memo's value for `key`, `f` run only by the key's first caller.
+fn once<V: Clone>(m: &Once<V>, key: u64, f: impl FnOnce() -> V) -> V {
+    let cell = m
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(key)
+        .or_default()
+        .clone();
+    cell.get_or_init(f).clone()
+}
+
+type MapCache = Once<Arc<Map>>;
 
 /// Parsed map files: a pure function's memo by the file's value.
 fn maps() -> &'static MapCache {
@@ -233,7 +250,7 @@ impl Fonts {
 /// `pdftex.map`'s `ps_tree`.
 type PsMap = BTreeMap<(Vec<u8>, i32, i32), MapEntry>;
 
-type PsCache = Mutex<FxHashMap<u64, Arc<PsMap>>>;
+type PsCache = Once<Arc<PsMap>>;
 
 fn ps_maps() -> &'static PsCache {
     static C: OnceLock<PsCache> = OnceLock::new();
@@ -249,20 +266,9 @@ pub(crate) fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
     let Some(&m) = list_of(v, x).get(1) else {
         return Ok(None);
     };
-    let key = m.raw();
-    if let Some(c) = ps_maps()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return Ok(Some(c.clone()));
-    }
-    let parsed = Arc::new(parse_map_ps(&bytes_of(&str_of(v, m))));
-    ps_maps()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, parsed.clone());
-    Ok(Some(parsed))
+    Ok(Some(once(ps_maps(), m.raw(), || {
+        Arc::new(parse_map_ps(&bytes_of(&str_of(v, m))))
+    })))
 }
 
 impl FontSource for Fonts {
@@ -429,26 +435,14 @@ pub(crate) fn vf_for(r: &mut Run<'_, '_>, b: &BoxNode) -> R<()> {
 
 /// A file's bytes, `None` if absent.
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
-    type Memo = Mutex<FxHashMap<u64, Arc<[u8]>>>;
-    static M: OnceLock<Memo> = OnceLock::new();
+    static M: OnceLock<Once<Arc<[u8]>>> = OnceLock::new();
     let v = r.v;
     Ok(r.file(name)?.and_then(|x| {
         let &t = list_of(v, x).get(1)?;
         // (a pure function's memo by the text's value: every page step
         // asks for its fonts' files)
         let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-        if let Some(b) = m
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&t.raw())
-        {
-            return Some(b.clone());
-        }
-        let b: Arc<[u8]> = Arc::from(bytes_of(&str_of(v, t)));
-        m.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(t.raw(), b.clone());
-        Some(b)
+        Some(once(m, t.raw(), || Arc::from(bytes_of(&str_of(v, t)))))
     }))
 }
 
@@ -461,20 +455,9 @@ fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
     let Some(&m) = list_of(v, x).get(1) else {
         return Ok(None);
     };
-    let key = m.raw();
-    if let Some(c) = maps()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return Ok(Some(c.clone()));
-    }
-    let parsed = Arc::new(parse_map(&bytes_of(&str_of(v, m))));
-    maps()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, parsed.clone());
-    Ok(Some(parsed))
+    Ok(Some(once(maps(), m.raw(), || {
+        Arc::new(parse_map(&bytes_of(&str_of(v, m))))
+    })))
 }
 
 /// The fonts `ids` as the writer asks for them, with the files of the
@@ -604,12 +587,29 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
 /// one.
 fn before(r: &mut Run<'_, '_>) -> R<(u64, Option<Arc<Fold>>)> {
     let k0 = u64::from_ne_bytes(r.cint(crate::fields::cell::PDF_STATE)?.to_ne_bytes());
+    if let Some((k, a)) = &r.pdf_fold
+        && *k == k0
+    {
+        return Ok((k0, Some(a.clone())));
+    }
     let a = states()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&k0)
         .cloned();
     Ok((k0, a))
+}
+
+/// The writer's state a run's last step made, where other nodes find
+/// it: the run ends (finishes or parks) with `pdf:state` naming it.
+pub(crate) fn publish(fold: Option<(u64, Arc<Fold>)>) {
+    if let Some((k, a)) = fold {
+        states()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(k)
+            .or_insert(a);
+    }
 }
 
 /// The forms' part of the fold's state where this node is.
@@ -639,9 +639,22 @@ pub(crate) fn step_forms<T>(
     // the inputs were read where they were made; the key is the state
     let _ = input;
     let v = r.v;
-    let (_, before) = before(r)?;
+    let (k0, before) = before(r)?;
+    // (the state this run's previous step left is the run's own: taken,
+    // not copied, when nothing else holds it)
+    let before = before.map(|a| {
+        if r.pdf_fold.as_ref().is_some_and(|(k, _)| *k == k0) {
+            r.pdf_fold = None;
+        }
+        Arc::try_unwrap(a).unwrap_or_else(|a| Fold {
+            st: a.st.clone(),
+            bytes: a.bytes.clone(),
+            forms: a.forms.clone(),
+            bytes_hash: a.bytes_hash,
+        })
+    });
     let (mut st, mut bytes, mut forms, bytes_hash) = if let Some(a) = before {
-        (a.st.clone(), a.bytes.clone(), a.forms.clone(), a.bytes_hash)
+        (a.st, a.bytes, a.forms, a.bytes_hash)
     } else {
         let date = r
             .get_loc(crate::fields::cell::PDFDATE)?
@@ -690,18 +703,19 @@ pub(crate) fn step_forms<T>(
     }
     let fh = phitex_defuse::hash_bytes(0, format!("{:?}", (&forms.whats, &forms.fonts)).as_bytes());
     let k1 = phitex_defuse::hash_words(st.digest(), &[bytes_hash, fh]).max(1);
-    states()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(k1)
-        .or_insert_with(|| {
-            Arc::new(Fold {
-                st,
-                bytes,
-                forms,
-                bytes_hash,
-            })
-        });
+    // (kept in the run: only the state the run ends with can be read
+    // elsewhere, [`publish`]; a run of a thousand writer commands, a
+    // format's `\pdfglyphtounicode` table, keeps one state, not a
+    // thousand copies)
+    r.pdf_fold = Some((
+        k1,
+        Arc::new(Fold {
+            st,
+            bytes,
+            forms,
+            bytes_hash,
+        }),
+    ));
     r.set(
         "pdf:state",
         v.int(i64::from_ne_bytes(k1.to_ne_bytes())),

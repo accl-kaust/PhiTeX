@@ -16,7 +16,7 @@ use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Va
 
 use crate::fields::Par;
 use crate::runstate::{Loc, Native};
-use crate::val::{Mean, Tok, cmd, int_at, int_of, list_of, str_of};
+use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
 pub(crate) enum Halt {
@@ -207,11 +207,16 @@ pub(crate) struct Run<'c, 'a> {
     /// `PHITEX_HEARTBEAT=1` (read once a process).
     pub heartbeat_on: bool,
     pub pulled: usize,
+    /// The writer's state this run's last PDF step made, not yet where
+    /// other nodes find it ([`crate::pdfout::publish`], at the run's end).
+    pub pdf_fold: Option<(u64, std::sync::Arc<crate::pdfout::Fold>)>,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
+    /// Whether the node's hint was found violated when it started.
+    pub hint_void: bool,
     /// The semantic nest (§211): the lists and groups this run has open
     /// ([`crate::nest`]), level 0 being the engine's scope.
     pub nest: Vec<crate::nest::Level>,
@@ -286,29 +291,6 @@ pub(crate) struct Run<'c, 'a> {
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
     pub irreversible: u64,
-    /// While a job-written line is interpreted ([`Run::interpret_line`]):
-    /// the read-back fields reverted so far in that line, to the value
-    /// they had before this round's read-back (`wpre:<field>`), and
-    /// what each location's pre-value is (memoized for the run).
-    pub interp: Option<phitex_defuse::FxHashSet<Loc>>,
-    /// The state's stamp as the line's interpretation began: a field the
-    /// line defined since is not reverted (`\@writefile` sets
-    /// `\@temptokena` and writes `\the\@temptokena`).
-    pub interp_base: u64,
-    /// The streams a document node closed with `\immediate\closeout`:
-    /// closed for this run's later writes, and for the writer from the
-    /// close's position (a stream entry), never for the page steps: the
-    /// steps run on the state at the end of the text, and TeX's deferred
-    /// writes fire before a close that follows their page
-    /// (`\enddocument` closes the `.aux` after `\clearpage`).
-    pub closed: Vec<i32>,
-    /// Flush points met by this run so far ([`Run::flush_point`]).
-    pub flushes: usize,
-    /// The last flush point's loop-back, not read yet: read (declared
-    /// first, `flushdecl:`) on the run's next read of a count register,
-    /// so a flush nothing reads after (plain's `\bye`) costs no round.
-    pub flush_pending: Option<(Field, Field)>,
-    pub pre_memo: phitex_defuse::FxHashMap<Loc, Option<ValueId>>,
     /// Errors since the last paragraph ended (§76 `error_count`, reset by
     /// `end_graf`, §1096): at 100 the job stops (§82).
     pub error_count: u32,
@@ -344,8 +326,10 @@ impl<'c, 'a> Run<'c, 'a> {
             mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
+            pdf_fold: None,
             top: false,
             claim_rest: false,
+            hint_void: false,
             nest: Vec::new(),
             next_lid: 0,
             last_par: (0, 0),
@@ -380,12 +364,6 @@ impl<'c, 'a> Run<'c, 'a> {
             pdf_occ: 0,
             resumed: false,
             irreversible: 0,
-            interp: None,
-            interp_base: 0,
-            closed: Vec::new(),
-            flushes: 0,
-            flush_pending: None,
-            pre_memo: phitex_defuse::FxHashMap::default(),
             error_count: 0,
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
@@ -424,63 +402,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Location `loc` read: from the engine on its first read in the run.
     #[inline]
     pub(crate) fn load(&mut self, loc: Loc) -> R<()> {
-        if self.interp.is_some() {
-            self.revert_read_back(loc)?;
-        } else if self.flush_pending.is_some() && crate::fields::is_count_slot(loc) {
-            self.flush_read()?;
-        }
         if self.st.is_loaded(loc) {
             return Ok(());
         }
         self.load_slow(loc)
-    }
-
-    /// A job-written line is read as the next round's read-back reads
-    /// it: in the state before this round's read-back took effect. The
-    /// first read of a read-back field in the line gets the value the
-    /// read-back replaced (`wpre:<field>`, left by [`Run::read_back`]),
-    /// so a line whose effect depends on the field (biblatex's
-    /// `\xifinlist`-guarded `\listxadd`, `\ifcsundef`-guarded
-    /// `\csgdef`) defines it as the reading run will, not as this run,
-    /// which already holds the previous round's value, would.
-    #[inline(never)]
-    fn revert_read_back(&mut self, loc: Loc) -> R<()> {
-        let Some(done) = &mut self.interp else {
-            return Ok(());
-        };
-        if !done.insert(loc) {
-            return Ok(());
-        }
-        if self.st.defined_after(loc, self.interp_base) {
-            return Ok(());
-        }
-        let pre = if let Some(&p) = self.pre_memo.get(&loc) {
-            p
-        } else {
-            let f = self.loc_field(loc);
-            let name = crate::val::field_name(self.v, f);
-            let p = if self
-                .cx
-                .is_loopback(self.keyed(crate::fields::Fam::Wdef, &name))
-            {
-                self.get(&format!("wpre:{name}"))?
-            } else {
-                None
-            };
-            self.pre_memo.insert(loc, p);
-            p
-        };
-        if let Some(p) = pre {
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                let name = crate::val::field_name(self.v, self.loc_field(loc));
-                eprintln!("aux-trace: revert {name} for the line's read");
-            }
-            // (read in place of the value, not a definition of the line:
-            // only what the line defines on it is published)
-            self.st
-                .preload(loc, if p == ValueId::UNIT { None } else { Some(p) });
-        }
-        Ok(())
     }
 
     #[inline(never)]
@@ -533,20 +458,6 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE")
-            && self.interp.is_none()
-            && loc == self.reg_loc(0, 0)
-        {
-            let x = match &val {
-                Native::Raw(x) => self.v.render(*x),
-                _ => "?".to_owned(),
-            };
-            eprintln!(
-                "aux-trace: count0 := {x} global={global} by node {} op {:?}",
-                self.cx.node().raw(),
-                self.cx.op()
-            );
-        }
         let grp = self.innermost_group();
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
@@ -692,6 +603,25 @@ impl<'c, 'a> Run<'c, 'a> {
     /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
     /// writes and reads back is a loop-back field: the previous round's.
     pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
+        let r = self.file_inner(key);
+        if r.is_err() {
+            self.trace_stop(&format!("file {key}"));
+        }
+        r
+    }
+
+    /// (measure) `PHITEX_READS`: a stop that is not a field read's.
+    pub(crate) fn trace_stop(&self, what: &str) {
+        if crate::exec::env_flag!("PHITEX_READS") {
+            eprintln!(
+                "reads: node {} op {:?} {what} PARKED",
+                self.cx.node().raw(),
+                self.cx.op()
+            );
+        }
+    }
+
+    fn file_inner(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
         // a file the job writes: its in-memory value (`wfile:<key>`, a
         // loop-back the writer publishes), never the client's file
@@ -708,15 +638,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 None
             }
         } else if self.cx.is_loopback(w) {
-            let x = self.cx.use_field(w)?;
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                let t = x.and_then(|x| list_of(v, x).get(1).map(|&t| str_of(v, t)));
-                eprintln!(
-                    "aux-trace: read wfile {key}: {:?} bytes",
-                    t.map(|t| t.len())
-                );
-            }
-            x
+            self.cx.use_field(w)?
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
@@ -795,21 +717,6 @@ impl<'c, 'a> Run<'c, 'a> {
             let xs = list_of(v, x);
             if let [val, g] = xs.as_slice() {
                 let global = int_of(v, *g) != 0;
-                // the value the read-back replaces, for the lines
-                // written this round ([`Run::revert_read_back`]): once
-                // per run (LaTeX reads the `.aux` again at `\enddocument`)
-                let pre = format!("wpre:{name}");
-                if self.get(&pre)?.is_none() {
-                    let was = self.get(&name)?;
-                    if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                        eprintln!(
-                            "aux-trace: read-back {key} {name} = {} (was {:?})",
-                            crate::val::show_def(v, *val),
-                            was.map(|x| crate::val::show_def(v, x))
-                        );
-                    }
-                    self.set(&pre, was.unwrap_or(ValueId::UNIT), true);
-                }
                 self.set(&name, *val, global);
             }
         }
@@ -818,12 +725,9 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// A line written to a file whose read-back only defines, read as
     /// its read-back reads it (under `\makeatletter`), on scratch: the
-    /// definitions it makes, `[[field, value, global], ...]`. Nothing
-    /// else of it stays in this run (its input, lists, contributions and
-    /// definitions are restored), except what it writes to other files
-    /// (LaTeX's `\@writefile{toc}{...}`, which writes the `.toc` line as
-    /// `\enddocument` reads the `.aux` back): those `streams` entries
-    /// (and a document node's `T_WRITE_AT` markers for them) are kept.
+    /// definitions it makes, `[[field, value, global], ...]`; nothing of
+    /// it stays in this run (its input, lists, contributions and
+    /// definitions are restored).
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<ValueId> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
@@ -839,8 +743,6 @@ impl<'c, 'a> Run<'c, 'a> {
         self.no_pull = true;
         self.set("cat:64", v.int(11), false);
         let base = self.st.stamp();
-        self.interp = Some(phitex_defuse::FxHashSet::default());
-        self.interp_base = base;
         for l in line.split('\n') {
             let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
             while buf.last() == Some(&32) {
@@ -878,25 +780,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 ])
             })
             .collect();
-        self.interp = None;
         self.input = input;
         self.st = st;
-        let streams = v.field("streams");
-        let items = v.field("items");
-        let written: Vec<(Field, ValueId)> = self
-            .contribs
-            .drain(nc..)
-            .filter(|&(f, x)| {
-                f == streams
-                    || f == items
-                        && v.seq_to_vec(x).iter().all(|&e| {
-                            list_of(v, e)
-                                .get(1)
-                                .is_some_and(|&n| int_at(v, n, 0) == crate::nodes::T_WRITE_AT)
-                        })
-            })
-            .collect();
-        self.contribs.extend(written);
+        self.contribs.truncate(nc);
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
         self.conds = conds;
@@ -1012,9 +898,22 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// The fields the run defines at its base level.
+    /// The fields the run defines: those whose value at its end differs
+    /// from the one it loaded, or that it never loaded (a local
+    /// assignment that ends where it began defines nothing, as LaTeX's
+    /// paragraph hooks setting `\\everypar` and back).
     pub(crate) fn def_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self.st.defined_locs().collect();
+        let locs = self.defined_now();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
+    }
+
+    /// [`Run::def_fields`]' locations, as the state table publishes them.
+    fn defined_now(&self) -> Vec<Loc> {
+        self.st
+            .published(self.v)
+            .into_iter()
+            .map(|(l, _, _)| l)
+            .collect()
     }
 
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
@@ -1121,20 +1020,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The location of token `t`'s meaning, if it has one.
     #[inline]
     pub(crate) fn mean_loc(&mut self, t: Tok) -> Option<Loc> {
-        let l = if let Some(l) = crate::fields::mean_loc(t) {
-            Loc::try_from(l).ok()?
-        } else {
-            let f = self
-                .ops
-                .fields
-                .meaning_at(self.v, self.cx.values_epoch(), t)?;
-            self.loc_of(f)
-        };
-        if self.interp.is_some() {
-            // (a meaning read bypasses `load` once the slot is loaded)
-            let _ = self.revert_read_back(l);
+        if let Some(l) = crate::fields::mean_loc(t) {
+            return Loc::try_from(l).ok();
         }
-        Some(l)
+        let f = self
+            .ops
+            .fields
+            .meaning_at(self.v, self.cx.values_epoch(), t)?;
+        Some(self.loc_of(f))
     }
 
     #[inline]
@@ -1289,9 +1182,9 @@ impl<'c, 'a> Run<'c, 'a> {
     // ------------------------------------------------------------ the end
 
     /// What is left of the node's own and claimed text, and the tokens a
-    /// command put back or an expansion produced, as child nodes: one per
-    /// token (a run of characters is one node), and the text not yet read
-    /// as one node per segment.
+    /// command put back or an expansion produced, as child nodes: the
+    /// token levels between two texts as one node, and the text not yet
+    /// read as one node per segment.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
         // a run reads everything of its own (expansion tokens run inline,
@@ -1312,18 +1205,11 @@ impl<'c, 'a> Run<'c, 'a> {
             let l = v.list(toks);
             vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(kind)]
         };
-        let toks_left = |toks: &[Tok], out: &mut Vec<Vec<ValueId>>, run: &mut Vec<ValueId>| {
-            for tok in toks {
-                let ch = matches!(tok.cat(), Some(10..=12));
-                if ch {
-                    run.push(crate::val::tok_id(v, epoch, *tok));
-                    continue;
-                }
-                if !run.is_empty() {
-                    out.push(node(std::mem::take(run)));
-                }
-                out.push(node(vec![crate::val::tok_id(v, epoch, *tok)]));
-            }
+        // (the token levels left, in reading order, are one node: TeX
+        // reads them one after the other, and a brace or a group they
+        // open and close stays inside one run, waiting on no scope)
+        let toks_left = |toks: &[Tok], _: &mut Vec<Vec<ValueId>>, run: &mut Vec<ValueId>| {
+            run.extend(toks.iter().map(|&tok| crate::val::tok_id(v, epoch, tok)));
         };
         let line_left = |s: &Line, out: &mut Vec<Vec<ValueId>>| {
             let end_due = s.ends && s.endch < -1;
@@ -1452,7 +1338,11 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// The scope kind the node runs in: the engine's.
     pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
-        Ok(self.cx.scope_kind()?)
+        let r = self.cx.scope_kind();
+        if r.is_err() {
+            self.trace_stop("scope kind");
+        }
+        Ok(r?)
     }
 
     /// Runs the node's input to its end (§1030's loop): every command of
@@ -1475,10 +1365,22 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         loop {
             while self.has_input() {
+                if self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT) {
+                    self.input.compact();
+                }
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
                 if self.claim_rest || self.closed_scope() {
+                    return Ok(());
+                }
+                // (one scope per node, `Effect::Scope` carrying one kind:
+                // a region in vertical mode inside one group of its own
+                // that is about to open another leaves the first to the
+                // engine here, and the rest of its input follows inside)
+                if self.can_leave_scope() && self.nest[0].mode.abs() == 1 && self.next_opens_group()
+                {
+                    self.leave_scope()?;
                     return Ok(());
                 }
             }
@@ -1488,17 +1390,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // leaves it to the engine as the scope the following regions
             // run in (`Run::leave_scope`); more than one, or a text that
             // said it opens no scope, reads on
-            if self.doc
-                && self.conds.is_empty()
-                && self.effect == Effect::None
-                && self.nest.len() == 1
-                && !self.nest[0].owns
-                && matches!(
-                    self.nest[0].group,
-                    crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
-                )
-                && !crate::hints::effect_none(self.v, &self.cx.args())
-            {
+            if self.can_leave_scope() {
                 self.leave_scope()?;
                 return Ok(());
             }
@@ -1526,6 +1418,101 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// Whether the run is a document region with exactly one group of
+    /// its own open (sharing the list below it), nothing else open, no
+    /// scope effect yet, and a text that does not say it opens none: the
+    /// group can be left to the engine as a scope (`Run::leave_scope`).
+    fn can_leave_scope(&self) -> bool {
+        self.doc
+            && self.conds.is_empty()
+            && self.effect == Effect::None
+            && self.nest.len() == 1
+            && !self.nest[0].owns
+            && matches!(
+                self.nest[0].group,
+                crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
+            )
+            && !crate::hints::effect_none(self.v, &self.cx.args())
+            && self.text_opens_group()
+    }
+
+    /// Whether the node's own text opens a group it does not close (an
+    /// unmatched `\\begin{...}`, `\\begingroup` or `\\bgroup`; a brace
+    /// of the text is never split between slices, `hints::slices_of`):
+    /// the group its run leaves open is the text's, not one a command
+    /// left open while it still reads on (a loading command's, a
+    /// macro's).
+    fn text_opens_group(&self) -> bool {
+        let text: String = decode_segs(self.v, &self.cx.args())
+            .iter()
+            .filter_map(|f| match f {
+                Seg::Line(s) => Some(
+                    s.buf
+                        .iter()
+                        .map(|&c| char::from_u32(c).unwrap_or('?'))
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let n = |p: &str| i64::try_from(text.matches(p).count()).unwrap_or(0);
+        (n("\\begin{") - n("\\end{"))
+            + (n("\\begingroup") - n("\\endgroup"))
+            + (n("\\bgroup") - n("\\egroup"))
+            > 0
+    }
+
+    /// Whether the text the run reads next begins (after blanks) with a
+    /// command that opens a group: `\\begin`, `\\begingroup`,
+    /// `\\bgroup` (the document's text only).
+    fn next_opens_group(&self) -> bool {
+        // (the first input with something left: a line of the text, or
+        // anything else, which is no group of the text)
+        let mut line = None;
+        for l in self.input.levels.iter().rev() {
+            let more = match l.kind {
+                crate::input::kind::TOKS => l.a < l.b,
+                crate::input::kind::LINE => {
+                    let x = self.input.line(*l);
+                    if x.has_more() {
+                        line = Some(x);
+                    }
+                    x.has_more()
+                }
+                _ => self.input.file(*l).has_lines(),
+            };
+            if more {
+                break;
+            }
+        }
+        if line.is_none()
+            && self.input.levels.is_empty()
+            && let Some(Seg::Line(x)) = self.input.text_rest().iter().find(|s| match s {
+                Seg::Toks(t) => !t.is_empty(),
+                Seg::Line(l) => l.has_more(),
+                Seg::File(f) => f.has_lines(),
+            })
+        {
+            line = Some(x);
+        }
+        let Some(s) = line else {
+            return false;
+        };
+        let rest = &s.buf[s.loc.min(s.buf.len())..];
+        let k = rest
+            .iter()
+            .position(|&c| !matches!(c, 32 | 9 | 10 | 13))
+            .unwrap_or(rest.len());
+        let word: String = rest[k..]
+            .iter()
+            .take(12)
+            .map(|&c| char::from_u32(c).unwrap_or('?'))
+            .collect();
+        ["\\begingroup", "\\bgroup", "\\begin{"]
+            .iter()
+            .any(|p| word.starts_with(p))
+    }
+
     /// Whether a document run closed the engine scope it ran in, with
     /// nothing of its own open but conditionals: it ends after that
     /// command (`Effect::Close`, its reads and definitions inside the
@@ -1545,6 +1532,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        crate::pdfout::publish(self.pdf_fold.take());
         if self.lines_read != 0 {
             let n = self.v.int(i64::try_from(self.lines_read).unwrap_or(0));
             self.contribute("lines", n);
@@ -1600,7 +1588,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 );
             }
         }
-        let locs: Vec<Loc> = self.st.defined_locs().collect();
+        let locs: Vec<Loc> = self.defined_now();
         if !locs.is_empty() {
             let names: Vec<ValueId> = locs.into_iter().map(|l| self.loc_field(l).0).collect();
             let l = self.v.list(names);
@@ -1901,6 +1889,7 @@ pub(crate) struct Parked {
     pulled: usize,
     top: bool,
     claim_rest: bool,
+    hint_void: bool,
     nest: Vec<PLevel>,
     next_lid: i64,
     last_par: (i64, i64),
@@ -1931,6 +1920,7 @@ impl Run<'_, '_> {
         if !self.rewind() {
             return None;
         }
+        crate::pdfout::publish(self.pdf_fold.take());
         let mut segs = Vec::new();
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         for l in input.levels.iter().rev() {
@@ -1968,6 +1958,7 @@ impl Run<'_, '_> {
             pulled: self.pulled,
             top: self.top,
             claim_rest: self.claim_rest,
+            hint_void: self.hint_void,
             nest,
             next_lid: self.next_lid,
             last_par: self.last_par,
@@ -2028,6 +2019,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.pulled = p.pulled;
         r.top = p.top;
         r.claim_rest = p.claim_rest;
+        r.hint_void = p.hint_void;
         r.next_lid = p.next_lid;
         r.last_par = p.last_par;
         r.doc = p.doc;

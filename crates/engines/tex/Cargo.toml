@@ -27,5 +27,10 @@ profile = ["phitex-defuse/profile"]
 [dev-dependencies]
 phitex-kpse = { path = "../../tools/kpse" }
 
+# the profile measures run on the CLI's allocator (`phitex-cli`'s
+# `jemalloc`), not the system's
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tikv-jemallocator = "0.6"
+
 [lints]
 workspace = true
