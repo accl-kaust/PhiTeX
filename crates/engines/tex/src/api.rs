@@ -1830,14 +1830,18 @@ impl Graph {
             })
         };
         let t2 = t0.elapsed();
-        let mut out = Vec::with_capacity(nodes.len());
-        for ((k, n), args) in nodes.iter().zip(args) {
-            if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+            for (k, _) in &nodes {
                 eprintln!("node {k:?}");
             }
-            let id = self.eng.push(unit, self.ops.exec, args);
-            out.push((*k, id, Src::of(n)));
         }
+        // (one append of every node, in order)
+        let ids = self.eng.push_many(unit, self.ops.exec, args);
+        let out: Vec<(u64, NodeId, Src)> = nodes
+            .iter()
+            .zip(ids)
+            .map(|((k, n), id)| (*k, id, Src::of(n)))
+            .collect();
         let t3 = t0.elapsed();
         for &(_, id, _) in &out {
             declare_marks_before(&mut self.eng, id);
@@ -2139,11 +2143,15 @@ fn loaded_names(text: &str) -> Vec<String> {
 }
 
 /// Harvests the files `text` loads that the finder resolves, then
-/// theirs, to depth 8, each file once.
+/// theirs, to depth 8, each file once; when the prelude's reads are
+/// known (`read`), only those it read (a name in a body never run,
+/// `\\documentstyle`'s `latex209.def`, is not the format's).
+#[allow(clippy::too_many_arguments)]
 fn harvest_inputs(
     text: &str,
     depth: u32,
     finder: &Finder,
+    read: &[String],
     defs: &mut pass::Definitions,
     order: &mut Vec<u32>,
     seen: &mut phitex_defuse::FxHashSet<String>,
@@ -2153,6 +2161,13 @@ fn harvest_inputs(
         return;
     }
     for name in loaded_names(text) {
+        if !read.is_empty()
+            && !read
+                .iter()
+                .any(|n| *n == name || n.ends_with(&format!("/{name}")))
+        {
+            continue;
+        }
         if !seen.insert(name.clone()) {
             continue;
         }
@@ -2164,7 +2179,7 @@ fn harvest_inputs(
         *next_id += 1;
         let kind = crate::hints::kind_of(&t, pass::FileKind::from_path(&name));
         // (what it loads comes first: its definitions precede the rest)
-        harvest_inputs(&t, depth + 1, finder, defs, order, seen, next_id);
+        harvest_inputs(&t, depth + 1, finder, read, defs, order, seen, next_id);
         defs.harvest(&t, kind, id);
         order.push(id);
     }
@@ -2190,7 +2205,22 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         // reads plain.tex; depth 8, each file once)
         let mut seen = phitex_defuse::FxHashSet::default();
         let mut next_id = 1_000_000u32;
-        harvest_inputs(p, 0, finder, &mut defs, &mut order, &mut seen, &mut next_id);
+        let read: Vec<String> = c
+            .reads
+            .iter()
+            .filter(|(_, h)| *h != 0)
+            .map(|(n, _)| n.clone())
+            .collect();
+        harvest_inputs(
+            p,
+            0,
+            finder,
+            &read,
+            &mut defs,
+            &mut order,
+            &mut seen,
+            &mut next_id,
+        );
     }
     for (k, (name, h)) in c.reads.iter().enumerate() {
         if *h == 0 || !is_tex_text(name) {
