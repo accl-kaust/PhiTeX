@@ -945,6 +945,11 @@ pub struct Stats {
     pub restarted_by: Vec<(&'static str, u64)>,
     /// Environment reads the engine's provider answered in place.
     pub env_provided: u64,
+    /// Finished runs that read at a gone position (`FieldAt::Gone`, the
+    /// node published nothing), and the live nodes whose last run did
+    /// when the build settled (always 0: such a node's output is stale).
+    pub gone_runs: u64,
+    pub gone_at_settle: u64,
     /// The executor's threads.
     pub threads: usize,
     /// The evaluate calls' wall time, summed (zero without a clock).
@@ -1367,6 +1372,7 @@ impl Graph {
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
+            gone: Arc::new(crate::run::GoneLog::default()),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -1754,8 +1760,11 @@ impl Graph {
             };
             t_eval += t0.elapsed();
             t_mark = std::time::Instant::now();
+            let gone = self.ops.gone.take_runs();
+            stats.gone_runs += gone;
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
+                eprintln!("round gone: {gone} runs");
                 eprintln!("  waits by kind {:?}", r.waits_by_kind);
                 for &(n, w) in &r.top_waited {
                     eprintln!("  waited on {w}x: {}", describe(&self.eng, n));
@@ -1913,6 +1922,26 @@ impl Graph {
             self.eng.set_environment(env);
             self.eng.set_environment_absent(self.absent.clone());
         }
+        // no node's last run read at a gone position: its output would be
+        // stale (a run that did published nothing, and its node runs again
+        // when the plan re-binds it)
+        let stale = self.ops.gone.stale(|n| self.eng.is_live(n));
+        stats.gone_at_settle += u64::try_from(stale.len()).unwrap_or(0);
+        if !stale.is_empty() {
+            eprintln!(
+                "phitex: gone at settle: {} nodes' last run read at a gone position: {}",
+                stale.len(),
+                stale
+                    .iter()
+                    .map(|&n| describe(&self.eng, n))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        debug_assert!(
+            stale.is_empty(),
+            "a node's last run read at a gone position"
+        );
         let v = self.eng.values();
         if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
             stats.if_depth_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);

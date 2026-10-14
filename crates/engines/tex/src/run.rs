@@ -29,6 +29,10 @@ pub(crate) enum Halt {
     /// The input ended for good inside a command (§360: in batch mode,
     /// "*** (job aborted, no legal \end found)").
     Fatal,
+    /// A page step's fire position is gone (removed or re-made,
+    /// `FieldAt::Gone`): its inputs are stale, so the run publishes
+    /// nothing; the plan's re-run re-binds the step, which runs again.
+    Gone,
 }
 
 impl From<Stop> for Halt {
@@ -69,6 +73,54 @@ pub(crate) struct Ops {
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
+    /// The runs that read at a gone position ([`Halt::Gone`]).
+    pub gone: std::sync::Arc<GoneLog>,
+}
+
+/// The runs that read at a position that was gone (`FieldAt::Gone`):
+/// counted per round, and the nodes whose last finished run saw one
+/// (none may be left when the build settles: such a run published
+/// nothing).
+#[derive(Default)]
+pub(crate) struct GoneLog {
+    runs: std::sync::atomic::AtomicU64,
+    last: std::sync::Mutex<phitex_defuse::FxHashSet<phitex_defuse::NodeId>>,
+}
+
+impl GoneLog {
+    /// A finished run of `node` (not one that stopped): whether it saw a
+    /// gone position.
+    pub(crate) fn note(&self, node: phitex_defuse::NodeId, gone: bool) {
+        let mut l = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if gone {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            l.insert(node);
+        } else if !l.is_empty() {
+            l.remove(&node);
+        }
+    }
+
+    /// The runs that saw a gone position since the last call.
+    pub(crate) fn take_runs(&self) -> u64 {
+        self.runs.swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The live nodes whose last finished run saw a gone position (the
+    /// others forgotten).
+    pub(crate) fn stale(
+        &self,
+        live: impl Fn(phitex_defuse::NodeId) -> bool,
+    ) -> Vec<phitex_defuse::NodeId> {
+        let mut l = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        l.retain(|&n| live(n));
+        l.iter().copied().collect()
+    }
 }
 
 /// A package load's finished run: its node, when it began and ended,
@@ -447,6 +499,9 @@ pub(crate) struct Run<'c, 'a> {
     /// start): the text's fields are read as they stand after it, the
     /// state TeX's `fire_up` sees (§1012); `None` for every other run.
     pub(crate) fire_at: Option<FireAt>,
+    /// A read at the fire position found it gone ([`Halt::Gone`]): the
+    /// run publishes nothing, even if a caller swallowed the halt.
+    pub(crate) saw_gone: bool,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -545,6 +600,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mark: crate::getnext::Mark::default(),
             halt: None,
             fire_at: None,
+            saw_gone: false,
         }
     }
 
@@ -647,12 +703,17 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let r = match self.fire_at {
             Some(FireAt(at)) if self.at_fire(f) => {
-                // gone: the position was removed or re-made; the producer re-binds
-                // on its re-run and this run re-runs then
-                self.cx.use_field_at(f, at).map(|x| match x {
-                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                    phitex_defuse::FieldAt::Unset | phitex_defuse::FieldAt::Gone => None,
-                })
+                match self.cx.use_field_at(f, at) {
+                    Ok(phitex_defuse::FieldAt::Def(x, _)) => Ok(Some(x)),
+                    Ok(phitex_defuse::FieldAt::Unset) => Ok(None),
+                    // the fire position is the step's argument, which only
+                    // the plan's re-run can renew: nothing to re-read here
+                    Ok(phitex_defuse::FieldAt::Gone) => {
+                        self.saw_gone = true;
+                        return Err(Halt::Gone);
+                    }
+                    Err(s) => Err(s),
+                }
             }
             _ => self.cx.use_field(f),
         };
