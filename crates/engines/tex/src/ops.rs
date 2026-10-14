@@ -252,7 +252,10 @@ impl Operation for Exec {
                 // (a load at the unit's top level only: there a global
                 // definition back to the value in force is no effect, and
                 // the run publishes its net effect, `State::published`)
-                r.rec_load = load && r.scope_kind()?.is_none();
+                // (`PHITEX_PKG_NONET=1`: no load recorded, for comparison)
+                r.rec_load = load
+                    && !crate::exec::env_flag!("PHITEX_PKG_NONET")
+                    && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));

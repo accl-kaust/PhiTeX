@@ -1499,7 +1499,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     "pub: node {node} pulled {} claim_rest {} text {}",
                     self.pulled,
                     self.claim_rest,
-                    first.chars().take(80).collect::<String>()
+                    first.chars().take(400).collect::<String>()
                 );
                 for (f, x, l) in &published {
                     eprintln!(
@@ -1509,6 +1509,19 @@ impl<'c, 'a> Run<'c, 'a> {
                         v.render(*x).chars().take(160).collect::<String>()
                     );
                 }
+                for (f, x) in &self.contribs {
+                    eprintln!(
+                        "pub: node {node} contrib {} += {}",
+                        crate::val::field_name(v, *f),
+                        v.render(*x).chars().take(300).collect::<String>()
+                    );
+                }
+                eprintln!(
+                    "pub: node {node} effect {:?} kids {} follow {}",
+                    self.effect,
+                    self.kids.len(),
+                    self.leftover().len()
+                );
             }
         }
         // (a load whose run went on into its siblings is not one load:
