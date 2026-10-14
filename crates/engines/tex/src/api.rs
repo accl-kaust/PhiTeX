@@ -3313,7 +3313,6 @@ impl Build {
         let Some(acc) = self.g.eng.acc_value(self.unit, v.field("pkgrecs")) else {
             return Vec::new();
         };
-        let values = self.g.loads.as_ref().is_some_and(|l| l.predict);
         let keys: FxHashMap<u64, String> = self
             .nodes
             .iter()
@@ -3324,7 +3323,7 @@ impl Build {
         v.seq_to_vec(acc)
             .into_iter()
             .filter_map(|e| {
-                let (node, r) = crate::pkgrec::decode_entry(v, e, values)?;
+                let (node, r) = crate::pkgrec::decode_entry(v, e)?;
                 Some((keys.get(&node)?.clone(), r))
             })
             .collect()

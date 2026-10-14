@@ -37,7 +37,7 @@ pub(crate) struct Rec {
     /// Its run opened and closed no scope, and took no sibling.
     pub no_scope: bool,
     pub claim0: bool,
-    /// The values it published (`PHITEX_PKG_PREDICT`): per field, its
+    /// The values it published: per field, its
     /// name, whether global, and the value as bytes
     /// ([`crate::api::tree_bytes`]); the prediction of its outputs when
     /// its key matches again.
@@ -160,9 +160,9 @@ pub(crate) fn entry(
     ])
 }
 
-/// An entry decoded: its node and record (with its values when
-/// `values`).
-pub(crate) fn decode_entry(v: &Values, e: ValueId, values: bool) -> Option<(u64, Rec)> {
+/// An entry decoded: its node and record (its values always: predicting
+/// or not, a later build may predict from it).
+pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, Rec)> {
     let xs = list_of(v, e);
     let node = crate::val::int_at(v, e, 0).cast_unsigned();
     let files = list_of(v, *xs.get(1)?)
@@ -176,25 +176,22 @@ pub(crate) fn decode_entry(v: &Values, e: ValueId, values: bool) -> Option<(u64,
         .collect();
     let strs = |x: ValueId| list_of(v, x).into_iter().map(|s| str_of(v, s)).collect();
     let flags = int_of(v, *xs.get(4)?);
-    let values = if values {
-        xs.get(5)
-            .map(|&l| {
-                list_of(v, l)
-                    .into_iter()
-                    .filter_map(|e| {
-                        let ys = list_of(v, e);
-                        Some((
-                            str_of(v, *ys.first()?),
-                            int_of(v, *ys.get(1)?) != 0,
-                            crate::api::tree_bytes(v, *ys.get(2)?),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let values = xs
+        .get(5)
+        .map(|&l| {
+            list_of(v, l)
+                .into_iter()
+                .filter_map(|e| {
+                    let ys = list_of(v, e);
+                    Some((
+                        str_of(v, *ys.first()?),
+                        int_of(v, *ys.get(1)?) != 0,
+                        crate::api::tree_bytes(v, *ys.get(2)?),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some((
         node,
         Rec {
@@ -216,7 +213,7 @@ pub(crate) struct LoadHints {
     /// The hash of each file's text as found (0: absent), asked once.
     now: Mutex<FxHashMap<String, u64>>,
     pub optimistic: bool,
-    /// Whether records carry their values, and a matching load's record
+    /// Whether a matching load's record
     /// predicts its outputs (`PHITEX_PKG_PREDICT=1`, or
     /// [`crate::Options::pkg_predict`]).
     pub predict: bool,
