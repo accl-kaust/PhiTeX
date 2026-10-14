@@ -280,13 +280,17 @@ impl Run<'_, '_> {
     fn init_display(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         let (items, _) = self.list_items(md.lid)?;
-        // the paragraph's level is popped before line_break (as end_graf)
+        // the paragraph's level is popped before line_break (as end_graf;
+        // §815 `pop_nest`), under groups opened inside the paragraph too
+        // (`\\begin{equation}`): they stay, in the vertical list (§1063)
         if let Some(l) = self.top()
             && l.group == 0
             && l.mode == 102
         {
             let l = self.pop_level().expect("the paragraph's level");
             self.last_par = l.par.unwrap_or((0, 0));
+        } else if let Some(k) = self.par_level_under_groups() {
+            self.end_graf_under_groups(k)?;
         }
         let w = if items.is_empty() {
             -MAX_DIMEN
