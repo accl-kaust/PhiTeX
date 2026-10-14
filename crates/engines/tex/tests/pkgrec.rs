@@ -48,9 +48,10 @@ fn sequential(d: &Path, doc: &str) -> Vec<u8> {
 fn note(what: &str, b: &Build) {
     let s = &b.stats;
     eprintln!(
-        "{what}: critical path {:?}, loads {} (recorded {}, optimistic {}), load runs {}, at once {}, refuted {}, undeclared {}",
+        "{what}: critical path {:?}, loads {} (claimed {}, recorded {}, optimistic {}), load runs {}, at once {}, refuted {}, undeclared {}",
         s.critical_path,
         s.pkg_loads,
+        s.pkg_claimed,
         s.pkg_recorded,
         s.pkg_optimistic,
         s.pkg_runs,
@@ -280,4 +281,50 @@ fn defining_outside_the_record_is_refuted() {
             "record replaced"
         );
     }
+}
+
+/// LaTeX: `\documentclass` and two `\usepackage` of toy packages are
+/// three load runs (each load's `\@ifnextchar[` peeks at the next
+/// load's first token, which is given back: no load takes the next),
+/// each recorded; the second build gives all three their records and
+/// the output is unchanged.
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn latex_loads_are_runs_of_their_own() {
+    let d = dir(
+        "latex",
+        &[
+            ("pa.sty", "\\ProvidesPackage{pa}\n\\def\\aa{A}\n"),
+            ("pb.sty", "\\ProvidesPackage{pb}\n\\def\\bb{B}\n"),
+        ],
+    );
+    let doc = "\\documentclass{article}\n\\usepackage{pa}\n\\usepackage{pb}\n\\begin{document}\n\\aa\\bb\n\\end{document}\n";
+    let prelude = "\\input latex.ini\n";
+    let latex = |bytes: Option<Vec<u8>>, recs: Vec<u8>, threads: Option<usize>| Options {
+        prelude_jobname: "latex".to_owned(),
+        epoch: Some(0),
+        prelude_bytes: bytes,
+        threads,
+        time_limit: None,
+        ..opts(&d, Speculation::Off, recs)
+    };
+    let first = common::build(latex(None, Vec::new(), None), Some(prelude), doc);
+    note("latex first", &first);
+    let fmt = first.export_prelude();
+    assert_eq!(first.stats.pkg_loads, 3);
+    assert_eq!(first.stats.pkg_claimed, 0, "a load took the next one");
+    let recs = first.export_pkgrec();
+    let keys: Vec<String> = phitex_tex::pkgrec_summary(&recs)
+        .into_iter()
+        .map(|(k, _, _)| k)
+        .collect();
+    eprintln!("recorded: {keys:?}");
+    assert_eq!(keys.len(), 3, "each load recorded");
+    let second = common::build(latex(fmt.clone(), recs, None), Some(prelude), doc);
+    note("latex second", &second);
+    assert_eq!(second.stats.pkg_recorded, 3);
+    assert_eq!(second.stats.pkg_claimed, 0);
+    let seq = common::build(latex(fmt, Vec::new(), Some(1)), Some(prelude), doc);
+    same("latex second", &second.output().0, &seq.output().0);
+    same("latex first", &first.output().0, &seq.output().0);
 }

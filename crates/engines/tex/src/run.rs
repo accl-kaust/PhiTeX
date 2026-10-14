@@ -8,14 +8,15 @@
 //! the node's own text. What TeX keeps between commands is read through
 //! fields (`Run::get`), the scope kind and contributions.
 
-use std::collections::VecDeque;
 use std::rc::Rc;
+
+use crate::input::{Line, MID_LINE, NEW_LINE, Seg};
 
 use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Values};
 
 use crate::fields::Par;
 use crate::runstate::{Loc, Native};
-use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
+use crate::val::{Mean, Tok, cmd, int_at, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
 pub(crate) enum Halt {
@@ -67,21 +68,10 @@ pub(crate) struct Ops {
 /// A package load's finished run: its node, when it began and ended.
 pub(crate) type PkgRun = (u64, std::time::Instant, std::time::Instant);
 
-/// A level of the input stack.
-#[derive(Clone, Debug)]
-pub(crate) enum Frame {
-    /// A token list and the position in it.
-    Toks(Rc<[Tok]>, usize),
-    /// A line of a file (§300): its characters (with `\endlinechar`
-    /// appended once read), position and state.
-    Src(Src),
-    /// The lines of a file not reached yet: its text (a string value)
-    /// and the byte offset of the next line. A line becomes a [`Src`]
-    /// frame when it is reached, so the rest of a file is one frame, and
-    /// one child when a node leaves it (never one per line).
-    File(FileRest),
-}
-
+/// The lines of a file not reached yet: its text (a string value) and
+/// the byte offset of the next line. A line becomes a [`Line`] level
+/// when it is reached, so the rest of a file is one level, and one
+/// child when a node leaves it (never one per line).
 #[derive(Clone, Debug)]
 pub(crate) struct FileRest {
     pub id: ValueId,
@@ -129,11 +119,19 @@ impl FileRest {
         self.off < self.str().len()
     }
 
+    pub(crate) fn pos_chars(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn set_pos_chars(&mut self, p: usize) {
+        self.pos = p;
+    }
+
     /// The next line as a segment not yet reached (what a top-level
     /// node's arguments for it decode to, without a value or a string per
     /// line: its bytes are its characters, trailing blanks removed, as
     /// web2c's `input_line`); the offset moves past it.
-    fn take_src(&mut self) -> Src {
+    pub(crate) fn take_line(&mut self) -> Line {
         let at = self.pos;
         let s = self.str();
         let rest = &s[self.off..];
@@ -152,7 +150,7 @@ impl FileRest {
         let chars = line.chars().count();
         self.pos += chars;
         self.off += n;
-        Src {
+        Line {
             buf,
             loc: 0,
             state: NEW_LINE,
@@ -165,38 +163,14 @@ impl FileRest {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Src {
-    pub buf: Vec<u32>,
-    pub loc: usize,
-    /// 0 `mid_line`, 1 `skip_blanks`, 2 `new_line` (§303).
-    pub state: u8,
-    /// -2 until the segment is reached; then `\endlinechar` as read when
-    /// it was reached (§360), appended to `buf` when it is a character
-    /// (-3: reached without its line's end, which a pulled sibling
-    /// brings, [`Run::pull`]).
-    pub endch: i64,
-    /// Whether the segment begins a line (it is counted), and whether it
-    /// ends one (`\endlinechar` goes after it).
-    pub starts: bool,
-    pub ends: bool,
-    /// Where `buf[0]` is in a file: the file's name and byte position
-    /// (lines of `\input` files; for diagnostics only).
-    pub origin: Option<(ValueId, usize)>,
-    /// Text read under the catcodes in force when it is read, which no
-    /// analysis of a file saw: a pseudo file's lines (pdfTeX §1766) and
-    /// a `\read` line (§483).
-    pub rescanned: bool,
+/// Whether `PHITEX_HEARTBEAT=1` (read once a process).
+fn heartbeat_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PHITEX_HEARTBEAT").is_ok_and(|v| v == "1"))
 }
 
-/// The commands an alignment entry watches for (§342, §347, §357):
-/// braces, `&` and `\cr`, as a bit mask by command code.
-const ALIGN_CMDS: u128 =
-    1 << cmd::LEFT_BRACE | 1 << cmd::RIGHT_BRACE | 1 << cmd::TAB_MARK | 1 << cmd::CAR_RET;
-
-pub(crate) const MID_LINE: u8 = 0;
-pub(crate) const SKIP_BLANKS: u8 = 1;
-pub(crate) const NEW_LINE: u8 = 2;
+/// The size of a run's control-sequence name cache ([`Run::cs_cache`]).
+pub(crate) const CS_CACHE: usize = 1024;
 
 /// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`, §297).
 /// Its meaning is read from its slot when a command needs it
@@ -226,8 +200,23 @@ pub(crate) struct Run<'c, 'a> {
     pub cx: &'c mut Ctx<'a>,
     pub v: &'a Values,
     pub ops: Ops,
-    pub frames: VecDeque<Frame>,
+    /// The input stack ([`crate::input`]).
+    pub input: crate::input::Input,
+    /// Control sequence names scanned, by a hash of their characters
+    /// ([`Run::cs_of_buf`]).
+    pub cs_cache: Box<[(u64, Tok)]>,
+    /// Lines begun by this run (the `lines` accumulator, contributed
+    /// once at the end).
+    pub lines_read: u64,
+    /// `macro_call`'s buffers, kept between calls.
+    pub mbufs: crate::expand::MacroBufs,
+    /// `PHITEX_HEARTBEAT=1` (read once a process).
+    pub heartbeat_on: bool,
     pub pulled: usize,
+    /// Where each pulled sibling's text begins in the input's text (its
+    /// first segment's index), or `None` when it joined the line before
+    /// it: [`Run::give_back_peeked`].
+    pub pull_at: Vec<Option<usize>>,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -281,7 +270,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The codes (`cur_if`) of `conds`, parallel to it.
     pub if_codes: Vec<i32>,
     /// The buffer a control sequence's name is scanned into (§356).
-    name_buf: String,
+    pub(crate) name_buf: String,
     /// The scope kind last decoded (`Run::mode`, once a command): its
     /// value and its fields `(group, sid, lid, mode, depth, extra)`.
     pub kind_memo: Option<(ValueId, KindFields)>,
@@ -313,16 +302,39 @@ pub(crate) struct Run<'c, 'a> {
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
     pub irreversible: u64,
+    /// While a job-written line is interpreted ([`Run::interpret_line`]):
+    /// the read-back fields reverted so far in that line, to the value
+    /// they had before this round's read-back (`wpre:<field>`), and
+    /// what each location's pre-value is (memoized for the run).
+    pub interp: Option<phitex_defuse::FxHashSet<Loc>>,
+    /// The state's stamp as the line's interpretation began: a field the
+    /// line defined since is not reverted (`\@writefile` sets
+    /// `\@temptokena` and writes `\the\@temptokena`).
+    pub interp_base: u64,
+    /// The streams a document node closed with `\immediate\closeout`:
+    /// closed for this run's later writes, and for the writer from the
+    /// close's position (a stream entry), never for the page steps: the
+    /// steps run on the state at the end of the text, and TeX's deferred
+    /// writes fire before a close that follows their page
+    /// (`\enddocument` closes the `.aux` after `\clearpage`).
+    pub closed: Vec<i32>,
+    /// Flush points met by this run so far ([`Run::flush_point`]).
+    pub flushes: usize,
+    /// The last flush point's loop-back, not read yet: read (declared
+    /// first, `flushdecl:`) on the run's next read of a count register,
+    /// so a flush nothing reads after (plain's `\bye`) costs no round.
+    pub flush_pending: Option<(Field, Field)>,
+    pub pre_memo: phitex_defuse::FxHashMap<Loc, Option<ValueId>>,
     /// Errors since the last paragraph ended (§76 `error_count`, reset by
     /// `end_graf`, §1096): at 100 the job stops (§82).
     pub error_count: u32,
     /// Whether the job stopped at 100 errors.
     pub fatal_logged: bool,
     /// The input as the command in progress began ([`Run::rewind`]).
-    mark: Mark,
+    pub(crate) mark: crate::getnext::Mark,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
-    halt: Option<Halt>,
+    pub(crate) halt: Option<Halt>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -342,8 +354,13 @@ impl<'c, 'a> Run<'c, 'a> {
             cx,
             v,
             ops,
-            frames: VecDeque::new(),
+            input: crate::input::Input::new(),
+            cs_cache: vec![(0, Tok::c(0)); CS_CACHE].into_boxed_slice(),
+            lines_read: 0,
+            mbufs: crate::expand::MacroBufs::default(),
+            heartbeat_on: heartbeat_enabled(),
             pulled: 0,
+            pull_at: Vec::new(),
             top: false,
             claim_rest: false,
             nest: Vec::new(),
@@ -382,9 +399,15 @@ impl<'c, 'a> Run<'c, 'a> {
             pdf_occ: 0,
             resumed: false,
             irreversible: 0,
+            interp: None,
+            interp_base: 0,
+            closed: Vec::new(),
+            flushes: 0,
+            flush_pending: None,
+            pre_memo: phitex_defuse::FxHashMap::default(),
             error_count: 0,
             fatal_logged: false,
-            mark: Mark::default(),
+            mark: crate::getnext::Mark::default(),
             halt: None,
         }
     }
@@ -420,10 +443,63 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Location `loc` read: from the engine on its first read in the run.
     #[inline]
     pub(crate) fn load(&mut self, loc: Loc) -> R<()> {
+        if self.interp.is_some() {
+            self.revert_read_back(loc)?;
+        } else if self.flush_pending.is_some() && crate::fields::is_count_slot(loc) {
+            self.flush_read()?;
+        }
         if self.st.is_loaded(loc) {
             return Ok(());
         }
         self.load_slow(loc)
+    }
+
+    /// A job-written line is read as the next round's read-back reads
+    /// it: in the state before this round's read-back took effect. The
+    /// first read of a read-back field in the line gets the value the
+    /// read-back replaced (`wpre:<field>`, left by [`Run::read_back`]),
+    /// so a line whose effect depends on the field (biblatex's
+    /// `\xifinlist`-guarded `\listxadd`, `\ifcsundef`-guarded
+    /// `\csgdef`) defines it as the reading run will, not as this run,
+    /// which already holds the previous round's value, would.
+    #[inline(never)]
+    fn revert_read_back(&mut self, loc: Loc) -> R<()> {
+        let Some(done) = &mut self.interp else {
+            return Ok(());
+        };
+        if !done.insert(loc) {
+            return Ok(());
+        }
+        if self.st.defined_after(loc, self.interp_base) {
+            return Ok(());
+        }
+        let pre = if let Some(&p) = self.pre_memo.get(&loc) {
+            p
+        } else {
+            let f = self.loc_field(loc);
+            let name = crate::val::field_name(self.v, f);
+            let p = if self
+                .cx
+                .is_loopback(self.keyed(crate::fields::Fam::Wdef, &name))
+            {
+                self.get(&format!("wpre:{name}"))?
+            } else {
+                None
+            };
+            self.pre_memo.insert(loc, p);
+            p
+        };
+        if let Some(p) = pre {
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                let name = crate::val::field_name(self.v, self.loc_field(loc));
+                eprintln!("aux-trace: revert {name} for the line's read");
+            }
+            // (read in place of the value, not a definition of the line:
+            // only what the line defines on it is published)
+            self.st
+                .preload(loc, if p == ValueId::UNIT { None } else { Some(p) });
+        }
+        Ok(())
     }
 
     #[inline(never)]
@@ -476,6 +552,20 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE")
+            && self.interp.is_none()
+            && loc == self.reg_loc(0, 0)
+        {
+            let x = match &val {
+                Native::Raw(x) => self.v.render(*x),
+                _ => "?".to_owned(),
+            };
+            eprintln!(
+                "aux-trace: count0 := {x} global={global} by node {} op {:?}",
+                self.cx.node().raw(),
+                self.cx.op()
+            );
+        }
         let grp = self.innermost_group();
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
@@ -637,7 +727,15 @@ impl<'c, 'a> Run<'c, 'a> {
                 None
             }
         } else if self.cx.is_loopback(w) {
-            self.cx.use_field(w)?
+            let x = self.cx.use_field(w)?;
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                let t = x.and_then(|x| list_of(v, x).get(1).map(|&t| str_of(v, t)));
+                eprintln!(
+                    "aux-trace: read wfile {key}: {:?} bytes",
+                    t.map(|t| t.len())
+                );
+            }
+            x
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
@@ -718,6 +816,21 @@ impl<'c, 'a> Run<'c, 'a> {
             let xs = list_of(v, x);
             if let [val, g] = xs.as_slice() {
                 let global = int_of(v, *g) != 0;
+                // the value the read-back replaces, for the lines
+                // written this round ([`Run::revert_read_back`]): once
+                // per run (LaTeX reads the `.aux` again at `\enddocument`)
+                let pre = format!("wpre:{name}");
+                if self.get(&pre)?.is_none() {
+                    let was = self.get(&name)?;
+                    if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                        eprintln!(
+                            "aux-trace: read-back {key} {name} = {} (was {:?})",
+                            crate::val::show_def(v, *val),
+                            was.map(|x| crate::val::show_def(v, x))
+                        );
+                    }
+                    self.set(&pre, was.unwrap_or(ValueId::UNIT), true);
+                }
                 self.set(&name, *val, global);
             }
         }
@@ -726,12 +839,15 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// A line written to a file whose read-back only defines, read as
     /// its read-back reads it (under `\makeatletter`), on scratch: the
-    /// definitions it makes, `[[field, value, global], ...]`; nothing of
-    /// it stays in this run (its input, lists, contributions and
-    /// definitions are restored).
+    /// definitions it makes, `[[field, value, global], ...]`. Nothing
+    /// else of it stays in this run (its input, lists, contributions and
+    /// definitions are restored), except what it writes to other files
+    /// (LaTeX's `\@writefile{toc}{...}`, which writes the `.toc` line as
+    /// `\enddocument` reads the `.aux` back): those `streams` entries
+    /// (and a document node's `T_WRITE_AT` markers for them) are kept.
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<ValueId> {
         let v = self.v;
-        let frames = std::mem::take(&mut self.frames);
+        let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         let st = self.st.clone();
         let (nc, nk) = (self.contribs.len(), self.kids.len());
         let nest_len = self.nest.len();
@@ -744,12 +860,14 @@ impl<'c, 'a> Run<'c, 'a> {
         self.no_pull = true;
         self.set("cat:64", v.int(11), false);
         let base = self.st.stamp();
+        self.interp = Some(phitex_defuse::FxHashSet::default());
+        self.interp_base = base;
         for l in line.split('\n') {
             let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
             while buf.last() == Some(&32) {
                 buf.pop();
             }
-            self.frames.push_back(Frame::Src(Src {
+            self.input.text.push(Seg::Line(Line {
                 buf,
                 loc: 0,
                 state: NEW_LINE,
@@ -781,9 +899,25 @@ impl<'c, 'a> Run<'c, 'a> {
                 ])
             })
             .collect();
-        self.frames = frames;
+        self.interp = None;
+        self.input = input;
         self.st = st;
-        self.contribs.truncate(nc);
+        let streams = v.field("streams");
+        let items = v.field("items");
+        let written: Vec<(Field, ValueId)> = self
+            .contribs
+            .drain(nc..)
+            .filter(|&(f, x)| {
+                f == streams
+                    || f == items
+                        && v.seq_to_vec(x).iter().all(|&e| {
+                            list_of(v, e)
+                                .get(1)
+                                .is_some_and(|&n| int_at(v, n, 0) == crate::nodes::T_WRITE_AT)
+                        })
+            })
+            .collect();
+        self.contribs.extend(written);
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
         self.conds = conds;
@@ -958,10 +1092,18 @@ impl<'c, 'a> Run<'c, 'a> {
     /// message. `error` false: a warning.
     pub(crate) fn diag(&mut self, error: bool, msg: &str) {
         let v = self.v;
-        let src = self.frames.iter().find_map(|f| match f {
-            Frame::Src(s) => Some(s.clone()),
-            _ => None,
-        });
+        let src = self
+            .input
+            .levels
+            .iter()
+            .rev()
+            .find_map(|l| (l.kind == crate::input::kind::LINE).then(|| self.input.line(*l).clone()))
+            .or_else(|| {
+                self.input.text_rest().iter().find_map(|s| match s {
+                    Seg::Line(l) => Some(l.clone()),
+                    _ => None,
+                })
+            });
         let (file, at, seg, loc) = match &src {
             Some(s) => {
                 let mut buf = s.buf.clone();
@@ -1000,14 +1142,20 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The location of token `t`'s meaning, if it has one.
     #[inline]
     pub(crate) fn mean_loc(&mut self, t: Tok) -> Option<Loc> {
-        if let Some(l) = crate::fields::mean_loc(t) {
-            return Loc::try_from(l).ok();
+        let l = if let Some(l) = crate::fields::mean_loc(t) {
+            Loc::try_from(l).ok()?
+        } else {
+            let f = self
+                .ops
+                .fields
+                .meaning_at(self.v, self.cx.values_epoch(), t)?;
+            self.loc_of(f)
+        };
+        if self.interp.is_some() {
+            // (a meaning read bypasses `load` once the slot is loaded)
+            let _ = self.revert_read_back(l);
         }
-        let f = self
-            .ops
-            .fields
-            .meaning_at(self.v, self.cx.values_epoch(), t)?;
-        Some(self.loc_of(f))
+        Some(l)
     }
 
     #[inline]
@@ -1021,6 +1169,19 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             None => Ok(Mean::Char(t.cat().unwrap_or(0), t.chr())),
         }
+    }
+
+    /// The current token's macro when its slot is loaded with one (the
+    /// common case of `macro_call`: no decoding, no `Mean` built); `None`
+    /// sends the caller through [`Self::cur_mean`].
+    #[inline]
+    pub(crate) fn cur_macro(&mut self) -> Option<Rc<crate::val::Macro>> {
+        let t = self.cur.tok;
+        if !t.is_cs_or_active() || self.cur.cmd == cmd::RELAX {
+            return None;
+        }
+        let l = Loc::try_from(crate::fields::mean_loc(t)?).ok()?;
+        self.st.macro_at(l)
     }
 
     /// The current token's meaning, read from its slot now (§389, §508):
@@ -1080,7 +1241,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// [`Self::set_cur`] without a `Result`: a halt is raised.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    fn set_cur_flag(&mut self, tok: Tok) {
+    pub(crate) fn set_cur_flag(&mut self, tok: Tok) {
         if !tok.is_cs_or_active() {
             // (a character's meaning is its own: no meaning stored)
             self.cur.tok = tok;
@@ -1094,7 +1255,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// [`Self::set_cur`] for a control sequence or active character.
-    #[inline(never)]
+    #[inline]
     fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
         if self.bare {
             // (a name about to be defined: its present meaning is never
@@ -1106,6 +1267,24 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        // (the common case: a control sequence whose meaning this run
+        // has read and decoded: one slot access)
+        if let Some(i) = tok.cs_index()
+            && let Ok(l) = Loc::try_from(crate::fields::MEAN_BASE + i)
+            && let Some((c, h)) = self.st.cmd_chr_fast(l)
+        {
+            self.cur = Cur {
+                tok,
+                cmd: c,
+                chr: h,
+            };
+            return Ok(());
+        }
+        self.set_cur_cs_slow(tok)
+    }
+
+    #[inline(never)]
+    fn set_cur_cs_slow(&mut self, tok: Tok) -> R<()> {
         let (c, h) = match self.mean_loc(tok) {
             Some(l) => {
                 if !self.st.is_loaded(l) {
@@ -1128,710 +1307,13 @@ impl<'c, 'a> Run<'c, 'a> {
 
     // -------------------------------------------------------------- input
 
-    /// `back_input` (§325): `t` is read next.
-    pub(crate) fn back_input(&mut self, t: Tok) {
-        // §325: a brace put back is counted again when read
-        if let Some(s) = self.astate
-            && !t.is_cs_or_active()
-        {
-            match t.cat() {
-                Some(1) => self.set_astate(s - 1),
-                Some(2) => self.set_astate(s + 1),
-                _ => {}
-            }
-        }
-        // (the token just read from the list on top is that list's
-        // previous token again: it is read next by stepping back, the
-        // same tokens in the same order without a new list)
-        if let Some(Frame::Toks(l, p)) = self.frames.front_mut()
-            && *p > 0
-            && l[*p - 1] == t
-        {
-            *p -= 1;
-            return;
-        }
-        self.drop_spent_lists();
-        self.frames.push_front(Frame::Toks(Rc::from([t]), 0));
-    }
-
-    /// `begin_token_list` (§323): `toks` are read next.
-    pub(crate) fn push_toks(&mut self, toks: impl Into<Rc<[Tok]>>) {
-        let toks: Rc<[Tok]> = toks.into();
-        if !toks.is_empty() {
-            self.drop_spent_lists();
-            self.frames.push_front(Frame::Toks(toks, 0));
-        }
-    }
-
-    /// Ends the token lists read to their end before another goes on
-    /// top (§325 and §390, "conserve stack space"): without it a tail
-    /// recursive macro leaves one spent list per round, and the input
-    /// stack grows with the number of rounds.
-    fn drop_spent_lists(&mut self) {
-        while let Some(Frame::Toks(t, p)) = self.frames.front() {
-            if *p < t.len() {
-                break;
-            }
-            self.pop_front_marked();
-        }
-    }
-
-    /// Takes the next sibling's text into the input (§362: the next line,
-    /// or the rest of this one).
-    pub(crate) fn pull(&mut self) -> R<bool> {
-        if self.eof || self.no_pull {
-            return Ok(false);
-        }
-        match self.cx.following(self.pulled) {
-            Some((op, args)) if op == self.ops.exec => {
-                self.pulled += 1;
-                let frames = decode_frames(self.v, &args);
-                let joined = self.push_back_frames(frames);
-                // (the rest of a line already reached is read now, §360:
-                // `\endlinechar` as it is now goes after it)
-                if let Some(k) = joined {
-                    let e = i64::from(self.ipar(Par::endlinechar)?);
-                    if let Some(Frame::Src(s)) = self.frames.get_mut(k) {
-                        if (0..256).contains(&e) {
-                            s.buf.push(u32::try_from(e).unwrap_or(13));
-                        }
-                        s.endch = e;
-                    }
-                }
-                Ok(true)
-            }
-            _ => {
-                if self.top {
-                    self.eof = true;
-                    Ok(false)
-                } else {
-                    Err(Halt::Starve)
-                }
-            }
-        }
-    }
-
-    /// Appends frames; a segment continuing the line of the last one joins
-    /// it (a control sequence's name may run across nodes). The index of
-    /// a joined segment reached before that now ends its line, whose
-    /// `\endlinechar` is due ([`Run::pull`]).
-    pub(crate) fn push_back_frames(&mut self, frames: Vec<Frame>) -> Option<usize> {
-        let mut due = None;
-        for f in frames {
-            if let (Some(Frame::Src(last)), Frame::Src(next)) = (self.frames.back_mut(), &f)
-                && !last.ends
-                && !next.starts
-            {
-                last.buf.extend_from_slice(&next.buf);
-                last.ends = next.ends;
-                if last.endch != -2 {
-                    last.endch = -3;
-                    if last.ends {
-                        due = Some(self.frames.len() - 1);
-                    }
-                }
-                continue;
-            }
-            self.frames.push_back(f);
-        }
-        due
-    }
-
-    /// Whether the first character of the next sibling's text, if it
-    /// continues this line, is a letter (§356: a control word's name
-    /// goes on).
-    fn next_continues_name(&mut self) -> R<bool> {
-        let Some(Frame::Src(last)) = self.frames.back() else {
-            return Ok(false);
-        };
-        if last.ends {
-            return Ok(false);
-        }
-        let Some((op, args)) = self.cx.following(self.pulled) else {
-            return Ok(false);
-        };
-        if op != self.ops.exec {
-            return Ok(false);
-        }
-        match first_frame(self.v, &args).as_ref() {
-            Some(Frame::Src(s)) if !s.starts => match s.buf.first() {
-                Some(&c) => Ok(matches!(self.cat(c)?, 7 | 11)),
-                None => Ok(false),
-            },
-            _ => Ok(false),
-        }
-    }
-
-    /// Whether the next sibling's text continues this line.
-    fn next_is_continuation(&self) -> bool {
-        let Some(Frame::Src(last)) = self.frames.back() else {
-            return false;
-        };
-        if last.ends || self.frames.len() != 1 {
-            return false;
-        }
-        match self.cx.following(self.pulled) {
-            Some((op, args)) if op == self.ops.exec => {
-                matches!(first_frame(self.v, &args), Some(Frame::Src(s)) if !s.starts)
-            }
-            _ => false,
-        }
-    }
-
-    /// Whether there is input left without claiming more siblings.
-    pub(crate) fn has_input(&self) -> bool {
-        // (a document file's lines left for the region children stop
-        // the run: what follows the file, its end marker included, is
-        // read after them, [`Run::leftover`])
-        for f in &self.frames {
-            let more = match f {
-                Frame::Toks(t, p) => *p < t.len(),
-                Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
-                Frame::File(f) => {
-                    if !f.has_lines() {
-                        continue;
-                    }
-                    if self.doc && !self.open_span() && self.doc_file(f) {
-                        return false;
-                    }
-                    true
-                }
-            };
-            if more {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// `get_next` (§341): the next token, its meaning not yet looked up.
-    /// `None` at the end of all input.
-    #[inline]
-    pub(crate) fn next_tok(&mut self) -> R<Option<Tok>> {
-        // (the common case: the next token of the list on top)
-        if let Some(Frame::Toks(t, p)) = self.frames.front_mut()
-            && let Some(&tok) = t.get(*p)
-        {
-            *p += 1;
-            return Ok(Some(tok));
-        }
-        self.next_tok_slow()
-    }
-
-    #[inline(never)]
-    fn next_tok_slow(&mut self) -> R<Option<Tok>> {
-        loop {
-            let Some(front) = self.frames.front_mut() else {
-                if self.pull()? {
-                    continue;
-                }
-                return Ok(None);
-            };
-            match front {
-                Frame::Toks(t, p) => {
-                    if *p < t.len() {
-                        let tok = t[*p];
-                        *p += 1;
-                        return Ok(Some(tok));
-                    }
-                    self.pop_front_marked();
-                }
-                Frame::Src(_) => {
-                    if let Some(t) = self.src_next()? {
-                        return Ok(Some(t));
-                    }
-                    self.pop_front_marked();
-                }
-                Frame::File(_) => {
-                    // (a document file's lines are paragraph-region
-                    // children, [`Run::leftover`], at a command's start:
-                    // [`Run::has_input`] stops the run there; a command
-                    // still scanning, `\count1=\input n`, reads on into
-                    // the file, §362)
-                    let Some(Frame::File(f)) = self.frames.front_mut() else {
-                        unreachable!()
-                    };
-                    if f.has_lines() {
-                        let src = f.take_src();
-                        self.frames.push_front(Frame::Src(src));
-                    } else {
-                        self.pop_front_marked();
-                    }
-                }
-            }
-        }
-    }
-
-    /// Whether a file `\input` opened is a document's (its rest becomes
-    /// paragraph regions), not a format's (run line by line).
-    fn doc_file(&self, f: &FileRest) -> bool {
-        crate::hints::file_kind_of(self.v, f.id, f.name) == phitex_source::pass::FileKind::Document
-    }
-
-    /// `get_next` on the current line (§343–§356); `None` when the line
-    /// is finished.
-    #[allow(clippy::too_many_lines)]
-    fn src_next(&mut self) -> R<Option<Tok>> {
-        // §362: a line is read when it is reached
-        if let Some(Frame::Src(s)) = self.frames.front()
-            && s.endch == -2
-        {
-            let (starts, ends) = (s.starts, s.ends);
-            // §360: `\endlinechar` as it is when the line is read goes
-            // after its last character (an assignment on the line itself
-            // reaches the next line only: `\endlinechar=-1` on a line
-            // still ends that line)
-            let e = if ends {
-                i64::from(self.ipar(Par::endlinechar)?)
-            } else {
-                -1
-            };
-            // §362: a line is counted as it begins
-            if starts {
-                self.lines_entered += 1;
-                let line = self.v.int(1);
-                self.contribute("lines", line);
-            }
-            if let Some(Frame::Src(s)) = self.frames.front_mut() {
-                if (0..256).contains(&e) {
-                    s.buf.push(u32::try_from(e).unwrap_or(13));
-                }
-                s.endch = e;
-                if starts {
-                    s.state = NEW_LINE;
-                }
-            }
-        }
-        loop {
-            let (c, state) = {
-                let Some(Frame::Src(s)) = self.frames.front_mut() else {
-                    return Ok(None);
-                };
-                if s.loc >= s.buf.len() {
-                    return Ok(None);
-                }
-                let c = s.buf[s.loc];
-                s.loc += 1;
-                (c, s.state)
-            };
-            // the line's end is reached after its last character (§360)
-            let mut c = c;
-            // reswitch
-            loop {
-                let cat = self.cat(c)?;
-                match cat {
-                    // §345
-                    x if x == 9 || (x == 10 && state != MID_LINE) => break,
-                    0 => return self.scan_cs().map(Some),
-                    13 => {
-                        self.set_state(MID_LINE);
-                        return Ok(Some(Tok::ch(13, c)));
-                    }
-                    7 => {
-                        // `^^` cut by a node boundary
-                        let near_end = matches!(self.frames.front(), Some(Frame::Src(s)) if s.loc + 2 > s.buf.len());
-                        if near_end && self.next_is_continuation() {
-                            self.pull()?;
-                        }
-                        if let Some(x) = self.sup_mark(c) {
-                            c = x;
-                            continue;
-                        }
-                        self.set_state(MID_LINE);
-                        return Ok(Some(Tok::ch(7, c)));
-                    }
-                    15 => break, // §346: an invalid character is skipped
-                    10 => {
-                        // §349
-                        self.set_state(SKIP_BLANKS);
-                        return Ok(Some(Tok::ch(10, 32)));
-                    }
-                    5 => {
-                        self.finish_line();
-                        return Ok(match state {
-                            MID_LINE => Some(Tok::ch(10, 32)), // §348
-                            SKIP_BLANKS => break,              // §350
-                            _ => Some(Tok::cs("par")),         // §351
-                        });
-                    }
-                    14 => {
-                        self.finish_line();
-                        break;
-                    }
-                    _ => {
-                        self.set_state(MID_LINE);
-                        return Ok(Some(Tok::ch(cat, c)));
-                    }
-                }
-            }
-            // goto switch
-            let done = matches!(self.frames.front(), Some(Frame::Src(s)) if s.loc >= s.buf.len());
-            if done {
-                return Ok(None);
-            }
-        }
-    }
-
-    fn set_state(&mut self, st: u8) {
-        if let Some(Frame::Src(s)) = self.frames.front_mut() {
-            s.state = st;
-        }
-    }
-
-    /// The rest of the line goes, its end too (§347, §348).
-    fn finish_line(&mut self) {
-        if let Some(Frame::Src(s)) = self.frames.front_mut() {
-            s.loc = s.buf.len();
-            if s.endch < -1 {
-                // the end has not been reached: nothing will follow
-                s.endch = -1;
-            }
-        }
-    }
-
-    /// §352: an expanded character `^^A` or `^^df` after the `sup_mark`
-    /// `c` just read.
-    fn sup_mark(&mut self, c: u32) -> Option<u32> {
-        let Some(Frame::Src(s)) = self.frames.front_mut() else {
-            return None;
-        };
-        let limit = s.buf.len().checked_sub(1)?;
-        let loc = s.loc;
-        if loc < s.buf.len() && s.buf[loc] == c && loc < limit {
-            let c1 = s.buf[loc + 1];
-            if c1 < 0o200 {
-                s.loc = loc + 2;
-                if is_hex(c1) && s.loc <= limit {
-                    let c2 = s.buf[s.loc];
-                    if is_hex(c2) {
-                        s.loc += 1;
-                        return Some(hex(c1) * 16 + hex(c2));
-                    }
-                }
-                return Some(if c1 < 0o100 { c1 + 0o100 } else { c1 - 0o100 });
-            }
-        }
-        None
-    }
-
-    /// §354–§356: a control sequence after an escape character.
-    fn scan_cs(&mut self) -> R<Tok> {
-        loop {
-            // a name cut by a node boundary goes on in the next node
-            if self.frames.len() == 1
-                && let Some(Frame::Src(s)) = self.frames.front()
-                && !s.ends
-            {
-                let rest: Vec<u32> = s.buf[s.loc.min(s.buf.len())..].to_vec();
-                let mut letters = true;
-                for &c in &rest {
-                    if !matches!(self.cat(c)?, 7 | 11) {
-                        letters = false;
-                        break;
-                    }
-                }
-                let last_sup = match rest.last() {
-                    Some(&c) => self.cat(c)? == 7,
-                    None => false,
-                };
-                let more = if rest.is_empty() || (letters && last_sup) {
-                    // `\` or `^^` at the cut: what follows is the name
-                    self.next_is_continuation()
-                } else {
-                    letters && self.next_continues_name()?
-                };
-                if more && self.pull()? {
-                    continue;
-                }
-            }
-            let (loc, limit_plus) = match self.frames.front() {
-                Some(Frame::Src(s)) => (s.loc, s.buf.len()),
-                _ => return Ok(Tok::cs("")),
-            };
-            if loc >= limit_plus {
-                return Ok(Tok::cs("")); // null_cs
-            }
-            // start_cs
-            let mut k = loc;
-            let c0 = self.buf(k);
-            let mut cat = self.cat(c0)?;
-            k += 1;
-            self.set_state(if cat == 11 || cat == 10 {
-                SKIP_BLANKS
-            } else {
-                MID_LINE
-            });
-            if cat == 11 && k < limit_plus {
-                // §356
-                loop {
-                    let c = self.buf(k);
-                    cat = self.cat(c)?;
-                    k += 1;
-                    if cat != 11 || k >= limit_plus {
-                        break;
-                    }
-                }
-                if self.reduce_expanded(k, cat) {
-                    continue;
-                }
-                if cat != 11 {
-                    k -= 1;
-                }
-                if k > loc + 1 {
-                    // (the name is built in a buffer kept by the run:
-                    // a known name allocates nothing, §259)
-                    let mut name = std::mem::take(&mut self.name_buf);
-                    name.clear();
-                    name.extend((loc..k).map(|i| char::from_u32(self.buf(i)).unwrap_or('?')));
-                    if let Some(Frame::Src(s)) = self.frames.front_mut() {
-                        s.loc = k;
-                    }
-                    let t = Tok::cs(&name);
-                    self.name_buf = name;
-                    return Ok(t);
-                }
-            } else if self.reduce_expanded(k, cat) {
-                continue;
-            }
-            let c = self.buf(loc);
-            if let Some(Frame::Src(s)) = self.frames.front_mut() {
-                s.loc = loc + 1;
-            }
-            let mut b = [0; 4];
-            return Ok(Tok::cs(
-                char::from_u32(c).unwrap_or('?').encode_utf8(&mut b),
-            ));
-        }
-    }
-
-    fn buf(&self, k: usize) -> u32 {
-        match self.frames.front() {
-            Some(Frame::Src(s)) => s.buf.get(k).copied().unwrap_or(0),
-            _ => 0,
-        }
-    }
-
-    /// §355: with `buffer[k-1]` of category `cat`, reduces an expanded code
-    /// there; true if it did (`goto start_cs`).
-    fn reduce_expanded(&mut self, k: usize, cat: u8) -> bool {
-        let Some(Frame::Src(s)) = self.frames.front_mut() else {
-            return false;
-        };
-        let limit = s.buf.len() - 1;
-        if k > limit || cat != 7 || k >= limit {
-            return false;
-        }
-        let cur = s.buf[k - 1];
-        if s.buf[k] != cur {
-            return false;
-        }
-        let c = s.buf[k + 1];
-        if c >= 0o200 {
-            return false;
-        }
-        let mut d = 2;
-        if is_hex(c) && k + 2 <= limit && is_hex(s.buf[k + 2]) {
-            d = 3;
-        }
-        s.buf[k - 1] = if d > 2 {
-            hex(c) * 16 + hex(s.buf[k + 2])
-        } else if c < 0o100 {
-            c + 0o100
-        } else {
-            c - 0o100
-        };
-        s.buf.drain(k..k + d);
-        self.irreversible += 1;
-        true
-    }
-
-    /// `get_next` with the meaning (§357–§358).
-    // the per-token hot path: inlined on purpose
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    pub(crate) fn get_next(&mut self) -> R<bool> {
-        let b = self.fetch();
-        match self.halt.take() {
-            Some(h) => Err(h),
-            None => Ok(b),
-        }
-    }
-
-    /// `get_next` without a `Result` (§341–§357): false at the end of all
-    /// input; a halt is raised ([`Self::raise`]).
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    fn fetch(&mut self) -> bool {
-        // (the common case: a token of the list on top that is not an
-        // internal marker, and no alignment entry to watch for)
-        let next = match self.frames.front_mut() {
-            Some(Frame::Toks(t, p)) => match t.get(*p) {
-                Some(&tok) if tok.as_cs().is_none_or(|n| !n.frozen()) => {
-                    *p += 1;
-                    Some(tok)
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(tok) = next {
-            self.set_cur_flag(tok);
-            if ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0 {
-                match self.align_token() {
-                    Ok(true) => return self.fetch_slow(),
-                    Ok(false) => {}
-                    Err(h) => self.raise(h),
-                }
-            }
-            return true;
-        }
-        self.fetch_slow()
-    }
-
-    #[inline(never)]
-    fn fetch_slow(&mut self) -> bool {
-        match self.get_next_slow() {
-            Ok(b) => b,
-            Err(h) => {
-                self.raise(h);
-                true
-            }
-        }
-    }
-
-    #[inline(never)]
-    fn get_next_slow(&mut self) -> R<bool> {
-        loop {
-            let t = loop {
-                let Some(t) = self.next_tok()? else {
-                    return Ok(false);
-                };
-                if let Some(n) = t.as_cs()
-                    && n.frozen()
-                {
-                    if n.starts_with("\u{10FFFE}eof") {
-                        // §362: the end of an \input file (or a pseudo file)
-                        crate::etex::end_of_file(self, n.name())?;
-                        continue;
-                    }
-                    if n.name() == "\u{10FFFE}uend" {
-                        // §324: the end of a u template
-                        self.align_u_end();
-                        continue;
-                    }
-                }
-                break t;
-            };
-            if let Some(n) = t.as_cs()
-                && n.frozen()
-                && let Some(k) = n.strip_prefix("\u{10FFFE}endv:")
-            {
-                // §789: the end of a v template (`endv`, §380)
-                let chr = k.parse().unwrap_or(0);
-                self.cur = Cur {
-                    tok: t,
-                    cmd: cmd::IGNORE,
-                    chr,
-                };
-                return Ok(true);
-            }
-            if !self.get_next_rest(t)? {
-                return Ok(false);
-            }
-            if matches!(
-                self.cur.cmd,
-                cmd::LEFT_BRACE | cmd::RIGHT_BRACE | cmd::TAB_MARK | cmd::CAR_RET
-            ) && self.align_token()?
-            {
-                continue;
-            }
-            return Ok(true);
-        }
-    }
-
-    fn get_next_rest(&mut self, t: Tok) -> R<bool> {
-        if t == crate::expand::notexpanded_tok() {
-            // §358
-            let Some(t2) = self.next_tok()? else {
-                return Ok(false);
-            };
-            self.set_cur(t2)?;
-            if self.cur.cmd > cmd::MAX_COMMAND {
-                self.cur.cmd = cmd::RELAX;
-                self.cur.chr = crate::val::NO_EXPAND_FLAG;
-            }
-            return Ok(true);
-        }
-        self.set_cur(t)?;
-        Ok(true)
-    }
-
-    /// `get_next`, at the end of all input a `\relax` (the end of a
-    /// document without `\end` is the client's to report).
-    pub(crate) fn get_next_or_end(&mut self) -> R<()> {
-        if !self.get_next()? {
-            if self.eof {
-                return Err(Halt::Fatal);
-            }
-            self.cur = Cur {
-                tok: Tok::cs("\u{10FFFE}relax"),
-                cmd: cmd::RELAX,
-                chr: 256,
-            };
-        }
-        Ok(())
-    }
-
-    /// The token `get_r_token` reads (§1215): a control sequence's
-    /// meaning is not looked up unless an alignment of this run watches
-    /// for `&` and `\cr` (§342); `\outer` is not checked here (§336
-    /// at `normal`).
-    pub(crate) fn get_name_token(&mut self) -> R<()> {
-        self.bare = self.aopen <= 0;
-        let r = self.get_token();
-        self.bare = false;
-        r
-    }
-
-    /// `get_token` (§365).
-    pub(crate) fn get_token(&mut self) -> R<()> {
-        self.get_next_or_end()
-    }
-
-    /// `get_x_token` (§380).
-    pub(crate) fn get_x_token(&mut self) -> R<()> {
-        loop {
-            self.get_next_or_end()?;
-            if self.cur.cmd <= cmd::MAX_COMMAND {
-                return Ok(());
-            }
-            // (a macro: its body goes on top here, no expansion level)
-            if (cmd::CALL..cmd::END_TEMPLATE).contains(&self.cur.cmd) {
-                self.macro_call()?;
-                continue;
-            }
-            if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
-                return Ok(());
-            }
-            self.expand()?;
-        }
-    }
-
-    /// `x_token` (§381).
-    pub(crate) fn x_token(&mut self) -> R<()> {
-        while self.cur.cmd > cmd::MAX_COMMAND {
-            self.expand()?;
-            self.get_next_or_end()?;
-        }
-        Ok(())
-    }
-
     // ------------------------------------------------------------ the end
 
     /// What is left of the node's own and claimed text, and the tokens a
     /// command put back or an expansion produced, as child nodes: one per
     /// token (a run of characters is one node), and the text not yet read
     /// as one node per segment.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
         // a run reads everything of its own (expansion tokens run inline,
         // the slice's text is the node's command): what is left is the
@@ -1851,67 +1333,91 @@ impl<'c, 'a> Run<'c, 'a> {
             let l = v.list(toks);
             vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(kind)]
         };
-        for f in &self.frames {
-            match f {
-                Frame::Toks(t, p) => {
-                    for tok in &t[*p..] {
-                        let ch = matches!(tok.cat(), Some(10..=12));
-                        if ch {
-                            run.push(crate::val::tok_id(v, epoch, *tok));
-                            continue;
-                        }
-                        if !run.is_empty() {
-                            out.push(node(std::mem::take(&mut run)));
-                        }
-                        out.push(node(vec![crate::val::tok_id(v, epoch, *tok)]));
-                    }
+        let toks_left = |toks: &[Tok], out: &mut Vec<Vec<ValueId>>, run: &mut Vec<ValueId>| {
+            for tok in toks {
+                let ch = matches!(tok.cat(), Some(10..=12));
+                if ch {
+                    run.push(crate::val::tok_id(v, epoch, *tok));
+                    continue;
                 }
-                Frame::Src(s) => {
+                if !run.is_empty() {
+                    out.push(node(std::mem::take(run)));
+                }
+                out.push(node(vec![crate::val::tok_id(v, epoch, *tok)]));
+            }
+        };
+        let line_left = |s: &Line, out: &mut Vec<Vec<ValueId>>| {
+            let end_due = s.ends && s.endch < -1;
+            if s.loc >= s.buf.len() && !end_due {
+                return;
+            }
+            let text: String = s.buf[s.loc.min(s.buf.len())..]
+                .iter()
+                .map(|&c| char::from_u32(c).unwrap_or('?'))
+                .collect();
+            let starts = s.starts && s.endch == -2;
+            let mut xs = vec![
+                tag_s,
+                v.str(&text),
+                v.int(i64::from(s.state)),
+                v.int(-2),
+                v.int(
+                    i64::from(starts) | (i64::from(end_due) << 1) | (i64::from(s.rescanned) << 2),
+                ),
+            ];
+            if let Some((name, at)) = s.origin {
+                let at = at + s.loc.min(s.buf.len());
+                xs.push(name);
+                xs.push(v.int(i64::try_from(at).unwrap_or(0)));
+            }
+            out.push(vec![v.list(vec![v.list(xs)]), v.int(kind)]);
+        };
+        let file_left = |f: &FileRest, out: &mut Vec<Vec<ValueId>>| {
+            if f.has_lines() && self.doc && self.doc_file(f) {
+                out.extend(self.doc_file_regions(f));
+            } else if f.has_lines() {
+                let fr = v.list(vec![
+                    tag_f,
+                    f.id,
+                    v.int(i64::try_from(f.off).unwrap_or(0)),
+                    f.name,
+                ]);
+                out.push(vec![v.list(vec![fr]), v.int(0)]);
+            }
+        };
+        for l in self.input.levels.iter().rev() {
+            match l.kind {
+                crate::input::kind::TOKS => {
+                    toks_left(self.input.arena.get(l.rest()), &mut out, &mut run);
+                }
+                crate::input::kind::LINE => {
                     if !run.is_empty() {
                         out.push(node(std::mem::take(&mut run)));
                     }
-                    let end_due = s.ends && s.endch < -1;
-                    if s.loc >= s.buf.len() && !end_due {
-                        continue;
-                    }
-                    let text: String = s.buf[s.loc.min(s.buf.len())..]
-                        .iter()
-                        .map(|&c| char::from_u32(c).unwrap_or('?'))
-                        .collect();
-                    let starts = s.starts && s.endch == -2;
-                    let mut xs = vec![
-                        tag_s,
-                        v.str(&text),
-                        v.int(i64::from(s.state)),
-                        v.int(-2),
-                        v.int(
-                            i64::from(starts)
-                                | (i64::from(end_due) << 1)
-                                | (i64::from(s.rescanned) << 2),
-                        ),
-                    ];
-                    if let Some((name, at)) = s.origin {
-                        let at = at + s.loc.min(s.buf.len());
-                        xs.push(name);
-                        xs.push(v.int(i64::try_from(at).unwrap_or(0)));
-                    }
-                    out.push(vec![v.list(vec![v.list(xs)]), v.int(kind)]);
+                    line_left(self.input.line(*l), &mut out);
                 }
-                Frame::File(f) => {
+                _ => {
                     if !run.is_empty() {
                         out.push(node(std::mem::take(&mut run)));
                     }
-                    if f.has_lines() && self.doc && self.doc_file(f) {
-                        out.extend(self.doc_file_regions(f));
-                    } else if f.has_lines() {
-                        let fr = v.list(vec![
-                            tag_f,
-                            f.id,
-                            v.int(i64::try_from(f.off).unwrap_or(0)),
-                            f.name,
-                        ]);
-                        out.push(vec![v.list(vec![fr]), v.int(0)]);
+                    file_left(self.input.file(*l), &mut out);
+                }
+            }
+        }
+        for s in self.input.text_rest() {
+            match s {
+                Seg::Toks(t) => toks_left(t, &mut out, &mut run),
+                Seg::Line(l) => {
+                    if !run.is_empty() {
+                        out.push(node(std::mem::take(&mut run)));
                     }
+                    line_left(l, &mut out);
+                }
+                Seg::File(f) => {
+                    if !run.is_empty() {
+                        out.push(node(std::mem::take(&mut run)));
+                    }
+                    file_left(f, &mut out);
                 }
             }
         }
@@ -1935,10 +1441,6 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         out
     }
-
-    /// The region children of the rest of a document file `\input` by a
-    /// document node: the file analysed as the document's own text (once,
-    /// with the format's definitions, registered under the file's name
     /// for its fragments' hints), each slice with its hint.
     fn doc_file_regions(&self, f: &FileRest) -> Vec<Vec<ValueId>> {
         let v = self.v;
@@ -1990,6 +1492,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         loop {
             while self.has_input() {
+                if self.give_back_peeked()? {
+                    return Ok(());
+                }
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
@@ -2052,7 +1557,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether the run has something open that must close in this run:
     /// a level of the nest or a conditional.
-    fn open_span(&self) -> bool {
+    pub(crate) fn open_span(&self) -> bool {
         !self.nest.is_empty() || !self.conds.is_empty()
     }
 
@@ -2060,6 +1565,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        if self.lines_read != 0 {
+            let n = self.v.int(i64::try_from(self.lines_read).unwrap_or(0));
+            self.contribute("lines", n);
+        }
         crate::pageinline::finish(&mut self);
         // a page parameter this run set reaches the page fold as a
         // marker in the main list (page.rs `breaks`)
@@ -2251,64 +1760,17 @@ impl<'c, 'a> Run<'c, 'a> {
 }
 
 /// Spent token lists by length, for the next macro body of that length
-/// (a body is written into one, not allocated, [`pooled_toks`]).
-const POOL_LEN: usize = 64;
-
-thread_local! {
-    static TOK_POOL: std::cell::RefCell<Vec<Vec<Rc<[Tok]>>>> =
-        std::cell::RefCell::new(vec![Vec::new(); POOL_LEN]);
+/// The segments of an `Exec` node's arguments.
+pub(crate) fn decode_segs(v: &Values, args: &[ValueId]) -> Vec<Seg> {
+    decode_segs_upto(v, args, usize::MAX)
 }
 
-/// A shared list holding `xs`: a spent one of its length reused if any.
-pub(crate) fn pooled_toks(xs: &[Tok]) -> Rc<[Tok]> {
-    if xs.len() < POOL_LEN
-        && let Some(mut r) = TOK_POOL.with(|p| p.borrow_mut()[xs.len()].pop())
-        && let Some(m) = Rc::get_mut(&mut r)
-    {
-        m.copy_from_slice(xs);
-        return r;
-    }
-    Rc::from(xs)
+/// The first of a node's segments, the rest not decoded.
+pub(crate) fn first_seg(v: &Values, args: &[ValueId]) -> Option<Seg> {
+    decode_segs_upto(v, args, 1).into_iter().next()
 }
 
-/// A token list read to its end: kept for [`pooled_toks`] if nothing
-/// else holds it.
-fn recycle_toks(t: Rc<[Tok]>) {
-    if !t.is_empty() && t.len() < POOL_LEN && Rc::strong_count(&t) == 1 && Rc::weak_count(&t) == 0 {
-        TOK_POOL.with(|p| {
-            let mut p = p.borrow_mut();
-            let v = &mut p[t.len()];
-            if v.len() < 32 {
-                v.push(t);
-            }
-        });
-    }
-}
-
-fn is_hex(c: u32) -> bool {
-    (u32::from(b'0')..=u32::from(b'9')).contains(&c)
-        || (u32::from(b'a')..=u32::from(b'f')).contains(&c)
-}
-
-fn hex(c: u32) -> u32 {
-    if c <= u32::from(b'9') {
-        c - u32::from(b'0')
-    } else {
-        c - u32::from(b'a') + 10
-    }
-}
-
-/// The frames of an `Exec` node's arguments.
-pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
-    decode_frames_upto(v, args, usize::MAX)
-}
-
-/// The first of a node's frames, the rest not decoded.
-pub(crate) fn first_frame(v: &Values, args: &[ValueId]) -> Option<Frame> {
-    decode_frames_upto(v, args, 1).into_iter().next()
-}
-
-fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> {
+fn decode_segs_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Seg> {
     let mut out = Vec::new();
     let Some(&l) = args.first() else { return out };
     let Value::List(fs) = &*v.get(l) else {
@@ -2318,7 +1780,7 @@ fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> 
         if out.len() >= limit {
             break;
         }
-        out.extend(crate::val::frame_of(v, f, || decode_frame(v, f)));
+        out.extend(crate::val::frame_of(v, f, || decode_seg(v, f)));
     }
     out
 }
@@ -2352,8 +1814,9 @@ pub(crate) fn carried_conds(v: &Values, args: &[ValueId]) -> Option<(Vec<u8>, Ve
 }
 
 /// One frame of a node's arguments (a frame is an immutable value, so
-/// its decoding is kept by id, [`crate::val::frame_of`]).
-fn decode_frame(v: &Values, f: ValueId) -> Option<Frame> {
+/// One segment of a node's arguments (a segment is an immutable value,
+/// so its decoding is kept by id, [`crate::val::frame_of`]).
+fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
     let mut out = None;
     {
         let Value::List(xs) = &*v.get(f) else {
@@ -2362,18 +1825,18 @@ fn decode_frame(v: &Values, f: ValueId) -> Option<Frame> {
         match xs.first().map(|&t| str_of(v, t)).as_deref() {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
-                out = Some(Frame::Toks(Rc::from(toks), 0));
+                out = Some(Seg::Toks(toks));
             }
             Some("f") => {
                 if let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) {
                     let off = usize::try_from(int_of(v, o)).unwrap_or(0);
                     let name = xs.get(3).copied().unwrap_or(ValueId::UNIT);
-                    out = Some(Frame::File(FileRest::new(v, id, off, name)));
+                    out = Some(Seg::File(FileRest::new(v, id, off, name)));
                 }
             }
             Some("s") => {
                 let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
-                out = Some(Frame::Src(Src {
+                out = Some(Seg::Line(Line {
                     buf: text.chars().map(u32::from).collect(),
                     loc: 0,
                     state: u8::try_from(xs.get(2).map_or(2, |&x| int_of(v, x))).unwrap_or(2),
@@ -2394,33 +1857,6 @@ fn decode_frame(v: &Values, f: ValueId) -> Option<Frame> {
     }
     out
 }
-
-/// A line already read (`\read`, §483): `\endlinechar` applied.
-pub(crate) fn src_frame(line: &str, endlinechar: i64) -> Frame {
-    let bytes = line.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-        end -= 1;
-    }
-    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
-        end -= 1;
-    }
-    let mut buf: Vec<u32> = line[..end].chars().map(u32::from).collect();
-    if (0..256).contains(&endlinechar) {
-        buf.push(u32::try_from(endlinechar).unwrap_or(13));
-    }
-    Frame::Src(Src {
-        buf,
-        loc: 0,
-        state: NEW_LINE,
-        endch: endlinechar,
-        starts: true,
-        ends: true,
-        origin: None,
-        rescanned: true,
-    })
-}
-
 /// [`slice_args`] for a piece of a file `\input` read, beginning at
 /// byte `at` of the file named `name`: every segment carries its origin
 /// `(name, offset)`; the kind is 2 (a document's piece, not the top).
@@ -2498,12 +1934,6 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
 
 // ------------------------------------------------------------- parking
 
-enum PFrame {
-    Toks(Vec<Tok>),
-    Src(Src),
-    File(FileRest),
-}
-
 /// A [`crate::nest::Level`] without `Rc`.
 struct PLevel {
     mode: i32,
@@ -2529,7 +1959,8 @@ struct PLevel {
 pub(crate) struct Parked {
     /// The values' epoch the ids below belong to.
     epoch: u64,
-    frames: Vec<PFrame>,
+    /// The input left, top first: the levels' rests, then the text.
+    segs: Vec<Seg>,
     pulled: usize,
     top: bool,
     claim_rest: bool,
@@ -2550,6 +1981,7 @@ pub(crate) struct Parked {
     astate: Option<i64>,
     aopen: i64,
     lines_entered: i64,
+    lines_read: u64,
     eof: bool,
     radix: i32,
     cur_order: phitex_typeset::glue::Order,
@@ -2557,216 +1989,25 @@ pub(crate) struct Parked {
     irreversible: u64,
 }
 
-/// Where an input frame stood when the command began.
-enum Snap {
-    Toks(Rc<[Tok]>, usize),
-    Src {
-        loc: usize,
-        state: u8,
-        endch: i64,
-        len: usize,
-    },
-    File(usize, usize),
-    None,
-}
-
-/// The command in progress (`Run::begin_command`): the input frames as it
-/// found them, the ones it used up, and a fingerprint of the rest of the
-/// run's state.
-#[derive(Default)]
-struct Mark {
-    active: bool,
-    /// `frames.len()` at the start.
-    len: usize,
-    /// The frames of the start still in `frames` (its tail).
-    orig_left: usize,
-    /// The start's frames, front first, as each was when it was reached.
-    snaps: Vec<Snap>,
-    /// The start's frames the command used up, front first.
-    popped: Vec<Frame>,
-    sig: u64,
-    effect: Option<Effect>,
-    astate: Option<i64>,
-    aopen: i64,
-    radix: i32,
-    cur_order: Option<phitex_typeset::glue::Order>,
-    no_pull: bool,
-}
-
 impl Run<'_, '_> {
-    fn snap_front(&self) -> Snap {
-        match self.frames.front() {
-            Some(Frame::Toks(t, p)) => Snap::Toks(t.clone(), *p),
-            Some(Frame::Src(s)) => Snap::Src {
-                loc: s.loc,
-                state: s.state,
-                endch: s.endch,
-                len: s.buf.len(),
-            },
-            Some(Frame::File(f)) => Snap::File(f.off, f.pos),
-            None => Snap::None,
-        }
-    }
-
-    /// What a stopped command must not have changed to be undone by
-    /// rewinding its input.
-    fn state_sig(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = phitex_defuse::FxHasher::default();
-        (
-            self.st.sig(),
-            self.contribs.len(),
-            self.kids.len(),
-            self.nest.len(),
-            self.conds.len(),
-            self.if_codes.len(),
-            self.next_lid,
-            self.irreversible,
-            self.fread.len(),
-        )
-            .hash(&mut h);
-        (
-            self.pulled,
-            self.eof,
-            self.last_par,
-            self.claim_rest,
-            self.pdf_occ,
-            self.lines_entered,
-            self.top,
-        )
-            .hash(&mut h);
-        for l in &self.nest {
-            (
-                l.list.len(),
-                l.list.last(),
-                l.ag.len(),
-                l.save_base,
-                l.prev_graf,
-                l.fold.sf,
-                l.fold.pd,
-                l.fold.since_bp,
-                l.par,
-                l.extra.len(),
-            )
-                .hash(&mut h);
-        }
-        h.finish()
-    }
-
-    /// A command begins: marks the input and the state it starts from.
-    pub(crate) fn begin_command(&mut self) {
-        let snap = self.snap_front();
-        let sig = self.state_sig();
-        let m = &mut self.mark;
-        m.active = true;
-        m.len = self.frames.len();
-        m.orig_left = m.len;
-        m.snaps.clear();
-        m.snaps.push(snap);
-        m.popped.clear();
-        m.sig = sig;
-        m.effect = Some(self.effect);
-        m.astate = self.astate;
-        m.aopen = self.aopen;
-        m.radix = self.radix;
-        m.cur_order = Some(self.cur_order);
-        m.no_pull = self.no_pull;
-    }
-
-    /// `frames.pop_front()`, keeping a frame the command in progress found
-    /// (and the state of the one it reaches next) for [`Run::rewind`].
-    fn pop_front_marked(&mut self) {
-        let f = self.frames.pop_front();
-        if self.mark.active && self.frames.len() < self.mark.orig_left {
-            self.mark.orig_left -= 1;
-            if let Some(f) = f {
-                self.mark.popped.push(f);
-            }
-            let s = self.snap_front();
-            self.mark.snaps.push(s);
-        } else if let Some(Frame::Toks(t, _)) = f {
-            recycle_toks(t);
-        }
-    }
-
-    /// After a stop inside a command: puts the input back as the command
-    /// found it, so a resumed run executes the command from its start.
-    /// False (the run must not park) if the command changed anything
-    /// else, or the input in a way not recorded.
-    fn rewind(&mut self) -> bool {
-        if !self.mark.active
-            || self.pg.is_some()
-            || self.state_sig() != self.mark.sig
-            || Some(self.effect) != self.mark.effect
-            || self.frames.len() < self.mark.orig_left
-        {
-            return false;
-        }
-        let m = std::mem::take(&mut self.mark);
-        for _ in m.orig_left..self.frames.len() {
-            self.frames.pop_front();
-        }
-        for f in m.popped.into_iter().rev() {
-            self.frames.push_front(f);
-        }
-        if self.frames.len() != m.len {
-            return false;
-        }
-        for (i, s) in m.snaps.into_iter().enumerate() {
-            match (s, self.frames.get_mut(i)) {
-                (Snap::Toks(t, p), Some(Frame::Toks(ft, fp))) => {
-                    *ft = t;
-                    *fp = p;
-                }
-                (
-                    Snap::Src {
-                        loc,
-                        state,
-                        endch,
-                        len,
-                    },
-                    Some(Frame::Src(x)),
-                ) => {
-                    if x.buf.len() < len {
-                        return false;
-                    }
-                    x.buf.truncate(len);
-                    x.loc = loc;
-                    x.state = state;
-                    x.endch = endch;
-                }
-                (Snap::File(off, pos), Some(Frame::File(x))) => {
-                    x.off = off;
-                    x.pos = pos;
-                }
-                (Snap::None, None) => {}
-                _ => return false,
-            }
-        }
-        self.astate = m.astate;
-        self.aopen = m.aopen;
-        self.radix = m.radix;
-        self.no_pull = m.no_pull;
-        if let Some(o) = m.cur_order {
-            self.cur_order = o;
-        }
-        true
-    }
-
     /// The run's state for [`phitex_defuse::Ctx::park`] after a stop:
     /// `None` if the stopped command cannot be rewound.
     pub(crate) fn park(&mut self) -> Option<Parked> {
         if !self.rewind() {
             return None;
         }
-        let frames = std::mem::take(&mut self.frames)
-            .into_iter()
-            .map(|f| match f {
-                Frame::Toks(t, p) => PFrame::Toks(t[p.min(t.len())..].to_vec()),
-                Frame::Src(s) => PFrame::Src(s),
-                Frame::File(f) => PFrame::File(f),
-            })
-            .collect();
+        let mut segs = Vec::new();
+        let input = std::mem::replace(&mut self.input, crate::input::Input::new());
+        for l in input.levels.iter().rev() {
+            match l.kind {
+                crate::input::kind::TOKS => {
+                    segs.push(Seg::Toks(input.arena.get(l.rest()).to_vec()));
+                }
+                crate::input::kind::LINE => segs.push(Seg::Line(input.line(*l).clone())),
+                _ => segs.push(Seg::File(input.file(*l).clone())),
+            }
+        }
+        segs.extend(input.text_rest().iter().cloned());
         let nest = std::mem::take(&mut self.nest)
             .into_iter()
             .map(|l| PLevel {
@@ -2788,7 +2029,7 @@ impl Run<'_, '_> {
             .collect();
         Some(Parked {
             epoch: self.cx.values_epoch(),
-            frames,
+            segs,
             pulled: self.pulled,
             top: self.top,
             claim_rest: self.claim_rest,
@@ -2809,6 +2050,7 @@ impl Run<'_, '_> {
             astate: self.astate,
             aopen: self.aopen,
             lines_entered: self.lines_entered,
+            lines_read: self.lines_read,
             eof: self.eof,
             radix: self.radix,
             cur_order: self.cur_order,
@@ -2831,15 +2073,8 @@ impl<'c, 'a> Run<'c, 'a> {
             return Err(cx);
         }
         let mut r = Run::new(cx, ops);
-        r.frames = p
-            .frames
-            .into_iter()
-            .map(|f| match f {
-                PFrame::Toks(t) => Frame::Toks(t.into(), 0),
-                PFrame::Src(s) => Frame::Src(s),
-                PFrame::File(f) => Frame::File(f),
-            })
-            .collect();
+        r.input.text = p.segs;
+        r.input.text_at = 0;
         r.nest = p
             .nest
             .into_iter()
@@ -2876,6 +2111,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.astate = p.astate;
         r.aopen = p.aopen;
         r.lines_entered = p.lines_entered;
+        r.lines_read = p.lines_read;
         r.eof = p.eof;
         r.radix = p.radix;
         r.cur_order = p.cur_order;
