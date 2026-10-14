@@ -37,7 +37,16 @@ pub(crate) struct Rec {
     /// Its run opened and closed no scope, and took no sibling.
     pub no_scope: bool,
     pub claim0: bool,
+    /// The values it published (`PHITEX_PKG_PREDICT`): per field, its
+    /// name, whether global, and the value as bytes
+    /// ([`crate::api::tree_bytes`]); the prediction of its outputs when
+    /// its key matches again.
+    pub values: RecValues,
 }
+
+/// A record's published values: per field its name, whether global,
+/// and the value as bytes.
+pub(crate) type RecValues = Vec<(String, bool, Vec<u8>)>;
 
 /// Records by load key ([`load_key`]).
 pub(crate) type Recs = FxHashMap<String, Rec>;
@@ -119,8 +128,9 @@ impl Rec {
 }
 
 /// The entry a load's run contributes to `pkgrecs`: `[node, files,
-/// writes, reads, flags]`, files `[name, hash]` (hash 0: absent), flags
-/// 1 no scope, 2 no sibling taken.
+/// writes, reads, flags, values]`, files `[name, hash]` (hash 0:
+/// absent), flags 1 no scope, 2 no sibling taken, values `[name,
+/// global, value]`.
 pub(crate) fn entry(
     v: &Values,
     node: u64,
@@ -128,6 +138,7 @@ pub(crate) fn entry(
     writes: &[String],
     reads: &[String],
     flags: i64,
+    values: &[(String, bool, ValueId)],
 ) -> ValueId {
     let fs = files
         .iter()
@@ -140,11 +151,18 @@ pub(crate) fn entry(
         strs(writes),
         strs(reads),
         v.int(flags),
+        v.list(
+            values
+                .iter()
+                .map(|(n, g, x)| v.list(vec![v.str(n), v.int(i64::from(*g)), *x]))
+                .collect(),
+        ),
     ])
 }
 
-/// An entry decoded: its node and record.
-pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, Rec)> {
+/// An entry decoded: its node and record (with its values when
+/// `values`).
+pub(crate) fn decode_entry(v: &Values, e: ValueId, values: bool) -> Option<(u64, Rec)> {
     let xs = list_of(v, e);
     let node = crate::val::int_at(v, e, 0).cast_unsigned();
     let files = list_of(v, *xs.get(1)?)
@@ -158,6 +176,25 @@ pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, Rec)> {
         .collect();
     let strs = |x: ValueId| list_of(v, x).into_iter().map(|s| str_of(v, s)).collect();
     let flags = int_of(v, *xs.get(4)?);
+    let values = if values {
+        xs.get(5)
+            .map(|&l| {
+                list_of(v, l)
+                    .into_iter()
+                    .filter_map(|e| {
+                        let ys = list_of(v, e);
+                        Some((
+                            str_of(v, *ys.first()?),
+                            int_of(v, *ys.get(1)?) != 0,
+                            crate::api::tree_bytes(v, *ys.get(2)?),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     Some((
         node,
         Rec {
@@ -166,6 +203,7 @@ pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, Rec)> {
             reads: strs(*xs.get(3)?),
             no_scope: flags & 1 != 0,
             claim0: flags & 2 != 0,
+            values,
         },
     ))
 }
@@ -178,19 +216,63 @@ pub(crate) struct LoadHints {
     /// The hash of each file's text as found (0: absent), asked once.
     now: Mutex<FxHashMap<String, u64>>,
     pub optimistic: bool,
+    /// Whether records carry their values, and a matching load's record
+    /// predicts its outputs (`PHITEX_PKG_PREDICT=1`, or
+    /// [`crate::Options::pkg_predict`]).
+    pub predict: bool,
+    /// The predictions given this build, by load key.
+    pub predicted: Mutex<FxHashMap<String, RecValues>>,
     /// Loads given a record, given the optimistic hint (counts).
     pub given: [std::sync::atomic::AtomicU64; 2],
 }
 
 impl LoadHints {
-    pub(crate) fn new(recs: Recs, finder: crate::api::Finder, optimistic: bool) -> LoadHints {
+    pub(crate) fn new(
+        recs: Recs,
+        finder: crate::api::Finder,
+        optimistic: bool,
+        predict: bool,
+    ) -> LoadHints {
         LoadHints {
             recs: Mutex::new(recs),
             finder,
             now: Mutex::new(FxHashMap::default()),
             optimistic,
+            predict,
+            predicted: Mutex::new(FxHashMap::default()),
             given: Default::default(),
         }
+    }
+
+    /// The record of the load `text` when its key matches the files as
+    /// they are now.
+    fn matching(&self, v: &Values, text: &str) -> Option<(String, Rec)> {
+        let k = load_key(text)?;
+        let r = self
+            .recs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&k)
+            .cloned()?;
+        r.matches(|n| Some(self.hash_now(v, n))).then_some((k, r))
+    }
+
+    /// The predicted publications of the load `text` (the hook's
+    /// answer): the values its record says it defines, when predicting
+    /// and its key matches; each field's name, whether global, and value.
+    pub(crate) fn prediction(
+        &self,
+        v: &Values,
+        text: &str,
+    ) -> Option<Vec<(String, bool, ValueId)>> {
+        if !self.predict {
+            return None;
+        }
+        let (_, r) = self.matching(v, text)?;
+        r.values
+            .iter()
+            .map(|(n, g, b)| Some((n.clone(), *g, crate::api::tree_from_bytes(v, b)?)))
+            .collect()
     }
 
     /// The hash of file `name`'s text as the build's finder gives it
@@ -272,6 +354,12 @@ impl LoadHints {
             && let Some(h) = r.hint()
         {
             self.given[0].fetch_add(1, Ordering::Relaxed);
+            if self.predict {
+                self.predicted
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(k, r.values);
+            }
             return Some(h);
         }
         if self.optimistic {
@@ -311,7 +399,7 @@ pub fn summary(bytes: &[u8]) -> Vec<(String, Vec<String>, Vec<String>)> {
 // Bytes: a magic, then per record its key, files, writes, reads, flags;
 // strings and counts length-prefixed (u32 little-endian).
 
-const MAGIC: &[u8; 8] = b"phipkr01";
+const MAGIC: &[u8; 8] = b"phipkr02";
 
 fn put(o: &mut Vec<u8>, b: &[u8]) {
     o.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
@@ -343,6 +431,12 @@ pub(crate) fn serialise(recs: &Recs) -> Vec<u8> {
             }
         }
         o.push(u8::from(r.no_scope) | (u8::from(r.claim0) << 1));
+        put_n(&mut o, r.values.len());
+        for (n, g, b) in &r.values {
+            put(&mut o, n.as_bytes());
+            o.push(u8::from(*g));
+            put(&mut o, b);
+        }
     }
     o
 }
@@ -389,6 +483,14 @@ pub(crate) fn parse(b: &[u8]) -> Recs {
             let writes = r.strings()?;
             let reads = r.strings()?;
             let fl = r.take(1)?[0];
+            let nv = r.n()?;
+            let mut values = Vec::with_capacity(nv.min(1 << 16));
+            for _ in 0..nv {
+                let name = r.string()?;
+                let g = r.take(1)?[0] != 0;
+                let n = r.n()?;
+                values.push((name, g, r.take(n)?.to_vec()));
+            }
             out.insert(
                 k,
                 Rec {
@@ -397,6 +499,7 @@ pub(crate) fn parse(b: &[u8]) -> Recs {
                     reads,
                     no_scope: fl & 1 != 0,
                     claim0: fl & 2 != 0,
+                    values,
                 },
             );
         }
@@ -435,6 +538,7 @@ mod tests {
                 reads: vec!["cs:b".to_owned(), "cat:64".to_owned()],
                 no_scope: true,
                 claim0: false,
+                values: vec![("cs:a".to_owned(), true, vec![1, 2, 3])],
             },
         );
         assert_eq!(parse(&serialise(&recs)), recs);

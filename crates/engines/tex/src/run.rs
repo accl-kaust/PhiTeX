@@ -618,6 +618,36 @@ impl<'c, 'a> Run<'c, 'a> {
             "markclasses",
         ];
         let name = crate::val::field_name(self.v, f);
+        // (`PHITEX_READS=<field>`: that field's reads, with the current
+        // token and the token lists being read)
+        if let Ok(want) = std::env::var("PHITEX_READS")
+            && want == name
+        {
+            let v = self.v;
+            let mut ctx = Vec::new();
+            for l in self.input.levels.iter().rev().take(6) {
+                if l.kind == crate::input::kind::TOKS {
+                    let toks: Vec<String> = self
+                        .input
+                        .arena
+                        .get(l.rest())
+                        .iter()
+                        .take(8)
+                        .map(|t| v.render(t.encode(v)))
+                        .collect();
+                    ctx.push(format!("t{}:{}", l.ty, toks.join(" ")));
+                } else {
+                    ctx.push(format!("k{}", l.kind));
+                }
+            }
+            eprintln!(
+                "reads: node {} {name} at {} (pulled {}) | {}",
+                self.cx.node().raw(),
+                v.render(self.cur.tok.encode(v)),
+                self.pulled,
+                ctx.join(" | ")
+            );
+        }
         if parked || HEADS.iter().any(|h| name.starts_with(h)) {
             eprintln!(
                 "reads: node {} op {:?} {name}{}",
@@ -1817,7 +1847,13 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         let flags = i64::from(self.effect == Effect::None) | 2;
         let node = self.cx.node().raw();
-        let e = crate::pkgrec::entry(v, node, &files, &writes, &reads, flags);
+        // (the values published: a later build's prediction of this
+        // load's outputs, `crate::pkgrec::LoadHints::prediction`)
+        let values: Vec<(String, bool, ValueId)> = published
+            .iter()
+            .map(|&(f, x, l)| (crate::val::field_name(v, f), l == Locality::Global, x))
+            .collect();
+        let e = crate::pkgrec::entry(v, node, &files, &writes, &reads, flags, &values);
         self.contribute("pkgrecs", v.seq_unit(e));
     }
 

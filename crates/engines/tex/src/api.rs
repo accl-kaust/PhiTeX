@@ -113,6 +113,10 @@ pub struct Options {
     /// uses what any earlier one learned (`crate::pkgrec`). Empty: none
     /// (every load unbounded, or optimistic under speculation).
     pub pkgrec: Vec<u8>,
+    /// Whether the records carry the values each load published, and a
+    /// load whose key matches is given them as the prediction of its
+    /// outputs (also `PHITEX_PKG_PREDICT=1`).
+    pub pkg_predict: bool,
     /// The loop-back rounds an evaluation may take before it ends with
     /// a no-fixpoint error naming the loop-back fields (a document whose
     /// written files oscillate), instead of running on.
@@ -411,6 +415,7 @@ impl Default for Options {
             pagefx: Vec::new(),
             pgst: Vec::new(),
             pkgrec: Vec::new(),
+            pkg_predict: false,
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
@@ -461,6 +466,20 @@ pub(crate) fn import(v: &Values, t: &Tree) -> ValueId {
             s
         }
     }
+}
+
+/// Value `x` as bytes, outside any table ([`tree_from_bytes`]).
+pub(crate) fn tree_bytes(v: &Values, x: ValueId) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_tree(&mut out, &export(v, x));
+    out
+}
+
+/// The value [`tree_bytes`] wrote, in `v`.
+pub(crate) fn tree_from_bytes(v: &Values, b: &[u8]) -> Option<ValueId> {
+    let mut r = Rd(b);
+    let t = r.tree()?;
+    r.0.is_empty().then(|| import(v, &t))
 }
 
 type Env = Arc<Vec<(String, Tree)>>;
@@ -981,6 +1000,13 @@ pub struct Stats {
     pub pkg_max_concurrent: usize,
     pub pkg_wall: std::time::Duration,
     pub pkg_on_critical: u64,
+    /// Loads whose record predicted their outputs
+    /// ([`Options::pkg_predict`]), of those whose run published exactly
+    /// the predicted values, and the fields predicted wrong (a value
+    /// that differs, or a field one side lacks), as `key: field`.
+    pub pkg_predicted: u64,
+    pub pkg_predict_right: u64,
+    pub pkg_predict_wrong: Vec<String>,
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
@@ -2702,10 +2728,12 @@ impl Build {
         // runs optimistically under speculation
         let optimistic = opts.speculation != Speculation::Off
             && std::env::var("PHITEX_PKG_OPTIMISTIC").map_or(true, |x| x != "0");
+        let predict = opts.pkg_predict || crate::exec::env_flag!("PHITEX_PKG_PREDICT");
         g.loads = Some(Arc::new(crate::pkgrec::LoadHints::new(
             crate::pkgrec::parse(&opts.pkgrec),
             inputs.clone(),
             optimistic,
+            predict,
         )));
         let (nodes, incr) = g.push_document(unit, document, defs, doc, Some(&inputs));
         // (the files sliced in are read: listed, and watched)
@@ -3121,12 +3149,25 @@ impl Build {
         }
     }
 
+    /// The predicted publications of the package load `text` (what the
+    /// engine's hook is given, `crate::pkgrec::LoadHints::prediction`):
+    /// each field, whether global, and its value rendered; `None` when
+    /// not predicting or the load's key does not match.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pkg_prediction(&self, text: &str) -> Option<Vec<(String, bool, String)>> {
+        let v = self.g.eng.values();
+        let p = self.g.loads.as_ref()?.prediction(v, text)?;
+        Some(p.into_iter().map(|(n, g, x)| (n, g, v.render(x))).collect())
+    }
+
     /// The records the loads' last runs left (`pkgrecs`), by load key.
     fn fresh_records(&self) -> Vec<(String, crate::pkgrec::Rec)> {
         let v = self.g.eng.values();
         let Some(acc) = self.g.eng.acc_value(self.unit, v.field("pkgrecs")) else {
             return Vec::new();
         };
+        let values = self.g.loads.as_ref().is_some_and(|l| l.predict);
         let keys: FxHashMap<u64, String> = self
             .nodes
             .iter()
@@ -3137,7 +3178,7 @@ impl Build {
         v.seq_to_vec(acc)
             .into_iter()
             .filter_map(|e| {
-                let (node, r) = crate::pkgrec::decode_entry(v, e)?;
+                let (node, r) = crate::pkgrec::decode_entry(v, e, values)?;
                 Some((keys.get(&node)?.clone(), r))
             })
             .collect()
@@ -3246,6 +3287,51 @@ impl Build {
         if let Some(l) = &self.g.loads {
             stats.pkg_recorded = l.given[0].load(std::sync::atomic::Ordering::Relaxed);
             stats.pkg_optimistic = l.given[1].load(std::sync::atomic::Ordering::Relaxed);
+            // each prediction against what the load's last run published
+            let predicted = l
+                .predicted
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if !predicted.is_empty() {
+                let fresh: FxHashMap<String, crate::pkgrec::Rec> =
+                    self.fresh_records().into_iter().collect();
+                stats.pkg_predicted = predicted.len() as u64;
+                stats.pkg_predict_wrong.clear();
+                let mut keys: Vec<&String> = predicted.keys().collect();
+                keys.sort();
+                for k in keys {
+                    let want = &predicted[k];
+                    let Some(got) = fresh.get(k) else {
+                        stats
+                            .pkg_predict_wrong
+                            .push(format!("{k}: (no record of its run)"));
+                        continue;
+                    };
+                    let a: FxHashMap<&str, (bool, &[u8])> = want
+                        .iter()
+                        .map(|(n, g, b)| (n.as_str(), (*g, b.as_slice())))
+                        .collect();
+                    let b: FxHashMap<&str, (bool, &[u8])> = got
+                        .values
+                        .iter()
+                        .map(|(n, g, b)| (n.as_str(), (*g, b.as_slice())))
+                        .collect();
+                    let mut wrong: Vec<&str> = a
+                        .iter()
+                        .filter(|(n, x)| b.get(*n) != Some(*x))
+                        .map(|(n, _)| *n)
+                        .chain(b.keys().filter(|n| !a.contains_key(*n)).copied())
+                        .collect();
+                    wrong.sort_unstable();
+                    if wrong.is_empty() {
+                        stats.pkg_predict_right += 1;
+                    }
+                    stats
+                        .pkg_predict_wrong
+                        .extend(wrong.into_iter().map(|f| format!("{k}: {f}")));
+                }
+            }
         }
         let log = self
             .g

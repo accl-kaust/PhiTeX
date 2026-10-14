@@ -328,3 +328,97 @@ fn latex_loads_are_runs_of_their_own() {
     same("latex second", &second.output().0, &seq.output().0);
     same("latex first", &first.output().0, &seq.output().0);
 }
+
+fn build_predicting(d: &Path, doc: &str, recs: Vec<u8>) -> Build {
+    let o = Options {
+        pkg_predict: true,
+        ..opts(d, Speculation::Off, recs)
+    };
+    common::build(o, Some(&common::plain()), doc)
+}
+
+/// With predictions on, a record carries the values its load published;
+/// on a later build a load whose key matches is given them, and its run
+/// publishes exactly those (the prediction is right); the output equals
+/// a sequential build's.
+#[test]
+fn prediction_is_right_when_nothing_changed() {
+    let d = dir(
+        "predict-right",
+        &[
+            (
+                "pa.sty",
+                "\\def\\aa{A}\\countdef\\pacnt=100 \\global\\pacnt=7\n",
+            ),
+            ("pb.sty", "\\edef\\bb{\\aa B}\n"),
+        ],
+    );
+    let doc = format!("{DEF}\\usepackage{{pa}}\n\\usepackage{{pb}}\n\\aa\\bb\n\\bye\n");
+    let want = sequential(&d, &doc);
+    let first = build_predicting(&d, &doc, Vec::new());
+    note("first", &first);
+    same("first", &first.output().0, &want);
+    assert_eq!(first.stats.pkg_predicted, 0);
+    let recs = first.export_pkgrec();
+    let second = build_predicting(&d, &doc, recs);
+    note("second", &second);
+    same("second", &second.output().0, &want);
+    let p = second
+        .pkg_prediction("\\usepackage{pb}\n")
+        .expect("pb is predicted");
+    eprintln!("prediction of pb: {p:?}");
+    assert!(
+        p.iter()
+            .any(|(f, _, x)| f == "cs:bb" && x.starts_with("[\"macro\"")),
+        "the prediction carries \\bb's value"
+    );
+    let pa = second
+        .pkg_prediction("\\usepackage{pa}\n")
+        .expect("pa is predicted");
+    assert!(pa.iter().any(|(f, g, _)| f == "count:100" && *g), "{pa:?}");
+    assert_eq!(second.stats.pkg_predicted, 2);
+    assert_eq!(
+        second.stats.pkg_predict_right, 2,
+        "wrong: {:?}",
+        second.stats.pkg_predict_wrong
+    );
+}
+
+/// An earlier load changed (its file did: its key no longer matches),
+/// and a later load reads what it defines: the later load's key still
+/// matches, so it is predicted, and the prediction is wrong exactly in
+/// the value that depends on the earlier load; the output equals a
+/// sequential build's.
+#[test]
+fn prediction_is_wrong_when_an_earlier_load_changed() {
+    let d = dir(
+        "predict-wrong",
+        &[
+            ("pa.sty", "\\def\\aa{A}\n"),
+            ("pb.sty", "\\edef\\bb{\\aa B}\\def\\bc{C}\n"),
+        ],
+    );
+    let doc = format!("{DEF}\\usepackage{{pa}}\n\\usepackage{{pb}}\n\\aa\\bb\\bc\n\\bye\n");
+    let first = build_predicting(&d, &doc, Vec::new());
+    note("first", &first);
+    let recs = first.export_pkgrec();
+    std::fs::write(d.join("pa.sty"), "\\def\\aa{Z}\n").unwrap();
+    let second = build_predicting(&d, &doc, recs);
+    note("earlier load changed", &second);
+    same(
+        "earlier load changed",
+        &second.output().0,
+        &sequential(&d, &doc),
+    );
+    assert!(
+        second.pkg_prediction("\\usepackage{pa}\n").is_none(),
+        "pa's key no longer matches"
+    );
+    assert_eq!(second.stats.pkg_predicted, 1, "pb only");
+    assert_eq!(second.stats.pkg_predict_right, 0);
+    assert_eq!(
+        second.stats.pkg_predict_wrong,
+        vec!["\\usepackage{pb}: cs:bb".to_owned()],
+        "only \\bb, which reads \\aa, is predicted wrong"
+    );
+}
