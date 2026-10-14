@@ -60,6 +60,8 @@ pub(crate) struct Ops {
     /// The page chain's loop-backs as read and published in the current
     /// evaluation: the refuted guesses ([`crate::Stats`]).
     pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
+    pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
 }
 
 /// The lines of a file not reached yet: its text (a string value) and
@@ -76,14 +78,22 @@ pub(crate) struct FileRest {
     /// The characters before `off` (kept as lines are taken: counting
     /// them from the start at every line made reading a file quadratic).
     pos: usize,
+    /// The lines before `off` (`line`, §304: the last line taken's
+    /// number).
+    pub line: u32,
 }
 
 impl FileRest {
     pub(crate) fn new(v: &Values, id: ValueId, off: usize, name: ValueId) -> FileRest {
         let text = v.get(id);
-        let pos = match &*text {
-            phitex_defuse::Value::Str(s) => s.get(..off).map_or(0, |p| p.chars().count()),
-            _ => 0,
+        let (pos, line) = match &*text {
+            phitex_defuse::Value::Str(s) => s.get(..off).map_or((0, 0), |p| {
+                (
+                    p.chars().count(),
+                    u32::try_from(p.bytes().filter(|&b| b == b'\n').count()).unwrap_or(u32::MAX),
+                )
+            }),
+            _ => (0, 0),
         };
         FileRest {
             id,
@@ -91,6 +101,7 @@ impl FileRest {
             off,
             name,
             pos,
+            line,
         }
     }
 
@@ -146,6 +157,7 @@ impl FileRest {
         let chars = line.chars().count();
         self.pos += chars;
         self.off += n;
+        self.line = self.line.saturating_add(1);
         Line {
             buf,
             loc: 0,
@@ -154,9 +166,19 @@ impl FileRest {
             starts: true,
             ends: true,
             origin: Some((self.name, at)),
+            lineno: self.line,
             rescanned: false,
         }
     }
+}
+
+/// Where `\inputlineno` reads (`line`, §304: the innermost file's).
+pub(crate) enum FileLine {
+    /// The line's number is known here.
+    Known(i64),
+    /// A line of a document's piece in the file of this name: the lines
+    /// of the file begun before the node, and by it.
+    Piece(ValueId),
 }
 
 /// Whether `PHITEX_HEARTBEAT=1` (read once a process).
@@ -210,9 +232,12 @@ pub(crate) struct Run<'c, 'a> {
     /// Control sequence names scanned, by a hash of their characters
     /// ([`Run::cs_of_buf`]).
     pub cs_cache: Box<[(u64, Tok)]>,
-    /// Lines begun by this run (the `lines` accumulator, contributed
-    /// once at the end).
+    /// Lines begun by this run.
     pub lines_read: u64,
+    /// Lines begun by this run of document pieces (lines without a
+    /// number of their own, `Line::lineno`), by file name: the `lines`
+    /// accumulator, contributed once at the end.
+    pub doc_lines: Vec<(ValueId, i64)>,
     /// `macro_call`'s buffers, kept between calls.
     pub mbufs: crate::expand::MacroBufs,
     /// `PHITEX_HEARTBEAT=1` (read once a process).
@@ -264,6 +289,8 @@ pub(crate) struct Run<'c, 'a> {
     pub pagefx_pub: bool,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
+    /// A page step that shipped a page (`pdf:shipped:<j>`).
+    pub shipped: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -336,6 +363,7 @@ impl<'c, 'a> Run<'c, 'a> {
             input: crate::input::Input::new(),
             cs_cache: vec![(0, Tok::c(0)); CS_CACHE].into_boxed_slice(),
             lines_read: 0,
+            doc_lines: Vec::new(),
             mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
@@ -356,6 +384,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pg: None,
             pagefx_pub: false,
             in_advance: false,
+            shipped: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -831,6 +860,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 starts: false,
                 ends: true,
                 origin: None,
+                lineno: 0,
                 rescanned: true,
             }));
         }
@@ -1281,9 +1311,18 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a document's leftovers stay a document's, [`Run::run_all`])
         let kind = if self.doc { 2 } else { 0 };
         let mut run: Vec<ValueId> = Vec::new();
+        // (the token levels' node reads `\inputlineno` of the file they
+        // are read in: its line, or its name for a document's piece)
+        let here = match self.file_line_here() {
+            Some(FileLine::Known(n)) => vec![ValueId::UNIT, v.int(n)],
+            Some(FileLine::Piece(name)) => vec![name, v.int(-1)],
+            None => Vec::new(),
+        };
         let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
             let l = v.list(toks);
-            vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(kind)]
+            let mut t = vec![tag_t, l];
+            t.extend(here.iter().copied());
+            vec![v.list(vec![v.list(t)]), v.int(kind)]
         };
         // (the token levels left, in reading order, are one node: TeX
         // reads them one after the other, and a brace or a group they
@@ -1314,6 +1353,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 let at = at + s.loc.min(s.buf.len());
                 xs.push(name);
                 xs.push(v.int(i64::try_from(at).unwrap_or(0)));
+                // (a line of a file read here: its number; a document
+                // piece's is counted, never in the arguments)
+                if s.lineno > 0 {
+                    xs.push(v.int(i64::from(s.lineno)));
+                }
             }
             out.push(vec![v.list(vec![v.list(xs)]), v.int(kind)]);
         };
@@ -1645,9 +1689,20 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         crate::pdfout::publish(self.pdf_fold.take());
-        if self.lines_read != 0 {
-            let n = self.v.int(i64::try_from(self.lines_read).unwrap_or(0));
-            self.contribute("lines", n);
+        if !self.doc_lines.is_empty() {
+            let v = self.v;
+            let mut xs: Vec<(String, ValueId, i64)> = self
+                .doc_lines
+                .iter()
+                .map(|&(n, k)| (str_of(v, n), n, k))
+                .collect();
+            xs.sort_by(|a, b| a.0.cmp(&b.0));
+            let m = v.list(
+                xs.into_iter()
+                    .map(|(_, n, k)| v.list(vec![n, v.int(k)]))
+                    .collect(),
+            );
+            self.contribute("lines", m);
         }
         crate::pageinline::finish(&mut self);
         // a page parameter this run set reaches the page fold as a
@@ -1668,6 +1723,16 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
+            let f = self.v.field(&crate::etex::shipped_field(self.page_index()));
+            let asked = self
+                .get("pp:probe")
+                .ok()
+                .flatten()
+                .is_some_and(|x| int_of(self.v, x) != 0);
+            if asked && self.cx.is_loopback(f) {
+                let x = self.v.int(i64::from(self.shipped));
+                self.cx.publish(f, x);
+            }
             crate::page::step_defs(&mut self, published);
         } else {
             let (n, t_list) = (published.len(), t_pub.elapsed());
@@ -1869,6 +1934,9 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
                         }
                         _ => None,
                     },
+                    lineno: xs
+                        .get(7)
+                        .map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
                 }));
             }
             _ => {}
@@ -2000,6 +2068,7 @@ pub(crate) struct Parked {
     aopen: i64,
     lines_entered: i64,
     lines_read: u64,
+    doc_lines: Vec<(ValueId, i64)>,
     eof: bool,
     radix: i32,
     cur_order: phitex_typeset::glue::Order,
@@ -2069,6 +2138,7 @@ impl Run<'_, '_> {
             aopen: self.aopen,
             lines_entered: self.lines_entered,
             lines_read: self.lines_read,
+            doc_lines: self.doc_lines.clone(),
             eof: self.eof,
             radix: self.radix,
             cur_order: self.cur_order,
@@ -2129,6 +2199,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.aopen = p.aopen;
         r.lines_entered = p.lines_entered;
         r.lines_read = p.lines_read;
+        r.doc_lines.clone_from(&p.doc_lines);
         r.eof = p.eof;
         r.radix = p.radix;
         r.cur_order = p.cur_order;
@@ -2136,5 +2207,55 @@ impl<'c, 'a> Run<'c, 'a> {
         r.irreversible = p.irreversible;
         r.resumed = true;
         Ok(r)
+    }
+}
+
+impl Run<'_, '_> {
+    /// The innermost file being read (§304): the top file level of the
+    /// input stack (a line of it, or the rest of a file read here), else
+    /// the file the node's token levels were left in (its `t` frame).
+    pub(crate) fn file_line_here(&self) -> Option<FileLine> {
+        for l in self.input.levels.iter().rev() {
+            match l.kind {
+                crate::input::kind::TOKS => {}
+                crate::input::kind::LINE => {
+                    let s = self.input.line(*l);
+                    if s.lineno > 0 {
+                        return Some(FileLine::Known(i64::from(s.lineno)));
+                    }
+                    // (a `\read` line is no file's, §483; a text
+                    // without an origin, a format's or INITEX's, is one
+                    // file, UNIT)
+                    if !s.rescanned {
+                        return Some(FileLine::Piece(s.origin.map_or(ValueId::UNIT, |o| o.0)));
+                    }
+                }
+                _ => {
+                    return Some(FileLine::Known(i64::from(self.input.file(*l).line)));
+                }
+            }
+        }
+        let v = self.v;
+        let frames = self.cx.args().first().map(|&f| list_of(v, f))?;
+        frames.iter().find_map(|&f| {
+            let xs = list_of(v, f);
+            if xs.len() < 4 || xs.first().map(|&t| str_of(v, t)).as_deref() != Some("t") {
+                return None;
+            }
+            let n = int_of(v, xs[3]);
+            Some(if n >= 0 {
+                FileLine::Known(n)
+            } else {
+                FileLine::Piece(xs[2])
+            })
+        })
+    }
+
+    /// A line of a document's piece in file `name` begun (§362).
+    pub(crate) fn doc_line_begun(&mut self, name: ValueId) {
+        match self.doc_lines.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, k)) => *k += 1,
+            None => self.doc_lines.push((name, 1)),
+        }
     }
 }

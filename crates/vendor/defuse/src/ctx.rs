@@ -940,7 +940,7 @@ impl<'a> Ctx<'a> {
             .unwrap_or(NIL);
         let lo = if anchor == NIL { 0 } else { e.n(anchor).label + 1 };
         let hi = if end == NIL { n.label } else { e.n(end).label + 1 };
-        let s = e.order_fold(n.unit, lo, hi);
+        let s = e.order_fold(n.unit, f, lo, hi);
         if s.0 > 0 {
             return self.stop(End::WaitRange(f, anchor, end));
         }
@@ -1100,6 +1100,7 @@ impl<'a> Ctx<'a> {
             env: self.env,
             env_found: self.env_found,
             publishes: self.publishes,
+            contrib_folds: (!self.contribs.is_empty()).then(|| self.eng.contrib_folds(&self.contribs)),
             contribs: self.contribs,
             watch: self.watch,
             scan: self.scan.get(),
