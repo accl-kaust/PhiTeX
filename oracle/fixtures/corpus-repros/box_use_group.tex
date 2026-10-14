@@ -1,0 +1,13 @@
+\documentclass{article}
+\begin{document}
+\setbox1\hbox{text-box}
+\output{\shipout\vbox{\hbox{box1: \ifvoid1 void\else\copy1\fi}\unvbox255}\global\setbox1\hbox{routine}}
+\begingroup
+\setbox1\hbox{inner}
+One.\newpage
+\setbox0\box1
+Two.\newpage
+\endgroup
+Three.\newpage
+Four.
+\end{document}

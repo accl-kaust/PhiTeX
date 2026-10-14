@@ -100,6 +100,10 @@ repro!(
     "amsldoc (multicol): \\begin{multicols} forces a page whose routine ships nothing (multicol.dtx \\prepare@multicols: the partial page saved in \\partial@page) and \\end{multicols} balances the columns back onto the page (\\balance@columns@out); the partial page came out twice, then 2pt high (§1025)"
 );
 repro!(
+    multicol_pages,
+    "amsldoc (multicol): a multicols environment over several pages (multicol.dtx \\multi@column@out ships each page with the partial page on the first) and balanced at \\end{multicols} on the last"
+);
+repro!(
     multicol_theindex,
     "amsldoc (multicol): imakeidx's theindex is a multicols environment under a \\section* title (amsldoc's index, pdflatex's pages 36-40); it hung with '257 rounds without progress'"
 );
@@ -108,6 +112,14 @@ repro!(
     "multicol: TeX's state holds the younger assignment (§279): a routine's \\global made at an earlier page beats the text's local made before it (multicol's \\@colroom), and a local the text makes after it beats it, in the same group; after the group the global survives (§283)"
 );
 repro!(
-    multicol_pages,
-    "amsldoc (multicol): a multicols environment over several pages (multicol.dtx \\multi@column@out ships each page with the partial page on the first, its \\vsize set inside the environment's group, §987) and balanced at \\end{multicols} on the last"
+    routine_local_dies,
+    "multicol (TeX's assignment order): a routine's local assignment dies with its output group (§1025–§1026), its \\global one reaches the next page's routine"
+);
+repro!(
+    text_global_in_group,
+    "multicol (TeX's assignment order): a \\global in an inner group hides the outer group's save (§283): after both groups end, the page's routine reads the global"
+);
+repro!(
+    box_use_group,
+    "multicol (TeX's assignment order): a box register used in the text (\\box1) is voided in place, unsaved (§1079), at level one when a routine set it \\global: the next routine reads it void"
 );
