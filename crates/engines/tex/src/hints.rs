@@ -3168,6 +3168,9 @@ impl ParLists {
                 ran.states.len(),
                 ran.defines.names.keys().collect::<Vec<_>>()
             );
+            for d in pass::ParMachine::describe_states(&ran.states) {
+                eprintln!("parlists:   {d}");
+            }
         }
         self.states = ran.states;
         let d = ran.defines;

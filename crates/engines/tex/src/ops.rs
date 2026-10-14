@@ -264,6 +264,9 @@ impl Operation for Exec {
             crate::hints::debug_defs(r, &hint);
             if hint.bound.is_some() {
                 if let Some(m) = crate::hints::check_defs(r, &hint) {
+                    if std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
+                        eprintln!("parlists: {}", m.chars().take(600).collect::<String>());
+                    }
                     r.log("error", &m)?;
                     crate::hints::count(r, 3);
                 }
