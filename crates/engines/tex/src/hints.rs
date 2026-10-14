@@ -554,6 +554,16 @@ impl Hint {
                 };
                 ps.extend(b.names.iter().cloned());
                 ps.extend(b.prefixes.iter().cloned());
+                // the page state and the shipped pages: any piece with
+                // items for the main list folds them at its end and
+                // defines the next page state (`crate::pages`), whatever
+                // its commands; a reader past a piece not declaring them
+                // would read an older version and run again
+                for f in [crate::pages::PS, crate::pages::SHIPPED] {
+                    if !ps.iter().any(|p| f.starts_with(p.as_str())) {
+                        ps.push(f.to_owned());
+                    }
+                }
                 MayDefine::Prefixes(ps)
             }
         }
