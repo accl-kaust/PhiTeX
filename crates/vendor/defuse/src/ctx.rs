@@ -20,6 +20,7 @@ pub struct Stop {
 
 /// The context of one run of one node. Everything an operation reads goes
 /// through here and becomes a def-use edge.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Ctx<'a> {
     eng: &'a Engine,
     slot: Slot,
@@ -34,6 +35,8 @@ pub struct Ctx<'a> {
     /// A speculative read of a finished node not yet settled (its value
     /// may still change).
     read_unsettled: bool,
+    /// A speculative read answered by a prediction.
+    read_predicted: bool,
     raise_from: Slot,
     cache: FxHashMap<(u8, u64), Option<ValueId>>,
     /// Walks the gate did for this run (same node, same batch state).
@@ -92,6 +95,7 @@ impl<'a> Ctx<'a> {
             stopped: None,
             raise: 0,
             read_unsettled: false,
+            read_predicted: false,
             raise_from: NIL,
             cache: FxHashMap::default(),
             walks: Vec::new(),
@@ -295,6 +299,18 @@ impl<'a> Ctx<'a> {
             return Ok(val);
         }
         let tn = e.n(t);
+        if self.spec
+            && !tn.has_ran()
+            && tn.in_work()
+            && let AssumeKind::Def(f) = kind
+            && let Some(p) = e.statics(tn.op, tn.args).predicted(f)
+        {
+            // Predicted by the text: run on it; the node's run confirms
+            // or refutes it like any guess.
+            self.read_predicted = true;
+            self.assumptions.push((t, kind, p));
+            return Ok(Some(p));
+        }
         if self.spec && tn.has_ran() {
             if tn.in_work() {
                 self.assumptions.push((t, kind, val.unwrap_or(ValueId::NONE)));
@@ -1092,6 +1108,7 @@ impl<'a> Ctx<'a> {
             end,
             raise: self.raise,
             read_unsettled: self.read_unsettled,
+            read_predicted: self.read_predicted,
             raise_from: self.raise_from,
             uses: self.uses,
             defs: self.defs,
@@ -1100,6 +1117,7 @@ impl<'a> Ctx<'a> {
             env: self.env,
             env_found: self.env_found,
             publishes: self.publishes,
+            contrib_folds: (!self.contribs.is_empty()).then(|| self.eng.contrib_folds(&self.contribs)),
             contribs: self.contribs,
             watch: self.watch,
             scan: self.scan.get(),

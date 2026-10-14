@@ -186,6 +186,16 @@ pub(crate) struct Static {
     may_define: Arc<MayDefine>,
     predict: bool,
     contribs: Option<Vec<(Field, ValueId)>>,
+    /// [`Operation::predicted_defs`], sorted by field.
+    pub(crate) predicted: Option<Vec<(Field, ValueId)>>,
+}
+
+impl Static {
+    /// The predicted value of `f`, if the text predicts one.
+    pub(crate) fn predicted(&self, f: Field) -> Option<ValueId> {
+        let p = self.predicted.as_ref()?;
+        p.binary_search_by_key(&f, |x| x.0).ok().map(|i| p[i].1)
+    }
 }
 
 /// Where a pending node is indexed: `pending` (an unbounded definition
@@ -254,6 +264,19 @@ pub trait Operation: Send + Sync {
     /// node claimed by another contributes nothing (its claimer does, in
     /// its place); a new text asks again.
     fn static_contribs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
+        None
+    }
+
+    /// Predicted values for some of the fields the node defines, known
+    /// before it runs (for example from an earlier run on the same
+    /// inputs). Under any speculation but [`crate::Speculation::Off`], a
+    /// reader may run on a prediction instead of waiting for the node.
+    /// When the node runs, each predicted field is compared by value with
+    /// what it defined: equal, the readers stand; different (or predicted
+    /// and not defined), exactly the readers of that field run again.
+    /// Predictions change speed, never results. Asked once per text: a
+    /// new text asks again.
+    fn predicted_defs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
         None
     }
 
@@ -511,10 +534,19 @@ pub struct Report {
     /// declaration, checked afresh). A static definition list that a run
     /// contradicts is an error instead.
     pub declarations_refuted: u64,
+    /// Every node made to run again, with the reason that made it dirty
+    /// (the last one when it was made dirty more than once; edits before
+    /// the evaluation included).
+    pub rerun_causes: Vec<(NodeId, Rerun)>,
     /// Runs whose contributions differed from what their text declared
     /// ([`Operation::static_contribs`]): the run's stand, and the range
     /// readers that folded the declared ones run again.
     pub static_contribs_refuted: u64,
+    /// Speculative runs that read a predicted value
+    /// ([`Operation::predicted_defs`]) and were confirmed.
+    pub predictions_confirmed: u64,
+    /// Speculative runs that read a predicted value and were refuted.
+    pub predictions_refuted: u64,
     /// Speculative runs that ran out of fuel.
     pub fuel_outs: u64,
     /// Scheduler steps.
@@ -605,12 +637,16 @@ pub enum EvalError {
     NoProgress {
         rounds: u32,
         waiters: Vec<Waiter>,
+        /// The evaluation's counters up to the error.
+        report: Box<Report>,
     },
     /// [`Limits::total_runs`] or [`Limits::time`] was reached with these
     /// nodes still waiting or queued.
     Deadline {
         runs: u64,
         waiters: Vec<Waiter>,
+        /// The evaluation's counters up to the deadline.
+        report: Box<Report>,
     },
 }
 
@@ -684,6 +720,42 @@ pub enum Cause {
     /// or waited for stands at the level below (for
     /// [`Engine::critical_chain`], which goes on from `by`; `None`: gone).
     Raised { to: u32, by: Option<NodeId>, how: Lifted },
+}
+
+/// Why a node was last made to run again ([`Report::rerun_causes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rerun {
+    /// Its text was replaced.
+    Text,
+    /// The definition of `field` it read changed value (`old` is
+    /// `ValueId::NONE` when the field had none).
+    Changed { field: Field, old: ValueId, new: ValueId },
+    /// A use of `field` now reaches another definition.
+    Rebind { field: Field },
+    /// A speculative run's assumption on `field` failed (`None`: on an
+    /// output, or a read that a node of its own batch had re-bound).
+    Refuted { field: Option<Field> },
+    /// It stopped, and what it waited for finished (`field`: `None` for
+    /// an output or a claim).
+    Woken { field: Option<Field> },
+    /// A loop-back field's value for the next round.
+    Loop { field: Field },
+    /// The environment's `field` changed.
+    Environment { field: Field },
+    /// The output of `of`, which it reads, changed or went.
+    Output { of: NodeId },
+    /// Its claim (or a claim stream's following siblings) changed: a
+    /// sibling came, went, changed or was claimed by another.
+    Claim,
+    /// A sibling its `prev_sibling_where` scan passed over changed.
+    SiblingScan,
+    /// An accumulator range it reads changed (a contribution or the
+    /// range's structure).
+    Range { field: Option<Field> },
+    /// A scope effect around it changed.
+    Scope,
+    /// Anything else.
+    Other,
 }
 
 /// How a finished node put another above it ([`Cause::Raised`]).
@@ -827,14 +899,14 @@ impl fmt::Display for EvalError {
                 f,
                 "node {node:?} created {created} children at depth {depth}; last: {last:?}"
             ),
-            EvalError::NoProgress { rounds, waiters } => {
+            EvalError::NoProgress { rounds, waiters, .. } => {
                 write!(
                     f,
                     "{rounds} rounds without progress; {} nodes waiting: {waiters:?}",
                     waiters.len()
                 )
             }
-            EvalError::Deadline { runs, waiters } => {
+            EvalError::Deadline { runs, waiters, .. } => {
                 write!(
                     f,
                     "deadline after {runs} runs; {} nodes waiting: {waiters:?}",
@@ -1020,7 +1092,7 @@ impl Node {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AssumeKind {
     Def(Field),
     Output,
@@ -1035,6 +1107,7 @@ pub(crate) struct Assume {
     value: ValueId,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 pub(crate) struct Aux {
     pub(crate) children: Vec<Slot>,
@@ -1042,6 +1115,8 @@ pub(crate) struct Aux {
     out_readers: Vec<Slot>,
     publishes: Vec<(Field, ValueId)>,
     contribs: Vec<(Field, ValueId)>,
+    /// `contribs` folded per field.
+    folds: Vec<(Field, ValueId)>,
     /// Whether `contribs` is known from the text before the run
     /// ([`Operation::static_contribs`]): range readers do not wait on it.
     static_contribs: bool,
@@ -1056,6 +1131,9 @@ pub(crate) struct Aux {
     pub(crate) body: Option<u32>,
     assumers: Vec<Assume>,
     assume_left: u32,
+    /// The kept guess read a predicted value (counted when it is
+    /// confirmed or refuted).
+    read_predicted: bool,
     watch: Option<(Field, Slot)>,
     /// The last node of a bounded range read ([`Ctx::acc_range_to`]):
     /// the range is `(anchor, to]`; `None`: up to the reader.
@@ -1656,7 +1734,7 @@ impl OrderOp {
 #[derive(Clone, Copy, Debug)]
 enum Tail {
     /// `make_dirty_quiet` of the node.
-    Dirty(Slot),
+    Dirty(Slot, Rerun),
     /// `raise(node, height, origin)`.
     Raise(Slot, u32, Slot),
     /// The first node parked on the second: it joins the waiters.
@@ -1746,6 +1824,15 @@ pub struct Engine {
     causes: OvMap<Slot, Vec<Cause>>,
     /// Nodes past half their run budget (`> 0`: causes are recorded).
     tracing: u32,
+    /// The reason recorded for the next `make_dirty` ([`Rerun`]).
+    why: Rerun,
+    /// Fields the results applied so far in this batch defined.
+    batch_defined: FxHashSet<Field>,
+    /// Nodes not yet guessed because of a likely definer that has not run
+    /// (see `likely_definer_due`), with that definer.
+    definer_due: Mutex<FxHashMap<Slot, Slot>>,
+    /// The value a definition had before the change being propagated.
+    changed_from: ValueId,
     created_in_eval: OvMap<Slot, (u32, Vec<(OpId, ValueId)>)>,
     /// While a run of fresh siblings is bound: (label, effect in the order,
     /// scope depth before it), sorted by label. Their definitions' depths
@@ -1782,6 +1869,8 @@ pub struct Engine {
     pub(crate) text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
     /// The text-only hooks of each (operation, text), computed once.
     statics: RwLock<FxHashMap<(OpId, ValueId), Arc<Static>>>,
+    /// Some text predicted values ([`Operation::predicted_defs`]).
+    predictions_seen: std::sync::atomic::AtomicBool,
     /// Dirty demanded nodes by height (a bucket queue: entries are removed
     /// lazily, an entry is live iff its node is `F_QUEUED` at that height).
     queue: Vec<Vec<(NodeId, Slot)>>,
@@ -2003,6 +2092,10 @@ impl Engine {
             runs_in_eval: SlotCounts::default(),
             causes: OvMap::default(),
             tracing: 0,
+            why: Rerun::Other,
+            batch_defined: FxHashSet::default(),
+            definer_due: Mutex::default(),
+            changed_from: ValueId::NONE,
             created_in_eval: OvMap::default(),
             run_depths: Vec::new(),
             idle_rounds: 0,
@@ -2025,6 +2118,7 @@ impl Engine {
             memo: OvMap::default(),
             text_memo: RwLock::new(FxHashMap::default()),
             statics: RwLock::new(FxHashMap::default()),
+            predictions_seen: std::sync::atomic::AtomicBool::new(false),
             queue: Vec::new(),
             queue_min: 0,
             queue_len: 0,
@@ -2158,6 +2252,12 @@ impl Engine {
             claim: opr.claim(&av, v, &mut std::iter::empty()),
             reads: opr.reads(&av, v),
             contribs: opr.static_contribs(&av, v),
+            predicted: opr.predicted_defs(&av, v).map(|mut p| {
+                p.sort_by_key(|x| x.0);
+                p.dedup_by_key(|x| x.0);
+                self.predictions_seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                p
+            }),
             predict: opr.until_predict(&av, v, &mut std::iter::empty()).is_some(),
         });
         self.statics
@@ -2184,7 +2284,7 @@ impl Engine {
             if let MayDefine::Names(fs) = &*x.may_define {
                 live.extend(fs.iter().map(|f| f.0));
             }
-            for &(f, v) in x.contribs.iter().flatten() {
+            for &(f, v) in x.contribs.iter().flatten().chain(x.predicted.iter().flatten()) {
                 live.extend([f.0, v]);
             }
         }
@@ -2854,6 +2954,24 @@ impl Engine {
         *self.mispredicted.entry_or(x, || 0) += 1;
     }
 
+    /// Whether a hinted read of `s` ([`Operation::reads`]) reaches a node in
+    /// work that has not run and predicts the field
+    /// ([`Operation::predicted_defs`]): a guess has a value to run on.
+    fn reads_predicted(&self, s: Slot) -> bool {
+        if !self.predictions_seen.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        let n = self.n(s);
+        let st = self.statics(n.op, n.args);
+        st.reads.iter().flatten().any(|&f| {
+            let w = self.walk(n.unit, n.label, f);
+            w.pending == NIL && w.site != NIL && {
+                let t = self.n(w.site);
+                t.in_work() && !t.has(F_RAN) && self.statics(t.op, t.args).predicted(f).is_some()
+            }
+        })
+    }
+
     /// Whether an input `s` read on its last run is itself due to run
     /// again: a guess now would read the value about to change (and be
     /// refuted when it does), so `s` is guessed after it instead.
@@ -2870,22 +2988,44 @@ impl Engine {
     /// guess past it would read the field as undefined and be refuted
     /// when it runs.
     fn likely_definer_due(&self, s: Slot) -> bool {
+        let unrun = |t: Slot| self.live(t) && self.n(t).state == State::Dirty && !self.n(t).has(F_RAN);
+        let memo = self
+            .definer_due
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&s)
+            .copied();
+        // A node found without one is not looked at again (a heuristic:
+        // a nearer definer is unlikely to appear).
+        match memo {
+            Some(NIL) => return false,
+            Some(t) if unrun(t) => return true,
+            _ => {}
+        }
+        let t = self.likely_definer(s);
+        self.definer_due
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(s, t.unwrap_or(NIL));
+        t.is_some()
+    }
+
+    /// The pending node `likely_definer_due` finds, if any.
+    fn likely_definer(&self, s: Slot) -> Option<Slot> {
         let n = self.n(s);
         let st = self.statics(n.op, n.args);
         let Some(reads) = &st.reads else {
-            return false;
+            return None;
         };
-        reads.iter().any(|&f| {
+        reads.iter().find_map(|&f| {
             let f = self.canon(f);
             let w = self.walk(n.unit, n.label, f);
             let t = w.pending;
             if t == NIL || t == s || self.n(t).state != State::Dirty || self.n(t).has(F_RAN) {
-                return false;
+                return None;
             }
-            let Some(ix) = self.aux_of(t).and_then(|a| a.pend_fields.as_ref()) else {
-                return false;
-            };
-            match &*ix.bound {
+            let ix = self.aux_of(t).and_then(|a| a.pend_fields.as_ref())?;
+            let likely = match &*ix.bound {
                 MayDefine::Names(fs) => fs.iter().any(|&g| self.canon(g) == f),
                 MayDefine::Prefixes(ps) => match &*self.values.get(self.client_name(f).0) {
                     Value::Str(text) => ps.iter().any(|p| {
@@ -2897,7 +3037,8 @@ impl Engine {
                     _ => false,
                 },
                 MayDefine::Nothing | MayDefine::Any => false,
-            }
+            };
+            likely.then_some(t)
         })
     }
 
@@ -3269,7 +3410,7 @@ impl Engine {
         self.free_node(s);
         if let Some(c) = by.filter(|&c| self.live(c)) {
             self.claim_dirty.insert(c);
-            self.make_dirty(c);
+            self.dirty_for(c, Rerun::Claim);
         }
         if let Some(p) = prev {
             self.claimer_near(p);
@@ -3369,7 +3510,7 @@ impl Engine {
             self.set_flag(s, F_DYN, decl.is_none());
             if let Some(c) = self.aux_of(s).and_then(|a| a.claimed_by) {
                 self.claim_dirty.insert(c);
-                self.make_dirty(c);
+                self.dirty_for(c, Rerun::Claim);
             }
         } else {
             match decl {
@@ -3389,7 +3530,7 @@ impl Engine {
                 self.set_static_kind(s, eff);
             }
             self.change_effect(s, new_eff);
-            self.make_dirty(s);
+            self.dirty_for(s, Rerun::Text);
             self.sync_pending(s);
             self.sync_static_contribs(s);
             if self.n(s).has(F_CLAIMER) || self.aux_of(s).is_some_and(|a| !a.claimed.is_empty()) {
@@ -3516,7 +3657,7 @@ impl Engine {
         // Runs that waited for it (the provider could not answer them).
         for x in self.env_waiters.remove(&f).unwrap_or_default() {
             if self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL {
-                self.make_dirty(x);
+                self.dirty_for(x, Rerun::Environment { field: f });
             }
         }
         if was_unknown {
@@ -3565,7 +3706,7 @@ impl Engine {
         for &f in &changed {
             for x in self.env_waiters.remove(&f).unwrap_or_default() {
                 if self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL {
-                    self.make_dirty(x);
+                    self.dirty_for(x, Rerun::Environment { field: f });
                 }
             }
         }
@@ -3890,7 +4031,7 @@ impl Engine {
                 self.settle_pending.push((unit, self.watch_hi(r).saturating_sub(1)));
                 continue;
             }
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Scope);
         }
     }
 
@@ -4956,7 +5097,7 @@ impl Engine {
         }
         let st = self.n(u).state;
         let only_rebind = st == State::Done || (st == State::Dirty && self.n(u).has(F_REBIND));
-        self.make_dirty(u);
+        self.dirty_for(u, Rerun::Rebind { field: f });
         if only_rebind && self.n(u).has(F_RAN) && self.n(u).state == State::Dirty {
             self.set_flag(u, F_REBIND, true);
         }
@@ -5111,7 +5252,7 @@ impl Engine {
                         }
                     });
                 if !same {
-                    self.make_dirty(s);
+                    self.dirty_for(s, Rerun::Scope);
                 }
                 link.push((u.key, u.site));
                 continue;
@@ -5440,7 +5581,7 @@ impl Engine {
                 .copied()
                 .collect();
             if reads.iter().any(|x| x.kind == K_CHAIN) {
-                self.make_dirty(u);
+                self.dirty_for(u, Rerun::Scope);
                 continue;
             }
             for use_ in reads {
@@ -5577,7 +5718,7 @@ impl Engine {
                 }
                 if marker && f != self.kind_field && self.declares(s, f) {
                     self.add_def(s, f, false);
-                    self.make_dirty(s);
+                    self.dirty_for(s, Rerun::Scope);
                 }
                 continue;
             }
@@ -5585,6 +5726,7 @@ impl Engine {
                 self.add_def(s, f, false);
             }
             if self.n(s).def_value(f) != Some(v) {
+                self.changed_from = self.n(s).def_value(f).unwrap_or(ValueId::NONE);
                 self.nm(s).set_def_value(f, v);
                 let cause = Cause::Changed {
                     field: f,
@@ -5604,7 +5746,7 @@ impl Engine {
         }
         if let Some(c) = self.aux_of(p).and_then(|a| a.claimed_by) {
             self.claim_dirty.insert(c);
-            self.make_dirty(c);
+            self.dirty_for(c, Rerun::Claim);
         } else if self.n(p).has(F_CLAIMER) {
             self.claim_dirty.insert(p);
         }
@@ -5779,7 +5921,7 @@ impl Engine {
                     let mut l = self.aux_of(other).map_or_else(Default::default, |a| a.claimed.clone());
                     l.retain(|&x| x != s);
                     self.ax(other).claimed = l;
-                    self.make_dirty(other);
+                    self.dirty_for(other, Rerun::Claim);
                 }
                 self.make_inert(s, c);
             }
@@ -5788,7 +5930,7 @@ impl Engine {
         // edit) changes what the run sees: it runs again. Its own run's
         // claim does not: the run made it from the text it saw.
         if !own_run {
-            self.make_dirty(c);
+            self.dirty_for(c, Rerun::Claim);
         }
     }
 
@@ -5863,7 +6005,8 @@ impl Engine {
                     if self.tracing > 0 {
                         self.note(w, self.woken_by(w, x));
                     }
-                    self.make_dirty_quiet(w);
+                    let field = self.origins.get(w).and_then(|o| o.waited_field);
+                    self.dirty_quiet_for(w, Rerun::Woken { field });
                 }
             }
         }
@@ -5908,7 +6051,7 @@ impl Engine {
         self.drop_scan(s);
         let readers = self.aux_of(s).map_or_else(Default::default, |a| a.out_readers.clone());
         for r in readers {
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Claim);
         }
         self.leave_spec(s);
         self.dequeue(s);
@@ -6234,6 +6377,20 @@ impl Engine {
     }
 
     /// Marks `x` as needing a re-run.
+    /// `make_dirty_quiet` for the reason `why`.
+    fn dirty_quiet_for(&mut self, x: Slot, why: Rerun) {
+        let old = std::mem::replace(&mut self.why, why);
+        self.make_dirty_quiet(x);
+        self.why = old;
+    }
+
+    /// `make_dirty` for the reason `why`.
+    fn dirty_for(&mut self, x: Slot, why: Rerun) {
+        let old = std::mem::replace(&mut self.why, why);
+        self.make_dirty(x);
+        self.why = old;
+    }
+
     pub(crate) fn make_dirty(&mut self, x: Slot) {
         if self.tracing > 0 {
             self.note(x, Cause::Structure);
@@ -6268,7 +6425,7 @@ impl Engine {
             return;
         }
         if !self.owned(x) {
-            self.defer(Tail::Dirty(x));
+            self.defer(Tail::Dirty(x, self.why));
             return;
         }
         self.node_errors.remove(&x);
@@ -6293,6 +6450,8 @@ impl Engine {
             _ => {}
         }
         count!(Dirty);
+        let id = self.n(x).id;
+        self.report.rerun_causes.push((id, self.why));
         self.set_state(x, State::Dirty);
         self.nm(x).floor = 0;
         if let Some(o) = self.origins.get_mut(x) {
@@ -6308,8 +6467,52 @@ impl Engine {
     }
 
     fn dirty_field_users(&mut self, site: u64, f: Field, cause: &Cause) {
+        let why = match cause {
+            Cause::Environment { field } => Rerun::Environment { field: *field },
+            _ => Rerun::Changed {
+                field: f,
+                old: self.changed_from,
+                new: ValueId::NONE,
+            },
+        };
+        let why = match why {
+            Rerun::Changed { field, old, .. } => {
+                let site_slot = Slot::unpack(site);
+                let new = if site_slot != NIL && self.live(site_slot) {
+                    self.n(site_slot).def_value(f).unwrap_or(ValueId::NONE)
+                } else {
+                    ValueId::NONE
+                };
+                Rerun::Changed { field, old, new }
+            }
+            w => w,
+        };
+        let old_why = std::mem::replace(&mut self.why, why);
+        self.dirty_field_users_inner(site, f, cause);
+        self.why = old_why;
+    }
+
+    fn dirty_field_users_inner(&mut self, site: u64, f: Field, cause: &Cause) {
         let users: Vec<Slot> = self.users.range(&(site, f), 0..).map(|(_, u)| u).collect();
+        let site_slot = Slot::unpack(site);
+        let now = (site_slot != NIL && self.live(site_slot)).then(|| self.n(site_slot).def_value(f));
         for u in users {
+            let n = self.n(u);
+            if n.state == State::Spec
+                && let Some(now) = now
+                && self.aux_of(site_slot).is_some_and(|a| {
+                    a.assumers.iter().any(|x| {
+                        x.node == u
+                            && x.epoch == n.epoch
+                            && x.kind == AssumeKind::Def(f)
+                            && x.value == now.unwrap_or(ValueId::NONE)
+                    })
+                })
+            {
+                // A guess on this very value (a prediction it read): its
+                // assumption confirms it.
+                continue;
+            }
             if self.tracing > 0 {
                 self.note(u, cause.clone());
             }
@@ -6341,7 +6544,7 @@ impl Engine {
             }
         }
         for u in users {
-            self.make_dirty_quiet(u);
+            self.dirty_quiet_for(u, Rerun::Loop { field: f });
         }
     }
 
@@ -6519,7 +6722,7 @@ impl Engine {
         let tail = std::mem::take(&mut self.tail);
         for t in &tail {
             match *t {
-                Tail::Dirty(x) => self.make_dirty_quiet(x),
+                Tail::Dirty(x, why) => self.dirty_for(x, why),
                 Tail::Raise(y, h, origin) => self.raise(y, h, origin),
                 Tail::ParkOn(x, on) => {
                     if !self.live(x) || self.n(x).state != State::Parked || self.n(x).on != on || !self.live(on) {
@@ -6541,7 +6744,7 @@ impl Engine {
                             a.out_readers.push(x);
                         }
                         if self.tail_out_changed.contains(&t) {
-                            self.make_dirty(x);
+                            self.dirty_for(x, Rerun::Output { of: self.n(t).id });
                         }
                     }
                 }
@@ -6616,7 +6819,7 @@ impl Engine {
             })
             .collect();
         for x in hit {
-            self.make_dirty(x);
+            self.dirty_for(x, Rerun::Claim);
         }
     }
 
@@ -6691,7 +6894,7 @@ impl Engine {
         self.ax(x).assumers.clear();
         for a in assumers {
             if self.live(a.node) && self.n(a.node).epoch == a.epoch && self.n(a.node).state == State::Spec {
-                self.make_dirty(a.node);
+                self.dirty_for(a.node, Rerun::Refuted { field: None });
             }
         }
     }
@@ -6751,7 +6954,7 @@ impl Engine {
                     .collect();
                 n.uses = uses.into_boxed_slice();
             }
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Output { of: self.n(x).id });
         }
     }
 
@@ -6787,7 +6990,7 @@ impl Engine {
             // The claimed text is one of the claimer's inputs: it runs
             // again (and its claim is recomputed) whatever freed `x`.
             self.claim_dirty.insert(by);
-            self.make_dirty(by);
+            self.dirty_for(by, Rerun::Claim);
         }
         let defs: Vec<Field> = self.n(x).defs.iter().map(|d| d.field).collect();
         for f in defs {
@@ -6908,9 +7111,13 @@ impl Engine {
     }
 
     fn node_contrib_folds(&self, x: Slot) -> Vec<(Field, ValueId)> {
-        let Some(a) = self.aux_of(x) else { return Vec::new() };
+        self.aux_of(x).map_or_else(Vec::new, |a| a.folds.clone())
+    }
+
+    /// The contributions folded per field (in first-contribution order).
+    pub(crate) fn contrib_folds(&self, contribs: &[(Field, ValueId)]) -> Vec<(Field, ValueId)> {
         let mut out: Vec<(Field, ValueId)> = Vec::new();
-        for &(f, v) in &a.contribs {
+        for &(f, v) in contribs {
             if let Some(e) = out.iter_mut().find(|e| e.0 == f) {
                 if let Some(m) = self.monoids.get(&f) {
                     e.1 = m.combine(&self.values, e.1, v);
@@ -6923,13 +7130,19 @@ impl Engine {
     }
 
     fn set_contribs(&mut self, x: Slot, new: Vec<(Field, ValueId)>) {
-        let old = self.aux_of(x).map_or_else(Default::default, |a| a.contribs.clone());
-        if old == new {
+        self.set_contribs_folded(x, new, None);
+    }
+
+    /// `set_contribs` with the folds of `new` if the run computed them.
+    fn set_contribs_folded(&mut self, x: Slot, new: Vec<(Field, ValueId)>, folds: Option<Vec<(Field, ValueId)>>) {
+        if self.aux_of(x).map_or(new.is_empty(), |a| a.contribs == new) {
             return;
         }
         let old_folds = self.node_contrib_folds(x);
-        self.ax(x).contribs = new;
-        let new_folds = self.node_contrib_folds(x);
+        let new_folds = folds.unwrap_or_else(|| self.contrib_folds(&new));
+        let a = self.ax(x);
+        a.contribs = new;
+        a.folds.clone_from(&new_folds);
         let (unit, label) = (self.n(x).unit, self.n(x).label);
         let mut fields: Vec<Field> = old_folds.iter().chain(&new_folds).map(|e| e.0).collect();
         fields.sort_unstable();
@@ -7077,7 +7290,7 @@ impl Engine {
             .filter(|&r| self.live(r) && label < self.n(r).label)
             .collect();
         for r in hit {
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::SiblingScan);
         }
     }
 
@@ -7124,7 +7337,7 @@ impl Engine {
             let lo = self.watch_key(r, w.anchor).0;
             let now = self.acc_fold(unit, f, lo, self.watch_hi(r));
             if now != w.seen {
-                self.make_dirty(r);
+                self.dirty_for(r, Rerun::Range { field: Some(f) });
             }
         }
     }
@@ -7143,7 +7356,7 @@ impl Engine {
                 self.settle_pending.push((unit, self.watch_hi(r).saturating_sub(1)));
                 continue;
             }
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Range { field: None });
         }
     }
 
@@ -7167,7 +7380,7 @@ impl Engine {
             .map(|((_, r), _)| *r)
             .collect();
         for r in readers.into_iter().chain(ending) {
-            self.make_dirty(r);
+            self.dirty_for(r, Rerun::Range { field: None });
         }
     }
 
@@ -7507,6 +7720,7 @@ impl Engine {
 
     /// Applies a run's definitions; returns whether any value changed.
     fn set_defs(&mut self, x: Slot, defs: &[(Field, ValueId, bool)]) -> bool {
+        self.batch_defined.extend(defs.iter().map(|d| d.0));
         if self.n(x).has(F_DYN) {
             // A dynamic definition set is bounded by the text's answer: a
             // definition outside it would have left readers bound past the
@@ -7594,6 +7808,7 @@ impl Engine {
                     field: f,
                     site: Some(self.n(x).id),
                 };
+                self.changed_from = old.unwrap_or(ValueId::NONE);
                 self.dirty_field_users(x.pack(), f, &cause);
             }
         }
@@ -7862,7 +8077,15 @@ impl Engine {
         if r.uses.iter().any(|u| {
             (u.kind == K_FIELD || u.kind == K_CHAIN)
                 && u.site != NIL
-                && (!self.live(u.site) || self.n(u.site).def_value(Field(ValueId(u.key))).is_none())
+                && (!self.live(u.site)
+                    || self.n(u.site).def_value(Field(ValueId(u.key))).is_none()
+                        // A predicted value of a node still in work: its
+                        // run confirms or refutes it.
+                        && !(r.read_predicted
+                            && self.n(u.site).in_work()
+                            && r.assumptions.iter().any(|&(t, k, _)| {
+                                t == u.site && k == AssumeKind::Def(Field(ValueId(u.key)))
+                            })))
         }) {
             count!(StaleSite);
             if r.speculative {
@@ -7963,6 +8186,9 @@ impl Engine {
             if !self.stale_assumptions_hold(x, &r) {
                 // A target finished earlier in this batch, against the
                 // prediction: the run is discarded and the node runs again.
+                if r.read_predicted {
+                    self.report.predictions_refuted += 1;
+                }
                 self.mispredicted(x);
                 return;
             }
@@ -8156,7 +8382,8 @@ impl Engine {
                 if self.tracing > 0 {
                     self.note(rd, Cause::Output { of: self.n(x).id });
                 }
-                self.make_dirty_quiet(rd);
+                let of = self.n(x).id;
+                self.dirty_quiet_for(rd, Rerun::Output { of });
             }
         }
         let _ = changed;
@@ -8178,7 +8405,7 @@ impl Engine {
                 }
             }
         }
-        self.set_contribs(x, r.contribs);
+        self.set_contribs_folded(x, r.contribs, r.contrib_folds);
         // A contribution in the window that changed after the run folded
         // it (a node whose run refuted its declared contributions, applied
         // in the same batch) leaves the fold stale.
@@ -8217,7 +8444,7 @@ impl Engine {
                 .n(x)
                 .uses
                 .iter()
-                .filter(|u| u.kind == K_FIELD)
+                .filter(|u| u.kind == K_FIELD && self.batch_defined.contains(&Field(ValueId(u.key))))
                 .map(|u| (Field(ValueId(u.key)), u.site))
                 .collect();
             stale_fold = fields
@@ -8226,7 +8453,12 @@ impl Engine {
         }
         if read_freed || stale_fold {
             count!(StaleSite);
-            self.make_dirty(x);
+            let why = if stale_fold {
+                Rerun::Refuted { field: None }
+            } else {
+                Rerun::Other
+            };
+            self.dirty_for(x, why);
         }
         // The run's own epoch bump (from rebinding during apply) must not
         // invalidate it.
@@ -8271,10 +8503,15 @@ impl Engine {
             self.set_state(x, State::Spec);
             self.spec_live += 1;
             self.ax(x).assume_left = pending_assumptions;
+            self.ax(x).read_predicted = r.read_predicted;
             let h = self.target_height_mut(x).max(self.n(x).height);
             self.lift(x, h);
             self.sync_order_lazy(x);
         } else {
+            if r.speculative && r.read_predicted {
+                // Every predicted value it read was already confirmed.
+                self.report.predictions_confirmed += 1;
+            }
             let h = self.target_height_mut(x);
             self.finish(x, h);
             if r.raise > 0 {
@@ -8290,7 +8527,7 @@ impl Engine {
                 && self.n(x).has(F_CLAIM_DYN)
                 && self.following_slots(x, k) != self.aux_of(x).map_or_else(Vec::new, |a| a.claimed.clone())
             {
-                self.make_dirty(x);
+                self.dirty_for(x, Rerun::Claim);
             }
         }
     }
@@ -8613,14 +8850,24 @@ impl Engine {
                     };
                     if left == 0 {
                         self.report.confirmations += 1;
+                        if std::mem::take(&mut self.ax(a.node).read_predicted) {
+                            self.report.predictions_confirmed += 1;
+                        }
                         let h = self.target_height_mut(a.node);
                         work.push((a.node, h));
                     }
                 } else {
-                    if let AssumeKind::Structure(f) | AssumeKind::Def(f) = a.kind {
-                        self.count_refuted(f);
+                    let field = match a.kind {
+                        AssumeKind::Structure(f) | AssumeKind::Def(f) => {
+                            self.count_refuted(f);
+                            Some(f)
+                        }
+                        AssumeKind::Output => None,
+                    };
+                    if std::mem::take(&mut self.ax(a.node).read_predicted) {
+                        self.report.predictions_refuted += 1;
                     }
-                    self.make_dirty(a.node);
+                    self.dirty_for(a.node, Rerun::Refuted { field });
                 }
             }
         }
@@ -8924,7 +9171,13 @@ impl Engine {
         self.sweep_all_shifts(50_000);
         self.finalize_report();
         let report = std::mem::take(&mut self.report);
-        result.map(|()| report)
+        result.map_err(|mut e| {
+            if let EvalError::NoProgress { report: r, .. } | EvalError::Deadline { report: r, .. } = &mut e {
+                **r = report.clone();
+            }
+            e
+        })?;
+        Ok(report)
     }
 
     fn has_feedback(&self) -> bool {
@@ -9009,6 +9262,18 @@ impl Engine {
 
     fn finalize_report(&mut self) {
         self.report.critical_path = self.critical_path();
+        // One entry per node: its last reason, at its first position.
+        let mut at: FxHashMap<NodeId, usize> = FxHashMap::default();
+        let mut causes: Vec<(NodeId, Rerun)> = Vec::new();
+        for (id, why) in std::mem::take(&mut self.report.rerun_causes) {
+            if let Some(&i) = at.get(&id) {
+                causes[i].1 = why;
+            } else {
+                at.insert(id, causes.len());
+                causes.push((id, why));
+            }
+        }
+        self.report.rerun_causes = causes;
         self.report
             .refuted_by_field
             .sort_by_key(|&(f, c)| (std::cmp::Reverse(c), f.0.raw()));
@@ -9083,6 +9348,10 @@ impl Engine {
         let r = self.rounds(sched, exec, edits);
         self.in_eval = false;
         self.touch_log.clear();
+        self.definer_due
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         r
     }
 
@@ -9464,7 +9733,7 @@ impl Engine {
                     cands.push(Candidate {
                         node: n.id,
                         slot: s,
-                        has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
+                        has_prediction: n.has(F_RAN) || n.has(F_PREDICT) || self.reads_predicted(s),
                         waiting: false,
                     });
                 }
@@ -9481,10 +9750,18 @@ impl Engine {
             }
             let n = self.n(s);
             if !n.has(F_NOSPEC) && n.on != NIL && self.may_speculate(s) {
+                let on_predicted = self.predictions_seen.load(std::sync::atomic::Ordering::Relaxed)
+                    && self.live(n.on)
+                    && self.n(n.on).in_work()
+                    && !self.n(n.on).has(F_RAN)
+                    && self.origins.get(s).and_then(|o| o.waited_field).is_some_and(|f| {
+                        let t = self.n(n.on);
+                        self.statics(t.op, t.args).predicted(f).is_some()
+                    });
                 cands.push(Candidate {
                     node: n.id,
                     slot: s,
-                    has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
+                    has_prediction: n.has(F_RAN) || n.has(F_PREDICT) || on_predicted || self.reads_predicted(s),
                     waiting: true,
                 });
             }
@@ -9522,6 +9799,7 @@ impl Engine {
                 return Err(EvalError::Deadline {
                     runs: self.eval_runs,
                     waiters: self.waiters_with_held(),
+                    report: Box::default(),
                 });
             }
             self.level = level;
@@ -9585,6 +9863,7 @@ impl Engine {
             let runs_before = self.report.runs;
             self.apply_results(&mut results, exec);
             self.batch_lift.plain_mut().clear();
+            self.batch_defined.clear();
             self.settle_deferred();
             let applied = self.report.runs - runs_before;
             if applied > 0 {
@@ -9600,6 +9879,7 @@ impl Engine {
                     return Err(EvalError::NoProgress {
                         rounds: self.idle_rounds,
                         waiters: self.waiters_with_held(),
+                        report: Box::default(),
                     });
                 }
             } else {
@@ -9721,6 +10001,7 @@ pub(crate) enum End {
 }
 
 /// What one run of a node reported. Opaque to clients.
+#[allow(clippy::struct_excessive_bools)]
 pub struct RunResult {
     pub(crate) node: NodeId,
     pub(crate) slot: Slot,
@@ -9732,6 +10013,8 @@ pub struct RunResult {
     pub(crate) raise: u32,
     /// A speculative run read a finished node not yet settled.
     pub(crate) read_unsettled: bool,
+    /// A speculative run read a predicted value ([`Operation::predicted_defs`]).
+    pub(crate) read_predicted: bool,
     pub(crate) raise_from: Slot,
     pub(crate) uses: Vec<Use>,
     pub(crate) defs: Vec<(Field, ValueId, bool)>,
@@ -9752,6 +10035,8 @@ pub struct RunResult {
     pub(crate) env_found: Vec<(Field, Option<ValueId>)>,
     pub(crate) publishes: Vec<(Field, ValueId)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
+    /// `contribs` folded per field, by the run.
+    pub(crate) contrib_folds: Option<Vec<(Field, ValueId)>>,
     pub(crate) watch: Option<(Field, Slot, Slot, ValueId)>,
     /// Where a backward sibling scan stopped (`NIL`: the unit start).
     pub(crate) scan: Option<Slot>,
