@@ -3280,3 +3280,134 @@ fn the_is_empty_projection() {
         Some("absent")
     );
 }
+
+/// `[i, k]`: reads `x{i-1}` (node 0: nothing), defines `x{i}` from it and
+/// `y{i}` as `k`; `["ry", j]` outputs `y{j}`.
+struct EditChain {
+    runs: std::sync::atomic::AtomicU64,
+}
+
+impl Operation for EditChain {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(match v.as_int(a[0]) {
+            Some(i) => vec![
+                (v.field(&format!("x{i}")), Locality::Local),
+                (v.field(&format!("y{i}")), Locality::Local),
+            ],
+            None => Vec::new(),
+        })
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(match v.as_int(a[0]) {
+            Some(0) => Vec::new(),
+            Some(i) => vec![v.field(&format!("x{}", i - 1))],
+            None => vec![v.field(&format!("y{}", v.as_int(a[1]).unwrap()))],
+        })
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let v = cx.values();
+        let a = cx.args();
+        let Some(i) = v.as_int(a[0]) else {
+            let j = v.as_int(a[1]).unwrap();
+            return Ok(cx.use_field(v.field(&format!("y{j}")))?.unwrap_or(ValueId::UNIT));
+        };
+        let p = if i == 0 {
+            0
+        } else {
+            cx.use_field(v.field(&format!("x{}", i - 1)))?
+                .and_then(|x| v.as_int(x))
+                .unwrap_or(0)
+        };
+        cx.define(v.field(&format!("x{i}")), v.int((p * 7 + i) % 1_000_003));
+        cx.define(v.field(&format!("y{i}")), a[1]);
+        Ok(v.int(p))
+    }
+}
+
+/// An edit to node 1 that changes only an unrelated field: the chain after
+/// it stands (its readers' values are equal), only node 1 and the reader
+/// of the changed field run again, under every schedule.
+#[test]
+fn an_edit_that_keeps_a_chains_values_reruns_only_the_real_readers() {
+    const N: i64 = 200;
+    for sched in ["seq", "spec", "random", "par"] {
+        let mut eng = Engine::new();
+        let op = Arc::new(EditChain {
+            runs: std::sync::atomic::AtomicU64::new(0),
+        });
+        let id = eng.register(op.clone());
+        let u = eng.new_unit();
+        let mut ids = Vec::new();
+        for i in 0..N {
+            let a = {
+                let v = eng.values();
+                vec![v.int(i), v.int(5)]
+            };
+            ids.push(eng.push(u, id, a));
+        }
+        let ry = {
+            let v = eng.values();
+            vec![v.str("ry"), v.int(1)]
+        };
+        let ry = eng.push(u, id, ry);
+        let eval = |eng: &mut Engine| {
+            match sched {
+                "seq" => eng.evaluate_sequential(),
+                "spec" => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                    &mut defuse::Sequential,
+                ),
+                "random" => eng.evaluate(&mut defuse::RandomScheduler::new(7, true), &mut defuse::Sequential),
+                _ => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                    &mut PredThreads,
+                ),
+            }
+            .expect("evaluate")
+        };
+        eval(&mut eng);
+        let outs = |eng: &Engine| {
+            let mut o: Vec<Option<ValueId>> = ids.iter().map(|&i| eng.output(i)).collect();
+            o.push(eng.output(ry));
+            o
+        };
+        let before = outs(&eng);
+        op.runs.store(0, std::sync::atomic::Ordering::Relaxed);
+        let a = {
+            let v = eng.values();
+            vec![v.int(1), v.int(6)]
+        };
+        eng.replace(ids[1], id, a);
+        let r = eval(&mut eng);
+        let after = outs(&eng);
+        assert_eq!(
+            before[..usize::try_from(N).unwrap()],
+            after[..usize::try_from(N).unwrap()],
+            "{sched}"
+        );
+        assert_eq!(eng.values().as_int(eng.output(ry).unwrap()), Some(6), "{sched}");
+        assert_eq!(op.runs.load(std::sync::atomic::Ordering::Relaxed), 2, "{sched}: {r:?}");
+        assert!(r.realised_critical_path <= 2, "{sched}: {r:?}");
+        // Nodes 1 and 2 both re-texted (x unchanged): three runs.
+        op.runs.store(0, std::sync::atomic::Ordering::Relaxed);
+        for (i, k) in [(1, 7), (2, 8)] {
+            let a = {
+                let v = eng.values();
+                vec![v.int(i), v.int(k)]
+            };
+            eng.replace(ids[usize::try_from(i).unwrap()], id, a);
+        }
+        let r = eval(&mut eng);
+        let after = outs(&eng);
+        assert_eq!(
+            before[..usize::try_from(N).unwrap()],
+            after[..usize::try_from(N).unwrap()],
+            "{sched}"
+        );
+        assert_eq!(eng.values().as_int(eng.output(ry).unwrap()), Some(7), "{sched}");
+        assert_eq!(op.runs.load(std::sync::atomic::Ordering::Relaxed), 3, "{sched}: {r:?}");
+        assert!(r.realised_critical_path <= 2, "{sched}: {r:?}");
+        assert_eq!(r.predictions_refuted, 0, "{sched}");
+    }
+}

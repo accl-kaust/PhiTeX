@@ -542,8 +542,9 @@ pub struct Report {
     /// ([`Operation::static_contribs`]): the run's stand, and the range
     /// readers that folded the declared ones run again.
     pub static_contribs_refuted: u64,
-    /// Speculative runs that read a predicted value
-    /// ([`Operation::predicted_defs`]) and were confirmed.
+    /// Speculative runs that read a predicted value and were confirmed: a
+    /// node's [`Operation::predicted_defs`] answer, or, for a node about to
+    /// run again, its previous run's definition.
     pub predictions_confirmed: u64,
     /// Speculative runs that read a predicted value and were refuted.
     pub predictions_refuted: u64,
@@ -10066,15 +10067,23 @@ impl Engine {
 
     fn sanitize(ready: &[(NodeId, Slot)], cands: &[Candidate], batch: &mut Vec<Job>) {
         let is_ready = |x: &NodeId| ready.binary_search_by_key(x, |r| r.0).is_ok();
-        batch.retain(|j| is_ready(&j.node) || (j.speculative && cands.iter().any(|c| c.node == j.node)));
+        // Candidates by id (the first of equal ids wins, as a scan would):
+        // a batch of thousands is checked against thousands of candidates.
+        let mut by_id: Vec<(NodeId, usize, Slot)> =
+            cands.iter().enumerate().map(|(i, c)| (c.node, i, c.slot)).collect();
+        by_id.sort_unstable();
+        let cand = |x: NodeId| {
+            let i = by_id.partition_point(|c| c.0 < x);
+            by_id.get(i).filter(|c| c.0 == x).map(|c| c.2)
+        };
+        batch.retain(|j| is_ready(&j.node) || (j.speculative && cand(j.node).is_some()));
         batch.sort_by_key(|j| (j.node, j.speculative));
         batch.dedup_by_key(|j| j.node);
         for j in batch.iter_mut() {
             if j.slot == NIL {
-                j.slot = ready.binary_search_by_key(&j.node, |r| r.0).map_or_else(
-                    |_| cands.iter().find(|c| c.node == j.node).map_or(NIL, |c| c.slot),
-                    |i| ready[i].1,
-                );
+                j.slot = ready
+                    .binary_search_by_key(&j.node, |r| r.0)
+                    .map_or_else(|_| cand(j.node).unwrap_or(NIL), |i| ready[i].1);
             }
         }
         if !batch.iter().any(|j| !j.speculative && is_ready(&j.node))
