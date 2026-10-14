@@ -268,6 +268,13 @@ impl Run<'_, '_> {
                     // §394
                     r += 1;
                     if r >= len || is_match(&p[r]) {
+                        // §397: a delimiter ending `#{`: its brace is
+                        // scanned again from the body, and counts in
+                        // `align_state` once
+                        if tok.raw() >> 21 == 1 {
+                            let a = self.astate();
+                            self.set_astate(a - 1);
+                        }
                         break 'cont;
                     }
                     continue 'cont;

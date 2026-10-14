@@ -153,6 +153,28 @@ impl Run<'_, '_> {
         );
     }
 
+    /// `report_illegal_case` (§1050): "You can't use" the command "in"
+    /// the mode (§211 `print_mode`, §298 `print_cmd_chr`).
+    pub(crate) fn report_illegal_case(&mut self, md: &crate::build::Mode) -> R<()> {
+        let what = crate::val::prim_name(self.cur.cmd, self.cur.chr).map_or_else(
+            || match self.cur.tok.as_cs() {
+                Some(n) => format!("\\{n}"),
+                None => char::from_u32(self.cur.tok.chr()).map_or_else(String::new, String::from),
+            },
+            |n| format!("\\{n}"),
+        );
+        let mode = match md.m {
+            1 => "vertical",
+            102 => "horizontal",
+            203 => "display math",
+            -1 => "internal vertical",
+            -102 => "restricted horizontal",
+            -203 => "math",
+            _ => "no",
+        };
+        self.log("error", &format!("You can't use `{what}' in {mode} mode"))
+    }
+
     /// `reswitch` (§1045): the case for `cur` in the current mode.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn dispatch(&mut self) -> R<()> {
@@ -318,8 +340,19 @@ impl Run<'_, '_> {
                     self.head_for_vmode(&md);
                 } else if c == cmd::HALIGN && v {
                     self.init_align(&md)?;
+                } else if c == cmd::HALIGN && md.m == 203 {
+                    // §1130: `mmode+halign`: privileged (a display), and
+                    // only at the display's own level
+                    if md.group == crate::val::group::MATH_SHIFT {
+                        self.init_align(&md)?;
+                    } else {
+                        self.off_save(&md)?;
+                    }
+                } else if c == cmd::HALIGN {
+                    // §1130 `privileged` (§1051)
+                    self.report_illegal_case(&md)?;
                 } else {
-                    // REDUCE-GAP: \valign and alignments in displays
+                    // REDUCE-GAP: \valign
                     self.log("error", "this alignment is not supported")?;
                 }
             }
@@ -453,7 +486,7 @@ impl Run<'_, '_> {
             _ => {
                 // forbidden cases, alignment errors, math in non-math
                 // modes (§1046–§1048): errors
-                self.log("error", "illegal command")?;
+                self.report_illegal_case(&md)?;
             }
         }
         Ok(())
@@ -893,7 +926,9 @@ impl Run<'_, '_> {
                 return Ok(());
             };
             let l = self.loc_of(field);
+            self.in_advance = q == cmd::ADVANCE;
             self.set_loc(l, Native::Int(r), global);
+            self.in_advance = false;
         } else {
             let s = glue_of(v, old);
             let r: Option<Glue> = if q < cmd::MULTIPLY {
@@ -1006,6 +1041,7 @@ impl Run<'_, '_> {
         };
         let f = self.cint(crate::fields::cell::FONTCOUNT)? + 1;
         self.set_cell(crate::fields::cell::FONTCOUNT, v.int(f), true);
+        self.font_loaded(f)?;
         let info = v.list(vec![
             v.str(name),
             v.int(i64::from(l.at.size)),
@@ -1420,6 +1456,22 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
+        // (web2c §1374: `kpse_out_name_ok` refuses the name, and
+        // `prompt_file_name` ends a nonstop job, §530)
+        let ok = self
+            .ops
+            .out_ok
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let allowed = match ok {
+            Some(f) => f(&name),
+            None => out_name_ok_p(&name),
+        };
+        if !allowed {
+            self.log("error", &format!("I can't write on file `{name}'"))?;
+            return self.fatal("*** (job aborted, file error in nonstop mode)");
+        }
         self.written_decl(&name)?;
         self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
         self.set(&format!("wopen:{name}"), v.int(1), true);
@@ -1441,6 +1493,11 @@ impl Run<'_, '_> {
         let before = self.cx.acc_range(f, None);
         if before.is_err() {
             self.trace_stop("range streams");
+        }
+        if let Ok(x) = before
+            && crate::rerun::on()
+        {
+            crate::rerun::note(self.v, self.cx.node().raw(), "(range streams)", Some(x));
         }
         let before = before?;
         let mut all = v.seq_to_vec(before);
@@ -1479,15 +1536,62 @@ impl Run<'_, '_> {
         Ok(s)
     }
 
-    /// The input left as one source line, for `\inputlineno`.
-    pub(crate) fn input_line_no(&mut self) -> R<i32> {
-        let lines = self.v.field("lines");
-        let x = self.cx.acc_range(lines, None);
-        if x.is_err() {
-            self.trace_stop("range lines");
+    /// A font loaded as `f` by the text (not by a page step's output
+    /// routine or virtual fonts, nor by a text paging inline, whose pages
+    /// ship in TeX's order): a `T_FONT_AT` marker on the main list, so
+    /// that the writer knows which `\shipout` came first after it.
+    /// (Exact mode only: in relaxed mode the fonts' names are free.)
+    pub(crate) fn font_loaded(&mut self, f: i64) -> R<()> {
+        let op = self.cx.op();
+        if op == self.ops.pagestep
+            || op == self.ops.pagestep_any
+            || self.pg.is_some()
+            || crate::pdfrelaxed::on(self)?
+        {
+            return Ok(());
         }
-        let x = x?;
-        Ok(i32::try_from(int_of(self.v, x) + self.lines_entered).unwrap_or(0))
+        let v = self.v;
+        let at = v.list(vec![v.int(crate::nodes::T_FONT_AT), v.int(f)]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        Ok(())
+    }
+
+    /// The input left as one source line, for `\inputlineno`.
+    ///
+    /// TeX's `line` (§304): the line of the innermost file read. A line
+    /// of a document's piece has its number from the lines of its file
+    /// the nodes before it began (the `lines` accumulator: per file, so
+    /// no other file's lines count) and those this node began.
+    pub(crate) fn input_line_no(&mut self) -> R<i32> {
+        let n = match self.file_line_here() {
+            Some(crate::run::FileLine::Known(n)) => n,
+            Some(crate::run::FileLine::Piece(name)) => {
+                let v = self.v;
+                let lines = v.field("lines");
+                let x = self.cx.acc_range(lines, None);
+                if let Ok(y) = x
+                    && crate::rerun::on()
+                {
+                    crate::rerun::note(v, self.cx.node().raw(), "(range lines)", Some(y));
+                }
+                if x.is_err() {
+                    self.trace_stop("range lines");
+                }
+                let before = list_of(v, x?)
+                    .iter()
+                    .map(|&e| list_of(v, e))
+                    .find(|e| e.first() == Some(&name))
+                    .map_or(0, |e| e.get(1).map_or(0, |&k| int_of(v, k)));
+                let mine = self
+                    .doc_lines
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(0, |&(_, k)| k);
+                before + mine
+            }
+            None => 0,
+        };
+        Ok(i32::try_from(n).unwrap_or(0))
     }
 }
 
@@ -1514,4 +1618,27 @@ pub(crate) fn add_glue(q: &Glue, r: &Glue) -> Glue {
         g.shrink_order = r.shrink_order;
     }
     g
+}
+
+/// kpathsea's `kpse_out_name_ok` (`tex-file.c`, TeX Live 2026, not
+/// extended) as TeX Live runs it by default, `openout_any = p` with no
+/// output directory: no dot file (a dot at the start or after a `/`
+/// begins `./` or `../`), no absolute name, no `..` component. (The
+/// client's check, with its `openout_any` and output directories, is
+/// [`crate::Options::out_name_ok`]; `phitex_kpse::Kpse::out_name_ok` is
+/// the CLI's.)
+fn out_name_ok_p(name: &str) -> bool {
+    let b = name.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        if c != b'.' || i > 0 && b[i - 1] != b'/' {
+            continue;
+        }
+        let next = b.get(i + 1).copied();
+        let dot_slash = next == Some(b'/');
+        let dot_dot_slash = next == Some(b'.') && b.get(i + 2) == Some(&b'/');
+        if !dot_slash && !dot_dot_slash {
+            return false;
+        }
+    }
+    !(b.first() == Some(&b'/') || b.starts_with(b"../") || b.windows(4).any(|w| w == b"/../"))
 }
