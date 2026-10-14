@@ -206,10 +206,6 @@ pub(crate) struct Run<'c, 'a> {
     pub mbufs: crate::expand::MacroBufs,
     /// `PHITEX_HEARTBEAT=1` (read once a process).
     pub heartbeat_on: bool,
-    /// Macro bodies copied into the arena, by their shared list's address
-    /// (the list is kept so the address is never reused):
-    /// [`Run::body_range`].
-    pub body_cache: phitex_defuse::FxHashMap<usize, (Rc<[Tok]>, crate::input::Range)>,
     pub pulled: usize,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
@@ -324,7 +320,6 @@ impl<'c, 'a> Run<'c, 'a> {
             lines_read: 0,
             mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
-            body_cache: phitex_defuse::FxHashMap::default(),
             pulled: 0,
             top: false,
             claim_rest: false,

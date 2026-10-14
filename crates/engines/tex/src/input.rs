@@ -33,13 +33,34 @@ impl Range {
 #[derive(Default)]
 pub(crate) struct Arena {
     toks: Vec<Tok>,
+    /// The macro bodies copied in (§390: read in place), by their shared
+    /// list: a range is only good in the arena that holds it, so the
+    /// cache lives and dies with it.
+    bodies: phitex_defuse::FxHashMap<usize, (std::rc::Rc<[Tok]>, Range)>,
 }
 
 impl Arena {
     pub(crate) fn with_capacity(n: usize) -> Arena {
         Arena {
             toks: Vec::with_capacity(n),
+            bodies: phitex_defuse::FxHashMap::default(),
         }
+    }
+
+    /// The range of a macro body: copied in on its first call, found by
+    /// its shared list after. Short bodies are copied every time (cheaper
+    /// than the lookup).
+    pub(crate) fn body(&mut self, body: &std::rc::Rc<[Tok]>) -> Range {
+        if body.len() <= 8 {
+            return self.alloc(body);
+        }
+        let key = std::rc::Rc::as_ptr(body).cast::<Tok>() as usize;
+        if let Some((_, r)) = self.bodies.get(&key) {
+            return *r;
+        }
+        let r = self.alloc(body);
+        self.bodies.insert(key, (body.clone(), r));
+        r
     }
 
     #[inline]
