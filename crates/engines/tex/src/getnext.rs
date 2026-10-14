@@ -462,6 +462,12 @@ impl Run<'_, '_> {
             if starts {
                 self.lines_entered += 1;
                 self.lines_read += 1;
+                if let Some(s) = self.input.top_line()
+                    && s.lineno == 0
+                    && let Some((name, _)) = s.origin
+                {
+                    self.doc_line_begun(name);
+                }
             }
             if let Some(s) = self.input.top_line_mut() {
                 if (0..256).contains(&e) {

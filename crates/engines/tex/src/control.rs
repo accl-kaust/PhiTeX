@@ -1534,14 +1534,36 @@ impl Run<'_, '_> {
     }
 
     /// The input left as one source line, for `\inputlineno`.
+    ///
+    /// TeX's `line` (§304): the line of the innermost file read. A line
+    /// of a document's piece has its number from the lines of its file
+    /// the nodes before it began (the `lines` accumulator: per file, so
+    /// no other file's lines count) and those this node began.
     pub(crate) fn input_line_no(&mut self) -> R<i32> {
-        let lines = self.v.field("lines");
-        let x = self.cx.acc_range(lines, None);
-        if x.is_err() {
-            self.trace_stop("range lines");
-        }
-        let x = x?;
-        Ok(i32::try_from(int_of(self.v, x) + self.lines_entered).unwrap_or(0))
+        let n = match self.file_line_here() {
+            Some(crate::run::FileLine::Known(n)) => n,
+            Some(crate::run::FileLine::Piece(name)) => {
+                let v = self.v;
+                let lines = v.field("lines");
+                let x = self.cx.acc_range(lines, None);
+                if x.is_err() {
+                    self.trace_stop("range lines");
+                }
+                let before = list_of(v, x?)
+                    .iter()
+                    .map(|&e| list_of(v, e))
+                    .find(|e| e.first() == Some(&name))
+                    .map_or(0, |e| e.get(1).map_or(0, |&k| int_of(v, k)));
+                let mine = self
+                    .doc_lines
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(0, |&(_, k)| k);
+                before + mine
+            }
+            None => 0,
+        };
+        Ok(i32::try_from(n).unwrap_or(0))
     }
 }
 

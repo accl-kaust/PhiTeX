@@ -3748,7 +3748,7 @@ fn declare_fields(eng: &mut Engine) {
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
     }
     let lines = eng.values().field("lines");
-    eng.declare_accumulator(lines, Arc::new(SumMonoid));
+    eng.declare_accumulator(lines, Arc::new(LinesMonoid));
     // what each page's output routine leaves for the next: a
     // loop-back the page builder's fold reads from the previous round
     for j in 0..crate::page::MAX_PAGES {
@@ -3821,5 +3821,40 @@ mod prelude_tests {
         assert!(deserialise(&other).is_none());
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
+    }
+}
+
+/// The `lines` accumulator: the lines of documents' pieces begun, by
+/// file name, as `[[name, count], ...]` sorted by name
+/// ([`crate::run::Run::doc_lines`]).
+struct LinesMonoid;
+
+impl phitex_defuse::Monoid for LinesMonoid {
+    fn empty(&self, v: &Values) -> ValueId {
+        v.list(Vec::new())
+    }
+
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        let (xs, ys) = (list_of(v, a), list_of(v, b));
+        if xs.is_empty() {
+            return b;
+        }
+        if ys.is_empty() {
+            return a;
+        }
+        let mut m: std::collections::BTreeMap<String, (ValueId, i64)> =
+            std::collections::BTreeMap::new();
+        for e in xs.iter().chain(ys.iter()) {
+            let p = list_of(v, *e);
+            if let (Some(&n), Some(&k)) = (p.first(), p.get(1)) {
+                let x = m.entry(str_of(v, n)).or_insert((n, 0));
+                x.1 += int_of(v, k);
+            }
+        }
+        v.list(
+            m.into_values()
+                .map(|(n, k)| v.list(vec![n, v.int(k)]))
+                .collect(),
+        )
     }
 }
