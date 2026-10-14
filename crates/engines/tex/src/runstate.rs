@@ -708,6 +708,47 @@ impl State {
         self.next_gid
     }
 
+    /// The locations whose value the run read from the engine: read
+    /// before the run defined them, or never defined (a value preloaded
+    /// in place of the engine's is not one).
+    pub(crate) fn read_locs(&self) -> Vec<Loc> {
+        let mut out: Vec<Loc> = self
+            .metas
+            .iter()
+            .filter(|m| m.eng.is_some())
+            .map(|m| m.loc)
+            .collect();
+        let has_meta: phitex_defuse::FxHashSet<Loc> = self.metas.iter().map(|m| m.loc).collect();
+        for &l in &self.touched {
+            if has_meta.contains(&l) {
+                continue;
+            }
+            if self
+                .slot_ref(l)
+                .is_some_and(|s| s.e.flags & LOADED != 0 && s.e.flags & PRELOADED == 0)
+            {
+                out.push(l);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The locations the run defined at its base level back to the
+    /// engine's value it read first (restored: no net effect).
+    pub(crate) fn restored_locs(&self, v: &Values) -> phitex_defuse::FxHashSet<Loc> {
+        self.metas
+            .iter()
+            .filter(|m| {
+                m.publ.as_ref().is_some_and(|(val, _)| {
+                    m.eng.is_some_and(|e| e.is_some() && val.encode(v) == e)
+                })
+            })
+            .map(|m| m.loc)
+            .collect()
+    }
+
     /// The definitions made after stamp `since`, at any level (a line
     /// read back is interpreted wherever the run is): the location, the
     /// value in force and the locality of the latest one. A local one
@@ -741,18 +782,34 @@ impl State {
 
     /// The definitions to publish: each location's definition at the base
     /// level, encoded once; a local one equal to the engine's value the
-    /// run read is left out (the same binding).
-    pub(crate) fn published(&self, v: &Values) -> Vec<(Loc, ValueId, Locality)> {
+    /// run read is left out (the same binding). `top`: a global one too
+    /// (a run at the unit's top level, no scope open around it, where a
+    /// global definition equal to the value in force changes nothing:
+    /// only the run's net effect is published; inside a scope, `\global`
+    /// of the value a local binding holds outlives the scope's close,
+    /// §283).
+    pub(crate) fn published(&self, v: &Values, top: bool) -> Vec<(Loc, ValueId, Locality)> {
         let mut out = Vec::with_capacity(self.metas.len());
         for m in &self.metas {
             let Some((val, l)) = &m.publ else { continue };
             let Some(x) = val.encode(v) else { continue };
-            if *l == Locality::Local && m.eng == Some(Some(x)) {
+            if (top || *l == Locality::Local) && m.eng == Some(Some(x)) {
                 continue;
             }
             out.push((m.loc, x, *l));
         }
         out
+    }
+
+    /// Whether the run has a local definition at its base level that
+    /// changes the engine's value (one [`State::published`] keeps), made
+    /// outside every group of the run: while a group is open, a
+    /// definition inside it leaves `publ` as the base level's.
+    pub(crate) fn has_base_local_def(&self, v: &Values) -> bool {
+        self.metas.iter().any(|m| match &m.publ {
+            Some((val, Locality::Local)) => val.encode(v).is_some_and(|x| m.eng != Some(Some(x))),
+            _ => false,
+        })
     }
 
     /// Whether any of `locs` has a definition at the base level.

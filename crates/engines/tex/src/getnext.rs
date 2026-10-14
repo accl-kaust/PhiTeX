@@ -261,6 +261,9 @@ impl Run<'_, '_> {
         loop {
             let Some(&top) = self.input.top() else {
                 if self.input.reach_text() {
+                    if self.pull_at.last() == Some(&Some(self.input.text_at - 1)) {
+                        self.pull_lev = Some(self.input.levels.len() - 1);
+                    }
                     continue;
                 }
                 if self.pull()? {
@@ -354,8 +357,20 @@ impl Run<'_, '_> {
         }
         match self.cx.following(self.pulled) {
             Some((op, args)) if op == self.ops.exec => {
-                self.pulled += 1;
                 let segs = crate::run::decode_segs(self.v, &args);
+                // (where the sibling's text begins, unless its first
+                // segment continues the line before it)
+                let joins = self.input.text.len() > self.input.text_at
+                    && matches!(
+                        (self.input.text.last(), segs.first()),
+                        (Some(Seg::Line(last)), Some(Seg::Line(next))) if !last.ends && !next.starts
+                    );
+                if self.pull_at.len() == self.pulled {
+                    self.pull_at.push((!joins).then_some(self.input.text.len()));
+                    self.pull_orig.push(None);
+                    self.pull_lev = None;
+                }
+                self.pulled += 1;
                 self.input.append_text(segs);
                 Ok(true)
             }
@@ -368,6 +383,277 @@ impl Run<'_, '_> {
                 }
             }
         }
+    }
+
+    /// At a command's start: when all that is left is the last sibling
+    /// pulled, of which only its first token was read and put back
+    /// (`\futurelet`, `\@ifnextchar` looking for an optional argument
+    /// after a load), and that token is what the sibling's text gives
+    /// under the codes in force now, the sibling is given back: unclaimed,
+    /// it runs as its own node on the state this run leaves. True when
+    /// the run is to end here. (A preamble's loads each end their run so,
+    /// instead of every later load joining the first.)
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn give_back_peeked(&mut self) -> R<bool> {
+        // (`PHITEX_GIVEBACK_TRACE`: a load's run, why a sibling it pulled
+        // was not given back)
+        // (`=all`: every run's)
+        static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let all =
+            *ALL.get_or_init(|| std::env::var("PHITEX_GIVEBACK_TRACE").is_ok_and(|x| x == "all"));
+        let trace = crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && (self.rec_load || all);
+        let pulled = self.pulled;
+        let refuse = |why: &str| {
+            if trace {
+                eprintln!("giveback: refused (pulled {pulled}): {why}");
+            }
+            Ok(false)
+        };
+        if self.pulled == 0 {
+            return Ok(false);
+        }
+        if self.pull_at.len() != self.pulled || self.pull_orig.len() != self.pulled {
+            return refuse("an earlier sibling was not given back");
+        }
+        if self.open_span() || self.aopen != 0 {
+            return refuse(&format!(
+                "open: {} nest levels, {} conditionals, {} alignments",
+                self.nest.len(),
+                self.conds.len(),
+                self.aopen
+            ));
+        }
+        if self.pg.is_some() || self.claim_rest {
+            return refuse("paging inline, or the rest claimed");
+        }
+        let Some(at) = self.pull_at[self.pulled - 1] else {
+            return refuse("the sibling's text joined a continuation line");
+        };
+        if !self.giveback_only_allows() {
+            return refuse("PHITEX_GIVEBACK_ONLY");
+        }
+        if let Some(orig) = self.pull_orig.get(self.pulled - 1).cloned().flatten() {
+            let given = self.give_back_resumed(at, orig)?;
+            if trace {
+                eprintln!(
+                    "giveback: {} (after a resume) by node {}",
+                    if given {
+                        "given back"
+                    } else {
+                        "refused: the resumed sibling's check"
+                    },
+                    self.cx.node().raw()
+                );
+            }
+            return Ok(given);
+        }
+        // (only the sibling's first segment reached)
+        if self.input.text_at != at + 1 {
+            return refuse(&format!(
+                "the sibling's segments reached: {} (first at {at})",
+                self.input.text_at
+            ));
+        }
+        // the levels left, spent ones aside: the sibling's
+        let left: Vec<crate::input::Level> = self
+            .input
+            .levels
+            .iter()
+            .copied()
+            .filter(|l| match l.kind {
+                kind::TOKS => l.a < l.b,
+                kind::LINE => self.input.line(*l).has_more(),
+                _ => self.input.file(*l).has_lines(),
+            })
+            .collect();
+        let first = self.input.text[at].clone();
+        let ok = match (&first, left.as_slice()) {
+            // a token list read not at all (the token stepped back)
+            (Seg::Toks(t), [l]) => {
+                l.kind == kind::TOKS && self.input.arena.get(l.rest()) == t.as_slice()
+            }
+            // a line of which one token was read and put back
+            (Seg::Line(orig), [line, back]) => {
+                if line.kind != kind::LINE
+                    || back.kind != kind::TOKS
+                    || back.ty != crate::input::ty::BACKED_UP
+                    || back.b - back.a != 1
+                {
+                    return refuse(&format!(
+                        "levels left: a line and a token list of kind {} type {} length {}",
+                        back.kind,
+                        back.ty,
+                        back.b - back.a
+                    ));
+                }
+                let peeked = self.input.arena.at(back.a);
+                let (loc, state, endch) = {
+                    let x = self.input.line(*line);
+                    (x.loc, x.state, x.endch)
+                };
+                self.same_first_token(orig.clone(), peeked, loc, state, endch)?
+            }
+            _ => {
+                return refuse(&format!(
+                    "{} levels left over a {} first segment",
+                    left.len(),
+                    if matches!(first, Seg::Toks(_)) {
+                        "token"
+                    } else {
+                        "line"
+                    }
+                ));
+            }
+        };
+        if !ok {
+            return refuse("the first token or its position differs re-read now");
+        }
+        if trace {
+            let sib = self
+                .cx
+                .following(self.pulled - 1)
+                .and_then(|(_, a)| a.first().map(|&x| self.v.render(x)))
+                .unwrap_or_default();
+            eprintln!(
+                "giveback: given back by node {}: {}",
+                self.cx.node().raw(),
+                sib.chars().take(100).collect::<String>()
+            );
+        }
+        self.drop_given_back(at);
+        Ok(true)
+    }
+
+    /// (debug, `PHITEX_GIVEBACK_ONLY=k`: only the k-th distinct sibling
+    /// text met by a give-back, in the order first met, may be given
+    /// back; the others are refused)
+    fn giveback_only_allows(&self) -> bool {
+        static K: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let Some(k) = *K.get_or_init(|| {
+            std::env::var("PHITEX_GIVEBACK_ONLY")
+                .ok()
+                .and_then(|x| x.parse().ok())
+        }) else {
+            return true;
+        };
+        let sib = self
+            .cx
+            .following(self.pulled - 1)
+            .and_then(|(_, a)| a.first().map(|&x| self.v.render(x)))
+            .unwrap_or_default();
+        let mut seen = SEEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let i = seen.iter().position(|x| *x == sib).unwrap_or_else(|| {
+            seen.push(sib.clone());
+            seen.len() - 1
+        });
+        if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") {
+            eprintln!(
+                "giveback-only: candidate {} (allowed {}): {}",
+                i + 1,
+                i + 1 == k,
+                sib.chars().take(100).collect::<String>()
+            );
+        }
+        i + 1 == k
+    }
+
+    /// [`Run::give_back_peeked`] after a park: the peeked token is the
+    /// text segment at `at`, the rest of the sibling's first line the one
+    /// after it, neither reached yet; `orig` is that line unread.
+    fn give_back_resumed(&mut self, at: usize, orig: crate::input::Line) -> R<bool> {
+        if self.input.text_at != at
+            || self.input.levels.iter().any(|l| match l.kind {
+                kind::TOKS => l.a < l.b,
+                kind::LINE => self.input.line(*l).has_more(),
+                _ => self.input.file(*l).has_lines(),
+            })
+        {
+            return Ok(false);
+        }
+        let (Some(Seg::Toks(t)), Some(Seg::Line(rest))) =
+            (self.input.text.get(at), self.input.text.get(at + 1))
+        else {
+            return Ok(false);
+        };
+        let ([tok], loc, state, endch) = (t.as_slice(), rest.loc, rest.state, rest.endch) else {
+            return Ok(false);
+        };
+        let tok = *tok;
+        if !self.same_first_token(orig, tok, loc, state, endch)? {
+            return Ok(false);
+        }
+        self.drop_given_back(at);
+        Ok(true)
+    }
+
+    /// Ends the run's hold on the last pulled sibling, whose text begins
+    /// at `at`: its levels popped, its text dropped, unclaimed.
+    fn drop_given_back(&mut self, at: usize) {
+        // (its first line was counted as it began, §362: the sibling's
+        // node counts it again)
+        let begun = match (self.input.text.get(at), self.input.text.get(at + 1)) {
+            (Some(Seg::Line(l)), _) if l.starts => Some(l),
+            (Some(Seg::Toks(_)), Some(Seg::Line(l))) if l.starts && l.endch != -2 => Some(l),
+            _ => None,
+        };
+        if let Some(l) = begun {
+            self.lines_entered -= 1;
+            self.lines_read -= 1;
+            // (and in the lines the run contributes by file,
+            // `Run::doc_line_begun`, as §362 counted it there)
+            if l.lineno == 0 && !l.rescanned {
+                let name = l.origin.map_or(phitex_defuse::ValueId::UNIT, |o| o.0);
+                if let Some(k) = self.doc_lines.iter().position(|(n, _)| *n == name) {
+                    self.doc_lines[k].1 -= 1;
+                    if self.doc_lines[k].1 <= 0 {
+                        self.doc_lines.remove(k);
+                    }
+                }
+            }
+        }
+        while self.input.pop().is_some() {}
+        self.input.text.truncate(at);
+        self.input.text_at = at;
+        self.pulled -= 1;
+        self.pull_at.pop();
+        self.pull_orig.pop();
+        self.pull_lev = None;
+    }
+
+    /// Whether `line`, read from its start under the codes in force now,
+    /// gives `tok` first and stands at `loc`/`state` after it.
+    fn same_first_token(
+        &mut self,
+        line: crate::input::Line,
+        tok: Tok,
+        loc: usize,
+        state: u8,
+        endch: i64,
+    ) -> R<bool> {
+        let counted = (self.lines_entered, self.lines_read);
+        let doc_lines = self.doc_lines.clone();
+        let saved = std::mem::replace(&mut self.input, crate::input::Input::new());
+        let (eof, no_pull) = (self.eof, self.no_pull);
+        self.eof = true;
+        self.no_pull = true;
+        self.input.push_line(line);
+        let got = self.next_tok();
+        // (the same token, the line where it was left, and the same
+        // `\endlinechar` after it, §360)
+        let same = matches!(got, Ok(Some(t)) if t == tok)
+            && self
+                .input
+                .top_line()
+                .is_some_and(|x| x.loc == loc && x.state == state && x.endch == endch);
+        (self.lines_entered, self.lines_read) = counted;
+        self.doc_lines = doc_lines;
+        self.input = saved;
+        self.eof = eof;
+        self.no_pull = no_pull;
+        got.map(|_| same)
     }
 
     /// Whether the input is down to one line that a node boundary cut
@@ -624,6 +910,14 @@ impl Run<'_, '_> {
         let Seg::Line(next) = self.input.text.remove(at) else {
             return Ok(());
         };
+        // (a sibling whose text began here now continues the line on top)
+        for p in &mut self.pull_at {
+            *p = match *p {
+                Some(x) if x == at => None,
+                Some(x) if x > at => Some(x - 1),
+                q => q,
+            };
+        }
         let line = self.input.line_mut(top);
         line.buf.extend_from_slice(&next.buf);
         line.ends = next.ends;
