@@ -36,6 +36,21 @@ const P: u64 = PAYLOAD;
 /// The base of the sequence hash.
 const B: u64 = 0x0b4b_82e9_7f3d_1a2b % P;
 
+#[cfg(feature = "observe")]
+impl serde::Serialize for ValueId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        crate::record::named(self.0);
+        s.serialize_u64(self.0)
+    }
+}
+
+#[cfg(feature = "observe")]
+impl<'de> serde::Deserialize<'de> for ValueId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        u64::deserialize(d).map(ValueId)
+    }
+}
+
 impl ValueId {
     /// The unit value `()`.
     pub const UNIT: ValueId = ValueId(T_UNIT << TAG_SHIFT);
@@ -65,6 +80,7 @@ impl ValueId {
 
 /// A field name: any value can name a field.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct Field(pub ValueId);
 
 /// One node of a sequence: `left`, then `elem`, then `right` (`len`

@@ -275,6 +275,7 @@ impl Shared {
         #[cfg(feature = "observe")]
         {
             *super::lock(&self.selects).entry(s).or_default() += 1;
+            crate::trace::node(self, s, "select", "");
         }
         let r = self.rec(s);
         let mode = self.spec.load(Ordering::Relaxed);
@@ -819,6 +820,8 @@ impl Shared {
                 });
             }
         }
+        #[cfg(feature = "observe")]
+        crate::trace::node(self, s, if gated == 1 { "gate" } else { "park" }, w.kind);
         if gated == 1 {
             crate::obs::count!(Gated);
             self.c.gated.fetch_add(1, Ordering::Relaxed);

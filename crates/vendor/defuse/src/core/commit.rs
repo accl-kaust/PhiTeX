@@ -134,6 +134,8 @@ impl Shared {
 
     /// Commits a finished run; `false`: a read broke, run again.
     pub(crate) fn commit(&self, cx: &mut Ctx<'_>, out: ValueId) -> bool {
+        #[cfg(feature = "observe")]
+        crate::trace::node(self, cx.me, "commit", "");
         let s = cx.me;
         let u = cx.unit;
         let r = self.rec(s);

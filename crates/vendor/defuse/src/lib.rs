@@ -11,8 +11,12 @@
 mod api;
 mod core;
 pub mod obs;
+#[cfg(feature = "observe")]
+mod record;
 #[allow(unsafe_code)]
 mod sync;
+#[cfg(feature = "observe")]
+mod trace;
 mod values;
 
 pub use api::{
