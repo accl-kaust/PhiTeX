@@ -650,6 +650,16 @@ impl Session {
         if let Some(b) = &self.build {
             self.store_wkeys(b);
             self.store_pkgrec(b);
+            // (`PHITEX_CHAIN_DUMP=1`: the critical chain in full, and its
+            // waits, for measurements)
+            if std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {
+                for l in b.critical_chain_lines() {
+                    eprintln!("CHAIN {}", l.replace('\n', " | "));
+                }
+                for l in b.chain_waits() {
+                    eprintln!("WAIT {}", l.replace('\n', " | "));
+                }
+            }
             // (the package loads' counters, for measurements)
             if std::env::var_os("PHITEX_PKG_STATS").is_some() {
                 let s = &b.stats;
