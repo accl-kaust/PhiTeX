@@ -152,6 +152,9 @@ pub(crate) struct State {
     /// left open: its definitions become the run's).
     defined: Vec<Loc>,
     stamp: u64,
+    /// The locations defined at the base level (or globally) since the
+    /// last [`State::take_base_defs`].
+    base_defs: Vec<Loc>,
     next_gid: u32,
     /// Bumped whenever a category code below 256 may have changed
     /// ([`State::cat_gen`]); unique across tables of a thread, so a
@@ -197,6 +200,7 @@ impl Clone for State {
             save: self.save.clone(),
             defined: self.defined.clone(),
             stamp: self.stamp,
+            base_defs: self.base_defs.clone(),
             next_gid: self.next_gid,
             cat_gen: new_cat_gen(),
         }
@@ -233,6 +237,7 @@ impl State {
             save: Vec::new(),
             defined: Vec::new(),
             stamp: 0,
+            base_defs: Vec::new(),
             next_gid: 0,
             cat_gen: new_cat_gen(),
         }
@@ -556,6 +561,14 @@ impl State {
         } else if grp.is_none() {
             m.publ = Some((val, Locality::Local));
         }
+        if global || grp.is_none() {
+            self.base_defs.push(loc);
+        }
+    }
+
+    /// The locations defined at the base level since the last call.
+    pub(crate) fn take_base_defs(&mut self) -> Vec<Loc> {
+        std::mem::take(&mut self.base_defs)
     }
 
     /// A binding changed in place (§1079, §1247), nothing saved:
@@ -755,10 +768,12 @@ impl State {
             })
             .collect();
         let defined = self.defined.iter().map(|&l| ploc(self, l)).collect();
+        let base_defs = self.base_defs.iter().map(|&l| ploc(self, l)).collect();
         PState {
             slots,
             save,
             defined,
+            base_defs,
             stamp: self.stamp,
             next_gid: self.next_gid,
         }
@@ -815,6 +830,10 @@ impl State {
             let l = loc(&mut st, d);
             st.defined.push(l);
         }
+        for d in p.base_defs {
+            let l = loc(&mut st, d);
+            st.base_defs.push(l);
+        }
         st.stamp = p.stamp;
         st.next_gid = p.next_gid;
         st.cat_gen = new_cat_gen();
@@ -865,6 +884,7 @@ pub(crate) struct PState {
     slots: Vec<PSlot>,
     save: Vec<PSaved>,
     defined: Vec<PLoc>,
+    base_defs: Vec<PLoc>,
     stamp: u64,
     next_gid: u32,
 }

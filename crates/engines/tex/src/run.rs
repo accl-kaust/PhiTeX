@@ -190,6 +190,15 @@ fn heartbeat_enabled() -> bool {
 /// The size of a run's control-sequence name cache ([`Run::cs_cache`]).
 pub(crate) const CS_CACHE: usize = 1024;
 
+/// The page builder's parameters (§980), which a `T_PAGE_PARAMS` marker
+/// carries.
+const PAGE_PARAMS: [Loc; 4] = [
+    Par::vsize as Loc,
+    Par::maxdepth as Loc,
+    Par::topskip as Loc,
+    Par::holdinginserts as Loc,
+];
+
 /// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`, §297).
 /// Its meaning is read from its slot when a command needs it
 /// ([`Run::cur_mean`]), as TeX reads `equiv(cur_cs)` (§389: a macro's
@@ -704,6 +713,44 @@ impl<'c, 'a> Run<'c, 'a> {
             let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);
             self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
         }
+    }
+
+    /// A page parameter (`\\vsize`, `\\maxdepth`, `\\topskip`,
+    /// `\\holdinginserts`) a document node set at its base level since the
+    /// last item it put on the main list: a `T_PAGE_PARAMS` marker there,
+    /// with the values in force. The page builder reads them when a page's
+    /// first item arrives (§987), so the marker stands before the next item
+    /// wherever the run that set them ends: where the scheduler splits runs
+    /// changes nothing. Whether this run is one that marks so (a document
+    /// node's).
+    pub(crate) fn flush_page_params(&mut self) -> bool {
+        let op = self.cx.op();
+        if self.pg.is_some() || (op != self.ops.exec && op != self.ops.put) {
+            return false;
+        }
+        let locs = self.st.take_base_defs();
+        if locs.iter().any(|l| PAGE_PARAMS.contains(l)) {
+            self.put_page_params();
+        }
+        true
+    }
+
+    /// The page parameters in force, as a `T_PAGE_PARAMS` marker on the
+    /// main list (page.rs `breaks`, §980).
+    fn put_page_params(&mut self) {
+        let v = self.v;
+        let vsize = self.ipar(Par::vsize).unwrap_or(0);
+        let maxdepth = self.ipar(Par::maxdepth).unwrap_or(0);
+        let topskip = self.gpar(Par::topskip).unwrap_or_default();
+        let holding = self.ipar(Par::holdinginserts).unwrap_or(0);
+        let marker = v.list(vec![
+            v.int(crate::nodes::T_PAGE_PARAMS),
+            v.int(i64::from(vsize)),
+            v.int(i64::from(maxdepth)),
+            crate::val::glue_value(v, &topskip),
+            v.int(i64::from(holding)),
+        ]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), marker])));
     }
 
     /// Whether file `name` is one the job writes and reads back, with its
@@ -1592,28 +1639,10 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         crate::pageinline::finish(&mut self);
         // a page parameter this run set reaches the page fold as a
-        // marker in the main list (page.rs `breaks`)
-        if self.st.defines_any(&[
-            Par::vsize as Loc,
-            Par::maxdepth as Loc,
-            Par::topskip as Loc,
-            Par::holdinginserts as Loc,
-        ]) {
-            let v = self.v;
-            let vsize = self.ipar(Par::vsize).unwrap_or(0);
-            let maxdepth = self.ipar(Par::maxdepth).unwrap_or(0);
-            let topskip = self.gpar(Par::topskip).unwrap_or_default();
-            let holding = self.ipar(Par::holdinginserts).unwrap_or(0);
-            let marker = v.list(vec![
-                v.int(crate::nodes::T_PAGE_PARAMS),
-                v.int(i64::from(vsize)),
-                v.int(i64::from(maxdepth)),
-                crate::val::glue_value(v, &topskip),
-                v.int(i64::from(holding)),
-            ]);
-            let item = v.list(vec![v.int(0), marker]);
-            let s = v.seq_unit(item);
-            self.contribute("items", s);
+        // marker in the main list (page.rs `breaks`): a document node's
+        // where it set it (`flush_page_params`), another run's here
+        if !self.flush_page_params() && self.st.defines_any(&PAGE_PARAMS) {
+            self.put_page_params();
         }
         // a page step defines nothing to the engine: its definitions are
         // the page chain's delta (`page::step_defs`), so no step reads
