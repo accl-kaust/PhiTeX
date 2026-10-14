@@ -2649,6 +2649,8 @@ pub(crate) struct Parked {
     cur_order: phitex_typeset::glue::Order,
     pdf_occ: usize,
     irreversible: u64,
+    flushes: usize,
+    flush_pending: Option<(Field, Field)>,
 }
 
 /// Where an input frame stood when the command began.
@@ -2906,6 +2908,8 @@ impl Run<'_, '_> {
             cur_order: self.cur_order,
             pdf_occ: self.pdf_occ,
             irreversible: self.irreversible,
+            flushes: self.flushes,
+            flush_pending: self.flush_pending,
         })
     }
 }
@@ -2971,6 +2975,8 @@ impl<'c, 'a> Run<'c, 'a> {
         r.cur_order = p.cur_order;
         r.pdf_occ = p.pdf_occ;
         r.irreversible = p.irreversible;
+        r.flushes = p.flushes;
+        r.flush_pending = p.flush_pending;
         r.resumed = true;
         Ok(r)
     }

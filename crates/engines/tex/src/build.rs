@@ -2197,6 +2197,9 @@ impl Run<'_, '_> {
         }
         let m = v.list(vec![v.int(nodes::T_END), b, g, p]);
         self.append(0, m);
+        // (nothing of the text reads the counts after the job's end: a
+        // flush before `\end`, plain's `\supereject`, costs no round)
+        self.flush_pending = None;
         // nothing after `\end` is read
         self.claim_rest = true;
         self.frames.clear();
