@@ -36,6 +36,7 @@ ID = "generic_pgf_pgfmanual"
 EDIT_FILE = "pgfmanual-en-tikz-shapes.tex"
 W = Path(os.environ.get("w", "/tmp/tikzman"))
 R = Path(os.environ.get("r", W / "results"))
+NORM = os.environ.get("TIKZMAN_PDFNORM")
 
 
 def edit(tree):
@@ -55,6 +56,19 @@ def edit(tree):
                 p.write_bytes(b"\n".join(lines))
                 return k + 1, old.decode(), new.decode()
     raise SystemExit("no line to edit")
+
+
+def include_to_input(tree):
+    """The manual's chapters read with \\input between \\clearpages
+    instead of \\include (label "include->input"): no per-chapter .aux."""
+    p = Path(tree) / "pgfmanual-en-main-body.tex"
+    t = p.read_bytes()
+    t2 = re.sub(rb"\\include\{([^}]*)\}", rb"\\clearpage\\input{\1}\\clearpage", t)
+    p.write_bytes(t2)
+    return t.count(b"\\include{")
+
+
+I2I = os.environ.get("TIKZMAN_INCLUDE_TO_INPUT") == "1"
 
 
 def sh(cmd, **kw):
@@ -77,6 +91,12 @@ def oracle():
     # the oracle: the harness on the doc tree, and on a copy edited
     edited = W / "doc-edit"
     shutil.copytree(DOC / REL, edited / REL, symlinks=True)
+    cold = DOC
+    if I2I:
+        cold = W / "doc-cold"
+        shutil.copytree(DOC / REL, cold / REL, symlinks=True)
+        include_to_input(cold / REL)
+        include_to_input(edited / REL)
     where = edit(edited / REL)
     (R / "edit.json").write_text(json.dumps({"file": EDIT_FILE, "line": where[0], "old": where[1], "new": where[2]}))
     cand = {"id": ID, "path": f"{REL}/{MAIN}", "dir": REL, "main": MAIN, "engine": "pdflatex"}
@@ -84,7 +104,7 @@ def oracle():
     lst.write_text(json.dumps({"candidates": [cand]}))
     harness = Path(__file__).resolve().parent.parent / "ci" / "manuals.py"
     ps = []
-    for name, doc in (("cold", DOC), ("edit", edited)):
+    for name, doc in (("cold", cold), ("edit", edited)):
         cache = W / f"oracle-{name}"
         env = dict(os.environ, CI_WORK=str(W / f"ci-{name}"))
         (W / f"ci-{name}").mkdir(exist_ok=True)
@@ -153,12 +173,14 @@ def stderr_summary(path):
             "other": other}
 
 
-def one(binary, oracle, n, cache, format_cold, do_edit, tag):
+def one(binary, oracle, n, cache, format_cold, do_edit, tag, mode="exact"):
     run = W / f"run-{tag}"
     if run.exists():
         shutil.rmtree(run)
     m = run / "m"
     shutil.copytree(DOC / REL, m, symlinks=True)
+    if I2I:
+        include_to_input(m)
     if format_cold and (cache / "formats").exists():
         shutil.rmtree(cache / "formats")
     if (cache / "docs").exists():
@@ -167,9 +189,10 @@ def one(binary, oracle, n, cache, format_cold, do_edit, tag):
     env = common.env({"HOME": str(W / "home"), "TEXMFVAR": str(W / "texmf-var"),
                       "PHITEX_CACHE_DIR": str(cache), "NO_COLOR": "1", "PHITEX_TEX_TIME": "1"})
     err = R / f"stderr-{tag}.txt"
-    res = {"tag": tag, "threads": n, "format_cold": format_cold, "builds": []}
+    res = {"tag": tag, "threads": n, "format_cold": format_cold, "mode": mode,
+           "include_to_input": I2I, "builds": []}
     t0 = time.monotonic()
-    p = subprocess.Popen([str(binary), "watch", "--no-view", "--json", "--exact-pdf", "-j", str(n), MAIN],
+    p = subprocess.Popen([str(binary), "watch", "--no-view", "--json", *(["--exact-pdf"] if mode == "exact" else []), "-j", str(n), MAIN],
                          cwd=m, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=open(err, "wb"))
     import threading
@@ -198,6 +221,9 @@ def one(binary, oracle, n, cache, format_cold, do_edit, tag):
         ref = oracle / ("cold" if k == 0 else "edit")
         refpdf = next(ref.glob(f"{ID}-*/files/pgfmanual.pdf"), None)
         e["compare"] = compare(pdf, refpdf) if refpdf else {"missing": "oracle pdf"}
+        if mode == "relaxed" and refpdf and NORM and pdf.exists():
+            q = subprocess.run([NORM, str(pdf), str(refpdf)], capture_output=True, text=True)
+            e["compare_relaxed"] = q.stdout.strip()[:600]
         e["oracle_pages"] = npages(refpdf) if refpdf else None
         e["first_error"] = first_error(m / "pgfmanual.log")
         try:
@@ -256,6 +282,7 @@ def run(args):
     ns = [int(x) for x in args[2].split(",")]
     format_cold = "--format-cold" in args
     do_edit = "--no-edit" not in args
+    modes = next((a.split("=", 1)[1] for a in args if a.startswith("--modes=")), "exact").split(",")
     R.mkdir(parents=True, exist_ok=True)
     sh(f"lscpu > {R}/lscpu.txt; nproc >> {R}/lscpu.txt; cat /proc/self/status | grep -i cpus_allowed_list >> {R}/lscpu.txt")
     cache = W / "cache"
@@ -264,15 +291,16 @@ def run(args):
         results.append(one(binary, oracle, ns[0], cache, True, False, f"fmtcold-j{ns[0]}"))
         (R / "runs.json").write_text(json.dumps(results, indent=1))
     for n in ns:
-        results.append(one(binary, oracle, n, cache, False, do_edit, f"j{n}"))
-        (R / "runs.json").write_text(json.dumps(results, indent=1))
+        for mode in modes:
+            results.append(one(binary, oracle, n, cache, False, do_edit, f"j{n}-{mode}", mode))
+            (R / "runs.json").write_text(json.dumps(results, indent=1))
     for x in results:
         for k, b in enumerate(x["builds"]):
             par = b.get("parallel") or {}
             print(f"{x['tag']} build{k}: wall {b.get('wall_ms', 0) / 1e3:.2f}s busy {par.get('busy_ms', 0) / 1e3:.2f}s "
                   f"engine {par.get('engine_ms', 0) / 1e3:.2f}s pages {b.get('pages')} nodes {b.get('nodes_run')} "
                   f"cp {par.get('critical_path')} errors {len(b.get('errors') or [])} rss {x.get('rss_kib')} "
-                  f"identical {b['compare'] is None} notes {b.get('notes')}", flush=True)
+                  f"identical {b['compare'] is None} relaxed {b.get('compare_relaxed')} notes {b.get('notes')}", flush=True)
 
 
 if __name__ == "__main__":

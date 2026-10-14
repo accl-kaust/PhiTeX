@@ -76,7 +76,7 @@ const CHAPTER: &str = "Chapter text. Some words in a paragraph here.\n\nA second
 
 /// `\include` of a one-paragraph file: pdflatex reads on after it (no
 /// error, two pages); phitex stopped at the first one's end with "! ***
-/// (job aborted, no legal \end found)." (the TikZ manual: after
+/// (job aborted, no legal \end found)." (the `TikZ` manual: after
 /// `pgfmanual-en-introduction`).
 #[test]
 #[ignore = "\\include ends the job: the main file's text after the first \\include is never read (no legal \\end found)"]
@@ -94,7 +94,7 @@ fn include_reads_on() {
 }
 
 /// `\include` with hyperref and a table of contents: also an evaluation
-/// error, "conflicting publications for Field(..)" (ConflictingPublication).
+/// error, "conflicting publications for Field(..)" (`ConflictingPublication`).
 #[test]
 #[ignore = "\\include with hyperref and \\tableofcontents: evaluation error ConflictingPublication"]
 fn include_with_hyperref_toc() {
