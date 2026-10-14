@@ -555,6 +555,14 @@ impl Compiler<'_, '_> {
                 .filter(|f| self.is_flag(f))
                 .map(str::to_owned)
                 .collect();
+            if self.top && std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
+                eprintln!(
+                    "parlists: call \\{n}: setters {ms:?}, flags {flags:?}, {} calls (afterheading {}), unbounded {:?}",
+                    set.calls.len(),
+                    set.calls.iter().any(|c| c == "@afterheading"),
+                    set.unbounded.first()
+                );
+            }
             if !flags.is_empty() {
                 out.push(Op::Unknown(flags));
             }

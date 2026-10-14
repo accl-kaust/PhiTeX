@@ -236,7 +236,31 @@ impl Incr {
         let mut todo: Vec<usize> = Vec::new();
         let mut outs: Vec<Option<(u64, Defs)>> = Vec::with_capacity(parts.len());
         let (mut key, mut defs) = (0u64, base.clone());
+        let hash = |key: u64, tag: u8, t: &str| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut h);
+            tag.hash(&mut h);
+            t.hash(&mut h);
+            h.finish()
+        };
+        // (file ids from the key: the same in every build of the
+        // process, whichever made the definitions first)
+        let first_id =
+            |key: u64| 0x8000_0000 | (u32::try_from(key >> 40).unwrap_or(0) & 0x7fff_ff00);
         for (k, p) in parts.iter_mut().enumerate() {
+            let t = &text[p.start..p.start + p.len];
+            // (what it loads, `\\documentclass`, `\\usepackage`: the
+            // files' definitions, read as the format's are, before its
+            // own commands, which call what they define)
+            if let Some(f) = finder.filter(|_| !crate::api::loaded_names(t).is_empty()) {
+                key = hash(key, 1, t);
+                let prev = defs.clone();
+                defs = loaded_defs(base, key, || {
+                    let mut d: Definitions = (*prev).clone();
+                    crate::api::harvest_loads(t, f, &mut d, &mut first_id(key));
+                    d
+                });
+            }
             ins.push((key, defs.clone()));
             // (whether it defines anything is its text's alone: a cached
             // analysis under other definitions says it too)
@@ -248,28 +272,12 @@ impl Incr {
                 e.out.clone()
             } else {
                 todo.push(k);
-                let defines = cached_defines.unwrap_or_else(|| defines(k));
-                let t = &text[p.start..p.start + p.len];
-                // (what it loads, `\\documentclass`, `\\usepackage`: the
-                // files' definitions, read as the format's are)
-                let loads = finder.filter(|_| !crate::api::loaded_names(t).is_empty());
-                if defines || loads.is_some() {
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    key.hash(&mut h);
-                    t.hash(&mut h);
-                    let out = h.finish();
-                    // (file ids from the key: the same in every build of
-                    // the process, whichever made the definitions first)
-                    let mut id =
-                        0x8000_0000 | (u32::try_from(out >> 40).unwrap_or(0) & 0x7fff_ff00);
+                if cached_defines.unwrap_or_else(|| defines(k)) {
+                    let out = hash(key, 0, t);
+                    let prev = defs.clone();
                     let d = loaded_defs(base, out, || {
-                        let mut d: Definitions = (*defs).clone();
-                        if let Some(f) = loads {
-                            crate::api::harvest_loads(t, f, &mut d, &mut id);
-                        }
-                        if defines {
-                            d.harvest(t, FileKind::Document, id);
-                        }
+                        let mut d: Definitions = (*prev).clone();
+                        d.harvest(t, FileKind::Document, first_id(out));
                         d
                     });
                     (out, d)
