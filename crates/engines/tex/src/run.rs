@@ -840,7 +840,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
         if let Some(x) = logged {
-            self.log_def(loc, if global { 1 } else { 0 }, x);
+            self.log_def(loc, i64::from(global), x);
         }
     }
 
