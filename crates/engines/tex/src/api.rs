@@ -122,6 +122,12 @@ pub struct Options {
     /// load whose key matches is given them as the prediction of its
     /// outputs (also `PHITEX_PKG_PREDICT=1`).
     pub pkg_predict: bool,
+    /// `\\pdfshellescape` (pdfTeX's `shellenabledp`): 0 off, 1 on,
+    /// 2 restricted (TeX Live's `shell_escape = p`, the default). No
+    /// command ever runs as a process: an allowed `makeindex` runs in
+    /// process (`phitex-makeindex`); the others are refused with a
+    /// diagnostic.
+    pub shell_escape: i32,
     /// The loop-back rounds an evaluation may take before it ends with
     /// a no-fixpoint error naming the loop-back fields (a document whose
     /// written files oscillate), instead of running on.
@@ -439,6 +445,7 @@ impl Default for Options {
             pgst: Vec::new(),
             pkgrec: Vec::new(),
             pkg_predict: false,
+            shell_escape: 2,
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
@@ -4398,6 +4405,7 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     }
     sets.push((v.field("jobname"), v.str(&opts.jobname)));
     sets.push((v.field("dvicomment"), v.str(&opts.comment)));
+    sets.push((v.field("shellescape"), v.int(i64::from(opts.shell_escape))));
     sets.push((
         v.field("pdf:relaxed"),
         v.int(i64::from(!opts.exact_objects)),
@@ -4474,6 +4482,7 @@ fn declare_fields(eng: &mut Engine) {
         "pagefxs",
         "pgdeltas",
         "pgsts",
+        "tools",
         "pkgrecs",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,

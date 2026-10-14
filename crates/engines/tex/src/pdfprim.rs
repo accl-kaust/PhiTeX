@@ -1497,7 +1497,8 @@ fn put_random(r: &mut Run<'_, '_>, st: &Random) {
 pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
     let field = match m {
         li::PDFTEX_VERSION => return Ok(IVal::Int(140)),
-        li::SHELL_ESCAPE => return Ok(IVal::Int(0)),
+        // (the job's, `Options::shell_escape`; the format's 0)
+        li::SHELL_ESCAPE => "shellescape",
         // F15: the clock is not on the graph; \pdfresettimer is when
         // the run starts
         li::ELAPSED_TIME => return Ok(IVal::Int(0)),

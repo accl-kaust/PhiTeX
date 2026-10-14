@@ -1402,6 +1402,10 @@ impl Run<'_, '_> {
     /// `write_out` (§1370–§1371): the tokens expanded, to the log.
     pub(crate) fn write_out(&mut self, k: i32, body: &[Tok]) -> R<()> {
         let s = self.expand_late(body)?;
+        // (web2c's §1370 change: stream 18 is a shell command)
+        if k == 18 && self.int32("shellescape")? != 0 {
+            return self.shell_command(&s);
+        }
         let open = (0..16).contains(&k)
             && !self.closed.contains(&k)
             && self
@@ -1503,6 +1507,59 @@ impl Run<'_, '_> {
         } else {
             self.log("wlog", &s)?;
         }
+        Ok(())
+    }
+
+    /// `\\write18{cmd}` with shell escape on (web2c's `runsystem`):
+    /// in restricted mode (2) only a command of TeX Live's
+    /// `shell_escape_commands` is allowed, as kpathsea's
+    /// `shell_cmd_is_allowed` judges it (texmfmp.c). No command runs as
+    /// a process: an allowed `makeindex` is our makeindex, run by the
+    /// writer on the `.idx` text this round wrote (`tools`, `ops::Files`)
+    /// and its `.ind` read back as a file the job writes
+    /// (`wfile:<name>`, the next round's: imakeidx's `\\printindex`
+    /// inputs it right after); any other command is refused with a
+    /// diagnostic.
+    fn shell_command(&mut self, cmd: &str) -> R<()> {
+        let restricted = self.int32("shellescape")? == 2;
+        let Some(args) = shell_words(cmd) else {
+            self.log(
+                "wlog",
+                &format!("runsystem({cmd})...quotation error in system command."),
+            )?;
+            return Ok(());
+        };
+        let name = args.first().cloned().unwrap_or_default();
+        if restricted && !SHELL_ESCAPE_COMMANDS.contains(&name.as_str()) {
+            self.log(
+                "wlog",
+                &format!("runsystem({cmd})...disabled (restricted)."),
+            )?;
+            return Ok(());
+        }
+        if name != "makeindex" {
+            self.diag(
+                false,
+                &format!("\\write18{{{cmd}}}: `{name}' has no in-process version here; not run"),
+            );
+            return Ok(());
+        }
+        let Some(ind) = makeindex_ind_name(&args[1..]) else {
+            return Ok(());
+        };
+        self.log(
+            "wlog",
+            &format!("runsystem({cmd})...executed safely (allowed)."),
+        )?;
+        // (the `.ind` a file the job writes: its in-memory text the
+        // writer's, next round)
+        self.written_decl(&ind)?;
+        let v = self.v;
+        let e = v.list(vec![
+            v.str(&ind),
+            v.list(args[1..].iter().map(|a| v.str(a)).collect()),
+        ]);
+        self.contribute("tools", v.seq_unit(e));
         Ok(())
     }
 
@@ -1777,4 +1834,89 @@ fn out_name_ok_p(name: &str) -> bool {
         }
     }
     !(b.first() == Some(&b'/') || b.starts_with(b"../") || b.windows(4).any(|w| w == b"/../"))
+}
+
+/// TeX Live 2026's `shell_escape_commands` (texmf.cnf): what restricted
+/// mode allows.
+const SHELL_ESCAPE_COMMANDS: &[&str] = &[
+    "bibtex",
+    "bibtex8",
+    "extractbb",
+    "gregorio",
+    "kpsewhich",
+    "makeindex",
+    "repstopdf",
+    "r-mpost",
+    "texosquery-jre8",
+];
+
+/// A command line split into words as kpathsea's `shell_cmd_is_allowed`
+/// reads it in restricted mode (texmfmp.c): blank-separated, a `"..."`
+/// quoted part taken literally (a word may join quoted and unquoted
+/// parts); `None` when a quote is left open or a `'` appears (kpathsea
+/// quotes with `'`, refusing one in the command).
+pub(crate) fn shell_words(cmd: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    for c in cmd.chars() {
+        match c {
+            '\'' => return None,
+            '"' => {
+                quoted = !quoted;
+                in_word = true;
+            }
+            ' ' | '\t' if !quoted => {
+                if in_word {
+                    words.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            _ => {
+                cur.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quoted {
+        return None;
+    }
+    if in_word {
+        words.push(cur);
+    }
+    Some(words)
+}
+
+/// The `.ind` file `makeindex ARGS` writes (makeindex 2.18's `-o`, else
+/// the first input file's base with `.ind`; an input named without an
+/// extension is `NAME.idx`).
+pub(crate) fn makeindex_ind_name(args: &[String]) -> Option<String> {
+    let mut out = None;
+    let mut first = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-o" => out = it.next().cloned(),
+            "-s" | "-t" | "-p" => {
+                it.next();
+            }
+            s if s.starts_with('-') && s.len() > 1 => {}
+            s => {
+                if first.is_none() {
+                    first = Some(s.to_owned());
+                }
+            }
+        }
+    }
+    if out.is_some() {
+        return out;
+    }
+    let f = first?;
+    let last = f.rsplit('/').next().unwrap_or(&f);
+    let base = match f.rsplit_once('.') {
+        Some((b, _)) if last.contains('.') => b.to_owned(),
+        _ => f.clone(),
+    };
+    Some(format!("{base}.ind"))
 }
