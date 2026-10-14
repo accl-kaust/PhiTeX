@@ -279,6 +279,7 @@ impl Run<'_, '_> {
         let mut before: Vec<ValueId> = Vec::new();
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
+        let mut fonts_at: Vec<ValueId> = Vec::new();
         let mut folds = 0usize;
         let (mut tfx, mut tfold) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         // nothing to reuse: the pages folded in parallel from predicted
@@ -344,7 +345,16 @@ impl Run<'_, '_> {
             };
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
-            plan.extend(rec.writes.iter().copied());
+            // (and the fonts loaded before page `j` fires: `fplan`)
+            let mut fl = Vec::new();
+            for &w in &rec.writes {
+                if nodes::tag(v, w) == nodes::T_FONT_AT {
+                    fl.push(v.int(crate::val::int_at(v, w, 1)));
+                } else {
+                    plan.push(w);
+                }
+            }
+            fonts_at.push(v.list(fl));
             for &node in &rec.passed {
                 if published.insert(node) {
                     let n = u64::from_ne_bytes(node.to_ne_bytes());
@@ -379,6 +389,12 @@ impl Run<'_, '_> {
         let pages = n_starts - 1;
         let wp = v.seq_unit(v.list(plan));
         self.contribute("wplan", wp);
+        // the fonts the text loaded, by the page that fired after them,
+        // and how many fonts the text loaded in all: the writer numbers
+        // the fonts as pdfTeX does (`pdfout::font_tags`)
+        let mut fp = vec![v.int(self.cint(crate::fields::cell::FONTCOUNT)?)];
+        fp.extend(fonts_at.iter().copied().take(pages));
+        self.contribute("fplan", v.seq_unit(v.list(fp)));
         // each page's own material (`pp:items:<j>`, its start rebased to
         // it): a `brk` reads only its page, so an edit elsewhere on the
         // list wakes no other page's `brk`
@@ -1342,6 +1358,12 @@ fn fold_page(
                 if let Some(&e) = list_of(v, x).get(1) {
                     writes.push(e);
                 }
+                continue;
+            }
+            // (a font load: kept with the writes, the marker itself, for
+            // the writer's numbering, `fplan`)
+            nodes::T_FONT_AT => {
+                writes.push(x);
                 continue;
             }
             _ => {}

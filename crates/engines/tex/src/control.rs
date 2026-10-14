@@ -1039,6 +1039,7 @@ impl Run<'_, '_> {
         };
         let f = self.cint(crate::fields::cell::FONTCOUNT)? + 1;
         self.set_cell(crate::fields::cell::FONTCOUNT, v.int(f), true);
+        self.font_loaded(f);
         let info = v.list(vec![
             v.str(name),
             v.int(i64::from(l.at.size)),
@@ -1510,6 +1511,20 @@ impl Run<'_, '_> {
         let mut s = String::new();
         self.show_toks_into(&mut s, &expanded)?;
         Ok(s)
+    }
+
+    /// A font loaded as `f` by the text (not by a page step's output
+    /// routine or virtual fonts, nor by a text paging inline, whose pages
+    /// ship in TeX's order): a `T_FONT_AT` marker on the main list, so
+    /// that the writer knows which `\shipout` came first after it.
+    pub(crate) fn font_loaded(&mut self, f: i64) {
+        let op = self.cx.op();
+        if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
+            return;
+        }
+        let v = self.v;
+        let at = v.list(vec![v.int(crate::nodes::T_FONT_AT), v.int(f)]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
     }
 
     /// The input left as one source line, for `\inputlineno`.

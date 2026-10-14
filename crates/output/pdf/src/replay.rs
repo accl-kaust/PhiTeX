@@ -524,7 +524,7 @@ impl PdfState {
             .iter()
             .filter(|(f, _)| self.fonts.get(f).is_some_and(|s| s.used))
             .filter_map(|&(f, k)| {
-                let here = self.ff(f);
+                let here = self.font_tag(self.ff(f));
                 (here != k).then_some((k, here))
             })
             .collect();

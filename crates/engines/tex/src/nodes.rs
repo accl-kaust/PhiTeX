@@ -72,6 +72,11 @@ pub(crate) const T_MARKS_AT: i64 = 91;
 /// among the shipped pages, so the writer assembles the file in TeX's
 /// order.
 pub(crate) const T_WRITE_AT: i64 = 88;
+/// A font a document node loaded (`read_font_info`, §1257): `[tag, f]`;
+/// the page builder's fold tells the writer which page shipped first
+/// after it, as pdfTeX numbers the fonts a page's virtual fonts load
+/// after the fonts loaded before that `\shipout` (`fplan`).
+pub(crate) const T_FONT_AT: i64 = 87;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]
