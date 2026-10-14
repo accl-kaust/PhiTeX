@@ -1064,6 +1064,13 @@ impl Session {
             main = Some(put(&format!("{}.{e}", self.job.jobname), b)?);
         }
         for (n, t) in &r.out.writes {
+            // (TeX Live's `openout_any = p`: never outside the output
+            // directory, never a dot file; a document can't overwrite
+            // ~/.bashrc with `\openout`)
+            if !out_name_ok(n) {
+                eprintln!("phitex: not writing to {n} (openout_any = p)");
+                continue;
+            }
             put(n, &tex::bytes(t))?;
         }
         put(
@@ -1122,6 +1129,21 @@ pub fn waiting_notes(job: &Job) -> Vec<String> {
         v.push("-shell-escape: the native engine runs no \\write18 yet".to_owned());
     }
     v
+}
+
+/// Whether a file the document writes may be written under `name`
+/// (kpathsea's `kpse_out_name_ok` in its paranoid mode, TeX Live's
+/// default `openout_any = p`): a relative name, no `..` component, no
+/// component that is a dot file.
+fn out_name_ok(name: &str) -> bool {
+    let p = Path::new(name);
+    !p.is_absolute()
+        && !name.starts_with('~')
+        && p.components().all(|c| match c {
+            std::path::Component::Normal(s) => !s.to_string_lossy().starts_with('.'),
+            std::path::Component::CurDir => true,
+            _ => false,
+        })
 }
 
 /// A file's name without a leading `./`.
@@ -1198,5 +1220,27 @@ mod tests {
     fn comment() {
         assert_eq!(dvi_comment(0), " TeX output 1970.01.01:0000");
         assert_eq!(dvi_comment(1_791_810_000), " TeX output 2026.10.12:1300");
+    }
+}
+
+#[cfg(test)]
+mod out_name_tests {
+    use super::out_name_ok;
+
+    #[test]
+    fn written_files_stay_in_the_output_directory() {
+        for ok in ["paper.aux", "./paper.toc", "sub/chap.aux"] {
+            assert!(out_name_ok(ok), "{ok}");
+        }
+        for bad in [
+            "/home/u/.bashrc",
+            "../x.tex",
+            "a/../../x",
+            ".bashrc",
+            "sub/.hidden",
+            "~/x",
+        ] {
+            assert!(!out_name_ok(bad), "{bad}");
+        }
     }
 }

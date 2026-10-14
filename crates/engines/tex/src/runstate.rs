@@ -688,14 +688,6 @@ impl State {
             .collect()
     }
 
-    /// The locations with a definition at the base level.
-    pub(crate) fn defined_locs(&self) -> impl Iterator<Item = Loc> + '_ {
-        self.metas
-            .iter()
-            .filter(|m| m.publ.is_some())
-            .map(|m| m.loc)
-    }
-
     /// The definitions made after stamp `since`, at any level (a line
     /// read back is interpreted wherever the run is): the location, the
     /// value in force and the locality of the latest one.

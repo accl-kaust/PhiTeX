@@ -56,7 +56,7 @@ pub(crate) fn run_node_parking(
             .unwrap_or_default();
         eprintln!(
             "run {} {}",
-            cx.node().raw() % 100_000,
+            cx.node().raw(),
             a.chars().take(70).collect::<String>()
         );
     }
@@ -100,7 +100,7 @@ pub(crate) fn run_node_parking(
             "  -> {}",
             match &res {
                 Ok(()) => "ok".to_owned(),
-                Err(Halt::Stop(_)) => "stop".to_owned(),
+                Err(Halt::Stop(_)) => format!("stop (node {})", r.cx.node().raw()),
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
             }
@@ -269,6 +269,7 @@ impl Operation for Exec {
                 if let Some(m) = crate::hints::verify(r, &hint)? {
                     r.log("error", &format!("hint regime violated: {m}"))?;
                     crate::hints::count(r, 2);
+                    r.hint_void = true;
                 }
             }
             // the whole slice runs here: a paragraph region to its end,
@@ -278,8 +279,17 @@ impl Operation for Exec {
             // until it is closed (`Run::run_all`)
             r.run_all()?;
             crate::hints::debug_defs(r, &hint);
-            if hint.bound.is_some() {
-                if let Some(m) = crate::hints::check_defs(r, &hint) {
+            // (a hint whose regime the run found violated bounds nothing:
+            // its definitions are not checked against it)
+            // (a run that claimed siblings ran their texts too: it is
+            // bounded by its hint and theirs together, and by nothing
+            // when one of theirs is unbounded)
+            let claimed: Vec<std::sync::Arc<crate::hints::Hint>> = (0..r.pulled)
+                .filter_map(|i| r.cx.following(i))
+                .map(|(_, a)| crate::hints::hint_of_args(r.v, &a))
+                .collect();
+            if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
+                if let Some(m) = crate::hints::check_defs(r, &hint, &claimed) {
                     r.log("error", &m)?;
                     crate::hints::count(r, 3);
                 }

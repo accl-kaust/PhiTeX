@@ -554,7 +554,7 @@ fn pdf_cache() -> PathBuf {
 
 /// A `pdfdocs` document built cold from `dir` (the format cached):
 /// byte-identical to its oracle, its document nodes counted.
-fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
+fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64, Vec<String>) {
     let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
         .expect("the oracle");
     let cache = pdf_cache();
@@ -576,19 +576,69 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
         let _ = std::fs::write(format!("{d}/{name}.pdf"), b.output().0);
         let _ = std::fs::write(format!("{d}/{name}.log"), b.output().1);
     }
+    let chain = b.critical_chain();
+    let mut by: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (_, kind, field) in &chain {
+        let f = field.split(':').next().unwrap_or("");
+        *by.entry(format!("{kind} {f}:")).or_default() += 1;
+    }
+    let everypar = chain.iter().filter(|c| c.2 == "param:everypar").count();
+    let s = &b.stats;
+    eprintln!(
+        "chains {name}: critical path {:?}, {} nodes run, {} regions, {} rounds, {} loop rounds, {} undeclared, {} violations, {} mispredictions, everypar links {everypar}, chain {} links {by:?}",
+        s.critical_path,
+        s.nodes_run,
+        s.nodes_text_frames,
+        s.rounds,
+        s.loop_rounds,
+        s.undeclared_definitions,
+        s.regime_violations,
+        s.mispredictions,
+        chain.len()
+    );
+    if std::env::var_os("PHITEX_CHAIN").is_some() {
+        for l in b.critical_chain_lines() {
+            eprintln!("  chain {name}: {l}");
+        }
+    }
     for d in b.diagnostics() {
         eprintln!("{d:?}");
     }
+    let reads: Vec<_> = b
+        .reads()
+        .into_iter()
+        .filter(|(n, _)| !n.to_ascii_lowercase().ends_with(".tfm"))
+        .collect();
+    eprintln!("reads {name}: {reads:?}");
     if let Some(d) = common::first_difference(&b.output().0, &want) {
         panic!("{name}.pdf cold: {d}");
     }
-    (b, regions)
+    let writes = common::read(&common::fixtures().join(format!("latex/pdf/{name}.writes")));
+    let files = b.files();
+    let mut writes_diff = Vec::new();
+    for (n, w) in parse_writes(&writes) {
+        let got = files.iter().find(|(m, _)| *m == n).map(|(_, t)| t.clone());
+        if got.as_deref() != Some(w.as_str()) {
+            eprintln!("{name}: written {n} differs: {got:?}");
+            writes_diff.push(n);
+        }
+    }
+    assert_eq!(
+        b.stats.undeclared_definitions, 0,
+        "{name}: undeclared definitions"
+    );
+    (b, regions, writes_diff)
 }
 
 fn pdf_opts(name: &str, dir: &Path) -> Options {
     Options {
         prelude_bytes: std::fs::read(pdf_cache()).ok(),
-        time_limit: None,
+        time_limit: Some(std::time::Duration::from_secs(
+            std::env::var("PHITEX_TEST_LIMIT")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(120),
+        )),
         ..options(name, dir, "", false, true)
     }
 }
@@ -697,12 +747,16 @@ fn quack(src: &str, marker: &str) -> String {
 fn latex_paragraph_nodes() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("paras30.tex"));
-    let (mut b, regions) = cold_nodes("paras30", &dir, &src);
+    let (mut b, regions, writes) = cold_nodes("paras30", &dir, &src);
     assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
     let new = quack(&src, "Paragraph 17 of the text: the quick ");
     b.edit(&new);
     let cold = common::build(pdf_opts("paras30", &dir), Some(&prelude(true)), &new);
     edit_check("paras30", &b, &cold, 3);
+    assert!(
+        writes.is_empty(),
+        "paras30: written files differ: {writes:?}"
+    );
 }
 
 /// `pdflatex` on an article with an abstract, two sections, itemize,
@@ -715,7 +769,7 @@ fn latex_paragraph_nodes() {
 fn latex_environments() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("envs.tex"));
-    let (mut b, regions) = cold_nodes("envs", &dir, &src);
+    let (mut b, regions, writes) = cold_nodes("envs", &dir, &src);
     let pars = paragraphs(&src);
     eprintln!("envs: {regions} document nodes for {pars} paragraphs");
     assert!(
@@ -726,6 +780,7 @@ fn latex_environments() {
     b.edit(&new);
     let cold = common::build(pdf_opts("envs", &dir), Some(&prelude(true)), &new);
     edit_check("envs", &b, &cold, 4);
+    assert!(writes.is_empty(), "envs: written files differ: {writes:?}");
 }
 
 /// `pdflatex` on a main file that `\input`s one chapter and
@@ -742,7 +797,7 @@ fn latex_input_include() {
         std::fs::copy(src_dir.join(f), dir.join(f)).expect("copy");
     }
     let src = common::read(&dir.join("inputs.tex"));
-    let (mut b, regions) = cold_nodes("inputs", &dir, &src);
+    let (mut b, regions, writes) = cold_nodes("inputs", &dir, &src);
     eprintln!("inputs: {regions} document nodes for 20 chapter paragraphs");
     assert!(regions >= 10, "{regions} document nodes: chap1 not sliced");
     let chap1 = common::read(&dir.join("chap1.tex"));
@@ -752,6 +807,45 @@ fn latex_input_include() {
     let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
     let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
     edit_check("inputs", &b, &cold, 4);
+    assert!(
+        writes.is_empty(),
+        "inputs: written files differ: {writes:?}"
+    );
+}
+
+/// An article with one paragraph between blank lines (the ladder's
+/// red-02): LaTeX's paragraph hook resets `\everypar` to its regime
+/// guess, no definition; byte-identical, the `.aux` too, no undeclared
+/// definition, and an edit equals a cold build.
+#[test]
+fn latex_one_paragraph() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("red02.tex"));
+    let (mut b, _, writes) = cold_nodes("red02", &dir, &src);
+    let new = src.replace("Hello", "Hallo");
+    b.edit(&new);
+    let cold = common::build(pdf_opts("red02", &dir), Some(&prelude(true)), &new);
+    edit_check("red02", &b, &cold, 3);
+    assert!(writes.is_empty(), "red02: written files differ: {writes:?}");
+}
+
+/// A heading and three paragraphs (`pdfdocs/secpars.tex`): the first
+/// consumes `\@afterheading`'s `\everypar` and resets it, the second and
+/// third are indented as pdfTeX indents them (the reset is a declared
+/// definition, never dropped); an edit in the first equals a cold build.
+#[test]
+fn latex_heading_paragraphs() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("secpars.tex"));
+    let (mut b, _, writes) = cold_nodes("secpars", &dir, &src);
+    let new = quack(&src, "The first paragraph after the heading: the ");
+    b.edit(&new);
+    let cold = common::build(pdf_opts("secpars", &dir), Some(&prelude(true)), &new);
+    edit_check("secpars", &b, &cold, 3);
+    assert!(
+        writes.is_empty(),
+        "secpars: written files differ: {writes:?}"
+    );
 }
 
 /// The chain census gate (`common::Census`) on a `pdflatex` document:
@@ -771,7 +865,7 @@ fn census_envs() {
 fn census_of(name: &str, marker: &str) {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join(format!("{name}.tex")));
-    let (mut b, _) = cold_nodes(name, &dir, &src);
+    let (mut b, _, _) = cold_nodes(name, &dir, &src);
     let new = quack(&src, marker);
     common::assert_census(&[common::Census::take(name, &mut b, &new)]);
 }
@@ -785,7 +879,7 @@ fn census_of(name: &str, marker: &str) {
 fn latex_utf8_edit() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("utf8.tex"));
-    let (mut b, regions) = cold_nodes("utf8", &dir, &src);
+    let (mut b, regions, writes) = cold_nodes("utf8", &dir, &src);
     assert!(regions >= 8, "{regions} document nodes for 8 paragraphs");
     // (the text's characters are its bytes: a UTF-8 word as `read` gives it)
     let bytes = |w: &str| -> String { w.bytes().map(char::from).collect() };
@@ -794,4 +888,5 @@ fn latex_utf8_edit() {
     b.edit(&new);
     let cold = common::build(pdf_opts("utf8", &dir), Some(&prelude(true)), &new);
     edit_check("utf8", &b, &cold, 3);
+    assert!(writes.is_empty(), "utf8: written files differ: {writes:?}");
 }

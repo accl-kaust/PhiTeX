@@ -234,6 +234,8 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
+    /// Whether the node's hint was found violated when it started.
+    pub hint_void: bool,
     /// The semantic nest (§211): the lists and groups this run has open
     /// ([`crate::nest`]), level 0 being the engine's scope.
     pub nest: Vec<crate::nest::Level>,
@@ -355,6 +357,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pull_orig: Vec::new(),
             top: false,
             claim_rest: false,
+            hint_void: false,
             nest: Vec::new(),
             next_lid: 0,
             last_par: (0, 0),
@@ -630,6 +633,25 @@ impl<'c, 'a> Run<'c, 'a> {
     /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
     /// writes and reads back is a loop-back field: the previous round's.
     pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
+        let r = self.file_inner(key);
+        if r.is_err() {
+            self.trace_stop(&format!("file {key}"));
+        }
+        r
+    }
+
+    /// (measure) `PHITEX_READS`: a stop that is not a field read's.
+    pub(crate) fn trace_stop(&self, what: &str) {
+        if crate::exec::env_flag!("PHITEX_READS") {
+            eprintln!(
+                "reads: node {} op {:?} {what} PARKED",
+                self.cx.node().raw(),
+                self.cx.op()
+            );
+        }
+    }
+
+    fn file_inner(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
         // a file the job writes: its in-memory value (`wfile:<key>`, a
         // loop-back the writer publishes), never the client's file
@@ -912,10 +934,22 @@ impl<'c, 'a> Run<'c, 'a> {
         locs.into_iter().map(|l| self.loc_field(l)).collect()
     }
 
-    /// The fields the run defines at its base level.
+    /// The fields the run defines: those whose value at its end differs
+    /// from the one it loaded, or that it never loaded (a local
+    /// assignment that ends where it began defines nothing, as LaTeX's
+    /// paragraph hooks setting `\\everypar` and back).
     pub(crate) fn def_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self.st.defined_locs().collect();
+        let locs = self.defined_now();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
+    }
+
+    /// [`Run::def_fields`]' locations, as the state table publishes them.
+    fn defined_now(&self) -> Vec<Loc> {
+        self.st
+            .published(self.v, self.rec_load)
+            .into_iter()
+            .map(|(l, _, _)| l)
+            .collect()
     }
 
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
@@ -1184,9 +1218,9 @@ impl<'c, 'a> Run<'c, 'a> {
     // ------------------------------------------------------------ the end
 
     /// What is left of the node's own and claimed text, and the tokens a
-    /// command put back or an expansion produced, as child nodes: one per
-    /// token (a run of characters is one node), and the text not yet read
-    /// as one node per segment.
+    /// command put back or an expansion produced, as child nodes: the
+    /// token levels between two texts as one node, and the text not yet
+    /// read as one node per segment.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
         // a run reads everything of its own (expansion tokens run inline,
@@ -1207,18 +1241,11 @@ impl<'c, 'a> Run<'c, 'a> {
             let l = v.list(toks);
             vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(kind)]
         };
-        let toks_left = |toks: &[Tok], out: &mut Vec<Vec<ValueId>>, run: &mut Vec<ValueId>| {
-            for tok in toks {
-                let ch = matches!(tok.cat(), Some(10..=12));
-                if ch {
-                    run.push(crate::val::tok_id(v, epoch, *tok));
-                    continue;
-                }
-                if !run.is_empty() {
-                    out.push(node(std::mem::take(run)));
-                }
-                out.push(node(vec![crate::val::tok_id(v, epoch, *tok)]));
-            }
+        // (the token levels left, in reading order, are one node: TeX
+        // reads them one after the other, and a brace or a group they
+        // open and close stays inside one run, waiting on no scope)
+        let toks_left = |toks: &[Tok], _: &mut Vec<Vec<ValueId>>, run: &mut Vec<ValueId>| {
+            run.extend(toks.iter().map(|&tok| crate::val::tok_id(v, epoch, tok)));
         };
         let line_left = |s: &Line, out: &mut Vec<Vec<ValueId>>| {
             let end_due = s.ends && s.endch < -1;
@@ -1343,7 +1370,11 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// The scope kind the node runs in: the engine's.
     pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
-        Ok(self.cx.scope_kind()?)
+        let r = self.cx.scope_kind();
+        if r.is_err() {
+            self.trace_stop("scope kind");
+        }
+        Ok(r?)
     }
 
     /// Runs the node's input to its end (§1030's loop): every command of
@@ -1378,6 +1409,15 @@ impl<'c, 'a> Run<'c, 'a> {
                 if self.claim_rest || self.closed_scope() {
                     return Ok(());
                 }
+                // (one scope per node, `Effect::Scope` carrying one kind:
+                // a region in vertical mode inside one group of its own
+                // that is about to open another leaves the first to the
+                // engine here, and the rest of its input follows inside)
+                if self.can_leave_scope() && self.nest[0].mode.abs() == 1 && self.next_opens_group()
+                {
+                    self.leave_scope()?;
+                    return Ok(());
+                }
             }
             // a region that ends with one group of its own still open
             // (an environment's `\begin`, a macro's `\begingroup` or
@@ -1385,17 +1425,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // leaves it to the engine as the scope the following regions
             // run in (`Run::leave_scope`); more than one, or a text that
             // said it opens no scope, reads on
-            if self.doc
-                && self.conds.is_empty()
-                && self.effect == Effect::None
-                && self.nest.len() == 1
-                && !self.nest[0].owns
-                && matches!(
-                    self.nest[0].group,
-                    crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
-                )
-                && !crate::hints::effect_none(self.v, &self.cx.args())
-            {
+            if self.can_leave_scope() {
                 self.leave_scope()?;
                 return Ok(());
             }
@@ -1421,6 +1451,101 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             return Ok(());
         }
+    }
+
+    /// Whether the run is a document region with exactly one group of
+    /// its own open (sharing the list below it), nothing else open, no
+    /// scope effect yet, and a text that does not say it opens none: the
+    /// group can be left to the engine as a scope (`Run::leave_scope`).
+    fn can_leave_scope(&self) -> bool {
+        self.doc
+            && self.conds.is_empty()
+            && self.effect == Effect::None
+            && self.nest.len() == 1
+            && !self.nest[0].owns
+            && matches!(
+                self.nest[0].group,
+                crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
+            )
+            && !crate::hints::effect_none(self.v, &self.cx.args())
+            && self.text_opens_group()
+    }
+
+    /// Whether the node's own text opens a group it does not close (an
+    /// unmatched `\\begin{...}`, `\\begingroup` or `\\bgroup`; a brace
+    /// of the text is never split between slices, `hints::slices_of`):
+    /// the group its run leaves open is the text's, not one a command
+    /// left open while it still reads on (a loading command's, a
+    /// macro's).
+    fn text_opens_group(&self) -> bool {
+        let text: String = decode_segs(self.v, &self.cx.args())
+            .iter()
+            .filter_map(|f| match f {
+                Seg::Line(s) => Some(
+                    s.buf
+                        .iter()
+                        .map(|&c| char::from_u32(c).unwrap_or('?'))
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let n = |p: &str| i64::try_from(text.matches(p).count()).unwrap_or(0);
+        (n("\\begin{") - n("\\end{"))
+            + (n("\\begingroup") - n("\\endgroup"))
+            + (n("\\bgroup") - n("\\egroup"))
+            > 0
+    }
+
+    /// Whether the text the run reads next begins (after blanks) with a
+    /// command that opens a group: `\\begin`, `\\begingroup`,
+    /// `\\bgroup` (the document's text only).
+    fn next_opens_group(&self) -> bool {
+        // (the first input with something left: a line of the text, or
+        // anything else, which is no group of the text)
+        let mut line = None;
+        for l in self.input.levels.iter().rev() {
+            let more = match l.kind {
+                crate::input::kind::TOKS => l.a < l.b,
+                crate::input::kind::LINE => {
+                    let x = self.input.line(*l);
+                    if x.has_more() {
+                        line = Some(x);
+                    }
+                    x.has_more()
+                }
+                _ => self.input.file(*l).has_lines(),
+            };
+            if more {
+                break;
+            }
+        }
+        if line.is_none()
+            && self.input.levels.is_empty()
+            && let Some(Seg::Line(x)) = self.input.text_rest().iter().find(|s| match s {
+                Seg::Toks(t) => !t.is_empty(),
+                Seg::Line(l) => l.has_more(),
+                Seg::File(f) => f.has_lines(),
+            })
+        {
+            line = Some(x);
+        }
+        let Some(s) = line else {
+            return false;
+        };
+        let rest = &s.buf[s.loc.min(s.buf.len())..];
+        let k = rest
+            .iter()
+            .position(|&c| !matches!(c, 32 | 9 | 10 | 13))
+            .unwrap_or(rest.len());
+        let word: String = rest[k..]
+            .iter()
+            .take(12)
+            .map(|&c| char::from_u32(c).unwrap_or('?'))
+            .collect();
+        ["\\begingroup", "\\bgroup", "\\begin{"]
+            .iter()
+            .any(|p| word.starts_with(p))
     }
 
     /// Whether a document run closed the engine scope it ran in, with
@@ -1555,7 +1680,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 );
             }
         }
-        let locs: Vec<Loc> = self.st.defined_locs().collect();
+        let locs: Vec<Loc> = self.defined_now();
         if !locs.is_empty() {
             let names: Vec<ValueId> = locs.into_iter().map(|l| self.loc_field(l).0).collect();
             let l = self.v.list(names);
@@ -1920,6 +2045,7 @@ pub(crate) struct Parked {
     pull_orig: Vec<Option<crate::input::Line>>,
     top: bool,
     claim_rest: bool,
+    hint_void: bool,
     nest: Vec<PLevel>,
     next_lid: i64,
     last_par: (i64, i64),
@@ -2023,6 +2149,7 @@ impl Run<'_, '_> {
             pull_orig,
             top: self.top,
             claim_rest: self.claim_rest,
+            hint_void: self.hint_void,
             nest,
             next_lid: self.next_lid,
             last_par: self.last_par,
@@ -2087,6 +2214,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.pull_orig = p.pull_orig;
         r.top = p.top;
         r.claim_rest = p.claim_rest;
+        r.hint_void = p.hint_void;
         r.next_lid = p.next_lid;
         r.last_par = p.last_par;
         r.doc = p.doc;

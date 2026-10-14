@@ -3613,8 +3613,20 @@ fn mean_kind(m: &Mean) -> &'static str {
 }
 
 /// The definitions a run made outside its bound: the violation, if any.
-pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
+pub(crate) fn check_defs(
+    r: &mut Run<'_, '_>,
+    h: &Hint,
+    claimed: &[std::sync::Arc<Hint>],
+) -> Option<String> {
     let b = h.bound.as_ref()?;
+    let others: Vec<&Bound> = claimed.iter().filter_map(|c| c.bound.as_ref()).collect();
+    let state_has = |b: &Bound, name: &str| match &b.state {
+        Some(st) => st.iter().any(|p| name.starts_with(*p)),
+        None => true,
+    };
+    let names_have = |b: &Bound, name: &str| {
+        b.names.iter().any(|n| n == name) || b.prefixes.iter().any(|p| name.starts_with(p.as_str()))
+    };
     // (a local definition of the value the run read is no definition:
     // `\\everypar` set back to what it was, the binding unchanged)
     for f in r.published_fields() {
@@ -3626,17 +3638,17 @@ pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
             continue;
         }
         if !is_cs_field(&name) {
-            match &b.state {
-                Some(st) if !st.iter().any(|p| name.starts_with(*p)) => {
-                    return Some(format!(
-                        "undeclared definition of {name} by {:?} (state {st:?}, {})",
-                        h.excerpt, h.cause
-                    ));
-                }
-                _ => continue,
+            if state_has(b, &name) || others.iter().any(|o| state_has(o, &name)) {
+                continue;
             }
+            return Some(format!(
+                "undeclared definition of {name} by {:?} (state {:?}, {})",
+                h.excerpt,
+                b.state.clone().unwrap_or_default(),
+                h.cause
+            ));
         }
-        if b.names.contains(&name) || b.prefixes.iter().any(|p| name.starts_with(p.as_str())) {
+        if names_have(b, &name) || others.iter().any(|o| names_have(o, &name)) {
             continue;
         }
         return Some(format!(
@@ -3650,6 +3662,21 @@ pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
 /// `PHITEX_HINTS=2`: the node's definitions, for learning the state
 /// each command sets.
 pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
+    // (`PHITEX_HINTS=3`: each node's published fields, against its bound)
+    if std::env::var("PHITEX_HINTS").is_ok_and(|x| x == "3") {
+        let fs: Vec<String> = r
+            .published_fields()
+            .into_iter()
+            .map(|f| crate::val::field_name(r.v, f))
+            .collect();
+        let ex: String = h.excerpt.chars().take(40).collect();
+        eprintln!(
+            "pubs {ex:?} void {} state {:?}: {}",
+            r.hint_void,
+            h.bound.as_ref().map(|b| b.state.clone()),
+            fs.join(",")
+        );
+    }
     if std::env::var("PHITEX_HINTS").is_ok_and(|x| x == "2") {
         let mut fs: Vec<String> = r
             .def_fields()
