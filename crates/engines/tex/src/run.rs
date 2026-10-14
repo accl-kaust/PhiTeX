@@ -304,7 +304,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The fields a read-back nested in a line's interpretation set (a
     /// written `\@input{part.aux}`): the part file's definitions, which
     /// that file's own lines publish; the line lists them as keys only.
-    pub interp_nested: phitex_defuse::FxHashSet<String>,
+    pub interp_nested: phitex_defuse::FxHashMap<String, String>,
     /// The interpreted text is a whole file whose end has come (its
     /// stream closed): running out of it is §362's end of file, which
     /// §336 checks ([`Run::file_ended`]), not "needs more".
@@ -429,7 +429,7 @@ impl<'c, 'a> Run<'c, 'a> {
             irreversible: 0,
             interp: None,
             interp_short: false,
-            interp_nested: phitex_defuse::FxHashSet::default(),
+            interp_nested: phitex_defuse::FxHashMap::default(),
             interp_eof: false,
             interp_errs: Vec::new(),
             scanner: None,
@@ -939,11 +939,12 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|x| list_of(v, x))
             .unwrap_or_default();
         for k in keys {
-            let name = str_of(v, k);
-            let wd = self.keyed(crate::fields::Fam::Wdef, &name);
+            let id = crate::api::wdef_id(key, &str_of(v, k));
+            let name = crate::api::wdef_field(&id).to_owned();
+            let wd = self.keyed(crate::fields::Fam::Wdef, &id);
             if !self.cx.is_loopback(wd) {
                 self.cx
-                    .use_env(self.keyed(crate::fields::Fam::Wdefdecl, &name))?;
+                    .use_env(self.keyed(crate::fields::Fam::Wdefdecl, &id))?;
             }
             if !self.cx.is_loopback(wd) {
                 continue;
@@ -959,7 +960,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 // (a file read as its text here, one this run writes,
                 // gives them as its text ends, §362)
                 if self.interp.is_some() {
-                    self.interp_nested.insert(name);
+                    self.interp_nested.insert(name, id);
                 } else if self.get(&format!("wopen:{key}"))?.is_none()
                     && let Some(&ms) = xs.first()
                 {
@@ -994,7 +995,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
                 self.set(&name, *val, global);
                 if self.interp.is_some() {
-                    self.interp_nested.insert(name);
+                    self.interp_nested.insert(name, id);
                 }
             }
         }
@@ -1031,18 +1032,24 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The definitions an interpreted text made since stamp `base`,
     /// `[field, value, global]` each; a read-back nested in it (`nested`)
     /// gives its fields as keys only, `[field]`.
-    fn made_since(&mut self, base: u64, nested: &phitex_defuse::FxHashSet<String>) -> Vec<ValueId> {
+    fn made_since(
+        &mut self,
+        base: u64,
+        nested: &phitex_defuse::FxHashMap<String, String>,
+        pre: &mut crate::runstate::State,
+    ) -> Vec<ValueId> {
         let v = self.v;
         let mut made: Vec<ValueId> = self
             .st
-            .defined_since(v, base)
+            .defined_since(v, base, pre)
             .into_iter()
             .filter_map(|(loc, x, l)| Some((self.loc_field(loc), x?, l)))
             .filter(|d| !str_of(v, d.0.0).starts_with("cat:"))
             .map(|(f, x, l)| {
-                // (a nested read-back's definition: its key only)
-                if nested.contains(&str_of(v, f.0)) {
-                    return v.list(vec![f.0]);
+                // (a nested read-back's definition: its key only, naming
+                // the file whose loop-back holds the value)
+                if let Some(id) = nested.get(&str_of(v, f.0)) {
+                    return v.list(vec![v.str(id)]);
                 }
                 v.list(vec![
                     f.0,
@@ -1055,8 +1062,8 @@ impl<'c, 'a> Run<'c, 'a> {
         made.extend(
             nested
                 .iter()
-                .filter(|n| n.starts_with("rberr:"))
-                .map(|n| v.list(vec![v.str(n)])),
+                .filter(|(n, _)| n.starts_with("rberr:"))
+                .map(|(_, id)| v.list(vec![v.str(id)])),
         );
         made
     }
@@ -1072,7 +1079,7 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<Option<ValueId>> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
-        let st = self.st.clone();
+        let mut st = self.st.clone();
         let (nc, nk) = (self.contribs.len(), self.kids.len());
         let nest_len = self.nest.len();
         let conds = self.conds.clone();
@@ -1128,7 +1135,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.scanner = scanner;
         self.outer_call = false;
         let nested = std::mem::take(&mut self.interp_nested);
-        let made = self.made_since(base, &nested);
+        let made = self.made_since(base, &nested, &mut st);
         self.interp = None;
         self.input = input;
         self.st = st;

@@ -469,9 +469,11 @@ impl Operation for Files {
             let mut keys = Vec::new();
             let trace = crate::exec::env_flag!("PHITEX_AUX_TRACE");
             for (f, val) in ds {
-                let w = v.field(&format!("wdef:{f}"));
+                let id = crate::api::wdef_id(name, f);
+                let w = v.field(&format!("wdef:{id}"));
                 if cx.is_loopback(w) {
-                    keys.push(v.str(f));
+                    // (a nested file's key names that file)
+                    keys.push(v.str(if *val == ValueId::UNIT { &id } else { f }));
                     // (a key whose value another file's lines publish)
                     if *val == ValueId::UNIT {
                         continue;

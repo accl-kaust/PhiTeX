@@ -657,27 +657,35 @@ impl State {
 
     /// The definitions made after stamp `since`, at any level (a line
     /// read back is interpreted wherever the run is): the location, the
-    /// value in force and the locality of the latest one.
+    /// value in force and the locality of the latest one. A local one
+    /// whose group has ended since (§282: the value it hid restored) is
+    /// left out: the value in force is what it was in `pre`, the table
+    /// as it was at `since` (or, unread there, the engine's value the
+    /// first definition hid).
     pub(crate) fn defined_since(
         &mut self,
         v: &Values,
         since: u64,
+        pre: &mut State,
     ) -> Vec<(Loc, Option<ValueId>, Locality)> {
-        let hits: Vec<(Loc, bool)> = self
+        let hits: Vec<(Loc, bool, Option<Option<ValueId>>)> = self
             .metas
             .iter()
             .filter(|m| m.ldef_stamp > since)
-            .map(|m| (m.loc, m.ldef_local))
+            .map(|m| (m.loc, m.ldef_local, m.eng))
             .collect();
         hits.into_iter()
-            .map(|(loc, local)| {
+            .filter_map(|(loc, local, eng)| {
                 let x = self.id_of(loc, v);
-                let l = if local {
-                    Locality::Local
+                if !local {
+                    return Some((loc, x, Locality::Global));
+                }
+                let before = if pre.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0) {
+                    Some(pre.id_of(loc, v))
                 } else {
-                    Locality::Global
+                    eng
                 };
-                (loc, x, l)
+                (before != Some(x)).then_some((loc, x, Locality::Local))
             })
             .collect()
     }
