@@ -1537,7 +1537,7 @@ impl<'a> Closure<'a> {
         let cached = self
             .prelude
             .closures
-            .lock()
+            .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(name)
             .cloned();
@@ -1560,7 +1560,7 @@ impl<'a> Closure<'a> {
         if !cut && !self.document_defines(&names) {
             self.prelude
                 .closures
-                .lock()
+                .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(name.to_owned(), (s.clone(), names.clone()));
         }

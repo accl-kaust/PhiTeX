@@ -690,8 +690,17 @@ pub(crate) fn leaf_of(v: &Values, id: ValueId) -> Option<phitex_typeset::node::N
     })
 }
 
+thread_local! {
+    /// Set while a pass decodes values it will not decode again (the
+    /// DVI writer's pages): their leaves are not kept.
+    pub(crate) static NO_KEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Keeps leaf node `n`, the decoding of `id` ([`leaf_of`]).
 pub(crate) fn keep_leaf(v: &Values, id: ValueId, n: &phitex_typeset::node::Node) {
+    if NO_KEEP.with(std::cell::Cell::get) {
+        return;
+    }
     DECODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.instance != v.instance() {

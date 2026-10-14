@@ -291,6 +291,15 @@ impl Run<'_, '_> {
         let mut flushed = phitex_defuse::FxHashSet::default();
         let mut folds = 0usize;
         let (mut tfx, mut tfold) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        // nothing to reuse: the pages folded in parallel from predicted
+        // starts, each taken below only where its start is the real one
+        let tp = std::time::Instant::now();
+        let mut ahead = if reusable.is_none() {
+            ahead_folds(v, items, table_v, marker)
+        } else {
+            Vec::new()
+        };
+        let tahead = tp.elapsed();
         let mut j = 0;
         while !ended && j < MAX_PAGES {
             let tf = std::time::Instant::now();
@@ -325,30 +334,23 @@ impl Run<'_, '_> {
                             })
                     })
             });
+            let ahead_hit = ahead.get_mut(j).and_then(|a| {
+                (a.start.idx == start.idx
+                    && crate::planinc::same_start(&a.start, &start)
+                    && a.fx == fx)
+                    .then(|| a.rec.take())
+                    .flatten()
+            });
             let rec = if let Some(r) = old {
+                r
+            } else if let Some(r) = ahead_hit {
                 r
             } else {
                 folds += 1;
                 let tq = std::time::Instant::now();
                 let out = plan_fold(v, items, table_v, marker, &start, fx.clone());
                 tfold += tq.elapsed();
-                let (a, b) = (start.idx.min(items.len()), out.reach.min(items.len()));
-                Arc::new(PageRec {
-                    start: start.clone(),
-                    fx,
-                    reach: out.reach,
-                    fired: out.fired,
-                    passed: out.passed,
-                    writes: out.writes,
-                    stuck: out.stuck,
-                    flushes: out.flushes,
-                    items_v: v.list(items[a..b.max(a)].to_vec()),
-                    start_v: PageStart {
-                        idx: 0,
-                        ..start.clone()
-                    }
-                    .value(v),
-                })
+                Arc::new(page_rec(v, items, &start, fx, out))
             };
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
@@ -444,9 +446,11 @@ impl Run<'_, '_> {
         }
         if tm {
             eprintln!(
-                "plan: {} items, {pages} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?} (acc {t_acc:?}), pages {:?} (fx {tfx:?}, folds {tfold:?}), sets {:?}",
+                "plan: {} items, {pages} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?} (acc {t_acc:?}), pages {:?} (ahead {tahead:?}: {} of {} taken; fx {tfx:?}, folds {tfold:?}), sets {:?}",
                 items.len(),
                 t2.saturating_sub(t1),
+                ahead.iter().filter(|a| a.rec.is_none()).count(),
+                ahead.len(),
                 t0.elapsed().saturating_sub(t2)
             );
         }
@@ -506,7 +510,7 @@ impl Run<'_, '_> {
             Value::List(xs) => xs,
             _ => &[],
         };
-        let out = fold_page(v, items, &classes, marker0, &start, fx);
+        let out = fold_page(v, items, &classes, marker0, &start, fx, None);
         drop(guard);
         if let Some((f, side, _)) = out.fired {
             let data = self.page_data(&f, &side)?;
@@ -1132,6 +1136,127 @@ struct PlanPage {
     stuck: bool,
 }
 
+/// The plan's record of a page folded from `start`.
+fn page_rec(
+    v: &Values,
+    items: &[ValueId],
+    start: &PageStart,
+    fx: Vec<ValueId>,
+    out: PlanPage,
+) -> crate::planinc::PageRec {
+    let (a, b) = (start.idx.min(items.len()), out.reach.min(items.len()));
+    crate::planinc::PageRec {
+        start: start.clone(),
+        fx,
+        reach: out.reach,
+        fired: out.fired,
+        passed: out.passed,
+        writes: out.writes,
+        stuck: out.stuck,
+        flushes: out.flushes,
+        items_v: v.list(items[a..b.max(a)].to_vec()),
+        start_v: PageStart {
+            idx: 0,
+            ..start.clone()
+        }
+        .value(v),
+    }
+}
+
+/// The list's items as a prediction reads them: their kinds, and their
+/// boxes' dimensions (`None` where the walk decodes the item itself).
+#[derive(Default)]
+struct Profile {
+    tags: Vec<i64>,
+    nodes: Vec<Option<Node>>,
+}
+
+/// A page folded ahead of the plan's walk: its predicted start and the
+/// record (taken by the walk when the start is the real one).
+struct Ahead {
+    start: PageStart,
+    fx: Vec<ValueId>,
+    rec: Option<std::sync::Arc<crate::planinc::PageRec>>,
+}
+
+/// The pages of `items` folded ahead, in parallel: the starts predicted
+/// by one walk of the break arithmetic over the boxes' dimensions alone
+/// ([`nodes::decode_shallow`], the routines taken as leaving nothing),
+/// then each page's real fold ([`plan_fold`]) from its predicted start
+/// on the executor's workers (`exec::par_each`). No page reads another:
+/// the plan's walk takes a page only where its start and what the
+/// routine before it left are the real ones, and folds the others.
+fn ahead_folds(v: &Values, items: &[ValueId], table: ValueId, marker0: ValueId) -> Vec<Ahead> {
+    let tp0 = std::time::Instant::now();
+    let classes = list_of(v, table);
+    let mut starts = Vec::new();
+    let mut s = PageStart::FIRST;
+    let was = crate::val::NO_KEEP.with(|c| c.replace(true));
+    let chunk = 1024;
+    let parts = crate::exec::par_map(items.len().div_ceil(chunk), &|k| {
+        let xs = &items[k * chunk..((k + 1) * chunk).min(items.len())];
+        let tags: Vec<i64> = xs.iter().map(|&x| nodes::tag(v, x)).collect();
+        // (an item a marks or a whatsit decodes with is decoded in the
+        // walk itself, which keeps them)
+        let nodes: Vec<Option<Node>> = xs
+            .iter()
+            .map(|&x| {
+                let mut side = Side::default();
+                let n = nodes::decode_shallow(v, x, &mut side);
+                (side.marks.is_empty() && side.whats.is_empty())
+                    .then_some(n)
+                    .flatten()
+            })
+            .collect();
+        (tags, nodes)
+    });
+    crate::val::NO_KEEP.with(|c| c.set(was));
+    let mut prof = Profile::default();
+    for (t, n) in parts {
+        prof.tags.extend(t);
+        prof.nodes.extend(n);
+    }
+    let was = crate::val::NO_KEEP.with(|c| c.replace(true));
+    let tprof = tp0.elapsed();
+    while starts.len() < MAX_PAGES {
+        let out = fold_page(v, items, &classes, marker0, &s, Vec::new(), Some(&prof));
+        starts.push(s);
+        match out.fired {
+            Some((_, _, end))
+                if end.idx > starts[starts.len() - 1].idx || !end.carried.is_empty() =>
+            {
+                s = end;
+            }
+            _ => break,
+        }
+    }
+    crate::val::NO_KEEP.with(|c| c.set(was));
+    let tw = std::time::Instant::now();
+    let tpred = tp0.elapsed();
+    let slots: Vec<std::sync::OnceLock<crate::planinc::PageRec>> =
+        starts.iter().map(|_| std::sync::OnceLock::new()).collect();
+    crate::exec::par_each(starts.len(), &|j| {
+        let out = plan_fold(v, items, table, marker0, &starts[j], Vec::new());
+        let _ = slots[j].set(page_rec(v, items, &starts[j], Vec::new(), out));
+    });
+    if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+        eprintln!(
+            "pages ahead: {} predicted in {tpred:?} (profile {tprof:?}), folds {:?}",
+            starts.len(),
+            tw.elapsed()
+        );
+    }
+    starts
+        .into_iter()
+        .zip(slots)
+        .map(|(start, r)| Ahead {
+            start,
+            fx: Vec::new(),
+            rec: r.into_inner().map(std::sync::Arc::new),
+        })
+        .collect()
+}
+
 /// A memo entry: the items the fold read (from the start's index), and
 /// the page with the next start's index relative to it, its carried
 /// material kept outside the value table (a sweep may free it).
@@ -1216,7 +1341,11 @@ fn plan_fold(
         };
     }
     let classes = list_of(v, table);
-    let out = fold_page(v, items, &classes, marker0, start, fx);
+    // (the items are decoded once a fold: not kept in this thread's
+    // cache, whose copies cost more than the decoding)
+    let was = crate::val::NO_KEEP.with(|c| c.replace(true));
+    let out = fold_page(v, items, &classes, marker0, start, fx, None);
+    crate::val::NO_KEEP.with(|c| c.set(was));
     let fired = out.fired.map(|(f, side, end)| {
         let ms: Vec<ValueId> = f
             .marks
@@ -1279,7 +1408,18 @@ fn fold_page(
     marker0: ValueId,
     start: &PageStart,
     fx: Vec<ValueId>,
+    pre: Option<&Profile>,
 ) -> PageFold {
+    let shallow = pre.is_some();
+    // an item of the list by its index, or anything else
+    let decode = |x: ValueId, at: Option<usize>, side: &mut Side| match (pre, at) {
+        (Some(p), Some(i)) => p.nodes[i]
+            .clone()
+            .or_else(|| nodes::decode_shallow(v, x, side)),
+        (Some(_), None) => nodes::decode_shallow(v, x, side),
+        (None, _) => nodes::decode(v, x, side),
+    };
+    let mut origins: Vec<ValueId> = Vec::new();
     // the page parameters in force where the page starts (the start
     // carries them: the list's own marker before it, or a routine's)
     let mut marker = start.marker.unwrap_or(marker0);
@@ -1326,9 +1466,11 @@ fn fold_page(
         }
     };
     loop {
+        let mut at = None;
         let x = if let Some(x) = queue.pop_front() {
             x
         } else if let Some(&x) = items.get(cursor) {
+            at = Some(cursor);
             cursor += 1;
             reach = reach.max(cursor);
             x
@@ -1346,7 +1488,11 @@ fn fold_page(
             }
             break;
         };
-        match nodes::tag(v, x) {
+        let t = match (pre, at) {
+            (Some(p), Some(i)) => p.tags[i],
+            _ => nodes::tag(v, x),
+        };
+        match t {
             nodes::T_END => {
                 ending = Some(x);
                 // §1054: an empty page ends the job without a cycle
@@ -1394,28 +1540,45 @@ fn fold_page(
             }
             _ => {}
         }
-        let Some(p) = nodes::decode(v, x, &mut side) else {
+        let Some(p) = decode(x, at, &mut side) else {
             continue;
         };
+        if shallow {
+            origins.push(x);
+        }
         // §1000: only a kern looks at what follows it
         let next = if matches!(p, Node::Kern(..)) {
             if queue.is_empty() {
                 reach = reach.max((cursor + 1).min(items.len()));
             }
-            queue
-                .front()
-                .copied()
-                .or_else(|| items.get(cursor).copied())
-                .and_then(|y| nodes::decode(v, y, &mut Side::default()))
+            match queue.front() {
+                Some(&y) => decode(y, None, &mut Side::default()),
+                None => items
+                    .get(cursor)
+                    .and_then(|&y| decode(y, Some(cursor), &mut Side::default())),
+            }
         } else {
             None
         };
         if let Outcome::Fire(f) = pb.contribute(p, next.as_ref(), &params, &mut class) {
-            let mut carried: Vec<ValueId> = f
-                .contributions
-                .iter()
-                .map(|n| nodes::encode(v, n, &side))
-                .collect();
+            let mut carried: Vec<ValueId> = if shallow {
+                // (a prediction, which the real fold checks: a box
+                // taken as the item contributed in its place)
+                let k = f.contributions.len();
+                f.contributions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| match (n, origins.len().checked_sub(k - i)) {
+                        (Node::Box(_), Some(o)) => origins[o],
+                        _ => nodes::encode(v, n, &side),
+                    })
+                    .collect()
+            } else {
+                f.contributions
+                    .iter()
+                    .map(|n| nodes::encode(v, n, &side))
+                    .collect()
+            };
             carried.extend(queue.drain(..));
             // the canonical end: the material carried over is the
             // list's own items before the cursor whenever it can be
@@ -1615,8 +1778,25 @@ fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
     // the pointer to the previous `bop` kept with its bytes
     let mut s = latin1(w.bytes());
     let nokeep = crate::exec::env_flag!("PHITEX_DVI_NOKEEP");
-    for page in all {
+    let mut written = write_apart(
+        v,
+        &all,
+        old.as_ref(),
+        i32::try_from(mag).unwrap_or(1000),
+        &comment,
+        nokeep,
+    );
+    let mut apart = 0usize;
+    for (i, page) in all.into_iter().enumerate() {
         let at = w.location();
+        if let Some(p) = written.remove(&i)
+            && w.ship_kept(&p.bytes)
+        {
+            push_page(&mut s, &w.bytes()[at..], &p);
+            kept.insert(page, p);
+            apart += 1;
+            continue;
+        }
         if let Some(p) = old.as_ref().and_then(|m| m.pages.get(&page))
             && w.ship_kept(&p.bytes)
         {
@@ -1625,18 +1805,12 @@ fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
             again += 1;
             continue;
         }
-        match dvi_page(v, &mut w, page, !nokeep) {
-            Some(p) if p.bytes().len() >= 45 => {
-                let b = p.bytes();
-                let k = std::sync::Arc::new(KeptPage {
-                    head: latin1(&b[..41]),
-                    tail: latin1(&b[45..]),
-                    bytes: p,
-                });
+        match dvi_page(v, &mut w, page, !nokeep).and_then(kept_page) {
+            Some(k) => {
                 push_page(&mut s, &w.bytes()[at..], &k);
                 kept.insert(page, k);
             }
-            _ => s.push_str(&latin1(&w.bytes()[at..])),
+            None => s.push_str(&latin1(&w.bytes()[at..])),
         }
     }
     let n = kept.len();
@@ -1661,7 +1835,7 @@ fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
     let r = v.intern(Value::Str(s.into_boxed_str()));
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "dvi file: {n} pages, {again} kept, pages {t1:?}, postamble {:?}, string {:?}, value {:?}",
+            "dvi file: {n} pages, {again} kept, {apart} written apart, pages {t1:?}, postamble {:?}, string {:?}, value {:?}",
             t2.saturating_sub(t1),
             t3.saturating_sub(t2),
             t0.elapsed().saturating_sub(t3)
@@ -1743,9 +1917,118 @@ fn dvi_page(
     page: ValueId,
     keep: bool,
 ) -> Option<phitex_dvi::PageBytes> {
+    dvi_page_assuming(v, w, page, keep, &|_| false)
+}
+
+/// The pages of `all` the memory `old` lacks, written apart in parallel
+/// (`exec::par_each`) by their index.
+fn write_apart(
+    v: &Values,
+    all: &[ValueId],
+    old: Option<&DviMemo>,
+    mag: i32,
+    comment: &str,
+    nokeep: bool,
+) -> phitex_defuse::FxHashMap<usize, std::sync::Arc<KeptPage>> {
+    // the pages the memory lacks, written apart in parallel, each with
+    // the fonts its page list names before it taken as defined (§621);
+    // `ship_kept` checks each where it lands, else it is written there
+    let fresh: Vec<usize> = (0..all.len())
+        .filter(|&i| !nokeep && old.is_none_or(|m| !m.pages.contains_key(&all[i])))
+        .collect();
+    let mut before: Vec<Vec<u32>> = vec![Vec::new(); all.len()];
+    if !fresh.is_empty() {
+        let mut seen = phitex_defuse::FxHashSet::default();
+        for (i, &page) in all.iter().enumerate() {
+            let ids = page_font_ids(v, page);
+            before[i] = ids.iter().copied().filter(|f| seen.contains(f)).collect();
+            seen.extend(ids);
+        }
+    }
+    let slots: Vec<std::sync::OnceLock<Option<std::sync::Arc<KeptPage>>>> =
+        fresh.iter().map(|_| std::sync::OnceLock::new()).collect();
+    let busy = std::sync::atomic::AtomicU64::new(0);
+    let t0 = std::time::Instant::now();
+    crate::exec::par_each(fresh.len(), &|k| {
+        let tk = std::time::Instant::now();
+        let _busy = Busy(&busy, tk);
+        let i = fresh[k];
+        let mut pw = phitex_dvi::DviWriter::new(mag, comment);
+        let pre = &before[i];
+        let r =
+            dvi_page_assuming(v, &mut pw, all[i], true, &|f| pre.contains(&f)).and_then(kept_page);
+        let _ = slots[k].set(r);
+    });
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") && !fresh.is_empty() {
+        eprintln!(
+            "dvi pages apart: {} in {:?}, busy {:?}",
+            fresh.len(),
+            t0.elapsed(),
+            std::time::Duration::from_nanos(busy.load(std::sync::atomic::Ordering::Relaxed))
+        );
+    }
+    fresh
+        .iter()
+        .zip(slots)
+        .filter_map(|(&i, s)| s.into_inner().flatten().map(|k| (i, k)))
+        .collect()
+}
+
+/// Adds the time since its start to a counter when dropped.
+struct Busy<'a>(&'a std::sync::atomic::AtomicU64, std::time::Instant);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        let n = u64::try_from(self.1.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.0.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A page's kept bytes with their characters.
+fn kept_page(p: phitex_dvi::PageBytes) -> Option<std::sync::Arc<KeptPage>> {
+    let b = p.bytes();
+    if b.len() < 45 {
+        return None;
+    }
+    let (head, tail) = (latin1(&b[..41]), latin1(&b[45..]));
+    Some(std::sync::Arc::new(KeptPage {
+        head,
+        tail,
+        bytes: p,
+    }))
+}
+
+/// The font numbers a page's list names (its `fontdefs`).
+fn page_font_ids(v: &Values, page: ValueId) -> Vec<u32> {
+    list_of(v, page)
+        .get(2)
+        .map(|&l| list_of(v, l))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|fx| {
+            let ys = list_of(v, fx);
+            u32::try_from(ys.first().map_or(0, |&y| int_of(v, y))).unwrap_or(0)
+        })
+        .collect()
+}
+
+/// [`dvi_page`], the fonts `defined` answers taken as defined before
+/// the page (no `fnt_def` for them, §621).
+fn dvi_page_assuming(
+    v: &Values,
+    w: &mut phitex_dvi::DviWriter,
+    page: ValueId,
+    keep: bool,
+    defined: &(dyn Fn(u32) -> bool + Sync),
+) -> Option<phitex_dvi::PageBytes> {
     let xs = list_of(v, page);
     let mut side = Side::default();
-    let Some(Node::Box(bx)) = xs.first().and_then(|&b| nodes::decode(v, b, &mut side)) else {
+    // (a page is decoded once: its nodes are not kept in this thread's
+    // cache, whose copies cost more than the decoding)
+    let was = crate::val::NO_KEEP.with(|c| c.replace(true));
+    let bx = xs.first().and_then(|&b| nodes::decode(v, b, &mut side));
+    crate::val::NO_KEEP.with(|c| c.set(was));
+    let Some(Node::Box(bx)) = bx else {
         return None;
     };
     let mut counts = [0i32; 10];
@@ -1769,6 +2052,11 @@ fn dvi_page(
             && let Some(l) = crate::fonts::load(v, file, s)
         {
             defs.insert(id, crate::fonts::font_def(&l, &name));
+        }
+    }
+    for (&f, d) in &defs {
+        if defined(f) {
+            w.assume_defined(f, d.clone());
         }
     }
     let fonts = |f: u32| {

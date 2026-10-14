@@ -246,21 +246,157 @@ pub(crate) struct Change {
     pub old_len: usize,
 }
 
+/// A block folded ahead: its space factor and previous depth in, the
+/// state after it (its count from 0), whether it holds a paragraph's
+/// `build_page` mark, and its items.
+type BlockAhead = Option<((i32, i32), FoldState, bool, Vec<ValueId>)>;
+
+/// Every block of `entries` (`bounds`: start, end, whether it deletes)
+/// folded in parallel. The state a block starts from comes from one
+/// scan of the entries' kinds: the space factor and the previous depth
+/// change only at their transitions and boxes (§1034, §679), and the
+/// count since the last `build_page` only matters to a deletion, so a
+/// block is folded from 0 and its count added in order. A block that
+/// deletes reaches into the items before it: folded in order.
+fn folded_ahead(
+    v: &Values,
+    entries: &[ValueId],
+    bounds: &[(usize, usize, bool)],
+) -> Vec<BlockAhead> {
+    use crate::nodes::{T_BUILD_PAGE, T_PD, T_SF, T_VBOX, tag};
+    let item = |x: ValueId| match &*v.get(x) {
+        Value::List(xs) if xs.len() == 2 && crate::val::int_of(v, xs[0]) == 0 => Some(xs[1]),
+        _ => None,
+    };
+    // each block's effect on the space factor (`x >= 1000 ? a : b`, or
+    // none), the previous depth (its last), and whether it resets the count
+    let tscan = std::time::Instant::now();
+    let fx = crate::exec::par_map(bounds.len(), &|k| {
+        let (at, end, _) = bounds[k];
+        let mut sfx: Option<(i32, i32)> = None;
+        let mut last_pd = None;
+        let mut reset = false;
+        for &x in &entries[at..end] {
+            let Some(n) = item(x) else { continue };
+            match tag(v, n) {
+                T_PD => last_pd = Some(i32::try_from(crate::val::int_at(v, n, 1)).unwrap_or(0)),
+                T_VBOX => {
+                    let b = crate::val::list_of(v, n)
+                        .get(1)
+                        .copied()
+                        .unwrap_or(ValueId::UNIT);
+                    last_pd = Some(crate::nodes::box_dim(v, b, 2));
+                }
+                T_SF => {
+                    let kk = crate::val::int_at(v, n, 1);
+                    let s = i32::try_from(crate::val::int_at(v, n, 2)).unwrap_or(1000);
+                    // §1034: this transition after the ones before
+                    let step = |x: i32| if kk == 0 || x >= 1000 { s } else { 1000 };
+                    sfx = Some(match sfx {
+                        None => (step(1000), step(999)),
+                        Some((a, b)) => (step(a), step(b)),
+                    });
+                }
+                T_BUILD_PAGE => reset = true,
+                _ => {}
+            }
+        }
+        (sfx, last_pd, reset)
+    });
+    let mut ins = Vec::with_capacity(bounds.len());
+    let mut resets = Vec::with_capacity(bounds.len());
+    let (mut sf, mut pd) = (IGNORE_DEPTH_STATE.sf, IGNORE_DEPTH_STATE.pd);
+    for (sfx, last_pd, reset) in fx {
+        ins.push((sf, pd));
+        if let Some((a, b)) = sfx {
+            sf = if sf >= 1000 { a } else { b };
+        }
+        if let Some(d) = last_pd {
+            pd = d;
+        }
+        resets.push(reset);
+    }
+    let ts = std::time::Instant::now();
+    let t0 = std::time::Instant::now();
+    let r = crate::exec::par_map(bounds.len(), &|k| {
+        let (at, end, del) = bounds[k];
+        if del {
+            return None;
+        }
+        let (sf, pd) = ins[k];
+        let mut st = FoldState {
+            sf,
+            pd,
+            since_bp: 0,
+        };
+        let mut out = Vec::new();
+        fold_entries(v, 0, &entries[at..end], &mut st, &mut out);
+        Some(((sf, pd), st, resets[k], out))
+    });
+    if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+        eprintln!(
+            "list ahead: {} blocks, scan {:?}, folds {:?}",
+            bounds.len(),
+            ts.duration_since(tscan),
+            t0.elapsed()
+        );
+    }
+    r
+}
+
 /// The main list's entries `all` folded, `prev`'s fold changed in place
 /// where the edit changed it; `None` when nothing of it was kept.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn fold(v: &Values, all: ValueId, prev: Option<ListMemo>) -> (ListMemo, Option<Change>) {
     let full = |entries: Vec<ValueId>| {
-        let mut items = Vec::new();
-        let mut blocks = Vec::new();
-        let mut st = IGNORE_DEPTH_STATE;
+        let tb = std::time::Instant::now();
+        let mut spans = Vec::new();
         let mut at = 0;
         while at < entries.len() {
             let end = block_end(&entries, at);
-            let del = deletes(v, &entries[at..end]);
-            blocks.push((at, items.len(), st, del));
-            fold_entries(v, 0, &entries[at..end], &mut st, &mut items);
+            spans.push((at, end));
             at = end;
+        }
+        let dels = crate::exec::par_map(spans.len(), &|k| {
+            deletes(v, &entries[spans[k].0..spans[k].1])
+        });
+        let bounds: Vec<(usize, usize, bool)> = spans
+            .iter()
+            .zip(dels)
+            .map(|(&(a, e), d)| (a, e, d))
+            .collect();
+        let tbounds = tb.elapsed();
+        let ahead = folded_ahead(v, &entries, &bounds);
+        if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+            eprintln!("list bounds: {tbounds:?}");
+        }
+        let mut items = Vec::new();
+        let mut blocks = Vec::new();
+        let mut st = IGNORE_DEPTH_STATE;
+        let t0 = std::time::Instant::now();
+        let mut missed = 0usize;
+        for (&(at, end, del), a) in bounds.iter().zip(ahead) {
+            blocks.push((at, items.len(), st, del));
+            match a {
+                Some((sp, out_st, reset, out)) if sp == (st.sf, st.pd) => {
+                    items.extend(out);
+                    st = FoldState {
+                        since_bp: if reset {
+                            out_st.since_bp
+                        } else {
+                            st.since_bp + out_st.since_bp
+                        },
+                        ..out_st
+                    };
+                }
+                _ => {
+                    missed += 1;
+                    fold_entries(v, 0, &entries[at..end], &mut st, &mut items);
+                }
+            }
+        }
+        if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+            eprintln!("list in order: {missed} folded again, {:?}", t0.elapsed());
         }
         ListMemo {
             root: all,
@@ -270,7 +406,12 @@ pub(crate) fn fold(v: &Values, all: ValueId, prev: Option<ListMemo>) -> (ListMem
         }
     };
     let Some(mut p) = prev else {
-        return (full(v.seq_to_vec(all)), None);
+        let t = std::time::Instant::now();
+        let e = v.seq_to_vec(all);
+        if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+            eprintln!("list entries: {} in {:?}", e.len(), t.elapsed());
+        }
+        return (full(e), None);
     };
     let old_len = p.items.len();
     if p.root == all {
