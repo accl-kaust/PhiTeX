@@ -524,11 +524,17 @@ impl<I: Copy, S: Copy, P: Copy> Arena<I, S, P> {
     /// Inserts a run of new keys (`items` sorted by key, none of them
     /// present).
     pub(crate) fn insert_run<A: Aug<I, S, P>>(&mut self, a: &A, root: u32, items: &[(u64, I)]) -> u32 {
-        if items.len() >= 2 * LCAP && !self.special && self.last(root).is_none_or(|(k, _)| k < items[0].0) {
-            // An append: built as a tree of its own and joined on, with no
-            // path re-summed per item.
+        let (Some(&(first, _)), Some(&(last, _))) = (items.first(), items.last()) else {
+            return root;
+        };
+        if items.len() >= 2 * LCAP && !self.special && self.next(root, first).is_none_or(|(k, _)| k > last) {
+            // One gap of the tree holds the whole run (a merge replays runs
+            // whose keys may straddle others'): built as a tree of its own
+            // and joined in, with no path re-summed per item.
+            let (l, r) = self.split(a, root, first);
             let m = self.build(a, items);
-            return self.join(a, root, m);
+            let lm = self.join(a, l, m);
+            return self.join(a, lm, r);
         }
         let mut root = root;
         for &(k, i) in items {
@@ -1862,12 +1868,27 @@ mod tests {
                         e.insert(it);
                         root = ar.insert(&A, root, k, it);
                     }
+                } else if op < 40 && !grow {
+                    // Fresh keys spread over existing ones (as a merge
+                    // replays a run whose span holds another's keys).
+                    let mut run: Vec<(u64, It)> = (0..rng.below(200))
+                        .map(|_| (rng.below(space), it))
+                        .filter(|(x, _)| !m.contains_key(x))
+                        .collect();
+                    run.sort_by_key(|x| x.0);
+                    run.dedup_by_key(|x| x.0);
+                    for &(x, i) in &run {
+                        m.insert(x, i);
+                    }
+                    if !run.is_empty() {
+                        root = ar.insert_run(&A, root, &run);
+                    }
                 } else if op < 55 {
                     // A run of fresh keys from `k` up to the next key.
                     let next = m.range(k..).next().map_or(u64::MAX, |x| *x.0);
                     let mut run = Vec::new();
                     let mut x = k;
-                    while x < next && run.len() < 40 {
+                    while x < next && run.len() < 200 {
                         run.push((x, it));
                         x += 1 + rng.below(3);
                     }

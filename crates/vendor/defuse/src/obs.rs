@@ -68,10 +68,16 @@ pub enum Counter {
     UseRecord,
     /// Slices of a wide batch that aborted (applied whole instead).
     SliceAbort,
+    /// Results applied in slices of a wide batch.
+    SlicedResult,
+    /// Results of a wide batch applied whole, after its slices.
+    WholeResult,
+    /// Results of batches too narrow to slice.
+    NarrowResult,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 26] = [
+    pub const ALL: [Counter; 29] = [
         Counter::Walk,
         Counter::WalkLevel,
         Counter::Step,
@@ -98,6 +104,9 @@ impl Counter {
         Counter::Tail,
         Counter::UseRecord,
         Counter::SliceAbort,
+        Counter::SlicedResult,
+        Counter::WholeResult,
+        Counter::NarrowResult,
     ];
 
     #[must_use]
@@ -129,6 +138,9 @@ impl Counter {
             Counter::Tail => "tail",
             Counter::UseRecord => "use_record",
             Counter::SliceAbort => "slice_abort",
+            Counter::SlicedResult => "sliced_result",
+            Counter::WholeResult => "whole_result",
+            Counter::NarrowResult => "narrow_result",
         }
     }
 }
