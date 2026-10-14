@@ -903,6 +903,11 @@ pub struct Stats {
     pub batches_inline: u64,
     pub jobs_max_batch: usize,
     pub critical_path: Option<usize>,
+    /// The engine's realised critical path (`Report::realised_critical_path`:
+    /// the longest chain of runs that waited for each other, counted from
+    /// 1; reads a guess or a prediction answered are no link), the most
+    /// over this build's evaluations.
+    pub realised_critical_path: u32,
     /// The light page steps run (OUTPUT.md §4.2a), and those of them
     /// with no output routine, which may define anything.
     pub page_steps: u64,
@@ -1107,6 +1112,7 @@ impl Stats {
         self.speculations += r.speculations;
         self.confirmations += r.confirmations;
         self.mispredictions += r.mispredictions;
+        self.realised_critical_path = self.realised_critical_path.max(r.realised_critical_path);
         self.spec_stops += r.spec_stops;
         self.spec_shape_changes += r.spec_shape_changes;
         self.raises += r.raises;
