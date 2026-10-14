@@ -1710,6 +1710,37 @@ impl<'c, 'a> Run<'c, 'a> {
                 );
             }
         }
+        // (debug, `PHITEX_ITEMS_TRACE=1`: every run's items, after its
+        // text's first segment and its claim)
+        if crate::exec::env_flag!("PHITEX_ITEMS_TRACE") {
+            let v = self.v;
+            let first = self
+                .cx
+                .args()
+                .first()
+                .and_then(|&l| list_of(v, l).first().map(|&f| v.render(f)))
+                .unwrap_or_default();
+            let items = v.field("items");
+            let mut out = format!(
+                "items: node {} op {:?} pulled {} rest {} effect {:?} text {}\n",
+                self.cx.node().raw(),
+                op,
+                self.pulled,
+                self.claim_rest,
+                self.effect,
+                first.chars().take(120).collect::<String>()
+            );
+            for (f, x) in &self.contribs {
+                if *f == items {
+                    for e in v.seq_to_vec(*x) {
+                        out.push_str("items:   ");
+                        out.extend(v.render(e).chars().take(400));
+                        out.push('\n');
+                    }
+                }
+            }
+            eprint!("{out}");
+        }
         // (a load whose run went on into its siblings is not one load:
         // no record of it)
         if self.rec_load && crate::exec::env_flag!("PHITEX_PKG_TRACE") {
