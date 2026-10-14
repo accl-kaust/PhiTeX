@@ -2232,6 +2232,16 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.follow(self.ops.exec, args);
         }
         let n = self.claim_count();
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+            eprintln!(
+                "  end {}: claim {n} (pulled {}, rest {}), cut {:?}, stop_at {:?}",
+                self.cx.node().raw(),
+                self.pulled,
+                self.claim_rest,
+                self.cut,
+                self.stop_at
+            );
+        }
         self.cx.claim(n);
         self.cx.set_effect(self.effect);
         ValueId::UNIT

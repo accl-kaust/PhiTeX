@@ -730,6 +730,15 @@ impl Run<'_, '_> {
                         && m.kids == self.kids.len()
                         && m.lines == self.lines_entered
                 }));
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+            eprintln!(
+                "  fold {}: page {} fires at candidate {} (at end {at_end}, stop_at {:?})",
+                self.cx.node().raw(),
+                ps.j,
+                fire.k,
+                self.stop_at
+            );
+        }
         if !at_end {
             self.cut = Some(fire.k);
             if self.stop_at != Some(fire.k) {
