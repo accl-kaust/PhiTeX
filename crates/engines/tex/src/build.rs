@@ -2301,7 +2301,14 @@ const SF_UNREAD: i32 = i32::MIN;
 
 /// The state of a list's fold: the space factor (§1034), the previous
 /// depth (§679), and the items since the last `build_page` marker.
-#[derive(Clone, Copy, Debug)]
+/// A list's fold state at its start (§215: the depth ignored).
+pub(crate) const IGNORE_DEPTH_STATE: FoldState = FoldState {
+    sf: 1000,
+    pd: IGNORE_DEPTH,
+    since_bp: 0,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FoldState {
     pub sf: i32,
     pub pd: i32,
