@@ -612,14 +612,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 .any(|l| l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b)
         });
         if !still {
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                eprintln!(
-                    "aux-trace: read-back macro gone at {}: had {:?}, levels {:?}",
-                    crate::val::field_name(v, self.loc_field(loc)),
-                    self.read_back_at,
-                    self.input.levels
-                );
-            }
             self.read_back_done = false;
             return;
         }
@@ -961,12 +953,14 @@ impl<'c, 'a> Run<'c, 'a> {
         let effect = self.effect;
         self.eof = true;
         self.no_pull = true;
+        // (interpreting from here: the run's own bookkeeping, as
+        // [`Run::note_pre`], is not the line's)
+        self.interp = Some(phitex_defuse::FxHashSet::default());
         self.set("cat:64", v.int(11), false);
         // (on a list of its own, dropped after: what a line typesets,
         // an error's text, goes nowhere)
         self.push_list(-1, crate::val::group::VBOX, Vec::new());
         let base = self.st.stamp();
-        self.interp = Some(phitex_defuse::FxHashSet::default());
         self.interp_base = base;
         for l in line.split('\n') {
             let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
