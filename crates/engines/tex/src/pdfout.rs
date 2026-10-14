@@ -518,12 +518,18 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         }
     }
     if space && let Some(x) = r.file("pdftexspace.tfm")? {
-        // REDUCE-GAP: pdfTeX loads the space font at the shipout that
-        // first needs it, as the next internal font number; here the
-        // number after the fonts so far (the engine's `fontcount` does
-        // not count it)
-        let n = r.cint(crate::fields::cell::FONTCOUNT)?;
-        let id = u32::try_from(n + 1).unwrap_or(u32::MAX - 1);
+        // pdfTeX loads the space font at the shipout that first needs
+        // it, as the next internal font number (the engine's
+        // `fontcount` does not count it)
+        let id = if in_page_step(r) && !folding(r)? {
+            // a page written apart: one id for every page, outside the
+            // fonts' range, numbered by the finish where it is first
+            // loaded ([`font_tags`])
+            SPACE_FONT
+        } else {
+            let n = r.cint(crate::fields::cell::FONTCOUNT)?;
+            u32::try_from(n + 1).unwrap_or(u32::MAX - 1)
+        };
         wanted.push((id, "pdftexspace".to_owned(), x, -1000));
         out.space = Some(id);
     }
@@ -1295,7 +1301,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
                 .get(&pk)
                 .cloned();
             if let Some(pc) = pc {
-                placed_pieces.push((pc.pj, pc.fcount));
+                placed_pieces.push(pc);
             }
         }
     }
@@ -1390,25 +1396,33 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
     Ok(out)
 }
 
+/// The id of `pdftexspace` in the pages written apart (none of the
+/// engine's: its fonts are numbered from 1 by `fontcount`).
+pub(crate) const SPACE_FONT: FontId = FontId::MAX - 15;
+
 /// The fonts' numbers as pdfTeX gives them, where they differ from the
 /// engine's (`None`: nowhere). The text numbers its fonts in its own
 /// order, `1..=t`; a page step numbers the fonts it loads (an output
 /// routine's, its virtual fonts' local fonts, `do_vf`) after the
-/// text's and the steps' before it. pdfTeX numbers each in the order it
-/// loads it: the text's fonts loaded before a `\shipout` (the
-/// `T_FONT_AT` markers the page builder's fold met before that page
-/// fired, `fplan`), then the fonts of that shipout, and so on.
-/// `pages` is each placed page's index in the chain and the font count
-/// its step left, in order.
-pub(crate) fn font_tags(
+/// text's and the steps' before it; `pdftexspace` is [`SPACE_FONT`].
+/// pdfTeX numbers each in the order it loads it: the text's fonts
+/// loaded before a `\shipout` (the `T_FONT_AT` markers the page
+/// builder's fold met before that page fired, `fplan`), then that
+/// shipout's: the output routine's, then as its walk reads them in (a
+/// virtual font's local fonts at its `do_vf`, the space font where a
+/// faked space first needs it), and so on. `pages` are the placed
+/// pages, in order.
+fn font_tags(
     v: &Values,
     fplan: Option<ValueId>,
-    pages: &[(i64, i64)],
+    pages: &[Arc<PagePiece>],
 ) -> Option<std::collections::HashMap<FontId, FontId>> {
-    let plan = list_of(v, fplan?);
-    let t = int_of(v, *plan.first()?);
-    let per_page: Vec<Vec<i64>> = plan[1..]
+    // (no plan: no text font loaded after a shipout is known)
+    let plan = fplan.map(|p| list_of(v, p)).unwrap_or_default();
+    let t = plan.first().map_or(0, |&x| int_of(v, x));
+    let per_page: Vec<Vec<i64>> = plan
         .iter()
+        .skip(1)
         .map(|&l| list_of(v, l).iter().map(|&x| int_of(v, x)).collect())
         .collect();
     // the text's fonts loaded before page j fires: those before the
@@ -1423,30 +1437,59 @@ pub(crate) fn font_tags(
             .map_or(t, |m| (m - 1).min(t))
     };
     let mut map = std::collections::HashMap::new();
-    let mut next: i64 = 0;
-    let mut text = 0i64;
-    let mut steps = t;
-    let mut put = |map: &mut std::collections::HashMap<FontId, FontId>, f: i64, next: &mut i64| {
-        *next += 1;
-        if f != *next
-            && let (Ok(a), Ok(b)) = (FontId::try_from(f), FontId::try_from(*next))
-        {
-            map.insert(a, b);
+    let mut done: BTreeSet<FontId> = BTreeSet::new();
+    let mut next: FontId = 0;
+    let mut put = |f: FontId| {
+        if done.insert(f) {
+            next += 1;
+            if f != next {
+                map.insert(f, next);
+            }
         }
     };
-    for &(j, fcount) in pages {
-        let c = before(j).max(text);
+    let id = |f: i64| FontId::try_from(f).unwrap_or(0);
+    let mut text = 0i64;
+    let mut steps = t;
+    for pc in pages {
+        let c = before(pc.pj).max(text);
         for f in text + 1..=c {
-            put(&mut map, f, &mut next);
+            put(id(f));
         }
         text = c;
-        for f in steps + 1..=fcount {
-            put(&mut map, f, &mut next);
+        let mine = |f: FontId| i64::from(f) > steps && i64::from(f) <= pc.fcount;
+        // the step's fonts no virtual font loads (its output routine's)
+        let locals: BTreeSet<FontId> = pc
+            .fonts
+            .vfs
+            .values()
+            .flat_map(|vf| vf.fonts.iter().map(|&(_, g)| g))
+            .collect();
+        for f in steps + 1..=pc.fcount {
+            if !locals.contains(&id(f)) {
+                put(id(f));
+            }
         }
-        steps = steps.max(fcount);
+        // then as the walk reads them in
+        for (vf, f) in pc.rec.font_loads() {
+            if vf {
+                if let Some(x) = pc.fonts.vfs.get(&f) {
+                    for &(_, g) in &x.fonts {
+                        if mine(g) {
+                            put(g);
+                        }
+                    }
+                }
+            } else if f == SPACE_FONT {
+                put(f);
+            }
+        }
+        for f in steps + 1..=pc.fcount {
+            put(id(f));
+        }
+        steps = steps.max(pc.fcount);
     }
     for f in text + 1..=t {
-        put(&mut map, f, &mut next);
+        put(id(f));
     }
     (!map.is_empty()).then_some(map)
 }
