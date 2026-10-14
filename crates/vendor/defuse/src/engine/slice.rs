@@ -17,6 +17,7 @@
 //! it wrote is dropped and its results are applied whole.
 
 use super::{Aux, Engine, FxHashMap, NO_AUX, Node, OItem, OrderOp, Report, Rerun, RunResult, Slot, State, TNIL, Unit};
+use crate::hash::FxHashSet;
 use crate::ix::{LabelIx, SlotCounts, SlotMap};
 use crate::obs::{count, span};
 use crate::ov::{OvMap, OvSet};
@@ -562,6 +563,7 @@ impl Engine {
             memo: OvMap::over(&self.memo),
             text_memo: RwLock::new(FxHashMap::default()),
             projections: self.projections.clone(),
+            at_readers: FxHashSet::default(),
             statics: RwLock::new(FxHashMap::default()),
             rtag: self.rtag,
             predictions_seen: std::sync::atomic::AtomicBool::new(

@@ -49,6 +49,7 @@ pub enum Counter {
     /// Re-bound nodes that had to run after all.
     RevalidateMiss,
     ProjKept,
+    AtRebind,
     /// Claims recomputed.
     ClaimRecompute,
     /// Nodes created.
@@ -78,7 +79,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 30] = [
+    pub const ALL: [Counter; 31] = [
         Counter::Walk,
         Counter::WalkLevel,
         Counter::Step,
@@ -96,6 +97,7 @@ impl Counter {
         Counter::RevalidateOk,
         Counter::RevalidateMiss,
         Counter::ProjKept,
+        Counter::AtRebind,
         Counter::ClaimRecompute,
         Counter::Create,
         Counter::Free,
@@ -131,6 +133,7 @@ impl Counter {
             Counter::RevalidateOk => "revalidate_ok",
             Counter::RevalidateMiss => "revalidate_miss",
             Counter::ProjKept => "proj_kept",
+            Counter::AtRebind => "at_rebind",
             Counter::ClaimRecompute => "claim_recompute",
             Counter::Create => "create",
             Counter::Free => "free",

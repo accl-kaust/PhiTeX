@@ -3411,3 +3411,184 @@ fn an_edit_that_keeps_a_chains_values_reruns_only_the_real_readers() {
         assert_eq!(r.predictions_refuted, 0, "{sched}");
     }
 }
+
+/// `["t"]` a text node; `["d", v]` defines `f` as `v`; `["r", k]` reads `f`
+/// at the node at index `k` of `AtOps::ids` (`-1`: the unit's start) and
+/// outputs `[value, definer index]`.
+struct AtOps {
+    ids: std::sync::Mutex<Vec<NodeId>>,
+    runs: std::sync::Mutex<Vec<(i64, u64)>>,
+}
+
+impl Operation for AtOps {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "d" {
+            vec![(v.field("f"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "d" => {
+                cx.define(v.field("f"), a[1]);
+                Ok(ValueId::UNIT)
+            }
+            "r" => {
+                let k = v.as_int(a[1]).unwrap();
+                let at = (k >= 0).then(|| self.ids.lock().unwrap()[usize::try_from(k).unwrap()]);
+                let got = cx.use_field_at(v.field("f"), at)?;
+                {
+                    let mut r = self.runs.lock().unwrap();
+                    match r.iter_mut().find(|e| e.0 == k) {
+                        Some(e) => e.1 += 1,
+                        None => r.push((k, 1)),
+                    }
+                }
+                let ids = self.ids.lock().unwrap();
+                let (val, by) = got.map_or((-1, -1), |(x, by)| {
+                    let i = by
+                        .and_then(|b| ids.iter().position(|&i| i == b))
+                        .map_or(-1, |p| i64::try_from(p).unwrap());
+                    (v.as_int(x).unwrap_or(-2), i)
+                });
+                Ok(v.list(vec![v.int(val), v.int(by)]))
+            }
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+/// `Ctx::use_field_at` reads the definition reaching another node's
+/// position, and re-runs only when that binding (or its value) changes.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_field_read_at_another_nodes_position() {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let ats: Vec<i64> = (0..10).map(|j| 50 + 100 * j).chain([-1]).collect();
+    let build = |defs: &[(usize, i64)]| {
+        let mut eng = Engine::new();
+        let ops = Arc::new(AtOps {
+            ids: std::sync::Mutex::new(Vec::new()),
+            runs: std::sync::Mutex::new(Vec::new()),
+        });
+        let op = eng.register(ops.clone());
+        let u = eng.new_unit();
+        let f = eng.values().field("f");
+        let seven = eng.values().int(7);
+        eng.set_environment([(f, seven)]);
+        let mut ids = Vec::new();
+        for i in 0..1000 {
+            let v = eng.values();
+            let a = match defs.iter().find(|d| d.0 == i) {
+                Some(&(_, x)) => vec![v.str("d"), v.int(x)],
+                None => vec![v.str("t")],
+            };
+            ids.push(eng.push(u, op, a));
+        }
+        *ops.ids.lock().unwrap() = ids.clone();
+        let readers: Vec<NodeId> = ats
+            .iter()
+            .map(|&k| {
+                let v = eng.values();
+                let a = vec![v.str("r"), v.int(k)];
+                eng.push(u, op, a)
+            })
+            .collect();
+        (eng, ops, ids, readers, op)
+    };
+    let outs = |eng: &Engine, rs: &[NodeId]| -> Vec<Vec<i64>> {
+        rs.iter()
+            .map(|&r| {
+                let v = eng.values();
+                match &*v.get(eng.output(r).unwrap()) {
+                    Value::List(xs) => xs.iter().map(|&x| v.as_int(x).unwrap()).collect(),
+                    _ => Vec::new(),
+                }
+            })
+            .collect()
+    };
+    let cold = |defs: &[(usize, i64)]| {
+        let (mut eng, _, _, rs, _) = build(defs);
+        eng.evaluate_sequential().expect("cold");
+        outs(&eng, &rs)
+    };
+    let base = [(100, 1), (500, 5), (900, 9)];
+    let r0 = cold(&base);
+    let want: Vec<Vec<i64>> = ats
+        .iter()
+        .map(|&k| match k {
+            -1 => vec![7, -1],
+            k if k < 100 => vec![7, -1],
+            k if k < 500 => vec![1, 100],
+            k if k < 900 => vec![5, 500],
+            _ => vec![9, 900],
+        })
+        .collect();
+    assert_eq!(r0, want);
+    let rerun = |ops: &AtOps, before: &[(i64, u64)]| -> Vec<i64> {
+        let now = ops.runs.lock().unwrap().clone();
+        let mut ks: Vec<i64> = now
+            .iter()
+            .filter(|e| before.iter().find(|b| b.0 == e.0).map_or(0, |b| b.1) != e.1)
+            .map(|e| e.0)
+            .collect();
+        ks.sort_unstable();
+        ks
+    };
+    let ran = AtomicU64::new(0);
+    for sched in ["seq", "spec", "random", "par"] {
+        let (mut eng, ops, ids, rs, op) = build(&base);
+        let ev = |eng: &mut Engine| {
+            ran.fetch_add(1, Relaxed);
+            match sched {
+                "seq" => eng.evaluate_sequential(),
+                "spec" => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                    &mut defuse::Sequential,
+                ),
+                "random" => eng.evaluate(&mut defuse::RandomScheduler::new(9, true), &mut defuse::Sequential),
+                _ => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                    &mut PredThreads,
+                ),
+            }
+        };
+        ev(&mut eng).expect("cold");
+        assert_eq!(outs(&eng, &rs), r0, "{sched}");
+        // The definition at 500 changes value.
+        let before = ops.runs.lock().unwrap().clone();
+        let a = vec![eng.values().str("d"), eng.values().int(55)];
+        eng.replace(ids[500], op, a);
+        ev(&mut eng).expect("edit 500");
+        assert_eq!(rerun(&ops, &before), vec![550, 650, 750, 850], "{sched}");
+        assert_eq!(outs(&eng, &rs), cold(&[(100, 1), (500, 55), (900, 9)]), "{sched}");
+        // A definer at 300.
+        let before = ops.runs.lock().unwrap().clone();
+        let a = vec![eng.values().str("d"), eng.values().int(3)];
+        eng.replace(ids[300], op, a);
+        ev(&mut eng).expect("definer at 300");
+        assert_eq!(rerun(&ops, &before), vec![350, 450], "{sched}");
+        assert_eq!(
+            outs(&eng, &rs),
+            cold(&[(100, 1), (300, 3), (500, 55), (900, 9)]),
+            "{sched}"
+        );
+        // The start value changes: only readers bound to it.
+        let before = ops.runs.lock().unwrap().clone();
+        let f = eng.values().field("f");
+        let eight = eng.values().int(8);
+        eng.set_environment([(f, eight)]);
+        ev(&mut eng).expect("start value");
+        assert_eq!(rerun(&ops, &before), vec![-1, 50], "{sched}");
+        // `at` goes: its reader runs again (and reports the position).
+        let before = ops.runs.lock().unwrap().clone();
+        eng.remove(ids[650]);
+        let r = ev(&mut eng);
+        assert!(matches!(r, Err(EvalError::BadPosition { .. })), "{sched}: {r:?}");
+        assert_eq!(rerun(&ops, &before), vec![650], "{sched}");
+    }
+    assert_eq!(ran.load(Relaxed), 20);
+}
