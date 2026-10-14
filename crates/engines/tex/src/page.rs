@@ -871,7 +871,7 @@ impl Run<'_, '_> {
     /// routines change (`\count0`, LaTeX's shipout counter at
     /// `\enddocument`) is the state after the page that breaks here.
     /// The node marks the point on the list (`T_FLUSH_AT`) and reads its
-    /// loop-back `pgst:at:<node>:<k>` (the writer publishes it from the
+    /// loop-back entry in `pgst:flushes` (the writer publishes it from the
     /// chain: `[counts, pairs]`), its fields read in place of the
     /// engine's from here on; UNIT (the first round) leaves the state as
     /// it is.
@@ -884,8 +884,6 @@ impl Run<'_, '_> {
         let node = self.cx.node().raw();
         let k = self.flushes;
         self.flushes += 1;
-        let f = v.field(&format!("pgst:at:{node}:{k}"));
-        let decl = v.field(&format!("flushdecl:{node}:{k}"));
         // the text's `\count0..9` as they stand here: what the page the
         // flush opens starts from (the writer's fold replaces its
         // running counts with them: the text's arithmetic since the
@@ -902,7 +900,10 @@ impl Run<'_, '_> {
         ]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
         // (read on the next count-register read, [`Run::flush_read`])
-        self.flush_pending = Some((decl, f));
+        self.flush_pending = Some((
+            i64::from_ne_bytes(node.to_ne_bytes()),
+            i64::try_from(k).unwrap_or(0),
+        ));
         Ok(())
     }
 
@@ -937,30 +938,27 @@ impl Run<'_, '_> {
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
     }
 
-    /// The pending flush point's loop-back read: declared by the client
-    /// first (`flushdecl:<node>:<k>`, answered by `api::Graph::settle`;
-    /// the node then runs again), then its fields read in place of the
-    /// engine's from here on; UNIT (round one) leaves the state as it is.
+    /// The pending flush point's loop-back read: its entry in
+    /// [`FLUSHES`] (`[node, k, value]`), its fields read in place of the
+    /// engine's from here on; none (round one) leaves the state as it is.
     pub(crate) fn flush_read(&mut self) -> R<()> {
         let v = self.v;
         // (pending until read: a stop here rewinds the command, which
         // reads it again)
-        let Some((decl, f)) = self.flush_pending else {
+        let Some((node, k)) = self.flush_pending else {
             return Ok(());
         };
-        if !self.cx.is_loopback(f) {
-            self.cx.use_env(decl)?;
-            if !self.cx.is_loopback(f) {
-                self.flush_pending = None;
-                return Ok(());
-            }
-        }
-        let read = self.cx.use_field(f)?;
+        let all = self.cx.use_field(v.field(FLUSHES))?;
         self.flush_pending = None;
+        let read = all.and_then(|all| {
+            list_of(v, all).into_iter().find_map(|e| {
+                let xs = list_of(v, e);
+                (xs.len() == 3 && int_of(v, xs[0]) == node && int_of(v, xs[1]) == k).then(|| xs[2])
+            })
+        });
         if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
-                "aux-trace: flush point {} reads {}",
-                crate::val::field_name(v, f),
+                "aux-trace: flush point {node}:{k} reads {}",
                 read.map_or("none".to_owned(), |x| v.render(x))
             );
         }
@@ -1990,7 +1988,11 @@ impl FinalState {
         sets_before(0, &mut counts);
         let pgread0 = v.field("pgread0");
         if (!flushes.is_empty() || !sets.is_empty()) && cx.is_loopback(pgread0) {
-            lb_pub(cx, pgread0, v.list(counts.iter().map(|&c| v.int(c)).collect()));
+            lb_pub(
+                cx,
+                pgread0,
+                v.list(counts.iter().map(|&c| v.int(c)).collect()),
+            );
         }
         for j in 0..steps {
             let Some(xs) = entries.get(&j) else { continue };
@@ -2099,24 +2101,23 @@ impl FinalState {
         Self::log_refuted(o, refuted);
         // the flush points' loop-backs: the state after their page,
         // UNIT before the first
+        let mut entries = Vec::with_capacity(flushes.len());
         for &(n, k, p, _) in &flushes {
-            // (the node id as the marker carries it: a signed value)
-            let node = u64::from_ne_bytes(n.to_ne_bytes());
-            let f = v.field(&format!("pgst:at:{node}:{k}"));
-            if !cx.is_loopback(f) {
-                continue;
-            }
             let x = usize::try_from(p)
                 .ok()
                 .and_then(|p| after.get(p))
                 .map_or(ValueId::UNIT, |&(cs, st)| v.list(vec![cs, st]));
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
-                    "aux-trace: flush point {node}:{k} after page {p}: {} (chain end {counts:?})",
+                    "aux-trace: flush point {n}:{k} after page {p}: {} (chain end {counts:?})",
                     v.render(x)
                 );
             }
-            lb_pub(cx, f, x);
+            entries.push(v.list(vec![v.int(n), v.int(k), x]));
+        }
+        let f = v.field(FLUSHES);
+        if cx.is_loopback(f) {
+            lb_pub(cx, f, v.list(entries));
         }
         Ok(FinalState {
             map: state.into_values().collect(),
@@ -2255,6 +2256,10 @@ impl LbLog {
         out
     }
 }
+
+/// The flush points' loop-back: `[node, k, [counts, pairs]]` each, the
+/// state after the page each one opens (`FinalState::load`).
+pub(crate) const FLUSHES: &str = "pgst:flushes";
 
 /// Publishes loop-back `f`'s value for the next round; `PHITEX_LOOP_TRACE`
 /// prints each publication (which keys keep changing round to round).

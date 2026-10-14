@@ -76,7 +76,7 @@ pub(crate) const T_WRITE_AT: i64 = 88;
 /// less on the main vertical list, §1005: `\clearpage`): `[tag, node,
 /// k]`, the node's k-th; the writer publishes the state the page chain
 /// leaves after the page that breaks there as the node's
-/// `pgst:at:<node>:<k>` loop-back, which the node reads on from.
+/// entry in the `pgst:flushes` loop-back, which the node reads on from.
 pub(crate) const T_FLUSH_AT: i64 = 87;
 
 /// Marks and whatsits met while decoding, numbered.

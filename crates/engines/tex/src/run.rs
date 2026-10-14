@@ -305,9 +305,9 @@ pub(crate) struct Run<'c, 'a> {
     /// Flush points met by this run so far ([`Run::flush_point`]).
     pub flushes: usize,
     /// The last flush point's loop-back, not read yet: read (declared
-    /// first, `flushdecl:`) on the run's next read of a count register,
+    /// first) on the run's next read of a count register,
     /// so a flush nothing reads after (plain's `\bye`) costs no round.
-    pub flush_pending: Option<(Field, Field)>,
+    pub flush_pending: Option<(i64, i64)>,
     /// Defining the counts a flush point fed back ([`Run::flush_read`]):
     /// not the text's own assignment.
     pub fed: bool,
@@ -1939,7 +1939,7 @@ pub(crate) struct Parked {
     pdf_occ: usize,
     irreversible: u64,
     flushes: usize,
-    flush_pending: Option<(Field, Field)>,
+    flush_pending: Option<(i64, i64)>,
 }
 
 impl Run<'_, '_> {
