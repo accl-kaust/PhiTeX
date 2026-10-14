@@ -1244,7 +1244,9 @@ impl Run<'_, '_> {
         }
         if let Some(&cs) = xs.first() {
             if define {
-                self.define_counts(cs)?;
+                // (defined on the text's first count read: a node that
+                // reads other fields only defines no count)
+                self.flush_cs = Some(cs);
             } else {
                 self.preload_counts(cs);
             }
@@ -1256,6 +1258,15 @@ impl Run<'_, '_> {
             self.flush_fields.insert(g);
             let l = self.loc_of(g);
             self.st.preload_global(l, Some(y));
+        }
+        Ok(())
+    }
+
+    /// The counts a flush point's read fed back, defined now (the text's
+    /// first read of a count after it).
+    pub(crate) fn flush_counts(&mut self) -> R<()> {
+        if let Some(cs) = self.flush_cs.take() {
+            self.define_counts(cs)?;
         }
         Ok(())
     }

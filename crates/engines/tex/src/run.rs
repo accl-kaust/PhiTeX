@@ -426,6 +426,9 @@ pub(crate) struct Run<'c, 'a> {
     /// first) on the run's next read of a count register,
     /// so a flush nothing reads after (plain's `\bye`) costs no round.
     pub flush_pending: Option<(i64, i64)>,
+    /// The `\\count0..9` a flush point read fed back, defined on the
+    /// text's first read of a count ([`Run::flush_counts`]).
+    pub flush_cs: Option<ValueId>,
     /// The run read a job-written file back ([`Run::read_back`]): what
     /// it defines from then on keeps its value there ([`Run::note_pre`]).
     pub read_back_done: bool,
@@ -545,6 +548,7 @@ impl<'c, 'a> Run<'c, 'a> {
             locals_out: ValueId::UNIT,
             probe_ok: false,
             flush_pending: None,
+            flush_cs: None,
             fed: false,
             flush_fields: phitex_defuse::FxHashSet::default(),
             read_back_done: false,
@@ -596,6 +600,11 @@ impl<'c, 'a> Run<'c, 'a> {
             // the routines left: any field, \\partial@page as multicol's
             // `\\endmulticols` unboxes it, not only the counts)
             self.flush_read()?;
+        }
+        if self.flush_cs.is_some() && crate::fields::is_count_slot(loc) {
+            // (the counts a flush point fed back: defined on the text's
+            // first read of one, as before a read of any other field)
+            self.flush_counts()?;
         } else if !self.probe_ok && crate::fields::is_chain_count_slot(loc) {
             self.count_probe()?;
         }
@@ -2789,6 +2798,7 @@ pub(crate) struct Parked {
     locals_out: ValueId,
     probe_ok: bool,
     flush_pending: Option<(i64, i64)>,
+    flush_cs: Option<ValueId>,
     flush_fields: phitex_defuse::FxHashSet<Field>,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
@@ -2906,6 +2916,7 @@ impl Run<'_, '_> {
             locals_out: self.locals_out,
             probe_ok: self.probe_ok,
             flush_pending: self.flush_pending,
+            flush_cs: self.flush_cs,
             flush_fields: self.flush_fields.clone(),
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
@@ -2979,6 +2990,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.locals_out = p.locals_out;
         r.probe_ok = p.probe_ok;
         r.flush_pending = p.flush_pending;
+        r.flush_cs = p.flush_cs;
         r.flush_fields = p.flush_fields;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
