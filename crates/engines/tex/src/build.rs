@@ -2365,7 +2365,8 @@ pub(crate) fn fold_item(
         | nodes::T_MARKS_AT
         | nodes::T_WRITE_AT
         | nodes::T_FONT_AT
-        | nodes::T_PDFW_AT => out.push(n),
+        | nodes::T_PDFW_AT
+        | nodes::T_PDFQ_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2530,6 +2531,7 @@ fn is_marker(v: &Values, x: ValueId) -> bool {
             | nodes::T_WRITE_AT
             | nodes::T_FONT_AT
             | nodes::T_PDFW_AT
+            | nodes::T_PDFQ_AT
     )
 }
 

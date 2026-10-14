@@ -281,6 +281,7 @@ impl Run<'_, '_> {
         let mut plan: Vec<ValueId> = Vec::new();
         let mut fonts_at: Vec<ValueId> = Vec::new();
         let mut objs_at: Vec<ValueId> = Vec::new();
+        let mut probes: Vec<(i64, usize)> = Vec::new();
         let mut folds = 0usize;
         let (mut tfx, mut tfold) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         // nothing to reuse: the pages folded in parallel from predicted
@@ -354,6 +355,7 @@ impl Run<'_, '_> {
                 match nodes::tag(v, w) {
                     nodes::T_FONT_AT => fl.push(v.int(crate::val::int_at(v, w, 1))),
                     nodes::T_PDFW_AT => ol.push(v.int(crate::val::int_at(v, w, 1))),
+                    nodes::T_PDFQ_AT => probes.push((crate::val::int_at(v, w, 1), j)),
                     _ => plan.push(w),
                 }
             }
@@ -365,10 +367,6 @@ impl Run<'_, '_> {
                     let f = v.field(&crate::etex::marks_before_field(n));
                     if self.cx.is_loopback(f) {
                         self.cx.publish(f, marks.value(v, j > 0));
-                    }
-                    let f = v.field(&crate::etex::fired_before_field(n));
-                    if self.cx.is_loopback(f) {
-                        self.cx.publish(f, v.int(i64::try_from(j).unwrap_or(0)));
                     }
                 }
             }
@@ -436,6 +434,17 @@ impl Run<'_, '_> {
         self.set("pp:classes", table_v, true);
         self.set("pp:any", v.int(i64::from(any)), true);
         self.set("pp:marker", marker, true);
+        // the nodes that asked whether a page shipped before them
+        // (`T_PDFQ_AT`): the pages fired before each, and the steps
+        // told to say whether they ship (`pdf:shipped:<j>`)
+        for &(node, j) in &probes {
+            let n = u64::from_ne_bytes(node.to_ne_bytes());
+            let f = v.field(&crate::etex::fired_before_field(n));
+            if self.cx.is_loopback(f) {
+                self.cx.publish(f, v.int(i64::try_from(j).unwrap_or(0)));
+            }
+        }
+        self.set("pp:probe", v.int(i64::from(!probes.is_empty())), true);
         // how many steps the chain has: the writer folds their deltas
         // up to here ([`FinalState`])
         self.set("pp:steps", v.int(i64::try_from(pages).unwrap_or(0)), true);
@@ -1378,7 +1387,7 @@ fn fold_page(
             }
             // (a font load: kept with the writes, the marker itself, for
             // the writer's numbering, `fplan`)
-            nodes::T_FONT_AT | nodes::T_PDFW_AT => {
+            nodes::T_FONT_AT | nodes::T_PDFW_AT | nodes::T_PDFQ_AT => {
                 writes.push(x);
                 continue;
             }

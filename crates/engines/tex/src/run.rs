@@ -1657,7 +1657,12 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
             let f = self.v.field(&crate::etex::shipped_field(self.page_index()));
-            if self.cx.is_loopback(f) {
+            let asked = self
+                .get("pp:probe")
+                .ok()
+                .flatten()
+                .is_some_and(|x| int_of(self.v, x) != 0);
+            if asked && self.cx.is_loopback(f) {
                 let x = self.v.int(i64::from(self.shipped));
                 self.cx.publish(f, x);
             }
@@ -2151,8 +2156,11 @@ impl Run<'_, '_> {
                     if s.lineno > 0 {
                         return Some(FileLine::Known(i64::from(s.lineno)));
                     }
-                    if let Some((name, _)) = s.origin {
-                        return Some(FileLine::Piece(name));
+                    // (a `\read` line is no file's, §483; a text
+                    // without an origin, a format's or INITEX's, is one
+                    // file, UNIT)
+                    if !s.rescanned {
+                        return Some(FileLine::Piece(s.origin.map_or(ValueId::UNIT, |o| o.0)));
                     }
                 }
                 _ => {

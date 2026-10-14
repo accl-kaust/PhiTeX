@@ -81,6 +81,10 @@ pub(crate) const T_FONT_AT: i64 = 87;
 /// (pdfTeX §1355): `[tag, n]`; the page builder's fold tells the writer
 /// which page it follows (`oplan`), where the finish writes object `n`.
 pub(crate) const T_PDFW_AT: i64 = 85;
+/// Where a document node asks whether a page shipped before it (an
+/// `\immediate\pdfobj`, [`crate::etex::page_shipped_before`]):
+/// `[tag, node]`; the plan publishes the pages fired before it.
+pub(crate) const T_PDFQ_AT: i64 = 84;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]

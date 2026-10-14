@@ -462,10 +462,12 @@ impl Run<'_, '_> {
             if starts {
                 self.lines_entered += 1;
                 self.lines_read += 1;
+                // (a `\read` line is no file's, §483: `line` stays)
                 if let Some(s) = self.input.top_line()
                     && s.lineno == 0
-                    && let Some((name, _)) = s.origin
+                    && !s.rescanned
                 {
+                    let name = s.origin.map_or(phitex_defuse::ValueId::UNIT, |o| o.0);
                     self.doc_line_begun(name);
                 }
             }

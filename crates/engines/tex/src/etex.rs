@@ -1149,6 +1149,22 @@ pub(crate) fn marks_before_field(node: u64) -> String {
     format!("marks:before:{node}")
 }
 
+/// Whether the node has its loop-backs (`marks:before:<node>`,
+/// `fired:before:<node>`): a node the client did not make (a document
+/// file's region, a display) asks the client to declare them
+/// (`marksdecl:<node>`, answered by `api::Graph::settle`) and waits;
+/// never seen inside a run already declared.
+fn node_loopbacks(r: &mut Run<'_, '_>) -> R<bool> {
+    let v = r.v;
+    let node = r.cx.node().raw();
+    let f = v.field(&marks_before_field(node));
+    if !r.cx.is_loopback(f) {
+        r.cx.use_env(r.keyed(crate::fields::Fam::Marksdecl, &node.to_string()))?;
+        return Ok(r.cx.is_loopback(f));
+    }
+    Ok(true)
+}
+
 /// The node's `marks:before:<node>` loop-back (UNIT while no page
 /// fired before it, or not yet known), its `T_MARKS_AT` item
 /// contributed; `None` where the node has none (a node the client did
@@ -1157,15 +1173,8 @@ fn marks_before(r: &mut Run<'_, '_>) -> R<Option<ValueId>> {
     let v = r.v;
     let node = r.cx.node().raw();
     let f = v.field(&marks_before_field(node));
-    if !r.cx.is_loopback(f) {
-        // a node the client did not make (a document file's region, a
-        // display): it asks the client to declare its loop-back
-        // (`marksdecl:<node>`, answered by `api::Graph::settle`) and
-        // waits; never seen inside a run already declared
-        r.cx.use_env(r.keyed(crate::fields::Fam::Marksdecl, &node.to_string()))?;
-        if !r.cx.is_loopback(f) {
-            return Ok(None);
-        }
+    if !node_loopbacks(r)? {
+        return Ok(None);
     }
     let at = v.list(vec![
         v.int(nodes::T_MARKS_AT),
@@ -1194,14 +1203,30 @@ pub(crate) fn page_shipped_before(r: &mut Run<'_, '_>) -> R<bool> {
     if op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
         return Ok(false);
     }
-    if marks_before(r)?.is_none() {
+    if !node_loopbacks(r)? {
         return Ok(false);
     }
-    // the pages fired before (`fired:before:<node>`, published by the
-    // plan), and whether one of their steps shipped (`pdf:shipped:<k>`,
-    // published by the step: a routine may fire without shipping)
+    // the node's probe on the main list (`T_PDFQ_AT`): the plan
+    // publishes the pages fired before it (`fired:before:<node>`), and
+    // the steps whether they shipped (`pdf:shipped:<k>`, a routine may
+    // fire without shipping), only for a document that has one, so
+    // that no other document pays a loop round
     let v = r.v;
-    let f = v.field(&fired_before_field(r.cx.node().raw()));
+    let node = r.cx.node().raw();
+    let at = v.list(vec![
+        v.int(nodes::T_PDFQ_AT),
+        v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+    ]);
+    let item = v.list(vec![v.int(0), at]);
+    let items = v.field("items");
+    if !r
+        .contribs
+        .iter()
+        .any(|&(g, s)| g == items && v.seq_to_vec(s).contains(&item))
+    {
+        r.contribute("items", v.seq_unit(item));
+    }
+    let f = v.field(&fired_before_field(node));
     let j = r.cx.use_field(f)?.map_or(0, |x| int_of(v, x));
     for k in 0..usize::try_from(j).unwrap_or(0) {
         let f = v.field(&shipped_field(k));
