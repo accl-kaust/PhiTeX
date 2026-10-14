@@ -500,11 +500,6 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
-        if let Ok(x) = r
-            && crate::rerun::on()
-        {
-            crate::rerun::read(self.v, self.cx.node().raw(), f, x);
-        }
         self.st.fill(loc, r?);
         Ok(())
     }
@@ -1530,9 +1525,6 @@ impl<'c, 'a> Run<'c, 'a> {
         let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
         crate::hints::register_text(f.name, &t);
         let mut out = Vec::new();
-        // (a list some text before the file assigned may be in force at
-        // its start, §1091)
-        let mut lists = crate::hints::ParLists::unknown();
         for &(s, e) in &t.slices {
             if e <= f.off {
                 continue;
@@ -1540,8 +1532,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let a = s.max(f.off);
             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
             let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
-            let lists = lists.step(&t, s);
-            args.push(crate::hints::hint_arg_in(v, &t, s, lists.as_deref()));
+            args.push(crate::hints::hint_arg(v, &t, s));
             out.push(args);
         }
         out
@@ -1552,11 +1543,6 @@ impl<'c, 'a> Run<'c, 'a> {
         let r = self.cx.scope_kind();
         if r.is_err() {
             self.trace_stop("scope kind");
-        }
-        if let Ok(x) = r
-            && crate::rerun::on()
-        {
-            crate::rerun::note(self.v, self.cx.node().raw(), "(scope kind)", x);
         }
         Ok(r?)
     }
@@ -1751,47 +1737,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
-        if crate::rerun::on() {
-            let v = self.v;
-            let text = self
-                .cx
-                .args()
-                .first()
-                .and_then(|&l| list_of(v, l).first().map(|&f| v.render(f)))
-                .unwrap_or_default();
-            let published: Vec<String> = self
-                .st
-                .published(v, false)
-                .into_iter()
-                .map(|(l, _, _)| l)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|l| {
-                    let f = self.loc_field(l);
-                    crate::val::field_name(v, f)
-                })
-                .collect();
-            crate::rerun::finish(
-                self.cx.node().raw(),
-                &format!("{:?}", self.cx.op()),
-                &text,
-                published,
-            );
-        }
         crate::pdfout::publish(self.pdf_fold.take());
-        if !self.doc_lines.is_empty() {
-            let v = self.v;
-            let mut xs: Vec<(String, ValueId, i64)> = self
-                .doc_lines
-                .iter()
-                .map(|&(n, k)| (str_of(v, n), n, k))
-                .collect();
-            xs.sort_by(|a, b| a.0.cmp(&b.0));
-            let m = v.list(
-                xs.into_iter()
-                    .map(|(_, n, k)| v.list(vec![n, v.int(k)]))
-                    .collect(),
-            );
+        // (a command node's, empty too: what its text declares,
+        // `Exec::static_contribs`)
+        if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
+            let m = lines_value(self.v, &self.doc_lines);
             self.contribute("lines", m);
         }
         crate::pageinline::finish(&mut self);
@@ -2562,4 +2512,41 @@ impl Run<'_, '_> {
             None => self.doc_lines.push((name, 1)),
         }
     }
+}
+
+/// A `lines` contribution: the lines begun by file name, sorted by name.
+pub(crate) fn lines_value(v: &Values, lines: &[(ValueId, i64)]) -> ValueId {
+    let mut xs: Vec<(String, ValueId, i64)> =
+        lines.iter().map(|&(n, k)| (str_of(v, n), n, k)).collect();
+    xs.sort_by(|a, b| a.0.cmp(&b.0));
+    v.list(
+        xs.into_iter()
+            .map(|(_, n, k)| v.list(vec![n, v.int(k)]))
+            .collect(),
+    )
+}
+
+/// The lines a node's own text begins, by file, as its run counts them
+/// ([`Run::doc_line_begun`]): its segments not reached yet that begin a
+/// line, are no `\read` line and carry no number of their own.
+pub(crate) fn text_lines(v: &Values, args: &[ValueId]) -> ValueId {
+    let mut lines: Vec<(ValueId, i64)> = Vec::new();
+    for f in args.first().map(|&a| list_of(v, a)).unwrap_or_default() {
+        let xs = list_of(v, f);
+        if xs.first().map(|&t| str_of(v, t)).as_deref() != Some("s") {
+            continue;
+        }
+        let flags = xs.get(4).map_or(3, |&x| int_of(v, x));
+        let unread = xs.get(3).map_or(-2, |&x| int_of(v, x)) == -2;
+        let lineno = xs.get(7).map_or(0, |&x| int_of(v, x));
+        if !unread || flags & 1 == 0 || flags & 4 != 0 || lineno != 0 {
+            continue;
+        }
+        let name = if xs.len() >= 7 { xs[5] } else { ValueId::UNIT };
+        match lines.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, k)) => *k += 1,
+            None => lines.push((name, 1)),
+        }
+    }
+    lines_value(v, &lines)
 }
