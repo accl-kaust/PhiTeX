@@ -3704,7 +3704,31 @@ pub(crate) fn check_defs(
     r: &mut Run<'_, '_>,
     h: &Hint,
     claimed: &[std::sync::Arc<Hint>],
-) -> Option<String> {
+) -> R<Option<String>> {
+    // (a definition outside the bound the run made without reading the
+    // field first may leave it as it was, `\g_para_indent_box` void to
+    // void at every LaTeX paragraph: the value before the run decides,
+    // read only for these)
+    loop {
+        let Some((f, m)) = undeclared(r, h, claimed) else {
+            return Ok(None);
+        };
+        let loc = r.loc_of(f);
+        if !r.st.defined_unread(loc) {
+            return Ok(Some(m));
+        }
+        let x = r.cx.use_field(f)?;
+        r.st.note_engine(loc, x);
+    }
+}
+
+/// The first definition the run made outside its bound (and the
+/// claimed siblings'), if any.
+fn undeclared(
+    r: &mut Run<'_, '_>,
+    h: &Hint,
+    claimed: &[std::sync::Arc<Hint>],
+) -> Option<(Field, String)> {
     let b = h.bound.as_ref()?;
     let others: Vec<&Bound> = claimed.iter().filter_map(|c| c.bound.as_ref()).collect();
     let state_has = |b: &Bound, name: &str| match &b.state {
@@ -3725,19 +3749,25 @@ pub(crate) fn check_defs(
             if state_has(b, &name) || others.iter().any(|o| state_has(o, &name)) {
                 continue;
             }
-            return Some(format!(
-                "undeclared definition of {name} by {:?} (state {:?}, {})",
-                h.excerpt,
-                b.state.clone().unwrap_or_default(),
-                h.cause
+            return Some((
+                f,
+                format!(
+                    "undeclared definition of {name} by {:?} (state {:?}, {})",
+                    h.excerpt,
+                    b.state.clone().unwrap_or_default(),
+                    h.cause
+                ),
             ));
         }
         if names_have(b, &name) || others.iter().any(|o| names_have(o, &name)) {
             continue;
         }
-        return Some(format!(
-            "undeclared definition of {name} by {:?} (bound {:?} {:?}, {})",
-            h.excerpt, b.names, b.prefixes, h.cause
+        return Some((
+            f,
+            format!(
+                "undeclared definition of {name} by {:?} (bound {:?} {:?}, {})",
+                h.excerpt, b.names, b.prefixes, h.cause
+            ),
         ));
     }
     None
