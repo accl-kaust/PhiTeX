@@ -1,0 +1,16 @@
+\documentclass{article}
+\usepackage{multicol}
+\makeatletter
+\let\amscprep\prepare@multicols
+\def\prepare@multicols{\typeout{AMSC prep: pd=\the\prevdepth\space pt=\the\pagetotal\space pg=\the\pagegoal\space lk=\the\lastkern\space ls=\the\lastskip}\amscprep\typeout{AMSC partial: \the\ht\partial@page}}
+\let\amscroom\enough@room
+\def\enough@room#1{\typeout{AMSC room0: pd=\the\prevdepth}\amscroom{#1}\typeout{AMSC room1: pd=\the\prevdepth\space free=\the\page@free}}
+\makeatother
+\begin{document}
+Some text before.
+\begin{multicols}{2}
+One two three four five six seven eight nine ten.
+Eleven twelve thirteen fourteen fifteen sixteen.
+\end{multicols}
+Some text after.
+\end{document}

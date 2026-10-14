@@ -1,0 +1,16 @@
+\documentclass{article}
+\begin{document}
+Some text before.\par
+\typeout{AMSC pd1: \the\prevdepth}
+\addvspace{12pt}
+\typeout{AMSC pd2: \the\prevdepth}
+
+\typeout{AMSC pd3: \the\prevdepth}
+\makeatletter
+\begingroup\@nobreakfalse\addpenalty\z@\endgroup
+\typeout{AMSC pd4: \the\prevdepth}
+
+\par\addvspace{12pt}
+\typeout{AMSC pd5: \the\prevdepth}
+Text.
+\end{document}
