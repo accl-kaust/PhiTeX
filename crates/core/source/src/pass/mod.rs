@@ -46,7 +46,7 @@ mod tests;
 
 use crate::syntax::Catcodes;
 pub use atoms::{Atom, AtomKind};
-pub use defs::{Arg, Definitions, Lit, OUTPUT, Shape};
+pub use defs::{Arg, Definitions, EVERYPAR, Lit, OUTPUT, Shape};
 pub use hints::{
     Assumption, Claim, Def, DefSet, Effect, Hints, Implicit, Mark, MayDefine, MeaningShape,
     ScopeHint, ScopeKind,
