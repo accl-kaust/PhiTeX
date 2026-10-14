@@ -17,6 +17,8 @@ use std::ops::{Bound, RangeBounds};
 const SMALL: usize = 24;
 
 enum Bucket {
+    /// One entry, held inline: most keys of a wide declaration have one.
+    One([(u64, Slot); 1]),
     Small(Vec<(u64, Slot)>),
     Big(BTreeMap<u64, Slot>),
 }
@@ -203,6 +205,9 @@ impl<K: Hash + Eq + Copy> LabelIx<K> {
         }
         for (k, b) in self.map {
             match b {
+                Bucket::One([(l, s)]) => {
+                    base.insert(k, l, s);
+                }
                 Bucket::Small(v) => {
                     for (l, s) in v {
                         base.insert(k, l, s);
@@ -257,8 +262,25 @@ impl<K: Hash + Eq + Copy> LabelIx<K> {
     }
 
     fn local_insert(&mut self, key: K, label: u64, s: Slot) -> Option<Slot> {
-        let b = self.map.entry(key).or_insert_with(|| Bucket::Small(Vec::new()));
+        let b = match self.map.entry(key) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(Bucket::One([(label, s)]));
+                return None;
+            }
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+        };
         match b {
+            Bucket::One([e]) => {
+                if e.0 == label {
+                    return Some(std::mem::replace(&mut e.1, s));
+                }
+                let mut v = Vec::with_capacity(4);
+                v.push(*e);
+                let i = usize::from(e.0 < label);
+                v.insert(i, (label, s));
+                *b = Bucket::Small(v);
+                None
+            }
             Bucket::Small(v) => {
                 let i = v.partition_point(|e| e.0 < label);
                 if i < v.len() && v[i].0 == label {
@@ -293,6 +315,13 @@ impl<K: Hash + Eq + Copy> LabelIx<K> {
     fn local_remove(&mut self, key: &K, label: u64) -> Option<Slot> {
         let b = self.map.get_mut(key)?;
         let (out, empty) = match b {
+            Bucket::One([e]) => {
+                if e.0 == label {
+                    (Some(e.1), true)
+                } else {
+                    (None, false)
+                }
+            }
             Bucket::Small(v) => {
                 let i = v.partition_point(|e| e.0 < label);
                 if i < v.len() && v[i].0 == label {
@@ -328,6 +357,7 @@ impl<K: Hash + Eq + Copy> LabelIx<K> {
 
     fn local_get(&self, key: &K, label: u64) -> Option<Slot> {
         match self.map.get(key)? {
+            Bucket::One([e]) => (e.0 == label).then_some(e.1),
             Bucket::Small(v) => {
                 let i = v.partition_point(|e| e.0 < label);
                 (i < v.len() && v[i].0 == label).then(|| v[i].1)
@@ -367,6 +397,10 @@ impl<K: Hash + Eq + Copy> LabelIx<K> {
     fn local_range(&self, key: &K, r: impl RangeBounds<u64>) -> Iter<'_> {
         match self.map.get(key) {
             None => Iter::Empty,
+            Some(Bucket::One(v)) => {
+                let (a, b) = span(v, &r);
+                Iter::Small(v[a..b].iter())
+            }
             Some(Bucket::Small(v)) => {
                 let (a, b) = span(v, &r);
                 Iter::Small(v[a..b].iter())
