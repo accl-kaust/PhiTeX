@@ -2536,7 +2536,7 @@ pub(crate) fn fold_entries(
 
 /// Whether `x` is a marker for the page builder's fold
 /// (`T_PAGE_PARAMS`, `T_MARKS_AT`), not list material.
-fn is_marker(v: &Values, x: ValueId) -> bool {
+pub(crate) fn is_marker(v: &Values, x: ValueId) -> bool {
     matches!(
         nodes::tag(v, x),
         nodes::T_PAGE_PARAMS
