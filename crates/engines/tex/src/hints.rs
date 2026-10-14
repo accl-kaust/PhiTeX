@@ -100,6 +100,9 @@ pub(crate) struct Bound {
     /// For a slice: the following siblings its run takes, when the text
     /// says so exactly (`Some(0)`: none); `None` when only the run knows.
     pub claim: Option<usize>,
+    /// The fields the node reads from outside its run, when known (a
+    /// package load's record, [`crate::pkgrec`]): declared reads.
+    pub reads: Vec<String>,
 }
 
 /// Bytes and the catcode each was read with, in the order first met,
@@ -664,6 +667,10 @@ fn encode_bound(b: &Bound, o: &mut String) {
     if let Some(n) = b.claim {
         o.push_str(&n.to_string());
     }
+    if !b.reads.is_empty() {
+        o.push('\x1e');
+        o.push_str(&b.reads.join("\x1f"));
+    }
 }
 
 fn decode_bound<'s>(mut it: impl Iterator<Item = &'s str>) -> Bound {
@@ -696,6 +703,7 @@ fn decode_bound<'s>(mut it: impl Iterator<Item = &'s str>) -> Bound {
     };
     let no_scope = it.next() == Some("N");
     let claim = it.next().and_then(|c| c.parse().ok());
+    let reads = items(it.next().unwrap_or(""));
     Bound {
         names,
         prefixes,
@@ -704,6 +712,7 @@ fn decode_bound<'s>(mut it: impl Iterator<Item = &'s str>) -> Bound {
         state,
         no_scope,
         claim,
+        reads,
     }
 }
 
@@ -1133,6 +1142,19 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         }
         if loader {
             loaders.push(k);
+            // (a package load's slice takes the blanks after it, its
+            // line's end: `\@ifnextchar[` skips them looking for an
+            // optional argument, so a node of their own would be taken
+            // by the load's run, `crate::pkgrec`)
+            if !matches!(name, "input" | "include") {
+                while p
+                    .atoms
+                    .get(last + 1)
+                    .is_some_and(|x| x.kind == AtomKind::Space)
+                {
+                    last += 1;
+                }
+            }
         }
         for x in inside.iter_mut().take(last + 1).skip(k + 1) {
             *x = true;
@@ -3426,6 +3448,7 @@ pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
     let b = h.bound.as_ref()?;
     let mut out: Vec<Field> = b.means.iter().map(|(n, _)| v.field(n)).collect();
     out.extend(b.cats.iter().map(|(c, _)| v.field(&format!("cat:{c}"))));
+    out.extend(b.reads.iter().map(|n| v.field(n)));
     (!out.is_empty()).then_some(out)
 }
 
@@ -3449,7 +3472,65 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
         };
         eprintln!("hint {:?}: {answer} ({})", h.excerpt, h.cause);
     }
+    // (a package load's record: exactly the fields it defined, never a
+    // prefix of them, `crate::pkgrec`)
+    if is_record(&h)
+        && let Some(b) = &h.bound
+    {
+        return MayDefine::Names(b.names.iter().map(|n| v.field(n)).collect());
+    }
     h.may_define()
+}
+
+/// The cause of a package load's hint taken from its record
+/// ([`crate::pkgrec`]).
+pub(crate) const RECORD_CAUSE: &str = "package record";
+
+/// The cause of a never-seen package load's optimistic hint.
+pub(crate) const OPTIMISTIC_CAUSE: &str = "package not recorded: optimistic";
+
+/// Whether the hint is a package load's record.
+pub(crate) fn is_record(h: &Hint) -> bool {
+    h.bound.is_some() && h.cause == RECORD_CAUSE
+}
+
+/// A package load's hint from its record: it defines exactly `writes`
+/// (no state head besides them), reads `reads`, and, when its last run
+/// said so, opens no scope and takes no sibling.
+pub(crate) fn record_hint(
+    writes: &[String],
+    reads: &[String],
+    no_scope: bool,
+    claim0: bool,
+) -> String {
+    Hint {
+        bound: Some(Bound {
+            names: writes.to_vec(),
+            state: Some(Vec::new()),
+            no_scope,
+            claim: claim0.then_some(0),
+            reads: reads.to_vec(),
+            ..Bound::default()
+        }),
+        cause: RECORD_CAUSE.to_owned(),
+        excerpt: String::new(),
+        guess: None,
+    }
+    .encode()
+}
+
+/// A never-seen package load's hint: unbounded, guessed to define no
+/// control sequence, so a later load reading one runs on the state as it
+/// stands (under speculation), refuted by the engine where the load did
+/// define it.
+pub(crate) fn optimistic_hint() -> String {
+    Hint {
+        bound: None,
+        cause: OPTIMISTIC_CAUSE.to_owned(),
+        excerpt: String::new(),
+        guess: Some(Bound::default()),
+    }
+    .encode()
 }
 
 /// The accumulators the nodes count into.
@@ -3546,6 +3627,9 @@ pub(crate) fn check_defs(
     let names_have = |b: &Bound, name: &str| {
         b.names.iter().any(|n| n == name) || b.prefixes.iter().any(|p| name.starts_with(p.as_str()))
     };
+    // (a bound's names as a set: a package load's record lists
+    // thousands, and its run publishes as many)
+    let own: phitex_defuse::FxHashSet<&str> = b.names.iter().map(String::as_str).collect();
     // (a local definition of the value the run read is no definition:
     // `\\everypar` set back to what it was, the binding unchanged)
     for f in r.published_fields() {
@@ -3553,6 +3637,9 @@ pub(crate) fn check_defs(
             Value::Str(s) => s.to_string(),
             _ => continue,
         };
+        if own.contains(name.as_str()) {
+            continue;
+        }
         if !is_cs_field(&name) {
             if state_has(b, &name) || others.iter().any(|o| state_has(o, &name)) {
                 continue;

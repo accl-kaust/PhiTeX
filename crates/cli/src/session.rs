@@ -614,6 +614,12 @@ impl Session {
                             c.get(&c.format_file(&name, "pgst1"))
                         })
                         .unwrap_or_default(),
+                    // (the package loads' records: machine-wide, beside the
+                    // format, from every document built with it)
+                    pkgrec: self
+                        .pkgrec_path()
+                        .and_then(|p| self.cache.as_ref()?.get(&p))
+                        .unwrap_or_default(),
                     ..Options::default()
                 };
                 let opts = Options {
@@ -656,6 +662,45 @@ impl Session {
         }
         if let Some(b) = &self.build {
             self.store_wkeys(b);
+            self.store_pkgrec(b);
+            // (`PHITEX_CHAIN_DUMP=1`: the critical chain in full, and its
+            // waits, for measurements)
+            if std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {
+                for l in b.critical_chain_lines() {
+                    eprintln!("CHAIN {}", l.replace('\n', " | "));
+                }
+                for l in b.chain_waits() {
+                    eprintln!("WAIT {}", l.replace('\n', " | "));
+                }
+                for (t, md, cause, reads) in b.node_declarations() {
+                    eprintln!("DECL\t{md}\t{cause}\t{reads}\t{t}");
+                }
+            }
+            // (the package loads' counters, for measurements)
+            if std::env::var_os("PHITEX_PKG_STATS").is_some() {
+                let s = &b.stats;
+                eprintln!(
+                    "PKG loads {} claimed {} recorded {} optimistic {} runs {} at-once {} span {:.3} on-critical {} refuted {} undeclared {} critical-path {:?} threads {} engine-wall {:.3} speculations {} confirmations {} mispredictions {} predicted-confirmed {} predicted-refuted {}",
+                    s.pkg_loads,
+                    s.pkg_claimed,
+                    s.pkg_recorded,
+                    s.pkg_optimistic,
+                    s.pkg_runs,
+                    s.pkg_max_concurrent,
+                    s.pkg_wall.as_secs_f64(),
+                    s.pkg_on_critical,
+                    s.declarations_refuted,
+                    s.undeclared_definitions,
+                    s.critical_path,
+                    s.threads,
+                    s.wall.as_secs_f64(),
+                    s.speculations,
+                    s.confirmations,
+                    s.mispredictions,
+                    s.predictions_confirmed,
+                    s.predictions_refuted
+                );
+            }
         }
         // (a long session: what the old texts' runs memoized and nothing
         // reaches any more goes, so the tables stay bounded)
@@ -911,6 +956,28 @@ impl Session {
         let p = p.with_file_name("pgst");
         if c.get(&p).as_deref() != Some(st.as_slice()) {
             let _ = c.put(&p, &st, &[]);
+        }
+    }
+
+    /// The cache's file of the package loads' records
+    /// ([`Build::export_pkgrec`]): beside the format, shared by every
+    /// document built with it.
+    fn pkgrec_path(&self) -> Option<PathBuf> {
+        if self.job.ini {
+            return None;
+        }
+        let c = self.cache.as_ref()?;
+        let text = format!("\\input {}\n", self.job.engine.ini);
+        Some(c.format_file(&self.format_name(&text), "pkgrec"))
+    }
+
+    fn store_pkgrec(&self, b: &Build) {
+        let (Some(c), Some(p)) = (&self.cache, self.pkgrec_path()) else {
+            return;
+        };
+        let recs = b.export_pkgrec();
+        if !recs.is_empty() && c.get(&p).as_deref() != Some(recs.as_slice()) {
+            let _ = c.put(&p, &recs, &[]);
         }
     }
 
