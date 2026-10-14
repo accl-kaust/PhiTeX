@@ -1039,7 +1039,7 @@ impl Run<'_, '_> {
         };
         let f = self.cint(crate::fields::cell::FONTCOUNT)? + 1;
         self.set_cell(crate::fields::cell::FONTCOUNT, v.int(f), true);
-        self.font_loaded(f);
+        self.font_loaded(f)?;
         let info = v.list(vec![
             v.str(name),
             v.int(i64::from(l.at.size)),
@@ -1517,14 +1517,20 @@ impl Run<'_, '_> {
     /// routine or virtual fonts, nor by a text paging inline, whose pages
     /// ship in TeX's order): a `T_FONT_AT` marker on the main list, so
     /// that the writer knows which `\shipout` came first after it.
-    pub(crate) fn font_loaded(&mut self, f: i64) {
+    /// (Exact mode only: in relaxed mode the fonts' names are free.)
+    pub(crate) fn font_loaded(&mut self, f: i64) -> R<()> {
         let op = self.cx.op();
-        if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
-            return;
+        if op == self.ops.pagestep
+            || op == self.ops.pagestep_any
+            || self.pg.is_some()
+            || crate::pdfrelaxed::on(self)?
+        {
+            return Ok(());
         }
         let v = self.v;
         let at = v.list(vec![v.int(crate::nodes::T_FONT_AT), v.int(f)]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        Ok(())
     }
 
     /// The input left as one source line, for `\inputlineno`.
