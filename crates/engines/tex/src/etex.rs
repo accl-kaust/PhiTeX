@@ -1150,9 +1150,10 @@ pub(crate) fn marks_before_field(node: u64) -> String {
 }
 
 /// The node's `marks:before:<node>` loop-back (UNIT while no page
-/// fired before it), its `T_MARKS_AT` item contributed; `None` where the
-/// node has none (a node the client did not declare it for).
-fn marks_before(r: &mut Run<'_, '_>) -> R<Option<Option<ValueId>>> {
+/// fired before it, or not yet known), its `T_MARKS_AT` item
+/// contributed; `None` where the node has none (a node the client did
+/// not declare it for).
+fn marks_before(r: &mut Run<'_, '_>) -> R<Option<ValueId>> {
     let v = r.v;
     let node = r.cx.node().raw();
     let f = v.field(&marks_before_field(node));
@@ -1179,7 +1180,7 @@ fn marks_before(r: &mut Run<'_, '_>) -> R<Option<Option<ValueId>>> {
     if !seen {
         r.contribute("items", v.seq_unit(item));
     }
-    Ok(Some(r.cx.use_field(f)?))
+    Ok(Some(r.cx.use_field(f)?.unwrap_or(ValueId::UNIT)))
 }
 
 /// Whether a page shipped before this point of a document node (the
@@ -1238,7 +1239,7 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
     let Some(state) = marks_before(r)? else {
         return r.get(&mark_field(kind, n));
     };
-    let Some(state) = state.filter(|&x| x != ValueId::UNIT) else {
+    let Some(state) = Some(state).filter(|&x| x != ValueId::UNIT) else {
         return Ok(None);
     };
     let k = match kind {
