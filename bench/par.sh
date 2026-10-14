@@ -21,6 +21,9 @@ run() { # doc j rep
 run para400 8 0 # (warms the format and font caches)
 for d in para400 para4000; do for j in 1 4 8 16; do for i in 1 2 3; do run "$d" "$j" "$i"; done; done; done
 if [ -d bench/amsldoc ]; then
+  # (the LaTeX format built once first, so no timed run pays for it)
+  rm -rf target/ams-warm && cp -a bench/amsldoc target/ams-warm
+  (cd target/ams-warm && PHITEX_CACHE_DIR=$here/target/par/cache timeout 900 "$B" build -j 8 amsldoc.tex > /dev/null 2>&1)
   for j in 1 8 16; do
     rm -rf "target/ams-$j" && cp -a bench/amsldoc "target/ams-$j"
     (cd "target/ams-$j" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 \
