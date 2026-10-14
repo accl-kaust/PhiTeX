@@ -327,16 +327,16 @@ def cmd_oracle(a):
         res.update(status="dropped", reason=f"the oracle has {res['errors']} errors: " + manuals.why_failed(RUN, job, RUN / f"term-pass{r['passes']}.txt"))
     else:
         res["status"] = "ok"
-    if pdf.exists():
+    if pdf.exists() and a.tag == "oracle":
         shutil.copy2(pdf, out / "oracle.pdf")
         lt = (RUN / f"{job}.log").read_bytes() if (RUN / f"{job}.log").exists() else b""
         m = re.search(rb"Output written on .*?\((\d+) pages?", lt, re.S)
         res["pages"] = int(m.group(1)) if m else pdf_pages(pdf)
         res["pdf_sha256"] = common.sha256_file(pdf)
-    if (RUN / f"{job}.log").exists():
+    if (RUN / f"{job}.log").exists() and a.tag == "oracle":
         shutil.copy2(RUN / f"{job}.log", out / "oracle.log")
     res["pass_walls"] = [x["wall_s"] for x in log if x["cmd"].startswith("pass")]
-    jdump(out / "oracle.json", res)
+    jdump(out / f"{a.tag}.json", res)
     print(json.dumps({k: res.get(k) for k in ("status", "reason", "passes", "wall_s", "pages", "errors")}))
 
 
@@ -624,6 +624,7 @@ def main():
     p.add_argument("--main", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--tools", action="store_true")
+    p.add_argument("--tag", default="oracle")
     p = sub.add_parser("phitex")
     p.add_argument("--doc", required=True)
     p.add_argument("--main", required=True)

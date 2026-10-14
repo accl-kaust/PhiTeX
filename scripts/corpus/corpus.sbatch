@@ -81,6 +81,9 @@ while IFS=$'\t' read -r id kind src main threads flags; do
         to=$(python3 -c 'import json,sys
 try: print(int(max(120, 20*json.load(open(sys.argv[1]))["wall_s"])))
 except Exception: print(900)' "$R/$id/oracle/oracle.json")
+        # (pdflatex again on this node: the ratio's denominator, same node as phitex)
+        tools=; [ "$kind" = manual ] && tools=--tools
+        box oracle --doc /w/doc --main "$main" --out /w/out $tools --tag oracle-here > "$w/work/out/oracle-here-term.txt" 2>&1 || true
         box phitex --doc /w/doc --main "$main" --out /w/out --threads "$threads" --timeout "$to" --edit $opdf \
           > "$w/work/out/phitex-term.txt" 2>&1 || status=$? ;;
     esac
