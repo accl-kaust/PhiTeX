@@ -72,6 +72,12 @@ pub(crate) const T_MARKS_AT: i64 = 91;
 /// among the shipped pages, so the writer assembles the file in TeX's
 /// order.
 pub(crate) const T_WRITE_AT: i64 = 88;
+/// Where a document node forced the page out (a penalty of -10000 or
+/// less on the main vertical list, §1005: `\clearpage`): `[tag, node,
+/// k]`, the node's k-th; the writer publishes the state the page chain
+/// leaves after the page that breaks there as the node's
+/// entry in the `pgst:flushes` loop-back, which the node reads on from.
+pub(crate) const T_FLUSH_AT: i64 = 90;
 /// `[T_DEFS_AT, field…]`: a marker on the main list, where the text
 /// defined these fields at its base level (since the item before): the
 /// page builder's fold tells each page step which fields the text

@@ -56,6 +56,9 @@ pub(crate) struct PageRec {
     /// The text's definition markers met (`T_DEFS_AT`), in order.
     pub tdefs: Vec<ValueId>,
     pub stuck: bool,
+    /// The flush points met folding this page (`(node, k, counts)`: no index,
+    /// so a shifted page keeps them).
+    pub flushes: Vec<(i64, i64, ValueId)>,
     /// `pp:items:<j>` and `pp:start:<j>` as that run set them.
     pub items_v: ValueId,
     pub start_v: ValueId,

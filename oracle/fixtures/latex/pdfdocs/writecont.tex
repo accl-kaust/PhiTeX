@@ -1,0 +1,15 @@
+\documentclass{article}
+\begin{document}
+Before.
+\makeatletter
+\immediate\write\@mainaux{\string\@input{i1-a.aux}}
+\immediate\openout\@partaux "i1-a.aux"
+\immediate\write\@partaux{\string\@setckpt{i1-a}\@charlb}
+\immediate\write\@partaux{\string\setcounter{page}{7}}
+\immediate\write\@partaux{\@charrb}
+\immediate\closeout\@partaux
+Checkpoint \expandafter\ifx\csname cp@i1-a\endcsname\relax missing\else
+read: \expandafter\meaning\csname cp@i1-a\endcsname\fi.
+\makeatother
+After.
+\end{document}
