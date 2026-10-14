@@ -468,7 +468,7 @@ impl defuse::Executor for Threads {
     }
 }
 
-const SCHEDS: [&str; 4] = ["seq", "spec", "random", "par"];
+const SCHEDS: [&str; 7] = ["seq", "spec", "random", "par", "pred1", "pred8", "par8"];
 
 fn eval(eng: &mut Engine, sched: &str) -> Result<Report, String> {
     match sched {
@@ -478,6 +478,18 @@ fn eval(eng: &mut Engine, sched: &str) -> Result<Report, String> {
             &mut defuse::Sequential,
         ),
         "random" => eng.evaluate(&mut defuse::RandomScheduler::new(7, true), &mut defuse::Sequential),
+        "pred1" => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::Predicted, 256),
+            &mut Threads(1),
+        ),
+        "pred8" => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::Predicted, 256),
+            &mut Threads(8),
+        ),
+        "par8" => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut Threads(8),
+        ),
         _ => eng.evaluate(
             &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
             &mut Threads(4),

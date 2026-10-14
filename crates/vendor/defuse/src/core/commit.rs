@@ -159,6 +159,7 @@ impl Shared {
         let pread = Self::take_pred_read();
         let mut wait = None;
         if !self.sread(u, || {
+            super::query::sib_cursor_reset();
             cx.log.iter_mut().all(|p| match self.recheck(s, p, false) {
                 Ok(Ok(())) => {
                     self.refresh_sites(s, p);
@@ -183,6 +184,7 @@ impl Shared {
         r.lgen.store(lgen, Ordering::Release);
         self.subscribe(s, u, lgen, &cx.log);
         if !self.sread(u, || {
+            super::query::sib_cursor_reset();
             cx.log.iter().all(|p| matches!(self.recheck(s, p, false), Ok(Ok(()))))
         }) {
             if pread {
@@ -239,6 +241,7 @@ impl Shared {
             r.data().ex().guess_pending = n;
             // A predicted read whose definer finished meanwhile is
             // compared now: a value that moved checks the run again.
+            super::query::sib_cursor_reset();
             let moved = pread
                 && cx.log.iter().any(|p| {
                     matches!(p, Pred::Def { spec: Some(q), .. } if !in_work(self.rec(*q).st()))

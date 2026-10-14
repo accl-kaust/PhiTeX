@@ -1224,6 +1224,7 @@ impl Engine {
                 }
                 if st == S_CLEAN {
                     let log = r.data().res.as_ref().map_or_else(Default::default, |c| c.log.clone());
+                    super::query::sib_cursor_reset();
                     for p in &log {
                         if !matches!(sh.recheck(s, p, false), Ok(Ok(()))) {
                             let (op, a) = sh.text(s);

@@ -71,6 +71,16 @@ thread_local! {
     static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+thread_local! {
+    /// The last sibling a log check's `Pred::Sib` found: (reader, index, slot).
+    static SIB_CUR: std::cell::Cell<Option<(Slot, usize, Slot)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Starts a log check: sibling reads walk from the start again.
+pub(crate) fn sib_cursor_reset() {
+    SIB_CUR.with(|c| c.set(None));
+}
+
 impl Shared {
     /// The entries of a label-sorted list strictly between `lo` and `hi`.
     fn span<'x>(&self, xs: &'x [Slot], lo: u64, hi: u64) -> &'x [Slot] {
@@ -778,10 +788,16 @@ impl Shared {
     /// The `i`-th following sibling (as `me` sees them) and every entry the
     /// walk passed.
     pub(crate) fn q_sib(&self, at: Slot, i: usize) -> (Option<(Slot, u32, u64)>, Vec<Slot>) {
+        self.q_sib_from(at, at, 0, i)
+    }
+
+    /// `q_sib` resumed: the walk goes on after `from`, `at`'s sibling number
+    /// `k0 - 1` (`from == at`, `k0 == 0`: from the start).
+    pub(crate) fn q_sib_from(&self, at: Slot, from: Slot, k0: usize, i: usize) -> (Option<(Slot, u32, u64)>, Vec<Slot>) {
         let mut seen = Vec::new();
         let mut got = None;
-        let mut k = 0;
-        self.following(at, at, |x, skipped| {
+        let mut k = k0;
+        self.following_from(from, at, |x, skipped| {
             seen.push(x);
             if skipped {
                 return true;
@@ -1082,7 +1098,14 @@ impl Shared {
                 Q::Wait(w) => Err(w),
             },
             Pred::Sib { i, ans } => {
-                let (got, _) = self.q_sib(me, *i as usize);
+                // A log's sibling reads come in order: one walk serves them
+                // (the cursor is reset before each log is checked).
+                let i = *i as usize;
+                let (got, _) = match SIB_CUR.with(std::cell::Cell::get) {
+                    Some((m, j, x)) if m == me && j < i => self.q_sib_from(me, x, j + 1, i),
+                    _ => self.q_sib(me, i),
+                };
+                SIB_CUR.with(|c| c.set(got.map(|g| (me, i, g.0))));
                 Ok(match (got, ans) {
                     (a, b) if a == *b => Ok(()),
                     (Some(a), Some(b)) if a.0 == b.0 && a.1 == b.1 => Err("following: changed"),
