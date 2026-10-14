@@ -75,6 +75,7 @@ impl PdfState {
         });
         let n = self.objs.len() - 1;
         self.obj_ptr = n;
+        self.rec_font(crate::replay::FontEv::New(t, i, n));
         if t == OBJ_TYPE_PAGE {
             self.index
                 .insert((t, Ident::Num(i32::try_from(i).unwrap_or(i32::MAX))), n);
@@ -131,10 +132,16 @@ impl PdfState {
     /// `get_obj(t, i, byname)`: the object of type `t` with identifier
     /// `id`, made if there is none.
     pub(crate) fn get_obj(&mut self, t: usize, id: &Ident) -> usize {
-        if let Some(&r) = self.index.get(&(t, id.clone())) {
-            return r;
-        }
-        self.create_obj_id(t, id)
+        let k = if let Some(&r) = self.index.get(&(t, id.clone())) {
+            r
+        } else {
+            self.rec_depth(true);
+            let k = self.create_obj_id(t, id);
+            self.rec_depth(false);
+            k
+        };
+        self.rec_font(crate::replay::FontEv::Get(t, id.clone(), k));
+        k
     }
 
     /// `pdf_os_switch`.

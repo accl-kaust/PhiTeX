@@ -41,7 +41,9 @@ pub(crate) const XPAGES: &str = "pdf:xpages";
 /// ([`finish`]); each step has already written its page once, apart, so
 /// that the finish finds its content stream compressed.
 pub(crate) struct PagePiece {
-    bx: BoxNode,
+    /// The page's box as `\shipout` got it (decoded again only for a
+    /// page the finish cannot place).
+    boxv: ValueId,
     params: Vec<ValueId>,
     margins: [i32; 3],
     whats: BTreeMap<u32, Whatsit>,
@@ -79,6 +81,48 @@ fn fold_back(r: &mut Run<'_, '_>, why: &str) {
     let id = v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()));
     let e = v.list(vec![v.str("pdf:fold"), id, v.str(why)]);
     r.contribute("needs", v.seq_unit(e));
+}
+
+/// A document-level command (`\pdfinfo`, `\pdfcatalog`, `\pdfnames`,
+/// `\pdftrailer`, `\pdftrailerid`) an output routine runs: kept in the
+/// pages' accumulator ([`XPAGES`]) where it was run, and applied by the
+/// finish there, so that the step reads no writer state. True when it
+/// was kept (the caller does nothing more).
+pub(crate) fn doc_op(r: &mut Run<'_, '_>, kind: &str, args: &[ValueId]) -> R<bool> {
+    if r.param("pdfoutput")? <= 0 || crate::pdfrelaxed::on(r)? || !in_page_step(r) || folding(r)? {
+        return Ok(false);
+    }
+    let v = r.v;
+    let mut xs = vec![v.str(kind)];
+    xs.extend_from_slice(args);
+    r.contribute(XPAGES, v.seq_unit(v.list(xs)));
+    Ok(true)
+}
+
+/// A document-level command kept by [`doc_op`], applied to `st`.
+fn apply_doc_op(v: &Values, st: &mut PdfState, e: ValueId) {
+    let xs = list_of(v, e);
+    let text = |k: usize| {
+        xs.get(k)
+            .map(|&t| bytes_of(&str_of(v, t)))
+            .unwrap_or_default()
+    };
+    match xs.first().map(|&k| str_of(v, k)).as_deref() {
+        Some("info") => st.info(&text(1)),
+        Some("names") => st.names(&text(1)),
+        Some("trailer") => st.trailer(&text(1)),
+        Some("trailerid") => st.trailer_id(&text(1)),
+        Some("catalog") => {
+            let a = xs
+                .get(2)
+                .copied()
+                .filter(|&x| x != ValueId::UNIT)
+                .and_then(|x| action(v, x));
+            // (the step's run logged nothing: the error is the fold's)
+            let _ = st.catalog(&text(1), a.as_ref());
+        }
+        _ => {}
+    }
 }
 
 /// `pdftex_banner` of the oracle's pdfTeX.
@@ -385,11 +429,26 @@ pub(crate) fn vf_for(r: &mut Run<'_, '_>, b: &BoxNode) -> R<()> {
 
 /// A file's bytes, `None` if absent.
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
+    type Memo = Mutex<FxHashMap<u64, Arc<[u8]>>>;
+    static M: OnceLock<Memo> = OnceLock::new();
     let v = r.v;
     Ok(r.file(name)?.and_then(|x| {
-        list_of(v, x)
-            .get(1)
-            .map(|&t| Arc::from(bytes_of(&str_of(v, t))))
+        let &t = list_of(v, x).get(1)?;
+        // (a pure function's memo by the text's value: every page step
+        // asks for its fonts' files)
+        let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+        if let Some(b) = m
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&t.raw())
+        {
+            return Some(b.clone());
+        }
+        let b: Arc<[u8]> = Arc::from(bytes_of(&str_of(v, t)));
+        m.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(t.raw(), b.clone());
+        Some(b)
     }))
 }
 
@@ -691,7 +750,8 @@ pub(crate) fn command<T: Default>(
     }
     if in_page_step(r) && !folding(r)? {
         // its state would be the pages' before it: stage B's loop-back
-        fold_back(r, "a PDF command in an output routine");
+        let what = r.v.render(input).chars().take(60).collect::<String>();
+        fold_back(r, &format!("a PDF command in an output routine: {what}"));
         return Ok(T::default());
     }
     let fs = fonts_for(r, fonts, false)?;
@@ -714,7 +774,8 @@ pub(crate) fn command_forms<T: Default>(
     }
     if in_page_step(r) && !folding(r)? {
         // its state would be the pages' before it: stage B's loop-back
-        fold_back(r, "a PDF command in an output routine");
+        let what = r.v.render(input).chars().take(60).collect::<String>();
+        fold_back(r, &format!("a PDF command in an output routine: {what}"));
         return Ok(T::default());
     }
     let fs = fonts_for(r, fonts, false)?;
@@ -1016,16 +1077,7 @@ pub(crate) fn ship(
         r.param("pdfthreadmargin")?,
     ];
     if in_page_step(r) && !folding(r)? {
-        return ship_apart(
-            r,
-            page.raw(),
-            &p,
-            bx,
-            &side.whats,
-            &resolved,
-            fonts,
-            margins,
-        );
+        return ship_apart(r, page, &p, bx, &side.whats, &resolved, fonts, margins);
     }
     let (err, shown) = step_forms(r, page, &fonts, |st, forms, fonts| {
         page_params(v, st.params_mut(), &p);
@@ -1098,7 +1150,7 @@ fn set_page_params(v: &Values, st: &mut PdfState, params: &[ValueId], margins: [
 #[allow(clippy::too_many_arguments)]
 fn ship_apart(
     r: &mut Run<'_, '_>,
-    page_id: u64,
+    page_v: ValueId,
     p: &[ValueId],
     bx: &BoxNode,
     side_whats: &[ValueId],
@@ -1129,7 +1181,7 @@ fn ship_apart(
         }
     }
     let mut pc = PagePiece {
-        bx: bx.clone(),
+        boxv: list_of(v, page_v).first().copied().unwrap_or(ValueId::UNIT),
         params: p.to_vec(),
         margins,
         whats,
@@ -1145,7 +1197,7 @@ fn ship_apart(
         .map_or(0, ValueId::raw);
     let pdfmap = r.file("pdftex.map")?.map_or(0, ValueId::raw);
     let mut words = vec![
-        page_id,
+        page_v.raw(),
         k0,
         maps,
         pdfmap,
@@ -1172,7 +1224,7 @@ fn ship_apart(
     pc.base = st.fonts_used();
     let (res, rec) = {
         let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
-        st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
+        st.ship_recorded(bx, &pc.fonts, &mut wh)
     };
     pc.rec = rec;
     let err = res.err();
@@ -1204,6 +1256,7 @@ fn ship_apart(
 /// on it in order (`PdfState::replay_page`: numbered, the content bytes
 /// the step made copied, no walk, no compression), or shipped again
 /// where a page cannot be placed, finished.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<ValueId, Stop> {
     let v = cx.values();
     let k = fin
@@ -1214,11 +1267,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         .unwrap_or_else(PoisonError::into_inner)
         .get(&k)
         .cloned();
-    let xpages: Vec<u64> = v
-        .seq_to_vec(cx.acc_range(v.field(XPAGES), None)?)
-        .into_iter()
-        .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
-        .collect();
+    let xpages: Vec<ValueId> = v.seq_to_vec(cx.acc_range(v.field(XPAGES), None)?);
     let a = match start {
         Some(a) => a,
         None if xpages.is_empty() => return Ok(v.str("")),
@@ -1243,7 +1292,16 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
     let mut st = a.st.clone();
     let mut bytes = a.bytes.clone();
     let (mut replayed, mut shipped) = (0usize, 0usize);
-    for pk in xpages {
+    // the variables' key after the page placed last (none after a page
+    // shipped again or an operation on the state)
+    let mut known: Option<String> = None;
+    for x in xpages {
+        if v.as_int(x).is_none() {
+            apply_doc_op(v, &mut st, x);
+            known = None;
+            continue;
+        }
+        let pk = u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
         let Some(pc) = pieces()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1253,12 +1311,22 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
             return Ok(v.str(""));
         };
         set_page_params(v, &mut st, &pc.params, pc.margins);
-        let placed = st.replay_page(&pc.rec, &pc.fonts, &pc.base);
+        let placed = st.replay_page(&pc.rec, &pc.fonts, &pc.base, known.as_deref());
+        known = placed
+            .as_ref()
+            .ok()
+            .and_then(|_| pc.rec.post_key())
+            .map(str::to_owned);
         if let Err(why) = &placed
             && shipped == 0
             && crate::exec::env_flag!("PHITEX_TEX_TIME")
         {
             eprintln!("pdf pages: page {} shipped again: {why}", replayed + 1);
+        }
+        if let Ok(Some(why)) = &placed
+            && crate::exec::env_flag!("PHITEX_TEX_TIME")
+        {
+            eprintln!("pdf pages: page {}: {why}", replayed + shipped + 1);
         }
         if placed.is_ok() {
             replayed += 1;
@@ -1266,7 +1334,12 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
             shipped += 1;
             // (the step logged the writer's error when it wrote the page)
             let mut wh = |h: u32, _leaders: bool| page_whatsit(&a.forms, &pc.whats, h);
-            let _ = st.ship_out_with(&pc.bx, &pc.fonts, &mut wh);
+            let mut side = crate::nodes::Side::default();
+            if let Some(phitex_typeset::node::Node::Box(bx)) =
+                crate::nodes::decode(v, pc.boxv, &mut side)
+            {
+                let _ = st.ship_out_with(&bx, &pc.fonts, &mut wh);
+            }
         }
     }
     st.flush(&mut bytes);
