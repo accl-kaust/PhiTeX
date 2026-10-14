@@ -483,38 +483,21 @@ fn file_hash(f: Option<&(String, Vec<u8>)>) -> u64 {
 }
 
 /// The texts of the files written: the `streams` entries (`[name]` opens
-/// a file empty, `[name, text]` adds to it, `[name, "", "close"]` closes
-/// it: what is written to it until it is opened again goes nowhere, as
-/// TeX's §1370 sends a closed stream's writes to the log), in the order
-/// first opened.
+/// a file empty, `[name, text]` adds to it), in the order first opened.
 pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut closed: Vec<String> = Vec::new();
     for &e in entries {
         let xs = list_of(v, stream_entry(v, e));
         let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
         let k = if let Some(k) = out.iter().position(|(n, _)| *n == name) {
             k
         } else {
-            out.push((name.clone(), String::new()));
+            out.push((name, String::new()));
             out.len() - 1
         };
-        if xs
-            .get(2)
-            .is_some_and(|&c| v.as_str(c).as_deref() == Some("close"))
-        {
-            if !closed.contains(&name) {
-                closed.push(name);
-            }
-            continue;
-        }
-        if let Some(&t) = xs.get(1) {
-            if !closed.contains(&name) {
-                out[k].1.push_str(&str_of(v, t));
-            }
-        } else {
-            closed.retain(|n| *n != name);
-            out[k].1.clear();
+        match xs.get(1) {
+            Some(&t) => out[k].1.push_str(&str_of(v, t)),
+            None => out[k].1.clear(),
         }
     }
     out
@@ -1294,7 +1277,7 @@ impl Graph {
         // head of the message; the error's full form last)
         let mut out = format!("evaluation: {e}");
         let v = self.eng.values();
-        if let E::UndeclaredDefinition { field, .. } | E::ConflictingPublication { field } = e {
+        if let E::UndeclaredDefinition { field, .. } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
         // (the engine does not say which loop-backs kept changing: the
@@ -1663,29 +1646,6 @@ impl Graph {
                     continue;
                 }
                 declare_marks_before(&mut self.eng, n);
-                self.marks_decl.push((f, ValueId::UNIT));
-                asked = true;
-            }
-            // a document node's flush points: their `pgst:at:<node>:<k>`
-            // loop-backs declared (`flushdecl:<node>:<k>`), UNIT (the
-            // state as it is) in round one
-            let fdecl: Vec<(Field, String)> = {
-                let v = self.eng.values();
-                r.env_waits
-                    .iter()
-                    .filter_map(|&(_, f)| {
-                        field_name(v, f)
-                            .strip_prefix("flushdecl:")
-                            .map(|k| (f, k.to_owned()))
-                    })
-                    .collect()
-            };
-            for (f, key) in fdecl {
-                if self.marks_decl.iter().any(|&(g, _)| g == f) {
-                    continue;
-                }
-                let lb = self.eng.values().field(&format!("pgst:at:{key}"));
-                self.eng.declare_loopback(lb, ValueId::UNIT);
                 self.marks_decl.push((f, ValueId::UNIT));
                 asked = true;
             }
@@ -3731,7 +3691,6 @@ fn declare_fields(eng: &mut Engine) {
         "ifviol",
         "streams",
         "wplan",
-        "flushplan",
         "fread",
         "pagefxs",
         "pgdeltas",
