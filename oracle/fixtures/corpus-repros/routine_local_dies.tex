@@ -1,0 +1,8 @@
+\documentclass{article}
+\begin{document}
+\def\X{text}\def\Y{text}
+\output{\shipout\vbox{\hbox{X=\X\ Y=\Y}\unvbox255}\def\X{routine-local}\gdef\Y{routine-global}}
+One.\newpage
+Two.\newpage
+Three.
+\end{document}

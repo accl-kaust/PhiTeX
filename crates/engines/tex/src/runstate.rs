@@ -507,15 +507,6 @@ impl State {
         }
     }
 
-    /// The locations a group of the run saved (§271), each once: the
-    /// local bindings in force that the run's groups will restore.
-    pub(crate) fn saved_locs(&self) -> Vec<Loc> {
-        let mut ls: Vec<Loc> = self.save.iter().map(|s| s.loc).collect();
-        ls.sort_unstable();
-        ls.dedup();
-        ls
-    }
-
     /// A new group of the run: its number, and where its saves and
     /// definitions begin, and its stamp.
     pub(crate) fn open(&mut self) -> (u32, usize, usize, u64) {

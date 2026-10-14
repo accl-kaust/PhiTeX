@@ -172,6 +172,9 @@ impl Run<'_, '_> {
             return self.mode();
         }
         self.effect = Effect::Close;
+        // (the engine scope's end: `unsave` is the engine's, the page
+        // chain's fold restores its saves as TeX does, §283)
+        self.log_end(md.depth);
         self.unsave_extras(md)?;
         self.kind_outer(md)
     }
@@ -313,8 +316,15 @@ impl Run<'_, '_> {
         }
         if lid == 0 {
             self.probe_ok = false;
-            self.mark_locals(false);
             self.flush_text_defs();
+            // (the invariant the writer's fold rests on: a run's
+            // assignments go out before each item it puts on the main
+            // list, so a run spanning several fires has each in the page
+            // part where it made it)
+            debug_assert!(
+                self.tlog.is_empty() || !self.logs_defs(),
+                "text assignments left behind an item"
+            );
         }
         let e = v.list(vec![v.int(lid), node]);
         let s = v.seq_unit(e);

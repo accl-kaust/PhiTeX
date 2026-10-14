@@ -411,42 +411,6 @@ impl Input {
         }
     }
 
-    /// The innermost token lists' text, up to `n` (diagnostics only).
-    pub(crate) fn debug_toks(&self, n: usize) -> Vec<String> {
-        self.levels
-            .iter()
-            .rev()
-            .filter(|l| l.kind == kind::TOKS)
-            .take(n)
-            .map(|l| {
-                let lo = l.c.min(l.b) as usize;
-                let hi = (l.b as usize).min(self.arena.len());
-                let toks: Vec<crate::val::Tok> = (lo..hi)
-                    .map(|i| self.arena.at(u32::try_from(i).unwrap_or(0)))
-                    .collect();
-                let mut s = String::new();
-                crate::print::show_toks(&mut s, &toks, 92, &mut |_| 12);
-                s.chars().take(200).collect()
-            })
-            .collect()
-    }
-
-    /// The innermost line level's text (diagnostics only).
-    pub(crate) fn debug_line(&self) -> String {
-        self.levels
-            .iter()
-            .rev()
-            .find(|l| l.kind == kind::LINE)
-            .map(|l| {
-                self.lines[l.a as usize]
-                    .buf
-                    .iter()
-                    .filter_map(|&c| char::from_u32(c))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     #[inline]
     pub(crate) fn top_line(&self) -> Option<&Line> {
         match self.levels.last() {

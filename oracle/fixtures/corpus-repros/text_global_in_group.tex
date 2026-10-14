@@ -1,0 +1,12 @@
+\documentclass{article}
+\begin{document}
+\def\X{outer}
+\output{\shipout\vbox{\hbox{X=\X}\unvbox255}}
+\begingroup
+\def\X{local}
+\begingroup\gdef\X{global}\endgroup
+Inside.
+\endgroup
+One.\newpage
+Two.
+\end{document}
