@@ -1402,8 +1402,25 @@ fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
     // the pointer to the previous `bop` kept with its bytes
     let mut s = latin1(w.bytes());
     let nokeep = crate::exec::env_flag!("PHITEX_DVI_NOKEEP");
-    for page in all {
+    let mut written = write_apart(
+        v,
+        &all,
+        old.as_ref(),
+        i32::try_from(mag).unwrap_or(1000),
+        &comment,
+        nokeep,
+    );
+    let mut apart = 0usize;
+    for (i, page) in all.into_iter().enumerate() {
         let at = w.location();
+        if let Some(p) = written.remove(&i)
+            && w.ship_kept(&p.bytes)
+        {
+            push_page(&mut s, &w.bytes()[at..], &p);
+            kept.insert(page, p);
+            apart += 1;
+            continue;
+        }
         if let Some(p) = old.as_ref().and_then(|m| m.pages.get(&page))
             && w.ship_kept(&p.bytes)
         {
@@ -1412,18 +1429,12 @@ fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
             again += 1;
             continue;
         }
-        match dvi_page(v, &mut w, page, !nokeep) {
-            Some(p) if p.bytes().len() >= 45 => {
-                let b = p.bytes();
-                let k = std::sync::Arc::new(KeptPage {
-                    head: latin1(&b[..41]),
-                    tail: latin1(&b[45..]),
-                    bytes: p,
-                });
+        match dvi_page(v, &mut w, page, !nokeep).and_then(kept_page) {
+            Some(k) => {
                 push_page(&mut s, &w.bytes()[at..], &k);
                 kept.insert(page, k);
             }
-            _ => s.push_str(&latin1(&w.bytes()[at..])),
+            None => s.push_str(&latin1(&w.bytes()[at..])),
         }
     }
     let n = kept.len();
@@ -1448,7 +1459,7 @@ fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
     let r = v.intern(Value::Str(s.into_boxed_str()));
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "dvi file: {n} pages, {again} kept, pages {t1:?}, postamble {:?}, string {:?}, value {:?}",
+            "dvi file: {n} pages, {again} kept, {apart} written apart, pages {t1:?}, postamble {:?}, string {:?}, value {:?}",
             t2.saturating_sub(t1),
             t3.saturating_sub(t2),
             t0.elapsed().saturating_sub(t3)
@@ -1530,9 +1541,118 @@ fn dvi_page(
     page: ValueId,
     keep: bool,
 ) -> Option<phitex_dvi::PageBytes> {
+    dvi_page_assuming(v, w, page, keep, &|_| false)
+}
+
+/// The pages of `all` the memory `old` lacks, written apart in parallel
+/// (`exec::par_each`) by their index.
+fn write_apart(
+    v: &Values,
+    all: &[ValueId],
+    old: Option<&DviMemo>,
+    mag: i32,
+    comment: &str,
+    nokeep: bool,
+) -> phitex_defuse::FxHashMap<usize, std::sync::Arc<KeptPage>> {
+    // the pages the memory lacks, written apart in parallel, each with
+    // the fonts its page list names before it taken as defined (§621);
+    // `ship_kept` checks each where it lands, else it is written there
+    let fresh: Vec<usize> = (0..all.len())
+        .filter(|&i| !nokeep && old.is_none_or(|m| !m.pages.contains_key(&all[i])))
+        .collect();
+    let mut before: Vec<Vec<u32>> = vec![Vec::new(); all.len()];
+    if !fresh.is_empty() {
+        let mut seen = phitex_defuse::FxHashSet::default();
+        for (i, &page) in all.iter().enumerate() {
+            let ids = page_font_ids(v, page);
+            before[i] = ids.iter().copied().filter(|f| seen.contains(f)).collect();
+            seen.extend(ids);
+        }
+    }
+    let slots: Vec<std::sync::OnceLock<Option<std::sync::Arc<KeptPage>>>> =
+        fresh.iter().map(|_| std::sync::OnceLock::new()).collect();
+    let busy = std::sync::atomic::AtomicU64::new(0);
+    let t0 = std::time::Instant::now();
+    crate::exec::par_each(fresh.len(), &|k| {
+        let tk = std::time::Instant::now();
+        let _busy = Busy(&busy, tk);
+        let i = fresh[k];
+        let mut pw = phitex_dvi::DviWriter::new(mag, comment);
+        let pre = &before[i];
+        let r =
+            dvi_page_assuming(v, &mut pw, all[i], true, &|f| pre.contains(&f)).and_then(kept_page);
+        let _ = slots[k].set(r);
+    });
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") && !fresh.is_empty() {
+        eprintln!(
+            "dvi pages apart: {} in {:?}, busy {:?}",
+            fresh.len(),
+            t0.elapsed(),
+            std::time::Duration::from_nanos(busy.load(std::sync::atomic::Ordering::Relaxed))
+        );
+    }
+    fresh
+        .iter()
+        .zip(slots)
+        .filter_map(|(&i, s)| s.into_inner().flatten().map(|k| (i, k)))
+        .collect()
+}
+
+/// Adds the time since its start to a counter when dropped.
+struct Busy<'a>(&'a std::sync::atomic::AtomicU64, std::time::Instant);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        let n = u64::try_from(self.1.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.0.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A page's kept bytes with their characters.
+fn kept_page(p: phitex_dvi::PageBytes) -> Option<std::sync::Arc<KeptPage>> {
+    let b = p.bytes();
+    if b.len() < 45 {
+        return None;
+    }
+    let (head, tail) = (latin1(&b[..41]), latin1(&b[45..]));
+    Some(std::sync::Arc::new(KeptPage {
+        head,
+        tail,
+        bytes: p,
+    }))
+}
+
+/// The font numbers a page's list names (its `fontdefs`).
+fn page_font_ids(v: &Values, page: ValueId) -> Vec<u32> {
+    list_of(v, page)
+        .get(2)
+        .map(|&l| list_of(v, l))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|fx| {
+            let ys = list_of(v, fx);
+            u32::try_from(ys.first().map_or(0, |&y| int_of(v, y))).unwrap_or(0)
+        })
+        .collect()
+}
+
+/// [`dvi_page`], the fonts `defined` answers taken as defined before
+/// the page (no `fnt_def` for them, §621).
+fn dvi_page_assuming(
+    v: &Values,
+    w: &mut phitex_dvi::DviWriter,
+    page: ValueId,
+    keep: bool,
+    defined: &(dyn Fn(u32) -> bool + Sync),
+) -> Option<phitex_dvi::PageBytes> {
     let xs = list_of(v, page);
     let mut side = Side::default();
-    let Some(Node::Box(bx)) = xs.first().and_then(|&b| nodes::decode(v, b, &mut side)) else {
+    // (a page is decoded once: its nodes are not kept in this thread's
+    // cache, whose copies cost more than the decoding)
+    let was = crate::val::NO_KEEP.with(|c| c.replace(true));
+    let bx = xs.first().and_then(|&b| nodes::decode(v, b, &mut side));
+    crate::val::NO_KEEP.with(|c| c.set(was));
+    let Some(Node::Box(bx)) = bx else {
         return None;
     };
     let mut counts = [0i32; 10];
@@ -1556,6 +1676,11 @@ fn dvi_page(
             && let Some(l) = crate::fonts::load(v, file, s)
         {
             defs.insert(id, crate::fonts::font_def(&l, &name));
+        }
+    }
+    for (&f, d) in &defs {
+        if defined(f) {
+            w.assume_defined(f, d.clone());
         }
     }
     let fonts = |f: u32| {
