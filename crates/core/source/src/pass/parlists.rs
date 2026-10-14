@@ -517,11 +517,11 @@ impl Compiler<'_, '_> {
                     Some(o) if o.kind == AtomKind::Open && o.mate != usize::MAX && o.mate < hi => {
                         let t: Arc<str> = Arc::from(&text[o.end..atoms[o.mate].start]);
                         self.flush(text, atoms, seg, o.mate + 1, &mut out);
-                        let known = !t.contains('#');
-                        if known {
-                            self.lists.push(t.clone());
-                        }
-                        out.push(Op::Assign(known.then_some(t)));
+                        // (a list made of a setter's parameters, `#1`: its
+                        // program reads them as values, which define
+                        // nothing of their own)
+                        self.lists.push(t.clone());
+                        out.push(Op::Assign(Some(t)));
                         k = o.mate + 1;
                     }
                     _ => {
