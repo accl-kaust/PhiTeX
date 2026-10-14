@@ -2323,6 +2323,8 @@ impl Shared {
     }
 
     pub(crate) fn wake(&self, s: Slot, seq: u32) {
+        #[cfg(feature = "observe")]
+        crate::trace::node(self, s, "wake", "");
         let r = self.rec(s);
         if seq == super::SPEC_SEQ {
             self.touch(s, u32::MAX, &Cause::Structure, false);

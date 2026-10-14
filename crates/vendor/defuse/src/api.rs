@@ -9,10 +9,12 @@ use crate::values::{Field, Rng, ValueId, Values};
 
 /// A registered operation.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpId(pub(crate) u32);
 
 /// A node: a run of an operation on arguments at a place in a unit.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct NodeId(pub(crate) u64);
 
 impl NodeId {
@@ -29,10 +31,12 @@ impl NodeId {
 
 /// A unit: an ordered text of nodes with its own scopes.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnitId(pub(crate) u32);
 
 /// Where a definition lives: the enclosing scope, or everywhere after it.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum Locality {
     Local,
     Global,
@@ -40,6 +44,7 @@ pub enum Locality {
 
 /// What a node with a pending definition set may define.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum MayDefine {
     Nothing,
     Any,
@@ -51,6 +56,7 @@ pub enum MayDefine {
 /// Scope brackets: `closes` scopes, then `opens` new ones, before or after
 /// the node itself.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct Brackets {
     pub closes: u8,
     pub opens: u8,
@@ -62,6 +68,7 @@ pub struct Brackets {
 
 /// A node's scope effect.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum Effect {
     None,
     /// Opens a scope after itself.
@@ -95,6 +102,7 @@ impl Effect {
 /// How many following siblings a node claims (they do not run; the claimer
 /// reads their text).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum Claim {
     None,
     Count(usize),
@@ -104,6 +112,7 @@ pub enum Claim {
 
 /// Whether a stream claim ends before a candidate node.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum Until {
     No,
     Yes,
@@ -321,6 +330,7 @@ pub enum Cause {
 
 /// What [`crate::Ctx::use_field_at`] found at a position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum FieldAt {
     /// The definition reaching it: its value and its defining node
     /// (`None` for the unit's start value).
@@ -337,6 +347,7 @@ pub enum FieldAt {
 /// [`crate::Ctx::use_field_proj`]: a reader depends only on the projected
 /// value, so a change that projects equal leaves it standing.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProjId(pub(crate) u16);
 
 impl ProjId {
@@ -557,6 +568,7 @@ impl std::error::Error for EvalError {}
 /// Bounds on one evaluation: exceeding one ends it with an error instead
 /// of running away.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct Limits {
     /// Applied runs of one node (default 64).
     pub runs_per_node: u32,
@@ -588,6 +600,7 @@ impl Default for Limits {
 
 /// Where an edit's loop-back iteration starts.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum LoopStart {
     /// The declared initial values (a cold evaluation's fixpoint).
     Initial,

@@ -1,6 +1,9 @@
 //! The engine: the client's handle. Text edits, declarations, and the
 //! read-only queries on the committed state.
 
+// The recording wrappers return what the call returned, unit included.
+#![allow(clippy::let_unit_value, clippy::semicolon_if_nothing_returned)]
+
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -227,6 +230,21 @@ impl Engine {
     }
 
     pub fn register(&mut self, op: Arc<dyn Operation>) -> OpId {
+        #[cfg(feature = "observe")]
+        #[allow(clippy::cast_possible_truncation)]
+        // The two built-in operations are the engine's own: not recorded.
+        let op: Arc<dyn Operation> = if crate::record::rec().is_some() && self.sh.ops.len() >= 2 {
+            let id = OpId(self.sh.ops.len() as u32);
+            crate::record::api(
+                &self.sh.values,
+                "register",
+                serde_json::json!([op.name()]),
+                crate::record::j(&id),
+            );
+            Arc::new(crate::record::RecOp { inner: op, id })
+        } else {
+            op
+        };
         let name = op.name();
         self.sh.ops.push(op);
         self.sh.op_names.push(name);
@@ -242,6 +260,18 @@ impl Engine {
     ///
     /// If more than 65,533 projections are registered.
     pub fn register_projection(&mut self, p: crate::api::Projection) -> crate::api::ProjId {
+        #[cfg(feature = "observe")]
+        #[allow(clippy::cast_possible_truncation)]
+        let p = {
+            let id = (self.sh.projs.len() + 2) as u16;
+            crate::record::api(
+                &self.sh.values,
+                "register_projection",
+                serde_json::Value::Null,
+                serde_json::json!(id),
+            );
+            crate::record::rec_projection(id, p)
+        };
         self.sh.projs.push(p);
         crate::api::ProjId(u16::try_from(self.sh.projs.len() + 1).expect("too many projections"))
     }
@@ -253,6 +283,16 @@ impl Engine {
     }
 
     pub fn new_unit(&mut self) -> UnitId {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&());
+        let r = self.new_unit_inner();
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "new_unit", a, crate::record::j(&r));
+        r
+    }
+
+    #[inline]
+    fn new_unit_inner(&mut self) -> UnitId {
         let u = self.sh.new_unit_rec(NIL);
         self.units.push(u);
         UnitId(u)
@@ -260,6 +300,16 @@ impl Engine {
 
     /// Appends a node at the end of `unit`.
     pub fn push(&mut self, unit: UnitId, op: OpId, args: Vec<ValueId>) -> NodeId {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&unit, &op, &args));
+        let r = self.push_inner(unit, op, args);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "push", a, crate::record::j(&r));
+        r
+    }
+
+    #[inline]
+    fn push_inner(&mut self, unit: UnitId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let last = self.sh.unit(unit.0).last.load(Ordering::Acquire);
         self.sh.make_top(unit.0, last, op, args)
     }
@@ -272,6 +322,16 @@ impl Engine {
 
     /// Keeps the node's applications alive across collections.
     pub fn add_root(&mut self, n: NodeId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&n,));
+        let r = self.add_root_inner(n);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "add_root", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn add_root_inner(&mut self, n: NodeId) {
         self.roots.push(n);
     }
 
@@ -279,6 +339,16 @@ impl Engine {
     ///
     /// If `node` is not a live node.
     pub fn insert_after(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&node, &op, &args));
+        let r = self.insert_after_inner(node, op, args);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "insert_after", a, crate::record::j(&r));
+        r
+    }
+
+    #[inline]
+    fn insert_after_inner(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let s = self.sh.live_slot(node).expect("insert_after: a live node");
         let u = self.sh.unit_of(s);
         let after = {
@@ -292,6 +362,16 @@ impl Engine {
     ///
     /// If `node` is not a live node.
     pub fn insert_before(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&node, &op, &args));
+        let r = self.insert_before_inner(node, op, args);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "insert_before", a, crate::record::j(&r));
+        r
+    }
+
+    #[inline]
+    fn insert_before_inner(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let s = self.sh.live_slot(node).expect("insert_before: a live node");
         let u = self.sh.unit_of(s);
         let p = self.sh.prev(s);
@@ -300,6 +380,16 @@ impl Engine {
 
     /// Replaces a node's text; the node keeps its id.
     pub fn replace(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&node, &op, &args));
+        let r = self.replace_inner(node, op, args);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "replace", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn replace_inner(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) {
         let Some(s) = self.sh.live_slot(node) else { return };
         let sh = &self.sh;
         let r = sh.rec(s);
@@ -366,6 +456,16 @@ impl Engine {
 
     /// Removes a node and its subtree.
     pub fn remove(&mut self, node: NodeId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&node,));
+        let r = self.remove_inner(node);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "remove", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn remove_inner(&mut self, node: NodeId) {
         let Some(s) = self.sh.live_slot(node) else { return };
         let sh = &self.sh;
         let u = sh.unit_of(s);
@@ -453,14 +553,44 @@ impl Engine {
     }
 
     pub fn declare_accumulator(&mut self, f: Field, m: Arc<dyn Monoid>) {
+        #[cfg(feature = "observe")]
+        let m: Arc<dyn Monoid> = {
+            crate::record::api(
+                &self.sh.values,
+                "declare_accumulator",
+                crate::record::j(&f),
+                serde_json::Value::Null,
+            );
+            Arc::new(crate::record::RecMonoid { inner: m, field: f })
+        };
         self.sh.accs.insert(f, m);
     }
 
     pub fn declare_sequence(&mut self, f: Field) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&f,));
+        let r = self.declare_sequence_inner(f);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "declare_sequence", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn declare_sequence_inner(&mut self, f: Field) {
         self.sh.seqs.insert(f);
     }
 
     pub fn declare_loopback(&mut self, f: Field, init: ValueId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&f, &init));
+        let r = self.declare_loopback_inner(f, init);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "declare_loopback", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn declare_loopback_inner(&mut self, f: Field, init: ValueId) {
         if let Some(&old) = self.sh.loops.get(&f) {
             // Declared again: the same is nothing; a new initial value is
             // the round value only while the field still has the old one.
@@ -512,15 +642,45 @@ impl Engine {
     }
 
     pub fn set_loop_start(&mut self, s: LoopStart) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&s,));
+        let r = self.set_loop_start_inner(s);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "set_loop_start", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn set_loop_start_inner(&mut self, s: LoopStart) {
         self.loop_start = s;
     }
 
     pub fn set_max_rounds(&mut self, n: u64) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&n,));
+        let r = self.set_max_rounds_inner(n);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "set_max_rounds", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn set_max_rounds_inner(&mut self, n: u64) {
         self.max_rounds = n;
     }
 
     /// Bounds an evaluation (see [`Limits`]); exceeding one is an error.
     pub fn set_limits(&mut self, l: Limits) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&l,));
+        let r = self.set_limits_inner(l);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "set_limits", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn set_limits_inner(&mut self, l: Limits) {
         *wlock(&self.sh.limits) = l.clone();
         self.limits = l;
     }
@@ -533,6 +693,17 @@ impl Engine {
     /// Supplies environment fields (replacing the previous ones).
     pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
         let new: FxHashMap<Field, ValueId> = env.into_iter().collect();
+        #[cfg(feature = "observe")]
+        {
+            let mut v: Vec<(Field, ValueId)> = new.iter().map(|(&f, &x)| (f, x)).collect();
+            v.sort_unstable();
+            crate::record::api(
+                &self.sh.values,
+                "set_environment",
+                crate::record::j(&v),
+                serde_json::Value::Null,
+            );
+        }
         // By value: only the fields whose answer moves wake their readers
         // (the provider's answers stay underneath).
         let changed = {
@@ -553,6 +724,16 @@ impl Engine {
 
     /// Sets the value a field has at the start of `unit`.
     pub fn set_env(&mut self, unit: UnitId, field: Field, value: ValueId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&unit, &field, &value));
+        let r = self.set_env_inner(unit, field, value);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "set_env", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn set_env_inner(&mut self, unit: UnitId, field: Field, value: ValueId) {
         let old = wlock(&self.sh.unit(unit.0).env).insert(field, value);
         if old != Some(value) {
             self.env_changed(&[field]);
@@ -562,11 +743,33 @@ impl Engine {
     /// Keeps `v` alive across value sweeps (for values the client holds).
     /// (Values are never swept here: every id stays valid.)
     pub fn pin(&mut self, v: ValueId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&v,));
+        let r = self.pin_inner(v);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "pin", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    #[allow(clippy::unused_self)]
+    fn pin_inner(&mut self, v: ValueId) {
         let _ = v;
     }
 
     /// Undoes one [`Self::pin`].
     pub fn unpin(&mut self, v: ValueId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&v,));
+        let r = self.unpin_inner(v);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "unpin", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    #[allow(clippy::unused_self)]
+    fn unpin_inner(&mut self, v: ValueId) {
         let _ = v;
     }
 
@@ -581,11 +784,31 @@ impl Engine {
 
     /// Removes the environment provider.
     pub fn clear_env_provider(&mut self) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&());
+        let r = self.clear_env_provider_inner();
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "clear_env_provider", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn clear_env_provider_inner(&mut self) {
         self.sh.provider = None;
     }
 
     /// Undoes [`Self::add_root`].
     pub fn remove_root(&mut self, node: NodeId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&node,));
+        let r = self.remove_root_inner(node);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "remove_root", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn remove_root_inner(&mut self, node: NodeId) {
         self.roots.retain(|&r| r != node);
     }
 
@@ -622,6 +845,16 @@ impl Engine {
     /// Marks every node created with `op` from now on (the client's
     /// output nodes, say), at creation.
     pub fn mark_op(&mut self, op: OpId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&op,));
+        let r = self.mark_op_inner(op);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "mark_op", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn mark_op_inner(&mut self, op: OpId) {
         let mut m = wlock(&self.sh.marked_ops);
         if !m.contains(&op) {
             m.push(op);
@@ -637,6 +870,17 @@ impl Engine {
     /// Declares environment fields absent (replacing the previous ones).
     pub fn set_environment_absent(&mut self, absent: impl IntoIterator<Item = Field>) {
         let new: FxHashSet<Field> = absent.into_iter().collect();
+        #[cfg(feature = "observe")]
+        {
+            let mut v: Vec<Field> = new.iter().copied().collect();
+            v.sort_unstable();
+            crate::record::api(
+                &self.sh.values,
+                "set_environment_absent",
+                crate::record::j(&v),
+                serde_json::Value::Null,
+            );
+        }
         let changed = {
             let mut e = wlock(&self.sh.env);
             let mut fs: Vec<Field> = e.absent.iter().chain(new.iter()).copied().collect();
@@ -684,6 +928,16 @@ impl Engine {
     /// Supplies environment fields on demand: `Some(answer)` known
     /// (`Some(None)`: absent), `None` unknown.
     pub fn set_env_provider(&mut self, provider: Box<crate::api::EnvProvider>) {
+        #[cfg(feature = "observe")]
+        let provider = {
+            crate::record::api(
+                &self.sh.values,
+                "set_env_provider",
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            );
+            crate::record::rec_provider(provider)
+        };
         self.sh.provider = Some(provider);
     }
 
@@ -700,6 +954,16 @@ impl Engine {
     /// Frees applications no live node reads (and their bodies); returns
     /// the nodes freed.
     pub fn collect_garbage(&mut self) -> usize {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&());
+        let r = self.collect_garbage_inner();
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "collect_garbage", a, crate::record::j(&r));
+        r
+    }
+
+    #[inline]
+    fn collect_garbage_inner(&mut self) -> usize {
         self.collect_apps(false)
     }
 
@@ -792,6 +1056,16 @@ impl Engine {
 
     /// Asks for a report when the node is final.
     pub fn mark(&mut self, n: NodeId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&n,));
+        let r = self.mark_inner(n);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "mark", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn mark_inner(&mut self, n: NodeId) {
         if let Some(s) = self.sh.live_slot(n) {
             if !self.sh.rec(s).has(F_MARKED) {
                 lock(&self.sh.marked).push(s);
@@ -804,6 +1078,16 @@ impl Engine {
     }
 
     pub fn unmark(&mut self, n: NodeId) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&n,));
+        let r = self.unmark_inner(n);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "unmark", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn unmark_inner(&mut self, n: NodeId) {
         if let Some(s) = self.sh.live_slot(n) {
             self.sh.rec(s).clear(F_MARKED);
         }
@@ -811,6 +1095,16 @@ impl Engine {
 
     /// The client's version of the text from now on.
     pub fn set_version(&mut self, v: u64) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::j(&(&v,));
+        let r = self.set_version_inner(v);
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.sh.values, "set_version", a, serde_json::Value::Null);
+        r
+    }
+
+    #[inline]
+    fn set_version_inner(&mut self, v: u64) {
         self.version = v;
     }
 

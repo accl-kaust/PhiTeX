@@ -45,6 +45,21 @@ impl Engine {
     ) -> Result<Report, EvalError> {
         #[cfg(feature = "observe")]
         super::lock(&self.sh.selects).clear();
+        #[cfg(feature = "observe")]
+        crate::trace::init();
+        #[cfg(feature = "observe")]
+        let _span = tracing::debug_span!(target: "defuse", "evaluate", version = self.version).entered();
+        #[cfg(feature = "observe")]
+        let mut rsrc = crate::record::RecSource { inner: src };
+        #[cfg(feature = "observe")]
+        let src: &mut dyn EditSource = &mut rsrc;
+        #[cfg(feature = "observe")]
+        crate::record::api(
+            &self.sh.values,
+            "evaluate_begin",
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
         let r = {
             crate::obs::span!(Evaluate);
             #[cfg(feature = "observe")]
@@ -62,6 +77,15 @@ impl Engine {
             )
         {
             super::watch::emit(&self.sh, &format!("error: {e}"));
+        }
+        #[cfg(feature = "observe")]
+        {
+            let r = match &r {
+                Ok(rep) => serde_json::json!({"ok": {"nodes_run": rep.nodes_run, "rounds": rep.rounds}}),
+                Err(e) => serde_json::json!(e.to_string()),
+            };
+            tracing::debug!(target: "defuse", event = "evaluate_end", result = %r);
+            crate::record::api(&self.sh.values, "evaluate_end", serde_json::Value::Null, r);
         }
         crate::obs::flush();
         // The next canonical window starts now: edits from here on count
@@ -104,6 +128,8 @@ impl Engine {
             let before = self.sh.c.runs.load(Ordering::Relaxed) + self.sh.c.commits.load(Ordering::Relaxed);
             // Edits absorbed meanwhile: their frame walks.
             self.sh.settle_deferred();
+            #[cfg(feature = "observe")]
+            let _step = tracing::debug_span!(target: "defuse", "step", n = rep.steps).entered();
             self.plan_step(sched);
             {
                 let sh = &self.sh;
@@ -172,6 +198,8 @@ impl Engine {
                 Ok(true) if self.sh.qlen.load(Ordering::Acquire) == 0 => continue,
                 Ok(true) => {
                     rounds += 1;
+                    #[cfg(feature = "observe")]
+                    tracing::debug!(target: "defuse", event = "round", round = rounds);
                     if rounds > self.max_rounds {
                         break Err(EvalError::NonConvergence {
                             rounds: self.max_rounds,
