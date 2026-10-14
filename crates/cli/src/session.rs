@@ -574,6 +574,7 @@ impl Session {
                     .or_else(|| std::env::var("PHITEX_THREADS").ok()?.parse().ok())
                     .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
                 let progress = Arc::new(phitex_tex::Progress::new(workers));
+                snapshots(&progress);
                 self.status.set_live(Some(live(progress.clone())));
                 let opts = Options {
                     name: self.printed_name(),
@@ -674,24 +675,33 @@ impl Session {
         // the log does not have: errors at no place, without context)
         // (the format's own errors first, with their places: a format
         // that stopped on them is not the oracle's, whatever follows)
-        let errors = b
-            .prelude_diagnostics()
+        // (the engine's failures first — a deadline, no fixpoint, an
+        // evaluation error: the result is not the document's — then the
+        // format's errors, then TeX's; a failure's first line, cut, as
+        // its own error: it never hides behind TeX's)
+        let errors = diagnostics
             .iter()
-            .map(|d| format!("! {} ({}:{})", d.message, d.file, d.line))
+            .filter(|d| {
+                d.severity == phitex_tex::Severity::Error
+                    && d.range == (0, 0)
+                    && d.context.is_empty()
+            })
+            .map(|d| {
+                let m = d.message.lines().next().unwrap_or("");
+                match m.char_indices().nth(240) {
+                    Some((k, _)) => format!("{}…", &m[..k]),
+                    None => m.to_owned(),
+                }
+            })
+            .chain(
+                b.prelude_diagnostics()
+                    .iter()
+                    .map(|d| format!("! {} ({}:{})", d.message, d.file, d.line)),
+            )
             .chain(
                 log.lines()
                     .filter(|l| l.starts_with("! "))
                     .map(str::to_owned),
-            )
-            .chain(
-                diagnostics
-                    .iter()
-                    .filter(|d| {
-                        d.severity == phitex_tex::Severity::Error
-                            && d.range == (0, 0)
-                            && d.context.is_empty()
-                    })
-                    .map(|d| d.message.lines().next().unwrap_or("").to_owned()),
             )
             .collect();
         // (a PDF file's pages: not known until the engine reports them;
@@ -1208,4 +1218,66 @@ mod out_name_tests {
             assert!(!out_name_ok(bad), "{bad}");
         }
     }
+}
+
+/// (measure) `PHITEX_SNAPSHOT_SECS=N`: every N seconds while the
+/// session lives, a line on standard error: the seconds since the build
+/// began, the jobs finished and known in the evaluation, the resident
+/// set, and what each worker runs (`op@offset`, the byte offset in the
+/// document; `op`: 1 a text node, 2 a box put, 3 an output page, 0
+/// another) with how long the same job has been seen running (whether
+/// a build is spinning or stuck, from outside it).
+fn snapshots(progress: &Arc<phitex_tex::Progress>) {
+    let Some(secs) = std::env::var("PHITEX_SNAPSHOT_SECS")
+        .ok()
+        .and_then(|x| x.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+    else {
+        return;
+    };
+    let weak = Arc::downgrade(progress);
+    let t0 = Instant::now();
+    let _ = std::thread::Builder::new()
+        .name("phitex-snapshots".into())
+        .spawn(move || {
+            // (each slot's last job and when it was first seen)
+            let mut seen: Vec<(Option<(u16, u64)>, Instant)> = Vec::new();
+            loop {
+                std::thread::sleep(Duration::from_secs(secs));
+                let Some(p) = weak.upgrade() else { return };
+                let now = Instant::now();
+                let running = p.running();
+                seen.resize(running.len(), (None, now));
+                let mut jobs = Vec::new();
+                for (k, r) in running.iter().enumerate() {
+                    if seen[k].0 != *r {
+                        seen[k] = (*r, now);
+                    }
+                    if let Some((op, off)) = r {
+                        let age = now.duration_since(seen[k].1).as_secs();
+                        let at = if *off == phitex_tex::Progress::INSIDE {
+                            "inside".to_owned()
+                        } else {
+                            off.to_string()
+                        };
+                        jobs.push(format!("w{k} {op}@{at} {age}s"));
+                    }
+                }
+                let rss = std::fs::read_to_string("/proc/self/status")
+                    .ok()
+                    .and_then(|t| {
+                        t.lines()
+                            .find_map(|l| l.strip_prefix("VmRSS:"))
+                            .map(|v| v.trim().to_owned())
+                    })
+                    .unwrap_or_default();
+                eprintln!(
+                    "snapshot: {}s, jobs done {} of {} known, rss {rss}, running [{}]",
+                    t0.elapsed().as_secs(),
+                    p.done(),
+                    p.total(),
+                    jobs.join(", ")
+                );
+            }
+        });
 }

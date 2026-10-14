@@ -472,6 +472,12 @@ pub fn report(
     }
     let log = job.out_dir.join(format!("{}.log", job.jobname));
     let text = r.log_text();
+    // (the engine's failures — a deadline, no fixpoint, an evaluation
+    // error — each on its own line first: the result is not the
+    // document's, whatever TeX's errors and pages say)
+    for f in r.out.errors.iter().filter(|e| !e.starts_with("! ")) {
+        ui.error(&format!("the engine failed: {f}"));
+    }
     // (the engine's places when it gave them, else the transcript's)
     let placed = crate::problems::rendered(s, r, false, st.color, o.verbose > 0 || ui.verbose > 0);
     if placed.is_empty() {
