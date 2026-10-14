@@ -27,7 +27,7 @@ use super::lex;
 use super::{Implicit, Shape};
 
 /// The most abstract states kept: beyond them, the state is unknown.
-const CAP: usize = 16;
+const CAP: usize = 64;
 
 /// TeX's conditionals (§487), e-TeX's and pdfTeX's.
 const CONDITIONALS: &[&str] = &[
@@ -122,6 +122,9 @@ impl ParState {
 pub struct ParMachine {
     setters: HashMap<String, Vec<Op>>,
     lists: HashMap<Arc<str>, Vec<Op>>,
+    /// The flags set by macros made by hand (`\def\@nobreaktrue{\global
+    /// \let\if@nobreak\iftrue}`): the macro, the flag and its value.
+    hand: HashMap<String, (String, bool)>,
     /// Every list's definitions: what an unknown list may define.
     all: DefSet,
 }
@@ -150,9 +153,14 @@ impl ParMachine {
         if setter_names.is_empty() {
             return None;
         }
+        let hand: HashMap<String, (String, bool)> = bodies
+            .iter()
+            .filter_map(|(n, t)| Some(((*n).to_owned(), hand_flag(t)?)))
+            .collect();
         let mut c = Compiler {
             closure: Closure::new(document, prelude),
             setters: &setter_names,
+            hand: &hand,
             lists: Vec::new(),
             top: false,
         };
@@ -179,8 +187,25 @@ impl ParMachine {
         Some(ParMachine {
             setters,
             lists,
+            hand,
             all,
         })
+    }
+
+    /// The states, for traces: each list's start and the flags.
+    #[must_use]
+    pub fn describe_states(states: &[ParState]) -> Vec<String> {
+        states
+            .iter()
+            .map(|s| {
+                format!(
+                    "{:?} {:?}{}",
+                    s.list.as_deref().map(|l| l.chars().take(30).collect::<String>()),
+                    s.flags,
+                    if s.horizontal { " h" } else { "" }
+                )
+            })
+            .collect()
     }
 
     /// Its setters' names and its lists' count (for traces).
@@ -188,7 +213,14 @@ impl ParMachine {
     pub fn describe(&self) -> String {
         let mut n: Vec<&String> = self.setters.keys().collect();
         n.sort();
-        format!("{} lists, setters {n:?}", self.lists.len())
+        let mut out = format!("{} lists, setters {n:?}", self.lists.len());
+        for k in n {
+            out.push_str(&format!("\n  setter {k}: {:?}", self.setters[k]));
+        }
+        for (l, ops) in &self.lists {
+            out.push_str(&format!("\n  list {:?}: {ops:?}", l.chars().take(40).collect::<String>()));
+        }
+        out
     }
 
     /// The program of a slice (atoms `lo..hi` of `text`, read with the
@@ -208,6 +240,7 @@ impl ParMachine {
         let mut c = Compiler {
             closure: Closure::new(document, prelude),
             setters: &names,
+            hand: &self.hand,
             lists: Vec::new(),
             top: true,
         };
@@ -228,6 +261,31 @@ impl ParMachine {
             defines: cx.defines,
         }
     }
+}
+
+/// The flag a body sets when it is only `[\global]\let\ifX\iftrue`
+/// (or `\iffalse`), and the value.
+fn hand_flag(body: &str) -> Option<(String, bool)> {
+    let t = body.trim_start();
+    let t = t.strip_prefix("\\global").unwrap_or(t).trim_start();
+    let t = t.strip_prefix("\\let")?.trim_start();
+    let t = t.strip_prefix('\\')?;
+    let end = t
+        .find(|c: char| !(c.is_ascii_alphabetic() || c == '@'))
+        .unwrap_or(t.len());
+    let (flag, rest) = t.split_at(end);
+    if !flag.starts_with("if") {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=').unwrap_or(rest).trim_start();
+    let v = if let Some(r) = rest.strip_prefix("\\iftrue") {
+        (r, true)
+    } else {
+        (rest.strip_prefix("\\iffalse")?, false)
+    };
+    let tail = v.0.trim();
+    (tail.is_empty() || tail == "%" || tail == "\\relax").then(|| (flag.to_owned(), v.1))
 }
 
 /// What a program defines in every branch.
@@ -260,6 +318,12 @@ impl Cx<'_> {
             }
             next.sort();
             next.dedup();
+            if next.len() > CAP && std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
+                eprintln!("parlists: {} states at {op:?}", next.len());
+                for st in next.iter().take(20) {
+                    eprintln!("  state {:?} {:?} h{}", st.list.as_deref().map(|l| l.chars().take(40).collect::<String>()), st.flags, st.horizontal);
+                }
+            }
             if next.len() > CAP {
                 // (too many: the lists' every definition from here on)
                 self.defines.add(&self.m.all);
@@ -343,6 +407,9 @@ impl Cx<'_> {
             return vec![s];
         }
         let Some(ops) = self.m.lists.get(&l) else {
+            if std::env::var_os("PHITEX_PARLISTS_TRACE").is_some() {
+                eprintln!("parlists: unknown list {:?}", l.chars().take(60).collect::<String>());
+            }
             self.defines.add(&self.m.all);
             return vec![ParState { list: None, ..s }];
         };
@@ -360,6 +427,7 @@ impl Cx<'_> {
 struct Compiler<'a, 'd> {
     closure: Closure<'d>,
     setters: &'a HashSet<String>,
+    hand: &'a HashMap<String, (String, bool)>,
     /// The lists met (texts of `\everypar{…}`).
     lists: Vec<Arc<str>>,
     /// A slice's text (its paragraph starts count), not a body.
@@ -374,16 +442,29 @@ impl Compiler<'_, '_> {
     }
 
     fn is_flag(&self, name: &str) -> bool {
+        if self.hand.values().any(|(f, _)| f == name) {
+            return true;
+        }
         let sh = self
             .closure
             .document
             .shapes(name)
             .or_else(|| self.closure.prelude.shapes(name));
-        sh.is_some_and(|v| v.iter().any(|s| matches!(s, Shape::Cond)))
+        // (`\newif`'s, or one made by hand: `\let\if@nobreak\iffalse`)
+        sh.is_some_and(|v| {
+            v.iter().any(|s| match s {
+                Shape::Cond => true,
+                Shape::Alias(a) => a == "iftrue" || a == "iffalse",
+                _ => false,
+            })
+        })
     }
 
     /// The flag a name sets: `@nobreaktrue` sets `if@nobreak`.
     fn flag_set(&self, name: &str) -> Option<(String, bool)> {
+        if let Some(h) = self.hand.get(name) {
+            return Some(h.clone());
+        }
         let (base, v) = if let Some(b) = name.strip_suffix("true") {
             (b, true)
         } else {
@@ -609,13 +690,14 @@ mod tests {
     /// A heading's list along the paragraphs after it: the first
     /// defines the flag and `\clubpenalty`, the second `\clubpenalty`
     /// and `\everypar` (the list empties itself), the third nothing.
-    #[test]
-    fn heading_list_runs_out() {
-        let prelude_text = "\\newif\\if@nobreak\n\
-            \\def\\@afterheading{\\@nobreaktrue\\everypar{\\if@nobreak\\@nobreakfalse\\clubpenalty\\@M\\else\\clubpenalty\\@clubpenalty\\everypar{}\\fi}}\n\
-            \\def\\section#1{\\par\\@afterheading}\n";
+    fn heading_list(flag: &str) {
+        let prelude_text = format!(
+            "{flag}\n\
+            \\def\\@afterheading{{\\@nobreaktrue\\everypar{{\\if@nobreak\\@nobreakfalse\\clubpenalty\\@M\\else\\clubpenalty\\@clubpenalty\\everypar{{}}\\fi}}}}\n\
+            \\def\\section#1{{\\par\\@afterheading}}\n"
+        );
         let mut prelude = Definitions::new();
-        prelude.harvest(prelude_text, FileKind::Package, 1);
+        prelude.harvest(&prelude_text, FileKind::Package, 1);
         let doc = Definitions::new();
         let m = ParMachine::new(&doc, &prelude).expect("a setter");
         let slices = ["\\section{A}\n", "One.\n\n", "Two.\n\n", "Three.\n\n"];
@@ -635,5 +717,22 @@ mod tests {
         assert!(!got[1].iter().any(|n| n.contains("everypar")), "{got:?}");
         assert!(got[2].iter().any(|n| n.contains("everypar")), "{got:?}");
         assert!(got[3].is_empty(), "{got:?}");
+        // (the list ran out in every state)
+        assert!(states.iter().all(|s| s.list.as_deref() == Some("")), "{states:?}");
+    }
+
+    #[test]
+    fn heading_list_runs_out() {
+        heading_list("\\newif\\if@nobreak");
+    }
+
+    /// The flag made by hand, as `latex.ltx` makes `\if@nobreak`.
+    #[test]
+    fn heading_list_runs_out_hand_flag() {
+        heading_list(
+            "\\def\\@nobreakfalse{\\global\\let\\if@nobreak\\iffalse}\n\
+             \\def\\@nobreaktrue {\\global\\let\\if@nobreak\\iftrue}\n\
+             \\@nobreakfalse",
+        );
     }
 }
