@@ -60,9 +60,27 @@ pub(crate) fn finish(node: u64, op: &str, text: &str) {
             cur.len(),
             changed.len()
         );
+        let other: Vec<&str> = cur
+            .iter()
+            .filter(|(n, _, _)| n.starts_with('('))
+            .map(|(n, _, _)| n.as_str())
+            .collect();
+        if !other.is_empty() {
+            eprintln!("rerun:   also read {other:?}");
+        }
         for c in changed.iter().take(12) {
             eprintln!("rerun:   {}", c.chars().take(260).collect::<String>());
         }
     }
     g.prev.insert(node, cur);
+}
+
+/// Node `node` read something that is not a field (`what`: a range, the
+/// scope kind) as `x`.
+pub(crate) fn note(v: &Values, node: u64, what: &str, x: Option<ValueId>) {
+    let mut g = log().lock().unwrap_or_else(PoisonError::into_inner);
+    let r = g.cur.entry(node).or_default();
+    if !r.iter().any(|(n, _, _)| n == what) {
+        r.push((what.to_owned(), x, show(v, x)));
+    }
 }
