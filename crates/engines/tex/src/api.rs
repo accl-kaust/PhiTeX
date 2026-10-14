@@ -1830,14 +1830,18 @@ impl Graph {
             })
         };
         let t2 = t0.elapsed();
-        let mut out = Vec::with_capacity(nodes.len());
-        for ((k, n), args) in nodes.iter().zip(args) {
-            if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+            for (k, _) in &nodes {
                 eprintln!("node {k:?}");
             }
-            let id = self.eng.push(unit, self.ops.exec, args);
-            out.push((*k, id, Src::of(n)));
         }
+        // (one append of every node, in order)
+        let ids = self.eng.push_many(unit, self.ops.exec, args);
+        let out: Vec<(u64, NodeId, Src)> = nodes
+            .iter()
+            .zip(ids)
+            .map(|((k, n), id)| (*k, id, Src::of(n)))
+            .collect();
         let t3 = t0.elapsed();
         for &(_, id, _) in &out {
             declare_marks_before(&mut self.eng, id);
