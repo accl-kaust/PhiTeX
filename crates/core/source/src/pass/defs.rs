@@ -142,11 +142,6 @@ pub(crate) struct Catcoder {
 /// The key the `\output` routine's text is kept under.
 pub const OUTPUT: &str = "\0output";
 
-/// The key the token lists assigned to `\everypar` are kept under,
-/// every one the texts assign (any may be in force when a paragraph
-/// starts, §1091).
-pub const EVERYPAR: &str = "\0everypar";
-
 /// A definition's body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Body {
@@ -326,14 +321,19 @@ impl Definitions {
         self.bodies.contains_key(OUTPUT).then(|| c.call(OUTPUT))
     }
 
-    /// What running the token lists assigned to `\everypar` may define
-    /// (every one `self` and `prelude` assign, and every macro they
-    /// call): what a paragraph's start runs, §1091. `None` when neither
-    /// assigns one.
+    /// Every name with a visible body, and its last body's text.
+    pub(crate) fn last_bodies(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.bodies
+            .iter()
+            .filter_map(|(n, v)| v.last().map(|b| (n.as_str(), b.what.text.as_str())))
+    }
+
+    /// Whether a body these definitions give assigns `\everypar` (a
+    /// paragraph-start list's setter, [`super::ParMachine`]).
     #[must_use]
-    pub fn everypar_defines(&self, prelude: &Definitions) -> Option<DefSet> {
-        (self.bodies.contains_key(EVERYPAR) || prelude.bodies.contains_key(EVERYPAR))
-            .then(|| Closure::new(self, prelude).call(EVERYPAR))
+    pub fn assigns_everypar(&self) -> bool {
+        self.last_bodies()
+            .any(|(n, t)| !n.starts_with('\0') && t.contains("\\everypar"))
     }
 
     /// What calling `name` may define (through `self`, then `prelude`).
@@ -575,16 +575,14 @@ impl Definitions {
                 self.add(&target, file, pos, Shape::Macro(args));
                 self.body(&target, text, atoms, open, file, pos);
             }
-            "output" | "everypar" => {
-                // (the output routine, `\output{…}` or `\output={…}`;
-                // a paragraph-start token list, `\everypar{…}`)
+            "output" => {
+                // (the output routine: `\output{…}` or `\output={…}`)
                 let mut j = skip(atoms, a + 1);
                 if atoms.get(j).map(|x| x.kind) == Some(AtomKind::Char('=')) {
                     j = skip(atoms, j + 1);
                 }
                 if atoms.get(j).map(|x| x.kind) == Some(AtomKind::Open) {
-                    let key = if name == "output" { OUTPUT } else { EVERYPAR };
-                    self.body(key, text, atoms, j, file, pos);
+                    self.body(OUTPUT, text, atoms, j, file, pos);
                 }
             }
             "cs_new:Npn"

@@ -302,7 +302,7 @@ fn slice_keys(
             doc_nodes(v, text, inc, finder, read)
         }
         None if text.is_empty() => Vec::new(),
-        None => vec![(key(text, true), DocNode::Doc(0, text.len(), false))],
+        None => vec![(key(text, true), DocNode::Doc(0, text.len(), None))],
     }
 }
 
@@ -1858,7 +1858,7 @@ impl Graph {
                 n
             }
             None if text.is_empty() => Vec::new(),
-            None => vec![(key(text, true), DocNode::Doc(0, text.len(), false))],
+            None => vec![(key(text, true), DocNode::Doc(0, text.len(), None))],
         };
         let t1 = t0.elapsed();
         // (the nodes' arguments made on the pool: values are named by
@@ -1983,9 +1983,9 @@ fn register_doc(v: &Values, inc: &Incr) {
 /// A document node's text: a slice of the document (its bytes), or one
 /// of an `\\input` file sliced in its place (`crate::inputs`).
 enum DocNode {
-    /// Its bytes, and whether its hint takes what the paragraph-start
-    /// token lists may define ([`crate::hints::ParLists`]).
-    Doc(usize, usize, bool),
+    /// Its bytes, and what the paragraph-start token lists its paragraph
+    /// starts run may define, added to its hint ([`crate::hints::ParLists`]).
+    Doc(usize, usize, Option<Arc<crate::hints::Hint>>),
     File(crate::inputs::Piece),
 }
 
@@ -2017,7 +2017,7 @@ fn doc_nodes(
             } else {
                 k
             };
-            (k, DocNode::Doc(s, e, false))
+            (k, DocNode::Doc(s, e, None))
         };
         let Some(f) = finder.filter(|_| c.input.names) else {
             out.extend(slices.map(doc_slice));
@@ -2042,18 +2042,18 @@ fn doc_nodes(
     }
     // (the paragraph-start token lists along the nodes, in order: a
     // node whose hint takes what they may define is keyed apart)
-    let mut lists = crate::hints::ParLists::default();
+    let mut lists = crate::hints::ParLists::new();
     for (k, n) in &mut out {
-        let takes = match n {
+        let delta = match n {
             DocNode::Doc(s, _, l) => {
                 let (c, at) = inc.chunk_at(*s);
                 *l = lists.step(&c.th, at);
-                *l
+                l.clone()
             }
             DocNode::File(p) => p.par_lists(&mut lists),
         };
-        if takes {
-            *k = phitex_defuse::hash_words(*k, &[0x0e7e_5a5a]);
+        if let Some(d) = delta {
+            *k = phitex_defuse::hash_bytes(*k, d.encode().as_bytes());
         }
     }
     out
@@ -2064,13 +2064,14 @@ fn doc_nodes(
 fn node_args(v: &Values, text: &str, incr: Option<&Incr>, n: &DocNode) -> Vec<ValueId> {
     match (n, incr) {
         (DocNode::File(p), _) => p.args(v, DOC_NAME),
-        (&DocNode::Doc(s, e, lists), Some(inc)) => {
+        (DocNode::Doc(s, e, lists), Some(inc)) => {
+            let (s, e) = (*s, *e);
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
             // (a document node is a top-level node)
             a[1] = v.int(3);
             let (c, at) = inc.chunk_at(s);
-            a.push(crate::hints::hint_arg_in(v, &c.th, at, lists));
+            a.push(crate::hints::hint_arg_in(v, &c.th, at, lists.as_deref()));
             a
         }
         (&DocNode::Doc(s, e, _), None) => {
