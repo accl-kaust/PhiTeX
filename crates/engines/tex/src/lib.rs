@@ -26,6 +26,7 @@ pub trait Engine: Send + Sync {
 
 mod align;
 mod api;
+mod assemble;
 mod build;
 mod control;
 mod etex;

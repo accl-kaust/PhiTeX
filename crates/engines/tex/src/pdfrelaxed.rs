@@ -60,7 +60,7 @@ fn key_int(v: &Values, k: u64) -> ValueId {
     v.int(i64::from_ne_bytes(k.to_ne_bytes()))
 }
 
-fn int_key(v: &Values, x: ValueId) -> u64 {
+pub(crate) fn int_key(v: &Values, x: ValueId) -> u64 {
     u64::from_ne_bytes(int_of(v, x).to_ne_bytes())
 }
 
@@ -145,7 +145,7 @@ fn fix(r: &mut Run<'_, '_>, p: &PdfParams) -> R<PdfParams> {
     Ok(relaxed::fixed_params(&first, p))
 }
 
-fn fixed_of(v: &Values, x: ValueId, p: &PdfParams) -> PdfParams {
+pub(crate) fn fixed_of(v: &Values, x: ValueId, p: &PdfParams) -> PdfParams {
     let xs = list_of(v, x);
     let g = |k: usize| {
         xs.get(k)
@@ -504,3 +504,12 @@ pub(crate) fn font_objnum(r: &mut Run<'_, '_>, f: u32) -> R<i64> {
 
 
 
+
+/// A piece by its key (the memo's), for the end node's assembly.
+pub(crate) fn piece(k: u64) -> Option<Arc<Piece>> {
+    pieces()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&k)
+        .cloned()
+}

@@ -491,14 +491,7 @@ impl Operation for Dvi {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
-        let _ = &o;
-        // (the file is not assembled yet: the pages the finishers ship
-        // are the `pages` accumulator's, in document order, which the
-        // writer takes from here later)
-        let v = cx.values();
-        let pages = v.field("pages");
-        let _ = cx.acc_range(pages, None)?;
-        Ok(ValueId::UNIT)
+        crate::assemble::output(cx, &o)
     }
 }
 
