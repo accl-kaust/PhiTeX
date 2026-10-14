@@ -777,6 +777,17 @@ impl State {
         out
     }
 
+    /// Whether the run has a local definition at its base level that
+    /// changes the engine's value (one [`State::published`] keeps), made
+    /// outside every group of the run: while a group is open, a
+    /// definition inside it leaves `publ` as the base level's.
+    pub(crate) fn has_base_local_def(&self, v: &Values) -> bool {
+        self.metas.iter().any(|m| match &m.publ {
+            Some((val, Locality::Local)) => val.encode(v).is_some_and(|x| m.eng != Some(Some(x))),
+            _ => false,
+        })
+    }
+
     /// Whether any of `locs` has a definition at the base level.
     pub(crate) fn defines_any(&self, locs: &[Loc]) -> bool {
         locs.iter().any(|&l| {

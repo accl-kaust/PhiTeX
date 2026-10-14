@@ -1643,6 +1643,12 @@ impl<'c, 'a> Run<'c, 'a> {
             )
             && !crate::hints::effect_none(self.v, &self.cx.args())
             && self.text_opens_group()
+            // (the scope's definitions are all the run's, `before` it:
+            // a local one the run made at its base level before the
+            // group opened, as `\document`'s before the `\begin` it
+            // reads on into, lies outside the group and outlives it,
+            // so the run reads on with the group open instead)
+            && !self.st.has_base_local_def(self.v)
     }
 
     /// Whether the node's own text opens a group it does not close (an
