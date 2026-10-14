@@ -944,7 +944,8 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         // go back before the rest, and the page builder goes on
         return crate::pageinline::output_done(r, left);
     }
-    if !left.is_empty() {
+    // (a step that read at a gone position publishes nothing)
+    if !left.is_empty() && !r.saw_gone {
         let j = r.page_index();
         if j < MAX_PAGES {
             let x = v.list(left);
@@ -1942,7 +1943,13 @@ pub(crate) fn dvi(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop
     let t0 = std::time::Instant::now();
     let fin = FinalState::load(cx, o);
     let t1 = t0.elapsed();
-    let r = fin.and_then(|fin| dvi_file(cx, &fin));
+    let r = fin.and_then(|fin| {
+        o.gone.note(cx.node(), fin.gone);
+        if fin.gone {
+            return Ok(ValueId::UNIT);
+        }
+        dvi_file(cx, &fin)
+    });
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "output file (dvi root run): {:?} (final state {t1:?}, file {:?}){}",
@@ -2434,6 +2441,10 @@ pub(crate) fn step_defs(r: &mut Run<'_, '_>, defs: Vec<(Field, ValueId, Locality
 /// round's input of step `j+1`: a change made by one routine reaches
 /// every later page in one round.
 pub(crate) struct FinalState {
+    /// A fire position was gone while it loaded: what it folded is
+    /// stale and nothing was published from there on (the writer
+    /// publishes nothing either).
+    gone: bool,
     map: phitex_defuse::FxHashMap<Field, ValueId>,
 }
 
@@ -2472,12 +2483,19 @@ impl FinalState {
             .collect();
         // the text's `f` as step `k` reads it (after the last step: the
         // text's final state, the writer's)
+        // (a gone fire position: `pp:fires` is stale, and re-reading it
+        // in this run gives the same list; from there on nothing is
+        // published, and the plan's re-run re-binds the writer)
+        let gone = std::cell::Cell::new(false);
         let text_at = |cx: &mut Ctx<'_>, f: Field, k: usize| -> Result<Option<ValueId>, Stop> {
             match fires.get(k) {
-                // gone: the plan re-runs with the new position, and this step after it
                 Some(&at) if k < steps => Ok(match cx.use_field_at(f, at)? {
                     phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                    phitex_defuse::FieldAt::Unset | phitex_defuse::FieldAt::Gone => None,
+                    phitex_defuse::FieldAt::Unset => None,
+                    phitex_defuse::FieldAt::Gone => {
+                        gone.set(true);
+                        None
+                    }
                 }),
                 _ => cx.use_field(f),
             }
@@ -2572,7 +2590,7 @@ impl FinalState {
         };
         sets_before(0, &mut counts);
         let pgread0 = v.field("pgread0");
-        if (!flushes.is_empty() || !sets.is_empty()) && cx.is_loopback(pgread0) {
+        if (!flushes.is_empty() || !sets.is_empty()) && cx.is_loopback(pgread0) && !gone.get() {
             lb_pub(
                 cx,
                 pgread0,
@@ -2704,7 +2722,7 @@ impl FinalState {
                 state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
             log_pub(o, "pgst", j, e);
             let jj = v.int(i64::try_from(j).unwrap_or(0));
-            if cur != ValueId::UNIT {
+            if cur != ValueId::UNIT && !gone.get() {
                 lb_pub(cx, v.field(&format!("pgst:{j}")), cur);
                 // (kept for the client: the next session's guess)
                 cx.contribute(
@@ -2722,8 +2740,10 @@ impl FinalState {
             sets_before(j + 1, &mut counts);
             let cs = v.list(counts.iter().map(|&c| v.int(c)).collect());
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
-            lb_pub(cx, v.field(&format!("pgdef:{j}")), cs);
-            cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
+            if !gone.get() {
+                lb_pub(cx, v.field(&format!("pgdef:{j}")), cs);
+                cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
+            }
         }
         Self::log_refuted(o, refuted);
         // the flush points' loop-backs: the state after their page,
@@ -2745,7 +2765,7 @@ impl FinalState {
         // (none: nothing published, as `pgst:<j>` with no change: a
         // document without flush points takes one round)
         let f = v.field(FLUSHES);
-        if !entries.is_empty() && cx.is_loopback(f) {
+        if !entries.is_empty() && cx.is_loopback(f) && !gone.get() {
             lb_pub(cx, f, v.list(entries));
         }
         // (the text's definitions after the last break: its own)
@@ -2757,6 +2777,7 @@ impl FinalState {
             }
         }
         Ok(FinalState {
+            gone: gone.get(),
             map: state.into_values().collect(),
         })
     }

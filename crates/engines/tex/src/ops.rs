@@ -41,6 +41,7 @@ pub(crate) fn run_node(
 /// its state there ([`Run::park`], [`Ctx::park`]) and the next attempt,
 /// if the engine resumes it, continues at that command (`Run::resumed`:
 /// the body skips what it did before its commands).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_node_parking(
     cx: &mut Ctx<'_>,
     o: Ops,
@@ -91,6 +92,7 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => "stop",
                 Err(Halt::Starve) => "starve",
                 Err(Halt::Fatal) => "fatal",
+                Err(Halt::Gone) => "gone",
             },
             r.cx.is_speculative(),
             r.resumed,
@@ -105,8 +107,12 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => format!("stop (node {})", r.cx.node().raw()),
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
+                Err(Halt::Gone) => "gone".to_owned(),
             }
         );
+    }
+    if gone_out(&r, matches!(res, Err(Halt::Stop(_)))) {
+        return Ok(ValueId::UNIT);
     }
     match res {
         Ok(()) => {
@@ -131,6 +137,7 @@ pub(crate) fn run_node_parking(
             }
             Err(s)
         }
+        Err(Halt::Gone) => Ok(ValueId::UNIT),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
             Ok(r.stall("starve", u))
@@ -155,6 +162,20 @@ pub(crate) fn run_node_parking(
             Ok(r.finish())
         }
     }
+}
+
+/// A page step's finished run (not `stopped`): whether it read at a
+/// gone position, noted. One that did publishes nothing (`true`): its
+/// stale inputs never reach the engine, and the plan's re-run re-binds
+/// it.
+fn gone_out(r: &Run<'_, '_>, stopped: bool) -> bool {
+    if stopped {
+        return false;
+    }
+    if r.fire_at.is_some() {
+        r.ops.gone.note(r.cx.node(), r.saw_gone);
+    }
+    r.saw_gone
 }
 
 /// One command (§1030) of the node's text: the first token decides; the
