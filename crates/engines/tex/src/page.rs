@@ -1009,6 +1009,27 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// The pending flush point withdrawn: nothing of this run read it
+    /// (the run ends, or the job does), so no text reads what it would
+    /// feed back, and it is no flush point (a marker `[k]`, which drops
+    /// it from the fold): plain's `\supereject` before `\end` costs no round.
+    pub(crate) fn withdraw_flush(&mut self) {
+        let v = self.v;
+        if let Some((node, k)) = self.flush_pending.take() {
+            // (a marker of its own, the flush's number its payload: the
+            // plan keeps one marker per node and number)
+            let id = self.flushes;
+            self.flushes += 1;
+            let at = v.list(vec![
+                v.int(nodes::T_FLUSH_AT),
+                v.int(node),
+                v.int(i64::try_from(id).unwrap_or(0)),
+                v.list(vec![v.int(k)]),
+            ]);
+            self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        }
+    }
+
     /// The text assigned `\count<k>` (0–9) the value `n`: a document
     /// node marks it on the main list (`T_FLUSH_AT` with `[k, n]`), so
     /// the page that fires after it starts its routine from it (the
@@ -2413,8 +2434,22 @@ impl FinalState {
         // (a marker's payload: a flush point's ten counts, or a count
         // the text assigned, `[k, n]`, applied before page `p + 1`
         // fires)
-        let (flushes, sets): (Vec<_>, Vec<_>) =
+        let (all_flushes, sets): (Vec<_>, Vec<_>) =
             marks.into_iter().partition(|m| list_of(v, m.3).len() == 10);
+        // (a flush point nothing read, withdrawn, `[k]`: the flush
+        // before `\end`; `Run::withdraw_flush`)
+        let (unread, sets): (Vec<_>, Vec<_>) =
+            sets.into_iter().partition(|m| list_of(v, m.3).len() == 1);
+        // (its counts still tell the text's there, for the chain's start)
+        let flushes: Vec<_> = all_flushes
+            .iter()
+            .filter(|f| {
+                !unread
+                    .iter()
+                    .any(|u| u.0 == f.0 && crate::val::int_at(v, u.3, 0) == f.1)
+            })
+            .copied()
+            .collect();
         // (and a field the text defined after a flush fed it back,
         // `[f, x, 1]`)
         let (fsets, sets): (Vec<_>, Vec<_>) =
@@ -2437,7 +2472,7 @@ impl FinalState {
         // at the flush before)
         let fires_at = |page: usize| -> Option<Vec<i64>> {
             let page = i64::try_from(page).ok()?;
-            flushes
+            all_flushes
                 .iter()
                 .filter(|f| f.2 == page)
                 .map(|f| ints(f.3))
@@ -2448,7 +2483,7 @@ impl FinalState {
         // pages before it read them as the text left them there; with
         // none, the text's final state
         let start = fires_at(0).or_else(|| {
-            flushes
+            all_flushes
                 .iter()
                 .min_by_key(|f| f.2)
                 .map(|f| ints(f.3))
@@ -2629,8 +2664,10 @@ impl FinalState {
             }
             entries.push(v.list(vec![v.int(n), v.int(k), x]));
         }
+        // (none: nothing published, as `pgst:<j>` with no change: a
+        // document without flush points takes one round)
         let f = v.field(FLUSHES);
-        if cx.is_loopback(f) {
+        if !entries.is_empty() && cx.is_loopback(f) {
             lb_pub(cx, f, v.list(entries));
         }
         // (the text's definitions after the last break: its own)
