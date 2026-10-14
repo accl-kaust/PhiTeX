@@ -271,10 +271,6 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
-    /// On a second pass (`stop_at`): the siblings the first pass, which
-    /// ran to the end, pulled; what this pass leaves of them is the
-    /// resume's predicted claim (`crate::pages`, `Resume::claim_limit`).
-    pub first_pulled: Option<usize>,
     /// Whether the node's hint was found violated when it started.
     pub hint_void: bool,
     /// The semantic nest (§211): the lists and groups this run has open
@@ -460,7 +456,6 @@ impl<'c, 'a> Run<'c, 'a> {
             pull_orig: Vec::new(),
             top: false,
             claim_rest: false,
-            first_pulled: None,
             hint_void: false,
             nest: Vec::new(),
             next_lid: 0,
