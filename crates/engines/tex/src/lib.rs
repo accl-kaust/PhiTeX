@@ -28,6 +28,7 @@ mod align;
 mod api;
 mod build;
 mod control;
+mod rerun;
 mod etex;
 mod exec;
 mod expand;

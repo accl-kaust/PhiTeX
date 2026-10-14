@@ -430,6 +430,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
+        if let Ok(x) = r
+            && crate::rerun::on()
+        {
+            crate::rerun::read(self.v, self.cx.node().raw(), f, x);
+        }
         self.st.fill(loc, r?);
         Ok(())
     }
@@ -1602,6 +1607,16 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        if crate::rerun::on() {
+            let v = self.v;
+            let text = self
+                .cx
+                .args()
+                .first()
+                .and_then(|&l| list_of(v, l).first().map(|&f| v.render(f)))
+                .unwrap_or_default();
+            crate::rerun::finish(self.cx.node().raw(), &format!("{:?}", self.cx.op()), &text);
+        }
         crate::pdfout::publish(self.pdf_fold.take());
         if self.lines_read != 0 {
             let n = self.v.int(i64::try_from(self.lines_read).unwrap_or(0));
