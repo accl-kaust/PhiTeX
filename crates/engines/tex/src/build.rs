@@ -311,6 +311,9 @@ impl Run<'_, '_> {
             fold_item(v, lid, node, &mut l.fold, &mut l.list);
             return;
         }
+        if lid == 0 {
+            self.flush_page_params();
+        }
         let e = v.list(vec![v.int(lid), node]);
         let s = v.seq_unit(e);
         self.contribute("items", s);

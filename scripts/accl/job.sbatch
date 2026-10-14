@@ -47,11 +47,16 @@ net() {
   apptainer exec --containall --bind "$w" --home "$w" --pwd "$w/phitex" \
     --env CARGO_HOME="$w/cargo" "$sif" "$@"
 }
+# (Apptainer binds the host's /run/systemd/resolve, whose resolved socket
+# answers DNS queries on some nodes even without a network: an empty
+# directory hides it)
+mkdir -p "$w/noresolve"
 box() {
-  apptainer exec --containall --net --network none --bind "$w" --home "$w" --pwd "$PWD" \
+  apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w" --home "$w" --pwd "$PWD" \
     --env CARGO_HOME="$w/cargo",CARGO_NET_OFFLINE=true,TEXMFVAR="$w/texmf-var",PHITEX_SANDBOX=1,w="$w",r="$r" \
     "$sif" "$@"
 }
+if box getent hosts export.arxiv.org >/dev/null 2>&1; then echo "FAILED: the box resolves names on $(hostname)"; exit 76; fi
 
 # the crates, fetched once per Cargo.lock
 key=$(sha256sum Cargo.lock | cut -c1-16)
