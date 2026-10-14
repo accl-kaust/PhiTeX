@@ -132,12 +132,15 @@ typeset) differs from pdfTeX's number.
 
 ## Options
 
-`Options::exact_objects` defaults to true until the LaTeX exact gates
-pass; then the default flips. The CLI exposes it as `--exact-pdf`.
+`Options::exact_objects` defaults to true for library callers and the
+test suites (their oracles are pdfTeX's bytes). The CLI builds in the
+relaxed mode by default; `--exact-pdf` asks for pdfTeX's numbering. A
+document the relaxed mode does not cover falls back to exact
+(Fallbacks above).
 
 ## Gates
 
-1. Every exact-mode gate is unchanged (exact stays the default).
+1. Every exact-mode gate is unchanged (`--exact-pdf`, and the suites).
 2. Relaxed equivalence, on every PDF fixture and the 18 LaTeX oracles:
    - parse both files;
    - map objects by content, not number: a graph isomorphism from the

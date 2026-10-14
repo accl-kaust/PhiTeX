@@ -26,6 +26,11 @@ use crate::val::{field_name, int_of, list_of, str_of};
 /// bytes.
 pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 
+/// Whether the job may write a file under a name (`\openout`): the
+/// client's `kpse_out_name_ok` (its `openout_any`, its output
+/// directories).
+pub type OutNameOk = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// How a document is run.
 #[derive(Clone)]
 pub struct Options {
@@ -111,6 +116,11 @@ pub struct Options {
     /// a no-fixpoint error naming the loop-back fields (a document whose
     /// written files oscillate), instead of running on.
     pub max_rounds: u64,
+    /// Whether `\openout` may write a file under a name (pdfTeX asks
+    /// kpathsea, §1374; a refused name ends a nonstop job); `None`:
+    /// TeX Live's default, `openout_any = p` with no output directory
+    /// (`control::out_name_ok_p`).
+    pub out_name_ok: Option<OutNameOk>,
 }
 
 /// When the engine speculates ([`Options::speculation`]).
@@ -241,6 +251,13 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
         .values()
         .field(&crate::etex::marks_before_field(n.raw()));
     eng.declare_loopback(f, ValueId::UNIT);
+    // how many pages fired before the node's marker (the writer's
+    // read-time writes after a `\shipout`, `etex::page_shipped_before`)
+    let f = eng
+        .values()
+        .field(&crate::etex::fired_before_field(n.raw()));
+    let zero = eng.values().int(0);
+    eng.declare_loopback(f, zero);
 }
 
 /// Edited texts of `\\input` files by name: the text and its bytes.
@@ -414,6 +431,7 @@ impl Default for Options {
             speculation: Speculation::Predicted,
             speculation_budget: 256,
             max_rounds: 64,
+            out_name_ok: None,
         }
     }
 }
@@ -1234,6 +1252,7 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
+            out_ok: Arc::new(Mutex::new(None)),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -2709,6 +2728,8 @@ impl Build {
         }
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.eng.set_max_rounds(opts.max_rounds);
+        (*g.ops.out_ok.lock().unwrap_or_else(PoisonError::into_inner))
+            .clone_from(&opts.out_name_ok);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
@@ -3264,6 +3285,22 @@ impl Build {
             })
     }
 
+    /// Whether the job ended on a fatal error with `\pdfoutput` positive
+    /// (pdfTeX then says no PDF file was produced, pages or none).
+    fn fatal_pdf(&self) -> bool {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("log"))
+            .is_some_and(|e| {
+                v.seq_to_vec(e).into_iter().any(|x| {
+                    let xs = list_of(v, x);
+                    xs.first().is_some_and(|&k| str_of(v, k) == "fatal")
+                        && xs.get(1).is_some_and(|&t| str_of(v, t) == "pdf")
+                })
+            })
+    }
+
     /// The output file (DVI or PDF) and the log.
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
@@ -3281,7 +3318,7 @@ impl Build {
             .unwrap_or_default();
         let n = self.pages().len();
         // (pdfTeX §794: after a fatal error the PDF file is removed)
-        let end = if dvi.starts_with(b"%PDF") && self.fatal() {
+        let end = if self.fatal() && (dvi.starts_with(b"%PDF") || self.fatal_pdf()) {
             dvi.clear();
             "!  ==> Fatal error occurred, no output PDF file produced!".to_owned()
         } else if n == 0 {
@@ -3869,6 +3906,8 @@ fn declare_fields(eng: &mut Engine) {
         "ifviol",
         "streams",
         "wplan",
+        "fplan",
+        "oplan",
         "fread",
         "pagefxs",
         "pgdeltas",
@@ -3880,7 +3919,12 @@ fn declare_fields(eng: &mut Engine) {
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
     }
     let lines = eng.values().field("lines");
-    eng.declare_accumulator(lines, Arc::new(SumMonoid));
+    eng.declare_accumulator(lines, Arc::new(LinesMonoid));
+    // the fonts' names as the writer gives them where they are not the
+    // engine's numbers (`pdfout::font_tags`), for `\pdffontname`
+    let f = eng.values().field(crate::pdfout::FONT_TAGS);
+    let none = eng.values().list(Vec::new());
+    eng.declare_loopback(f, none);
     // what each page's output routine leaves for the next: a
     // loop-back the page builder's fold reads from the previous round
     for j in 0..crate::page::MAX_PAGES {
@@ -3896,6 +3940,10 @@ fn declare_fields(eng: &mut Engine) {
         // writer; guess: none)
         let f = eng.values().field(&format!("pgst:{j}"));
         eng.declare_loopback(f, ValueId::UNIT);
+        // whether page j's step shipped a page (guess: no)
+        let f = eng.values().field(&crate::etex::shipped_field(j));
+        let zero = eng.values().int(0);
+        eng.declare_loopback(f, zero);
     }
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
@@ -3929,6 +3977,41 @@ fn page_guesses(g: &mut Graph, env: &Env) {
     }
     for (f, x) in decl {
         g.eng.declare_loopback(f, x);
+    }
+}
+
+/// The `lines` accumulator: the lines of documents' pieces begun, by
+/// file name, as `[[name, count], ...]` sorted by name
+/// ([`crate::run::Run::doc_lines`]).
+struct LinesMonoid;
+
+impl phitex_defuse::Monoid for LinesMonoid {
+    fn empty(&self, v: &Values) -> ValueId {
+        v.list(Vec::new())
+    }
+
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        let (xs, ys) = (list_of(v, a), list_of(v, b));
+        if xs.is_empty() {
+            return b;
+        }
+        if ys.is_empty() {
+            return a;
+        }
+        let mut m: std::collections::BTreeMap<String, (ValueId, i64)> =
+            std::collections::BTreeMap::new();
+        for e in xs.iter().chain(ys.iter()) {
+            let p = list_of(v, *e);
+            if let (Some(&n), Some(&k)) = (p.first(), p.get(1)) {
+                let x = m.entry(str_of(v, n)).or_insert((n, 0));
+                x.1 += int_of(v, k);
+            }
+        }
+        v.list(
+            m.into_values()
+                .map(|(n, k)| v.list(vec![n, v.int(k)]))
+                .collect(),
+        )
     }
 }
 
