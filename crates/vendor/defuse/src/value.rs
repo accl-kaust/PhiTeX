@@ -98,6 +98,9 @@ pub struct Values {
     shards: Box<[Shard]>,
     /// Distinguishes tables in the per-thread read cache.
     instance: u64,
+    /// Bumped by every sweep: a thread's cache of interned ids (`KNOWN`)
+    /// holds only ids interned since the last one.
+    sweeps: std::sync::atomic::AtomicU64,
 }
 
 static INSTANCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -121,9 +124,34 @@ thread_local! {
     /// entry is never stale.
     static READS: std::cell::RefCell<Vec<ReadSlot>> =
         std::cell::RefCell::new(vec![(0, ValueId::NONE, None); READ_SLOTS]);
+    /// Each thread's ids known to be interned (table instance, sweep
+    /// count, id): interning a value again, or naming a field again, is
+    /// answered without the shard's lock, whose word every worker would
+    /// otherwise write.
+    static KNOWN: std::cell::RefCell<Vec<(u64, u64, ValueId)>> =
+        std::cell::RefCell::new(vec![(0, 0, ValueId::NONE); KNOWN_SLOTS]);
 }
 
+const KNOWN_SLOTS: usize = 1 << 14;
+
 impl Values {
+    #[allow(clippy::cast_possible_truncation)]
+    fn known_slot(&self, id: ValueId) -> usize {
+        (id.0 as usize ^ self.instance as usize) % KNOWN_SLOTS
+    }
+
+    fn known(&self, id: ValueId) -> bool {
+        let g = self.sweeps.load(std::sync::atomic::Ordering::Acquire);
+        let i = self.known_slot(id);
+        KNOWN.with(|c| c.borrow()[i] == (self.instance, g, id))
+    }
+
+    fn note_known(&self, id: ValueId) {
+        let g = self.sweeps.load(std::sync::atomic::Ordering::Acquire);
+        let i = self.known_slot(id);
+        KNOWN.with(|c| c.borrow_mut()[i] = (self.instance, g, id));
+    }
+
     fn shard(&self, id: ValueId) -> &Shard {
         &self.shards[(id.0 >> 58) as usize % SHARDS]
     }
@@ -134,6 +162,7 @@ impl Default for Values {
         let v = Values {
             shards: (0..SHARDS).map(|_| RwLock::new(FxHashMap::default())).collect(),
             instance: INSTANCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            sweeps: std::sync::atomic::AtomicU64::new(0),
         };
         for (id, x) in [(ValueId::UNIT, Value::Unit), (ValueId::NIL, Value::Nil)] {
             v.shard(id)
@@ -160,10 +189,15 @@ impl Values {
     pub fn intern(&self, v: Value) -> ValueId {
         crate::obs::count!(ValueIntern);
         let id = content_id(&v);
+        if self.known(id) {
+            return id;
+        }
         {
             let t = self.shard(id).read().unwrap_or_else(PoisonError::into_inner);
             if let Some(old) = t.get(&id) {
                 assert!(**old == v, "value hash collision");
+                drop(t);
+                self.note_known(id);
                 return id;
             }
         }
@@ -173,6 +207,8 @@ impl Values {
             return id;
         }
         t.insert(id, Arc::new(v));
+        drop(t);
+        self.note_known(id);
         id
     }
 
@@ -269,11 +305,16 @@ impl Values {
         // The hit path allocates nothing: the id is the content hash, and
         // an interned value is checked against the text in place.
         let id = unreserved(hash_bytes(3, s.as_bytes()));
+        if self.known(id) {
+            return id;
+        }
         {
             let t = self.shard(id).read().unwrap_or_else(PoisonError::into_inner);
             if let Some(old) = t.get(&id)
                 && matches!(&**old, Value::Str(o) if &**o == s)
             {
+                drop(t);
+                self.note_known(id);
                 return id;
             }
         }
@@ -341,6 +382,7 @@ impl Values {
                 _ => {}
             }
         }
+        self.sweeps.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let mut freed = 0;
         for t in &mut t {
             let before = t.len();
