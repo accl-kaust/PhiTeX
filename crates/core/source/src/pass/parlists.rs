@@ -70,6 +70,8 @@ pub enum Op {
     MayStart,
     /// `\par` or a blank line: vertical mode again.
     End,
+    /// `\def\par{…}`: the body `\par` runs from here on.
+    SetPar(Arc<str>),
     /// A conditional: its flag when the text knows it (`if@nobreak`),
     /// its branches.
     If(Option<String>, Vec<Op>, Vec<Op>),
@@ -94,6 +96,9 @@ pub struct ParState {
     list: Option<Arc<str>>,
     flags: BTreeMap<String, bool>,
     horizontal: bool,
+    /// `\par` as a setter redefined it (its body), until it runs: LaTeX's
+    /// `\@doendpe` (`None`: the standard one).
+    par: Option<Arc<str>>,
 }
 
 impl ParState {
@@ -104,6 +109,7 @@ impl ParState {
             list: Some(Arc::from("")),
             flags: BTreeMap::new(),
             horizontal: false,
+            par: None,
         }
     }
 
@@ -114,6 +120,7 @@ impl ParState {
             list: None,
             flags: BTreeMap::new(),
             horizontal: false,
+            par: None,
         }
     }
 }
@@ -148,7 +155,9 @@ impl ParMachine {
         }
         let setter_names: HashSet<String> = bodies
             .iter()
-            .filter(|(n, t)| !n.starts_with('\0') && t.contains("\\everypar"))
+            // (`\\par`'s body is what a setter's `\\def\\par` gives,
+            // [`Op::SetPar`], not a setter of its own)
+            .filter(|(n, t)| !n.starts_with('\0') && **n != "par" && t.contains("\\everypar"))
             .map(|(n, _)| (*n).to_owned())
             .collect();
         if setter_names.is_empty() {
@@ -358,6 +367,25 @@ impl Cx<'_> {
             }
             Op::End => {
                 s.horizontal = false;
+                let Some(b) = s.par.take() else {
+                    return vec![s];
+                };
+                // (`\par` redefined: its body runs, §1094 no more)
+                match self.m.lists.get(&b) {
+                    Some(ops) if depth < DEPTH => {
+                        let collect = std::mem::replace(&mut self.collect, true);
+                        let out = self.run_all(ops, vec![s], depth + 1);
+                        self.collect = collect;
+                        out
+                    }
+                    _ => {
+                        self.defines.add(&self.m.all);
+                        vec![ParState { list: None, ..s }]
+                    }
+                }
+            }
+            Op::SetPar(b) => {
+                s.par = Some(b.clone());
                 vec![s]
             }
             Op::If(flag, a, b) => match flag.as_ref().and_then(|f| s.flags.get(f)) {
@@ -566,7 +594,26 @@ impl Compiler<'_, '_> {
             let n = a.name(text);
             if super::hints::is_definer(n) {
                 // (a definition: its body runs when that macro is called)
-                k = super::hints::past_definition(atoms, k + 1, text);
+                let past = super::hints::past_definition(atoms, k + 1, text);
+                // (but `\par`'s, in a setter: the next paragraph end runs it)
+                let names_par = atoms
+                    .get(skip(atoms, k + 1))
+                    .is_some_and(|a| a.kind == AtomKind::Cs && a.name(text) == "par");
+                let body = past
+                    .checked_sub(1)
+                    .and_then(|c| atoms.get(c))
+                    .filter(|c| c.kind == AtomKind::Close && c.mate != usize::MAX)
+                    .map(|c| Arc::<str>::from(&text[atoms[c.mate].end..c.start]));
+                if !self.top
+                    && names_par
+                    && let Some(b) = body
+                {
+                    self.flush(text, atoms, seg, past, &mut out);
+                    self.lists.push(b.clone());
+                    out.push(Op::SetPar(b));
+                    seg = past;
+                }
+                k = past;
                 continue;
             }
             if self.is_conditional(n) {
@@ -754,5 +801,32 @@ mod tests {
              \\def\\@nobreaktrue {\\global\\let\\if@nobreak\\iftrue}\n\
              \\@nobreakfalse",
         );
+    }
+
+    /// An environment's end redefines `\par` (LaTeX's `\@doendpe`): the
+    /// next paragraph's end runs that body, which defines `\par` again.
+    #[test]
+    fn a_redefined_par_runs_at_the_next_end() {
+        let prelude_text = "\\newif\\if@endpe\n\
+            \\def\\@restorepar{\\def\\par{\\@@par}}\n\
+            \\def\\@doendpe{\\@endpetrue\\def\\par{\\@restorepar\\everypar{}\\par\\@endpefalse}\\everypar{{\\setbox0\\lastbox}\\everypar{}\\@endpefalse}}\n\
+            \\def\\endthing{\\par\\@doendpe}\n";
+        let mut prelude = Definitions::new();
+        prelude.harvest(prelude_text, FileKind::Package, 1);
+        let doc = Definitions::new();
+        let m = ParMachine::new(&doc, &prelude).expect("a setter");
+        let slices = ["\\endthing\n", "Text.\n\n", "More.\n\n"];
+        let mut states = vec![ParState::start()];
+        let mut got = Vec::new();
+        for t in slices {
+            let lexed = lex::lex(t, FileKind::Document, None);
+            let atoms = atoms::atoms(t, &lexed.tokens);
+            let ops = m.slice_ops(t, &atoms, 0, atoms.len(), &doc, &prelude);
+            let r = m.slice(&ops, &states);
+            states = r.states;
+            got.push(r.defines.names.keys().cloned().collect::<Vec<_>>());
+        }
+        assert!(got[1].iter().any(|n| n == "cs:\\par"), "{got:?}");
+        assert!(!got[2].iter().any(|n| n == "cs:\\par"), "{got:?}");
     }
 }
