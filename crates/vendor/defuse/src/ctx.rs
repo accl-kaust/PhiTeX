@@ -2,6 +2,8 @@
 
 use std::sync::PoisonError;
 
+use crate::MayDefine;
+
 use crate::engine::{
     AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_ENV, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
     RunResult, Slot, State, StreamRange, Suspended, Until, Use, WaitKind, WalkResult, eff_code, eff_kind,
@@ -55,6 +57,9 @@ pub struct Ctx<'a> {
     publishes: Vec<(Field, ValueId)>,
     contribs: Vec<(Field, ValueId)>,
     watch: Option<(Field, Slot, Slot, ValueId)>,
+    /// The earliest node a backward sibling scan stopped at.
+    scan: std::cell::Cell<Option<Slot>>,
+    narrow: Option<MayDefine>,
     effect: Option<u8>,
     kind: Option<ValueId>,
     claim: Option<usize>,
@@ -102,6 +107,8 @@ impl<'a> Ctx<'a> {
             publishes: Vec::new(),
             contribs: Vec::new(),
             watch: None,
+            scan: std::cell::Cell::new(None),
+            narrow: None,
             effect: None,
             kind: None,
             claim: None,
@@ -140,6 +147,7 @@ impl<'a> Ctx<'a> {
         cx.diagnostics = s.diagnostics;
         cx.sig = s.sig;
         cx.following_seen = std::cell::RefCell::new(s.following);
+        cx.narrow = s.narrow;
         cx.token = Some(s.token.into_inner().unwrap_or_else(PoisonError::into_inner));
         cx.resumed = true;
         cx
@@ -948,10 +956,30 @@ impl<'a> Ctx<'a> {
         Ok(v)
     }
 
+    /// Narrows this node's definition set to `m`, a subset of what its
+    /// text declares ([`Operation::may_define`]), from what the run has
+    /// read so far: readers waiting on the node for a field outside `m`
+    /// stop waiting and bind past it. Applied with the run's result (a
+    /// stop included); a change that re-runs the node restores the text's
+    /// answer until it narrows again. Defining outside `m` refutes the
+    /// declaration, as defining outside the text's answer does.
+    pub fn narrow(&mut self, m: MayDefine) {
+        self.narrow = Some(m);
+    }
+
     /// The nearest preceding sibling whose text satisfies `pred`.
     #[must_use]
+    ///
+    /// The siblings passed over are read: a change to one (its text, its
+    /// presence, or a claim taking it) re-runs this node.
     pub fn prev_sibling_where(&self, pred: &dyn Fn(OpId, &[ValueId]) -> bool) -> Option<NodeId> {
-        self.eng.prev_sibling_where(self.slot, pred)
+        let e = self.eng;
+        let (found, stop) = e.prev_sibling_where(self.slot, pred);
+        let key = |s: Slot| if s == NIL { 0 } else { e.n(s).label };
+        if self.scan.get().is_none_or(|old| key(stop) < key(old)) {
+            self.scan.set(Some(stop));
+        }
+        found
     }
 
     /// Memoized text production: `produce` runs once per `(a, b)` (e.g. a
@@ -979,6 +1007,7 @@ impl<'a> Ctx<'a> {
         !self.spec
             && self.token.is_some()
             && self.watch.is_none()
+            && self.scan.get().is_none()
             && self.stream.is_none()
             && self.claim.is_none()
             && self.assumptions.is_empty()
@@ -1026,6 +1055,7 @@ impl<'a> Ctx<'a> {
                 sig: self.sig,
                 steps: self.steps,
                 following: self.following_seen.borrow().clone(),
+                narrow: self.narrow.clone(),
                 token: std::sync::Mutex::new(self.token.take().expect("a token")),
             }))
         } else {
@@ -1072,6 +1102,8 @@ impl<'a> Ctx<'a> {
             publishes: self.publishes,
             contribs: self.contribs,
             watch: self.watch,
+            scan: self.scan.get(),
+            narrow: self.narrow.clone(),
             effect: self.effect,
             kind: self.kind,
             claim: self.claim,
