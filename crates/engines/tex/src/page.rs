@@ -623,7 +623,7 @@ impl Run<'_, '_> {
             // the step's own delta, for the writer's fold (`pgdeltas`)
             let mut own: std::collections::BTreeMap<String, (Field, ValueId)> =
                 std::collections::BTreeMap::new();
-            for (loc, x, _) in self.st.published(v) {
+            for (loc, x, _) in self.st.published(v, false) {
                 let f = self.loc_field(loc);
                 let name = crate::val::field_name(v, f);
                 if name == "pdf:state" || step_input(&name) {

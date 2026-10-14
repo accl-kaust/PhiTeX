@@ -674,6 +674,20 @@ impl State {
         out
     }
 
+    /// The locations the run defined at its base level back to the
+    /// engine's value it read first (restored: no net effect).
+    pub(crate) fn restored_locs(&self, v: &Values) -> phitex_defuse::FxHashSet<Loc> {
+        self.metas
+            .iter()
+            .filter(|m| {
+                m.publ.as_ref().is_some_and(|(val, _)| {
+                    m.eng.is_some_and(|e| e.is_some() && val.encode(v) == e)
+                })
+            })
+            .map(|m| m.loc)
+            .collect()
+    }
+
     /// Whether `loc` was defined after stamp `since`.
     pub(crate) fn defined_after(&self, loc: Loc, since: u64) -> bool {
         self.slot_ref(loc)
@@ -719,13 +733,16 @@ impl State {
 
     /// The definitions to publish: each location's definition at the base
     /// level, encoded once; a local one equal to the engine's value the
-    /// run read is left out (the same binding).
-    pub(crate) fn published(&self, v: &Values) -> Vec<(Loc, ValueId, Locality)> {
+    /// run read is left out (the same binding). `net`: a global one too
+    /// (a run at the unit's top level, where a global definition equal
+    /// to the value in force changes nothing: only the run's net effect
+    /// is published).
+    pub(crate) fn published(&self, v: &Values, net: bool) -> Vec<(Loc, ValueId, Locality)> {
         let mut out = Vec::with_capacity(self.metas.len());
         for m in &self.metas {
             let Some((val, l)) = &m.publ else { continue };
             let Some(x) = val.encode(v) else { continue };
-            if *l == Locality::Local && m.eng == Some(Some(x)) {
+            if (net || *l == Locality::Local) && m.eng == Some(Some(x)) {
                 continue;
             }
             out.push((m.loc, x, *l));

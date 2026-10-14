@@ -391,6 +391,9 @@ impl Run<'_, '_> {
         let Some(at) = self.pull_at[self.pulled - 1] else {
             return refuse("the sibling's text joined a continuation line");
         };
+        if !self.giveback_only_allows() {
+            return refuse("PHITEX_GIVEBACK_ONLY");
+        }
         if let Some(orig) = self.pull_orig.get(self.pulled - 1).cloned().flatten() {
             let given = self.give_back_resumed(at, orig)?;
             if trace {
@@ -481,6 +484,45 @@ impl Run<'_, '_> {
         }
         self.drop_given_back(at);
         Ok(true)
+    }
+
+    /// (debug, `PHITEX_GIVEBACK_ONLY=k`: only the k-th distinct sibling
+    /// text met by a give-back, in the order first met, may be given
+    /// back; the others are refused)
+    fn giveback_only_allows(&self) -> bool {
+        static K: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let Some(k) = *K.get_or_init(|| {
+            std::env::var("PHITEX_GIVEBACK_ONLY")
+                .ok()
+                .and_then(|x| x.parse().ok())
+        }) else {
+            return true;
+        };
+        let sib = self
+            .cx
+            .following(self.pulled - 1)
+            .and_then(|(_, a)| a.first().map(|&x| self.v.render(x)))
+            .unwrap_or_default();
+        let mut seen = SEEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let i = match seen.iter().position(|x| *x == sib) {
+            Some(i) => i,
+            None => {
+                seen.push(sib.clone());
+                seen.len() - 1
+            }
+        };
+        if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") {
+            eprintln!(
+                "giveback-only: candidate {} (allowed {}): {}",
+                i + 1,
+                i + 1 == k,
+                sib.chars().take(100).collect::<String>()
+            );
+        }
+        i + 1 == k
     }
 
     /// [`Run::give_back_peeked`] after a park: the peeked token is the
