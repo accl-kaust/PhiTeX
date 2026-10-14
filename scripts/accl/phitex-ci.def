@@ -3,8 +3,11 @@
 # language collections the manuals need, from the same Arch Linux Archive
 # snapshot, so the manuals' sources are the TeX Live 2026.1 tree's own
 # (svn r78408, as the installed packages): nothing is downloaded at CI
-# time. Built by build-image.sbatch:
-#   sbatch --qos=build4 build-image.sbatch phitex-ci-2026-09-25 phitex-ci.def
+# time. Built by build-image.sbatch, on acclnode01 (fakeroot fails on
+# acclnode05) with 40 GB (mksquashfs was killed at 16), the def outside
+# phitex-accl/ (each `accl submit` syncs that directory with --delete):
+#   sbatch --qos=build4 -w acclnode01 -c 8 --mem=40G build-image.sbatch phitex-ci-2026-09-25 <def>
+# (pacman without a download timeout: texlive-doc is 3.1 GB)
 Bootstrap: localimage
 From: /home/mohaam0e/shared-cache/phitex/phitex-2026-09-25-tools.sif
 
@@ -14,7 +17,7 @@ From: /home/mohaam0e/shared-cache/phitex/phitex-2026-09-25-tools.sif
     # sources are there)
     sed -i '/^NoExtract/d' /etc/pacman.conf
     pacman -Syy --noconfirm
-    pacman -S --noconfirm --needed texlive-doc \
+    pacman -S --noconfirm --needed --disable-download-timeout texlive-doc \
         texlive-langcjk texlive-langchinese texlive-langjapanese texlive-langkorean \
         texlive-langcyrillic texlive-langgreek texlive-langeuropean texlive-langother \
         texlive-langfrench texlive-langgerman texlive-langitalian texlive-langspanish \
