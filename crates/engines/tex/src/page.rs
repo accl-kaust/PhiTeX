@@ -281,6 +281,15 @@ impl Run<'_, '_> {
         let mut plan: Vec<ValueId> = Vec::new();
         let mut folds = 0usize;
         let (mut tfx, mut tfold) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        // nothing to reuse: the pages folded in parallel from predicted
+        // starts, each taken below only where its start is the real one
+        let tp = std::time::Instant::now();
+        let mut ahead = if reusable.is_none() {
+            ahead_folds(v, items, table_v, marker)
+        } else {
+            Vec::new()
+        };
+        let tahead = tp.elapsed();
         let mut j = 0;
         while !ended && j < MAX_PAGES {
             let tf = std::time::Instant::now();
@@ -315,29 +324,23 @@ impl Run<'_, '_> {
                             })
                     })
             });
+            let ahead_hit = ahead.get_mut(j).and_then(|a| {
+                (a.start.idx == start.idx
+                    && crate::planinc::same_start(&a.start, &start)
+                    && a.fx == fx)
+                    .then(|| a.rec.take())
+                    .flatten()
+            });
             let rec = if let Some(r) = old {
+                r
+            } else if let Some(r) = ahead_hit {
                 r
             } else {
                 folds += 1;
                 let tq = std::time::Instant::now();
                 let out = plan_fold(v, items, table_v, marker, &start, fx.clone());
                 tfold += tq.elapsed();
-                let (a, b) = (start.idx.min(items.len()), out.reach.min(items.len()));
-                Arc::new(PageRec {
-                    start: start.clone(),
-                    fx,
-                    reach: out.reach,
-                    fired: out.fired,
-                    passed: out.passed,
-                    writes: out.writes,
-                    stuck: out.stuck,
-                    items_v: v.list(items[a..b.max(a)].to_vec()),
-                    start_v: PageStart {
-                        idx: 0,
-                        ..start.clone()
-                    }
-                    .value(v),
-                })
+                Arc::new(page_rec(v, items, &start, fx, out))
             };
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
@@ -409,9 +412,11 @@ impl Run<'_, '_> {
         }
         if tm {
             eprintln!(
-                "plan: {} items, {pages} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?} (acc {t_acc:?}), pages {:?} (fx {tfx:?}, folds {tfold:?}), sets {:?}",
+                "plan: {} items, {pages} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?} (acc {t_acc:?}), pages {:?} (ahead {tahead:?}: {} of {} taken; fx {tfx:?}, folds {tfold:?}), sets {:?}",
                 items.len(),
                 t2.saturating_sub(t1),
+                ahead.iter().filter(|a| a.rec.is_none()).count(),
+                ahead.len(),
                 t0.elapsed().saturating_sub(t2)
             );
         }
@@ -471,7 +476,7 @@ impl Run<'_, '_> {
             Value::List(xs) => xs,
             _ => &[],
         };
-        let out = fold_page(v, items, &classes, marker0, &start, fx);
+        let out = fold_page(v, items, &classes, marker0, &start, fx, None);
         drop(guard);
         if let Some((f, side, _)) = out.fired {
             let data = self.page_data(&f, &side)?;
@@ -938,6 +943,126 @@ struct PlanPage {
     stuck: bool,
 }
 
+/// The plan's record of a page folded from `start`.
+fn page_rec(
+    v: &Values,
+    items: &[ValueId],
+    start: &PageStart,
+    fx: Vec<ValueId>,
+    out: PlanPage,
+) -> crate::planinc::PageRec {
+    let (a, b) = (start.idx.min(items.len()), out.reach.min(items.len()));
+    crate::planinc::PageRec {
+        start: start.clone(),
+        fx,
+        reach: out.reach,
+        fired: out.fired,
+        passed: out.passed,
+        writes: out.writes,
+        stuck: out.stuck,
+        items_v: v.list(items[a..b.max(a)].to_vec()),
+        start_v: PageStart {
+            idx: 0,
+            ..start.clone()
+        }
+        .value(v),
+    }
+}
+
+/// The list's items as a prediction reads them: their kinds, and their
+/// boxes' dimensions (`None` where the walk decodes the item itself).
+#[derive(Default)]
+struct Profile {
+    tags: Vec<i64>,
+    nodes: Vec<Option<Node>>,
+}
+
+/// A page folded ahead of the plan's walk: its predicted start and the
+/// record (taken by the walk when the start is the real one).
+struct Ahead {
+    start: PageStart,
+    fx: Vec<ValueId>,
+    rec: Option<std::sync::Arc<crate::planinc::PageRec>>,
+}
+
+/// The pages of `items` folded ahead, in parallel: the starts predicted
+/// by one walk of the break arithmetic over the boxes' dimensions alone
+/// ([`nodes::decode_shallow`], the routines taken as leaving nothing),
+/// then each page's real fold ([`plan_fold`]) from its predicted start
+/// on the executor's workers (`exec::par_each`). No page reads another:
+/// the plan's walk takes a page only where its start and what the
+/// routine before it left are the real ones, and folds the others.
+fn ahead_folds(v: &Values, items: &[ValueId], table: ValueId, marker0: ValueId) -> Vec<Ahead> {
+    let tp0 = std::time::Instant::now();
+    let classes = list_of(v, table);
+    let mut starts = Vec::new();
+    let mut s = PageStart::FIRST;
+    let was = crate::val::NO_KEEP.with(|c| c.replace(true));
+    let chunk = 1024;
+    let parts = crate::exec::par_map(items.len().div_ceil(chunk), &|k| {
+        let xs = &items[k * chunk..((k + 1) * chunk).min(items.len())];
+        let tags: Vec<i64> = xs.iter().map(|&x| nodes::tag(v, x)).collect();
+        // (an item a marks or a whatsit decodes with is decoded in the
+        // walk itself, which keeps them)
+        let nodes: Vec<Option<Node>> = xs
+            .iter()
+            .map(|&x| {
+                let mut side = Side::default();
+                let n = nodes::decode_shallow(v, x, &mut side);
+                (side.marks.is_empty() && side.whats.is_empty())
+                    .then_some(n)
+                    .flatten()
+            })
+            .collect();
+        (tags, nodes)
+    });
+    crate::val::NO_KEEP.with(|c| c.set(was));
+    let mut prof = Profile::default();
+    for (t, n) in parts {
+        prof.tags.extend(t);
+        prof.nodes.extend(n);
+    }
+    let was = crate::val::NO_KEEP.with(|c| c.replace(true));
+    let tprof = tp0.elapsed();
+    while starts.len() < MAX_PAGES {
+        let out = fold_page(v, items, &classes, marker0, &s, Vec::new(), Some(&prof));
+        starts.push(s);
+        match out.fired {
+            Some((_, _, end))
+                if end.idx > starts[starts.len() - 1].idx || !end.carried.is_empty() =>
+            {
+                s = end;
+            }
+            _ => break,
+        }
+    }
+    crate::val::NO_KEEP.with(|c| c.set(was));
+    let tw = std::time::Instant::now();
+    let tpred = tp0.elapsed();
+    let slots: Vec<std::sync::OnceLock<crate::planinc::PageRec>> =
+        starts.iter().map(|_| std::sync::OnceLock::new()).collect();
+    crate::exec::par_each(starts.len(), &|j| {
+        let out = plan_fold(v, items, table, marker0, &starts[j], Vec::new());
+        let _ = slots[j].set(page_rec(v, items, &starts[j], Vec::new(), out));
+    });
+    if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+        eprintln!(
+            "pages ahead: {} predicted in {tpred:?} (profile {tprof:?}), folds {:?}",
+            starts.len(),
+            tw.elapsed()
+        );
+    }
+    starts
+        .into_iter()
+        .zip(slots)
+        .map(|(start, r)| Ahead {
+            start,
+            fx: Vec::new(),
+            rec: r.into_inner().map(std::sync::Arc::new),
+        })
+        .collect()
+}
+
 /// A memo entry: the items the fold read (from the start's index), and
 /// the page with the next start's index relative to it, its carried
 /// material kept outside the value table (a sweep may free it).
@@ -1020,7 +1145,11 @@ fn plan_fold(
         };
     }
     let classes = list_of(v, table);
-    let out = fold_page(v, items, &classes, marker0, start, fx);
+    // (the items are decoded once a fold: not kept in this thread's
+    // cache, whose copies cost more than the decoding)
+    let was = crate::val::NO_KEEP.with(|c| c.replace(true));
+    let out = fold_page(v, items, &classes, marker0, start, fx, None);
+    crate::val::NO_KEEP.with(|c| c.set(was));
     let fired = out.fired.map(|(f, side, end)| {
         let ms: Vec<ValueId> = f
             .marks
@@ -1081,7 +1210,18 @@ fn fold_page(
     marker0: ValueId,
     start: &PageStart,
     fx: Vec<ValueId>,
+    pre: Option<&Profile>,
 ) -> PageFold {
+    let shallow = pre.is_some();
+    // an item of the list by its index, or anything else
+    let decode = |x: ValueId, at: Option<usize>, side: &mut Side| match (pre, at) {
+        (Some(p), Some(i)) => p.nodes[i]
+            .clone()
+            .or_else(|| nodes::decode_shallow(v, x, side)),
+        (Some(_), None) => nodes::decode_shallow(v, x, side),
+        (None, _) => nodes::decode(v, x, side),
+    };
+    let mut origins: Vec<ValueId> = Vec::new();
     // the page parameters in force where the page starts (the start
     // carries them: the list's own marker before it, or a routine's)
     let mut marker = start.marker.unwrap_or(marker0);
@@ -1127,9 +1267,11 @@ fn fold_page(
         }
     };
     loop {
+        let mut at = None;
         let x = if let Some(x) = queue.pop_front() {
             x
         } else if let Some(&x) = items.get(cursor) {
+            at = Some(cursor);
             cursor += 1;
             reach = reach.max(cursor);
             x
@@ -1147,7 +1289,11 @@ fn fold_page(
             }
             break;
         };
-        match nodes::tag(v, x) {
+        let t = match (pre, at) {
+            (Some(p), Some(i)) => p.tags[i],
+            _ => nodes::tag(v, x),
+        };
+        match t {
             nodes::T_END => {
                 ending = Some(x);
                 // §1054: an empty page ends the job without a cycle
@@ -1186,28 +1332,45 @@ fn fold_page(
             }
             _ => {}
         }
-        let Some(p) = nodes::decode(v, x, &mut side) else {
+        let Some(p) = decode(x, at, &mut side) else {
             continue;
         };
+        if shallow {
+            origins.push(x);
+        }
         // §1000: only a kern looks at what follows it
         let next = if matches!(p, Node::Kern(..)) {
             if queue.is_empty() {
                 reach = reach.max((cursor + 1).min(items.len()));
             }
-            queue
-                .front()
-                .copied()
-                .or_else(|| items.get(cursor).copied())
-                .and_then(|y| nodes::decode(v, y, &mut Side::default()))
+            match queue.front() {
+                Some(&y) => decode(y, None, &mut Side::default()),
+                None => items
+                    .get(cursor)
+                    .and_then(|&y| decode(y, Some(cursor), &mut Side::default())),
+            }
         } else {
             None
         };
         if let Outcome::Fire(f) = pb.contribute(p, next.as_ref(), &params, &mut class) {
-            let mut carried: Vec<ValueId> = f
-                .contributions
-                .iter()
-                .map(|n| nodes::encode(v, n, &side))
-                .collect();
+            let mut carried: Vec<ValueId> = if shallow {
+                // (a prediction, which the real fold checks: a box
+                // taken as the item contributed in its place)
+                let k = f.contributions.len();
+                f.contributions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| match (n, origins.len().checked_sub(k - i)) {
+                        (Node::Box(_), Some(o)) => origins[o],
+                        _ => nodes::encode(v, n, &side),
+                    })
+                    .collect()
+            } else {
+                f.contributions
+                    .iter()
+                    .map(|n| nodes::encode(v, n, &side))
+                    .collect()
+            };
             carried.extend(queue.drain(..));
             // the canonical end: the material carried over is the
             // list's own items before the cursor whenever it can be

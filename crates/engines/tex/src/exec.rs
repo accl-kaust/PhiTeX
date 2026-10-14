@@ -324,6 +324,18 @@ pub(crate) fn par_each(n: usize, f: &(dyn Fn(usize) + Sync)) {
     parallel(t, n, 1, f);
 }
 
+/// `f(i)` for every `i < n` through [`par_each`], in index order.
+pub(crate) fn par_map<T: Send + Sync>(n: usize, f: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+    let slots: Vec<OnceLock<T>> = (0..n).map(|_| OnceLock::new()).collect();
+    par_each(n, &|i| {
+        let _ = slots[i].set(f(i));
+    });
+    slots
+        .into_iter()
+        .map(|s| s.into_inner().expect("every item ran"))
+        .collect()
+}
+
 /// The thread count: `given`, else `PHITEX_THREADS`, else the available
 /// parallelism; 1 where this target cannot run threads.
 pub(crate) fn threads(given: Option<usize>) -> usize {
