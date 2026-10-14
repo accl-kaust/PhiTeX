@@ -392,10 +392,22 @@ impl Run<'_, '_> {
                 // §1271
                 self.get_token()?;
                 let t = self.cur.tok;
-                // the innermost group's level keeps the tokens; at the
-                // bottom level they are dropped (§1271 `cur_level>level_one`)
+                // the innermost group's level keeps the tokens: one of
+                // this run's, else the engine scope the node runs in (its
+                // `ag` list, run at its close, `Run::unsave_extras`); at
+                // the bottom level they are dropped (§1271
+                // `cur_level>level_one`)
                 if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
                     l.ag.push(t);
+                } else {
+                    let base = self.base_mode()?;
+                    if base.depth > 0 {
+                        let v = self.v;
+                        let mut xs = vec![v.int(base.sid)];
+                        xs.extend(self.scope_list("ag", &base)?);
+                        xs.push(t.encode(v));
+                        self.set("ag", v.list(xs), false);
+                    }
                 }
             }
             cmd::IN_STREAM => self.open_or_close_in()?,
@@ -1428,7 +1440,11 @@ impl Run<'_, '_> {
             return self.file(key);
         }
         let f = v.field("streams");
-        let before = self.cx.acc_range(f, None)?;
+        let before = self.cx.acc_range(f, None);
+        if before.is_err() {
+            self.trace_stop("range streams");
+        }
+        let before = before?;
         let mut all = v.seq_to_vec(before);
         all.extend(
             self.contribs
@@ -1468,7 +1484,11 @@ impl Run<'_, '_> {
     /// The input left as one source line, for `\inputlineno`.
     pub(crate) fn input_line_no(&mut self) -> R<i32> {
         let lines = self.v.field("lines");
-        let x = self.cx.acc_range(lines, None)?;
+        let x = self.cx.acc_range(lines, None);
+        if x.is_err() {
+            self.trace_stop("range lines");
+        }
+        let x = x?;
         Ok(i32::try_from(int_of(self.v, x) + self.lines_entered).unwrap_or(0))
     }
 }

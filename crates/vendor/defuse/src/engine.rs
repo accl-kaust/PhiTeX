@@ -854,6 +854,7 @@ pub(crate) struct Suspended {
     /// The following siblings the attempt consulted (index, node, text):
     /// a claimer resumes only while they are still the same.
     pub(crate) following: Vec<(usize, Slot, OpId, ValueId)>,
+    pub(crate) narrow: Option<MayDefine>,
     /// Behind a mutex only so a result holding it is `Sync` for client
     /// executors (never contended).
     pub(crate) token: Mutex<Box<dyn std::any::Any + Send>>,
@@ -1020,6 +1021,11 @@ pub(crate) struct Aux {
     /// The last node of a bounded range read ([`Ctx::acc_range_to`]):
     /// the range is `(anchor, to]`; `None`: up to the reader.
     watch_to: Option<Slot>,
+    /// A backward sibling scan ([`Ctx::prev_sibling_where`]): the node it
+    /// stopped at (`NIL`: the unit start) and the label it was indexed
+    /// under. A change to the structure strictly between that label and
+    /// the reader re-runs the reader.
+    scan: Option<(Slot, u64)>,
     /// For a pending claim: 1 + the label of the last sibling it could take
     /// (0: not computed yet, i.e. unbounded).
     reach1: u64,
@@ -1032,6 +1038,9 @@ pub(crate) struct Aux {
     /// A run defined outside the declared set: the set is unbounded until
     /// the text changes.
     decl_refuted: bool,
+    /// The definition set the node's current run narrowed to
+    /// ([`Ctx::narrow`]); `None`: the text's answer.
+    narrowed: Option<MayDefine>,
     /// The last stopped attempt's state, for a resume (taken by the next
     /// attempt on its thread; behind a mutex only for that hand-off).
     suspended: Mutex<Option<Box<Suspended>>>,
@@ -1287,6 +1296,9 @@ pub(crate) struct Unit {
     accs: FxHashMap<Field, u32>,
     watches: BTreeMap<(u64, Slot), Watch>,
     max_span: u64,
+    /// Backward sibling scans `(lower label, reader)` and the widest one.
+    scans: std::collections::BTreeSet<(u64, Slot)>,
+    scan_span: u64,
     live: bool,
     /// Pending depth shifts `(lo, hi, delta)`: the scope depth of every
     /// label in `[lo, hi)` changed by `delta` since its definitions were
@@ -3009,6 +3021,8 @@ impl Engine {
             accs: FxHashMap::default(),
             watches: BTreeMap::new(),
             max_span: 0,
+            scans: std::collections::BTreeSet::new(),
+            scan_span: 0,
             live: true,
             shifts: Vec::new(),
         };
@@ -3207,6 +3221,7 @@ impl Engine {
         self.set_flag(s, F_MAYBE, maybe);
         if let Some(a) = self.aux_mut_opt(s) {
             a.decl_refuted = false;
+            a.narrowed = None;
         }
         self.set_flag(s, F_HINT, hint);
         let predict = st.predict;
@@ -4611,9 +4626,13 @@ impl Engine {
     fn pend_ix(&self, s: Slot) -> PendIx {
         let n = self.n(s);
         let refuted = self.aux_of(s).is_some_and(|a| a.decl_refuted);
-        let bounded = n.has(F_DYN) && n.has(F_MAYBE) && !refuted;
+        let narrowed = self
+            .aux_of(s)
+            .and_then(|a| a.narrowed.clone())
+            .filter(|m| *m != MayDefine::Any);
+        let bounded = n.has(F_DYN) && (n.has(F_MAYBE) || narrowed.is_some()) && !refuted;
         let bound = if bounded {
-            self.statics(n.op, n.args).may_define.clone()
+            narrowed.unwrap_or_else(|| self.statics(n.op, n.args).may_define.clone())
         } else {
             MayDefine::Nothing
         };
@@ -5616,6 +5635,67 @@ impl Engine {
 
     /// Nodes parked on `x` (by a wait, a gate or a needed child) run again:
     /// `x` is going away, so it will never finish for them.
+    /// A run narrowed its node's definition set: readers waiting on the
+    /// node run again (those of a field it no longer declares bind past
+    /// it).
+    fn narrow(&mut self, x: Slot, m: MayDefine) {
+        if !self.n(x).has(F_DYN)
+            || self
+                .aux_of(x)
+                .is_some_and(|a| a.decl_refuted || a.narrowed.as_ref() == Some(&m))
+        {
+            return;
+        }
+        let indexed = self.n(x).has(F_INPEND);
+        if indexed {
+            self.pending_index(x, false);
+        }
+        self.ax(x).narrowed = Some(m);
+        if indexed {
+            self.pending_index(x, true);
+        }
+        let waiters = std::mem::take(&mut self.ax(x).waiters);
+        self.release_waiters(x, &waiters);
+    }
+
+    /// Whether `t`'s run narrowed its definition set to one without `f`
+    /// (and nothing else about it is pending).
+    fn narrowed_without(&self, t: Slot, f: Field) -> bool {
+        let Some(a) = self.aux_of(t) else {
+            return false;
+        };
+        let (Some(m), Some(ix)) = (&a.narrowed, &a.pend_fields) else {
+            return false;
+        };
+        if ix.unbounded || ix.effect || ix.kind || self.n(t).has(F_CLAIM_DYN) {
+            return false;
+        }
+        match m {
+            MayDefine::Nothing => true,
+            MayDefine::Any => false,
+            MayDefine::Names(fs) => !fs.iter().any(|&g| self.canon(g) == f),
+            MayDefine::Prefixes(ps) => match &*self.values.get(self.client_name(f).0) {
+                Value::Str(text) => !ps.iter().any(|p| text.starts_with(p.as_str())),
+                _ => false,
+            },
+        }
+    }
+
+    /// The node's definition set is the text's answer again.
+    fn unnarrow(&mut self, x: Slot) {
+        if self.aux_of(x).is_none_or(|a| a.narrowed.is_none()) {
+            return;
+        }
+        let indexed = self.n(x).has(F_INPEND);
+        if indexed {
+            self.pending_index(x, false);
+        }
+        self.ax(x).narrowed = None;
+        if indexed {
+            self.pending_index(x, true);
+        }
+    }
+
     fn release_waiters(&mut self, x: Slot, waiters: &[Slot]) {
         for &w in waiters {
             if self.live(w) && w != x && self.n(w).on == x {
@@ -5663,6 +5743,7 @@ impl Engine {
         self.unanchor_watches(s);
         self.set_publishes(s, Vec::new());
         self.drop_watch(s);
+        self.drop_scan(s);
         let readers = self.aux_of(s).map_or_else(Default::default, |a| a.out_readers.clone());
         for r in readers {
             self.make_dirty(r);
@@ -5674,6 +5755,8 @@ impl Engine {
         self.release_waiters(s, &waiters);
         let old_eff = self.eff_now(s);
         self.set_state(s, State::Inert);
+        let (su, sl) = (self.n(s).unit, self.n(s).label);
+        self.scan_touch(su, sl);
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
         self.sync_pending(s);
         self.sync_order(s);
@@ -5685,6 +5768,8 @@ impl Engine {
 
     fn activate(&mut self, s: Slot) {
         self.touch(s);
+        let (su, sl) = (self.n(s).unit, self.n(s).label);
+        self.scan_touch(su, sl);
         self.ax(s).claimed_by = None;
         self.set_state(s, State::Dirty);
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
@@ -6026,6 +6111,7 @@ impl Engine {
         self.node_errors.remove(&x);
         self.set_flag(x, F_REBIND, false);
         self.touch(x);
+        self.unnarrow(x);
         let n = self.nm(x);
         n.epoch = n.epoch.wrapping_add(1);
         let st = n.state;
@@ -6132,6 +6218,15 @@ impl Engine {
             return;
         }
         let first = self.n(x).id < self.n(t).id;
+        if self.n(t).in_work()
+            && let Some(f) = field
+            && self.narrowed_without(t, f)
+        {
+            // `t` narrowed its set past the field in this batch: the run
+            // binds past it on its next attempt, at its own level.
+            self.enqueue(x);
+            return;
+        }
         if self.n(t).in_work() {
             self.note_wait(t, kind);
             self.park(x, t, field);
@@ -6343,6 +6438,7 @@ impl Engine {
     /// A range ends just before the node after its delimiter, so that node
     /// going counts too.
     fn stream_touch(&mut self, unit: u32, label: u64) {
+        self.scan_touch(unit, label);
         if self.in_eval {
             self.touch_log.push((unit, label));
         }
@@ -6536,6 +6632,7 @@ impl Engine {
         }
         self.clear_contribs(x);
         self.drop_watch(x);
+        self.drop_scan(x);
         // Not a sibling for anyone now: a reader anchored on it re-anchors.
         self.unanchor_watches(x);
         self.leave_spec(x);
@@ -6745,7 +6842,69 @@ impl Engine {
         }
     }
 
+    fn scan_key(&self, from: Slot) -> u64 {
+        if from == NIL || !self.live(from) {
+            0
+        } else {
+            self.n(from).label
+        }
+    }
+
+    fn set_scan(&mut self, reader: Slot, from: Option<Slot>) {
+        self.drop_scan(reader);
+        let Some(from) = from else {
+            return;
+        };
+        let unit = self.n(reader).unit;
+        let key = self.scan_key(from);
+        let span = self.n(reader).label.saturating_sub(key);
+        let u = self.unit_mut(unit);
+        u.scan_span = u.scan_span.max(span);
+        u.scans.insert((key, reader));
+        self.ax(reader).scan = Some((from, key));
+    }
+
+    fn drop_scan(&mut self, reader: Slot) {
+        if let Some((_, key)) = self.aux_of(reader).and_then(|a| a.scan) {
+            let unit = self.n(reader).unit;
+            self.unit_mut(unit).scans.remove(&(key, reader));
+            self.ax(reader).scan = None;
+        }
+    }
+
+    /// The structure at `label` changed (a node came, went, was re-made,
+    /// claimed or released): the backward scans that passed over it run
+    /// again.
+    fn scan_touch(&mut self, unit: u32, label: u64) {
+        let Some(u) = self.units.get(unit as usize) else {
+            return;
+        };
+        if u.scans.is_empty() {
+            return;
+        }
+        let lo = label.saturating_sub(u.scan_span);
+        let hit: Vec<Slot> = u
+            .scans
+            .range((lo, Slot { ix: 0, gen_: 0 })..(label, Slot { ix: 0, gen_: 0 }))
+            .map(|&(_, r)| r)
+            .filter(|&r| self.live(r) && label < self.n(r).label)
+            .collect();
+        for r in hit {
+            self.make_dirty(r);
+        }
+    }
+
     fn rebuild_watches(&mut self, unit: u32) {
+        let old = std::mem::take(&mut self.unit_mut(unit).scans);
+        self.unit_mut(unit).scan_span = 0;
+        for (_, reader) in old {
+            if self.live(reader)
+                && let Some((from, _)) = self.aux_of(reader).and_then(|a| a.scan)
+            {
+                self.ax(reader).scan = None;
+                self.set_scan(reader, Some(from));
+            }
+        }
         let old = std::mem::take(&mut self.unit_mut(unit).watches);
         self.unit_mut(unit).max_span = 0;
         for ((_, reader), w) in old {
@@ -7164,6 +7323,10 @@ impl Engine {
             // node while it was pending.
             let (op, args, id) = (self.n(x).op, self.n(x).args, self.n(x).id);
             let st = self.statics(op, args);
+            let bound = self
+                .aux_of(x)
+                .and_then(|a| a.narrowed.clone())
+                .unwrap_or_else(|| st.may_define.clone());
             let av = self.args_vec(args);
             let mut undeclared = Vec::new();
             let refuted = self.aux_of(x).is_some_and(|a| a.decl_refuted);
@@ -7176,7 +7339,7 @@ impl Engine {
                     continue;
                 }
                 let name = self.client_name(f);
-                let covered = match &st.may_define {
+                let covered = match &bound {
                     MayDefine::Nothing => false,
                     MayDefine::Names(names) => names.iter().any(|&g| self.canon(g) == f),
                     MayDefine::Prefixes(ps) => match &*self.values.get(name.0) {
@@ -7570,6 +7733,11 @@ impl Engine {
                 return;
             }
         }
+        if !r.speculative
+            && let Some(m) = r.narrow.take()
+        {
+            self.narrow(x, m);
+        }
         self.report.text_memo_hits += u64::from(r.memo[0]);
         self.report.text_memo_misses += u64::from(r.memo[1]);
         self.report.app_memo_hits += u64::from(r.memo[2]);
@@ -7808,6 +7976,7 @@ impl Engine {
             Some((f, anchor, to, seen)) => self.set_watch(x, Some((f, anchor, to, seen, false))),
             None => self.drop_watch(x),
         }
+        self.set_scan(x, r.scan);
         self.nm(x).sig = r.sig;
         self.set_flag(x, F_RAN, true);
         self.set_flag(x, F_REBIND, false);
@@ -8076,6 +8245,8 @@ impl Engine {
             || n.has(F_CLAIMER)
             || (n.has(F_EFF_DYN) && r.effect.is_some())
             || r.watch.is_some()
+            || r.scan.is_some()
+            || r.narrow.is_some()
             || self
                 .aux_of(r.slot)
                 .is_some_and(|a| a.watch.is_some() || a.stream.is_some() || !a.publishes.is_empty())
@@ -9342,6 +9513,10 @@ pub struct RunResult {
     pub(crate) publishes: Vec<(Field, ValueId)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) watch: Option<(Field, Slot, Slot, ValueId)>,
+    /// Where a backward sibling scan stopped (`NIL`: the unit start).
+    pub(crate) scan: Option<Slot>,
+    /// The definition set the run narrowed to ([`Ctx::narrow`]).
+    pub(crate) narrow: Option<MayDefine>,
     pub(crate) effect: Option<u8>,
     /// The kind of the scope the run's effect opens.
     pub(crate) kind: Option<ValueId>,
@@ -9408,7 +9583,14 @@ impl Engine {
         (s.work, s.maxh)
     }
 
-    pub(crate) fn prev_sibling_where(&self, x: Slot, pred: &dyn Fn(OpId, &[ValueId]) -> bool) -> Option<NodeId> {
+    /// The nearest preceding sibling of `x` whose text satisfies `pred`,
+    /// and the node the walk stopped at (`NIL`: the unit start): every
+    /// node strictly between that one and `x` was passed over.
+    pub(crate) fn prev_sibling_where(
+        &self,
+        x: Slot,
+        pred: &dyn Fn(OpId, &[ValueId]) -> bool,
+    ) -> (Option<NodeId>, Slot) {
         let n = self.n(x);
         let root = self.root(n.unit);
         let mut label = n.label;
@@ -9419,12 +9601,12 @@ impl Engine {
             if m.parent == n.parent {
                 // A sibling a claim took is not there for anyone.
                 if m.state != State::Inert && pred(m.op, &self.args_vec(m.args)) {
-                    return Some(m.id);
+                    return (Some(m.id), s);
                 }
             } else if !self.descends(s, n.parent) {
-                return None;
+                return (None, s);
             }
         }
-        None
+        (None, NIL)
     }
 }
