@@ -76,7 +76,7 @@ pub(crate) const T_WRITE_AT: i64 = 88;
 /// defined these fields at its base level (since the item before): the
 /// page builder's fold tells each page step which fields the text
 /// defined since the break before it (the routines' deltas give way).
-pub(crate) const T_DEFS_AT: i64 = 87;
+pub(crate) const T_DEFS_AT: i64 = 86;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]
