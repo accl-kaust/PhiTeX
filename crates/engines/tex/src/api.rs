@@ -3261,7 +3261,6 @@ impl Build {
                     }
                 }
                 let nd = deps.len();
-                deps.truncate(12);
                 eprintln!(
                     "pkgrec: runs of {k}: {runs} ({spec} speculative); reads {nd} fields another load defined: {deps:?}"
                 );
