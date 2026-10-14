@@ -478,35 +478,30 @@ impl Run<'_, '_> {
             .map_or(items.len(), |r| r.start.idx)
             .min(items.len());
         self.set("pp:tail", v.list(items[last..].to_vec()), true);
-        // the fields the text defined in each page's part, before its
-        // break (and after the last): the writer's fold lets them win
-        // over the routines' earlier deltas (`FinalState::load`)
+        // the text's assignments in each page's part, before its break
+        // (and after the last), in TeX's order, with the flush points
+        // among them (`[UNIT, 4, node, k]`): the writer folds them with
+        // the routines' `\\global`s (`FinalState::load`)
         let tdefs: Vec<ValueId> = recs
             .iter()
             .map(|r| {
-                v.list(
-                    r.tdefs
-                        .iter()
-                        .flat_map(|&m| list_of(v, m).into_iter().skip(2))
-                        .collect(),
-                )
+                let mut es = Vec::new();
+                for &m in &r.tdefs {
+                    match nodes::tag(v, m) {
+                        nodes::T_DEFS_AT => es.extend(list_of(v, m).into_iter().skip(2)),
+                        nodes::T_FLUSH_AT => es.push(v.list(vec![
+                            ValueId::UNIT,
+                            v.int(4),
+                            v.int(crate::val::int_at(v, m, 1)),
+                            v.int(crate::val::int_at(v, m, 2)),
+                        ])),
+                        _ => {}
+                    }
+                }
+                v.list(es)
             })
             .collect();
         let tdefs = v.list(tdefs);
-        if crate::exec::env_flag!("PHITEX_LOOP_TRACE") {
-            let per: Vec<String> = list_of(v, tdefs)
-                .iter()
-                .enumerate()
-                .map(|(j, &p)| {
-                    let names: Vec<String> = list_of(v, p)
-                        .into_iter()
-                        .map(|f| crate::val::field_name(v, Field(f)))
-                        .collect();
-                    format!("{j}:{}", names.join(","))
-                })
-                .collect();
-            eprintln!("lb-pub pp:tdefs {:x} {}", tdefs.raw(), per.join(" "));
-        }
         self.set("pp:tdefs", tdefs, true);
         self.set("pp:classes", table_v, true);
         self.set("pp:any", v.int(i64::from(any)), true);
@@ -716,6 +711,10 @@ impl Run<'_, '_> {
             inherited = pgst_pairs(v, x);
             log_read(&self.ops, "pgst", j - 1, named(v, &inherited));
         }
+        // the chain's state over the text's where the page fires: the
+        // routines' `\\global`s while TeX's state holds them, and the
+        // text's local bindings of the groups open there (§1025, §279,
+        // §283: the writer's fold, `TexOrder`)
         for &(f, x) in &inherited {
             let l = self.loc_of(f);
             self.st.preload(l, Some(x));
@@ -1008,10 +1007,15 @@ impl Run<'_, '_> {
         // flush opens starts from (the writer's fold replaces its
         // running counts with them: the text's arithmetic since the
         // last flush, on the value fed back there)
+        // (the engine's own reads: no probe; the flush is read next)
+        self.probe_ok = true;
         let mut before = Vec::with_capacity(10);
         for c in 0..10 {
             before.push(v.int(i64::from(self.reg_int(0, c)?)));
         }
+        // (the text's assignments before it go first: the fold reads
+        // them in TeX's order)
+        self.flush_text_defs();
         let at = v.list(vec![
             v.int(nodes::T_FLUSH_AT),
             v.int(i64::from_ne_bytes(node.to_ne_bytes())),
@@ -1025,6 +1029,53 @@ impl Run<'_, '_> {
             i64::try_from(k).unwrap_or(0),
         ));
         Ok(())
+    }
+
+    /// The text reads `\\count0..9` where pages may have fired since it
+    /// last had them from the chain (the run's start, or an item it put
+    /// on the main list since): TeX's text reads them as the output
+    /// routines left them (§1025: `\\global` assignments to eqtb, which
+    /// the text sees at once). A probe on the main list there (a flush
+    /// point's marker with no page forced: `T_FLUSH_AT` with the ten
+    /// counts and a 1), read as a flush point is: the state after the
+    /// last page fired before it (`pgst:flushes`, the writer's; none in
+    /// round one or before the first page). amsmath's `\\savecounters@`
+    /// and `\\restorecounters@` in a display write `\\c@page` back
+    /// with the value they read.
+    pub(crate) fn count_probe(&mut self) -> R<()> {
+        self.probe_ok = true;
+        let op = self.cx.op();
+        if self.fed
+            || self.interp.is_some()
+            || self.pg.is_some()
+            || (op != self.ops.exec && op != self.ops.put)
+        {
+            return Ok(());
+        }
+        let v = self.v;
+        let node = self.cx.node().raw();
+        let k = self.flushes;
+        self.flushes += 1;
+        let mut before = Vec::with_capacity(11);
+        for c in 0..10 {
+            before.push(v.int(i64::from(self.reg_int(0, c)?)));
+        }
+        before.push(v.int(1));
+        // (the text's assignments before it go first: the fold reads
+        // them in TeX's order)
+        self.flush_text_defs();
+        let at = v.list(vec![
+            v.int(nodes::T_FLUSH_AT),
+            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+            v.int(i64::try_from(k).unwrap_or(0)),
+            v.list(before),
+        ]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        self.flush_pending = Some((
+            i64::from_ne_bytes(node.to_ne_bytes()),
+            i64::try_from(k).unwrap_or(0),
+        ));
+        self.flush_read_as(false)
     }
 
     /// The pending flush point withdrawn: nothing of this run read it
@@ -1048,69 +1099,17 @@ impl Run<'_, '_> {
         }
     }
 
-    /// The text assigned `\count<k>` (0–9) the value `n`: a document
-    /// node marks it on the main list (`T_FLUSH_AT` with `[k, n]`), so
-    /// the page that fires after it starts its routine from it (the
-    /// writer's fold); a definition of the counts a flush point fed back
-    /// is none.
-    pub(crate) fn count_set(&mut self, loc: crate::runstate::Loc, n: i64) {
-        let v = self.v;
-        let Some(k) = (0..10).find(|&k| self.reg_loc(0, k) == loc) else {
-            return;
-        };
-        let op = self.cx.op();
-        if self.fed
-            || self.interp.is_some()
-            || op == self.ops.pagestep
-            || op == self.ops.pagestep_any
-            || self.pg.is_some()
-        {
-            return;
-        }
-        let node = self.cx.node().raw();
-        let id = self.flushes;
-        self.flushes += 1;
-        let at = v.list(vec![
-            v.int(nodes::T_FLUSH_AT),
-            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
-            v.int(i64::try_from(id).unwrap_or(0)),
-            v.list(vec![v.int(i64::from(k)), v.int(n)]),
-        ]);
-        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
-    }
-
-    /// The text defined field `f` (one the routines change) after a
-    /// flush point fed it back: marked on the main list (`T_FLUSH_AT`
-    /// with `[f, x, 1]`), so the page that fires after it reads the
-    /// text's value, not the chain's (LaTeX's `\thispagestyle` after
-    /// `\cleardoublepage`).
-    pub(crate) fn field_set(&mut self, f: Field, x: ValueId) {
-        let v = self.v;
-        let op = self.cx.op();
-        if self.fed
-            || self.interp.is_some()
-            || op == self.ops.pagestep
-            || op == self.ops.pagestep_any
-            || self.pg.is_some()
-        {
-            return;
-        }
-        let node = self.cx.node().raw();
-        let id = self.flushes;
-        self.flushes += 1;
-        let at = v.list(vec![
-            v.int(nodes::T_FLUSH_AT),
-            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
-            v.int(i64::try_from(id).unwrap_or(0)),
-            v.list(vec![f.0, x, v.int(1)]),
-        ]);
-        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
-    }
-
     /// The pending flush point's loop-back read: its entry in
     /// [`FLUSHES`] (`[node, k, value]`), its fields read in place of the
     /// engine's from here on; none (round one) leaves the state as it is.
     pub(crate) fn flush_read(&mut self) -> R<()> {
+        self.flush_read_as(true)
+    }
+
+    /// [`Run::flush_read`]; a count probe's (`define` false) reads the
+    /// counts in place of the engine's, defining nothing (the text's
+    /// view of the chain's registers, not an assignment of its own).
+    fn flush_read_as(&mut self, define: bool) -> R<()> {
         let v = self.v;
         // (pending until read: a stop here rewinds the command, which
         // reads it again)
@@ -1118,32 +1117,72 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let all = self.cx.use_field(v.field(FLUSHES))?;
-        self.flush_pending = None;
         let read = all.and_then(|all| {
             list_of(v, all).into_iter().find_map(|e| {
                 let xs = list_of(v, e);
                 (xs.len() == 3 && int_of(v, xs[0]) == node && int_of(v, xs[1]) == k).then(|| xs[2])
             })
         });
+        let xs = read
+            .filter(|&x| x != ValueId::UNIT)
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
+        let pairs = pgst_pairs(v, xs.get(1).copied());
+        // a field an earlier flush point fed back that the routines no
+        // longer leave changed here is the text's own again (multicol's
+        // `\\partial@page`, voided by the routine that unboxed it)
+        let mut stale = Vec::new();
+        if !xs.is_empty() {
+            let gs: Vec<Field> = self
+                .flush_fields
+                .iter()
+                .copied()
+                .filter(|g| !pairs.iter().any(|p| p.0 == *g))
+                .collect();
+            for g in gs {
+                let l = self.loc_of(g);
+                if self.st.is_preloaded(l) {
+                    stale.push((l, self.cx.use_field(g)?));
+                }
+            }
+        }
+        self.flush_pending = None;
+        // (the text has the chain's counts from here on)
+        self.probe_ok = true;
         if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: flush point {node}:{k} reads {}",
                 read.map_or("none".to_owned(), |x| v.render(x))
             );
         }
-        let Some(x) = read.filter(|&x| x != ValueId::UNIT) else {
+        if xs.is_empty() {
             return Ok(());
-        };
-        let xs = list_of(v, x);
-        if let Some(&cs) = xs.first() {
-            self.define_counts(cs)?;
         }
-        if let Some(&pairs) = xs.get(1) {
-            for (g, y) in pgst_pairs(v, Some(pairs)) {
-                self.flush_fields.insert(g);
-                let l = self.loc_of(g);
-                self.st.preload(l, Some(y));
+        if let Some(&cs) = xs.first() {
+            if define {
+                // (defined on the text's first count read: a node that
+                // reads other fields only defines no count)
+                self.flush_cs = Some(cs);
+            } else {
+                self.preload_counts(cs);
             }
+        }
+        for (l, x) in stale {
+            self.st.fill(l, x);
+        }
+        for (g, y) in pairs {
+            self.flush_fields.insert(g);
+            let l = self.loc_of(g);
+            self.st.preload_global(l, Some(y));
+        }
+        Ok(())
+    }
+
+    /// The counts a flush point's read fed back, defined now (the text's
+    /// first read of a count after it).
+    pub(crate) fn flush_counts(&mut self) -> R<()> {
+        if let Some(cs) = self.flush_cs.take() {
+            self.define_counts(cs)?;
         }
         Ok(())
     }
@@ -1712,6 +1751,9 @@ fn fold_page(
                 continue;
             }
             nodes::T_FLUSH_AT => {
+                // (in order with the text's assignments: the writer's
+                // fold reads the state there, `FinalState`)
+                tdefs.push(x);
                 flushes.push((
                     crate::val::int_at(v, x, 1),
                     crate::val::int_at(v, x, 2),
@@ -1719,7 +1761,9 @@ fn fold_page(
                 ));
                 continue;
             }
-            nodes::T_DEFS_AT => {
+            // (a run's local bindings, kept in order with the
+            // definition markers: `fire_nodes`)
+            nodes::T_DEFS_AT | nodes::T_LOCALS_AT => {
                 tdefs.push(x);
                 continue;
             }
@@ -1744,16 +1788,37 @@ fn fold_page(
             origins.push(x);
         }
         // §1000: only a kern looks at what follows it
+        // (the next node TeX's list holds: the fold's markers are none
+        // of TeX's nodes, and `\\end`'s items come first where it is)
         let next = if matches!(p, Node::Kern(..)) {
-            if queue.is_empty() {
-                reach = reach.max((cursor + 1).min(items.len()));
+            let mut found = None;
+            let mut k = 0;
+            loop {
+                let (y, yat) = if let Some(&y) = queue.get(k) {
+                    (y, None)
+                } else if let Some(&y) = items.get(cursor + k - queue.len()) {
+                    let i = cursor + k - queue.len();
+                    reach = reach.max(i + 1);
+                    (y, Some(i))
+                } else {
+                    break;
+                };
+                k += 1;
+                if crate::build::is_marker(v, y) {
+                    continue;
+                }
+                if nodes::tag(v, y) == nodes::T_END {
+                    found = list_of(v, y)
+                        .get(1)
+                        .and_then(|&z| decode(z, None, &mut Side::default()));
+                    break;
+                }
+                if let Some(n) = decode(y, yat, &mut Side::default()) {
+                    found = Some(n);
+                    break;
+                }
             }
-            match queue.front() {
-                Some(&y) => decode(y, None, &mut Side::default()),
-                None => items
-                    .get(cursor)
-                    .and_then(|&y| decode(y, Some(cursor), &mut Side::default())),
-            }
+            found
         } else {
             None
         };
@@ -2347,8 +2412,10 @@ fn fire_nodes(v: &Values, recs: &[std::sync::Arc<crate::planinc::PageRec>]) -> V
     let mut cur = ValueId::UNIT;
     recs.iter()
         .map(|r| {
-            if let Some(&m) = r.tdefs.last() {
-                cur = v.int(crate::val::int_at(v, m, 1));
+            for &m in &r.tdefs {
+                if nodes::tag(v, m) == nodes::T_DEFS_AT {
+                    cur = v.int(crate::val::int_at(v, m, 1));
+                }
             }
             cur
         })
@@ -2359,6 +2426,15 @@ fn fire_nodes(v: &Values, recs: &[std::sync::Arc<crate::planinc::PageRec>]) -> V
 /// start.
 pub(crate) fn fire_node(v: &Values, x: Option<ValueId>) -> Option<phitex_defuse::NodeId> {
     let x = x.filter(|&x| x != ValueId::UNIT)?;
+    // (`[node, bindings]`: the node first)
+    let x = if v.as_int(x).is_some() {
+        x
+    } else {
+        list_of(v, x)
+            .first()
+            .copied()
+            .filter(|&y| y != ValueId::UNIT)?
+    };
     v.as_int(x)
         .map(|n| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())))
 }
@@ -2460,27 +2536,22 @@ impl FinalState {
         // each step's entry: [j, own pairs, pgst read, counts, pgdef
         // read, the count registers only advanced] (`Run::page_step`)
         let entries = Self::entries(v, all);
-        // the fields the text defined in page k's part, before break k
-        // (k = steps: after the last)
-        let tdefs: Vec<Vec<Field>> = cx
+        // the text's assignments in page k's part, before fire k (k =
+        // steps: after the last), in TeX's order, the flush points among
+        // them (`Run::log_def`, `PagePlan`)
+        let parts: Vec<Vec<ValueId>> = cx
             .use_field(v.field("pp:tdefs"))?
-            .map(|x| {
-                list_of(v, x)
-                    .into_iter()
-                    .map(|p| list_of(v, p).into_iter().map(Field).collect())
-                    .collect()
-            })
+            .map(|x| list_of(v, x).into_iter().map(|p| list_of(v, p)).collect())
             .unwrap_or_default();
         // where each step read the text (`pp:fires`, the plan's): the
         // text's state when page `j` fired, for the fields its routine's
         // delta does not carry
-        let fires: Vec<Option<phitex_defuse::NodeId>> = cx
+        let fire_vals: Vec<ValueId> = cx
             .use_field(v.field("pp:fires"))?
             .map(|x| list_of(v, x))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|x| fire_node(v, Some(x)))
-            .collect();
+            .unwrap_or_default();
+        let fires: Vec<Option<phitex_defuse::NodeId>> =
+            fire_vals.iter().map(|&x| fire_node(v, Some(x))).collect();
         // the text's `f` as step `k` reads it (after the last step: the
         // text's final state, the writer's)
         // (a gone fire position: `pp:fires` is stale, and re-reading it
@@ -2501,16 +2572,11 @@ impl FinalState {
             }
         };
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
-            std::collections::BTreeMap::new();
         let mut cur = ValueId::UNIT;
-        // the state after each page, for the flush points' loop-backs
-        let mut after: Vec<(ValueId, ValueId)> = Vec::new();
-        // the flush points (`flushplan`: `[node, k, page, counts]`): the
-        // text's `\\count0..9` as it stood at each, what the page after
-        // `page` starts from (the text's arithmetic since the flush
-        // before, on the value fed back there); the first, before any
-        // page, is the chain's start
+        // the flush points (`flushplan`: `[node, k, page, counts]`): a
+        // forced page's (`\\count0..9` as the text had them there, the
+        // chain's start), a count probe's (`[counts…, 1]`), or one
+        // nothing read (`[k]`, withdrawn: `\\bye`'s)
         let fp = cx.acc_range(v.field("flushplan"), None)?;
         let marks: Vec<(i64, i64, i64, ValueId)> = v
             .seq_to_vec(fp)
@@ -2526,16 +2592,14 @@ impl FinalState {
             .collect();
         let ints =
             |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
-        // (a marker's payload: a flush point's ten counts, or a count
-        // the text assigned, `[k, n]`, applied before page `p + 1`
-        // fires)
-        let (all_flushes, sets): (Vec<_>, Vec<_>) =
+        let (all_flushes, rest): (Vec<_>, Vec<_>) =
             marks.into_iter().partition(|m| list_of(v, m.3).len() == 10);
-        // (a flush point nothing read, withdrawn, `[k]`: the flush
-        // before `\end`; `Run::withdraw_flush`)
-        let (unread, sets): (Vec<_>, Vec<_>) =
-            sets.into_iter().partition(|m| list_of(v, m.3).len() == 1);
-        // (its counts still tell the text's there, for the chain's start)
+        let (probes, rest): (Vec<_>, Vec<_>) =
+            rest.into_iter().partition(|m| list_of(v, m.3).len() == 11);
+        let unread: Vec<_> = rest
+            .into_iter()
+            .filter(|m| list_of(v, m.3).len() == 1)
+            .collect();
         let flushes: Vec<_> = all_flushes
             .iter()
             .filter(|f| {
@@ -2545,26 +2609,6 @@ impl FinalState {
             })
             .copied()
             .collect();
-        // (and a field the text defined after a flush fed it back,
-        // `[f, x, 1]`)
-        let (fsets, sets): (Vec<_>, Vec<_>) =
-            sets.into_iter().partition(|m| list_of(v, m.3).len() == 3);
-        let sets_before = |page: usize, counts: &mut Vec<i64>| {
-            for s in sets
-                .iter()
-                .filter(|s| s.2 + 1 == i64::try_from(page).unwrap_or(-1))
-            {
-                let c = ints(s.3);
-                if let (Some(&k), Some(&n)) = (c.first(), c.get(1))
-                    && let Some(x) = usize::try_from(k).ok().and_then(|k| counts.get_mut(k))
-                {
-                    *x = n;
-                }
-            }
-        };
-        // the counts the routine of the page that fires at a flush point
-        // reads: the text's there (its arithmetic on the values fed back
-        // at the flush before)
         let fires_at = |page: usize| -> Option<Vec<i64>> {
             let page = i64::try_from(page).ok()?;
             all_flushes
@@ -2584,21 +2628,33 @@ impl FinalState {
                 .map(|f| ints(f.3))
                 .filter(|c| c.len() == 10)
         });
-        let mut counts = match start {
+        let counts = match start {
             Some(c) => c,
             None => Self::counts(cx, &|cx: &mut Ctx<'_>, f| text_at(cx, f, 0))?,
         };
-        sets_before(0, &mut counts);
+        let count_fields: Vec<Field> = (0..10).map(|k| v.field(&format!("count:{k}"))).collect();
+        let mut tex = TexOrder::new(counts);
+        // the text's assignments before the first page fires
+        let part0_counts = tex.replay(
+            v,
+            parts.first().map_or(&[][..], Vec::as_slice),
+            &count_fields,
+            false,
+        );
         let pgread0 = v.field("pgread0");
-        if (!flushes.is_empty() || !sets.is_empty()) && cx.is_loopback(pgread0) && !gone.get() {
-            lb_pub(
-                cx,
-                pgread0,
-                v.list(counts.iter().map(|&c| v.int(c)).collect()),
-            );
+        if (!flushes.is_empty() || part0_counts) && cx.is_loopback(pgread0) && !gone.get() {
+            lb_pub(cx, pgread0, tex.counts_value(v));
         }
         for j in 0..steps {
-            let Some(xs) = entries.get(&j) else { continue };
+            let Some(xs) = entries.get(&j) else {
+                tex.replay(
+                    v,
+                    parts.get(j + 1).map_or(&[][..], Vec::as_slice),
+                    &count_fields,
+                    true,
+                );
+                continue;
+            };
             let g = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
             // what step j read against what the steps before it left
             // (step 0 reads the state before the chain itself)
@@ -2613,8 +2669,7 @@ impl FinalState {
             if j > 0 {
                 if g(2) != cur {
                     let read = named(v, &read_pairs);
-                    let want: Vec<(String, ValueId)> =
-                        state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
+                    let want = tex.named(v);
                     for n in differing(&read, &want) {
                         if crate::exec::env_flag!("PHITEX_PGST") {
                             let r = |e: &[(String, ValueId)]| {
@@ -2629,7 +2684,7 @@ impl FinalState {
                         refuted.insert(n);
                     }
                 }
-                for (k, (a, b)) in read_counts.iter().zip(&counts).enumerate() {
+                for (k, (a, b)) in read_counts.iter().zip(&tex.counts).enumerate() {
                     if a != b {
                         refuted.insert(format!("count:{k}"));
                     }
@@ -2637,32 +2692,23 @@ impl FinalState {
             }
             // `\\count0..9` by the step's change, not its result: the page
             // number the routine advances (`\\advancepageno`, or not on a
-            // dead cycle) lands right on every page from one round's runs
+            // dead cycle) lands right on every page from one round's runs;
+            // a routine's change is a `\\global` one (§1025), which hides
+            // the text's saves of it (§283)
             let out_counts = ints(g(3));
             if out_counts.len() == 10 && read_counts.len() == 10 {
                 for k in 0..10 {
-                    counts[k] += out_counts[k] - read_counts[k];
+                    let d = out_counts[k] - read_counts[k];
+                    if d != 0 {
+                        tex.counts[k] += d;
+                        tex.hide_saves(count_fields[k]);
+                    }
                 }
-            }
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                eprintln!(
-                    "aux-trace: fold step {j}: read count0 {:?} out {:?} -> {}",
-                    read_counts.first(),
-                    out_counts.first(),
-                    counts[0]
-                );
             }
             if crate::exec::env_flag!("PHITEX_PGST") {
                 for (f, x) in pgst_pairs(v, Some(g(1))) {
                     let r: String = v.render(x).chars().take(160).collect();
                     eprintln!("pgst step {j} own: {} = {r}", crate::val::field_name(v, f));
-                }
-                for (f, x) in &read_pairs {
-                    let r: String = v.render(*x).chars().take(80).collect();
-                    eprintln!(
-                        "pgst step {j} read: {} = {r}",
-                        crate::val::field_name(v, *f)
-                    );
                 }
             }
             let advanced: Vec<ValueId> = list_of(v, g(5));
@@ -2678,49 +2724,34 @@ impl FinalState {
                 let x = if name.starts_with("count:") && advanced.contains(&f.0) {
                     let as_int = |y: Option<ValueId>| y.map_or(0, |y| int_of(v, y));
                     let had = as_int(read_pairs.iter().find(|p| p.0 == f).map(|p| p.1).or(pre));
-                    let now = as_int(state.get(&name).map(|p| p.1).or(pre));
+                    let now = as_int(tex.held(f).or(pre));
                     v.int(now + int_of(v, x) - had)
                 } else {
                     x
                 };
-                if same_as_before(v, &name, pre, x) {
-                    state.remove(&name);
-                } else {
-                    state.insert(name, (f, x));
-                }
+                // the routine's `\\global` (§1025): TeX's state holds it
+                // until the text assigns the field again; equal to the
+                // text's value where the next page fires (and no binding
+                // of the text's group there hides that), nothing to carry
+                let local = tex.in_frame(f);
+                tex.global(
+                    f,
+                    name,
+                    x,
+                    same_as_before(v, &crate::val::field_name(v, f), pre, x) && !local,
+                );
             }
-            let as_pairs = |state: &std::collections::BTreeMap<String, (Field, ValueId)>| {
-                if state.is_empty() {
-                    ValueId::UNIT
-                } else {
-                    v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
-                }
-            };
-            // a routine's delta holds at a later step only while the text
-            // has not defined the field since: what the text defined
-            // before the next break (step j+1's) is the text's again
-            if let Some(ds) = tdefs.get(j + 1) {
-                for &f in ds {
-                    state.remove(&crate::val::field_name(v, f));
-                }
-            }
-            // (the state after page j, as the text after a flush there
-            // reads it)
-            let cur_after = as_pairs(&state);
-            // what the next page's routine reads: the fields the text
-            // defined before it fires
-            for s in fsets
-                .iter()
-                .filter(|s| s.2 == i64::try_from(j).unwrap_or(-1))
-            {
-                let xs = list_of(v, s.3);
-                let (f, x) = (Field(xs[0]), xs[1]);
-                state.insert(crate::val::field_name(v, f), (f, x));
-            }
-            cur = as_pairs(&state);
-            let e: Vec<(String, ValueId)> =
-                state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
-            log_pub(o, "pgst", j, e);
+            // the text's assignments before the next page fires, in TeX's
+            // order with this page's routine (§277–§283), the flush
+            // points among them reading the state there
+            tex.replay(
+                v,
+                parts.get(j + 1).map_or(&[][..], Vec::as_slice),
+                &count_fields,
+                true,
+            );
+            cur = tex.pairs(v);
+            log_pub(o, "pgst", j, tex.named(v));
             let jj = v.int(i64::try_from(j).unwrap_or(0));
             if cur != ValueId::UNIT && !gone.get() {
                 lb_pub(cx, v.field(&format!("pgst:{j}")), cur);
@@ -2730,15 +2761,7 @@ impl FinalState {
                     v.seq_unit(v.list(vec![v.int(0), jj, cur])),
                 );
             }
-            // (the state after page j, as the text after a flush there
-            // reads it)
-            let done = v.list(counts.iter().map(|&c| v.int(c)).collect());
-            after.resize(j + 1, (ValueId::UNIT, ValueId::UNIT));
-            after[j] = (done, cur_after);
-            // what the next page's routine reads: the counts the text
-            // assigned before it fires
-            sets_before(j + 1, &mut counts);
-            let cs = v.list(counts.iter().map(|&c| v.int(c)).collect());
+            let cs = tex.counts_value(v);
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
             if !gone.get() {
                 lb_pub(cx, v.field(&format!("pgdef:{j}")), cs);
@@ -2746,39 +2769,25 @@ impl FinalState {
             }
         }
         Self::log_refuted(o, refuted);
-        // the flush points' loop-backs: the state after their page,
-        // UNIT before the first
-        let mut entries = Vec::with_capacity(flushes.len());
-        for &(n, k, p, _) in &flushes {
-            let x = usize::try_from(p)
-                .ok()
-                .and_then(|p| after.get(p))
-                .map_or(ValueId::UNIT, |&(cs, st)| v.list(vec![cs, st]));
+        // the flush points' loop-backs: the state where each stands (UNIT
+        // before the first page)
+        let mut out = Vec::with_capacity(flushes.len() + probes.len());
+        for &(n, k, _, _) in flushes.iter().chain(&probes) {
+            let x = tex.at.get(&(n, k)).copied().unwrap_or(ValueId::UNIT);
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                eprintln!(
-                    "aux-trace: flush point {n}:{k} after page {p}: {} (chain end {counts:?})",
-                    v.render(x)
-                );
+                eprintln!("aux-trace: flush point {n}:{k}: {}", v.render(x));
             }
-            entries.push(v.list(vec![v.int(n), v.int(k), x]));
+            out.push(v.list(vec![v.int(n), v.int(k), x]));
         }
         // (none: nothing published, as `pgst:<j>` with no change: a
         // document without flush points takes one round)
         let f = v.field(FLUSHES);
-        if !entries.is_empty() && cx.is_loopback(f) && !gone.get() {
-            lb_pub(cx, f, v.list(entries));
-        }
-        // (the text's definitions after the last break: its own)
-        if steps > 0
-            && let Some(ds) = tdefs.get(steps)
-        {
-            for &f in ds {
-                state.remove(&crate::val::field_name(v, f));
-            }
+        if !out.is_empty() && cx.is_loopback(f) && !gone.get() {
+            lb_pub(cx, f, v.list(out));
         }
         Ok(FinalState {
             gone: gone.get(),
-            map: state.into_values().collect(),
+            map: tex.held,
         })
     }
 
@@ -2941,4 +2950,211 @@ pub(crate) fn lb_pub(cx: &mut Ctx<'_>, f: Field, x: ValueId) {
         );
     }
     cx.publish(f, x);
+}
+
+/// What a group saved of a field (§283): the routine's `\\global` the
+/// state held then (`None`: the text's own), and a count register's value.
+#[derive(Clone, Copy)]
+struct Save {
+    held: Option<ValueId>,
+    count: Option<i64>,
+    /// The text's value the group hid (`None`: one before the log, the
+    /// engine's).
+    text: Option<ValueId>,
+}
+
+/// TeX's assignment order over the page chain (§277–§283), the writer's
+/// one fold of it: the text's assignments (`T_DEFS_AT` events,
+/// [`Run::log_def`]) where the text made them and each routine's
+/// `\\global`s at its fire. A field holds the younger assignment: a
+/// routine's `\\global` until the text assigns the field again (then the
+/// text's own, which a page step reads where its page fires), and a
+/// group's end restores what the group saved unless a `\\global` hid it
+/// since. The same rule for every kind of field; `\\count0..9` kept as
+/// values (the routines' by their change, [`FinalState::load`]).
+struct TexOrder {
+    held: phitex_defuse::FxHashMap<Field, ValueId>,
+    names: phitex_defuse::FxHashMap<Field, String>,
+    /// The text's value of each field it assigned (its latest, or what a
+    /// group's end restored).
+    text: phitex_defuse::FxHashMap<Field, ValueId>,
+    frames: std::collections::BTreeMap<i64, phitex_defuse::FxHashMap<Field, Save>>,
+    counts: Vec<i64>,
+    /// The state at each flush point (`[counts, pairs]`), by node and number.
+    at: phitex_defuse::FxHashMap<(i64, i64), ValueId>,
+}
+
+impl TexOrder {
+    fn new(counts: Vec<i64>) -> TexOrder {
+        TexOrder {
+            held: phitex_defuse::FxHashMap::default(),
+            names: phitex_defuse::FxHashMap::default(),
+            text: phitex_defuse::FxHashMap::default(),
+            frames: std::collections::BTreeMap::new(),
+            counts,
+            at: phitex_defuse::FxHashMap::default(),
+        }
+    }
+
+    /// Whether a group open here saved `f` (the text's local binding).
+    fn in_frame(&self, f: Field) -> bool {
+        self.frames.values().any(|fr| fr.contains_key(&f))
+    }
+
+    fn held(&self, f: Field) -> Option<ValueId> {
+        self.held.get(&f).copied()
+    }
+
+    /// A `\\global` assignment of `f`: the saves of it below are hidden
+    /// (§283: its level is one now, which `unsave` retains).
+    fn hide_saves(&mut self, f: Field) {
+        for fr in self.frames.values_mut() {
+            fr.remove(&f);
+        }
+    }
+
+    /// A routine's `\\global` of `f` (`drop`: equal to the text's, held
+    /// as the text's).
+    fn global(&mut self, f: Field, name: String, x: ValueId, drop: bool) {
+        self.hide_saves(f);
+        if drop {
+            self.held.remove(&f);
+        } else {
+            self.held.insert(f, x);
+            self.names.insert(f, name);
+        }
+    }
+
+    /// What a page firing here reads in place of the text's fields
+    /// where it fires: the routines' values held, and the text's local
+    /// bindings of the groups open here (§1025: eqtb as it stands; a
+    /// group of the text's open at the fire is no scope the step is in),
+    /// by name.
+    fn sorted(&self, v: &Values) -> Vec<(String, Field, ValueId)> {
+        self.sorted_as(v, true)
+    }
+
+    fn sorted_as(&self, v: &Values, locals: bool) -> Vec<(String, Field, ValueId)> {
+        let mut xs: Vec<(String, Field, ValueId)> = self
+            .held
+            .iter()
+            .map(|(&f, &x)| (self.names.get(&f).cloned().unwrap_or_default(), f, x))
+            .collect();
+        let mut seen = phitex_defuse::FxHashSet::default();
+        for fr in self.frames.values().filter(|_| locals) {
+            for &f in fr.keys() {
+                if self.held.contains_key(&f) || !seen.insert(f) {
+                    continue;
+                }
+                if let Some(&x) = self.text.get(&f) {
+                    xs.push((crate::val::field_name(v, f), f, x));
+                }
+            }
+        }
+        xs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        xs
+    }
+
+    fn named(&self, v: &Values) -> Vec<(String, ValueId)> {
+        self.sorted(v).into_iter().map(|(n, _, x)| (n, x)).collect()
+    }
+
+    /// The routines' values held, as `pgst:<j>` carries them (UNIT: none).
+    fn pairs(&self, v: &Values) -> ValueId {
+        self.pairs_as(v, true)
+    }
+
+    /// [`TexOrder::pairs`]; without the text's own local bindings
+    /// (`locals` false): what the text reads at a flush point, the
+    /// routines' values alone.
+    fn pairs_as(&self, v: &Values, locals: bool) -> ValueId {
+        let xs = self.sorted_as(v, locals);
+        if xs.is_empty() {
+            return ValueId::UNIT;
+        }
+        v.list(
+            xs.into_iter()
+                .map(|(_, f, x)| v.list(vec![f.0, x]))
+                .collect(),
+        )
+    }
+
+    fn counts_value(&self, v: &Values) -> ValueId {
+        v.list(self.counts.iter().map(|&c| v.int(c)).collect())
+    }
+
+    /// The text's assignments `events` in order (`[field, kind, depth,
+    /// value]`, kind 0 local, 1 global, 2 changed in place; `[UNIT, 3,
+    /// depth]` a group's end; `[UNIT, 4, node, k]` a flush point, its
+    /// state noted when `snap`). Whether a count register was assigned.
+    fn replay(&mut self, v: &Values, events: &[ValueId], counts: &[Field], snap: bool) -> bool {
+        let mut any_count = false;
+        for &e in events {
+            let xs = list_of(v, e);
+            let [f, kind, d, x] = xs[..] else { continue };
+            let (kind, d) = (int_of(v, kind), int_of(v, d));
+            if f == ValueId::UNIT {
+                match kind {
+                    3 => {
+                        let popped = self.frames.split_off(&d);
+                        for (_, fr) in popped.into_iter().rev() {
+                            for (g, s) in fr {
+                                match s.text {
+                                    Some(y) => {
+                                        self.text.insert(g, y);
+                                    }
+                                    None => {
+                                        self.text.remove(&g);
+                                    }
+                                }
+                                match s.held {
+                                    Some(y) => {
+                                        self.held.insert(g, y);
+                                    }
+                                    None => {
+                                        self.held.remove(&g);
+                                    }
+                                }
+                                if let Some(c) = s.count
+                                    && let Some(k) = counts.iter().position(|&h| h == g)
+                                {
+                                    self.counts[k] = c;
+                                }
+                            }
+                        }
+                    }
+                    4 if snap => {
+                        let st = self.pairs_as(v, false);
+                        let cs = self.counts_value(v);
+                        self.at.insert((d, int_of(v, x)), v.list(vec![cs, st]));
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            let f = Field(f);
+            let k = counts.iter().position(|&h| h == f);
+            match kind {
+                0 if d > 0 => {
+                    let s = Save {
+                        held: self.held(f),
+                        count: k.map(|k| self.counts[k]),
+                        text: self.text.get(&f).copied(),
+                    };
+                    self.frames.entry(d).or_default().entry(f).or_insert(s);
+                }
+                1 => self.hide_saves(f),
+                _ => {}
+            }
+            self.held.remove(&f);
+            self.text.insert(f, x);
+            if let Some(k) = k
+                && kind != 2
+            {
+                any_count = true;
+                self.counts[k] = v.as_int(x).unwrap_or(0);
+            }
+        }
+        any_count
+    }
 }

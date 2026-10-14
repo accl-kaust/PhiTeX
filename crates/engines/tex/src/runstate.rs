@@ -158,6 +158,11 @@ pub(crate) struct State {
     /// The locations defined at the base level (or globally) since the
     /// last [`State::take_base_defs`].
     base_defs: Vec<Loc>,
+    /// A page parameter (§980: `\\vsize`, `\\maxdepth`, `\\topskip`,
+    /// `\\holdinginserts`) defined at any level, or restored at a
+    /// group's end, since the last [`State::take_page_params`]: the
+    /// page builder reads eqtb as it stands (§987), groups or not.
+    pp_dirty: bool,
     /// In a page step: each location it defined, and whether only by
     /// `\advance` (its value then the one it read plus a change), for
     /// the writer's fold of the chain ([`State::advanced_only`]).
@@ -208,6 +213,7 @@ impl Clone for State {
             defined: self.defined.clone(),
             stamp: self.stamp,
             base_defs: self.base_defs.clone(),
+            pp_dirty: self.pp_dirty,
             kinds: self.kinds.clone(),
             next_gid: self.next_gid,
             cat_gen: new_cat_gen(),
@@ -246,6 +252,7 @@ impl State {
             defined: Vec::new(),
             stamp: 0,
             base_defs: Vec::new(),
+            pp_dirty: false,
             kinds: None,
             next_gid: 0,
             cat_gen: new_cat_gen(),
@@ -322,6 +329,13 @@ impl State {
         (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
     }
 
+    /// Whether `loc` holds a value read in place of the engine's
+    /// ([`State::preload`]) that nothing in the run has replaced since.
+    pub(crate) fn is_preloaded(&self, loc: Loc) -> bool {
+        self.slot_ref(loc)
+            .is_some_and(|s| s.e.flags & PRELOADED != 0)
+    }
+
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }
@@ -351,6 +365,16 @@ impl State {
             cmd: 0,
             chr: 0,
         };
+    }
+
+    /// [`State::preload`] of a value a routine assigned `\\global`ly
+    /// (the chain's, read at a flush point): the saves of `loc` the run's
+    /// groups hold before it are inert, so a group's end keeps it (§283).
+    pub(crate) fn preload_global(&mut self, loc: Loc, x: Option<ValueId>) {
+        self.preload(loc, x);
+        self.stamp += 1;
+        let st = self.stamp;
+        self.slot(loc).ginert = st;
     }
 
     /// The loaded entry of `loc` (call [`State::is_loaded`] first).
@@ -575,6 +599,9 @@ impl State {
         if global || grp.is_none() {
             self.base_defs.push(loc);
         }
+        if is_page_param(loc) {
+            self.pp_dirty = true;
+        }
     }
 
     /// Starts noting how each location is defined ([`State::note_kind`]).
@@ -602,6 +629,12 @@ impl State {
     /// The locations defined at the base level since the last call.
     pub(crate) fn take_base_defs(&mut self) -> Vec<Loc> {
         std::mem::take(&mut self.base_defs)
+    }
+
+    /// Whether a page parameter changed since the last call
+    /// ([`State::set`], [`State::close`]).
+    pub(crate) fn take_page_params(&mut self) -> bool {
+        std::mem::take(&mut self.pp_dirty)
     }
 
     /// A binding changed in place (§1079, §1247), nothing saved:
@@ -652,6 +685,9 @@ impl State {
             }
             if is_cat(s.loc) {
                 self.cat_gen = new_cat_gen();
+            }
+            if is_page_param(s.loc) {
+                self.pp_dirty = true;
             }
             let slot = self.slot(s.loc);
             slot.e = s.prev;
@@ -888,6 +924,7 @@ impl State {
             save,
             defined,
             base_defs,
+            pp_dirty: self.pp_dirty,
             kinds,
             stamp: self.stamp,
             next_gid: self.next_gid,
@@ -950,6 +987,7 @@ impl State {
             let l = loc(&mut st, d);
             st.base_defs.push(l);
         }
+        st.pp_dirty = p.pp_dirty;
         if let Some(ks) = p.kinds {
             let mut m = FxHashMap::default();
             for (d, a) in ks {
@@ -1010,7 +1048,20 @@ pub(crate) struct PState {
     save: Vec<PSaved>,
     defined: Vec<PLoc>,
     base_defs: Vec<PLoc>,
+    pp_dirty: bool,
     kinds: Option<Vec<(PLoc, bool)>>,
     stamp: u64,
     next_gid: u32,
+}
+
+/// Whether `loc` is one of the page builder's parameters (§980).
+fn is_page_param(loc: Loc) -> bool {
+    use crate::fields::Par;
+    [
+        Par::vsize as Loc,
+        Par::maxdepth as Loc,
+        Par::topskip as Loc,
+        Par::holdinginserts as Loc,
+    ]
+    .contains(&loc)
 }

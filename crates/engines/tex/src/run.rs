@@ -466,10 +466,22 @@ pub(crate) struct Run<'c, 'a> {
     pub closed: Vec<i32>,
     /// Flush points met by this run so far ([`Run::flush_point`]).
     pub flushes: usize,
+    /// Whether this run's text has the page chain's `\\count0..9` as
+    /// they stand here: read at a count probe ([`Run::count_probe`])
+    /// with no item put on the main list since (a page fires only as an
+    /// item arrives, §994).
+    pub probe_ok: bool,
     /// The last flush point's loop-back, not read yet: read (declared
     /// first) on the run's next read of a count register,
     /// so a flush nothing reads after (plain's `\bye`) costs no round.
     pub flush_pending: Option<(i64, i64)>,
+    /// The `\\count0..9` a flush point read fed back, defined on the
+    /// text's first read of a count ([`Run::flush_counts`]).
+    pub flush_cs: Option<ValueId>,
+    /// The text's assignments since the last item it put on the main
+    /// list, in TeX's order ([`Run::log_def`], [`Run::log_end`]): the
+    /// events of the next `T_DEFS_AT` marker.
+    pub tlog: Vec<ValueId>,
     /// The run read a job-written file back ([`Run::read_back`]): what
     /// it defines from then on keeps its value there ([`Run::note_pre`]).
     pub read_back_done: bool,
@@ -589,7 +601,10 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_base: 0,
             closed: Vec::new(),
             flushes: 0,
+            probe_ok: false,
             flush_pending: None,
+            flush_cs: None,
+            tlog: Vec::new(),
             fed: false,
             flush_fields: phitex_defuse::FxHashSet::default(),
             read_back_done: false,
@@ -637,8 +652,18 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn load(&mut self, loc: Loc) -> R<()> {
         if self.interp.is_some() {
             self.revert_read_back(loc)?;
-        } else if self.flush_pending.is_some() && crate::fields::is_count_slot(loc) {
+        } else if self.flush_pending.is_some() {
+            // (the text's first read after a flush point reads the state
+            // the routines left: any field, \\partial@page as multicol's
+            // `\\endmulticols` unboxes it, not only the counts)
             self.flush_read()?;
+        }
+        if self.flush_cs.is_some() && crate::fields::is_count_slot(loc) {
+            // (the counts a flush point fed back: defined on the text's
+            // first read of one, as before a read of any other field)
+            self.flush_counts()?;
+        } else if !self.probe_ok && crate::fields::is_chain_count_slot(loc) {
+            self.count_probe()?;
         }
         if self.st.is_loaded(loc) {
             return Ok(());
@@ -798,14 +823,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cx.op()
             );
         }
-        let set = crate::fields::is_count_slot(loc)
-            .then(|| val.encode(self.v))
-            .flatten()
-            .and_then(|x| self.v.as_int(x));
-        let field_set = (!self.flush_fields.is_empty())
-            .then(|| self.loc_field(loc))
-            .filter(|f| self.flush_fields.contains(f))
-            .map(|f| (f, val.encode(self.v).unwrap_or(ValueId::UNIT)));
+        let logged = self.logs_defs().then(|| val.encode(self.v));
         if self.read_back_done && self.interp.is_none() {
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 let f = self.loc_field(loc);
@@ -821,12 +839,63 @@ impl<'c, 'a> Run<'c, 'a> {
         self.st.note_kind(loc, self.in_advance);
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
-        if let Some(n) = set {
-            self.count_set(loc, n);
+        if let Some(x) = logged {
+            self.log_def(loc, if global { 1 } else { 0 }, x);
         }
-        if let Some((f, x)) = field_set {
-            self.field_set(f, x);
+    }
+
+    /// Whether this run's assignments are the text's, for the page
+    /// chain's fold (`T_DEFS_AT`): a document node's, not a page step's,
+    /// not a line read back, not the chain's values fed back.
+    pub(crate) fn logs_defs(&self) -> bool {
+        let op = self.cx.op();
+        self.pg.is_none()
+            && !self.fed
+            && self.interp.is_none()
+            && (op == self.ops.exec || op == self.ops.put)
+    }
+
+    /// The group depth here: the engine scope's (the run's base level)
+    /// and the run's own groups open above it.
+    pub(crate) fn def_depth(&self) -> i64 {
+        let base = self.kind_memo.as_ref().map_or(0, |(_, p)| p.4);
+        base + self.local_groups()
+    }
+
+    /// A text assignment, in TeX's order (§277–§279): `kind` 0 a local
+    /// one (`eq_define`: saved by the innermost group, at its depth), 1
+    /// a `\\global` one (`geq_define`), 2 a binding changed in place
+    /// (§1079: a box register used, nothing saved). Folded with the
+    /// routines' `\\global`s by the writer ([`crate::page::FinalState`]).
+    pub(crate) fn log_def(&mut self, loc: Loc, kind: i64, x: Option<ValueId>) {
+        let v = self.v;
+        let f = self.loc_field(loc);
+        let d = self.def_depth();
+        let e = v.list(vec![f.0, v.int(kind), v.int(d), x.unwrap_or(ValueId::UNIT)]);
+        // (the same field defined again, the same way, with no group's
+        // end between: the later value alone)
+        if let Some(i) = self.tlog.iter().rposition(|&y| {
+            let ys = list_of(v, y);
+            ys[0] == f.0 || ys[0] == ValueId::UNIT
+        }) {
+            let ys = list_of(v, self.tlog[i]);
+            if ys[0] == f.0 && ys[1] == v.int(kind) && ys[2] == v.int(d) {
+                self.tlog[i] = e;
+                return;
+            }
         }
+        self.tlog.push(e);
+    }
+
+    /// A group's end at depth `d` (§281–§283): the saves of the groups at
+    /// `d` and deeper restored, those a `\\global` hid since excepted.
+    pub(crate) fn log_end(&mut self, d: i64) {
+        if !self.logs_defs() {
+            return;
+        }
+        let v = self.v;
+        self.tlog
+            .push(v.list(vec![ValueId::UNIT, v.int(3), v.int(d), ValueId::UNIT]));
     }
 
     /// A field this run defines after reading a job-written file back:
@@ -1161,24 +1230,23 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.pg.is_some() || (op != self.ops.exec && op != self.ops.put) {
             return false;
         }
-        let mut locs = self.st.take_base_defs();
-        if locs.is_empty() {
-            return true;
-        }
-        if locs.iter().any(|l| PAGE_PARAMS.contains(l)) {
+        // (a page parameter set in a group, or restored at its end,
+        // too: the page builder reads eqtb as it stands, §987)
+        if self.st.take_page_params() {
             self.put_page_params();
         }
-        locs.sort_unstable();
-        locs.dedup();
+        // (the base definitions are in the log too)
+        let _ = self.st.take_base_defs();
+        if self.tlog.is_empty() {
+            return true;
+        }
         let v = self.v;
-        let mut xs = Vec::with_capacity(locs.len() + 2);
+        let mut xs = Vec::with_capacity(self.tlog.len() + 2);
         xs.push(v.int(crate::nodes::T_DEFS_AT));
         // (the defining node: a page firing after this marker reads the
         // text's state after it, `Run::step_fire`)
         xs.push(v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes())));
-        for l in locs {
-            xs.push(self.loc_field(l).0);
-        }
+        xs.append(&mut self.tlog);
         let at = v.list(xs);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
         true
@@ -2790,7 +2858,10 @@ pub(crate) struct Parked {
     pdf_occ: usize,
     irreversible: u64,
     flushes: usize,
+    probe_ok: bool,
     flush_pending: Option<(i64, i64)>,
+    flush_cs: Option<ValueId>,
+    tlog: Vec<ValueId>,
     flush_fields: phitex_defuse::FxHashSet<Field>,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
@@ -2905,7 +2976,10 @@ impl Run<'_, '_> {
             pdf_occ: self.pdf_occ,
             irreversible: self.irreversible,
             flushes: self.flushes,
+            probe_ok: self.probe_ok,
             flush_pending: self.flush_pending,
+            flush_cs: self.flush_cs,
+            tlog: self.tlog.clone(),
             flush_fields: self.flush_fields.clone(),
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
@@ -2976,7 +3050,10 @@ impl<'c, 'a> Run<'c, 'a> {
         r.pdf_occ = p.pdf_occ;
         r.irreversible = p.irreversible;
         r.flushes = p.flushes;
+        r.probe_ok = p.probe_ok;
         r.flush_pending = p.flush_pending;
+        r.flush_cs = p.flush_cs;
+        r.tlog = p.tlog;
         r.flush_fields = p.flush_fields;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;

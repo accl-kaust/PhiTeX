@@ -734,6 +734,9 @@ impl Session {
                     && d.context.is_empty()
             })
             .map(|d| {
+                if std::env::var_os("PHITEX_EVAL_DUMP").is_some() {
+                    eprintln!("eval-dump: {}", d.message);
+                }
                 let m = d.message.lines().next().unwrap_or("");
                 match m.char_indices().nth(240) {
                     Some((k, _)) => format!("{}…", &m[..k]),

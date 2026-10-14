@@ -151,10 +151,12 @@ impl Run<'_, '_> {
     /// globals among them kept, §283), its `\aftergroup` tokens put
     /// back (§282); the level is returned with its list.
     pub(crate) fn pop_level(&mut self) -> Option<Level> {
+        let d = self.def_depth();
         let l = self.nest.pop()?;
         // (a paragraph is no group: its definitions are the level's below)
         if l.group != 0 {
             self.st.close(l.save_base, l.def_base);
+            self.log_end(d);
         }
         let toks: Vec<Tok> = l.ag.clone();
         self.push_toks(toks);
@@ -192,5 +194,11 @@ impl Run<'_, '_> {
         let at_base = lvl <= base;
         self.st
             .modify(loc, crate::runstate::Native::Raw(val), at_base, lvl == 0);
+        // (at level one it is a global binding changed: as a \\global
+        // one, which hides the saves below it; else the binding's group
+        // keeps what it saved)
+        if self.logs_defs() {
+            self.log_def(loc, if lvl == 0 { 1 } else { 2 }, Some(val));
+        }
     }
 }

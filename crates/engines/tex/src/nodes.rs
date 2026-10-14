@@ -85,6 +85,16 @@ pub(crate) const T_FLUSH_AT: i64 = 90;
 /// routines' deltas give way), and the last marker before a page's fire
 /// is where its step reads the text's state (`pp:fire:<j>`).
 pub(crate) const T_DEFS_AT: i64 = 86;
+/// `[T_LOCALS_AT, field, value, …]`: a marker on the main list before
+/// an item a document node contributed inside a group of its own run
+/// (§271: the save stack the run keeps, which never reaches the engine):
+/// the local bindings in force there, `[T_LOCALS_AT]` when none are any
+/// more. A page that fires at an item after it runs its routine in that
+/// state (§1025: the output routine sees eqtb as it stands; LaTeX's
+/// `\cleardoublepage` sets `\pagestyle{empty}` inside a group around
+/// the `\newpage` that fires the page), so its step reads them in place
+/// of the text's fields at the fire node (`pp:fire:<j>`).
+pub(crate) const T_LOCALS_AT: i64 = 83;
 /// A font a document node loaded (`read_font_info`, §1257): `[tag, f]`;
 /// the page builder's fold tells the writer which page shipped first
 /// after it, as pdfTeX numbers the fonts a page's virtual fonts load
