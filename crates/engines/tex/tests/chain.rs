@@ -117,10 +117,11 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
         }
     }
     eprintln!(
-        "{name}: {} nodes run, {} runs, critical path {:?}, peak running {}, ready mean {:.2}, page steps {} ({} any), chain {} links: {by:?}",
+        "{name}: {} nodes run, {} runs, critical path {:?}, realised cp {}, peak running {}, ready mean {:.2}, page steps {} ({} any), chain {} links: {by:?}",
         b.stats.nodes_run,
         b.stats.runs,
         b.stats.critical_path,
+        b.stats.realised_critical_path,
         b.stats.peak_running,
         b.stats.ready_mean(),
         b.stats.page_steps,
