@@ -483,38 +483,21 @@ fn file_hash(f: Option<&(String, Vec<u8>)>) -> u64 {
 }
 
 /// The texts of the files written: the `streams` entries (`[name]` opens
-/// a file empty, `[name, text]` adds to it, `[name, "", "close"]` closes
-/// it: what is written to it until it is opened again goes nowhere, as
-/// TeX's §1370 sends a closed stream's writes to the log), in the order
-/// first opened.
+/// a file empty, `[name, text]` adds to it), in the order first opened.
 pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut closed: Vec<String> = Vec::new();
     for &e in entries {
         let xs = list_of(v, stream_entry(v, e));
         let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
         let k = if let Some(k) = out.iter().position(|(n, _)| *n == name) {
             k
         } else {
-            out.push((name.clone(), String::new()));
+            out.push((name, String::new()));
             out.len() - 1
         };
-        if xs
-            .get(2)
-            .is_some_and(|&c| v.as_str(c).as_deref() == Some("close"))
-        {
-            if !closed.contains(&name) {
-                closed.push(name);
-            }
-            continue;
-        }
-        if let Some(&t) = xs.get(1) {
-            if !closed.contains(&name) {
-                out[k].1.push_str(&str_of(v, t));
-            }
-        } else {
-            closed.retain(|n| *n != name);
-            out[k].1.clear();
+        match xs.get(1) {
+            Some(&t) => out[k].1.push_str(&str_of(v, t)),
+            None => out[k].1.clear(),
         }
     }
     out
@@ -1294,7 +1277,7 @@ impl Graph {
         // head of the message; the error's full form last)
         let mut out = format!("evaluation: {e}");
         let v = self.eng.values();
-        if let E::UndeclaredDefinition { field, .. } | E::ConflictingPublication { field } = e {
+        if let E::UndeclaredDefinition { field, .. } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
         // (the engine does not say which loop-backs kept changing: the
@@ -1374,48 +1357,48 @@ impl Graph {
         let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let spent = Arc::new(std::sync::atomic::AtomicU64::new(0));
         // a file asked for again in the evaluation (by every page step,
-        // say) is answered from here, not read and converted again
-        let answered: std::sync::Mutex<FxHashMap<String, Option<ValueId>>> =
-            std::sync::Mutex::new(FxHashMap::default());
+        // say) is answered from here, not read and converted again; its
+        // first asker reads it, concurrent askers wait for that answer
+        let answered: std::sync::Mutex<
+            FxHashMap<String, Arc<std::sync::OnceLock<Option<ValueId>>>>,
+        > = std::sync::Mutex::new(FxHashMap::default());
         self.eng.set_env_provider(Box::new(move |v, f| {
             let name = v.as_str(f.0)?;
             let name = name.strip_prefix("file:")?;
             if written.iter().any(|w| w == name) {
                 return None;
             }
-            if let Some(&val) = answered
+            let cell = answered
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(name)
-            {
-                return Some(val);
-            }
-            let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            let t1 = std::time::Instant::now();
-            let found = finder(name);
-            let hash = file_hash(found.as_ref());
-            let val = found.map(|(path, bytes)| {
-                let text: String = bytes.iter().map(|&b| char::from(b)).collect();
-                v.list(vec![v.str(&path), v.str(&text)])
-            });
-            answered
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(name.to_owned(), val);
-            if let Ok(mut l) = log.lock() {
-                l.push((name.to_owned(), f, val, hash));
-            }
-            let ns = u64::try_from(t1.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            let all = spent.fetch_add(ns, std::sync::atomic::Ordering::Relaxed) + ns;
-            if crate::exec::env_flag!("PHITEX_TEX_TIME") {
-                #[allow(clippy::cast_precision_loss)]
-                let all = all as f64 / 1e9;
-                eprintln!(
-                    "provider: at {:.1} s, {n} answers, {all:.3} s in the provider, last {name}",
-                    t0.elapsed().as_secs_f64()
-                );
-            }
-            Some(val)
+                .entry(name.to_owned())
+                .or_default()
+                .clone();
+            let answer = || {
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let t1 = std::time::Instant::now();
+                let found = finder(name);
+                let hash = file_hash(found.as_ref());
+                let val = found.map(|(path, bytes)| {
+                    let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                    v.list(vec![v.str(&path), v.str(&text)])
+                });
+                if let Ok(mut l) = log.lock() {
+                    l.push((name.to_owned(), f, val, hash));
+                }
+                let ns = u64::try_from(t1.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let all = spent.fetch_add(ns, std::sync::atomic::Ordering::Relaxed) + ns;
+                if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                    #[allow(clippy::cast_precision_loss)]
+                    let all = all as f64 / 1e9;
+                    eprintln!(
+                        "provider: at {:.1} s, {n} answers, {all:.3} s in the provider, last {name}",
+                        t0.elapsed().as_secs_f64()
+                    );
+                }
+                val
+            };
+            Some(*cell.get_or_init(answer))
         }));
     }
 
@@ -1663,29 +1646,6 @@ impl Graph {
                     continue;
                 }
                 declare_marks_before(&mut self.eng, n);
-                self.marks_decl.push((f, ValueId::UNIT));
-                asked = true;
-            }
-            // a document node's flush points: their `pgst:at:<node>:<k>`
-            // loop-backs declared (`flushdecl:<node>:<k>`), UNIT (the
-            // state as it is) in round one
-            let fdecl: Vec<(Field, String)> = {
-                let v = self.eng.values();
-                r.env_waits
-                    .iter()
-                    .filter_map(|&(_, f)| {
-                        field_name(v, f)
-                            .strip_prefix("flushdecl:")
-                            .map(|k| (f, k.to_owned()))
-                    })
-                    .collect()
-            };
-            for (f, key) in fdecl {
-                if self.marks_decl.iter().any(|&(g, _)| g == f) {
-                    continue;
-                }
-                let lb = self.eng.values().field(&format!("pgst:at:{key}"));
-                self.eng.declare_loopback(lb, ValueId::UNIT);
                 self.marks_decl.push((f, ValueId::UNIT));
                 asked = true;
             }
@@ -3731,7 +3691,6 @@ fn declare_fields(eng: &mut Engine) {
         "ifviol",
         "streams",
         "wplan",
-        "flushplan",
         "fread",
         "pagefxs",
         "pgdeltas",

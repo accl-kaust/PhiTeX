@@ -72,12 +72,6 @@ pub(crate) const T_MARKS_AT: i64 = 91;
 /// among the shipped pages, so the writer assembles the file in TeX's
 /// order.
 pub(crate) const T_WRITE_AT: i64 = 88;
-/// Where a document node forced the page out (a penalty of -10000 or
-/// less on the main vertical list, §1005: `\clearpage`): `[tag, node,
-/// k]`, the node's k-th; the writer publishes the state the page chain
-/// leaves after the page that breaks there as the node's
-/// `pgst:at:<node>:<k>` loop-back, which the node reads on from.
-pub(crate) const T_FLUSH_AT: i64 = 87;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]

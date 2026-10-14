@@ -7,6 +7,12 @@
 
 mod common;
 
+// the CLI's allocator: with the system's, concurrent page steps
+// contend in it and the measures do not show the binary's scaling
+#[cfg(not(target_family = "wasm"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[test]
 #[ignore = "profiling run"]
 fn profile_pages() {

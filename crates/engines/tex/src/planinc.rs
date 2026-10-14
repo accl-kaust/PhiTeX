@@ -54,9 +54,6 @@ pub(crate) struct PageRec {
     pub passed: Vec<i64>,
     pub writes: Vec<ValueId>,
     pub stuck: bool,
-    /// The flush points met folding this page (`(node, k)`: no index,
-    /// so a shifted page keeps them).
-    pub flushes: Vec<(i64, i64)>,
     /// `pp:items:<j>` and `pp:start:<j>` as that run set them.
     pub items_v: ValueId,
     pub start_v: ValueId,

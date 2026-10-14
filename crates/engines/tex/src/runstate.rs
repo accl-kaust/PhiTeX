@@ -647,14 +647,6 @@ impl State {
         self.stamp
     }
 
-    /// Whether `loc` was defined after stamp `since`.
-    pub(crate) fn defined_after(&self, loc: Loc, since: u64) -> bool {
-        self.slot_ref(loc)
-            .and_then(|s| usize::try_from(s.meta).ok().filter(|&m| m > 0))
-            .and_then(|m| self.metas.get(m - 1))
-            .is_some_and(|m| m.ldef_stamp > since)
-    }
-
     /// The locations with a definition at the base level.
     pub(crate) fn defined_locs(&self) -> impl Iterator<Item = Loc> + '_ {
         self.metas
