@@ -207,3 +207,98 @@ fn golden_there() {
     };
     assert_eq!(ship(&expected, &page), expected);
 }
+
+/// A page of `n` lines (a `vbox` of `hbox`es of text, kerns and empty
+/// boxes between them), in font 1.
+fn page_of(f: &ScaledFont, n: usize, seed: usize) -> BoxNode {
+    let mut b = BoxNode {
+        kind: BoxKind::V,
+        ..BoxNode::default()
+    };
+    for k in 0..n {
+        let words: [&[u8]; 4] = [b"the", b"quick", b"brown", b"fox"];
+        let line = hbox(f, words[(k + seed) % 4]);
+        b.height += line.height + line.depth + PT;
+        b.width = b.width.max(line.width);
+        b.list.push(Node::Box(line));
+        b.list.push(Node::Kern(
+            PT * i32::try_from((k + seed) % 3 + 1).unwrap(),
+            KernKind::Explicit,
+        ));
+        if (k + seed).is_multiple_of(5) {
+            b.list.push(Node::Box(BoxNode {
+                kind: BoxKind::H,
+                ..BoxNode::default()
+            }));
+        }
+    }
+    b
+}
+
+#[test]
+fn kept_pages_ship_again_as_written() {
+    // §598, §601, §611: a small buffer, so that the pages' movements and
+    // cancelled pushes read its state; each page kept, then shipped
+    // again after a first page of every length, equal to writing it
+    let f = cmr10();
+    let def = font_def(&f, [1, 2, 3, 4]);
+    let fonts = |_| def.clone();
+    let pages: Vec<BoxNode> = (0..12).map(|k| page_of(&f, 3 + k * 2, k)).collect();
+    let mut w = DviWriter::with_buf_size(1000, "", 64);
+    let kept: Vec<_> = pages
+        .iter()
+        .map(|p| {
+            w.ship_out_kept(p, [0; 10], &fonts, &mut |_, _| None)
+                .unwrap()
+        })
+        .collect();
+    let (mut reused, mut written) = (0, 0);
+    for first in 0..24 {
+        let lead = page_of(&f, first, first);
+        let mut a = DviWriter::with_buf_size(1000, "", 64);
+        let mut b = DviWriter::with_buf_size(1000, "", 64);
+        a.ship_out(&lead, [0; 10], &fonts, &mut |_, _| None)
+            .unwrap();
+        b.ship_out(&lead, [0; 10], &fonts, &mut |_, _| None)
+            .unwrap();
+        for (p, k) in pages.iter().zip(&kept) {
+            if a.ship_kept(k) {
+                reused += 1;
+            } else {
+                written += 1;
+                a.ship_out(p, [0; 10], &fonts, &mut |_, _| None).unwrap();
+            }
+            b.ship_out(p, [0; 10], &fonts, &mut |_, _| None).unwrap();
+        }
+        assert_eq!(
+            a.finish(),
+            b.finish(),
+            "after a first page of {first} lines"
+        );
+    }
+    eprintln!("kept pages: {reused} shipped again, {written} written");
+    assert!(reused > 0 && written > 0);
+}
+
+#[test]
+fn a_kept_page_defines_its_fonts_where_it_lands() {
+    // §621: a kept page that defined a font is not shipped again where
+    // the font is already defined, and the other way round
+    let f = cmr10();
+    let def = font_def(&f, [1, 2, 3, 4]);
+    let fonts = |_| def.clone();
+    let p = page_of(&f, 4, 0);
+    let mut w = DviWriter::new(1000, "");
+    let first = w
+        .ship_out_kept(&p, [0; 10], &fonts, &mut |_, _| None)
+        .unwrap();
+    let second = w
+        .ship_out_kept(&p, [0; 10], &fonts, &mut |_, _| None)
+        .unwrap();
+    let mut a = DviWriter::new(1000, "");
+    assert!(!a.ship_kept(&second));
+    assert!(a.ship_kept(&first));
+    assert!(!a.ship_kept(&first));
+    assert!(a.ship_kept(&second));
+    assert_eq!(a.finish(), w.finish());
+}

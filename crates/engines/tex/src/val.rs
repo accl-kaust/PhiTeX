@@ -315,6 +315,10 @@ impl std::fmt::Display for CsId {
 
 /// The bit of a control sequence token.
 const CS_BIT: u32 = 1 << 31;
+/// The bit of a frozen or internal control sequence token (its name
+/// starts with `\u{10FFFE}`): tested without touching the entry.
+const FROZEN_BIT: u32 = 1 << 30;
+const CS_MASK: u32 = CS_BIT | FROZEN_BIT;
 
 /// A token (§289) in one word: a character, `cat << 21 | char` (category
 /// 13 is an active character), or, with bit 31 set, a control sequence
@@ -348,7 +352,8 @@ impl Tok {
     }
 
     pub(crate) fn of_cs(c: CsId) -> Tok {
-        Tok(CS_BIT | u32::try_from(c.index()).unwrap_or(0))
+        let f = if c.frozen() { FROZEN_BIT } else { 0 };
+        Tok(CS_BIT | f | u32::try_from(c.index()).unwrap_or(0))
     }
 
     /// The word: `cat << 21 | char` for a character (so `raw() >> 21` is
@@ -367,18 +372,25 @@ impl Tok {
     /// The control sequence of a control sequence token.
     #[inline]
     pub(crate) fn as_cs(self) -> Option<CsId> {
-        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & !CS_BIT) as usize))
+        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & !CS_MASK) as usize))
     }
 
     /// The number of a control sequence token ([`CsId::index`]).
     #[inline]
     pub(crate) fn cs_index(self) -> Option<usize> {
-        (self.0 & CS_BIT != 0).then_some((self.0 & !CS_BIT) as usize)
+        (self.0 & CS_BIT != 0).then_some((self.0 & !CS_MASK) as usize)
     }
 
     #[inline]
     pub(crate) fn is_cs(self) -> bool {
         self.0 & CS_BIT != 0
+    }
+
+    /// Whether this is a frozen or internal control sequence (one bit,
+    /// no entry lookup).
+    #[inline]
+    pub(crate) fn is_frozen_cs(self) -> bool {
+        self.0 & CS_MASK == CS_MASK
     }
 
     /// The category of a character token.
@@ -481,7 +493,7 @@ struct Decoded {
     toks: FxHashMap<ValueId, Rc<[Tok]>>,
     means: FxHashMap<ValueId, Mean>,
     glues: FxHashMap<ValueId, Glue>,
-    frames: FxHashMap<ValueId, Option<crate::run::Frame>>,
+    frames: FxHashMap<ValueId, Option<crate::input::Seg>>,
     leaves: FxHashMap<ValueId, phitex_typeset::node::Node>,
 }
 
@@ -661,8 +673,8 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
 pub(crate) fn frame_of(
     v: &Values,
     id: ValueId,
-    make: impl FnOnce() -> Option<crate::run::Frame>,
-) -> Option<crate::run::Frame> {
+    make: impl FnOnce() -> Option<crate::input::Seg>,
+) -> Option<crate::input::Seg> {
     decoded(v, id, |d| &mut d.frames, make)
 }
 
@@ -804,6 +816,58 @@ pub(crate) struct Macro {
     pub params: Vec<Tok>,
     /// Shared: a call without arguments reads it in place.
     pub body: Rc<[Tok]>,
+    /// The body cut at its parameters (§400): each segment is a run of
+    /// plain tokens followed by one parameter (0: none). Empty when the
+    /// macro has no parameters (its body is read in place).
+    pub segs: Box<[Seg]>,
+}
+
+/// One piece of a macro body: `body[lo..hi]` then parameter `param`
+/// (1-based; 0 for the tail without one).
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) struct Seg {
+    pub lo: u32,
+    pub hi: u32,
+    pub param: u8,
+}
+
+impl Macro {
+    pub(crate) fn new(flags: u8, params: Vec<Tok>, body: Rc<[Tok]>) -> Self {
+        let segs = if params.is_empty() {
+            Box::default()
+        } else {
+            let mut segs = Vec::new();
+            let mut lo = 0u32;
+            for (i, t) in body.iter().enumerate() {
+                if let Some(x) = t.as_char()
+                    && x >> 21 == u32::from(OUT_PARAM_CAT)
+                {
+                    let i = u32::try_from(i).unwrap_or(u32::MAX);
+                    segs.push(Seg {
+                        lo,
+                        hi: i,
+                        param: u8::try_from(x & 0x1F_FFFF).unwrap_or(1),
+                    });
+                    lo = i + 1;
+                }
+            }
+            let end = u32::try_from(body.len()).unwrap_or(u32::MAX);
+            if lo < end {
+                segs.push(Seg {
+                    lo,
+                    hi: end,
+                    param: 0,
+                });
+            }
+            segs.into_boxed_slice()
+        };
+        Macro {
+            flags,
+            params,
+            body,
+            segs,
+        }
+    }
 }
 
 pub(crate) const MATCH_CAT: u8 = 14;
@@ -941,11 +1005,11 @@ impl Mean {
                 let name = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
                 prim(&name).map_or(Mean::Undefined, |(n, c, h)| Mean::Prim(n, c, h))
             }
-            "macro" => Mean::Macro(Rc::new(Macro {
-                flags: u8::try_from(n(1)).unwrap_or(0),
-                params: toks_of(v, xs.get(2).copied()),
-                body: toks_rc(v, xs.get(3).copied()),
-            })),
+            "macro" => Mean::Macro(Rc::new(Macro::new(
+                u8::try_from(n(1)).unwrap_or(0),
+                toks_of(v, xs.get(2).copied()),
+                toks_rc(v, xs.get(3).copied()),
+            ))),
             "char" => Mean::Char(
                 u8::try_from(n(1)).unwrap_or(0),
                 u32::try_from(n(2)).unwrap_or(0),
