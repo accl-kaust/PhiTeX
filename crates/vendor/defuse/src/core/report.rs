@@ -20,9 +20,20 @@ fn sorted(m: &FxHashMap<&'static str, u64>) -> Vec<(&'static str, u64)> {
 #[derive(Default)]
 pub(crate) struct Heights {
     init: bool,
-    of: FxHashMap<Slot, (u32, Cause, Slot)>,
-    lev: std::collections::BTreeMap<u32, crate::values::FxHashSet<Slot>>,
-    rev: FxHashMap<Slot, crate::values::FxHashSet<Slot>>,
+    /// By slot.
+    of: Vec<Option<(u32, Cause, Slot)>>,
+    /// How many nodes have each height.
+    lev: Vec<u32>,
+    /// By slot: the nodes whose heights read it.
+    rev: Vec<Vec<Slot>>,
+}
+
+impl Heights {
+    /// The greatest height held.
+    #[allow(clippy::cast_possible_truncation)]
+    fn top(&self) -> u32 {
+        self.lev.iter().rposition(|&c| c > 0).unwrap_or(0) as u32
+    }
 }
 
 /// A node on the height walk's stack: its reads and how many are done.
@@ -122,14 +133,12 @@ impl Engine {
             rep.refutations_max = t.refuted_nodes.values().copied().max().unwrap_or(0);
         }
         // Canonical counters: the snapshots against the state now.
-        let touched = std::mem::take(&mut *lock(&sh.touched));
+        let mut touched = std::mem::take(&mut *lock(&sh.touched));
+        touched.sort_unstable();
+        touched.dedup();
         let mut snaps = std::mem::take(&mut *lock(&sh.snaps));
         let mut ran: Vec<Slot> = Vec::new();
-        let mut seen = crate::values::FxHashSet::default();
         for s in touched {
-            if !seen.insert(s) {
-                continue;
-            }
             let r = sh.rec(s);
             if r.flags.fetch_and(!super::F_GUESS, Ordering::AcqRel) & super::F_GUESS != 0 {
                 // The guesses held to the end of the evaluation.
@@ -170,14 +179,14 @@ impl Engine {
         #[cfg(feature = "profile")]
         #[allow(clippy::cast_possible_truncation)]
         crate::obs::add_impl("report_heights", th.elapsed().as_nanos() as u64);
-        let path = self.heights.lev.keys().next_back().copied().unwrap_or(0);
+        let path = self.heights.top();
         rep.critical_path = path;
         let hs = &self.heights.of;
         // Levels: the nodes that ran, by height; a level's width is how
         // many ran there (the steps a barrier schedule would take).
         let mut widths: FxHashMap<u32, u64> = FxHashMap::default();
         for s in ran {
-            if let Some(h) = hs.get(&s) {
+            if let Some(Some(h)) = hs.get(s as usize) {
                 *widths.entry(h.0).or_default() += 1;
             }
         }
@@ -202,20 +211,23 @@ impl Engine {
         let h = &self.heights;
         let sh = &self.sh;
         let live = |x: Slot| !matches!(sh.rec(x).st(), S_FREE | S_MARKER | S_INERT);
-        let Some((&max, set)) = h.lev.iter().next_back() else {
+        if h.lev.iter().all(|&c| c == 0) {
             return (0, Vec::new());
-        };
-        let top = set
-            .iter()
-            .copied()
-            .filter(|&x| live(x))
-            .min_by_key(|&x| sh.rec(x).lab())
-            .unwrap_or(NIL);
+        }
+        let max = h.top();
+        #[allow(clippy::cast_possible_truncation)]
+        let top =
+            h.of.iter()
+                .enumerate()
+                .filter(|(x, e)| e.as_ref().is_some_and(|e| e.0 == max) && live(*x as Slot))
+                .map(|(x, _)| x as Slot)
+                .min_by_key(|&x| sh.rec(x).lab())
+                .unwrap_or(NIL);
         let mut chain = Vec::new();
         let mut x = top;
         let mut guard = 0;
         while x != NIL && guard < 1 << 20 {
-            let Some((hx, c, nx)) = h.of.get(&x).cloned() else {
+            let Some((hx, c, nx)) = h.of.get(x as usize).cloned().flatten() else {
                 break;
             };
             chain.push((x, hx, c, nx));
@@ -330,42 +342,56 @@ impl Engine {
             out.retain(|(x, _)| *x != s && !matches!(sh.rec(*x).st(), S_FREE | S_MARKER | S_INERT));
             out
         };
+        #[cfg(feature = "profile")]
+        let mut tq = std::time::Instant::now();
         let h = &mut self.heights;
+        let n = sh.recs.len();
+        if h.of.len() < n {
+            h.of.resize_with(n, || None);
+            h.rev.resize_with(n, Vec::new);
+        }
+        let dead = |x: Slot| matches!(sh.rec(x).st(), S_FREE | S_MARKER | S_INERT);
         // The affected region: the changed nodes and every reader above
         // them; its heights are recomputed, the rest are kept.
-        let mut region: crate::values::FxHashSet<Slot> = crate::values::FxHashSet::default();
+        let mut in_region = vec![false; n];
+        let mut region: Vec<Slot> = Vec::new();
         let mut work = seeds;
         while let Some(s) = work.pop() {
-            if region.insert(s)
-                && let Some(rv) = h.rev.get(&s)
-            {
-                work.extend(rv.iter().copied().filter(|y| !region.contains(y)));
+            let i = s as usize;
+            if i < n && !in_region[i] {
+                in_region[i] = true;
+                region.push(s);
+                work.extend(h.rev[i].iter().copied().filter(|&y| !in_region[y as usize]));
             }
         }
         for &s in &region {
-            if let Some(o) = h.of.remove(&s)
-                && let Some(set) = h.lev.get_mut(&o.0)
-            {
-                set.remove(&s);
-                if set.is_empty() {
-                    h.lev.remove(&o.0);
-                }
+            if let Some(o) = h.of[s as usize].take() {
+                h.lev[o.0 as usize] -= 1;
             }
         }
-        let mut order: Vec<Slot> = region
-            .iter()
-            .copied()
-            .filter(|&x| !matches!(sh.rec(x).st(), S_FREE | S_MARKER | S_INERT))
-            .collect();
+        #[cfg(feature = "profile")]
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            crate::obs::add_impl("h_region", tq.elapsed().as_nanos() as u64);
+            tq = std::time::Instant::now();
+        }
+        let mut order: Vec<Slot> = region.iter().copied().filter(|&x| !dead(x)).collect();
         order.sort_by_key(|&x| sh.rec(x).lab());
         for &x in &region {
-            if matches!(sh.rec(x).st(), S_FREE | S_MARKER | S_INERT) {
-                h.rev.remove(&x);
+            if dead(x) {
+                h.rev[x as usize] = Vec::new();
             }
+        }
+        drop(region);
+        #[cfg(feature = "profile")]
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            crate::obs::add_impl("h_sort", tq.elapsed().as_nanos() as u64);
+            tq = std::time::Instant::now();
         }
         // The region's reads, gathered on the executor's threads when it
         // is large (the walk below takes them from here).
-        let mut pre: FxHashMap<Slot, Vec<(Slot, Cause)>> = FxHashMap::default();
+        let mut pre: Vec<Option<Vec<(Slot, Cause)>>> = Vec::new();
         if let Some(exec) = exec
             && exec.parallelism() > 1
             && order.len() >= 1 << 13
@@ -378,27 +404,41 @@ impl Engine {
                 let v: Vec<NodeDeps> = chunks[i].iter().map(|&x| (x, deps(x))).collect();
                 *lock(&out[i]) = v;
             });
-            pre.reserve(order.len());
+            pre.resize_with(n, || None);
             for m in out {
-                pre.extend(m.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
+                for (x, d) in m.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
+                    pre[x as usize] = Some(d);
+                }
             }
         }
-        let mut deps_of = |x: Slot| pre.remove(&x).unwrap_or_else(|| deps(x));
+        #[cfg(feature = "profile")]
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            crate::obs::add_impl("h_pre", tq.elapsed().as_nanos() as u64);
+            tq = std::time::Instant::now();
+        }
+        let mut deps_of = |x: Slot| {
+            pre.get_mut(x as usize)
+                .and_then(Option::take)
+                .unwrap_or_else(|| deps(x))
+        };
+        // On the walk's stack (reads of a node on it are a cycle: skipped).
+        let mut on = vec![false; n];
+        let mut stack: Vec<Frame> = Vec::new();
         for &root in &order {
-            if h.of.contains_key(&root) {
+            if h.of[root as usize].is_some() {
                 continue;
             }
             // Iterative DFS.
-            let mut stack: Vec<Frame> = vec![(root, deps_of(root), 0)];
-            let mut on: crate::values::FxHashSet<Slot> = crate::values::FxHashSet::default();
-            on.insert(root);
+            stack.push((root, deps_of(root), 0));
+            on[root as usize] = true;
             while let Some(top) = stack.last_mut() {
                 let (s, ds, i) = (top.0, &top.1, top.2);
                 if i < ds.len() {
                     let x = ds[i].0;
                     top.2 += 1;
-                    if !h.of.contains_key(&x) && !on.contains(&x) {
-                        on.insert(x);
+                    if (x as usize) < n && h.of[x as usize].is_none() && !on[x as usize] {
+                        on[x as usize] = true;
                         let dx = deps_of(x);
                         stack.push((x, dx, 0));
                     }
@@ -414,8 +454,21 @@ impl Engine {
                 );
                 let mut any = false;
                 for (x, c) in ds {
-                    h.rev.entry(*x).or_default().insert(s);
-                    let Some(hx) = h.of.get(x).map(|e| e.0) else {
+                    let xi = *x as usize;
+                    if xi >= n {
+                        continue;
+                    }
+                    let rv = &mut h.rev[xi];
+                    // Kept free of repeats (lists stay short; a long one is
+                    // deduplicated when it doubles).
+                    if rv.last() != Some(&s) && (rv.len() >= 16 || !rv.contains(&s)) {
+                        rv.push(s);
+                        if rv.len() >= 32 && rv.len().is_power_of_two() {
+                            rv.sort_unstable();
+                            rv.dedup();
+                        }
+                    }
+                    let Some(hx) = h.of[xi].as_ref().map(|e| e.0) else {
                         continue;
                     };
                     let cand = hx + 1;
@@ -427,12 +480,19 @@ impl Engine {
                 if !any {
                     best.0 = 0;
                 }
-                on.remove(&s);
-                h.lev.entry(best.0).or_default().insert(s);
-                h.of.insert(s, best);
+                on[s as usize] = false;
+                let l = best.0 as usize;
+                if h.lev.len() <= l {
+                    h.lev.resize(l + 1, 0);
+                }
+                h.lev[l] += 1;
+                h.of[s as usize] = Some(best);
                 stack.pop();
             }
         }
+        #[cfg(feature = "profile")]
+        #[allow(clippy::cast_possible_truncation)]
+        crate::obs::add_impl("h_walk", tq.elapsed().as_nanos() as u64);
     }
 
     /// The longest chain of reads below any node (as of the last
