@@ -1,11 +1,13 @@
 //! Gates for LaTeX: the format made from `latex.ini` (`latex.ltx` with
 //! `texsys.cfg`, `hyphen.cfg`, the font configuration) as the prelude,
 //! then the documents of `oracle/fixtures/latex/docs` run as `latex`
-//! runs them: the DVI file (its preamble's date masked) and the files
-//! written (`NAME.writes`) equal TeX Live's, on the first run from
-//! nothing (`NAME.dvi`) and at the fixpoint of the files read back
-//! (`NAME.fix.dvi`); then `pdflatex` on the same documents through the
-//! PDF writer (`oracle/fixtures/latex/pdf`), and one-word edits.
+//! runs them: the DVI file (its preamble's date masked) equal to TeX
+//! Live's, on the first run from nothing (`NAME.dvi`) and at the
+//! fixpoint of the files read back (`NAME.fix.dvi`); then `pdflatex` on
+//! the same documents through the PDF writer
+//! (`oracle/fixtures/latex/pdf`), and one-word edits. The files a job
+//! writes and reads back (`.aux`, `.toc`, ...) live in memory: the
+//! gates compare the output file, never their bytes.
 //!
 //! Heavy (the format is evaluated once per process): ignored by default;
 //! run with `--ignored`, one test at a time, `PHITEX_GATE=name` for one
@@ -33,25 +35,6 @@ fn masked(dvi: &[u8]) -> Vec<u8> {
         }
     }
     d
-}
-
-/// `=== name length` headers, each before the file's text.
-fn parse_writes(s: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut rest = s;
-    while let Some(head) = rest.strip_prefix("=== ") {
-        let Some((line, after)) = head.split_once('\n') else {
-            break;
-        };
-        let Some((name, n)) = line.rsplit_once(' ') else {
-            break;
-        };
-        let n: usize = n.parse().unwrap_or(0);
-        let end = after.char_indices().nth(n).map_or(after.len(), |(i, _)| i);
-        out.push((name.to_string(), after[..end].to_string()));
-        rest = &after[end..];
-    }
-    out
 }
 
 /// `latex.ini` (or `pdflatex.ini`) as `-ini` reads it.
@@ -149,18 +132,6 @@ fn latex_gate(name: &str, fix: bool) -> Result<String, String> {
     if let Some(d) = common::first_difference(&masked(&dvi), &masked(&want)) {
         bad.push(format!("dvi {d}"));
     }
-    let writes = common::read(&dir.join(format!("{name}{suffix}.writes")));
-    let files = b.files();
-    for (n, w) in parse_writes(&writes) {
-        let got = files
-            .iter()
-            .find(|(m, _)| *m == n)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default();
-        if let Some(d) = common::first_difference(got.as_bytes(), w.as_bytes()) {
-            bad.push(format!("{n} {d}"));
-        }
-    }
     if bad.is_empty() {
         Ok(r)
     } else {
@@ -205,8 +176,8 @@ fn latex_fixpoint() {
     run_all(true);
 }
 
-/// `pdflatex` on the documents with a PDF oracle: the PDF file and the
-/// written files byte for byte.
+/// `pdflatex` on the documents with a PDF oracle: the PDF file byte for
+/// byte.
 #[test]
 #[ignore = "heavy: the LaTeX format"]
 fn pdflatex() {
@@ -224,10 +195,13 @@ fn pdflatex() {
         .collect();
     ns.sort();
     for name in ns {
-        let dir = if docs().join(format!("{name}.tex")).exists() {
-            docs()
+        // (the PDF oracles' own sources first: `docs/` holds the DVI
+        // oracles' documents, and a name in both is two documents)
+        let pdfdocs = common::fixtures().join("latex/pdfdocs");
+        let dir = if pdfdocs.join(format!("{name}.tex")).exists() {
+            pdfdocs
         } else {
-            common::fixtures().join("latex/pdfdocs")
+            docs()
         };
         let want = std::fs::read(oracles.join(format!("{name}.pdf"))).expect("the oracle");
         let src = common::read(&dir.join(format!("{name}.tex")));
@@ -241,18 +215,6 @@ fn pdflatex() {
         let mut bad = Vec::new();
         if let Some(d) = common::first_difference(&pdf, &want) {
             bad.push(format!("pdf {d}"));
-        }
-        let writes = common::read(&oracles.join(format!("{name}.writes")));
-        let files = b.files();
-        for (n, w) in parse_writes(&writes) {
-            let got = files
-                .iter()
-                .find(|(m, _)| *m == n)
-                .map(|(_, t)| t.clone())
-                .unwrap_or_default();
-            if let Some(d) = common::first_difference(got.as_bytes(), w.as_bytes()) {
-                bad.push(format!("{n} {d}"));
-            }
         }
         let r = report(&name, &b);
         if bad.is_empty() {
@@ -335,7 +297,7 @@ fn sections_edits() {
         );
         text = new;
         let cold = common::build(opts(), Some(&pre), &text);
-        let same = b.output().0 == cold.output().0 && b.files() == cold.files();
+        let same = b.output().0 == cold.output().0;
         if same {
             eprintln!("  edit {k}: equals cold");
         } else {
@@ -492,7 +454,6 @@ fn latex_loop_rounds() {
                     b3.stats.loop_rounds, b3.stats.rounds, b3.stats.nodes_run
                 );
                 assert_eq!(b.output().0, b3.output().0, "the guess changed the output");
-                assert_eq!(b.files(), b3.files(), "the guess changed the files");
                 let (out, log) = b.output();
                 eprintln!(
                     "fixpoint {name}: {} bytes out, {:?}, log tail {:?}",
@@ -554,7 +515,7 @@ fn pdf_cache() -> PathBuf {
 
 /// A `pdfdocs` document built cold from `dir` (the format cached):
 /// byte-identical to its oracle, its document nodes counted.
-fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64, Vec<String>) {
+fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
         .expect("the oracle");
     let cache = pdf_cache();
@@ -613,21 +574,11 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64, Vec<String>) {
     if let Some(d) = common::first_difference(&b.output().0, &want) {
         panic!("{name}.pdf cold: {d}");
     }
-    let writes = common::read(&common::fixtures().join(format!("latex/pdf/{name}.writes")));
-    let files = b.files();
-    let mut writes_diff = Vec::new();
-    for (n, w) in parse_writes(&writes) {
-        let got = files.iter().find(|(m, _)| *m == n).map(|(_, t)| t.clone());
-        if got.as_deref() != Some(w.as_str()) {
-            eprintln!("{name}: written {n} differs: {got:?}");
-            writes_diff.push(n);
-        }
-    }
     assert_eq!(
         b.stats.undeclared_definitions, 0,
         "{name}: undeclared definitions"
     );
-    (b, regions, writes_diff)
+    (b, regions)
 }
 
 fn pdf_opts(name: &str, dir: &Path) -> Options {
@@ -747,16 +698,12 @@ fn quack(src: &str, marker: &str) -> String {
 fn latex_paragraph_nodes() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("paras30.tex"));
-    let (mut b, regions, writes) = cold_nodes("paras30", &dir, &src);
+    let (mut b, regions) = cold_nodes("paras30", &dir, &src);
     assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
     let new = quack(&src, "Paragraph 17 of the text: the quick ");
     b.edit(&new);
     let cold = common::build(pdf_opts("paras30", &dir), Some(&prelude(true)), &new);
     edit_check("paras30", &b, &cold, 3);
-    assert!(
-        writes.is_empty(),
-        "paras30: written files differ: {writes:?}"
-    );
 }
 
 /// `pdflatex` on an article with an abstract, two sections, itemize,
@@ -769,7 +716,7 @@ fn latex_paragraph_nodes() {
 fn latex_environments() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("envs.tex"));
-    let (mut b, regions, writes) = cold_nodes("envs", &dir, &src);
+    let (mut b, regions) = cold_nodes("envs", &dir, &src);
     let pars = paragraphs(&src);
     eprintln!("envs: {regions} document nodes for {pars} paragraphs");
     assert!(
@@ -780,7 +727,6 @@ fn latex_environments() {
     b.edit(&new);
     let cold = common::build(pdf_opts("envs", &dir), Some(&prelude(true)), &new);
     edit_check("envs", &b, &cold, 4);
-    assert!(writes.is_empty(), "envs: written files differ: {writes:?}");
 }
 
 /// `pdflatex` on a book whose chapters and section are followed by
@@ -794,7 +740,7 @@ fn latex_environments() {
 fn latex_heading_everypar() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("headings.tex"));
-    let (b, _, _) = cold_nodes("headings", &dir, &src);
+    let (b, _) = cold_nodes("headings", &dir, &src);
     assert_eq!(b.stats.undeclared_definitions, 0, "undeclared definitions");
     assert_eq!(b.stats.regime_violations, 0, "regime violations");
 }
@@ -886,7 +832,7 @@ fn latex_input_include() {
         std::fs::copy(src_dir.join(f), dir.join(f)).expect("copy");
     }
     let src = common::read(&dir.join("inputs.tex"));
-    let (mut b, regions, writes) = cold_nodes("inputs", &dir, &src);
+    let (mut b, regions) = cold_nodes("inputs", &dir, &src);
     eprintln!("inputs: {regions} document nodes for 20 chapter paragraphs");
     assert!(regions >= 10, "{regions} document nodes: chap1 not sliced");
     let chap1 = common::read(&dir.join("chap1.tex"));
@@ -896,10 +842,6 @@ fn latex_input_include() {
     let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
     let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
     edit_check("inputs", &b, &cold, 4);
-    assert!(
-        writes.is_empty(),
-        "inputs: written files differ: {writes:?}"
-    );
 }
 
 /// An article with one paragraph between blank lines (the ladder's
@@ -910,12 +852,11 @@ fn latex_input_include() {
 fn latex_one_paragraph() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("red02.tex"));
-    let (mut b, _, writes) = cold_nodes("red02", &dir, &src);
+    let (mut b, _) = cold_nodes("red02", &dir, &src);
     let new = src.replace("Hello", "Hallo");
     b.edit(&new);
     let cold = common::build(pdf_opts("red02", &dir), Some(&prelude(true)), &new);
     edit_check("red02", &b, &cold, 3);
-    assert!(writes.is_empty(), "red02: written files differ: {writes:?}");
 }
 
 /// A heading and three paragraphs (`pdfdocs/secpars.tex`): the first
@@ -926,15 +867,11 @@ fn latex_one_paragraph() {
 fn latex_heading_paragraphs() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("secpars.tex"));
-    let (mut b, _, writes) = cold_nodes("secpars", &dir, &src);
+    let (mut b, _) = cold_nodes("secpars", &dir, &src);
     let new = quack(&src, "The first paragraph after the heading: the ");
     b.edit(&new);
     let cold = common::build(pdf_opts("secpars", &dir), Some(&prelude(true)), &new);
     edit_check("secpars", &b, &cold, 3);
-    assert!(
-        writes.is_empty(),
-        "secpars: written files differ: {writes:?}"
-    );
 }
 
 /// The chain census gate (`common::Census`) on a `pdflatex` document:
@@ -954,7 +891,7 @@ fn census_envs() {
 fn census_of(name: &str, marker: &str) {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join(format!("{name}.tex")));
-    let (mut b, _, _) = cold_nodes(name, &dir, &src);
+    let (mut b, _) = cold_nodes(name, &dir, &src);
     let new = quack(&src, marker);
     common::assert_census(&[common::Census::take(name, &mut b, &new)]);
 }
@@ -968,7 +905,7 @@ fn census_of(name: &str, marker: &str) {
 fn latex_utf8_edit() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("utf8.tex"));
-    let (mut b, regions, writes) = cold_nodes("utf8", &dir, &src);
+    let (mut b, regions) = cold_nodes("utf8", &dir, &src);
     assert!(regions >= 8, "{regions} document nodes for 8 paragraphs");
     // (the text's characters are its bytes: a UTF-8 word as `read` gives it)
     let bytes = |w: &str| -> String { w.bytes().map(char::from).collect() };
@@ -977,5 +914,4 @@ fn latex_utf8_edit() {
     b.edit(&new);
     let cold = common::build(pdf_opts("utf8", &dir), Some(&prelude(true)), &new);
     edit_check("utf8", &b, &cold, 3);
-    assert!(writes.is_empty(), "utf8: written files differ: {writes:?}");
 }

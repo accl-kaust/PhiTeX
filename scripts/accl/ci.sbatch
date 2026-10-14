@@ -29,18 +29,22 @@ cache=$HOME/shared-cache/phitex
 R=$CI/runs/$run
 oracle=$CI/oracle/$image
 w=/tmp/$USER-${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID:-0}
-mkdir -p "$w"/{results,oracle-new,home,texmf-var,cargo} "$R" "$oracle"
+mkdir -p "$w"/{results,oracle-new,home,texmf-var,cargo,noresolve} "$R" "$oracle"
 trap 'rm -rf "$w"' EXIT
 echo "stage $stage, run $run, node $(hostname), job ${SLURM_JOB_ID} task ${SLURM_ARRAY_TASK_ID:-}, image $image, $(date -Is)"
 
 # box CMD...: CMD in the container, as described above (/h: the harness,
-# read-only; /o: the oracle cache, read-only; /w: the scratch)
+# read-only; /o: the oracle cache, read-only; /w: the scratch). Apptainer
+# binds the host's /run/systemd/resolve, whose resolved socket answers DNS
+# queries on some nodes even without a network: an empty directory hides it.
 box() {
   apptainer exec --containall --cleanenv --no-home --net --network none \
-    --bind "$w:/w" --bind "$CI/harness:/h:ro" --bind "$oracle:/o:ro" --pwd /w \
+    --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w:/w" --bind "$CI/harness:/h:ro" --bind "$oracle:/o:ro" --pwd /w \
     --env TEXMFVAR=/w/texmf-var,CARGO_HOME=/w/cargo,CARGO_NET_OFFLINE=true,PHITEX_SANDBOX=1,CI_WORK=/w \
     "$sif" "$@"
 }
+# (no name resolves inside: no channel out)
+if box getent hosts export.arxiv.org >/dev/null 2>&1; then echo "FAILED: the box resolves names on $(hostname)"; exit 76; fi
 # out: the results to the run's directory; new oracle builds to the cache
 out() {
   local into=$1

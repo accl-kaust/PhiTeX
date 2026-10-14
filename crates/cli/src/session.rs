@@ -113,7 +113,7 @@ pub struct Job {
     /// The engine's threads (none: `PHITEX_THREADS`, else all the cores).
     pub threads: Option<usize>,
     /// `--exact-pdf`: the PDF's objects numbered as pdfTeX numbers them
-    /// (false: the engine's default).
+    /// (false: the relaxed mode, the default).
     pub exact_pdf: bool,
     /// `--spec`: when the engine runs steps ahead of their inputs (none:
     /// its default).
@@ -577,8 +577,10 @@ impl Session {
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
                     threads: self.job.threads,
                     progress: Some(progress),
-                    // (--exact-pdf: pdfTeX's numbering asked for; else the engine's default)
-                    exact_objects: self.job.exact_pdf || Options::default().exact_objects,
+                    // (--exact-pdf: pdfTeX's numbering; else the relaxed mode,
+                    // pages written apart, the same pages after renumbering:
+                    // crates/output/pdf/RELAXED.md)
+                    exact_objects: self.job.exact_pdf,
                     speculation: match self.job.spec.as_deref() {
                         Some("off") => phitex_tex::Speculation::Off,
                         Some("all") => phitex_tex::Speculation::All,
@@ -662,10 +664,17 @@ impl Session {
         let diagnostics = b.diagnostics();
         // (and the evaluation's own errors — no fixpoint, a stop — which
         // the log does not have: errors at no place, without context)
-        let errors = log
-            .lines()
-            .filter(|l| l.starts_with("! "))
-            .map(str::to_owned)
+        // (the format's own errors first, with their places: a format
+        // that stopped on them is not the oracle's, whatever follows)
+        let errors = b
+            .prelude_diagnostics()
+            .iter()
+            .map(|d| format!("! {} ({}:{})", d.message, d.file, d.line))
+            .chain(
+                log.lines()
+                    .filter(|l| l.starts_with("! "))
+                    .map(str::to_owned),
+            )
             .chain(
                 diagnostics
                     .iter()

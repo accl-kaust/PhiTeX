@@ -454,7 +454,12 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                     Some((n, o))
                 })?;
                 let (name, obj) = got.unwrap_or((name, obj));
-                (if c == cv::FONT_NAME { name } else { obj }).to_string()
+                if c == cv::FONT_NAME {
+                    // (the name the finish gives it, pdfTeX's number)
+                    crate::pdfout::font_tag_read(r, name)?.to_string()
+                } else {
+                    obj.to_string()
+                }
             }
         }
         cv::FONT_SIZE => {
@@ -1627,6 +1632,7 @@ fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str) -> R<i64> {
     };
     let nf = r.cint(crate::fields::cell::FONTCOUNT)? + 1;
     r.set_cell(crate::fields::cell::FONTCOUNT, v.int(nf), true);
+    r.font_loaded(nf)?;
     let mut xs = vec![
         v.str(&format!("{}{suffix}", i.name)),
         v.int(i64::from(i.size)),
@@ -1969,15 +1975,27 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 fv,
                 v.int(i64::from(immediate)),
             ]);
+            // (written after a page fired: by the finish, after that page,
+            // where pdfTeX writes it; the pages are placed after every
+            // read-time command, `pdfout::finish`)
+            let later =
+                immediate && crate::pdfout::pages_apart(r)? && crate::etex::page_shipped_before(r)?;
             let got = crate::pdfout::command(r, input, &[], |st, _| {
                 let (n, refused) = st.obj(use_n, stream, attr_b, body);
-                let err = if immediate {
+                let err = if immediate && !later {
                     st.write_obj(n).err()
                 } else {
                     None
                 };
                 Some((n, refused, err))
             })?;
+            if later && let Some((n, false, _)) = got {
+                let at = v.list(vec![
+                    v.int(crate::nodes::T_PDFW_AT),
+                    v.int(i64::try_from(n).unwrap_or(0)),
+                ]);
+                r.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+            }
             let n = match got {
                 Some((n, refused, err)) => {
                     if refused {
