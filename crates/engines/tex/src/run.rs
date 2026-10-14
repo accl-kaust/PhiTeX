@@ -211,6 +211,9 @@ pub(crate) struct Run<'c, 'a> {
     /// first segment's index), or `None` when it joined the line before
     /// it: [`Run::give_back_peeked`].
     pub pull_at: Vec<Option<usize>>,
+    /// The writer's state this run's last PDF step made, not yet where
+    /// other nodes find it ([`crate::pdfout::publish`], at the run's end).
+    pub pdf_fold: Option<(u64, std::sync::Arc<crate::pdfout::Fold>)>,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -349,6 +352,7 @@ impl<'c, 'a> Run<'c, 'a> {
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
             pull_at: Vec::new(),
+            pdf_fold: None,
             top: false,
             claim_rest: false,
             nest: Vec::new(),
@@ -1552,6 +1556,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        crate::pdfout::publish(self.pdf_fold.take());
         if self.lines_read != 0 {
             let n = self.v.int(i64::try_from(self.lines_read).unwrap_or(0));
             self.contribute("lines", n);
@@ -1938,6 +1943,7 @@ impl Run<'_, '_> {
         if !self.rewind() {
             return None;
         }
+        crate::pdfout::publish(self.pdf_fold.take());
         let mut segs = Vec::new();
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         for l in input.levels.iter().rev() {
