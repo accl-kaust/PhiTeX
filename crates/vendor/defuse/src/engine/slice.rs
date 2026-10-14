@@ -165,6 +165,7 @@ impl Aux {
             body: self.body,
             assumers: self.assumers.clone(),
             assume_left: self.assume_left,
+            read_predicted: self.read_predicted,
             watch: self.watch,
             watch_to: self.watch_to,
             scan: self.scan,
@@ -190,6 +191,7 @@ impl RunResult {
             epoch: self.epoch,
             speculative: self.speculative,
             read_unsettled: self.read_unsettled,
+            read_predicted: self.read_predicted,
             end: self.end.clone(),
             raise: self.raise,
             raise_from: self.raise_from,
@@ -270,6 +272,8 @@ impl Report {
             declarations_refuted,
             rerun_causes,
             static_contribs_refuted,
+            predictions_confirmed,
+            predictions_refuted,
             fuel_outs,
             steps,
             values_freed,
@@ -332,6 +336,8 @@ impl Report {
         self.declarations_refuted += declarations_refuted;
         self.rerun_causes.extend(rerun_causes);
         self.static_contribs_refuted += static_contribs_refuted;
+        self.predictions_confirmed += predictions_confirmed;
+        self.predictions_refuted += predictions_refuted;
         self.fuel_outs += fuel_outs;
         self.steps += steps;
         self.values_freed += values_freed;
@@ -553,6 +559,9 @@ impl Engine {
             memo: OvMap::over(&self.memo),
             text_memo: RwLock::new(FxHashMap::default()),
             statics: RwLock::new(FxHashMap::default()),
+            predictions_seen: std::sync::atomic::AtomicBool::new(
+                self.predictions_seen.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             queue: Vec::new(),
             queue_min: usize::MAX,
             queue_len: 0,

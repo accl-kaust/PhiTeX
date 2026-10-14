@@ -2790,3 +2790,191 @@ fn a_range_reader_folds_declared_contributions_and_a_wrong_one_is_refuted() {
         assert_eq!(rep.static_contribs_refuted, 0, "{sched}");
     }
 }
+
+/// `[i]`: node `i` of a chain reads `a{i-1}` and `b{i-1}` and defines
+/// `a{i}` and `b{i}`; `predict` holds the values each node predicts.
+struct PredChain {
+    predict: Option<Vec<(i64, i64)>>,
+    runs: std::sync::atomic::AtomicU64,
+}
+
+fn pred_step(i: i64, (a, b): (i64, i64)) -> (i64, i64) {
+    ((a + b + i) % 1_000_003, (a * 3 + i) % 1_000_033)
+}
+
+fn pred_truth(n: usize) -> Vec<(i64, i64)> {
+    let mut p = (1, 2);
+    (0..n)
+        .map(|i| {
+            p = pred_step(i64::try_from(i).unwrap(), p);
+            p
+        })
+        .collect()
+}
+
+fn pred_fields(v: &Values, i: i64) -> (Field, Field) {
+    (v.field(&format!("a{i}")), v.field(&format!("b{i}")))
+}
+
+impl Operation for PredChain {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        let (fa, fb) = pred_fields(v, v.as_int(a[0]).unwrap());
+        Some(vec![(fa, Locality::Local), (fb, Locality::Local)])
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        let i = v.as_int(a[0]).unwrap();
+        Some(if i == 0 {
+            Vec::new()
+        } else {
+            let (fa, fb) = pred_fields(v, i - 1);
+            vec![fa, fb]
+        })
+    }
+    fn predicted_defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        let i = v.as_int(a[0]).unwrap();
+        let &(pa, pb) = self.predict.as_ref()?.get(usize::try_from(i).unwrap())?;
+        let (fa, fb) = pred_fields(v, i);
+        Some(vec![(fa, v.int(pa)), (fb, v.int(pb))])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let i = v.as_int(cx.args()[0]).unwrap();
+        let prev = if i == 0 {
+            (1, 2)
+        } else {
+            let (fa, fb) = pred_fields(v, i - 1);
+            let pa = cx.use_field(fa)?.and_then(|x| v.as_int(x)).unwrap_or(0);
+            let pb = cx.use_field(fb)?.and_then(|x| v.as_int(x)).unwrap_or(0);
+            (pa, pb)
+        };
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (na, nb) = pred_step(i, prev);
+        let (fa, fb) = pred_fields(v, i);
+        cx.define(fa, v.int(na));
+        cx.define(fb, v.int(nb));
+        Ok(v.int(na))
+    }
+}
+
+/// Jobs on scoped threads.
+struct PredThreads;
+
+impl defuse::Executor for PredThreads {
+    fn parallelism(&self) -> usize {
+        4
+    }
+    fn execute(
+        &mut self,
+        n: usize,
+        run: &(dyn Fn(usize) -> defuse::RunResult + Sync),
+        out: &mut Vec<defuse::RunResult>,
+    ) {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::OnceLock<defuse::RunResult>> = (0..n).map(|_| std::sync::OnceLock::new()).collect();
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        let _ = slots[i].set(run(i));
+                    }
+                });
+            }
+        });
+        out.extend(slots.into_iter().map(|s| s.into_inner().expect("every job ran")));
+    }
+}
+
+/// Predicted definitions: a 50-node chain whose readers run on the
+/// predictions overlaps in one step; a wrong prediction re-runs only the
+/// node that read it; the output never depends on the predictions, under
+/// any schedule; an edit asks the new text again.
+#[test]
+fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers() {
+    const N: usize = 50;
+    let wrong = {
+        let mut p = pred_truth(N);
+        p[25].0 += 1;
+        p
+    };
+    let build = |predict: Option<Vec<(i64, i64)>>| {
+        let mut eng = Engine::new();
+        let op = Arc::new(PredChain {
+            predict,
+            runs: std::sync::atomic::AtomicU64::new(0),
+        });
+        let id = eng.register(op.clone());
+        let u = eng.new_unit();
+        let ids: Vec<NodeId> = (0..N)
+            .map(|i| {
+                let a = vec![eng.values().int(i64::try_from(i).unwrap())];
+                eng.push(u, id, a)
+            })
+            .collect();
+        (eng, op, ids, id)
+    };
+    let outs = |eng: &Engine, ids: &[NodeId]| -> Vec<Option<i64>> {
+        ids.iter()
+            .map(|&i| eng.output(i).and_then(|x| eng.values().as_int(x)))
+            .collect()
+    };
+    let (mut plain, _, pids, _) = build(None);
+    plain.evaluate_sequential().expect("evaluate");
+    let reference = outs(&plain, &pids);
+    for sched in ["seq", "spec", "random", "par"] {
+        for predict in [Some(pred_truth(N)), Some(wrong.clone())] {
+            let is_wrong = predict.as_ref().is_some_and(|p| p[25] != pred_truth(N)[25]);
+            let (mut eng, op, ids, opid) = build(predict);
+            let r = match sched {
+                "seq" => eng.evaluate_sequential(),
+                "spec" => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                    &mut defuse::Sequential,
+                ),
+                "random" => eng.evaluate(&mut defuse::RandomScheduler::new(5, true), &mut defuse::Sequential),
+                _ => eng.evaluate(
+                    &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                    &mut PredThreads,
+                ),
+            }
+            .expect("evaluate");
+            assert_eq!(outs(&eng, &ids), reference, "{sched} wrong={is_wrong}");
+            let runs = op.runs.load(std::sync::atomic::Ordering::Relaxed);
+            if sched == "spec" || sched == "par" {
+                if is_wrong {
+                    // Node 26 read the wrong value; nothing else re-runs.
+                    assert_eq!(runs, N as u64 + 1, "{sched}: {r:?}");
+                    assert_eq!(r.predictions_refuted, 1, "{sched}");
+                    assert!(r.steps <= 2, "{sched}: {r:?}");
+                } else {
+                    assert_eq!(runs, N as u64, "{sched}: {r:?}");
+                    assert_eq!(r.steps, 1, "{sched}: {r:?}");
+                    assert_eq!(r.predictions_refuted, 0, "{sched}");
+                    assert_eq!(r.predictions_confirmed, N as u64 - 1, "{sched}");
+                }
+            }
+            if sched == "seq" {
+                // Off: no guess at all.
+                assert_eq!(runs, N as u64, "{sched}");
+                assert_eq!(r.predictions_confirmed + r.predictions_refuted, 0);
+            }
+            // An edit after the build: node 10 re-texted (the same index
+            // plus a marker, so its hooks are asked again) keeps the
+            // output equal to the plain build's.
+            let a = {
+                let v = eng.values();
+                vec![v.int(10), v.str("again")]
+            };
+            eng.replace(ids[10], opid, a);
+            eng.evaluate(
+                &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                &mut defuse::Sequential,
+            )
+            .expect("edit");
+            assert_eq!(outs(&eng, &ids), reference, "{sched} wrong={is_wrong} after an edit");
+        }
+    }
+}

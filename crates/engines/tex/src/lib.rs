@@ -52,7 +52,6 @@ mod pkgrec;
 mod planinc;
 mod prims;
 mod print;
-mod rerun;
 mod run;
 mod runstate;
 mod scan;
