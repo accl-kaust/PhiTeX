@@ -43,6 +43,7 @@
 //! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
 
 use phitex_defuse::FxHashMap;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -636,11 +637,20 @@ fn encode_bound(b: &Bound, o: &mut String) {
     o.push('\x1e');
     o.push_str(&b.prefixes.join("\x1f"));
     o.push('\x1e');
-    let cats: Vec<String> = b.cats.iter().map(|(c, k)| format!("{c}\x1d{k}")).collect();
-    o.push_str(&cats.join("\x1f"));
+    // (written in place: no string per pair)
+    for (i, (c, k)) in b.cats.iter().enumerate() {
+        if i > 0 {
+            o.push('\x1f');
+        }
+        let _ = write!(o, "{c}\x1d{k}");
+    }
     o.push('\x1e');
-    let means: Vec<String> = b.means.iter().map(|(n, k)| format!("{n}\x1d{k}")).collect();
-    o.push_str(&means.join("\x1f"));
+    for (i, (n, k)) in b.means.iter().enumerate() {
+        if i > 0 {
+            o.push('\x1f');
+        }
+        let _ = write!(o, "{n}\x1d{k}");
+    }
     o.push('\x1e');
     match &b.state {
         None => o.push('*'),
@@ -821,6 +831,9 @@ pub(crate) struct TextHints {
     pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
+    /// Whether the text defines anything the pass harvests (a macro, an
+    /// active character).
+    pub defines: bool,
 }
 
 impl TextHints {
@@ -2044,6 +2057,43 @@ impl Analysis<'_> {
     /// command that is itself such; a space; a primitive assignment,
     /// definition or message (§1208-§1280), never a macro, a box, a group
     /// or a conditional.
+    /// For a run of characters starting at `a` whose hint depends only
+    /// on its own text, its regime and its place (no active character,
+    /// no command after it or before it, all under one regime, not an
+    /// operand): its text's span, the regime and the place's flags (in
+    /// an alignment, inside a group without `\\global`). Runs with equal
+    /// keys get equal hints ([`Analysis::hint_run`]).
+    fn run_key(&self, a: usize) -> Option<(usize, usize, usize, u8)> {
+        let atoms = self.atoms();
+        let at = atoms.get(a)?;
+        if !matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb) || self.claimed[a] {
+            return None;
+        }
+        if self.prev(a).is_some_and(|p| atoms[p].kind == AtomKind::Cs) {
+            return None;
+        }
+        let mut k = a;
+        while let Some(x) = atoms.get(k)
+            && matches!(x.kind, AtomKind::Char(_) | AtomKind::Verb)
+        {
+            if self.reg[k] != self.reg[a] {
+                return None;
+            }
+            if let AtomKind::Char(c) = x.kind
+                && self.is_active(c)
+            {
+                return None;
+            }
+            k += 1;
+        }
+        if atoms.get(k).is_some_and(|x| x.kind == AtomKind::Cs) {
+            return None;
+        }
+        let flags = u8::from(self.in_align[a])
+            | (u8::from(self.inner.get(a).copied().unwrap_or(false) && !self.after_global(a)) << 1);
+        Some((at.start, atoms[k - 1].end, self.reg[a], flags))
+    }
+
     fn no_scope(&self, a: usize) -> bool {
         let atoms = self.atoms();
         match atoms[a].kind {
@@ -2643,6 +2693,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     }
     let mut prev_char = false;
     let blank = Arc::new(Hint::default());
+    let mut runs: FxHashMap<(&str, usize, u8), Arc<Hint>> = FxHashMap::default();
     #[allow(clippy::needless_range_loop)]
     for a in 0..an.p.atoms.len() {
         let at = &an.p.atoms[a];
@@ -2653,6 +2704,19 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         if (ch && prev_char) || at.kind == AtomKind::Space {
             hints.push(blank.clone());
             skip.push(true);
+            prev_char = ch;
+            continue;
+        }
+        // (a run of characters whose hint depends on its text alone: one
+        // hint per distinct run, shared)
+        if let Some((s0, e0, reg, fl)) = an.run_key(a) {
+            let key = (&text[s0..e0], reg, fl);
+            let h = runs
+                .entry(key)
+                .or_insert_with(|| Arc::new(an.hint(a)))
+                .clone();
+            hints.push(h);
+            skip.push(false);
             prev_char = ch;
             continue;
         }
@@ -2673,6 +2737,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         prev_char = ch;
     }
     let mut t = TextHints {
+        defines: !an.defs.is_empty() || an.defs.active_chars() != 0,
         slices,
         starts,
         hints,
@@ -3459,7 +3524,9 @@ fn mean_kind(m: &Mean) -> &'static str {
 /// The definitions a run made outside its bound: the violation, if any.
 pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
     let b = h.bound.as_ref()?;
-    for f in r.def_fields() {
+    // (a local definition of the value the run read is no definition:
+    // `\\everypar` set back to what it was, the binding unchanged)
+    for f in r.published_fields() {
         let name = match &*r.v.get(f.0) {
             Value::Str(s) => s.to_string(),
             _ => continue,

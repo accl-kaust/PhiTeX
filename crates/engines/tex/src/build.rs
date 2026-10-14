@@ -2186,7 +2186,7 @@ impl Run<'_, '_> {
             // a text paging inline: §1054 as tex.web has it
             if self.all_over_inline()? {
                 self.claim_rest = true;
-                self.frames.clear();
+                self.input = crate::input::Input::new();
                 return Ok(());
             }
             self.back_cur();
@@ -2199,7 +2199,7 @@ impl Run<'_, '_> {
         self.append(0, m);
         // nothing after `\end` is read
         self.claim_rest = true;
-        self.frames.clear();
+        self.input = crate::input::Input::new();
         Ok(())
     }
 
@@ -2301,7 +2301,14 @@ const SF_UNREAD: i32 = i32::MIN;
 
 /// The state of a list's fold: the space factor (§1034), the previous
 /// depth (§679), and the items since the last `build_page` marker.
-#[derive(Clone, Copy, Debug)]
+/// A list's fold state at its start (§215: the depth ignored).
+pub(crate) const IGNORE_DEPTH_STATE: FoldState = FoldState {
+    sf: 1000,
+    pd: IGNORE_DEPTH,
+    since_bp: 0,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FoldState {
     pub sf: i32,
     pub pd: i32,
@@ -2331,7 +2338,9 @@ pub(crate) fn fold_item(
         }
         // the page builder's markers (page parameters, a marks read): kept
         // in place for its fold, invisible to the list's readers
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT => out.push(n),
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_FLUSH_AT => {
+            out.push(n);
+        }
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2491,7 +2500,7 @@ pub(crate) fn fold_entries(
 fn is_marker(v: &Values, x: ValueId) -> bool {
     matches!(
         nodes::tag(v, x),
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT | nodes::T_FLUSH_AT
     )
 }
 
