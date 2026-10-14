@@ -614,9 +614,7 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
         }
         let limit = verb.as_ref().map_or(b.len(), |v| v.start);
-        // (in a definition's body every brace counts, §473: the scan
-        // that reads it as a constant comes when it runs)
-        let (sk, mut end) = if body_depth == 0 && char_constant_at(&st, i) {
+        let (sk, mut end) = if char_constant_at(&st, i) {
             // (`` `{ ``: the character's code, a number, §442; never a group)
             (SyntaxKind::Text, i + 1)
         } else {
@@ -745,9 +743,7 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
             TokKind::Cs => {
                 let name = &text[i + 1..end];
-                // (a name being defined, `\\def\\verb{…}`, is no call: no
-                // verbatim run begins at it)
-                if verb.is_none() && !st.names_follow() {
+                if verb.is_none() {
                     verb = verbatim_run(text, i);
                 }
                 let n = bodies(text, name, end);

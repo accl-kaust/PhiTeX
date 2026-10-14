@@ -877,31 +877,6 @@ fn latex_links_aux_defines_only() {
     );
 }
 
-/// `PHITEX_CHAIN_DOCS=a.tex:b.tex`: a cold `pdflatex` build of each
-/// document, its chain printed (critical path, waits): a measurement.
-#[test]
-#[ignore = "a measurement (documents given by path)"]
-fn latex_chain_docs() {
-    let Ok(docs) = std::env::var("PHITEX_CHAIN_DOCS") else {
-        return;
-    };
-    for path in docs.split(':').map(Path::new) {
-        let dir = path.parent().expect("a directory");
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("doc");
-        let b = common::build(
-            pdf_opts(name, dir),
-            Some(&prelude(true)),
-            &common::read(path),
-        );
-        eprintln!(
-            "chain {name}: {} pages, undeclared {}, {}",
-            b.pages().len(),
-            b.stats.undeclared_definitions,
-            report(name, &b)
-        );
-    }
-}
-
 /// `pdflatex` on a main file that `\input`s one chapter and
 /// `\include`s another (`pdfdocs/inputs.tex`, `chap1.tex`,
 /// `chap2.tex`; `\include` goes through `\@input` and its own `.aux`):

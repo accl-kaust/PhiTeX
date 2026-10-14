@@ -36,22 +36,9 @@ pub(crate) struct Piece {
     /// The file's path (`None`: the document).
     file: Option<Arc<str>>,
     hints: Arc<TextHints>,
-    /// What the paragraph-start token lists its paragraph starts run
-    /// may define, added to its hint ([`crate::hints::ParLists`]).
-    lists: Option<Arc<crate::hints::Hint>>,
 }
 
 impl Piece {
-    /// The piece follows along `lists`: what the paragraph-start token
-    /// lists may define in it ([`crate::hints::ParLists::step`]).
-    pub(crate) fn par_lists(
-        &mut self,
-        lists: &mut crate::hints::ParLists,
-    ) -> Option<Arc<crate::hints::Hint>> {
-        self.lists = lists.step(&self.hints, self.s);
-        self.lists.clone()
-    }
-
     /// Whether it is a slice of a file the document inputs.
     pub(crate) fn is_file(&self) -> bool {
         self.file.is_some()
@@ -72,12 +59,7 @@ impl Piece {
         let mut a =
             crate::run::slice_args_in_file(v, &self.text[self.s..self.e], starts, name, self.s);
         a[1] = v.int(3);
-        a.push(crate::hints::hint_arg_in(
-            v,
-            &self.hints,
-            self.s,
-            self.lists.as_deref(),
-        ));
+        a.push(crate::hints::hint_arg(v, &self.hints, self.s));
         a
     }
 }
@@ -223,7 +205,6 @@ fn add(
             e,
             file: file.cloned(),
             hints: hints.clone(),
-            lists: None,
         });
     }
 }

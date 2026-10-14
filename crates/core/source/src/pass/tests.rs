@@ -1379,28 +1379,3 @@ fn a_macro_ending_with_par_ends_the_paragraph() {
         .count();
     assert_eq!(n, 14);
 }
-
-/// The kernel harvested in INITEX's regime (as a format build reads it,
-/// `kind_of`): the definitions after `\verb`'s and `\@argtabularcr`'s
-/// keep coming (the output routine, `\verb`'s machinery), and the
-/// output routine's closure is there.
-#[test]
-#[ignore = "reads the installed latex.ltx"]
-fn latex_ltx_initex_harvest_reaches_the_output_routine() {
-    let path = std::env::var("PHITEX_LATEX_LTX")
-        .unwrap_or_else(|_| "/usr/share/texmf-dist/tex/latex/base/latex.ltx".into());
-    let t = std::fs::read_to_string(path).unwrap();
-    let mut d = Definitions::new();
-    d.harvest(&t, FileKind::Initex, 0);
-    for n in ["@makecol", "@outputpage", "verb@egroup", "r@@t"] {
-        assert!(d.is_defined(n), "\\{n} not harvested");
-    }
-    let o = d
-        .output_defines(&Definitions::new())
-        .expect("\\output's closure");
-    assert!(
-        o.names.get("cs:\\@currlist") == Some(&true),
-        "{:?}",
-        o.names
-    );
-}
