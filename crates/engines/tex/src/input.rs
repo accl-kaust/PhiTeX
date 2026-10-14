@@ -47,6 +47,12 @@ impl Arena {
         }
     }
 
+    /// Tokens allocated so far.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.toks.len()
+    }
+
     /// The range of a macro body: copied in on its first call, found by
     /// its shared list after. Short bodies are copied every time (cheaper
     /// than the lookup).
@@ -291,7 +297,14 @@ pub(crate) struct Input {
     /// the next to reach.
     pub text: Vec<Seg>,
     pub text_at: usize,
+    /// The arena's size, in tokens, past which the run compacts it
+    /// between commands ([`Input::compact`]): four times what survived
+    /// the last compaction, at least [`ARENA_COMPACT`].
+    pub compact_at: usize,
 }
+
+/// The least arena size, in tokens, at which a run compacts it.
+pub(crate) const ARENA_COMPACT: usize = 1 << 22;
 
 impl Input {
     pub(crate) fn new() -> Input {
@@ -304,6 +317,7 @@ impl Input {
             free_files: Vec::new(),
             text: Vec::new(),
             text_at: 0,
+            compact_at: ARENA_COMPACT,
         }
     }
 
@@ -537,6 +551,39 @@ impl Input {
         }
         into.text_at = self.text_at;
         into.arena = self.arena.mark();
+    }
+
+    /// Copies what the token-list levels still hold (each from its
+    /// origin, for a step back, §325) into a fresh arena and drops the
+    /// rest: lists read to their end, finished macro calls, bodies cached
+    /// for calls to come (copied in again on their next call). Nothing
+    /// else holds a place in the arena between commands, so a long run
+    /// (a format's preamble of a million commands) stays as large as what
+    /// its input stack holds.
+    pub(crate) fn compact(&mut self) {
+        let live: usize = self
+            .levels
+            .iter()
+            .filter(|l| l.kind == kind::TOKS && l.a < l.b)
+            .map(|l| (l.b - l.c) as usize)
+            .sum();
+        let mut fresh = Arena::with_capacity((live * 2).max(1 << 14));
+        for l in &mut self.levels {
+            if l.kind != kind::TOKS {
+                continue;
+            }
+            if l.a >= l.b {
+                *l = Level::toks(Range { start: 0, end: 0 }, l.ty);
+                continue;
+            }
+            let r = fresh.alloc(&self.arena.toks[l.c as usize..l.b as usize]);
+            let read = l.a - l.c;
+            l.c = r.start;
+            l.a = r.start + read;
+            l.b = r.end;
+        }
+        self.compact_at = (fresh.len() * 4).max(ARENA_COMPACT);
+        self.arena = fresh;
     }
 
     /// Puts the levels back as [`Input::snapshot`] found them. False if
