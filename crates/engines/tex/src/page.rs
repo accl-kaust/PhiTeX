@@ -289,6 +289,9 @@ impl Run<'_, '_> {
         let mut plan: Vec<ValueId> = Vec::new();
         let mut flushplan: Vec<ValueId> = Vec::new();
         let mut flushed = phitex_defuse::FxHashSet::default();
+        let mut fonts_at: Vec<ValueId> = Vec::new();
+        let mut objs_at: Vec<ValueId> = Vec::new();
+        let mut probes: Vec<(i64, usize)> = Vec::new();
         let mut folds = 0usize;
         let (mut tfx, mut tfold) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         // nothing to reuse: the pages folded in parallel from predicted
@@ -354,7 +357,20 @@ impl Run<'_, '_> {
             };
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
-            plan.extend(rec.writes.iter().copied());
+            // (and the fonts loaded before page `j` fires: `fplan`)
+            // (and the objects written after the page before it:
+            // `oplan`)
+            let (mut fl, mut ol) = (Vec::new(), Vec::new());
+            for &w in &rec.writes {
+                match nodes::tag(v, w) {
+                    nodes::T_FONT_AT => fl.push(v.int(crate::val::int_at(v, w, 1))),
+                    nodes::T_PDFW_AT => ol.push(v.int(crate::val::int_at(v, w, 1))),
+                    nodes::T_PDFQ_AT => probes.push((crate::val::int_at(v, w, 1), j)),
+                    _ => plan.push(w),
+                }
+            }
+            fonts_at.push(v.list(fl));
+            objs_at.push(v.list(ol));
             // the flush points met folding this page: each follows the
             // penalty the page before broke at (§1005 fires there, so
             // the marker after it opens this page): the state after
@@ -413,6 +429,20 @@ impl Run<'_, '_> {
         if !flushplan.is_empty() {
             self.contribute("flushplan", v.seq_unit(v.list(flushplan)));
         }
+        // the fonts the text loaded, by the page that fired after them,
+        // and how many fonts the text loaded in all: the writer numbers
+        // the fonts as pdfTeX does (`pdfout::font_tags`)
+        // (exact mode only: in relaxed mode the names are free)
+        if !crate::pdfrelaxed::on(self)? {
+            let mut fp = vec![v.int(self.cint(crate::fields::cell::FONTCOUNT)?)];
+            fp.extend(fonts_at.iter().copied().take(pages));
+            self.contribute("fplan", v.seq_unit(v.list(fp)));
+            // the objects written after page j-1 fired, before page j
+            // (the last list: after every page)
+            if objs_at.iter().any(|&l| !list_of(v, l).is_empty()) {
+                self.contribute("oplan", v.seq_unit(v.list(objs_at.clone())));
+            }
+        }
         // each page's own material (`pp:items:<j>`, its start rebased to
         // it): a `brk` reads only its page, so an edit elsewhere on the
         // list wakes no other page's `brk`
@@ -435,9 +465,52 @@ impl Run<'_, '_> {
             .map_or(items.len(), |r| r.start.idx)
             .min(items.len());
         self.set("pp:tail", v.list(items[last..].to_vec()), true);
+        // the fields the text defined in each page's part, before its
+        // break (and after the last): the writer's fold lets them win
+        // over the routines' earlier deltas (`FinalState::load`)
+        let tdefs: Vec<ValueId> = recs
+            .iter()
+            .map(|r| {
+                v.list(
+                    r.tdefs
+                        .iter()
+                        .flat_map(|&m| list_of(v, m).into_iter().skip(1))
+                        .collect(),
+                )
+            })
+            .collect();
+        let tdefs = v.list(tdefs);
+        if crate::exec::env_flag!("PHITEX_LOOP_TRACE") {
+            let per: Vec<String> = list_of(v, tdefs)
+                .iter()
+                .enumerate()
+                .map(|(j, &p)| {
+                    let names: Vec<String> = list_of(v, p)
+                        .into_iter()
+                        .map(|f| crate::val::field_name(v, Field(f)))
+                        .collect();
+                    format!("{j}:{}", names.join(","))
+                })
+                .collect();
+            eprintln!("lb-pub pp:tdefs {:x} {}", tdefs.raw(), per.join(" "));
+        }
+        self.set("pp:tdefs", tdefs, true);
         self.set("pp:classes", table_v, true);
         self.set("pp:any", v.int(i64::from(any)), true);
         self.set("pp:marker", marker, true);
+        // the nodes that asked whether a page shipped before them
+        // (`T_PDFQ_AT`): the pages fired before each, and the steps
+        // told to say whether they ship (`pdf:shipped:<j>`)
+        for &(node, j) in &probes {
+            let n = u64::from_ne_bytes(node.to_ne_bytes());
+            let f = v.field(&crate::etex::fired_before_field(n));
+            if self.cx.is_loopback(f) {
+                self.cx.publish(f, v.int(i64::try_from(j).unwrap_or(0)));
+            }
+        }
+        if !probes.is_empty() {
+            self.set("pp:probe", v.int(1), true);
+        }
         // how many steps the chain has: the writer folds their deltas
         // up to here ([`FinalState`])
         self.set("pp:steps", v.int(i64::try_from(pages).unwrap_or(0)), true);
@@ -623,6 +696,7 @@ impl Run<'_, '_> {
             let l = self.loc_of(f);
             self.st.preload(l, Some(x));
         }
+        self.st.watch_kinds();
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
         if self.fire_page(d, args.get(2).copied())? {
             self.run_all()?;
@@ -639,11 +713,17 @@ impl Run<'_, '_> {
             // the step's own delta, for the writer's fold (`pgdeltas`)
             let mut own: std::collections::BTreeMap<String, (Field, ValueId)> =
                 std::collections::BTreeMap::new();
+            // (the count registers it only advanced: the writer folds
+            // them by their change, the others by their value)
+            let mut advanced = Vec::new();
             for (loc, x, _) in self.st.published(v) {
                 let f = self.loc_field(loc);
                 let name = crate::val::field_name(v, f);
                 if name == "pdf:state" || step_input(&name) {
                     continue;
+                }
+                if name.starts_with("count:") && self.st.advanced_only(loc) {
+                    advanced.push(f.0);
                 }
                 own.insert(name, (f, x));
             }
@@ -654,6 +734,7 @@ impl Run<'_, '_> {
                 readst,
                 counts,
                 readdef,
+                v.list(advanced),
             ]);
             self.contribute("pgdeltas", v.seq_unit(e));
         }
@@ -1152,6 +1233,8 @@ struct PageFold {
     flushes: Vec<(i64, i64, ValueId)>,
     /// The immediate writes' entries met (`T_WRITE_AT`), in order.
     writes: Vec<ValueId>,
+    /// The text's definition markers met (`T_DEFS_AT`), in order.
+    tdefs: Vec<ValueId>,
     stuck: bool,
     /// The end of the list's items the fold read (its cursor, or one
     /// past it where a kern looked at what follows).
@@ -1169,6 +1252,7 @@ struct PlanPage {
     writes: Vec<ValueId>,
     /// The flush points met (`T_FLUSH_AT`): `[node, k]`.
     flushes: Vec<(i64, i64, ValueId)>,
+    tdefs: Vec<ValueId>,
     stuck: bool,
 }
 
@@ -1188,6 +1272,7 @@ fn page_rec(
         fired: out.fired,
         passed: out.passed,
         writes: out.writes,
+        tdefs: out.tdefs,
         stuck: out.stuck,
         flushes: out.flushes,
         items_v: v.list(items[a..b.max(a)].to_vec()),
@@ -1305,6 +1390,7 @@ struct PlanMemo {
     passed: Vec<i64>,
     writes: Vec<ValueId>,
     flushes: Vec<(i64, i64, ValueId)>,
+    tdefs: Vec<ValueId>,
     stuck: bool,
 }
 
@@ -1373,6 +1459,7 @@ fn plan_fold(
             passed: m.passed.clone(),
             writes: m.writes.clone(),
             flushes: m.flushes.clone(),
+            tdefs: m.tdefs.clone(),
             stuck: m.stuck,
         };
     }
@@ -1411,6 +1498,7 @@ fn plan_fold(
         passed: out.passed.clone(),
         writes: out.writes.clone(),
         flushes: out.flushes.clone(),
+        tdefs: out.tdefs.clone(),
         stuck: out.stuck,
     };
     {
@@ -1429,6 +1517,7 @@ fn plan_fold(
         passed: out.passed,
         writes: out.writes,
         flushes: out.flushes,
+        tdefs: out.tdefs,
         stuck: out.stuck,
     }
 }
@@ -1478,6 +1567,7 @@ fn fold_page(
     let mut passed = Vec::new();
     let mut writes = Vec::new();
     let mut flushes = Vec::new();
+    let mut tdefs = Vec::new();
     let mut class = |n: u16| -> InsertClass {
         for &c in classes {
             let xs = list_of(v, c);
@@ -1547,6 +1637,7 @@ fn fold_page(
                     passed,
                     writes,
                     flushes,
+                    tdefs,
                     stuck: false,
                     reach,
                 };
@@ -1568,10 +1659,20 @@ fn fold_page(
                 ));
                 continue;
             }
+            nodes::T_DEFS_AT => {
+                tdefs.push(x);
+                continue;
+            }
             nodes::T_WRITE_AT => {
                 if let Some(&e) = list_of(v, x).get(1) {
                     writes.push(e);
                 }
+                continue;
+            }
+            // (a font load: kept with the writes, the marker itself, for
+            // the writer's numbering, `fplan`)
+            nodes::T_FONT_AT | nodes::T_PDFW_AT | nodes::T_PDFQ_AT => {
+                writes.push(x);
                 continue;
             }
             _ => {}
@@ -1635,6 +1736,7 @@ fn fold_page(
                 passed,
                 writes,
                 flushes,
+                tdefs,
                 stuck: false,
                 reach,
             };
@@ -1645,6 +1747,7 @@ fn fold_page(
         passed,
         writes,
         flushes,
+        tdefs,
         stuck: ending.is_some() && !pb.page.is_empty(),
         reach,
     }
@@ -2237,8 +2340,19 @@ impl FinalState {
             .map_or(0, |x| usize::try_from(int_of(v, x)).unwrap_or(0))
             .min(MAX_PAGES);
         // each step's entry: [j, own pairs, pgst read, counts, pgdef
-        // read] (`Run::page_step`)
+        // read, the count registers only advanced] (`Run::page_step`)
         let entries = Self::entries(v, all);
+        // the fields the text defined in page k's part, before break k
+        // (k = steps: after the last)
+        let tdefs: Vec<Vec<Field>> = cx
+            .use_field(v.field("pp:tdefs"))?
+            .map(|x| {
+                list_of(v, x)
+                    .into_iter()
+                    .map(|p| list_of(v, p).into_iter().map(Field).collect())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
@@ -2390,12 +2504,16 @@ impl FinalState {
                     );
                 }
             }
+            let advanced: Vec<ValueId> = list_of(v, g(5));
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
                 let pre = cx.use_field(f)?;
-                // a count register by the step's change, as `\\count0..9`
-                // (a routine's counter of pages or shipouts it advances)
-                let x = if name.starts_with("count:") {
+                // a count register the step only advanced, by its change,
+                // as `\\count0..9` (a routine's counter of pages or
+                // shipouts); one it set, by its value (`\\@topnum`
+                // set at each column's start: by its change, a stale
+                // read would feed back its error)
+                let x = if name.starts_with("count:") && advanced.contains(&f.0) {
                     let as_int = |y: Option<ValueId>| y.map_or(0, |y| int_of(v, y));
                     let had = as_int(read_pairs.iter().find(|p| p.0 == f).map(|p| p.1).or(pre));
                     let now = as_int(state.get(&name).map(|p| p.1).or(pre));
@@ -2416,6 +2534,14 @@ impl FinalState {
                     v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
                 }
             };
+            // a routine's delta holds at a later step only while the text
+            // has not defined the field since: what the text defined
+            // before the next break (step j+1's) is the text's again
+            if let Some(ds) = tdefs.get(j + 1) {
+                for &f in ds {
+                    state.remove(&crate::val::field_name(v, f));
+                }
+            }
             // (the state after page j, as the text after a flush there
             // reads it)
             let cur_after = as_pairs(&state);
@@ -2475,6 +2601,14 @@ impl FinalState {
         let f = v.field(FLUSHES);
         if cx.is_loopback(f) {
             lb_pub(cx, f, v.list(entries));
+        }
+        // (the text's definitions after the last break: its own)
+        if steps > 0
+            && let Some(ds) = tdefs.get(steps)
+        {
+            for &f in ds {
+                state.remove(&crate::val::field_name(v, f));
+            }
         }
         Ok(FinalState {
             map: state.into_values().collect(),

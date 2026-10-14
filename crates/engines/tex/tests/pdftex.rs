@@ -379,3 +379,56 @@ fn relaxed_documents() {
     }
     assert!(failed.is_empty(), "failed: {failed:?}");
 }
+
+/// `\openout` under TeX Live's `openout_any = p` (web2c §1374): an
+/// absolute name, a `../` name, and one at `\shipout` are refused, and
+/// the nonstop job ends there with no PDF file, as `pdftex -ini` does
+/// (`! I can't write on file`, `*** (job aborted, file error in nonstop
+/// mode)`, `no output PDF file produced`); a plain name is written.
+#[test]
+fn openout_refused() {
+    let dir = common::fixtures().join("pdf");
+    let doc = |open: &str| {
+        format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=1 \\font\\r=cmr10 \\r \\hsize=100pt \\vsize=100pt\nBefore.{open} After.\\par\n\\end\n"
+        )
+    };
+    let cases = [
+        (
+            "\\immediate\\openout1=../escape.txt \\immediate\\write1{x}\\immediate\\closeout1",
+            Some("../escape.txt"),
+        ),
+        (
+            "\\immediate\\openout1=/tmp/abs.txt \\immediate\\write1{x}\\immediate\\closeout1",
+            Some("/tmp/abs.txt"),
+        ),
+        ("\\openout1=../late.txt \\write1{x}", Some("../late.txt")),
+        (
+            "\\immediate\\openout1=ok.txt \\immediate\\write1{x}\\immediate\\closeout1",
+            None,
+        ),
+    ];
+    for (open, refused) in cases {
+        let opts = common::options("./t.tex", "t", "", &dir);
+        let b = common::build(opts, None, &doc(open));
+        let (pdf, log) = b.output();
+        if let Some(name) = refused {
+            assert!(pdf.is_empty(), "{name}: a PDF file was written");
+            assert!(b.fatal(), "{name}: the job did not end");
+            for want in [
+                format!("! I can't write on file `{name}'."),
+                "*** (job aborted, file error in nonstop mode)".to_owned(),
+                "no output PDF file produced".to_owned(),
+            ] {
+                assert!(
+                    log.contains(&want),
+                    "{name}: no {want:?} in the log:\n{log}"
+                );
+            }
+            assert!(b.files().iter().all(|(n, _)| n != name), "{name}: written");
+        } else {
+            assert!(pdf.starts_with(b"%PDF"), "ok.txt: no PDF file\n{log}");
+            assert!(!b.fatal(), "ok.txt: the job ended\n{log}");
+        }
+    }
+}

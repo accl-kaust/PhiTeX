@@ -152,6 +152,13 @@ pub(crate) struct State {
     /// left open: its definitions become the run's).
     defined: Vec<Loc>,
     stamp: u64,
+    /// The locations defined at the base level (or globally) since the
+    /// last [`State::take_base_defs`].
+    base_defs: Vec<Loc>,
+    /// In a page step: each location it defined, and whether only by
+    /// `\advance` (its value then the one it read plus a change), for
+    /// the writer's fold of the chain ([`State::advanced_only`]).
+    kinds: Option<FxHashMap<Loc, bool>>,
     next_gid: u32,
     /// Bumped whenever a category code below 256 may have changed
     /// ([`State::cat_gen`]); unique across tables of a thread, so a
@@ -197,6 +204,8 @@ impl Clone for State {
             save: self.save.clone(),
             defined: self.defined.clone(),
             stamp: self.stamp,
+            base_defs: self.base_defs.clone(),
+            kinds: self.kinds.clone(),
             next_gid: self.next_gid,
             cat_gen: new_cat_gen(),
         }
@@ -233,6 +242,8 @@ impl State {
             save: Vec::new(),
             defined: Vec::new(),
             stamp: 0,
+            base_defs: Vec::new(),
+            kinds: None,
             next_gid: 0,
             cat_gen: new_cat_gen(),
         }
@@ -556,6 +567,36 @@ impl State {
         } else if grp.is_none() {
             m.publ = Some((val, Locality::Local));
         }
+        if global || grp.is_none() {
+            self.base_defs.push(loc);
+        }
+    }
+
+    /// Starts noting how each location is defined ([`State::note_kind`]).
+    pub(crate) fn watch_kinds(&mut self) {
+        self.kinds.get_or_insert_with(FxHashMap::default);
+    }
+
+    /// Notes a definition of `loc`, an `\advance` or not, when watching.
+    pub(crate) fn note_kind(&mut self, loc: Loc, advance: bool) {
+        if let Some(k) = &mut self.kinds {
+            k.entry(loc)
+                .and_modify(|a| *a &= advance)
+                .or_insert(advance);
+        }
+    }
+
+    /// Whether every definition of `loc` noted was an `\advance`.
+    pub(crate) fn advanced_only(&self, loc: Loc) -> bool {
+        self.kinds
+            .as_ref()
+            .and_then(|k| k.get(&loc).copied())
+            .unwrap_or(false)
+    }
+
+    /// The locations defined at the base level since the last call.
+    pub(crate) fn take_base_defs(&mut self) -> Vec<Loc> {
+        std::mem::take(&mut self.base_defs)
     }
 
     /// A binding changed in place (§1079, §1247), nothing saved:
@@ -771,10 +812,17 @@ impl State {
             })
             .collect();
         let defined = self.defined.iter().map(|&l| ploc(self, l)).collect();
+        let base_defs = self.base_defs.iter().map(|&l| ploc(self, l)).collect();
+        let kinds = self
+            .kinds
+            .as_ref()
+            .map(|k| k.iter().map(|(&l, &a)| (ploc(self, l), a)).collect());
         PState {
             slots,
             save,
             defined,
+            base_defs,
+            kinds,
             stamp: self.stamp,
             next_gid: self.next_gid,
         }
@@ -831,6 +879,18 @@ impl State {
             let l = loc(&mut st, d);
             st.defined.push(l);
         }
+        for d in p.base_defs {
+            let l = loc(&mut st, d);
+            st.base_defs.push(l);
+        }
+        if let Some(ks) = p.kinds {
+            let mut m = FxHashMap::default();
+            for (d, a) in ks {
+                let l = loc(&mut st, d);
+                m.insert(l, a);
+            }
+            st.kinds = Some(m);
+        }
         st.stamp = p.stamp;
         st.next_gid = p.next_gid;
         st.cat_gen = new_cat_gen();
@@ -881,6 +941,8 @@ pub(crate) struct PState {
     slots: Vec<PSlot>,
     save: Vec<PSaved>,
     defined: Vec<PLoc>,
+    base_defs: Vec<PLoc>,
+    kinds: Option<Vec<(PLoc, bool)>>,
     stamp: u64,
     next_gid: u32,
 }

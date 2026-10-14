@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 
-HARNESS_VERSION = "1"
+HARNESS_VERSION = "2"
 MAX_PASSES = 8
 PASS_TIMEOUT = 1200
 WORK = Path(os.environ.get("CI_WORK", "/w"))
@@ -331,9 +331,12 @@ def oracle_one(doc, c, cache, new_cache=None):
                 return Path(d) / name, res
     key = Path(new_cache or cache) / name
     run_dir = prepare(doc, c, src)
+    job = Path(c["main"]).stem
+    # (the doc tree ships the manual's own PDF: an output, removed, so a
+    # failing build is not taken for one that made it)
+    (run_dir / f"{job}.pdf").unlink(missing_ok=True)
     base = {rel: common.sha256_file(run_dir / rel) for rel in common.tree_files(run_dir)}
     ist = {k for k in base if k.endswith(".ist")}
-    job = Path(c["main"]).stem
     log = []
     res = {"id": c["id"], "path": c["path"], "engine": c["engine"], "input_hash": h,
            "harness": HARNESS_VERSION}
@@ -351,6 +354,9 @@ def oracle_one(doc, c, cache, new_cache=None):
             res.update(status="excluded", reason="the oracle fails: " + why_failed(run_dir, job, run_dir / f"term-pass{r['passes']}.txt"))
         elif not r.get("settled"):
             res.update(status="excluded", reason=f"the oracle does not settle in {MAX_PASSES} passes")
+        elif res["errors"]:
+            res.update(status="excluded", reason=f"the oracle has errors ({res['errors']}): "
+                       + why_failed(run_dir, job, run_dir / f"term-pass{r['passes']}.txt"))
         else:
             res["status"] = "ok"
     res["log"] = log

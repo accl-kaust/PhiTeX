@@ -26,6 +26,11 @@ use crate::val::{field_name, int_of, list_of, str_of};
 /// bytes.
 pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 
+/// Whether the job may write a file under a name (`\openout`): the
+/// client's `kpse_out_name_ok` (its `openout_any`, its output
+/// directories).
+pub type OutNameOk = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// How a document is run.
 #[derive(Clone)]
 pub struct Options {
@@ -111,6 +116,11 @@ pub struct Options {
     /// a no-fixpoint error naming the loop-back fields (a document whose
     /// written files oscillate), instead of running on.
     pub max_rounds: u64,
+    /// Whether `\openout` may write a file under a name (pdfTeX asks
+    /// kpathsea, §1374; a refused name ends a nonstop job); `None`:
+    /// TeX Live's default, `openout_any = p` with no output directory
+    /// (`control::out_name_ok_p`).
+    pub out_name_ok: Option<OutNameOk>,
 }
 
 /// When the engine speculates ([`Options::speculation`]).
@@ -241,6 +251,13 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
         .values()
         .field(&crate::etex::marks_before_field(n.raw()));
     eng.declare_loopback(f, ValueId::UNIT);
+    // how many pages fired before the node's marker (the writer's
+    // read-time writes after a `\shipout`, `etex::page_shipped_before`)
+    let f = eng
+        .values()
+        .field(&crate::etex::fired_before_field(n.raw()));
+    let zero = eng.values().int(0);
+    eng.declare_loopback(f, zero);
 }
 
 /// Edited texts of `\\input` files by name: the text and its bytes.
@@ -414,6 +431,7 @@ impl Default for Options {
             speculation: Speculation::Predicted,
             speculation_budget: 256,
             max_rounds: 64,
+            out_name_ok: None,
         }
     }
 }
@@ -463,6 +481,10 @@ struct Cached {
     env: Env,
     /// The prelude's evaluation errors: such a prelude is not cached.
     errors: Vec<String>,
+    /// TeX's errors in the prelude (a format whose text stops on them),
+    /// at their places in its files: reported with every build on it,
+    /// and such a prelude is never exported.
+    diags: Vec<Diagnostic>,
 }
 
 /// Prelude environments by the hash of the prelude's text; each is good
@@ -822,6 +844,7 @@ fn deserialise_as(b: &[u8], layout: u32, engine: u64) -> Option<Cached> {
         reads,
         env: Arc::new(env),
         errors: Vec::new(),
+        diags: Vec::new(),
     })
 }
 
@@ -1252,6 +1275,7 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
+            out_ok: Arc::new(Mutex::new(None)),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -2407,6 +2431,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let m_supply = mem_mb();
     let mut m_settle = m_supply;
     let mut t_settle = t_supply;
+    let mut diags = Vec::new();
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
         let f = g.eng.values().field(name);
@@ -2428,6 +2453,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         if time {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
+        diags = prelude_diagnostics(&g, unit, &as_file(p), finder);
         t_settle = t_start.elapsed();
         m_settle = mem_mb();
         env = final_bindings(&g, unit, end, env);
@@ -2460,6 +2486,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         reads: g.reads.clone(),
         env: e,
         errors: g.eval_errors.clone(),
+        diags,
     });
     if c.errors.is_empty() {
         env_cache()
@@ -2470,6 +2497,97 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             .push(c.clone());
     }
     c
+}
+
+/// The name a diagnostic in the prelude's own text carries (its
+/// `\\input`s carry their files' names).
+pub const PRELUDE_NAME: &str = "(format)";
+
+/// TeX's errors in the prelude (`text`, its own text) at their places:
+/// the file and line, TeX's context (§318), as [`Build::diagnostics`]
+/// places a document's.
+fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> Vec<Diagnostic> {
+    let v = g.eng.values();
+    let entries = g
+        .eng
+        .acc_value(unit, v.field("diags"))
+        .map(|s| v.seq_to_vec(s))
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for e in entries {
+        let xs = list_of(v, e);
+        let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
+        if int(0) == 0 {
+            continue;
+        }
+        let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
+        let loc = usize::try_from(int(6)).unwrap_or(0);
+        let name = xs
+            .get(2)
+            .filter(|&&n| n != ValueId::UNIT)
+            .map(|&n| str_of(v, n));
+        // (the file's characters are its bytes; the prelude's own text
+        // is its characters)
+        let (file, chars, at): (String, Vec<char>, usize) = match name {
+            Some(n) if n != DOC_NAME && int(3) >= 0 => {
+                let bytes = finder(n.trim_start_matches("./"))
+                    .map(|(_, b)| b)
+                    .unwrap_or_default();
+                let at = usize::try_from(int(3)).unwrap_or(0) + loc;
+                (n, bytes.iter().map(|&b| char::from(b)).collect(), at)
+            }
+            _ => {
+                let chars: Vec<char> = text.chars().collect();
+                let at = if int(3) >= 0 {
+                    let b = usize::try_from(int(3)).unwrap_or(0);
+                    text.get(..b.min(text.len()))
+                        .map_or(0, |t| t.chars().count())
+                        + loc
+                } else {
+                    0
+                };
+                (PRELUDE_NAME.to_owned(), chars, at)
+            }
+        };
+        let ci = at.min(chars.len());
+        let line = chars[..ci].iter().filter(|&&c| c == '\n').count() + 1;
+        let ls = chars[..ci]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |k| k + 1);
+        let le = chars[ci..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(chars.len(), |k| ci + k);
+        let before: String = chars[ls..ci].iter().collect();
+        let after: String = chars[ci..le]
+            .iter()
+            .collect::<String>()
+            .trim_end_matches('\r')
+            .to_owned();
+        let start = if message == "Undefined control sequence" {
+            before
+                .rfind('\\')
+                .map_or(ci, |k| ls + before[..k].chars().count())
+        } else {
+            ci
+        };
+        let lead = format!("l.{line} ");
+        let context = format!(
+            "{lead}{before}\n{}{after}",
+            " ".repeat(lead.len() + before.chars().count())
+        );
+        out.push(Diagnostic {
+            file,
+            range: (start, ci),
+            line,
+            severity: Severity::Error,
+            message,
+            context,
+            help: None,
+        });
+    }
+    out
 }
 
 /// The prelude's bindings at its end (`end`, the mark after its text):
@@ -2638,6 +2756,8 @@ impl Build {
         }
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.eng.set_max_rounds(opts.max_rounds);
+        (*g.ops.out_ok.lock().unwrap_or_else(PoisonError::into_inner))
+            .clone_from(&opts.out_name_ok);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
@@ -3037,7 +3157,14 @@ impl Build {
     /// one).
     #[must_use]
     pub fn prelude_complete(&self) -> bool {
-        self.prelude.errors.is_empty()
+        self.prelude.errors.is_empty() && self.prelude.diags.is_empty()
+    }
+
+    /// TeX's errors in the prelude, at their places in its files (a
+    /// format that stopped on them): every build on it reports them.
+    #[must_use]
+    pub fn prelude_diagnostics(&self) -> &[Diagnostic] {
+        &self.prelude.diags
     }
 
     /// The prelude's environment, serialised, for
@@ -3175,6 +3302,22 @@ impl Build {
             })
     }
 
+    /// Whether the job ended on a fatal error with `\pdfoutput` positive
+    /// (pdfTeX then says no PDF file was produced, pages or none).
+    fn fatal_pdf(&self) -> bool {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("log"))
+            .is_some_and(|e| {
+                v.seq_to_vec(e).into_iter().any(|x| {
+                    let xs = list_of(v, x);
+                    xs.first().is_some_and(|&k| str_of(v, k) == "fatal")
+                        && xs.get(1).is_some_and(|&t| str_of(v, t) == "pdf")
+                })
+            })
+    }
+
     /// The output file (DVI or PDF) and the log.
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
@@ -3192,7 +3335,7 @@ impl Build {
             .unwrap_or_default();
         let n = self.pages().len();
         // (pdfTeX §794: after a fatal error the PDF file is removed)
-        let end = if dvi.starts_with(b"%PDF") && self.fatal() {
+        let end = if self.fatal() && (dvi.starts_with(b"%PDF") || self.fatal_pdf()) {
             dvi.clear();
             "!  ==> Fatal error occurred, no output PDF file produced!".to_owned()
         } else if n == 0 {
@@ -3413,6 +3556,7 @@ impl Build {
                 help,
             });
         }
+        out.extend(self.prelude.diags.iter().cloned());
         for m in self.prelude.errors.iter().chain(&self.g.eval_errors) {
             out.push(Diagnostic {
                 file: docname.clone(),
@@ -3780,6 +3924,8 @@ fn declare_fields(eng: &mut Engine) {
         "streams",
         "wplan",
         "flushplan",
+        "fplan",
+        "oplan",
         "fread",
         "pagefxs",
         "pgdeltas",
@@ -3791,7 +3937,12 @@ fn declare_fields(eng: &mut Engine) {
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
     }
     let lines = eng.values().field("lines");
-    eng.declare_accumulator(lines, Arc::new(SumMonoid));
+    eng.declare_accumulator(lines, Arc::new(LinesMonoid));
+    // the fonts' names as the writer gives them where they are not the
+    // engine's numbers (`pdfout::font_tags`), for `\pdffontname`
+    let f = eng.values().field(crate::pdfout::FONT_TAGS);
+    let none = eng.values().list(Vec::new());
+    eng.declare_loopback(f, none);
     // what each page's output routine leaves for the next: a
     // loop-back the page builder's fold reads from the previous round
     // the state after the page each flush point opens, by flush point
@@ -3816,6 +3967,10 @@ fn declare_fields(eng: &mut Engine) {
         // writer; guess: none)
         let f = eng.values().field(&format!("pgst:{j}"));
         eng.declare_loopback(f, ValueId::UNIT);
+        // whether page j's step shipped a page (guess: no)
+        let f = eng.values().field(&crate::etex::shipped_field(j));
+        let zero = eng.values().int(0);
+        eng.declare_loopback(f, zero);
     }
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
@@ -3852,6 +4007,41 @@ fn page_guesses(g: &mut Graph, env: &Env) {
     }
 }
 
+/// The `lines` accumulator: the lines of documents' pieces begun, by
+/// file name, as `[[name, count], ...]` sorted by name
+/// ([`crate::run::Run::doc_lines`]).
+struct LinesMonoid;
+
+impl phitex_defuse::Monoid for LinesMonoid {
+    fn empty(&self, v: &Values) -> ValueId {
+        v.list(Vec::new())
+    }
+
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        let (xs, ys) = (list_of(v, a), list_of(v, b));
+        if xs.is_empty() {
+            return b;
+        }
+        if ys.is_empty() {
+            return a;
+        }
+        let mut m: std::collections::BTreeMap<String, (ValueId, i64)> =
+            std::collections::BTreeMap::new();
+        for e in xs.iter().chain(ys.iter()) {
+            let p = list_of(v, *e);
+            if let (Some(&n), Some(&k)) = (p.first(), p.get(1)) {
+                let x = m.entry(str_of(v, n)).or_insert((n, 0));
+                x.1 += int_of(v, k);
+            }
+        }
+        v.list(
+            m.into_values()
+                .map(|(n, k)| v.list(vec![n, v.int(k)]))
+                .collect(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod prelude_tests {
     use super::*;
@@ -3864,6 +4054,7 @@ mod prelude_tests {
             reads: vec![("a.tex".to_owned(), 9)],
             env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
             errors: Vec::new(),
+            diags: Vec::new(),
         };
         let b = serialise(&c);
         assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
