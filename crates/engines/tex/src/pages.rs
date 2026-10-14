@@ -330,10 +330,18 @@ impl PageState {
         live: &mut dyn FnMut(u16) -> R<InsertClass>,
     ) -> R<Option<Fire>> {
         // §1245: `\pagegoal=` and its kin set the page so far at once;
-        // §1008: an insertion class's registers as the call reads them
+        // §1008: an insertion class's registers as the call reads them;
+        // §987: the page parameters as the call reads them (the last
+        // marker: the one the run put at this candidate), for every
+        // contribution it takes
         let mut classes: Vec<(u16, InsertClass)> = Vec::new();
+        let mut page_params = None;
         let so_far = &mut self.pb.so_far;
         buf.retain(|&x| match nodes::tag(v, x) {
+            nodes::T_PAGE_PARAMS => {
+                page_params = Some(x);
+                false
+            }
             nodes::T_SET_PAGE => {
                 let i = usize::try_from(int_at(v, x, 1)).unwrap_or(8);
                 if i < 8 {
@@ -347,7 +355,10 @@ impl PageState {
             }
             _ => true,
         });
-        let mut params = self.params.map_or(
+        if page_params.is_some() {
+            self.params = page_params;
+        }
+        let params = self.params.map_or(
             PageParams {
                 vsize: 0,
                 max_depth: 0,
@@ -380,11 +391,6 @@ impl PageState {
                 nodes::T_ABORT => {
                     buf.clear();
                     return Ok(None);
-                }
-                nodes::T_PAGE_PARAMS => {
-                    self.params = Some(x);
-                    params = params_of(v, x);
-                    continue;
                 }
                 nodes::T_WRITE_AT | nodes::T_FONT_AT | nodes::T_PDFW_AT => continue,
                 _ => {}
@@ -664,17 +670,27 @@ impl Run<'_, '_> {
         };
         self.mark.active = false;
         let Some(fire) = fire else {
+            // a second pass whose state no longer finishes the page at
+            // its candidate (the version reaching it changed since the
+            // first pass read it): nothing placed, the run goes again
+            // from the top as a first pass
+            if self.stop_at.is_some() {
+                return Ok(());
+            }
             self.cx.define_with(f, ps.encode(v), Locality::Global);
             return Ok(());
         };
+        // (a second pass stopped at the candidate: the piece goes on
+        // after it, whatever the pass did not run)
         let at_end = fin
-            || self.cand_mark.is_some_and(|m| {
-                m.k == fire.k
-                    && m.stamp == self.st.stamp()
-                    && m.contribs == self.contribs.len()
-                    && m.kids == self.kids.len()
-                    && m.lines == self.lines_entered
-            });
+            || (self.stop_at != Some(fire.k)
+                && self.cand_mark.is_some_and(|m| {
+                    m.k == fire.k
+                        && m.stamp == self.st.stamp()
+                        && m.contribs == self.contribs.len()
+                        && m.kids == self.kids.len()
+                        && m.lines == self.lines_entered
+                }));
         if !at_end {
             self.cut = Some(fire.k);
             if self.stop_at != Some(fire.k) {
