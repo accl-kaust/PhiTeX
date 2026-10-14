@@ -265,8 +265,15 @@ impl Operation for Exec {
             crate::hints::debug_defs(r, &hint);
             // (a hint whose regime the run found violated bounds nothing:
             // its definitions are not checked against it)
-            if hint.bound.is_some() && !r.hint_void {
-                if let Some(m) = crate::hints::check_defs(r, &hint) {
+            // (a run that claimed siblings ran their texts too: it is
+            // bounded by its hint and theirs together, and by nothing
+            // when one of theirs is unbounded)
+            let claimed: Vec<std::sync::Arc<crate::hints::Hint>> = (0..r.pulled)
+                .filter_map(|i| r.cx.following(i))
+                .map(|(_, a)| crate::hints::hint_of_args(r.v, &a))
+                .collect();
+            if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
+                if let Some(m) = crate::hints::check_defs(r, &hint, &claimed) {
                     r.log("error", &m)?;
                     crate::hints::count(r, 3);
                 }
