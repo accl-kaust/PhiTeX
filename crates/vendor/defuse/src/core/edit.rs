@@ -453,6 +453,29 @@ impl Engine {
     }
 
     pub fn declare_loopback(&mut self, f: Field, init: ValueId) {
+        if let Some(&old) = self.sh.loops.get(&f) {
+            // Declared again: the same is nothing; a new initial value is
+            // the round value only while the field still has the old one.
+            if old == init {
+                return;
+            }
+            self.sh.loops.insert(f, init);
+            let moved = {
+                let mut lv = wlock(&self.sh.loop_vals);
+                let at_init = lv.get(&f) == Some(&old);
+                if at_init {
+                    lv.insert(f, init);
+                }
+                at_init
+            };
+            if moved {
+                let readers = lock(&self.sh.loop_readers).remove(&f).unwrap_or_default();
+                for (n, g) in readers {
+                    self.sh.touch(n, g, &Cause::Loop { field: f }, false);
+                }
+            }
+            return;
+        }
         self.sh.loops.insert(f, init);
         wlock(&self.sh.loop_vals).insert(f, init);
         lock(&self.sh.pubs_dirty).insert(f);
@@ -502,19 +525,21 @@ impl Engine {
     /// Supplies environment fields (replacing the previous ones).
     pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
         let new: FxHashMap<Field, ValueId> = env.into_iter().collect();
-        let old = std::mem::take(&mut wlock(&self.sh.env).known);
-        let mut changed: Vec<Field> = Vec::new();
-        for (f, x) in &new {
-            if old.get(f) != Some(x) {
-                changed.push(*f);
-            }
-        }
-        for f in old.keys() {
-            if !new.contains_key(f) {
-                changed.push(*f);
-            }
-        }
-        wlock(&self.sh.env).known = new;
+        // By value: only the fields whose answer moves wake their readers
+        // (the provider's answers stay underneath).
+        let changed = {
+            let mut e = wlock(&self.sh.env);
+            let mut fs: Vec<Field> = e.known.keys().chain(new.keys()).copied().collect();
+            fs.sort_unstable_by_key(|f| f.0.raw());
+            fs.dedup();
+            let before: Vec<_> = fs.iter().map(|&f| e.get(f)).collect();
+            e.known = new;
+            fs.into_iter()
+                .zip(before)
+                .filter(|(f, b)| e.get(*f) != *b)
+                .map(|(f, _)| f)
+                .collect::<Vec<_>>()
+        };
         self.env_changed(&changed);
     }
 
@@ -604,9 +629,19 @@ impl Engine {
     /// Declares environment fields absent (replacing the previous ones).
     pub fn set_environment_absent(&mut self, absent: impl IntoIterator<Item = Field>) {
         let new: FxHashSet<Field> = absent.into_iter().collect();
-        let old = std::mem::take(&mut wlock(&self.sh.env).absent);
-        let changed: Vec<Field> = new.symmetric_difference(&old).copied().collect();
-        wlock(&self.sh.env).absent = new;
+        let changed = {
+            let mut e = wlock(&self.sh.env);
+            let mut fs: Vec<Field> = e.absent.iter().chain(new.iter()).copied().collect();
+            fs.sort_unstable_by_key(|f| f.0.raw());
+            fs.dedup();
+            let before: Vec<_> = fs.iter().map(|&f| e.get(f)).collect();
+            e.absent = new;
+            fs.into_iter()
+                .zip(before)
+                .filter(|(f, b)| e.get(*f) != *b)
+                .map(|(f, _)| f)
+                .collect::<Vec<_>>()
+        };
         self.env_changed(&changed);
     }
 
@@ -626,7 +661,15 @@ impl Engine {
 
     /// The supplied environment.
     pub fn environment(&self) -> impl Iterator<Item = (Field, ValueId)> + '_ {
-        let v: Vec<(Field, ValueId)> = rlock(&self.sh.env).known.iter().map(|(f, x)| (*f, *x)).collect();
+        let e = rlock(&self.sh.env);
+        let mut v: Vec<(Field, ValueId)> = e.known.iter().map(|(f, x)| (*f, *x)).collect();
+        v.extend(
+            e.provided
+                .iter()
+                .filter(|(f, _)| !e.known.contains_key(*f) && !e.absent.contains(*f))
+                .filter_map(|(f, x)| x.map(|x| (*f, x))),
+        );
+        drop(e);
         v.into_iter()
     }
 
