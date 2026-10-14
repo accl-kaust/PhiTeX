@@ -1607,7 +1607,18 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         // (a load whose run went on into its siblings is not one load:
         // no record of it)
-        if self.rec_load && op == self.ops.exec && self.pulled == 0 && !self.claim_rest {
+        if self.rec_load && crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+            eprintln!(
+                "pkgrec: load run {} finishes: pulled {} (blanks only {}), rest claimed {}, effect {:?}, {} definitions",
+                self.cx.node().raw(),
+                self.pulled,
+                self.pulled_only_blanks(),
+                self.claim_rest,
+                self.effect,
+                published.len()
+            );
+        }
+        if self.rec_load && op == self.ops.exec && !self.claim_rest && self.pulled_only_blanks() {
             self.record_load(&published);
         }
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
@@ -1705,6 +1716,23 @@ impl<'c, 'a> Run<'c, 'a> {
         self.cx.claim(n);
         self.cx.set_effect(self.effect);
         ValueId::UNIT
+    }
+
+    /// Whether every sibling the run took is blank text (a line's end
+    /// left as a node of its own): the run is still its load's alone.
+    fn pulled_only_blanks(&self) -> bool {
+        (0..self.pulled).all(|i| match self.cx.following(i) {
+            Some((op, args)) if op == self.ops.exec => args.first().is_some_and(|&fr| {
+                list_of(self.v, fr).into_iter().all(|f| {
+                    let xs = list_of(self.v, f);
+                    xs.first().map(|&t| str_of(self.v, t)).as_deref() == Some("s")
+                        && xs
+                            .get(1)
+                            .is_some_and(|&t| str_of(self.v, t).trim().is_empty())
+                })
+            }),
+            _ => false,
+        })
     }
 
     /// A package load's record (`crate::pkgrec`): the files it read (and
