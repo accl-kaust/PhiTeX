@@ -3194,7 +3194,13 @@ impl ParLists {
             ..Bound::default()
         };
         let mut cause = String::new();
-        let h = Arc::new(if an.add_set(&d, &mut b, &mut cause) {
+        let ok = an.add_set(&d, &mut b, &mut cause);
+        // (what a list may define, only: the meanings and catcodes its
+        // bodies rest on are no assumption of the slice's, which may run
+        // none of them)
+        b.means.clear();
+        b.cats = Cats::default();
+        let h = Arc::new(if ok {
             Hint {
                 bound: Some(b),
                 cause: "paragraph-start token lists".to_owned(),
