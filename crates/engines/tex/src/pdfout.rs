@@ -76,7 +76,8 @@ fn folding(r: &mut Run<'_, '_>) -> R<bool> {
 
 /// Whether the pages are written apart and placed by the finish after
 /// every read-time command (exact mode, not folding): a read-time write
-/// after a page then waits for the finish (`oplan`).
+/// after a page goes to the pages' accumulator ([`XPAGES`]), where the
+/// end node writes it ([`finish_exact`]).
 pub(crate) fn pages_apart(r: &mut Run<'_, '_>) -> R<bool> {
     Ok(r.param("pdfoutput")? > 0 && !crate::pdfrelaxed::on(r)? && !folding(r)?)
 }
@@ -1316,41 +1317,20 @@ pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
 pub(crate) const SPACE_FONT: FontId = FontId::MAX - 15;
 
 /// The fonts' numbers as pdfTeX gives them, where they differ from the
-/// engine's (`None`: nowhere). The text numbers its fonts in its own
-/// order, `1..=t`; a page step numbers the fonts it loads (an output
-/// routine's, its virtual fonts' local fonts, `do_vf`) after the
-/// text's and the steps' before it; `pdftexspace` is [`SPACE_FONT`].
-/// pdfTeX numbers each in the order it loads it: the text's fonts
-/// loaded before a `\shipout` (the `T_FONT_AT` markers the page
-/// builder's fold met before that page fired, `fplan`), then that
-/// shipout's: the output routine's, then as its walk reads them in (a
-/// virtual font's local fonts at its `do_vf`, the space font where a
-/// faked space first needs it), and so on. `pages` are the placed
-/// pages, in order.
-fn font_tags(
-    v: &Values,
-    fplan: Option<ValueId>,
-    pages: &[Arc<PagePiece>],
-) -> Option<std::collections::HashMap<FontId, FontId>> {
-    // (no plan: no text font loaded after a shipout is known)
-    let plan = fplan.map(|p| list_of(v, p)).unwrap_or_default();
-    let t = plan.first().map_or(0, |&x| int_of(v, x));
-    let per_page: Vec<Vec<i64>> = plan
-        .iter()
-        .skip(1)
-        .map(|&l| list_of(v, l).iter().map(|&x| int_of(v, x)).collect())
-        .collect();
-    // the text's fonts loaded before page j fires: those before the
-    // first one a later page's fold met
-    let before = |j: i64| -> i64 {
-        per_page
-            .iter()
-            .enumerate()
-            .filter(|&(k, _)| i64::try_from(k).unwrap_or(i64::MAX) > j)
-            .flat_map(|(_, l)| l.iter().copied())
-            .min()
-            .map_or(t, |m| (m - 1).min(t))
-    };
+/// engine's (`None`: nowhere). The engine numbers the fonts in the
+/// order the line loads them (`fontcount`, a field every load defines
+/// for what follows it: the text's and a finisher's output routine's
+/// alike, a finisher being a node in the line), which is pdfTeX's
+/// order except where a `\shipout` loads fonts as its walk reads them
+/// in: a virtual font's local fonts at its `do_vf` (the engine loads
+/// them before the walk, [`vf_for`]) and `pdftexspace`
+/// ([`SPACE_FONT`]) where a faked space first needs it. `pages` are the
+/// placed pages in order; `t` the fonts loaded in all.
+///
+/// Example: text fonts 1 and 2, then a page whose virtual font 2 loads
+/// its local font 3 and whose walk needs the space font, then a text
+/// font 4: pdfTeX's numbers 1, 2, 3, space 4, then 5 for font 4.
+fn font_tags(t: i64, pages: &[Arc<PagePiece>]) -> Option<std::collections::HashMap<FontId, FontId>> {
     let mut map = std::collections::HashMap::new();
     let mut done: BTreeSet<FontId> = BTreeSet::new();
     let mut next: FontId = 0;
@@ -1363,22 +1343,20 @@ fn font_tags(
         }
     };
     let id = |f: i64| FontId::try_from(f).unwrap_or(0);
-    let mut text = 0i64;
-    let mut steps = t;
+    // the fonts loaded before the pages placed so far
+    let mut steps = 0i64;
     for pc in pages {
-        let c = before(pc.pj).max(text);
-        for f in text + 1..=c {
-            put(id(f));
-        }
-        text = c;
         let mine = |f: FontId| i64::from(f) > steps && i64::from(f) <= pc.fcount;
-        // the step's fonts no virtual font loads (its output routine's)
+        // the fonts this page's virtual fonts loaded (at its walk)
         let locals: BTreeSet<FontId> = pc
             .fonts
             .vfs
             .values()
             .flat_map(|vf| vf.fonts.iter().map(|&(_, g)| g))
+            .filter(|&g| mine(g))
             .collect();
+        // the line's fonts loaded before this `\shipout`: the text's,
+        // the output routine's
         for f in steps + 1..=pc.fcount {
             if !locals.contains(&id(f)) {
                 put(id(f));
@@ -1403,8 +1381,140 @@ fn font_tags(
         }
         steps = steps.max(pc.fcount);
     }
-    for f in text + 1..=t {
+    for f in steps + 1..=t {
         put(id(f));
     }
     (!map.is_empty()).then_some(map)
+}
+
+/// The fixed parts of the exact file the end node reads: the fields
+/// reaching it.
+pub(crate) struct EndFields {
+    /// `pdf:state`: the key of the writer's state the read-time
+    /// commands left (none: no command touched it).
+    pub state: Option<u64>,
+    pub date: String,
+    pub jobname: String,
+    pub g2u: Option<ValueId>,
+    /// `fontcount`: the fonts loaded in all.
+    pub fonts: i64,
+    pub info_omit_date: i32,
+    pub suppress_ptex_info: i32,
+}
+
+/// The exact PDF file (the end node's): the writer's state the
+/// read-time commands left, and the pages' accumulator ([`XPAGES`])
+/// folded on it in order. An entry is a page's key (its [`PagePiece`]
+/// placed: `PdfState::replay_page`, or shipped again where it cannot be
+/// placed), `["obj", n]` (an `\immediate\pdfobj` the text ran after a
+/// page: object `n` written there, as pdfTeX does), or a document-level
+/// command an output routine ran ([`apply_doc_op`]). Then the fonts'
+/// names in pdfTeX's order ([`font_tags`]) and `phitex_pdf::finish`.
+/// The empty string: no file.
+///
+/// Example: `xpages = [k1, ["obj", 7], k2]` writes page 1's objects,
+/// object 7, then page 2's.
+pub(crate) fn finish_exact(v: &Values, f: &EndFields, xpages: &[ValueId]) -> Vec<u8> {
+    let start = f.state.and_then(|k| {
+        states()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&k)
+            .cloned()
+    });
+    let a = match start {
+        Some(a) => a,
+        None if xpages.is_empty() => return Vec::new(),
+        None => Arc::new(Fold {
+            st: fresh(v, f.date.clone(), &f.jobname, f.g2u),
+            bytes: PdfBytes::new(),
+            forms: Forms::default(),
+            bytes_hash: 0,
+        }),
+    };
+    let t0 = std::time::Instant::now();
+    let mut st = a.st.clone();
+    let mut bytes = a.bytes.clone();
+    let piece = |x: ValueId| -> Option<Arc<PagePiece>> {
+        let pk = u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
+        pieces()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&pk)
+            .cloned()
+    };
+    let placed: Vec<Arc<PagePiece>> = xpages
+        .iter()
+        .filter(|&&x| v.as_int(x).is_some())
+        .filter_map(|&x| piece(x))
+        .collect();
+    if let Some(tags) = font_tags(f.fonts, &placed) {
+        st.set_font_tags(tags);
+    }
+    let (mut replayed, mut shipped) = (0usize, 0usize);
+    // the variables' key after the page placed last (none after a page
+    // shipped again or an operation on the state)
+    let mut known: Option<String> = None;
+    for &x in xpages {
+        if v.as_int(x).is_none() {
+            let xs = list_of(v, x);
+            if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("obj") {
+                let n = xs.get(1).map_or(0, |&n| usize::try_from(int_of(v, n)).unwrap_or(0));
+                // (the command's run logged the writer's error)
+                let _ = st.write_obj(n);
+            } else {
+                apply_doc_op(v, &mut st, x);
+            }
+            known = None;
+            continue;
+        }
+        let Some(pc) = piece(x) else {
+            return Vec::new();
+        };
+        set_page_params(v, &mut st, &pc.params, pc.margins);
+        let res = st.replay_page(&pc.rec, &pc.fonts, &pc.base, known.as_deref());
+        known = res
+            .as_ref()
+            .ok()
+            .and_then(|_| pc.rec.post_key())
+            .map(str::to_owned);
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            match &res {
+                Err(why) => eprintln!("pdf pages: page {} shipped again: {why}", replayed + shipped + 1),
+                Ok(Some(why)) => eprintln!("pdf pages: page {}: {why}", replayed + shipped + 1),
+                Ok(None) => {}
+            }
+        }
+        if res.is_ok() {
+            replayed += 1;
+        } else {
+            shipped += 1;
+            // (the finisher logged the writer's error when it wrote the
+            // page)
+            let mut wh = |h: u32, _leaders: bool| page_whatsit(&a.forms, &pc.whats, h);
+            let mut side = crate::nodes::Side::default();
+            if let Some(phitex_typeset::node::Node::Box(bx)) =
+                crate::nodes::decode(v, pc.boxv, &mut side)
+            {
+                let _ = st.ship_out_with(&bx, &pc.fonts, &mut wh);
+            }
+        }
+    }
+    st.flush(&mut bytes);
+    st.params_mut().info_omit_date = f.info_omit_date;
+    st.params_mut().suppress_ptex_info = f.suppress_ptex_info;
+    let out = phitex_pdf::finish(st, &bytes).unwrap_or_else(|e| {
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!("pdf: {e}");
+        }
+        Vec::new()
+    });
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "pdf pages: {replayed} placed, {shipped} shipped again; file {} bytes, {:?}",
+            out.len(),
+            t0.elapsed()
+        );
+    }
+    out
 }
