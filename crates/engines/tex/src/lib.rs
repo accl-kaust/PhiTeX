@@ -46,6 +46,7 @@ mod pageinline;
 mod pdfout;
 mod pdfprim;
 mod pdfrelaxed;
+mod pkgrec;
 mod planinc;
 mod prims;
 mod print;
