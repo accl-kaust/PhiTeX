@@ -3070,6 +3070,29 @@ impl Build {
             .map(|(_, n, _)| n.raw())
             .collect();
         stats.pkg_loads = loads.len() as u64;
+        if crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+            let fresh = self.fresh_records();
+            for (_, n, src) in &self.nodes {
+                let Some(k) = crate::pkgrec::load_key(src.text(&self.text)) else {
+                    continue;
+                };
+                let st = self.g.eng.node_info(*n).map(|i| i.state);
+                let r = fresh.iter().find(|(f, _)| *f == k).map(|(_, r)| {
+                    (
+                        r.files
+                            .iter()
+                            .map(|(n, h)| format!("{n}:{h:x}"))
+                            .collect::<Vec<_>>(),
+                        r.writes.len(),
+                        r.reads.len(),
+                    )
+                });
+                eprintln!(
+                    "pkgrec: load {k} node {} state {st:?}: fresh {r:?}",
+                    n.raw()
+                );
+            }
+        }
         if let Some(l) = &self.g.loads {
             stats.pkg_recorded = l.given[0].load(std::sync::atomic::Ordering::Relaxed);
             stats.pkg_optimistic = l.given[1].load(std::sync::atomic::Ordering::Relaxed);

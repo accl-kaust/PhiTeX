@@ -94,7 +94,13 @@ impl Rec {
     /// The hint the record gives its load, when every name encodes.
     pub(crate) fn hint(&self) -> Option<String> {
         (self.writes.iter().chain(&self.reads).all(|n| encodable(n))).then(|| {
-            crate::hints::record_hint(&self.writes, &self.reads, self.no_scope, self.claim0)
+            // (`PHITEX_PKG_NOREADS=1`: the definitions only, for comparison)
+            let reads: &[String] = if crate::exec::env_flag!("PHITEX_PKG_NOREADS") {
+                &[]
+            } else {
+                &self.reads
+            };
+            crate::hints::record_hint(&self.writes, reads, self.no_scope, self.claim0)
         })
     }
 
@@ -233,6 +239,27 @@ impl LoadHints {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&k)
             .cloned();
+        if crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+            match &rec {
+                None => eprintln!("pkgrec: {k}: no record"),
+                Some(r) => {
+                    let bad: Vec<String> = r
+                        .files
+                        .iter()
+                        .filter(|(n, h)| self.hash_now(v, n) != *h)
+                        .map(|(n, h)| {
+                            format!("{n} (recorded {h:x}, now {:x})", self.hash_now(v, n))
+                        })
+                        .collect();
+                    eprintln!(
+                        "pkgrec: {k}: record of {} files, {} writes, {} reads; differing {bad:?}",
+                        r.files.len(),
+                        r.writes.len(),
+                        r.reads.len()
+                    );
+                }
+            }
+        }
         if let Some(r) = rec
             && r.matches(|n| Some(self.hash_now(v, n)))
             && let Some(h) = r.hint()
