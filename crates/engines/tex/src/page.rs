@@ -942,6 +942,34 @@ impl Run<'_, '_> {
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
     }
 
+    /// The text defined field `f` (one the routines change) after a
+    /// flush point fed it back: marked on the main list (`T_FLUSH_AT`
+    /// with `[f, x, 1]`), so the page that fires after it reads the
+    /// text's value, not the chain's (LaTeX's `\thispagestyle` after
+    /// `\cleardoublepage`).
+    pub(crate) fn field_set(&mut self, f: Field, x: ValueId) {
+        let v = self.v;
+        let op = self.cx.op();
+        if self.fed
+            || self.interp.is_some()
+            || op == self.ops.pagestep
+            || op == self.ops.pagestep_any
+            || self.pg.is_some()
+        {
+            return;
+        }
+        let node = self.cx.node().raw();
+        let id = self.flushes;
+        self.flushes += 1;
+        let at = v.list(vec![
+            v.int(nodes::T_FLUSH_AT),
+            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+            v.int(i64::try_from(id).unwrap_or(0)),
+            v.list(vec![f.0, x, v.int(1)]),
+        ]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+    }
+
     /// The pending flush point's loop-back read: its entry in
     /// [`FLUSHES`] (`[node, k, value]`), its fields read in place of the
     /// engine's from here on; none (round one) leaves the state as it is.
@@ -975,6 +1003,7 @@ impl Run<'_, '_> {
         }
         if let Some(&pairs) = xs.get(1) {
             for (g, y) in pgst_pairs(v, Some(pairs)) {
+                self.flush_fields.insert(g);
                 let l = self.loc_of(g);
                 self.st.preload(l, Some(y));
             }
@@ -2234,6 +2263,10 @@ impl FinalState {
         // fires)
         let (flushes, sets): (Vec<_>, Vec<_>) =
             marks.into_iter().partition(|m| list_of(v, m.3).len() == 10);
+        // (and a field the text defined after a flush fed it back,
+        // `[f, x, 1]`)
+        let (fsets, sets): (Vec<_>, Vec<_>) =
+            sets.into_iter().partition(|m| list_of(v, m.3).len() == 3);
         let sets_before = |page: usize, counts: &mut Vec<i64>| {
             for s in sets
                 .iter()
@@ -2356,11 +2389,27 @@ impl FinalState {
                     state.insert(name, (f, x));
                 }
             }
-            cur = if state.is_empty() {
-                ValueId::UNIT
-            } else {
-                v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
+            let as_pairs = |state: &std::collections::BTreeMap<String, (Field, ValueId)>| {
+                if state.is_empty() {
+                    ValueId::UNIT
+                } else {
+                    v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
+                }
             };
+            // (the state after page j, as the text after a flush there
+            // reads it)
+            let cur_after = as_pairs(&state);
+            // what the next page's routine reads: the fields the text
+            // defined before it fires
+            for s in fsets
+                .iter()
+                .filter(|s| s.2 == i64::try_from(j).unwrap_or(-1))
+            {
+                let xs = list_of(v, s.3);
+                let (f, x) = (Field(xs[0]), xs[1]);
+                state.insert(crate::val::field_name(v, f), (f, x));
+            }
+            cur = as_pairs(&state);
             let e: Vec<(String, ValueId)> =
                 state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
             log_pub(o, "pgst", j, e);
@@ -2377,7 +2426,7 @@ impl FinalState {
             // reads it)
             let done = v.list(counts.iter().map(|&c| v.int(c)).collect());
             after.resize(j + 1, (ValueId::UNIT, ValueId::UNIT));
-            after[j] = (done, cur);
+            after[j] = (done, cur_after);
             // what the next page's routine reads: the counts the text
             // assigned before it fires
             sets_before(j + 1, &mut counts);
