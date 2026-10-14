@@ -901,6 +901,17 @@ impl<'c, 'a> Run<'c, 'a> {
             .find(|l| l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO)
             .copied();
         self.read_back_done = self.read_back_at.is_some();
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: read back {key} in node {}: levels {:?}",
+                self.cx.node().raw(),
+                self.input
+                    .levels
+                    .iter()
+                    .map(|l| (l.kind, l.ty))
+                    .collect::<Vec<_>>()
+            );
+        }
         Ok(true)
     }
 
@@ -926,6 +937,9 @@ impl<'c, 'a> Run<'c, 'a> {
         self.eof = true;
         self.no_pull = true;
         self.set("cat:64", v.int(11), false);
+        // (on a list of its own, dropped after: what a line typesets,
+        // an error's text, goes nowhere)
+        self.push_list(-1, crate::val::group::VBOX, Vec::new());
         let base = self.st.stamp();
         self.interp = Some(phitex_defuse::FxHashSet::default());
         self.interp_base = base;
