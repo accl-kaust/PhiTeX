@@ -970,6 +970,8 @@ pub struct Stats {
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
+    /// (measure) why nodes ran again, by the kind of their cause.
+    pub rerun_by_kind: Vec<(String, u64)>,
     /// The page chain's loop-back guesses the evaluation refuted, with
     /// the fields that refuted them (`refuted: <fields> at page <n>
     /// (<loop-back>)`).
@@ -1108,6 +1110,15 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
+        for (_, c) in &r.rerun_causes {
+            let d = format!("{c:?}");
+            let k = d.split([' ', '{', '(']).next().unwrap_or("").to_owned();
+            match self.rerun_by_kind.iter_mut().find(|e| e.0 == k) {
+                Some(e) => e.1 += 1,
+                None => self.rerun_by_kind.push((k, 1)),
+            }
+        }
+        self.rerun_by_kind.sort_by_key(|e| std::cmp::Reverse(e.1));
         self.nodes_run += r.nodes_run;
         self.runs += r.runs;
         self.cutoffs += r.cutoffs;
@@ -2964,6 +2975,21 @@ impl Build {
         // whose rounds restart begins from them, not from the cold guess
         let kept = self.export_pgst();
         chain_guesses(&mut self.g, &kept);
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "measure: runs {} nodes_run {} rounds {} loop_rounds {} stops {} resumed {} restarted {} restarted_by {:?}; rerun causes {:?}; waits {:?}",
+                stats.runs,
+                stats.nodes_run,
+                stats.rounds,
+                stats.loop_rounds,
+                stats.stops,
+                stats.resumed,
+                stats.restarted,
+                stats.restarted_by,
+                stats.rerun_by_kind,
+                stats.waits_by_kind
+            );
+        }
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
