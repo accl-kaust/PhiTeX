@@ -360,9 +360,6 @@ impl Run<'_, '_> {
     pub(crate) fn list_fold(&mut self, lid: i64) -> R<ListFold> {
         let v = self.v;
         let f = v.field("items");
-        // a list is this run's or the engine's (lid 0): no list is opened
-        // by one node and read by another
-        let all = self.cx.acc_range(f, None)?;
         let mut out: Vec<ValueId> = Vec::new();
         let mut st = FoldState {
             sf: 1000,
@@ -377,7 +374,19 @@ impl Run<'_, '_> {
             .filter(|(g, _)| *g == f)
             .map(|(_, x)| *x)
             .collect();
-        fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
+        if lid == 0 {
+            // the main list as the nodes before left it: its tail, from
+            // the fold before this node (`vtail`, [`vtail_value`]), not
+            // every item since the start: a tail that comes out equal
+            // after an edit before it reruns no reader
+            let x = self.cx.use_field(v.field(VTAIL))?;
+            (out, st) = vtail_decode(v, x);
+        } else {
+            // a list is this run's or the engine's (lid 0): no list is
+            // opened by one node and read by another
+            let all = self.cx.acc_range(f, None)?;
+            fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
+        }
         let mut push = |x: ValueId, out: &mut Vec<ValueId>| {
             let Value::List(xs) = &*v.get(x) else { return };
             if xs.len() != 2 || int_of(v, xs[0]) != lid {
@@ -2549,6 +2558,64 @@ pub(crate) fn is_marker(v: &Values, x: ValueId) -> bool {
             | nodes::T_PDFW_AT
             | nodes::T_SET_PAGE
             | nodes::T_INS_PARAMS
+    )
+}
+
+/// The main list's tail as the nodes up to a fold left it: defined by
+/// every fold (`crate::pages`), read by a node that asks for the list's
+/// last item, `\\spacefactor` or `\\prevdepth` ([`Run::list_fold`]).
+pub(crate) const VTAIL: &str = "vtail";
+
+/// The main list's tail after `items` (a piece's own main-list items,
+/// as its fold gets them) folded onto `prev` (`vtail` reaching the
+/// fold): `[tail, sf, pd, since_bp]`, the tail being the items after the
+/// page builder's last call and the one before them (what a reader sees
+/// of the list: its last item, and what `\\unskip`, `\\lastbox` can
+/// take, which is never before that call, §1105, §1080).
+pub(crate) fn vtail_value(v: &Values, prev: Option<ValueId>, items: &[ValueId]) -> ValueId {
+    let (mut out, mut st) = vtail_decode(v, prev);
+    for &x in items {
+        fold_item(v, 0, x, &mut st, &mut out);
+    }
+    vtail_encode(v, &out, &st)
+}
+
+fn vtail_encode(v: &Values, out: &[ValueId], st: &FoldState) -> ValueId {
+    let keep = st.since_bp + 1;
+    let mut tail: Vec<ValueId> = out
+        .iter()
+        .rev()
+        .filter(|&&x| !is_marker(v, x))
+        .take(keep)
+        .copied()
+        .collect();
+    tail.reverse();
+    v.list(vec![
+        v.list(tail),
+        v.int(i64::from(st.sf)),
+        v.int(i64::from(st.pd)),
+        v.int(i64::try_from(st.since_bp).unwrap_or(0)),
+    ])
+}
+
+fn vtail_decode(v: &Values, x: Option<ValueId>) -> (Vec<ValueId>, FoldState) {
+    let st0 = FoldState {
+        sf: 1000,
+        pd: IGNORE_DEPTH,
+        since_bp: 0,
+    };
+    let Some(x) = x else { return (Vec::new(), st0) };
+    let xs = list_of(v, x);
+    if xs.len() < 4 {
+        return (Vec::new(), st0);
+    }
+    (
+        list_of(v, xs[0]),
+        FoldState {
+            sf: i32::try_from(int_of(v, xs[1])).unwrap_or(1000),
+            pd: i32::try_from(int_of(v, xs[2])).unwrap_or(IGNORE_DEPTH),
+            since_bp: usize::try_from(int_of(v, xs[3])).unwrap_or(0),
+        },
     )
 }
 

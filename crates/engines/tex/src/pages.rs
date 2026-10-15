@@ -1001,11 +1001,15 @@ impl Run<'_, '_> {
         self.cx.claim(n);
         let mut defs = self.published_fields();
         defs.push(v.field(PS));
+        defs.push(v.field(crate::build::VTAIL));
         defs.push(v.field(SHIPPED));
         self.cx.narrow(MayDefine::Names(defs));
         self.begin_command();
         let f = self.ps_field();
         let ps_in = self.cx.use_field(f)?;
+        // (the run's own main-list items, before a finisher's are joined
+        // by what the page left)
+        self.define_vtail(&raw)?;
         // (before the state is taken: a stop here leaves it for the
         // attempt that resumes)
         let dead = self.deadcycles_for(&raw)?;
@@ -2015,6 +2019,7 @@ impl FinDefs {
 const FINISHER_FIELDS: &[&str] = &[
     PS,
     SHIPPED,
+    crate::build::VTAIL,
     "deadcycles",
     "mark:",
     "param:outputpenalty",
@@ -2232,13 +2237,14 @@ impl Operation for Fold {
         None
     }
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        MayDefine::Names(vec![v.field(PS)])
+        MayDefine::Names(vec![v.field(PS), v.field(crate::build::VTAIL)])
     }
     /// The page state and `\deadcycles`: the node waits for them
     /// instead of starting and stopping.
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(vec![
             v.field(PS),
+            v.field(crate::build::VTAIL),
             v.field("deadcycles"),
             v.field("param:vsize"),
             v.field("param:maxdepth"),
@@ -2270,6 +2276,17 @@ impl Run<'_, '_> {
         Ok(0)
     }
 
+    /// The main list's tail after this fold's items (`vtail`,
+    /// [`crate::build::vtail_value`]): read where the fold is, defined.
+    fn define_vtail(&mut self, raw: &[ValueId]) -> R<()> {
+        let v = self.v;
+        let vt = v.field(crate::build::VTAIL);
+        let prev = self.cx.use_field(vt)?;
+        let x = crate::build::vtail_value(v, prev, raw);
+        self.cx.define_with(vt, x, Locality::Global);
+        Ok(())
+    }
+
     /// A [`Fold`] node's run.
     fn fold_node(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
@@ -2280,6 +2297,7 @@ impl Run<'_, '_> {
         // (a stop at the read parks the run: it resumes here)
         self.begin_command();
         let ps_in = self.cx.use_field(f)?;
+        self.define_vtail(&raw)?;
         self.resolve_page_params(&mut raw)?;
         let dead = self.deadcycles_for(&raw)?;
         let mut timer = FoldTimer::new(raw.len());
