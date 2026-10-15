@@ -638,6 +638,11 @@ impl State {
         if !base {
             self.defined.push(loc);
         }
+        // (`\multiply\vsize` changes a page parameter as `\vsize=`
+        // does: the next candidate notes it, [`State::take_page_params`])
+        if is_page_param(loc) {
+            self.pp_dirty = true;
+        }
         let m = &mut self.metas[mi];
         m.ldef_stamp = st;
         m.ldef_local = true;
@@ -1251,6 +1256,9 @@ impl State {
             chr: 0,
         };
         s.ginert = st;
+        if is_page_param(loc) {
+            self.pp_dirty = true;
+        }
         let m = &mut self.metas[mi];
         m.ldef_stamp = st;
         m.ldef_local = false;

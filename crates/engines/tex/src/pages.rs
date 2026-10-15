@@ -488,6 +488,15 @@ impl PageState {
                     break;
                 }
                 Outcome::Fire(f) => {
+                    if crate::exec::env_flag!("PHITEX_PAGE_TRACE") {
+                        eprintln!(
+                            "page-trace: page {} fires at candidate {k}: vsize {} maxdepth {} (marker {})",
+                            self.j,
+                            params.vsize,
+                            params.max_depth,
+                            self.params.map_or_else(|| "none".to_owned(), |m| v.render(m))
+                        );
+                    }
                     // §1017: what the page could not take goes first
                     let mut carried: Vec<ValueId> = f
                         .contributions
@@ -623,8 +632,18 @@ impl Run<'_, '_> {
         let v = self.v;
         let k = self.cand;
         if self.st.take_page_params() {
+            if crate::exec::env_flag!("PHITEX_PAGE_TRACE") {
+                eprintln!(
+                    "page-trace: node {} candidate {k}: page params changed, vsize {}",
+                    self.cx.node().raw(),
+                    self.ipar(Par::vsize)?
+                );
+            }
             self.put_page_params();
-        } else if k == 0 {
+        } else if k == 0 && !self.own_page_params_put() {
+            // (the parameters reaching the piece, unless an item of it
+            // already noted the ones it set, `Run::append`: that marker
+            // is later in force and this one, after it, would undo it)
             self.put_page_params_reaching();
         }
         for n in std::mem::take(&mut self.ins_pending) {
@@ -656,6 +675,14 @@ impl Run<'_, '_> {
             return Err(Halt::Cut);
         }
         Ok(())
+    }
+
+    /// Whether this run put a page parameter marker on the main list.
+    fn own_page_params_put(&self) -> bool {
+        let v = self.v;
+        self.own_outer_items()
+            .iter()
+            .any(|&x| nodes::tag(v, x) == nodes::T_PAGE_PARAMS)
     }
 
     /// The items this run put on the main list, in order (its `items`
@@ -718,6 +745,50 @@ impl Run<'_, '_> {
             dimen: self.reg_int(1, n)?,
             skip: glue_of(v, self.reg(2, i32::from(n))?),
         })
+    }
+
+    /// The `[tag]` page parameter markers of `raw` (the parameters
+    /// reaching the piece, [`Run::put_page_params_reaching`]) given their
+    /// values, when the piece defined a page parameter itself: the
+    /// marker means the values in force where the piece began, and both
+    /// the run's own state at its end and the fold after it hold the
+    /// piece's later values (multicol sets `\vsize`: a first pass and a
+    /// pass stopped at the candidate resolved them differently and never
+    /// agreed). A piece that leaves them alone reads nothing here.
+    fn pin_reaching_page_params(&mut self, raw: &mut [ValueId]) -> R<()> {
+        let v = self.v;
+        let names = ["param:vsize", "param:maxdepth", "param:topskip", "param:holdinginserts"];
+        let mut defined = false;
+        for n in names {
+            let l = self.loc_of(v.field(n));
+            if self.st.defined_after(l, 0) {
+                defined = true;
+            }
+        }
+        let has = raw
+            .iter()
+            .any(|&x| nodes::tag(v, x) == nodes::T_PAGE_PARAMS && list_of(v, x).len() == 1);
+        if !defined || !has {
+            return Ok(());
+        }
+        let mut xs = Vec::with_capacity(4);
+        for n in names {
+            xs.push(self.cx.use_field(v.field(n))?);
+        }
+        let int = |x: Option<ValueId>| x.map_or(0, |x| int_of(v, x));
+        let marker = v.list(vec![
+            v.int(nodes::T_PAGE_PARAMS),
+            v.int(int(xs[0])),
+            v.int(int(xs[1])),
+            glue_value(v, &glue_of(v, xs[2])),
+            v.int(int(xs[3])),
+        ]);
+        for x in raw.iter_mut() {
+            if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
+                *x = marker;
+            }
+        }
+        Ok(())
     }
 
     /// The run's end on the page. A piece with items for the main list
@@ -844,7 +915,8 @@ impl Run<'_, '_> {
     /// the names the run defined after it (and its local definitions at
     /// any time: a scope closing after the candidate hides them from a
     /// finisher placed after the piece).
-    fn fold_apart(&mut self, raw: Vec<ValueId>) -> R<()> {
+    fn fold_apart(&mut self, mut raw: Vec<ValueId>) -> R<()> {
+        self.pin_reaching_page_params(&mut raw)?;
         let v = self.v;
         let last = self.last_candidate();
         let n = self.cand_marks.len();
@@ -935,6 +1007,11 @@ impl Run<'_, '_> {
         // (before the state is taken: a stop here leaves it for the
         // attempt that resumes)
         let dead = self.deadcycles_for(&raw)?;
+        // (a finisher's items are built after its routine, with the
+        // parameters as the routine leaves them, §987: its own state)
+        if !fin {
+            self.pin_reaching_page_params(&mut raw)?;
+        }
         self.resolve_page_params(&mut raw)?;
         let mut timer = FoldTimer::new(raw.len());
         let cache = self.ops.page_states.clone();
@@ -1008,7 +1085,10 @@ impl Run<'_, '_> {
         self.cx.follow(self.ops.finish, fargs);
         if let Some(cont) = cont {
             let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
-            self.cx.follow(self.ops.resume, vec![cont, v.int(flags)]);
+            // (the cutting node: the finishers between it and the resume
+            // tell which fields they defined globally, `gdefs`)
+            let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+            self.cx.follow(self.ops.resume, vec![cont, v.int(flags), pid]);
         }
         Ok(())
     }
@@ -1732,6 +1812,16 @@ impl Run<'_, '_> {
             stamp: u(sa(3)),
             next_gid: u32::try_from(int_of(v, sa(4))).unwrap_or(0),
         });
+        // the fields the finishers between the cut and this resume
+        // defined globally (`gdefs`, the window after the cutting node)
+        let gdefs: Vec<ValueId> = match self.cx.args().get(2).copied() {
+            Some(p) if self.cx.op() == self.ops.resume => {
+                let pid = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, p).to_ne_bytes()));
+                let acc = self.cx.acc_range(v.field("gdefs"), Some(pid))?;
+                v.seq_to_vec(acc).into_iter().flat_map(|e| list_of(v, e)).collect()
+            }
+            _ => Vec::new(),
+        };
         for e in list_of(v, a(6)) {
             let ys = list_of(v, e);
             if ys.len() < 2 {
@@ -1740,6 +1830,23 @@ impl Run<'_, '_> {
             let f = Field(ys[0]);
             let x0 = some(ys[1]);
             let x1 = self.cx.use_field(f)?;
+            // (§279: a global definition replaces the group's local value
+            // whatever it defines, the value outside the group too: by
+            // the definition, not the value)
+            if gdefs.contains(&f.0) {
+                let loc = self.loc_of(f);
+                self.st.override_global(loc, x1);
+                continue;
+            }
+            if crate::exec::env_flag!("PHITEX_PAGE_TRACE") {
+                eprintln!(
+                    "page-trace: resume {} override check {}: at the cut {:?}, now {:?}",
+                    self.cx.node().raw(),
+                    str_of(v, f.0),
+                    x0.map(|x| v.render(x)),
+                    x1.map(|x| v.render(x))
+                );
+            }
             if x1 != x0 {
                 let loc = self.loc_of(f);
                 self.st.override_global(loc, x1);
@@ -1982,12 +2089,30 @@ impl Operation for Finish {
             r.run_all()?;
             r.check_cut(&args)?;
             r.record_finisher_defs(&args);
+            r.contribute_global_defs();
             Ok(())
         })
     }
 }
 
 impl Run<'_, '_> {
+    /// The fields this finisher defined globally, for the resume after
+    /// it ([`Run::cont_load`]): a group-local value the resume carries
+    /// is replaced by a global definition even of an equal value.
+    fn contribute_global_defs(&mut self) {
+        let v = self.v;
+        let names: Vec<ValueId> = self
+            .st
+            .published(v, self.rec_load)
+            .into_iter()
+            .filter(|d| d.2 == Locality::Global)
+            .map(|d| self.loc_field(d.0).0)
+            .collect();
+        if !names.is_empty() {
+            self.contribute("gdefs", v.seq_unit(v.list(names)));
+        }
+    }
+
     /// The definitions this finisher publishes, kept for the next one
     /// running the same routine ([`Finish::predicted_defs`]), and what
     /// it read and defined for the pieces' own-fold decision

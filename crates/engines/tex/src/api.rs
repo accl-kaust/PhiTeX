@@ -4336,6 +4336,7 @@ fn declare_fields(eng: &mut Engine) {
         "tools",
         "pkgrecs",
         "cutreq",
+        "gdefs",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
     ] {
