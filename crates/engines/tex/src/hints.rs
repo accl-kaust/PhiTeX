@@ -564,6 +564,8 @@ impl Hint {
                         ps.push(f.to_owned());
                     }
                 }
+                // (a cell's definer defines its record too)
+                crate::fields::add_record_prefixes(&mut ps);
                 MayDefine::Prefixes(ps)
             }
         }
@@ -628,6 +630,11 @@ impl Hint {
     pub(crate) fn may_define_field(&self, f: &str) -> bool {
         if crate::exec::env_flag!("PHITEX_NO_GUESS") {
             return true;
+        }
+        // (a record: where the node may define one of its cells)
+        if let Some(b) = crate::fields::RECORDS.iter().position(|&r| r == f) {
+            return (0..crate::fields::record_len(b))
+                .any(|i| self.may_define_field(&crate::fields::record_cell_name(b, i)));
         }
         let Some(b) = self.bound.as_ref().or(self.guess.as_ref()) else {
             return true;
@@ -3622,8 +3629,20 @@ pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
     let h = hint_of_args(v, args);
     let b = h.bound.as_ref()?;
     let mut out: Vec<Field> = b.means.iter().map(|(n, _)| v.field(n)).collect();
-    out.extend(b.cats.iter().map(|(c, _)| v.field(&format!("cat:{c}"))));
-    out.extend(b.reads.iter().map(|n| v.field(n)));
+    // (a record's cells are read from the record)
+    let mut recs = [false; crate::fields::NREC];
+    recs[crate::fields::B_CAT] = !b.cats.is_empty();
+    for n in &b.reads {
+        match crate::fields::record_of_name(n) {
+            Some(r) => recs[r] = true,
+            None => out.push(v.field(n)),
+        }
+    }
+    for (r, &on) in recs.iter().enumerate() {
+        if on {
+            out.push(v.field(crate::fields::RECORDS[r]));
+        }
+    }
     (!out.is_empty()).then_some(out)
 }
 
@@ -3652,7 +3671,17 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
     if is_record(&h)
         && let Some(b) = &h.bound
     {
-        return MayDefine::Names(b.names.iter().map(|n| v.field(n)).collect());
+        let mut ns = b.names.clone();
+        for r in crate::fields::RECORDS {
+            if !ns.iter().any(|n| n == r)
+                && ns.iter().any(|n| {
+                    crate::fields::record_of_name(n).is_some_and(|x| crate::fields::RECORDS[x] == r)
+                })
+            {
+                ns.push(r.to_owned());
+            }
+        }
+        return MayDefine::Names(ns.iter().map(|n| v.field(n)).collect());
     }
     h.may_define()
 }
@@ -3818,6 +3847,18 @@ pub(crate) fn check_defs(
         };
         if own.contains(name.as_str()) {
             continue;
+        }
+        // (a record: declared where one of its cells is)
+        if let Some(rb) = crate::fields::RECORDS.iter().position(|&x| x == name) {
+            let covers = |b: &Bound| {
+                (0..crate::fields::record_len(rb)).any(|i| {
+                    let c = crate::fields::record_cell_name(rb, i);
+                    own.contains(c.as_str()) || state_has(b, &c) || names_have(b, &c)
+                })
+            };
+            if covers(b) || others.iter().any(|o| covers(o)) {
+                continue;
+            }
         }
         if !is_cs_field(&name) {
             if state_has(b, &name) || others.iter().any(|o| state_has(o, &name)) {

@@ -452,12 +452,27 @@ pub(crate) struct Run<'c, 'a> {
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
     pub cut: Option<u32>,
+    /// The records read ([`crate::fields::RECORDS`]), by record: `None`
+    /// not read yet; `Some(None)` undefined or stale (its cells are read
+    /// one by one); `Some(Some(cells))` each cell's value.
+    #[allow(clippy::option_option)]
+    pub(crate) recs: [Option<Option<Rc<[ValueId]>>>; crate::fields::NREC],
+    /// The records the run defines at its end ([`Run::ready_records`]).
+    pub(crate) rec_out: Vec<(Field, ValueId, Locality)>,
+    /// The engine values of record cells read for a stale record
+    /// ([`Run::engine_cell`]).
+    pub(crate) cell_eng: phitex_defuse::FxHashMap<Loc, Option<ValueId>>,
+    /// [`Run::rec_out`] is made, and the state table's signature then.
+    pub(crate) rec_ready: bool,
+    pub(crate) rec_absent: Option<ValueId>,
+    pub(crate) rec_sig: (usize, usize, usize, u64),
     /// The candidate a finisher asked this piece to cut at
     /// (`Run::read_cut_request`): the piece folds in its own run.
     pub cut_req: Option<u32>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn new(cx: &'c mut Ctx<'a>, ops: Ops) -> Self {
         let v = cx.values();
         let op = cx.op();
@@ -554,6 +569,12 @@ impl<'c, 'a> Run<'c, 'a> {
             ins_pending: Vec::new(),
             fin: None,
             cut: None,
+            recs: [None, None, None],
+            rec_out: Vec::new(),
+            rec_ready: false,
+            rec_absent: None,
+            cell_eng: phitex_defuse::FxHashMap::default(),
+            rec_sig: (0, 0, 0, 0),
             cut_req: None,
         }
     }
@@ -647,12 +668,281 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(())
     }
 
+    /// An engine read of field `f` outside the state table (by name): a
+    /// record's cell from its record.
+    pub(crate) fn eng_read(&mut self, f: Field) -> Result<Option<ValueId>, phitex_defuse::Stop> {
+        if let Some((b, i)) = self.ops.fields.record_of_field(f) {
+            let cells = match self.record(b) {
+                Ok(c) => c,
+                Err(Halt::Stop(s)) => return Err(s),
+                Err(_) => None,
+            };
+            if let Some(cells) = cells {
+                let x = cells[i];
+                return Ok((x != self.absent()).then_some(x));
+            }
+        }
+        self.cx.use_field(f)
+    }
+
+    /// The value of an absent cell in a record (made once a run).
+    fn absent(&mut self) -> ValueId {
+        if let Some(a) = self.rec_absent {
+            return a;
+        }
+        let a = crate::fields::record_absent(self.v);
+        self.rec_absent = Some(a);
+        a
+    }
+
+    /// Record `b`'s cells, read once a run (`None`: undefined or stale,
+    /// its cells read one by one).
+    pub(crate) fn record(&mut self, b: usize) -> R<Option<Rc<[ValueId]>>> {
+        if let Some(c) = &self.recs[b] {
+            return Ok(c.clone());
+        }
+        let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
+        let x = self.cx.use_field(f)?;
+        crate::exec::widths::read(f);
+        let v = self.v;
+        let cells: Option<Rc<[ValueId]>> = x
+            .map(|x| list_of(v, x))
+            .filter(|xs| xs.len() == crate::fields::record_len(b))
+            .map(Rc::from);
+        self.recs[b] = Some(cells.clone());
+        Ok(cells)
+    }
+
+    /// The engine's value of cell `loc` reaching the run (what it read,
+    /// or a read of the cell's own field).
+    fn engine_cell(&mut self, loc: Loc) -> R<Option<ValueId>> {
+        if let Some(x) = self.st.engine_value(loc) {
+            return Ok(x);
+        }
+        if let Some(&x) = self.cell_eng.get(&loc) {
+            return Ok(x);
+        }
+        let f = self.loc_field(loc);
+        let x = self.cx.use_field(f)?;
+        self.cell_eng.insert(loc, x);
+        Ok(x)
+    }
+
+    /// Reads what [`Run::record_after`] of record `b` reads: the record,
+    /// or (undefined or stale) its cells' engine values.
+    pub(crate) fn prepare_record(&mut self, b: usize) -> R<()> {
+        if self.record(b)?.is_none() {
+            for i in 0..crate::fields::record_len(b) {
+                let loc = Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
+                self.engine_cell(loc)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record `b` as the run leaves it at its base level, given `defs`,
+    /// the definitions to publish: the record read, or (undefined or
+    /// stale) its cells' engine values, with the cells the run defines
+    /// replaced. `None` with the record unchanged.
+    fn record_after(
+        &mut self,
+        b: usize,
+        defs: &[(Loc, ValueId, Locality)],
+    ) -> R<Option<(ValueId, bool)>> {
+        let mine: Vec<(usize, ValueId, Locality)> = defs
+            .iter()
+            .filter_map(|&(l, x, lc)| {
+                crate::fields::record_of(l as usize)
+                    .filter(|r| r.0 == b)
+                    .map(|r| (r.1, x, lc))
+            })
+            .collect();
+        if mine.is_empty() {
+            return Ok(None);
+        }
+        let v = self.v;
+        let a = self.absent();
+        let rec = self.record(b)?;
+        let (base, fresh): (Vec<ValueId>, bool) = if let Some(c) = rec {
+            (c.to_vec(), true)
+        } else {
+            let mut xs = Vec::with_capacity(crate::fields::record_len(b));
+            for i in 0..crate::fields::record_len(b) {
+                let loc = Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
+                xs.push(self.engine_cell(loc)?.unwrap_or(a));
+            }
+            (xs, false)
+        };
+        let mut cells = base.clone();
+        for &(i, x, _) in &mine {
+            cells[i] = x;
+        }
+        // (debug, `PHITEX_REC_TRACE=1`: each record a run defines, the
+        // cells it changes)
+        if crate::exec::env_flag!("PHITEX_REC_TRACE") {
+            let ch: Vec<String> = (0..cells.len())
+                .filter(|&i| cells[i] != base[i])
+                .map(|i| {
+                    format!(
+                        "{} {} -> {}",
+                        crate::fields::record_cell_name(b, i),
+                        v.render(base[i]),
+                        v.render(cells[i])
+                    )
+                })
+                .collect();
+            eprintln!(
+                "rec-trace: node {} op {:?} {} (fresh {fresh}): {}",
+                self.cx.node().raw(),
+                self.cx.op(),
+                crate::fields::RECORDS[b],
+                ch.join(", ")
+            );
+        }
+        let global = mine.iter().any(|m| m.2 == Locality::Global);
+        if fresh && cells == base {
+            return Ok(None);
+        }
+        Ok(Some((v.list(cells), global)))
+    }
+
+    /// A continuation's open-group bindings the run republishes locally
+    /// at its base level are no definitions where they equal the value
+    /// reaching the run (read from the engine here: a record's cell
+    /// from its record): only a binding that differs is published, so a
+    /// resume re-made by an edit is no new definition of what it left
+    /// as it was (per cell, and so per record).
+    pub(crate) fn drop_unchanged_republished(&mut self) -> R<()> {
+        for (loc, x) in self.st.cont_republished(self.v) {
+            let f = self.loc_field(loc);
+            if self.eng_read(f)? == Some(x) {
+                self.st.drop_publ(loc);
+            }
+        }
+        Ok(())
+    }
+
+    /// The records the run defines at its end, made before it finishes
+    /// (they may read): each record a cell of which the run publishes,
+    /// as the run leaves it. A global definition of a cell where a scope
+    /// is open (the record holds the scope's local values of its other
+    /// cells, which a global record would keep past the scope's end)
+    /// makes the record stale (its readers read the cells one by one)
+    /// until a definition of a cell outside every scope makes it whole.
+    /// (This is the hole the engine's `define_in_scope` will close: a
+    /// global definition of the record's outermost value, the scopes'
+    /// local records kept.)
+    pub(crate) fn ready_records(&mut self) -> R<()> {
+        self.rec_out.clear();
+        self.rec_ready = false;
+        let defs = self.st.published(self.v, self.rec_load);
+        if !defs
+            .iter()
+            .any(|d| crate::fields::record_of(d.0 as usize).is_some())
+        {
+            self.rec_ready = true;
+            self.rec_sig = self.st.sig();
+            return Ok(());
+        }
+        let v = self.v;
+        let mut inside = None;
+        for b in 0..crate::fields::RECORDS.len() {
+            let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
+            let global = defs.iter().any(|d| {
+                d.2 == Locality::Global
+                    && crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b)
+            });
+            if global {
+                let at = if let Some(i) = inside {
+                    i
+                } else {
+                    let opens_before = matches!(
+                        self.effect,
+                        Effect::Scope(k) if k.before && k.opens > 0
+                    );
+                    let i = opens_before || self.scope_kind()?.is_some();
+                    inside = Some(i);
+                    i
+                };
+                if at {
+                    self.rec_out.push((f, v.list(Vec::new()), Locality::Global));
+                    continue;
+                }
+            }
+            let Some((x, global)) = self.record_after(b, &defs)? else {
+                continue;
+            };
+            let l = if global {
+                Locality::Global
+            } else {
+                Locality::Local
+            };
+            self.rec_out.push((f, x, l));
+        }
+        self.rec_ready = true;
+        self.rec_sig = self.st.sig();
+        Ok(())
+    }
+
+    /// The records of the definitions a scope's `put` makes inside it
+    /// (`inside`, by location), on the run's record outside it: as
+    /// `[name, value, 0]` entries.
+    pub(crate) fn scope_records(&mut self, inside: &[(Loc, ValueId)]) -> R<Vec<ValueId>> {
+        let v = self.v;
+        let mut out = Vec::new();
+        if !inside
+            .iter()
+            .any(|d| crate::fields::record_of(d.0 as usize).is_some())
+        {
+            return Ok(out);
+        }
+        let mut defs = self.st.published(v, self.rec_load);
+        defs.extend(inside.iter().map(|&(l, x)| (l, x, Locality::Local)));
+        for b in 0..crate::fields::RECORDS.len() {
+            if !inside
+                .iter()
+                .any(|d| crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b))
+            {
+                continue;
+            }
+            if let Some((x, _)) = self.record_after(b, &defs)? {
+                out.push(v.list(vec![v.str(crate::fields::RECORDS[b]), x, v.int(0)]));
+            }
+        }
+        Ok(out)
+    }
+
     #[inline(never)]
     fn load_slow(&mut self, loc: Loc) -> R<()> {
-        let f = self.loc_field(loc);
         if self.in_skip && self.rec_load {
             self.skip_first.push(loc);
         }
+        // (a record's cell: read from the record, once a run)
+        if let Some((b, i)) = crate::fields::record_of(loc as usize)
+            && let Some(cells) = self.record(b)?
+        {
+            let x = cells[i];
+            let x = (x != self.absent()).then_some(x);
+            // (debug, `PHITEX_RECORD_CHECK=1`: the cell's own field read
+            // too, a difference reported)
+            if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
+                let f = self.loc_field(loc);
+                let y = self.cx.use_field(f)?;
+                if y != x {
+                    let v = self.v;
+                    eprintln!(
+                        "record-check: node {} {} record {:?} cell {:?}",
+                        self.cx.node().raw(),
+                        crate::val::field_name(v, f),
+                        x.map(|x| v.render(x)),
+                        y.map(|y| v.render(y))
+                    );
+                }
+            }
+            self.st.fill(loc, x);
+            return Ok(());
+        }
+        let f = self.loc_field(loc);
         let r = self.cx.use_field(f);
         crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
@@ -1471,7 +1761,8 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// The fields the run publishes: its definitions at the base level
-    /// but a local one equal to the value it read (the same binding).
+    /// but a local one equal to the value it read (the same binding),
+    /// and the records of the cells among them.
     pub(crate) fn published_fields(&mut self) -> Vec<Field> {
         let locs: Vec<Loc> = self
             .st
@@ -1479,7 +1770,40 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .map(|x| x.0)
             .collect();
-        locs.into_iter().map(|l| self.loc_field(l)).collect()
+        let mut fs: Vec<Field> = locs.into_iter().map(|l| self.loc_field(l)).collect();
+        self.ops.fields.add_record_fields(&mut fs);
+        fs
+    }
+
+    /// The records the run defines ([`Run::ready_records`], made before
+    /// the run finishes). A run that publishes a cell and could not make
+    /// its record (no chance to read before finishing) makes it stale:
+    /// its readers read the cells one by one, as they are.
+    fn records_at_finish(&mut self) -> Vec<(Field, ValueId, Locality)> {
+        if self.rec_ready && self.rec_sig == self.st.sig() {
+            return std::mem::take(&mut self.rec_out);
+        }
+        let v = self.v;
+        let mut out = Vec::new();
+        let defs = self.st.published(v, self.rec_load);
+        for b in 0..crate::fields::RECORDS.len() {
+            let mine: Vec<Locality> = defs
+                .iter()
+                .filter(|d| crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b))
+                .map(|d| d.2)
+                .collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let l = if mine.contains(&Locality::Global) {
+                Locality::Global
+            } else {
+                Locality::Local
+            };
+            let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
+            out.push((f, v.list(Vec::new()), l));
+        }
+        out
     }
 
     /// The fields the run defines: those whose value at its end differs
@@ -2158,12 +2482,14 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let op = self.cx.op();
         let t_pub = std::time::Instant::now();
-        let published: Vec<(Field, ValueId, Locality)> = self
+        let mut published: Vec<(Field, ValueId, Locality)> = self
             .st
             .published(self.v, self.rec_load)
             .into_iter()
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
+        let recs = self.records_at_finish();
+        published.extend(recs.iter().copied());
         // (debug, `PHITEX_PUB_TRACE=<a>|<b>…`: the definitions of a run whose
         // first text segment contains one of the texts)
         if let Ok(pat) = std::env::var("PHITEX_PUB_TRACE") {
@@ -2267,7 +2593,8 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let locs: Vec<Loc> = self.defined_now();
         if !locs.is_empty() {
-            let names: Vec<ValueId> = locs.into_iter().map(|l| self.loc_field(l).0).collect();
+            let mut names: Vec<ValueId> = locs.into_iter().map(|l| self.loc_field(l).0).collect();
+            names.extend(recs.iter().map(|r| r.0.0));
             let l = self.v.list(names);
             let s = self.v.seq_unit(l);
             let defs = self

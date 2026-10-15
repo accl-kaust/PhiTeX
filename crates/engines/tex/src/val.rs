@@ -1261,5 +1261,8 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
         "fontinfo:0".to_owned(),
         v.list(vec![v.str("nullfont"), v.int(0), v.int(0)]),
     ));
+    // the records of the cells above ([`crate::fields::RECORDS`])
+    let recs = crate::fields::initial_records(v, &out);
+    out.extend(recs);
     out
 }

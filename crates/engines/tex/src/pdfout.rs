@@ -1488,7 +1488,7 @@ pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
     if !r.cx.is_loopback(f) || crate::pdfrelaxed::on(r)? {
         return Ok(n);
     }
-    let x = r.cx.use_field(f)?;
+    let x = r.eng_read(f)?;
     Ok(x.map(|x| list_of(v, x))
         .unwrap_or_default()
         .iter()

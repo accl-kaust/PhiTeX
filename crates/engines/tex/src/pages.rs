@@ -775,7 +775,7 @@ impl Run<'_, '_> {
         }
         let mut xs = Vec::with_capacity(4);
         for n in names {
-            xs.push(self.cx.use_field(v.field(n))?);
+            xs.push(self.eng_read(v.field(n))?);
         }
         let int = |x: Option<ValueId>| x.map_or(0, |x| int_of(v, x));
         let marker = v.list(vec![
@@ -1012,7 +1012,7 @@ impl Run<'_, '_> {
         self.cx.narrow(MayDefine::Names(defs));
         self.begin_command();
         let f = self.ps_field();
-        let ps_in = self.cx.use_field(f)?;
+        let ps_in = self.eng_read(f)?;
         // (the run's own main-list items, before a finisher's are joined
         // by what the page left)
         self.define_vtail(&raw)?;
@@ -1186,7 +1186,7 @@ impl Run<'_, '_> {
         }
         if why.is_none() {
             for f in restore {
-                let x = self.cx.use_field(f)?;
+                let x = self.eng_read(f)?;
                 let loc = self.loc_of(f);
                 self.set_loc(loc, x.map_or(crate::runstate::Native::Absent, crate::runstate::Native::Raw), true);
             }
@@ -1215,7 +1215,7 @@ impl Run<'_, '_> {
             .rposition(|&x| nodes::tag(v, x) == nodes::T_BUILD_PAGE)
             .map_or(0, |i| i + 1);
         let f = self.ps_field();
-        let mut ps = PageState::decode(v, self.cx.use_field(f)?);
+        let mut ps = PageState::decode(v, self.eng_read(f)?);
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
         let mut head = raw[..last].to_vec();
         self.resolve_page_params(&mut head)?;
@@ -1703,7 +1703,7 @@ impl Run<'_, '_> {
             if s.group_local {
                 let base = match s.base {
                     Some(x) => x,
-                    None => self.cx.use_field(f)?,
+                    None => self.eng_read(f)?,
                 };
                 overrides.push(v.list(vec![f.0, opt_val(base)]));
                 locals.push(v.list(vec![f.0, opt_val(s.cur)]));
@@ -1884,7 +1884,7 @@ impl Run<'_, '_> {
             }
             let f = Field(ys[0]);
             let x0 = some(ys[1]);
-            let x1 = self.cx.use_field(f)?;
+            let x1 = self.eng_read(f)?;
             // (§279: a global definition replaces the group's local value
             // whatever it defines, the value outside the group too: by
             // the definition, not the value)
@@ -2068,6 +2068,7 @@ impl Operation for Finish {
             for n in [PS, SHIPPED, "deadcycles", "param:outputpenalty", "inspen", "badness", "box:255"] {
                 names.push(v.field(n));
             }
+            ops(&self.0).fields.add_record_fields(&mut names);
             return MayDefine::Names(names);
         }
         let h = crate::hints::Hint::decode(&str_of(v, t));
@@ -2078,6 +2079,7 @@ impl Operation for Finish {
             MayDefine::Nothing => Vec::new(),
         };
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
+        crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
     /// What the last finisher running the same routine defined, with
@@ -2255,10 +2257,8 @@ impl Operation for Fold {
             v.field(PS),
             v.field(crate::build::VTAIL),
             v.field("deadcycles"),
-            v.field("param:vsize"),
-            v.field("param:maxdepth"),
-            v.field("param:topskip"),
-            v.field("param:holdinginserts"),
+            // (the page parameters' record)
+            v.field("pagepar"),
         ])
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
@@ -2290,7 +2290,7 @@ impl Run<'_, '_> {
     fn define_vtail(&mut self, raw: &[ValueId]) -> R<()> {
         let v = self.v;
         let vt = v.field(crate::build::VTAIL);
-        let prev = self.cx.use_field(vt)?;
+        let prev = self.eng_read(vt)?;
         let x = crate::build::vtail_value(v, prev, raw);
         self.cx.define_with(vt, x, Locality::Global);
         Ok(())
@@ -2305,7 +2305,7 @@ impl Run<'_, '_> {
         let f = self.ps_field();
         // (a stop at the read parks the run: it resumes here)
         self.begin_command();
-        let ps_in = self.cx.use_field(f)?;
+        let ps_in = self.eng_read(f)?;
         self.define_vtail(&raw)?;
         self.resolve_page_params(&mut raw)?;
         let dead = self.deadcycles_for(&raw)?;

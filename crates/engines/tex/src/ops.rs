@@ -174,6 +174,15 @@ pub(crate) fn run_node_parking(
             if r.cut.is_none() {
                 r.end_open();
             }
+            // (what a continuation republishes and the records the run
+            // defines, which may read: a stop here runs the node again
+            // from its start)
+            if let Err(Halt::Stop(s)) = r
+                .drop_unchanged_republished()
+                .and_then(|()| r.ready_records())
+            {
+                return Err(s);
+            }
             let t = std::time::Instant::now();
             let x = r.finish();
             if timed {
@@ -215,6 +224,9 @@ pub(crate) fn run_node_parking(
             let pdf = r.param("pdfoutput").is_ok_and(|p| p > 0);
             let _ = r.log("fatal", if pdf { "pdf" } else { "" });
             r.end_fatal();
+            if let Err(Halt::Stop(s)) = r.ready_records() {
+                return Err(s);
+            }
             Ok(r.finish())
         }
     }

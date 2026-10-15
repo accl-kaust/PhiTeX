@@ -176,6 +176,10 @@ pub(crate) struct State {
     /// the writer's fold of the chain ([`State::advanced_only`]).
     kinds: Option<FxHashMap<Loc, bool>>,
     next_gid: u32,
+    /// The locations a continuation's table brought ([`State::from_cont`]):
+    /// a group-local binding it republishes is no definition where it
+    /// equals the value reaching the run ([`State::drop_publ`]).
+    cont_locs: Vec<Loc>,
     /// Bumped whenever a category code below 256 may have changed
     /// ([`State::cat_gen`]); unique across tables of a thread, so a
     /// table put in place of another is never mistaken for it.
@@ -224,6 +228,7 @@ impl Clone for State {
             pp_dirty: self.pp_dirty,
             kinds: self.kinds.clone(),
             next_gid: self.next_gid,
+            cont_locs: self.cont_locs.clone(),
             cat_gen: new_cat_gen(),
         }
     }
@@ -263,6 +268,7 @@ impl State {
             pp_dirty: false,
             kinds: None,
             next_gid: 0,
+            cont_locs: Vec::new(),
             cat_gen: new_cat_gen(),
         }
     }
@@ -419,6 +425,69 @@ impl State {
         } else {
             &mut self.spill[(loc & !SPILL) as usize].e
         }
+    }
+
+    /// The local definitions at the base level of locations a
+    /// continuation's table brought (its open groups' bindings, which
+    /// the run republishes), with their values.
+    pub(crate) fn cont_republished(&self, v: &Values) -> Vec<(Loc, ValueId)> {
+        let mut out = Vec::new();
+        for &l in &self.cont_locs {
+            let Some(s) = self.slot_ref(l) else { continue };
+            let Some(m) = usize::try_from(s.meta)
+                .ok()
+                .filter(|&m| m > 0)
+                .and_then(|m| self.metas.get(m - 1))
+            else {
+                continue;
+            };
+            if let Some((val, Locality::Local)) = &m.publ
+                && let Some(x) = val.encode(v)
+            {
+                out.push((l, x));
+            }
+        }
+        out
+    }
+
+    /// `loc`'s local definition at the base level is no definition (its
+    /// value is the one reaching the run): not published.
+    pub(crate) fn drop_publ(&mut self, loc: Loc) {
+        let Some(m) = self
+            .slot_ref(loc)
+            .and_then(|s| usize::try_from(s.meta).ok())
+            .filter(|&m| m > 0)
+        else {
+            return;
+        };
+        if let Some(m) = self.metas.get_mut(m - 1)
+            && matches!(m.publ, Some((_, Locality::Local)))
+        {
+            m.publ = None;
+        }
+    }
+
+    /// The records ([`crate::fields::record_of`]) a cell of which the run
+    /// defined, at any level.
+    pub(crate) fn defined_records(&self) -> [bool; crate::fields::NREC] {
+        let mut out = [false; crate::fields::NREC];
+        for m in &self.metas {
+            if let Some((b, _)) = crate::fields::record_of(m.loc as usize) {
+                out[b] = true;
+            }
+        }
+        out
+    }
+
+    /// The engine's value of `loc` as the run read it, before any
+    /// definition of its own (`None`: not known here).
+    #[allow(clippy::option_option)]
+    pub(crate) fn engine_value(&self, loc: Loc) -> Option<Option<ValueId>> {
+        let s = self.slot_ref(loc)?;
+        if s.meta != 0 {
+            return self.metas.get(s.meta as usize - 1).and_then(|m| m.eng);
+        }
+        (s.e.flags & (LOADED | HAS_ID | PRELOADED) == LOADED | HAS_ID).then_some(s.e.id)
     }
 
     /// The engine value of loaded `loc` (encoded once).
@@ -1036,7 +1105,9 @@ impl State {
             .kinds
             .as_ref()
             .map(|k| k.iter().map(|(&l, &a)| (ploc(self, l), a)).collect());
+        let cont_locs = self.cont_locs.iter().map(|&l| ploc(self, l)).collect();
         PState {
+            cont_locs,
             slots,
             save,
             defined,
@@ -1105,6 +1176,10 @@ impl State {
             let l = loc(&mut st, d);
             st.base_defs.push(l);
         }
+        for d in p.cont_locs {
+            let l = loc(&mut st, d);
+            st.cont_locs.push(l);
+        }
         st.pp_dirty = p.pp_dirty;
         if let Some(ks) = p.kinds {
             let mut m = FxHashMap::default();
@@ -1163,6 +1238,7 @@ struct PSaved {
 
 /// A run's table, parked ([`State::park`]).
 pub(crate) struct PState {
+    cont_locs: Vec<PLoc>,
     slots: Vec<PSlot>,
     save: Vec<PSaved>,
     defined: Vec<PLoc>,
@@ -1317,6 +1393,7 @@ impl State {
             chr: 0,
         };
         for s in c.slots {
+            st.cont_locs.push(s.loc);
             let meta = s.ldef.map(|(stamp, local, gid)| {
                 st.metas.push(Meta {
                     loc: s.loc,

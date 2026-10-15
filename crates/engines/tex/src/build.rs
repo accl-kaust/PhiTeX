@@ -223,6 +223,14 @@ impl Run<'_, '_> {
         // (local definitions the run made at its base level, before the
         // group opened: they lie outside the scope)
         let outside = self.st.base_local_defs(v);
+        // (what the records of the scope's definitions read, before the
+        // group is left: [`Run::scope_records`])
+        let defined = self.st.defined_records();
+        for (b, &d) in defined.iter().enumerate() {
+            if d {
+                self.prepare_record(b)?;
+            }
+        }
         let Some(l) = self.nest.pop() else {
             return Ok(());
         };
@@ -252,6 +260,9 @@ impl Run<'_, '_> {
         if !before {
             let inside = self.st.take_scope_locals(v, &outside);
             let mut defs = Vec::with_capacity(inside.len());
+            // (the records of the cells among them, on the run's own
+            // record outside the scope)
+            defs.extend(self.scope_records(&inside)?);
             for (loc, x) in inside {
                 let f = self.loc_field(loc);
                 let name = crate::val::field_name(v, f);
@@ -400,7 +411,7 @@ impl Run<'_, '_> {
             // the fold before this node (`vtail`, [`vtail_value`]), not
             // every item since the start: a tail that comes out equal
             // after an edit before it reruns no reader
-            let x = self.cx.use_field(v.field(VTAIL))?;
+            let x = self.eng_read(v.field(VTAIL))?;
             (out, st) = vtail_decode(v, x);
         } else {
             // a list is this run's or the engine's (lid 0): no list is

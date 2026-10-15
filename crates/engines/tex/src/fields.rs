@@ -32,6 +32,15 @@ const STATIC: &[&str] = &[
     "f",
     "aftertoken",
     "align:open",
+    // (the records, [`B_CAT`], [`B_PAR`], [`B_PAGE`])
+    "cattab",
+    "parpar",
+    "pagepar",
+    // (e-TeX's penalty arrays: components of `parpar`)
+    "param:interlinepenalties",
+    "param:clubpenalties",
+    "param:widowpenalties",
+    "param:displaywidowpenalties",
     "align:state",
     "badness",
     "deadcycles",
@@ -317,6 +326,227 @@ pub(crate) mod cell {
     pub(crate) const WRITES: u32 = (STATIC0 + static_index("writes")) as u32;
 }
 
+// ------------------------------------------------------------ records
+
+/// The records: each a field holding several cells' values in one list,
+/// read by a run once in place of each cell's field (one engine read
+/// for the character-class table, one for the paragraph and page
+/// parameters). Inside a run the cells stay per location; a run that
+/// defines a cell defines its record at its end too ([`crate::run`]).
+/// The cells' own fields are defined as before, for their readers by
+/// name.
+pub(crate) const B_CAT: usize = 0;
+pub(crate) const B_PAR: usize = 1;
+/// The page builder's parameters (§980), apart from the paragraph's:
+/// an output routine sets `\\vsize` (plain's `vs.tex`, LaTeX's
+/// `\\@colroom`), which the paragraphs after it do not read.
+pub(crate) const B_PAGE: usize = 2;
+pub(crate) const NREC: usize = 3;
+pub(crate) const RECORDS: [&str; NREC] = ["cattab", "parpar", "pagepar"];
+
+/// The parameters of `pagepar`.
+const PAGEPAR: &[Par] = &[Par::vsize, Par::maxdepth, Par::topskip, Par::holdinginserts];
+
+/// The parameters of `parpar` known by name.
+const PARPAR: &[Par] = &[
+    Par::hsize,
+    Par::hbadness,
+    Par::hfuzz,
+    Par::vbadness,
+    Par::vfuzz,
+    Par::overfullrule,
+    Par::boxmaxdepth,
+    Par::baselineskip,
+    Par::lineskip,
+    Par::lineskiplimit,
+    Par::parskip,
+    Par::parindent,
+    Par::looseness,
+    Par::hangindent,
+    Par::hangafter,
+    Par::pretolerance,
+    Par::tolerance,
+    Par::emergencystretch,
+    Par::linepenalty,
+    Par::hyphenpenalty,
+    Par::exhyphenpenalty,
+    Par::adjdemerits,
+    Par::doublehyphendemerits,
+    Par::finalhyphendemerits,
+    Par::leftskip,
+    Par::rightskip,
+    Par::parfillskip,
+    Par::lastlinefit,
+    Par::clubpenalty,
+    Par::widowpenalty,
+    Par::displaywidowpenalty,
+    Par::brokenpenalty,
+    Par::interlinepenalty,
+    Par::uchyph,
+    Par::lefthyphenmin,
+    Par::righthyphenmin,
+    Par::language,
+    Par::spaceskip,
+    Par::xspaceskip,
+    Par::endlinechar,
+];
+
+/// The state cells of `parpar` (after [`PARPAR`]).
+const PARPAR_CELLS: [&str; 5] = [
+    "parshape",
+    "param:interlinepenalties",
+    "param:clubpenalties",
+    "param:widowpenalties",
+    "param:displaywidowpenalties",
+];
+
+/// The number of cells of record `b`.
+pub(crate) fn record_len(b: usize) -> usize {
+    match b {
+        B_CAT => 256,
+        B_PAR => PARPAR.len() + PARPAR_CELLS.len(),
+        _ => PAGEPAR.len(),
+    }
+}
+
+/// The location of cell `i` of record `b`.
+pub(crate) fn record_cell(b: usize, i: usize) -> usize {
+    if b == B_CAT {
+        CAT0 + i
+    } else if b == B_PAGE {
+        PAGEPAR[i] as usize
+    } else if i < PARPAR.len() {
+        PARPAR[i] as usize
+    } else {
+        STATIC0 + static_index(PARPAR_CELLS[i - PARPAR.len()])
+    }
+}
+
+/// The location of record `b`'s own field.
+pub(crate) fn record_loc(b: usize) -> usize {
+    STATIC0 + static_index(RECORDS[b])
+}
+
+/// The record a location is a cell of, and its index there.
+#[inline]
+pub(crate) fn record_of(loc: usize) -> Option<(usize, usize)> {
+    static IX: std::sync::OnceLock<Vec<(u8, u8)>> = std::sync::OnceLock::new();
+    if loc.wrapping_sub(CAT0) < 256 {
+        return Some((B_CAT, loc - CAT0));
+    }
+    if loc >= NSLOT {
+        return None;
+    }
+    let ix = IX.get_or_init(|| {
+        let mut t = vec![(u8::MAX, 0); NSLOT];
+        for b in [B_PAR, B_PAGE] {
+            for i in 0..record_len(b) {
+                t[record_cell(b, i)] = (
+                    u8::try_from(b).unwrap_or(u8::MAX),
+                    u8::try_from(i).unwrap_or(u8::MAX),
+                );
+            }
+        }
+        t
+    });
+    let (b, i) = ix[loc];
+    (b != u8::MAX).then_some((b as usize, i as usize))
+}
+
+/// The field name of cell `i` of record `b`.
+pub(crate) fn record_cell_name(b: usize, i: usize) -> String {
+    if b == B_CAT {
+        format!("cat:{i}")
+    } else if b == B_PAGE {
+        format!("param:{}", PARAMS[PAGEPAR[i] as usize])
+    } else if i < PARPAR.len() {
+        format!("param:{}", PARAMS[PARPAR[i] as usize])
+    } else {
+        PARPAR_CELLS[i - PARPAR.len()].to_owned()
+    }
+}
+
+/// The record a field name is a cell of.
+pub(crate) fn record_of_name(name: &str) -> Option<usize> {
+    if let Some(c) = name.strip_prefix("cat:") {
+        return c.parse::<u32>().ok().filter(|&c| c < 256).map(|_| B_CAT);
+    }
+    if PARPAR_CELLS.contains(&name) {
+        return Some(B_PAR);
+    }
+    let p = name.strip_prefix("param:")?;
+    if PAGEPAR.iter().any(|&q| PARAMS[q as usize] == p) {
+        return Some(B_PAGE);
+    }
+    PARPAR
+        .iter()
+        .any(|&q| PARAMS[q as usize] == p)
+        .then_some(B_PAR)
+}
+
+/// The records whose cells a declaration by prefix (or exact name)
+/// covers: each record a prefix may define a cell of.
+pub(crate) fn records_of_prefix(p: &str) -> [bool; NREC] {
+    static NAMES: std::sync::OnceLock<[Vec<String>; 2]> = std::sync::OnceLock::new();
+    let cat = if p.len() <= 4 {
+        "cat:".starts_with(p)
+    } else {
+        p.strip_prefix("cat:").is_some_and(|r| {
+            r.bytes().all(|c| c.is_ascii_digit()) && r.parse::<u32>().is_ok_and(|c| c < 256)
+        })
+    };
+    let names = NAMES.get_or_init(|| {
+        [B_PAR, B_PAGE].map(|b| (0..record_len(b)).map(|i| record_cell_name(b, i)).collect())
+    });
+    let par = names[0].iter().any(|n| n.starts_with(p));
+    let page = names[1].iter().any(|n| n.starts_with(p));
+    [cat, par, page]
+}
+
+/// Adds the records a declared set by prefixes covers to it.
+pub(crate) fn add_record_prefixes(ps: &mut Vec<String>) {
+    let mut add = [false; NREC];
+    for p in ps.iter() {
+        for (a, r) in add.iter_mut().zip(records_of_prefix(p)) {
+            *a |= r;
+        }
+    }
+    for (b, &on) in add.iter().enumerate() {
+        if on && !ps.iter().any(|p| RECORDS[b].starts_with(p.as_str())) {
+            ps.push(RECORDS[b].to_owned());
+        }
+    }
+}
+
+/// The value of an absent cell in a record (a list holds a value for
+/// every cell).
+pub(crate) fn record_absent(v: &Values) -> phitex_defuse::ValueId {
+    v.str("\u{10FFFE}absent")
+}
+
+/// The records of a set of definitions by name (the initial state, no
+/// definitions before it): each cell's value, absent where none.
+pub(crate) fn initial_records(
+    v: &Values,
+    defs: &[(String, phitex_defuse::ValueId)],
+) -> Vec<(String, phitex_defuse::ValueId)> {
+    let by: FxHashMap<&str, phitex_defuse::ValueId> =
+        defs.iter().map(|(n, x)| (n.as_str(), *x)).collect();
+    let a = record_absent(v);
+    (0..NREC)
+        .map(|b| {
+            let xs = (0..record_len(b))
+                .map(|i| {
+                    by.get(record_cell_name(b, i).as_str())
+                        .copied()
+                        .unwrap_or(a)
+                })
+                .collect();
+            (RECORDS[b].to_owned(), v.list(xs))
+        })
+        .collect()
+}
+
 /// The meanings of active characters 0–255.
 pub(crate) const MEAN_ACTIVE: usize = NSLOT;
 /// The meanings of control sequences, by number.
@@ -475,6 +705,27 @@ impl Fields {
             reg_slot(r, chr - base)
         } else {
             self.qpar.get(&(c, chr)).map(|&s| s as usize)
+        }
+    }
+
+    /// The record field `name` is a cell of, and the cell's index.
+    pub(crate) fn record_of_field(&self, f: Field) -> Option<(usize, usize)> {
+        self.field_slot.get(&f).and_then(|&s| record_of(s as usize))
+    }
+
+    /// Adds the records of the cells in `fs` to it.
+    pub(crate) fn add_record_fields(&self, fs: &mut Vec<Field>) {
+        let mut add = [false; NREC];
+        for f in fs.iter() {
+            if let Some((b, _)) = self.record_of_field(*f) {
+                add[b] = true;
+            }
+        }
+        for (b, &on) in add.iter().enumerate() {
+            let r = self.slot_field[record_loc(b)];
+            if on && !fs.contains(&r) {
+                fs.push(r);
+            }
         }
     }
 
