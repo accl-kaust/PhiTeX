@@ -1987,18 +1987,16 @@ pub(crate) struct FinTouch {
 pub(crate) struct FinDefs {
     pub prev: Vec<(Field, ValueId)>,
     pub last: Vec<(Field, ValueId)>,
+    /// Every field a run of the routine defined so far: a routine
+    /// defines some on some pages only (a float page, a page with a
+    /// list continued), not on the last two.
+    pub seen: Vec<Field>,
 }
 
 impl FinDefs {
-    /// The fields either run defined.
+    /// The fields any run of the routine defined.
     fn names(&self) -> Vec<Field> {
-        let mut out: Vec<Field> = self.last.iter().map(|d| d.0).collect();
-        for d in &self.prev {
-            if !out.contains(&d.0) {
-                out.push(d.0);
-            }
-        }
-        out
+        self.seen.clone()
     }
 
     /// The definitions both runs made with the same value: stable
@@ -2215,6 +2213,11 @@ impl Run<'_, '_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let e = m.entry(t.raw()).or_default();
+        for &(f, _) in &out {
+            if !e.seen.contains(&f) {
+                e.seen.push(f);
+            }
+        }
         e.prev = std::mem::take(&mut e.last);
         e.last = out;
     }
