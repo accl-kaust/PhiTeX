@@ -612,9 +612,11 @@ impl Run<'_, '_> {
             .filter(|l| l.owns)
             .map(|l| (l.group, l.mode))
             .collect();
+        // (§1145's `nest_ptr=1`: a display's math level right above the
+        // outer vertical list, the paragraph before it broken into lines)
         Ok(match owning[..] {
             [] => true,
-            [(g, m)] => g == 0 && m.abs() == 102,
+            [(g, m)] => (g == 0 && m.abs() == 102) || (g == group::MATH_SHIFT && m == 203),
             _ => false,
         })
     }

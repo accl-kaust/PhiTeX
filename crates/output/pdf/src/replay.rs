@@ -343,6 +343,9 @@ impl PdfState {
         self.init_output();
         let pre = self.pre_key();
         let shared = self.sys_obj_ptr();
+        // (a link running across the page's start: its objects are the
+        // page before's, numbered where that page was placed)
+        let link_at_start = !self.link_stack.is_empty();
         self.rec = Some(Box::default());
         let r = self.ship(page, true, fonts, wh);
         let rec = self.rec.take().unwrap_or_default();
@@ -357,7 +360,15 @@ impl PdfState {
         let Some((a, b)) = rec.blob else {
             return (r, pr);
         };
-        pr.simple = r.is_ok() && !rec.other && a <= b && b <= self.out.len();
+        // (a page inside a link running across a page break is shipped
+        // where it is placed, not replayed: the link's objects carry over
+        // from page to page)
+        pr.simple = r.is_ok()
+            && !rec.other
+            && a <= b
+            && b <= self.out.len()
+            && !link_at_start
+            && self.link_stack.is_empty();
         if pr.simple {
             pr.blob = self.out[a..b].to_vec();
             pr.post = Some(Box::new(self.scratch()));

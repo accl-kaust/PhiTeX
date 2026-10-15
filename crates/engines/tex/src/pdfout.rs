@@ -1400,7 +1400,19 @@ fn place_node(r: &mut Run<'_, '_>, args: &[ValueId]) -> R<()> {
             st.set_font_tags(t);
         }
         set_page_params(v, st, &pc.params, pc.margins);
+        let n0 = st.objects_numbered();
         let res = st.replay_page(&pc.rec, fonts, &pc.base, None);
+        if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+            eprintln!(
+                "  place page {}: objects {n0} -> {} ({})",
+                pc.pj,
+                st.objects_numbered(),
+                match &res {
+                    Ok(_) => "replayed".to_owned(),
+                    Err(e) => format!("shipped again: {e}"),
+                }
+            );
+        }
         if res.is_err() {
             // (the finisher logged the writer's error when it wrote the
             // page)

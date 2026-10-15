@@ -108,6 +108,12 @@ impl PdfState {
     }
 
     /// `sys_obj_ptr`.
+    /// The objects numbered so far (debug and checks).
+    #[must_use]
+    pub fn objects_numbered(&self) -> usize {
+        self.sys_obj_ptr()
+    }
+
     pub(crate) fn sys_obj_ptr(&self) -> usize {
         self.objs.len() - 1
     }

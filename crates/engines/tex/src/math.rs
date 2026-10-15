@@ -332,6 +332,10 @@ impl Run<'_, '_> {
         let e = self.par(Par::everydisplay)?;
         let toks = crate::val::toks_of(v, e);
         self.push_toks(toks);
+        // §1145: `if nest_ptr=1 then build_page` (the paragraph's lines
+        // so far are on the page's list: a page can finish here, the
+        // display not begun; `\everydisplay` is read after the routine)
+        self.finish_candidate()?;
         Ok(())
     }
 
