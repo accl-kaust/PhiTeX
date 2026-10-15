@@ -1721,6 +1721,9 @@ impl Run<'_, '_> {
                 v.int(i64::from(s.gid)),
                 v.int(i64::from_ne_bytes(s.stamp.to_ne_bytes())),
                 v.int(i64::from_ne_bytes(s.at.to_ne_bytes())),
+                v.int(i64::from_ne_bytes(s.ldef.0.to_ne_bytes())),
+                v.int(i64::from(s.ldef.1)),
+                gid_int(v, s.ldef.2),
             ]));
         }
         let mut defined = Vec::new();
@@ -1822,6 +1825,11 @@ impl Run<'_, '_> {
                 gid: u32::try_from(int_of(v, ys[3])).unwrap_or(0),
                 stamp: u(ys[4]),
                 at: u(ys[5]),
+                ldef: if ys.len() >= 9 {
+                    (u(ys[6]), int_of(v, ys[7]) != 0, int_gid(int_of(v, ys[8])))
+                } else {
+                    (0, false, None)
+                },
             });
         }
         let mut defined = Vec::new();

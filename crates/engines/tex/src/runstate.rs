@@ -141,7 +141,15 @@ struct Saved {
     stamp: u64,
     /// The stamp of this save.
     at: u64,
+    /// The slot's latest-definition mark when saved (stamp, local, its
+    /// group), restored with the value: after a group's close the
+    /// binding in force is the saved one, an outer group's local or the
+    /// run's base, and the mark says whose.
+    ldef: Ldef,
 }
+
+/// A latest-definition mark: its stamp, whether local, its group.
+pub(crate) type Ldef = (u64, bool, Option<u32>);
 
 /// The table.
 pub(crate) struct State {
@@ -581,6 +589,10 @@ impl State {
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
+        let ldef = {
+            let m = &self.metas[mi];
+            (m.ldef_stamp, m.ldef_local, m.ldef_gid)
+        };
         let s = self.slot(loc);
         if global {
             s.ginert = st;
@@ -593,6 +605,7 @@ impl State {
                 gid: s.save_gid,
                 stamp: s.save_stamp,
                 at: st,
+                ldef,
             };
             s.save_gid = g;
             s.save_stamp = st;
@@ -718,6 +731,14 @@ impl State {
             slot.e = s.prev;
             slot.save_gid = s.gid;
             slot.save_stamp = s.stamp;
+            let meta = slot.meta;
+            if let Some(m) = usize::try_from(meta)
+                .ok()
+                .filter(|&m| m > 0)
+                .and_then(|m| self.metas.get_mut(m - 1))
+            {
+                (m.ldef_stamp, m.ldef_local, m.ldef_gid) = s.ldef;
+            }
         }
         self.defined.truncate(def_base.min(self.defined.len()));
     }
@@ -964,6 +985,7 @@ impl State {
                 gid: s.gid,
                 stamp: s.stamp,
                 at: s.at,
+                ldef: s.ldef,
             })
             .collect();
         let defined = self.defined.iter().map(|&l| ploc(self, l)).collect();
@@ -1030,6 +1052,7 @@ impl State {
                 gid: s.gid,
                 stamp: s.stamp,
                 at: s.at,
+                ldef: s.ldef,
             });
         }
         for d in p.defined {
@@ -1093,6 +1116,7 @@ struct PSaved {
     gid: u32,
     stamp: u64,
     at: u64,
+    ldef: Ldef,
 }
 
 /// A run's table, parked ([`State::park`]).
@@ -1152,6 +1176,7 @@ pub(crate) struct ContSaved {
     pub gid: u32,
     pub stamp: u64,
     pub at: u64,
+    pub ldef: Ldef,
 }
 
 /// The table's groups for a continuation: what the run's open groups
@@ -1226,6 +1251,7 @@ impl State {
                     gid: s.gid,
                     stamp: s.stamp,
                     at: s.at,
+                    ldef: s.ldef,
                 }
             })
             .collect();
@@ -1274,6 +1300,7 @@ impl State {
                 gid: s.gid,
                 stamp: s.stamp,
                 at: s.at,
+                ldef: s.ldef,
             });
         }
         st.defined = c.defined;
