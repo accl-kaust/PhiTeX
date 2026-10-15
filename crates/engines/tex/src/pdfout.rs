@@ -363,7 +363,10 @@ fn store_scaled_f(sq: i32, z: i32) -> i32 {
 /// outputs one of its characters; its local fonts are the TeX fonts of
 /// that name and size (`tfm_lookup`), else new ones (`read_font_info`:
 /// the next font numbers, as pdfTeX's are). `pdf:vf:<f>` holds the
-/// local fonts (`[k, font]`), empty for a font that is not virtual.
+/// local fonts (`[k, font]`) of a virtual font; a font that is not
+/// virtual defines nothing: its name goes to the build's memo
+/// (`Ops::not_virtual`), and a reader finds no field (`None`: not
+/// virtual).
 pub(crate) fn do_vf(r: &mut Run<'_, '_>, f: u32) -> R<()> {
     let v = r.v;
     let key = format!("pdf:vf:{f}");
@@ -372,15 +375,27 @@ pub(crate) fn do_vf(r: &mut Run<'_, '_>, f: u32) -> R<()> {
     }
     let info = crate::fonts::info(v, r.get(&format!("fontinfo:{f}"))?);
     let Some(i) = info.filter(|i| i.file.is_some()) else {
-        r.set(&key, v.list(Vec::new()), true);
         return Ok(());
     };
+    let memo = r.ops.not_virtual.clone();
+    if memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&i.name)
+    {
+        return Ok(());
+    }
+    let not_virtual = |name: &str| {
+        memo.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name.to_owned());
+    };
     let Some(bytes) = file_bytes(r, &format!("{}.vf", i.name))? else {
-        r.set(&key, v.list(Vec::new()), true);
+        not_virtual(&i.name);
         return Ok(());
     };
     let Ok(vf) = phitex_tfm::parse_vf(&bytes) else {
-        r.set(&key, v.list(Vec::new()), true);
+        not_virtual(&i.name);
         return Ok(());
     };
     let mut locals = Vec::new();

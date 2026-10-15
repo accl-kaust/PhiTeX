@@ -1335,6 +1335,8 @@ impl Graph {
             out_ok: Arc::new(Mutex::new(None)),
             page_states: Arc::default(),
             fin_defs: Arc::default(),
+            fin_touch: Arc::default(),
+            not_virtual: Arc::default(),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -1752,12 +1754,15 @@ impl Graph {
                     let mut shown = 0;
                     for (n, c) in &r.rerun_causes {
                         if let Rr::Changed { field, old, new } = *c {
-                            if shown < 4 && std::env::var("PHITEX_RERUN_DIFF").is_ok() && crate::val::field_name(v, field) == "ps" {
+                            if std::env::var("PHITEX_RERUN_DIFF").ok().and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| shown < n) && crate::val::field_name(v, field) == "ps" {
                                 shown += 1;
                                 let (o, w) = (v.render(old), v.render(new));
                                 let i = o.bytes().zip(w.bytes()).take_while(|(a, b)| a == b).count();
                                 let cut = |x: &str| x.get(i.saturating_sub(80)..(i + 240).min(x.len())).unwrap_or("").to_owned();
                                 eprintln!("  changed ps at {} (len {} vs {}, first diff at {i}):\n    old ..{}\n    new ..{}", describe(&self.eng, *n), o.len(), w.len(), cut(&o), cut(&w));
+                                if let Some((path, a, b)) = structural_diff(v, old, new, String::new()) {
+                                    eprintln!("    leaf diff at {path}: old {a} | new {b}");
+                                }
                             }
                         }
                         let (k, f) = match *c {
@@ -4468,5 +4473,34 @@ mod prelude_tests {
         assert!(deserialise(&other).is_none());
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
+    }
+}
+
+
+/// (debug) The first leaf where two values differ: its path, and both
+/// leaves shown with their ids and kinds.
+fn structural_diff(v: &Values, a: ValueId, b: ValueId, path: String) -> Option<(String, String, String)> {
+    use phitex_defuse::Value;
+    if a == b {
+        return None;
+    }
+    let (va, vb) = (v.get(a), v.get(b));
+    match (&*va, &*vb) {
+        (Value::List(xa), Value::List(xb)) => {
+            if xa.len() != xb.len() {
+                return Some((path, format!("list len {}", xa.len()), format!("list len {}", xb.len())));
+            }
+            for (i, (&x, &y)) in xa.iter().zip(xb.iter()).enumerate() {
+                if let Some(d) = structural_diff(v, x, y, format!("{path}/{i}")) {
+                    return Some(d);
+                }
+            }
+            Some((path, format!("list {:?} (same elements)", a.raw()), format!("list {:?}", b.raw())))
+        }
+        _ => Some((
+            path,
+            format!("{:?} id {}", &*va, a.raw()).chars().take(120).collect(),
+            format!("{:?} id {}", &*vb, b.raw()).chars().take(120).collect(),
+        )),
     }
 }

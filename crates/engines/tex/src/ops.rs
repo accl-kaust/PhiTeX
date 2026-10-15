@@ -99,6 +99,19 @@ pub(crate) fn run_node_parking(
             (None, Some(_)) => Some(None),
             _ => None,
         };
+        if trace {
+            eprintln!(
+                "  pass {passes} of {}: {}, cut {:?}, stop_at {:?} -> again {again:?}",
+                r.cx.node().raw(),
+                match &res {
+                    Ok(()) => "ok",
+                    Err(Halt::Cut) => "cut",
+                    Err(_) => "other",
+                },
+                r.cut,
+                r.stop_at
+            );
+        }
         let Some(stop_at) = again else { break };
         passes += 1;
         // (the state a pass reads can change only as often as the nodes
@@ -106,6 +119,17 @@ pub(crate) fn run_node_parking(
         // worth seeing in the diagnostics)
         if passes > 3 {
             r.engine_diag(&format!("page fold: pass {passes} of this run"));
+        }
+        if passes > 16 {
+            // (the passes must end: the two outcomes alternate only on a
+            // defect; the run ends as it stands rather than never)
+            eprintln!(
+                "phitex: page fold of node {} did not settle in {passes} passes (cut {:?}, stop_at {:?})",
+                r.cx.node().raw(),
+                r.cut,
+                r.stop_at
+            );
+            break;
         }
         let cx = r.cx;
         cx.restart();

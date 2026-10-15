@@ -70,10 +70,23 @@ pub(crate) struct Ops {
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
     /// The page states folds hand on (`crate::pages::PageStates`).
     pub page_states: std::sync::Arc<crate::pages::PageStates>,
-    /// What the last finisher running each output routine defined, by
-    /// the routine's hint value: the next finisher's predicted
-    /// definitions (`crate::pages::Finish`).
-    pub fin_defs: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, Vec<(Field, ValueId)>>>>,
+    /// What the last two finishers running each output routine defined,
+    /// by the routine's hint value (the earlier run first): the next
+    /// finisher's declared names, and its predicted definitions where
+    /// both agree (`crate::pages::Finish`).
+    pub fin_defs: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, crate::pages::FinDefs>>>,
+    /// The fields any finisher of this build read from the engine, and
+    /// the fields any defined globally: a piece that defines one of the
+    /// first after a candidate, or reads one of the second, folds in
+    /// its own run, where a page finishing inside it is a cut at once
+    /// (`Run::needs_own_fold`), instead of a finisher's check and a
+    /// round (`crate::pages`).
+    pub fin_touch: std::sync::Arc<std::sync::Mutex<crate::pages::FinTouch>>,
+    /// The names of fonts found not virtual (`pdfout::do_vf`): a memo
+    /// of the build, not a field, so the finisher that found out does
+    /// not define something every later finisher reads (an edit
+    /// replacing that finisher ran them all again).
+    pub not_virtual: std::sync::Arc<std::sync::Mutex<phitex_defuse::FxHashSet<String>>>,
 }
 
 

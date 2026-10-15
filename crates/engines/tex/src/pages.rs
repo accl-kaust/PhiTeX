@@ -69,7 +69,7 @@ use crate::input::{Line, Seg};
 use crate::nodes::{self, Side};
 use crate::ops::{Shared, ops, run_node_parking};
 use crate::run::{Halt, R, Run};
-use crate::runstate::{ContSaved, ContSlot, ContState, State};
+use crate::runstate::{ContSaved, ContSlot, ContState, Loc, State};
 use crate::val::{glue_of, glue_value, group, int_at, int_of, list_of, str_of, toks_of, toks_value};
 
 /// The page state's versions: defined by every piece that puts something
@@ -734,13 +734,82 @@ impl Run<'_, '_> {
             self.end_open();
         }
         let raw = self.own_outer_items();
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") && self.stop_at.is_some() {
+            eprintln!(
+                "  page fold {}: pass stopped at {:?}: {} items, {} candidates, piece {piece}, top {} doc {}, contribs {}",
+                self.cx.node().raw(),
+                self.stop_at,
+                raw.len(),
+                self.cand_marks.len(),
+                self.top,
+                self.doc,
+                self.contribs.len()
+            );
+        }
         if piece && raw.is_empty() {
             return Ok(());
         }
-        if piece && self.cut_req.is_none() {
+        // (a pass stopped at its candidate folds here whatever it did
+        // before it: the finisher and the resume are its to place)
+        if piece && self.stop_at.is_none() && self.cut_req.is_none() && !self.needs_own_fold()? {
             return self.fold_apart(raw);
         }
         self.fold_here(raw, fin)
+    }
+
+    /// Whether a page finishing inside this piece would need a cut, as
+    /// far as the finishers so far tell (`Ops::fin_touch`): the piece
+    /// read a field a routine defines (the page number), or defined
+    /// after its first candidate (or locally anywhere) a field a routine
+    /// reads. Then the piece folds in its own run: a finisher's check
+    /// would ask for the cut a round later, at the chain's cost.
+    fn needs_own_fold(&mut self) -> R<bool> {
+        let n = self.cand_marks.len();
+        if n == 0 || (n == 1 && self.last_candidate() == Some(0)) {
+            return Ok(false);
+        }
+        let touch = self.ops.fin_touch.clone();
+        let t = touch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if t.reads.is_empty() && t.defs.is_empty() {
+            return Ok(false);
+        }
+        let v = self.v;
+        for l in self.st.read_locs() {
+            let f = self.loc_field(l);
+            if t.defs.contains(&f) {
+                if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+                    eprintln!("  own fold {}: reads {}", self.cx.node().raw(), str_of(v, f.0));
+                }
+                return Ok(true);
+            }
+        }
+        let gids = self.st.gid_mark();
+        let m0 = self.cand_marks[0];
+        let mut defs: Vec<Loc> = self
+            .st
+            .defined_since(v, m0.stamp, m0.gids)
+            .into_iter()
+            .map(|d| d.0)
+            .collect();
+        defs.extend(
+            self.st
+                .defined_since(v, 0, gids)
+                .into_iter()
+                .filter(|d| d.2 == Locality::Local)
+                .map(|d| d.0),
+        );
+        for l in defs {
+            let f = self.loc_field(l);
+            if t.reads.contains(&f) {
+                if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+                    eprintln!("  own fold {}: defines {}", self.cx.node().raw(), str_of(v, f.0));
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The candidate the run passed last, when nothing happened after
@@ -849,7 +918,7 @@ impl Run<'_, '_> {
         let ps_in = self.cx.use_field(f)?;
         // (before the state is taken: a stop here leaves it for the
         // attempt that resumes)
-        let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        let dead = self.deadcycles_for(&raw)?;
         self.resolve_page_params(&mut raw)?;
         let mut timer = FoldTimer::new(raw.len());
         let cache = self.ops.page_states.clone();
@@ -1727,6 +1796,46 @@ impl Run<'_, '_> {
 /// page is shipped from here.
 pub(crate) struct Finish(pub Shared);
 
+/// What the finishers of a build read and defined (`Ops::fin_touch`).
+#[derive(Default)]
+pub(crate) struct FinTouch {
+    pub reads: phitex_defuse::FxHashSet<Field>,
+    pub defs: phitex_defuse::FxHashSet<Field>,
+}
+
+/// What the last two finishers running one routine defined
+/// (`Ops::fin_defs`): the earlier run's definitions, then the last's.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FinDefs {
+    pub prev: Vec<(Field, ValueId)>,
+    pub last: Vec<(Field, ValueId)>,
+}
+
+impl FinDefs {
+    /// The fields either run defined.
+    fn names(&self) -> Vec<Field> {
+        let mut out: Vec<Field> = self.last.iter().map(|d| d.0).collect();
+        for d in &self.prev {
+            if !out.contains(&d.0) {
+                out.push(d.0);
+            }
+        }
+        out
+    }
+
+    /// The definitions both runs made with the same value: stable
+    /// across pages, so a reader may run on them; a page number or a
+    /// mark, changing every page, is not predicted (a wrong prediction
+    /// runs its readers again).
+    fn stable(&self) -> Vec<(Field, ValueId)> {
+        self.last
+            .iter()
+            .filter(|d| self.prev.contains(d))
+            .copied()
+            .collect()
+    }
+}
+
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
 const FINISHER_FIELDS: &[&str] = &[
@@ -1769,7 +1878,7 @@ impl Operation for Finish {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&t.raw())
-            .map(|d| d.iter().map(|(f, _)| *f).collect::<Vec<Field>>());
+            .map(FinDefs::names);
         if let Some(mut names) = known
             && !crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
         {
@@ -1797,12 +1906,13 @@ impl Operation for Finish {
         if t == ValueId::UNIT || crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT") {
             return None;
         }
-        ops(&self.0)
+        let stable = ops(&self.0)
             .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&t.raw())
-            .cloned()
+            .map(FinDefs::stable)?;
+        (!stable.is_empty()).then_some(stable)
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
@@ -1840,13 +1950,38 @@ impl Operation for Finish {
 
 impl Run<'_, '_> {
     /// The definitions this finisher publishes, kept for the next one
-    /// running the same routine ([`Finish::predicted_defs`]).
+    /// running the same routine ([`Finish::predicted_defs`]), and what
+    /// it read and defined for the pieces' own-fold decision
+    /// ([`Run::needs_own_fold`]).
     fn record_finisher_defs(&mut self, args: &[ValueId]) {
+        let v = self.v;
+        {
+            let reads: Vec<Field> = self
+                .st
+                .read_locs()
+                .into_iter()
+                .map(|l| self.loc_field(l))
+                .collect();
+            let gdefs: Vec<Field> = self
+                .st
+                .published(v, self.rec_load)
+                .into_iter()
+                .filter(|d| d.2 == Locality::Global)
+                .map(|d| self.loc_field(d.0))
+                .filter(|f| !is_page_field(&crate::val::field_name(v, *f)))
+                .collect();
+            let mut t = self
+                .ops
+                .fin_touch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            t.reads.extend(reads);
+            t.defs.extend(gdefs);
+        }
         let Some(&t) = args.get(9) else { return };
         if t == ValueId::UNIT {
             return;
         }
-        let v = self.v;
         let mut out = Vec::new();
         for (loc, x, _) in self.st.published(v, self.rec_load) {
             let f = self.loc_field(loc);
@@ -1856,11 +1991,14 @@ impl Run<'_, '_> {
             }
             out.push((f, x));
         }
-        self.ops
+        let mut m = self
+            .ops
             .fin_defs
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(t.raw(), out);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = m.entry(t.raw()).or_default();
+        e.prev = std::mem::take(&mut e.last);
+        e.last = out;
     }
 }
 
@@ -1907,6 +2045,18 @@ impl Operation for Fold {
 }
 
 impl Run<'_, '_> {
+    /// `\deadcycles` where the fold is, when the fold needs it: only
+    /// `\end` reads it (§1054); any other fold reads nothing a finisher
+    /// defines, so a finisher placed anew does not run the folds after
+    /// it again.
+    fn deadcycles_for(&mut self, raw: &[ValueId]) -> R<i64> {
+        let v = self.v;
+        if raw.iter().any(|&x| nodes::tag(v, x) == nodes::T_END) {
+            return self.cint(crate::fields::cell::DEADCYCLES);
+        }
+        Ok(0)
+    }
+
     /// A [`Fold`] node's run.
     fn fold_node(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
@@ -1918,7 +2068,7 @@ impl Run<'_, '_> {
         self.begin_command();
         let ps_in = self.cx.use_field(f)?;
         self.resolve_page_params(&mut raw)?;
-        let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        let dead = self.deadcycles_for(&raw)?;
         let mut timer = FoldTimer::new(raw.len());
         let cache = self.ops.page_states.clone();
         let mut ps = timer.decode(|| {
