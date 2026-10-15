@@ -48,7 +48,7 @@ pub(crate) struct DefOut {
     pub guess: Option<Slot>,
 }
 
-fn wait_node(n: Slot, field: Option<Field>, kind: &'static str, has_prev: bool) -> Wait {
+pub(crate) fn wait_node(n: Slot, field: Option<Field>, kind: &'static str, has_prev: bool) -> Wait {
     Wait {
         on: Subj::Node(n),
         field,
@@ -499,6 +499,7 @@ impl Shared {
                     && (self.rec(q).st() != super::S_STEP
                         || e.val == DefVal::Val(x)
                         || !self.rec(me).has(super::F_PREDREF))
+                    && self.guess_ok(f)
                     && self.take_prediction()
                 {
                     // A predicted definition: the reader runs on it, and
@@ -508,7 +509,7 @@ impl Shared {
                     guess = Some(q);
                 } else if !self.busy(q, me) {
                     // Done on a guess of its own: read as committed.
-                } else if e.val == DefVal::Pending || !(self.only_checking(q) || (self.guess_ok(f) && self.take_guess())) {
+                } else if e.val == DefVal::Pending || !(self.guess_ok(f) && (self.only_checking(q) || (!self.rec(q).has(super::F_NEEDS_RUN | super::F_PREDRUN) && self.take_guess()))) {
                     return Q::Wait(wait_node(q, Some(f), "definition", e.val != DefVal::Pending));
                 } else {
                     guess = Some(q);
@@ -518,7 +519,8 @@ impl Shared {
                 && !self.rec(me).has(super::F_PREDREF)
                 && let Some(x) = self.predicted(q, f)
                 && (e.val == DefVal::Val(x) || self.ran_now(q))
-                && self.take_prediction()
+                && self.guess_ok(f)
+                    && self.take_prediction()
             {
                 // Read as a prediction whether or not the definer has
                 // finished in this evaluation (what a run reads does not

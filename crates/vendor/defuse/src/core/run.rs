@@ -417,7 +417,7 @@ impl Shared {
                 }
             }
         }
-        if let Some(w) = self.gate(s) {
+        if let Some(w) = self.gate(s).or_else(|| self.hold_refuted(s)) {
             if let Subj::Node(x) = w.on
                 && self.rec(x).st() == super::S_STEP
             {
@@ -460,6 +460,25 @@ impl Shared {
                 super::query::Q::Ans(_) => None,
             },
         }
+    }
+
+    /// A node whose last run read a field no longer guessed (refuted in
+    /// this evaluation) from a definer now in work waits for that definer
+    /// instead of running ahead on the old value.
+    fn hold_refuted(&self, s: Slot) -> Option<Wait> {
+        if !self.any_no_guess.load(Ordering::Acquire) {
+            return None;
+        }
+        let d = self.rec(s).data();
+        let log = &d.res.as_ref()?.log;
+        log.iter().find_map(|p| match p {
+            super::Pred::Def { f, ans: super::DAns::Site { node, .. }, .. }
+                if *node != s && self.busy(*node, s) && !self.guess_ok(*f) =>
+            {
+                Some(super::query::wait_node(*node, Some(*f), "gated", self.rec(*node).has(super::F_DONE)))
+            }
+            _ => None,
+        })
     }
 
     /// A node whose read hint names a field still in work before it waits
