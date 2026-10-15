@@ -142,3 +142,14 @@ amsldoc cold, same PDF at every thread count, release build on accl:
 para4000: critical path ≤ 1 500 nodes (from 5 894), wall at j16 ≤ 0.2 × j1.
 Edit: amsldoc one-word edit stays ≤ 7 nodes + the finishers of pages whose
 break moved, ≤ 0.2 s.
+
+## 7. Node identity (finding 2026-10-15 23:40)
+
+Today the fold is spawned with the piece's items and the parent's raw node id
+in its arguments, so an edit re-makes the fold instead of re-running it, and
+every reader of its `vtail` is dirtied by the rebind even when the value is
+identical. In the target shape no node carries content or a node id in its
+identity: the scan step and the finisher are identified by position (their
+index and keys) and read the pieces' items and profiles through fields the
+exec nodes define. A changed piece then re-runs the same scan node, whose
+value cutoff stops the chain as soon as the breaks agree.
