@@ -43,15 +43,20 @@ its macro bodies bound the hints of document slices that call them. A
 group still open at the format's end is an error ("format: group left
 open at end").
 
-Besides the text (`pages.rs`, whose module doc is the spec): a
-**finisher** per page, placed by the piece in whose items the page
-ends (`follow(finish, [j, data, carried, locals])`): it runs the output
-routine and ships the page; a **resume** piece after a page that ends
-inside a piece (a cut: the piece runs again stopped at that candidate
-and the resume carries on from there with the continuation value); and
-the end node that writes the DVI or PDF (`assemble.rs`). So a node is a
-paragraph region, a display, an alignment, a finisher, a resume or the
-end node; the nest (`nest.rs`) is local to its run.
+Besides the text (`pages.rs`, whose module doc is the spec): a **fold**
+per piece with main-list items, placed by the piece after itself
+(`follow(fold, [items, last, piece, reads, defs])`): it reads `ps`,
+folds the items in and defines `ps'`; a **finisher** per page, placed
+by the fold in whose items the page ends (`follow(finish, [j, data,
+carried, locals, rest…])`): it runs the output routine and ships the
+page, and when the page ended inside the piece it checks that running
+after the piece changed nothing the piece's later commands saw (else
+it asks for a cut: the piece runs again next round, folding in its own
+run, stopped at that candidate, and a **resume** piece after the
+finisher carries on from there with the continuation value); and the
+end node that writes the DVI or PDF (`assemble.rs`). So a node is a
+paragraph region, a display, an alignment, a fold, a finisher, a
+resume or the end node; the nest (`nest.rs`) is local to its run.
 
 Nothing else is a node. Expansion runs inline in the node that reads the
 token; a macro body, a conditional, `\the`, `\csname` never become
@@ -72,13 +77,13 @@ condition-level cells. The page builder's state is ONE field, `ps`
   bounds of the commands in the region.
 - A `T_PAGE_PARAMS` item when it changed `\vsize`, `\maxdepth`,
   `\topskip` or `\holdinginserts`, so the fold uses them from there.
-- At its end, when it has items for the main list: the next version of
-  `ps`. The run reads `ps` as its last command (a stop there parks the
-  run with its paragraph built), folds its own items candidate by
-  candidate, and defines `ps'`; where a page finishes it places the
-  finisher. Every bounded piece declares `ps` and `pages:shipped` in its
-  `may_define` (`hints.rs`): a reader past an undeclared definer reads an
-  older page state, finishes on it, and runs again from the top.
+- At its end, when it has items for the main list: its fold node after
+  it, with the items as its argument. The piece's run never reads `ps`;
+  the fold does, folds the items candidate by candidate, defines `ps'`,
+  and where a page finishes places the finisher. Only a piece a
+  finisher asked to cut folds in its own run. Every bounded piece still
+  declares `ps` and `pages:shipped` in its `may_define` (`hints.rs`) for
+  that case.
 
 A group opened and closed inside the region restores its locals at its
 close (`nest.rs`: saved bindings, globals retained, §283) and nothing of
@@ -91,8 +96,9 @@ Writing `A <- B` for "A reads what B defined".
 | reader | may read | from |
 |---|---|---|
 | region R | regime cells (`cat:`, `cs:`, `font`, `param:`, `count:`, …) | the last node before R that changed them: a fan-out from the format and the preamble, not a chain |
-| region R, at its end | `ps` | the last piece or finisher before it with main-list items: the page chain, one link per piece |
-| finisher j | its page (its argument), `\output`, the registers and fields the routine reads | the piece that placed it, and whatever the text before it defined; what the routine defines (`\count0`, marks, `\global`s) reaches the text after it like any definition |
+| fold of region R | `ps` | the last fold or finisher before it: the page chain, one link per piece with main-list items |
+| region R asked to cut | `cut:<node>` (loop-back), `ps` | the finisher that asked, last round; the fold or finisher before it |
+| finisher j | its page (its argument), `\output`, the registers and fields the routine reads | the fold that placed it, and whatever the text before it defined; what the routine defines (`\count0`, marks, `\global`s) reaches the text after it like any definition |
 | resume | its continuation (argument) | the finisher before it |
 | end node | `pages`, `pdf:pieces`, `pdf:xpages`, the document-level fields | every finisher |
 | region R (`\begin{document}`) | `wkeys:<file>`, `wdef:<field>` | the files the job writes and reads back, per field: the previous round's publication by the writer (`files`); a written line is interpreted in the reading state (the field's value before this round's read-back, `wpre:<field>`), and what it writes to another file (`\@writefile{toc}`) goes to that file's text (`wfile:<file>`) |
@@ -112,13 +118,13 @@ Forbidden, and asserted by the test:
 
 ## Heights
 
-In nodes, the critical path is the page chain: one link per piece with
-main-list items and one per finisher, so it grows with the document.
-That is TeX's page builder, which is ordered; it is not the bound that
-matters. What runs on the chain is each piece's FOLD only (its read of
-`ps` is its last command; it parks there with its paragraph built), so
-the chain's length in time is the sum of the folds and finishers plus
-one wake per link. The paragraphs run in parallel beside it.
+In nodes, the critical path is the page chain: one fold per piece with
+main-list items and one finisher per page, so it grows with the
+document. That is TeX's page builder, which is ordered; it is not the
+bound that matters. What runs on the chain is the folds only (nodes of
+their own, no text, one read and one definition each), so the chain's
+length in time is the sum of the folds and finishers plus one wake per
+link. The paragraphs run in parallel beside it and never wait for it.
 
 The measures, per build: runs per node (1.0 when nothing reran; parks
 resume, they do not rerun), the realised critical path in time

@@ -2,17 +2,19 @@
 //! as nodes of the graph; every page value moves by def-use.
 //!
 //! - A text piece (an `exec` node, or a `resume` piece) typesets in
-//!   parallel with every other. The items it puts on the main vertical
-//!   list are its own contributions, delimited by candidate markers at
-//!   the points where tex.web calls `build_page` (§994;
-//!   [`Run::finish_candidate`]). At its end the piece reads the version
-//!   of the page state reaching it ([`PS`]: the page so far as §980–§991
-//!   keep it, the main list's fold, the page parameters in force, the
-//!   contributions not looked at yet), folds its own items in, candidate
-//!   by candidate (§994–§1010, the pure builder of
-//!   `phitex_typeset::page`), and defines the next version. A piece with
-//!   nothing for the main list leaves the state alone: the next reader
-//!   gets the version before it.
+//!   parallel with every other, and never reads the page state. The
+//!   items it puts on the main vertical list are its own contributions,
+//!   delimited by candidate markers at the points where tex.web calls
+//!   `build_page` (§994; [`Run::finish_candidate`]). At its end it
+//!   places its fold after it ([`Fold`], its items as the argument): a
+//!   node of its own that reads the version of the page state reaching
+//!   it ([`PS`]: the page so far as §980–§991 keep it, the main list's
+//!   fold, the page parameters in force, the contributions not looked at
+//!   yet), folds the items in, candidate by candidate (§994–§1010, the
+//!   pure builder of `phitex_typeset::page`), and defines the next
+//!   version. The chain of the page is the folds and the finishers; the
+//!   pieces run beside it. A piece with nothing for the main list places
+//!   no fold: the next reader gets the version before it.
 //! - A page that finishes at a candidate is a finisher node ([`Finish`])
 //!   placed after the piece, its page as its arguments (`[j, data,
 //!   carried, locals]`). It runs the output routine (§1012–§1026) as one
@@ -25,15 +27,25 @@
 //!   hundred-page paragraph is a hundred finishers in a row.
 //! - A page that finishes at a candidate inside a piece, with the piece
 //!   going on after it (a definition, an item, a line after the
-//!   candidate), is a cut: the piece runs again, stopping at that
-//!   candidate (its second pass; what the first pass did after the
-//!   candidate is dropped), and its continuation ([`Run::cont_encode`]:
-//!   the input left, the groups and lists open, the local bindings of
-//!   those groups) is the argument of a `resume` piece ([`Resume`])
-//!   placed after the finisher, which reads what the finisher defined as
-//!   any node does. The bindings local to the groups open at the cut go
-//!   to the finisher as its `locals`: the routine runs inside those
-//!   groups in tex.web and sees them.
+//!   candidate), gets its finisher after the piece all the same, the
+//!   rest of the piece's items carried past it (the fold folds them
+//!   after the routine's, §1026). In tex.web the routine runs at the
+//!   candidate, between the piece's two parts; here it runs after both.
+//!   That is the same unless the routine changes what the second part
+//!   read, or reads what the second part defined (or a binding a scope
+//!   the second part closed hid): the finisher checks ([`Run::check_cut`],
+//!   from the piece's reads and definitions handed down through the
+//!   fold) and, when it is not, asks for a cut (`cutreq`). The client
+//!   declares the piece's `cut:<node>` loop-back and the piece runs
+//!   again next round: it folds in its own run ([`Run::fold_here`]),
+//!   stopping at that candidate (its second pass; what the first pass
+//!   did after the candidate is dropped), and its continuation
+//!   ([`Run::cont_encode`]: the input left, the groups and lists open,
+//!   the local bindings of those groups) is the argument of a `resume`
+//!   piece ([`Resume`]) placed after the finisher, which reads what the
+//!   finisher defined as any node does. The bindings local to the groups
+//!   open at the cut go to the finisher as its `locals`: the routine
+//!   runs inside those groups in tex.web and sees them.
 //! - Nothing reads the whole list, nothing is fed back to a later round,
 //!   nothing is replayed: the chain is one state version per piece that
 //!   touches the main list and one finisher per page, each placed by the
@@ -77,26 +89,32 @@ pub(crate) fn is_page_field(name: &str) -> bool {
     name == PS || name == SHIPPED
 }
 
-/// What a run had done when it passed its last candidate: at its end,
-/// a page finishing at that candidate finishes at the end of the piece
-/// iff nothing of this changed after it.
+/// What a run had done when it passed a candidate: at its end, a page
+/// finishing at its last candidate finishes at the end of the piece iff
+/// nothing of this changed after it; a finisher's check of a page
+/// finishing at an earlier one takes what the run defined after it
+/// (`stamp`, `gids`: [`State::defined_since`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CandMark {
     pub k: u32,
     pub stamp: u64,
+    pub gids: u32,
     pub contribs: usize,
     pub kids: usize,
     pub lines: i64,
 }
 
 /// A finisher's page: its index, the material carried over past it
-/// (the fold's §1017 contributions), and what the routine leaves for the
-/// next page (§1026: the held-over insertions, then its list).
+/// (the fold's §1017 contributions), what the routine leaves for the
+/// next page (§1026: the held-over insertions, then its list), and the
+/// rest of the piece the page finished inside of (its items after the
+/// candidate, folded after the routine's).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FinCtx {
     pub j: i64,
     pub carried: Vec<ValueId>,
     pub pending: Vec<ValueId>,
+    pub rest: Vec<ValueId>,
 }
 
 // -------------------------------------------------------------- state
@@ -125,12 +143,14 @@ pub(crate) struct PageState {
     pub discard_ids: Vec<ValueId>,
 }
 
-/// A page finishing: at candidate `k`, the finisher's page data, and the
-/// material to carry over past it.
+/// A page finishing: at candidate `k`, the finisher's page data, the
+/// material to carry over past it, and the items after the candidate
+/// (not folded: the finisher's fold takes them after the routine's).
 pub(crate) struct Fire {
     pub k: u32,
     pub data: ValueId,
     pub carried: Vec<ValueId>,
+    pub rest: Vec<ValueId>,
 }
 
 fn some(x: ValueId) -> Option<ValueId> {
@@ -321,12 +341,13 @@ impl PageState {
         live: &mut dyn FnMut(u16) -> R<InsertClass>,
     ) -> R<Option<Fire>> {
         let mut buf = std::mem::take(&mut self.pending);
-        for &x in raw {
+        for (i, &x) in raw.iter().enumerate() {
             match nodes::tag(v, x) {
                 nodes::T_BUILD_PAGE => {
                     let k = u32::try_from(int_at(v, x, 1)).unwrap_or(0);
                     self.fold.since_bp = 0;
-                    if let Some(f) = self.build(v, &mut buf, k, dead, live)? {
+                    if let Some(mut f) = self.build(v, &mut buf, k, dead, live)? {
+                        f.rest = raw[i + 1..].to_vec();
                         return Ok(Some(f));
                     }
                 }
@@ -480,7 +501,12 @@ impl PageState {
                     self.j += 1;
                     self.fold.since_bp = 0;
                     buf.clear();
-                    return Ok(Some(Fire { k, data, carried }));
+                    return Ok(Some(Fire {
+                        k,
+                        data,
+                        carried,
+                        rest: Vec::new(),
+                    }));
                 }
             }
         }
@@ -591,28 +617,30 @@ impl Run<'_, '_> {
         }
         let v = self.v;
         let k = self.cand;
-        if k == 0 || self.st.take_page_params() {
+        if self.st.take_page_params() {
             self.put_page_params();
+        } else if k == 0 {
+            self.put_page_params_reaching();
         }
         for n in std::mem::take(&mut self.ins_pending) {
-            let c = self.insert_class(n)?;
-            let m = v.list(vec![
-                v.int(nodes::T_INS_PARAMS),
-                v.int(i64::from(n)),
-                v.int(c.box_height_plus_depth.map_or(-1, i64::from)),
-                v.int(i64::from(c.box_is_hbox)),
-                v.int(i64::from(c.count)),
-                v.int(i64::from(c.dimen)),
-                glue_value(v, &c.skip),
-            ]);
+            // (the class's registers as this run left them when it
+            // defined one; else as they reach the fold, read there:
+            // `Run::resolve_page_params`)
+            let own = self.ins_registers_defined(n);
+            let m = if own {
+                self.ins_params_marker(n)?
+            } else {
+                v.list(vec![v.int(nodes::T_INS_PARAMS), v.int(i64::from(n))])
+            };
             self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
         }
         let m = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(k))]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
         self.cand += 1;
-        self.cand_mark = Some(CandMark {
+        self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
+            gids: self.st.gid_mark(),
             contribs: self.contribs.len(),
             kids: self.kids.len(),
             lines: self.lines_entered,
@@ -643,6 +671,36 @@ impl Run<'_, '_> {
         out
     }
 
+    /// A `T_INS_PARAMS` marker with class `n`'s registers as this run
+    /// sees them (§1008).
+    pub(crate) fn ins_params_marker(&mut self, n: u16) -> R<ValueId> {
+        let v = self.v;
+        let c = self.insert_class(n)?;
+        Ok(v.list(vec![
+            v.int(nodes::T_INS_PARAMS),
+            v.int(i64::from(n)),
+            v.int(c.box_height_plus_depth.map_or(-1, i64::from)),
+            v.int(i64::from(c.box_is_hbox)),
+            v.int(i64::from(c.count)),
+            v.int(i64::from(c.dimen)),
+            glue_value(v, &c.skip),
+        ]))
+    }
+
+    /// Whether this run defined one of class `n`'s registers (its box,
+    /// `\count`, `\dimen` or `\skip`).
+    fn ins_registers_defined(&mut self, n: u16) -> bool {
+        let b = self.box_field(i64::from(n));
+        let bl = self.loc_of(b);
+        if self.st.defined_after(bl, 0) {
+            return true;
+        }
+        (0..3).any(|r| {
+            let l = self.reg_loc(r, i32::from(n));
+            self.st.defined_after(l, 0)
+        })
+    }
+
     pub(crate) fn insert_class(&mut self, n: u16) -> R<InsertClass> {
         let b = self.box_reg(i32::from(n))?;
         let v = self.v;
@@ -655,11 +713,15 @@ impl Run<'_, '_> {
         })
     }
 
-    /// The run's end: its items folded into the page state reaching it,
-    /// the next version defined, and the finisher (and the resume piece
-    /// after a cut) placed where a page finishes. A piece with nothing
-    /// for the main list touches nothing. A stop here parks the run: the
-    /// fold is a command of its own ([`Run::begin_command`]).
+    /// The run's end on the page. A piece with items for the main list
+    /// places its fold ([`Fold`]: the items folded into the page state
+    /// reaching that node, the next version defined, the finisher placed
+    /// where a page finishes) and runs no further; its own run never
+    /// reads the page state. A piece a finisher asked to cut
+    /// (`cut:<node>`, [`Run::read_cut_request`]) folds here instead, as a
+    /// finisher does ([`Run::fold_here`]): a page finishing inside it is
+    /// a cut, the run going again stopped at that candidate. A piece
+    /// with nothing for the main list touches nothing.
     pub(crate) fn page_fold(&mut self) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
@@ -671,11 +733,106 @@ impl Run<'_, '_> {
         if self.claim_rest {
             self.end_open();
         }
-        let v = self.v;
-        let mut raw = self.own_outer_items();
+        let raw = self.own_outer_items();
         if piece && raw.is_empty() {
             return Ok(());
         }
+        if piece && self.cut_req.is_none() {
+            return self.fold_apart(raw);
+        }
+        self.fold_here(raw, fin)
+    }
+
+    /// The candidate the run passed last, when nothing happened after
+    /// it: a page finishing there finishes at the piece's end.
+    fn last_candidate(&self) -> Option<u32> {
+        self.cand_marks.last().and_then(|m| {
+            (m.stamp == self.st.stamp()
+                && m.contribs == self.contribs.len()
+                && m.kids == self.kids.len()
+                && m.lines == self.lines_entered)
+                .then_some(m.k)
+        })
+    }
+
+    /// A piece's fold placed after it ([`Fold`]), with what the
+    /// finisher's check needs ([`Run::check_cut`]) when a page can finish
+    /// inside the piece with commands after it: the locations the run
+    /// read from the engine with the values it read, and per candidate
+    /// the names the run defined after it (and its local definitions at
+    /// any time: a scope closing after the candidate hides them from a
+    /// finisher placed after the piece).
+    fn fold_apart(&mut self, raw: Vec<ValueId>) -> R<()> {
+        let v = self.v;
+        let last = self.last_candidate();
+        let n = self.cand_marks.len();
+        let inside_possible = !(n == 1 && last == Some(0)) && n > 0;
+        let (reads, defs) = if inside_possible {
+            let rs: Vec<ValueId> = self
+                .st
+                .read_values()
+                .into_iter()
+                .map(|(l, x)| {
+                    let f = self.loc_field(l);
+                    v.list(vec![f.0, opt_val(x)])
+                })
+                .collect();
+            let gids = self.st.gid_mark();
+            let locals: Vec<Field> = self
+                .st
+                .defined_since(v, 0, gids)
+                .into_iter()
+                .filter(|(_, _, l)| *l == Locality::Local)
+                .map(|(l, _, _)| self.loc_field(l))
+                .collect();
+            let marks = self.cand_marks.clone();
+            let mut per = Vec::with_capacity(n);
+            for m in &marks {
+                if Some(m.k) == last {
+                    per.push(v.list(Vec::new()));
+                    continue;
+                }
+                let mut names: Vec<(ValueId, bool)> =
+                    locals.iter().map(|f| (f.0, false)).collect();
+                for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
+                    let stands = self.st.def_stands(l);
+                    names.push((self.loc_field(l).0, stands));
+                }
+                names.sort_unstable_by_key(|x| (x.0.raw(), !x.1));
+                names.dedup_by_key(|x| x.0);
+                per.push(v.list(
+                    names
+                        .into_iter()
+                        .map(|(f, g)| v.list(vec![f, v.int(i64::from(g))]))
+                        .collect(),
+                ));
+            }
+            (v.list(rs), v.list(per))
+        } else {
+            (ValueId::UNIT, ValueId::UNIT)
+        };
+        let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+        self.cx.follow(
+            self.ops.fold,
+            vec![
+                v.list(raw),
+                v.int(last.map_or(-1, i64::from)),
+                pid,
+                reads,
+                defs,
+            ],
+        );
+        Ok(())
+    }
+
+    /// The fold in this run: its items folded into the page state
+    /// reaching it, the next version defined, and the finisher (and the
+    /// resume piece after a cut) placed where a page finishes. A stop
+    /// here parks the run: the fold is a command of its own
+    /// ([`Run::begin_command`]).
+    #[allow(clippy::too_many_lines)]
+    fn fold_here(&mut self, mut raw: Vec<ValueId>, fin: bool) -> R<()> {
+        let v = self.v;
         // (its input read out: the siblings it takes are known, and so
         // are the fields it defines: what its state publishes and the
         // page state; a park at the page state's read below holds no
@@ -693,6 +850,7 @@ impl Run<'_, '_> {
         // (before the state is taken: a stop here leaves it for the
         // attempt that resumes)
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        self.resolve_page_params(&mut raw)?;
         let mut timer = FoldTimer::new(raw.len());
         let cache = self.ops.page_states.clone();
         let mut ps = timer.decode(|| {
@@ -702,11 +860,13 @@ impl Run<'_, '_> {
         });
         if fin {
             // §1026: the held-over insertions and the routine's list,
-            // then the contributions put back, and the page built again
+            // then the contributions put back, and the page built again;
+            // then the rest of the piece the page finished inside of
             let c = self.fin.clone().unwrap_or_default();
             raw.extend(c.pending);
             raw.extend(c.carried);
             raw.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
+            raw.extend(c.rest);
         }
         let fire = {
             let mut live = |n: u16| self.insert_class(n);
@@ -728,22 +888,15 @@ impl Run<'_, '_> {
         };
         // (a second pass stopped at the candidate: the piece goes on
         // after it, whatever the pass did not run)
-        let at_end = fin
-            || (self.stop_at != Some(fire.k)
-                && self.cand_mark.is_some_and(|m| {
-                    m.k == fire.k
-                        && m.stamp == self.st.stamp()
-                        && m.contribs == self.contribs.len()
-                        && m.kids == self.kids.len()
-                        && m.lines == self.lines_entered
-                }));
+        let at_end = fin || (self.stop_at != Some(fire.k) && self.last_candidate() == Some(fire.k));
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             eprintln!(
-                "  fold {}: page {} fires at candidate {} (at end {at_end}, stop_at {:?})",
+                "  fold {}: page {} fires at candidate {} (at end {at_end}, stop_at {:?}, cut asked {:?})",
                 self.cx.node().raw(),
                 ps.j,
                 fire.k,
-                self.stop_at
+                self.stop_at,
+                self.cut_req
             );
         }
         if !at_end {
@@ -763,14 +916,108 @@ impl Run<'_, '_> {
             let (c, l) = self.cont_encode()?;
             (Some(c), l)
         };
-        self.cx.follow(
-            self.ops.finish,
-            vec![v.int(j), fire.data, v.list(fire.carried), v.list(locals)],
-        );
+        let text = self.output_hint()?;
+        let mut fargs = vec![v.int(j), fire.data, v.list(fire.carried), v.list(locals)];
+        fargs.extend([ValueId::UNIT; 5]);
+        fargs.push(text);
+        self.cx.follow(self.ops.finish, fargs);
         if let Some(cont) = cont {
             let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
             self.cx.follow(self.ops.resume, vec![cont, v.int(flags)]);
         }
+        Ok(())
+    }
+
+    /// A piece's start: whether a finisher asked for a cut of this node
+    /// (`cut:<node>`, an environment field the client sets from the
+    /// finishers' `cutreq` contributions, [`Run::check_cut`]), at which
+    /// candidate.
+    pub(crate) fn read_cut_request(&mut self) -> R<()> {
+        let args = self.cx.args();
+        let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
+        if k & 3 == 0 {
+            return Ok(());
+        }
+        let f = self.v.field(&format!("cut:{}", self.cx.node().raw()));
+        self.cut_req = self
+            .cx
+            .use_field(f)?
+            .and_then(|x| u32::try_from(int_of(self.v, x)).ok());
+        Ok(())
+    }
+
+    /// A finisher placed after the piece its page finished inside of
+    /// (arguments past the fourth: the rest of the piece's items, the
+    /// piece's node, the candidate, what the piece read, what it defined
+    /// after the candidate): whether the routine, run here instead of at
+    /// the candidate, changed what the piece's commands after it saw or
+    /// saw what they defined. If so, a cut is asked for: the piece runs
+    /// again next round with the routine between its two parts.
+    fn check_cut(&mut self, args: &[ValueId]) -> R<()> {
+        let v = self.v;
+        let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
+        if args.len() < 9 {
+            return Ok(());
+        }
+        let (pid, k, reads, defs) = (a(5), a(6), a(7), a(8));
+        let mut gdefs: Vec<(ValueId, ValueId)> = Vec::new();
+        for (loc, x, l) in self.st.published(v, self.rec_load) {
+            if l == Locality::Global {
+                gdefs.push((self.loc_field(loc).0, x));
+            }
+        }
+        let read: Vec<ValueId> = self
+            .st
+            .read_locs()
+            .into_iter()
+            .map(|l| self.loc_field(l).0)
+            .collect();
+        let mut why = None;
+        for e in list_of(v, reads) {
+            let xs = list_of(v, e);
+            if let [f, x] = xs[..]
+                && let Some(&(_, y)) = gdefs.iter().find(|(g, _)| *g == f)
+                && y != x
+            {
+                why = Some(format!("changed {}", str_of(v, f)));
+                break;
+            }
+        }
+        // (a location both defined, the piece's definition standing at
+        // its end: the piece's is the later one in tex.web, so the
+        // routine's gives way to it: the value reaching here put back)
+        let mut restore = Vec::new();
+        if why.is_none() {
+            for e in list_of(v, defs) {
+                let xs = list_of(v, e);
+                let Some(&f) = xs.first() else { continue };
+                let stands = xs.get(1).is_some_and(|&g| int_of(v, g) != 0);
+                if read.contains(&f) {
+                    why = Some(format!("after {}", str_of(v, f)));
+                    break;
+                }
+                if gdefs.iter().any(|(g, _)| *g == f) && stands {
+                    restore.push(Field(f));
+                }
+            }
+        }
+        if why.is_none() {
+            for f in restore {
+                let x = self.cx.use_field(f)?;
+                let loc = self.loc_of(f);
+                self.set_loc(loc, x.map_or(crate::runstate::Native::Absent, crate::runstate::Native::Raw), true);
+            }
+            return Ok(());
+        }
+        let Some(why) = why else { return Ok(()) };
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "  cut asked: piece {} at candidate {} ({why})",
+                int_of(v, pid),
+                int_of(v, k)
+            );
+        }
+        self.contribute("cutreq", v.seq_unit(v.list(vec![pid, k])));
         Ok(())
     }
 
@@ -787,9 +1034,11 @@ impl Run<'_, '_> {
         let f = self.ps_field();
         let mut ps = PageState::decode(v, self.cx.use_field(f)?);
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        let mut head = raw[..last].to_vec();
+        self.resolve_page_params(&mut head)?;
         {
             let mut live = |n: u16| self.insert_class(n);
-            let _ = ps.fold_items(v, &raw[..last], dead, &mut live)?;
+            let _ = ps.fold_items(v, &head, dead, &mut live)?;
         }
         if ps.pb.contents == Contents::Empty {
             return Ok(if m == 0 { MAX_DIMEN } else { 0 });
@@ -956,11 +1205,31 @@ impl Run<'_, '_> {
             }
         }
         self.log("ship", &s)?;
+        let timed = crate::exec::env_flag!("PHITEX_TEX_TIME");
+        let t0 = std::time::Instant::now();
         let mut side = Side::default();
         let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
             return Ok(());
         };
-        let pos = crate::pdfprim::positions(self, &bx)?;
+        let t_decode = t0.elapsed();
+        // (the positions walk only for a whatsit that needs one: a
+        // `\write` expands without positions; a plain page skips the
+        // walk, the second copy of the box it makes and the font view)
+        let needs_pos = side.whats.iter().any(|&w| {
+            let xs = list_of(v, w);
+            let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
+            !matches!(kind.as_str(), "write" | "open" | "close")
+        });
+        let pos = if needs_pos {
+            crate::pdfprim::positions(self, &bx)?
+        } else {
+            crate::pdfprim::Positions {
+                at: phitex_defuse::FxHashMap::default(),
+                page_height: 0,
+                pdf: self.param("pdfoutput")? > 0,
+            }
+        };
+        let t_pos = t0.elapsed();
         // what the PDF writer makes of the page's pdfTeX whatsits
         let mut pdf_data = Vec::new();
         // §1366: the whatsits in the order `hlist_out`/`vlist_out` meet them
@@ -994,6 +1263,7 @@ impl Run<'_, '_> {
                 }
             }
         }
+        let t_whats = t0.elapsed();
         let page_box = Node::Box(bx);
         let view = self.font_view(std::slice::from_ref(&page_box))?;
         let mut fonts = Vec::new();
@@ -1015,10 +1285,21 @@ impl Run<'_, '_> {
         let cs = v.list(counts.iter().map(|&c| v.int(i64::from(c))).collect());
         let pdf = self.pdf_page_params(pos.pdf)?;
         let page = v.list(vec![b, cs, v.list(fonts), pdf, v.list(pdf_data)]);
+        let t_fonts = t0.elapsed();
         let shown = match &page_box {
             Node::Box(bx) if pos.pdf => crate::pdfout::ship(self, page, bx, &side, &ids)?,
             _ => page.raw(),
         };
+        if timed {
+            eprintln!(
+                "shipout: decode_us {} positions_us {} whatsits_us {} fonts_us {} pdf_us {}",
+                t_decode.as_micros(),
+                (t_pos - t_decode).as_micros(),
+                (t_whats - t_pos).as_micros(),
+                (t_fonts - t_whats).as_micros(),
+                (t0.elapsed() - t_fonts).as_micros()
+            );
+        }
         let su = v.seq_unit(page);
         self.contribute("pages", su);
         let h = v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes())));
@@ -1438,10 +1719,28 @@ impl Run<'_, '_> {
 /// page's index, its material (`\box255`, the insertion boxes, the
 /// marks, the held-over insertions, `\outputpenalty`), what the fold
 /// carries past it, and the bindings local to the groups open at the
-/// cut (the routine runs inside them). It reads what reaches its place
-/// as any node does and defines what the routine defines; its page is
-/// shipped from here.
+/// cut (the routine runs inside them). A finisher placed after the
+/// piece its page finished inside of has five more: `[rest, piece,
+/// k, reads, defs]`, the piece's items after the candidate and what
+/// its check needs ([`Run::check_cut`]). It reads what reaches its
+/// place as any node does and defines what the routine defines; its
+/// page is shipped from here.
 pub(crate) struct Finish(pub Shared);
+
+/// What a finisher defines besides its routine's definitions
+/// (`fire_page`, `output_end`, `ship_out`): field prefixes.
+const FINISHER_FIELDS: &[&str] = &[
+    PS,
+    SHIPPED,
+    "deadcycles",
+    "mark:",
+    "param:outputpenalty",
+    "inspen",
+    "box:",
+    "badness",
+    "write:",
+    "pdf:",
+];
 
 impl Operation for Finish {
     fn name(&self) -> &'static str {
@@ -1450,8 +1749,60 @@ impl Operation for Finish {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
     }
-    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
-        MayDefine::Any
+    /// The output routine's hint (encoded, the tenth argument:
+    /// [`crate::hints::routine_hint`]) and the fields a finisher defines
+    /// itself; anything where the routine's text cannot be bounded, or
+    /// the hint is not given.
+    fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
+        let Some(&t) = args.get(9) else {
+            return MayDefine::Any;
+        };
+        if t == ValueId::UNIT || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
+            return MayDefine::Any;
+        }
+        // (a finisher ran this routine before: what it defined then,
+        // by name, and the fields a finisher sets itself; a definition
+        // outside them refutes the declaration, as any node's does, and
+        // only its readers run again)
+        let known = ops(&self.0)
+            .fin_defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&t.raw())
+            .map(|d| d.iter().map(|(f, _)| *f).collect::<Vec<Field>>());
+        if let Some(mut names) = known
+            && !crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
+        {
+            for n in [PS, SHIPPED, "deadcycles", "param:outputpenalty", "inspen", "badness", "box:255"] {
+                names.push(v.field(n));
+            }
+            return MayDefine::Names(names);
+        }
+        let h = crate::hints::Hint::decode(&str_of(v, t));
+        let mut ps: Vec<String> = match h.may_define() {
+            MayDefine::Any => return MayDefine::Any,
+            MayDefine::Prefixes(ps) => ps,
+            MayDefine::Names(ns) => ns.iter().map(|&f| crate::val::field_name(v, f)).collect(),
+            MayDefine::Nothing => Vec::new(),
+        };
+        ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
+        MayDefine::Prefixes(ps)
+    }
+    /// What the last finisher running the same routine defined, with
+    /// its values: the text after this one runs on them, and runs again
+    /// only where a value differs (the page number's readers). The page
+    /// state and the shipped mark are left out: the chain reads them.
+    fn predicted_defs(&self, args: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
+        let &t = args.get(9)?;
+        if t == ValueId::UNIT || crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT") {
+            return None;
+        }
+        ops(&self.0)
+            .fin_defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&t.raw())
+            .cloned()
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
@@ -1468,6 +1819,7 @@ impl Operation for Finish {
                     j: int_of(v, a(0)),
                     carried: list_of(v, a(2)),
                     pending: Vec::new(),
+                    rest: list_of(v, a(4)),
                 });
                 for e in list_of(v, a(3)) {
                     let ys = list_of(v, e);
@@ -1478,8 +1830,168 @@ impl Operation for Finish {
                 }
                 r.fire_page(a(1))?;
             }
-            r.run_all()
+            r.run_all()?;
+            r.check_cut(&args)?;
+            r.record_finisher_defs(&args);
+            Ok(())
         })
+    }
+}
+
+impl Run<'_, '_> {
+    /// The definitions this finisher publishes, kept for the next one
+    /// running the same routine ([`Finish::predicted_defs`]).
+    fn record_finisher_defs(&mut self, args: &[ValueId]) {
+        let Some(&t) = args.get(9) else { return };
+        if t == ValueId::UNIT {
+            return;
+        }
+        let v = self.v;
+        let mut out = Vec::new();
+        for (loc, x, _) in self.st.published(v, self.rec_load) {
+            let f = self.loc_field(loc);
+            let name = crate::val::field_name(v, f);
+            if is_page_field(&name) {
+                continue;
+            }
+            out.push((f, x));
+        }
+        self.ops
+            .fin_defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(t.raw(), out);
+    }
+}
+
+/// A piece's fold ([`Run::fold_apart`]): arguments `[items, last, piece,
+/// reads, defs]`, the piece's items for the main list, the candidate
+/// nothing followed (or -1), the piece's node, and what a finisher's
+/// check needs (unit when no page can finish inside the piece with
+/// commands after it). It reads the page state reaching it, folds the
+/// items in, defines the next version, and places the finisher where a
+/// page finishes, the items after that candidate carried to it.
+pub(crate) struct Fold(pub Shared);
+
+impl Operation for Fold {
+    fn name(&self) -> &'static str {
+        "fold"
+    }
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
+        MayDefine::Names(vec![v.field(PS)])
+    }
+    /// The page state and `\deadcycles`: the node waits for them
+    /// instead of starting and stopping.
+    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(vec![
+            v.field(PS),
+            v.field("deadcycles"),
+            v.field("param:vsize"),
+            v.field("param:maxdepth"),
+            v.field("param:topskip"),
+            v.field("param:holdinginserts"),
+        ])
+    }
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let args = cx.args();
+        let o = ops(&self.0);
+        run_node_parking(cx, o, true, |r| r.fold_node(&args))
+    }
+}
+
+impl Run<'_, '_> {
+    /// A [`Fold`] node's run.
+    fn fold_node(&mut self, args: &[ValueId]) -> R<()> {
+        let v = self.v;
+        let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
+        let mut raw = list_of(v, a(0));
+        let last = int_of(v, a(1));
+        let f = self.ps_field();
+        // (a stop at the read parks the run: it resumes here)
+        self.begin_command();
+        let ps_in = self.cx.use_field(f)?;
+        self.resolve_page_params(&mut raw)?;
+        let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        let mut timer = FoldTimer::new(raw.len());
+        let cache = self.ops.page_states.clone();
+        let mut ps = timer.decode(|| {
+            ps_in
+                .and_then(|x| cache.take(x))
+                .unwrap_or_else(|| PageState::decode(v, ps_in))
+        });
+        let fire = {
+            let mut live = |n: u16| self.insert_class(n);
+            timer.fold(|| ps.fold_items(v, &raw, dead, &mut live))?
+        };
+        let Some(fire) = fire else {
+            let e = timer.encode(|| ps.encode(v));
+            self.cx.define_with(f, e, Locality::Global);
+            cache.put(e, ps);
+            return Ok(());
+        };
+        let at_end = i64::from(fire.k) == last;
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+            eprintln!(
+                "  fold {}: page {} fires at candidate {} (at end {at_end}, piece {})",
+                self.cx.node().raw(),
+                ps.j,
+                fire.k,
+                int_of(v, a(2))
+            );
+        }
+        let e = ps.encode(v);
+        self.cx.define_with(f, e, Locality::Global);
+        let j = ps.j - 1;
+        cache.put(e, ps);
+        let mut fargs = vec![v.int(j), fire.data, v.list(fire.carried), v.list(Vec::new())];
+        if at_end {
+            fargs.extend([ValueId::UNIT; 5]);
+        } else {
+            let defs_k = list_of(v, a(4))
+                .get(usize::try_from(fire.k).unwrap_or(usize::MAX))
+                .copied()
+                .unwrap_or(ValueId::UNIT);
+            fargs.extend([
+                v.list(fire.rest),
+                a(2),
+                v.int(i64::from(fire.k)),
+                a(3),
+                defs_k,
+            ]);
+        }
+        fargs.push(self.output_hint()?);
+        self.cx.follow(self.ops.finish, fargs);
+        Ok(())
+    }
+
+    /// The hint of the output routine in force (its tokens shown as
+    /// source, read under the format's definitions), encoded: the
+    /// finisher's bound ([`Finish`]). Unit for the default routine.
+    fn output_hint(&mut self) -> R<ValueId> {
+        let v = self.v;
+        let out = self.par(Par::output)?;
+        let toks = toks_of(v, out);
+        if toks.is_empty() {
+            return Ok(ValueId::UNIT);
+        }
+        let mut text = String::new();
+        self.show_toks_into(&mut text, &toks)?;
+        let h = {
+            let defs = self
+                .ops
+                .defs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::hints::routine_hint(&text, &defs)
+        };
+        Ok(v.str(&h.encode()))
     }
 }
 
@@ -1517,6 +2029,7 @@ impl Operation for Resume {
         run_node_parking(cx, o, true, |r| {
             if !r.resumed {
                 r.cont_load(args.first().copied().unwrap_or(ValueId::UNIT))?;
+                r.read_cut_request()?;
             }
             r.run_all()
         })

@@ -571,7 +571,7 @@ impl Hint {
 
     /// `A` or `B`, the cause, the excerpt, then the bound's parts;
     /// records by `\x1e`, items by `\x1f`, pairs by `\x1d`.
-    fn encode(&self) -> String {
+    pub(crate) fn encode(&self) -> String {
         let mut o = String::new();
         match &self.bound {
             None => {
@@ -596,7 +596,7 @@ impl Hint {
         o
     }
 
-    fn decode(s: &str) -> Hint {
+    pub(crate) fn decode(s: &str) -> Hint {
         let mut it = s.split('\x1e');
         let tag = it.next().unwrap_or("");
         let cause = it.next().unwrap_or("").to_owned();
@@ -872,7 +872,7 @@ impl TextHints {
     /// The hint of the text from byte `off` to byte `end`: the union of
     /// the bounds of the commands in it (a run executes all of them: a
     /// line of a file read by `\input`, a region).
-    fn at_until(&self, off: usize, end: usize) -> Hint {
+    pub(crate) fn at_until(&self, off: usize, end: usize) -> Hint {
         let k = self.starts.partition_point(|&s| s < off);
         let mut acc: Option<Bound> = None;
         let mut first: Option<usize> = None;
@@ -3044,6 +3044,24 @@ pub(crate) fn kind_of(text: &str, named: FileKind) -> FileKind {
     } else {
         named
     }
+}
+
+/// The hint of an output routine's text (`\output` shown as source,
+/// `crate::pages`), read whole under the format's definitions: what
+/// the finisher running it may define.
+pub(crate) fn routine_hint(text: &str, defs: &Defs) -> Hint {
+    let t = text_hints(text, FileKind::Document, defs);
+    let mut h = t.at_until(0, text.len());
+    if crate::exec::env_flag!("PHITEX_HINTS") {
+        eprintln!(
+            "hint (output routine) {:?}: {:?} ({})",
+            short(text),
+            h.may_define(),
+            h.cause
+        );
+    }
+    h.excerpt = short(text);
+    h
 }
 
 /// The analysis of a document's or prelude's text under the format's

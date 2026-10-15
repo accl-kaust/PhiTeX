@@ -2,6 +2,7 @@
 //! loading command, a whole format), `Put` (definitions that land
 //! outside a group that just closed), `Dvi` (the file), `Mark` (the
 //! end of the prelude) and `Files` (the files read back next round).
+//! The pages' (`Fold`, `Finish`, `Resume`) are in `crate::pages`.
 
 use std::sync::{Arc, OnceLock};
 
@@ -330,6 +331,7 @@ impl Operation for Exec {
                     && !crate::exec::env_flag!("PHITEX_PKG_NONET")
                     && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
+                r.read_cut_request()?;
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
                 crate::hints::count(r, if tokens { 5 } else { 6 });

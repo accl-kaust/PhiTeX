@@ -708,6 +708,16 @@ impl State {
             .is_some_and(|m| m.ldef_stamp > since)
     }
 
+    /// Whether the latest definition of `loc` stands at the run's end
+    /// as its own: global, or local outside every group of the run (a
+    /// local one in a group is restored at the group's close).
+    pub(crate) fn def_stands(&self, loc: Loc) -> bool {
+        self.slot_ref(loc)
+            .and_then(|s| usize::try_from(s.meta).ok().filter(|&m| m > 0))
+            .and_then(|m| self.metas.get(m - 1))
+            .is_some_and(|m| !m.ldef_local || m.ldef_gid.is_none())
+    }
+
     /// The groups opened so far: a group [`State::open`] opens after
     /// this has a greater number.
     pub(crate) fn gid_mark(&self) -> u32 {
@@ -738,6 +748,31 @@ impl State {
         }
         out.sort_unstable();
         out.dedup();
+        out
+    }
+
+    /// [`State::read_locs`] with the values read (`None`: undefined in
+    /// the engine).
+    pub(crate) fn read_values(&self) -> Vec<(Loc, Option<ValueId>)> {
+        let mut out: Vec<(Loc, Option<ValueId>)> = self
+            .metas
+            .iter()
+            .filter_map(|m| m.eng.map(|e| (m.loc, e)))
+            .collect();
+        let has_meta: phitex_defuse::FxHashSet<Loc> = self.metas.iter().map(|m| m.loc).collect();
+        for &l in &self.touched {
+            if has_meta.contains(&l) {
+                continue;
+            }
+            if let Some(s) = self.slot_ref(l)
+                && s.e.flags & LOADED != 0
+                && s.e.flags & PRELOADED == 0
+            {
+                out.push((l, s.e.id));
+            }
+        }
+        out.sort_unstable_by_key(|e| e.0);
+        out.dedup_by_key(|e| e.0);
         out
     }
 

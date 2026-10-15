@@ -48,7 +48,9 @@ pub(crate) type R<T> = Result<T, Halt>;
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
-    /// A page's finisher and the rest of a cut piece (`crate::pages`).
+    /// A piece's fold, a page's finisher and the rest of a cut piece
+    /// (`crate::pages`).
+    pub fold: OpId,
     pub finish: OpId,
     pub resume: OpId,
     /// The build's field handles (`crate::fields`).
@@ -68,6 +70,10 @@ pub(crate) struct Ops {
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
     /// The page states folds hand on (`crate::pages::PageStates`).
     pub page_states: std::sync::Arc<crate::pages::PageStates>,
+    /// What the last finisher running each output routine defined, by
+    /// the routine's hint value: the next finisher's predicted
+    /// definitions (`crate::pages::Finish`).
+    pub fin_defs: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, Vec<(Field, ValueId)>>>>,
 }
 
 
@@ -416,10 +422,13 @@ pub(crate) struct Run<'c, 'a> {
     /// main list since, a finisher's page, and the cut its fold found.
     pub cand: u32,
     pub stop_at: Option<u32>,
-    pub cand_mark: Option<crate::pages::CandMark>,
+    pub cand_marks: Vec<crate::pages::CandMark>,
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
     pub cut: Option<u32>,
+    /// The candidate a finisher asked this piece to cut at
+    /// (`Run::read_cut_request`): the piece folds in its own run.
+    pub cut_req: Option<u32>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -512,10 +521,11 @@ impl<'c, 'a> Run<'c, 'a> {
             halt: None,
             cand: 0,
             stop_at: None,
-            cand_mark: None,
+            cand_marks: Vec::new(),
             ins_pending: Vec::new(),
             fin: None,
             cut: None,
+            cut_req: None,
         }
     }
 
@@ -1011,18 +1021,83 @@ impl<'c, 'a> Run<'c, 'a> {
     /// main list (page.rs `breaks`, §980).
     pub(crate) fn put_page_params(&mut self) {
         let v = self.v;
-        let vsize = self.ipar(Par::vsize).unwrap_or(0);
-        let maxdepth = self.ipar(Par::maxdepth).unwrap_or(0);
-        let topskip = self.gpar(Par::topskip).unwrap_or_default();
-        let holding = self.ipar(Par::holdinginserts).unwrap_or(0);
-        let marker = v.list(vec![
+        let marker = self.page_params_marker().unwrap_or_else(|_| {
+            v.list(vec![
+                v.int(crate::nodes::T_PAGE_PARAMS),
+                v.int(0),
+                v.int(0),
+                crate::val::glue_value(v, &phitex_typeset::glue::Glue::ZERO),
+                v.int(0),
+            ])
+        });
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), marker])));
+    }
+
+    /// The page parameters in force (§980), as a `T_PAGE_PARAMS` marker:
+    /// `[tag, vsize, maxdepth, topskip, holdinginserts]`.
+    pub(crate) fn page_params_marker(&mut self) -> R<ValueId> {
+        let v = self.v;
+        let vsize = self.ipar(Par::vsize)?;
+        let maxdepth = self.ipar(Par::maxdepth)?;
+        let topskip = self.gpar(Par::topskip)?;
+        let holding = self.ipar(Par::holdinginserts)?;
+        Ok(v.list(vec![
             v.int(crate::nodes::T_PAGE_PARAMS),
             v.int(i64::from(vsize)),
             v.int(i64::from(maxdepth)),
             crate::val::glue_value(v, &topskip),
             v.int(i64::from(holding)),
-        ]);
+        ]))
+    }
+
+    /// The page parameters reaching the fold, as a `T_PAGE_PARAMS`
+    /// marker without values (`[tag]`): the fold reads them where it is
+    /// ([`Run::resolve_page_params`]), so a piece that leaves them alone
+    /// does not read them (an output routine setting one would refute
+    /// every piece after it that had run ahead).
+    pub(crate) fn put_page_params_reaching(&mut self) {
+        let v = self.v;
+        let marker = v.list(vec![v.int(crate::nodes::T_PAGE_PARAMS)]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), marker])));
+    }
+
+    /// The `[tag]` page parameter markers of `raw`
+    /// ([`Run::put_page_params_reaching`]) and the `[tag, n]` insertion
+    /// class markers (`Run::finish_candidate`) given the values in force
+    /// in this run.
+    pub(crate) fn resolve_page_params(&mut self, raw: &mut [ValueId]) -> R<()> {
+        let v = self.v;
+        let mut full = None;
+        let mut classes: Vec<(u16, ValueId)> = Vec::new();
+        for x in raw.iter_mut() {
+            let tag = crate::nodes::tag(v, *x);
+            if tag == crate::nodes::T_PAGE_PARAMS && crate::val::list_of(v, *x).len() == 1 {
+                let m = match full {
+                    Some(m) => m,
+                    None => {
+                        let m = self.page_params_marker()?;
+                        full = Some(m);
+                        m
+                    }
+                };
+                *x = m;
+            } else if tag == crate::nodes::T_INS_PARAMS {
+                let xs = crate::val::list_of(v, *x);
+                if xs.len() == 2 {
+                    let n = u16::try_from(int_of(v, xs[1])).unwrap_or(0);
+                    let m = match classes.iter().find(|c| c.0 == n) {
+                        Some(&(_, m)) => m,
+                        None => {
+                            let m = self.ins_params_marker(n)?;
+                            classes.push((n, m));
+                            m
+                        }
+                    };
+                    *x = m;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether file `name` is one the job writes and reads back, with its
@@ -2593,9 +2668,10 @@ pub(crate) struct Parked {
     read_back_at: Option<crate::input::Level>,
     cand: u32,
     stop_at: Option<u32>,
-    cand_mark: Option<crate::pages::CandMark>,
+    cand_marks: Vec<crate::pages::CandMark>,
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
+    cut_req: Option<u32>,
 }
 
 impl Run<'_, '_> {
@@ -2710,9 +2786,10 @@ impl Run<'_, '_> {
             read_back_at: self.read_back_at,
             cand: self.cand,
             stop_at: self.stop_at,
-            cand_mark: self.cand_mark,
+            cand_marks: std::mem::take(&mut self.cand_marks),
             ins_pending: std::mem::take(&mut self.ins_pending),
             fin: self.fin.take(),
+            cut_req: self.cut_req,
         })
     }
 }
@@ -2783,9 +2860,10 @@ impl<'c, 'a> Run<'c, 'a> {
         r.read_back_at = p.read_back_at;
         r.cand = p.cand;
         r.stop_at = p.stop_at;
-        r.cand_mark = p.cand_mark;
+        r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
+        r.cut_req = p.cut_req;
         r.resumed = true;
         Ok(r)
     }

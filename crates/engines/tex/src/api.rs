@@ -898,6 +898,10 @@ pub struct Stats {
     pub tail_siblings: u64,
     /// Children that ran out of text (a claim measured short: a bug).
     pub starved: u64,
+    /// Cuts the finishers asked for (`crate::pages`: a routine run after
+    /// the piece its page finished inside of changed what the piece's
+    /// commands after the candidate saw): each costs a round.
+    pub cuts: u64,
     /// Loop-back rounds the engine ran (the files read back, to their
     /// fixpoint).
     pub loop_rounds: u64,
@@ -1254,6 +1258,10 @@ struct Graph {
     /// The `wdef:<field>` loop-backs declared: the fields the read-back
     /// of a job-written file defines.
     wdefs: Vec<String>,
+    /// The pieces a finisher asked to cut, at which candidate (`cutreq`,
+    /// `crate::pages`): each piece's `cut:<node>` is in the environment
+    /// from the next evaluation on.
+    cuts: Vec<(i64, i64)>,
     /// The round-one guesses of the `wkeys:<name>` loop-backs.
     wkeys_guess: Vec<(String, Vec<String>)>,
     /// What the executor runs now, for readers on other threads.
@@ -1302,6 +1310,7 @@ impl Graph {
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
+        let fold = eng.register(Arc::new(crate::pages::Fold(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi(shared.clone())));
@@ -1316,6 +1325,7 @@ impl Graph {
         let ops = Ops {
             exec,
             put,
+            fold,
             finish,
             resume,
             fields,
@@ -1324,6 +1334,7 @@ impl Graph {
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
             page_states: Arc::default(),
+            fin_defs: Arc::default(),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -1342,6 +1353,7 @@ impl Graph {
             pdf_exact: None,
             pdf_fold: None,
             wdefs: Vec::new(),
+            cuts: Vec::new(),
             wkeys_guess: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             sched: phitex_defuse::Greedy::default(),
@@ -1666,6 +1678,10 @@ impl Graph {
         if self.pdf_fold.is_some() {
             env.push((v.field("pdf:fold"), v.int(1)));
         }
+        for &(pid, k) in &self.cuts {
+            let name = format!("cut:{}", u64::from_ne_bytes(pid.to_ne_bytes()));
+            env.push((v.field(&name), v.int(k)));
+        }
         if fixpoint {
             let names = self.written.iter().map(|n| v.str(n)).collect();
             env.push((v.field("loopfiles"), v.list(names)));
@@ -1825,6 +1841,29 @@ impl Graph {
                     }
                     self.wdefs.push(f);
                     asked = true;
+                }
+            }
+            // the cuts the finishers asked for (`crate::pages`): each
+            // piece's `cut:<node>` put in the environment at its
+            // candidate, and the piece (its reader) runs again, folding
+            // in its own run
+            {
+                let v = self.eng.values();
+                let reqs = self
+                    .eng
+                    .acc_value(unit, v.field("cutreq"))
+                    .map(|x| v.seq_to_vec(x))
+                    .unwrap_or_default();
+                for e in reqs {
+                    let xs = list_of(v, e);
+                    if let [pid, k] = xs[..] {
+                        let (pid, k) = (int_of(v, pid), int_of(v, k));
+                        if !self.cuts.iter().any(|(p, _)| *p == pid) {
+                            self.cuts.push((pid, k));
+                            stats.cuts += 1;
+                            asked = true;
+                        }
+                    }
                 }
             }
             let asked_names: Vec<String> = {
@@ -4287,6 +4326,7 @@ fn declare_fields(eng: &mut Engine) {
         "fread",
         "tools",
         "pkgrecs",
+        "cutreq",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
     ] {
