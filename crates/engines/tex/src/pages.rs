@@ -1659,7 +1659,30 @@ impl Run<'_, '_> {
         let conds = v.list(self.conds.iter().map(|&c| v.int(i64::from(c))).collect());
         let codes = v.list(self.if_codes.iter().map(|&c| v.int(i64::from(c))).collect());
         // the state table's groups
-        let c = self.st.cont(v);
+        let open: Vec<u32> = self
+            .nest
+            .iter()
+            .filter(|l| l.group != 0)
+            .map(|l| l.gid)
+            .collect();
+        if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
+            let l = self.loc_of(v.field(&name));
+            eprintln!(
+                "cont {} at a cut: {name}: {} (open groups {open:?})",
+                self.cx.node().raw(),
+                self.st.debug_marks(l)
+            );
+        }
+        let c = self.st.cont(v, &open);
+        if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
+            let l = self.loc_of(v.field(&name));
+            let hit = c.slots.iter().find(|s| s.loc == l);
+            eprintln!(
+                "cont {} encodes {name}: {:?}",
+                self.cx.node().raw(),
+                hit.map(|s| (s.cur.map(|x| v.render(x)), s.loaded, s.save_gid, s.ldef, s.group_local))
+            );
+        }
         let mut slots = Vec::new();
         let mut overrides = Vec::new();
         let mut locals = Vec::new();
@@ -1805,13 +1828,25 @@ impl Run<'_, '_> {
         for f in list_of(v, sa(2)) {
             defined.push(self.loc_of(Field(f)));
         }
-        self.st = State::from_cont(ContState {
+        // (the locations above were computed in the run's first state:
+        // a field past the static cells has its location there, kept)
+        let mut ns = State::from_cont(ContState {
             slots,
             save,
             defined,
             stamp: u(sa(3)),
             next_gid: u32::try_from(int_of(v, sa(4))).unwrap_or(0),
         });
+        ns.adopt_spill(&self.st);
+        self.st = ns;
+        if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
+            let l = self.loc_of(v.field(&name));
+            eprintln!(
+                "cont {} loaded: {name}: {}",
+                self.cx.node().raw(),
+                self.st.debug_marks(l)
+            );
+        }
         // the fields the finishers between the cut and this resume
         // defined globally (`gdefs`, the window after the cutting node)
         let gdefs: Vec<ValueId> = match self.cx.args().get(2).copied() {
@@ -2067,19 +2102,23 @@ impl Operation for Finish {
                         r.st.preload(loc, some(x));
                     }
                 }
-                if let Ok(names) = std::env::var("PHITEX_FIN_SHOW") {
+                if let Some(names) = crate::exec::env_str!("PHITEX_FIN_SHOW") {
                     let mut shown = Vec::new();
                     for n in names.split(',') {
                         let x = r.get(n)?;
                         shown.push(format!("{n}={}", x.map_or_else(|| "undefined".to_owned(), |x| crate::val::show_def(v, x))));
                     }
+                    let locals: Vec<String> = list_of(v, a(3))
+                        .iter()
+                        .filter_map(|&e| list_of(v, e).first().map(|&f| str_of(v, f)))
+                        .collect();
                     eprintln!(
-                        "finisher {} page {} (piece {}, candidate {}, locals {}, args {}): {}",
+                        "finisher {} page {} (piece {}, candidate {}, locals {:?}, args {}): {}",
                         r.cx.node().raw(),
                         int_of(v, a(0)),
                         v.render(a(5)),
                         v.render(a(6)),
-                        list_of(v, a(3)).len(),
+                        locals,
                         args.len(),
                         shown.join(", ")
                     );

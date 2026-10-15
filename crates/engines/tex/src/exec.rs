@@ -43,6 +43,17 @@ macro_rules! env_flag {
 }
 pub(crate) use env_flag;
 
+/// A debug variable's text, read once per process (`None`: unset or
+/// empty).
+macro_rules! env_str {
+    ($name:literal) => {{
+        static F: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        F.get_or_init(|| std::env::var($name).ok().filter(|v| !v.is_empty()))
+            .as_deref()
+    }};
+}
+pub(crate) use env_str;
+
 /// Below this many items an engine pass runs on the calling thread
 /// (its items cost microseconds).
 const GRAIN: usize = 64;

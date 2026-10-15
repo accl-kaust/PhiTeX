@@ -296,6 +296,17 @@ impl State {
         s
     }
 
+    /// The spill locations of `prev` (the state a continuation's
+    /// locations were computed in, [`State::from_cont`]): a field past
+    /// the static cells keeps its location, and its slot its field.
+    pub(crate) fn adopt_spill(&mut self, prev: &State) {
+        self.spill_ix = prev.spill_ix.clone();
+        let fields: Vec<(Field, u32)> = self.spill_ix.iter().map(|(&f, &i)| (f, i)).collect();
+        for (f, i) in fields {
+            self.slot(SPILL | i).field = Some(f);
+        }
+    }
+
     /// The spill location of field `f`.
     pub(crate) fn spill_loc(&mut self, f: Field) -> Loc {
         if let Some(&i) = self.spill_ix.get(&f) {
@@ -348,6 +359,27 @@ impl State {
     /// A value read in place of the engine's (a page step's `\count0..9`
     /// as the step before left them): loaded, and never compared with
     /// the engine's at the end.
+    /// Debug: a slot's marks (touched, local definition and its group,
+    /// saving group, inert stamp).
+    pub(crate) fn debug_marks(&self, loc: Loc) -> String {
+        let Some(s) = self.slot_ref(loc) else {
+            return "no slot".to_owned();
+        };
+        let m = usize::try_from(s.meta)
+            .ok()
+            .filter(|&m| m > 0)
+            .and_then(|m| self.metas.get(m - 1));
+        format!(
+            "touched {} in-touched-list {} save_gid {} ginert {} ldef {:?} defined-list {}",
+            s.touched,
+            self.touched.contains(&loc),
+            s.save_gid,
+            s.ginert,
+            m.map(|m| (m.ldef_local, m.ldef_gid, m.ldef_stamp)),
+            self.defined.contains(&loc)
+        )
+    }
+
     /// Debug: a slot's entry as the run holds it (value kind, id,
     /// flags), without loading it.
     pub(crate) fn debug_slot(&self, loc: Loc) -> String {
@@ -643,10 +675,19 @@ impl State {
         if is_page_param(loc) {
             self.pp_dirty = true;
         }
+        // (a group's binding changed in place stays that group's: its
+        // local definition, by the group that saved it when the last
+        // definition does not say; `\multiply\doublecol@number` in
+        // multicol's environment group)
+        let save_gid = self.slot_ref(loc).map_or(0, |s| s.save_gid);
         let m = &mut self.metas[mi];
         m.ldef_stamp = st;
         m.ldef_local = true;
-        m.ldef_gid = None;
+        if base {
+            m.ldef_gid = None;
+        } else if m.ldef_gid.is_none() && save_gid != 0 {
+            m.ldef_gid = Some(save_gid);
+        }
         if base {
             let l = if global {
                 Locality::Global
@@ -1125,7 +1166,10 @@ pub(crate) struct ContState {
 }
 
 impl State {
-    pub(crate) fn cont(&self, v: &Values) -> ContState {
+    /// `open`: the groups of the run open now (their ids, the nest's
+    /// group levels): a slot is a group's local only while its local
+    /// definition's group is one of them.
+    pub(crate) fn cont(&self, v: &Values, open: &[u32]) -> ContState {
         let ent = |e: &Entry| -> (Option<ValueId>, bool) {
             let id = if e.flags & HAS_ID != 0 {
                 e.id
@@ -1136,19 +1180,20 @@ impl State {
         };
         let mut slots = Vec::new();
         // (the local definitions in the groups still open: a group's
-        // close drops its own from `defined`, and restores the slot
-        // without clearing the meta's mark of a local definition in a
-        // group; `\begingroup\let\thepage\relax...\endgroup`
-        // closed before the cut is no local of the continuation)
-        let open_locals: phitex_defuse::FxHashSet<Loc> = self.defined.iter().copied().collect();
+        // close restores the slot without clearing the meta's mark of a
+        // local definition in a group; `\begingroup\let\thepage\relax
+        // ...\endgroup` closed before the cut is no local of the
+        // continuation. By the group's id, which a resume keeps: the
+        // `defined` list does not survive a resume's own closes)
         for &l in &self.touched {
             let Some(s) = self.slot_ref(l) else { continue };
             let m = usize::try_from(s.meta)
                 .ok()
                 .filter(|&m| m > 0)
                 .and_then(|m| self.metas.get(m - 1));
-            let group_local = open_locals.contains(&l)
-                && m.is_some_and(|m| m.ldef_local && m.ldef_gid.is_some());
+            let group_local = m.is_some_and(|m| {
+                m.ldef_local && m.ldef_gid.is_some_and(|g| open.contains(&g))
+            });
             if s.save_gid == 0 && s.ginert == 0 && !group_local {
                 continue;
             }
