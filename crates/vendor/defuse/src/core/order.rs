@@ -2191,6 +2191,10 @@ impl Shared {
     /// Marks a node for validation (or a re-run with `run`).
     pub(crate) fn touch(&self, s: Slot, gn: u32, cause: &Cause, run: bool) {
         let r = self.rec(s);
+        // Something it read may have changed: its next check starts over.
+        if let Some(e) = r.data().x.as_mut() {
+            e.check_from = 0;
+        }
         if gn != u32::MAX && gn != super::SPEC_SEQ {
             if r.st() == S_PARK && r.has(F_NEEDS_RUN) {
                 // It runs again when woken: only its kept log (under its
@@ -2336,6 +2340,19 @@ impl Shared {
             .as_mut()
             .map_or_else(Vec::new, |e| std::mem::take(&mut e.guessed_by));
         for g in gs {
+            // Its guess on `q` is compared now: a commit of `q` that raced
+            // the guesser's registration did not touch it.
+            let log = self.rec(g).data().res.as_ref().map(|c| c.log.clone());
+            super::query::sib_cursor_reset();
+            let moved = log.is_some_and(|l| {
+                l.iter().any(|p| {
+                    matches!(p, super::Pred::Def { spec: Some(x), .. } if *x == q)
+                        && !matches!(self.recheck(g, p, false), Ok(Ok(())))
+                })
+            });
+            if moved {
+                self.touch(g, u32::MAX, &Cause::Structure, false);
+            }
             let done = {
                 let mut d = self.rec(g).data();
                 let e = d.ex();

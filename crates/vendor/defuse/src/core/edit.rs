@@ -824,6 +824,40 @@ impl Engine {
         self.sh.live_slot(node).is_some()
     }
 
+    /// A node's committed reads of definitions, one per line: field, the
+    /// node whose definition answered (or env / loop), the value, and the
+    /// node a speculative read guessed from. For tracking down a wrong
+    /// result after an edit.
+    #[must_use]
+    pub fn debug_reads(&self, id: NodeId) -> String {
+        let Some(s) = self.sh.live_slot(id) else {
+            return format!("{id:?}: gone");
+        };
+        let sh = &self.sh;
+        let log = sh.rec(s).data().res.as_ref().map(|c| c.log.clone()).unwrap_or_default();
+        let mut out = String::new();
+        for p in &log {
+            if let super::Pred::Def { f, ans, spec, mode, .. } = p {
+                let name = sh.values.render(f.0);
+                let (from, val) = match ans {
+                    super::DAns::Site { node, val, .. } => (
+                        format!("{:?}", sh.node_id(*node)),
+                        match val {
+                            super::DefVal::Val(x) | super::DefVal::Push(x) | super::DefVal::Repl(x) => sh.values.render(*x),
+                            other => format!("{other:?}"),
+                        },
+                    ),
+                    super::DAns::Env(x) => ("env".into(), x.map_or("none".into(), |x| sh.values.render(x))),
+                    super::DAns::Loop(x) => ("loop".into(), sh.values.render(*x)),
+                    super::DAns::Seq(x) => ("seq".into(), x.map_or("none".into(), |x| sh.values.render(x))),
+                };
+                let guess = spec.map_or(String::new(), |g| format!(" guessed from {:?}", sh.node_id(g)));
+                out.push_str(&format!("{name} ({mode:?}): from {from} = {val}{guess}\n"));
+            }
+        }
+        out
+    }
+
     /// A node's scheduling state, for diagnostics.
     #[must_use]
     pub fn debug_node(&self, id: NodeId) -> String {

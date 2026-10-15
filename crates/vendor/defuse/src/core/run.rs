@@ -181,9 +181,16 @@ impl Shared {
 
     #[inline(never)]
     pub(crate) fn check_log_in(&self, me: Slot, log: &[Pred]) -> Check {
+        self.check_log_from(me, log, 0).0
+    }
+
+    /// `check_log_in` from read `from` on (the reads before it held when
+    /// last checked, and nothing they read has changed since: a change
+    /// would have touched the node). Also returns where it stopped.
+    pub(crate) fn check_log_from(&self, me: Slot, log: &[Pred], from: usize) -> (Check, usize) {
         // Following-sibling reads in order share one walk.
         let mut cur: Option<(usize, Slot)> = None;
-        for p in log {
+        for (k, p) in log.iter().enumerate().skip(from) {
             if let Pred::Sib { i, ans } = p {
                 let i = *i as usize;
                 let (got, _) = match cur {
@@ -193,17 +200,17 @@ impl Shared {
                 cur = got.map(|g| (i, g.0));
                 match (got, ans) {
                     (a, b) if a == *b => continue,
-                    (Some(a), Some(b)) if a.0 == b.0 && a.1 == b.1 => return Check::Broke("following: changed"),
-                    _ => return Check::Broke("following: gone"),
+                    (Some(a), Some(b)) if a.0 == b.0 && a.1 == b.1 => return (Check::Broke("following: changed"), k),
+                    _ => return (Check::Broke("following: gone"), k),
                 }
             }
             match self.recheck(me, p, true) {
-                Err(w) => return Check::Wait(w),
-                Ok(Err(why)) => return Check::Broke(why),
+                Err(w) => return (Check::Wait(w), k),
+                Ok(Err(why)) => return (Check::Broke(why), k),
                 Ok(Ok(())) => {}
             }
         }
-        Check::Holds
+        (Check::Holds, log.len())
     }
 
     /// An in-work pending claimer before `s` whose claim may cover it.
@@ -372,7 +379,21 @@ impl Shared {
         } else if st == S_DIRTY && has_res && !r.has(F_NEEDS_RUN) {
             let log = r.data().res.as_ref().map_or_else(Default::default, |c| c.log.clone());
             r.set(super::F_CHECKING);
-            let ck = self.check_log(s, &log);
+            let from = r.data().x.as_ref().map_or(0, |e| e.check_from as usize).min(log.len());
+            let u = self.unit_of(s);
+            let (ck, at) = self.sread(u, || self.check_log_from(s, &log, from));
+            if let Some(e) = r.data().x.as_mut() {
+                e.check_from = 0;
+            }
+            if matches!(ck, Check::Wait(_)) {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    let mut d = r.data();
+                    let e = d.ex();
+                    e.check_from = at as u32;
+                    e.check_stuck = at == from;
+                }
+            }
             match ck {
                 Check::Holds => {
                     let done = self.settle_clean(s);
@@ -857,10 +878,15 @@ impl Shared {
     /// may leave its reads holding); after that it runs, so that a chain
     /// of waits is not validated over and over.
     fn park_validation(&self, s: Slot, w: Wait) {
-        // Woken, it checks again; past one wait it runs instead, except
-        // for a range (whose fold is cheap to compare, and whose window
-        // may hold several nodes in work in turn).
-        let again = w.kind == "range" || self.rec(s).data().x.as_ref().is_none_or(|e| e.wait_on.is_none());
+        // Woken, it checks again from where this check waited (the reads
+        // before held, and a change to any of them touches it, which starts
+        // the check over): a chain of waits costs one pass over the log.
+        // A repeat wait at the same read makes no progress: it runs
+        // (except on a pending set, whose definer is often about to
+        // settle the read the same way).
+        let again = w.kind == "range"
+            || w.kind == "pending set"
+            || self.rec(s).data().x.as_ref().is_none_or(|e| e.wait_on.is_none() || !e.check_stuck);
         self.park_with(s, w, None, 1, !again);
     }
 

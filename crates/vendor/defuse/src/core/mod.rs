@@ -501,6 +501,11 @@ pub(crate) struct Extra {
     /// attempt's answer, so siblings past it are not held (cleared when it
     /// runs again from the start).
     pub early_claim: Option<usize>,
+    /// Where a check of the committed log that waited stopped: the next
+    /// check starts there (reset by every touch).
+    pub check_from: u32,
+    /// That check waited where the one before it started.
+    pub check_stuck: bool,
 }
 
 impl Data {

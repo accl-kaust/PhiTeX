@@ -239,11 +239,11 @@ impl Shared {
                 }
             }
             r.data().ex().guess_pending = n;
-            // A predicted read whose definer finished meanwhile is
-            // compared now: a value that moved checks the run again.
+            // A guessed read whose definer finished meanwhile (before this
+            // run registered with it) is compared now: a value that moved
+            // checks the run again.
             super::query::sib_cursor_reset();
-            let moved = pread
-                && cx.log.iter().any(|p| {
+            let moved = cx.log.iter().any(|p| {
                     matches!(p, Pred::Def { spec: Some(q), .. } if !in_work(self.rec(*q).st()))
                         && !matches!(self.recheck(s, p, false), Ok(Ok(())))
                 });
