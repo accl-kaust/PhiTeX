@@ -589,6 +589,10 @@ fn edit_check(name: &str, b: &Build, cold: &Build, k: u64) {
         b.stats.runs,
         report(name, b)
     );
+    if let Ok(dir) = std::env::var("PHITEX_TEST_OUT") {
+        let _ = std::fs::write(format!("{dir}/{name}-edit.pdf"), b.output().0);
+        let _ = std::fs::write(format!("{dir}/{name}-cold.pdf"), cold.output().0);
+    }
     if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
         panic!("{name}: edit differs from cold: {d}");
     }

@@ -2244,7 +2244,13 @@ fn node_args(
                 a.push(v.str(&h));
             } else {
                 let (c, at) = inc.chunk_at(s);
-                a.push(crate::hints::hint_arg(v, &c.th, at));
+                a.push(crate::hints::hint_arg_after(
+                    v,
+                    &c.th,
+                    &text[c.start..],
+                    at,
+                    c.everypar,
+                ));
             }
             a
         }
@@ -4538,5 +4544,10 @@ fn debug_nodes(eng: &Engine, when: &str) {
         let tail = d.rfind(" flags ").map_or(d.as_str(), |i| &d[i..]);
         let head: String = d.chars().take(40).collect();
         eprintln!("  {id}: parent {parent:?}; {head} ...{tail}");
+        for l in eng.debug_reads(n).lines() {
+            if l.contains("count:0") || l.starts_with("\"ps\"") || l.starts_with("ps ") {
+                eprintln!("    read: {}", l.chars().take(160).collect::<String>());
+            }
+        }
     }
 }

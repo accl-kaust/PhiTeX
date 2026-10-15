@@ -1003,6 +1003,12 @@ impl Run<'_, '_> {
         defs.push(v.field(PS));
         defs.push(v.field(crate::build::VTAIL));
         defs.push(v.field(SHIPPED));
+        if let Some(list) = crate::exec::env_str!("PHITEX_DEBUG_NODES")
+            && list.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(self.cx.node().raw()))
+        {
+            let names: Vec<String> = defs.iter().map(|f| crate::val::field_name(v, *f)).collect();
+            eprintln!("narrow {} (resumed {}): {names:?}", self.cx.node().raw(), self.resumed);
+        }
         self.cx.narrow(MayDefine::Names(defs));
         self.begin_command();
         let f = self.ps_field();

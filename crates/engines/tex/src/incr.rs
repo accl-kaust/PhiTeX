@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use phitex_source::pass::{Definitions, FileKind};
 use phitex_source::{Paragraphs, Source, UnitId};
 
-use crate::hints::{Defs, TextHints};
+use crate::hints::{Defs, Everypar, TextHints};
 
 /// A chunk's analysis, under the key of the definitions before it.
 struct Entry {
@@ -48,6 +48,9 @@ pub(crate) struct Chunk {
     pub keys: Arc<[u64]>,
     /// Whether its text names `\\input`, and whether it defines it.
     pub input: Input,
+    /// The `\\everypar` the chunks before it leave pending
+    /// ([`Everypar::after`]): a heading's next paragraphs run it.
+    pub everypar: Everypar,
 }
 
 /// What a chunk's text does with `\\input`.
@@ -337,6 +340,7 @@ impl Incr {
         let analysed = todo.len();
         let mut made = made.into_iter();
         let mut chunks = Vec::with_capacity(parts.len());
+        let mut everypar = Everypar::default();
         for (k, p) in parts.into_iter().enumerate() {
             let e = if let Some(e) = p.cached {
                 e
@@ -357,7 +361,9 @@ impl Incr {
                 th: e.th.clone(),
                 keys: e.keys.clone(),
                 input: e.input,
+                everypar,
             });
+            everypar = everypar.after(&e.th);
             self.cache.insert(e.units[0], e);
         }
         self.chunks = chunks;
