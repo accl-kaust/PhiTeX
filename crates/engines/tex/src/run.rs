@@ -2327,6 +2327,9 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.follow(self.ops.exec, args);
         }
         let n = self.claim_count();
+        if crate::exec::env_flag!("PHITEX_DEBUG_CLAIMS") {
+            eprintln!("claim: node {} claims {n} (pulled {})", self.cx.node().raw(), self.pulled);
+        }
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             eprintln!(
                 "  end {}: claim {n} (pulled {}, rest {}), cut {:?}, stop_at {:?}",

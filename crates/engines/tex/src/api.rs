@@ -1706,6 +1706,7 @@ impl Graph {
     ) {
         let needs_f = self.eng.values().field("needs");
         let tm = crate::exec::env_flag!("PHITEX_TEX_TIME");
+        debug_nodes(&self.eng, "before the evaluation");
         let (mut t_prov, mut t_eval, mut t_after) = (
             std::time::Duration::ZERO,
             std::time::Duration::ZERO,
@@ -1958,6 +1959,7 @@ impl Graph {
                 "settle phases: provider {t_prov:?}, evaluate (rounds, the writer's nodes among them) {t_eval:?}, after the rounds (files, loop-backs, stats) {t_after:?}"
             );
         }
+        debug_nodes(&self.eng, "after the evaluation");
     }
 
     /// The document's nodes pushed onto `unit`, with its units kept for
@@ -4504,5 +4506,20 @@ fn structural_diff(v: &Values, a: ValueId, b: ValueId, path: String) -> Option<(
             format!("{:?} id {}", &*va, a.raw()).chars().take(120).collect(),
             format!("{:?} id {}", &*vb, b.raw()).chars().take(120).collect(),
         )),
+    }
+}
+
+/// Debug: `PHITEX_DEBUG_NODES=id,id,...` prints the engine's view of
+/// those nodes (`debug_node`: label, state, flags; the parent) at the
+/// evaluation's start and end.
+fn debug_nodes(eng: &Engine, when: &str) {
+    let Ok(list) = std::env::var("PHITEX_DEBUG_NODES") else {
+        return;
+    };
+    eprintln!("debug nodes {when}:");
+    for id in list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()) {
+        let n = phitex_defuse::NodeId::from_raw(id);
+        let parent = eng.node_info(n).map(|i| i.parent.map(|p| p.raw()));
+        eprintln!("  {id}: parent {parent:?}; {}", eng.debug_node(n));
     }
 }

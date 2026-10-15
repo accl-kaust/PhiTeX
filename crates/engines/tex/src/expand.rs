@@ -132,9 +132,19 @@ impl Run<'_, '_> {
                     if crate::exec::env_flag!("PHITEX_TEX_TRACE")
                         || crate::exec::env_flag!("PHITEX_UNDEF_TRACE")
                     {
+                        // (debug: what the engine has for the name where
+                        // this node stands, and who defined it)
+                        let t = format!("{:?}", self.cur.tok);
+                        let at = t
+                            .strip_prefix("S(\"")
+                            .and_then(|x| x.strip_suffix("\")"))
+                            .map(|n| {
+                                let f = self.v.field(&format!("cs:{n}"));
+                                { let l = self.loc_of(f); let here = self.cx.use_field(f); format!("here {here:?}, local {}", self.st.debug_slot(l)) }
+                            })
+                            .unwrap_or_default();
                         eprintln!(
-                            "undefined {:?} in node {} (op {:?}, page {})",
-                            self.cur.tok,
+                            "undefined {t} in node {} (op {:?}, page {}): engine {at}",
                             self.cx.node().raw(),
                             self.cx.op(),
                             self.page_index()

@@ -632,6 +632,19 @@ impl Shared {
         }
     }
 
+    /// The last entry of `x`'s extent: its subtree, then its own follows
+    /// (and theirs), which come after the subtree at its level.
+    pub(crate) fn extent_end(&self, x: Slot) -> Slot {
+        let mut e = self.subtree_end(x);
+        loop {
+            let n = self.next(e);
+            if n == NIL || !self.own_cont(n, x) {
+                return e;
+            }
+            e = self.subtree_end(n);
+        }
+    }
+
     /// Whether `x` is a continuation `c` made (directly or through its
     /// continuations): not a sibling `c` sees.
     pub(crate) fn own_cont(&self, x: Slot, c: Slot) -> bool {
@@ -1774,7 +1787,7 @@ impl Shared {
                     fresh.clear();
                 }
                 out.push(x);
-                after = self.subtree_end(x);
+                after = self.extent_end(x);
                 continue;
             }
             let s = match sp {

@@ -907,6 +907,9 @@ impl Run<'_, '_> {
         // other sibling and no reader of another field, a finisher's
         // `MayDefine::Any` and a piece's hint bound narrowed to them)
         let n = self.claim_count();
+        if crate::exec::env_flag!("PHITEX_DEBUG_CLAIMS") {
+            eprintln!("claim: node {} claims {n} at its fold (pulled {})", self.cx.node().raw(), self.pulled);
+        }
         self.cx.claim(n);
         let mut defs = self.published_fields();
         defs.push(v.field(PS));

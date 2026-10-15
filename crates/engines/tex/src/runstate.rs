@@ -348,6 +348,15 @@ impl State {
     /// A value read in place of the engine's (a page step's `\count0..9`
     /// as the step before left them): loaded, and never compared with
     /// the engine's at the end.
+    /// Debug: a slot's entry as the run holds it (value kind, id,
+    /// flags), without loading it.
+    pub(crate) fn debug_slot(&self, loc: Loc) -> String {
+        self.slot_ref(loc).map_or_else(
+            || "none".to_owned(),
+            |s| format!("absent {} id {:?} flags {:#x}", matches!(s.e.val, Native::Absent), s.e.id, s.e.flags),
+        )
+    }
+
     pub(crate) fn preload(&mut self, loc: Loc, x: Option<ValueId>) {
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
