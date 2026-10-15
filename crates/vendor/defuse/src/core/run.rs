@@ -410,6 +410,17 @@ impl Shared {
                 }
                 Check::Broke(_) => {
                     r.clear(super::F_CHECKING);
+                    // The rerun's cause is the read that broke (not the
+                    // last touch, which may have held).
+                    if let Some(f) = self.first_broken_field(s, &log) {
+                        let last = super::lock(&self.reruns).iter().rev().find(|e| e.0 == s).map(|e| e.1.clone());
+                        if let Some(Some(crate::api::Rerun::Changed { field, .. })) = last
+                            && field != f
+                        {
+                            let old = Self::read_value(&r.data(), f).unwrap_or(crate::values::ValueId::UNIT);
+                            self.note_rerun(s, crate::api::Rerun::Changed { field: f, old, new: crate::values::ValueId::UNIT });
+                        }
+                    }
                     if r.has(super::F_PREDREAD | super::F_PROJREAD) {
                         let f = self.broken_field(s, &log);
                         self.prediction_broke(s, f);
@@ -429,6 +440,15 @@ impl Shared {
             return;
         }
         self.run_node(s);
+    }
+
+    /// The field of the first definition read in `log` that no longer
+    /// holds.
+    fn first_broken_field(&self, s: Slot, log: &[super::Pred]) -> Option<crate::values::Field> {
+        log.iter().find_map(|p| match p {
+            super::Pred::Def { f, .. } if matches!(self.check_log(s, std::slice::from_ref(p)), Check::Broke(_)) => Some(*f),
+            _ => None,
+        })
     }
 
     /// The field of the first predicted read in `log` that no longer

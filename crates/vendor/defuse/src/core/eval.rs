@@ -488,8 +488,18 @@ impl Engine {
             a.store(0, Ordering::Relaxed);
         }
         *lock(&sh.t) = super::Tallies::default();
-        sh.no_guess.write().clear();
-        sh.any_no_guess.store(false, Ordering::Relaxed);
+        {
+            // Refutations carry over, fading by one an evaluation: a field
+            // refuted in the last edit is not guessed in the next ones, and
+            // guessed again (a probe) once its count fades.
+            let mut m = sh.no_guess.write();
+            m.retain(|_, n| {
+                *n = n.saturating_sub(1);
+                *n > 0
+            });
+            let any = m.values().any(|&n| n >= super::NO_GUESS_AFTER);
+            sh.any_no_guess.store(any, Ordering::Relaxed);
+        }
         sh.env.write().unknown.clear();
         *lock(&sh.error) = None;
         sh.abort.store(false, Ordering::Relaxed);

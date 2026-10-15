@@ -2336,7 +2336,7 @@ impl Shared {
     pub(crate) fn note_refuted(&self, f: Field) {
         let mut m = self.no_guess.write();
         let n = m.entry(f).or_default();
-        *n += 1;
+        *n = (*n + 1).min(super::NO_GUESS_MAX);
         if *n >= super::NO_GUESS_AFTER {
             self.any_no_guess.store(true, Ordering::Release);
         }
