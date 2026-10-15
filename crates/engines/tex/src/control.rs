@@ -1452,6 +1452,21 @@ impl Run<'_, '_> {
                 self.cx.node().raw(),
                 self.cx.op()
             );
+            if s.contains("contentsline") {
+                let mut ctx = Vec::new();
+                for l in &self.input.levels {
+                    match l.kind {
+                        crate::input::kind::TOKS => ctx.push(format!("T{}", l.ty)),
+                        crate::input::kind::LINE => {
+                            let ln = self.input.line(*l);
+                            let t: String = ln.buf.iter().take(50).filter_map(|&c| char::from_u32(c)).collect();
+                            ctx.push(format!("L[{t}]"));
+                        }
+                        _ => ctx.push("F".to_owned()),
+                    }
+                }
+                eprintln!("aux-trace: context {}", ctx.join(" | "));
+            }
         }
         if open {
             let v = self.v;

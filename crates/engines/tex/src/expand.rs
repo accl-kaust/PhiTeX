@@ -896,18 +896,27 @@ impl Run<'_, '_> {
             self.log("error", "I can't find file")?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         };
-        // (a job-written file whose read-back only defines)
-        self.read_back(&key)?;
         let xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
             self.log("error", "I can't find file")?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         }
+        // (a job-written file whose read-back only defines: its
+        // definitions from the per-field loop-backs, and none of its
+        // text; what its lines write to other files went there where
+        // each line was written, `Run::interpret_line`. Reading the text
+        // too, as `\enddocument` reads the `.aux` it wrote, wrote every
+        // `\@writefile{toc}` line a second time.)
+        let text = if self.read_back(&key)? {
+            self.v.str("")
+        } else {
+            xs[1]
+        };
         let path = str_of(self.v, xs[0]);
         self.log("open", &path)?;
         self.push_toks([Tok::cs("\u{10FFFE}eof")]);
         self.input
-            .push_file(crate::run::FileRest::new(self.v, xs[1], 0, xs[0]));
+            .push_file(crate::run::FileRest::new(self.v, text, 0, xs[0]));
         Ok(())
     }
 
