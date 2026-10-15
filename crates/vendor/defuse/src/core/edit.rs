@@ -633,7 +633,7 @@ impl Engine {
         for &u in &self.all_units() {
             let sh = rlock(self.sh.shard(u, f));
             if let Some(idx) = sh.get(&(u, f)) {
-                for sub in &idx.readers {
+                for sub in &idx.readers.v {
                     notes.touch.push((sub.node, sub.gn, Cause::Loop { field: f }));
                 }
             }

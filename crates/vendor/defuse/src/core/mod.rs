@@ -667,6 +667,15 @@ pub(crate) struct Sub {
     pub from: Slot,
 }
 
+/// Subscriptions by position: appended as readers commit (cheap under the
+/// field's write lock), sorted when a definition change scans them.
+#[derive(Default)]
+pub(crate) struct SubList {
+    pub v: Vec<Sub>,
+    /// Appended out of position order since the last sort.
+    pub unsorted: bool,
+}
+
 /// Everything known about one field in one unit.
 #[derive(Default)]
 pub(crate) struct FieldIdx {
@@ -679,15 +688,15 @@ pub(crate) struct FieldIdx {
     /// The local entries outside the root frame, by label.
     pub nonroot: Vec<Slot>,
     /// Every reader, by position.
-    pub readers: Vec<Sub>,
+    pub readers: SubList,
     /// The readers by each frame of their scope chain, by position.
-    pub freaders: FxHashMap<u32, Vec<Sub>>,
+    pub freaders: FxHashMap<u32, SubList>,
     /// Sequence readers by their frame, by position (they read every
     /// entry of their frame before them).
-    pub sreaders: FxHashMap<u32, Vec<Sub>>,
+    pub sreaders: FxHashMap<u32, SubList>,
     pub named: Vec<Slot>,
     pub contribs: Vec<(Slot, ValueId)>,
-    pub range_readers: Vec<Sub>,
+    pub range_readers: SubList,
 }
 
 pub(crate) const SHARDS: usize = 256;

@@ -1200,23 +1200,33 @@ impl Shared {
     }
 
     /// Inserts a subscription by its position.
-    pub(crate) fn ins_sub(&self, v: &mut Vec<super::Sub>, sub: super::Sub) {
-        let l = self.rec(sub.at).lab();
-        let i = v.partition_point(|x| self.rec(x.at).lab() <= l);
-        v.insert(i, sub);
+    pub(crate) fn ins_sub(&self, v: &mut super::SubList, sub: super::Sub) {
+        if !v.unsorted
+            && let Some(last) = v.v.last()
+            && self.rec(last.at).lab() > self.rec(sub.at).lab()
+        {
+            v.unsorted = true;
+        }
+        v.v.push(sub);
     }
 
     /// Notifies the live subscriptions of `v` at positions in `(lo, hi]`
     /// (`hi` none: to the end), dropping the dead ones met.
     fn scan_subs(
         &self,
-        v: &mut Vec<super::Sub>,
+        v: &mut super::SubList,
         lo: u64,
         hi: Option<u64>,
         skip: Slot,
         cause: &Cause,
         notes: &mut Notes,
     ) {
+        if v.unsorted {
+            // (Stable: entries at one label keep their commit order.)
+            v.v.sort_by_key(|x| self.rec(x.at).lab());
+            v.unsorted = false;
+        }
+        let v = &mut v.v;
         let start = v.partition_point(|x| self.rec(x.at).lab() <= lo);
         let mut j = start;
         let mut i = start;
@@ -1410,6 +1420,11 @@ impl Shared {
             // The range readers after it (by position) whose range starts
             // before it.
             let v = &mut idx.range_readers;
+            if v.unsorted {
+                v.v.sort_by_key(|x| self.rec(x.at).lab());
+                v.unsorted = false;
+            }
+            let v = &mut v.v;
             let start = v.partition_point(|x| self.rec(x.at).lab() <= l);
             let mut j = start;
             for i in start..v.len() {
