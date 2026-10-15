@@ -999,7 +999,8 @@ pub struct Stats {
     pub paragraphs_taken: u64,
     /// Runs that read on with their one group open because leaving it
     /// to the engine as a scope would define a field both at the run's
-    /// level and in the scope (one definition per field and run).
+    /// level and in the scope: 0 since the engine takes both entries
+    /// (kept as a check).
     pub scope_both_levels: u64,
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.

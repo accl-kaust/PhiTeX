@@ -251,10 +251,17 @@ impl Run<'_, '_> {
         if !l.ag.is_empty() {
             let mut xs = vec![v.int(sid)];
             xs.extend(l.ag.iter().map(|t| t.encode(v)));
-            self.set("ag", v.list(xs), false);
             let f = self.ops.fields.get_at(v, self.cx.values_epoch(), "ag");
             let loc = self.loc_of(f);
-            self.st.publish_in_scope(loc);
+            // (an `ag` list the run made at its base level, the enclosing
+            // scope's, stays: the scope's is the field's second entry)
+            if self.st.base_publishes(v, f, Some(loc), self.rec_load) {
+                self.st
+                    .define_scope_extra(loc, crate::runstate::Native::Raw(v.list(xs)));
+            } else {
+                self.set("ag", v.list(xs), false);
+                self.st.publish_in_scope(loc);
+            }
         }
         if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") {
             let ds: Vec<String> = self

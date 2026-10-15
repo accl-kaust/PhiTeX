@@ -2928,6 +2928,12 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         if everypar.step(blank) {
             declare_everypar_run(&mut h);
         }
+        // (a blank line in a list's scope before its first `\item` runs
+        // the list's `\par`, which counts `\par@deathcycles`, a count
+        // register: a blank slice given back into a scope may define one)
+        if blank && let Some(b) = h.bound.as_mut().or(h.guess.as_mut()) {
+            add_head(&mut b.state, "count:");
+        }
         if sets_everypar(&text[s..e]) {
             if let Some(b) = h.bound.as_mut().or(h.guess.as_mut()) {
                 add_head(&mut b.state, "param:everypar");
@@ -3573,8 +3579,9 @@ pub(crate) fn hint_arg_after(
 /// `\\everypar` may define (LaTeX's `\\@afterheading`, `\\@doendpe`),
 /// or a list item's (`\\@item`'s, the first paragraph of a trivlist
 /// environment: `\\@minipagefalse`, `\\global\\@newlistfalse`,
-/// `\\global\\@inlabelfalse`).
-const EVERYPAR_RUN: [&str; 10] = [
+/// `\\global\\@inlabelfalse`; a theorem's later paragraph, run in its
+/// scope: `\\@noparitemfalse`).
+const EVERYPAR_RUN: [&str; 11] = [
     "cs:par",
     "param:clubpenalty",
     "param:everypar",
@@ -3585,6 +3592,7 @@ const EVERYPAR_RUN: [&str; 10] = [
     "cs:if@minipage",
     "cs:if@newlist",
     "cs:if@inlabel",
+    "cs:if@noparitem",
 ];
 
 /// Whether a slice calls a command that leaves `\\everypar` other
@@ -3752,8 +3760,8 @@ pub(crate) const COUNTERS: [&str; 10] = [
     "frames:pars",
     // (paragraph-region slices another node's run took, pulled)
     "frames:pars_taken",
-    // (groups a run could not leave to the engine as a scope: a field
-    // at both levels, `Run::scope_both_levels`)
+    // (groups a run could not leave to the engine as a scope for a
+    // field at both levels: none since the engine's two-entry form)
     "frames:scope_both",
 ];
 

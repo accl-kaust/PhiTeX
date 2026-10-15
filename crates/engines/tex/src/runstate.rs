@@ -158,6 +158,10 @@ pub(crate) struct State {
     spill_ix: FxHashMap<Field, u32>,
     touched: Vec<Loc>,
     metas: Vec<Meta>,
+    /// The scope's definitions of locations the run's base level also
+    /// publishes, at another value: the field's second entry, the scope's
+    /// ([`State::abandon_to_scope`]; made as the run ends, never parked).
+    scope_extra: Vec<(Loc, Native)>,
     save: Vec<Saved>,
     /// Locations defined locally inside a group of the run (for a group
     /// left open: its definitions become the run's).
@@ -221,6 +225,7 @@ impl Clone for State {
             spill_ix: self.spill_ix.clone(),
             touched: self.touched.clone(),
             metas: self.metas.clone(),
+            scope_extra: self.scope_extra.clone(),
             save: self.save.clone(),
             defined: self.defined.clone(),
             stamp: self.stamp,
@@ -261,6 +266,7 @@ impl State {
             spill_ix: FxHashMap::default(),
             touched: Vec::new(),
             metas: Vec::new(),
+            scope_extra: Vec::new(),
             save: Vec::new(),
             defined: Vec::new(),
             stamp: 0,
@@ -984,6 +990,11 @@ impl State {
             }
             out.push((m.loc, x, *l));
         }
+        for (loc, val) in &self.scope_extra {
+            if let Some(x) = val.encode(v) {
+                out.push((*loc, x, Locality::Scope));
+            }
+        }
         out
     }
 
@@ -1032,21 +1043,6 @@ impl State {
         out
     }
 
-    /// Whether a group left to the engine as a scope ([`State::
-    /// abandon_to_scope`]) would need a field defined at both levels: a
-    /// local definition of the group's whose location the run's base
-    /// level publishes at another value (the engine takes one
-    /// definition per field and run).
-    pub(crate) fn scope_both_levels(&self, v: &Values, def_base: usize, open_stamp: u64, top: bool) -> Vec<Loc> {
-        self.group_locals(v, def_base, open_stamp)
-            .into_iter()
-            .filter(|&(mi, x)| Self::base_publish(&self.metas[mi], v, top).is_some_and(|y| x != Some(y)))
-            .map(|(mi, _)| self.metas[mi].loc)
-            .collect::<std::collections::BTreeSet<Loc>>()
-            .into_iter()
-            .collect()
-    }
-
     /// Whether the run's base level publishes field `f` (at `loc`, its
     /// static location, else its spill location if it has one).
     pub(crate) fn base_publishes(&self, v: &Values, f: Field, loc: Option<Loc>, top: bool) -> bool {
@@ -1064,9 +1060,8 @@ impl State {
     /// the run opens after itself: its local definitions are published
     /// as the scope's (`Locality::Scope`, `Ctx::define_in_scope`), the
     /// base level's stay the run's; a group's local of the value the base
-    /// level publishes is that definition seen inside. (A location the
-    /// base level publishes at another value is refused before,
-    /// [`State::scope_both_levels`].)
+    /// level publishes is that definition seen inside; of another value,
+    /// a second entry of the field, the scope's ([`State::scope_extra`]).
     pub(crate) fn abandon_to_scope(
         &mut self,
         v: &Values,
@@ -1076,15 +1071,31 @@ impl State {
         top: bool,
     ) {
         for (mi, x) in self.group_locals(v, def_base, open_stamp) {
-            if Self::base_publish(&self.metas[mi], v, top).is_some() || x.is_none() {
-                continue;
-            }
+            let Some(x) = x else { continue };
             let loc = self.metas[mi].loc;
-            let val = self.slot(loc).e.val.clone();
-            self.metas[mi].publ = Some((val, Locality::Scope));
+            match Self::base_publish(&self.metas[mi], v, top) {
+                Some(y) if y == x => {}
+                Some(_) => {
+                    if !self.scope_extra.iter().any(|e| e.0 == loc) {
+                        let val = self.slot(loc).e.val.clone();
+                        self.scope_extra.push((loc, val));
+                    }
+                }
+                None => {
+                    let val = self.slot(loc).e.val.clone();
+                    self.metas[mi].publ = Some((val, Locality::Scope));
+                }
+            }
         }
         self.save.truncate(save_base.min(self.save.len()));
         self.defined.truncate(def_base.min(self.defined.len()));
+    }
+
+    /// A definition of `loc` in the scope the run opens after itself,
+    /// beside the run's own one at its base level ([`State::scope_extra`]).
+    pub(crate) fn define_scope_extra(&mut self, loc: Loc, val: Native) {
+        self.scope_extra.retain(|e| e.0 != loc);
+        self.scope_extra.push((loc, val));
     }
 
     /// The run's definition of `loc` at its base level made the scope's
