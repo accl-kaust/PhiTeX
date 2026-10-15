@@ -3444,7 +3444,9 @@ fn plain_catcode(b: u8, at: bool) -> u8 {
 
 /// Counts since the process began (the fallback when the build's own
 /// counters are not read): bounded, any, violations, undeclared.
-pub(crate) static COUNTS: [AtomicU64; 7] = [
+pub(crate) static COUNTS: [AtomicU64; 9] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -3560,8 +3562,11 @@ pub(crate) fn hint_arg_after(
 }
 
 /// What a paragraph running a heading's or an environment end's
-/// `\\everypar` may define (LaTeX's `\\@afterheading`, `\\@doendpe`).
-const EVERYPAR_RUN: [&str; 7] = [
+/// `\\everypar` may define (LaTeX's `\\@afterheading`, `\\@doendpe`),
+/// or a list item's (`\\@item`'s, the first paragraph of a trivlist
+/// environment: `\\@minipagefalse`, `\\global\\@newlistfalse`,
+/// `\\global\\@inlabelfalse`).
+const EVERYPAR_RUN: [&str; 10] = [
     "cs:par",
     "param:clubpenalty",
     "param:everypar",
@@ -3569,6 +3574,9 @@ const EVERYPAR_RUN: [&str; 7] = [
     "cs:if@nobreak",
     "cs:if@endpe",
     "box:0",
+    "cs:if@minipage",
+    "cs:if@newlist",
+    "cs:if@inlabel",
 ];
 
 /// Whether a slice calls a command that leaves `\\everypar` other
@@ -3701,7 +3709,7 @@ pub(crate) fn optimistic_hint() -> String {
 }
 
 /// The accumulators the nodes count into.
-pub(crate) const COUNTERS: [&str; 7] = [
+pub(crate) const COUNTERS: [&str; 9] = [
     "hints:bounded",
     "hints:any",
     "hints:violations",
@@ -3710,6 +3718,10 @@ pub(crate) const COUNTERS: [&str; 7] = [
     // (nodes whose text is a token list, and those reading source text)
     "frames:tokens",
     "frames:text",
+    // (nodes whose own slice is a paragraph region, `slices_of`)
+    "frames:pars",
+    // (paragraph-region slices another node's run took, pulled)
+    "frames:pars_taken",
 ];
 
 /// Classes whose state row still let a run define outside it in the

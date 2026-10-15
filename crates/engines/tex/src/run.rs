@@ -291,6 +291,13 @@ pub(crate) struct Run<'c, 'a> {
     /// and the rest of the line as two text segments
     /// ([`Run::give_back_peeked`]).
     pub pull_orig: Vec<Option<crate::input::Line>>,
+    /// Per pulled sibling: whether a box of the run's own was open when
+    /// it was pulled (a figure's float: one node, like a picture).
+    pub pull_box: Vec<bool>,
+    /// The `put` node a run that left its group to the engine as a scope
+    /// with base-level local definitions too makes for the group's local
+    /// definitions, the first node following it ([`Run::leave_scope`]).
+    pub scope_put: Option<Vec<ValueId>>,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -483,6 +490,8 @@ impl<'c, 'a> Run<'c, 'a> {
             placed_page: false,
             pull_lev: None,
             pull_orig: Vec::new(),
+            pull_box: Vec::new(),
+            scope_put: None,
             top: false,
             claim_rest: false,
             hint_void: false,
@@ -1940,6 +1949,9 @@ impl<'c, 'a> Run<'c, 'a> {
         loop {
             while self.has_input() {
                 if self.give_back_peeked()? {
+                    if self.can_leave_scope() {
+                        self.leave_scope()?;
+                    }
                     return Ok(());
                 }
                 if self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT) {
@@ -1973,6 +1985,18 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             // a paragraph, a group or a conditional still open reads on
             // into the next sibling, claimed
+            if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && self.doc && self.open_span() {
+                eprintln!(
+                    "readon: node {} pulled {}: nest {:?}, conds {}, effect {:?}, opens {}, baselocal {}",
+                    self.cx.node().raw(),
+                    self.pulled,
+                    self.nest.iter().map(|l| (l.mode, l.group, l.owns)).collect::<Vec<_>>(),
+                    self.conds.len(),
+                    self.effect,
+                    self.text_opens_group(),
+                    self.st.has_base_local_def(self.v)
+                );
+            }
             if self.open_span() && !self.eof && self.pull()? {
                 continue;
             }
@@ -1999,7 +2023,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// its own open (sharing the list below it), nothing else open, no
     /// scope effect yet, and a text that does not say it opens none: the
     /// group can be left to the engine as a scope (`Run::leave_scope`).
-    fn can_leave_scope(&self) -> bool {
+    pub(crate) fn can_leave_scope(&self) -> bool {
         self.doc
             && self.conds.is_empty()
             && self.effect == Effect::None
@@ -2011,12 +2035,18 @@ impl<'c, 'a> Run<'c, 'a> {
             )
             && !crate::hints::effect_none(self.v, &self.cx.args())
             && self.text_opens_group()
-            // (the scope's definitions are all the run's, `before` it:
-            // a local one the run made at its base level before the
-            // group opened, as `\document`'s before the `\begin` it
-            // reads on into, lies outside the group and outlives it,
-            // so the run reads on with the group open instead)
-            && !self.st.has_base_local_def(self.v)
+            // (a local definition the run made at its base level before
+            // the group opened lies outside the group and outlives it;
+            // the scope's definitions are all the run's, `before` it, so
+            // the run reads on with the group open instead. `Run::
+            // leave_scope` can keep them outside (the scope opened after
+            // the run's entry, the group's locals in a `put` node after
+            // it), opt-in with `PHITEX_SCOPE_EXPORT=1`: it waits for the
+            // engine's two-level commit (outer-level definitions and the
+            // scope's locals committed atomically by one run); as a
+            // separate `put` node its PDF is not deterministic at 8
+            // threads)
+            && (crate::exec::env_flag!("PHITEX_SCOPE_EXPORT") || !self.st.has_base_local_def(self.v))
     }
 
     /// Whether the node's own text opens a group it does not close (an
@@ -2296,6 +2326,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a run cut at a candidate: its input left is its continuation,
         // the resume piece's, `crate::pages`)
+        if let Some(args) = self.scope_put.take() {
+            self.cx.follow(self.ops.put, args);
+        }
         let leftover = if self.cut.is_some() {
             Vec::new()
         } else {
@@ -2646,6 +2679,7 @@ pub(crate) struct Parked {
     /// peeked sibling back.
     pull_at: Vec<Option<usize>>,
     pull_orig: Vec<Option<crate::input::Line>>,
+    pull_box: Vec<bool>,
     top: bool,
     claim_rest: bool,
     hint_void: bool,
@@ -2762,6 +2796,7 @@ impl Run<'_, '_> {
             pulled: self.pulled,
             pull_at,
             pull_orig,
+            pull_box: self.pull_box.clone(),
             top: self.top,
             claim_rest: self.claim_rest,
             hint_void: self.hint_void,
@@ -2841,6 +2876,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.pulled = p.pulled;
         r.pull_at = p.pull_at;
         r.pull_orig = p.pull_orig;
+        r.pull_box = p.pull_box;
         r.top = p.top;
         r.claim_rest = p.claim_rest;
         r.hint_void = p.hint_void;

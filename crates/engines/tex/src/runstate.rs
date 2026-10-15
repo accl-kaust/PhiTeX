@@ -930,6 +930,48 @@ impl State {
     }
 
 
+    /// The run's local definitions at its base level that change the
+    /// engine's value ([`State::has_base_local_def`]), as they stand.
+    pub(crate) fn base_local_defs(&self, v: &Values) -> Vec<(Loc, Native, ValueId)> {
+        self.metas
+            .iter()
+            .filter_map(|m| match &m.publ {
+                Some((val, Locality::Local)) => val
+                    .encode(v)
+                    .filter(|&x| m.eng != Some(Some(x)))
+                    .map(|x| (m.loc, val.clone(), x)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Takes the local definitions published now that are not the base
+    /// level's `base` ([`State::base_local_defs`] before a group the run
+    /// leaves to the engine was abandoned): they are the group's, and
+    /// go inside the scope. What stays published is `base` (a location
+    /// the group redefined is published at its base-level value).
+    pub(crate) fn take_scope_locals(
+        &mut self,
+        v: &Values,
+        base: &[(Loc, Native, ValueId)],
+    ) -> Vec<(Loc, ValueId)> {
+        let mut out = Vec::new();
+        for m in &mut self.metas {
+            let Some((val, Locality::Local)) = &m.publ else { continue };
+            let Some(x) = val.encode(v) else { continue };
+            let b = base.iter().find(|(l, _, _)| *l == m.loc);
+            if b.is_some_and(|(_, _, y)| *y == x) {
+                continue;
+            }
+            if m.eng == Some(Some(x)) && b.is_none() {
+                continue;
+            }
+            out.push((m.loc, x));
+            m.publ = b.map(|(_, n, _)| (n.clone(), Locality::Local));
+        }
+        out
+    }
+
     /// The table without `Rc`, for a parked run ([`PState`]): the slots
     /// that hold more than an engine read.
     pub(crate) fn park(&mut self, v: &Values) -> PState {

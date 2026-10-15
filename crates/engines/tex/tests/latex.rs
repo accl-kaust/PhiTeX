@@ -512,7 +512,9 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     }
     let regions = b.stats.nodes_text_frames;
     eprintln!(
-        "cold {name}: {regions} document nodes, {} pages; {}",
+        "cold {name}: {regions} document nodes, {} paragraph nodes, {} paragraphs taken, {} pages; {}",
+        b.stats.nodes_paragraphs,
+        b.stats.paragraphs_taken,
         b.pages().len(),
         report(name, &b)
     );
@@ -650,10 +652,20 @@ fn latex_environments() {
     let src = common::read(&dir.join("envs.tex"));
     let (mut b, regions) = cold_nodes("envs", &dir, &src);
     let pars = paragraphs(&src);
-    eprintln!("envs: {regions} document nodes for {pars} paragraphs");
+    // the paragraphs inside an environment that builds a box of its own
+    // (its float), by line: the box is one node, like a picture
+    const IN_BOX: &[usize] = &[67]; // \begin{figure}[t] ... \end{figure}
+    // (the nodes whose own slice is a paragraph region, not every node
+    // reading text: a paragraph another node's run took outside a box is
+    // not one)
+    let (own, taken) = (b.stats.nodes_paragraphs, b.stats.paragraphs_taken);
+    let want = pars - IN_BOX.len() as u64;
+    eprintln!(
+        "envs: {own} paragraph nodes ({taken} paragraphs taken by another node's run outside a box), {regions} text nodes, {pars} paragraphs ({want} outside a box)"
+    );
     assert!(
-        regions >= pars,
-        "{regions} document nodes for {pars} paragraphs"
+        own >= want && taken == 0,
+        "{own} paragraph nodes for {want} paragraphs outside a box, {taken} paragraphs taken by another node's run"
     );
     let new = quack(&src, "Item 3 of the list: the quick ");
     b.edit(&new);

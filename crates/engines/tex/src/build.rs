@@ -220,6 +220,9 @@ impl Run<'_, '_> {
         let v = self.v;
         let base = self.base_mode()?;
         let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
+        // (local definitions the run made at its base level, before the
+        // group opened: they lie outside the scope)
+        let outside = self.st.base_local_defs(v);
         let Some(l) = self.nest.pop() else {
             return Ok(());
         };
@@ -240,10 +243,28 @@ impl Run<'_, '_> {
             xs.extend(l.ag.iter().map(|t| t.encode(v)));
             self.set("ag", v.list(xs), false);
         }
+        // the run's definitions are the scope's (it opens before the
+        // run's own entry); with local definitions at the run's base
+        // level too, the scope opens after the entry, which keeps those
+        // outside it, and the group's local definitions follow inside it
+        // as a `put` node
+        let before = outside.is_empty();
+        if !before {
+            let inside = self.st.take_scope_locals(v, &outside);
+            let mut defs = Vec::with_capacity(inside.len());
+            for (loc, x) in inside {
+                let f = self.loc_field(loc);
+                let name = crate::val::field_name(v, f);
+                defs.push(v.list(vec![v.str(&name), x, v.int(0)]));
+            }
+            if !defs.is_empty() {
+                self.scope_put = Some(vec![v.list(defs), v.list(Vec::new())]);
+            }
+        }
         self.effect = Effect::Scope(phitex_defuse::Brackets {
             closes: 0,
             opens: 1,
-            before: true,
+            before,
             kind: Some(kind),
             kind_pending: false,
         });

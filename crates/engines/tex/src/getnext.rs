@@ -368,7 +368,23 @@ impl Run<'_, '_> {
                 if self.pull_at.len() == self.pulled {
                     self.pull_at.push((!joins).then_some(self.input.text.len()));
                     self.pull_orig.push(None);
+                    let in_box = self.nest.iter().any(|l| l.owns && l.group != 0);
+                    self.pull_box.push(in_box);
                     self.pull_lev = None;
+                }
+                if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && self.doc {
+                    let first: String = args
+                        .first()
+                        .map(|&x| self.v.render(x))
+                        .unwrap_or_default()
+                        .chars()
+                        .take(60)
+                        .collect();
+                    eprintln!(
+                        "pull: node {} pulls sibling {}: {first}",
+                        self.cx.node().raw(),
+                        self.pulled
+                    );
                 }
                 self.pulled += 1;
                 self.input.append_text(segs);
@@ -411,9 +427,10 @@ impl Run<'_, '_> {
             *ALL.get_or_init(|| std::env::var("PHITEX_GIVEBACK_TRACE").is_ok_and(|x| x == "all"));
         let trace = crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && (self.rec_load || all);
         let pulled = self.pulled;
+        let node = self.cx.node().raw();
         let refuse = |why: &str| {
             if trace {
-                eprintln!("giveback: refused (pulled {pulled}): {why}");
+                eprintln!("giveback: refused (node {node}, pulled {pulled}): {why}");
             }
             Ok(false)
         };
@@ -423,7 +440,10 @@ impl Run<'_, '_> {
         if self.pull_at.len() != self.pulled || self.pull_orig.len() != self.pulled {
             return refuse("an earlier sibling was not given back");
         }
-        if self.open_span() || self.aopen != 0 {
+        // (one group of the run's own open is no bar: it is left to the
+        // engine as the scope the given-back sibling runs in,
+        // `Run::run_all`)
+        if (self.open_span() && !self.can_leave_scope()) || self.aopen != 0 {
             return refuse(&format!(
                 "open: {} nest levels, {} conditionals, {} alignments",
                 self.nest.len(),
@@ -628,6 +648,7 @@ impl Run<'_, '_> {
         self.pulled -= 1;
         self.pull_at.pop();
         self.pull_orig.pop();
+        self.pull_box.pop();
         self.pull_lev = None;
     }
 

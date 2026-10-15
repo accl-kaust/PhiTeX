@@ -215,7 +215,52 @@ impl Run<'_, '_> {
                 }
             }
             cmd::IGNORE_SPACES => {
-                self.skip_blanks_x()?;
+                // (vertical mode, a document run: a token of a sibling
+                // pulled during the scan ends the command unexpanded,
+                // put back, so the sibling can be given back at the next
+                // command's start; expanded there instead, as here, since
+                // vertical mode ignores the blanks an expansion leaves,
+                // §1045)
+                if self.doc && self.aopen == 0 && v {
+                    let p0 = self.pulled;
+                    loop {
+                        self.get_next_or_end()?;
+                        if self.pulled > p0 {
+                            self.back_cur();
+                            return Ok(());
+                        }
+                        let c = self.cur.cmd;
+                        if c == cmd::SPACER {
+                            continue;
+                        }
+                        if c <= cmd::MAX_COMMAND {
+                            break;
+                        }
+                        if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
+                            self.macro_call()?;
+                            continue;
+                        }
+                        if c >= cmd::END_TEMPLATE && c != cmd::DONT_EXPAND {
+                            break;
+                        }
+                        self.expand()?;
+                    }
+                } else {
+                    self.skip_blanks_x()?;
+                }
+                // (a run that read past its text: the token found ends
+                // the command, put back, so that at the next command's
+                // start a sibling whose first token it is can be given
+                // back and run as its own node, `Run::give_back_peeked`;
+                // the same token is read again, §1045's reswitch)
+                if self.doc
+                    && self.pulled > 0
+                    && self.aopen == 0
+                    && (!self.cur.tok.is_cs() || self.cur.cmd != cmd::RELAX)
+                {
+                    self.back_cur();
+                    return Ok(());
+                }
                 return self.dispatch();
             }
             cmd::STOP => {

@@ -359,6 +359,9 @@ impl Operation for Exec {
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
                 crate::hints::count(r, if tokens { 5 } else { 6 });
+                if hint.cause.starts_with("region") {
+                    crate::hints::count(r, 7);
+                }
                 r.input.append_text(fs);
                 if let Some((c, k)) = crate::run::carried_conds(r.v, &args) {
                     r.conds = c;
@@ -387,6 +390,13 @@ impl Operation for Exec {
                 .filter_map(|i| r.cx.following(i))
                 .map(|(_, a)| crate::hints::hint_of_args(r.v, &a))
                 .collect();
+            // (a paragraph taken inside a box of the run's own, a
+            // figure's float, is the box's: one node, like a picture)
+            for (i, h) in claimed.iter().enumerate() {
+                if h.cause.starts_with("region") && !r.pull_box.get(i).copied().unwrap_or(false) {
+                    crate::hints::count(r, 8);
+                }
+            }
             if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
                 if let Some(m) = crate::hints::check_defs(r, &hint, &claimed) {
                     r.engine_diag(&m);
