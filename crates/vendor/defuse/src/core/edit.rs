@@ -83,6 +83,8 @@ impl Shared {
             frames: Arena::new(),
             units: Arena::new(),
             fields: (0..SHARDS).map(|_| RwLock::new(FxHashMap::default())).collect(),
+            no_guess: crate::sync::BrLock::new(FxHashMap::default()),
+            any_no_guess: AtomicBool::new(false),
             by_id: (0..256).map(|_| Mutex::new(FxHashMap::default())).collect(),
             accs: FxHashMap::default(),
             seqs: FxHashSet::default(),

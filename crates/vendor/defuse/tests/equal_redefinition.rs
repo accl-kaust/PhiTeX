@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
-use defuse::{Ctx, Engine, Field, Locality, OpId, Operation, Stop, ValueId, Values};
+use defuse::{Report, Ctx, Engine, Field, Locality, OpId, Operation, Stop, ValueId, Values};
 
 struct Ops {
     me: Mutex<Option<OpId>>,
@@ -65,4 +65,81 @@ fn an_equal_value_from_a_remade_node_keeps_readers() {
     eng.replace(pn, op, vec![p, c]);
     eng.evaluate_sequential().unwrap();
     assert_eq!(eng.output(rn), Some(eng.values().int(8)), "a change at the new site reaches R");
+}
+
+struct Threads;
+
+impl defuse::Executor for Threads {
+    fn parallelism(&self) -> usize {
+        4
+    }
+    fn execute(
+        &mut self,
+        n: usize,
+        run: &(dyn Fn(usize) -> defuse::RunResult + Sync),
+        out: &mut Vec<defuse::RunResult>,
+    ) {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::OnceLock<defuse::RunResult>> = (0..n).map(|_| std::sync::OnceLock::new()).collect();
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        let _ = slots[i].set(run(i));
+                    }
+                });
+            }
+        });
+        out.extend(slots.into_iter().map(|s| s.into_inner().expect("every job ran")));
+    }
+}
+
+const SCHEDS: [&str; 4] = ["seq", "spec", "random", "par"];
+
+fn eval(eng: &mut Engine, sched: &str) -> Report {
+    match sched {
+        "seq" => eng.evaluate_sequential(),
+        "spec" => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut defuse::Sequential,
+        ),
+        "random" => eng.evaluate(&mut defuse::RandomScheduler::new(7, true), &mut defuse::Sequential),
+        _ => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut Threads,
+        ),
+    }
+    .expect("evaluate")
+}
+
+
+/// The same under every schedule, with several readers after the re-made
+/// definer (a reader may be checked while the new definer is in work).
+#[test]
+fn an_equal_value_from_a_remade_node_keeps_readers_in_every_schedule() {
+    for sched in ["seq", "spec", "random", "par"] {
+        for _ in 0..if sched == "par" { 50 } else { 1 } {
+            let ops = Arc::new(Ops { me: Mutex::new(None), reads: AtomicU64::new(0) });
+            let mut eng = Engine::new();
+            let op = eng.register(ops.clone());
+            *ops.me.lock().unwrap() = Some(op);
+            let u = eng.new_unit();
+            let (p, a, r) = (eng.values().str("p"), eng.values().str("a"), eng.values().str("r"));
+            let pn = eng.push(u, op, vec![p, a]);
+            let rs: Vec<_> = (0..8).map(|_| eng.push(u, op, vec![r])).collect();
+            eval(&mut eng, sched);
+            let before = ops.reads.load(Relaxed);
+            let b = eng.values().str("b");
+            eng.replace(pn, op, vec![p, b]);
+            let rep = eval(&mut eng, sched);
+            for &rn in &rs {
+                assert_eq!(eng.output(rn), Some(eng.values().int(7)));
+            }
+            assert_eq!(ops.reads.load(Relaxed), before, "{sched}: readers stand: {:?}", rep.rerun_causes);
+        }
+    }
 }

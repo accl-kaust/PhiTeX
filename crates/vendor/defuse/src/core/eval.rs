@@ -488,6 +488,8 @@ impl Engine {
             a.store(0, Ordering::Relaxed);
         }
         *lock(&sh.t) = super::Tallies::default();
+        sh.no_guess.write().clear();
+        sh.any_no_guess.store(false, Ordering::Relaxed);
         sh.env.write().unknown.clear();
         *lock(&sh.error) = None;
         sh.abort.store(false, Ordering::Relaxed);

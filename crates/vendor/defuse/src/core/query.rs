@@ -508,7 +508,7 @@ impl Shared {
                     guess = Some(q);
                 } else if !self.busy(q, me) {
                     // Done on a guess of its own: read as committed.
-                } else if e.val == DefVal::Pending || !(self.only_checking(q) || self.take_guess()) {
+                } else if e.val == DefVal::Pending || !(self.only_checking(q) || (self.guess_ok(f) && self.take_guess())) {
                     return Q::Wait(wait_node(q, Some(f), "definition", e.val != DefVal::Pending));
                 } else {
                     guess = Some(q);

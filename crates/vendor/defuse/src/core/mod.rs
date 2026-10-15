@@ -700,6 +700,8 @@ pub(crate) struct FieldIdx {
 }
 
 pub(crate) const SHARDS: usize = 256;
+/// Refuted guesses of one field after which it is no longer guessed.
+pub(crate) const NO_GUESS_AFTER: u32 = 2;
 
 pub(crate) type FieldMap = FxHashMap<(u32, Field), Box<FieldIdx>>;
 
@@ -804,6 +806,10 @@ pub(crate) struct Shared {
     pub frames: Arena<Frame>,
     pub units: Arena<Unit>,
     pub fields: Box<[RwLock<FieldMap>]>,
+    /// Fields whose guesses were refuted `NO_GUESS_AFTER` times in this
+    /// evaluation: reads of them wait instead of guessing.
+    pub no_guess: crate::sync::BrLock<FxHashMap<Field, u32>>,
+    pub any_no_guess: AtomicBool,
     pub by_id: Box<[Mutex<FxHashMap<u64, Slot>>]>,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     pub seqs: FxHashSet<Field>,

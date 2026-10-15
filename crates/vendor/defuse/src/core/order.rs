@@ -2107,6 +2107,7 @@ impl Shared {
             let mut t = super::lock(&self.t);
             if let Some(f) = why {
                 *t.refuted_by_field.entry(f).or_default() += 1;
+                self.note_refuted(f);
             }
             *t.refuted_nodes.entry(s).or_default() += 1;
         }
@@ -2238,6 +2239,7 @@ impl Shared {
             let mut t = super::lock(&self.t);
             if let Cause::Changed { field: f, .. } = cause {
                 *t.refuted_by_field.entry(*f).or_default() += 1;
+                self.note_refuted(*f);
             }
             *t.refuted_nodes.entry(s).or_default() += 1;
         }
@@ -2328,6 +2330,24 @@ impl Shared {
     }
 
     /// Wakes a parked node if it still waits with sequence `seq`.
+    /// A guess of `f` was refuted: past `NO_GUESS_AFTER` of them in this
+    /// evaluation, reads of `f` wait for their definer instead (on a
+    /// chain whose every link changes, each guess is wrong).
+    pub(crate) fn note_refuted(&self, f: Field) {
+        let mut m = self.no_guess.write();
+        let n = m.entry(f).or_default();
+        *n += 1;
+        if *n >= super::NO_GUESS_AFTER {
+            self.any_no_guess.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether reads of `f` may still guess in this evaluation.
+    pub(crate) fn guess_ok(&self, f: Field) -> bool {
+        !self.any_no_guess.load(Ordering::Acquire)
+            || self.no_guess.read().get(&f).is_none_or(|&n| n < super::NO_GUESS_AFTER)
+    }
+
     /// `g`'s guesses all held: no longer outstanding.
     pub(crate) fn confirm_guess(&self, g: Slot) {
         let r = self.rec(g);

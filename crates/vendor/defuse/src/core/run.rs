@@ -881,11 +881,10 @@ impl Shared {
         // Woken, it checks again from where this check waited (the reads
         // before held, and a change to any of them touches it, which starts
         // the check over): a chain of waits costs one pass over the log.
-        // A repeat wait at the same read makes no progress: it runs
-        // (except on a pending set, whose definer is often about to
-        // settle the read the same way).
-        let again = w.kind == "range"
-            || w.kind == "pending set"
+        // A repeat wait at the same claim or scope effect makes no
+        // progress: it runs. (A wait on a definition or a pending set is
+        // settled by its definer, often the same way: it checks again.)
+        let again = !matches!(w.kind, "claim" | "scope effect")
             || self.rec(s).data().x.as_ref().is_none_or(|e| e.wait_on.is_none() || !e.check_stuck);
         self.park_with(s, w, None, 1, !again);
     }
