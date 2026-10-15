@@ -83,7 +83,7 @@ impl Shared {
             stripes: std::sync::OnceLock::new(),
             label_epoch: AtomicU64::new(0),
             frame_epoch: AtomicU64::new(0),
-            env: std::sync::RwLock::new(crate::values::FxHashMap::default()),
+            env: crate::sync::BrLock::new(crate::values::FxHashMap::default()),
             wild: crate::sync::BrLock::new(Vec::new()),
             pfx: crate::sync::BrLock::new(crate::values::FxHashMap::default()),
             pfx_lens: crate::sync::BrLock::new(Vec::new()),

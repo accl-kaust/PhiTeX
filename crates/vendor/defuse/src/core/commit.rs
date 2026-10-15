@@ -482,7 +482,7 @@ impl Shared {
             // The application's environment.
             if r.has(F_APP) && !cx.env.is_empty() {
                 let au = r.data().app_unit();
-                let mut e = wlock(&self.unit(au).env);
+                let mut e = self.unit(au).env.write();
                 for &(f, x) in &cx.env {
                     e.insert(f, x);
                 }

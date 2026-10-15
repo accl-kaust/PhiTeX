@@ -10,7 +10,7 @@ use super::order::Notes;
 use super::query::{Subj, Wait};
 use super::{
     F_DOOM_FREE, F_DOOM_INERT, F_NEEDS_RUN, F_QUEUED, F_STALE, Kept, NIL, Pred, S_DIRTY, S_FREE, S_NEW, S_PARK, S_RUN,
-    Shared, Slot, WaitRec, in_work, lock, rlock, wlock,
+    Shared, Slot, WaitRec, in_work, lock, rlock,
 };
 use crate::api::{Cause, EvalError};
 
@@ -455,7 +455,7 @@ impl Shared {
         // The hint is the text's: analysed once, not per attempt.
         let fields = self.rec(s).data().stat.reads().cloned()?;
         for f in fields {
-            if rlock(&self.loop_vals).contains_key(&f) {
+            if self.loop_vals.read().contains_key(&f) {
                 continue;
             }
             if let super::query::Q::Wait(mut w) = self.q_def(s, f, true, s) {
@@ -958,7 +958,7 @@ impl Shared {
             }
             if !cx.env.is_empty() && self.rec(s).has(super::F_APP) {
                 let au = self.rec(s).data().app_unit();
-                let mut e = wlock(&self.unit(au).env);
+                let mut e = self.unit(au).env.write();
                 for &(f, x) in &cx.env {
                     e.insert(f, x);
                 }

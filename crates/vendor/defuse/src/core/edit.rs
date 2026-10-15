@@ -87,8 +87,8 @@ impl Shared {
             accs: FxHashMap::default(),
             seqs: FxHashSet::default(),
             loops: FxHashMap::default(),
-            loop_vals: RwLock::new(FxHashMap::default()),
-            env: RwLock::new(EnvState::default()),
+            loop_vals: crate::sync::BrLock::new(FxHashMap::default()),
+            env: crate::sync::BrLock::new(EnvState::default()),
             provider: None,
             apps: Mutex::new(FxHashMap::default()),
             env_readers: Mutex::new(FxHashMap::default()),
@@ -599,7 +599,7 @@ impl Engine {
             }
             self.sh.loops.insert(f, init);
             let moved = {
-                let mut lv = wlock(&self.sh.loop_vals);
+                let mut lv = self.sh.loop_vals.write();
                 let at_init = lv.get(&f) == Some(&old);
                 if at_init {
                     lv.insert(f, init);
@@ -615,7 +615,7 @@ impl Engine {
             return;
         }
         self.sh.loops.insert(f, init);
-        wlock(&self.sh.loop_vals).insert(f, init);
+        self.sh.loop_vals.write().insert(f, init);
         lock(&self.sh.pubs_dirty).insert(f);
         // Readers that bound `f` otherwise read the round value now: those
         // that found a definition, and those that fell through to the
@@ -713,7 +713,7 @@ impl Engine {
         // By value: only the fields whose answer moves wake their readers
         // (the provider's answers stay underneath).
         let changed = {
-            let mut e = wlock(&self.sh.env);
+            let mut e = self.sh.env.write();
             let mut fs: Vec<Field> = e.known.keys().chain(new.keys()).copied().collect();
             fs.sort_unstable_by_key(|f| f.0.raw());
             fs.dedup();
@@ -740,7 +740,7 @@ impl Engine {
 
     #[inline]
     fn set_env_inner(&mut self, unit: UnitId, field: Field, value: ValueId) {
-        let old = wlock(&self.sh.unit(unit.0).env).insert(field, value);
+        let old = self.sh.unit(unit.0).env.write().insert(field, value);
         if old != Some(value) {
             self.env_changed(&[field]);
         }
@@ -888,7 +888,7 @@ impl Engine {
             );
         }
         let changed = {
-            let mut e = wlock(&self.sh.env);
+            let mut e = self.sh.env.write();
             let mut fs: Vec<Field> = e.absent.iter().chain(new.iter()).copied().collect();
             fs.sort_unstable_by_key(|f| f.0.raw());
             fs.dedup();
@@ -919,7 +919,7 @@ impl Engine {
 
     /// The supplied environment.
     pub fn environment(&self) -> impl Iterator<Item = (Field, ValueId)> + '_ {
-        let e = rlock(&self.sh.env);
+        let e = self.sh.env.read();
         let mut v: Vec<(Field, ValueId)> = e.known.iter().map(|(f, x)| (*f, *x)).collect();
         v.extend(
             e.provided

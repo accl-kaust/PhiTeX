@@ -377,12 +377,12 @@ impl Shared {
     pub(crate) fn env_fallback(&self, u: u32, f: Field) -> Option<ValueId> {
         let un = self.unit(u);
         if un.app.load(Ordering::Acquire) != NIL {
-            return rlock(&un.env).get(&f).copied();
+            return un.env.read().get(&f).copied();
         }
-        if let Some(&x) = rlock(&un.env).get(&f) {
+        if let Some(&x) = un.env.read().get(&f) {
             return Some(x);
         }
-        rlock(&self.env).get(f).flatten()
+        self.env.read().get(f).flatten()
     }
 
     /// The nearest earlier definition of `f` in scope at `at`.
@@ -961,7 +961,7 @@ impl Shared {
 
     /// A field's value at entry `x` (before it), as `use_field` reads it.
     pub(crate) fn read_at(&self, x: Slot, f: Field, strict: bool, me: Slot) -> Q<Option<ValueId>> {
-        if let Some(&lv) = rlock(&self.loop_vals).get(&f) {
+        if let Some(&lv) = self.loop_vals.read().get(&f) {
             return Q::Ans(Some(lv));
         }
         match self.q_def(x, f, strict, me) {
@@ -981,7 +981,7 @@ impl Shared {
     #[allow(clippy::option_option)]
     pub(crate) fn q_env(&self, f: Field) -> Option<Option<ValueId>> {
         {
-            let e = rlock(&self.env);
+            let e = self.env.read();
             if let Some(a) = e.get(f) {
                 return Some(a);
             }
@@ -991,10 +991,10 @@ impl Shared {
         }
         let p = self.provider.as_ref()?;
         let Some(got) = p(&self.values, f) else {
-            super::wlock(&self.env).unknown.insert(f);
+            self.env.write().unknown.insert(f);
             return None;
         };
-        super::wlock(&self.env).provided.insert(f, got);
+        self.env.write().provided.insert(f, got);
         self.c.env_provided.fetch_add(1, Ordering::Relaxed);
         Some(got)
     }
@@ -1032,7 +1032,7 @@ impl Shared {
                     return Ok(Err("definition: gone"));
                 }
                 if let DAns::Loop(v) = ans {
-                    return Ok(if rlock(&self.loop_vals).get(f) == Some(v) {
+                    return Ok(if self.loop_vals.read().get(f) == Some(v) {
                         Ok(())
                     } else {
                         Err("loop")
@@ -1040,7 +1040,7 @@ impl Shared {
                 }
                 // A plain use of a field declared a loop-back since then
                 // reads the round value now (as a run would).
-                if *mode == DMode::Use && rlock(&self.loop_vals).contains_key(f) {
+                if *mode == DMode::Use && self.loop_vals.read().contains_key(f) {
                     return Ok(Err("loop: declared"));
                 }
                 let q = match mode {

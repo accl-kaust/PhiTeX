@@ -232,7 +232,7 @@ impl<'a> Ctx<'a> {
     /// Reads `f` at the position of `at` (before it): the value, and the
     /// read is logged.
     fn read_def_at(&mut self, at: Slot, f: Field) -> Result<Option<(ValueId,)>, Stop> {
-        if let Some(&lv) = rlock(&self.sh.loop_vals).get(&f) {
+        if let Some(&lv) = self.sh.loop_vals.read().get(&f) {
             self.log.push(Pred::Def {
                 f,
                 at,

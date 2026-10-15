@@ -622,7 +622,7 @@ pub(crate) struct Unit {
     pub label_epoch: AtomicU64,
     /// Bumped when existing entries' frames change.
     pub frame_epoch: AtomicU64,
-    pub env: RwLock<FxHashMap<Field, ValueId>>,
+    pub env: crate::sync::BrLock<FxHashMap<Field, ValueId>>,
     /// In-work nodes whose pending definition sets are not named fields.
     pub wild: crate::sync::BrLock<Vec<Slot>>,
     /// In-work nodes whose pending definition sets are prefixes, by
@@ -794,8 +794,8 @@ pub(crate) struct Shared {
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     pub seqs: FxHashSet<Field>,
     pub loops: FxHashMap<Field, ValueId>,
-    pub loop_vals: RwLock<FxHashMap<Field, ValueId>>,
-    pub env: RwLock<EnvState>,
+    pub loop_vals: crate::sync::BrLock<FxHashMap<Field, ValueId>>,
+    pub env: crate::sync::BrLock<EnvState>,
     pub provider: Option<Provider>,
     pub apps: Mutex<FxHashMap<u64, Slot>>,
     pub env_readers: Mutex<FxHashMap<Field, Vec<(Slot, u32)>>>,

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use super::edit::Engine;
 use super::query::Subj;
-use super::{F_MARKED, NIL, S_FREE, S_INERT, S_PARK, Slot, lock, rlock, wlock};
+use super::{F_MARKED, NIL, S_FREE, S_INERT, S_PARK, Slot, lock, rlock};
 use crate::api::{
     Cause, EditSource, EvalError, Executor, LoopStart, NoEdits, NodeId, Report, Scheduler, Sequential, Settled, WaitOn,
     Waiter,
@@ -488,7 +488,7 @@ impl Engine {
             a.store(0, Ordering::Relaxed);
         }
         *lock(&sh.t) = super::Tallies::default();
-        wlock(&sh.env).unknown.clear();
+        sh.env.write().unknown.clear();
         *lock(&sh.error) = None;
         sh.abort.store(false, Ordering::Relaxed);
         // Parked nodes from an earlier evaluation try again.
@@ -505,7 +505,7 @@ impl Engine {
     fn reset_loops(&mut self) -> bool {
         let mut changed = Vec::new();
         {
-            let mut lv = wlock(&self.sh.loop_vals);
+            let mut lv = self.sh.loop_vals.write();
             for (&f, &init) in &self.sh.loops {
                 if lv.get(&f) != Some(&init) {
                     lv.insert(f, init);
@@ -567,7 +567,7 @@ impl Engine {
         }
         let mut changed = Vec::new();
         {
-            let mut lv = wlock(&self.sh.loop_vals);
+            let mut lv = self.sh.loop_vals.write();
             for (f, x) in next {
                 if !self.sh.loops.contains_key(&f) {
                     continue;
