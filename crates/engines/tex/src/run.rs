@@ -1165,13 +1165,11 @@ impl<'c, 'a> Run<'c, 'a> {
             // command, §338: given again at every read-back, as TeX
             // gives them at every `\input` of the file)
             if name.starts_with("rberr:") {
-                // (a file read as its text here, one this run writes,
-                // gives them as its text ends, §362)
+                // (none of the file's text is read, `start_input`: its
+                // errors come from here, a file this run writes too)
                 if self.interp.is_some() {
                     self.interp_nested.insert(name, id);
-                } else if self.get(&format!("wopen:{key}"))?.is_none()
-                    && let Some(&ms) = xs.first()
-                {
+                } else if let Some(&ms) = xs.first() {
                     if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                         eprintln!(
                             "aux-trace: read-back {key} gives {name} in node {}",

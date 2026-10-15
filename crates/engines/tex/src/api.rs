@@ -1778,6 +1778,19 @@ impl Graph {
                         let name = f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
                         *by.entry(format!("{k} {name}")).or_default() += 1;
                     }
+                    if let Some(list) = crate::exec::env_str!("PHITEX_DEBUG_NODES") {
+                        let ids: Vec<u64> = list.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                        for (n, c) in &r.rerun_causes {
+                            if ids.contains(&n.raw()) {
+                                let f = match *c {
+                                    Rr::Changed { field, .. } | Rr::Rebind { field } => crate::val::field_name(v, field),
+                                    _ => String::new(),
+                                };
+                                eprintln!("  rerun cause of {}: {c:?} ({f})", n.raw());
+                            }
+                        }
+                        eprintln!("  restarted by {:?}", r.restarted_by);
+                    }
                     let mut by: Vec<_> = by.into_iter().collect();
                     by.sort_by(|a, b| b.1.cmp(&a.1));
                     by.truncate(12);
@@ -4521,6 +4534,9 @@ fn debug_nodes(eng: &Engine, when: &str) {
     for id in list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()) {
         let n = phitex_defuse::NodeId::from_raw(id);
         let parent = eng.node_info(n).map(|i| i.parent.map(|p| p.raw()));
-        eprintln!("  {id}: parent {parent:?}; {}", eng.debug_node(n));
+        let d = eng.debug_node(n);
+        let tail = d.rfind(" flags ").map_or(d.as_str(), |i| &d[i..]);
+        let head: String = d.chars().take(40).collect();
+        eprintln!("  {id}: parent {parent:?}; {head} ...{tail}");
     }
 }
