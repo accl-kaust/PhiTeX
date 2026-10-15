@@ -419,6 +419,89 @@ pub(crate) mod signals {
     }
 }
 
+/// A read-mostly lock whose readers do not share a cache line: each thread
+/// reads under its own padded slot, and a writer takes every slot. For the
+/// lists every definition query reads and only work transitions write.
+pub(crate) struct BrLock<T> {
+    slots: Box<[Padded]>,
+    data: std::cell::UnsafeCell<T>,
+}
+
+#[repr(align(128))]
+struct Padded(std::sync::RwLock<()>);
+
+const BR_SLOTS: usize = 32;
+
+// SAFETY: `data` is reached only under a slot's read lock (shared) or
+// under every slot's write lock (exclusive), so it is shared as by a RwLock.
+unsafe impl<T: Send + Sync> Sync for BrLock<T> {}
+// SAFETY: as above; moving the lock moves the data.
+unsafe impl<T: Send> Send for BrLock<T> {}
+
+fn br_slot() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static SLOT: usize = NEXT.fetch_add(1, Ordering::Relaxed) % BR_SLOTS;
+    }
+    SLOT.with(|s| *s)
+}
+
+pub(crate) struct BrRead<'a, T> {
+    _g: std::sync::RwLockReadGuard<'a, ()>,
+    data: &'a T,
+}
+
+impl<T> std::ops::Deref for BrRead<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.data
+    }
+}
+
+pub(crate) struct BrWrite<'a, T> {
+    _g: Vec<std::sync::RwLockWriteGuard<'a, ()>>,
+    data: &'a mut T,
+}
+
+impl<T> std::ops::Deref for BrWrite<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.data
+    }
+}
+
+impl<T> std::ops::DerefMut for BrWrite<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.data
+    }
+}
+
+impl<T> BrLock<T> {
+    pub(crate) fn new(v: T) -> Self {
+        BrLock {
+            slots: (0..BR_SLOTS).map(|_| Padded(std::sync::RwLock::new(()))).collect(),
+            data: std::cell::UnsafeCell::new(v),
+        }
+    }
+
+    pub(crate) fn read(&self) -> BrRead<'_, T> {
+        let g = self.slots[br_slot()].0.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: a read slot is held: no writer holds every slot.
+        BrRead { _g: g, data: unsafe { &*self.data.get() } }
+    }
+
+    pub(crate) fn write(&self) -> BrWrite<'_, T> {
+        let g: Vec<_> = self
+            .slots
+            .iter()
+            .map(|s| s.0.write().unwrap_or_else(std::sync::PoisonError::into_inner))
+            .collect();
+        // SAFETY: every slot is held for writing: no reader, no other writer.
+        BrWrite { _g: g, data: unsafe { &mut *self.data.get() } }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

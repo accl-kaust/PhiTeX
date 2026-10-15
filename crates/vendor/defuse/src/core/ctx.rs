@@ -216,6 +216,9 @@ impl<'a> Ctx<'a> {
             // (A re-ask at its own position would ask another place.)
             self.ask = None;
         }
+        if let Some(Pred::Def { who, .. }) = self.log.last_mut() {
+            *who = true;
+        }
         let by = match self.log.last() {
             Some(Pred::Def {
                 ans: DAns::Site { node, .. },
@@ -239,6 +242,7 @@ impl<'a> Ctx<'a> {
                 sites: Box::default(),
                 spec: None,
                 proj: 0,
+                who: false,
             });
             return Ok(Some((lv,)));
         }
@@ -269,6 +273,7 @@ impl<'a> Ctx<'a> {
                     sites: Box::default(),
                     spec: o.guess,
                     proj: 0,
+                who: false,
                 });
                 Ok(v.map(|x| (x,)))
             }
@@ -324,6 +329,7 @@ impl<'a> Ctx<'a> {
                     sites: o.sites.into_boxed_slice(),
                     spec: o.guess,
                     proj: 0,
+                who: false,
                 });
                 Ok(v)
             }

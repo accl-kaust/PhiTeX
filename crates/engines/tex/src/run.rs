@@ -53,6 +53,8 @@ pub(crate) struct Ops {
     pub fold: OpId,
     pub finish: OpId,
     pub resume: OpId,
+    /// A page's placement on the writer's state (`crate::pdfout::Place`).
+    pub place: OpId,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
     /// The format's definitions the build analyses document texts with
@@ -277,6 +279,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The writer's state this run's last PDF step made, not yet where
     /// other nodes find it ([`crate::pdfout::publish`], at the run's end).
     pub pdf_fold: Option<(u64, std::sync::Arc<crate::pdfout::Fold>)>,
+    /// Whether this finisher wrote its page apart and placed its
+    /// `place` node ([`crate::pdfout::ship_apart`]): the page's objects
+    /// come after every writer command before it ([`Run::check_cut`]).
+    pub placed_page: bool,
     /// The input level that holds the last pulled sibling's first line,
     /// once reached: where [`Run::park`] finds it.
     pub pull_lev: Option<usize>,
@@ -474,6 +480,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pulled: 0,
             pull_at: Vec::new(),
             pdf_fold: None,
+            placed_page: false,
             pull_lev: None,
             pull_orig: Vec::new(),
             top: false,
@@ -2685,6 +2692,7 @@ pub(crate) struct Parked {
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
     cut_req: Option<u32>,
+    placed_page: bool,
 }
 
 impl Run<'_, '_> {
@@ -2803,6 +2811,7 @@ impl Run<'_, '_> {
             ins_pending: std::mem::take(&mut self.ins_pending),
             fin: self.fin.take(),
             cut_req: self.cut_req,
+            placed_page: self.placed_page,
         })
     }
 }
@@ -2877,6 +2886,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
         r.cut_req = p.cut_req;
+        r.placed_page = p.placed_page;
         r.resumed = true;
         Ok(r)
     }

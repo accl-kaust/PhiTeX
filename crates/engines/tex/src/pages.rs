@@ -76,8 +76,7 @@ use crate::val::{glue_of, glue_value, group, int_at, int_of, list_of, str_of, to
 /// on the main list and by every finisher, read where it reaches.
 pub(crate) const PS: &str = "ps";
 
-/// Defined by a `\shipout`: text after it reads it (a read-time PDF
-/// write after a page shipped, `page_shipped_before`).
+/// Defined by a `\shipout`: the mark that a page shipped before.
 pub(crate) const SHIPPED: &str = "pages:shipped";
 
 /// `max_dimen` (§421).
@@ -1035,12 +1034,18 @@ impl Run<'_, '_> {
                 gdefs.push((self.loc_field(loc).0, x));
             }
         }
-        let read: Vec<ValueId> = self
+        let mut read: Vec<ValueId> = self
             .st
             .read_locs()
             .into_iter()
             .map(|l| self.loc_field(l).0)
             .collect();
+        // (the page placed by this finisher's `place` node reads the
+        // writer's state where the finisher stands: a writer command the
+        // piece ran after the candidate came before the page's objects)
+        if self.placed_page {
+            read.push(v.field("pdf:state").0);
+        }
         let mut why = None;
         for e in list_of(v, reads) {
             let xs = list_of(v, e);

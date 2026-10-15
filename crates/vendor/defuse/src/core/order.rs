@@ -84,11 +84,11 @@ impl Shared {
             label_epoch: AtomicU64::new(0),
             frame_epoch: AtomicU64::new(0),
             env: std::sync::RwLock::new(crate::values::FxHashMap::default()),
-            wild: std::sync::RwLock::new(Vec::new()),
-            pfx: std::sync::RwLock::new(crate::values::FxHashMap::default()),
-            pfx_lens: std::sync::RwLock::new(Vec::new()),
-            peff: std::sync::RwLock::new(Vec::new()),
-            pclaim: std::sync::RwLock::new(Vec::new()),
+            wild: crate::sync::BrLock::new(Vec::new()),
+            pfx: crate::sync::BrLock::new(crate::values::FxHashMap::default()),
+            pfx_lens: crate::sync::BrLock::new(Vec::new()),
+            peff: crate::sync::BrLock::new(Vec::new()),
+            pclaim: crate::sync::BrLock::new(Vec::new()),
             pclaim_lo: std::sync::atomic::AtomicUsize::new(0),
             lists: std::sync::Mutex::new(0),
         });
@@ -986,8 +986,8 @@ impl Shared {
                 if fl & super::F_AT_PFX != 0 {
                     *dead = dead.saturating_sub(1);
                 } else {
-                    let mut m = wlock(&u.pfx);
-                    let mut lens = wlock(&u.pfx_lens);
+                    let mut m = u.pfx.write();
+                    let mut lens = u.pfx_lens.write();
                     for p in ps {
                         if let Err(i) = lens.binary_search(&p.len()) {
                             lens.insert(i, p.len());
@@ -1012,12 +1012,12 @@ impl Shared {
                     // Still there from before: counts again.
                     *dead = dead.saturating_sub(1);
                     if want == F_PCLAIM {
-                        let v = super::rlock(list);
+                        let v = list.read();
                         let pos = self.sorted_pos(&v, s);
                         u.pclaim_lo.fetch_min(pos, Ordering::AcqRel);
                     }
                 } else {
-                    let mut v = wlock(list);
+                    let mut v = list.write();
                     let pos = self.sorted_pos(&v, s);
                     v.insert(pos, s);
                     if want == F_PCLAIM {
@@ -1047,7 +1047,7 @@ impl Shared {
             }
         }
         if fl & F_IN_PCLAIM != 0 {
-            let v = super::rlock(&u.pclaim);
+            let v = u.pclaim.read();
             let mut lo = u.pclaim_lo.load(Ordering::Acquire);
             while lo < v.len() && !self.rec(v[lo]).has(F_IN_PCLAIM) {
                 lo += 1;
@@ -1055,14 +1055,14 @@ impl Shared {
             u.pclaim_lo.store(lo, Ordering::Release);
         }
         // Compacted once the entries that left outnumber the rest.
-        let total = super::rlock(&u.wild).len() + super::rlock(&u.peff).len() + super::rlock(&u.pclaim).len();
+        let total = u.wild.read().len() + u.peff.read().len() + u.pclaim.read().len();
         if *dead * 2 > total + 64 {
             for (have, at, list) in [
                 (F_IN_WILD, super::F_AT_WILD, &u.wild),
                 (F_IN_PEFF, super::F_AT_PEFF, &u.peff),
                 (F_IN_PCLAIM, super::F_AT_PCLAIM, &u.pclaim),
             ] {
-                let mut v = wlock(list);
+                let mut v = list.write();
                 v.retain(|&x| {
                     let keep = self.rec(x).has(have);
                     if !keep {
@@ -1071,7 +1071,7 @@ impl Shared {
                     keep
                 });
             }
-            let mut m = wlock(&u.pfx);
+            let mut m = u.pfx.write();
             let mut gone = Vec::new();
             for v in m.values_mut() {
                 v.retain(|&x| {
@@ -1102,7 +1102,7 @@ impl Shared {
         let u = self.unit(self.unit_of(s));
         let mut dead = lock(&u.lists);
         if r.fl() & super::F_AT_PFX != 0 {
-            for v in wlock(&u.pfx).values_mut() {
+            for v in u.pfx.write().values_mut() {
                 v.retain(|&x| x != s);
             }
             r.clear(super::F_AT_PFX);
@@ -1113,7 +1113,7 @@ impl Shared {
             (super::F_AT_PCLAIM, &u.pclaim),
         ] {
             if r.fl() & at != 0 {
-                wlock(list).retain(|&x| x != s);
+                list.write().retain(|&x| x != s);
                 if at == super::F_AT_PCLAIM {
                     u.pclaim_lo.store(0, Ordering::Release);
                 }

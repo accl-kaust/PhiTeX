@@ -1150,14 +1150,6 @@ fn mark_field(kind: &str, n: i32) -> String {
 
 
 
-/// Whether a page shipped before this point: a finisher before it in
-/// the line defined [`crate::pages::SHIPPED`] (def-use, as any value).
-pub(crate) fn page_shipped_before(r: &mut Run<'_, '_>) -> R<bool> {
-    Ok(r.get(crate::pages::SHIPPED)?.is_some())
-}
-
-
-
 /// `\topmark` and its kin as read by a run (§386): the marks a
 /// finisher defined where it stands (TeX's `cur_mark` after `fire_up`,
 /// §1012), read by def-use as any value; inside a finisher, its own.

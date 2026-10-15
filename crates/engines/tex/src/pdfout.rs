@@ -1,6 +1,13 @@
 //! The PDF file as a fold over the document (pdfTeX §750–§815): the
 //! writer's state (`phitex_pdf::PdfState`) after each step that touches
-//! it, a step being a PDF command when TeX reads it or a `\shipout`.
+//! it, a step being a PDF command when TeX reads it or a page's
+//! placement. A finisher writes its page apart ([`ship_apart`]: the
+//! box decoded, the fonts, the content stream compressed, on the state
+//! reaching the finisher, as a record) and places a [`Place`] node after
+//! itself; that node puts the record on the state in the line's order
+//! (`PdfState::replay_page`), so the page's objects are numbered after
+//! every writer command before it and before every one after, as
+//! pdfTeX numbers them, while the pages' expensive part runs apart.
 //!
 //! The field `pdf:state` holds a key: the digest of the state after the
 //! step (`PdfState::digest`, the bytes so far, the forms' table), so an
@@ -15,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use phitex_defuse::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use phitex_defuse::{ValueId, Values};
+use phitex_defuse::{Ctx, Effect, Field, Locality, MayDefine, Operation, Stop, ValueId, Values};
 use phitex_pdf::map::{MapEntry, parse_line, parse_map, parse_map_ps};
 use phitex_pdf::{
     Action, ColorStackCmd, DestKind, FontSource, Ident, LiteralMode, PdfBytes, PdfParams, PdfState,
@@ -27,19 +34,22 @@ use phitex_typeset::node::BoxNode;
 
 use crate::fonts::bytes_of;
 use crate::nodes::Side;
+use crate::ops::{Shared, ops, run_node_parking};
 use crate::run::{R, Run};
 use crate::val::{int_of, list_of, str_of};
 
 /// The accumulator of the exact writer's pages, in document order: each
-/// entry the key of a [`PagePiece`] ([`pieces`]).
+/// entry the key of a [`PagePiece`] ([`pieces`]), for the fonts' names
+/// over the pages ([`font_tags`]), with the document-level commands the
+/// output routines ran ([`doc_op`]).
 pub(crate) const XPAGES: &str = "pdf:xpages";
 
 /// One page as the exact writer ships it, made by the page's own step
 /// with nothing read from another page's: the box, the parameters
-/// `\shipout` read, the whatsits' data, the fonts. The `Dvi` node ships
-/// the pages in order on the state the read-time commands left
-/// ([`finish`]); each step has already written its page once, apart, so
-/// that the finish finds its content stream compressed.
+/// `\shipout` read, the whatsits' data, the fonts. The page's [`Place`]
+/// node puts it on the writer's state in the line's order; the step has
+/// already written the page once, apart, so that the placement finds
+/// its content stream compressed.
 pub(crate) struct PagePiece {
     /// The page's box as `\shipout` got it (decoded again only for a
     /// page the finish cannot place).
@@ -72,14 +82,6 @@ fn pieces() -> &'static PieceMemo {
 /// whose output routine runs a PDF command.
 fn folding(r: &mut Run<'_, '_>) -> R<bool> {
     Ok(r.cint(crate::fields::cell::PDF_FOLD)? != 0)
-}
-
-/// Whether the pages are written apart and placed by the finish after
-/// every read-time command (exact mode, not folding): a read-time write
-/// after a page goes to the pages' accumulator ([`XPAGES`]), where the
-/// end node writes it ([`finish_exact`]).
-pub(crate) fn pages_apart(r: &mut Run<'_, '_>) -> R<bool> {
-    Ok(r.param("pdfoutput")? > 0 && !crate::pdfrelaxed::on(r)? && !folding(r)?)
 }
 
 /// Whether this run is a finisher.
@@ -737,6 +739,18 @@ pub(crate) fn step_forms<T>(
     }
     let fh = phitex_defuse::hash_bytes(0, format!("{:?}", (&forms.whats, &forms.fonts)).as_bytes());
     let k1 = phitex_defuse::hash_words(st.digest(), &[bytes_hash, fh]).max(1);
+    if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+        eprintln!(
+            "  pdf step {} ({:?}): {} -> {} (digest {}, {} bytes) {}",
+            r.cx.node().raw(),
+            r.cx.op(),
+            k0 % 100_000,
+            k1 % 100_000,
+            st.digest() % 100_000,
+            bytes.chunks().iter().map(|c| c.bytes.len()).sum::<usize>(),
+            v.render(input).chars().take(50).collect::<String>()
+        );
+    }
     // (kept in the run: only the state the run ends with can be read
     // elsewhere, [`publish`]; a run of a thousand writer commands, a
     // format's `\pdfglyphtounicode` table, keeps one state, not a
@@ -1293,6 +1307,7 @@ fn ship_apart(
         // they go to the log, the job going on
         r.log("error", &format!("pdfTeX error: {e}"))?;
     }
+    let pj = pc.pj;
     pieces()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1300,7 +1315,113 @@ fn ship_apart(
         .or_insert_with(|| Arc::new(pc));
     let k = v.int(i64::from_ne_bytes(key.to_ne_bytes()));
     r.contribute(XPAGES, v.seq_unit(k));
+    // the page's place in the file: a node after this finisher that puts
+    // the page on the writer's state where the finisher stands
+    // ([`Place`]); its objects then come after every writer command
+    // before it in the line, and before every one after
+    r.cx.follow(r.ops.place, vec![k, v.int(pj)]);
+    r.placed_page = true;
     Ok(shown)
+}
+
+/// A page's placement: arguments `[key, j]`, the [`PagePiece`] the
+/// finisher wrote apart and the page's index. The node reads the
+/// writer's state reaching it (`pdf:state`: the read-time commands' and
+/// the pages' before it, a chain the finishers and the commands thread
+/// by def-use), puts the page on it (`PdfState::replay_page`: the
+/// recorded page renumbered, or shipped again where it cannot be
+/// placed) and defines the next state. The expensive part of a page
+/// (its box decoded, its fonts, its content stream compressed) was
+/// done apart by the finisher; this step is the cheap, serial one.
+///
+/// Example: pieces `A B` with a page finishing at the end of `A`, `B`
+/// running `\pdfobj`: the line is `A, finish, place, B`; `B`'s object
+/// is numbered after the page's, as pdfTeX numbers it.
+pub(crate) struct Place(pub Shared);
+
+impl Operation for Place {
+    fn name(&self) -> &'static str {
+        "place"
+    }
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
+        MayDefine::Names(vec![v.field("pdf:state")])
+    }
+    /// The writer's state: the node waits for it instead of starting
+    /// and stopping.
+    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(vec![v.field("pdf:state")])
+    }
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let args = cx.args();
+        let o = ops(&self.0);
+        run_node_parking(cx, o, true, |r| place_node(r, &args))
+    }
+}
+
+/// A [`Place`] node's run.
+fn place_node(r: &mut Run<'_, '_>, args: &[ValueId]) -> R<()> {
+    let v = r.v;
+    let Some(&kx) = args.first() else { return Ok(()) };
+    let key = u64::from_ne_bytes(int_of(v, kx).to_ne_bytes());
+    let Some(pc) = pieces()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned()
+    else {
+        r.engine_diag("page placement: the page's piece is not in the memo");
+        return Ok(());
+    };
+    // the fonts' names as pdfTeX numbers them, over the pages placed so
+    // far (the accumulator before this node, in order: `font_tags` is
+    // cumulative, a page's numbers never change by a later page)
+    let xp = v.seq_to_vec(r.cx.acc_range(v.field(XPAGES), None)?);
+    let placed: Vec<Arc<PagePiece>> = {
+        let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
+        xp.iter()
+            .filter(|&&x| v.as_int(x).is_some())
+            .filter_map(|&x| m.get(&u64::from_ne_bytes(int_of(v, x).to_ne_bytes())).cloned())
+            .collect()
+    };
+    let fcount = placed.last().map_or(pc.fcount, |p| p.fcount.max(pc.fcount));
+    let tags = font_tags(fcount, &placed);
+    // (a stop at the state's read parks the run: it resumes here)
+    r.begin_command();
+    let t0 = std::time::Instant::now();
+    let res = step_forms(r, kx, &pc.fonts, |st, forms, fonts| {
+        if let Some(t) = tags {
+            st.set_font_tags(t);
+        }
+        set_page_params(v, st, &pc.params, pc.margins);
+        let res = st.replay_page(&pc.rec, fonts, &pc.base, None);
+        if res.is_err() {
+            // (the finisher logged the writer's error when it wrote the
+            // page)
+            let mut wh = |h: u32, _leaders: bool| page_whatsit(forms, &pc.whats, h);
+            let mut side = crate::nodes::Side::default();
+            if let Some(phitex_typeset::node::Node::Box(bx)) =
+                crate::nodes::decode(v, pc.boxv, &mut side)
+            {
+                let _ = st.ship_out_with(&bx, fonts, &mut wh);
+            }
+        }
+        res
+    })?;
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        match &res {
+            Err(why) => eprintln!("place: page {} shipped again ({:?}): {why}", pc.pj, t0.elapsed()),
+            Ok(Some(why)) => eprintln!("place: page {} ({:?}): {why}", pc.pj, t0.elapsed()),
+            Ok(None) => eprintln!("place: page {} placed ({:?})", pc.pj, t0.elapsed()),
+        }
+    }
+    Ok(())
 }
 
 
@@ -1417,18 +1538,13 @@ pub(crate) struct EndFields {
     pub suppress_ptex_info: i32,
 }
 
-/// The exact PDF file (the end node's): the writer's state the
-/// read-time commands left, and the pages' accumulator ([`XPAGES`])
-/// folded on it in order. An entry is a page's key (its [`PagePiece`]
-/// placed: `PdfState::replay_page`, or shipped again where it cannot be
-/// placed), `["obj", n]` (an `\immediate\pdfobj` the text ran after a
-/// page: object `n` written there, as pdfTeX does), or a document-level
-/// command an output routine ran ([`apply_doc_op`]). Then the fonts'
-/// names in pdfTeX's order ([`font_tags`]) and `phitex_pdf::finish`.
-/// The empty string: no file.
-///
-/// Example: `xpages = [k1, ["obj", 7], k2]` writes page 1's objects,
-/// object 7, then page 2's.
+/// The exact PDF file (the end node's): the writer's state reaching the
+/// end (the read-time commands' steps and the pages' placements, in the
+/// line's order), the document-level commands the output routines ran
+/// applied ([`apply_doc_op`], from the pages' accumulator [`XPAGES`]),
+/// the fonts' names in pdfTeX's order over all the pages
+/// ([`font_tags`]), then `phitex_pdf::finish`. The empty string: no
+/// file.
 pub(crate) fn finish_exact(v: &Values, f: &EndFields, xpages: &[ValueId]) -> Vec<u8> {
     let start = f.state.and_then(|k| {
         states()
@@ -1450,70 +1566,25 @@ pub(crate) fn finish_exact(v: &Values, f: &EndFields, xpages: &[ValueId]) -> Vec
     let t0 = std::time::Instant::now();
     let mut st = a.st.clone();
     let mut bytes = a.bytes.clone();
-    let piece = |x: ValueId| -> Option<Arc<PagePiece>> {
-        let pk = u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
-        pieces()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&pk)
-            .cloned()
+    // the pages are on the state, each placed by its node in the line
+    // ([`Place`]); the accumulator gives the pages' pieces (for the
+    // fonts' names over all of them) and the document-level commands
+    let placed: Vec<Arc<PagePiece>> = {
+        let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
+        xpages
+            .iter()
+            .filter(|&&x| v.as_int(x).is_some())
+            .filter_map(|&x| m.get(&u64::from_ne_bytes(int_of(v, x).to_ne_bytes())).cloned())
+            .collect()
     };
-    let placed: Vec<Arc<PagePiece>> = xpages
-        .iter()
-        .filter(|&&x| v.as_int(x).is_some())
-        .filter_map(|&x| piece(x))
-        .collect();
     if let Some(tags) = font_tags(f.fonts, &placed) {
         st.set_font_tags(tags);
     }
-    let (mut replayed, mut shipped) = (0usize, 0usize);
-    // the variables' key after the page placed last (none after a page
-    // shipped again or an operation on the state)
-    let mut known: Option<String> = None;
     for &x in xpages {
-        if v.as_int(x).is_none() {
-            let xs = list_of(v, x);
-            if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("obj") {
-                let n = xs.get(1).map_or(0, |&n| usize::try_from(int_of(v, n)).unwrap_or(0));
-                // (the command's run logged the writer's error)
-                let _ = st.write_obj(n);
-            } else {
-                apply_doc_op(v, &mut st, x);
-            }
-            known = None;
+        if v.as_int(x).is_some() {
             continue;
         }
-        let Some(pc) = piece(x) else {
-            return Vec::new();
-        };
-        set_page_params(v, &mut st, &pc.params, pc.margins);
-        let res = st.replay_page(&pc.rec, &pc.fonts, &pc.base, known.as_deref());
-        known = res
-            .as_ref()
-            .ok()
-            .and_then(|_| pc.rec.post_key())
-            .map(str::to_owned);
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
-            match &res {
-                Err(why) => eprintln!("pdf pages: page {} shipped again: {why}", replayed + shipped + 1),
-                Ok(Some(why)) => eprintln!("pdf pages: page {}: {why}", replayed + shipped + 1),
-                Ok(None) => {}
-            }
-        }
-        if res.is_ok() {
-            replayed += 1;
-        } else {
-            shipped += 1;
-            // (the finisher logged the writer's error when it wrote the
-            // page)
-            let mut wh = |h: u32, _leaders: bool| page_whatsit(&a.forms, &pc.whats, h);
-            let mut side = crate::nodes::Side::default();
-            if let Some(phitex_typeset::node::Node::Box(bx)) =
-                crate::nodes::decode(v, pc.boxv, &mut side)
-            {
-                let _ = st.ship_out_with(&bx, &pc.fonts, &mut wh);
-            }
-        }
+        apply_doc_op(v, &mut st, x);
     }
     st.flush(&mut bytes);
     st.params_mut().info_omit_date = f.info_omit_date;
@@ -1526,7 +1597,8 @@ pub(crate) fn finish_exact(v: &Values, f: &EndFields, xpages: &[ValueId]) -> Vec
     });
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "pdf pages: {replayed} placed, {shipped} shipped again; file {} bytes, {:?}",
+            "pdf pages: {} placed in the line; file {} bytes, {:?}",
+            placed.len(),
             out.len(),
             t0.elapsed()
         );

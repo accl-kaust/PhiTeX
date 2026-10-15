@@ -320,28 +320,25 @@ fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
 
 // ---------------------------------------------------------- PDF, exact
 
-/// The PDF file with pdfTeX's object numbers: the pages the finishers
-/// wrote apart (`crate::pdfout::XPAGES`, each a `PagePiece` by key, and
-/// the document-level commands an output routine ran, kept there in
-/// order) placed one by one on the writer state the read-time commands
-/// left (`pdf:state`, a fold the commands thread by def-use, with the
-/// objects they wrote), in the order the accumulator gives.
+/// The PDF file with pdfTeX's object numbers: the writer's state
+/// reaching the end (`pdf:state`, a fold the read-time commands and the
+/// pages' placements thread by def-use, in the line's order), finished.
 ///
-/// 1. A read-time `\immediate\pdfobj` run after a page shipped
-///    (`crate::pdfprim`) is allocated on the state and contributes
-///    `["obj", n]` to `XPAGES` where it runs, so the accumulator alone
-///    says which objects pdfTeX wrote between two pages.
-/// 2. `crate::pdfout::finish_exact` folds `XPAGES` on the state: a page
-///    key places its `PagePiece`'s record (its content stream already
-///    compressed by the finisher), an `["obj", n]` entry writes object
-///    `n`, a document-level command applies; the fonts' resource names
-///    (`/F<n>`) in pdfTeX's order of first use (`font_tags`); then
+/// 1. A finisher writes its page apart (`crate::pdfout::ship_apart`:
+///    decoded, compressed, as a record) and places a `place` node after
+///    itself (`crate::pdfout::Place`), which puts the record on the
+///    state where the finisher stands: the page's objects are numbered
+///    after every writer command before it and before every one after.
+///    A read-time `\immediate\pdfobj` writes in its own step.
+/// 2. `crate::pdfout::finish_exact` applies the document-level commands
+///    the output routines ran (`XPAGES`), sets the fonts' resource names
+///    (`/F<n>`) in pdfTeX's order of first use (`font_tags`), then
 ///    `phitex_pdf::finish` for the fonts, the page tree, the catalog and
 ///    the trailer.
 ///
-/// Example: pages `k1 k2`, with `\immediate\pdfobj` run by the text
-/// between them: `XPAGES = [k1, [obj, 7], k2]`; the file numbers page
-/// 1's objects, then object 7, then page 2's.
+/// Example: pieces `A B`, a page finishing at `A`'s end, `B` running
+/// `\immediate\pdfobj`: the line is `A, finish, place, B`; the file
+/// numbers page 1's objects, then `B`'s object.
 fn pdf_exact(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     let v = cx.values();
     let xpages = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);

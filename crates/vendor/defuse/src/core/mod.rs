@@ -335,6 +335,9 @@ pub(crate) enum Pred {
         spec: Option<Slot>,
         /// Read through this projection (0: in full).
         proj: u16,
+        /// The run saw which node defined it (`use_field_at`): an equal
+        /// value from another node is a change to it.
+        who: bool,
     },
     /// A position read at node `node` ([`crate::Ctx::use_field_at`]):
     /// holds while it is there.
@@ -621,16 +624,16 @@ pub(crate) struct Unit {
     pub frame_epoch: AtomicU64,
     pub env: RwLock<FxHashMap<Field, ValueId>>,
     /// In-work nodes whose pending definition sets are not named fields.
-    pub wild: RwLock<Vec<Slot>>,
+    pub wild: crate::sync::BrLock<Vec<Slot>>,
     /// In-work nodes whose pending definition sets are prefixes, by
     /// prefix (label order; entries count only with `F_IN_WILD`).
-    pub pfx: RwLock<FxHashMap<String, Vec<Slot>>>,
+    pub pfx: crate::sync::BrLock<FxHashMap<String, Vec<Slot>>>,
     /// The distinct lengths of the prefixes in `pfx`, ascending.
-    pub pfx_lens: RwLock<Vec<usize>>,
+    pub pfx_lens: crate::sync::BrLock<Vec<usize>>,
     /// In-work nodes whose effect is pending.
-    pub peff: RwLock<Vec<Slot>>,
+    pub peff: crate::sync::BrLock<Vec<Slot>>,
     /// In-work pending claimers.
-    pub pclaim: RwLock<Vec<Slot>>,
+    pub pclaim: crate::sync::BrLock<Vec<Slot>>,
     /// Every entry of `pclaim` below this index has left (they leave
     /// mostly in label order, so a scan starts here, not at 0).
     pub pclaim_lo: std::sync::atomic::AtomicUsize,

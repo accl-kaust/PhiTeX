@@ -81,6 +81,16 @@ pub(crate) fn sib_cursor_reset() {
     SIB_CUR.with(|c| c.set(None));
 }
 
+/// Two use answers that give the run the same value (the site may differ).
+pub(crate) fn same_value(a: &DAns, b: &DAns) -> bool {
+    match (a, b) {
+        (DAns::Site { val: x, .. }, DAns::Site { val: y, .. }) => {
+            matches!((x, y), (DefVal::Val(p), DefVal::Val(q)) if p == q)
+        }
+        _ => false,
+    }
+}
+
 impl Shared {
     /// The entries of a label-sorted list strictly between `lo` and `hi`.
     fn span<'x>(&self, xs: &'x [Slot], lo: u64, hi: u64) -> &'x [Slot] {
@@ -256,7 +266,7 @@ impl Shared {
 
     /// An in-work pending-effect node strictly between labels `lo` and `hi`.
     fn peff_between(&self, u: u32, lo: u64, hi: u64, me: Slot) -> Option<Slot> {
-        let list = rlock(&self.unit(u).peff);
+        let list = self.unit(u).peff.read();
         if list.is_empty() {
             return None;
         }
@@ -318,7 +328,7 @@ impl Shared {
                 }
             }
         }
-        let wild = rlock(&self.unit(u).wild);
+        let wild = self.unit(u).wild.read();
         if !wild.is_empty() {
             for &x in self.span(&wild, lo, hi).iter().rev() {
                 let l = self.rec(x).lab();
@@ -336,8 +346,8 @@ impl Shared {
         }
         // Prefix pending sets: the lists of the prefixes of `f`'s name.
         // (Locks in the writers' order: the map, then the lengths.)
-        let m = rlock(&self.unit(u).pfx);
-        let lens = rlock(&self.unit(u).pfx_lens);
+        let m = self.unit(u).pfx.read();
+        let lens = self.unit(u).pfx_lens.read();
         if !lens.is_empty()
             && let Value::Str(name) = &*self.values.get(f.0)
         {
@@ -1017,7 +1027,7 @@ impl Shared {
 
     pub(crate) fn recheck(&self, me: Slot, p: &Pred, strict: bool) -> Result<Result<(), &'static str>, Wait> {
         match p {
-            Pred::Def { f, at, mode, ans, .. } => {
+            Pred::Def { f, at, mode, ans, who, .. } => {
                 if self.rec(*at).st() == S_FREE {
                     return Ok(Err("definition: gone"));
                 }
@@ -1028,6 +1038,11 @@ impl Shared {
                         Err("loop")
                     });
                 }
+                // A plain use of a field declared a loop-back since then
+                // reads the round value now (as a run would).
+                if *mode == DMode::Use && rlock(&self.loop_vals).contains_key(f) {
+                    return Ok(Err("loop: declared"));
+                }
                 let q = match mode {
                     DMode::Use => self.q_def(*at, *f, strict, me),
                     m => self.q_seq(*at, *f, *m, strict, me),
@@ -1035,6 +1050,7 @@ impl Shared {
                 match q {
                     Q::Ans(o) => Ok(
                         if o.ans == *ans
+                            || (!*who && *mode == DMode::Use && same_value(&o.ans, ans))
                             || self.holds_predicted(me, p, &o.ans)
                             || matches!(p, Pred::Def { proj, .. } if *proj != 0 && self.proj_eq(*proj, ans, &o.ans))
                         {

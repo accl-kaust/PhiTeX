@@ -617,9 +617,15 @@ impl Engine {
         self.sh.loops.insert(f, init);
         wlock(&self.sh.loop_vals).insert(f, init);
         lock(&self.sh.pubs_dirty).insert(f);
-        // Readers that bound `f` otherwise read the round value now.
+        // Readers that bound `f` otherwise read the round value now: those
+        // that found a definition, and those that fell through to the
+        // environment (nothing defined it).
         let mut notes = Notes::default();
         self.touch_field_readers(f, &mut notes);
+        let env = lock(&self.sh.env_readers).remove(&f).unwrap_or_default();
+        for (n, g) in env {
+            self.sh.touch(n, g, &Cause::Loop { field: f }, false);
+        }
         self.sh.dispatch(&mut notes, NIL);
     }
 

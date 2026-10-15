@@ -1313,6 +1313,7 @@ impl Graph {
         let fold = eng.register(Arc::new(crate::pages::Fold(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
+        let place = eng.register(Arc::new(crate::pdfout::Place(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -1328,6 +1329,7 @@ impl Graph {
             fold,
             finish,
             resume,
+            place,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             pkg_log: Arc::new(Mutex::new(Vec::new())),

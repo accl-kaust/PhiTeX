@@ -210,7 +210,7 @@ impl Shared {
     pub(crate) fn held_by(&self, s: Slot) -> Option<Slot> {
         let u = self.unit_of(s);
         // No pending claimer: nothing to read (and no writer to wait out).
-        if super::rlock(&self.unit(u).pclaim).is_empty() {
+        if self.unit(u).pclaim.read().is_empty() {
             return None;
         }
         self.sread(u, || self.held_by_in(s))
@@ -219,7 +219,7 @@ impl Shared {
     #[inline(never)]
     pub(crate) fn held_by_in(&self, s: Slot) -> Option<Slot> {
         let u = self.unit_of(s);
-        let list = super::rlock(&self.unit(u).pclaim);
+        let list = self.unit(u).pclaim.read();
         if list.is_empty() {
             return None;
         }
@@ -606,6 +606,14 @@ impl Shared {
                 return;
             }
             if *mode == super::DMode::Use {
+                // Held with an equal value from another site: follow the
+                // site, so later changes there reach this reader.
+                if let super::query::Q::Ans(o) = self.q_def(*at, *f, false, s)
+                    && o.ans != *ans
+                    && super::query::same_value(&o.ans, ans)
+                {
+                    *ans = o.ans;
+                }
                 return;
             }
             if let super::query::Q::Ans(o) = self.q_seq(*at, *f, *mode, false, s) {
