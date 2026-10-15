@@ -2782,7 +2782,7 @@ fn final_bindings(
                 t_name += t.elapsed();
                 // open files are not dumped
                 // nor is the PDF writer's state (pdfTeX dumps no objects)
-                if ["wopen:", "write:", "file:", "read:", "pdf:state"]
+                if ["wopen:", "write:", "file:", "read:", "pdf:state", "pdf:pre"]
                     .iter()
                     .any(|p| name.starts_with(p))
                 {

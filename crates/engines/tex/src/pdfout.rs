@@ -210,6 +210,38 @@ fn states() -> &'static States {
     S.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
+type PreStates = Mutex<FxHashMap<u64, Arc<Fold>>>;
+
+/// A writer state by its page-base digest (`pdf:pre`,
+/// `PdfState::page_base_digest` with the forms'): the latest state a
+/// step left with it. A finisher writes its page apart on it, reading
+/// only the digest, not the whole state's key (`pdf:state`): an earlier
+/// page placed anew changes the key, seldom the digest.
+fn pre_states() -> &'static PreStates {
+    static S: OnceLock<PreStates> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// The writer's state a finisher writes its page apart on: one with the
+/// page-base digest reaching it (`pdf:pre`), else the state reaching it.
+/// The digest stands for the state's key in the page's memo key.
+fn page_base(r: &mut Run<'_, '_>) -> R<(u64, Option<Arc<Fold>>)> {
+    if in_page_step(r) && !folding(r)? {
+        if let Some(x) = r.get("pdf:pre")? {
+            let k = u64::from_ne_bytes(int_of(r.v, x).to_ne_bytes());
+            let a = pre_states()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&k)
+                .cloned();
+            if a.is_some() {
+                return Ok((k, a));
+            }
+        }
+    }
+    before(r)
+}
+
 /// One font as the writer asks for it.
 struct Font {
     name: Vec<u8>,
@@ -755,20 +787,24 @@ pub(crate) fn step_forms<T>(
     // elsewhere, [`publish`]; a run of a thousand writer commands, a
     // format's `\pdfglyphtounicode` table, keeps one state, not a
     // thousand copies)
-    r.pdf_fold = Some((
-        k1,
-        Arc::new(Fold {
-            st,
-            bytes,
-            forms,
-            bytes_hash,
-        }),
-    ));
+    let pre = phitex_defuse::hash_words(st.page_base_digest(), &[fh]).max(1);
+    let fold = Arc::new(Fold {
+        st,
+        bytes,
+        forms,
+        bytes_hash,
+    });
+    pre_states()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(pre, fold.clone());
+    r.pdf_fold = Some((k1, fold));
     r.set(
         "pdf:state",
         v.int(i64::from_ne_bytes(k1.to_ne_bytes())),
         true,
     );
+    r.set("pdf:pre", v.int(i64::from_ne_bytes(pre.to_ne_bytes())), true);
     Ok(out)
 }
 
@@ -1100,14 +1136,15 @@ pub(crate) fn ship(
     }
     // the fonts of the forms the page may ship too
     let mut all: BTreeSet<u32> = ids.iter().copied().collect();
-    all.extend(forms_here(r)?.fonts);
+    let base_forms = page_base(r)?.1.map(|a| a.forms.clone()).unwrap_or_default();
+    all.extend(base_forms.fonts.iter().copied());
     let all: Vec<u32> = all.into_iter().collect();
     let mut fonts = fonts_for(r, &all, space)?;
     let whats = side.whats.clone();
     let images = resolved
         .values()
         .any(|&d| list_of(v, d).first().map(|&k| str_of(v, k)).as_deref() == Some("pdf:refximage"))
-        || forms_here(r)?
+        || base_forms
             .whats
             .values()
             .any(|w| matches!(w, Whatsit::RefXImage(_)));
@@ -1115,7 +1152,7 @@ pub(crate) fn ship(
         // an included PDF's fonts replaced by the map's (`copyFont`
         // off): the files a dry run of the page asks for, read now
         fonts.ps = default_ps_map(r)?;
-        if let (_, Some(a)) = before(r)? {
+        if let (_, Some(a)) = page_base(r)? {
             let mut st = a.st.clone();
             let forms = &a.forms;
             page_params(v, st.params_mut(), &p);
@@ -1255,7 +1292,7 @@ fn ship_apart(
     };
     // the key: what the piece is made of, by the values' identities
     // (interned: equal values, equal ids), not by their bytes
-    let (k0, _) = before(r)?;
+    let (k0, _) = page_base(r)?;
     let maps = r
         .get_loc(crate::fields::cell::PDF_MAPS)?
         .map_or(0, ValueId::raw);
@@ -1271,8 +1308,9 @@ fn ship_apart(
     ];
     words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
     let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
-    // the page written once, apart, on the read-time commands' state
-    let (_, a) = before(r)?;
+    // the page written once, apart, on a state with the page-base digest
+    // reaching the finisher (`page_base`)
+    let (_, a) = page_base(r)?;
     let (mut st, forms) = if let Some(a) = a {
         (a.st.clone(), a.forms.clone())
     } else {
@@ -1347,7 +1385,7 @@ impl Operation for Place {
         None
     }
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        MayDefine::Names(vec![v.field("pdf:state")])
+        MayDefine::Names(vec![v.field("pdf:state"), v.field("pdf:pre")])
     }
     /// The writer's state: the node waits for it instead of starting
     /// and stopping.

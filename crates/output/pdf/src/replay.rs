@@ -123,6 +123,20 @@ impl PdfState {
         }
     }
 
+    /// A digest of what a page written apart on this state depends on
+    /// besides the page ([`PdfState::ship_recorded`]): the variables
+    /// `pdf_ship_out` reads before it sets them and the fonts in use.
+    /// Two states with equal digests record the same page alike, up to
+    /// object numbers, which [`PdfState::replay_page`] maps and checks.
+    #[must_use]
+    pub fn page_base_digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.pre_key().hash(&mut h);
+        self.fonts_used().hash(&mut h);
+        h.finish()
+    }
+
     /// What of the writer's variables `pdf_ship_out` reads before it sets
     /// them (the text state is set at the page's start and by
     /// `pdf_begin_text`), formatted.
