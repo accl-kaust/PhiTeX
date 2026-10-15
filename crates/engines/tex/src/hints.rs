@@ -2795,6 +2795,8 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
     let mut pending: Vec<&'static str> = Vec::new();
+    // (a slice set `\\everypar` for the next paragraph, which runs it)
+    let mut everypar_pending = false;
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         // (whether the run reads on into the next slice: a scan for a
@@ -2896,10 +2898,23 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // `\\@afterheading`, a list's `\\item` and an environment's
         // end (`\\@doendpe`) set another, which the next paragraph
         // consumes, §1091: a slice calling one declares it)
-        if sets_everypar(&text[s..e])
-            && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
-        {
-            add_head(&mut b.state, "param:everypar");
+        // (LaTeX 2025's `\\everypar` is a token register, `\\newtoks`,
+        // the primitive behind the paragraph hooks: a register's field)
+        // (the paragraph after it runs that `\\everypar`: the heading's
+        // sets `\\clubpenalty` and `\\if@nobreak`, `\\@doendpe`'s
+        // `\\if@endpe`, both `\\everypar` again)
+        let consumes = std::mem::take(&mut everypar_pending);
+        if consumes && let Some(b) = h.bound.as_mut().or(h.guess.as_mut()) {
+            for n in EVERYPAR_RUN {
+                add_head(&mut b.state, n);
+            }
+        }
+        if sets_everypar(&text[s..e]) {
+            if let Some(b) = h.bound.as_mut().or(h.guess.as_mut()) {
+                add_head(&mut b.state, "param:everypar");
+                add_head(&mut b.state, "toks:");
+            }
+            everypar_pending = true;
         }
         let mut out = pending.clone();
         let mut ends = false;
@@ -3431,6 +3446,17 @@ static OFF: AtomicBool = AtomicBool::new(false);
 pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
+
+/// What a paragraph running a heading's or an environment end's
+/// `\\everypar` may define (LaTeX's `\\@afterheading`, `\\@doendpe`).
+const EVERYPAR_RUN: [&str; 6] = [
+    "param:clubpenalty",
+    "param:everypar",
+    "toks:",
+    "cs:if@nobreak",
+    "cs:if@endpe",
+    "box:0",
+];
 
 /// Whether a slice calls a command that leaves `\\everypar` other
 /// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
