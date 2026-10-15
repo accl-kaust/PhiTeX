@@ -129,8 +129,16 @@ impl Run<'_, '_> {
                 }
                 _ => {
                     // §370: "Undefined control sequence" (dropped)
-                    if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
-                        eprintln!("undefined {:?}", self.cur.tok);
+                    if crate::exec::env_flag!("PHITEX_TEX_TRACE")
+                        || crate::exec::env_flag!("PHITEX_UNDEF_TRACE")
+                    {
+                        eprintln!(
+                            "undefined {:?} in node {} (op {:?}, page {})",
+                            self.cur.tok,
+                            self.cx.node().raw(),
+                            self.cx.op(),
+                            self.page_index()
+                        );
                     }
                     self.log("error", "Undefined control sequence")?;
                 }

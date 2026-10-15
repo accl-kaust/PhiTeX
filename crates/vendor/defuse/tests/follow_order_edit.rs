@@ -145,3 +145,63 @@ fn a_restarted_run_drops_its_first_pass_follows() {
     eng.evaluate_sequential().unwrap();
     assert_eq!(*ops.saw.lock().unwrap(), vec![Some("from f".to_string())], "one S, after F");
 }
+
+/// An edit that makes a parent place the same follows in another order
+/// moves them: `A [1]` follows `S`, `F`; `A [2]` follows `F`, `S`.
+struct Swapper {
+    me: Mutex<Option<OpId>>,
+    saw: Mutex<Vec<Option<String>>>,
+}
+
+impl Operation for Swapper {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "f" { vec![(v.field("x"), Locality::Local)] } else { Vec::new() })
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(if tag(v, a) == "s" { vec![v.field("x")] } else { Vec::new() })
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let op = self.me.lock().unwrap().unwrap();
+        match tag(v, &a).as_str() {
+            "a" => {
+                let (f, s) = (vec![v.str("f")], vec![v.str("s")]);
+                if v.as_int(a[1]) == Some(1) {
+                    cx.follow(op, s);
+                    cx.follow(op, f);
+                } else {
+                    cx.follow(op, f);
+                    cx.follow(op, s);
+                }
+                Ok(ValueId::UNIT)
+            }
+            "f" => {
+                cx.define(v.field("x"), v.str("from f"));
+                Ok(ValueId::UNIT)
+            }
+            _ => {
+                let x = cx.use_field(v.field("x"))?.and_then(|p| v.as_str(p));
+                self.saw.lock().unwrap().push(x);
+                Ok(ValueId::UNIT)
+            }
+        }
+    }
+}
+
+#[test]
+fn an_edit_that_reorders_kept_follows_moves_them() {
+    let ops = Arc::new(Swapper { me: Mutex::new(None), saw: Mutex::new(Vec::new()) });
+    let mut eng = Engine::new();
+    let op = eng.register(ops.clone());
+    *ops.me.lock().unwrap() = Some(op);
+    let u = eng.new_unit();
+    let (a, one) = (eng.values().str("a"), eng.values().int(1));
+    let an = eng.push(u, op, vec![a, one]);
+    eng.evaluate_sequential().unwrap();
+    assert_eq!(ops.saw.lock().unwrap().last(), Some(&None), "S before F reads nothing");
+    let two = eng.values().int(2);
+    eng.replace(an, op, vec![a, two]);
+    eng.evaluate_sequential().unwrap();
+    assert_eq!(ops.saw.lock().unwrap().last(), Some(&Some("from f".to_string())), "S after F now");
+}

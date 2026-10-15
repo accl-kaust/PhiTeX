@@ -1748,10 +1748,23 @@ impl Shared {
             parent
         };
         let mut fresh: Vec<Slot> = Vec::new();
+        // Kept entries keep their places only in their old order: one the
+        // specs now put before an earlier-kept one is made again where it
+        // belongs (its old place is after it in the list).
+        let mut last_old: Option<usize> = None;
         for sp in specs {
-            let existing = self
+            let mut existing = self
                 .slot_of(sp.id())
                 .filter(|&x| self.rec(x).st() != S_FREE && old.contains(&x));
+            if let Some(x) = existing {
+                let i = old.iter().position(|&o| o == x);
+                if last_old.is_some_and(|l| i.is_some_and(|i| i < l)) {
+                    self.free_entry(x, notes);
+                    existing = None;
+                } else {
+                    last_old = i.or(last_old);
+                }
+            }
             if let Some(x) = existing {
                 if !fresh.is_empty() {
                     self.link_after(u, after, &fresh);
