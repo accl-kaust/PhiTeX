@@ -396,6 +396,16 @@ impl<'a> Ctx<'a> {
         r
     }
 
+    /// Defines `f` as a local of the scope this node opens after itself
+    /// (`Brackets { opens >= 1, before: false }`): readers inside the scope
+    /// see it, readers after its close see the node's other definitions.
+    /// A node that opens no scope after itself defines it as a plain local.
+    /// (One definition per field and run: defining `f` here and with
+    /// another locality in the same run keeps the last.)
+    pub fn define_in_scope(&mut self, f: Field, x: ValueId) {
+        self.define_with(f, x, Locality::Scope);
+    }
+
     #[inline]
     fn define_with_inner(&mut self, f: Field, x: ValueId, loc: Locality) {
         self.set_def(f, loc, DefVal::Val(x));

@@ -1279,6 +1279,8 @@ impl Shared {
 
     /// Inserts a definition entry for `s`, notifying readers after it.
     pub(crate) fn insert_def(&self, u: u32, s: Slot, f: Field, loc: Locality, val: DefVal, notes: &mut Notes) {
+        // (Before the shard lock: the scope frame reads the node's data.)
+        let fk_new = self.def_frame(s, loc);
         let mut sh = wlock(self.shard(u, f));
         let idx = sh.entry((u, f)).or_default();
         if let Some(i) = self.def_pos(idx, s) {
@@ -1318,7 +1320,7 @@ impl Shared {
         }
         let l = self.rec(s).lab();
         let pos = idx.defs.partition_point(|e| self.rec(e.node).lab() < l);
-        let fk = self.frame_of(s);
+        let fk = fk_new;
         idx.defs.insert(
             pos,
             DefE {
@@ -1331,6 +1333,32 @@ impl Shared {
         );
         self.add_def_keys(idx, u, s, loc, fk);
         self.notify_entry(idx, s, f, loc, fk, notes);
+    }
+
+    /// The frame an entry of `s` with locality `loc` is filed under: its
+    /// node's frame, or for `Locality::Scope` the innermost scope the node
+    /// opens after itself (its own frame while it opens none).
+    pub(crate) fn def_frame(&self, s: Slot, loc: Locality) -> u32 {
+        if loc == Locality::Scope {
+            let (br, _) = self.brackets_of(s);
+            if br.oa > 0 {
+                let r = self.rec(s);
+                let k = u32::from(br.ob) + u32::from(br.oa);
+                if r.nframes.load(Ordering::Acquire) >= k {
+                    return r.frames.load(Ordering::Acquire) + k - 1;
+                }
+            }
+        }
+        self.frame_of(s)
+    }
+
+    /// Whether `s`'s committed run made a scope-local definition.
+    pub(crate) fn has_scope_defs(&self, s: Slot) -> bool {
+        self.rec(s)
+            .data()
+            .res
+            .as_ref()
+            .is_some_and(|c| c.defs.iter().any(|d| d.loc == Locality::Scope))
     }
 
     /// Files `s`'s entries again under its frame now (its frame changed),
@@ -1349,12 +1377,14 @@ impl Shared {
             v.dedup();
             v
         };
-        let fk = self.frame_of(s);
+        let fk_node = self.frame_of(s);
+        let fk_scope = self.def_frame(s, Locality::Scope);
         for f in fields {
             let mut sh = wlock(self.shard(u, f));
             let Some(idx) = sh.get_mut(&(u, f)) else { continue };
             let Some(i) = self.def_pos(idx, s) else { continue };
             let (old, loc) = (idx.defs[i].fk, idx.defs[i].loc);
+            let fk = if loc == Locality::Scope { fk_scope } else { fk_node };
             for (n, g) in std::mem::take(&mut idx.defs[i].users) {
                 notes.touch.push((n, g, Cause::Changed { site: None, field: f }));
             }
@@ -2005,6 +2035,10 @@ impl Shared {
             }
             let mut moved = Vec::new();
             let walked = self.recompute_frames(u, x, &mut moved);
+            // Its scope-local definitions go under the scope it opens now.
+            if !moved.contains(&x) && self.has_scope_defs(x) {
+                self.refile_defs(u, x, notes);
+            }
             // Definitions whose scope changed: their readers after them.
             for m in moved {
                 // Its own reads now see from another scope (unless it has

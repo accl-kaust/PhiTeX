@@ -40,6 +40,9 @@ pub struct UnitId(pub(crate) u32);
 pub enum Locality {
     Local,
     Global,
+    /// A local of the scope the node opens after itself (`Ctx::define_in_scope`):
+    /// seen inside that scope, not after it closes.
+    Scope,
 }
 
 /// What a node with a pending definition set may define.

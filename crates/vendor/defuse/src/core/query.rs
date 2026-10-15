@@ -82,13 +82,17 @@ pub(crate) fn sib_cursor_reset() {
 }
 
 /// Two use answers that give the run the same value (the site may differ).
+/// (A site's committed value and the environment's are both just the
+/// value to the run.)
 pub(crate) fn same_value(a: &DAns, b: &DAns) -> bool {
-    match (a, b) {
-        (DAns::Site { val: x, .. }, DAns::Site { val: y, .. }) => {
-            matches!((x, y), (DefVal::Val(p), DefVal::Val(q)) if p == q)
+    fn val(x: &DAns) -> Option<Option<ValueId>> {
+        match x {
+            DAns::Site { val: DefVal::Val(v), .. } => Some(Some(*v)),
+            DAns::Env(v) => Some(*v),
+            _ => None,
         }
-        _ => false,
     }
+    matches!((val(a), val(b)), (Some(p), Some(q)) if p == q)
 }
 
 impl Shared {

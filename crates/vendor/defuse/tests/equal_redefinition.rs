@@ -98,7 +98,6 @@ impl defuse::Executor for Threads {
     }
 }
 
-const SCHEDS: [&str; 4] = ["seq", "spec", "random", "par"];
 
 fn eval(eng: &mut Engine, sched: &str) -> Report {
     match sched {
