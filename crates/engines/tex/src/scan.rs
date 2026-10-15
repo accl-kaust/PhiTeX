@@ -858,8 +858,12 @@ impl Run<'_, '_> {
                 // sequence's in a `\def`, for §479's `#`; braces count
                 // by token alone)
                 let tok = self.get_token_tok()?;
+                // (a read that must wait stops the scan here: a raised
+                // halt would leave its sentinel in the body, and the
+                // definition made before the halt surfaced, so a run
+                // resumed after it keeps the sentinel for the meaning)
                 if macro_def && tok.is_cs_or_active() {
-                    self.set_cur_flag(tok);
+                    self.set_cur(tok)?;
                 }
             }
             let tok = self.cur.tok;
