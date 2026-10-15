@@ -57,7 +57,8 @@ pub struct Ctx<'a> {
     pub(crate) restart: bool,
     pub(crate) dup: FxHashMap<u64, u32>,
     /// Where each field is in `defs`, once there are many.
-    def_ix: FxHashMap<Field, usize>,
+    /// The run's definitions by field and whether scope-local.
+    def_ix: FxHashMap<(Field, bool), usize>,
     pub(crate) static_claimed: Option<Vec<Slot>>,
     pub(crate) ask: Option<super::Ask>,
 }
@@ -400,8 +401,8 @@ impl<'a> Ctx<'a> {
     /// (`Brackets { opens >= 1, before: false }`): readers inside the scope
     /// see it, readers after its close see the node's other definitions.
     /// A node that opens no scope after itself defines it as a plain local.
-    /// (One definition per field and run: defining `f` here and with
-    /// another locality in the same run keeps the last.)
+    /// The same field may also be defined at the node's own level in the
+    /// same run: that entry is seen after the scope closes.
     pub fn define_in_scope(&mut self, f: Field, x: ValueId) {
         self.define_with(f, x, Locality::Scope);
     }
@@ -413,13 +414,17 @@ impl<'a> Ctx<'a> {
 
     fn set_def(&mut self, f: Field, loc: Locality, val: DefVal) {
         const SCAN: usize = 16;
+        // A scope-local definition and an outer one of the same field are
+        // two entries.
+        let k = (f, loc == Locality::Scope);
+        let key = |d: &Def| (d.f, d.loc == Locality::Scope);
         let at = if self.defs.len() <= SCAN {
-            self.defs.iter().position(|d| d.f == f)
+            self.defs.iter().position(|d| key(d) == k)
         } else {
             if self.def_ix.is_empty() {
-                self.def_ix = self.defs.iter().enumerate().map(|(i, d)| (d.f, i)).collect();
+                self.def_ix = self.defs.iter().enumerate().map(|(i, d)| (key(d), i)).collect();
             }
-            self.def_ix.get(&f).copied()
+            self.def_ix.get(&k).copied()
         };
         if let Some(i) = at {
             let d = &mut self.defs[i];
@@ -428,9 +433,9 @@ impl<'a> Ctx<'a> {
         } else {
             if !self.def_ix.is_empty() || self.defs.len() == SCAN {
                 if self.def_ix.is_empty() {
-                    self.def_ix = self.defs.iter().enumerate().map(|(i, d)| (d.f, i)).collect();
+                    self.def_ix = self.defs.iter().enumerate().map(|(i, d)| (key(d), i)).collect();
                 }
-                self.def_ix.insert(f, self.defs.len());
+                self.def_ix.insert(k, self.defs.len());
             }
             self.defs.push(Def { f, loc, val });
         }

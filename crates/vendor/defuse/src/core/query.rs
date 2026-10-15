@@ -406,23 +406,23 @@ impl Shared {
         if let Some(idx) = idx {
             // The candidates: the last entry before `at` in each frame of
             // its scope chain, and the last global one; the nearest wins.
-            let mut chain: Vec<(&[Slot], usize)> = Vec::new();
+            let mut chain: Vec<(&[Slot], usize, u32)> = Vec::new();
             let mut g = fp;
             while g != NO_FRAME && chain.len() < 1 << 12 {
                 if let Some(v) = idx.local.get(&g) {
                     let i = v.partition_point(|&x| self.rec(x).lab() < pl);
-                    chain.push((v.as_slice(), i));
+                    chain.push((v.as_slice(), i, g));
                 }
                 g = self.frame_parent(g);
             }
             {
                 let v = idx.globals.as_slice();
-                chain.push((v, v.partition_point(|&x| self.rec(x).lab() < pl)));
+                chain.push((v, v.partition_point(|&x| self.rec(x).lab() < pl), NO_FRAME));
             }
             loop {
                 crate::obs::count!(WalkLevel);
                 let mut best: Option<(usize, u64)> = None;
-                for (k, &(v, i)) in chain.iter().enumerate() {
+                for (k, &(v, i, _)) in chain.iter().enumerate() {
                     if i > 0 {
                         let l = self.rec(v[i - 1]).lab();
                         if best.is_none_or(|b| l > b.1) {
@@ -440,7 +440,7 @@ impl Shared {
                     // A definition its old text made: gone once it commits.
                     continue;
                 }
-                if let Some(i) = self.def_pos(idx, q) {
+                if let Some(i) = self.def_pos_at(idx, q, chain[k].2) {
                     site = Some(&idx.defs[i]);
                     break;
                 }
@@ -594,7 +594,7 @@ impl Shared {
                     // A definition its old text made: gone once it commits.
                     continue;
                 }
-                let Some(i) = self.def_pos(idx, q) else { continue };
+                let Some(i) = self.def_pos_at(idx, q, fp) else { continue };
                 let e = &idx.defs[i];
                 if strict && self.busy(q, me) {
                     return Q::Wait(wait_node(q, Some(f), "definition", e.val != DefVal::Pending));

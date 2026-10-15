@@ -2,13 +2,19 @@
 //! commit: `x = 2` at its own level (seen after the scope closes) and
 //! `y = 5` local to the scope it opens (seen inside, gone after). Readers
 //! inside the scope see `y = 5` and `x = 2`; after the close, `y` is the
-//! outer value and `x` still 2. Edits of the opener's arguments reach the
-//! readers in every schedule; outputs equal a cold build's.
+//! outer value and `x` still 2. Also with `y` defined at both levels by
+//! the same run (`y = 3` after the close), and with the effect set by the
+//! run. Edits of the opener's arguments reach the readers in every
+//! schedule; outputs equal a cold build's.
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
 use defuse::{Brackets, Ctx, Effect, Engine, Field, Locality, MayDefine, OpId, Operation, Report, Stop, ValueId, Values};
+
+/// Bit 0: the opener defines `y` at both levels; bit 1: its effect is
+/// set by the run.
+static MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 struct Ops {
     me: Mutex<Option<OpId>>,
@@ -22,6 +28,11 @@ impl Operation for Ops {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
         match tag(v, a).as_str() {
             "a" => Some(vec![(v.field("x"), Locality::Global), (v.field("y"), Locality::Global)]),
+            "o" if MODE.load(Relaxed) & 1 != 0 => Some(vec![
+                (v.field("x"), Locality::Local),
+                (v.field("y"), Locality::Local),
+                (v.field("y"), Locality::Scope),
+            ]),
             "o" => Some(vec![(v.field("x"), Locality::Local), (v.field("y"), Locality::Scope)]),
             _ => Some(Vec::new()),
         }
@@ -31,7 +42,7 @@ impl Operation for Ops {
     }
     fn effect(&self, a: &[ValueId], v: &Values) -> Effect {
         match tag(v, a).as_str() {
-            "o" if std::env::var("EFFECT_PENDING").is_ok() => Effect::Pending,
+            "o" if MODE.load(Relaxed) & 2 != 0 => Effect::Pending,
             "o" => Effect::Scope(Brackets { opens: 1, ..Brackets::default() }),
             "c" => Effect::Close,
             _ => Effect::None,
@@ -49,8 +60,12 @@ impl Operation for Ops {
             "o" => {
                 let k = v.as_int(a[1]).unwrap_or(0);
                 cx.define(v.field("x"), v.int(2));
+                if MODE.load(Relaxed) & 1 != 0 {
+                    // The same field at both levels: 3 after the close.
+                    cx.define(v.field("y"), v.int(3));
+                }
                 cx.define_in_scope(v.field("y"), v.int(5 + k));
-                if std::env::var("EFFECT_PENDING").is_ok() {
+                if MODE.load(Relaxed) & 2 != 0 {
                     cx.set_effect(Effect::Scope(Brackets { opens: 1, ..Brackets::default() }));
                 }
                 Ok(ValueId::UNIT)
@@ -129,10 +144,18 @@ fn outs(eng: &Engine, rs: &[defuse::NodeId]) -> Vec<Option<i64>> {
 
 #[test]
 fn a_scope_local_definition_is_seen_inside_only() {
+    for mode in 0..4 {
+        MODE.store(mode, Relaxed);
+        check();
+    }
+}
+
+fn check() {
     for i in 0..80 {
         let (mut eng, rs, o, op) = build(0);
         eval(&mut eng, i);
-        assert_eq!(outs(&eng, &rs), vec![Some(205); 4].into_iter().chain([Some(201)]).collect::<Vec<_>>(), "cold {i}");
+        let after = if MODE.load(Relaxed) & 1 != 0 { 203 } else { 201 };
+        assert_eq!(outs(&eng, &rs), vec![Some(205); 4].into_iter().chain([Some(after)]).collect::<Vec<_>>(), "cold {i}");
         // Edit the opener: the scope local changes, the readers inside follow.
         let (ov, k3) = (eng.values().str("o"), eng.values().int(3));
         eng.replace(o, op, vec![ov, k3]);

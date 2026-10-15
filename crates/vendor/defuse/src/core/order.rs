@@ -909,7 +909,7 @@ impl Shared {
             for &(f, loc) in defs {
                 let exists = super::rlock(self.shard(u, f))
                     .get(&(u, f))
-                    .is_some_and(|idx| self.def_pos(idx, s).is_some());
+                    .is_some_and(|idx| self.def_pos_k(idx, s, loc == Locality::Scope).is_some());
                 if !exists {
                     self.insert_def(u, s, f, loc, DefVal::Pending, notes);
                 }
@@ -1137,16 +1137,38 @@ impl Shared {
     }
 
     /// Where `s`'s entry is in `idx.defs`.
+    /// `s`'s entry (its outer one, not a scope entry).
     pub(crate) fn def_pos(&self, idx: &super::FieldIdx, s: Slot) -> Option<usize> {
+        self.def_pos_k(idx, s, false)
+    }
+
+    /// `s`'s scope entry (`scope`) or its other entry.
+    pub(crate) fn def_pos_k(&self, idx: &super::FieldIdx, s: Slot, scope: bool) -> Option<usize> {
         let l = self.rec(s).lab();
         let mut i = idx.defs.partition_point(|e| self.rec(e.node).lab() < l);
         while i < idx.defs.len() && self.rec(idx.defs[i].node).lab() == l {
-            if idx.defs[i].node == s {
+            if idx.defs[i].node == s && idx.defs[i].scope == scope {
                 return Some(i);
             }
             i += 1;
         }
         None
+    }
+
+    /// `s`'s entry filed under frame `g` (`NO_FRAME`: its global one).
+    pub(crate) fn def_pos_at(&self, idx: &super::FieldIdx, s: Slot, g: u32) -> Option<usize> {
+        if g != NO_FRAME
+            && let Some(i) = self.def_pos_k(idx, s, true)
+            && idx.defs[i].fk == g
+        {
+            return Some(i);
+        }
+        self.def_pos(idx, s)
+    }
+
+    /// Both of `s`'s entries (outer first).
+    pub(crate) fn def_positions(&self, idx: &super::FieldIdx, s: Slot) -> impl Iterator<Item = usize> {
+        [self.def_pos_k(idx, s, false), self.def_pos_k(idx, s, true)].into_iter().flatten()
     }
 
     fn ins_sorted(&self, v: &mut Vec<Slot>, s: Slot) {
@@ -1185,7 +1207,27 @@ impl Shared {
         }
     }
 
-    fn rm_def_keys(&self, idx: &mut super::FieldIdx, s: Slot, loc: Locality, fk: u32) {
+    /// Unfiles `s`'s entry of kind `scope` (the other entry, if any, keeps
+    /// the lists it shares).
+    fn rm_def_keys(&self, idx: &mut super::FieldIdx, s: Slot, loc: Locality, fk: u32, scope: bool) {
+        let root = self.unit(self.unit_of(s)).root_frame;
+        let other = self.def_pos_k(idx, s, !scope).map(|i| (idx.defs[i].fk, idx.defs[i].loc));
+        if let Some((ofk, oloc)) = other {
+            if ofk != fk
+                && let Some(v) = idx.local.get_mut(&fk)
+            {
+                self.rm_sorted(v, s);
+                if v.is_empty() {
+                    idx.local.remove(&fk);
+                }
+            }
+            if loc == Locality::Global && oloc != Locality::Global {
+                self.rm_sorted(&mut idx.globals, s);
+            } else if loc != Locality::Global && (oloc == Locality::Global || ofk == root) {
+                self.rm_sorted(&mut idx.nonroot, s);
+            }
+            return;
+        }
         if let Some(v) = idx.local.get_mut(&fk) {
             self.rm_sorted(v, s);
             if v.is_empty() {
@@ -1283,7 +1325,8 @@ impl Shared {
         let fk_new = self.def_frame(s, loc);
         let mut sh = wlock(self.shard(u, f));
         let idx = sh.entry((u, f)).or_default();
-        if let Some(i) = self.def_pos(idx, s) {
+        let scope = loc == Locality::Scope;
+        if let Some(i) = self.def_pos_k(idx, s, scope) {
             let e = &mut idx.defs[i];
             if e.val != val || e.loc != loc {
                 let old_loc = e.loc;
@@ -1310,7 +1353,7 @@ impl Shared {
                     notes.touch.push((n, g, Cause::Changed { site: None, field: f }));
                 }
                 if old_loc != loc {
-                    self.rm_def_keys(idx, s, old_loc, fk);
+                    self.rm_def_keys(idx, s, old_loc, fk, scope);
                     self.add_def_keys(idx, u, s, loc, fk);
                     self.notify_entry(idx, s, f, old_loc, fk, notes);
                     self.notify_entry(idx, s, f, loc, fk, notes);
@@ -1329,6 +1372,7 @@ impl Shared {
                 val,
                 users: Vec::new(),
                 fk,
+                scope,
             },
         );
         self.add_def_keys(idx, u, s, loc, fk);
@@ -1382,32 +1426,41 @@ impl Shared {
         for f in fields {
             let mut sh = wlock(self.shard(u, f));
             let Some(idx) = sh.get_mut(&(u, f)) else { continue };
-            let Some(i) = self.def_pos(idx, s) else { continue };
-            let (old, loc) = (idx.defs[i].fk, idx.defs[i].loc);
-            let fk = if loc == Locality::Scope { fk_scope } else { fk_node };
-            for (n, g) in std::mem::take(&mut idx.defs[i].users) {
-                notes.touch.push((n, g, Cause::Changed { site: None, field: f }));
+            for scope in [false, true] {
+                let Some(i) = self.def_pos_k(idx, s, scope) else { continue };
+                let (old, loc) = (idx.defs[i].fk, idx.defs[i].loc);
+                let fk = if scope { fk_scope } else { fk_node };
+                for (n, g) in std::mem::take(&mut idx.defs[i].users) {
+                    notes.touch.push((n, g, Cause::Changed { site: None, field: f }));
+                }
+                if old != fk {
+                    self.rm_def_keys(idx, s, loc, old, scope);
+                    self.notify_entry(idx, s, f, loc, old, notes);
+                    idx.defs[i].fk = fk;
+                    self.add_def_keys(idx, u, s, loc, fk);
+                }
+                self.notify_entry(idx, s, f, loc, fk, notes);
             }
-            if old != fk {
-                self.rm_def_keys(idx, s, loc, old);
-                self.notify_entry(idx, s, f, loc, old, notes);
-                idx.defs[i].fk = fk;
-                self.add_def_keys(idx, u, s, loc, fk);
-            }
-            self.notify_entry(idx, s, f, loc, fk, notes);
         }
     }
 
-    /// Removes `s`'s definition of `f`, notifying its users and readers.
+    /// Removes `s`'s definitions of `f` (both kinds), notifying their
+    /// users and readers.
     pub(crate) fn remove_def(&self, u: u32, s: Slot, f: Field, notes: &mut Notes) {
+        self.remove_def_k(u, s, f, false, notes);
+        self.remove_def_k(u, s, f, true, notes);
+    }
+
+    /// Removes `s`'s definition of `f` of kind `scope`.
+    pub(crate) fn remove_def_k(&self, u: u32, s: Slot, f: Field, scope: bool, notes: &mut Notes) {
         let mut sh = wlock(self.shard(u, f));
         let Some(idx) = sh.get_mut(&(u, f)) else { return };
-        if let Some(i) = self.def_pos(idx, s) {
+        if let Some(i) = self.def_pos_k(idx, s, scope) {
             let e = idx.defs.remove(i);
             for (n, g) in e.users {
                 notes.touch.push((n, g, Cause::Changed { site: None, field: f }));
             }
-            self.rm_def_keys(idx, s, e.loc, e.fk);
+            self.rm_def_keys(idx, s, e.loc, e.fk, scope);
             self.notify_entry(idx, s, f, e.loc, e.fk, notes);
         }
     }

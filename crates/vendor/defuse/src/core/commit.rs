@@ -10,7 +10,7 @@ use super::{
     ClaimS, Committed, DAns, DMode, Def, DefVal, F_APP, F_DONE, F_FWD, F_HAS_OUT, F_NEEDS_RUN, F_SENS, NIL, Pred,
     S_CLEAN, S_FREE, S_RUN, Shared, Slot, Sub, in_work, lock, wlock,
 };
-use crate::api::{Cause, EvalError};
+use crate::api::{Cause, EvalError, Locality};
 use crate::values::{Field, ValueId, hash_words};
 
 fn dans_hash(a: &DAns) -> u64 {
@@ -390,6 +390,16 @@ impl Shared {
             }
             let made: crate::values::FxHashSet<Field> = cx.defs.iter().map(|d| d.f).collect();
             let defined = |f: Field| made.contains(&f);
+            // Of a field it still defines, the kind (scope-local or not)
+            // it no longer makes.
+            let made_k: crate::values::FxHashSet<(Field, bool)> =
+                cx.defs.iter().map(|d| (d.f, d.loc == Locality::Scope)).collect();
+            for d in &old.defs {
+                let sc = d.loc == Locality::Scope;
+                if defined(d.f) && !made_k.contains(&(d.f, sc)) {
+                    self.remove_def_k(u, s, d.f, sc, &mut notes);
+                }
+            }
             {
                 let mut un = lock(&self.undeclared);
                 if un.get(&s).is_some_and(|&f| !defined(f)) {
@@ -397,9 +407,10 @@ impl Shared {
                 }
             }
             if let Some(sd) = &stat_defs {
-                for &(f, _) in sd {
-                    if !defined(f) {
-                        self.remove_def(u, s, f, &mut notes);
+                for &(f, loc) in sd {
+                    let sc = loc == Locality::Scope;
+                    if !made_k.contains(&(f, sc)) {
+                        self.remove_def_k(u, s, f, sc, &mut notes);
                     }
                 }
             }
@@ -732,7 +743,9 @@ impl Shared {
                         _ => None,
                     };
                     for node in sites.iter().map(|x| x.0).chain(one) {
-                        if let Some(i) = self.def_pos(idx, node) {
+                        // (Both of its entries: the answer names the node.)
+                        let is: Vec<usize> = self.def_positions(idx, node).collect();
+                        for i in is {
                             idx.defs[i].users.push((s, gn));
                         }
                     }
@@ -821,7 +834,8 @@ impl Shared {
                             },
                         );
                         for (q, _) in site {
-                            if let Some(i) = self.def_pos(idx, q) {
+                            let is: Vec<usize> = self.def_positions(idx, q).collect();
+                            for i in is {
                                 idx.defs[i].users.push((s, gn));
                             }
                         }

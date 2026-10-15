@@ -653,8 +653,12 @@ pub(crate) struct DefE {
     pub loc: Locality,
     pub val: DefVal,
     pub users: Vec<(Slot, u32)>,
-    /// The frame the entry is filed under (its node's frame).
+    /// The frame the entry is filed under (its node's frame, or for a
+    /// scope entry the scope the node opens).
     pub fk: u32,
+    /// A `Locality::Scope` entry: a node may have one of these and one
+    /// other entry for the same field.
+    pub scope: bool,
 }
 
 /// A subscription of a reader at a position.
