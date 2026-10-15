@@ -1130,13 +1130,20 @@ impl State {
             (id, e.flags & LOADED != 0)
         };
         let mut slots = Vec::new();
+        // (the local definitions in the groups still open: a group's
+        // close drops its own from `defined`, and restores the slot
+        // without clearing the meta's mark of a local definition in a
+        // group; `\begingroup\let\thepage\relax...\endgroup`
+        // closed before the cut is no local of the continuation)
+        let open_locals: phitex_defuse::FxHashSet<Loc> = self.defined.iter().copied().collect();
         for &l in &self.touched {
             let Some(s) = self.slot_ref(l) else { continue };
             let m = usize::try_from(s.meta)
                 .ok()
                 .filter(|&m| m > 0)
                 .and_then(|m| self.metas.get(m - 1));
-            let group_local = m.is_some_and(|m| m.ldef_local && m.ldef_gid.is_some());
+            let group_local = open_locals.contains(&l)
+                && m.is_some_and(|m| m.ldef_local && m.ldef_gid.is_some());
             if s.save_gid == 0 && s.ginert == 0 && !group_local {
                 continue;
             }
