@@ -957,6 +957,9 @@ pub struct Stats {
     /// The light page steps run (OUTPUT.md §4.2a), and those of them
     /// with no output routine, which may define anything.
     pub page_steps: u64,
+    /// The engine's runs by operation (`exec`, `fold`, `finish`,
+    /// `resume`, `place`, ...), every attempt, summed over the evaluations.
+    pub runs_by_op: Vec<(&'static str, u64)>,
     /// The engine's pending waits by kind, summed over the evaluations.
     pub waits_by_kind: Vec<(&'static str, u64)>,
     /// The nodes most waited on in the last evaluation (raw ids, waits).
@@ -1232,6 +1235,12 @@ impl Stats {
             match self.waits_by_kind.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,
                 None => self.waits_by_kind.push((k, n)),
+            }
+        }
+        for &(k, n) in &r.runs_by_op {
+            match self.runs_by_op.iter_mut().find(|x| x.0 == k) {
+                Some(x) => x.1 += n,
+                None => self.runs_by_op.push((k, n)),
             }
         }
     }

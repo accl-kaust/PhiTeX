@@ -129,6 +129,92 @@ pub fn log_excerpt(log: &str) -> String {
     }
 }
 
+/// The pages whose content an edit changed: the indices of the page
+/// hashes before and after that differ, and of the pages one side has
+/// and the other not.
+#[must_use]
+pub fn pages_touched(before: &[u64], after: &[u64]) -> Vec<usize> {
+    (0..before.len().max(after.len()))
+        .filter(|&k| before.get(k) != after.get(k))
+        .collect()
+}
+
+/// The runs of `op` in `b`'s last build or edit.
+#[must_use]
+pub fn runs_of(b: &Build, op: &str) -> u64 {
+    b.stats.runs_by_op.iter().filter(|x| x.0 == op).map(|x| x.1).sum()
+}
+
+/// What an edit may run in the node model, by operation (runs, not
+/// nodes): the touched pieces' `exec` (and one more); the `fold` of
+/// every piece on a touched page (a fold is per piece and chained on
+/// the page: the edited piece's and the ones after it on its page;
+/// pieces per page = the cold build's folds / its pages, rounded up);
+/// one `finish` and one `resume` per touched page; a `place` for every
+/// page from the first touched one to the last (in exact mode place
+/// replays the PDF state in order); the end node (`dvi`) once; nothing
+/// of any other operation; and at most 1.1 runs a node.
+/// `cold_folds` and `before` are the cold build's fold runs and page
+/// hashes.
+#[must_use]
+pub fn edit_cost_failures(
+    b: &Build,
+    touched: u64,
+    before: &[u64],
+    cold_folds: u64,
+) -> Vec<String> {
+    let after = b.pages();
+    let pages = pages_touched(before, &after);
+    let n = pages.len() as u64;
+    let per_page = cold_folds.div_ceil(before.len().max(1) as u64);
+    let to_end = pages
+        .first()
+        .map_or(0, |&k| (after.len().max(before.len()) - k) as u64);
+    let bounds = [
+        ("exec", touched + 1),
+        ("fold", per_page * n),
+        ("finish", n),
+        ("resume", n),
+        ("place", to_end),
+        ("dvi", 1),
+    ];
+    let mut f = Vec::new();
+    for &(op, bound) in &bounds {
+        let r = runs_of(b, op);
+        if r > bound {
+            f.push(format!("{op}: {r} runs, bound {bound}"));
+        }
+    }
+    for &(op, r) in &b.stats.runs_by_op {
+        if r > 0 && !bounds.iter().any(|x| x.0 == op) {
+            f.push(format!("{op}: {r} runs, bound 0"));
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let per_node = b.stats.runs as f64 / b.stats.nodes_run.max(1) as f64;
+    if per_node > 1.1 {
+        f.push(format!("runs a node {per_node:.2}"));
+    }
+    f
+}
+
+/// Asserts [`edit_cost_failures`] on an edit, printing the runs by
+/// operation and the touched pages either way.
+pub fn assert_edit_cost(name: &str, b: &Build, touched: u64, before: &[u64], cold_folds: u64) {
+    eprintln!(
+        "{name}: edit runs by op {:?}; {touched} touched pieces, pages touched {:?} of {}, cold folds {cold_folds}",
+        b.stats.runs_by_op,
+        pages_touched(before, &b.pages()),
+        b.pages().len()
+    );
+    let f = edit_cost_failures(b, touched, before, cold_folds);
+    assert!(
+        f.is_empty(),
+        "{name}: edit ran beyond the node model: {}",
+        f.join("; ")
+    );
+}
+
 /// One document's chain census, cold and after a one-word edit: the
 /// gate the engine's parallelism and speculation rest on.
 pub struct Census {

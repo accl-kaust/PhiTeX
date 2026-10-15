@@ -500,9 +500,10 @@ fn oscillating_written_file() {
 }
 
 /// A one-word edit on a generated plain document of 40 paragraphs:
-/// the edited region, its page's `brk`, the page step and the writer
-/// re-run (the plan too: it folds the list), no loop round, and the PDF
-/// equals a cold build of the edited text.
+/// what re-runs is the node model's (`common::assert_edit_cost`: the
+/// edited paragraph, and the fold, finisher, place and resume of each
+/// page whose content changed), no loop round, and the PDF equals a
+/// cold build of the edited text.
 #[test]
 fn one_word_edit_reruns_little() {
     let fx = common::fixtures().join("dvi");
@@ -522,20 +523,22 @@ fn one_word_edit_reruns_little() {
     let opts = || common::options("./w.tex", "w", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
     assert!(b.is_pdf());
+    let (before, cold_folds) = (b.pages(), common::runs_of(&b, "fold"));
     let at = src.match_indices("\n\n").nth(37).expect("a paragraph").0 + 2;
     let text = format!("{}Q{}", &src[..at], &src[at + 1..]);
     b.edit(&text);
-    let (runs, rounds) = (b.stats.nodes_run, b.stats.loop_rounds);
+    let rounds = b.stats.loop_rounds;
     let cold = common::build(opts(), Some(&prelude), &text);
     let d = common::first_difference(&b.output().0, &cold.output().0);
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert!(rounds <= 1, "{rounds} loop rounds");
-    assert!(runs <= 5, "{runs} nodes run");
+    common::assert_edit_cost("one word", &b, 1, &before, cold_folds);
 }
 
 /// An edit on page 1 of 400 plain paragraphs in PDF mode re-runs that
 /// page's step only: no page step reads another's writer state, so the
 /// later pages' steps are not run again; the PDF equals a cold build.
+/// What else re-runs is the node model's (`common::assert_edit_cost`).
 #[test]
 fn pdf_edit_reruns_one_page_step() {
     use std::fmt::Write as _;
@@ -554,6 +557,7 @@ fn pdf_edit_reruns_one_page_step() {
     let opts = || common::options("./p400.tex", "p400", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
     assert!(b.is_pdf());
+    let (before, cold_folds) = (b.pages(), common::runs_of(&b, "fold"));
     let text = src.replacen(
         "Paragraph 3 has some words",
         "Paragraph 3 has some wordz",
@@ -571,6 +575,7 @@ fn pdf_edit_reruns_one_page_step() {
     let d = common::first_difference(&b.output().0, &cold.output().0);
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert!(steps <= 1, "{steps} page steps re-run");
+    common::assert_edit_cost("p400", &b, 1, &before, cold_folds);
 }
 
 /// A measure: 400 and 4000 plain paragraphs with `\pdfoutput=1`, cold
