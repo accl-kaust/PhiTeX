@@ -561,6 +561,8 @@ fn main() {
                     units: units.clone(),
                 };
                 let mut sched = Greedy::speculative(spec, budget);
+                eprintln!("play: evaluating {}", evals);
+                std::thread::sleep(std::time::Duration::from_millis(std::env::var("PLAY_PAUSE_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(0)));
                 let t0 = std::time::Instant::now();
                 let r = eng.evaluate_absorbing(&mut sched, &mut Threads(threads), &mut src);
                 let got = match &r {

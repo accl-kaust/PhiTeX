@@ -141,7 +141,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` when the answer's subject is still in work.
     pub fn use_field(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f,)) } else { serde_json::Value::Null };
         let r = self.use_field_inner(f);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_field", a, crate::record::stop_or(&r));
@@ -172,7 +172,7 @@ impl<'a> Ctx<'a> {
     /// [`Stop`] while the definition (or structure before it) is in work.
     pub fn use_field_at(&mut self, f: Field, at: Option<NodeId>) -> Result<FieldAt, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &at));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &at)) } else { serde_json::Value::Null };
         let r = self.use_field_at_inner(f, at);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_field_at", a, crate::record::stop_or(&r));
@@ -286,7 +286,7 @@ impl<'a> Ctx<'a> {
     /// [`Stop`] as for [`Ctx::use_field`].
     pub fn use_field_proj(&mut self, f: Field, p: crate::api::ProjId) -> Result<Option<ValueId>, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &p));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &p)) } else { serde_json::Value::Null };
         let r = self.use_field_proj_inner(f, p);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_field_proj", a, crate::record::stop_or(&r));
@@ -338,7 +338,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` while the field is unknown.
     pub fn use_env(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f,)) } else { serde_json::Value::Null };
         let r = self.use_env_inner(f);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_env", a, crate::record::stop_or(&r));
@@ -364,7 +364,7 @@ impl<'a> Ctx<'a> {
 
     pub fn define(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &x));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x)) } else { serde_json::Value::Null };
         let r = self.define_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "define", a, serde_json::Value::Null);
@@ -383,7 +383,7 @@ impl<'a> Ctx<'a> {
 
     pub fn define_with(&mut self, f: Field, x: ValueId, loc: Locality) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &x, &loc));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x, &loc)) } else { serde_json::Value::Null };
         let r = self.define_with_inner(f, x, loc);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "define_with", a, serde_json::Value::Null);
@@ -423,7 +423,7 @@ impl<'a> Ctx<'a> {
     /// Publishes a loop-back field's next round value.
     pub fn publish(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &x));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x)) } else { serde_json::Value::Null };
         let r = self.publish_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "publish", a, serde_json::Value::Null);
@@ -454,7 +454,7 @@ impl<'a> Ctx<'a> {
     /// Unfolds a child: a node placed after this one's earlier children.
     pub fn child(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&op, &args));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&op, &args)) } else { serde_json::Value::Null };
         let r = self.child_inner(op, args);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "child", a, crate::record::j(&r));
@@ -476,7 +476,7 @@ impl<'a> Ctx<'a> {
     /// A continuation: a node placed after this one's subtree, at its level.
     pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&op, &args));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&op, &args)) } else { serde_json::Value::Null };
         let r = self.follow_inner(op, args);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "follow", a, crate::record::j(&r));
@@ -498,7 +498,7 @@ impl<'a> Ctx<'a> {
     /// Opens a scope among the children (closed by `close_scope`).
     pub fn open_scope(&mut self) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.open_scope_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "open_scope", a, serde_json::Value::Null);
@@ -513,7 +513,7 @@ impl<'a> Ctx<'a> {
 
     pub fn close_scope(&mut self) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.close_scope_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "close_scope", a, serde_json::Value::Null);
@@ -533,7 +533,7 @@ impl<'a> Ctx<'a> {
     /// [`Stop`] if the child has not produced it yet.
     pub fn output_of(&mut self, i: usize) -> Result<ValueId, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&i,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&i,)) } else { serde_json::Value::Null };
         let r = self.output_of_inner(i);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "output_of", a, crate::record::stop_or(&r));
@@ -610,7 +610,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` until the application has its result.
     pub fn apply(&mut self, op: OpId, args: Vec<ValueId>) -> Result<ValueId, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&op, &args));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&op, &args)) } else { serde_json::Value::Null };
         let r = self.apply_inner(op, args);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "apply", a, crate::record::stop_or(&r));
@@ -637,7 +637,7 @@ impl<'a> Ctx<'a> {
     /// Adds `x` to accumulator `f` at this node.
     pub fn contribute(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &x));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x)) } else { serde_json::Value::Null };
         let r = self.contribute_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "contribute", a, serde_json::Value::Null);
@@ -665,7 +665,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` while a node in the range is in work.
     pub fn acc_range(&mut self, f: Field, from: Option<NodeId>) -> Result<ValueId, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &from));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &from)) } else { serde_json::Value::Null };
         let r = self.acc_range_inner(f, from);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "acc_range", a, crate::record::stop_or(&r));
@@ -688,7 +688,7 @@ impl<'a> Ctx<'a> {
     /// [`Stop`] until every node in the window has finished.
     pub fn acc_range_to(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &from, &to));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &from, &to)) } else { serde_json::Value::Null };
         let r = self.acc_range_to_inner(f, from, to);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "acc_range_to", a, crate::record::stop_or(&r));
@@ -729,7 +729,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` while the scope structure before it is undecided.
     pub fn scope_kind(&mut self) -> Result<Option<ValueId>, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.scope_kind_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "scope_kind", a, crate::record::stop_or(&r));
@@ -758,7 +758,7 @@ impl<'a> Ctx<'a> {
     /// Sets the kind of the scopes this node opens (a kind-pending effect).
     pub fn set_kind(&mut self, k: ValueId) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&k,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&k,)) } else { serde_json::Value::Null };
         let r = self.set_kind_inner(k);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "set_kind", a, serde_json::Value::Null);
@@ -773,7 +773,7 @@ impl<'a> Ctx<'a> {
     /// Decides a pending effect.
     pub fn set_effect(&mut self, e: Effect) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&e,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&e,)) } else { serde_json::Value::Null };
         let r = self.set_effect_inner(e);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "set_effect", a, serde_json::Value::Null);
@@ -789,7 +789,7 @@ impl<'a> Ctx<'a> {
     #[must_use]
     pub fn effect_pending(&self) -> bool {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.effect_pending_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "effect_pending", a, crate::record::j(&r));
@@ -811,7 +811,7 @@ impl<'a> Ctx<'a> {
     /// declaration, as defining outside the text's answer does.
     pub fn narrow(&mut self, m: crate::api::MayDefine) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&m,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&m,)) } else { serde_json::Value::Null };
         let r = self.narrow_inner(m);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "narrow", a, serde_json::Value::Null);
@@ -825,7 +825,7 @@ impl<'a> Ctx<'a> {
 
     pub fn claim(&mut self, n: usize) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&n,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&n,)) } else { serde_json::Value::Null };
         let r = self.claim_inner(n);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "claim", a, serde_json::Value::Null);
@@ -840,7 +840,7 @@ impl<'a> Ctx<'a> {
     /// The claimed siblings' texts.
     pub fn claimed(&self) -> Vec<(OpId, Vec<ValueId>)> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.claimed_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "claimed", a, crate::record::j(&r));
@@ -867,7 +867,7 @@ impl<'a> Ctx<'a> {
     /// The `i`-th following sibling's text.
     pub fn following(&self, i: usize) -> Option<(OpId, Vec<ValueId>)> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&i,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&i,)) } else { serde_json::Value::Null };
         let r = self.following_inner(i);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "following", a, crate::record::j(&r));
@@ -921,7 +921,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` while an element is in work.
     pub fn claim_stream(&mut self) -> Result<Vec<ValueId>, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.claim_stream_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "claim_stream", a, crate::record::stop_or(&r));
@@ -1021,7 +1021,7 @@ impl<'a> Ctx<'a> {
     /// Pushes `x` on sequence `f` in this node's scope.
     pub fn push_contribution(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &x));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x)) } else { serde_json::Value::Null };
         let r = self.push_contribution_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "push_contribution", a, serde_json::Value::Null);
@@ -1040,7 +1040,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` while an earlier node of the scope is in work.
     pub fn prev_contribution(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f,)) } else { serde_json::Value::Null };
         let r = self.prev_contribution_inner(f);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "prev_contribution", a, crate::record::stop_or(&r));
@@ -1059,7 +1059,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` while an earlier node of the scope is in work.
     pub fn contributions_before_me(&mut self, f: Field) -> Result<ValueId, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f,)) } else { serde_json::Value::Null };
         let r = self.contributions_before_me_inner(f);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "contributions_before_me", a, crate::record::stop_or(&r));
@@ -1078,7 +1078,7 @@ impl<'a> Ctx<'a> {
     /// `Stop` while an earlier node of the scope is in work.
     pub fn take_prev_contribution(&mut self, f: Field, r: Option<ValueId>) -> Result<Option<ValueId>, Stop> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &r));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &r)) } else { serde_json::Value::Null };
         let r = self.take_prev_contribution_inner(f, r);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "take_prev_contribution", a, crate::record::stop_or(&r));
@@ -1099,7 +1099,7 @@ impl<'a> Ctx<'a> {
     /// Sets an environment field of the unit this application owns.
     pub fn set_env(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f, &x));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x)) } else { serde_json::Value::Null };
         let r = self.set_env_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "set_env", a, serde_json::Value::Null);
@@ -1119,7 +1119,7 @@ impl<'a> Ctx<'a> {
     /// `parked` when its reads so far still hold.
     pub fn park(&mut self, token: Box<dyn Any + Send>) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.park_inner(token);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "park", a, serde_json::Value::Null);
@@ -1134,7 +1134,7 @@ impl<'a> Ctx<'a> {
     /// The token a stopped run of this node kept.
     pub fn parked(&mut self) -> Option<Box<dyn Any + Send>> {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.parked_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "parked", a, crate::record::j(&r.is_some()));
@@ -1149,7 +1149,7 @@ impl<'a> Ctx<'a> {
     /// Drops the kept state: the run starts over.
     pub fn restart(&mut self) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&());
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
         let r = self.restart_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "restart", a, serde_json::Value::Null);
@@ -1165,7 +1165,7 @@ impl<'a> Ctx<'a> {
 
     pub fn diagnostic(&mut self, msg: ValueId) {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&msg,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&msg,)) } else { serde_json::Value::Null };
         let r = self.diagnostic_inner(msg);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "diagnostic", a, serde_json::Value::Null);
@@ -1212,7 +1212,7 @@ impl<'a> Ctx<'a> {
     #[must_use]
     pub fn is_loopback(&self, f: Field) -> bool {
         #[cfg(feature = "observe")]
-        let a = crate::record::j(&(&f,));
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f,)) } else { serde_json::Value::Null };
         let r = self.is_loopback_inner(f);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "is_loopback", a, crate::record::j(&r));

@@ -621,7 +621,10 @@ impl Shared {
                 x = self.next(x);
                 continue;
             }
-            let skipped = r.st() == S_INERT && r.claimed_by.load(Ordering::Acquire) != claimer;
+            // Taken by another claimer: skipped. What the claimer's own
+            // follows took is its own output: still a sibling to it.
+            let by = r.claimed_by.load(Ordering::Acquire);
+            let skipped = r.st() == S_INERT && by != claimer && !(by != NIL && self.own_cont(by, claimer));
             if !f(x, skipped) {
                 return;
             }
@@ -824,7 +827,8 @@ impl Shared {
                 }
                 level = d;
                 let r = self.rec(cur);
-                if self.own_cont(cur, s) || (r.st() == S_INERT && r.claimed_by.load(Ordering::Acquire) != s) {
+                let by = r.claimed_by.load(Ordering::Acquire);
+                if self.own_cont(cur, s) || (r.st() == S_INERT && by != s && !(by != NIL && self.own_cont(by, s))) {
                     continue;
                 }
                 let (op, a) = self.text(cur);
