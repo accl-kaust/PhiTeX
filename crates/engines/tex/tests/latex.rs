@@ -512,9 +512,10 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     }
     let regions = b.stats.nodes_text_frames;
     eprintln!(
-        "cold {name}: {regions} document nodes, {} paragraph nodes, {} paragraphs taken, {} pages; {}",
+        "cold {name}: {regions} document nodes, {} paragraph nodes, {} paragraphs taken, {} scopes refused (a field at both levels), {} pages; {}",
         b.stats.nodes_paragraphs,
         b.stats.paragraphs_taken,
+        b.stats.scope_both_levels,
         b.pages().len(),
         report(name, &b)
     );

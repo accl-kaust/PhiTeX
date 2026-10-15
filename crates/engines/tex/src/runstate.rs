@@ -979,7 +979,7 @@ impl State {
         for m in &self.metas {
             let Some((val, l)) = &m.publ else { continue };
             let Some(x) = val.encode(v) else { continue };
-            if (top || *l == Locality::Local) && m.eng == Some(Some(x)) {
+            if (top || *l != Locality::Global) && m.eng == Some(Some(x)) {
                 continue;
             }
             out.push((m.loc, x, *l));
@@ -999,46 +999,101 @@ impl State {
     }
 
 
-    /// The run's local definitions at its base level that change the
-    /// engine's value ([`State::has_base_local_def`]), as they stand.
-    pub(crate) fn base_local_defs(&self, v: &Values) -> Vec<(Loc, Native, ValueId)> {
-        self.metas
-            .iter()
-            .filter_map(|m| match &m.publ {
-                Some((val, Locality::Local)) => val
-                    .encode(v)
-                    .filter(|&x| m.eng != Some(Some(x)))
-                    .map(|x| (m.loc, val.clone(), x)),
-                _ => None,
-            })
+    /// The value `m` publishes at the run's base level, if any (a local
+    /// one equal to the engine's value it read publishes nothing, nor a
+    /// global one at the top level, [`State::published`]).
+    fn base_publish(m: &Meta, v: &Values, top: bool) -> Option<ValueId> {
+        let (val, l) = m.publ.as_ref()?;
+        if *l == Locality::Scope {
+            return None;
+        }
+        let x = val.encode(v)?;
+        if (top || *l == Locality::Local) && m.eng == Some(Some(x)) {
+            None
+        } else {
+            Some(x)
+        }
+    }
+
+    /// The group's local definitions as they stand: of the group whose
+    /// definitions began at `def_base` (opened at `open_stamp`), each
+    /// location whose latest definition is a local one made since, with
+    /// its value.
+    fn group_locals(&self, v: &Values, def_base: usize, open_stamp: u64) -> Vec<(usize, Option<ValueId>)> {
+        let mut out = Vec::new();
+        for &loc in &self.defined[def_base.min(self.defined.len())..] {
+            let Some(s) = self.slot_ref(loc) else { continue };
+            let Some(mi) = (s.meta as usize).checked_sub(1) else { continue };
+            let Some(m) = self.metas.get(mi) else { continue };
+            if m.ldef_local && m.ldef_stamp > open_stamp {
+                out.push((mi, s.e.val.encode(v)));
+            }
+        }
+        out
+    }
+
+    /// Whether a group left to the engine as a scope ([`State::
+    /// abandon_to_scope`]) would need a field defined at both levels: a
+    /// local definition of the group's whose location the run's base
+    /// level publishes at another value (the engine takes one
+    /// definition per field and run).
+    pub(crate) fn scope_both_levels(&self, v: &Values, def_base: usize, open_stamp: u64, top: bool) -> Vec<Loc> {
+        self.group_locals(v, def_base, open_stamp)
+            .into_iter()
+            .filter(|&(mi, x)| Self::base_publish(&self.metas[mi], v, top).is_some_and(|y| x != Some(y)))
+            .map(|(mi, _)| self.metas[mi].loc)
+            .collect::<std::collections::BTreeSet<Loc>>()
+            .into_iter()
             .collect()
     }
 
-    /// Takes the local definitions published now that are not the base
-    /// level's `base` ([`State::base_local_defs`] before a group the run
-    /// leaves to the engine was abandoned): they are the group's, and
-    /// go inside the scope. What stays published is `base` (a location
-    /// the group redefined is published at its base-level value).
-    pub(crate) fn take_scope_locals(
+    /// Whether the run's base level publishes field `f` (at `loc`, its
+    /// static location, else its spill location if it has one).
+    pub(crate) fn base_publishes(&self, v: &Values, f: Field, loc: Option<Loc>, top: bool) -> bool {
+        let Some(loc) = loc.or_else(|| self.spill_ix.get(&f).map(|&i| SPILL | i)) else {
+            return false;
+        };
+        self.slot_ref(loc)
+            .and_then(|s| (s.meta as usize).checked_sub(1))
+            .and_then(|mi| self.metas.get(mi))
+            .is_some_and(|m| Self::base_publish(m, v, top).is_some())
+    }
+
+    /// Leaves the group whose saves and definitions began at `save_base`
+    /// and `def_base` (opened at `open_stamp`) to the engine as the scope
+    /// the run opens after itself: its local definitions are published
+    /// as the scope's (`Locality::Scope`, `Ctx::define_in_scope`), the
+    /// base level's stay the run's; a group's local of the value the base
+    /// level publishes is that definition seen inside. (A location the
+    /// base level publishes at another value is refused before,
+    /// [`State::scope_both_levels`].)
+    pub(crate) fn abandon_to_scope(
         &mut self,
         v: &Values,
-        base: &[(Loc, Native, ValueId)],
-    ) -> Vec<(Loc, ValueId)> {
-        let mut out = Vec::new();
-        for m in &mut self.metas {
-            let Some((val, Locality::Local)) = &m.publ else { continue };
-            let Some(x) = val.encode(v) else { continue };
-            let b = base.iter().find(|(l, _, _)| *l == m.loc);
-            if b.is_some_and(|(_, _, y)| *y == x) {
+        save_base: usize,
+        def_base: usize,
+        open_stamp: u64,
+        top: bool,
+    ) {
+        for (mi, x) in self.group_locals(v, def_base, open_stamp) {
+            if Self::base_publish(&self.metas[mi], v, top).is_some() || x.is_none() {
                 continue;
             }
-            if m.eng == Some(Some(x)) && b.is_none() {
-                continue;
-            }
-            out.push((m.loc, x));
-            m.publ = b.map(|(_, n, _)| (n.clone(), Locality::Local));
+            let loc = self.metas[mi].loc;
+            let val = self.slot(loc).e.val.clone();
+            self.metas[mi].publ = Some((val, Locality::Scope));
         }
-        out
+        self.save.truncate(save_base.min(self.save.len()));
+        self.defined.truncate(def_base.min(self.defined.len()));
+    }
+
+    /// The run's definition of `loc` at its base level made the scope's
+    /// it opens after itself ([`State::abandon_to_scope`]).
+    pub(crate) fn publish_in_scope(&mut self, loc: Loc) {
+        let mi = self.meta(loc);
+        if let Some((_, l)) = &mut self.metas[mi].publ {
+            *l = Locality::Scope;
+        }
     }
 
     /// The table without `Rc`, for a parked run ([`PState`]): the slots

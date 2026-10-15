@@ -997,6 +997,10 @@ pub struct Stats {
     pub nodes_paragraphs: u64,
     /// Paragraph-region slices run inside another node's run (pulled).
     pub paragraphs_taken: u64,
+    /// Runs that read on with their one group open because leaving it
+    /// to the engine as a scope would define a field both at the run's
+    /// level and in the scope (one definition per field and run).
+    pub scope_both_levels: u64,
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
@@ -1159,6 +1163,7 @@ impl Stats {
         self.nodes_text_frames = get(c[6]);
         self.nodes_paragraphs = get(c[7]);
         self.paragraphs_taken = get(c[8]);
+        self.scope_both_levels = get(c[9]);
         self.undeclared_definitions = get(c[3])
             + u64::try_from(
                 errors

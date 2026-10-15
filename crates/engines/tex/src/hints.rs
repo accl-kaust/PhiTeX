@@ -3451,7 +3451,8 @@ fn plain_catcode(b: u8, at: bool) -> u8 {
 
 /// Counts since the process began (the fallback when the build's own
 /// counters are not read): bounded, any, violations, undeclared.
-pub(crate) static COUNTS: [AtomicU64; 9] = [
+pub(crate) static COUNTS: [AtomicU64; 10] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -3738,7 +3739,7 @@ pub(crate) fn optimistic_hint() -> String {
 }
 
 /// The accumulators the nodes count into.
-pub(crate) const COUNTERS: [&str; 9] = [
+pub(crate) const COUNTERS: [&str; 10] = [
     "hints:bounded",
     "hints:any",
     "hints:violations",
@@ -3751,6 +3752,9 @@ pub(crate) const COUNTERS: [&str; 9] = [
     "frames:pars",
     // (paragraph-region slices another node's run took, pulled)
     "frames:pars_taken",
+    // (groups a run could not leave to the engine as a scope: a field
+    // at both levels, `Run::scope_both_levels`)
+    "frames:scope_both",
 ];
 
 /// Classes whose state row still let a run define outside it in the

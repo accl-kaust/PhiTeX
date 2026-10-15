@@ -294,10 +294,10 @@ pub(crate) struct Run<'c, 'a> {
     /// Per pulled sibling: whether a box of the run's own was open when
     /// it was pulled (a figure's float: one node, like a picture).
     pub pull_box: Vec<bool>,
-    /// The `put` node a run that left its group to the engine as a scope
-    /// with base-level local definitions too makes for the group's local
-    /// definitions, the first node following it ([`Run::leave_scope`]).
-    pub scope_put: Option<Vec<ValueId>>,
+    /// Whether the run counted a group it could not leave to the engine
+    /// as a scope because a field would be defined at both levels
+    /// ([`Run::scope_both_levels`]).
+    pub both_counted: bool,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -506,7 +506,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pull_lev: None,
             pull_orig: Vec::new(),
             pull_box: Vec::new(),
-            scope_put: None,
+            both_counted: false,
             top: false,
             claim_rest: false,
             hint_void: false,
@@ -848,6 +848,35 @@ impl<'c, 'a> Run<'c, 'a> {
         let mut inside = None;
         for b in 0..crate::fields::RECORDS.len() {
             let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
+            // (cells the run defines in the scope it opens after itself,
+            // `Locality::Scope`: the scope's record is the one reaching
+            // the run with those cells; with cells of the record defined
+            // outside the scope too, one definition of the record per
+            // run cannot hold both levels, so it is made stale where the
+            // run publishes it, and its readers read the cells)
+            let of_b = |d: &(Loc, ValueId, Locality)| {
+                crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b)
+            };
+            if defs.iter().any(|d| d.2 == Locality::Scope && of_b(d)) {
+                let outside: Vec<Locality> = defs
+                    .iter()
+                    .filter(|d| d.2 != Locality::Scope && of_b(d))
+                    .map(|d| d.2)
+                    .collect();
+                if outside.is_empty() {
+                    if let Some((x, _)) = self.record_after(b, &defs)? {
+                        self.rec_out.push((f, x, Locality::Scope));
+                    }
+                } else {
+                    let l = if outside.contains(&Locality::Global) {
+                        Locality::Global
+                    } else {
+                        Locality::Local
+                    };
+                    self.rec_out.push((f, v.list(Vec::new()), l));
+                }
+                continue;
+            }
             let global = defs.iter().any(|d| {
                 d.2 == Locality::Global
                     && crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b)
@@ -882,34 +911,6 @@ impl<'c, 'a> Run<'c, 'a> {
         self.rec_ready = true;
         self.rec_sig = self.st.sig();
         Ok(())
-    }
-
-    /// The records of the definitions a scope's `put` makes inside it
-    /// (`inside`, by location), on the run's record outside it: as
-    /// `[name, value, 0]` entries.
-    pub(crate) fn scope_records(&mut self, inside: &[(Loc, ValueId)]) -> R<Vec<ValueId>> {
-        let v = self.v;
-        let mut out = Vec::new();
-        if !inside
-            .iter()
-            .any(|d| crate::fields::record_of(d.0 as usize).is_some())
-        {
-            return Ok(out);
-        }
-        let mut defs = self.st.published(v, self.rec_load);
-        defs.extend(inside.iter().map(|&(l, x)| (l, x, Locality::Local)));
-        for b in 0..crate::fields::RECORDS.len() {
-            if !inside
-                .iter()
-                .any(|d| crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b))
-            {
-                continue;
-            }
-            if let Some((x, _)) = self.record_after(b, &defs)? {
-                out.push(v.list(vec![v.str(crate::fields::RECORDS[b]), x, v.int(0)]));
-            }
-        }
-        Ok(out)
     }
 
     #[inline(never)]
@@ -1797,6 +1798,8 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             let l = if mine.contains(&Locality::Global) {
                 Locality::Global
+            } else if mine.iter().all(|&l| l == Locality::Scope) {
+                Locality::Scope
             } else {
                 Locality::Local
             };
@@ -2321,6 +2324,23 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.st.has_base_local_def(self.v)
                 );
             }
+            if !self.both_counted && self.scope_shape() && self.scope_both_levels() {
+                self.both_counted = true;
+                crate::hints::count(self, 9);
+                if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") {
+                    let v = self.v;
+                    let (db, os, agn) = (self.nest[0].def_base, self.nest[0].open_stamp, self.nest[0].ag.len());
+                    let locs = self.st.scope_both_levels(v, db, os, self.rec_load);
+                    let fs: Vec<String> = locs
+                        .into_iter()
+                        .map(|loc| crate::val::field_name(v, self.loc_field(loc)))
+                        .collect();
+                    eprintln!(
+                        "scope: node {} reads on: at both levels {fs:?} (ag {agn})",
+                        self.cx.node().raw()
+                    );
+                }
+            }
             if self.open_span() && !self.eof && self.pull()? {
                 continue;
             }
@@ -2345,9 +2365,16 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether the run is a document region with exactly one group of
     /// its own open (sharing the list below it), nothing else open, no
-    /// scope effect yet, and a text that does not say it opens none: the
-    /// group can be left to the engine as a scope (`Run::leave_scope`).
+    /// scope effect yet, a text that does not say it opens none, and no
+    /// field to define both at the run's level and in the scope
+    /// ([`Run::scope_both_levels`]): the group can be left to the engine
+    /// as a scope (`Run::leave_scope`).
     pub(crate) fn can_leave_scope(&self) -> bool {
+        self.scope_shape() && !self.scope_both_levels()
+    }
+
+    /// [`Run::can_leave_scope`] but for the definitions.
+    fn scope_shape(&self) -> bool {
         self.doc
             && self.conds.is_empty()
             && self.effect == Effect::None
@@ -2359,18 +2386,34 @@ impl<'c, 'a> Run<'c, 'a> {
             )
             && !crate::hints::effect_none(self.v, &self.cx.args())
             && self.text_opens_group()
-            // (a local definition the run made at its base level before
-            // the group opened lies outside the group and outlives it;
-            // the scope's definitions are all the run's, `before` it, so
-            // the run reads on with the group open instead. `Run::
-            // leave_scope` can keep them outside (the scope opened after
-            // the run's entry, the group's locals in a `put` node after
-            // it), opt-in with `PHITEX_SCOPE_EXPORT=1`: it waits for the
-            // engine's two-level commit (outer-level definitions and the
-            // scope's locals committed atomically by one run); as a
-            // separate `put` node its PDF is not deterministic at 8
-            // threads)
-            && (crate::exec::env_flag!("PHITEX_SCOPE_EXPORT") || !self.st.has_base_local_def(self.v))
+    }
+
+    /// Whether leaving the run's one open group to the engine as a scope
+    /// would define a field both at the run's level and in the scope:
+    /// a local definition of the group's of a location the run's base
+    /// level defines to another value (or the group's `\aftergroup`
+    /// tokens with an `ag` list of the enclosing scope's defined by the
+    /// run). The engine takes one definition per field and run
+    /// (`Ctx::define_in_scope`), so the run reads on with the group
+    /// open instead.
+    pub(crate) fn scope_both_levels(&self) -> bool {
+        let Some(l) = self.nest.first() else {
+            return false;
+        };
+        let v = self.v;
+        if !self.st.scope_both_levels(v, l.def_base, l.open_stamp, self.rec_load).is_empty() {
+            return true;
+        }
+        if l.ag.is_empty() {
+            return false;
+        }
+        let f = self.ops.fields.get_at(v, self.cx.values_epoch(), "ag");
+        let loc = self
+            .ops
+            .fields
+            .loc_of(v, self.cx.values_epoch(), f)
+            .and_then(|l| crate::runstate::Loc::try_from(l).ok());
+        self.st.base_publishes(v, f, loc, self.rec_load)
     }
 
     /// Whether the node's own text opens a group it does not close (an
@@ -2653,9 +2696,6 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a run cut at a candidate: its input left is its continuation,
         // the resume piece's, `crate::pages`)
-        if let Some(args) = self.scope_put.take() {
-            self.cx.follow(self.ops.put, args);
-        }
         let leftover = if self.cut.is_some() {
             Vec::new()
         } else {

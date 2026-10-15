@@ -213,18 +213,17 @@ impl Run<'_, '_> {
     /// Leaves the run's one open group (sharing the list it is in) to
     /// the engine as a scope (`new_save_level`, §274): its kind is
     /// `[group, sid, list, mode, depth, parent kind, extra…]`, the
-    /// following siblings' level 0 ([`Run::base_mode`]). Its local
-    /// definitions are the run's, made inside the scope (`before`); its
-    /// `\aftergroup` tokens the scope's `ag` list.
+    /// following siblings' level 0 ([`Run::base_mode`]). It opens after
+    /// the run's entry: the run's definitions at its base level lie
+    /// outside it, the group's local ones are the scope's
+    /// (`Ctx::define_in_scope`); its `\aftergroup` tokens the scope's
+    /// `ag` list.
     pub(crate) fn leave_scope(&mut self) -> R<()> {
         let v = self.v;
         let base = self.base_mode()?;
         let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
-        // (local definitions the run made at its base level, before the
-        // group opened: they lie outside the scope)
-        let outside = self.st.base_local_defs(v);
         // (what the records of the scope's definitions read, before the
-        // group is left: [`Run::scope_records`])
+        // group is left: [`Run::ready_records`])
         let defined = self.st.defined_records();
         for (b, &d) in defined.iter().enumerate() {
             if d {
@@ -234,7 +233,10 @@ impl Run<'_, '_> {
         let Some(l) = self.nest.pop() else {
             return Ok(());
         };
-        self.abandon_levels(std::slice::from_ref(&l));
+        // (the group's local definitions are the scope's, the base
+        // level's stay the run's: `Locality::Scope`)
+        self.st
+            .abandon_to_scope(v, l.save_base, l.def_base, l.open_stamp, self.rec_load);
         let sid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         let mut xs = vec![
             v.int(l.group),
@@ -250,32 +252,30 @@ impl Run<'_, '_> {
             let mut xs = vec![v.int(sid)];
             xs.extend(l.ag.iter().map(|t| t.encode(v)));
             self.set("ag", v.list(xs), false);
+            let f = self.ops.fields.get_at(v, self.cx.values_epoch(), "ag");
+            let loc = self.loc_of(f);
+            self.st.publish_in_scope(loc);
         }
-        // the run's definitions are the scope's (it opens before the
-        // run's own entry); with local definitions at the run's base
-        // level too, the scope opens after the entry, which keeps those
-        // outside it, and the group's local definitions follow inside it
-        // as a `put` node
-        let before = outside.is_empty();
-        if !before {
-            let inside = self.st.take_scope_locals(v, &outside);
-            let mut defs = Vec::with_capacity(inside.len());
-            // (the records of the cells among them, on the run's own
-            // record outside the scope)
-            defs.extend(self.scope_records(&inside)?);
-            for (loc, x) in inside {
-                let f = self.loc_field(loc);
-                let name = crate::val::field_name(v, f);
-                defs.push(v.list(vec![v.str(&name), x, v.int(0)]));
-            }
-            if !defs.is_empty() {
-                self.scope_put = Some(vec![v.list(defs), v.list(Vec::new())]);
-            }
+        if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") {
+            let ds: Vec<String> = self
+                .st
+                .published(v, self.rec_load)
+                .into_iter()
+                .map(|(loc, x, l)| {
+                    let f = self.loc_field(loc);
+                    let mut r = v.render(x);
+                    r.truncate(r.char_indices().nth(60).map_or(r.len(), |(i, _)| i));
+                    format!("{} {l:?} {r}", crate::val::field_name(v, f))
+                })
+                .collect();
+            eprintln!("leave_scope: node {} defs {ds:#?}", self.cx.node().raw());
         }
+        // the scope opens after the run's entry: its base-level
+        // definitions outside it, the group's inside
         self.effect = Effect::Scope(phitex_defuse::Brackets {
             closes: 0,
             opens: 1,
-            before,
+            before: false,
             kind: Some(kind),
             kind_pending: false,
         });
