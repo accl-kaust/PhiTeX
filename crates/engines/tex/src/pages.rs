@@ -101,6 +101,12 @@ pub(crate) struct CandMark {
     pub contribs: usize,
     pub kids: usize,
     pub lines: i64,
+    /// The state table's shape at the candidate (definitions at the base
+    /// level, saves, local definitions in groups, the clock) and the
+    /// nest's depth: a group closed after the candidate restores without
+    /// advancing the clock, and the page was finished inside it.
+    pub sig: (usize, usize, usize, u64),
+    pub nest: usize,
 }
 
 /// A finisher's page: its index, the material carried over past it
@@ -643,6 +649,8 @@ impl Run<'_, '_> {
             contribs: self.contribs.len(),
             kids: self.kids.len(),
             lines: self.lines_entered,
+            sig: self.st.sig(),
+            nest: self.nest.len(),
         });
         if self.stop_at == Some(k) {
             return Err(Halt::Cut);
@@ -812,10 +820,16 @@ impl Run<'_, '_> {
     }
 
     /// The candidate the run passed last, when nothing happened after
-    /// it: a page finishing there finishes at the piece's end.
+    /// it: a page finishing there finishes at the piece's end. A group
+    /// that closed after it is something (its local definitions, in force
+    /// at the candidate, are gone at the end: amsbook's
+    /// `\cleardoublepage` is `\clearpage{\pagestyle{empty}...\newpage}`).
     fn last_candidate(&self) -> Option<u32> {
         self.cand_marks.last().and_then(|m| {
             (m.stamp == self.st.stamp()
+                && m.sig == self.st.sig()
+                && m.gids == self.st.gid_mark()
+                && m.nest == self.nest.len()
                 && m.contribs == self.contribs.len()
                 && m.kids == self.kids.len()
                 && m.lines == self.lines_entered)
@@ -1945,6 +1959,23 @@ impl Operation for Finish {
                         let loc = r.loc_of(Field(f));
                         r.st.preload(loc, some(x));
                     }
+                }
+                if let Ok(names) = std::env::var("PHITEX_FIN_SHOW") {
+                    let mut shown = Vec::new();
+                    for n in names.split(',') {
+                        let x = r.get(n)?;
+                        shown.push(format!("{n}={}", x.map_or_else(|| "undefined".to_owned(), |x| crate::val::show_def(v, x))));
+                    }
+                    eprintln!(
+                        "finisher {} page {} (piece {}, candidate {}, locals {}, args {}): {}",
+                        r.cx.node().raw(),
+                        int_of(v, a(0)),
+                        v.render(a(5)),
+                        v.render(a(6)),
+                        list_of(v, a(3)).len(),
+                        args.len(),
+                        shown.join(", ")
+                    );
                 }
                 r.fire_page(a(1))?;
             }
