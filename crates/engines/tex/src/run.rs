@@ -16,7 +16,7 @@ use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Va
 
 use crate::fields::Par;
 use crate::runstate::{Loc, Native};
-use crate::val::{Mean, Tok, cmd, int_at, int_of, list_of, str_of};
+use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
 pub(crate) enum Halt {
@@ -1165,11 +1165,13 @@ impl<'c, 'a> Run<'c, 'a> {
             // command, §338: given again at every read-back, as TeX
             // gives them at every `\input` of the file)
             if name.starts_with("rberr:") {
-                // (none of the file's text is read, `start_input`: its
-                // errors come from here, a file this run writes too)
+                // (a file read as its text here, one this run writes,
+                // gives them as its text ends, §362)
                 if self.interp.is_some() {
                     self.interp_nested.insert(name, id);
-                } else if let Some(&ms) = xs.first() {
+                } else if self.get(&format!("wopen:{key}"))?.is_none()
+                    && let Some(&ms) = xs.first()
+                {
                     if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                         eprintln!(
                             "aux-trace: read-back {key} gives {name} in node {}",
@@ -1278,10 +1280,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// its read-back reads it (under `\makeatletter`), on scratch: the
     /// definitions it makes, `[[field, value, global], ...]`. Nothing
     /// else of it stays in this run (its input, lists, contributions and
-    /// definitions are restored), except what it writes to other files
-    /// (LaTeX's `\@writefile{toc}{...}`, which writes the `.toc` line as
-    /// `\enddocument` reads the `.aux` back): those `streams` entries
-    /// (and a document node's `T_WRITE_AT` markers for them) are kept.
+    /// definitions are restored): what it writes to other files (LaTeX's
+    /// `\@writefile{toc}{...}`) is written where the run reads the text
+    /// back, as `\enddocument` does.
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<Option<ValueId>> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
@@ -1349,22 +1350,10 @@ impl<'c, 'a> Run<'c, 'a> {
         self.interp = None;
         self.input = input;
         self.st = st;
-        let streams = v.field("streams");
-        let items = v.field("items");
-        let written: Vec<(Field, ValueId)> = self
-            .contribs
-            .drain(nc..)
-            .filter(|&(f, x)| {
-                f == streams
-                    || f == items
-                        && v.seq_to_vec(x).iter().all(|&e| {
-                            list_of(v, e)
-                                .get(1)
-                                .is_some_and(|&n| int_at(v, n, 0) == crate::nodes::T_WRITE_AT)
-                        })
-            })
-            .collect();
-        self.contribs.extend(written);
+        // (what the line writes to other files is not kept: TeX writes
+        // it as `\enddocument` reads the file back, which this run does
+        // where it reads the text it wrote, `start_input`)
+        self.contribs.truncate(nc);
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
         self.conds = conds;

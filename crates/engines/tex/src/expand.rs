@@ -902,16 +902,12 @@ impl Run<'_, '_> {
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         }
         // (a job-written file whose read-back only defines: its
-        // definitions from the per-field loop-backs, and none of its
-        // text; what its lines write to other files went there where
-        // each line was written, `Run::interpret_line`. Reading the text
-        // too, as `\enddocument` reads the `.aux` it wrote, wrote every
-        // `\@writefile{toc}` line a second time.)
-        let text = if self.read_back(&key)? {
-            self.v.str("")
-        } else {
-            xs[1]
-        };
+        // definitions from the per-field loop-backs; the text, when this
+        // run wrote it, is read as TeX reads it, `\enddocument`'s `.aux`
+        // with its `\@writefile` lines and the errors its end gives where
+        // it is read)
+        self.read_back(&key)?;
+        let text = xs[1];
         let path = str_of(self.v, xs[0]);
         self.log("open", &path)?;
         self.push_toks([Tok::cs("\u{10FFFE}eof")]);
