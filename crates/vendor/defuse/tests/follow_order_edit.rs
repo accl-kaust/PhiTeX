@@ -1,0 +1,147 @@
+//! Follows re-placed by a new parent keep text order after an edit: the
+//! edited result equals a cold build of the edited text.
+//!
+//! `A [v]` defines `x = "a"` and follows `F [v]`, then `S`; `F [v]` follows
+//! `P`; `S` reads `x`, defines `x = x + "s"`, follows `G`; `G` follows `Q`;
+//! `P` and `Q` read `x` and define `x = x + name`. Editing `A` to `v = 2`
+//! re-makes `F` (new args) while `S` stays; `F'` follows `P` with the same
+//! args as before.
+
+use std::sync::{Arc, Mutex};
+
+use defuse::{Ctx, Engine, Field, Locality, NodeId, OpId, Operation, Stop, ValueId, Values};
+
+struct Ops {
+    me: Mutex<Option<OpId>>,
+    /// Each reader's last read of `x`.
+    saw: Mutex<std::collections::BTreeMap<String, String>>,
+}
+
+fn tag(v: &Values, a: &[ValueId]) -> String {
+    v.as_str(a[0]).unwrap_or_default()
+}
+
+impl Operation for Ops {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(match tag(v, a).as_str() {
+            "a" | "s" | "p" | "q" => vec![(v.field("x"), Locality::Global)],
+            _ => Vec::new(),
+        })
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(match tag(v, a).as_str() {
+            "s" | "p" | "q" => vec![v.field("x")],
+            _ => Vec::new(),
+        })
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let op = self.me.lock().unwrap().unwrap();
+        let x = v.field("x");
+        let t = tag(v, &a);
+        match t.as_str() {
+            "a" => {
+                cx.define_with(x, v.str("a"), Locality::Global);
+                cx.follow(op, vec![v.str("f"), a[1]]);
+                cx.follow(op, vec![v.str("s")]);
+                Ok(ValueId::UNIT)
+            }
+            "f" => {
+                cx.follow(op, vec![v.str("p")]);
+                Ok(ValueId::UNIT)
+            }
+            "g" => {
+                cx.follow(op, vec![v.str("q")]);
+                Ok(ValueId::UNIT)
+            }
+            _ => {
+                let prev = cx.use_field(x)?.and_then(|p| v.as_str(p)).unwrap_or_default();
+                self.saw.lock().unwrap().insert(t.clone(), prev.clone());
+                let now = format!("{prev}{t}");
+                cx.define_with(x, v.str(&now), Locality::Global);
+                if t == "s" {
+                    cx.follow(op, vec![v.str("g")]);
+                }
+                Ok(v.str(&now))
+            }
+        }
+    }
+}
+
+fn build(ver: i64) -> (Engine, OpId, NodeId, Arc<Ops>) {
+    let ops = Arc::new(Ops { me: Mutex::new(None), saw: Mutex::new(Default::default()) });
+    let mut eng = Engine::new();
+    let op = eng.register(ops.clone());
+    *ops.me.lock().unwrap() = Some(op);
+    let u = eng.new_unit();
+    let (a, n) = (eng.values().str("a"), eng.values().int(ver));
+    let an = eng.push(u, op, vec![a, n]);
+    (eng, op, an, ops)
+}
+
+#[test]
+fn an_edit_keeps_the_follow_order_of_a_cold_build() {
+    let (mut cold, _, _, cops) = build(2);
+    cold.evaluate_sequential().unwrap();
+    let want = cops.saw.lock().unwrap().clone();
+    assert_eq!(want.get("p").map(String::as_str), Some("a"), "cold: P reads A's x");
+    let (mut eng, op, an, ops) = build(1);
+    eng.evaluate_sequential().unwrap();
+    let (a, n) = (eng.values().str("a"), eng.values().int(2));
+    eng.replace(an, op, vec![a, n]);
+    eng.evaluate_sequential().unwrap();
+    assert_eq!(*ops.saw.lock().unwrap(), want, "edited reads equal a cold build's");
+}
+
+/// A run that restarts drops what its first pass placed: `R` follows `S`,
+/// restarts, then follows `F` and `S`; `F` defines `x`, `S` reads it.
+struct Restarter {
+    me: Mutex<Option<OpId>>,
+    saw: Mutex<Vec<Option<String>>>,
+}
+
+impl Operation for Restarter {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "f" { vec![(v.field("x"), Locality::Local)] } else { Vec::new() })
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(if tag(v, a) == "s" { vec![v.field("x")] } else { Vec::new() })
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let op = self.me.lock().unwrap().unwrap();
+        match tag(v, &a).as_str() {
+            "r" => {
+                cx.follow(op, vec![v.str("s")]);
+                cx.restart();
+                cx.follow(op, vec![v.str("f")]);
+                cx.follow(op, vec![v.str("s")]);
+                Ok(ValueId::UNIT)
+            }
+            "f" => {
+                cx.define(v.field("x"), v.str("from f"));
+                Ok(ValueId::UNIT)
+            }
+            _ => {
+                let x = cx.use_field(v.field("x"))?.and_then(|p| v.as_str(p));
+                self.saw.lock().unwrap().push(x);
+                Ok(ValueId::UNIT)
+            }
+        }
+    }
+}
+
+#[test]
+fn a_restarted_run_drops_its_first_pass_follows() {
+    let ops = Arc::new(Restarter { me: Mutex::new(None), saw: Mutex::new(Vec::new()) });
+    let mut eng = Engine::new();
+    let op = eng.register(ops.clone());
+    *ops.me.lock().unwrap() = Some(op);
+    let u = eng.new_unit();
+    let r = eng.values().str("r");
+    eng.push(u, op, vec![r]);
+    eng.evaluate_sequential().unwrap();
+    assert_eq!(*ops.saw.lock().unwrap(), vec![Some("from f".to_string())], "one S, after F");
+}

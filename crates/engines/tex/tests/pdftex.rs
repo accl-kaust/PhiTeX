@@ -205,8 +205,12 @@ fn pdf_edits() {
         ("linkbreak", &[("several", "sevral"), ("Then", "Thn")]),
         ("png", &[("{png-gray.png}", "{png-rgba.png}")]),
     ];
+    let only = std::env::var("PHITEX_GATE").ok();
     let mut failed = Vec::new();
     for &(name, edits) in cases {
+        if only.as_ref().is_some_and(|o| o != name) {
+            continue;
+        }
         let src = common::read(&dir.join(format!("{name}.tex")));
         let opts = || phitex_tex::Options {
             epoch: Some(0),

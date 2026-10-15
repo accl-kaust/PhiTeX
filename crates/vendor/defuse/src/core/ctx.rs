@@ -1167,6 +1167,24 @@ impl<'a> Ctx<'a> {
         self.kept = None;
         self.restart = true;
         self.log.clear();
+        // Starting over drops what the first pass made: its definitions,
+        // children, follows and the rest are not this run's output.
+        self.side.borrow_mut().clear();
+        self.defs.clear();
+        self.def_ix.clear();
+        self.contribs.clear();
+        self.pubs.clear();
+        self.kids.clear();
+        self.conts.clear();
+        self.effect = None;
+        self.kind = None;
+        self.claim = None;
+        self.narrowed = None;
+        self.diag.clear();
+        self.env.clear();
+        self.dup.clear();
+        self.sib_cur.set(None);
+        *self.sib_logged.borrow_mut() = None;
     }
 
     pub fn diagnostic(&mut self, msg: ValueId) {
