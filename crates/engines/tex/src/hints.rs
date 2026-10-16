@@ -3059,42 +3059,39 @@ fn texts() -> &'static TextsCache {
     C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
-/// Registers a text's analysis under `name` (a string value) for the
-/// build whose value table is `v`: a node made from part of that text
-/// later (the rest of a slice another command's read-ahead claimed,
-/// `Run::leftover`) names it and its offset, and gets the union hint of
-/// its text from the whole analysis instead of one computed on its own
-/// without the definitions. (Per value table: every document is
-/// registered under the same name, `api::DOC_NAME`, and an `\input`
-/// file by its path, so a registry shared by the builds of a process
-/// gave a node the analysis of another build's document at its offsets
-/// whenever that build had registered one: its hint, and with it its
-/// scope and give-back decisions, depended on what else the process
-/// ran before.)
-pub(crate) fn register_text(v: &Values, name: ValueId, t: &Arc<TextHints>) {
-    let key = (v.instance(), name.raw());
-    let mut bn = by_name().lock().unwrap_or_else(PoisonError::into_inner);
-    if !bn.get(&key).is_some_and(|x| Arc::ptr_eq(x, t)) {
-        bn.insert(key, t.clone());
+/// A build's hint state (`run::Ops::hints`): the analyses of texts
+/// registered by name, and the nodes' hints by their arguments. Owned
+/// by the build, not the process: every document is registered under
+/// the same name (`api::DOC_NAME`) and an `\\input` file by its path,
+/// so a registry shared by the builds of a process gave a node the
+/// analysis of another build's document at its offsets.
+#[derive(Default)]
+pub(crate) struct Registry {
+    by_name: Mutex<FxHashMap<u64, Arc<TextHints>>>,
+    hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
+}
+
+/// Registers a text's analysis under `name` (a string value) in the
+/// build's registry: a node made from part of that text later (the rest
+/// of a slice another command's read-ahead claimed, `Run::leftover`)
+/// names it and its offset, and gets the union hint of its text from
+/// the whole analysis instead of one computed on its own without the
+/// definitions.
+pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
+    let mut bn = reg.by_name.lock().unwrap_or_else(PoisonError::into_inner);
+    if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, t)) {
+        bn.insert(name.raw(), t.clone());
     }
 }
 
-/// Withdraws the analysis registered under `name` for the build of `v`
-/// (a document whose text is no longer one analysed whole): its nodes'
-/// hints answer `Any`, as before anything was registered.
-pub(crate) fn unregister_text(v: &Values, name: ValueId) {
-    by_name()
+/// Withdraws the analysis registered under `name` (a document whose
+/// text is no longer one analysed whole): its nodes' hints answer
+/// `Any`, as before anything was registered.
+pub(crate) fn unregister_text(reg: &Registry, name: ValueId) {
+    reg.by_name
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .remove(&(v.instance(), name.raw()));
-}
-
-/// (Process-wide, keyed by the value table, because the hint callbacks,
-/// `hint_of_args`, see only the values and the arguments; the build's
-/// `run::Ops` could own it with the callers passing it in.)
-fn by_name() -> &'static Cache<(u64, u64)> {
-    static C: OnceLock<Cache<(u64, u64)>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(FxHashMap::default()))
+        .remove(&name.raw());
 }
 
 /// Whether a text is written for INITEX's catcodes: its first `{` comes
@@ -3215,7 +3212,7 @@ pub(crate) fn file_kind_of(v: &Values, id: ValueId, name: ValueId) -> FileKind {
 
 /// The analysis of a file read by `\input`: its text value `id`, named
 /// `name`.
-pub(crate) fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
+pub(crate) fn file_hints(reg: &Registry, v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
     let known = by_id()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -3238,15 +3235,13 @@ pub(crate) fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHint
             t
         }
     };
-    register_text(v, name, &t);
+    register_text(reg, name, &t);
     t
 }
 
 /// The hint of a node from its arguments: the extra argument when the
 /// slice carries one, else its first text frame.
-pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
-    static C: OnceLock<Mutex<FxHashMap<u64, Arc<Hint>>>> = OnceLock::new();
-    let cache = C.get_or_init(|| Mutex::new(FxHashMap::default()));
+pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<Hint> {
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for a in args {
@@ -3254,7 +3249,8 @@ pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
         }
         h.finish()
     };
-    if let Some(h) = cache
+    if let Some(h) = reg
+        .hints
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&key)
@@ -3262,14 +3258,13 @@ pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
         return h.clone();
     }
     let mut registry = false;
-    let h = Arc::new(compute_hint(v, args, &mut registry));
+    let h = Arc::new(compute_hint(reg, v, args, &mut registry));
     if registry {
-        // (a hint read from the registered analysis of a text: the
-        // registry is per build and changes with an edit, the
-        // arguments alone do not name it)
+        // (a hint read from the registered analysis of a text, which an
+        // edit registers again: the arguments alone do not name it)
         return h;
     }
-    let mut c = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut c = reg.hints.lock().unwrap_or_else(PoisonError::into_inner);
     if c.len() > 1 << 20 {
         c.clear();
     }
@@ -3278,7 +3273,7 @@ pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn compute_hint(v: &Values, args: &[ValueId], registry: &mut bool) -> Hint {
+fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut bool) -> Hint {
     // (the hint argument: the string tagged `A` or `B`, wherever the
     // node's other extra arguments put it)
     for &h in args.iter().skip(2) {
@@ -3305,7 +3300,7 @@ fn compute_hint(v: &Values, args: &[ValueId], registry: &mut bool) -> Hint {
                 // conditional stays open; the union of the line's
                 // commands, extended to the end of such a span)
                 let off = usize::try_from(int_of(v, o)).unwrap_or(0);
-                let t = file_hints(v, id, name);
+                let t = file_hints(reg, v, id, name);
                 let text = str_of(v, id);
                 let end = line_span_end(&text, off);
                 return t.at_until(off, end);
@@ -3325,10 +3320,11 @@ fn compute_hint(v: &Values, args: &[ValueId], registry: &mut bool) -> Hint {
                 // (what the registry holds now: not cached by the
                 // arguments, `hint_of_args`)
                 *registry = true;
-                let t = by_name()
+                let t = reg
+                    .by_name
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .get(&(v.instance(), name.raw()))
+                    .get(&name.raw())
                     .cloned();
                 return match t {
                     Some(t) => t.at_until(at, at + text.len()),
@@ -3658,11 +3654,11 @@ fn sets_everypar(slice: &str) -> bool {
 }
 
 /// Whether the node's text says its command opens and closes no scope.
-pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
+pub(crate) fn effect_none(reg: &Registry, v: &Values, args: &[ValueId]) -> bool {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return false;
     }
-    hint_of_args(v, args)
+    hint_of_args(reg, v, args)
         .bound
         .as_ref()
         .is_some_and(|b| b.no_scope)
@@ -3671,11 +3667,11 @@ pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
 /// The fields the hint rests on, which the node reads first: the
 /// meanings of the names its text calls (`cs:name`, `act:code`) and the
 /// catcodes its bytes were read with (`cat:c`).
-pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
+pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return None;
     }
-    let h = hint_of_args(v, args);
+    let h = hint_of_args(reg, v, args);
     let b = h.bound.as_ref()?;
     let mut out: Vec<Field> = b.means.iter().map(|(n, _)| v.field(n)).collect();
     // (a record's cells are read from the record)
@@ -3696,11 +3692,11 @@ pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
 }
 
 /// The engine's question, answered from the text.
-pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
+pub(crate) fn may_define(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return MayDefine::Any;
     }
-    let h = hint_of_args(v, args);
+    let h = hint_of_args(reg, v, args);
     if crate::exec::env_flag!("PHITEX_HINTS") {
         let answer = match &h.bound {
             None => "Any".to_owned(),

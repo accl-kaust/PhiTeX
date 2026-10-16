@@ -20,6 +20,12 @@ pub(crate) fn ops(s: &Shared) -> Ops {
     s.get().expect("operations registered").clone()
 }
 
+/// The build's hint registry (`crate::hints::Registry`), for the
+/// engine's questions about a node.
+fn reg(s: &Shared) -> &crate::hints::Registry {
+    &s.get().expect("operations registered").hints
+}
+
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead.
@@ -269,7 +275,7 @@ impl Operation for Exec {
     /// field heads and the control sequences its command can define, or
     /// anything where the pass cannot bound it.
     fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
-        crate::hints::may_define(v, args)
+        crate::hints::may_define(reg(&self.0), v, args)
     }
     /// For an unbounded region: the fields its hint's guess names (its
     /// commands' rows, its calls' bodies); a wrong `false` is refuted
@@ -282,13 +288,13 @@ impl Operation for Exec {
         // (the page state a piece with items on the main list defines,
         // and a `\shipout`'s mark: `crate::pages`)
         crate::pages::is_page_field(&name)
-            || crate::hints::hint_of_args(v, args).may_define_field(&name)
+            || crate::hints::hint_of_args(reg(&self.0), v, args).may_define_field(&name)
     }
     /// The meanings and catcodes the text's hint rests on
     /// ([`crate::hints::reads`]): the node waits for them instead of
     /// starting and stopping.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        crate::hints::reads(v, args)
+        crate::hints::reads(reg(&self.0), v, args)
     }
     /// The lines of its own text the node begins (`lines`, by file:
     /// [`crate::run::Run::doc_lines`]): readers of `\inputlineno` fold
@@ -302,7 +308,7 @@ impl Operation for Exec {
     /// nothing ([`crate::hints`]); otherwise known when it runs (the
     /// scope's kind comes from the run).
     fn effect(&self, args: &[ValueId], v: &Values) -> Effect {
-        if crate::hints::effect_none(v, args) {
+        if crate::hints::effect_none(reg(&self.0), v, args) {
             Effect::None
         } else {
             Effect::Pending
@@ -319,7 +325,7 @@ impl Operation for Exec {
         if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
             return Claim::Pending;
         }
-        match crate::hints::hint_of_args(v, args)
+        match crate::hints::hint_of_args(reg(&self.0), v, args)
             .bound
             .as_ref()
             .and_then(|b| b.claim)
@@ -338,7 +344,7 @@ impl Operation for Exec {
         if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
             return None;
         }
-        crate::hints::hint_of_args(v, args)
+        crate::hints::hint_of_args(reg(&self.0), v, args)
             .bound
             .as_ref()
             .and_then(|b| b.claim)
@@ -346,7 +352,7 @@ impl Operation for Exec {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
-        let hint = crate::hints::hint_of_args(cx.values(), &args);
+        let hint = crate::hints::hint_of_args(reg(&self.0), cx.values(), &args);
         // (a package load: its run recorded, `crate::pkgrec`)
         let load = crate::pkgrec::is_load(cx.values(), &args);
         let (node, t0, spec) = (
@@ -400,7 +406,7 @@ impl Operation for Exec {
             // when one of theirs is unbounded)
             let claimed: Vec<std::sync::Arc<crate::hints::Hint>> = (0..r.pulled)
                 .filter_map(|i| r.cx.following(i))
-                .map(|(_, a)| crate::hints::hint_of_args(r.v, &a))
+                .map(|(_, a)| crate::hints::hint_of_args(&r.ops.hints, r.v, &a))
                 .collect();
             // (a paragraph taken inside a box of the run's own, a
             // figure's float, is the box's: one node, like a picture)

@@ -148,6 +148,9 @@ pub(crate) struct Ops {
     /// (set by `api::Build::with`; none while a format is built): a
     /// document file `\input` is sliced with them ([`Run::leftover`]).
     pub defs: std::sync::Arc<std::sync::Mutex<crate::hints::Defs>>,
+    /// The build's registered text analyses and its nodes' hints
+    /// (`crate::hints::Registry`).
+    pub hints: std::sync::Arc<crate::hints::Registry>,
     /// The package loads' finished runs (`crate::pkgrec`): node, start,
     /// end, for [`crate::Stats`] (concurrency, preamble wall).
     pub pkg_log: std::sync::Arc<std::sync::Mutex<Vec<PkgRun>>>,
@@ -2314,7 +2317,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
-        crate::hints::register_text(self.v, f.name, &t);
+        crate::hints::register_text(&self.ops.hints, f.name, &t);
         let mut out = Vec::new();
         for &(s, e) in &t.slices {
             if e <= f.off {
@@ -2440,7 +2443,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.nest[0].group,
                 crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
             )
-            && !crate::hints::effect_none(self.v, &self.cx.args())
+            && !crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
             && self.text_opens_group()
     }
 

@@ -117,6 +117,7 @@ pub(crate) fn document_file(path: &str, text: &str) -> bool {
 /// `\input` slice replaced by its file's ([`target`]). `read` gets the
 /// names of the files sliced in.
 pub(crate) fn pieces(
+    reg: &crate::hints::Registry,
     v: &Values,
     text: &str,
     hints: &Arc<TextHints>,
@@ -128,6 +129,7 @@ pub(crate) fn pieces(
     let mut out = Vec::new();
     let mut seen = Vec::new();
     add(
+        reg,
         v,
         &Arc::from(text),
         None,
@@ -144,6 +146,7 @@ pub(crate) fn pieces(
 
 #[allow(clippy::too_many_arguments)]
 fn add(
+    reg: &crate::hints::Registry,
     v: &Values,
     text: &Arc<str>,
     file: Option<&Arc<str>>,
@@ -171,10 +174,11 @@ fn add(
             };
             if document_file(&path, &t) && plain_input(&t) {
                 let h = crate::hints::text_hints(&t, FileKind::Document, defs);
-                crate::hints::register_text(v, v.str(&path), &h);
+                crate::hints::register_text(reg, v.str(&path), &h);
                 read.push(name.clone());
                 seen.push(name);
                 add(
+                    reg,
                     v,
                     &Arc::from(t.as_str()),
                     Some(&Arc::from(path.as_str())),

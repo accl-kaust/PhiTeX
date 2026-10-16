@@ -225,12 +225,15 @@ struct Absorb<'a> {
     text: &'a mut String,
     /// The package loads' hints (`crate::pkgrec`).
     loads: Option<&'a crate::pkgrec::LoadHints>,
+    /// The build's hint registry (`crate::hints::Registry`).
+    hints: Arc<crate::hints::Registry>,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
         let changed = apply_text(
+            &self.hints,
             eng,
             self.exec,
             self.end,
@@ -299,6 +302,7 @@ fn common_ends(old: &[(u64, NodeId, Src)], new: &[(u64, DocNode)]) -> (usize, us
 /// The text's nodes and their keys: a document's (`incr`) per chunk of
 /// its units ([`doc_nodes`]), a format's the whole text as one.
 fn slice_keys(
+    reg: &crate::hints::Registry,
     v: &Values,
     text: &str,
     incr: Option<&Incr>,
@@ -307,8 +311,8 @@ fn slice_keys(
 ) -> Vec<(u64, DocNode)> {
     match incr {
         Some(inc) => {
-            register_doc(v, inc);
-            doc_nodes(v, text, inc, finder, read)
+            register_doc(reg, v, inc);
+            doc_nodes(reg, v, text, inc, finder, read)
         }
         None if text.is_empty() => Vec::new(),
         None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
@@ -322,6 +326,7 @@ fn slice_keys(
 // one call site (Absorb::absorb), which passes its fields apart
 #[allow(clippy::too_many_arguments)]
 fn apply_text(
+    reg: &crate::hints::Registry,
     eng: &mut Engine,
     exec: OpId,
     end: NodeId,
@@ -341,7 +346,7 @@ fn apply_text(
     let incr = incr.as_deref();
     let t_slices = t_all.elapsed();
     let mut read = Vec::new();
-    let new = slice_keys(eng.values(), &text, incr, finder, &mut read);
+    let new = slice_keys(reg, eng.values(), &text, incr, finder, &mut read);
     let t_hints = t_all.elapsed();
     let old = &*nodes_now;
     if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
@@ -1358,6 +1363,7 @@ impl Graph {
             place,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
+            hints: Arc::default(),
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
@@ -1461,7 +1467,7 @@ impl Graph {
                         .map(|&a| v.render(a).chars().take(200).collect())
                         .collect();
                     // (and the node's hint: what its text was taken to be)
-                    let h = crate::hints::hint_of_args(v, &i.args);
+                    let h = crate::hints::hint_of_args(&self.ops.hints, v, &i.args);
                     format!(
                         "{} {:?}, parent {:?}, hint {:?} ({}), args {}",
                         i.op,
@@ -2038,9 +2044,16 @@ impl Graph {
         // from its parts, so anything (it runs once, serially, cached)
         let nodes: Vec<(u64, DocNode)> = match incr {
             Some(inc) => {
-                register_doc(self.eng.values(), inc);
+                register_doc(&self.ops.hints, self.eng.values(), inc);
                 let mut read = Vec::new();
-                let n = doc_nodes(self.eng.values(), text, inc, finder, &mut read);
+                let n = doc_nodes(
+                    &self.ops.hints,
+                    self.eng.values(),
+                    text,
+                    inc,
+                    finder,
+                    &mut read,
+                );
                 self.inputs_read = read;
                 n
             }
@@ -2183,11 +2196,11 @@ const DOC_NAME: &str = "\u{10FFFE}document";
 /// offsets): when one chunk is the whole document. A document of several
 /// chunks has no whole analysis; such a node's hint answers `Any` (an
 /// analysis registered for an earlier text of the build is withdrawn).
-fn register_doc(v: &Values, inc: &Incr) {
+fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
     if let [c] = inc.chunks.as_slice() {
-        crate::hints::register_text(v, v.str(DOC_NAME), &c.th);
+        crate::hints::register_text(reg, v.str(DOC_NAME), &c.th);
     } else {
-        crate::hints::unregister_text(v, v.str(DOC_NAME));
+        crate::hints::unregister_text(reg, v.str(DOC_NAME));
     }
 }
 
@@ -2202,6 +2215,7 @@ enum DocNode {
 /// `\\input` slice replaced by its file's ([`crate::inputs::pieces`],
 /// for the chunks that have one). `read` gets the files sliced in.
 fn doc_nodes(
+    reg: &crate::hints::Registry,
     v: &Values,
     text: &str,
     inc: &Incr,
@@ -2234,7 +2248,7 @@ fn doc_nodes(
         };
         let mut slices = slices;
         let chunk = &text[c.start..end];
-        for p in crate::inputs::pieces(v, chunk, &c.th, inc.defs(), Some(f), read) {
+        for p in crate::inputs::pieces(reg, v, chunk, &c.th, inc.defs(), Some(f), read) {
             if p.is_file() {
                 out.push((p.key, DocNode::File(p)));
                 continue;
@@ -3156,6 +3170,7 @@ impl Build {
             edits: &self.edits,
             nodes: &mut self.nodes,
             exec: self.g.ops.exec,
+            hints: self.g.ops.hints.clone(),
             end: self.end,
             incr: self.doc.then_some(&mut self.incr),
             unchanged: None,
@@ -4106,12 +4121,13 @@ impl Build {
                     .chars()
                     .take(60)
                     .collect();
-                let md = match crate::hints::may_define(v, &i.args) {
+                let md = match crate::hints::may_define(&self.g.ops.hints, v, &i.args) {
                     phitex_defuse::MayDefine::Any => "Any".to_owned(),
                     other => format!("{other:?}").chars().take(12).collect(),
                 };
-                let h = crate::hints::hint_of_args(v, &i.args);
-                let reads = crate::hints::reads(v, &i.args).map_or(0, |r| r.len());
+                let h = crate::hints::hint_of_args(&self.g.ops.hints, v, &i.args);
+                let reads =
+                    crate::hints::reads(&self.g.ops.hints, v, &i.args).map_or(0, |r| r.len());
                 Some((text, md, h.cause.clone(), reads))
             })
             .collect()
@@ -4140,17 +4156,17 @@ impl Build {
             if i.op != "exec" {
                 return format!("{} {text}", i.op);
             }
-            let h = crate::hints::hint_of_args(v, &i.args);
-            let md = match crate::hints::may_define(v, &i.args) {
+            let h = crate::hints::hint_of_args(&self.g.ops.hints, v, &i.args);
+            let md = match crate::hints::may_define(&self.g.ops.hints, v, &i.args) {
                 phitex_defuse::MayDefine::Any => "Any".to_owned(),
                 other => format!("{other:?}").chars().take(160).collect(),
             };
-            let eff = if crate::hints::effect_none(v, &i.args) {
+            let eff = if crate::hints::effect_none(&self.g.ops.hints, v, &i.args) {
                 "None"
             } else {
                 "Pending"
             };
-            let reads: Vec<String> = crate::hints::reads(v, &i.args)
+            let reads: Vec<String> = crate::hints::reads(&self.g.ops.hints, v, &i.args)
                 .unwrap_or_default()
                 .iter()
                 .map(|f| field_name(v, *f))
