@@ -393,9 +393,29 @@ impl PdfState {
         self.print(b"( )Tj");
     }
 
+    /// The horizontal offset from where the `TJ` string's last glyph
+    /// left the position to `cur_h`, in thousandths of the font's size
+    /// (`pdf_begin_string`'s `s`), and the width it stands for in the
+    /// output, the text matrix's expansion `tm_a` applied.
+    fn tj_offset(&self, size: Scaled) -> (Scaled, Scaled) {
+        let gap = self.cur_h - (self.tj_start_h + self.delta_h);
+        if self.tm_a == 0 {
+            return divide_scaled(gap, size, 3);
+        }
+        let d = round_xn_over_d(gap, 1000, 1000 + self.tm_a);
+        let (s, _) = divide_scaled(d, size, 3);
+        let mut out = 0;
+        if s.abs() < 0o100000 {
+            out = round_xn_over_d(round_xn_over_d(size, s.abs(), 1000), 1000 + self.tm_a, 1000);
+            if s < 0 {
+                out = -out;
+            }
+        }
+        (s, out)
+    }
+
     /// `pdf_begin_string`; font `f`'s `pdf_font_size` (set by the
     /// font's first use, here at the latest).
-    #[allow(clippy::too_many_lines)]
     fn begin_string(&mut self, f: FontId, src: &dyn FontSource) -> Scaled {
         let mut must_end_string = false;
         let mut must_insert_space = false;
@@ -421,24 +441,7 @@ impl PdfState {
         let a = st.auto_expand_ratio();
         let (space, shrink) = (st.metrics.space(), st.metrics.space_shrink());
         let has_space = st.has_space;
-        let (mut s, mut s_out) = if self.tm_a == 0 {
-            divide_scaled(self.cur_h - (self.tj_start_h + self.delta_h), size, 3)
-        } else {
-            let d = round_xn_over_d(
-                self.cur_h - (self.tj_start_h + self.delta_h),
-                1000,
-                1000 + self.tm_a,
-            );
-            let (s, _) = divide_scaled(d, size, 3);
-            let mut out = 0;
-            if s.abs() < 0o100000 {
-                out = round_xn_over_d(round_xn_over_d(size, s.abs(), 1000), 1000 + self.tm_a, 1000);
-                if s < 0 {
-                    out = -out;
-                }
-            }
-            (s, out)
-        };
+        let (mut s, mut s_out) = self.tj_offset(size);
         let (v, v_out) = if (self.cur_v - self.pdf_v).abs() >= self.min_bp_val {
             divide_scaled(self.pdf_v - self.cur_v, ONE_HUNDRED_BP, self.dd + 2)
         } else {
