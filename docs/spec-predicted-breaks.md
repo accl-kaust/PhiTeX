@@ -153,3 +153,32 @@ identity: the scan step and the finisher are identified by position (their
 index and keys) and read the pieces' items and profiles through fields the
 exec nodes define. A changed piece then re-runs the same scan node, whose
 value cutoff stops the chain as soon as the breaks agree.
+
+## 8. S0 findings (2026-10-16 03:40, para4000, pages-skel 924edfaf)
+
+- Exec nodes read neither `ps` nor `vtail` (0 reads). The chain readers are the
+  5201 folds and the 692 finishers; the end node reads `ps` once. The realised
+  critical path is exactly all folds plus all finishers: 72% of its time is the
+  finishers (3.5 ms per page), 26% the folds (166 µs; 9.4 µs per item in
+  `fold_items`, which decodes whole line boxes), 1% the end node.
+- The page builder runs only in the fold (`PageState::fold_items` →
+  `PageBuilder::contribute`, `fire_up` builds box 255 there); the exec only
+  places `T_BUILD_PAGE` markers. The fold also resolves page params (`pagepar`)
+  in 85% of runs; the exec should resolve them.
+- `vtail` is a pure fold over items (tail, sf, pd, since_bp) with no page
+  decision in it; readers (`\lastskip`, `\prevdepth`, `\unskip`) wait on the
+  page chain for nothing.
+- The 2.2x per-op slowdown at 8–16 threads is CPU clock: the chain hops
+  between idle, low-P-state cores (schedutil here, ondemand on accl EPYC 7763);
+  cycles +20%, busy +96%, LLC misses flat, SMT excluded by a 4c×2t control.
+  Fix: run a commit's single woken successor on the same worker (engine), or
+  the performance governor.
+- On amsldoc ~40% of exec nodes join the chain through `needs_own_fold`
+  (`fin_touch` union): `aftertoken` 582, `param:maxdepth` 117, `count:0` 46,
+  `param:vsize` 18, `cs:if@newlist` 11. Narrow to value-changing global
+  definitions.
+- The fold's `ps` value averages 128 KB (max 272 KB, 13 000 sub-values): the
+  page so far with full line boxes. The profile form (§2) replaces it.
+- Consequence for the slices: S2 (scan) shrinks the chain time by at most a
+  quarter; S3 (finishers in parallel on guessed routine state) carries the
+  bar. The finisher's own 3.5 ms is being profiled separately.
