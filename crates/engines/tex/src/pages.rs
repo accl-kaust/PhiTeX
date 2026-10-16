@@ -2601,6 +2601,10 @@ impl Run<'_, '_> {
                 .map(|l| self.loc_field(l))
                 .collect();
             reads.extend(self.streams_since(0));
+            if crate::exec::env_flag!("PHITEX_FINREADS_SHOW") {
+                let names: Vec<String> = reads.iter().map(|f| str_of(v, f.0)).collect();
+                eprintln!("finreads {} spec {}: {}", self.cx.node().raw(), self.cx.is_speculative(), names.join(" "));
+            }
             let mut gdefs: Vec<Field> = Vec::new();
             for (loc, x, l) in self.st.published(v, self.rec_load) {
                 if l != Locality::Global {
