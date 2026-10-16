@@ -451,6 +451,7 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
             let w2 = changed(&e.word);
             let new = format!("{}{w2}{}", &at.text[..e.at], &at.text[e.at + e.word.len()..]);
             let before = b.pages();
+            let back_before = b.read_back_texts();
             let t1 = std::time::Instant::now();
             apply(&mut b, at, &new);
             let wall = t1.elapsed();
@@ -458,6 +459,57 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
             for x in &mut v {
                 if !x.contains(':') {
                     *x = format!("runs/node: {x}");
+                }
+            }
+            // an edit that changes a file the job writes and reads back
+            // may run the read-back publisher (`files`) once; else none
+            let back_changed: Vec<String> = {
+                let after = b.read_back_texts();
+                let mut c: Vec<String> = after
+                    .iter()
+                    .filter(|x| !back_before.contains(x))
+                    .map(|x| x.0.clone())
+                    .chain(
+                        back_before
+                            .iter()
+                            .filter(|x| !after.iter().any(|y| y.0 == x.0))
+                            .map(|x| x.0.clone()),
+                    )
+                    .collect();
+                c.sort();
+                c.dedup();
+                c
+            };
+            if !back_changed.is_empty() {
+                v.retain(|x| !x.starts_with("files:"));
+                let f = common::runs_of(&b, "files");
+                if f > 1 {
+                    v.push(format!(
+                        "files: {f} runs, bound 1 (read-back changed: {})",
+                        back_changed.join(", ")
+                    ));
+                }
+            }
+            // a second round of a fixpoint build: name the loop-back
+            // fields whose new values made it
+            for x in &mut v {
+                if x.starts_with("dvi:") {
+                    let mut loops: Vec<&str> = b
+                        .stats
+                        .reruns
+                        .iter()
+                        .filter_map(|(_, _, why)| why.strip_prefix("Loop "))
+                        .collect();
+                    loops.sort_unstable();
+                    loops.dedup();
+                    let shown: Vec<&str> = loops.iter().take(6).copied().collect();
+                    let _ = write!(
+                        x,
+                        " (second round by loop-back {:?}{}; read-back changed: {:?})",
+                        shown,
+                        if loops.len() > 6 { format!(" +{} more", loops.len() - 6) } else { String::new() },
+                        back_changed
+                    );
                 }
             }
             let content = if e.seen_text == e.at_text { new.as_str() } else { ts[e.seen_text].text.as_str() };
@@ -529,6 +581,36 @@ fn table(name: &str, head: &str, rows: &[Row]) -> String {
     }
     let bad = rows.iter().filter(|r| !r.violations.is_empty()).count();
     let _ = writeln!(s, "{name}: {} edits, {bad} with violations; exec runs per edit (runs: edits) {dist:?}", rows.len());
+    // per text: edits, edits with violations, exec runs, the most
+    // frequent kinds of violation (numbers masked)
+    let mut names: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+    names.dedup();
+    for t in names {
+        let rs: Vec<&Row> = rows.iter().filter(|r| r.text == t).collect();
+        let bad = rs.iter().filter(|r| !r.violations.is_empty()).count();
+        let mut dist = std::collections::BTreeMap::<u64, usize>::new();
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        for r in &rs {
+            let e = r
+                .runs
+                .split(", ")
+                .find_map(|x| x.strip_prefix("exec ").and_then(|n| n.parse().ok()))
+                .unwrap_or(0);
+            *dist.entry(e).or_default() += 1;
+            for v in &r.violations {
+                let k: String = v.split(" (").next().unwrap_or(v).chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
+                let mut k = k.replace("##", "#");
+                while k.contains("##") {
+                    k = k.replace("##", "#");
+                }
+                *kinds.entry(k).or_default() += 1;
+            }
+        }
+        let mut kinds: Vec<(String, usize)> = kinds.into_iter().collect();
+        kinds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        kinds.truncate(5);
+        let _ = writeln!(s, "  per text {t}: {} edits, {bad} with violations, exec runs {dist:?}, top violations {kinds:?}", rs.len());
+    }
     s
 }
 
