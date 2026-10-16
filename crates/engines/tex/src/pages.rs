@@ -916,6 +916,9 @@ impl Run<'_, '_> {
         if piece && self.stop_at.is_none() && self.cut_req.is_none() && !self.needs_own_fold()? {
             return self.fold_apart(raw);
         }
+        if piece && crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") && (self.stop_at.is_some() || self.cut_req.is_some()) {
+            eprintln!("  own fold {}: cut (stop_at {:?}, cut_req {})", self.cx.node().raw(), self.stop_at, self.cut_req.is_some());
+        }
         let mut prof = None;
         self.fold_here(raw, fin, &mut prof)?;
         if let Some(ints) = prof {
@@ -987,7 +990,7 @@ impl Run<'_, '_> {
         for l in self.st.read_locs() {
             let f = self.loc_field(l);
             if t.defs.contains(&f) {
-                if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+                if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") {
                     eprintln!("  own fold {}: reads {}", self.cx.node().raw(), str_of(v, f.0));
                 }
                 return Ok(true);
@@ -1012,7 +1015,7 @@ impl Run<'_, '_> {
         defs.extend(self.streams_since(m0.contribs));
         for f in defs {
             if t.reads.contains(&f) {
-                if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+                if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") {
                     eprintln!("  own fold {}: defines {}", self.cx.node().raw(), str_of(v, f.0));
                 }
                 return Ok(true);
