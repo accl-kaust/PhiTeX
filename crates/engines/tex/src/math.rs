@@ -295,7 +295,7 @@ impl Run<'_, '_> {
         let w = if items.is_empty() {
             -MAX_DIMEN
         } else {
-            let last = self.line_break(md, &items, true)?;
+            let last = self.line_break(md, crate::nest::of_values(items), true)?;
             self.pre_display_size(last.as_ref())?
         };
         // §1149

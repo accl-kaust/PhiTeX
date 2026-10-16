@@ -1827,7 +1827,7 @@ impl Run<'_, '_> {
                     v.int(l.group),
                     v.int(l.lid),
                     v.int(i64::from(l.owns)),
-                    v.list(l.list.clone()),
+                    v.list(l.list.iter().map(|x| x.to_value(v)).collect()),
                     v.int(i64::from(l.fold.sf)),
                     v.int(i64::from(l.fold.pd)),
                     v.int(i64::try_from(l.fold.since_bp).unwrap_or(0)),
@@ -2095,7 +2095,7 @@ impl Run<'_, '_> {
                 n(3) != 0,
                 list_of(v, ys[11]),
             );
-            l.list = list_of(v, ys[4]);
+            l.list = crate::nest::of_values(list_of(v, ys[4]));
             l.fold = FoldState {
                 sf: i32::try_from(n(5)).unwrap_or(1000),
                 pd: i32::try_from(n(6)).unwrap_or(IGNORE_DEPTH),

@@ -22,7 +22,8 @@
 //! environment's `\end`) ends there, its engine effect a close
 //! (`Run::close_group`), the rest of its input following it outside.
 
-use phitex_defuse::ValueId;
+use phitex_defuse::{ValueId, Values};
+use phitex_typeset::node::Node;
 
 use crate::build::{FoldState, IGNORE_DEPTH};
 use crate::run::Run;
@@ -44,7 +45,7 @@ pub(crate) struct Level {
     pub owns: bool,
     /// The list, its transitions folded as they are appended
     /// ([`crate::build::fold_item`]).
-    pub list: Vec<ValueId>,
+    pub list: Vec<Item>,
     pub fold: FoldState,
     /// A paragraph's `(language, packed hyphen minima)` (§1091).
     pub par: Option<(i64, i64)>,
@@ -62,6 +63,83 @@ pub(crate) struct Level {
     pub open_stamp: u64,
     /// `\aftergroup` tokens (§282).
     pub ag: Vec<Tok>,
+}
+
+/// An item of a list of this run's: a value, or a node kept native
+/// (what the main loop makes: characters, ligatures, spaces,
+/// discretionaries; never one with a mark or whatsit handle), encoded
+/// only when a reader asks for values ([`Item::value`]) and handed to
+/// the line breaker or the packager as it is.
+#[derive(Clone, Debug)]
+pub(crate) enum Item {
+    V(ValueId),
+    N(Node),
+}
+
+impl Item {
+    /// The item's value, the node encoded (and kept so) if native.
+    pub(crate) fn value(&mut self, v: &Values) -> ValueId {
+        match self {
+            Item::V(x) => *x,
+            Item::N(n) => {
+                let x = crate::nodes::encode(v, n, &crate::nodes::Side::default());
+                *self = Item::V(x);
+                x
+            }
+        }
+    }
+
+    /// The item's value, without keeping it.
+    pub(crate) fn to_value(&self, v: &Values) -> ValueId {
+        match self {
+            Item::V(x) => *x,
+            Item::N(n) => crate::nodes::encode(v, n, &crate::nodes::Side::default()),
+        }
+    }
+
+    /// A cheap signature of the item, for a command's state signature
+    /// (`Run::state_sig`): a value's id, a native node's leading fields.
+    pub(crate) fn sig(&self) -> u64 {
+        match self {
+            Item::V(x) => x.raw(),
+            Item::N(n) => {
+                let (a, b) = match n {
+                    Node::Char { font, ch } => (u64::from(*font), u64::from(*ch)),
+                    Node::Lig(l) => (u64::from(l.font), u64::from(l.ch) | 1 << 20),
+                    Node::Glue(g) => (2, u64::from(g.spec.width.cast_unsigned())),
+                    Node::Kern(w, _) => (3, u64::from(w.cast_unsigned())),
+                    Node::Penalty(p) => (4, u64::from(p.cast_unsigned())),
+                    Node::Disc(d) => (5, d.replace.len() as u64),
+                    _ => (6, 0),
+                };
+                (1 << 63) | (a << 32) ^ b
+            }
+        }
+    }
+
+    /// Whether the item is a page builder's marker
+    /// ([`crate::build::is_marker`]); a native node never is.
+    pub(crate) fn is_marker(&self, v: &Values) -> bool {
+        match self {
+            Item::V(x) => crate::build::is_marker(v, *x),
+            Item::N(_) => false,
+        }
+    }
+}
+
+/// The values of a list's items, its native nodes encoded and kept so.
+pub(crate) fn values(v: &Values, items: &mut [Item]) -> Vec<ValueId> {
+    items.iter_mut().map(|x| x.value(v)).collect()
+}
+
+/// The values of a list's items, given up.
+pub(crate) fn into_values(v: &Values, items: Vec<Item>) -> Vec<ValueId> {
+    items.into_iter().map(|x| x.to_value(v)).collect()
+}
+
+/// A list of values as items.
+pub(crate) fn of_values(xs: Vec<ValueId>) -> Vec<Item> {
+    xs.into_iter().map(Item::V).collect()
 }
 
 impl Level {
