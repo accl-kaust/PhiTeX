@@ -84,6 +84,35 @@ pub(crate) fn value(v: &Values, ints: &[i64]) -> ValueId {
     v.list(ints.iter().map(|&i| v.int(i)).collect())
 }
 
+/// A piece's unit of [`VPROF`]: `[piece, profile]`, the piece's node
+/// (its raw id) and its profile ([`value`]).
+pub(crate) fn unit(v: &Values, piece: i64, ints: &[i64]) -> ValueId {
+    v.list(vec![v.int(piece), value(v, ints)])
+}
+
+/// A unit's piece and profile.
+pub(crate) fn unit_parts(v: &Values, x: ValueId) -> (i64, Vec<i64>) {
+    let xs = list_of(v, x);
+    let piece = xs.first().map_or(-1, |&p| int_of(v, p));
+    let ints = xs
+        .get(1)
+        .map(|&p| list_of(v, p).into_iter().map(|y| int_of(v, y)).collect())
+        .unwrap_or_default();
+    (piece, ints)
+}
+
+/// The page parameters as a `T_PAGE_PARAMS` marker (the real fold's
+/// form, [`crate::pages::params_of`]).
+pub(crate) fn params_marker(v: &Values, p: &PageParams) -> ValueId {
+    v.list(vec![
+        v.int(nodes::T_PAGE_PARAMS),
+        v.int(i64::from(p.vsize)),
+        v.int(i64::from(p.max_depth)),
+        crate::val::glue_value(v, &p.top_skip),
+        v.int(i64::from(p.holding_inserts)),
+    ])
+}
+
 fn i32_at(v: &Values, x: ValueId, k: usize) -> i32 {
     i32::try_from(int_at(v, x, k)).unwrap_or(0)
 }
@@ -391,10 +420,9 @@ pub(crate) fn decode(xs: &[i64]) -> Vec<PItem> {
     out
 }
 
-/// A profile value's items.
+/// A unit's profile items ([`unit`]).
 pub(crate) fn decode_value(v: &Values, x: ValueId) -> Vec<PItem> {
-    let xs: Vec<i64> = list_of(v, x).into_iter().map(|y| int_of(v, y)).collect();
-    decode(&xs)
+    decode(&unit_parts(v, x).1)
 }
 
 /// A node reduced to what the builder reads.
@@ -459,6 +487,9 @@ pub(crate) struct ScanFire {
 /// The page builder's state over profiles.
 pub(crate) struct ScanState {
     pub j: i64,
+    /// The pages fired so far whose `\outputpenalty` is above -10001
+    /// ([`crate::pages::PageState::normal`]).
+    pub normal: i64,
     pub pb: PageBuilder,
     pub fold: FoldState,
     pub params: Option<PageParams>,
@@ -539,6 +570,7 @@ impl ScanState {
         pb.measure_only = true;
         ScanState {
             j: ps.j,
+            normal: ps.normal,
             pb,
             fold: ps.fold,
             params: ps.params.map(|m| crate::pages::params_of(v, m)),
@@ -548,6 +580,21 @@ impl ScanState {
 
     pub(crate) fn snapshot(&self) -> Snapshot {
         snapshot(self.j, &self.pb, self.fold, self.params, self.pending.len())
+    }
+
+    /// The state just after a page fired (§1017: an empty page, the
+    /// contributions all carried), as the scan state defines it.
+    pub(crate) fn fresh(j: i64, normal: i64, fold: FoldState, params: Option<PageParams>) -> ScanState {
+        let mut pb = PageBuilder::new();
+        pb.measure_only = true;
+        ScanState {
+            j,
+            normal,
+            pb,
+            fold,
+            params,
+            pending: Vec::new(),
+        }
     }
 
     /// [`crate::pages::PageState::fold_items`] over profile items.
@@ -704,6 +751,9 @@ impl ScanState {
                     self.pb = PageBuilder::new();
                     self.pb.measure_only = true;
                     self.j += 1;
+                    if f.output_penalty > -10001 {
+                        self.normal += 1;
+                    }
                     self.fold.since_bp = 0;
                     buf.clear();
                     return Some(ScanFire {
@@ -836,4 +886,81 @@ fn first_decision_diff(a: &Decision, b: &Decision) -> String {
     }
     cmp!(best, least_cost, best_size, output_penalty, mark_at, ins_records, inserts, held, carried);
     String::from("decision")
+}
+
+// ------------------------------------------------- breaks check (S2)
+
+/// `PHITEX_BREAKS_CHECK=1`: the scan steps' fires compared with the
+/// real folds' page by page ([`record_break`]).
+pub(crate) fn breaks_checking() -> bool {
+    crate::exec::env_flag!("PHITEX_BREAKS_CHECK")
+}
+
+/// A page's break as one builder found it: the piece it fired in (its
+/// raw node id; -2 in a continuation), the candidate, the decisions, the
+/// items after the candidate.
+pub(crate) type Break = (i64, u32, Decision, usize);
+
+#[derive(Default)]
+struct Breaks {
+    real: phitex_defuse::FxHashMap<(u64, i64), Break>,
+    scan: phitex_defuse::FxHashMap<(u64, i64), Break>,
+    diff: phitex_defuse::FxHashSet<(u64, i64)>,
+    shown: u64,
+}
+
+static BREAKS: std::sync::Mutex<Option<Breaks>> = std::sync::Mutex::new(None);
+
+/// Page `j`'s break as the real fold (`real`) or the scan found it; the
+/// two compared once both are there (the last of each counts: a run
+/// again replaces its page's entry). Prints the first differences and
+/// the running count.
+pub(crate) fn record_break(v: &Values, real: bool, j: i64, b: Break) {
+    let j = (v.instance(), j);
+    let mut g = BREAKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let s = g.get_or_insert_with(Breaks::default);
+    if real {
+        s.real.insert(j, b);
+    } else {
+        s.scan.insert(j, b);
+    }
+    let (Some(a), Some(r)) = (s.scan.get(&j), s.real.get(&j)) else {
+        return;
+    };
+    let d = if a.0 != r.0 {
+        Some(format!("piece: scan {} real {}", a.0, r.0))
+    } else if a.1 != r.1 {
+        Some(format!("candidate: scan {} real {}", a.1, r.1))
+    } else if a.2 != r.2 {
+        Some(first_decision_diff(&a.2, &r.2))
+    } else if a.3 != r.3 {
+        Some(format!("rest: scan {} real {}", a.3, r.3))
+    } else {
+        None
+    };
+    match d {
+        Some(d) => {
+            s.diff.insert(j);
+            s.shown += 1;
+            if s.shown <= 20 {
+                eprintln!("breaks-check DIFF page {}: {d}", j.1 + 1);
+            }
+        }
+        None => {
+            s.diff.remove(&j);
+        }
+    }
+    let both = s.scan.keys().filter(|k| s.real.contains_key(k)).count();
+    eprintln!(
+        "breaks-check: pages real {} scan {} both {both} differing {}",
+        s.real.len(),
+        s.scan.len(),
+        s.diff.len()
+    );
+}
+
+/// Whether profile items hold an `\end` marker (the scan then reads
+/// `\deadcycles`, §1054).
+pub(crate) fn has_end(items: &[PItem]) -> bool {
+    items.iter().any(|x| matches!(x, PItem::End(_)))
 }

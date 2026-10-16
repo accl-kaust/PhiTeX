@@ -102,6 +102,39 @@ pub(crate) const RESUME: &str = "pages:resume";
 /// fold's arguments are its position, as the resume's).
 pub(crate) const FOLD_IN: &str = "pages:foldin";
 
+/// The scan's state (spec-predicted-breaks §2, S2): defined where the
+/// scan continues after a page fired ([`Scan`] after the finisher), read
+/// by every scan step after it: `[anchor, j, normal, sf, pd, since_bp,
+/// params, profile, material]`, the defining node (the steps read the
+/// pieces' profiles after it), the pages fired, the ordinary ones, the
+/// main list's fold where the page fired, the page parameters in force
+/// there, and what the next page begins with (the routine's markers,
+/// the held-over insertions, the routine's list, the material carried
+/// over, the rest of the piece) as a profile and as items. No version
+/// per piece: a step that fires no page defines nothing.
+pub(crate) const SCAN: &str = "scan:state";
+
+/// A page fired by the scan: `[j, piece, k, rest, best, least_cost,
+/// best_size, output_penalty, carried, held, j', normal, sf, pd,
+/// since_bp, params]`, the page, where it fired (the piece's raw node
+/// id, -2 in a continuation; the candidate; the profile items after
+/// it), its decisions, and the scan state after it (read by the
+/// continuation).
+pub(crate) const BREAKS: &str = "breaks";
+
+/// The pieces that put items on the main list: 1 per piece with its
+/// [`crate::vprof::VPROF`] unit, and 1 statically per command node
+/// before it runs (`Exec::static_contribs`): a scan step whose window
+/// holds fewer units than this waits for the pieces still to run.
+pub(crate) const NPIECES: &str = "npieces";
+
+/// No node defines it: every piece may (its hint names it), so a scan
+/// step's read of it as a sequence ([`Ctx::prev_contribution`]) waits
+/// until no piece before the step in its scope is in work. A range of
+/// profiles does not wait for a command node not run yet (its declared
+/// contributions stand in for its run's, `Exec::static_contribs`).
+pub(crate) const BARRIER: &str = "pages:pieces";
+
 /// Whether the page chain runs through the finishers as before the
 /// predicted breaks (the finisher folds what its routine left).
 pub(crate) fn fold_chain() -> bool {
@@ -117,7 +150,7 @@ pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
 /// The fields the pages define through a text piece (beyond what its
 /// hint can name).
 pub(crate) fn is_page_field(name: &str) -> bool {
-    name == PS || name == SHIPPED || name == CONT || name == RESUME || name == FOLD_IN
+    name == PS || name == SHIPPED || name == CONT || name == RESUME || name == FOLD_IN || name == BARRIER
 }
 
 /// What a run had done when it passed a candidate: at its end, a page
@@ -558,7 +591,7 @@ impl PageState {
                         carried.push(e);
                     }
                     let data = page_data(v, &f, &self.side);
-                    if crate::vprof::checking() {
+                    if crate::vprof::checking() || crate::vprof::breaks_checking() {
                         self.fired = Some(crate::vprof::Decision::of(&f, &self.pb, carried.len()));
                     }
                     self.pb = PageBuilder::new();
@@ -929,6 +962,10 @@ impl Run<'_, '_> {
             return self.fold_apart(raw);
         }
         let mut prof = None;
+        if piece {
+            // (the scan step of the piece, before what its fold places)
+            self.cx.follow(self.ops.scan, vec![self.v.int(-3)]);
+        }
         self.fold_here(raw, fin, &mut prof)?;
         if let Some(ints) = prof {
             self.contribute_vprof(&ints);
@@ -962,6 +999,7 @@ impl Run<'_, '_> {
         let held = list_of(v, data).get(3).copied().unwrap_or_else(|| v.list(Vec::new()));
         let x = v.list(vec![held, v.list(carried), v.list(rest)]);
         self.cx.define_with(v.field(CONT), x, Locality::Global);
+        self.cx.follow(self.ops.scan, vec![v.int(-2)]);
         self.cx.follow(
             self.ops.fold,
             vec![v.list(Vec::new()), v.int(-2)],
@@ -973,8 +1011,10 @@ impl Run<'_, '_> {
     fn contribute_vprof(&mut self, ints: &[i64]) {
         let v = self.v;
         crate::vprof::count_unit(ints);
-        let x = crate::vprof::value(v, ints);
+        let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        let x = crate::vprof::unit(v, pid, ints);
         self.contribute(crate::vprof::VPROF, v.seq_unit(x));
+        self.contribute(NPIECES, v.int(1));
     }
 
     /// Whether a page finishing inside this piece would need a cut, as
@@ -1060,6 +1100,10 @@ impl Run<'_, '_> {
     /// finisher placed after the piece).
     fn fold_apart(&mut self, mut raw: Vec<ValueId>) -> R<()> {
         self.pin_reaching_page_params(&mut raw)?;
+        // (the parameters and insertion registers reaching the piece's
+        // end, read here: the scan steps after it read its profile
+        // resolved, not the fields where each of them is)
+        self.resolve_page_params(&mut raw)?;
         let v = self.v;
         let last = self.last_candidate();
         let n = self.cand_marks.len();
@@ -1113,6 +1157,7 @@ impl Run<'_, '_> {
         self.contribute_vprof(&ints);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         let fargs = vec![v.list(raw), v.int(last.map_or(-1, i64::from)), pid, reads, defs];
+        self.cx.follow(self.ops.scan, vec![v.int(-3)]);
         if fold_chain() {
             self.cx.follow(self.ops.fold, fargs);
         } else {
@@ -1174,9 +1219,11 @@ impl Run<'_, '_> {
         // parameters as the routine leaves them, §987: its own state)
         if !fin {
             self.pin_reaching_page_params(&mut raw)?;
-            *prof = Some(crate::vprof::encode(v, &raw));
         }
         self.resolve_page_params(&mut raw)?;
+        if !fin {
+            *prof = Some(crate::vprof::encode(v, &raw));
+        }
         let mut timer = FoldTimer::new(raw.len());
         let cache = self.ops.page_states.clone();
         let mut ps = timer.decode(|| {
@@ -1185,6 +1232,7 @@ impl Run<'_, '_> {
                 .unwrap_or_else(|| PageState::decode(v, ps_in))
         });
         let scan_in = crate::vprof::checking().then(|| crate::vprof::ScanState::of(v, &ps));
+        let fin_flag = fin;
         if fin {
             // §1026: the held-over insertions and the routine's list,
             // then the contributions put back, and the page built again;
@@ -1199,6 +1247,7 @@ impl Run<'_, '_> {
             let mut live = |n: u16| self.insert_class(n);
             timer.fold(|| ps.fold_items(v, &raw, dead, &mut live))?
         };
+        let real_dec = ps.fired.clone();
         if let Some(scan) = scan_in {
             let items = match prof.as_ref() {
                 Some(ints) if !fin => crate::vprof::decode(ints),
@@ -1239,6 +1288,13 @@ impl Run<'_, '_> {
                 // the second pass, stopped at the candidate, places it
                 return Ok(());
             }
+        }
+        if crate::vprof::breaks_checking()
+            && !fin_flag
+            && let Some(d) = real_dec
+        {
+            let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+            crate::vprof::record_break(v, true, ps.j - 1, (pid, fire.k, d, fire.rest.len()));
         }
         let e = ps.encode(v);
         self.cx.define_with(f, e, Locality::Global);
@@ -2345,6 +2401,11 @@ impl Operation for Finish {
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
+    /// Never the pieces' barrier ([`BARRIER`]): a scan step does not
+    /// wait for a finisher.
+    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
+        f != v.field(BARRIER)
+    }
     /// What the last finisher running the same routine defined, with
     /// its values: the text after this one runs on them, and runs again
     /// only where a value differs (the page number's readers). The page
@@ -2700,6 +2761,13 @@ impl Run<'_, '_> {
             let mut live = |n: u16| self.insert_class(n);
             timer.fold(|| ps.fold_items(v, &raw, dead, &mut live))?
         };
+        if crate::vprof::breaks_checking()
+            && let Some(fi) = fire.as_ref()
+            && let Some(d) = ps.fired.clone()
+        {
+            let pid = if cont { -2 } else { int_of(v, a(2)) };
+            crate::vprof::record_break(v, true, ps.j - 1, (pid, fi.k, d, fi.rest.len()));
+        }
         if let Some(scan) = scan_in {
             let items = match unit {
                 Some(u) => crate::vprof::decode_value(v, u),
@@ -2974,5 +3042,313 @@ impl PageStates {
             }
             m.insert(x, ps);
         }
+    }
+}
+
+// ------------------------------------------------------------- scan
+
+/// A scan step (spec-predicted-breaks §2, S2): TeX's page builder
+/// (§980–§1010) over the pieces' vertical profiles, from the last page
+/// fired on. Arguments `[kind]`, its position only (§7): -3, after a
+/// piece (the step of that piece), or -2, after a finisher (the scan's
+/// continuation).
+///
+/// - A piece's step reads the scan state ([`SCAN`]) and the profiles
+///   of the pieces after the state's anchor up to its own (the
+///   [`crate::vprof::VPROF`] units of that window, and [`NPIECES`]: a
+///   window missing a piece still to run is not scanned, the step runs
+///   again when the piece's unit comes), runs the builder over the
+///   material the page began with and the units, and where a page
+///   fires in its own piece defines [`BREAKS`]. A step that fires no
+///   page defines nothing: the scan's state has one version per page,
+///   not per piece.
+/// - A continuation reads the page fired before it ([`BREAKS`]), what
+///   the page left ([`CONT`]) and what its routine gave back ([`RTN`]),
+///   and defines the scan state the next page begins with (or fires
+///   again within that material).
+pub(crate) struct Scan(pub Shared);
+
+impl Operation for Scan {
+    fn name(&self) -> &'static str {
+        "scan"
+    }
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
+        MayDefine::Names(vec![v.field(SCAN), v.field(BREAKS)])
+    }
+    fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        if args.first().is_some_and(|&x| int_of(v, x) == -2) {
+            return Some(vec![v.field(BREAKS), v.field(CONT)]);
+        }
+        Some(vec![v.field(SCAN)])
+    }
+    /// A step contributes nothing: a window holding it does not wait for
+    /// it.
+    fn static_contribs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(Vec::new())
+    }
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let args = cx.args();
+        let o = ops(&self.0);
+        run_node_parking(cx, o, false, |r| r.scan_node(&args))
+    }
+}
+
+/// The scan state a step starts from ([`SCAN`]).
+struct ScanIn {
+    anchor: Option<phitex_defuse::NodeId>,
+    j: i64,
+    normal: i64,
+    fold: FoldState,
+    params: Option<PageParams>,
+    prof: Vec<i64>,
+}
+
+impl ScanIn {
+    fn decode(v: &Values, x: Option<ValueId>) -> ScanIn {
+        let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
+        if xs.len() < 8 {
+            return ScanIn {
+                anchor: None,
+                j: 0,
+                normal: 0,
+                fold: crate::build::IGNORE_DEPTH_STATE,
+                params: None,
+                prof: Vec::new(),
+            };
+        }
+        let n = |i: usize| int_of(v, xs[i]);
+        ScanIn {
+            anchor: Some(phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n(0).to_ne_bytes()))),
+            j: n(1),
+            normal: n(2),
+            fold: FoldState {
+                sf: i32::try_from(n(3)).unwrap_or(1000),
+                pd: i32::try_from(n(4)).unwrap_or(IGNORE_DEPTH),
+                since_bp: usize::try_from(n(5)).unwrap_or(0),
+            },
+            params: some(xs[6]).map(|m| params_of(v, m)),
+            prof: list_of(v, xs[7]).into_iter().map(|y| int_of(v, y)).collect(),
+        }
+    }
+
+    fn state(&self) -> crate::vprof::ScanState {
+        crate::vprof::ScanState::fresh(self.j, self.normal, self.fold, self.params)
+    }
+}
+
+impl Run<'_, '_> {
+    /// A [`Scan`] node's run.
+    fn scan_node(&mut self, args: &[ValueId]) -> R<()> {
+        let v = self.v;
+        if args.first().is_some_and(|&x| int_of(v, x) == -2) {
+            return self.scan_cont();
+        }
+        // (the pieces before the step run first: their profiles are in
+        // the window)
+        self.cx.prev_contribution(v.field(BARRIER))?;
+        let s = ScanIn::decode(v, self.eng_read(v.field(SCAN))?);
+        let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
+        let n = self.cx.acc_range(v.field(NPIECES), s.anchor)?;
+        let expected = usize::try_from(v.as_int(n).unwrap_or(0)).unwrap_or(0);
+        let trace = crate::exec::env_flag!("PHITEX_SCAN_TRACE");
+        if units.len() < expected {
+            if trace {
+                eprintln!(
+                    "scan {}: window holds {} units of {expected}: pieces still to run",
+                    self.cx.node().raw(),
+                    units.len()
+                );
+            }
+            return Ok(());
+        }
+        if units.is_empty() {
+            return Ok(());
+        }
+        if trace {
+            eprintln!(
+                "scan {}: from page {} (anchor {:?}), {} units, speculative {}",
+                self.cx.node().raw(),
+                s.j,
+                s.anchor.map(phitex_defuse::NodeId::raw),
+                units.len(),
+                self.cx.is_speculative()
+            );
+        }
+        let mut st = s.state();
+        let material = crate::vprof::decode(&s.prof);
+        let decoded: Vec<(i64, Vec<crate::vprof::PItem>)> = units
+            .iter()
+            .map(|&u| {
+                let (pid, ints) = crate::vprof::unit_parts(v, u);
+                (pid, crate::vprof::decode(&ints))
+            })
+            .collect();
+        let dead = if crate::vprof::has_end(&material) || decoded.iter().any(|d| crate::vprof::has_end(&d.1)) {
+            self.cint(crate::fields::cell::DEADCYCLES)?
+        } else {
+            0
+        };
+        let mut rd = RunReaching(self);
+        if st.fold_items(&material, dead, &mut rd).is_some() {
+            // (the continuation fires on this material itself: a state
+            // this step read before that continuation ran)
+            if trace {
+                eprintln!("scan {}: fires in the material read", rd.0.cx.node().raw());
+            }
+            return Ok(());
+        }
+        let last = decoded.len() - 1;
+        for (i, (pid, items)) in decoded.iter().enumerate() {
+            let Some(fire) = st.fold_items(items, dead, &mut rd) else {
+                continue;
+            };
+            if i != last {
+                // (a page fires in an earlier piece: that piece's step
+                // fires it; this run read a state before that)
+                if trace {
+                    eprintln!(
+                        "scan {}: fires in piece {pid}, not its own",
+                        rd.0.cx.node().raw()
+                    );
+                }
+                return Ok(());
+            }
+            rd.0.define_breaks(&s, *pid, &fire, &st);
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    /// Defines [`BREAKS`] for a page the scan fired (`st` the state
+    /// after it); the check's entry.
+    fn define_breaks(&mut self, s: &ScanIn, pid: i64, fire: &crate::vprof::ScanFire, st: &crate::vprof::ScanState) {
+        let v = self.v;
+        let j = st.j - 1;
+        let d = &fire.decision;
+        if crate::exec::env_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "scan {}: page {} fires in piece {pid} at candidate {} (from page {})",
+                self.cx.node().raw(),
+                j + 1,
+                fire.k,
+                s.j
+            );
+        }
+        if crate::vprof::breaks_checking() {
+            crate::vprof::record_break(v, false, j, (pid, fire.k, d.clone(), fire.rest));
+        }
+        let int = |x: i64| v.int(x);
+        let usz = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
+        let x = v.list(vec![
+            int(j),
+            int(pid),
+            int(i64::from(fire.k)),
+            usz(fire.rest),
+            usz(d.best),
+            int(i64::from(d.least_cost)),
+            int(i64::from(d.best_size)),
+            int(i64::from(d.output_penalty)),
+            usz(d.carried),
+            usz(d.held),
+            int(st.j),
+            int(st.normal),
+            int(i64::from(st.fold.sf)),
+            int(i64::from(st.fold.pd)),
+            usz(st.fold.since_bp),
+            st.params.map_or(ValueId::UNIT, |p| crate::vprof::params_marker(v, &p)),
+        ]);
+        self.cx.define_with(v.field(BREAKS), x, Locality::Global);
+    }
+
+    /// A scan continuation's run: the material the next page begins with
+    /// (§1026: the routine's markers, the held-over insertions, its list,
+    /// the material carried over, the page built again, the rest of the
+    /// piece), its page parameter and insertion class markers resolved
+    /// here; the page builder over it from the state after the page
+    /// fired; the scan state defined (or the page fired again).
+    fn scan_cont(&mut self) -> R<()> {
+        let v = self.v;
+        let b = self.eng_read(v.field(BREAKS))?.map(|x| list_of(v, x)).unwrap_or_default();
+        if b.len() < 16 {
+            return Ok(());
+        }
+        let n = |i: usize| int_of(v, b[i]);
+        let c = self.eng_read(v.field(CONT))?;
+        let cs = c.map(|x| list_of(v, x)).unwrap_or_default();
+        let part = |i: usize| cs.get(i).map(|&x| list_of(v, x)).unwrap_or_default();
+        let r = self.eng_read(v.field(RTN))?;
+        let rs = r.map(|x| list_of(v, x)).unwrap_or_default();
+        let mut material = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
+        let held = part(0);
+        let carried = part(1);
+        // (the insertion classes of the material carried and held over:
+        // their registers as they are here, for the page built at once;
+        // a step after this reads the material, not the registers where
+        // it is)
+        let mut classes: Vec<u16> = Vec::new();
+        for &x in held.iter().chain(carried.iter()) {
+            if let Some(Node::Ins(i)) = nodes::decode_shallow(v, x, &mut Side::default())
+                && !classes.contains(&i.number)
+            {
+                classes.push(i.number);
+            }
+        }
+        material.extend(held);
+        material.extend(rs.get(1).map(|&x| list_of(v, x)).unwrap_or_default());
+        material.extend(carried);
+        for k in classes {
+            let m = self.ins_params_marker(k)?;
+            material.push(m);
+        }
+        material.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
+        material.extend(part(2));
+        self.resolve_page_params(&mut material)?;
+        let dead = self.deadcycles_for(&material)?;
+        let prof = crate::vprof::encode(v, &material);
+        let fold = FoldState {
+            sf: i32::try_from(n(12)).unwrap_or(1000),
+            pd: i32::try_from(n(13)).unwrap_or(IGNORE_DEPTH),
+            since_bp: usize::try_from(n(14)).unwrap_or(0),
+        };
+        let params = some(b[15]).map(|m| params_of(v, m));
+        let s = ScanIn {
+            anchor: None,
+            j: n(10),
+            normal: n(11),
+            fold,
+            params,
+            prof: Vec::new(),
+        };
+        let mut st = s.state();
+        let items = crate::vprof::decode(&prof);
+        let fire = {
+            let mut rd = RunReaching(self);
+            st.fold_items(&items, dead, &mut rd)
+        };
+        if let Some(fire) = fire {
+            self.define_breaks(&s, -2, &fire, &st);
+            return Ok(());
+        }
+        let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        let x = v.list(vec![
+            v.int(me),
+            v.int(s.j),
+            v.int(s.normal),
+            v.int(i64::from(fold.sf)),
+            v.int(i64::from(fold.pd)),
+            v.int(i64::try_from(fold.since_bp).unwrap_or(0)),
+            b[15],
+            crate::vprof::value(v, &prof),
+            v.list(material),
+        ]);
+        self.cx.define_with(v.field(SCAN), x, Locality::Global);
+        Ok(())
     }
 }

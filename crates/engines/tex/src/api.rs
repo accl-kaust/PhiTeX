@@ -1355,6 +1355,7 @@ impl Graph {
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
         let fold = eng.register(Arc::new(crate::pages::Fold(shared.clone())));
+        let scan = eng.register(Arc::new(crate::pages::Scan(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
         let place = eng.register(Arc::new(crate::pdfout::Place(shared.clone())));
@@ -1371,6 +1372,7 @@ impl Graph {
             exec,
             put,
             fold,
+            scan,
             finish,
             resume,
             place,
@@ -4437,6 +4439,10 @@ fn declare_fields(eng: &mut Engine) {
     {
         decl_trace(eng, f, none);
         eng.declare_loopback(f, none);
+    }
+    {
+        let fld = eng.values().field(crate::pages::NPIECES);
+        eng.declare_accumulator(fld, Arc::new(SumMonoid));
     }
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);

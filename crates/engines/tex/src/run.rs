@@ -138,6 +138,8 @@ pub(crate) struct Ops {
     /// A piece's fold, a page's finisher and the rest of a cut piece
     /// (`crate::pages`).
     pub fold: OpId,
+    /// A scan step over the pieces' profiles (`crate::pages::Scan`).
+    pub scan: OpId,
     pub finish: OpId,
     pub resume: OpId,
     /// A page's placement on the writer's state (`crate::pdfout::Place`).
