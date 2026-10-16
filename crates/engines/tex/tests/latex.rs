@@ -922,3 +922,45 @@ fn latex_utf8_edit() {
     let cold = common::build(pdf_opts("utf8", &dir), Some(&prelude(true)), &new);
     edit_check("utf8", &b, &cold, (&before.0, before.1));
 }
+
+/// A `multicols` index after a heading whose `\addcontentsline` lands on
+/// multicol's saved partial page (box register, shipped by the next
+/// page's routine and emptied there): its toc line is written once,
+/// whatever the finishers' predictions (two runs of one page once made
+/// the next finisher take that box as still full, and ship the heading's
+/// write a second time: amsldoc's toc had "Index 36" and "Index 37").
+#[test]
+fn latex_multicol_heading_written_once() {
+    use std::fmt::Write as _;
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let mut src = String::from(
+        "\\documentclass{article}\\usepackage{multicol}\n\\begin{document}\n\\tableofcontents\n",
+    );
+    for s in 0..3 {
+        let _ = writeln!(src, "\\section{{Part {s}}}");
+        for p in 0..6 {
+            let _ = writeln!(
+                src,
+                "Paragraph {p} of part {s}: words enough for a few lines of an article page, \
+                 so that the sections fill some pages before the index begins.\n"
+            );
+        }
+    }
+    src.push_str("\\section*{Index}\\addcontentsline{toc}{section}{Index}\n\\begin{multicols}{2}\n");
+    for k in 0..400 {
+        let _ = writeln!(src, "entry {k}, {}\\par", k * 7 % 97);
+    }
+    src.push_str("\\end{multicols}\n\\end{document}\n");
+    let b = common::build(pdf_opts("mcindex", &dir), Some(&prelude(true)), &src);
+    let files = b.files();
+    let count = |ext: &str| {
+        files
+            .iter()
+            .filter(|(n, _)| n.ends_with(ext))
+            .map(|(_, t)| t.matches("{Index}").count())
+            .sum::<usize>()
+    };
+    eprintln!("mcindex: {} pages, files {:?}", b.pages().len(), files.iter().map(|f| &f.0).collect::<Vec<_>>());
+    assert_eq!(count(".aux"), 1, "the index's toc line in the .aux");
+    assert_eq!(count(".toc"), 1, "the index's toc line in the .toc");
+}
