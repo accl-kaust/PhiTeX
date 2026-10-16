@@ -323,9 +323,9 @@ fn isize_of(s: usize) -> isize {
 fn common_len(a: &[u8], b: &[u8]) -> usize {
     let (a, b) = (&a[3..=MAX_MATCH], &b[3..=MAX_MATCH]);
     let mut i = 0;
-    for (x, y) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
-        let x = u64::from_le_bytes(x.try_into().unwrap_or([0; 8]));
-        let y = u64::from_le_bytes(y.try_into().unwrap_or([0; 8]));
+    for (x, y) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
+        let x = u64::from_le_bytes(*x);
+        let y = u64::from_le_bytes(*y);
         let d = x ^ y;
         if d != 0 {
             return 3 + i + (d.trailing_zeros() / 8) as usize;
@@ -953,7 +953,7 @@ impl State<'_> {
                 // first differing byte in 3..258, or 258; found here
                 // eight bytes at a time by the lowest set byte of their
                 // XOR)
-                let len = common_len(&w[scan0..strend + 1], &w[m..m + MAX_MATCH + 1]);
+                let len = common_len(&w[scan0..=strend], &w[m..=m + MAX_MATCH]);
                 if len > best_len {
                     match_start = cur_match;
                     best_len = len;
@@ -1349,6 +1349,11 @@ mod tests {
     /// compare two builds of the compressor) and the time per call.
     #[test]
     #[ignore = "needs PHITEX_DEFLATE_DIR"]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::unchecked_time_subtraction,
+        clippy::format_collect
+    )]
     fn dir_digests() {
         extern crate std;
         use alloc::string::String;
