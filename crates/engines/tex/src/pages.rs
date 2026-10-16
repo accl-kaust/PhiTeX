@@ -2579,8 +2579,15 @@ impl Run<'_, '_> {
                 }
             }
         }
-        // (the two latest pages: finishers commit in any order)
-        if j >= e.last_j || e.last.is_empty() {
+        // (the two latest pages: finishers commit in any order; a page's
+        // run again replaces its own entry, never makes the other: two
+        // runs of one page agree on what changes from page to page, a
+        // column kept, a mark, and would predict it for the next page)
+        if j == e.last_j && !e.last.is_empty() {
+            e.last = out;
+        } else if j == e.prev_j && !e.prev.is_empty() {
+            e.prev = out;
+        } else if j > e.last_j || e.last.is_empty() {
             e.prev = std::mem::take(&mut e.last);
             e.prev_j = e.last_j;
             e.last = out;
