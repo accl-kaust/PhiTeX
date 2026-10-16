@@ -230,6 +230,11 @@ struct Absorb<'a> {
     unchanged: Option<u64>,
     /// The text applied.
     text: &'a mut String,
+    /// The document's own text last taken, and whether the nodes hold
+    /// its canonical text ([`canonical_text`]; off for good once a text
+    /// has none).
+    raw: &'a mut String,
+    canon: &'a mut bool,
     /// The package loads' hints (`crate::pkgrec`).
     loads: Option<&'a crate::pkgrec::LoadHints>,
     /// The build's hint registry (`crate::hints::Registry`).
@@ -238,7 +243,16 @@ struct Absorb<'a> {
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
-        let (text, version) = self.edits.take()?;
+        let (raw, version) = self.edits.take()?;
+        let text = if *self.canon {
+            canonical_text(&raw).unwrap_or_else(|| {
+                *self.canon = false;
+                raw.clone()
+            })
+        } else {
+            raw.clone()
+        };
+        *self.raw = raw;
         let changed = apply_text(
             &self.hints,
             eng,
@@ -2378,6 +2392,53 @@ pub(crate) fn key(piece: &str, starts: bool) -> u64 {
     phitex_defuse::hash_bytes(1 + u64::from(starts), piece.as_bytes())
 }
 
+/// The document's text as its tokens need it (spec-redesign §8: a unit's
+/// value is its tokens, not its text): each comment's text after its
+/// `%` replaced by one NUL, the comment's mark. Under the catcodes a
+/// document's text is read with (`\\` an escape, `%` a comment) the
+/// tokens are the same and a comment-only edit changes no node. A run
+/// that reads a mark as text (`%` was no comment there, a verbatim's)
+/// asks for the document's own text (`needs` `rawtext`,
+/// `Run::canon_broken`), which the build applies in place of the
+/// canonical ([`Build::settle`]). `None` for a text this cannot mark
+/// (one holding NUL, or `^^`, which can spell an escape or a `%`).
+pub(crate) fn canonical_text(text: &str) -> Option<String> {
+    if text.contains('\0') || text.contains("^^") {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, nl) = match line.strip_suffix('\n') {
+            Some(b) => (b, "\n"),
+            None => (line, ""),
+        };
+        let b = body.as_bytes();
+        let mut i = 0;
+        let mut cut = None;
+        while i < b.len() {
+            match b[i] {
+                // (a control symbol's character, or a control word's first
+                // letter: never a comment)
+                b'\\' => i += 2,
+                b'%' => {
+                    cut = Some(i);
+                    break;
+                }
+                _ => i += 1,
+            }
+        }
+        match cut {
+            Some(k) if k + 1 < body.len() => {
+                out.push_str(&body[..=k]);
+                out.push('\0');
+            }
+            _ => out.push_str(body),
+        }
+        out.push_str(nl);
+    }
+    Some(out)
+}
+
 /// A text as TeX reads a file: every line ends (§31).
 fn as_file(text: &str) -> String {
     if text.is_empty() || text.ends_with('\n') {
@@ -2867,6 +2928,9 @@ pub struct Build {
     text: String,
     /// The document's own text last sent (`text` is made from it).
     raw: String,
+    /// Whether `text` is `raw`'s canonical text ([`canonical_text`]);
+    /// `g.canon` follows it between evaluations.
+    canon: bool,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
 }
@@ -2921,6 +2985,14 @@ impl Build {
                 t_sup.elapsed()
             );
         }
+        // (a document's nodes hold its canonical text, [`canonical_text`],
+        // unless it has none: a comment-only edit changes no node)
+        let canon_text = (is_doc(prelude, document) && !crate::exec::env_flag!("PHITEX_NO_CANON"))
+            .then(|| canonical_text(document))
+            .flatten();
+        g.canon = canon_text.is_some();
+        let g_canon = g.canon;
+        let text = canon_text.unwrap_or_else(|| document.to_owned());
         // (the files the job writes and reads back are loop-backs from
         // the `\openout` that opens them, `wfiledecl:`: a read before it
         // runs again on the loop-back)
@@ -2967,7 +3039,7 @@ impl Build {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone_from(&g.loads);
-        let (nodes, incr) = g.push_document(unit, document, defs, doc);
+        let (nodes, incr) = g.push_document(unit, &text, defs, doc);
         // (the pages: each piece places the finisher of a page that ends
         // in it, `crate::pages`; nothing of them is pushed here)
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
@@ -2991,7 +3063,9 @@ impl Build {
             edits,
             settled: Vec::new(),
             doc,
-            text: document.to_owned(),
+            text,
+            raw: document.to_owned(),
+            canon: g_canon,
         };
         b.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -3079,6 +3153,8 @@ impl Build {
             incr: self.doc.then_some(&mut self.incr),
             unchanged: None,
             text: &mut self.text,
+            raw: &mut self.raw,
+            canon: &mut self.canon,
             loads: loads.as_deref(),
         };
         let t_before = t_all.elapsed();
@@ -3099,6 +3175,7 @@ impl Build {
         if let Some(v) = absorb.unchanged {
             stats.version = stats.version.max(v);
         }
+        self.g.canon = self.canon;
         stats.live = self.g.eng.live_nodes();
         if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
             crate::run::record_check(&self.g.eng, &self.g.start_env);
@@ -3131,6 +3208,19 @@ impl Build {
                 "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
             );
         }
+        // a run read a comment's mark as text (a `%` that was no comment
+        // there): the document's own text applied in place of the
+        // canonical (only the units with comments change) and evaluated
+        // again; the build keeps its own text from here on
+        if self.canon && self.g.raw_needed && self.apply_raw_text() {
+            let first = std::mem::take(&mut self.stats);
+            self.settle();
+            self.stats.nodes_run += first.nodes_run;
+            self.stats.runs += first.runs;
+            self.stats.rounds += first.rounds;
+            self.stats.loop_rounds += first.loop_rounds;
+            return;
+        }
         self.dump_claims();
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
@@ -3141,6 +3231,29 @@ impl Build {
             }
             self.settled = pages;
         }
+    }
+
+    /// The document's own text applied in place of the canonical
+    /// ([`canonical_text`]; only the units with comments change), for
+    /// good: whether any node changed.
+    fn apply_raw_text(&mut self) -> bool {
+        self.canon = false;
+        self.g.canon = false;
+        self.g.raw_needed = false;
+        let loads = self.g.loads.clone();
+        let raw = self.raw.clone();
+        let changed = apply_text(
+            &self.g.ops.hints.clone(),
+            &mut self.g.eng,
+            self.g.ops.exec,
+            self.end,
+            &mut self.nodes,
+            &raw,
+            self.doc.then_some(&mut self.incr),
+            loads.as_deref(),
+        );
+        self.text = raw;
+        changed
     }
 
     /// A handle to send this build new texts from another thread

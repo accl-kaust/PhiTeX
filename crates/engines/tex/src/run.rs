@@ -2246,7 +2246,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.class_reads
             && let Some(c) = self.class_lookup(tok)?
         {
-            self.cur = Cur { tok, cmd: c, chr: 0 };
+            self.cur = Cur {
+                tok,
+                cmd: c,
+                chr: 0,
+            };
             return Ok(());
         }
         self.set_cur_cs_slow(tok)
@@ -2280,6 +2284,30 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         self.class_memo.insert(l, c);
         Ok(Some(c))
+    }
+
+    /// A NUL read from a line: in a document held as its canonical text
+    /// (`doc:canon`, `api::canonical_text`) it is a comment's mark, read
+    /// as text where `%` was no comment; the build is asked for the
+    /// document's own text (`needs` `rawtext`). This run's tokens are
+    /// wrong meanwhile; the evaluation on the own text replaces them.
+    #[cold]
+    pub(crate) fn canon_broken(&mut self) -> R<()> {
+        let v = self.v;
+        let canon = self
+            .cx
+            .use_env(v.field("doc:canon"))?
+            .is_some_and(|x| int_of(v, x) != 0);
+        if canon {
+            let id = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+            let e = v.list(vec![
+                v.str("rawtext"),
+                id,
+                v.str("a comment's mark read as text"),
+            ]);
+            self.contribute("needs", v.seq_unit(e));
+        }
+        Ok(())
     }
 
     /// The fields this run read by class only ([`Run::class_lookup`]):

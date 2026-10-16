@@ -14,8 +14,9 @@
 # -j 8, md5 against the epoch oracle on acclhead1, the round counters
 # with PHITEX_TEX_TIME=1; then the cold watch build at -j 1/8/16 timed
 # by op class, the head beside the control GATE_CONTROL, default
-# 566fb842, built and run in the same job: gate-time.py). Six jobs:
-# accl's limit of concurrent builds.
+# 566fb842, built and run in the same job: gate-time.py); para
+# (bench/para4000.tex, plain pdfTeX, md5 against GATE_PARA_MD5, wall,
+# us per paragraph and realised critical path at -j 1/8/16). Seven jobs.
 # GATE_LATEX_ORDER (test names, heaviest first) balances the latex shards.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -56,6 +57,9 @@ submit() {
   # (the timing control: 566fb842 as it is, the engine of the c13f152
   # era vendored, built and timed in the same job; GATE_CONTROL= none)
   if on ams; then ids+=("$(sub "-c 18 --mem=48G -t 00:45:00 -J gf-ams" ams "$want" "${GATE_CONTROL-566fb842}")"); fi
+  # (para4000: plain pdfTeX, bytes against its bar, wall and the
+  # realised critical path at -j 1/8/16)
+  if on para; then ids+=("$(sub "-c 18 --mem=48G -t 00:30:00 -J gf-para" para "${GATE_PARA_MD5:-bf12c9ddee6407a005c5140fc8a4b5cd}")"); fi
   echo "gate-fast: commit $c, oracle md5 $want" >&2
   mkdir -p "$runs"
   echo "$c ${ids[*]}" >> "$runs/gate-fast.ids"
@@ -115,6 +119,7 @@ table() {
   for j in "$@"; do
     d=$runs/cmd-$j
     if [ -f "$d/ams.txt" ]; then echo "amsldoc:"; sed 's/^/  /' "$d/ams.txt"; fi
+    if [ -f "$d/para.txt" ]; then echo "para4000:"; sed 's/^/  /' "$d/para.txt"; fi
     if [ -f "$d/cold.txt" ]; then echo "amsldoc cold watch build by op class, head vs control (same node, same command):"; cat "$d/cold.txt"; fi
   done
   echo

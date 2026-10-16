@@ -810,21 +810,18 @@ pub(crate) fn show_def(v: &Values, x: ValueId) -> String {
 /// the same class leaves a class reader standing.
 pub(crate) fn class_projection(x: ValueId, v: &Values) -> ValueId {
     let m = Mean::decode(v, Some(x));
-    let c = match &m {
-        Mean::Macro(mm) => {
-            if mm.flags & crate::etex::PROTECTED != 0 && mm.flags & 2 == 0 {
-                i64::from(cmd::RELAX)
-            } else {
-                -1
-            }
+    let c = if let Mean::Macro(mm) = &m {
+        if mm.flags & crate::etex::PROTECTED != 0 && mm.flags & 2 == 0 {
+            i64::from(cmd::RELAX)
+        } else {
+            -1
         }
-        _ => {
-            let (c, _) = m.cmd_chr();
-            if c <= cmd::MAX_COMMAND {
-                i64::from(c)
-            } else {
-                -1
-            }
+    } else {
+        let (c, _) = m.cmd_chr();
+        if c <= cmd::MAX_COMMAND {
+            i64::from(c)
+        } else {
+            -1
         }
     };
     v.int(c)

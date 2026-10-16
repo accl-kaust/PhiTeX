@@ -10,6 +10,10 @@
 #   gate-shard.sh ams ORACLE_MD5 CTL    amsldoc --exact-pdf at -j 1 and -j 8;
 #                                       cold watch timing at -j 1/8/16, head
 #                                       and control commit CTL
+#   gate-shard.sh para BAR_MD5          bench/para4000.tex (plain pdfTeX) cold
+#                                       at -j 1/8/16: md5 against BAR_MD5,
+#                                       wall, us per paragraph, realised
+#                                       critical path, guess counters
 #
 # Writes $r/shard.txt, $r/status (green|red), $r/red.txt (one red name a
 # line), $r/times.txt (build_s, wall_s) and the shard's logs.
@@ -149,6 +153,36 @@ case $shard in
       done
     done
     ls "$r"/cold-*.json > /dev/null 2>&1 && python3 -I "$w/gate-time.py" show $(ls "$r"/cold-*-j1.json "$r"/cold-*-j8.json "$r"/cold-*-j16.json 2>/dev/null) > "$r/cold.txt" 2>&1
+    ;;
+  para)
+    # para BAR_MD5: the head's release CLI; the format made once untimed,
+    # then each -j cold in its own output directory (same cache: the
+    # format's, not the document's)
+    want=$1
+    cargo build -q --release -p phitex-cli > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt"
+    grep -q '^EXIT 0$' "$r/build.txt" || red "build: $(grep -m1 '^error' "$r/build.txt")"
+    built
+    bin=$PWD/target/release/phitex
+    mkdir -p "$w/par" && cp bench/para4000.tex "$w/par/"
+    (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para4000.tex > "$r/para-warm.log" 2>&1)
+    for j in 1 8 16; do
+      L=$r/para-j$j.log
+      rm -rf "$w/par/o$j"
+      s0=$(date +%s.%N)
+      (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_CHECK_READS=1 NO_COLOR=1 \
+        timeout 900 "$bin" build -j $j --output-dir=o$j --program pdftex para4000.tex > "$L" 2>&1)
+      e=$?
+      s1=$(date +%s.%N)
+      m=$(md5sum < "$w/par/o$j/para4000.pdf" 2>/dev/null | cut -c1-32)
+      [ -n "$m" ] || m=none
+      sum() { grep -E 'round guesses: ' "$L" | grep -oE "[0-9]+ $1" | awk '{s+=$1} END {print s+0}'; }
+      cp_n=$(grep -oE 'realised cp [0-9]+ nodes [^,]+' "$L" | awk '{if ($3+0 >= m) {m=$3+0; t=$5}} END {print m+0, t}')
+      nodes=$(grep -oE '[0-9]+ nodes run of [0-9]+ live' "$L" | tail -1 | awk '{print $1"/"$5}')
+      wall=$(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}')
+      echo "para4000 -j $j: exit $e md5 $m bar $want $([ "$m" = "$want" ] && echo same || echo DIFFERS) wall $wall us/paragraph $(awk -v w="$wall" 'BEGIN{printf "%.0f", w*1e6/4000}') nodes ${nodes:-?} cp $cp_n claims_refuted $(sum 'claims refuted') effects_refuted $(sum 'effects refuted') defs_refuted $(sum 'definitions refuted') stale_reads $(grep -oE 'check_reads: [0-9]+ stale' "$L" | awk '{s+=$2} END {print s+0}')" >> "$r/para.txt"
+      [ "$e" = 0 ] || red "para4000 -j $j: exit $e $(grep -m1 -E 'panicked at|error' "$L" | cut -c1-160)"
+      [ "$m" = "$want" ] || red "para4000 -j $j: md5 $m, bar $want"
+    done
     ;;
   *) red "unknown shard $shard" ;;
 esac

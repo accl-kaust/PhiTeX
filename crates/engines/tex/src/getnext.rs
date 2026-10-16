@@ -848,6 +848,11 @@ impl Run<'_, '_> {
                 s.loc += 1;
                 (c, s.state)
             };
+            // (a comment's mark of the canonical text read as text:
+            // `api::canonical_text`)
+            if c == 0 {
+                self.canon_broken()?;
+            }
             let mut c = c;
             // reswitch
             loop {

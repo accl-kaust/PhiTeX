@@ -899,7 +899,9 @@ impl Run<'_, '_> {
         let fire = {
             let mut live = |c: u16| self.insert_class_at(c, at);
             let last = raws.len();
-            let mut out = ps.fold_items(v, &s.material, dead, &mut live)?.map(|f| (0, f));
+            let mut out = ps
+                .fold_items(v, &s.material, dead, &mut live)?
+                .map(|f| (0, f));
             for (i, raw) in raws.iter().enumerate() {
                 if out.is_some() {
                     break;
@@ -987,7 +989,11 @@ impl Run<'_, '_> {
         let pid = b.get(3).map_or(-2, |&x| int_of(v, x));
         let a = |i: usize| own.get(i).copied().unwrap_or(ValueId::UNIT);
         let at_end = pid == -2 || i64::from(fire.k) == int_of(v, a(1));
-        let locals = if pid == -2 { Vec::new() } else { list_of(v, a(5)) };
+        let locals = if pid == -2 {
+            Vec::new()
+        } else {
+            list_of(v, a(5))
+        };
         let mut args = vec![
             pos.first().copied().unwrap_or(ValueId::UNIT),
             fire.data,
