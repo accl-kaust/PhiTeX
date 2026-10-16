@@ -32,10 +32,12 @@ const STATIC: &[&str] = &[
     "f",
     "aftertoken",
     "align:open",
-    // (the records, [`B_CAT`], [`B_PAR`], [`B_PAGE`])
+    // (the records, [`B_CAT`], [`B_PAR`], [`B_PAGE`], [`B_SF`], [`B_LC`])
     "cattab",
     "parpar",
     "pagepar",
+    "sftab",
+    "lctab",
     // (e-TeX's penalty arrays: components of `parpar`)
     "param:interlinepenalties",
     "param:clubpenalties",
@@ -341,8 +343,19 @@ pub(crate) const B_PAR: usize = 1;
 /// an output routine sets `\\vsize` (plain's `vs.tex`, LaTeX's
 /// `\\@colroom`), which the paragraphs after it do not read.
 pub(crate) const B_PAGE: usize = 2;
-pub(crate) const NREC: usize = 3;
-pub(crate) const RECORDS: [&str; NREC] = ["cattab", "parpar", "pagepar"];
+/// The space factor codes of characters 0–255 (`sf:<c>`), which every
+/// character a paragraph appends reads (§1034).
+pub(crate) const B_SF: usize = 3;
+/// The lowercase codes of characters 0–255 (`lc:<c>`), which the
+/// hyphenation pass reads for each letter of a word (§897).
+pub(crate) const B_LC: usize = 4;
+pub(crate) const NREC: usize = 5;
+pub(crate) const RECORDS: [&str; NREC] = ["cattab", "parpar", "pagepar", "sftab", "lctab"];
+
+/// The code tables that are records: record, location of code 0, name
+/// prefix.
+const CODE_RECORDS: [(usize, usize, &str); 2] =
+    [(B_SF, CODE0 + 2 * 256, "sf:"), (B_LC, CODE0, "lc:")];
 
 /// The parameters of `pagepar`.
 const PAGEPAR: &[Par] = &[Par::vsize, Par::maxdepth, Par::topskip, Par::holdinginserts];
@@ -403,7 +416,7 @@ const PARPAR_CELLS: [&str; 5] = [
 /// The number of cells of record `b`.
 pub(crate) fn record_len(b: usize) -> usize {
     match b {
-        B_CAT => 256,
+        B_CAT | B_SF | B_LC => 256,
         B_PAR => PARPAR.len() + PARPAR_CELLS.len(),
         _ => PAGEPAR.len(),
     }
@@ -413,6 +426,8 @@ pub(crate) fn record_len(b: usize) -> usize {
 pub(crate) fn record_cell(b: usize, i: usize) -> usize {
     if b == B_CAT {
         CAT0 + i
+    } else if let Some(&(_, at, _)) = CODE_RECORDS.iter().find(|r| r.0 == b) {
+        at + i
     } else if b == B_PAGE {
         PAGEPAR[i] as usize
     } else if i < PARPAR.len() {
@@ -433,6 +448,12 @@ pub(crate) fn record_of(loc: usize) -> Option<(usize, usize)> {
     static IX: std::sync::OnceLock<Vec<(u8, u8)>> = std::sync::OnceLock::new();
     if loc.wrapping_sub(CAT0) < 256 {
         return Some((B_CAT, loc - CAT0));
+    }
+    if loc.wrapping_sub(CODE0) < 5 * 256 {
+        return CODE_RECORDS
+            .iter()
+            .find(|r| loc.wrapping_sub(r.1) < 256)
+            .map(|r| (r.0, loc - r.1));
     }
     if loc >= NSLOT {
         return None;
@@ -457,6 +478,8 @@ pub(crate) fn record_of(loc: usize) -> Option<(usize, usize)> {
 pub(crate) fn record_cell_name(b: usize, i: usize) -> String {
     if b == B_CAT {
         format!("cat:{i}")
+    } else if let Some(&(_, _, p)) = CODE_RECORDS.iter().find(|r| r.0 == b) {
+        format!("{p}{i}")
     } else if b == B_PAGE {
         format!("param:{}", PARAMS[PAGEPAR[i] as usize])
     } else if i < PARPAR.len() {
@@ -470,6 +493,11 @@ pub(crate) fn record_cell_name(b: usize, i: usize) -> String {
 pub(crate) fn record_of_name(name: &str) -> Option<usize> {
     if let Some(c) = name.strip_prefix("cat:") {
         return c.parse::<u32>().ok().filter(|&c| c < 256).map(|_| B_CAT);
+    }
+    for &(b, _, p) in &CODE_RECORDS {
+        if let Some(c) = name.strip_prefix(p) {
+            return c.parse::<u32>().ok().filter(|&c| c < 256).map(|_| b);
+        }
     }
     if PARPAR_CELLS.contains(&name) {
         return Some(B_PAR);
@@ -488,19 +516,22 @@ pub(crate) fn record_of_name(name: &str) -> Option<usize> {
 /// covers: each record a prefix may define a cell of.
 pub(crate) fn records_of_prefix(p: &str) -> [bool; NREC] {
     static NAMES: std::sync::OnceLock<[Vec<String>; 2]> = std::sync::OnceLock::new();
-    let cat = if p.len() <= 4 {
-        "cat:".starts_with(p)
-    } else {
-        p.strip_prefix("cat:").is_some_and(|r| {
-            r.bytes().all(|c| c.is_ascii_digit()) && r.parse::<u32>().is_ok_and(|c| c < 256)
-        })
+    // (a table of the 256 character codes, by its name prefix)
+    let table = |t: &str| {
+        if p.len() <= t.len() {
+            t.starts_with(p)
+        } else {
+            p.strip_prefix(t).is_some_and(|r| {
+                r.bytes().all(|c| c.is_ascii_digit()) && r.parse::<u32>().is_ok_and(|c| c < 256)
+            })
+        }
     };
     let names = NAMES.get_or_init(|| {
         [B_PAR, B_PAGE].map(|b| (0..record_len(b)).map(|i| record_cell_name(b, i)).collect())
     });
     let par = names[0].iter().any(|n| n.starts_with(p));
     let page = names[1].iter().any(|n| n.starts_with(p));
-    [cat, par, page]
+    [table("cat:"), par, page, table("sf:"), table("lc:")]
 }
 
 /// Adds the records a declared set by prefixes covers to it.

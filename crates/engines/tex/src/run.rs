@@ -564,7 +564,7 @@ impl<'c, 'a> Run<'c, 'a> {
             ins_pending: Vec::new(),
             fin: None,
             cut: None,
-            recs: [None, None, None],
+            recs: std::array::from_fn(|_| None),
             rec_out: Vec::new(),
             rec_ready: false,
             rec_absent: None,
