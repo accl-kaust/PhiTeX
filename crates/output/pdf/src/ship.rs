@@ -393,8 +393,9 @@ impl PdfState {
         self.print(b"( )Tj");
     }
 
-    /// `pdf_begin_string`.
-    fn begin_string(&mut self, f: FontId, src: &dyn FontSource) {
+    /// `pdf_begin_string`; font `f`'s `pdf_font_size` (set by the
+    /// font's first use, here at the latest).
+    fn begin_string(&mut self, f: FontId, src: &dyn FontSource) -> Scaled {
         let mut must_end_string = false;
         let mut must_insert_space = false;
         let mut must_set_text_pos = false;
@@ -412,7 +413,13 @@ impl PdfState {
             self.end_string();
             self.set_font(f, src);
         }
-        let size = self.font(f).size;
+        // (font `f`'s fields read once: nothing below changes them but
+        // `chars`, read where it is set)
+        let st = self.font(f);
+        let size = st.size;
+        let a = st.auto_expand_ratio();
+        let (space, shrink) = (st.metrics.space(), st.metrics.space_shrink());
+        let has_space = st.has_space;
         let (mut s, mut s_out) = if self.tm_a == 0 {
             divide_scaled(self.cur_h - (self.tj_start_h + self.delta_h), size, 3)
         } else {
@@ -437,24 +444,24 @@ impl PdfState {
             (0, 0)
         };
         if !must_set_text_pos {
-            let a = self.font(f).auto_expand_ratio();
-            let b = self
-                .fonts
-                .get(&self.pdf_f)
-                .map_or(0, |s| s.auto_expand_ratio());
+            let b = if self.pdf_f == f {
+                a
+            } else {
+                self.fonts
+                    .get(&self.pdf_f)
+                    .map_or(0, |s| s.auto_expand_ratio())
+            };
             must_set_text_pos = v != 0 || s.abs() >= 0o100000 || a != self.tm_a || a != b;
         }
         if must_set_text_pos {
             must_end_string = true;
         }
-        let m = &self.font(f).metrics;
-        let (space, shrink) = (m.space(), m.space_shrink());
         let looks_like_space = space > ONE_BP && s_out > space - shrink - ONE_BP / 10 && v == 0;
         if faked && looks_like_space {
             must_insert_space = true;
         }
         if must_insert_space {
-            if self.font(f).has_space && self.doing_string {
+            if has_space && self.doing_string {
                 self.pdf_out(b' ');
                 let (ws, wout) = self.adv_char_width(f, 32);
                 s -= ws;
@@ -466,7 +473,7 @@ impl PdfState {
         }
         if must_end_string {
             self.end_string();
-            if must_insert_space && !self.font(f).has_space {
+            if must_insert_space && !has_space {
                 self.insert_interword_space(src);
             }
             self.set_font(f, src);
@@ -492,6 +499,7 @@ impl PdfState {
             self.delta_h += s_out;
         }
         self.doing_string = true;
+        size
     }
 
     /// `pdf_insert_fake_space`.
@@ -520,11 +528,14 @@ impl PdfState {
 
     /// `pdf_print_char`.
     fn print_char(&mut self, f: FontId, c: u8) {
-        self.font_mut(f).chars[usize::from(c)] = true;
+        // (a character already marked is not marked again: `font_mut`
+        // would clone a shared state and note the font changed for the
+        // digest, whose sum the same content leaves the same)
+        if !self.font(f).chars[usize::from(c)] {
+            self.font_mut(f).chars[usize::from(c)] = true;
+        }
         if c <= 32 || c == 92 || c == 40 || c == 41 || c > 127 {
-            self.pdf_out(b'\\');
-            let o = format!("{c:03o}");
-            self.print(o.as_bytes());
+            self.print(&[b'\\', b'0' + (c >> 6), b'0' + ((c >> 3) & 7), b'0' + (c & 7)]);
         } else {
             self.pdf_out(c);
         }
@@ -533,8 +544,13 @@ impl PdfState {
     /// `adv_char_width`: (`adv_char_width_s`, `adv_char_width_s_out`).
     fn adv_char_width(&mut self, f: FontId, c: u16) -> (i32, Scaled) {
         let st = self.font(f);
-        let w = st.width(c);
-        let size = st.size;
+        let (w, size) = (st.width(c), st.size);
+        self.adv_width(w, size)
+    }
+
+    /// [`PdfState::adv_char_width`] of a character of width `w` in a
+    /// font of `pdf_font_size` `size`.
+    fn adv_width(&mut self, w: Scaled, size: Scaled) -> (i32, Scaled) {
         let (s, s_out) = if self.tm_a == 0 {
             divide_scaled(w, size, 4)
         } else {
@@ -677,24 +693,42 @@ impl PdfState {
 
     /// `output_one_char` (pdfTeX §726 with `do_vf`).
     pub(crate) fn output_one_char(&mut self, f: FontId, c: u8, src: &dyn FontSource) {
-        if self.font(f).kind == FontType::New {
+        let mut kind = self.font(f).kind;
+        if kind == FontType::New {
             self.do_vf(f, src);
+            kind = self.font(f).kind;
         }
-        if self.font(f).kind == FontType::Virtual {
+        if kind == FontType::Virtual {
             self.do_vf_packet(f, c, src);
         } else {
-            self.begin_string(f, src);
+            let size = self.begin_string(f, src);
             self.print_char(f, c);
-            self.adv_char_width(f, u16::from(c));
+            let w = self.font(f).width(u16::from(c));
+            self.adv_width(w, size);
         }
     }
 
     /// A character in an hlist (pdfTeX §731).
     fn char_out(&mut self, f: FontId, c: u16, src: &dyn FontSource) {
         self.load_font(f, src);
-        if self.font(f).valid(c) {
-            self.output_one_char(f, u8::try_from(c).unwrap_or(0), src);
+        let st = self.font(f);
+        let (valid, real) = (st.valid(c), st.kind == FontType::Real);
+        if !valid {
+            self.cur_h += st.width(c);
+            return;
         }
+        if real {
+            // (a real font's width is not changed by writing the
+            // character: read once)
+            let w = st.width(c);
+            let c8 = u8::try_from(c).unwrap_or(0);
+            let size = self.begin_string(f, src);
+            self.print_char(f, c8);
+            self.adv_width(w, size);
+            self.cur_h += w;
+            return;
+        }
+        self.output_one_char(f, u8::try_from(c).unwrap_or(0), src);
         self.cur_h += self.font(f).width(c);
     }
 
