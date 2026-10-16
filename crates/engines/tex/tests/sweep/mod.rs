@@ -399,6 +399,116 @@ fn granularity(b: &Build, t: &Text, content: &str, at: usize) -> Vec<String> {
     f
 }
 
+/// The census of one edit (`PHITEX_SWEEP_CENSUS`, with `PHITEX_RUN_LOG`
+/// for the runs): every node run again, by operation; per exec node its
+/// unit, its runs (round, resumed, speculative, how it ended) and the
+/// causes the engine recorded; each exec run given one cause label.
+/// `known`: the nodes that had run before this edit (a node not in it
+/// is new: re-made by its parent). Returns the labels with their exec
+/// runs.
+fn census(b: &Build, ts: &[Text], known: &std::collections::HashSet<u64>, head: &str) -> Vec<(String, usize)> {
+    use std::collections::BTreeMap;
+    let spans = b.node_spans();
+    let unit_of = |n: u64| -> Option<String> {
+        let (_, f, s, _) = spans.iter().find(|x| x.0 == n)?;
+        let t = match f {
+            None => ts.iter().find(|t| t.kind == Kind::Main)?,
+            Some(x) => ts
+                .iter()
+                .find(|t| t.kind != Kind::Main && t.text.trim_end_matches('\n') == x.trim_end_matches('\n'))?,
+        };
+        let u = t.units.iter().position(|&(a, z)| a <= *s && *s < z)?;
+        Some(if t.kind == Kind::Main { format!("u{u}") } else { format!("{}:u{u}", t.name) })
+    };
+    let mut causes: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+    for (n, _, why) in &b.stats.reruns {
+        causes.entry(*n).or_default().push(why.clone());
+    }
+    let mut by_node: BTreeMap<u64, Vec<(bool, bool, u8, u64)>> = BTreeMap::new();
+    let mut by_op: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for &(n, op, resumed, spec, how, round) in &b.stats.run_log {
+        let e = by_op.entry(op).or_default();
+        e.0 += 1;
+        if op == "exec" {
+            by_node.entry(n).or_default().push((resumed, spec, how, round));
+        }
+    }
+    for (op, e) in &mut by_op {
+        e.1 = b.stats.run_log.iter().filter(|x| x.1 == *op).map(|x| x.0).collect::<std::collections::HashSet<_>>().len();
+    }
+    let mut out = format!("census {head}: runs/nodes by op {by_op:?}\n");
+    let mut labels: BTreeMap<String, usize> = BTreeMap::new();
+    // (a cause's label: its kind and field, without the value diff)
+    let label = |w: &str| -> String {
+        let w = w.split(" #r").next().unwrap_or(w);
+        let w = w.split(" @").next().unwrap_or(w);
+        w.to_owned()
+    };
+    for (n, runs) in &by_node {
+        let cs = causes.get(n).cloned().unwrap_or_default();
+        let new = !known.contains(n);
+        let where_ = unit_of(*n).unwrap_or_else(|| {
+            let d = b.describe_node(*n);
+            format!("[{}]", d.chars().take(50).collect::<String>())
+        });
+        let rs: Vec<String> = runs
+            .iter()
+            .map(|&(r, s, h, round)| {
+                format!("r{round}{}{}{}", if r { "+resumed" } else { "" }, if s { "+spec" } else { "" }, char::from(h))
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "  exec {where_} node {n}{} runs {}: {} causes {cs:?}",
+            if new { " NEW" } else { "" },
+            runs.len(),
+            rs.join(" ")
+        );
+        // each run's label
+        let mut rounds: BTreeMap<u64, Vec<(bool, bool)>> = BTreeMap::new();
+        for &(r, s, _, round) in runs {
+            rounds.entry(round).or_default().push((r, s));
+        }
+        for (round, rr) in rounds {
+            let c = cs.iter().find(|w| w.ends_with(&format!("#r{round}")));
+            let fresh: Vec<usize> = (0..rr.len()).filter(|&i| !rr[i].0).collect();
+            for (i, &(resumed, spec)) in rr.iter().enumerate() {
+                let l = if resumed {
+                    format!("park-resume ({})", c.map_or("-".to_owned(), |w| label(w)))
+                } else if Some(&i) == fresh.last() {
+                    match c {
+                        Some(w) => label(w),
+                        None if new => "new node (re-made by its parent)".to_owned(),
+                        None => "no cause recorded".to_owned(),
+                    }
+                } else if spec {
+                    "speculative run, run again".to_owned()
+                } else {
+                    "earlier run, run again (cause not kept)".to_owned()
+                };
+                *labels.entry(l).or_default() += 1;
+            }
+        }
+    }
+    // the other operations' causes, counted
+    let mut other: BTreeMap<String, usize> = BTreeMap::new();
+    for (n, op, why) in &b.stats.reruns {
+        if *op != "exec" {
+            let _ = n;
+            *other.entry(format!("{op}: {}", label(why))).or_default() += 1;
+        }
+    }
+    let mut ls: Vec<(String, usize)> = labels.into_iter().collect();
+    ls.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let _ = writeln!(out, "  exec runs by cause {ls:?}");
+    let mut os: Vec<(String, usize)> = other.into_iter().collect();
+    os.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    os.truncate(16);
+    let _ = writeln!(out, "  other ops' causes {os:?}");
+    eprint!("{out}");
+    ls
+}
+
 /// The sweep of one document in `src_dir` (its files copied to a
 /// directory of its own): the rows, and the cold build's check.
 #[allow(clippy::too_many_lines)]
@@ -427,6 +537,9 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
     }
     let cold_folds = common::runs_of(&b, "fold");
     let ts = texts(&b, name, &dir, &src);
+    let census_on = std::env::var_os("PHITEX_SWEEP_CENSUS").is_some();
+    let mut known: std::collections::HashSet<u64> = b.stats.run_log.iter().map(|x| x.0).collect();
+    let mut totals: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for t in &ts {
         let _ = write!(head, "\n  text {} ({:?}): {} units", t.name, t.kind, t.units.len());
     }
@@ -512,6 +625,13 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
                     );
                 }
             }
+            if census_on {
+                let h = format!("{} unit {} <{}>", t.name, u, e.word);
+                for (l, k) in census(&b, &ts, &known, &h) {
+                    *totals.entry(format!("{}: {l}", if t.kind == Kind::Main { "main" } else { "read-back" })).or_default() += k;
+                }
+            }
+            known.extend(b.stats.run_log.iter().map(|x| x.0));
             let content = if e.seen_text == e.at_text { new.as_str() } else { ts[e.seen_text].text.as_str() };
             v.extend(granularity(&b, &ts[e.seen_text], content, e.seen_at));
             edits += 1;
@@ -550,6 +670,15 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
             });
             // undone: the next edit starts from the cold text
             apply(&mut b, at, &at.text);
+            known.extend(b.stats.run_log.iter().map(|x| x.0));
+        }
+    }
+    if census_on {
+        let mut ts: Vec<(String, usize)> = totals.into_iter().collect();
+        ts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        eprintln!("census {name}: exec runs by cause over the edits");
+        for (l, k) in ts {
+            eprintln!("  {k:>5}  {l}");
         }
     }
     (rows, head)

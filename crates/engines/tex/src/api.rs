@@ -969,6 +969,12 @@ pub struct Stats {
     /// id, its operation, and why (the engine's `Rerun` kind and the
     /// field's name).
     pub reruns: Vec<(u64, &'static str, String)>,
+    /// (measure, with `PHITEX_RUN_LOG` set) every run attempt in the last
+    /// build or edit, in order: the node's raw id, its operation, whether
+    /// it resumed a parked run, whether it ran speculatively, how it
+    /// ended (`o` finished, `s` stopped, `x` other), and the evaluation's
+    /// index in the build or edit (its round).
+    pub run_log: Vec<(u64, &'static str, bool, bool, u8, u64)>,
     /// The engine's pending waits by kind, summed over the evaluations.
     pub waits_by_kind: Vec<(&'static str, u64)>,
     /// The nodes most waited on in the last evaluation (raw ids, waits).
@@ -1225,8 +1231,30 @@ impl Stats {
             };
             let kind = format!("{c:?}");
             let kind = kind.split([' ', '(', '{']).next().unwrap_or("").to_owned();
-            let why = f.map_or_else(|| kind.clone(), |f| format!("{kind} {}", field_name(v, f)));
+            let mut why = f.map_or_else(|| kind.clone(), |f| format!("{kind} {}", field_name(v, f)));
+            if crate::exec::env_flag!("PHITEX_RUN_LOG") {
+                // (measure: where the value read differs from the one the
+                // run had read, and the round)
+                if let Rr::Changed { old, new, .. } = c {
+                    match structural_diff(v, old, new, String::new()) {
+                        Some((path, a, b)) => {
+                            let cut = |x: String| x.chars().take(90).collect::<String>();
+                            why = format!("{why} @{path}: {} | {}", cut(a), cut(b));
+                        }
+                        None => why = format!("{why} (EQUAL value)"),
+                    }
+                }
+                why = format!("{why} #r{}", self.rounds);
+            }
             self.reruns.push((n.raw(), op, why));
+        }
+        if crate::exec::env_flag!("PHITEX_RUN_LOG") {
+            let log = std::mem::take(&mut *crate::ops::RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            let round = self.rounds;
+            for (n, resumed, spec, how) in log {
+                let op = eng.node_info(phitex_defuse::NodeId::from_raw(n)).map_or("?", |i| i.op);
+                self.run_log.push((n, op, resumed, spec, how, round));
+            }
         }
     }
 
