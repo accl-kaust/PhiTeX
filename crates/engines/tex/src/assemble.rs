@@ -357,6 +357,27 @@ fn pdf_exact(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };
+    // a placed page the writer could not write is the job's error, in
+    // the log and loudly, naming the node that wrote the page (a page
+    // written from another mode's handles is never placed: its run is
+    // run again, [`crate::pdfout::PagePiece`])
+    for (msg, node) in crate::pdfout::placed_errors(v, &xpages) {
+        let e = v.list(vec![v.str("error"), v.str(&msg), v.int(-1)]);
+        cx.contribute(v.field("log"), v.seq_unit(e));
+        let d = v.list(vec![
+            v.int(1),
+            v.str(&format!(
+                "{msg} (on a page the output places, written by node {})",
+                u64::from_ne_bytes(node.to_ne_bytes())
+            )),
+            ValueId::UNIT,
+            v.int(-1),
+            v.int(node),
+            v.str(""),
+            v.int(0),
+        ]);
+        cx.contribute(v.field("diags"), v.seq_unit(d));
+    }
     let bytes = crate::pdfout::finish_exact(v, &f, &xpages);
     Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
 }

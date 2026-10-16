@@ -68,6 +68,12 @@ pub(crate) struct PagePiece {
     /// [`font_tags`].
     pj: i64,
     fcount: i64,
+    /// The writer's error writing it (pdfTeX's, `PDF-BACKEND-GAP`: a
+    /// fatal error there, here logged, the job going on) and the node
+    /// that wrote it: the job's error only where the end node places the
+    /// page ([`placed_errors`]); a run fed another mode's handles, which
+    /// the engine runs again with its own, leaves none in the job.
+    err: Option<(String, i64)>,
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
@@ -1329,6 +1335,7 @@ fn ship_apart(
         base: BTreeSet::new(),
         pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
         fcount: r.cint(crate::fields::cell::FONTCOUNT)?,
+        err: None,
     };
     // the key: what the piece is made of, by the values' identities
     // (interned: equal values, equal ids), not by their bytes
@@ -1380,11 +1387,14 @@ fn ship_apart(
     let shown = phitex_defuse::hash_words(phitex_defuse::hash_bytes(0, content), &words);
     let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
     let shown = phitex_defuse::hash_bytes(shown, attr.as_bytes());
-    if let Some(e) = err {
-        // PDF-BACKEND-GAP: the writer's errors are pdfTeX's fatal errors;
-        // they go to the log, the job going on
-        r.log("error", &format!("pdfTeX error: {e}"))?;
-    }
+    // (the writer's error goes with the page: the job's where the end
+    // node places it, [`placed_errors`])
+    pc.err = err.map(|e| {
+        (
+            format!("pdfTeX error: {e}"),
+            i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
+        )
+    });
     let pj = pc.pj;
     pieces()
         .lock()
@@ -1635,6 +1645,18 @@ pub(crate) struct EndFields {
 /// the fonts' names in pdfTeX's order over all the pages
 /// ([`font_tags`]), then `phitex_pdf::finish`. The empty string: no
 /// file.
+/// The writer's errors of the pages the end node places (`xpages`), with
+/// the node that wrote each: the job's errors ([`PagePiece::err`]).
+pub(crate) fn placed_errors(v: &Values, xpages: &[ValueId]) -> Vec<(String, i64)> {
+    let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
+    xpages
+        .iter()
+        .filter(|&&x| v.as_int(x).is_some())
+        .filter_map(|&x| m.get(&u64::from_ne_bytes(int_of(v, x).to_ne_bytes())))
+        .filter_map(|p| p.err.clone())
+        .collect()
+}
+
 pub(crate) fn finish_exact(v: &Values, f: &EndFields, xpages: &[ValueId]) -> Vec<u8> {
     let start = f.state.and_then(|k| {
         states()
