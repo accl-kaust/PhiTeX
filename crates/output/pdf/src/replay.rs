@@ -238,7 +238,7 @@ pub struct PageRecord {
     events: Vec<FontEv>,
     /// The fonts the page's resources list.
     font_list: Vec<FontId>,
-    /// The characters used per font after the page, and the fonts it
+    /// The characters the page used per font, and the fonts it
     /// initialized with their sharing key.
     chars: Vec<(FontId, [bool; 256])>,
     /// `ff` of every font used after the page.
@@ -360,8 +360,34 @@ impl PdfState {
         // (a link running across the page's start: its objects are the
         // page before's, numbered where that page was placed)
         let link_at_start = !self.link_stack.is_empty();
+        // (the record keeps the characters the page uses, not those the
+        // state had used: the state it is written on is any with its
+        // page-base digest, which counts the fonts in use, not their
+        // characters, and a state another page left would add that
+        // page's, or hold this page's already; nothing in the walk reads
+        // them, so they are cleared for it and given back after)
+        let chars_before: Vec<(FontId, [bool; 256])> = self
+            .fonts
+            .iter()
+            .filter(|(_, s)| s.chars.iter().any(|&c| c))
+            .map(|(&f, s)| (f, s.chars))
+            .collect();
+        for &(f, _) in &chars_before {
+            self.font_mut(f).chars = [false; 256];
+        }
         self.rec = Some(Box::default());
         let r = self.ship(page, true, fonts, wh);
+        let page_chars: Vec<(FontId, [bool; 256])> = self
+            .fonts
+            .iter()
+            .filter(|(_, s)| s.chars.iter().any(|&c| c))
+            .map(|(&f, s)| (f, s.chars))
+            .collect();
+        for &(f, b) in &chars_before {
+            for (c, was) in self.font_mut(f).chars.iter_mut().zip(b) {
+                *c |= was;
+            }
+        }
         let rec = self.rec.take().unwrap_or_default();
         let pre_p = Some(self.p.clone());
         let mut pr = PageRecord {
@@ -388,10 +414,8 @@ impl PdfState {
             pr.post = Some(Box::new(self.scratch()));
             pr.events = rec.events;
             pr.font_list = rec.font_list;
+            pr.chars = page_chars;
             for (&f, s) in self.fonts.iter() {
-                if s.chars.iter().any(|&c| c) {
-                    pr.chars.push((f, s.chars));
-                }
                 if s.used {
                     pr.ffs.push((f, self.ff(f)));
                 }
