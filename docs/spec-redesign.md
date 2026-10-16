@@ -128,3 +128,51 @@ first, every number against its bar.
     proportional to what ran (engine request with the numbers); an
     evaluation round's wall ≈ its critical path's busy time (92 ms wall for
     ~50 ms busy today).
+
+## 8. Lessons taken from the main branch's dynamic SSA (DESIGN.md §3, read 2026-10-16)
+
+Main could not go parallel (its state was one interpreter's), but its
+dependency discipline is measured and we take it:
+
+- **A read is of a field, as fine as the reader needs.** "The page builder
+  reads a box's height and depth, not its list." Our `vprof:i` is that; the
+  same rule applies to every read in the run: a lookup that only stores a
+  token reads the name's *class*, not its meaning (**class reads**); the
+  finisher reads the lines' dimensions, not their contents.
+- **Soft reads.** A slot a run saved at a group entry and restored at the
+  group's end is neither a read nor a definition if it left it as found.
+  Main measured a section-title edit: 986 steps re-run without this, 85
+  with it. The touched-loc list implements it: an entry copied for a local
+  assignment and restored equal is dropped from both sets.
+- **Remembered skips.** A false conditional branch skipped in a macro body
+  reads each name it meets once, by class; a remembered skip replays those
+  reads without walking the tokens.
+- **A unit's value is its tokens, not its text.** Main tokenizes per line
+  keyed by bytes + catcodes, so a changed comment or doubled space yields
+  equal tokens and everything after it hits. Our unit's exec reads the unit
+  as the token list made under its entry catcodes (a value); a comment-only
+  edit stops at the tokenizer.
+- **Appends dirty only readers of the whole.** A list grown by appends (a
+  stream's lines, the glyphs a page uses, the page's items) is a definition
+  that does not end the one before it; a changed append wakes the readers
+  of the whole value (the fire, the link), never the later appenders. This
+  is the accumulator form for `wstream:*`, `pdf:chars`, `pdf:chunks`.
+- **Virtual object numbers, proven.** Objects named by TeX identity (page
+  number, destination name, font, object/form/image count) or by (node,
+  count); numbers in bytes are relocations; numbering events are an append
+  read only where TeX observes a number. Main's thesis reflow: 5,712 →
+  586 steps. That is §1's link, with the naming rule made explicit.
+- **No entry states.** "The state at a point is stored nowhere; it is,
+  address by address, the reaching definition." Our records (`cattab`,
+  `parpar`, …) are an entry-state cache: allowed only as a *read hint*
+  whose cells are still individually reaching definitions (a changed cell
+  wakes only the readers of that cell), never as one value.
+- **Identity.** Main names a call by content (f + its inputs' versions),
+  never by position: a moved paragraph is the same call. §0.4 chose
+  positional identity because content in the *node id* re-made readers.
+  The reconciliation: the node's key is its position among its unit
+  siblings; its *memo* is content-keyed (the engine's own cutoff on equal
+  inputs); an inserted paragraph shifts positions but every shifted node's
+  inputs are equal and it costs a compare. If the engine's child matching
+  can match by content key instead, prefer it; it is an engine question,
+  not a client rule.
