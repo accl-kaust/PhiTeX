@@ -2466,12 +2466,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// (`Ctx::define_in_scope`, `Ctx::define_in_scope_at`).
     pub(crate) fn can_leave_scope(&self) -> bool {
         let op = self.cx.op();
-        // (a document's runs only: a format's or INITEX text's run leaving
-        // frames gives a wrong value after their close, catrestore's
-        // `\show:` after `\endgroup` in the node continuing the closer;
-        // not yet understood, the engine's own semantics checked right)
-        self.doc
-            && (op == self.ops.exec || op == self.ops.resume)
+        (op == self.ops.exec || op == self.ops.resume)
             && !self.nest.is_empty()
             && self.nest.len() < usize::from(u8::MAX - 2)
             && self.conds.is_empty()
@@ -2768,6 +2763,16 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         self.cx.claim(n);
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE")
+            && self.effect != Effect::None
+            && crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
+        {
+            eprintln!(
+                "  effect {:?} of {} against its hint's none (refuted)",
+                self.effect,
+                self.cx.node().raw()
+            );
+        }
         self.cx.set_effect(self.effect);
         ValueId::UNIT
     }
