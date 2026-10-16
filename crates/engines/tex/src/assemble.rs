@@ -16,12 +16,12 @@
 //!   `phitex_pdf::relaxed::finish_relaxed` and writes the file. A
 //!   document the mode cannot write asks for exact mode (a `pdf:exact`
 //!   need) and the build evaluates again.
-//! - **PDF, exact** (byte-identical object numbers): [`pdf_exact`],
-//!   to write: the pages written apart by the finishers
-//!   (`crate::pdfout::XPAGES`, `PagePiece`) placed in order on the
-//!   writer state the read-time commands left (`pdf:state`), the
-//!   objects those commands wrote between two pages written where
-//!   pdfTeX writes them.
+//! - **PDF, exact** (byte-identical object numbers): [`pdf_exact`], the
+//!   link (spec-redesign §1): the line's records (`crate::pdfout::XPAGES`:
+//!   the pages written apart, the read-time commands, the document-level
+//!   ones) put on one writer state in order, numbered as pdfTeX numbers
+//!   them; what the commands and the pages' writers guessed given back
+//!   as loop-backs for the next round.
 
 use std::sync::Arc;
 
@@ -37,7 +37,6 @@ use crate::val::{int_of, list_of, str_of};
 
 /// The end node's run: the file as a string value (empty: no file, §642).
 pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
-    let _ = o;
     let t0 = std::time::Instant::now();
     let v = cx.values();
     // the scan's last state first: every continuation before this node
@@ -60,7 +59,7 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     } else if relaxed_mode(cx)? {
         pdf_relaxed(cx, &pages)
     } else {
-        pdf_exact(cx)
+        pdf_exact(cx, o)
     };
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -320,36 +319,32 @@ fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
 
 // ---------------------------------------------------------- PDF, exact
 
-/// The PDF file with pdfTeX's object numbers: the writer's state
-/// reaching the end (`pdf:state`, a fold the read-time commands and the
-/// pages' placements thread by def-use, in the line's order), finished.
+/// The PDF file with pdfTeX's object numbers: the link of the line's
+/// records (`crate::pdfout::finish_exact`).
 ///
-/// 1. A finisher writes its page apart (`crate::pdfout::ship_apart`:
-///    decoded, compressed, as a record) and places a `place` node after
-///    itself (`crate::pdfout::Place`), which puts the record on the
-///    state where the finisher stands: the page's objects are numbered
-///    after every writer command before it and before every one after.
-///    A read-time `\immediate\pdfobj` writes in its own step.
-/// 2. `crate::pdfout::finish_exact` applies the document-level commands
-///    the output routines ran (`XPAGES`), sets the fonts' resource names
-///    (`/F<n>`) in pdfTeX's order of first use (`font_tags`), then
-///    `phitex_pdf::finish` for the fonts, the page tree, the catalog and
-///    the trailer.
+/// 1. A node that ships a page writes it apart
+///    (`crate::pdfout::ship_apart`: decoded, compressed, as a record)
+///    and puts its key in the line's accumulator where it shipped; a
+///    read-time command puts its step there where it runs
+///    (`crate::pdfout::command`), a document-level one its data.
+/// 2. This node puts them on one state in that order (a page's objects
+///    numbered after every record before it), names the fonts in
+///    pdfTeX's order of first use, writes the tail, and gives back what
+///    each command got and the fonts' names (loop-backs: a node that
+///    guessed otherwise runs again in the next round).
 ///
 /// Example: pieces `A B`, a page finishing at `A`'s end, `B` running
-/// `\immediate\pdfobj`: the line is `A, finish, place, B`; the file
-/// numbers page 1's objects, then `B`'s object.
-fn pdf_exact(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+/// `\immediate\pdfobj`: the line is `A, finish, B`; the file numbers
+/// page 1's objects, then `B`'s object.
+fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let v = cx.values();
     let xpages = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
-    let state = field(cx, "pdf:state")?.map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()));
     let date = field(cx, "pdfdate")?.map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
     let jobname = field(cx, "jobname")?
         .map(|x| str_of(v, x))
         .unwrap_or_default();
     let g2u = field(cx, "pdf:glyphtounicode")?;
     let f = crate::pdfout::EndFields {
-        state,
         date,
         jobname,
         g2u,
@@ -378,8 +373,13 @@ fn pdf_exact(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         ]);
         cx.contribute(v.field("diags"), v.seq_unit(d));
     }
-    let chunks = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::CHUNKS), None)?);
-    let chars = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::CHARS), None)?);
-    let bytes = crate::pdfout::finish_exact(v, &f, &xpages, &chunks, &chars);
-    Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
+    let l = crate::pdfout::finish_exact(v, &f, &xpages, &o.pdf_cmds);
+    // (the loop-backs the link gives the next round)
+    for (name, x) in [
+        (crate::pdfout::OBJNUMS, l.objnums),
+        (crate::pdfout::FONT_TAGS, l.ftags),
+    ] {
+        cx.publish(v.field(name), x);
+    }
+    Ok(v.intern(Value::Str(latin1(&l.file).into_boxed_str())))
 }

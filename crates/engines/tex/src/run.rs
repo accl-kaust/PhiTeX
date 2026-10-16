@@ -140,8 +140,6 @@ pub(crate) struct Ops {
     pub scan: OpId,
     pub finish: OpId,
     pub resume: OpId,
-    /// A page's placement on the writer's state (`crate::pdfout::Place`).
-    pub place: OpId,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
     /// The format's definitions the build analyses document texts with
@@ -165,13 +163,6 @@ pub(crate) struct Ops {
     /// finisher's declared names, and its predicted definitions where
     /// both agree (`crate::pages::Finish`).
     pub fin_defs: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, crate::pages::FinDefs>>>,
-    /// The fields any finisher of this build read from the engine, and
-    /// the fields any defined globally: a piece that defines one of the
-    /// first after a candidate, or reads one of the second, folds in
-    /// its own run, where a page finishing inside it is a cut at once
-    /// (`Run::needs_own_fold`), instead of a finisher's check and a
-    /// round (`crate::pages`).
-    pub fin_touch: std::sync::Arc<std::sync::Mutex<crate::pages::FinTouch>>,
     /// The class projection of meanings ([`crate::val::class_projection`],
     /// registered with the engine): a lookup that only stores its token
     /// reads the name's class, not its meaning ([`Run::class_lookup`]).
@@ -181,6 +172,9 @@ pub(crate) struct Ops {
     /// not define something every later finisher reads (an edit
     /// replacing that finisher ran them all again).
     pub not_virtual: std::sync::Arc<std::sync::Mutex<phitex_defuse::FxHashSet<String>>>,
+    /// The build's read-time PDF commands, kept for the link by serial
+    /// (`crate::pdfout::command`).
+    pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
 }
 
 /// A package load's finished run: its node, when it began and ended,
@@ -365,13 +359,6 @@ pub(crate) struct Run<'c, 'a> {
     /// first segment's index), or `None` when it joined the line before
     /// it: [`Run::give_back_peeked`].
     pub pull_at: Vec<Option<usize>>,
-    /// The writer's state this run's last PDF step made, not yet where
-    /// other nodes find it ([`crate::pdfout::publish`], at the run's end).
-    pub pdf_fold: Option<(u64, std::sync::Arc<crate::pdfout::Fold>)>,
-    /// Whether this finisher wrote its page apart and placed its
-    /// `place` node ([`crate::pdfout::ship_apart`]): the page's objects
-    /// come after every writer command before it ([`Run::check_cut`]).
-    pub placed_page: bool,
     /// The input level that holds the last pulled sibling's first line,
     /// once reached: where [`Run::park`] finds it.
     pub pull_lev: Option<usize>,
@@ -603,8 +590,6 @@ impl<'c, 'a> Run<'c, 'a> {
             heartbeat_on: heartbeat_enabled(),
             pulled: 0,
             pull_at: Vec::new(),
-            pdf_fold: None,
-            placed_page: false,
             pull_lev: None,
             pull_orig: Vec::new(),
             pull_box: Vec::new(),
@@ -1832,12 +1817,58 @@ impl<'c, 'a> Run<'c, 'a> {
         self.read_f(f)
     }
 
-    pub(crate) fn int(&mut self, name: &str) -> R<i64> {
-        Ok(self.get(name)?.map_or(0, |x| int_of(self.v, x)))
-    }
-
     pub(crate) fn int32(&mut self, name: &str) -> R<i32> {
         Ok(crate::val::i32_of(self.v, self.get(name)?))
+    }
+
+    /// The location of font `f`'s cell `c` (spec-runstate §2): a fixed
+    /// one ([`crate::fields::font_loc`]), or for a font past them, the
+    /// spill's by its field.
+    #[inline]
+    pub(crate) fn font_loc(&mut self, f: impl TryInto<i64>, c: crate::fields::FontCell) -> Loc {
+        let f = f.try_into().unwrap_or(-1);
+        match crate::fields::font_loc(f, c) {
+            Some(l) => Loc::try_from(l).unwrap_or(0),
+            None => self.font_loc_slow(f, c),
+        }
+    }
+
+    #[cold]
+    fn font_loc_slow(&mut self, f: i64, c: crate::fields::FontCell) -> Loc {
+        let name = crate::fields::font_cell_name(f, c);
+        let fld = self
+            .ops
+            .fields
+            .get_at(self.v, self.cx.values_epoch(), &name);
+        self.loc_of(fld)
+    }
+
+    /// Font `f`'s cell `c` ([`Run::font_loc`]).
+    pub(crate) fn font_get(
+        &mut self,
+        f: impl TryInto<i64>,
+        c: crate::fields::FontCell,
+    ) -> R<Option<ValueId>> {
+        let l = self.font_loc(f, c);
+        self.get_loc(l)
+    }
+
+    /// Font `f`'s cell `c` as an integer ([`Run::font_loc`]).
+    pub(crate) fn font_int(&mut self, f: impl TryInto<i64>, c: crate::fields::FontCell) -> R<i32> {
+        let l = self.font_loc(f, c);
+        self.int_loc(l)
+    }
+
+    /// Defines font `f`'s cell `c` ([`Run::font_loc`]).
+    pub(crate) fn font_set(
+        &mut self,
+        f: impl TryInto<i64>,
+        c: crate::fields::FontCell,
+        val: ValueId,
+        global: bool,
+    ) {
+        let l = self.font_loc(f, c);
+        self.set_loc(l, Native::Raw(val), global);
     }
 
     /// The parameter `name` (a name known only at run time; the fixed
@@ -2286,28 +2317,41 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(c))
     }
 
-    /// A NUL read from a line: in a document held as its canonical text
-    /// (`doc:canon`, `api::canonical_text`) it is a comment's mark, read
-    /// as text where `%` was no comment; the build is asked for the
-    /// document's own text (`needs` `rawtext`). This run's tokens are
-    /// wrong meanwhile; the evaluation on the own text replaces them.
+    /// A NUL read from a document line: the mark of a comment of the
+    /// canonical text (`api::canonical_text`), read as text where `%` was
+    /// no comment (a verbatim's): the comment put back in the line in
+    /// its place from `doc:marks` (the line's, by its number, §304's
+    /// `line`), and the line read on from there, as TeX reads the
+    /// document's own text. Whether it was one.
     #[cold]
-    pub(crate) fn canon_broken(&mut self) -> R<()> {
+    pub(crate) fn splice_mark(&mut self) -> R<bool> {
         let v = self.v;
-        let canon = self
-            .cx
-            .use_env(v.field("doc:canon"))?
-            .is_some_and(|x| int_of(v, x) != 0);
-        if canon {
-            let id = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-            let e = v.list(vec![
-                v.str("rawtext"),
-                id,
-                v.str("a comment's mark read as text"),
-            ]);
-            self.contribute("needs", v.seq_unit(e));
+        let doc = self.input.top_line().is_some_and(|s| {
+            s.origin
+                .is_some_and(|(n, _)| str_of(v, n) == crate::api::DOC_NAME)
+        });
+        if !doc {
+            return Ok(false);
         }
-        Ok(())
+        let Some(marks) = self.cx.use_env(v.field(crate::api::DOC_MARKS))? else {
+            return Ok(false);
+        };
+        let n = i64::from(self.input_line_no()?);
+        let Some(text) = list_of(v, marks).into_iter().find_map(|e| {
+            let xs = list_of(v, e);
+            (xs.first().map(|&x| int_of(v, x)) == Some(n))
+                .then(|| xs.get(1).map(|&t| str_of(v, t)))
+                .flatten()
+        }) else {
+            return Ok(false);
+        };
+        let Some(s) = self.input.top_line_mut() else {
+            return Ok(false);
+        };
+        let i = s.loc - 1;
+        s.buf.splice(i..=i, text.chars().map(u32::from));
+        s.loc = i;
+        Ok(true)
     }
 
     /// The fields this run read by class only ([`Run::class_lookup`]):
@@ -2612,7 +2656,6 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
-        crate::pdfout::publish(self.pdf_fold.take());
         // (a command node's, empty too: what its text declares,
         // `Exec::static_contribs`)
         if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
@@ -3202,7 +3245,6 @@ pub(crate) struct Parked {
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
     cut_req: Option<u32>,
-    placed_page: bool,
 }
 
 impl Run<'_, '_> {
@@ -3213,7 +3255,6 @@ impl Run<'_, '_> {
         if !self.rewind() {
             return None;
         }
-        crate::pdfout::publish(self.pdf_fold.take());
         let mut segs = Vec::new();
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         for l in input.levels.iter().rev() {
@@ -3322,7 +3363,6 @@ impl Run<'_, '_> {
             ins_pending: std::mem::take(&mut self.ins_pending),
             fin: self.fin.take(),
             cut_req: self.cut_req,
-            placed_page: self.placed_page,
         })
     }
 }
@@ -3398,7 +3438,6 @@ impl<'c, 'a> Run<'c, 'a> {
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
         r.cut_req = p.cut_req;
-        r.placed_page = p.placed_page;
         r.resumed = true;
         Ok(r)
     }

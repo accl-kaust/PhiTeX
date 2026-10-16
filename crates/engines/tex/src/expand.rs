@@ -692,7 +692,7 @@ impl Run<'_, '_> {
 
     /// The font identifier token of font `f` (§1257: `font_id_text`).
     pub(crate) fn font_id_tok(&mut self, f: i64) -> R<Tok> {
-        let x = self.get(&format!("fontid:{f}"))?;
+        let x = self.font_get(f, crate::fields::FontCell::Id)?;
         let name = x.map_or_else(|| "nullfont".to_owned(), |x| str_of(self.v, x));
         Ok(Tok::cs(&format!("\u{10FFFE}F{f}\u{2}{name}")))
     }
@@ -741,7 +741,7 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn print_font_name(&mut self, s: &mut String, f: i64) -> R<()> {
-        let info = self.get(&format!("fontinfo:{f}"))?;
+        let info = self.font_get(f, crate::fields::FontCell::Info)?;
         if let Some(info) = info {
             let xs = crate::val::list_of(self.v, info);
             let name = xs.first().map(|&x| str_of(self.v, x)).unwrap_or_default();

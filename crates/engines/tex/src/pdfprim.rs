@@ -448,12 +448,18 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                 crate::pdfrelaxed::font_objnum(r, fid)?.to_string()
             } else {
                 let input = pdf_input(r, "fontobjnum", f, ValueId::UNIT)?;
-                let got = crate::pdfout::command(r, input, &[fid], |st, fs| {
-                    let n = st.font_name(fid, fs).ok()?;
-                    let o = st.font_objnum(fid, fs).ok()?;
-                    Some((n, o))
+                let got = crate::pdfout::command(r, input, &[fid], move |st, fs| {
+                    match (st.font_name(fid, fs), st.font_objnum(fid, fs)) {
+                        (Ok(n), Ok(o)) => crate::pdfout::CmdOut {
+                            nums: vec![n, o],
+                            err: None,
+                        },
+                        _ => crate::pdfout::CmdOut::default(),
+                    }
                 })?;
-                let (name, obj) = got.unwrap_or((name, obj));
+                let (name, obj) = got
+                    .and_then(|g| Some((g.at(0)?, g.at(1)?)))
+                    .unwrap_or((name, obj));
                 if c == cv::FONT_NAME {
                     // (the name the finish gives it, pdfTeX's number)
                     crate::pdfout::font_tag_read(r, name)?.to_string()
@@ -464,7 +470,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         }
         cv::FONT_SIZE => {
             let f = r.scan_font_ident()?;
-            let info = r.get(&format!("fontinfo:{f}"))?;
+            let info = r.font_get(f, crate::fields::FontCell::Info)?;
             let size = crate::fonts::info(v, info).map_or(0, |i| i.size);
             let mut s = String::new();
             crate::print::print_scaled(&mut s, size);
@@ -485,7 +491,10 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                 crate::pdfrelaxed::fall_back(r, "\\pdfpageref (its number is text)");
                 None
             } else {
-                crate::pdfout::command(r, input, &[], |st, _| Some(st.page_ref(n)))?
+                crate::pdfout::command(r, input, &[], move |st, _| {
+                    crate::pdfout::CmdOut::num(st.page_ref(n))
+                })?
+                .and_then(|g| g.at(0))
             };
             if let Some(o) = got {
                 o.to_string()
@@ -660,9 +669,14 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             let got = if crate::pdfrelaxed::on(r)? {
                 None
             } else {
-                crate::pdfout::command(r, input, &[], |st, _| {
-                    st.colorstack_init(page, mode == 2, &init).ok()
+                crate::pdfout::command(r, input, &[], move |st, _| {
+                    match st.colorstack_init(page, mode == 2, &init) {
+                        Ok(n) => crate::pdfout::CmdOut::num(n),
+                        Err(e) => crate::pdfout::CmdOut::err(Some(e)),
+                    }
                 })?
+                .and_then(|g| g.at(0))
+                .and_then(|n| usize::try_from(n).ok())
             };
             let n = got.unwrap_or(stacks.len() + 1);
             stacks.push(v.list(vec![v.int(i64::from(page)), v.int(mode), v.str(&s)]));
@@ -1618,7 +1632,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         r.define_cs(&u, &Mean::Font(nf), global);
         let id = Tok::cs(&format!("\u{10FFFE}F{nf}\u{2}{t}"));
         r.define_cs(&id, &Mean::Font(nf), true);
-        r.set(&format!("fontid:{nf}"), v.str(&t), true);
+        r.font_set(nf, crate::fields::FontCell::Id, v.str(&t), true);
         return Ok(true);
     }
     Ok(false)
@@ -1627,7 +1641,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
 /// A new font with `f`'s metrics (and its name plus `suffix`).
 fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str) -> R<i64> {
     let v = r.v;
-    let info = r.get(&format!("fontinfo:{f}"))?;
+    let info = r.font_get(f, crate::fields::FontCell::Info)?;
     let Some(i) = crate::fonts::info(v, info) else {
         return Ok(0);
     };
@@ -1641,17 +1655,17 @@ fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str) -> R<i64> {
     ];
     xs.extend(i.file);
     xs.push(v.int(i64::from(i.s)));
-    r.set(&format!("fontinfo:{nf}"), v.list(xs), true);
-    let n = r.int32(&format!("fdn:{f}"))?;
+    r.font_set(nf, crate::fields::FontCell::Info, v.list(xs), true);
+    let n = r.font_int(f, crate::fields::FontCell::Fdn)?;
     for k in 1..=n {
-        let d = r.int(&format!("fd:{f}:{k}"))?;
-        r.set(&format!("fd:{nf}:{k}"), v.int(d), true);
+        let d = i64::from(r.font_int(f, crate::fields::FontCell::Fd(k))?);
+        r.font_set(nf, crate::fields::FontCell::Fd(k), v.int(d), true);
     }
-    r.set(&format!("fdn:{nf}"), v.int(i64::from(n)), true);
-    let hc = r.int(&format!("hc:{f}"))?;
-    let sc = r.int(&format!("sc:{f}"))?;
-    r.set(&format!("hc:{nf}"), v.int(hc), true);
-    r.set(&format!("sc:{nf}"), v.int(sc), true);
+    r.font_set(nf, crate::fields::FontCell::Fdn, v.int(i64::from(n)), true);
+    let hc = i64::from(r.font_int(f, crate::fields::FontCell::Hc)?);
+    let sc = i64::from(r.font_int(f, crate::fields::FontCell::Sc)?);
+    r.font_set(nf, crate::fields::FontCell::Hc, v.int(hc), true);
+    r.font_set(nf, crate::fields::FontCell::Sc, v.int(sc), true);
     Ok(nf)
 }
 
@@ -1678,7 +1692,9 @@ impl Run<'_, '_> {
 /// as loaded (its `fontinfo`), and the data.
 fn pdf_input(r: &mut Run<'_, '_>, kind: &str, f: i64, data: ValueId) -> R<ValueId> {
     let v = r.v;
-    let info = r.get(&format!("fontinfo:{f}"))?.unwrap_or(ValueId::UNIT);
+    let info = r
+        .font_get(f, crate::fields::FontCell::Info)?
+        .unwrap_or(ValueId::UNIT);
     Ok(v.list(vec![v.str(kind), v.int(f), info, data]))
 }
 
@@ -1829,6 +1845,13 @@ fn obj_num_option(r: &mut Run<'_, '_>) -> R<(Option<i64>, bool)> {
 
 /// A number from the writer's step, or (in DVI mode, no writer) the
 /// TeX side's count.
+/// The object number the link gave a command, if it has
+/// (`pdfout::command`).
+fn num_of(got: Option<crate::pdfout::CmdOut>) -> Option<usize> {
+    got.and_then(|g| g.at(0))
+        .and_then(|n| usize::try_from(n).ok())
+}
+
 fn or_alloc(r: &mut Run<'_, '_>, n: Option<usize>) -> R<i64> {
     match n {
         Some(n) => Ok(i64::try_from(n).unwrap_or(0)),
@@ -1940,9 +1963,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     crate::pdfrelaxed::new_handle(r)
                 } else {
                     let input = v.list(vec![s("objreserve")]);
-                    let got =
-                        crate::pdfout::command(r, input, &[], |st, _| Some(st.obj_reserve()))?;
-                    or_alloc(r, got)?
+                    let got = crate::pdfout::command(r, input, &[], |st, _| {
+                        crate::pdfout::CmdOut::num(st.obj_reserve())
+                    })?;
+                    or_alloc(r, num_of(got))?
                 };
                 r.set_cell(crate::fields::cell::PDF_LASTOBJ, v.int(n), true);
                 return Ok(());
@@ -1976,18 +2000,21 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 fv,
                 v.int(i64::from(immediate)),
             ]);
-            // (written where it runs: the pages before it in the text
-            // are on the state by then, each placed by its `place` node
-            // in the line, `pdfout::Place`)
-            let got = crate::pdfout::command(r, input, &[], |st, _| {
-                let (n, refused) = st.obj(use_n, stream, attr_b, body);
+            // (a record in the line where it runs: the link writes it
+            // after the pages before it, `pdfout::finish_exact`)
+            let got = crate::pdfout::command(r, input, &[], move |st, _| {
+                let (n, refused) = st.obj(use_n, stream, attr_b.clone(), body.clone());
                 let err = if immediate {
                     st.write_obj(n).err()
                 } else {
                     None
                 };
-                Some((n, refused, err))
+                crate::pdfout::CmdOut {
+                    nums: vec![i64::try_from(n).unwrap_or(0), i64::from(refused)],
+                    err: err.map(|e| e.to_string()),
+                }
             })?;
+            let got = got.and_then(|g| Some((g.at(0)?, g.at(1)? != 0, g.err)));
             let n = match got {
                 Some((n, refused, err)) => {
                     if refused {
@@ -2000,7 +2027,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     if let Some(e) = err {
                         r.log("error", &format!("pdfTeX error: {e}"))?;
                     }
-                    i64::try_from(n).unwrap_or(0)
+                    n
                 }
                 None => match use_n {
                     Some(n) => n,
@@ -2102,8 +2129,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             } else {
                 {
                     let input = v.list(vec![s("newobjnum"), s("annot")]);
-                    let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.new_objnum()))?;
-                    or_alloc(r, got)?
+                    let got = crate::pdfout::command(r, input, &[], |st, _| {
+                        crate::pdfout::CmdOut::num(st.new_objnum())
+                    })?;
+                    or_alloc(r, num_of(got))?
                 }
             };
             if !reserved {
@@ -2138,8 +2167,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 crate::pdfrelaxed::new_handle(r)
             } else {
                 let input = v.list(vec![s("newobjnum"), s("link")]);
-                let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.new_objnum()))?;
-                or_alloc(r, got)?
+                let got = crate::pdfout::command(r, input, &[], |st, _| {
+                    crate::pdfout::CmdOut::num(st.new_objnum())
+                })?;
+                or_alloc(r, num_of(got))?
             };
             whatsit(
                 r,
@@ -2184,10 +2215,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let a = crate::pdfout::action_of(v, act);
             let at_b = Some(bytes(&str_of(v, at))).filter(|a| !a.is_empty());
             let tb = bytes(&str_of(v, title));
-            let err = crate::pdfout::command(r, input, &[], |st, _| {
-                a.map(|a| st.outline(at_b, &a, count, &tb).err())
+            let got = crate::pdfout::command(r, input, &[], move |st, _| {
+                crate::pdfout::CmdOut::err(
+                    a.as_ref()
+                        .and_then(|a| st.outline(at_b.clone(), a, count, &tb).err()),
+                )
             })?;
-            if let Some(Some(e)) = err {
+            if let Some(e) = got.and_then(|g| g.err) {
                 r.log("error", &format!("pdfTeX error: {e}"))?;
             }
         }
@@ -2265,12 +2299,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             if crate::pdfrelaxed::on(r)? {
                 return Ok(());
             }
-            let tb = bytes(&str_of(v, t));
-            if crate::pdfout::doc_op(r, "info", &[t])? {
-                return Ok(());
-            }
-            let input = v.list(vec![s("info"), t]);
-            crate::pdfout::command(r, input, &[], |st, _| st.info(&tb))?;
+            crate::pdfout::doc_op(r, "info", &[t])?;
         }
         ex::CATALOG => {
             let t = ext_value(r)?;
@@ -2280,22 +2309,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 oa = action(r)?;
                 r.set_cell(crate::fields::cell::PDF_OPENACTION, oa, true);
             }
-            let a = (oa != ValueId::UNIT)
-                .then(|| crate::pdfout::action_of(v, oa))
-                .flatten();
-            let tb = bytes(&str_of(v, t));
             if crate::pdfrelaxed::on(r)? {
                 return Ok(());
             }
-            if crate::pdfout::doc_op(r, "catalog", &[t, oa])? {
-                return Ok(());
-            }
-            let input = v.list(vec![s("catalog"), t, oa]);
-            let err =
-                crate::pdfout::command(r, input, &[], |st, _| st.catalog(&tb, a.as_ref()).err())?;
-            if let Some(e) = err {
-                r.log("error", &format!("pdfTeX error: {e}"))?;
-            }
+            crate::pdfout::doc_op(r, "catalog", &[t, oa])?;
         }
         ex::NAMES => {
             let t = ext_value(r)?;
@@ -2303,12 +2320,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             if crate::pdfrelaxed::on(r)? {
                 return Ok(());
             }
-            let tb = bytes(&str_of(v, t));
-            if crate::pdfout::doc_op(r, "names", &[t])? {
-                return Ok(());
-            }
-            let input = v.list(vec![s("names"), t]);
-            crate::pdfout::command(r, input, &[], |st, _| st.names(&tb))?;
+            crate::pdfout::doc_op(r, "names", &[t])?;
         }
         ex::TRAILER => {
             let t = ext_value(r)?;
@@ -2316,12 +2328,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             if crate::pdfrelaxed::on(r)? {
                 return Ok(());
             }
-            let tb = bytes(&str_of(v, t));
-            if crate::pdfout::doc_op(r, "trailer", &[t])? {
-                return Ok(());
-            }
-            let input = v.list(vec![s("trailer"), t]);
-            crate::pdfout::command(r, input, &[], |st, _| st.trailer(&tb))?;
+            crate::pdfout::doc_op(r, "trailer", &[t])?;
         }
         ex::TRAILER_ID => {
             let t = ext_value(r)?;
@@ -2329,12 +2336,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             if crate::pdfrelaxed::on(r)? {
                 return Ok(());
             }
-            let tb = bytes(&str_of(v, t));
-            if crate::pdfout::doc_op(r, "trailerid", &[t])? {
-                return Ok(());
-            }
-            let input = v.list(vec![s("trailerid"), t]);
-            crate::pdfout::command(r, input, &[], |st, _| st.trailer_id(&tb))?;
+            crate::pdfout::doc_op(r, "trailerid", &[t])?;
         }
         ex::INCLUDE_CHARS | ex::FONT_ATTR => {
             let attr = r.cur.chr == ex::FONT_ATTR;
@@ -2356,12 +2358,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             }
             let tb = bytes(&str_of(v, t));
             let input = pdf_input(r, if attr { "fontattr" } else { "includechars" }, f, t)?;
-            crate::pdfout::command(r, input, &[fid], |st, fs| {
+            crate::pdfout::command(r, input, &[fid], move |st, fs| {
                 if attr {
                     st.font_attr(fid, &tb, fs);
                 } else {
                     let _ = st.include_chars(fid, &tb, fs);
                 }
+                crate::pdfout::CmdOut::default()
             })?;
         }
         ex::MAP_FILE | ex::MAP_LINE => {
@@ -2379,12 +2382,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let input = v.list(vec![s("map"), s(k), t]);
             let tb = bytes(&str_of(v, t));
             let file = k == "file";
-            crate::pdfout::command(r, input, &[], |st, fs| {
+            crate::pdfout::command(r, input, &[], move |st, fs| {
                 if file {
                     st.map_file(&tb, fs);
                 } else {
                     st.map_line(&tb);
                 }
+                crate::pdfout::CmdOut::default()
             })?;
         }
         ex::RESET_TIMER => {}
@@ -2417,7 +2421,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             }
             let (ab, bb) = (bytes(&str_of(v, a)), bytes(&str_of(v, b)));
             let input = v.list(vec![v.str("glyphtounicode"), a, b]);
-            crate::pdfout::command(r, input, &[], |st, _| st.glyph_to_unicode(&ab, &bb))?;
+            crate::pdfout::command(r, input, &[], move |st, _| {
+                st.glyph_to_unicode(&ab, &bb);
+                crate::pdfout::CmdOut::default()
+            })?;
         }
         ex::NOBUILTIN_TOUNICODE => {
             let f = r.scan_font_ident()?;
@@ -2428,7 +2435,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             }
             let fid = u32::try_from(f).unwrap_or(0);
             let input = pdf_input(r, "nobuiltintounicode", f, ValueId::UNIT)?;
-            crate::pdfout::command(r, input, &[fid], |st, fs| st.no_builtin_tounicode(fid, fs))?;
+            crate::pdfout::command(r, input, &[fid], move |st, fs| {
+                st.no_builtin_tounicode(fid, fs);
+                crate::pdfout::CmdOut::default()
+            })?;
         }
         ex::INTERWORD_SPACE_ON => whatsit(r, md, vec![s("pdf:interwordspaceon")]),
         ex::INTERWORD_SPACE_OFF => whatsit(r, md, vec![s("pdf:interwordspaceoff")]),
@@ -2566,7 +2576,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
         pages = i.pages;
         depth = i.colordepth;
     }
-    let n = or_alloc(r, got.map(|g| g.0))?;
+    let n = or_alloc(r, got.and_then(|g| g.0))?;
     r.set(
         &format!("pdf:ximage:{n}"),
         v.list(vec![
@@ -2597,6 +2607,34 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     Ok(())
 }
 
+/// The image parameters `ps` (`\\pdfimagehicolor`, `\\pdfimageapplygamma`,
+/// `\\pdfgamma`, `\\pdfimagegamma`, `\\pdfinclusioncopyfonts`, from the
+/// third) on `st`.
+fn image_params(st: &mut phitex_pdf::PdfState, ps: &[i32]) {
+    let p = |k: usize| ps.get(k).copied().unwrap_or(0);
+    let pm = st.params_mut();
+    pm.image_hicolor = p(2);
+    pm.image_apply_gamma = p(3);
+    pm.gamma = p(4);
+    pm.image_gamma = p(5);
+    pm.inclusion_copy_fonts = p(6);
+}
+
+/// What TeX reads of an image (its size, pages, color depth): the
+/// image's own, read on a writer of its own (its number is the link's,
+/// `pdfout::command`).
+fn ximage_own_info(
+    spec: &phitex_pdf::ImageSpec,
+    set: impl Fn(&mut phitex_pdf::PdfState),
+) -> Result<phitex_pdf::XImageInfo, phitex_pdf::PdfError> {
+    let mut st = phitex_pdf::PdfState::new(phitex_pdf::PdfParams::default());
+    set(&mut st);
+    st.ximage(spec.clone()).and_then(|n| {
+        st.ximage_info(n)
+            .ok_or_else(|| phitex_pdf::PdfError::Unsupported("image without its data".to_owned()))
+    })
+}
+
 /// What `\\pdfximage` scanned.
 struct XImageScan {
     rule: (i32, i32, i32),
@@ -2612,7 +2650,10 @@ struct XImageScan {
 
 /// `\\pdfximage` as a step (pdfTeX §1358, writeimg.c `read_image`):
 /// the image's object number and what TeX reads of it.
-fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<Option<(usize, phitex_pdf::XImageInfo)>> {
+fn ximage_step(
+    r: &mut Run<'_, '_>,
+    x: XImageScan,
+) -> R<Option<(Option<usize>, phitex_pdf::XImageInfo)>> {
     let v = r.v;
     let fv = r.file(&x.name)?.unwrap_or(ValueId::UNIT);
     let mut ps = Vec::new();
@@ -2670,34 +2711,38 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<Option<(usize, phitex_pd
         inclusion_errorlevel: ps[1],
     };
     if crate::pdfrelaxed::on(r)? {
-        return crate::pdfrelaxed::ximage(r, spec, &ps);
+        return Ok(crate::pdfrelaxed::ximage(r, spec, &ps)?.map(|(n, i)| (Some(n), i)));
     }
     let immediate = x.immediate;
-    let got = crate::pdfout::command(r, input, &[], |st, fs| {
-        let pm = st.params_mut();
-        pm.image_hicolor = ps[2];
-        pm.image_apply_gamma = ps[3];
-        pm.gamma = ps[4];
-        pm.image_gamma = ps[5];
-        pm.inclusion_copy_fonts = ps[6];
-        Some(st.ximage(spec).and_then(|n| {
-            if immediate {
-                st.write_ximage(n, fs)?;
-            }
-            let i = st.ximage_info(n).ok_or_else(|| {
-                phitex_pdf::PdfError::Unsupported("image without its data".to_owned())
-            })?;
-            Ok((n, i))
-        }))
-    })?;
-    match got {
-        Some(Ok(g)) => Ok(Some(g)),
-        Some(Err(e)) => {
+    let set = move |st: &mut phitex_pdf::PdfState| image_params(st, &ps);
+    let i = match ximage_own_info(&spec, &set) {
+        Ok(i) => i,
+        Err(e) => {
             r.log("error", &format!("pdfTeX error: {e}"))?;
-            Ok(None)
+            return Ok(None);
         }
-        None => Ok(None),
+    };
+    let got = crate::pdfout::command(r, input, &[], move |st, fs| {
+        set(st);
+        match st.ximage(spec.clone()) {
+            Ok(n) => {
+                let err = if immediate {
+                    st.write_ximage(n, fs).err()
+                } else {
+                    None
+                };
+                crate::pdfout::CmdOut {
+                    nums: vec![i64::try_from(n).unwrap_or(0)],
+                    err: err.map(|e| e.to_string()),
+                }
+            }
+            Err(e) => crate::pdfout::CmdOut::err(Some(e)),
+        }
+    })?;
+    if let Some(e) = got.as_ref().and_then(|g| g.err.clone()) {
+        r.log("error", &format!("pdfTeX error: {e}"))?;
     }
+    Ok(Some((num_of(got), i)))
 }
 
 /// `\\pdfxform` as a step (pdfTeX §1357): the box goes to the writer,
@@ -2714,7 +2759,7 @@ fn xform_step(
     let v = r.v;
     let Some(b) = b else { return Ok(None) };
     let mut side = nodes::Side::default();
-    let Some(Node::Box(mut bx)) = nodes::decode(v, b, &mut side) else {
+    let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
         return Ok(None);
     };
     // PDF-BACKEND-GAP: pdfTeX reads a form's virtual fonts when it
@@ -2736,8 +2781,9 @@ fn xform_step(
         return crate::pdfrelaxed::xform(r, &bx, &data, &fs, at_b, res_b, immediate);
     }
     let mut all: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
-    all.extend(crate::pdfout::forms_here(r)?.fonts);
+    all.extend(crate::pdfout::form_fonts(r)?);
     let all: Vec<u32> = all.into_iter().collect();
+    crate::pdfout::add_form_fonts(r, &ids)?;
     let at_b = Some(bytes(&str_of(v, at))).filter(|a| !a.is_empty());
     let res_b = Some(bytes(&str_of(v, res))).filter(|a| !a.is_empty());
     let input = v.list(vec![
@@ -2747,33 +2793,34 @@ fn xform_step(
         b,
         v.int(i64::from(immediate)),
     ]);
-    let got = crate::pdfout::command_forms(r, input, &all, |st, forms, fs| {
+    let got = crate::pdfout::command_forms(r, input, &all, move |st, forms, fs| {
         let base = forms.next_handle();
+        let mut bx = bx.clone();
         remap_whatsits(&mut bx.list, base);
-        for (k, d) in data.into_iter().enumerate() {
+        for (k, d) in data.iter().enumerate() {
             if let Some(d) = d {
-                forms.whats.insert(base + u32::try_from(k).unwrap_or(0), d);
+                forms
+                    .whats
+                    .insert(base + u32::try_from(k).unwrap_or(0), d.clone());
             }
         }
         forms.fonts.extend(ids.iter().copied());
-        let n = st.xform(at_b, res_b, bx);
+        let n = st.xform(at_b.clone(), res_b.clone(), bx);
         let mut err = None;
         if immediate {
             let whats = &forms.whats;
             let mut wh = |h: u32, _leaders: bool| whats.get(&h).cloned();
             err = st.write_xform(n, fs, &mut wh).err();
         }
-        Some((n, err))
-    })?;
-    Ok(match got {
-        Some((n, err)) => {
-            if let Some(e) = err {
-                r.log("error", &format!("pdfTeX error: {e}"))?;
-            }
-            Some(n)
+        crate::pdfout::CmdOut {
+            nums: vec![i64::try_from(n).unwrap_or(0)],
+            err: err.map(|e| e.to_string()),
         }
-        None => None,
-    })
+    })?;
+    if let Some(e) = got.as_ref().and_then(|g| g.err.clone()) {
+        r.log("error", &format!("pdfTeX error: {e}"))?;
+    }
+    Ok(num_of(got))
 }
 
 /// A form's whatsit handles moved to the forms' table's, from `base`.

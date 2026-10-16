@@ -70,7 +70,7 @@ const STATIC: &[&str] = &[
     "pdf:colorstacks",
     "pdf:exact",
     "pdf:fixed",
-    "pdf:fold",
+    "pdf:formfonts",
     "pdf:fontcount",
     "pdf:lastannot",
     "pdf:lastlink",
@@ -91,7 +91,6 @@ const STATIC: &[&str] = &[
     "pdf:relaxed",
     "pdf:retval",
     "pdf:spacefont",
-    "pdf:state",
     "pdf:trailerid",
     "pdf:xformcount",
     "pdf:xpages",
@@ -238,8 +237,11 @@ pub(crate) const CODE0: usize = REG0 + 5 * 256;
 const CODES: [&str; 5] = ["lc", "uc", "sf", "mc", "dc"];
 /// Box registers 0–255.
 pub(crate) const BOX0: usize = CODE0 + 5 * 256;
+/// The math families' fonts (`fam:<size>:<n>`, §230's
+/// `math_font_base`): text, script and scriptscript size, 16 each.
+pub(crate) const FAM0: usize = BOX0 + 256;
 /// The state cells with fixed names ([`STATIC`]).
-pub(crate) const STATIC0: usize = BOX0 + 256;
+pub(crate) const STATIC0: usize = FAM0 + 48;
 /// The number of fixed locations (the old name: slots).
 pub(crate) const NSLOT: usize = STATIC0 + STATIC.len();
 /// The index of `n` in [`STATIC`] (at compile time).
@@ -297,7 +299,7 @@ pub(crate) mod cell {
     pub(crate) const PDF_COLORSTACKS: u32 = (STATIC0 + static_index("pdf:colorstacks")) as u32;
     pub(crate) const PDF_EXACT: u32 = (STATIC0 + static_index("pdf:exact")) as u32;
     pub(crate) const PDF_FIXED: u32 = (STATIC0 + static_index("pdf:fixed")) as u32;
-    pub(crate) const PDF_FOLD: u32 = (STATIC0 + static_index("pdf:fold")) as u32;
+    pub(crate) const PDF_FORMFONTS: u32 = (STATIC0 + static_index("pdf:formfonts")) as u32;
     pub(crate) const PDF_FONTCOUNT: u32 = (STATIC0 + static_index("pdf:fontcount")) as u32;
     pub(crate) const PDF_LASTANNOT: u32 = (STATIC0 + static_index("pdf:lastannot")) as u32;
     pub(crate) const PDF_LASTLINK: u32 = (STATIC0 + static_index("pdf:lastlink")) as u32;
@@ -320,7 +322,6 @@ pub(crate) mod cell {
     pub(crate) const PDF_RELAXED: u32 = (STATIC0 + static_index("pdf:relaxed")) as u32;
     pub(crate) const PDF_RETVAL: u32 = (STATIC0 + static_index("pdf:retval")) as u32;
     pub(crate) const PDF_SPACEFONT: u32 = (STATIC0 + static_index("pdf:spacefont")) as u32;
-    pub(crate) const PDF_STATE: u32 = (STATIC0 + static_index("pdf:state")) as u32;
     pub(crate) const PDF_TRAILERID: u32 = (STATIC0 + static_index("pdf:trailerid")) as u32;
     pub(crate) const PDF_XFORMCOUNT: u32 = (STATIC0 + static_index("pdf:xformcount")) as u32;
     pub(crate) const PDFDATE: u32 = (STATIC0 + static_index("pdfdate")) as u32;
@@ -578,8 +579,114 @@ pub(crate) fn initial_records(
         .collect()
 }
 
+/// The fonts with fixed locations (spec-runstate §2: `font`,
+/// `fontdimen`): numbers 0 to `FONTS - 1`; a font past them goes by
+/// its field (the spill).
+pub(crate) const FONTS: usize = 256;
+/// The font dimensions with a fixed location per font: parameters 1 to
+/// `FONT_FD` (a math extension font has 13, a math symbol font 22).
+pub(crate) const FONT_FD: usize = 24;
+/// A font's cells: its metrics' handle (`fontinfo:`), its identifier's
+/// name (`fontid:`), its number of parameters (`fdn:`), its
+/// `\hyphenchar` (`hc:`) and `\skewchar` (`sc:`), then its
+/// parameters (`fd:<f>:<k>`, [`FONT_FD`] of them).
+const FONT_W: usize = 5 + FONT_FD;
+/// The fonts' cells, after the cells with fixed names: font `f`'s at
+/// `FONT0 + f * FONT_W` ([`font_loc`]). Their fields are named when a
+/// run first needs one ([`Fields::field_of`]), as the meanings' are.
+pub(crate) const FONT0: usize = NSLOT;
+
+/// One of a font's cells ([`font_loc`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FontCell {
+    /// The metrics (`fontinfo:<f>`).
+    Info,
+    /// The identifier's name (`fontid:<f>`).
+    Id,
+    /// The number of parameters (`fdn:<f>`, §578's `font_params`).
+    Fdn,
+    /// `\hyphenchar` (`hc:<f>`).
+    Hc,
+    /// `\skewchar` (`sc:<f>`).
+    Sc,
+    /// Parameter `k` (`fd:<f>:<k>`, §558's `param`).
+    Fd(i32),
+}
+
+impl FontCell {
+    fn index(self) -> Option<usize> {
+        match self {
+            FontCell::Info => Some(0),
+            FontCell::Id => Some(1),
+            FontCell::Fdn => Some(2),
+            FontCell::Hc => Some(3),
+            FontCell::Sc => Some(4),
+            FontCell::Fd(k) => usize::try_from(k)
+                .ok()
+                .filter(|&k| (1..=FONT_FD).contains(&k))
+                .map(|k| 4 + k),
+        }
+    }
+
+    /// The cell at index `i` of a font's cells.
+    fn of_index(i: usize) -> FontCell {
+        match i {
+            0 => FontCell::Info,
+            1 => FontCell::Id,
+            2 => FontCell::Fdn,
+            3 => FontCell::Hc,
+            4 => FontCell::Sc,
+            k => FontCell::Fd(i32::try_from(k - 4).unwrap_or(0)),
+        }
+    }
+}
+
+/// The location of font `f`'s cell `c`, if it has a fixed one.
+#[inline]
+pub(crate) fn font_loc(f: i64, c: FontCell) -> Option<usize> {
+    let f = usize::try_from(f).ok().filter(|&f| f < FONTS)?;
+    Some(FONT0 + f * FONT_W + c.index()?)
+}
+
+/// The field name of font `f`'s cell `c`.
+pub(crate) fn font_cell_name(f: i64, c: FontCell) -> String {
+    match c {
+        FontCell::Info => format!("fontinfo:{f}"),
+        FontCell::Id => format!("fontid:{f}"),
+        FontCell::Fdn => format!("fdn:{f}"),
+        FontCell::Hc => format!("hc:{f}"),
+        FontCell::Sc => format!("sc:{f}"),
+        FontCell::Fd(k) => format!("fd:{f}:{k}"),
+    }
+}
+
+/// The font and cell a font cell's field name names, if it has a fixed
+/// location ([`font_loc`]).
+fn font_of_name(name: &str) -> Option<usize> {
+    let num = |s: &str| s.parse::<i64>().ok();
+    let (f, c) = if let Some(r) = name.strip_prefix("fd:") {
+        let (f, k) = r.split_once(':')?;
+        (num(f)?, FontCell::Fd(k.parse::<i32>().ok()?))
+    } else if let Some(r) = name.strip_prefix("fdn:") {
+        (num(r)?, FontCell::Fdn)
+    } else if let Some(r) = name.strip_prefix("fontinfo:") {
+        (num(r)?, FontCell::Info)
+    } else if let Some(r) = name.strip_prefix("fontid:") {
+        (num(r)?, FontCell::Id)
+    } else if let Some(r) = name.strip_prefix("hc:") {
+        (num(r)?, FontCell::Hc)
+    } else {
+        (num(name.strip_prefix("sc:")?)?, FontCell::Sc)
+    };
+    // (the name's spelling is the canonical one: `fd:01:2` is another
+    // field than `fd:1:2`)
+    (font_cell_name(f, c) == name)
+        .then(|| font_loc(f, c))
+        .flatten()
+}
+
 /// The meanings of active characters 0–255.
-pub(crate) const MEAN_ACTIVE: usize = NSLOT;
+pub(crate) const MEAN_ACTIVE: usize = FONT0 + FONTS * FONT_W;
 /// The meanings of control sequences, by number.
 pub(crate) const MEAN_BASE: usize = MEAN_ACTIVE + 256;
 
@@ -591,6 +698,14 @@ pub(crate) fn mean_loc(t: Tok) -> Option<usize> {
         return Some(MEAN_BASE + i);
     }
     (t.cat() == Some(13) && t.chr() < 256).then(|| MEAN_ACTIVE + t.chr() as usize)
+}
+
+/// The location of math family `n`'s font in size `size` (0 text, 16
+/// script, 32 scriptscript), as `\\textfont` and its kin set it.
+pub(crate) fn fam_slot(size: i32, n: i32) -> crate::runstate::Loc {
+    let s = usize::try_from(size / 16).unwrap_or(0).min(2);
+    let n = usize::try_from(n).unwrap_or(0).min(15);
+    crate::runstate::Loc::try_from(FAM0 + s * 16 + n).unwrap_or(0)
 }
 
 /// The location of character `c`'s entry in code table `table` (0 `lc`,
@@ -630,6 +745,9 @@ impl Fields {
             slot_field.extend((0..256).map(|n| v.field(&format!("{t}:{n}"))));
         }
         slot_field.extend((0..256).map(|n| v.field(&format!("box:{n}"))));
+        for size in [0, 16, 32] {
+            slot_field.extend((0..16).map(|n| v.field(&format!("fam:{size}:{n}"))));
+        }
         slot_field.extend(STATIC.iter().map(|n| names[n]));
         debug_assert_eq!(slot_field.len(), NSLOT);
         let field_slot = slot_field
@@ -675,7 +793,7 @@ impl Fields {
                 .filter(|&c| c < 256)
                 .map(|c| MEAN_ACTIVE + c as usize)
         } else {
-            None
+            font_of_name(&name)
         };
         let l32 = l.and_then(|l| u32::try_from(l).ok());
         with_names(v, epoch, |c| {
@@ -689,6 +807,17 @@ impl Fields {
     pub(crate) fn field_of(&self, v: &Values, epoch: u64, loc: usize) -> Field {
         if loc < NSLOT {
             return self.slot_field[loc];
+        }
+        if loc < MEAN_ACTIVE {
+            let i = loc - FONT0;
+            let f = i64::try_from(i / FONT_W).unwrap_or(0);
+            let name = font_cell_name(f, FontCell::of_index(i % FONT_W));
+            let f = self.get_at(v, epoch, &name);
+            with_names(v, epoch, |c| {
+                bounded(&mut c.locs);
+                c.locs.insert(f, u32::try_from(loc).ok());
+            });
+            return f;
         }
         let t = if loc >= MEAN_BASE {
             Tok::of_cs(crate::val::CsId::from_index(loc - MEAN_BASE))

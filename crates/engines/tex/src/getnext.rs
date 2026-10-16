@@ -783,9 +783,8 @@ impl Run<'_, '_> {
     /// paragraph regions), not a format's (run line by line).
     pub(crate) fn doc_file(&self, f: &crate::run::FileRest) -> bool {
         // (the same test as for a file the text names, `inputs.rs`: a
-        // file of the distribution, or one that ends itself early or
-        // reads its own line numbers, is read inline, as a package's
-        // `\\input` of `supp-pdf.mkii` is)
+        // file that ends itself early or reads its own line numbers is
+        // read inline)
         crate::hints::file_kind_of(self.v, f.id, f.name) == phitex_source::pass::FileKind::Document
             && crate::inputs::document_file(
                 &crate::val::str_of(self.v, f.name),
@@ -850,8 +849,8 @@ impl Run<'_, '_> {
             };
             // (a comment's mark of the canonical text read as text:
             // `api::canonical_text`)
-            if c == 0 {
-                self.canon_broken()?;
+            if c == 0 && self.splice_mark()? {
+                continue;
             }
             let mut c = c;
             // reswitch

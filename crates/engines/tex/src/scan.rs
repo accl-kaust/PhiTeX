@@ -491,7 +491,7 @@ impl Run<'_, '_> {
         {
             return Ok(d);
         }
-        self.int32(&format!("fd:{f}:{k}"))
+        self.font_int(f, crate::fields::FontCell::Fd(k))
     }
 
     /// `scan_glue` (§461–§462).
@@ -572,7 +572,8 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn fam_font(&mut self, size: i32, n: i32) -> R<i64> {
-        self.int(&format!("fam:{size}:{n}"))
+        let l = crate::fields::fam_slot(size, n);
+        Ok(i64::from(self.int_loc(l)?))
     }
 
     /// `find_font_dimen` (§578): the font and parameter number, `None`
@@ -584,7 +585,7 @@ impl Run<'_, '_> {
         if n <= 0 {
             return Ok(None);
         }
-        let count = self.int32(&format!("fdn:{f}"))?;
+        let count = self.font_int(f, crate::fields::FontCell::Fdn)?;
         if n > count {
             let last = self.cint(crate::fields::cell::FONTCOUNT)?;
             if f < last || f == 0 {
@@ -592,7 +593,7 @@ impl Run<'_, '_> {
             }
             // §580: the parameters of the last font grow
             let v = self.v.int(i64::from(n));
-            self.set(&format!("fdn:{f}"), v, true);
+            self.font_set(f, crate::fields::FontCell::Fdn, v, true);
         }
         Ok(Some((f, n)))
     }
@@ -606,15 +607,18 @@ impl Run<'_, '_> {
             cmd::DEF_CODE => {
                 // §414
                 let n = self.scan_char_num()?;
-                let name = match m {
-                    LC_CODE_BASE => "lc",
-                    UC_CODE_BASE => "uc",
-                    SF_CODE_BASE => "sf",
-                    MATH_CODE_BASE => "mc",
-                    DEL_CODE_BASE => "dc",
-                    _ => "cat",
+                let table = match m {
+                    LC_CODE_BASE => Some(0),
+                    UC_CODE_BASE => Some(1),
+                    SF_CODE_BASE => Some(2),
+                    MATH_CODE_BASE => Some(3),
+                    DEL_CODE_BASE => Some(4),
+                    _ => None,
                 };
-                IVal::Int(self.int32(&format!("{name}:{n}"))?)
+                IVal::Int(match table {
+                    Some(t) => self.code(t, n)?,
+                    None => i32::from(self.cat(u32::try_from(n).unwrap_or(0))?),
+                })
             }
             cmd::TOKS_REGISTER
             | cmd::ASSIGN_TOKS
@@ -715,7 +719,12 @@ impl Run<'_, '_> {
             cmd::ASSIGN_FONT_INT => {
                 // §426
                 let f = self.scan_font_ident()?;
-                IVal::Int(self.int32(&format!("{}:{f}", if m == 0 { "hc" } else { "sc" }))?)
+                let c = if m == 0 {
+                    crate::fields::FontCell::Hc
+                } else {
+                    crate::fields::FontCell::Sc
+                };
+                IVal::Int(self.font_int(f, c)?)
             }
             cmd::REGISTER => {
                 // §427

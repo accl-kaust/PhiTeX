@@ -596,8 +596,6 @@ impl Operation for Dvi {
                 "pages",
                 crate::pdfrelaxed::PIECES,
                 crate::pdfout::XPAGES,
-                crate::pdfout::CHUNKS,
-                crate::pdfout::CHARS,
             ]
             .iter()
             .map(|&f| v.field(f))

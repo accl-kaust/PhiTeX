@@ -73,6 +73,42 @@ fn vsize_document_pages() {
     );
 }
 
+/// The page chain's bar (coordinator, 2026-10-16): the realised
+/// critical path of a plain document of 400 one-paragraph pieces is
+/// bounded by a constant times log2(pages) plus its longest paragraph
+/// (one node), not by the page count: a page's nodes depend on prefix
+/// sums, never on the previous page's finisher. Red while the scan's
+/// chain is per page.
+#[test]
+fn page_chain_is_logarithmic() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from("\\pdfoutput=1 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+    for k in 0..400 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+             with plain's macros, so that the paragraph builder has work to do and the \
+             pages fill up one after another.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let opts = common::options("./p400.tex", "p400", "", &fx);
+    let b = common::build(opts, Some(&common::plain()), &src);
+    let pages = b.pages().len().max(1);
+    let log2 = (pages - 1).bit_width();
+    let bound = 8 * u64::from(log2) + 1 + 4;
+    eprintln!(
+        "page chain: {pages} pages, realised critical path {} nodes (bar {bound})",
+        b.stats.realised_critical_path
+    );
+    assert!(
+        u64::from(b.stats.realised_critical_path) <= bound,
+        "realised critical path {} nodes for {pages} pages (bar 8*log2(pages)+1+4 = {bound})",
+        b.stats.realised_critical_path
+    );
+}
+
 #[test]
 fn an_edit_on_the_last_page_keeps_the_earlier_pages() {
     let (src, _) = common::plain_paragraphs(40, false);

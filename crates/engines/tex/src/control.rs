@@ -502,17 +502,13 @@ impl Run<'_, '_> {
                 // §1288
                 let b = self.cur.chr;
                 let (_, body) = self.scan_toks(false, false)?;
-                let table = if b == crate::val::LC_CODE_BASE {
-                    "lc"
-                } else {
-                    "uc"
-                };
+                let table = usize::from(b != crate::val::LC_CODE_BASE);
                 let mut out = Vec::with_capacity(body.len());
                 for t in body {
                     match t.as_cs() {
                         None => {
                             let ch = t.chr() & 0xFF;
-                            let e = self.int(&format!("{table}:{ch}"))?;
+                            let e = self.code(table, ch)?;
                             if e != 0 {
                                 out.push(Tok::ch(
                                     t.cat().unwrap_or(0),
@@ -751,7 +747,8 @@ impl Run<'_, '_> {
                 let n = self.scan_four_bit_int()?;
                 self.scan_optional_equals()?;
                 let f = self.scan_font_ident()?;
-                self.set(&format!("fam:{size}:{n}"), v.int(f), global);
+                let l = crate::fields::fam_slot(size, n);
+                self.set_loc(l, crate::runstate::Native::Raw(v.int(f)), global);
             }
             cmd::REGISTER | cmd::ADVANCE | cmd::MULTIPLY | cmd::DIVIDE => {
                 self.do_register_command(global)?;
@@ -853,7 +850,7 @@ impl Run<'_, '_> {
                 self.scan_optional_equals()?;
                 let d = self.scan_normal_dimen()?;
                 if let Some((f, k)) = fd {
-                    self.set(&format!("fd:{f}:{k}"), v.int(i64::from(d)), true);
+                    self.font_set(f, crate::fields::FontCell::Fd(k), v.int(i64::from(d)), true);
                 }
             }
             cmd::ASSIGN_FONT_INT => {
@@ -861,11 +858,12 @@ impl Run<'_, '_> {
                 let f = self.scan_font_ident()?;
                 self.scan_optional_equals()?;
                 let x = self.scan_int()?;
-                self.set(
-                    &format!("{}:{f}", if n == 0 { "hc" } else { "sc" }),
-                    v.int(i64::from(x)),
-                    true,
-                );
+                let c = if n == 0 {
+                    crate::fields::FontCell::Hc
+                } else {
+                    crate::fields::FontCell::Sc
+                };
+                self.font_set(f, c, v.int(i64::from(x)), true);
             }
             cmd::DEF_FONT => self.new_font(global)?,
             cmd::SET_INTERACTION => {
@@ -1051,7 +1049,7 @@ impl Run<'_, '_> {
         let count = self.cint(crate::fields::cell::FONTCOUNT)?;
         let mut found = None;
         for f in 1..=count {
-            let info = self.get(&format!("fontinfo:{f}"))?;
+            let info = self.font_get(f, crate::fields::FontCell::Info)?;
             if let Some(i) = crate::fonts::info(self.v, info)
                 && i.name == name
             {
@@ -1075,7 +1073,7 @@ impl Run<'_, '_> {
         // §1257: the font identifier
         let id = Tok::cs(&format!("\u{10FFFE}F{f}\u{2}{t}"));
         self.define_cs(&id, &Mean::Font(f), true);
-        self.set(&format!("fontid:{f}"), v.str(&t), true);
+        self.font_set(f, crate::fields::FontCell::Id, v.str(&t), true);
         Ok(())
     }
 
@@ -1102,20 +1100,27 @@ impl Run<'_, '_> {
             file,
             v.int(i64::from(s)),
         ]);
-        self.set(&format!("fontinfo:{f}"), info, true);
+        self.font_set(f, crate::fields::FontCell::Info, info, true);
         let params = l.at.params.clone();
         for (k, p) in params.iter().enumerate() {
-            self.set(&format!("fd:{f}:{}", k + 1), v.int(i64::from(*p)), true);
+            let k = i32::try_from(k + 1).unwrap_or(0);
+            self.font_set(
+                f,
+                crate::fields::FontCell::Fd(k),
+                v.int(i64::from(*p)),
+                true,
+            );
         }
-        self.set(
-            &format!("fdn:{f}"),
+        self.font_set(
+            f,
+            crate::fields::FontCell::Fdn,
             v.int(i64::try_from(params.len()).unwrap_or(0)),
             true,
         );
         let hc = i64::from(self.ipar(Par::defaulthyphenchar)?);
         let sc = i64::from(self.ipar(Par::defaultskewchar)?);
-        self.set(&format!("hc:{f}"), v.int(hc), true);
-        self.set(&format!("sc:{f}"), v.int(sc), true);
+        self.font_set(f, crate::fields::FontCell::Hc, v.int(hc), true);
+        self.font_set(f, crate::fields::FontCell::Sc, v.int(sc), true);
         Ok(f)
     }
 

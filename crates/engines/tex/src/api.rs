@@ -230,11 +230,11 @@ struct Absorb<'a> {
     unchanged: Option<u64>,
     /// The text applied.
     text: &'a mut String,
-    /// The document's own text last taken, and whether the nodes hold
-    /// its canonical text ([`canonical_text`]; off for good once a text
-    /// has none).
-    raw: &'a mut String,
+    /// Whether the nodes hold the document's canonical text
+    /// ([`canonical_text`]; off for good once a text cannot be), and its
+    /// comments by line, for the environment (`doc:marks`).
     canon: &'a mut bool,
+    marks: Marks,
     /// The package loads' hints (`crate::pkgrec`).
     loads: Option<&'a crate::pkgrec::LoadHints>,
     /// The build's hint registry (`crate::hints::Registry`).
@@ -244,15 +244,14 @@ struct Absorb<'a> {
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (raw, version) = self.edits.take()?;
-        let text = if *self.canon {
-            canonical_text(&raw).unwrap_or_else(|| {
-                *self.canon = false;
-                raw.clone()
-            })
+        let text = if let Some((t, ms)) = canonical_text(&raw).filter(|_| *self.canon) {
+            self.marks.set(ms);
+            t
         } else {
-            raw.clone()
+            *self.canon = false;
+            self.marks.set(Vec::new());
+            raw
         };
-        *self.raw = raw;
         let changed = apply_text(
             &self.hints,
             eng,
@@ -1385,15 +1384,10 @@ struct Graph {
     threads: usize,
     /// Why the relaxed PDF mode gave way to exact mode, once it has.
     pdf_exact: Option<String>,
-    /// Why the exact PDF writer folds the pages (`pdf:fold`), if it does.
-    pdf_fold: Option<String>,
-    /// Whether the document's nodes hold its canonical text
-    /// ([`canonical_text`]): `doc:canon` in the environment, read by a
-    /// run that meets a comment's mark (`Run::canon_broken`).
-    canon: bool,
-    /// A run met a comment's mark as text (`needs` `rawtext`): the
-    /// document's own text is to be applied in place of the canonical.
-    raw_needed: bool,
+    /// The comments of the document's canonical text by line
+    /// ([`canonical_text`]): `doc:marks` in the environment, read by a
+    /// run that reads a comment's mark as text (`Run::splice_mark`).
+    marks: Marks,
     /// The `wdef:<field>` loop-backs declared: the fields the read-back
     /// of a job-written file defines.
     wdefs: Vec<String>,
@@ -1445,7 +1439,6 @@ impl Graph {
         let scan = eng.register(Arc::new(crate::pages::Scan(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
-        let place = eng.register(Arc::new(crate::pdfout::Place(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -1462,7 +1455,6 @@ impl Graph {
             scan,
             finish,
             resume,
-            place,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             hints: Arc::default(),
@@ -1470,8 +1462,8 @@ impl Graph {
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
-            fin_touch: Arc::default(),
             not_virtual: Arc::default(),
+            pdf_cmds: Arc::default(),
             class_proj,
         };
         let _ = shared.set(ops.clone());
@@ -1490,9 +1482,7 @@ impl Graph {
             written: Vec::new(),
             threads: crate::exec::threads(threads),
             pdf_exact: None,
-            pdf_fold: None,
-            canon: false,
-            raw_needed: false,
+            marks: Marks::default(),
             wdefs: Vec::new(),
             cuts: Vec::new(),
             wkeys_guess: Vec::new(),
@@ -1802,10 +1792,7 @@ impl Graph {
         if self.pdf_exact.is_some() {
             env.push((v.field("pdf:exact"), v.int(1)));
         }
-        if self.pdf_fold.is_some() {
-            env.push((v.field("pdf:fold"), v.int(1)));
-        }
-        env.push((v.field("doc:canon"), v.int(i64::from(self.canon))));
+        env.push((v.field(DOC_MARKS), self.marks.value(v)));
         for &(pid, k) in &self.cuts {
             let name = format!("cut:{}", u64::from_ne_bytes(pid.to_ne_bytes()));
             env.push((v.field(&name), v.int(k)));
@@ -1844,6 +1831,13 @@ impl Graph {
                 self.provide(finder);
             }
             t_prov += tp.elapsed();
+            // (the comments of a text applied before this evaluation)
+            if self.marks.dirty() {
+                let env = self.environment(fixpoint);
+                env_trace(&self.eng, &env);
+                self.eng.set_environment(env);
+                self.eng.set_environment_absent(self.absent.clone());
+            }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
@@ -2111,21 +2105,6 @@ impl Graph {
                     self.pdf_exact = Some(why.clone());
                     asked = true;
                 }
-                // the exact writer's pages cannot be written apart:
-                // the build again, with the pages in the `pdf:state` fold
-                // a comment's mark read as text: the document's own text
-                // in place of the canonical, applied by the build
-                // ([`Build::settle`])
-                if kind == "rawtext" && self.canon {
-                    self.raw_needed = true;
-                }
-                if kind == "pdf:fold" && self.pdf_fold.is_none() {
-                    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
-                        eprintln!("pdf: the pages folded again: {why}");
-                    }
-                    self.pdf_fold = Some(why.clone());
-                    asked = true;
-                }
             }
             for name in asked_names {
                 let f = self.eng.values().field(&format!("file:{name}"));
@@ -2147,6 +2126,9 @@ impl Graph {
             // files (an edit of one replaces it, [`Build::edit_file`]),
             // whether or not this round asked for more
             self.absorb_provided();
+            // (an edit taken during the evaluation changed the comments:
+            // the environment holds them before it ends)
+            asked |= self.marks.dirty();
             if !asked {
                 t_after += t_mark.elapsed();
                 break;
@@ -2286,7 +2268,7 @@ fn is_doc(prelude: Option<&str>, text: &str) -> bool {
 
 /// The name a document's own text is registered under for the hints
 /// of nodes made from parts of it (`hints::register_text`).
-const DOC_NAME: &str = "\u{10FFFE}document";
+pub(crate) const DOC_NAME: &str = "\u{10FFFE}document";
 
 /// Registers the document's analysis for the hints of nodes made from
 /// parts of its slices (`hints::register_text`, by the document's
@@ -2392,22 +2374,61 @@ pub(crate) fn key(piece: &str, starts: bool) -> u64 {
     phitex_defuse::hash_bytes(1 + u64::from(starts), piece.as_bytes())
 }
 
+/// The environment field of the canonical text's comments
+/// ([`canonical_text`]): `[[line, comment], ...]`.
+pub(crate) const DOC_MARKS: &str = "doc:marks";
+
+/// The comments of the document's canonical text by line, shared with
+/// the edits a running evaluation takes ([`Absorb`]); `dirty` while the
+/// environment does not hold them yet.
+#[derive(Clone, Default)]
+pub(crate) struct Marks(Arc<Mutex<MarksState>>);
+
+/// The comments by line, and whether the environment lacks them.
+type MarksState = (Vec<(u32, String)>, bool);
+
+impl Marks {
+    fn set(&self, ms: Vec<(u32, String)>) {
+        let mut m = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if m.0 != ms {
+            *m = (ms, true);
+        }
+    }
+
+    /// The `doc:marks` value; the environment holds them from here.
+    fn value(&self, v: &Values) -> ValueId {
+        let mut m = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        m.1 = false;
+        v.list(
+            m.0.iter()
+                .map(|(n, c)| v.list(vec![v.int(i64::from(*n)), v.str(c)]))
+                .collect(),
+        )
+    }
+
+    /// Whether marks changed since the environment was set.
+    fn dirty(&self) -> bool {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).1
+    }
+}
+
 /// The document's text as its tokens need it (spec-redesign §8: a unit's
 /// value is its tokens, not its text): each comment's text after its
-/// `%` replaced by one NUL, the comment's mark. Under the catcodes a
-/// document's text is read with (`\\` an escape, `%` a comment) the
-/// tokens are the same and a comment-only edit changes no node. A run
-/// that reads a mark as text (`%` was no comment there, a verbatim's)
-/// asks for the document's own text (`needs` `rawtext`,
-/// `Run::canon_broken`), which the build applies in place of the
-/// canonical ([`Build::settle`]). `None` for a text this cannot mark
-/// (one holding NUL, or `^^`, which can spell an escape or a `%`).
-pub(crate) fn canonical_text(text: &str) -> Option<String> {
+/// `%` replaced by one NUL, the comment's mark, and the comments by line
+/// (1-based). Under the catcodes a document is read with (`\\` an
+/// escape, `%` a comment) the tokens are the same, and a comment-only
+/// edit changes no node. A run that reads a mark as text (`%` no
+/// comment there, a verbatim's) puts the comment back in its line from
+/// `doc:marks` (`Run::splice_mark`): the tokens are TeX's either way.
+/// `None` for a text this cannot mark (one holding NUL, or `^^`, which
+/// can spell an escape or a `%`).
+pub(crate) fn canonical_text(text: &str) -> Option<(String, Vec<(u32, String)>)> {
     if text.contains('\0') || text.contains("^^") {
         return None;
     }
     let mut out = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
+    let mut marks = Vec::new();
+    for (n, line) in text.split_inclusive('\n').enumerate() {
         let (body, nl) = match line.strip_suffix('\n') {
             Some(b) => (b, "\n"),
             None => (line, ""),
@@ -2431,12 +2452,18 @@ pub(crate) fn canonical_text(text: &str) -> Option<String> {
             Some(k) if k + 1 < body.len() => {
                 out.push_str(&body[..=k]);
                 out.push('\0');
+                // (the comment as web2c's `input_line` keeps it: the
+                // line's end, then its trailing blanks removed, §31)
+                let c = body[k + 1..]
+                    .trim_end_matches(['\r', '\n'])
+                    .trim_end_matches([' ', '\t']);
+                marks.push((u32::try_from(n + 1).unwrap_or(u32::MAX), c.to_owned()));
             }
             _ => out.push_str(body),
         }
         out.push_str(nl);
     }
-    Some(out)
+    Some((out, marks))
 }
 
 /// A text as TeX reads a file: every line ends (§31).
@@ -2827,7 +2854,7 @@ fn final_bindings(
                 t_name += t.elapsed();
                 // open files are not dumped
                 // nor is the PDF writer's state (pdfTeX dumps no objects)
-                if ["wopen:", "write:", "file:", "read:", "pdf:state", "pdf:pre"]
+                if ["wopen:", "write:", "file:", "read:", "pdf:formfonts"]
                     .iter()
                     .any(|p| name.starts_with(p))
                 {
@@ -2924,12 +2951,9 @@ pub struct Build {
     doc: bool,
     /// The document's text last applied (`edit_file` applies it again
     /// when a file sliced into it changed): its canonical text
-    /// ([`canonical_text`]) while `g.canon`.
+    /// ([`canonical_text`]) while `canon`.
     text: String,
-    /// The document's own text last sent (`text` is made from it).
-    raw: String,
-    /// Whether `text` is `raw`'s canonical text ([`canonical_text`]);
-    /// `g.canon` follows it between evaluations.
+    /// Whether `text` is the document's canonical text.
     canon: bool,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
@@ -2990,9 +3014,14 @@ impl Build {
         let canon_text = (is_doc(prelude, document) && !crate::exec::env_flag!("PHITEX_NO_CANON"))
             .then(|| canonical_text(document))
             .flatten();
-        g.canon = canon_text.is_some();
-        let g_canon = g.canon;
-        let text = canon_text.unwrap_or_else(|| document.to_owned());
+        let g_canon = canon_text.is_some();
+        let text = match canon_text {
+            Some((t, ms)) => {
+                g.marks.set(ms);
+                t
+            }
+            None => document.to_owned(),
+        };
         // (the files the job writes and reads back are loop-backs from
         // the `\openout` that opens them, `wfiledecl:`: a read before it
         // runs again on the loop-back)
@@ -3064,7 +3093,6 @@ impl Build {
             settled: Vec::new(),
             doc,
             text,
-            raw: document.to_owned(),
             canon: g_canon,
         };
         b.settle();
@@ -3153,8 +3181,8 @@ impl Build {
             incr: self.doc.then_some(&mut self.incr),
             unchanged: None,
             text: &mut self.text,
-            raw: &mut self.raw,
             canon: &mut self.canon,
+            marks: self.g.marks.clone(),
             loads: loads.as_deref(),
         };
         let t_before = t_all.elapsed();
@@ -3175,7 +3203,6 @@ impl Build {
         if let Some(v) = absorb.unchanged {
             stats.version = stats.version.max(v);
         }
-        self.g.canon = self.canon;
         stats.live = self.g.eng.live_nodes();
         if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
             crate::run::record_check(&self.g.eng, &self.g.start_env);
@@ -3208,19 +3235,6 @@ impl Build {
                 "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
             );
         }
-        // a run read a comment's mark as text (a `%` that was no comment
-        // there): the document's own text applied in place of the
-        // canonical (only the units with comments change) and evaluated
-        // again; the build keeps its own text from here on
-        if self.canon && self.g.raw_needed && self.apply_raw_text() {
-            let first = std::mem::take(&mut self.stats);
-            self.settle();
-            self.stats.nodes_run += first.nodes_run;
-            self.stats.runs += first.runs;
-            self.stats.rounds += first.rounds;
-            self.stats.loop_rounds += first.loop_rounds;
-            return;
-        }
         self.dump_claims();
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
@@ -3231,29 +3245,6 @@ impl Build {
             }
             self.settled = pages;
         }
-    }
-
-    /// The document's own text applied in place of the canonical
-    /// ([`canonical_text`]; only the units with comments change), for
-    /// good: whether any node changed.
-    fn apply_raw_text(&mut self) -> bool {
-        self.canon = false;
-        self.g.canon = false;
-        self.g.raw_needed = false;
-        let loads = self.g.loads.clone();
-        let raw = self.raw.clone();
-        let changed = apply_text(
-            &self.g.ops.hints.clone(),
-            &mut self.g.eng,
-            self.g.ops.exec,
-            self.end,
-            &mut self.nodes,
-            &raw,
-            self.doc.then_some(&mut self.incr),
-            loads.as_deref(),
-        );
-        self.text = raw;
-        changed
     }
 
     /// A handle to send this build new texts from another thread
@@ -3294,14 +3285,6 @@ impl Build {
     #[must_use]
     pub fn pdf_exact_reason(&self) -> Option<&str> {
         self.g.pdf_exact.as_deref()
-    }
-
-    /// Why the exact PDF writer folded the pages in order (`pdf:state`
-    /// threaded through the page steps) instead of writing each on its
-    /// own, if it did.
-    #[must_use]
-    pub fn pdf_fold_reason(&self) -> Option<&str> {
-        self.g.pdf_fold.as_deref()
     }
 
     /// Frees the engine's memoized applications nothing reaches any
@@ -4412,8 +4395,6 @@ fn declare_fields(eng: &mut Engine) {
         "ifviol",
         "streams",
         "wplan",
-        "fplan",
-        "oplan",
         "fread",
         "tools",
         "pkgrecs",
@@ -4421,8 +4402,6 @@ fn declare_fields(eng: &mut Engine) {
         "gdefs",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
-        crate::pdfout::CHUNKS,
-        crate::pdfout::CHARS,
         crate::vprof::VPROF,
         crate::pages::PITEMS,
     ] {
@@ -4431,11 +4410,13 @@ fn declare_fields(eng: &mut Engine) {
     }
     let lines = eng.values().field("lines");
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
-    // the fonts' names as the writer gives them where they are not the
-    // engine's numbers (`pdfout::font_tags`), for `\pdffontname`
-    let f = eng.values().field(crate::pdfout::FONT_TAGS);
-    let none = eng.values().list(Vec::new());
-    {
+    // the link's loop-backs, declared with the graph (spec-redesign §1
+    // `link`): the fonts' names as the writer gives them where they are
+    // not the engine's numbers (`\pdffontname`), what each read-time
+    // command got (`pdfout::finish_exact`)
+    for name in [crate::pdfout::FONT_TAGS, crate::pdfout::OBJNUMS] {
+        let f = eng.values().field(name);
+        let none = eng.values().list(Vec::new());
         decl_trace(eng, f, none);
         eng.declare_loopback(f, none);
     }

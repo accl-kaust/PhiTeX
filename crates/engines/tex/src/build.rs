@@ -841,19 +841,19 @@ impl Run<'_, '_> {
         {
             return Ok(e.clone());
         }
-        let info = self.get(&format!("fontinfo:{f}"))?;
+        let info = self.font_get(f, crate::fields::FontCell::Info)?;
         let e = match crate::fonts::info(self.v, info) {
             Some(i) => match i
                 .file
                 .and_then(|file| crate::fonts::load(self.v, file, i.s))
             {
                 Some(l) => {
-                    let n = self.int32(&format!("fdn:{f}"))?;
+                    let n = self.font_int(f, crate::fields::FontCell::Fdn)?;
                     let mut params = Vec::new();
                     for k in 1..=n {
-                        params.push(self.int32(&format!("fd:{f}:{k}"))?);
+                        params.push(self.font_int(f, crate::fields::FontCell::Fd(k))?);
                     }
-                    let hc = self.int32(&format!("hc:{f}"))?;
+                    let hc = self.font_int(f, crate::fields::FontCell::Hc)?;
                     Some(std::rc::Rc::new(crate::fonts::Entry {
                         loaded: l,
                         params,
@@ -1113,11 +1113,22 @@ impl Run<'_, '_> {
         })
     }
 
+    /// The location of box register `n` (spec-runstate §2: a fixed one
+    /// for 0–255, the spill's by its field past them).
+    pub(crate) fn box_loc(&mut self, n: i64) -> crate::runstate::Loc {
+        if let Some(i) = usize::try_from(n).ok().filter(|&i| i < 256) {
+            crate::runstate::Loc::try_from(crate::fields::BOX0 + i).unwrap_or(0)
+        } else {
+            let f = self.box_field(n);
+            self.loc_of(f)
+        }
+    }
+
     /// The box in register `n` (`None`: void).
     pub(crate) fn box_reg(&mut self, n: i32) -> R<Option<ValueId>> {
         let x = {
-            let f = self.box_field(i64::from(n));
-            self.get_f(f)?
+            let l = self.box_loc(i64::from(n));
+            self.get_loc(l)?
         };
         let v = self.v;
         Ok(x.and_then(|x| match &*v.get(x) {
@@ -1131,8 +1142,8 @@ impl Run<'_, '_> {
         let v = self.v;
         let lvl = if global { 0 } else { md.depth };
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
-        let f = self.box_field(n);
-        self.set_f(f, val, global);
+        let l = self.box_loc(n);
+        self.set_loc(l, crate::runstate::Native::Raw(val), global);
     }
 
     /// A box register changed "at the same level" (§1079 `box(n):=null`,
@@ -1141,12 +1152,11 @@ impl Run<'_, '_> {
     /// keep the change at their close ([`Run::modify_at`]).
     pub(crate) fn modify_box_reg(&mut self, n: i32, b: Option<ValueId>) -> R<()> {
         let v = self.v;
-        let f = self.box_field(i64::from(n));
-        let x = self.get_f(f)?;
+        let l = self.box_loc(i64::from(n));
+        let x = self.get_loc(l)?;
         let lvl = x.map_or(0, |x| crate::val::int_at(v, x, 0));
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let base = self.base_mode()?.depth;
-        let l = self.loc_of(f);
         self.modify_at(l, val, lvl, base);
         Ok(())
     }
@@ -1461,7 +1471,7 @@ impl Run<'_, '_> {
         let v = self.v;
         if self.cur.chr == 1 {
             let f = self.cint(crate::fields::cell::FONT)?;
-            let c = self.int32(&format!("hc:{f}"))?;
+            let c = self.font_int(f, crate::fields::FontCell::Hc)?;
             let mut d = Disc::default();
             if (0..256).contains(&c) {
                 let mut view = crate::fonts::View::default();
@@ -2435,7 +2445,7 @@ impl Run<'_, '_> {
             let mut s = String::from("Missing character: There is no ");
             crate::print::push_code(&mut s, c);
             s.push_str(" in font ");
-            let info = self.get(&format!("fontinfo:{f}"))?;
+            let info = self.font_get(f, crate::fields::FontCell::Info)?;
             if let Some(i) = crate::fonts::info(self.v, info) {
                 s.push_str(&i.name);
             }

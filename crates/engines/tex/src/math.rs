@@ -983,7 +983,7 @@ impl Run<'_, '_> {
         let s = self.ipar(Par::displayindent)?;
         let (mut e, q) = match &a {
             Some(a) if !danger => {
-                let f2 = self.int("fam:0:2")?;
+                let f2 = self.fam_font(0, 2)?;
                 let mq = self.font_dimen(f2, 6)?;
                 (a.width, a.width + mq)
             }
@@ -1136,9 +1136,11 @@ impl Run<'_, '_> {
     /// §1195: whether families 2 and 3 lack their parameters.
     fn insufficient_fonts(&mut self) -> R<bool> {
         for size in [0, 16, 32] {
-            let f2 = self.int(&format!("fam:{size}:2"))?;
-            let f3 = self.int(&format!("fam:{size}:3"))?;
-            if self.int(&format!("fdn:{f2}"))? < 22 || self.int(&format!("fdn:{f3}"))? < 13 {
+            let f2 = self.fam_font(size, 2)?;
+            let f3 = self.fam_font(size, 3)?;
+            if i64::from(self.font_int(f2, crate::fields::FontCell::Fdn)?) < 22
+                || i64::from(self.font_int(f3, crate::fields::FontCell::Fdn)?) < 13
+            {
                 return Ok(true);
             }
         }
@@ -1157,11 +1159,13 @@ impl Run<'_, '_> {
         let mut skew = crate::FxHashMap::default();
         for (s, row) in fam_fnt.iter_mut().enumerate() {
             for (k, slot) in row.iter_mut().enumerate() {
-                let f = u32::try_from(self.int(&format!("fam:{}:{k}", s * 16))?).unwrap_or(0);
+                let size = i32::try_from(s * 16).unwrap_or(0);
+                let k32 = i32::try_from(k).unwrap_or(0);
+                let f = u32::try_from(self.fam_font(size, k32)?).unwrap_or(0);
                 if f != 0 {
                     *slot = Some(f);
                     self.add_font(&mut view, f)?;
-                    skew.insert(f, self.int32(&format!("sc:{f}"))?);
+                    skew.insert(f, self.font_int(f, crate::fields::FontCell::Sc)?);
                 }
             }
         }
