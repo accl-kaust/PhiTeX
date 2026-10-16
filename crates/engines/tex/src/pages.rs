@@ -140,10 +140,13 @@ pub(crate) struct CandMark {
     pub sig: (usize, usize, usize, u64),
     pub nest: usize,
     /// The values at the candidate of the fields the routines read so
-    /// far (`Ops::fin_touch`) that the run had in hand there: a field
-    /// defined after the candidate with the value it had there changes
-    /// nothing a routine run at the candidate would see.
-    pub vals: std::sync::Arc<[(Field, Option<ValueId>)]>,
+    /// far (`Ops::fin_touch`): `Some(x)` where the run had it in hand,
+    /// `None` where it had not touched it (its value there is the one
+    /// reaching the piece). A field defined after the candidate with the
+    /// value it had there changes nothing a routine run at the candidate
+    /// would see.
+    #[allow(clippy::option_option)]
+    pub vals: std::sync::Arc<[(Field, Option<Option<ValueId>>)]>,
 }
 
 /// A finisher's page: its index, the material carried over past it
@@ -1034,7 +1037,7 @@ impl Run<'_, '_> {
             defs.extend(self.locals_unlike_at(m));
             let defs: Vec<Field> = defs.into_iter().map(|l| self.loc_field(l)).collect();
             for f in defs {
-                if t.reads.contains(&f) && !self.same_as_at(m, f) {
+                if t.reads.contains(&f) && !self.same_as_at(m, f)? {
                     if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") {
                         eprintln!("  own fold {}: defines {}", self.cx.node().raw(), str_of(v, f.0));
                     }
@@ -1054,9 +1057,9 @@ impl Run<'_, '_> {
     }
 
     /// The values here of the fields the routines read so far
-    /// ([`CandMark::vals`]), those the run has in hand (loaded or
-    /// defined: nothing is read for this).
-    fn routine_read_values(&mut self) -> std::sync::Arc<[(Field, Option<ValueId>)]> {
+    /// ([`CandMark::vals`]): nothing is read for this.
+    #[allow(clippy::option_option)]
+    fn routine_read_values(&mut self) -> std::sync::Arc<[(Field, Option<Option<ValueId>>)]> {
         let reads: Vec<Field> = {
             let t = self
                 .ops
@@ -1069,25 +1072,41 @@ impl Run<'_, '_> {
         let mut out = Vec::new();
         for f in reads {
             let l = self.loc_of(f);
-            if self.st.is_loaded(l) {
-                out.push((f, self.st.id_of(l, v)));
-            }
+            let x = self.st.is_loaded(l).then(|| self.st.id_of(l, v));
+            out.push((f, x));
         }
         out.into()
     }
 
     /// Whether field `f`, defined after candidate `m`, has at the run's
     /// end the value it had there (as a finisher placed after the piece
-    /// sees it: not when the run closed the scope it ran in).
-    fn same_as_at(&mut self, m: &CandMark, f: Field) -> bool {
+    /// sees it: not when the run closed the scope it ran in). A field
+    /// the run had not touched at the candidate had there the value
+    /// reaching the piece: the one the run read, else read now.
+    fn same_as_at(&mut self, m: &CandMark, f: Field) -> R<bool> {
         if self.effect == Effect::Close {
-            return false;
+            return Ok(false);
         }
         let Some(&(_, x)) = m.vals.iter().find(|e| e.0 == f) else {
-            return false;
+            return Ok(false);
         };
         let l = self.loc_of(f);
-        self.st.is_loaded(l) && self.st.id_of(l, self.v) == x
+        if !self.st.is_loaded(l) {
+            return Ok(false);
+        }
+        let x = match x {
+            Some(x) => x,
+            None => match self.st.engine_value(l) {
+                Some(e) => e,
+                None => {
+                    // (a stop at the read parks the run: it resumes at
+                    // its end on the page)
+                    self.begin_command();
+                    self.eng_read(f)?
+                }
+            },
+        };
+        Ok(self.st.id_of(l, self.v) == x)
     }
 
     /// The local definitions in force at the run's end that a finisher
@@ -1179,13 +1198,13 @@ impl Run<'_, '_> {
                 // there is the one it had at the candidate)
                 let mut names: Vec<(ValueId, bool, bool)> = Vec::new();
                 for f in locals {
-                    let same = self.same_as_at(m, f);
+                    let same = self.same_as_at(m, f)?;
                     names.push((f.0, false, same));
                 }
                 for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
                     let stands = self.st.def_stands(l);
                     let f = self.loc_field(l);
-                    let same = self.same_as_at(m, f);
+                    let same = self.same_as_at(m, f)?;
                     names.push((f.0, stands, same));
                 }
                 names.extend(self.streams_since(m.contribs).into_iter().map(|f| (f.0, false, false)));
