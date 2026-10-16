@@ -841,6 +841,9 @@ impl Shared {
         {
             e.early_claim = None;
         }
+        if token.is_none() && r.has(super::F_PCLAIM) && !r.has(super::F_IN_PCLAIM) {
+            self.enter_work_lists(s);
+        }
         let mut cx = Ctx::new(self, s, token);
         // A resumed run keeps the reads its earlier attempts made.
         cx.log = prior;
@@ -918,6 +921,11 @@ impl Shared {
                 && r.has(super::F_PCLAIM)
             {
                 let old = r.data().ex().early_claim.replace(n);
+                if n == 0 {
+                    // Claims nothing while stopped: not a claimer later
+                    // nodes look past (it joins again when it runs anew).
+                    self.leave_pclaim(s);
+                }
                 if old != Some(n) {
                     let w = std::mem::take(&mut r.data().waiters);
                     for (x, q) in w {

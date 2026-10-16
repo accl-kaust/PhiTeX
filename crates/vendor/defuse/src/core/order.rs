@@ -1056,6 +1056,25 @@ impl Shared {
         }
     }
 
+    /// Takes `s` out of its unit's pending claimers only (it claims nothing
+    /// for now).
+    pub(crate) fn leave_pclaim(&self, s: Slot) {
+        let r = self.rec(s);
+        if !r.has(F_IN_PCLAIM) {
+            return;
+        }
+        let u = self.unit(self.unit_of(s));
+        let mut dead = lock(&u.lists);
+        r.clear(F_IN_PCLAIM);
+        *dead += 1;
+        let v = u.pclaim.read();
+        let mut lo = u.pclaim_lo.load(Ordering::Acquire);
+        while lo < v.len() && !self.rec(v[lo]).has(F_IN_PCLAIM) {
+            lo += 1;
+        }
+        u.pclaim_lo.store(lo, Ordering::Release);
+    }
+
     /// Removes `s` from its unit's in-work lists (`keep_claim`: stay a
     /// pending claimer).
     pub(crate) fn leave_work_lists(&self, s: Slot) {
