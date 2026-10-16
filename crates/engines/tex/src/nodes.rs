@@ -85,11 +85,26 @@ pub(crate) const T_SET_PAGE: i64 = 91;
 /// is hbox, count, dimen, skip]`.
 pub(crate) const T_INS_PARAMS: i64 = 90;
 
-/// Marks and whatsits met while decoding, numbered.
+/// Marks and whatsits met while decoding, numbered; and the lists of
+/// the boxes decoded shallow ([`decode_shallow`]), numbered.
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Side {
     pub marks: Vec<ValueId>,
     pub whats: Vec<ValueId>,
+    pub lazy: Vec<ValueId>,
+}
+
+/// The handles of a shallow box's list stand-in: `LAZY + k` is
+/// `side.lazy[k]` (a whatsit handle no list has: those number the
+/// decode's whatsits from 0).
+const LAZY: u32 = 0xF000_0000;
+
+/// The value of a shallow box's list, if `b` is one ([`decode_shallow`]).
+fn lazy_list(b: &BoxNode, side: &Side) -> Option<ValueId> {
+    match b.list.as_slice() {
+        [Node::Whatsit(h, None)] if *h >= LAZY => side.lazy.get((*h - LAZY) as usize).copied(),
+        _ => None,
+    }
 }
 
 fn i(v: &Values, x: i64) -> ValueId {
@@ -154,6 +169,9 @@ pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
 }
 
 pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
+    if let Some(l) = lazy_list(b, side) {
+        return encode_box_with(v, b, l);
+    }
     encode_box_with(v, b, encode_list(v, &b.list, side))
 }
 
@@ -316,6 +334,15 @@ pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
 }
 
 pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode {
+    let mut b = decode_box_head(v, xs);
+    b.list = xs
+        .get(9)
+        .map_or_else(Vec::new, |&l| decode_list(v, l, side));
+    b
+}
+
+/// A box's dimensions and glue setting, its list empty.
+fn decode_box_head(v: &Values, xs: &[ValueId]) -> BoxNode {
     let g = |k: usize| xs.get(k).map_or(0, |&x| n32(v, x));
     BoxNode {
         kind: if g(1) == 0 { BoxKind::H } else { BoxKind::V },
@@ -334,12 +361,37 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
                 xs.get(8).map_or(0, |&x| int_of(v, x)).to_ne_bytes(),
             )),
         },
-        list: xs
-            .get(9)
-            .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
+        list: Vec::new(),
     }
 }
 
+
+/// A node as a reader that only measures it sees it: a box with its
+/// dimensions and glue setting, its list left encoded (one whatsit
+/// `LAZY + k` standing for `side.lazy[k]`, which [`encode`] with the
+/// same `side` puts back as it was); any other node decoded
+/// ([`decode`]). Its readers do not look into the boxes (packaging,
+/// the page builder): the writers and `\unvbox` decode a box's value.
+pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
+    let head = match &*v.get(x) {
+        Value::List(xs) if xs.len() == 10 => {
+            let mut h = [ValueId::UNIT; 10];
+            h.copy_from_slice(xs);
+            Some(h)
+        }
+        _ => None,
+    };
+    if let Some(xs) = head
+        && int_of(v, xs[0]) == T_BOX
+    {
+        let k = u32::try_from(side.lazy.len()).unwrap_or(0);
+        side.lazy.push(xs[9]);
+        let mut b = decode_box_head(v, &xs);
+        b.list = vec![Node::Whatsit(LAZY + k, None)];
+        return Some(Node::Box(b));
+    }
+    decode(v, x, side)
+}
 
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     if let Some(n) = crate::val::leaf_of(v, x) {

@@ -202,14 +202,16 @@ impl PageState {
         let n32 = |i: usize| i32::try_from(n(i)).unwrap_or(0);
         let mut side = Side::default();
         let mut page_ids = list_of(v, xs[20]);
+        // (the page builder measures its items: a box's list stays
+        // encoded, and the encode puts it back)
         let page: List = page_ids
             .iter()
-            .filter_map(|&y| nodes::decode(v, y, &mut side))
+            .filter_map(|&y| nodes::decode_shallow(v, y, &mut side))
             .collect();
         let mut discard_ids = list_of(v, xs[21]);
         let discards: List = discard_ids
             .iter()
-            .filter_map(|&y| nodes::decode(v, y, &mut side))
+            .filter_map(|&y| nodes::decode_shallow(v, y, &mut side))
             .collect();
         // (a node the decoder skipped: no reuse, the encode does it all)
         if page.len() != page_ids.len() {
@@ -443,7 +445,7 @@ impl PageState {
                 nodes::T_WRITE_AT | nodes::T_FONT_AT | nodes::T_PDFW_AT => continue,
                 _ => {}
             }
-            let Some(p) = nodes::decode(v, x, &mut self.side) else {
+            let Some(p) = nodes::decode_shallow(v, x, &mut self.side) else {
                 continue;
             };
             // §1000: only a kern looks at what follows it
@@ -1434,7 +1436,12 @@ impl Run<'_, '_> {
         let timed = crate::exec::env_flag!("PHITEX_TEX_TIME");
         let t0 = std::time::Instant::now();
         let mut side = Side::default();
-        let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
+        // (the page's boxes are decoded once, here, for the writer: their
+        // decodings are not kept for a later decode)
+        let prev = crate::val::NO_KEEP.with(|c| c.replace(true));
+        let decoded = nodes::decode(v, b, &mut side);
+        crate::val::NO_KEEP.with(|c| c.set(prev));
+        let Some(Node::Box(bx)) = decoded else {
             return Ok(());
         };
         let t_decode = t0.elapsed();

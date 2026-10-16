@@ -1457,7 +1457,8 @@ impl Run<'_, '_> {
                 let list: List = items
                     .iter()
                     .filter_map(|&y| {
-                        let n = nodes::decode(v, y, &mut side)?;
+                        // (the items measured: a box's list stays encoded)
+                        let n = nodes::decode_shallow(v, y, &mut side)?;
                         kept.push(y);
                         Some(n)
                     })
@@ -2371,6 +2372,7 @@ fn merge_sides(a: Side, b: Side) -> Side {
     let _ = off_m;
     s.marks.extend(b.marks);
     s.whats.extend(b.whats);
+    s.lazy.extend(b.lazy);
     s
 }
 
