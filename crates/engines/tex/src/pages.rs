@@ -120,7 +120,7 @@ pub(crate) fn is_page_field(name: &str) -> bool {
 /// nothing of this changed after it; a finisher's check of a page
 /// finishing at an earlier one takes what the run defined after it
 /// (`stamp`, `gids`: [`State::defined_since`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CandMark {
     pub k: u32,
     pub stamp: u64,
@@ -134,6 +134,11 @@ pub(crate) struct CandMark {
     /// advancing the clock, and the page was finished inside it.
     pub sig: (usize, usize, usize, u64),
     pub nest: usize,
+    /// The values at the candidate of the fields the routines read so
+    /// far (`Ops::fin_touch`) that the run had in hand there: a field
+    /// defined after the candidate with the value it had there changes
+    /// nothing a routine run at the candidate would see.
+    pub vals: std::sync::Arc<[(Field, Option<ValueId>)]>,
 }
 
 /// A finisher's page: its index, the material carried over past it
@@ -719,6 +724,7 @@ impl Run<'_, '_> {
         let m = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(k))]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
         self.cand += 1;
+        let vals = self.routine_read_values();
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -728,6 +734,7 @@ impl Run<'_, '_> {
             lines: self.lines_entered,
             sig: self.st.sig(),
             nest: self.nest.len(),
+            vals,
         });
         if self.stop_at == Some(k) {
             return Err(Halt::Cut);
@@ -978,10 +985,11 @@ impl Run<'_, '_> {
     /// Whether a page finishing inside this piece would need a cut, as
     /// far as the finishers so far tell (`Ops::fin_touch`): the piece
     /// read a field a routine defines with a new value (the page
-    /// number). Then the piece folds in its own run: a finisher's check
-    /// would ask for the cut a round later, at the chain's cost.
-    /// (`PHITEX_OWNFOLD_DEFS`: also when it defined after its first
-    /// candidate a field a routine reads, as before.)
+    /// number), or defined after a candidate a field a routine reads
+    /// with a value other than it had at the candidate
+    /// ([`CandMark::vals`]). Then the piece folds in its own run: a
+    /// finisher's check would ask for the cut a round later, at the
+    /// chain's cost.
     fn needs_own_fold(&mut self) -> R<bool> {
         let n = self.cand_marks.len();
         if n == 0 || (n == 1 && self.last_candidate() == Some(0)) {
@@ -1004,33 +1012,77 @@ impl Run<'_, '_> {
                 return Ok(true);
             }
         }
-        // (what the piece defined after a candidate that a routine reads
-        // is the finisher's check's ([`Run::check_cut`]), where a page
-        // does finish inside the piece: decided here, every piece with
-        // two candidates on a page would read the page state, and run
-        // again with every change of the page above it)
-        if !crate::exec::env_flag!("PHITEX_OWNFOLD_DEFS") {
-            return Ok(false);
-        }
-        let m0 = self.cand_marks[0];
-        let mut defs: Vec<Loc> = self
-            .st
-            .defined_since(v, m0.stamp, m0.gids)
-            .into_iter()
-            .map(|d| d.0)
-            .collect();
-        defs.extend(self.locals_unlike_at(m0));
-        let mut defs: Vec<Field> = defs.into_iter().map(|l| self.loc_field(l)).collect();
-        defs.extend(self.streams_since(m0.contribs));
-        for f in defs {
-            if t.reads.contains(&f) {
-                if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") {
-                    eprintln!("  own fold {}: defines {}", self.cx.node().raw(), str_of(v, f.0));
+        // what the piece defined after a candidate that a routine reads,
+        // unless it has the value there that it had at the candidate
+        let marks = self.cand_marks.clone();
+        let last = self.last_candidate();
+        for m in &marks {
+            if Some(m.k) == last {
+                continue;
+            }
+            let mut defs: Vec<Loc> = self
+                .st
+                .defined_since(v, m.stamp, m.gids)
+                .into_iter()
+                .map(|d| d.0)
+                .collect();
+            defs.extend(self.locals_unlike_at(m));
+            let defs: Vec<Field> = defs.into_iter().map(|l| self.loc_field(l)).collect();
+            for f in defs {
+                if t.reads.contains(&f) && !self.same_as_at(m, f) {
+                    if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") {
+                        eprintln!("  own fold {}: defines {}", self.cx.node().raw(), str_of(v, f.0));
+                    }
+                    return Ok(true);
                 }
-                return Ok(true);
+            }
+            for f in self.streams_since(m.contribs) {
+                if t.reads.contains(&f) {
+                    if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") {
+                        eprintln!("  own fold {}: writes {}", self.cx.node().raw(), str_of(v, f.0));
+                    }
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
+    }
+
+    /// The values here of the fields the routines read so far
+    /// ([`CandMark::vals`]), those the run has in hand (loaded or
+    /// defined: nothing is read for this).
+    fn routine_read_values(&mut self) -> std::sync::Arc<[(Field, Option<ValueId>)]> {
+        let reads: Vec<Field> = {
+            let t = self
+                .ops
+                .fin_touch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            t.reads.iter().copied().collect()
+        };
+        let v = self.v;
+        let mut out = Vec::new();
+        for f in reads {
+            let l = self.loc_of(f);
+            if self.st.is_loaded(l) {
+                out.push((f, self.st.id_of(l, v)));
+            }
+        }
+        out.into()
+    }
+
+    /// Whether field `f`, defined after candidate `m`, has at the run's
+    /// end the value it had there (as a finisher placed after the piece
+    /// sees it: not when the run closed the scope it ran in).
+    fn same_as_at(&mut self, m: &CandMark, f: Field) -> bool {
+        if self.effect == Effect::Close {
+            return false;
+        }
+        let Some(&(_, x)) = m.vals.iter().find(|e| e.0 == f) else {
+            return false;
+        };
+        let l = self.loc_of(f);
+        self.st.is_loaded(l) && self.st.id_of(l, self.v) == x
     }
 
     /// The local definitions in force at the run's end that a finisher
@@ -1043,7 +1095,7 @@ impl Run<'_, '_> {
     /// force after the piece, not at the candidate). A local made before
     /// the candidate at the run's base level, or in a group open at the
     /// candidate and still open, is the same binding at both places.
-    fn locals_unlike_at(&mut self, m: CandMark) -> Vec<Loc> {
+    fn locals_unlike_at(&mut self, m: &CandMark) -> Vec<Loc> {
         let v = self.v;
         let all: Vec<Loc> = self
             .st
@@ -1114,23 +1166,30 @@ impl Run<'_, '_> {
                     continue;
                 }
                 let locals: Vec<Field> = self
-                    .locals_unlike_at(*m)
+                    .locals_unlike_at(m)
                     .into_iter()
                     .map(|l| self.loc_field(l))
                     .collect();
-                let mut names: Vec<(ValueId, bool)> =
-                    locals.iter().map(|f| (f.0, false)).collect();
+                // (name, its definition stands at the end, its value
+                // there is the one it had at the candidate)
+                let mut names: Vec<(ValueId, bool, bool)> = Vec::new();
+                for f in locals {
+                    let same = self.same_as_at(m, f);
+                    names.push((f.0, false, same));
+                }
                 for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
                     let stands = self.st.def_stands(l);
-                    names.push((self.loc_field(l).0, stands));
+                    let f = self.loc_field(l);
+                    let same = self.same_as_at(m, f);
+                    names.push((f.0, stands, same));
                 }
-                names.extend(self.streams_since(m.contribs).into_iter().map(|f| (f.0, false)));
-                names.sort_unstable_by_key(|x| (x.0.raw(), !x.1));
+                names.extend(self.streams_since(m.contribs).into_iter().map(|f| (f.0, false, false)));
+                names.sort_unstable_by_key(|x| (x.0.raw(), !x.1, x.2));
                 names.dedup_by_key(|x| x.0);
                 per.push(v.list(
                     names
                         .into_iter()
-                        .map(|(f, g)| v.list(vec![f, v.int(i64::from(g))]))
+                        .map(|(f, g, same)| v.list(vec![f, v.int(i64::from(g)), v.int(i64::from(same))]))
                         .collect(),
                 ));
             }
@@ -1381,7 +1440,10 @@ impl Run<'_, '_> {
                 let xs = list_of(v, e);
                 let Some(&f) = xs.first() else { continue };
                 let stands = xs.get(1).is_some_and(|&g| int_of(v, g) != 0);
-                if read.contains(&f) {
+                // (defined after the candidate with the value it had
+                // there: the routine read the same)
+                let same = xs.get(2).is_some_and(|&g| int_of(v, g) != 0);
+                if read.contains(&f) && !same {
                     why = Some(format!("after {}", str_of(v, f)));
                     break;
                 }
