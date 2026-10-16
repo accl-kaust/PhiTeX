@@ -127,6 +127,16 @@ pub mod phase {
             });
         }
     }
+    /// Clock `i` counts one (a count, not a time).
+    pub fn bump(i: usize) {
+        if on() {
+            T.with(|t| {
+                let mut a = t.get();
+                a[i] += 1000;
+                t.set(a);
+            });
+        }
+    }
     /// The clocks, reset.
     #[must_use]
     pub fn take() -> [u64; N] {

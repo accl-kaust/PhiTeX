@@ -25,6 +25,7 @@ static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
     pub(crate) fn command(&mut self) -> R<()> {
+        phitex_pdf::phase::bump(23);
         if self.heartbeat_on {
             self.heartbeat();
         }

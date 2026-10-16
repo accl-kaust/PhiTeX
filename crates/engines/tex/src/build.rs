@@ -992,6 +992,14 @@ impl Run<'_, '_> {
 
     /// `begin_box` (§1079–§1083).
     pub(crate) fn begin_box(&mut self, md: &Mode, ctx: i64) -> R<()> {
+        let t0 = std::time::Instant::now();
+        let r = self.begin_box_(md, ctx);
+        phitex_pdf::phase::add(22, t0);
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn begin_box_(&mut self, md: &Mode, ctx: i64) -> R<()> {
         let c = self.cur.chr;
         let v = self.v;
         let b: Option<ValueId> = match c {
@@ -1218,6 +1226,13 @@ impl Run<'_, '_> {
 
     /// `unpackage` (§1110).
     pub(crate) fn unpackage(&mut self, md: &Mode) -> R<()> {
+        let t0 = std::time::Instant::now();
+        let r = self.unpackage_(md);
+        phitex_pdf::phase::add(21, t0);
+        r
+    }
+
+    fn unpackage_(&mut self, md: &Mode) -> R<()> {
         let c = self.cur.chr;
         let n = self.scan_eight_bit_int()?;
         let Some(b) = self.box_reg(n)? else {
@@ -1398,6 +1413,14 @@ impl Run<'_, '_> {
     /// `handle_right_brace` (§1068, §1085, §1100, §1118).
     #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_right_brace(&mut self, md: &Mode) -> R<()> {
+        let t0 = std::time::Instant::now();
+        let r = self.handle_right_brace_(md);
+        phitex_pdf::phase::add(20, t0);
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn handle_right_brace_(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         // a paragraph inside a vertical group ends first (`end_graf`)
         if md.m == 102
