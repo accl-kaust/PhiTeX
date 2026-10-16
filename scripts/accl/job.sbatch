@@ -97,8 +97,10 @@ export -f box
 export w sif r
 case $task in
   gate)
-    box cargo fmt --all --check
-    box cargo clippy --workspace --all-targets -q -- -D warnings
+    # (the vendored engine is an archive of another tree: not formatted or linted here)
+    pkgs=$(box cargo metadata --no-deps --format-version 1 | python3 -I -c 'import json,sys; print(" ".join("-p "+p["name"] for p in json.load(sys.stdin)["packages"] if p["name"]!="defuse"))')
+    box cargo fmt --check $pkgs
+    box cargo clippy --workspace --exclude defuse --all-targets -q -- -D warnings
     status=0
     box cargo xtask check > "$r/gate.log" 2>&1 || status=$?
     tail -25 "$r/gate.log"
