@@ -2401,15 +2401,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 if self.claim_rest || self.closed_scope() {
                     return Ok(());
                 }
-                // (one scope per node, `Effect::Scope` carrying one kind:
-                // a region in vertical mode inside one group of its own
-                // that is about to open another leaves the first to the
-                // engine here, and the rest of its input follows inside)
-                if self.can_leave_scope() && self.nest[0].mode.abs() == 1 && self.next_opens_group()
-                {
-                    self.leave_scope()?;
-                    return Ok(());
-                }
             }
             // a region that ends with one group of its own still open
             // (an environment's `\begin`, a macro's `\begingroup` or
@@ -2473,57 +2464,6 @@ impl<'c, 'a> Run<'c, 'a> {
             && self.effect == Effect::None
             && self.nest.iter().all(|l| !l.owns && l.group != 0)
             && !crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
-    }
-
-    /// Whether the text the run reads next begins (after blanks) with a
-    /// command that opens a group: `\\begin`, `\\begingroup`,
-    /// `\\bgroup` (the document's text only).
-    fn next_opens_group(&self) -> bool {
-        // (the first input with something left: a line of the text, or
-        // anything else, which is no group of the text)
-        let mut line = None;
-        for l in self.input.levels.iter().rev() {
-            let more = match l.kind {
-                crate::input::kind::TOKS => l.a < l.b,
-                crate::input::kind::LINE => {
-                    let x = self.input.line(*l);
-                    if x.has_more() {
-                        line = Some(x);
-                    }
-                    x.has_more()
-                }
-                _ => self.input.file(*l).has_lines(),
-            };
-            if more {
-                break;
-            }
-        }
-        if line.is_none()
-            && self.input.levels.is_empty()
-            && let Some(Seg::Line(x)) = self.input.text_rest().iter().find(|s| match s {
-                Seg::Toks(t) => !t.is_empty(),
-                Seg::Line(l) => l.has_more(),
-                Seg::File(f) => f.has_lines(),
-            })
-        {
-            line = Some(x);
-        }
-        let Some(s) = line else {
-            return false;
-        };
-        let rest = &s.buf[s.loc.min(s.buf.len())..];
-        let k = rest
-            .iter()
-            .position(|&c| !matches!(c, 32 | 9 | 10 | 13))
-            .unwrap_or(rest.len());
-        let word: String = rest[k..]
-            .iter()
-            .take(12)
-            .map(|&c| char::from_u32(c).unwrap_or('?'))
-            .collect();
-        ["\\begingroup", "\\bgroup", "\\begin{"]
-            .iter()
-            .any(|p| word.starts_with(p))
     }
 
     /// Whether the run closed the engine scope it ran in, with nothing
