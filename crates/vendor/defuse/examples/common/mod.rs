@@ -23,6 +23,10 @@
 //! page                      reads `out` since the previous page
 //! loop later = 0            loop-back field (later = .. publishes)
 //! print x
+//! gopen a = 1 b = 2         opens two scopes: a local to the outer, b to the inner
+//! both v = 5 6              v = 5 here, and 6 in the scope it opens (two levels)
+//! sneak v = 3               defines v though it declares nothing
+//! grab s 2                  declares no claim; its run claims the next 2 (as sumnext)
 //! ```
 #![allow(dead_code, clippy::many_single_char_names)] // AST code reads best with short names
 
@@ -328,11 +332,36 @@ impl Parser<'_> {
                     let e = self.expr()?;
                     return Ok(self.tagged("loop", vec![self.s(&n), e]));
                 }
-                "sumnext" => {
+                "sumnext" | "grab" => {
                     self.pos += 1;
                     let n = self.ident()?;
                     let c = self.int()?;
-                    return Ok(self.tagged("sumnext", vec![self.s(&n), self.v.int(c)]));
+                    return Ok(self.tagged(&k, vec![self.s(&n), self.v.int(c)]));
+                }
+                "gopen" => {
+                    self.pos += 1;
+                    let x = self.ident()?;
+                    self.eat("=")?;
+                    let ex = self.expr()?;
+                    let y = self.ident()?;
+                    self.eat("=")?;
+                    let ey = self.expr()?;
+                    return Ok(self.tagged("gopen", vec![self.s(&x), ex, self.s(&y), ey]));
+                }
+                "both" => {
+                    self.pos += 1;
+                    let x = self.ident()?;
+                    self.eat("=")?;
+                    let e1 = self.expr()?;
+                    let e2 = self.expr()?;
+                    return Ok(self.tagged("both", vec![self.s(&x), e1, e2]));
+                }
+                "sneak" => {
+                    self.pos += 1;
+                    let x = self.ident()?;
+                    self.eat("=")?;
+                    let e = self.expr()?;
+                    return Ok(self.tagged("sneak", vec![self.s(&x), e]));
                 }
                 "listto" => {
                     self.pos += 1;
@@ -675,7 +704,11 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 33] = [
+const KEYWORDS: [&str; 37] = [
+    "gopen",
+    "both",
+    "sneak",
+    "grab",
     "begin",
     "end",
     "endlist",
@@ -1201,9 +1234,19 @@ impl Operation for StmtOp {
                         .collect(),
                 )
             }
-            "sumnext" | "listto" | "listuntil" | "item" | "collect" => {
+            "sumnext" | "grab" | "listto" | "listuntil" | "item" | "collect" => {
                 Some(vec![(v.field(&text(v, a[0])), Locality::Local)])
             }
+            "gopen" => Some(vec![
+                (v.field(&text(v, a[0])), Locality::ScopeAt(0)),
+                (v.field(&text(v, a[2])), Locality::ScopeAt(1)),
+            ]),
+            "both" => Some(vec![
+                (v.field(&text(v, a[0])), Locality::Local),
+                (v.field(&text(v, a[0])), Locality::Scope),
+            ]),
+            // Declares nothing: its definition refutes the list.
+            "sneak" => Some(Vec::new()),
             // A contribution is a definition of the sequence.
             "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
             "fold" => Some(vec![
@@ -1278,6 +1321,14 @@ impl Operation for StmtOp {
     fn effect(&self, args: &[ValueId], v: &Values) -> Effect {
         match tag(v, args[0]).0.as_str() {
             "begin" => Effect::Open,
+            "gopen" => Effect::Scope(Brackets {
+                opens: 2,
+                ..Brackets::default()
+            }),
+            "both" => Effect::Scope(Brackets {
+                opens: 1,
+                ..Brackets::default()
+            }),
             "scope" => Effect::Scope(Brackets {
                 opens: 1,
                 kind: Some(tag(v, args[0]).1[0]),
@@ -1415,6 +1466,39 @@ impl Operation for StmtOp {
                 let val = eval_expr(cx, ops, a[1])?;
                 cx.define(v.field(&text(v, a[0])), val);
                 Ok(val)
+            }
+            "sneak" => {
+                let val = eval_expr(cx, ops, a[1])?;
+                cx.define_with(v.field(&text(v, a[0])), val, Locality::Local);
+                Ok(val)
+            }
+            "gopen" => {
+                let x = eval_expr(cx, ops, a[1])?;
+                let y = eval_expr(cx, ops, a[3])?;
+                cx.define_in_scope_at(v.field(&text(v, a[0])), 0, x);
+                cx.define_in_scope_at(v.field(&text(v, a[2])), 1, y);
+                Ok(ValueId::UNIT)
+            }
+            "both" => {
+                let x = eval_expr(cx, ops, a[1])?;
+                let y = eval_expr(cx, ops, a[2])?;
+                let f = v.field(&text(v, a[0]));
+                cx.define_with(f, x, Locality::Local);
+                cx.define_in_scope(f, y);
+                Ok(ValueId::UNIT)
+            }
+            "grab" => {
+                let n = usize::try_from(v.as_int(a[1]).unwrap_or(0).max(0)).unwrap_or(0);
+                cx.claim(n);
+                let lines = cx.claimed();
+                let vals = claimed_values(cx, ops, &lines)?;
+                let sum = vals
+                    .iter()
+                    .map(|&x| v.as_int(x).unwrap_or(0))
+                    .fold(0i64, i64::wrapping_add);
+                let s = v.int(sum);
+                cx.define(v.field(&text(v, a[0])), s);
+                Ok(s)
             }
             "publish" => {
                 let val = eval_expr(cx, ops, a[1])?;

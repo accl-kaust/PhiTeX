@@ -1376,14 +1376,28 @@ impl Engine {
                         sh.def_frame(e.node, e.loc)
                     };
                     if sh.rec(e.node).st() != S_FREE && e.fk != want {
+                        let r = sh.rec(e.node);
+                        let (op, args) = sh.text(e.node);
                         out.push(format!(
-                            "unit {u}: {f:?} entry of {} filed under frame {} not {}",
-                            e.node, e.fk, want
+                            "unit {u}: {f:?} entry of {} (key {}, {}, frames {}+{}, own frame {}, op {} {:?}) filed under frame {} not {}",
+                            e.node,
+                            e.scope,
+                            super::Shared::status_name(r.st()),
+                            r.frames.load(Ordering::Acquire),
+                            r.nframes.load(Ordering::Acquire),
+                            sh.frame_of(e.node),
+                            op.0,
+                            args.iter().map(|a| sh.values.render(*a)).collect::<Vec<_>>(),
+                            e.fk,
+                            want
                         ));
                     }
                 }
+                // (A node's entries in one frame are filed there once.)
                 let filed: usize = idx.local.values().map(Vec::len).sum();
-                if filed != idx.defs.len() {
+                let distinct: std::collections::HashSet<(Slot, u32)> =
+                    idx.defs.iter().map(|e| (e.node, e.fk)).collect();
+                if filed != distinct.len() {
                     out.push(format!(
                         "unit {u}: {f:?} has {} entries, {filed} filed by frame",
                         idx.defs.len()

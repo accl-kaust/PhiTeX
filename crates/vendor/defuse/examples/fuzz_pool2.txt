@@ -1,0 +1,35 @@
+add 1
+add 3
+add 7
+take
+replace 4
+x = prev()
+y = before()
+begin
+end
+x = 3
+cap = 9
+cap = 12
+fold "z = out"
+fold "when k == 2 add 5  global g = k"
+fold "when k == 1 add 8  when k == 1 add 2"
+y = g
+s = fold.state
+when x add 2
+eval "add 4"
+{ add 6  z = prev() }
+if x { add 5 } else { take }
+scope doc
+item a = prev()
+para
+w = x + 1
+gopen u = 4 w = 6
+gopen x = 7 y = 8
+both x = 5 6
+both y = 1 2
+sneak y = 3
+sneak w = 9
+grab s 2
+grab g 1
+q = u + w
+r = x + y

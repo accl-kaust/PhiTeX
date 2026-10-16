@@ -302,6 +302,10 @@ impl Shared {
             !same(&d.kids, &cx.kids)
                 || !same(&d.conts, &cx.conts)
                 || d.stat.claim == ClaimS::Pending
+                // A run's claim over a declared one (or its end) moves
+                // siblings: under the structure lock, as a pending claim.
+                || cx.claim.is_some()
+                || d.x.as_ref().is_some_and(|e| e.claim_run.is_some())
                 || (cx.effect.is_some() && d.res.as_ref().is_none_or(|c| c.effect != cx.effect))
                 || d.kind_val != cx.kind
                 || d.kind_vals != cx.kinds
@@ -326,6 +330,24 @@ impl Shared {
             if r.st() != S_RUN || r.has(super::F_DOOM_FREE | super::F_DOOM_INERT) {
                 drop(guard);
                 return self.doomed(s) || r.st() != S_RUN;
+            }
+            // A run's claim: the siblings it saw must still be the first
+            // `n` now (another claim may have landed since its reads were
+            // checked, before this lock): else it runs again.
+            if let Some(n) = cx.claim {
+                let seen: Vec<Slot> = (0..n)
+                    .filter_map(|i| {
+                        cx.log.iter().find_map(|p| match p {
+                            Pred::Sib { i: j, ans } if *j as usize == i => Some(ans.map(|a| a.0)),
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                if seen.len() == n && self.run_claim_list(s, n) != seen {
+                    drop(guard);
+                    return false;
+                }
             }
             #[cfg(feature = "profile")]
             let held = std::time::Instant::now();
@@ -713,6 +735,16 @@ impl Shared {
             );
         }
         self.dispatch(&mut notes, s);
+        // Claimed (or freed) while it committed: the mark came after the
+        // check at the start, so it is acted on here.
+        if r.has(super::F_DOOM_FREE | super::F_DOOM_INERT) {
+            for (n, q) in waiters {
+                self.wake(n, q);
+            }
+            self.doomed(s);
+            self.guesses_settle(s);
+            return true;
+        }
         if self.any_preds.load(Ordering::Relaxed) && !self.pred_open(s) {
             // Readers that took its predicted values (perhaps while an
             // earlier run's value stayed) are checked against these.

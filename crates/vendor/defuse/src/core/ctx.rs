@@ -1027,10 +1027,18 @@ impl<'a> Ctx<'a> {
             .filter(|&(j, x, gn)| j < i && self.sh.rec(x).gn.load(std::sync::atomic::Ordering::Acquire) == gn);
         let got = {
             let (sh, me) = (self.sh, self.me);
-            sh.sread(self.unit, || match cur {
-                Some((j, x, _)) => sh.q_sib_from(me, x, j + 1, i).0,
-                None => sh.q_sib(me, i).0,
-            })
+            let (got, seen) = sh.sread(self.unit, || match cur {
+                Some((j, x, _)) => sh.q_sib_from(me, x, j + 1, i),
+                None => sh.q_sib(me, i),
+            });
+            // The siblings passed over (held by other claimers): a release
+            // of one changes this answer, so it notifies this reader.
+            for x in seen {
+                if got.is_none_or(|g| g.0 != x) {
+                    sh.sib_subscribe(x, me, u32::MAX);
+                }
+            }
+            got
         };
         if let Some((x, gn, _)) = got {
             self.sib_cur.set(Some((i, x, gn)));

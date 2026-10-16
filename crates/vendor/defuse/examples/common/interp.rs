@@ -202,7 +202,7 @@ impl Interp<'_> {
             let visits = self.visits;
             let rest = &stmts[i + 1..];
             let claim = match t.as_str() {
-                "sumnext" => usize::try_from(v.as_int(a[1]).unwrap_or(0).max(0))
+                "sumnext" | "grab" => usize::try_from(v.as_int(a[1]).unwrap_or(0).max(0))
                     .unwrap_or(0)
                     .min(rest.len()),
                 "listto" => rest
@@ -228,9 +228,9 @@ impl Interp<'_> {
                 }
                 _ => 0,
             };
-            let out = if claim > 0 || matches!(t.as_str(), "sumnext" | "listto" | "listuntil") {
+            let out = if claim > 0 || matches!(t.as_str(), "sumnext" | "grab" | "listto" | "listuntil") {
                 let vals = self.claimed_values(u, &rest[..claim]);
-                let val = if t == "sumnext" {
+                let val = if t == "sumnext" || t == "grab" {
                     v.int(
                         vals.iter()
                             .map(|&x| v.as_int(x).unwrap_or(0))
@@ -343,6 +343,28 @@ impl Interp<'_> {
                 let val = self.expr(u, a[1]);
                 self.define(u, v.field(&text(v, a[0])), val, truthy(v, a[2]));
                 val
+            }
+            "sneak" => {
+                let val = self.expr(u, a[1]);
+                self.define(u, v.field(&text(v, a[0])), val, false);
+                val
+            }
+            // Both expressions are taken before the scopes open.
+            "gopen" => {
+                let (x, y) = (self.expr(u, a[1]), self.expr(u, a[3]));
+                Self::open(u);
+                self.define(u, v.field(&text(v, a[0])), x, false);
+                Self::open(u);
+                self.define(u, v.field(&text(v, a[2])), y, false);
+                ValueId::UNIT
+            }
+            "both" => {
+                let (x, y) = (self.expr(u, a[1]), self.expr(u, a[2]));
+                let f = v.field(&text(v, a[0]));
+                self.define(u, f, x, false);
+                Self::open(u);
+                self.define(u, f, y, false);
+                ValueId::UNIT
             }
             "publish" => {
                 let val = self.expr(u, a[1]);

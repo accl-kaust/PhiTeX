@@ -1369,9 +1369,12 @@ impl Shared {
 
     /// Inserts a definition entry for `s`, notifying readers after it.
     pub(crate) fn insert_def(&self, u: u32, s: Slot, f: Field, loc: Locality, val: DefVal, notes: &mut Notes) {
-        // (Before the shard lock: the scope frame reads the node's data.)
-        let fk_new = self.def_frame(s, loc);
+        // (A scope frame reads the node's data: before the shard lock. A
+        // node's own frame is read under it, so a frame walk's refile,
+        // which takes the lock, sees this entry or files it right.)
+        let fk_scope = (loc.entry_key() != 0).then(|| self.def_frame(s, loc));
         let mut sh = wlock(self.shard(u, f));
+        let fk_new = fk_scope.unwrap_or_else(|| self.frame_of(s));
         let idx = sh.entry((u, f)).or_default();
         let scope = loc.entry_key();
         if let Some(i) = self.def_pos_k(idx, s, scope) {
@@ -1453,13 +1456,27 @@ impl Shared {
         self.frame_of(s)
     }
 
-    /// Whether `s`'s committed run made a scope-local definition.
-    pub(crate) fn has_scope_defs(&self, s: Slot) -> bool {
-        self.rec(s)
-            .data()
-            .res
-            .as_ref()
-            .is_some_and(|c| c.defs.iter().any(|d| d.loc.entry_key() != 0))
+    /// Whether one of `s`'s scope-local entries is filed under another
+    /// frame than the one it opens now.
+    pub(crate) fn scope_misfiled(&self, u: u32, s: Slot) -> bool {
+        // (The run's definitions and the declared ones, filed before it ran.)
+        let defs: Vec<(Field, Locality)> = {
+            let d = self.rec(s).data();
+            let run = d
+                .res
+                .as_ref()
+                .into_iter()
+                .flat_map(|c| c.defs.iter().map(|d| (d.f, d.loc)));
+            let stat = d.stat.defs.iter().flatten().copied();
+            run.chain(stat).filter(|e| e.1.entry_key() != 0).collect()
+        };
+        defs.into_iter().any(|(f, loc)| {
+            let want = self.def_frame(s, loc);
+            let sh = super::rlock(self.shard(u, f));
+            sh.get(&(u, f))
+                .and_then(|idx| self.def_pos_k(idx, s, loc.entry_key()).map(|i| idx.defs[i].fk != want))
+                .unwrap_or(false)
+        })
     }
 
     /// The run-set kind of frame `f` that `opener` opens: its entry in
@@ -1775,6 +1792,9 @@ impl Shared {
 
     /// Makes `s` inert: claimed by `by`.
     pub(crate) fn make_inert(&self, s: Slot, by: Slot, notes: &mut Notes) {
+        if self.held_by_other(s, by) {
+            return;
+        }
         lock(&self.hdirty).push(s);
         let r = self.rec(s);
         r.claimed_by.store(by, Ordering::Release);
@@ -1819,6 +1839,9 @@ impl Shared {
         }
         r.claimed_by.store(NIL, Ordering::Release);
         if r.st() != S_INERT {
+            // Claimed while it ran: the mark that would make it inert at
+            // its commit goes with the claim.
+            r.clear(super::F_DOOM_INERT);
             return;
         }
         r.status.store(S_NEW, Ordering::Release);
@@ -2102,23 +2125,35 @@ impl Shared {
     /// run saw).
     pub(crate) fn apply_claim(&self, c: Slot, list: &[Slot], notes: &mut Notes) -> bool {
         let r = self.rec(c);
-        let old = std::mem::replace(&mut r.data().ex().claimed, list.to_vec());
-        let changed = old != list;
+        let old = r.data().x.as_ref().map(|e| e.claimed.clone()).unwrap_or_default();
         for &x in &old {
             if !list.contains(&x) {
                 self.release(x, c, notes);
             }
         }
+        // A node an earlier claimer holds is not taken (it stays that
+        // claimer's); one a later claimer holds is taken over. The list
+        // records only what it took (a release later frees only those).
+        let mut taken = Vec::with_capacity(list.len());
         for &x in list {
+            if !old.contains(&x) && self.held_by_other(x, c) {
+                continue;
+            }
             if !old.contains(&x) {
-                let st = self.rec(x).st();
-                if st == S_INERT && self.rec(x).claimed_by.load(Ordering::Acquire) != c {
-                    continue;
-                }
                 self.make_inert(x, c, notes);
             }
+            taken.push(x);
         }
+        let changed = old != taken;
+        r.data().ex().claimed = taken;
         changed
+    }
+
+    /// Whether `x` is claimed by a live claimer before `c` (an earlier
+    /// claimer wins, as in the text's order: a later one's claim yields).
+    fn held_by_other(&self, x: Slot, c: Slot) -> bool {
+        let by = self.rec(x).claimed_by.load(Ordering::Acquire);
+        by != NIL && by != c && !matches!(self.rec(by).st(), S_FREE) && self.before(by, c)
     }
 
     /// Processes the structural follow-ups: static claims, frames, scans.
@@ -2185,9 +2220,20 @@ impl Shared {
             }
             let mut moved = Vec::new();
             let walked = self.recompute_frames(u, x, &mut moved);
-            // Its scope-local definitions go under the scope it opens now.
-            if !moved.contains(&x) && self.has_scope_defs(x) {
-                self.refile_defs(u, x, notes);
+            // Scope-local definitions of the walked entries go under the
+            // scopes they open now (their frames may be new).
+            let mut y = x;
+            loop {
+                if !moved.contains(&y) && self.scope_misfiled(u, y) {
+                    self.refile_defs(u, y, notes);
+                }
+                if Some(y) == walked || walked.is_none() {
+                    break;
+                }
+                y = self.next(y);
+                if y == NIL {
+                    break;
+                }
             }
             // Definitions whose scope changed: their readers after them.
             for m in moved {
