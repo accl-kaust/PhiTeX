@@ -2147,8 +2147,9 @@ impl Operation for Finish {
                 r.fire_page(a(1))?;
             }
             r.run_all()?;
+            let olds = r.fin_olds()?;
             r.check_cut(&args)?;
-            r.record_finisher_defs(&args);
+            r.record_finisher_defs(&args, &olds);
             r.contribute_global_defs();
             Ok(())
         })
@@ -2173,11 +2174,38 @@ impl Run<'_, '_> {
         }
     }
 
+    /// The values reaching this finisher of the fields its routine
+    /// defined globally without reading them first (`\global\vsize=`):
+    /// read before the commit, for [`Run::record_finisher_defs`].
+    fn fin_olds(&mut self) -> R<Vec<(Loc, Option<ValueId>)>> {
+        let v = self.v;
+        let mut out = Vec::new();
+        for (loc, _, l) in self.st.published(v, self.rec_load) {
+            if l != Locality::Global || self.st.engine_value(loc).is_some() {
+                continue;
+            }
+            let f = self.loc_field(loc);
+            let name = crate::val::field_name(v, f);
+            // (what the finisher sets itself, `fire_page` and `ship_out`,
+            // counts as changed unread: reading it would make this
+            // finisher wait on the last one's value)
+            if is_page_field(&name) || FINISHER_FIELDS.iter().any(|p| name.starts_with(p)) {
+                continue;
+            }
+            out.push((loc, self.eng_read(f)?));
+        }
+        Ok(out)
+    }
+
     /// The definitions this finisher publishes, kept for the next one
-    /// running the same routine ([`Finish::predicted_defs`]), and what
-    /// it read and defined for the pieces' own-fold decision
-    /// ([`Run::needs_own_fold`]).
-    fn record_finisher_defs(&mut self, args: &[ValueId]) {
+    /// running the same routine ([`Finish::predicted_defs`]), and the
+    /// fields it read and whose value it changed, for the pieces'
+    /// own-fold decision ([`Run::needs_own_fold`]): a global definition
+    /// giving the value that reached the finisher changes nothing a piece
+    /// sees (LaTeX's `\shipout` sets `\afterassignment` and its
+    /// `\setbox` consumes it; the routine sets `\vsize` to the value it
+    /// has).
+    fn record_finisher_defs(&mut self, args: &[ValueId], olds: &[(Loc, Option<ValueId>)]) {
         let v = self.v;
         {
             let reads: Vec<Field> = self
@@ -2186,14 +2214,23 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|l| self.loc_field(l))
                 .collect();
-            let gdefs: Vec<Field> = self
-                .st
-                .published(v, self.rec_load)
-                .into_iter()
-                .filter(|d| d.2 == Locality::Global)
-                .map(|d| self.loc_field(d.0))
-                .filter(|f| !is_page_field(&crate::val::field_name(v, *f)))
-                .collect();
+            let mut gdefs: Vec<Field> = Vec::new();
+            for (loc, x, l) in self.st.published(v, self.rec_load) {
+                if l != Locality::Global {
+                    continue;
+                }
+                let f = self.loc_field(loc);
+                if is_page_field(&crate::val::field_name(v, f)) {
+                    continue;
+                }
+                let old = match self.st.engine_value(loc) {
+                    Some(e) => Some(e),
+                    None => olds.iter().find(|o| o.0 == loc).map(|o| o.1),
+                };
+                if old != Some(Some(x)) {
+                    gdefs.push(f);
+                }
+            }
             let mut t = self
                 .ops
                 .fin_touch
