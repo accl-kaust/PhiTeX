@@ -40,12 +40,12 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     let _ = o;
     let t0 = std::time::Instant::now();
     let v = cx.values();
-    // the last page state first: every piece and finisher before this
-    // node may define it, so the read waits, parked, until the last fold
-    // has run and placed the last finisher; read first, the pages are
-    // all there (a node started before would assemble the pages so far
-    // and run again at each page added)
-    cx.use_field(v.field(crate::pages::PS))?;
+    // the scan's last state first: every continuation before this node
+    // may define it, so the read waits, parked, until the last page has
+    // fired and placed its finisher; read first, the pages are all there
+    // (a node started before would assemble the pages so far and run
+    // again at each page added)
+    cx.use_field(v.field(crate::pages::SCAN))?;
     let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
     // the format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`):
     // a page entry is `[box, counts, fonts, pdf params, pdf data]`, the
@@ -378,6 +378,8 @@ fn pdf_exact(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         ]);
         cx.contribute(v.field("diags"), v.seq_unit(d));
     }
-    let bytes = crate::pdfout::finish_exact(v, &f, &xpages);
+    let chunks = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::CHUNKS), None)?);
+    let chars = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::CHARS), None)?);
+    let bytes = crate::pdfout::finish_exact(v, &f, &xpages, &chunks, &chars);
     Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
 }

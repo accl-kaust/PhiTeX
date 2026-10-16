@@ -1415,7 +1415,7 @@ impl Graph {
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
-        let fold = eng.register(Arc::new(crate::pages::Fold(shared.clone())));
+        let scan = eng.register(Arc::new(crate::pages::Scan(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
         let place = eng.register(Arc::new(crate::pdfout::Place(shared.clone())));
@@ -1431,7 +1431,7 @@ impl Graph {
         let ops = Ops {
             exec,
             put,
-            fold,
+            scan,
             finish,
             resume,
             place,
@@ -1441,7 +1441,6 @@ impl Graph {
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
-            page_states: Arc::default(),
             fin_defs: Arc::default(),
             fin_touch: Arc::default(),
             not_virtual: Arc::default(),
@@ -1862,6 +1861,23 @@ impl Graph {
                     let v = self.eng.values();
                     let mut by = FxHashMap::<String, usize>::default();
                     let mut shown = 0;
+                    if crate::exec::env_flag!("PHITEX_RERUN_OPS") {
+                        // (each node run again: its operation, why, the field by name)
+                        for (n, c) in &r.rerun_causes {
+                            let f = match *c {
+                                Rr::Changed { field, .. }
+                                | Rr::Rebind { field }
+                                | Rr::Loop { field }
+                                | Rr::Environment { field } => crate::val::field_name(v, field),
+                                Rr::Refuted { field: Some(field) }
+                                | Rr::Woken { field: Some(field) }
+                                | Rr::Range { field: Some(field) } => crate::val::field_name(v, field),
+                                _ => String::new(),
+                            };
+                            let d: String = describe(&self.eng, *n).chars().take(60).collect();
+                            eprintln!("rerunop: {} [{d}] {c:?} {f}", n.raw());
+                        }
+                    }
                     for (n, c) in &r.rerun_causes {
                         if let Rr::Changed { field, old, new } = *c {
                             if std::env::var("PHITEX_RERUN_DIFF").ok().and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| shown < n) && crate::val::field_name(v, field) == "ps" {
@@ -4510,7 +4526,10 @@ fn declare_fields(eng: &mut Engine) {
         "gdefs",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
+        crate::pdfout::CHUNKS,
+        crate::pdfout::CHARS,
         crate::vprof::VPROF,
+        crate::pages::PITEMS,
     ] {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));

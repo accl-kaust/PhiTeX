@@ -523,7 +523,7 @@ fn one_word_edit_reruns_little() {
     let opts = || common::options("./w.tex", "w", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
     assert!(b.is_pdf());
-    let (before, cold_folds) = (b.pages(), common::runs_of(&b, "fold"));
+    let (before, cold_folds) = (b.pages(), common::runs_of(&b, "scan"));
     let at = src.match_indices("\n\n").nth(37).expect("a paragraph").0 + 2;
     let text = format!("{}Q{}", &src[..at], &src[at + 1..]);
     b.edit(&text);
@@ -557,7 +557,7 @@ fn pdf_edit_reruns_one_page_step() {
     let opts = || common::options("./p400.tex", "p400", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
     assert!(b.is_pdf());
-    let (before, cold_folds) = (b.pages(), common::runs_of(&b, "fold"));
+    let (before, cold_folds) = (b.pages(), common::runs_of(&b, "scan"));
     let text = src.replacen(
         "Paragraph 3 has some words",
         "Paragraph 3 has some wordz",
@@ -576,6 +576,58 @@ fn pdf_edit_reruns_one_page_step() {
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert!(steps <= 1, "{steps} page steps re-run");
     common::assert_edit_cost("p400", &b, 1, &before, cold_folds);
+}
+
+/// Exact PDF, a one-word edit on page k of n with read-time writer
+/// commands (`\immediate\pdfobj`) on every page: the edited piece, its
+/// page's finisher and that page's placement run, then the end node links
+/// the chunks; no later page's placement and no later writer command runs
+/// again (the writer state after the edited page holds no byte offset and
+/// no used character, so it is the state the later steps read before). A
+/// new character (`z`) on the page changes only the fonts' union at the
+/// end. The PDF equals a cold build's.
+#[test]
+fn exact_pdf_edit_on_page_k_reruns_its_piece_finisher_place_and_the_link_only() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from("\\pdfoutput=1 \\pdfcompresslevel=0 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+    for k in 0..300 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+             with plain's macros, so that the paragraph builder has work to do and the \
+             pages fill up one after another.\n"
+        );
+        if k % 10 == 5 {
+            let _ = writeln!(src, "\\immediate\\pdfobj{{<< /K {k} >>}}\n");
+        }
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./pk.tex", "pk", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    assert!(b.is_pdf());
+    let n = b.pages().len();
+    let before = b.pages();
+    let text = src.replacen("Paragraph 150 has some words", "Paragraph 150 has some wordz", 1);
+    b.edit(&text);
+    let touched = common::pages_touched(&before, &b.pages());
+    eprintln!(
+        "page k edit: runs by op {:?}, pages touched {touched:?} of {n}",
+        b.stats.runs_by_op
+    );
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert_eq!(touched.len(), 1, "one page's record changes");
+    assert!(touched[0] > 0 && touched[0] + 1 < n, "the edit is on a middle page");
+    assert_eq!(common::runs_of(&b, "exec"), 1, "only the edited piece");
+    assert_eq!(common::runs_of(&b, "finish"), 1, "only its page's finisher");
+    // (the placement's node may start once and stop at a pending
+    // definition set before it, then run: two runs of the one node; no
+    // other page's placement runs)
+    assert!(common::runs_of(&b, "place") <= 2, "only its page's placement");
+    assert_eq!(common::runs_of(&b, "dvi"), 1, "one link");
 }
 
 /// A measure: 400 and 4000 plain paragraphs with `\pdfoutput=1`, cold
@@ -620,4 +672,63 @@ fn pdf_para_edit_measure() {
             b.stats.nodes_run
         );
     }
+}
+
+/// An edit that moves page breaks (a paragraph made two lines longer)
+/// in a plain document whose sections end with `\vfill\eject`: the
+/// scan re-runs from the edited piece's page only while the breaks
+/// move, and stops at the first page whose break comes out where it
+/// was (the section's `\eject`: the scan state after it is equal, so
+/// no step after it runs again). Bound: the scan steps of the touched
+/// pages and of the page after them, where the scan finds the break
+/// equal (steps per page of the cold build, rounded up, times the
+/// touched pages and one), and one finisher per touched page; the
+/// output equals a cold build.
+#[test]
+fn moving_breaks_rescan_touched_pages_and_one() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from("\\hsize=4in \\vsize=3in \\parindent=20pt\n");
+    for s in 0..12 {
+        for p in 0..5 {
+            let _ = writeln!(
+                src,
+                "Section {s} paragraph {p} has words enough to fill some lines of a narrow \
+                 page, set with plain's macros, so that the page builder breaks the section \
+                 over two pages and the eject ends it.\n"
+            );
+        }
+        src.push_str("\\vfill\\eject\n");
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./mb.tex", "mb", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let before = b.pages();
+    let cold_scans = common::runs_of(&b, "scan");
+    let per_page = cold_scans.div_ceil(before.len().max(1) as u64);
+    let text = src.replacen(
+        "Section 5 paragraph 1 has words",
+        "Section 5 paragraph 1 has many more words than the others, many more words than \
+         the others, many more words than the others, words",
+        1,
+    );
+    b.edit(&text);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    let after = b.pages();
+    let touched = common::pages_touched(&before, &after);
+    eprintln!(
+        "moving breaks: {} pages, touched {touched:?}, edit runs by op {:?}, cold scans {cold_scans}",
+        after.len(),
+        b.stats.runs_by_op
+    );
+    assert!(!touched.is_empty() && touched.len() <= 3, "pages touched {touched:?}");
+    let n = touched.len() as u64;
+    let scans = common::runs_of(&b, "scan");
+    let fins = common::runs_of(&b, "finish");
+    let bound = per_page * (n + 1);
+    assert!(scans <= bound, "{scans} scan runs, bound {bound} ({per_page} a page, {n} pages and one)");
+    assert!(fins <= n, "{fins} finisher runs, bound {n}");
 }

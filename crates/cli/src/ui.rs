@@ -679,6 +679,11 @@ pub fn capture_panics(verbose: bool) {
             .unwrap_or_default();
         if verbose {
             eprintln!("panic at {at}:\n{msg}");
+            // (with RUST_BACKTRACE set, where it came from)
+            let bt = std::backtrace::Backtrace::capture();
+            if bt.status() == std::backtrace::BacktraceStatus::Captured {
+                eprintln!("{bt}");
+            }
         }
         PANICS
             .lock()

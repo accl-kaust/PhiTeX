@@ -12,10 +12,10 @@
 //! [`ScanState::fold_items`] is the page builder over profiles: the same
 //! [`PageBuilder::contribute`] on reduced nodes (a box with no list),
 //! the box 255 not packaged ([`PageBuilder::measure_only`]); around it
-//! the fold's bookkeeping of [`crate::pages::PageState::fold_items`]
-//! (§679's interline glue from the previous depth, deletions, markers).
-//! With `PHITEX_SCAN_CHECK=1` every fold runs the scan beside the real
-//! builder and compares the decisions ([`check`]).
+//! the bookkeeping of [`crate::pages::PageState::fold_items`] (§679's
+//! interline glue from the previous depth, deletions, markers). The
+//! scan steps (`crate::pages::Scan`) run it; where a page fires, the
+//! step builds the page from the items and compares the decisions.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use phitex_defuse::{ValueId, Values};
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{BoxKind, BoxNode, Insert, KernKind, List, Node, Rule, WhatsitSize};
-use phitex_typeset::page::{Contents, Fired, InsertClass, Outcome, PageBuilder, PageIns, PageParams};
+use phitex_typeset::page::{Fired, InsertClass, Outcome, PageBuilder, PageIns, PageParams};
 
 use crate::build::FoldState;
 use crate::nodes::{self, Side};
@@ -56,10 +56,6 @@ const P_ABORT: i64 = 20;
 const P_SF: i64 = 21; // kind, n
 const P_OPAQUE: i64 = 22; // tag
 
-pub(crate) fn checking() -> bool {
-    crate::exec::env_flag!("PHITEX_SCAN_CHECK")
-}
-
 fn put_glue(out: &mut Vec<i64>, g: &Glue) {
     out.extend([
         i64::from(g.width),
@@ -82,6 +78,23 @@ pub(crate) fn encode(v: &Values, raw: &[ValueId]) -> Vec<i64> {
 /// The profile as a value: a list of inline integers.
 pub(crate) fn value(v: &Values, ints: &[i64]) -> ValueId {
     v.list(ints.iter().map(|&i| v.int(i)).collect())
+}
+
+/// A piece's unit of [`VPROF`]: `[piece, profile]`, the piece's node
+/// (its raw id) and its profile ([`value`]).
+pub(crate) fn unit(v: &Values, piece: i64, ints: &[i64]) -> ValueId {
+    v.list(vec![v.int(piece), value(v, ints)])
+}
+
+/// A unit's piece and profile.
+pub(crate) fn unit_parts(v: &Values, x: ValueId) -> (i64, Vec<i64>) {
+    let xs = list_of(v, x);
+    let piece = xs.first().map_or(-1, |&p| int_of(v, p));
+    let ints = xs
+        .get(1)
+        .map(|&p| list_of(v, p).into_iter().map(|y| int_of(v, y)).collect())
+        .unwrap_or_default();
+    (piece, ints)
 }
 
 fn i32_at(v: &Values, x: ValueId, k: usize) -> i32 {
@@ -391,20 +404,9 @@ pub(crate) fn decode(xs: &[i64]) -> Vec<PItem> {
     out
 }
 
-/// A profile value's items.
+/// A unit's profile items ([`unit`]).
 pub(crate) fn decode_value(v: &Values, x: ValueId) -> Vec<PItem> {
-    let xs: Vec<i64> = list_of(v, x).into_iter().map(|y| int_of(v, y)).collect();
-    decode(&xs)
-}
-
-/// A node reduced to what the builder reads.
-fn reduce(n: &Node) -> Node {
-    let mut xs = Vec::new();
-    push_node(n, &mut xs);
-    match decode(&xs).pop() {
-        Some(PItem::Node(n)) => n,
-        _ => Node::Whatsit(0, None),
-    }
+    decode(&unit_parts(v, x).1)
 }
 
 fn is_marker(x: &PItem) -> bool {
@@ -459,6 +461,9 @@ pub(crate) struct ScanFire {
 /// The page builder's state over profiles.
 pub(crate) struct ScanState {
     pub j: i64,
+    /// The pages fired so far whose `\outputpenalty` is above -10001
+    /// ([`crate::pages::PageState::normal`]).
+    pub normal: i64,
     pub pb: PageBuilder,
     pub fold: FoldState,
     pub params: Option<PageParams>,
@@ -472,82 +477,20 @@ pub(crate) trait Reaching {
     fn class(&mut self, n: u16) -> InsertClass;
 }
 
-/// The comparable scalars of a builder state.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Snapshot {
-    j: i64,
-    contents: u8,
-    so_far: [i32; 8],
-    max_depth: i32,
-    best_break: Option<usize>,
-    least_cost: i32,
-    best_size: i32,
-    last_glue: Option<Glue>,
-    last_penalty: i32,
-    last_kern: i32,
-    last_node_type: i32,
-    insert_penalties: i32,
-    ins: Vec<PageIns>,
-    page: usize,
-    discards: usize,
-    fold: FoldState,
-    params: Option<PageParams>,
-    pending: usize,
-}
-
-pub(crate) fn snapshot(
-    j: i64,
-    pb: &PageBuilder,
-    fold: FoldState,
-    params: Option<PageParams>,
-    pending: usize,
-) -> Snapshot {
-    Snapshot {
-        j,
-        contents: match pb.contents {
-            Contents::Empty => 0,
-            Contents::InsertsOnly => 1,
-            Contents::BoxThere => 2,
-        },
-        so_far: pb.so_far,
-        max_depth: pb.max_depth,
-        best_break: pb.best_break,
-        least_cost: pb.least_cost,
-        best_size: pb.best_size,
-        last_glue: pb.last_glue,
-        last_penalty: pb.last_penalty,
-        last_kern: pb.last_kern,
-        last_node_type: pb.last_node_type,
-        insert_penalties: pb.insert_penalties,
-        ins: pb.ins.clone(),
-        page: pb.page.len(),
-        discards: pb.discards.len(),
-        fold,
-        params,
-        pending,
-    }
-}
-
 impl ScanState {
-    /// The scan state of a page state (its page reduced, its pending
-    /// contributions as profile items).
-    pub(crate) fn of(v: &Values, ps: &crate::pages::PageState) -> ScanState {
-        let mut pb = ps.pb.clone();
-        pb.page = pb.page.iter().map(reduce).collect();
-        pb.discards = pb.discards.iter().map(reduce).collect();
-        pb.diags.clear();
+    /// The state just after a page fired (§1017: an empty page, the
+    /// contributions all carried), as the scan state defines it.
+    pub(crate) fn fresh(j: i64, normal: i64, fold: FoldState, params: Option<PageParams>) -> ScanState {
+        let mut pb = PageBuilder::new();
         pb.measure_only = true;
         ScanState {
-            j: ps.j,
+            j,
+            normal,
             pb,
-            fold: ps.fold,
-            params: ps.params.map(|m| crate::pages::params_of(v, m)),
-            pending: decode(&encode(v, &ps.pending)),
+            fold,
+            params,
+            pending: Vec::new(),
         }
-    }
-
-    pub(crate) fn snapshot(&self) -> Snapshot {
-        snapshot(self.j, &self.pb, self.fold, self.params, self.pending.len())
     }
 
     /// [`crate::pages::PageState::fold_items`] over profile items.
@@ -704,6 +647,9 @@ impl ScanState {
                     self.pb = PageBuilder::new();
                     self.pb.measure_only = true;
                     self.j += 1;
+                    if f.output_penalty > -10001 {
+                        self.normal += 1;
+                    }
                     self.fold.since_bp = 0;
                     buf.clear();
                     return Some(ScanFire {
@@ -719,21 +665,16 @@ impl ScanState {
     }
 }
 
-// -------------------------------------------------------------- check
+// -------------------------------------------------------------- sizes
 
-static FOLDS: AtomicU64 = AtomicU64::new(0);
-static FIRES: AtomicU64 = AtomicU64::new(0);
-static DIFFS: AtomicU64 = AtomicU64::new(0);
 static UNITS: AtomicU64 = AtomicU64::new(0);
 static INTS: AtomicU64 = AtomicU64::new(0);
 static LINES: AtomicU64 = AtomicU64::new(0);
-static SCAN_NS: AtomicU64 = AtomicU64::new(0);
-static SCAN_ITEMS: AtomicU64 = AtomicU64::new(0);
 
 /// A profile contributed: counted for the size report (units, bytes,
 /// boxes appended with interline glue: the lines).
 pub(crate) fn count_unit(ints: &[i64]) {
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") || checking() {
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         let lines = decode(ints)
             .iter()
             .filter(|x| matches!(x, PItem::VBox { .. }))
@@ -757,76 +698,8 @@ fn size_report() -> String {
     )
 }
 
-/// The real fold's outcome, to compare: the page fired (candidate, the
-/// decisions, the raw items after the candidate) or not, and the state
-/// after.
-pub(crate) struct RealOutcome {
-    pub fire: Option<(u32, Decision, usize)>,
-    pub after: Snapshot,
-}
-
-/// Compares the scan over `items` from `scan` with the real fold's
-/// outcome; prints the first difference.
-pub(crate) fn check(
-    node: u64,
-    mut scan: ScanState,
-    items: &[PItem],
-    dead: i64,
-    rd: &mut dyn Reaching,
-    real: &RealOutcome,
-) {
-    FOLDS.fetch_add(1, Relaxed);
-    let j = scan.j;
-    let t0 = std::time::Instant::now();
-    let fire = scan.fold_items(items, dead, rd);
-    SCAN_NS.fetch_add(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0), Relaxed);
-    SCAN_ITEMS.fetch_add(items.len() as u64, Relaxed);
-    let got = fire.as_ref().map(|f| (f.k, f.decision.clone(), f.rest));
-    let mut diff: Option<String> = None;
-    match (&got, &real.fire) {
-        (None, None) => {}
-        (Some(_), None) | (None, Some(_)) => {
-            diff = Some(format!(
-                "fire: scan {:?} real {:?}",
-                got.as_ref().map(|g| g.0),
-                real.fire.as_ref().map(|g| g.0)
-            ));
-        }
-        (Some(a), Some(b)) => {
-            FIRES.fetch_add(1, Relaxed);
-            if a.0 != b.0 {
-                diff = Some(format!("candidate: scan {} real {}", a.0, b.0));
-            } else if a.1 != b.1 {
-                diff = Some(first_decision_diff(&a.1, &b.1));
-            } else if a.2 != b.2 {
-                diff = Some(format!("rest: scan {} real {}", a.2, b.2));
-            }
-        }
-    }
-    if diff.is_none() {
-        let after = scan.snapshot();
-        if after != real.after {
-            diff = Some(format!("state after: scan {after:?} real {:?}", real.after));
-        }
-    }
-    if let Some(d) = diff {
-        let n = DIFFS.fetch_add(1, Relaxed) + 1;
-        eprintln!("scan-check DIFF #{n}: fold node {node}, page {}: {d}", j + 1);
-    }
-    let f = FOLDS.load(Relaxed);
-    if f.is_power_of_two() || f.is_multiple_of(1000) || got.is_some() {
-        eprintln!(
-            "scan-check: folds {f} fires {} diffs {} scan {} items {} us ({})",
-            FIRES.load(Relaxed),
-            DIFFS.load(Relaxed),
-            SCAN_ITEMS.load(Relaxed),
-            SCAN_NS.load(Relaxed) / 1000,
-            size_report()
-        );
-    }
-}
-
-fn first_decision_diff(a: &Decision, b: &Decision) -> String {
+/// The first decision two builders differ in, for a diagnostic.
+pub(crate) fn first_decision_diff(a: &Decision, b: &Decision) -> String {
     macro_rules! cmp {
         ($($f:ident),*) => {
             $(if a.$f != b.$f {
@@ -836,4 +709,10 @@ fn first_decision_diff(a: &Decision, b: &Decision) -> String {
     }
     cmp!(best, least_cost, best_size, output_penalty, mark_at, ins_records, inserts, held, carried);
     String::from("decision")
+}
+
+/// Whether profile items hold an `\end` marker (the scan then reads
+/// `\deadcycles`, §1054).
+pub(crate) fn has_end(items: &[PItem]) -> bool {
+    items.iter().any(|x| matches!(x, PItem::End(_)))
 }

@@ -171,9 +171,12 @@ impl PdfState {
             let at = self.os.buf.len();
             self.os.list.push((i, at));
         } else {
-            self.objs[i].offset = int(self.offset());
+            // (the offset is the chunk's to keep: the state holds no byte
+            // position of the document, so a chunk of other length leaves
+            // the state after it equal)
+            self.objs[i].offset = if self.linking { int(self.offset()) } else { 0 };
             self.objs[i].os_idx = -1;
-            self.chunk_objs.push(i);
+            self.chunk_objs.push((i, self.out.len()));
         }
     }
 

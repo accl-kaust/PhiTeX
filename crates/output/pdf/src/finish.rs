@@ -27,14 +27,16 @@ pub struct Chunk {
     /// The bytes.
     pub bytes: Arc<[u8]>,
     /// The objects written directly (not in an object stream) that begin
-    /// in `bytes`, in order.
-    pub objs: Vec<usize>,
+    /// in `bytes`, in order, with their offsets in `bytes`.
+    pub objs: Vec<(usize, usize)>,
 }
 
-/// The file's bytes so far, append-only: one [`Chunk`] per
-/// [`PdfState::flush`]. The state never reads them back; it only counts
-/// them, so a state cloned after step `k` continues from these bytes
-/// truncated to `k` chunks.
+/// The file's bytes so far, append-only: one [`Chunk`] per non-empty
+/// [`PdfState::flush`]. The state never reads them back nor knows their
+/// lengths: an object's offset is kept within its chunk, by the chunk's
+/// ordinal, so a state does not change when an earlier chunk's bytes do
+/// (an edited page re-rendered: the steps after it see an equal state).
+/// [`finish`] places the chunks by the prefix sums of their lengths.
 #[derive(Clone, Debug, Default)]
 pub struct PdfBytes {
     chunks: Vec<Chunk>,
@@ -73,36 +75,93 @@ impl PdfBytes {
         self.len = self.chunks.iter().map(|c| c.bytes.len()).sum();
     }
 
+    /// `c` appended (a chunk a step flushed, kept apart and assembled
+    /// in order by the caller).
+    pub fn push(&mut self, c: Chunk) {
+        self.len += c.bytes.len();
+        self.chunks.push(c);
+    }
+
     /// The chunk that object `n` begins in.
     #[must_use]
     pub fn chunk_of(&self, n: usize) -> Option<usize> {
-        self.chunks.iter().position(|c| c.objs.contains(&n))
+        self.chunks.iter().position(|c| c.objs.iter().any(|&(m, _)| m == n))
     }
 }
 
 /// The whole file: the bytes flushed, then the end of the file (fonts,
 /// pages tree, outlines, names, threads, catalog, `/Info`, the
 /// cross-reference table or stream and the trailer); empty without pages
-/// (or with `\pdfdraftmode`).
+/// (or with `\pdfdraftmode`). [`PdfState::tail`] then [`Tail::link`].
 ///
 /// # Errors
 /// A font that cannot be embedded, or what pdfTeX stops at; `bytes` not
 /// the ones `state` flushed.
 pub fn finish(state: PdfState, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
-    if bytes.len() != state.base {
-        return Err(PdfError::Unsupported(
-            "finish: the bytes are not the ones the state flushed".into(),
-        ));
+    match state.tail()? {
+        Some(t) => t.link(bytes),
+        None => Ok(Vec::new()),
     }
-    let Some(tail) = state.finish_tail()? else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(bytes.len() + tail.len());
-    for c in &bytes.chunks {
-        out.extend_from_slice(&c.bytes);
+}
+
+/// The objects at the end of the file written as one more chunk, with
+/// offsets within it like any step's: a pure function of the state
+/// (whatever the chunks before it are), so a caller can keep it for an
+/// equal state. [`Tail::link`] places the chunks and writes the
+/// cross-reference section and the trailer.
+#[derive(Clone, Debug)]
+pub struct Tail {
+    st: PdfState,
+    root: usize,
+}
+
+impl Tail {
+    /// The file: `bytes` (the chunks the state flushed, in order) and
+    /// the tail's chunk copied, the objects' offsets the chunks' prefix
+    /// sums plus their offsets within them, then the cross-reference
+    /// table or stream and the trailer.
+    ///
+    /// # Errors
+    /// `bytes` not the ones the state flushed.
+    pub fn link(&self, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
+        let mut st = self.st.clone();
+        let tail = std::mem::take(&mut st.out);
+        let tail_objs = std::mem::take(&mut st.chunk_objs);
+        if bytes.chunks.len() != st.flushes || st.base != 0 {
+            return Err(PdfError::Unsupported(
+                "finish: the bytes are not the ones the state flushed".into(),
+            ));
+        }
+        // the objects' offsets: each chunk's offsets of its objects plus
+        // the chunk's place, the prefix sum of the lengths before it (a
+        // chunk copied, not written again)
+        let mut sum = 0usize;
+        for (c, objs) in bytes
+            .chunks
+            .iter()
+            .map(|c| (c.bytes.len(), c.objs.as_slice()))
+            .chain(std::iter::once((tail.len(), tail_objs.as_slice())))
+        {
+            for &(n, at) in objs {
+                if n < st.objs.len() {
+                    st.objs[n].offset = int(sum + at);
+                }
+            }
+            sum += c;
+        }
+        // the cross-reference section written after the tail's objects:
+        // its offsets are the file's
+        st.base = sum;
+        st.linking = true;
+        let end = st.xref(self.root)?;
+        let mut out = Vec::with_capacity(st.base + end.len());
+        for c in &bytes.chunks {
+            out.extend_from_slice(&c.bytes);
+        }
+        out.extend_from_slice(&tail);
+        out.extend_from_slice(&end);
+        Ok(out)
     }
-    out.extend_from_slice(&tail);
-    Ok(out)
 }
 
 impl PdfState {
@@ -112,20 +171,36 @@ impl PdfState {
     /// # Panics
     /// If `bytes` are not the ones this state flushed before.
     pub fn flush(&mut self, bytes: &mut PdfBytes) {
-        assert_eq!(bytes.len, self.base, "flush: not this state's bytes");
-        let b = std::mem::take(&mut self.out);
-        self.base += b.len();
-        bytes.len += b.len();
-        bytes.chunks.push(Chunk {
-            bytes: b.into(),
-            objs: std::mem::take(&mut self.chunk_objs),
-        });
+        assert_eq!(bytes.chunks.len(), self.flushes, "flush: not this state's bytes");
+        if let Some(c) = self.flush_chunk() {
+            bytes.push(c);
+        }
     }
 
-    /// The number of bytes flushed.
+    /// The bytes written since the last flush as the next chunk, `None`
+    /// if there are none (no chunk counted): a step's end, its bytes
+    /// kept by the caller, who gives [`finish`] every chunk in order.
+    pub fn flush_chunk(&mut self) -> Option<Chunk> {
+        // (the positions within the chunk a step's stream used, and the
+        // page it showed, are the step's: not the state after it)
+        self.stream_length_offset = 0;
+        self.save_offset = 0;
+        self.page_shown = (Vec::new(), 0, 0);
+        if self.out.is_empty() {
+            return None;
+        }
+        let b = std::mem::take(&mut self.out);
+        self.flushes += 1;
+        Some(Chunk {
+            bytes: b.into(),
+            objs: std::mem::take(&mut self.chunk_objs),
+        })
+    }
+
+    /// The number of chunks flushed.
     #[must_use]
     pub fn flushed(&self) -> usize {
-        self.base
+        self.flushes
     }
 
     /// `\pdfcolorstackinit [page] [direct] {...}`: the new stack's
@@ -163,14 +238,30 @@ impl PdfState {
         finish(self, &PdfBytes::new())
     }
 
-    /// The end of the file after the bytes flushed: `None` for no file.
-    fn finish_tail(mut self) -> Result<Option<Vec<u8>>, PdfError> {
+    /// The objects at the end of the file, written after the chunks
+    /// flushed (fonts, the pages tree, outlines, names, threads, the
+    /// catalog, `/Info`, the last object stream): `None` for no file.
+    ///
+    /// # Errors
+    /// A font that cannot be embedded, or what pdfTeX stops at.
+    pub fn tail(mut self) -> Result<Option<Tail>, PdfError> {
         if self.total_pages == 0 || self.fixed_draftmode != 0 {
             return Ok(None);
         }
         let (root, _) = self.tail_objects()?;
         if self.os.enable {
             self.os_flush();
+        }
+        if let Some(e) = self.error.take() {
+            return Err(e);
+        }
+        Ok(Some(Tail { st: self, root }))
+    }
+
+    /// The cross-reference table or stream, the trailer and `startxref`,
+    /// the objects' offsets the file's.
+    fn xref(&mut self, root: usize) -> Result<Vec<u8>, PdfError> {
+        if self.os.enable {
             self.output_xref_stream(root);
         } else {
             self.output_obj_tab();
@@ -198,7 +289,7 @@ impl PdfState {
         self.print_ln(b"%%EOF");
         match self.error.take() {
             Some(e) => Err(e),
-            None => Ok(Some(self.out)),
+            None => Ok(std::mem::take(&mut self.out)),
         }
     }
 

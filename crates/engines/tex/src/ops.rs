@@ -575,6 +575,26 @@ impl Operation for Dvi {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
     }
+    /// The scan's last state and the accumulators the file is made of:
+    /// the node waits while a page node or writer step before it is in
+    /// work instead of starting, stopping at a range and running again
+    /// (an edit's end node ran twice: once stopped at `pages` while the
+    /// edited page's finisher ran).
+    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(
+            [
+                crate::pages::SCAN,
+                "pages",
+                crate::pdfrelaxed::PIECES,
+                crate::pdfout::XPAGES,
+                crate::pdfout::CHUNKS,
+                crate::pdfout::CHARS,
+            ]
+            .iter()
+            .map(|&f| v.field(f))
+            .collect(),
+        )
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
