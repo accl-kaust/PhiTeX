@@ -1,0 +1,13 @@
+#!/bin/bash
+# ssh for the accl drivers (gate-fast, corpus-run, fixture-from put this
+# directory first on PATH, so accl, rsync and git use it too): a
+# connection the head resets under load retried (connection sharing is
+# not allowed by the local ssh).
+real=/usr/bin/ssh
+for i in 1 2 3 4 5 6 7 8; do
+  "$real" "$@"
+  e=$?
+  [ $e = 255 ] || exit $e
+  sleep $((i * 4))
+done
+exit 255

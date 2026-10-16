@@ -1,0 +1,136 @@
+#!/bin/bash
+# The fast gate: one commit's checks as parallel accl jobs, one table.
+#
+#   scripts/accl/gate-fast [COMMIT]     submit the shards (default: HEAD);
+#                                       prints the job ids
+#   scripts/accl/gate-fast wait ID...   wait for them, fetch, print the table
+#
+# Shards (scripts/accl/gate-shard.sh, passed as text to job.sbatch's cmd
+# task, so any commit can be gated): lint (clippy -D warnings; fmt is
+# local only, the image's rustfmt is another version);
+# suites (phitex-tex's pdftex edits pages plain etex hints relaxed inputs
+# defuse_gaps); latex 0..N-1 (the latex target's non-ignored tests dealt
+# out, GATE_LATEX_SHARDS, default 3); ams (amsldoc --exact-pdf at -j 1 and
+# -j 8, md5 against the epoch oracle on acclhead1, the round counters
+# with PHITEX_TEX_TIME=1; then the cold watch build at -j 1/8/16 timed
+# by op class, the head beside the control GATE_CONTROL, default
+# 566fb842, built and run in the same job: gate-time.py). Six jobs:
+# accl's limit of concurrent builds.
+# GATE_LATEX_ORDER (test names, heaviest first) balances the latex shards.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+H=acclhead1
+slurm='export PATH=/opt/slurm/current/bin:$PATH;'
+# (acclhead1 resets connections under load: one shared connection,
+# retried, for these scripts and the accl, rsync and git they run)
+export PATH="$here/sshmux":$PATH
+runs=$HOME/code/flinner/phitex-runs
+ORACLE=code/flinner/phitex-runs/amsldoc-oracle-epoch.pdf
+# the latex tests heaviest first (measured: test-walls.txt of the shards)
+ORDER_FILE=$here/gate-latex-order.txt
+
+submit() {
+  local c want n k script order
+  c=$(git rev-parse "${1:-HEAD}^{commit}")
+  want=$(ssh $H "md5sum $ORACLE" 2>/dev/null | cut -c1-32)
+  [ -n "$want" ] || { echo "gate-fast: no oracle $ORACLE on $H" >&2; exit 1; }
+  script=$(cat "$here/gate-shard.sh")
+  n=${GATE_LATEX_SHARDS:-3}
+  order=${GATE_LATEX_ORDER:-$( [ -f "$ORDER_FILE" ] && tr '\n' ' ' < "$ORDER_FILE" || true)}
+  sub() {
+    local opts=$1
+    shift
+    ACCL_COMMIT=$c ACCL_OPTS="$opts" "$here/accl" submit cmd \
+      env GATE_LATEX_ORDER="$order" GATE_TIME_PY="$(cat "$here/gate-time.py")" bash -c "$script" gate-shard "$@" 2>/dev/null
+  }
+  # (GATE_ONLY="lint ams": those shards only)
+  on() { [ -z "${GATE_ONLY:-}" ] || [[ " $GATE_ONLY " == *" $1 "* ]]; }
+  ids=()
+  if on lint; then ids+=("$(sub "-c 10 --mem=32G -t 00:30:00 -J gf-lint" lint)"); fi
+  if on suites; then ids+=("$(sub "-c 12 --mem=48G -t 00:30:00 -J gf-suites" suites)"); fi
+  if on latex; then
+    for ((k = 0; k < n; k++)); do
+      ids+=("$(sub "-c 10 --mem=48G -t 00:30:00 -J gf-latex$k" latex "$k" "$n")")
+    done
+  fi
+  # (the timing control: 566fb842 as it is, the engine of the c13f152
+  # era vendored, built and timed in the same job; GATE_CONTROL= none)
+  if on ams; then ids+=("$(sub "-c 18 --mem=48G -t 00:45:00 -J gf-ams" ams "$want" "${GATE_CONTROL-566fb842}")"); fi
+  echo "gate-fast: commit $c, oracle md5 $want" >&2
+  mkdir -p "$runs"
+  echo "$c ${ids[*]}" >> "$runs/gate-fast.ids"
+  echo "${ids[*]}"
+}
+
+# S J: the job's sacct field
+acct() { ssh $H "$slurm sacct -j $1 -n -X -P -o $2" 2>/dev/null | head -1; }
+secs() { awk -F'[-:]' '{ if (NF == 4) print $1*86400+$2*3600+$3*60+$4; else if (NF == 3) print $1*3600+$2*60+$3; else print $1*60+$2 }' <<< "$1"; }
+
+wait_all() {
+  local j s d
+  for j in "$@"; do
+    while :; do
+      s=$(acct "$j" State | awk '{print $1}')
+      case $s in COMPLETED | FAILED | CANCELLED* | TIMEOUT | OUT_OF_ME* | NODE_FAIL) break ;; esac
+      sleep 20
+    done
+    mkdir -p "$runs"
+    rsync -a "$H:code/flinner/phitex-runs/cmd-$j" "$runs/" 2>/dev/null || true
+    rsync -a "$H:code/flinner/phitex-runs/phitex-$j.out" "$runs/" 2>/dev/null || true
+  done
+  table "$@"
+}
+
+table() {
+  set +e
+  local j d st sh status build wall el sub0 end first="" last="" reds=0
+  printf '%-8s %-10s %-10s %-6s %7s %7s  %s\n' job shard state gate build_s wall_s red
+  for j in "$@"; do
+    d=$runs/cmd-$j
+    st=$(acct "$j" State | awk '{print $1}')
+    el=$(secs "$(acct "$j" Elapsed)")
+    sub0=$(acct "$j" Submit)
+    end=$(acct "$j" End)
+    [ -z "$first" ] || [[ "$sub0" < "$first" ]] && first=$sub0
+    [ -z "$last" ] || [[ "$end" > "$last" ]] && last=$end
+    sh=$(cat "$d/shard.txt" 2>/dev/null || echo '?')
+    status=$(cat "$d/status" 2>/dev/null || echo "none")
+    build=$(sed -n 's/^build_s //p' "$d/times.txt" 2>/dev/null)
+    wall=$(sed -n 's/^wall_s //p' "$d/times.txt" 2>/dev/null)
+    printf '%-8s %-10s %-10s %-6s %7s %7s  %s\n' "$j" "$sh" "$st" "$status" "${build:--}" "${wall:-$el}" "$(cat "$d/red.txt" 2>/dev/null | grep -c .)"
+    [ "$status" = green ] || reds=1
+  done
+  echo
+  echo "red (failures first):"
+  for j in "$@"; do
+    d=$runs/cmd-$j
+    if [ -s "$d/red.txt" ]; then sed "s/^/  [$(cut -d' ' -f1 "$d/shard.txt")] /" "$d/red.txt"; fi
+    [ -f "$d/status" ] || echo "  [$j] no result: $(tail -3 "$runs/phitex-$j.out" 2>/dev/null | tr '\n' ' ')"
+  done
+  for j in "$@"; do
+    d=$runs/cmd-$j
+    if [ -s "$d/known-red.txt" ]; then sed "s/^/  [known red, corpus fixture] /" "$d/known-red.txt"; fi
+  done
+  echo
+  for j in "$@"; do
+    d=$runs/cmd-$j
+    if [ -f "$d/ams.txt" ]; then echo "amsldoc:"; sed 's/^/  /' "$d/ams.txt"; fi
+    if [ -f "$d/cold.txt" ]; then echo "amsldoc cold watch build by op class, head vs control (same node, same command):"; cat "$d/cold.txt"; fi
+  done
+  echo
+  echo "slowest tests (s):"
+  for j in "$@"; do cat "$runs/cmd-$j/test-walls.txt" 2>/dev/null; done | sort -k2 -rn | head -8 | sed 's/^/  /'
+  for j in "$@"; do [ -f "$runs/cmd-$j/suite-walls.txt" ] && { echo "suite walls (s):"; sort -k2 -rn "$runs/cmd-$j/suite-walls.txt" | tr '\n' ' ' | sed 's/^/  /'; echo; }; done
+  echo
+  local a b
+  a=$(date -d "$first" +%s 2>/dev/null || echo 0)
+  b=$(date -d "$last" +%s 2>/dev/null || echo 0)
+  echo "gate wall: $((b - a)) s, first submit $first to last end $last; verdict: $([ $reds = 0 ] && echo GREEN || echo RED)"
+}
+
+case ${1:-} in
+  wait) shift; wait_all "$@" ;;
+  table) shift; table "$@" ;;
+  -h | --help) sed -n '2,20p' "$0" ;;
+  *) submit "${1:-HEAD}" ;;
+esac
