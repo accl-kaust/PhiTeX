@@ -1130,7 +1130,7 @@ pub(crate) fn ship(
                 ))
             })
         };
-        let shown = crate::pdfrelaxed::ship(r, &p, bx, &fonts, &mut wh)?;
+        let shown = crate::pdfrelaxed::ship(r, &p, xs[0], bx, &fonts, &mut wh)?;
         let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
         return Ok(phitex_defuse::hash_bytes(shown, attr.as_bytes()));
     }

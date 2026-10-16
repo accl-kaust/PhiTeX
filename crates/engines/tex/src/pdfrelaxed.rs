@@ -10,6 +10,7 @@
 //! need): the build is then evaluated again with the fold.
 
 use phitex_defuse::FxHashMap;
+use std::hash::Hash as _;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{ValueId, Values};
@@ -263,10 +264,12 @@ fn carry_here(r: &mut Run<'_, '_>) -> R<(Carry, usize)> {
 
 /// `pdf_ship_out` in relaxed mode: page `n` written on its own, the
 /// carry folded on. `p` is the page's parameters as `\shipout` read
-/// them; the result is the page's hash for `pagehash`.
+/// them; `b` is the box value `bx` was decoded from; the result is
+/// the page's hash for `pagehash`.
 pub(crate) fn ship(
     r: &mut Run<'_, '_>,
     p: &[ValueId],
+    b: ValueId,
     bx: &BoxNode,
     fonts: &Fonts,
     wh: &mut dyn FnMut(u32) -> Option<Whatsit>,
@@ -299,12 +302,17 @@ pub(crate) fn ship(
     ref_keys.sort_unstable();
     let mut whats: Vec<(u32, Option<Whatsit>)> = Vec::new();
     collect_whats(bx, &mut |h| whats.push((h, whf(h, false))));
+    // (the box by its value id, content-addressed: `bx` is decoded
+    // from `b` alone; the rest by their derived `Hash` written out as
+    // bytes, a prefix-free encoding, hashed once)
+    let mut enc = Encoded(Vec::with_capacity(1024));
+    (&pm, &whats, &maps, &ref_keys).hash(&mut enc);
     let input = phitex_defuse::hash_bytes(
         phitex_defuse::hash_words(
             fonts.digest(),
-            &[carry.digest(), u64::try_from(n).unwrap_or(0)],
+            &[carry.digest(), u64::try_from(n).unwrap_or(0), b.raw()],
         ),
-        format!("{pm:?}|{bx:?}|{whats:?}|{maps:?}|{ref_keys:?}").as_bytes(),
+        &enc.0,
     );
     let memo = written()
         .lock()
@@ -343,6 +351,20 @@ pub(crate) fn ship(
         r.set_cell(crate::fields::cell::PDF_LASTPH, v.int(i64::from(h)), true);
     }
     Ok(keep(r, true, piece))
+}
+
+/// A [`Hasher`](std::hash::Hasher) that keeps the bytes written to it:
+/// the page memo key hashes them with a fixed function.
+struct Encoded(Vec<u8>);
+
+impl std::hash::Hasher for Encoded {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        phitex_defuse::hash_bytes(0, &self.0)
+    }
 }
 
 /// Calls `f` with every whatsit handle of `b`, leaders' boxes included.

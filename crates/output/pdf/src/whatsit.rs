@@ -5,7 +5,7 @@
 use phitex_typeset::arith::Scaled;
 
 /// `pdf_literal_mode` (pdfTeX §695).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LiteralMode {
     /// `set_origin`: end the text, move the origin to the current point.
     SetOrigin,
@@ -18,7 +18,7 @@ pub enum LiteralMode {
 }
 
 /// A `\pdfcolorstack` command (`colorstack_set` ... `colorstack_current`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ColorStackCmd {
     /// `set{...}`.
     Set(Vec<u8>),
@@ -40,7 +40,7 @@ pub enum Ident {
 }
 
 /// An action (`scan_action`, pdfTeX §1546): what `write_action` writes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     /// `user{...}`: the text as it is.
     User(Vec<u8>),
@@ -78,7 +78,7 @@ pub enum Action {
 }
 
 /// A destination's type and its data (`pdf_dest_type`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DestKind {
     /// `xyz`, with `zoom n` or not.
     Xyz(Option<i32>),
@@ -103,7 +103,7 @@ pub enum DestKind {
 /// dimensions of annotations, links and threads are those of the rule
 /// specification, each [`RUNNING`](phitex_typeset::node::RUNNING) when
 /// not given.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Whatsit {
     /// `\special{...}` (`pdf_special`): only a `PDF:` or `pdf:` text
     /// is written.
