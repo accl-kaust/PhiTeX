@@ -318,6 +318,29 @@ fn isize_of(s: usize) -> isize {
     isize::try_from(s).expect("a position in the window")
 }
 
+/// The index of the first byte in 3..`MAX_MATCH` where `a` and `b`
+/// differ, or `MAX_MATCH` (`a`, `b`: `MAX_MATCH + 1` bytes).
+fn common_len(a: &[u8], b: &[u8]) -> usize {
+    let (a, b) = (&a[3..=MAX_MATCH], &b[3..=MAX_MATCH]);
+    let mut i = 0;
+    for (x, y) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
+        let x = u64::from_le_bytes(x.try_into().unwrap_or([0; 8]));
+        let y = u64::from_le_bytes(y.try_into().unwrap_or([0; 8]));
+        let d = x ^ y;
+        if d != 0 {
+            return 3 + i + (d.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < a.len() {
+        if a[i] != b[i] {
+            return 3 + i;
+        }
+        i += 1;
+    }
+    MAX_MATCH
+}
+
 impl State<'_> {
     // ---- trees.c ----
 
@@ -923,27 +946,14 @@ impl State<'_> {
                 || w[m] != w[scan0]
                 || w[m + 1] != w[scan0 + 1];
             if !skip {
-                // (the bytes from 2 on: zlib compares eight at a time and
-                // then stops at `strend`; the length is where they differ)
-                let mut scan = scan0 + 2;
-                let mut mat = m + 2;
-                loop {
-                    let mut k = 0;
-                    let mut stop = false;
-                    while k < 8 {
-                        scan += 1;
-                        mat += 1;
-                        if w[scan] != w[mat] {
-                            stop = true;
-                            break;
-                        }
-                        k += 1;
-                    }
-                    if stop || scan >= strend {
-                        break;
-                    }
-                }
-                let len = MAX_MATCH - (strend - scan);
+                // (the bytes from 3 on, as zlib's loop compares them: it
+                // steps eight at a time from `scan + 2` and stops at the
+                // first byte that differs or at `strend` (256 bytes on,
+                // a multiple of eight), so the length is the index of the
+                // first differing byte in 3..258, or 258; found here
+                // eight bytes at a time by the lowest set byte of their
+                // XOR)
+                let len = common_len(&w[scan0..strend + 1], &w[m..m + MAX_MATCH + 1]);
                 if len > best_len {
                     match_start = cur_match;
                     best_len = len;
