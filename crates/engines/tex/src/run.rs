@@ -43,6 +43,93 @@ impl From<Stop> for Halt {
 
 pub(crate) type R<T> = Result<T, Halt>;
 
+/// The runs that read a record whole (node, record), kept under
+/// `PHITEX_RECORD_CHECK=1` for [`record_check`].
+static RECORD_READERS: std::sync::Mutex<Vec<(phitex_defuse::NodeId, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Debug (`PHITEX_RECORD_CHECK=1`), after an evaluation: each live node
+/// that read a record, the record reaching it against the value of each
+/// of its cells reaching it; a difference is reported. Inside a run a
+/// read may answer with a definer's prediction, which that definer's
+/// commit rechecks (a refuted reader runs again), so the record and a
+/// cell read in the same run may disagree for a while: only the state
+/// the evaluation leaves is compared. A stale record (no cells, its
+/// readers read the cells) has nothing to compare, nor has a reader
+/// inside a scope whose opener defined the record or a cell only there
+/// (the engine shows a node's entry outside its scope only); such
+/// readers are counted.
+pub(crate) fn record_check(
+    eng: &phitex_defuse::Engine,
+    start: &phitex_defuse::FxHashMap<Field, ValueId>,
+) -> usize {
+    let mut readers = std::mem::take(
+        &mut *RECORD_READERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    readers.sort_unstable();
+    readers.dedup();
+    let v = eng.values();
+    let absent = crate::fields::record_absent(v);
+    // (the value reaching `n`: a node's definition, else the value the
+    // job's environment sets at the document's start, else the supplied
+    // environment's; `Err` where the node reaching it defined it only
+    // inside the scope it opened, an entry the engine does not show)
+    let env: phitex_defuse::FxHashMap<Field, ValueId> = eng.environment().collect();
+    let reaching = |n: phitex_defuse::NodeId, f: Field| match eng.reaching_def(n, f) {
+        Some(d) => eng.def_value(d, f).map(Some).ok_or(()),
+        None => Ok(start.get(&f).or_else(|| env.get(&f)).copied()),
+    };
+    let (mut bad, mut scoped, mut compared) = (0, 0, 0);
+    'readers: for (n, b) in readers {
+        if eng.node_info(n).is_none() {
+            continue;
+        }
+        let rf = v.field(crate::fields::RECORDS[b]);
+        let rec = match reaching(n, rf) {
+            Ok(Some(rec)) => rec,
+            Ok(None) => continue,
+            Err(()) => {
+                scoped += 1;
+                continue;
+            }
+        };
+        let rec = list_of(v, rec);
+        if rec.len() != crate::fields::record_len(b) {
+            continue;
+        }
+        let mut diffs = Vec::new();
+        compared += 1;
+        for (i, &x) in rec.iter().enumerate() {
+            let cf = v.field(&crate::fields::record_cell_name(b, i));
+            let Ok(y) = reaching(n, cf) else {
+                compared -= 1;
+                scoped += 1;
+                continue 'readers;
+            };
+            let x = (x != absent).then_some(x);
+            if x != y {
+                diffs.push((cf, x, y));
+            }
+        }
+        for (cf, x, y) in diffs {
+            bad += 1;
+            eprintln!(
+                "record-check: node {} {} record {:?} cell {:?}",
+                n.raw(),
+                crate::val::field_name(v, cf),
+                x.map(|x| v.render(x)),
+                y.map(|y| v.render(y))
+            );
+        }
+    }
+    eprintln!(
+        "record-check: {bad} differences in {compared} readers ({scoped} readers inside a scope its opener defined a cell in: not compared)"
+    );
+    bad
+}
+
 /// The operations, as registered.
 #[derive(Clone)]
 pub(crate) struct Ops {
@@ -704,6 +791,15 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|x| list_of(v, x))
             .filter(|xs| xs.len() == crate::fields::record_len(b))
             .map(Rc::from);
+        // (debug, `PHITEX_RECORD_CHECK=1`: the record's readers, whose
+        // record is compared with its cells after the evaluation,
+        // [`record_check`])
+        if cells.is_some() && crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
+            RECORD_READERS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((self.cx.node(), b));
+        }
         self.recs[b] = Some(cells.clone());
         Ok(cells)
     }
@@ -922,22 +1018,6 @@ impl<'c, 'a> Run<'c, 'a> {
         {
             let x = cells[i];
             let x = (x != self.absent()).then_some(x);
-            // (debug, `PHITEX_RECORD_CHECK=1`: the cell's own field read
-            // too, a difference reported)
-            if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
-                let f = self.loc_field(loc);
-                let y = self.cx.use_field(f)?;
-                if y != x {
-                    let v = self.v;
-                    eprintln!(
-                        "record-check: node {} {} record {:?} cell {:?}",
-                        self.cx.node().raw(),
-                        crate::val::field_name(v, f),
-                        x.map(|x| v.render(x)),
-                        y.map(|y| v.render(y))
-                    );
-                }
-            }
             self.st.fill(loc, x);
             return Ok(());
         }

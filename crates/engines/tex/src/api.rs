@@ -1255,6 +1255,10 @@ impl Stats {
 /// An engine with the operations registered.
 struct Graph {
     eng: Engine,
+    /// The values the job's environment sets at the start of the
+    /// document ([`job_env`]), for `PHITEX_RECORD_CHECK`
+    /// ([`crate::run::record_check`]).
+    start_env: FxHashMap<Field, ValueId>,
     /// The evaluation errors met (the engine's), as messages.
     eval_errors: Vec<String>,
     ops: Ops,
@@ -1365,6 +1369,7 @@ impl Graph {
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
         Graph {
+            start_env: FxHashMap::default(),
             eng,
             ops,
             mark,
@@ -3174,6 +3179,9 @@ impl Build {
             stats.version = stats.version.max(v);
         }
         stats.live = self.g.eng.live_nodes();
+        if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
+            crate::run::record_check(&self.g.eng, &self.g.start_env);
+        }
         self.pkg_stats(&mut stats);
         // the loads' records as this evaluation left them: a load
         // inserted by a later edit uses them
@@ -4350,6 +4358,9 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
         for (k, x) in date_params(t) {
             sets.push((v.field(k), v.int(x)));
         }
+    }
+    if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
+        g.start_env.extend(sets.iter().copied());
     }
     for (f, x) in sets {
         g.eng.set_env(unit, f, x);
