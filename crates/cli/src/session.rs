@@ -809,8 +809,17 @@ impl Session {
             diagnostics,
             unsettled: Vec::new(),
             notes: std::iter::once(format!(
-                "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds",
-                s.nodes_run, s.live, s.runs, s.cutoffs, s.loop_rounds
+                "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds, realised cp {} nodes; guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions",
+                s.nodes_run,
+                s.live,
+                s.runs,
+                s.cutoffs,
+                s.loop_rounds,
+                s.realised_critical_path,
+                s.claims_refuted,
+                s.effects_refuted,
+                s.claim_siblings,
+                s.defs_refuted
             ))
             .chain(std::iter::once({
                 let (nodes, units, values) = b.sizes();

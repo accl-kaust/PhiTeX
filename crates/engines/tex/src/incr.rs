@@ -7,7 +7,10 @@
 //! A chunk's analysis depends on its text and on the definitions in
 //! force before it: the format's and those of the earlier chunks that
 //! define anything. The latter are named by a key, the hash chain of the
-//! texts of the defining chunks before it. An edit splices the units
+//! digests of what the defining chunks before it define
+//! ([`Definitions::digest`]): an edit inside a chunk that defines the
+//! same things analyses that chunk again and keeps every analysis after
+//! it (spec-redesign §7.11: the hint pass over the changed units only). An edit splices the units
 //! ([`Source::edit`], from the common prefix and suffix of the old and new
 //! texts); a chunk whose first unit kept its identity, whose units are
 //! the same and whose key is the same keeps its analysis, the others are
@@ -34,6 +37,10 @@ struct Entry {
     out: (u64, Defs),
     /// Whether nothing stays open at its end ([`Open::closed`]).
     closed: bool,
+    /// The digest of its own definitions ([`Definitions::digest`]), or
+    /// `None` when it defines nothing: the key of the definitions after
+    /// it chains this, not its text.
+    own: Option<u64>,
 }
 
 /// One chunk of the document as analysed: where it begins in the text,
@@ -192,44 +199,51 @@ impl Incr {
         base: &Defs,
         next_file: &mut u32,
         parts: &mut [Part],
-        defines: &dyn Fn(usize) -> bool,
-    ) -> (Vec<(u64, Defs)>, Vec<usize>, Vec<Option<(u64, Defs)>>) {
+        own_digest: &dyn Fn(usize) -> Option<u64>,
+    ) -> (
+        Vec<(u64, Defs)>,
+        Vec<usize>,
+        Vec<Option<(u64, Defs)>>,
+        Vec<Option<u64>>,
+    ) {
         // the definitions before each chunk, in order: a cached chunk
         // under the same ones keeps its analysis
         let mut ins: Vec<(u64, Defs)> = Vec::with_capacity(parts.len());
         let mut todo: Vec<usize> = Vec::new();
         let mut outs: Vec<Option<(u64, Defs)>> = Vec::with_capacity(parts.len());
+        let mut owns: Vec<Option<u64>> = Vec::with_capacity(parts.len());
         let (mut key, mut defs) = (0u64, base.clone());
         for (k, p) in parts.iter_mut().enumerate() {
             ins.push((key, defs.clone()));
-            // (whether it defines anything is its text's alone: a cached
-            // analysis under other definitions says it too)
-            let cached_defines = p.cached.as_ref().map(|e| e.th.defines);
+            // (what it defines is its text's alone: a cached analysis
+            // under other definitions says it too)
+            let cached_own = p.cached.as_ref().map(|e| e.own);
             if p.cached.as_ref().is_some_and(|e| e.key != key) {
                 p.cached = None;
             }
-            let out = if let Some(e) = &p.cached {
-                e.out.clone()
+            let (out, own) = if let Some(e) = &p.cached {
+                (e.out.clone(), e.own)
             } else {
                 todo.push(k);
-                let defines = cached_defines.unwrap_or_else(|| defines(k));
-                if defines {
+                let own = cached_own.unwrap_or_else(|| own_digest(k));
+                if let Some(d_own) = own {
                     let t = &text[p.start..p.start + p.len];
                     let mut d: Definitions = (*defs).clone();
                     d.harvest(t, FileKind::Document, *next_file);
                     *next_file = next_file.wrapping_add(1);
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     key.hash(&mut h);
-                    t.hash(&mut h);
-                    (h.finish(), Arc::new(d))
+                    d_own.hash(&mut h);
+                    ((h.finish(), Arc::new(d)), own)
                 } else {
-                    (key, defs.clone())
+                    ((key, defs.clone()), None)
                 }
             };
             (key, defs) = (out.0, out.1.clone());
             outs.push(Some(out));
+            owns.push(own);
         }
-        (ins, todo, outs)
+        (ins, todo, outs, owns)
     }
 
     /// The chunks of the units, analysed where their text or incoming
@@ -264,15 +278,15 @@ impl Incr {
         for (x, &k) in fresh.iter().enumerate() {
             own_of[k] = Some(x);
         }
-        let (ins, todo, mut outs) =
+        let (ins, todo, mut outs, own_digests) =
             Self::chain(text, &self.defs, &mut self.next_file, &mut parts, &|k| {
-                own_of[k].is_some_and(|x| {
-                    owns[x]
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .as_ref()
-                        .is_some_and(crate::hints::defines_any)
-                })
+                let x = own_of[k]?;
+                owns[x]
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                    .filter(|d| crate::hints::defines_any(d))
+                    .map(Definitions::digest)
             });
         let t_chain = t0.elapsed();
         // the analyses of the chunks not kept
@@ -313,6 +327,7 @@ impl Incr {
                     keys,
                     out: outs[k].take().expect("the definitions after it"),
                     closed: p.closed,
+                    own: own_digests[k],
                 }
             };
             chunks.push(Chunk {

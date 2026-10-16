@@ -209,6 +209,41 @@ impl Definitions {
         self.macros.is_empty()
     }
 
+    /// A digest of what the definitions define, in order, without where
+    /// (file, byte): two harvests of texts that define the same things
+    /// in the same order have one digest, so an edit that changes no
+    /// definition keeps the analyses after it (`phitex-tex`'s per-chunk
+    /// cache keys).
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        use std::fmt::Write as _;
+        use std::hash::{Hash, Hasher};
+        fn put<T: std::fmt::Debug>(s: &mut String, tag: &str, m: &HashMap<String, Vec<At<T>>>) {
+            let mut names: Vec<&String> = m.keys().collect();
+            names.sort_unstable();
+            for n in names {
+                let _ = write!(s, "{tag}{n}");
+                for d in &m[n] {
+                    let _ = write!(s, "|{:?}", d.what);
+                }
+                s.push('\n');
+            }
+        }
+        let mut s = String::new();
+        put(&mut s, "m:", &self.macros);
+        put(&mut s, "e:", &self.envs);
+        put(&mut s, "c:", &self.catcoders);
+        put(&mut s, "b:", &self.bodies);
+        let mut ec: Vec<&String> = self.env_catcoders.iter().collect();
+        ec.sort_unstable();
+        let mut fonts: Vec<&String> = self.fonts.iter().collect();
+        fonts.sort_unstable();
+        let _ = write!(s, "ec:{ec:?}\nf:{fonts:?}\na:{}", self.active);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    }
+
     /// What `name` is at `at` (file, byte) or, without a place, by its
     /// last definition (a format's).
     pub(crate) fn find(&self, name: &str, at: Option<(u32, usize)>) -> Found<'_, Shape> {

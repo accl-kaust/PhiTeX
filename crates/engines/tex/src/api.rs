@@ -994,10 +994,20 @@ pub struct Stats {
     pub nodes_bounded: u64,
     pub nodes_any: u64,
     /// Nodes whose hint's assumptions (catcodes, meanings) did not hold
-    /// when they ran, and nodes that defined outside their bound: both
-    /// diagnostics, never a silent fallback.
+    /// when they ran: a diagnostic, never a silent fallback.
     pub regime_violations: u64,
+    /// The engine's undeclared-definition errors (a definition outside
+    /// a node's `may_define` bound). A static definition list is a
+    /// guess the engine widens: a run defining outside it is counted in
+    /// [`Stats::defs_refuted`], not here.
     pub undeclared_definitions: u64,
+    /// The engine's guess counters (spec-redesign §0.2): declared
+    /// claims, effects and definition lists a run refuted, and the
+    /// siblings a refuted claim took or released.
+    pub claims_refuted: u64,
+    pub effects_refuted: u64,
+    pub claim_siblings: u64,
+    pub defs_refuted: u64,
     /// Nodes answering `Any` because their class is demoted
     /// (`crate::hints`; `PHITEX_HINTS=1` names the class).
     pub hints_demoted: u64,
@@ -1189,20 +1199,19 @@ impl Stats {
         self.nodes_bounded = get(c[0]);
         self.nodes_any = get(c[1]);
         self.regime_violations = get(c[2]);
-        self.hints_demoted = get(c[4]);
-        self.nodes_token_frames = get(c[5]);
-        self.nodes_text_frames = get(c[6]);
-        self.nodes_paragraphs = get(c[7]);
-        self.paragraphs_taken = get(c[8]);
-        self.scope_both_levels = get(c[9]);
-        self.undeclared_definitions = get(c[3])
-            + u64::try_from(
-                errors
-                    .iter()
-                    .filter(|e| e.contains("UndeclaredDefinition"))
-                    .count(),
-            )
-            .unwrap_or(u64::MAX);
+        self.hints_demoted = get(c[3]);
+        self.nodes_token_frames = get(c[4]);
+        self.nodes_text_frames = get(c[5]);
+        self.nodes_paragraphs = get(c[6]);
+        self.paragraphs_taken = get(c[7]);
+        self.scope_both_levels = get(c[8]);
+        self.undeclared_definitions = u64::try_from(
+            errors
+                .iter()
+                .filter(|e| e.contains("UndeclaredDefinition"))
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
     }
 
     fn add_refuted(&mut self, eng: &Engine, r: &Report) {
@@ -1288,6 +1297,10 @@ impl Stats {
             }
         }
         self.env_provided += r.env_provided;
+        self.claims_refuted += r.claims_refuted;
+        self.effects_refuted += r.effects_refuted;
+        self.claim_siblings += r.claim_siblings;
+        self.defs_refuted += r.defs_refuted;
         self.version = r.version;
         self.absorbed.extend_from_slice(&r.edits_applied);
         self.steps += r.steps;
@@ -1695,7 +1708,14 @@ impl Graph {
         self.files.retain(|(g, _)| *g != f);
         self.absent.retain(|g| *g != f);
         self.reads.retain(|(n, _)| n != name);
-        self.absent.push(f);
+        // (`file:<name>` given a value of its own, the empty list, which
+        // a run reads as no file: a run that read it absent before the
+        // `\openout` declared the loop-back, LaTeX's `\@input` of the
+        // `.aux` in `\document` and `\@starttoc`'s `.toc`, runs again
+        // and reads the loop-back; left absent, nothing it read changed
+        // and it kept the empty read)
+        let none = self.eng.values().list(Vec::new());
+        self.files.push((f, none));
         if fixpoint {
             // nothing reads the bytes on disk: a read-back that only
             // defines (`.aux`) is its key set `wkeys:<name>` and one

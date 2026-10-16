@@ -411,9 +411,9 @@ impl Operation for Exec {
                 r.read_cut_request()?;
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
-                crate::hints::count(r, if tokens { 5 } else { 6 });
+                crate::hints::count(r, if tokens { 4 } else { 5 });
                 if hint.cause.starts_with("region") {
-                    crate::hints::count(r, 7);
+                    crate::hints::count(r, 6);
                 }
                 r.input.append_text(fs);
                 if let Some((c, k)) = crate::run::carried_conds(r.v, &args) {
@@ -447,19 +447,18 @@ impl Operation for Exec {
             // figure's float, is the box's: one node, like a picture)
             for (i, h) in claimed.iter().enumerate() {
                 if h.cause.starts_with("region") && !r.pull_box.get(i).copied().unwrap_or(false) {
-                    crate::hints::count(r, 8);
+                    crate::hints::count(r, 7);
                 }
             }
+            // (what it defined outside its bound is the engine's: a
+            // static definition list is a guess it widens, counted as
+            // `defs_refuted`)
             if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
-                if let Some(m) = crate::hints::check_defs(r, &hint, &claimed) {
-                    r.engine_diag(&m);
-                    crate::hints::count(r, 3);
-                }
                 crate::hints::count(r, 0);
             } else {
                 crate::hints::count(r, 1);
                 if crate::hints::is_demoted(&hint) {
-                    crate::hints::count(r, 4);
+                    crate::hints::count(r, 3);
                 }
             }
             Ok(())

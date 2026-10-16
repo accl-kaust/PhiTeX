@@ -527,7 +527,7 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     let everypar = chain.iter().filter(|c| c.2 == "param:everypar").count();
     let s = &b.stats;
     eprintln!(
-        "chains {name}: critical path {:?}, realised cp {}, {} nodes run, {} regions, {} rounds, {} loop rounds, {} undeclared, {} violations, {} mispredictions, everypar links {everypar}, chain {} links {by:?}",
+        "chains {name}: critical path {:?}, realised cp {}, {} nodes run, {} regions, {} rounds, {} loop rounds, {} undeclared, guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions, {} violations, {} mispredictions, everypar links {everypar}, chain {} links {by:?}",
         s.critical_path,
         s.realised_critical_path,
         s.nodes_run,
@@ -535,6 +535,10 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
         s.rounds,
         s.loop_rounds,
         s.undeclared_definitions,
+        s.claims_refuted,
+        s.effects_refuted,
+        s.claim_siblings,
+        s.defs_refuted,
         s.regime_violations,
         s.mispredictions,
         chain.len()
@@ -556,9 +560,12 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     if let Some(d) = common::first_difference(&b.output().0, &want) {
         panic!("{name}.pdf cold: {d}");
     }
+    // (a definition outside a node's static list is a guess the engine
+    // widens, `defs_refuted` above; only the engine's own error, outside
+    // its `may_define` bound, fails)
     assert_eq!(
         b.stats.undeclared_definitions, 0,
-        "{name}: undeclared definitions"
+        "{name}: undeclared definitions (engine errors)"
     );
     (b, regions)
 }

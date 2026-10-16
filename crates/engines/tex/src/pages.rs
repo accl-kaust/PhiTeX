@@ -102,6 +102,12 @@ pub(crate) const PITEMS: &str = "pitems";
 /// anew re-makes everything after it (spec-predicted-breaks §7).
 pub(crate) const RESUME: &str = "pages:resume";
 
+/// The fields a finisher defined globally, one unit per finisher: read
+/// by range by the resume after a cut (a global definition replaces
+/// the group's local value, §279). A finisher declares its unit as the
+/// last run of its routine gave it, a guess ([`Finish::static_contribs`]).
+pub(crate) const GDEFS: &str = "gdefs";
+
 /// The scan's state (spec-predicted-breaks §2, S2): defined where the
 /// scan continues after a page fired ([`Scan`] after the finisher), read
 /// by every scan step after it: `[anchor, j, normal, sf, pd, since_bp,
@@ -2128,7 +2134,7 @@ impl Run<'_, '_> {
             Some(p) if self.cx.op() == self.ops.resume => {
                 let pid =
                     phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, p).to_ne_bytes()));
-                let acc = self.cx.acc_range(v.field("gdefs"), Some(pid))?;
+                let acc = self.cx.acc_range(v.field(GDEFS), Some(pid))?;
                 v.seq_to_vec(acc)
                     .into_iter()
                     .flat_map(|e| list_of(v, e))
@@ -2259,6 +2265,10 @@ pub(crate) struct FinDefs {
     /// defines some on some pages only (a float page, a page with a
     /// list continued), not on the last two.
     pub seen: Vec<Field>,
+    /// What the last run contributed to `gdefs` (the fields it defined
+    /// globally, [`Run::contribute_global_defs`]): the next finisher's
+    /// declared contribution, a guess ([`Finish::static_contribs`]).
+    pub gdefs: Option<ValueId>,
 }
 
 impl FinDefs {
@@ -2349,25 +2359,64 @@ pub(crate) static FIN_UNPREDICTED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl Finish {
+    /// What the last runs of the routine defined, carried to page `j`
+    /// ([`FinDefs::predict`]), and always what the routine gives back to
+    /// the main list ([`RTN`]): the continuation after the finisher
+    /// reads it, and with it guessed the scan goes on to the next page
+    /// without waiting for the routine (spec-redesign §1, finish row).
+    /// The guess is the last run's value, or nothing given back (the
+    /// routine that ships its page, §1026); a wrong guess runs the
+    /// continuation again.
     fn predicted_defs_(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        let &t = args.get(9)?;
-        if t == ValueId::UNIT || crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT") {
+        if crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT") {
             return None;
         }
+        let t = args.get(9).copied().unwrap_or(ValueId::UNIT);
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
-        let stable = ops(&self.0)
+        let o = ops(&self.0);
+        let m = o
             .fin_defs
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&fin_key(v, t, args))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let d = (t != ValueId::UNIT)
+            .then(|| m.get(&fin_key(v, t, args)))
+            .flatten();
+        let mut out = d
             .map(|d| {
                 if crate::exec::env_flag!("PHITEX_NO_STEP") {
                     d.stable()
                 } else {
                     d.predict(v, j)
                 }
-            })?;
-        (!stable.is_empty()).then_some(stable)
+            })
+            .unwrap_or_default();
+        let rtn = v.field(RTN);
+        if !out.iter().any(|e| e.0 == rtn) {
+            let last = d.and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1));
+            out.push((
+                rtn,
+                last.unwrap_or_else(|| v.list(vec![v.list(Vec::new()), v.list(Vec::new())])),
+            ));
+        }
+        Some(out)
+    }
+
+    /// The finisher's declared contribution to `gdefs` (what it defines
+    /// globally, read by the resume after it as a guess, spec-redesign
+    /// §1 resume row): the last run's of the routine, else none; a run
+    /// giving another runs the resume again.
+    fn gdefs_guess(&self, args: &[ValueId], v: &Values) -> ValueId {
+        let t = args.get(9).copied().unwrap_or(ValueId::UNIT);
+        if t == ValueId::UNIT {
+            return ValueId::NIL;
+        }
+        ops(&self.0)
+            .fin_defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&fin_key(v, t, args))
+            .and_then(|d| d.gdefs)
+            .unwrap_or(ValueId::NIL)
     }
 }
 
@@ -2432,9 +2481,12 @@ impl Operation for Finish {
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
-    /// No pieces' units ([`no_units`]).
-    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        Some(no_units(v))
+    /// No pieces' units ([`no_units`]), and its global definitions as
+    /// the last run of the routine gave them ([`Finish::gdefs_guess`]).
+    fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        let mut out = no_units(v);
+        out.push((v.field(GDEFS), self.gdefs_guess(args, v)));
+        Some(out)
     }
     /// What the last finisher running the same routine defined, with
     /// its values: the text after this one runs on them, and runs again
@@ -2531,8 +2583,8 @@ impl Operation for Finish {
             let args = r.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
             let olds = r.fin_olds()?;
             r.check_cut(&args)?;
-            r.record_finisher_defs(&args, &olds);
-            r.contribute_global_defs();
+            let g = r.contribute_global_defs();
+            r.record_finisher_defs(&args, &olds, g);
             Ok(())
         });
         if phitex_pdf::phase::on() {
@@ -2553,7 +2605,7 @@ impl Run<'_, '_> {
     /// The fields this finisher defined globally, for the resume after
     /// it ([`Run::cont_load`]): a group-local value the resume carries
     /// is replaced by a global definition even of an equal value.
-    fn contribute_global_defs(&mut self) {
+    fn contribute_global_defs(&mut self) -> ValueId {
         let v = self.v;
         let names: Vec<ValueId> = self
             .st
@@ -2562,9 +2614,15 @@ impl Run<'_, '_> {
             .filter(|d| d.2 == Locality::Global)
             .map(|d| self.loc_field(d.0).0)
             .collect();
-        if !names.is_empty() {
-            self.contribute("gdefs", v.seq_unit(v.list(names)));
-        }
+        // (none given as nothing, as the declared guess says it,
+        // [`Finish::static_contribs`])
+        let x = if names.is_empty() {
+            ValueId::NIL
+        } else {
+            v.seq_unit(v.list(names))
+        };
+        self.contribute(GDEFS, x);
+        x
     }
 
     /// The values reaching this finisher of the fields its routine
@@ -2598,7 +2656,12 @@ impl Run<'_, '_> {
     /// sees (LaTeX's `\shipout` sets `\afterassignment` and its
     /// `\setbox` consumes it; the routine sets `\vsize` to the value it
     /// has).
-    fn record_finisher_defs(&mut self, args: &[ValueId], olds: &[(Loc, Option<ValueId>)]) {
+    fn record_finisher_defs(
+        &mut self,
+        args: &[ValueId],
+        olds: &[(Loc, Option<ValueId>)],
+        gdefs: ValueId,
+    ) {
         let v = self.v;
         {
             let mut reads: Vec<Field> = self
@@ -2660,6 +2723,7 @@ impl Run<'_, '_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let e = m.entry(fin_key(v, t, args)).or_default();
+        e.gdefs = Some(gdefs);
         for &(f, _) in &out {
             if !e.seen.contains(&f) {
                 e.seen.push(f);

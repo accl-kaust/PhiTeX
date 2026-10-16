@@ -45,7 +45,7 @@
 use phitex_defuse::FxHashMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Field, MayDefine, Value, ValueId, Values};
@@ -859,9 +859,6 @@ pub(crate) struct TextHints {
     pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
-    /// Whether the text defines anything the pass harvests (a macro, an
-    /// active character).
-    pub defines: bool,
 }
 
 impl TextHints {
@@ -2796,7 +2793,6 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         prev_char = ch;
     }
     let mut t = TextHints {
-        defines: defines_any(&an.defs),
         slices,
         starts,
         hints,
@@ -3115,7 +3111,7 @@ pub(crate) fn own_definitions(text: &str, kind: FileKind) -> Definitions {
 }
 
 /// Whether a text's own definitions ([`own_definitions`]) define
-/// anything: [`TextHints::defines`] of its analysis.
+/// anything (a macro, an active character).
 pub(crate) fn defines_any(own: &Definitions) -> bool {
     !own.is_empty() || own.active_chars() != 0
 }
@@ -3451,21 +3447,6 @@ fn plain_catcode(b: u8, at: bool) -> u8 {
 // ---------------------------------------------------------------------
 // At the node.
 
-/// Counts since the process began (the fallback when the build's own
-/// counters are not read): bounded, any, violations, undeclared.
-pub(crate) static COUNTS: [AtomicU64; 10] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
-
 static OFF: AtomicBool = AtomicBool::new(false);
 
 /// Turns the hints off (every node may define anything, as without
@@ -3605,11 +3586,10 @@ pub(crate) fn optimistic_hint() -> String {
 }
 
 /// The accumulators the nodes count into.
-pub(crate) const COUNTERS: [&str; 10] = [
+pub(crate) const COUNTERS: [&str; 9] = [
     "hints:bounded",
     "hints:any",
     "hints:violations",
-    "hints:undeclared",
     "hints:demoted",
     // (nodes whose text is a token list, and those reading source text)
     "frames:tokens",
@@ -3690,68 +3670,6 @@ fn mean_kind(m: &Mean) -> &'static str {
     }
 }
 
-/// The definitions a run made outside its bound: the violation, if any.
-pub(crate) fn check_defs(
-    r: &mut Run<'_, '_>,
-    h: &Hint,
-    claimed: &[std::sync::Arc<Hint>],
-) -> Option<String> {
-    let b = h.bound.as_ref()?;
-    let others: Vec<&Bound> = claimed.iter().filter_map(|c| c.bound.as_ref()).collect();
-    let state_has = |b: &Bound, name: &str| match &b.state {
-        Some(st) => st.iter().any(|p| name.starts_with(*p)),
-        None => true,
-    };
-    let names_have = |b: &Bound, name: &str| {
-        b.names.iter().any(|n| n == name) || b.prefixes.iter().any(|p| name.starts_with(p.as_str()))
-    };
-    // (a bound's names as a set: a package load's record lists
-    // thousands, and its run publishes as many)
-    let own: phitex_defuse::FxHashSet<&str> = b.names.iter().map(String::as_str).collect();
-    // (a local definition of the value the run read is no definition:
-    // `\\everypar` set back to what it was, the binding unchanged)
-    for f in r.published_fields() {
-        let name = match &*r.v.get(f.0) {
-            Value::Str(s) => s.to_string(),
-            _ => continue,
-        };
-        if own.contains(name.as_str()) {
-            continue;
-        }
-        // (a record: declared where one of its cells is)
-        if let Some(rb) = crate::fields::RECORDS.iter().position(|&x| x == name) {
-            let covers = |b: &Bound| {
-                (0..crate::fields::record_len(rb)).any(|i| {
-                    let c = crate::fields::record_cell_name(rb, i);
-                    own.contains(c.as_str()) || state_has(b, &c) || names_have(b, &c)
-                })
-            };
-            if covers(b) || others.iter().any(|o| covers(o)) {
-                continue;
-            }
-        }
-        if !is_cs_field(&name) {
-            if state_has(b, &name) || others.iter().any(|o| state_has(o, &name)) {
-                continue;
-            }
-            return Some(format!(
-                "undeclared definition of {name} by {:?} (state {:?}, {})",
-                h.excerpt,
-                b.state.clone().unwrap_or_default(),
-                h.cause
-            ));
-        }
-        if names_have(b, &name) || others.iter().any(|o| names_have(o, &name)) {
-            continue;
-        }
-        return Some(format!(
-            "undeclared definition of {name} by {:?} (bound {:?} {:?}, {})",
-            h.excerpt, b.names, b.prefixes, h.cause
-        ));
-    }
-    None
-}
-
 /// `PHITEX_HINTS=2`: the node's definitions, for learning the state
 /// each command sets.
 pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
@@ -3796,7 +3714,6 @@ pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
 
 /// Counts the node into accumulator `k` of [`COUNTERS`].
 pub(crate) fn count(r: &mut Run<'_, '_>, k: usize) {
-    COUNTS[k].fetch_add(1, Ordering::Relaxed);
     let one = r.v.int(1);
     r.contribute(COUNTERS[k], one);
 }
