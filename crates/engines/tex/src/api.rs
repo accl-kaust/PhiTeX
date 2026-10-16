@@ -71,7 +71,7 @@ pub struct Options {
     /// them in order. The output is the same at any count.
     pub threads: Option<usize>,
     /// Whether the PDF file's objects are numbered as pdfTeX numbers
-    /// them (the `pdf:state` fold, byte-identical), or each page and
+    /// them (the link of the line's records, byte-identical), or each page and
     /// each object TeX makes is written on its own and numbered at the
     /// end (`crates/output/pdf/RELAXED.md`: the same file up to object
     /// numbers and resource names). A document the relaxed mode does

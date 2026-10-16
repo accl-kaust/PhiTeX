@@ -48,9 +48,11 @@ use crate::val::{int_of, list_of, str_of};
 /// this order ([`finish_exact`]).
 pub(crate) const XPAGES: &str = "pdf:xpages";
 
-/// The loop-back of what the link gave each read-time command
-/// ([`command`]): `[[key, [n, ...], error], ...]`, by the command's key.
-pub(crate) const OBJNUMS: &str = "pdf:objnums";
+/// The loop-back of the object numbers the link gave the read-time
+/// commands (spec-redesign §1, `pdf:objbase`: what a piece reads where
+/// TeX reads a number back, a guess from the round before):
+/// `[[key, [n, ...], error], ...]`, by the command's key ([`command`]).
+pub(crate) const OBJNUMS: &str = "pdf:objbase";
 
 /// The writer's parameters a step reads as it writes (the compression,
 /// the digits, the version: pdfTeX fixes them at the first write,
@@ -150,9 +152,9 @@ pub(crate) type CmdMemo = Mutex<FxHashMap<u64, Arc<Cmd>>>;
 
 /// One page as the exact writer ships it, made by the page's own step
 /// with nothing read from another page's: the box, the parameters
-/// `\shipout` read, the whatsits' data, the fonts. The page's [`Place`]
-/// node puts it on the writer's state in the line's order; the step has
-/// already written the page once, apart, so that the placement finds
+/// `\shipout` read, the whatsits' data, the fonts. The link puts it on
+/// its writer in the line's order ([`finish_exact`]); the node that
+/// shipped it has already written it once, apart, so that the link finds
 /// its content stream compressed.
 pub(crate) struct PagePiece {
     /// The writer's parameters where it was shipped ([`WParams`]).

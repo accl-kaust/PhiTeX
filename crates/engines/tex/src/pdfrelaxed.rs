@@ -1,7 +1,7 @@
 //! The relaxed PDF mode (`crates/output/pdf/RELAXED.md`): every page,
 //! and every object TeX makes when it reads a command, written on its
 //! own by `phitex_pdf::relaxed`, under handles; the `Dvi` node merges
-//! the pieces and numbers the objects. No `pdf:state` fold: what passes
+//! the pieces and numbers the objects. No writer state is threaded: what passes
 //! from page to page is the carry (`pdf:carry`: the colour stacks, the
 //! open links, the two switches, the fonts used), and what TeX reads
 //! back (`\pdflastobj`, `\pdfpageref`, ...) is a handle.
