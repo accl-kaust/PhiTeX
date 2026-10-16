@@ -165,3 +165,51 @@ fn phitex_tex_hash(b: &[u8]) -> u64 {
     b.hash(&mut h);
     h.finish()
 }
+
+/// A run that reads on across a page break (two groups of its own
+/// open over lines set as paragraphs: the run claims the following
+/// texts) is cut at the break, its resume claiming the rest; an edit
+/// before it that moves the break out of the claimed span makes the run
+/// claim them all itself, no cut. The output is the cold build's.
+#[test]
+fn an_edit_that_moves_a_break_out_of_a_claimed_span() {
+    use std::fmt::Write as _;
+    let (src, _) = common::plain_paragraphs(30, false);
+    let at = |k: usize| src.find(&format!("Paragraph {k} has")).expect("paragraph");
+    let mut block = String::from("\\csname begingroup\\endcsname\\csname begingroup\\endcsname\\obeylines\n");
+    for j in 0..36 {
+        let _ = writeln!(block, "Line {j} of the block, page \\the\\pageno");
+        if j % 4 == 3 {
+            block.push('\n');
+        }
+    }
+    block.push_str("\\csname endgroup\\endcsname\\csname endgroup\\endcsname\n\n");
+    let src = format!("{}{block}{}", &src[..at(12)], &src[at(12)..]);
+    let dir = common::fixtures().join("plain/vsize");
+    let opts = || common::options("./pp.tex", "pp", "", &dir);
+    let mut bad = Vec::new();
+    let block_at = src.find("\\csname begingroup").expect("the block");
+    for k in 6..13 {
+        let mut b = common::build(opts(), Some(&common::plain()), &src);
+        // (12: right before the block)
+        let at = if k == 12 {
+            block_at
+        } else {
+            src.find(&format!("Paragraph {k} has")).expect("paragraph")
+        };
+        let new = format!("{}\\vfill\\eject {}", &src[..at], &src[at..]);
+        b.edit(&new);
+        let after = b.pages();
+        let cold = common::build(opts(), Some(&common::plain()), &new);
+        let errs: Vec<String> = b.diagnostics().iter().map(|d| d.message.clone()).collect();
+        eprintln!(
+            "eject before paragraph {k}: edit {} pages, cold {} pages, edit diagnostics {errs:?}",
+            after.len(),
+            cold.pages().len()
+        );
+        if cold.pages() != after {
+            bad.push(k);
+        }
+    }
+    assert!(bad.is_empty(), "edit != cold for the eject before paragraphs {bad:?}");
+}
