@@ -35,6 +35,12 @@ thread_local! {
     static LONG_TEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
+/// (measure, `PHITEX_RUN_LOG`) every run attempt of the process: the
+/// node's raw id, whether it resumed a parked run, whether it ran
+/// speculatively, and how it ended (`o` finished, `s` stopped, `x`
+/// other); drained into [`crate::Stats::run_log`] per evaluation.
+pub(crate) static RUN_LOG: std::sync::Mutex<Vec<(u64, bool, bool, u8)>> = std::sync::Mutex::new(Vec::new());
+
 pub(crate) fn run_node(
     cx: &mut Ctx<'_>,
     o: Ops,
@@ -150,6 +156,18 @@ pub(crate) fn run_node_parking(
         res = body(&mut r);
     }
     let t_body = t_body.elapsed();
+    if crate::exec::env_flag!("PHITEX_RUN_LOG") {
+        // (measure: every attempt, for `Stats::run_log`)
+        let how = match &res {
+            Ok(()) | Err(Halt::Cut) => b'o',
+            Err(Halt::Stop(_)) => b's',
+            _ => b'x',
+        };
+        RUN_LOG
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((r.cx.node().raw(), r.resumed, r.cx.is_speculative(), how));
+    }
     // (a long run, the format's: its commands' time, then its finish)
     let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
     if timed {
@@ -753,6 +771,31 @@ fn makeindex_runs(
         }
     }
     Ok(out)
+}
+
+/// The `.ind` each written `.idx` makes under `makeindex NAME.idx` (no
+/// style): what a read-back of the index reads, for
+/// [`crate::Build::read_back_texts`].
+pub(crate) fn makeindex_plain(texts: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (name, _) in texts {
+        let Some(base) = name.strip_suffix(".idx") else {
+            continue;
+        };
+        let mut files = MiFiles { texts, styles: &[] };
+        let o = phitex_makeindex::run(
+            &[latin1_bytes(name)],
+            b"version 2.18 [TeX Live 2026] (kpathsea + Thai support)",
+            &mut files,
+        );
+        if let Some(f) = o.ind {
+            out.push((
+                format!("{base}.ind"),
+                f.contents.iter().map(|&b| char::from(b)).collect(),
+            ));
+        }
+    }
+    out
 }
 
 /// TeX's characters as bytes (Latin-1; a character past 255 as `?`).

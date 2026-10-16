@@ -970,6 +970,16 @@ pub struct Stats {
     /// The engine's runs by operation (`exec`, `fold`, `finish`,
     /// `resume`, `place`, ...), every attempt, summed over the evaluations.
     pub runs_by_op: Vec<(&'static str, u64)>,
+    /// Every node made to run again in the last build or edit: its raw
+    /// id, its operation, and why (the engine's `Rerun` kind and the
+    /// field's name).
+    pub reruns: Vec<(u64, &'static str, String)>,
+    /// (measure, with `PHITEX_RUN_LOG` set) every run attempt in the last
+    /// build or edit, in order: the node's raw id, its operation, whether
+    /// it resumed a parked run, whether it ran speculatively, how it
+    /// ended (`o` finished, `s` stopped, `x` other), and the evaluation's
+    /// index in the build or edit (its round).
+    pub run_log: Vec<(u64, &'static str, bool, bool, u8, u64)>,
     /// The engine's pending waits by kind, summed over the evaluations.
     pub waits_by_kind: Vec<(&'static str, u64)>,
     /// The nodes most waited on in the last evaluation (raw ids, waits).
@@ -1213,6 +1223,48 @@ impl Stats {
         }
         self.refuted_by_field
             .sort_by_key(|e| std::cmp::Reverse(e.1));
+    }
+
+    fn add_reruns(&mut self, eng: &Engine, r: &Report) {
+        use phitex_defuse::Rerun as Rr;
+        let v = eng.values();
+        for &(n, c) in &r.rerun_causes {
+            let op = eng.node_info(n).map_or("?", |i| i.op);
+            let f = match c {
+                Rr::Changed { field, .. }
+                | Rr::Rebind { field }
+                | Rr::Loop { field }
+                | Rr::Environment { field } => Some(field),
+                Rr::Refuted { field } | Rr::Woken { field } | Rr::Range { field } => field,
+                _ => None,
+            };
+            let kind = format!("{c:?}");
+            let kind = kind.split([' ', '(', '{']).next().unwrap_or("").to_owned();
+            let mut why = f.map_or_else(|| kind.clone(), |f| format!("{kind} {}", field_name(v, f)));
+            if crate::exec::env_flag!("PHITEX_RUN_LOG") {
+                // (measure: where the value read differs from the one the
+                // run had read, and the round)
+                if let Rr::Changed { old, new, .. } = c {
+                    match structural_diff(v, old, new, String::new()) {
+                        Some((path, a, b)) => {
+                            let cut = |x: String| x.chars().take(90).collect::<String>();
+                            why = format!("{why} @{path}: {} | {}", cut(a), cut(b));
+                        }
+                        None => why = format!("{why} (EQUAL value)"),
+                    }
+                }
+                why = format!("{why} #r{}", self.rounds);
+            }
+            self.reruns.push((n.raw(), op, why));
+        }
+        if crate::exec::env_flag!("PHITEX_RUN_LOG") {
+            let log = std::mem::take(&mut *crate::ops::RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            let round = self.rounds;
+            for (n, resumed, spec, how) in log {
+                let op = eng.node_info(phitex_defuse::NodeId::from_raw(n)).map_or("?", |i| i.op);
+                self.run_log.push((n, op, resumed, spec, how, round));
+            }
+        }
     }
 
     fn add(&mut self, r: &Report) {
@@ -1857,6 +1909,7 @@ impl Graph {
                 }
             }
             stats.add(&r);
+            stats.add_reruns(&self.eng, &r);
             stats.add_refuted(&self.eng, &r);
             stats.add_exec(&ex, c0, &self.eng);
             stats.add_hints(&self.eng, unit, &self.eval_errors);
@@ -3437,6 +3490,31 @@ impl Build {
         let absent = self.g.absent.clone();
         self.g.eng.set_environment_absent(absent);
         self.settle();
+    }
+
+    /// The document's nodes' texts: each node's raw id, its text (`None`:
+    /// the document's, as given to [`Self::edit`]; else the file's text
+    /// it is a slice of) and its byte range in it.
+    #[must_use]
+    pub fn node_spans(&self) -> Vec<(u64, Option<Arc<str>>, usize, usize)> {
+        self.nodes
+            .iter()
+            .map(|(_, n, src)| match src {
+                &Src::Doc(s, e) => (n.raw(), None, s, e),
+                Src::File(t, s, e) => (n.raw(), Some(t.clone()), *s, *e),
+            })
+            .collect()
+    }
+
+    /// The files the job writes and reads back, with the text a read-back
+    /// reads (an index's `.ind` as `makeindex` makes it from the `.idx`).
+    #[must_use]
+    pub fn read_back_texts(&self) -> Vec<(String, String)> {
+        let mut t = self.files();
+        let made = crate::ops::makeindex_plain(&t);
+        t.extend(made);
+        t.retain(|(n, _)| self.g.written.iter().any(|w| w == n));
+        t
     }
 
     /// The finder's answers in the last evaluation: each name asked for,
