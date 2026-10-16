@@ -930,10 +930,10 @@ impl Run<'_, '_> {
 
     /// Whether a page finishing inside this piece would need a cut, as
     /// far as the finishers so far tell (`Ops::fin_touch`): the piece
-    /// read a field a routine defines (the page number), or defined
-    /// after its first candidate (or locally anywhere) a field a routine
-    /// reads. Then the piece folds in its own run: a finisher's check
-    /// would ask for the cut a round later, at the chain's cost.
+    /// read a field a routine defines (the page number). Then the piece
+    /// folds in its own run. What it defined after a candidate that a
+    /// routine reads is the finisher's check's (a cut where a page
+    /// finishes inside it, `Run::check_cut`), never a fold here.
     #[allow(clippy::unnecessary_wraps)]
     fn needs_own_fold(&mut self) -> R<bool> {
         let n = self.cand_marks.len();
@@ -954,35 +954,6 @@ impl Run<'_, '_> {
                 if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                     eprintln!(
                         "  own fold {}: reads {}",
-                        self.cx.node().raw(),
-                        str_of(v, f.0)
-                    );
-                }
-                return Ok(true);
-            }
-        }
-        let gids = self.st.gid_mark();
-        let m0 = self.cand_marks[0];
-        let mut defs: Vec<Loc> = self
-            .st
-            .defined_since(v, m0.stamp, m0.gids)
-            .into_iter()
-            .map(|d| d.0)
-            .collect();
-        defs.extend(
-            self.st
-                .defined_since(v, 0, gids)
-                .into_iter()
-                .filter(|d| d.2 == Locality::Local)
-                .map(|d| d.0),
-        );
-        let mut defs: Vec<Field> = defs.into_iter().map(|l| self.loc_field(l)).collect();
-        defs.extend(self.streams_since(m0.contribs));
-        for f in defs {
-            if t.reads.contains(&f) {
-                if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
-                    eprintln!(
-                        "  own fold {}: defines {}",
                         self.cx.node().raw(),
                         str_of(v, f.0)
                     );
