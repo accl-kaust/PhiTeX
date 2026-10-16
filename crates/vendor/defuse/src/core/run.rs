@@ -573,6 +573,15 @@ impl Shared {
             if self.loop_vals.read().contains_key(&f) {
                 continue;
             }
+            // An accumulator read: held while a contributor before it is in
+            // work (from the unit's start: a later anchor waits on more).
+            if self.accs.contains_key(&f) {
+                if let super::query::Q::Wait(mut w) = self.q_range(s, f, None, None, true, s) {
+                    w.kind = "gated";
+                    return Some(w);
+                }
+                continue;
+            }
             if let super::query::Q::Wait(mut w) = self.q_def(s, f, true, s) {
                 w.kind = "gated";
                 return Some(w);

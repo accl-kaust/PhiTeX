@@ -414,12 +414,15 @@ impl Shared {
                 KindSpec::None,
             );
         }
-        let eff = match &d.stat.effect {
-            Effect::Pending => d.res.as_ref().and_then(|c| c.effect).unwrap_or(Effect::None),
-            e => *e,
+        // A declared effect is a guess: the committed run's, when it set
+        // one, holds.
+        let eff = match (d.res.as_ref().and_then(|c| c.effect), &d.stat.effect) {
+            (Some(e), _) => e,
+            (None, Effect::Pending) => Effect::None,
+            (None, e) => *e,
         };
         let b = eff.brackets();
-        let kind = if b.kind_pending {
+        let kind = if b.kind_pending || (b.opens > 0 && (d.kind_val.is_some() || !d.kind_vals.is_empty())) {
             KindSpec::Pending
         } else {
             match b.kind {
@@ -904,7 +907,17 @@ impl Shared {
             MayDefineS::Names(ns) => Some(ns.clone()),
             _ => None,
         };
-        r.data().stat = stat;
+        {
+            let mut d = r.data();
+            // A changed declaration: the effect its last run set (under the
+            // old one) is not this declaration's refutation.
+            if d.stat.effect != stat.effect
+                && let Some(c) = d.res.as_mut()
+            {
+                c.effect = None;
+            }
+            d.stat = stat;
+        }
         if let Some(defs) = &defs {
             for &(f, loc) in defs {
                 let exists = super::rlock(self.shard(u, f))
@@ -1961,6 +1974,20 @@ impl Shared {
     }
 
     /// Recomputes a static count claim.
+    /// The first `n` following siblings of `s` (a run's claim).
+    pub(crate) fn run_claim_list(&self, s: Slot, n: usize) -> Vec<Slot> {
+        let mut list = Vec::new();
+        if n > 0 {
+            self.following(s, s, |x, skipped| {
+                if !skipped {
+                    list.push(x);
+                }
+                list.len() < n
+            });
+        }
+        list
+    }
+
     pub(crate) fn reclaim(&self, c: Slot, notes: &mut Notes) {
         let r = self.rec(c);
         let st = r.st();
@@ -1971,6 +1998,15 @@ impl Shared {
             let claimed = r.data().take_claimed();
             for x in claimed {
                 self.release(x, c, notes);
+            }
+            return;
+        }
+        // Its run's claim over the declared one: the first `n` again.
+        let run = r.data().x.as_ref().and_then(|e| e.claim_run);
+        if let Some(n) = run {
+            let list = self.run_claim_list(c, n);
+            if self.apply_claim(c, &list, notes) {
+                notes.touch.push((c, u32::MAX, Cause::Structure));
             }
             return;
         }

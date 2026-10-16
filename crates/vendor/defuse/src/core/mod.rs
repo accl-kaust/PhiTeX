@@ -503,6 +503,9 @@ pub(crate) struct Extra {
     /// attempt's answer, so siblings past it are not held (cleared when it
     /// runs again from the start).
     pub early_claim: Option<usize>,
+    /// The claim its committed run made over a static `Claim::None` or
+    /// `Count` (a declaration is a guess the run may refute).
+    pub claim_run: Option<usize>,
     /// Where a check of the committed log that waited stopped: the next
     /// check starts there (reset by every touch).
     pub check_from: u32,
@@ -774,6 +777,9 @@ pub(crate) struct Counters {
     pub mispredictions: AtomicU64,
     pub fuel_outs: AtomicU64,
     pub spec_stops: AtomicU64,
+    pub claims_refuted: AtomicU64,
+    pub effects_refuted: AtomicU64,
+    pub claim_siblings: AtomicU64,
     pub sole_successor: AtomicU64,
     pub many_successors: AtomicU64,
     pub kept_successors: AtomicU64,

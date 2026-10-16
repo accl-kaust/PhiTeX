@@ -709,6 +709,13 @@ pub struct Report {
     pub mispredictions: u64,
     pub fuel_outs: u64,
     pub spec_stops: u64,
+    /// Runs whose claim differed from the one in force (a static
+    /// `Claim::None`/`Count` taken as a guess, or the run's last claim).
+    pub claims_refuted: u64,
+    /// Runs whose scope effect differed from the declared one.
+    pub effects_refuted: u64,
+    /// Siblings claimed or released by those claims.
+    pub claim_siblings: u64,
     /// Free-running jobs whose run made exactly one node ready.
     pub sole_successor: u64,
     /// Free-running jobs whose run made two or more ready.
