@@ -2181,10 +2181,13 @@ const DOC_NAME: &str = "\u{10FFFE}document";
 /// Registers the document's analysis for the hints of nodes made from
 /// parts of its slices (`hints::register_text`, by the document's
 /// offsets): when one chunk is the whole document. A document of several
-/// chunks has no whole analysis; such a node's hint answers `Any`.
+/// chunks has no whole analysis; such a node's hint answers `Any` (an
+/// analysis registered for an earlier text of the build is withdrawn).
 fn register_doc(v: &Values, inc: &Incr) {
     if let [c] = inc.chunks.as_slice() {
-        crate::hints::register_text(v.str(DOC_NAME), &c.th);
+        crate::hints::register_text(v, v.str(DOC_NAME), &c.th);
+    } else {
+        crate::hints::unregister_text(v, v.str(DOC_NAME));
     }
 }
 

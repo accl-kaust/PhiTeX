@@ -2314,7 +2314,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
-        crate::hints::register_text(f.name, &t);
+        crate::hints::register_text(self.v, f.name, &t);
         let mut out = Vec::new();
         for &(s, e) in &t.slices {
             if e <= f.off {

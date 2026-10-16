@@ -3041,27 +3041,59 @@ fn hash_str(s: &str) -> u64 {
 
 type Cache<K> = Mutex<FxHashMap<K, Arc<TextHints>>>;
 
-/// By the text, its kind and the definitions (one set per prelude, so
-/// its address identifies it).
-fn texts() -> &'static Cache<(u64, u8, usize)> {
-    static C: OnceLock<Cache<(u64, u8, usize)>> = OnceLock::new();
+/// By the text, its kind and the definitions, by address. The entry
+/// holds a weak reference to the definitions it was made under: an
+/// `Arc`'s allocation never moves and is freed only when its strong and
+/// weak counts are both zero, so while the entry lives no other set can
+/// be allocated at that address (a set dropped is a miss: its `Weak`
+/// no longer upgrades). Keyed by the bare address, a document chunk's
+/// chained definitions (`incr::Incr::chain`, made per build and dropped
+/// with it) could be followed by another set at the same address, which
+/// would get the analysis made under the first.
+/// (`phitex_pdf::digest::blob_hash` memoizes the same way.)
+type TextsCache =
+    Mutex<FxHashMap<(u64, u8, usize), (std::sync::Weak<pass::Definitions>, Arc<TextHints>)>>;
+
+fn texts() -> &'static TextsCache {
+    static C: OnceLock<TextsCache> = OnceLock::new();
     C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
-/// Registers a text's analysis under `name` (a string value): a node
-/// made from part of that text later (the rest of a slice another
-/// command's read-ahead claimed, `Run::leftover`) names it and its
-/// offset, and gets the union hint of its text from the whole analysis
-/// instead of one computed on its own without the definitions.
-pub(crate) fn register_text(name: ValueId, t: &Arc<TextHints>) {
+/// Registers a text's analysis under `name` (a string value) for the
+/// build whose value table is `v`: a node made from part of that text
+/// later (the rest of a slice another command's read-ahead claimed,
+/// `Run::leftover`) names it and its offset, and gets the union hint of
+/// its text from the whole analysis instead of one computed on its own
+/// without the definitions. (Per value table: every document is
+/// registered under the same name, `api::DOC_NAME`, and an `\input`
+/// file by its path, so a registry shared by the builds of a process
+/// gave a node the analysis of another build's document at its offsets
+/// whenever that build had registered one: its hint, and with it its
+/// scope and give-back decisions, depended on what else the process
+/// ran before.)
+pub(crate) fn register_text(v: &Values, name: ValueId, t: &Arc<TextHints>) {
+    let key = (v.instance(), name.raw());
     let mut bn = by_name().lock().unwrap_or_else(PoisonError::into_inner);
-    if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, t)) {
-        bn.insert(name.raw(), t.clone());
+    if !bn.get(&key).is_some_and(|x| Arc::ptr_eq(x, t)) {
+        bn.insert(key, t.clone());
     }
 }
 
-fn by_name() -> &'static Cache<u64> {
-    static C: OnceLock<Cache<u64>> = OnceLock::new();
+/// Withdraws the analysis registered under `name` for the build of `v`
+/// (a document whose text is no longer one analysed whole): its nodes'
+/// hints answer `Any`, as before anything was registered.
+pub(crate) fn unregister_text(v: &Values, name: ValueId) {
+    by_name()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&(v.instance(), name.raw()));
+}
+
+/// (Process-wide, keyed by the value table, because the hint callbacks,
+/// `hint_of_args`, see only the values and the arguments; the build's
+/// `run::Ops` could own it with the callers passing it in.)
+fn by_name() -> &'static Cache<(u64, u64)> {
+    static C: OnceLock<Cache<(u64, u64)>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
@@ -3142,10 +3174,11 @@ pub(crate) fn text_hints_with(
     let named = kind;
     let kind = kind_of(text, kind);
     let key = (hash_str(text), kind as u8, Arc::as_ptr(defs) as usize);
-    if let Some(t) = texts()
+    if let Some((d, t)) = texts()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&key)
+        && d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
     {
         return t.clone();
     }
@@ -3155,7 +3188,7 @@ pub(crate) fn text_hints_with(
     if c.len() > 256 {
         c.clear();
     }
-    c.insert(key, t.clone());
+    c.insert(key, (Arc::downgrade(defs), t.clone()));
     t
 }
 
@@ -3205,10 +3238,7 @@ pub(crate) fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHint
             t
         }
     };
-    let mut bn = by_name().lock().unwrap_or_else(PoisonError::into_inner);
-    if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, &t)) {
-        bn.insert(name.raw(), t.clone());
-    }
+    register_text(v, name, &t);
     t
 }
 
@@ -3231,7 +3261,14 @@ pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
     {
         return h.clone();
     }
-    let h = Arc::new(compute_hint(v, args));
+    let mut registry = false;
+    let h = Arc::new(compute_hint(v, args, &mut registry));
+    if registry {
+        // (a hint read from the registered analysis of a text: the
+        // registry is per build and changes with an edit, the
+        // arguments alone do not name it)
+        return h;
+    }
     let mut c = cache.lock().unwrap_or_else(PoisonError::into_inner);
     if c.len() > 1 << 20 {
         c.clear();
@@ -3241,7 +3278,7 @@ pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
+fn compute_hint(v: &Values, args: &[ValueId], registry: &mut bool) -> Hint {
     // (the hint argument: the string tagged `A` or `B`, wherever the
     // node's other extra arguments put it)
     for &h in args.iter().skip(2) {
@@ -3285,10 +3322,13 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
             }
             if let (Some(&name), Some(&o)) = (xs.get(5), xs.get(6)) {
                 let at = usize::try_from(int_of(v, o)).unwrap_or(0);
+                // (what the registry holds now: not cached by the
+                // arguments, `hint_of_args`)
+                *registry = true;
                 let t = by_name()
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .get(&name.raw())
+                    .get(&(v.instance(), name.raw()))
                     .cloned();
                 return match t {
                     Some(t) => t.at_until(at, at + text.len()),

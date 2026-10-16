@@ -171,7 +171,7 @@ fn add(
             };
             if document_file(&path, &t) && plain_input(&t) {
                 let h = crate::hints::text_hints(&t, FileKind::Document, defs);
-                crate::hints::register_text(v.str(&path), &h);
+                crate::hints::register_text(v, v.str(&path), &h);
                 read.push(name.clone());
                 seen.push(name);
                 add(
