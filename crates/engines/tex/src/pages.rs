@@ -173,6 +173,10 @@ pub(crate) struct PageState {
     /// The decisions of the page the last `build` fired (kept for the
     /// scan check, [`crate::vprof::check`]).
     pub fired: Option<crate::vprof::Decision>,
+    /// The pages fired so far whose `\outputpenalty` is above -10001
+    /// (the ordinary ones: the finishers' predictions step page
+    /// counters by these, [`FinDefs::predict`]).
+    pub normal: i64,
 }
 
 /// A page finishing: at candidate `k`, the finisher's page data, the
@@ -213,6 +217,7 @@ impl PageState {
             page_ids: Vec::new(),
             discard_ids: Vec::new(),
             fired: None,
+            normal: 0,
         }
     }
 
@@ -298,6 +303,7 @@ impl PageState {
             page_ids,
             discard_ids,
             fired: None,
+            normal: xs.get(27).map_or(0, |&x| int_of(v, x)),
         }
     }
 
@@ -362,6 +368,7 @@ impl PageState {
         xs.push(i(i64::try_from(self.fold.since_bp).unwrap_or(0)));
         xs.push(self.params.unwrap_or(ValueId::UNIT));
         xs.push(v.list(self.pending.clone()));
+        xs.push(i(self.normal));
         v.list(xs)
     }
 
@@ -547,6 +554,9 @@ impl PageState {
                     self.page_ids.clear();
                     self.discard_ids.clear();
                     self.j += 1;
+                    if f.output_penalty > -10001 {
+                        self.normal += 1;
+                    }
                     self.fold.since_bp = 0;
                     buf.clear();
                     return Ok(Some(Fire {
@@ -592,6 +602,11 @@ pub(crate) fn class_of(v: &Values, m: ValueId) -> (u16, InsertClass) {
             skip: glue_of(v, xs.get(6).copied()),
         },
     )
+}
+
+/// Whether a fired page's `\outputpenalty` is -10001 or less.
+fn fire_special(v: &Values, data: ValueId) -> bool {
+    list_of(v, data).get(4).is_some_and(|&x| int_of(v, x) <= -10001)
 }
 
 /// A fired page as a finisher gets it: `[\box255, inserts, marks, held,
@@ -1218,6 +1233,7 @@ impl Run<'_, '_> {
         let e = ps.encode(v);
         self.cx.define_with(f, e, Locality::Global);
         let j = ps.j - 1;
+        let normal = ps.normal;
         cache.put(e, ps);
         let (cont, locals) = if at_end {
             (None, Vec::new())
@@ -1229,6 +1245,8 @@ impl Run<'_, '_> {
         let mut fargs = vec![v.int(j), fire.data, v.list(if fold_chain() { fire.carried.clone() } else { Vec::new() }), v.list(locals)];
         fargs.extend([ValueId::UNIT; 5]);
         fargs.push(text);
+        fargs.push(v.int(normal));
+        fargs.push(v.int(i64::from(fire_special(v, fire.data))));
         self.cx.follow(self.ops.finish, fargs);
         if !fin {
             self.place_continuation(fire.data, fire.carried, Vec::new());
@@ -2188,7 +2206,7 @@ impl FinDefs {
                 // (the marks are the page's text: equal on two pages by
                 // chance; the scan knows them, spec §3)
                 let name = crate::val::field_name(v, f);
-                if name.starts_with("mark") || name == "param:outputpenalty" {
+                if name.starts_with("mark") || name.starts_with("cs:g__mark_") || name == "param:outputpenalty" {
                     return None;
                 }
                 let &(_, y) = self.prev.iter().find(|d| d.0 == f)?;
@@ -2225,6 +2243,16 @@ const FINISHER_FIELDS: &[&str] = &[
     "pdf:",
 ];
 
+/// A finisher's entry in `Ops::fin_defs`: its routine (the hint `t`)
+/// and whether its page is an ordinary one or one fired at a penalty
+/// of -10001 or less (`\outputpenalty` is in the page data): such a
+/// routine run (LaTeX's float and `\clearpage` handling) defines other
+/// things and ships nothing; predicted from runs of its own kind.
+fn fin_key(v: &Values, t: ValueId, args: &[ValueId]) -> u64 {
+    let special = crate::exec::env_flag!("PHITEX_FIN_KIND") && args.get(11).is_some_and(|&x| v.as_int(x) == Some(1));
+    t.raw() ^ u64::from(special).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
 /// Finishers created with a prediction of their definitions, and
 /// without (reported with `PHITEX_TEX_TIME`).
 pub(crate) static FIN_PREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2236,12 +2264,12 @@ impl Finish {
         if t == ValueId::UNIT || crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT") {
             return None;
         }
-        let j = args.first().map_or(0, |&x| int_of(v, x));
+        let j = args.get(10).map_or(0, |&x| int_of(v, x));
         let stable = ops(&self.0)
             .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&t.raw())
+            .get(&fin_key(v, t, args))
             .map(|d| if fold_chain() || crate::exec::env_flag!("PHITEX_NO_STEP") { d.stable() } else { d.predict(v, j) })?;
         (!stable.is_empty()).then_some(stable)
     }
@@ -2273,7 +2301,7 @@ impl Operation for Finish {
             .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&t.raw())
+            .get(&fin_key(v, t, args))
             .map(FinDefs::names);
         if let Some(mut names) = known
             && !crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
@@ -2465,7 +2493,9 @@ impl Run<'_, '_> {
             t.defs.extend(gdefs);
         }
         let Some(&t) = args.get(9) else { return };
-        if t == ValueId::UNIT {
+        // (a speculative run's definitions may be refuted: they would
+        // seed the predictions of the finishers after it)
+        if t == ValueId::UNIT || self.cx.is_speculative() {
             return;
         }
         let mut out = Vec::new();
@@ -2480,13 +2510,15 @@ impl Run<'_, '_> {
         if let Some(x) = self.fin.as_ref().and_then(|c| c.rtn) {
             out.push((v.field(RTN), x));
         }
-        let j = args.first().map_or(0, |&x| int_of(v, x));
+        // (the ordinary pages fired up to this one: page counters step
+        // by them)
+        let j = args.get(10).map_or(0, |&x| int_of(v, x));
         let mut m = self
             .ops
             .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let e = m.entry(t.raw()).or_default();
+        let e = m.entry(fin_key(v, t, args)).or_default();
         for &(f, _) in &out {
             if !e.seen.contains(&f) {
                 e.seen.push(f);
@@ -2672,6 +2704,7 @@ impl Run<'_, '_> {
         let e = ps.encode(v);
         self.cx.define_with(f, e, Locality::Global);
         let j = ps.j - 1;
+        let normal = ps.normal;
         cache.put(e, ps);
         let mut fargs = vec![v.int(j), fire.data, v.list(if fold_chain() { fire.carried.clone() } else { Vec::new() }), v.list(Vec::new())];
         if at_end {
@@ -2690,6 +2723,8 @@ impl Run<'_, '_> {
             ]);
         }
         fargs.push(self.output_hint()?);
+        fargs.push(v.int(normal));
+        fargs.push(v.int(i64::from(fire_special(v, fire.data))));
         self.cx.follow(self.ops.finish, fargs);
         let rest = if at_end && !cont { Vec::new() } else { fire.rest };
         self.place_continuation(fire.data, fire.carried, rest);
