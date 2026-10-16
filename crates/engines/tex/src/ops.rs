@@ -75,6 +75,11 @@ pub(crate) fn run_node_parking(
         );
     }
     let parks = parks && !crate::exec::env_flag!("PHITEX_NO_PARK");
+    let pp = if cx.op() == o.exec {
+        crate::prof::start()
+    } else {
+        None
+    };
     let parked = if parks { cx.parked() } else { None };
     let mut r = match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
         Some(Ok(p)) => match Run::from_parked(cx, o.clone(), *p) {
@@ -104,7 +109,9 @@ pub(crate) fn run_node_parking(
     // the state it now reads finishes it, or not stopping)
     let mut passes = 1usize;
     while matches!(res, Ok(()) | Err(Halt::Cut)) {
+        let tf = pp.and_then(|_| crate::prof::start());
         res = r.page_fold();
+        crate::prof::add(crate::prof::FOLD, tf);
         let again = match (r.cut, r.stop_at) {
             _ if res.is_err() => None,
             (Some(k), s) if s != Some(k) => Some(Some(k)),
@@ -196,7 +203,13 @@ pub(crate) fn run_node_parking(
                 return Err(s);
             }
             let t = std::time::Instant::now();
+            let tf = pp.and_then(|_| crate::prof::start());
             let x = r.finish();
+            crate::prof::add(crate::prof::FINISH, tf);
+            if pp.is_some() {
+                crate::prof::add(crate::prof::RUN, pp);
+                crate::prof::run();
+            }
             if timed {
                 eprintln!(
                     "run: finish {:?}, memory MB resident/peak {:?}",

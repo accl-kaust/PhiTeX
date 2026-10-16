@@ -51,6 +51,7 @@ mod pdfrelaxed;
 mod pkgrec;
 mod prims;
 mod print;
+mod prof;
 mod run;
 mod runstate;
 mod scan;

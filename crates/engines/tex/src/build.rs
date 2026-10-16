@@ -747,12 +747,29 @@ impl Run<'_, '_> {
         items: &[ValueId],
         display: bool,
     ) -> R<Option<BoxNode>> {
+        let t0 = crate::prof::start();
+        crate::prof::paragraph();
+        let r = self.line_break_(md, items, display);
+        crate::prof::add(crate::prof::LB, t0);
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn line_break_(
+        &mut self,
+        md: &Mode,
+        items: &[ValueId],
+        display: bool,
+    ) -> R<Option<BoxNode>> {
         let v = self.v;
+        let t0 = crate::prof::start();
         let mut side = Side::default();
         let list: List = items
             .iter()
             .filter_map(|&x| nodes::decode(v, x, &mut side))
             .collect();
+        crate::prof::add(crate::prof::LB_DEC, t0);
+        let t0 = crate::prof::start();
         let view = self.font_view(&list)?;
         let shape = self
             .get_loc(crate::fields::cell::PARSHAPE)?
@@ -827,7 +844,11 @@ impl Run<'_, '_> {
             uc_hyph,
             hyphen_char: &hcf,
         };
+        crate::prof::add(crate::prof::LB_PARAMS, t0);
+        let t0 = crate::prof::start();
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
+        crate::prof::add(crate::prof::LB_TS, t0);
+        let t0 = crate::prof::start();
         let mut vm = md.clone();
         vm.lid = md.vlid;
         let just_box = para.lines.last().map(|l| l.packed.node.clone());
@@ -845,6 +866,7 @@ impl Run<'_, '_> {
             }
         }
         self.set_prev_graf(md, para.prev_graf);
+        crate::prof::add(crate::prof::LB_COMMIT, t0);
         Ok(just_box)
     }
 
@@ -1679,6 +1701,14 @@ impl Run<'_, '_> {
     /// after it, while the input lasts without claiming more.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn char_run(&mut self, md: &Mode, cancel: bool) -> R<()> {
+        let t0 = crate::prof::start();
+        let r = self.char_run_(md, cancel);
+        crate::prof::add(crate::prof::CHAR, t0);
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn char_run_(&mut self, md: &Mode, cancel: bool) -> R<()> {
         let v = self.v;
         let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
         let mut view = crate::fonts::View::default();
@@ -1767,6 +1797,7 @@ impl Run<'_, '_> {
         if sf != SF_UNREAD {
             raws.push((out.len(), sf_value(v, sf)));
         }
+        let te = crate::prof::start();
         let side = Side::default();
         let mut raws = raws.into_iter().peekable();
         for (k, n) in out.iter().enumerate() {
@@ -1779,6 +1810,7 @@ impl Run<'_, '_> {
         for (_, r) in raws {
             self.append(md.lid, r);
         }
+        crate::prof::add(crate::prof::CHAR_ENC, te);
         Ok(())
     }
 
