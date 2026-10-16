@@ -530,14 +530,10 @@ fn last_node_type(r: &mut Run<'_, '_>) -> R<i32> {
         return Ok(-1);
     }
     let md = r.mode()?;
-    let (items, since_bp) = r.list_items(md.lid)?;
+    let (last, since_bp) = r.list_last(md.lid)?;
     let v = r.v;
     let main = md.lid == 0 && md.km == 1;
-    let tail = if main && since_bp == 0 {
-        None
-    } else {
-        items.last().copied()
-    };
+    let tail = if main && since_bp == 0 { None } else { last };
     let Some(t) = tail else { return Ok(-1) };
     Ok(match nodes::tag(v, t) {
         nodes::T_CHAR => 0,

@@ -2435,7 +2435,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.abandon_levels(&nest);
                 for l in nest {
                     if l.owns {
-                        for x in l.list {
+                        for x in crate::nest::into_values(self.v, l.list) {
                             self.append(0, x);
                         }
                     }
@@ -3007,7 +3007,7 @@ struct PLevel {
     group: i64,
     lid: i64,
     owns: bool,
-    list: Vec<ValueId>,
+    list: Vec<crate::nest::Item>,
     fold: crate::build::FoldState,
     par: Option<(i64, i64)>,
     prev_graf: i64,

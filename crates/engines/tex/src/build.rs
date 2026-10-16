@@ -185,7 +185,7 @@ impl Run<'_, '_> {
         self.abandon_levels(&nest);
         for l in nest {
             if self.claim_rest && l.owns {
-                for x in l.list {
+                for x in crate::nest::into_values(self.v, l.list) {
                     self.append(0, x);
                 }
             }
@@ -201,7 +201,7 @@ impl Run<'_, '_> {
         self.abandon_levels(&nest);
         for l in nest {
             if l.owns && l.lid == 0 {
-                for x in l.list {
+                for x in crate::nest::into_values(self.v, l.list) {
                     self.append(0, x);
                 }
             }
@@ -405,6 +405,19 @@ impl Run<'_, '_> {
     /// `tail_append` to list `lid`: a list of this run's grows here, its
     /// transitions folded; a list of the engine's scope (the main
     /// vertical list, a box a format line left open) gets a contribution.
+    /// [`Self::append`] of a node without marks or whatsits: kept native
+    /// on a list of this run's ([`crate::nest::Item`]), encoded for the
+    /// engine's.
+    pub(crate) fn append_node(&mut self, lid: i64, node: Node) {
+        if let Some(l) = self.level_of(lid) {
+            l.list.push(crate::nest::Item::N(node));
+            l.fold.since_bp += 1;
+            return;
+        }
+        let x = nodes::encode(self.v, &node, &Side::default());
+        self.append(lid, x);
+    }
+
     pub(crate) fn append(&mut self, lid: i64, node: ValueId) {
         let v = self.v;
         if let Some(l) = self.level_of(lid) {
@@ -434,8 +447,9 @@ impl Run<'_, '_> {
     /// opener appended, then the contributions after the opener (the main
     /// list, opened by no node: from the unit's start).
     pub(crate) fn list_items(&mut self, lid: i64) -> R<(Vec<ValueId>, usize)> {
+        let v = self.v;
         if let Some(l) = self.level_of(lid) {
-            return Ok((l.list.clone(), l.list.len()));
+            return Ok((crate::nest::values(v, &mut l.list), l.list.len()));
         }
         let f = self.list_fold(lid)?;
         // the page builder's markers are no list material
@@ -444,11 +458,22 @@ impl Run<'_, '_> {
         Ok((items, f.since_bp))
     }
 
+    /// The items of list `lid` as [`Self::list_items`] has them, a list
+    /// of this run's with its native nodes as they are.
+    pub(crate) fn list_own_items(&mut self, lid: i64) -> R<Vec<crate::nest::Item>> {
+        if let Some(l) = self.level_of(lid) {
+            return Ok(l.list.clone());
+        }
+        Ok(crate::nest::of_values(self.list_items(lid)?.0))
+    }
+
     /// The last item of list `lid` and the count [`Self::list_items`]
     /// gives, without copying a local list.
     pub(crate) fn list_last(&mut self, lid: i64) -> R<(Option<ValueId>, usize)> {
+        let v = self.v;
         if let Some(l) = self.level_of(lid) {
-            return Ok((l.list.last().copied(), l.list.len()));
+            let n = l.list.len();
+            return Ok((l.list.last_mut().map(|x| x.value(v)), n));
         }
         let (items, since) = self.list_items(lid)?;
         Ok((items.last().copied(), since))
@@ -669,7 +694,7 @@ impl Run<'_, '_> {
             // §1096: error_count:=0
             self.error_count = 0;
             if !items.is_empty() {
-                self.line_break(md, &items, false)?;
+                self.line_break(md, items, false)?;
             }
             self.normal_paragraph()?;
         }
@@ -697,7 +722,7 @@ impl Run<'_, '_> {
     /// groups stay open, now in the vertical list the paragraph was in
     /// (their saved definitions restored at their own close, as ever).
     /// Returns the paragraph's list.
-    pub(crate) fn end_graf_under_groups(&mut self, k: usize) -> R<Vec<ValueId>> {
+    pub(crate) fn end_graf_under_groups(&mut self, k: usize) -> R<Vec<crate::nest::Item>> {
         let (mode, lid) = if let Some(b) = k.checked_sub(1) {
             (self.nest[b].mode, self.nest[b].lid)
         } else {
@@ -807,15 +832,35 @@ impl Run<'_, '_> {
     pub(crate) fn line_break(
         &mut self,
         md: &Mode,
-        items: &[ValueId],
+        items: Vec<crate::nest::Item>,
+        display: bool,
+    ) -> R<Option<BoxNode>> {
+        let t0 = crate::prof::start();
+        crate::prof::paragraph();
+        let r = self.line_break_(md, items, display);
+        crate::prof::add(crate::prof::LB, t0);
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn line_break_(
+        &mut self,
+        md: &Mode,
+        items: Vec<crate::nest::Item>,
         display: bool,
     ) -> R<Option<BoxNode>> {
         let v = self.v;
+        let t0 = crate::prof::start();
         let mut side = Side::default();
         let list: List = items
-            .iter()
-            .filter_map(|&x| nodes::decode(v, x, &mut side))
+            .into_iter()
+            .filter_map(|x| match x {
+                crate::nest::Item::N(n) => Some(n),
+                crate::nest::Item::V(x) => nodes::decode(v, x, &mut side),
+            })
             .collect();
+        crate::prof::add(crate::prof::LB_DEC, t0);
+        let t0 = crate::prof::start();
         let view = self.font_view(&list)?;
         let shape = self
             .get_loc(crate::fields::cell::PARSHAPE)?
@@ -890,7 +935,11 @@ impl Run<'_, '_> {
             uc_hyph,
             hyphen_char: &hcf,
         };
+        crate::prof::add(crate::prof::LB_PARAMS, t0);
+        let t0 = crate::prof::start();
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
+        crate::prof::add(crate::prof::LB_TS, t0);
+        let t0 = crate::prof::start();
         let mut vm = md.clone();
         vm.lid = md.vlid;
         let just_box = para.lines.last().map(|l| l.packed.node.clone());
@@ -908,6 +957,7 @@ impl Run<'_, '_> {
             }
         }
         self.set_prev_graf(md, para.prev_graf);
+        crate::prof::add(crate::prof::LB_COMMIT, t0);
         Ok(just_box)
     }
 
@@ -1083,8 +1133,7 @@ impl Run<'_, '_> {
                 if md.m.abs() == 203 {
                     None
                 } else {
-                    let (items, since) = self.list_items(md.lid)?;
-                    let last = items.last().copied();
+                    let (last, since) = self.list_last(md.lid)?;
                     let ok = last.is_some_and(|x| nodes::tag(v, x) == nodes::T_BOX)
                         && !(md.m == 1 && since == 0);
                     if ok {
@@ -1514,16 +1563,22 @@ impl Run<'_, '_> {
                     Spec::Additional(amount)
                 };
                 let depth_limit = self.ipar(Par::boxmaxdepth)?;
-                let (items, _) = self.list_items(md.lid)?;
+                let items = self.list_own_items(md.lid)?;
                 let mut side = Side::default();
                 let mut kept = Vec::with_capacity(items.len());
                 let list: List = items
-                    .iter()
-                    .filter_map(|&y| {
-                        // (the items measured: a box's list stays encoded)
-                        let n = nodes::decode_shallow(v, y, &mut side)?;
-                        kept.push(y);
-                        Some(n)
+                    .into_iter()
+                    .filter_map(|y| match y {
+                        crate::nest::Item::N(n) => {
+                            kept.push(nodes::encode(v, &n, &Side::default()));
+                            Some(n)
+                        }
+                        crate::nest::Item::V(y) => {
+                            // (the items measured: a box's list stays encoded)
+                            let n = nodes::decode_shallow(v, y, &mut side)?;
+                            kept.push(y);
+                            Some(n)
+                        }
                     })
                     .collect();
                 let adjusted = md.group == group::ADJUSTED_HBOX;
@@ -1742,6 +1797,14 @@ impl Run<'_, '_> {
     /// after it, while the input lasts without claiming more.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn char_run(&mut self, md: &Mode, cancel: bool) -> R<()> {
+        let t0 = crate::prof::start();
+        let r = self.char_run_(md, cancel);
+        crate::prof::add(crate::prof::CHAR, t0);
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn char_run_(&mut self, md: &Mode, cancel: bool) -> R<()> {
         let v = self.v;
         let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
         let mut view = crate::fonts::View::default();
@@ -1830,18 +1893,20 @@ impl Run<'_, '_> {
         if sf != SF_UNREAD {
             raws.push((out.len(), sf_value(v, sf)));
         }
+        let te = crate::prof::start();
         let side = Side::default();
         let mut raws = raws.into_iter().peekable();
-        for (k, n) in out.iter().enumerate() {
+        let _ = &side;
+        for (k, n) in out.into_iter().enumerate() {
             while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
                 self.append(md.lid, r);
             }
-            let x = nodes::encode(v, n, &side);
-            self.append(md.lid, x);
+            self.append_node(md.lid, n);
         }
         for (_, r) in raws {
             self.append(md.lid, r);
         }
+        crate::prof::add(crate::prof::CHAR_ENC, te);
         Ok(())
     }
 
@@ -2327,7 +2392,7 @@ impl Run<'_, '_> {
         let last = if self.mode_zero {
             None
         } else {
-            self.list_items(md.lid)?.0.last().copied()
+            self.list_last(md.lid)?.0
         };
         let v = self.v;
         let tag = last.map_or(-1, |x| nodes::tag(v, x));
@@ -2507,16 +2572,14 @@ pub(crate) fn fold_item(
     lid: i64,
     n: ValueId,
     st: &mut FoldState,
-    out: &mut Vec<ValueId>,
+    out: &mut impl FoldOut,
 ) {
     let _ = lid;
     match nodes::tag(v, n) {
         T_DELETE => {
             if st.since_bp > 0 {
                 // the last node, seen through the page builder's markers
-                if let Some(i) = out.iter().rposition(|&x| !is_marker(v, x)) {
-                    out.remove(i);
-                }
+                out.delete_last(v);
                 st.since_bp -= 1;
             }
         }
@@ -2527,7 +2590,7 @@ pub(crate) fn fold_item(
         | nodes::T_FONT_AT
         | nodes::T_PDFW_AT
         | nodes::T_SET_PAGE
-        | nodes::T_INS_PARAMS => out.push(n),
+        | nodes::T_INS_PARAMS => out.push_v(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2540,10 +2603,10 @@ pub(crate) fn fold_item(
             let lsl = i32::try_from(crate::val::int_at(v, n, 4)).unwrap_or(0);
             let ht = nodes::box_dim(v, b, 3);
             if let Some(g) = phitex_typeset::linebreak::interline_glue(st.pd, ht, bs, ls, lsl) {
-                out.push(nodes::encode(v, &g, &Side::default()));
+                out.push_v(nodes::encode(v, &g, &Side::default()));
                 st.since_bp += 1;
             }
-            out.push(b);
+            out.push_v(b);
             st.since_bp += 1;
             st.pd = nodes::box_dim(v, b, 2);
         }
@@ -2553,12 +2616,42 @@ pub(crate) fn fold_item(
             st.sf = if k == 0 || st.sf >= 1000 { s } else { 1000 };
         }
         T_SPACE => {
-            out.push(resolve_space(v, n, st.sf));
+            out.push_v(resolve_space(v, n, st.sf));
             st.since_bp += 1;
         }
         _ => {
-            out.push(n);
+            out.push_v(n);
             st.since_bp += 1;
+        }
+    }
+}
+
+/// What [`fold_item`] folds into: a list of values (an engine list's
+/// reader), or a list of this run's items ([`crate::nest::Item`]).
+pub(crate) trait FoldOut {
+    fn push_v(&mut self, x: ValueId);
+    /// Removes the last item that is not a page builder's marker.
+    fn delete_last(&mut self, v: &Values);
+}
+
+impl FoldOut for Vec<ValueId> {
+    fn push_v(&mut self, x: ValueId) {
+        self.push(x);
+    }
+    fn delete_last(&mut self, v: &Values) {
+        if let Some(i) = self.iter().rposition(|&x| !is_marker(v, x)) {
+            self.remove(i);
+        }
+    }
+}
+
+impl FoldOut for Vec<crate::nest::Item> {
+    fn push_v(&mut self, x: ValueId) {
+        self.push(crate::nest::Item::V(x));
+    }
+    fn delete_last(&mut self, v: &Values) {
+        if let Some(i) = self.iter().rposition(|x| !x.is_marker(v)) {
+            self.remove(i);
         }
     }
 }

@@ -1297,7 +1297,7 @@ impl Run<'_, '_> {
             lines_entered: self.lines_entered,
             top_list: top.map_or(0, |l| l.list.len()),
             top_last: top
-                .and_then(|l| l.list.last().map(|x| x.raw()))
+                .and_then(|l| l.list.last().map(crate::nest::Item::sig))
                 .unwrap_or(0),
             top_ag: top.map_or(0, |l| l.ag.len()),
             top_extra: top.map_or(0, |l| l.extra.len()),
