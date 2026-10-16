@@ -230,6 +230,9 @@ impl Run<'_, '_> {
                 self.prepare_record(b)?;
             }
         }
+        if self.nest.len() > 1 {
+            return self.leave_frames(base, parent);
+        }
         let Some(l) = self.nest.pop() else {
             return Ok(());
         };
@@ -285,6 +288,66 @@ impl Run<'_, '_> {
             before: false,
             kind: Some(kind),
             kind_pending: false,
+        });
+        Ok(())
+    }
+
+    /// Leaves the run's open groups (several, each sharing the list
+    /// below it) to the engine as nested scopes, one frame per group,
+    /// outermost first (`new_save_level` once per group, §274): frame
+    /// `k`'s kind is group `k`'s, `[group, sid, list, mode, depth, parent
+    /// kind, extra…]`, its parent kind frame `k - 1`'s (the scope the run
+    /// runs in for frame 0), its sid its own; group `k`'s local
+    /// definitions are frame `k`'s (`Ctx::define_in_scope_at`), its
+    /// `\aftergroup` tokens frame `k`'s `ag` list. The run's definitions
+    /// at its base level lie outside them all.
+    fn leave_frames(&mut self, base: crate::build::Mode, parent: ValueId) -> R<()> {
+        let v = self.v;
+        let levels = std::mem::take(&mut self.nest);
+        let n = levels.len();
+        let sid0 = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        let sid = |k: usize| sid0.wrapping_add(i64::try_from(k).unwrap_or(0));
+        let mut kinds = Vec::with_capacity(n);
+        let mut outer = parent;
+        for (k, l) in levels.iter().enumerate() {
+            let mut xs = vec![
+                v.int(l.group),
+                v.int(sid(k)),
+                v.int(base.lid),
+                v.int(i64::from(l.mode)),
+                v.int(base.depth + 1 + i64::try_from(k).unwrap_or(0)),
+                outer,
+            ];
+            xs.extend(l.extra.iter().copied());
+            outer = v.list(xs);
+            kinds.push(outer);
+        }
+        let spans: Vec<(usize, usize, u64)> = levels
+            .iter()
+            .map(|l| (l.save_base, l.def_base, l.open_stamp))
+            .collect();
+        self.st.abandon_to_frames(&spans);
+        let f = self.ops.fields.get_at(v, self.cx.values_epoch(), "ag");
+        let loc = self.loc_of(f);
+        for (k, l) in levels.iter().enumerate() {
+            if l.ag.is_empty() {
+                continue;
+            }
+            let mut xs = vec![v.int(sid(k))];
+            xs.extend(l.ag.iter().map(|t| t.encode(v)));
+            self.st.define_frame_extra(
+                loc,
+                crate::runstate::Native::Raw(v.list(xs)),
+                u8::try_from(k).unwrap_or(u8::MAX - 2),
+            );
+        }
+        self.cx.set_kinds(&kinds);
+        self.effect = Effect::Scope(phitex_defuse::Brackets {
+            closes: 0,
+            opens: u8::try_from(n).unwrap_or(u8::MAX),
+            before: false,
+            kind: None,
+            kind_pending: true,
         });
         Ok(())
     }

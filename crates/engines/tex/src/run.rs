@@ -939,6 +939,27 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         let v = self.v;
+        // (cells the run defines in the frames it opens after itself,
+        // one per group it left open, `Locality::ScopeAt`: the record is
+        // stale in each such frame, its readers there read the cells;
+        // the rest below is made from the other definitions)
+        let defs = {
+            let mut defs = defs;
+            let mut stale: Vec<(usize, Locality)> = Vec::new();
+            for d in &defs {
+                if let (Locality::ScopeAt(_), Some(r)) = (d.2, crate::fields::record_of(d.0 as usize))
+                    && !stale.contains(&(r.0, d.2))
+                {
+                    stale.push((r.0, d.2));
+                }
+            }
+            for (b, l) in stale {
+                let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
+                self.rec_out.push((f, v.list(Vec::new()), l));
+            }
+            defs.retain(|d| !matches!(d.2, Locality::ScopeAt(_)));
+            defs
+        };
         let mut inside = None;
         for b in 0..crate::fields::RECORDS.len() {
             let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
@@ -1869,11 +1890,21 @@ impl<'c, 'a> Run<'c, 'a> {
         let mut out = Vec::new();
         let defs = self.st.published(v, self.rec_load);
         for b in 0..crate::fields::RECORDS.len() {
-            let mine: Vec<Locality> = defs
+            let mut mine: Vec<Locality> = defs
                 .iter()
                 .filter(|d| crate::fields::record_of(d.0 as usize).is_some_and(|r| r.0 == b))
                 .map(|d| d.2)
                 .collect();
+            // (stale in each frame the run opens with cells of it)
+            let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
+            let mut frames: Vec<Locality> =
+                mine.iter().copied().filter(|l| matches!(l, Locality::ScopeAt(_))).collect();
+            frames.sort_unstable();
+            frames.dedup();
+            for l in frames {
+                out.push((f, v.list(Vec::new()), l));
+            }
+            mine.retain(|l| !matches!(l, Locality::ScopeAt(_)));
             if mine.is_empty() {
                 continue;
             }
@@ -1884,7 +1915,6 @@ impl<'c, 'a> Run<'c, 'a> {
             } else {
                 Locality::Local
             };
-            let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
             out.push((f, v.list(Vec::new()), l));
         }
         out
@@ -2395,13 +2425,12 @@ impl<'c, 'a> Run<'c, 'a> {
             // into the next sibling, claimed
             if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && self.doc && self.open_span() {
                 eprintln!(
-                    "readon: node {} pulled {}: nest {:?}, conds {}, effect {:?}, opens {}, baselocal {}",
+                    "readon: node {} pulled {}: nest {:?}, conds {}, effect {:?}, baselocal {}",
                     self.cx.node().raw(),
                     self.pulled,
                     self.nest.iter().map(|l| (l.mode, l.group, l.owns)).collect::<Vec<_>>(),
                     self.conds.len(),
                     self.effect,
-                    self.text_opens_group(),
                     self.st.has_base_local_def(self.v)
                 );
             }
@@ -2427,50 +2456,23 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    /// Whether the run is a document region with exactly one group of
-    /// its own open (sharing the list below it), nothing else open, no
-    /// scope effect yet, and a text that does not say it opens none: the
-    /// group can be left to the engine as a scope (`Run::leave_scope`;
-    /// a field the run defines at its level and the group inside it has
-    /// two entries, the scope's by `Ctx::define_in_scope`).
+    /// Whether the run's own open levels can be left to the engine as
+    /// nested scopes (`Run::leave_scope`): a text piece or a resume, at
+    /// least one level open and every one a group sharing the list below
+    /// it (a list of the run's own cannot be handed over), no conditional
+    /// open, no scope effect yet, and a text that does not say it opens
+    /// none. Each group is a frame; a field the run defines at its level
+    /// and a group inside it has an entry for each
+    /// (`Ctx::define_in_scope`, `Ctx::define_in_scope_at`).
     pub(crate) fn can_leave_scope(&self) -> bool {
-        self.doc
+        let op = self.cx.op();
+        (op == self.ops.exec || op == self.ops.resume)
+            && !self.nest.is_empty()
+            && self.nest.len() < usize::from(u8::MAX - 2)
             && self.conds.is_empty()
             && self.effect == Effect::None
-            && self.nest.len() == 1
-            && !self.nest[0].owns
-            && matches!(
-                self.nest[0].group,
-                crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
-            )
+            && self.nest.iter().all(|l| !l.owns && l.group != 0)
             && !crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
-            && self.text_opens_group()
-    }
-
-    /// Whether the node's own text opens a group it does not close (an
-    /// unmatched `\\begin{...}`, `\\begingroup` or `\\bgroup`; a brace
-    /// of the text is never split between slices, `hints::slices_of`):
-    /// the group its run leaves open is the text's, not one a command
-    /// left open while it still reads on (a loading command's, a
-    /// macro's).
-    fn text_opens_group(&self) -> bool {
-        let text: String = decode_segs(self.v, &self.cx.args())
-            .iter()
-            .filter_map(|f| match f {
-                Seg::Line(s) => Some(
-                    s.buf
-                        .iter()
-                        .map(|&c| char::from_u32(c).unwrap_or('?'))
-                        .collect::<String>(),
-                ),
-                _ => None,
-            })
-            .collect();
-        let n = |p: &str| i64::try_from(text.matches(p).count()).unwrap_or(0);
-        (n("\\begin{") - n("\\end{"))
-            + (n("\\begingroup") - n("\\endgroup"))
-            + (n("\\bgroup") - n("\\egroup"))
-            > 0
     }
 
     /// Whether the text the run reads next begins (after blanks) with a

@@ -734,9 +734,9 @@ impl Run<'_, '_> {
     pub(crate) fn has_input(&self) -> bool {
         // (the levels on top: a list with tokens left, a line with
         // characters left, a file with lines; a document file's lines
-        // left for the region children stop the run: what follows the
-        // file, its end marker included, is read after them,
-        // [`Run::leftover`])
+        // left for the region children stop the run, also inside groups
+        // of the run's own it leaves as scopes: what follows the file,
+        // its end marker included, is read after them, [`Run::leftover`])
         for l in self.input.levels.iter().rev() {
             let more = match l.kind {
                 kind::TOKS => l.a < l.b,
@@ -746,7 +746,10 @@ impl Run<'_, '_> {
                     if !f.has_lines() {
                         continue;
                     }
-                    if self.doc && !self.open_span() && self.doc_file(f) {
+                    if self.doc
+                        && (!self.open_span() || self.can_leave_scope())
+                        && self.doc_file(f)
+                    {
                         return false;
                     }
                     true
@@ -764,7 +767,10 @@ impl Run<'_, '_> {
                     if !f.has_lines() {
                         continue;
                     }
-                    if self.doc && !self.open_span() && self.doc_file(f) {
+                    if self.doc
+                        && (!self.open_span() || self.can_leave_scope())
+                        && self.doc_file(f)
+                    {
                         return false;
                     }
                     true
