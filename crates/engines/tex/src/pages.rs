@@ -977,10 +977,11 @@ impl Run<'_, '_> {
 
     /// Whether a page finishing inside this piece would need a cut, as
     /// far as the finishers so far tell (`Ops::fin_touch`): the piece
-    /// read a field a routine defines (the page number), or defined
-    /// after its first candidate (or locally anywhere) a field a routine
-    /// reads. Then the piece folds in its own run: a finisher's check
+    /// read a field a routine defines with a new value (the page
+    /// number). Then the piece folds in its own run: a finisher's check
     /// would ask for the cut a round later, at the chain's cost.
+    /// (`PHITEX_OWNFOLD_DEFS`: also when it defined after its first
+    /// candidate a field a routine reads, as before.)
     fn needs_own_fold(&mut self) -> R<bool> {
         let n = self.cand_marks.len();
         if n == 0 || (n == 1 && self.last_candidate() == Some(0)) {
@@ -1002,6 +1003,14 @@ impl Run<'_, '_> {
                 }
                 return Ok(true);
             }
+        }
+        // (what the piece defined after a candidate that a routine reads
+        // is the finisher's check's ([`Run::check_cut`]), where a page
+        // does finish inside the piece: decided here, every piece with
+        // two candidates on a page would read the page state, and run
+        // again with every change of the page above it)
+        if !crate::exec::env_flag!("PHITEX_OWNFOLD_DEFS") {
+            return Ok(false);
         }
         let m0 = self.cand_marks[0];
         let mut defs: Vec<Loc> = self

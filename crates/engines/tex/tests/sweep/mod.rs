@@ -537,10 +537,13 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
     let t0 = std::time::Instant::now();
     let mut b = cold(name, &dir, epoch, &src);
     let mut head = format!(
-        "sweep {name}: cold {:?}, {} pages, {} nodes run",
+        "sweep {name}: cold {:?}, {} pages, {} nodes run, {} runs, {} rounds, runs by op {}",
         t0.elapsed(),
         b.pages().len(),
-        b.stats.nodes_run
+        b.stats.nodes_run,
+        b.stats.runs,
+        b.stats.rounds,
+        runs_line(&b)
     );
     if let Some(o) = oracle {
         let want = std::fs::read(o).expect("the oracle");
