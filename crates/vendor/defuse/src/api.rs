@@ -671,6 +671,23 @@ pub enum NodeState {
     Inert,
 }
 
+/// Where one loop-back round's time went (`Report::round_times`):
+/// nanoseconds, summed over workers except `wall`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub struct RoundTimes {
+    /// The round's elapsed time.
+    pub wall_ns: u64,
+    /// In operations' runs (the client's code, the reads it makes inside).
+    pub op_ns: u64,
+    /// In commits (applying a run's result to the store).
+    pub commit_ns: u64,
+    /// In checking committed logs again (validation without a run).
+    pub check_ns: u64,
+    /// Workers waiting with nothing ready.
+    pub idle_ns: u64,
+}
+
 /// What an evaluation did. The first seven counters (`nodes_run` ..
 /// `restarts`) are canonical: functions of the texts before and after,
 /// equal under every schedule.
@@ -709,6 +726,8 @@ pub struct Report {
     pub mispredictions: u64,
     pub fuel_outs: u64,
     pub spec_stops: u64,
+    /// Per loop-back round, where the time went.
+    pub round_times: Vec<RoundTimes>,
     /// Runs whose claim differed from the one in force (a static
     /// `Claim::None`/`Count` taken as a guess, or the run's last claim).
     pub claims_refuted: u64,

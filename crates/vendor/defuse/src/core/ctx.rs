@@ -475,6 +475,25 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Declares `f` a loop-back field from a run (a file the job writes
+    /// and reads back, found as it runs): in effect when the evaluation is
+    /// next quiet, within the same evaluation; readers that bound `f`
+    /// otherwise run again and read its round value (`init` until a run
+    /// publishes one). As `Engine::declare_loopback` between evaluations.
+    pub fn declare_loopback(&mut self, f: Field, init: ValueId) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() {
+            crate::record::j(&(&f, &init))
+        } else {
+            serde_json::Value::Null
+        };
+        if !self.sh.loops.contains_key(&f) {
+            super::lock(&self.sh.pending_loops).push((f, init));
+        }
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "declare_loopback", a, serde_json::Value::Null);
+    }
+
     /// Publishes a loop-back field's next round value.
     pub fn publish(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]

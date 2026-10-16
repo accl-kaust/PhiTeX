@@ -502,6 +502,9 @@ impl Shared {
             let open = strict && q != me && self.any_preds.load(Ordering::Relaxed) && self.pred_open(q);
             if strict && (self.busy(q, me) || open) {
                 if let Some(x) = self.predicted(q, f)
+                    // (Not once it committed another value: that one is
+                    // what a guess takes now.)
+                    && !matches!(e.val, DefVal::Val(v) if v != x)
                     && (self.rec(q).st() != super::S_STEP
                         || e.val == DefVal::Val(x)
                         || !self.rec(me).has(super::F_PREDREF))
@@ -528,6 +531,7 @@ impl Shared {
                 && self.any_preds.load(Ordering::Relaxed)
                 && !self.rec(me).has(super::F_PREDREF)
                 && let Some(x) = self.predicted(q, f)
+                && !matches!(e.val, DefVal::Val(v) if v != x)
                 && (e.val == DefVal::Val(x) || self.ran_now(q))
                 && self.guess_ok(f)
                 && self.take_prediction()
@@ -1056,7 +1060,10 @@ impl Shared {
         else {
             return false;
         };
-        matches!(now, DAns::Site { node: n, .. } if n == node)
+        // (Once the definer has committed another value, the prediction no
+        // longer holds, whatever its own guesses' state.)
+        matches!(now, DAns::Site { node: n, val, .. } if n == node
+            && !matches!(val, DefVal::Val(v) if v != x))
             && node == q
             && (self.busy(*q, me) || self.pred_open(*q))
             && self.rec(*q).st() != super::S_STEP

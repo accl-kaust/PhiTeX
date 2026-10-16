@@ -2948,9 +2948,11 @@ fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers(
             let runs = op.runs.load(std::sync::atomic::Ordering::Relaxed);
             if sched == "spec" || sched == "par" {
                 if is_wrong {
-                    // Node 26 read the wrong value; nothing else re-runs.
-                    assert_eq!(runs, N as u64 + 1, "{sched}: {r:?}");
-                    assert_eq!(r.predictions_refuted, 1, "{sched}");
+                    // Node 26 read the wrong value (unless node 25 had
+                    // committed its own first: then it read that); nothing
+                    // else re-runs.
+                    assert!(runs == N as u64 || runs == N as u64 + 1, "{sched}: {r:?}");
+                    assert_eq!(r.predictions_refuted, runs - N as u64, "{sched}");
                     assert!(r.steps <= 2, "{sched}: {r:?}");
                 } else {
                     assert_eq!(runs, N as u64, "{sched}: {r:?}");

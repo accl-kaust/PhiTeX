@@ -140,6 +140,7 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "define" => json!(cx.define(de(&g(0)), de(&g(1)))),
         "define_with" => json!(cx.define_with(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "publish" => json!(cx.publish(de(&g(0)), de(&g(1)))),
+        "declare_loopback" => json!(cx.declare_loopback(de(&g(0)), de(&g(1)))),
         "child" => json!(cx.child(de(&g(0)), de(&g(1)))),
         "follow" => json!(cx.follow(de(&g(0)), de(&g(1)))),
         "open_scope" => json!(cx.open_scope()),

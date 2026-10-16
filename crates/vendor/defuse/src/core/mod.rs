@@ -777,6 +777,10 @@ pub(crate) struct Counters {
     pub mispredictions: AtomicU64,
     pub fuel_outs: AtomicU64,
     pub spec_stops: AtomicU64,
+    pub op_ns: AtomicU64,
+    pub commit_ns: AtomicU64,
+    pub check_ns: AtomicU64,
+    pub idle_ns: AtomicU64,
     pub claims_refuted: AtomicU64,
     pub defs_refuted: AtomicU64,
     pub effects_refuted: AtomicU64,
@@ -831,6 +835,9 @@ pub(crate) struct Shared {
     pub any_no_guess: AtomicBool,
     /// Run a job's sole successor next on the same worker.
     pub affinity: AtomicBool,
+    /// Loop-back fields runs declared (`Ctx::declare_loopback`), applied
+    /// when the evaluation is next quiet.
+    pub pending_loops: Mutex<Vec<(Field, ValueId)>>,
     pub by_id: Box<[Mutex<FxHashMap<u64, Slot>>]>,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     pub seqs: FxHashSet<Field>,

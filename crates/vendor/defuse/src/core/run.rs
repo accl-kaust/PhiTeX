@@ -135,6 +135,15 @@ impl Shared {
         #[cfg(feature = "profile")]
         let _flush = FlushOnExit;
         let mut idle = 0u32;
+        // When this worker found nothing ready (its idle time, counted).
+        let mut idle_since: Option<std::time::Instant> = None;
+        let idle_add = |t: &mut Option<std::time::Instant>| {
+            if let Some(t0) = t.take() {
+                self.c
+                    .idle_ns
+                    .fetch_add(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0), Ordering::Relaxed);
+            }
+        };
         #[cfg(feature = "profile")]
         let mut idle_t: Option<std::time::Instant> = None;
         #[cfg(feature = "profile")]
@@ -151,6 +160,7 @@ impl Shared {
                 return;
             }
             if let Some(mut s) = self.pop() {
+                idle_add(&mut idle_since);
                 #[cfg(feature = "profile")]
                 idle_end(&mut idle_t);
                 idle = 0;
@@ -191,6 +201,7 @@ impl Shared {
                 continue;
             }
             if self.quiet() {
+                idle_add(&mut idle_since);
                 #[cfg(feature = "profile")]
                 idle_end(&mut idle_t);
                 return;
@@ -200,6 +211,9 @@ impl Shared {
                 idle_t = Some(std::time::Instant::now());
                 crate::obs::add_impl("idle_busy_others", self.busy.load(Ordering::Relaxed) as u64);
                 crate::obs::add_impl("idle_parked", lock(&self.parked).len() as u64);
+            }
+            if idle_since.is_none() {
+                idle_since = Some(std::time::Instant::now());
             }
             idle += 1;
             if idle == 2_000_000 {
@@ -437,7 +451,11 @@ impl Shared {
             r.set(super::F_CHECKING);
             let from = r.data().x.as_ref().map_or(0, |e| e.check_from as usize).min(log.len());
             let u = self.unit_of(s);
+            let tk = std::time::Instant::now();
             let (ck, at) = self.sread(u, || self.check_log_from(s, &log, from));
+            self.c
+                .check_ns
+                .fetch_add(u64::try_from(tk.elapsed().as_nanos()).unwrap_or(0), Ordering::Relaxed);
             if let Some(e) = r.data().x.as_mut() {
                 e.check_from = 0;
             }
@@ -883,6 +901,7 @@ impl Shared {
             {
                 cx.run_ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 *lock(&self.t).run_ns.entry(s).or_default() += cx.run_ns;
+                self.c.op_ns.fetch_add(cx.run_ns, Ordering::Relaxed);
             }
             Self::set_in_run(false);
             match res {
@@ -919,7 +938,12 @@ impl Shared {
             }
         }
         if let Ok(out) = res {
-            if !self.commit(&mut cx, out) {
+            let tc = std::time::Instant::now();
+            let committed = self.commit(&mut cx, out);
+            self.c
+                .commit_ns
+                .fetch_add(u64::try_from(tc.elapsed().as_nanos()).unwrap_or(0), Ordering::Relaxed);
+            if !committed {
                 r.data().kept = None;
                 if let Some(w) = cx.wait.take() {
                     // A read waits on a node in work: it runs again once

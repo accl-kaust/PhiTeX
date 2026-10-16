@@ -110,6 +110,24 @@ impl Engine {
         self.begin(sched);
         let mut rep = Report::default();
         let mut rounds: u64 = 1;
+        // Per-round times: the counters at the round's start.
+        let snap = |sh: &super::Shared| {
+            (
+                std::time::Instant::now(),
+                sh.c.op_ns.load(Ordering::Relaxed),
+                sh.c.commit_ns.load(Ordering::Relaxed),
+                sh.c.check_ns.load(Ordering::Relaxed),
+                sh.c.idle_ns.load(Ordering::Relaxed),
+            )
+        };
+        let close = |sh: &super::Shared, m: &(std::time::Instant, u64, u64, u64, u64)| crate::api::RoundTimes {
+            wall_ns: u64::try_from(m.0.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            op_ns: sh.c.op_ns.load(Ordering::Relaxed) - m.1,
+            commit_ns: sh.c.commit_ns.load(Ordering::Relaxed) - m.2,
+            check_ns: sh.c.check_ns.load(Ordering::Relaxed) - m.3,
+            idle_ns: sh.c.idle_ns.load(Ordering::Relaxed) - m.4,
+        };
+        let mut mark = snap(&self.sh);
         let mut idle: u64 = 0;
         let mut restarts = 0u64;
         if let Some(v) = src.absorb(self) {
@@ -162,6 +180,19 @@ impl Engine {
                 break Err(self.finish_error(e));
             }
             let after = self.sh.c.runs.load(Ordering::Relaxed) + self.sh.c.commits.load(Ordering::Relaxed);
+            // Loop-back fields runs declared: in effect now, within this
+            // evaluation (their readers that bound them otherwise run again).
+            if self.sh.qlen.load(Ordering::Acquire) == 0 {
+                let decl = std::mem::take(&mut *lock(&self.sh.pending_loops));
+                if !decl.is_empty() {
+                    for (f, init) in decl {
+                        self.declare_loopback_inner(f, init);
+                    }
+                    if self.sh.qlen.load(Ordering::Acquire) > 0 {
+                        continue;
+                    }
+                }
+            }
             if self.sh.qlen.load(Ordering::Acquire) > 0 && self.stepped_between(&mut rep, src, rounds) {
                 continue;
             }
@@ -197,6 +228,8 @@ impl Engine {
                 // (A round only when a changed value has a reader to run.)
                 Ok(true) if self.sh.qlen.load(Ordering::Acquire) == 0 => continue,
                 Ok(true) => {
+                    rep.round_times.push(close(&self.sh, &mark));
+                    mark = snap(&self.sh);
                     rounds += 1;
                     #[cfg(feature = "observe")]
                     tracing::debug!(target: "defuse", event = "round", round = rounds);
@@ -258,6 +291,7 @@ impl Engine {
         let _ = stalled;
         #[cfg(feature = "profile")]
         tick("tail_classify", &mut tt);
+        rep.round_times.push(close(&self.sh, &mark));
         rep.rounds = rounds;
         rep.restarts = restarts;
         rep.version = self.version;
@@ -472,6 +506,10 @@ impl Engine {
             &c.mispredictions,
             &c.fuel_outs,
             &c.spec_stops,
+            &c.op_ns,
+            &c.commit_ns,
+            &c.check_ns,
+            &c.idle_ns,
             &c.claims_refuted,
             &c.defs_refuted,
             &c.effects_refuted,

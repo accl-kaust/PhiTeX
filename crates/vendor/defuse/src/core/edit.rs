@@ -86,6 +86,7 @@ impl Shared {
             no_guess: crate::sync::BrLock::new(FxHashMap::default()),
             any_no_guess: AtomicBool::new(false),
             affinity: AtomicBool::new(false),
+            pending_loops: Mutex::new(Vec::new()),
             by_id: (0..256).map(|_| Mutex::new(FxHashMap::default())).collect(),
             accs: FxHashMap::default(),
             seqs: FxHashSet::default(),
@@ -629,7 +630,7 @@ impl Engine {
     }
 
     #[inline]
-    fn declare_loopback_inner(&mut self, f: Field, init: ValueId) {
+    pub(crate) fn declare_loopback_inner(&mut self, f: Field, init: ValueId) {
         if let Some(&old) = self.sh.loops.get(&f) {
             // Declared again: the same is nothing; a new initial value is
             // the round value only while the field still has the old one.
