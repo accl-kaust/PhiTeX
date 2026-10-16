@@ -1098,6 +1098,10 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.mispredictions
     );
     eprintln!(
+        "round guesses: {} claims refuted, {} effects refuted, {} claim siblings",
+        r.claims_refuted, r.effects_refuted, r.claim_siblings
+    );
+    eprintln!(
         "round rerun causes: {} nodes, {causes:?}, realised cp {} nodes {:?}, longest runs {:?}",
         r.rerun_causes.len(),
         r.realised_critical_path,
