@@ -90,6 +90,13 @@ pub(crate) const RTN: &str = "rtn";
 /// everything it placed).
 pub(crate) const CONT: &str = "pages:cont";
 
+/// A cut's continuation, `[cont, cutting node]` ([`Run::cont_encode`]):
+/// defined by the piece that cuts, read by the resume placed after its
+/// finisher. A field, not the resume's arguments: the input left
+/// changes with any edit before the document's end, and a resume made
+/// anew re-makes everything after it (spec-predicted-breaks §7).
+pub(crate) const RESUME: &str = "pages:resume";
+
 /// Whether the page chain runs through the finishers as before the
 /// predicted breaks (the finisher folds what its routine left).
 pub(crate) fn fold_chain() -> bool {
@@ -105,7 +112,7 @@ pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
 /// The fields the pages define through a text piece (beyond what its
 /// hint can name).
 pub(crate) fn is_page_field(name: &str) -> bool {
-    name == PS || name == SHIPPED || name == CONT
+    name == PS || name == SHIPPED || name == CONT || name == RESUME
 }
 
 /// What a run had done when it passed a candidate: at its end, a page
@@ -1169,6 +1176,7 @@ impl Run<'_, '_> {
         defs.push(v.field(crate::build::VTAIL));
         defs.push(v.field(SHIPPED));
         defs.push(v.field(CONT));
+        defs.push(v.field(RESUME));
         if let Some(list) = crate::exec::env_str!("PHITEX_DEBUG_NODES")
             && list.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(self.cx.node().raw()))
         {
@@ -1281,7 +1289,12 @@ impl Run<'_, '_> {
             // (the cutting node: the finishers between it and the resume
             // tell which fields they defined globally, `gdefs`)
             let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-            self.cx.follow(self.ops.resume, vec![cont, v.int(flags), pid]);
+            if fold_chain() {
+                self.cx.follow(self.ops.resume, vec![cont, v.int(flags), pid]);
+            } else {
+                self.cx.define_with(v.field(RESUME), v.list(vec![cont, pid]), Locality::Global);
+                self.cx.follow(self.ops.resume, vec![ValueId::UNIT, v.int(flags), ValueId::UNIT]);
+            }
         }
         Ok(())
     }
@@ -1987,7 +2000,7 @@ impl Run<'_, '_> {
     /// between the cut and here, the finisher's, replaces the binding and
     /// makes the groups' saves inert, §283).
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn cont_load(&mut self, x: ValueId) -> R<()> {
+    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
         let v = self.v;
         let xs = list_of(v, x);
         let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -2069,7 +2082,7 @@ impl Run<'_, '_> {
         }
         // the fields the finishers between the cut and this resume
         // defined globally (`gdefs`, the window after the cutting node)
-        let gdefs: Vec<ValueId> = match self.cx.args().get(2).copied() {
+        let gdefs: Vec<ValueId> = match Some(pid).filter(|&p| p != ValueId::UNIT) {
             Some(p) if self.cx.op() == self.ops.resume => {
                 let pid = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, p).to_ne_bytes()));
                 let acc = self.cx.acc_range(v.field("gdefs"), Some(pid))?;
@@ -2818,7 +2831,15 @@ impl Operation for Resume {
         let t0 = std::time::Instant::now();
         let out = run_node_parking(cx, o, true, |r| {
             if !r.resumed {
-                r.cont_load(args.first().copied().unwrap_or(ValueId::UNIT))?;
+                let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
+                let (cont, pid) = if a(0) == ValueId::UNIT {
+                    let x = r.eng_read(r.v.field(RESUME))?;
+                    let xs = x.map(|x| list_of(r.v, x)).unwrap_or_default();
+                    (xs.first().copied().unwrap_or(ValueId::UNIT), xs.get(1).copied().unwrap_or(ValueId::UNIT))
+                } else {
+                    (a(0), a(2))
+                };
+                r.cont_load(cont, pid)?;
                 r.read_cut_request()?;
             }
             r.run_all()
