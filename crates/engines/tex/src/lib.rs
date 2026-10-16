@@ -55,6 +55,7 @@ mod run;
 mod runstate;
 mod scan;
 mod val;
+mod vprof;
 
 pub use api::{
     Build, Diagnostic, EditSender, Finder, Options, PageSettled, Severity, Speculation, Stats,

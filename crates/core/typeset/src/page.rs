@@ -353,6 +353,13 @@ pub struct Fired {
     /// To put back at the front of the contribution list, after the
     /// output (§1017).
     pub contributions: List,
+    /// `best_page_break`'s index on the page (§1014).
+    pub best: usize,
+    /// The page indices of the marks before the break, in order.
+    pub mark_at: Vec<usize>,
+    /// The insertion classes' records as the fire found them (§1018:
+    /// `best_ins_ptr`, the split's `broken_ptr`/`broken_ins`).
+    pub ins_records: Vec<PageIns>,
 }
 
 /// The page builder's state (§980–§991).
@@ -385,6 +392,9 @@ pub struct PageBuilder {
     pub discards: List,
     /// What `build_page` complained about.
     pub diags: Vec<PageDiag>,
+    /// The decisions only: `fire_up` does not package `\box255` (its
+    /// `box255` is empty). The scan over vertical profiles sets it.
+    pub measure_only: bool,
 }
 
 /// e-TeX's `\lastnodetype` of a node: tex.web's type plus one (etex.ch).
@@ -750,6 +760,7 @@ impl PageBuilder {
     #[allow(clippy::too_many_lines)]
     fn fire_up(&mut self, mut c: Node, params: &PageParams) -> Fired {
         let best = self.best_break.unwrap_or(self.page.len());
+        let ins_records = self.ins.clone();
         // §1013
         let target = if best == self.page.len() {
             &mut c
@@ -769,6 +780,7 @@ impl PageBuilder {
         rest.push(c);
         self.insert_penalties = 0;
         let mut marks = Vec::new();
+        let mut mark_at = Vec::new();
         let mut inserts: Vec<(u16, List)> = Vec::new();
         let mut held = List::new();
         let mut kept = List::with_capacity(page.len());
@@ -825,6 +837,7 @@ impl PageBuilder {
                 }
                 Node::Mark(m) => {
                     marks.push(m);
+                    mark_at.push(idx);
                     kept.push(Node::Mark(m));
                 }
                 p => kept.push(p),
@@ -836,7 +849,16 @@ impl PageBuilder {
             fuzz: MAX_DIMEN,
             overfull_rule: 0,
         };
-        let box255 = vpackage(kept, Spec::Exactly(self.best_size), self.max_depth, &quiet);
+        let box255 = if self.measure_only {
+            Packed {
+                node: crate::node::BoxNode::default(),
+                badness: 0,
+                report: None,
+                adjustments: List::new(),
+            }
+        } else {
+            vpackage(kept, Spec::Exactly(self.best_size), self.max_depth, &quiet)
+        };
         // §991, §1019
         self.contents = Contents::Empty;
         self.last_glue = None;
@@ -854,6 +876,9 @@ impl PageBuilder {
             inserts,
             held_inserts: held,
             contributions: rest,
+            best,
+            mark_at,
+            ins_records,
         }
     }
 }

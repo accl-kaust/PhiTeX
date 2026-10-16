@@ -146,6 +146,9 @@ pub(crate) struct PageState {
     /// so an encode re-encodes only the nodes after them.
     pub page_ids: Vec<ValueId>,
     pub discard_ids: Vec<ValueId>,
+    /// The decisions of the page the last `build` fired (kept for the
+    /// scan check, [`crate::vprof::check`]).
+    pub fired: Option<crate::vprof::Decision>,
 }
 
 /// A page finishing: at candidate `k`, the finisher's page data, the
@@ -185,6 +188,7 @@ impl PageState {
             pending: Vec::new(),
             page_ids: Vec::new(),
             discard_ids: Vec::new(),
+            fired: None,
         }
     }
 
@@ -269,6 +273,7 @@ impl PageState {
             pending: list_of(v, xs[26]),
             page_ids,
             discard_ids,
+            fired: None,
         }
     }
 
@@ -510,6 +515,9 @@ impl PageState {
                         carried.push(e);
                     }
                     let data = page_data(v, &f, &self.side);
+                    if crate::vprof::checking() {
+                        self.fired = Some(crate::vprof::Decision::of(&f, &self.pb, carried.len()));
+                    }
                     self.pb = PageBuilder::new();
                     self.side = Side::default();
                     self.page_ids.clear();
@@ -532,7 +540,7 @@ impl PageState {
 }
 
 /// A `T_PAGE_PARAMS` marker's parameters (§980).
-fn params_of(v: &Values, m: ValueId) -> PageParams {
+pub(crate) fn params_of(v: &Values, m: ValueId) -> PageParams {
     let xs = list_of(v, m);
     let g = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
     PageParams {
@@ -546,7 +554,7 @@ fn params_of(v: &Values, m: ValueId) -> PageParams {
 
 /// A `T_INS_PARAMS` marker: `[tag, n, box h+d or -1, box is hbox, count,
 /// dimen, skip]` (§1008's reads of eqtb for class `n`).
-fn class_of(v: &Values, m: ValueId) -> (u16, InsertClass) {
+pub(crate) fn class_of(v: &Values, m: ValueId) -> (u16, InsertClass) {
     let xs = list_of(v, m);
     let g = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
     let h = g(2);
@@ -866,7 +874,21 @@ impl Run<'_, '_> {
         if piece && self.stop_at.is_none() && self.cut_req.is_none() && !self.needs_own_fold()? {
             return self.fold_apart(raw);
         }
-        self.fold_here(raw, fin)
+        let mut prof = None;
+        self.fold_here(raw, fin, &mut prof)?;
+        if let Some(ints) = prof {
+            self.contribute_vprof(&ints);
+        }
+        Ok(())
+    }
+
+    /// The piece's vertical profile, one unit of [`crate::vprof::VPROF`]
+    /// at its position.
+    fn contribute_vprof(&mut self, ints: &[i64]) {
+        let v = self.v;
+        crate::vprof::count_unit(ints);
+        let x = crate::vprof::value(v, ints);
+        self.contribute(crate::vprof::VPROF, v.seq_unit(x));
     }
 
     /// Whether a page finishing inside this piece would need a cut, as
@@ -1001,6 +1023,8 @@ impl Run<'_, '_> {
         } else {
             (ValueId::UNIT, ValueId::UNIT)
         };
+        let ints = crate::vprof::encode(v, &raw);
+        self.contribute_vprof(&ints);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         self.cx.follow(
             self.ops.fold,
@@ -1021,15 +1045,15 @@ impl Run<'_, '_> {
     /// here parks the run: the fold is a command of its own
     /// ([`Run::begin_command`]).
     #[allow(clippy::too_many_lines)]
-    fn fold_here(&mut self, raw: Vec<ValueId>, fin: bool) -> R<()> {
+    fn fold_here(&mut self, raw: Vec<ValueId>, fin: bool, prof: &mut Option<Vec<i64>>) -> R<()> {
         let t0 = std::time::Instant::now();
-        let r = self.fold_here_(raw, fin);
+        let r = self.fold_here_(raw, fin, prof);
         phitex_pdf::phase::add(18, t0);
         r
     }
 
     #[allow(clippy::too_many_lines)]
-    fn fold_here_(&mut self, mut raw: Vec<ValueId>, fin: bool) -> R<()> {
+    fn fold_here_(&mut self, mut raw: Vec<ValueId>, fin: bool, prof: &mut Option<Vec<i64>>) -> R<()> {
         let v = self.v;
         // (its input read out: the siblings it takes are known, and so
         // are the fields it defines: what its state publishes and the
@@ -1065,6 +1089,7 @@ impl Run<'_, '_> {
         // parameters as the routine leaves them, §987: its own state)
         if !fin {
             self.pin_reaching_page_params(&mut raw)?;
+            *prof = Some(crate::vprof::encode(v, &raw));
         }
         self.resolve_page_params(&mut raw)?;
         let mut timer = FoldTimer::new(raw.len());
@@ -1074,6 +1099,7 @@ impl Run<'_, '_> {
                 .and_then(|x| cache.take(x))
                 .unwrap_or_else(|| PageState::decode(v, ps_in))
         });
+        let scan_in = crate::vprof::checking().then(|| crate::vprof::ScanState::of(v, &ps));
         if fin {
             // §1026: the held-over insertions and the routine's list,
             // then the contributions put back, and the page built again;
@@ -1088,6 +1114,13 @@ impl Run<'_, '_> {
             let mut live = |n: u16| self.insert_class(n);
             timer.fold(|| ps.fold_items(v, &raw, dead, &mut live))?
         };
+        if let Some(scan) = scan_in {
+            let items = match prof.as_ref() {
+                Some(ints) if !fin => crate::vprof::decode(ints),
+                _ => crate::vprof::decode(&crate::vprof::encode(v, &raw)),
+            };
+            self.scan_check(scan, &items, dead, &mut ps, fire.as_ref());
+        }
         self.mark.active = false;
         let Some(fire) = fire else {
             // a second pass whose state no longer finishes the page at
@@ -2411,6 +2444,14 @@ impl Run<'_, '_> {
         // (a stop at the read parks the run: it resumes here)
         self.begin_command();
         let ps_in = self.eng_read(f)?;
+        // (the scan check: the piece's profile, its unit of `vprof`)
+        let unit = if crate::vprof::checking() {
+            let pid = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, a(2)).to_ne_bytes()));
+            let acc = self.cx.acc_range_to(v.field(crate::vprof::VPROF), None, Some(pid))?;
+            v.seq_to_vec(acc).last().copied()
+        } else {
+            None
+        };
         self.define_vtail(&raw)?;
         self.resolve_page_params(&mut raw)?;
         let dead = self.deadcycles_for(&raw)?;
@@ -2421,10 +2462,21 @@ impl Run<'_, '_> {
                 .and_then(|x| cache.take(x))
                 .unwrap_or_else(|| PageState::decode(v, ps_in))
         });
+        let scan_in = crate::vprof::checking().then(|| crate::vprof::ScanState::of(v, &ps));
         let fire = {
             let mut live = |n: u16| self.insert_class(n);
             timer.fold(|| ps.fold_items(v, &raw, dead, &mut live))?
         };
+        if let Some(scan) = scan_in {
+            let items = match unit {
+                Some(u) => crate::vprof::decode_value(v, u),
+                None => {
+                    eprintln!("scan-check: fold node {}: no profile unit", self.cx.node().raw());
+                    Vec::new()
+                }
+            };
+            self.scan_check(scan, &items, dead, &mut ps, fire.as_ref());
+        }
         let Some(fire) = fire else {
             let e = timer.encode(|| ps.encode(v));
             self.cx.define_with(f, e, Locality::Global);
@@ -2583,6 +2635,63 @@ impl Drop for FoldTimer {
                 self.t[2].as_micros()
             );
         }
+    }
+}
+
+impl Run<'_, '_> {
+    /// The scan over `items` from `scan` compared with the real fold
+    /// that left `ps` and `fire` ([`crate::vprof::check`]).
+    fn scan_check(
+        &mut self,
+        scan: crate::vprof::ScanState,
+        items: &[crate::vprof::PItem],
+        dead: i64,
+        ps: &mut PageState,
+        fire: Option<&Fire>,
+    ) {
+        let v = self.v;
+        let real = crate::vprof::RealOutcome {
+            fire: fire.map(|f| (f.k, ps.fired.take().expect("decisions of the page fired"), f.rest.len())),
+            after: crate::vprof::snapshot(
+                ps.j,
+                &ps.pb,
+                ps.fold,
+                ps.params.map(|m| params_of(v, m)),
+                ps.pending.len(),
+            ),
+        };
+        let node = self.cx.node().raw();
+        let mut rd = RunReaching(self);
+        crate::vprof::check(node, scan, items, dead, &mut rd, &real);
+    }
+}
+
+/// What a scan reads where a fold runs: the fold's run.
+struct RunReaching<'r, 'c, 'a>(&'r mut Run<'c, 'a>);
+
+impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
+    fn params(&mut self) -> PageParams {
+        let v = self.0.v;
+        self.0.page_params_marker().map_or(
+            PageParams {
+                vsize: 0,
+                max_depth: 0,
+                top_skip: Glue::ZERO,
+                holding_inserts: 0,
+                saving_vdiscards: false,
+            },
+            |m| params_of(v, m),
+        )
+    }
+
+    fn class(&mut self, n: u16) -> InsertClass {
+        self.0.insert_class(n).unwrap_or(InsertClass {
+            box_height_plus_depth: None,
+            box_is_hbox: false,
+            count: 0,
+            dimen: 0,
+            skip: Glue::ZERO,
+        })
     }
 }
 

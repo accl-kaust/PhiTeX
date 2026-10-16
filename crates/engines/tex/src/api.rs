@@ -4410,6 +4410,7 @@ fn declare_fields(eng: &mut Engine) {
         "gdefs",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
+        crate::vprof::VPROF,
     ] {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
