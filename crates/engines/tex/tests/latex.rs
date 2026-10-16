@@ -464,14 +464,13 @@ fn latex_loop_rounds() {
             }
             b.edit(&src.replacen("\\begin{document}", "\\begin{document}Hi ", 1));
             eprintln!(
-                "rounds {name} fixpoint={fixpoint}: cold {} loop rounds / {} evaluations / {} nodes run, edit {} / {} / {}; wkeys {keys:?}; guess {:?}",
+                "rounds {name} fixpoint={fixpoint}: cold {} loop rounds / {} evaluations / {} nodes run, edit {} / {} / {}; wkeys {keys:?}",
                 cold.0,
                 cold.1,
                 cold.2,
                 b.stats.loop_rounds,
                 b.stats.rounds,
                 b.stats.nodes_run,
-                phitex_tex::guess_wkeys(src)
             );
         }
     }
