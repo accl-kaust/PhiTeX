@@ -160,8 +160,10 @@ pub(crate) struct State {
     metas: Vec<Meta>,
     /// The scope's definitions of locations the run's base level also
     /// publishes, at another value: the field's second entry, the scope's
-    /// ([`State::abandon_to_scope`]; made as the run ends, never parked).
-    scope_extra: Vec<(Loc, Native)>,
+    /// ([`State::abandon_to_scope`]); with several frames left open, each
+    /// frame's locals at its own frame ([`State::abandon_to_frames`],
+    /// `Locality::ScopeAt`). Made as the run ends, never parked.
+    scope_extra: Vec<(Loc, Native, Locality)>,
     save: Vec<Saved>,
     /// Locations defined locally inside a group of the run (for a group
     /// left open: its definitions become the run's).
@@ -990,9 +992,9 @@ impl State {
             }
             out.push((m.loc, x, *l));
         }
-        for (loc, val) in &self.scope_extra {
+        for (loc, val, l) in &self.scope_extra {
             if let Some(x) = val.encode(v) {
-                out.push((*loc, x, Locality::Scope));
+                out.push((*loc, x, *l));
             }
         }
         out
@@ -1078,7 +1080,7 @@ impl State {
                 Some(_) => {
                     if !self.scope_extra.iter().any(|e| e.0 == loc) {
                         let val = self.slot(loc).e.val.clone();
-                        self.scope_extra.push((loc, val));
+                        self.scope_extra.push((loc, val, Locality::Scope));
                     }
                 }
                 None => {
@@ -1095,7 +1097,65 @@ impl State {
     /// beside the run's own one at its base level ([`State::scope_extra`]).
     pub(crate) fn define_scope_extra(&mut self, loc: Loc, val: Native) {
         self.scope_extra.retain(|e| e.0 != loc);
-        self.scope_extra.push((loc, val));
+        self.scope_extra.push((loc, val, Locality::Scope));
+    }
+
+    /// A definition of `loc` in frame `k` of those the run opens after
+    /// itself (0: the outermost; [`State::abandon_to_frames`]).
+    pub(crate) fn define_frame_extra(&mut self, loc: Loc, val: Native, k: u8) {
+        let l = Locality::ScopeAt(k);
+        self.scope_extra.retain(|e| !(e.0 == loc && e.2 == l));
+        self.scope_extra.push((loc, val, l));
+    }
+
+    /// Leaves the run's open groups, `levels` (each `(save_base,
+    /// def_base, open_stamp)`, outermost first), to the engine as the
+    /// frames the run opens after itself, frame `k` for group `k`: each
+    /// group's local definitions, at the value in force at its level,
+    /// are frame `k`'s (`Locality::ScopeAt(k)`); the base level's stay
+    /// the run's. A location an inner group defined again holds the
+    /// group's value in the inner group's first save of it (what that
+    /// group's close restores, §282; a save hidden by a global
+    /// definition since restores nothing, §283).
+    pub(crate) fn abandon_to_frames(&mut self, levels: &[(usize, usize, u64)]) {
+        let Some(&(sb0, db0, _)) = levels.first() else {
+            return;
+        };
+        let mut out: Vec<(Loc, Native, Locality)> = Vec::new();
+        for (k, &(_, db, open_stamp)) in levels.iter().enumerate() {
+            let next = levels.get(k + 1);
+            let de = next.map_or(self.defined.len(), |l| l.1).min(self.defined.len());
+            let se = next.map_or(self.save.len(), |l| l.0).min(self.save.len());
+            let mut seen = phitex_defuse::FxHashSet::default();
+            for i in db.min(de)..de {
+                let loc = self.defined[i];
+                if !seen.insert(loc) {
+                    continue;
+                }
+                let Some(s) = self.slot_ref(loc) else { continue };
+                let inner = self.save[se..]
+                    .iter()
+                    .find(|x| x.loc == loc && s.ginert <= x.at);
+                let (val, ldef) = match inner {
+                    Some(x) => (x.prev.val.clone(), x.ldef),
+                    None => {
+                        let Some(m) = (s.meta as usize).checked_sub(1).and_then(|mi| self.metas.get(mi)) else {
+                            continue;
+                        };
+                        (s.e.val.clone(), (m.ldef_stamp, m.ldef_local, m.ldef_gid))
+                    }
+                };
+                if ldef.1 && ldef.0 > open_stamp {
+                    out.push((loc, val, Locality::ScopeAt(u8::try_from(k).unwrap_or(u8::MAX - 2))));
+                }
+            }
+        }
+        for e in out {
+            self.scope_extra.retain(|x| !(x.0 == e.0 && x.2 == e.2));
+            self.scope_extra.push(e);
+        }
+        self.save.truncate(sb0.min(self.save.len()));
+        self.defined.truncate(db0.min(self.defined.len()));
     }
 
     /// The run's definition of `loc` at its base level made the scope's

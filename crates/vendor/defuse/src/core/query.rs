@@ -723,7 +723,7 @@ impl Shared {
                 // (A node whose last run contributed nothing here is
                 // passed: should it contribute, its commit notifies this
                 // window.)
-                if self.busy(x, me) && !self.rec(x).has(super::F_SCONTRIB) && !self.checks_without(x, f) {
+                if self.busy(x, me) && !self.contributes_statically(x, f) && !self.checks_without(x, f) {
                     return Q::Wait(Wait {
                         on: Subj::Node(x),
                         field: Some(f),
@@ -753,6 +753,14 @@ impl Shared {
             }
         }
         Q::Ans((acc, last))
+    }
+
+    /// Whether `x`'s text declares its contribution to `f` (its run need
+    /// not be waited for: the value is known). Per field: a node with
+    /// static contributions to other fields is waited for as any other.
+    fn contributes_statically(&self, x: Slot, f: Field) -> bool {
+        self.rec(x).has(super::F_SCONTRIB)
+            && self.rec(x).data().stat.contribs().is_some_and(|c| c.iter().any(|e| e.0 == f))
     }
 
     /// The whole fold of `f` in unit `u`.
@@ -794,8 +802,7 @@ impl Shared {
                 if strict && self.busy(opener, me) {
                     return Q::Wait(wait_node(opener, None, "kind", self.rec(opener).has(super::F_DONE)));
                 }
-                let k = self.rec(opener).data().kind_val;
-                Q::Ans((k, opener))
+                Q::Ans((self.opener_kind(opener, fr), opener))
             }
             _ => Q::Ans((None, opener)),
         }

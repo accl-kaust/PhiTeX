@@ -1286,3 +1286,109 @@ fn a_reader_after_a_node_whose_continuation_closes_its_scope_waits() {
         eng.check_invariants()
     );
 }
+
+/// `["a"]` reads the environment field `mode`: at "cut" it claims its
+/// first following sibling and places a continuation `["r"]` after
+/// itself; at "whole" it claims every following `["s", x]` itself and
+/// places nothing. `["r"]` claims every following `["s", x]`. `["s", x]`
+/// counts its runs (it must never run: one of the others always claims
+/// it).
+struct ToyCut {
+    s_runs: std::sync::atomic::AtomicU64,
+}
+
+static CUT_OP: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+impl Operation for ToyCut {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        if matches!(tag(v, a).as_str(), "a" | "r") {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let ss = |cx: &Ctx<'_>| {
+            let mut n = 0;
+            while cx.following(n).is_some_and(|(_, xs)| tag(v, &xs) == "s") {
+                n += 1;
+            }
+            n
+        };
+        match tag(v, &a).as_str() {
+            "a" => {
+                let m = cx.use_env(v.field("mode"))?;
+                if m.is_some_and(|m| matches!(&*v.get(m), Value::Str(s) if &**s == "cut")) {
+                    let _ = cx.following(0);
+                    cx.claim(1);
+                    let op = CUT_OP.get().copied().unwrap();
+                    cx.follow(op, vec![v.str("r")]);
+                } else {
+                    let n = ss(cx);
+                    cx.claim(n);
+                }
+                Ok(ValueId::UNIT)
+            }
+            "r" => {
+                let n = ss(cx);
+                cx.claim(n);
+                Ok(ValueId::UNIT)
+            }
+            "s" => {
+                self.s_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(a.get(1).copied().unwrap_or(ValueId::UNIT))
+            }
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+/// The TeX client's run cut at a page break: the run claims the first
+/// sibling and its continuation the rest; an edit before them moves the
+/// break away, and the run, running again, claims all of them itself and
+/// places no continuation. Its new claim reaches siblings that the
+/// continuation it no longer places had claimed: they must stay claimed
+/// (by the run) and never run. Seen: they are released when the old
+/// continuation goes and run on their own (`apply_claim` skips a sibling
+/// inert under another claimer before `set_unfolding` removes that
+/// claimer).
+#[test]
+fn a_claim_that_takes_over_its_old_continuations_siblings() {
+    let toy = Arc::new(ToyCut { s_runs: std::sync::atomic::AtomicU64::new(0) });
+    let mut eng = Engine::new();
+    let op = eng.register(toy.clone());
+    let _ = CUT_OP.set(op);
+    let u = eng.new_unit();
+    let a = eng.push(u, op, vec![eng.values().str("a")]);
+    for k in 0..4 {
+        let (s, x) = (eng.values().str("s"), eng.values().int(k));
+        eng.push(u, op, vec![s, x]);
+    }
+    let z = eng.push(u, op, vec![eng.values().str("z")]);
+    eng.add_root(z);
+    let f = eng.values().field("mode");
+    let cut = eng.values().str("cut");
+    eng.set_environment(vec![(f, cut)]);
+    eng.evaluate_sequential().expect("evaluate");
+    let r = std::sync::atomic::Ordering::Relaxed;
+    assert_eq!(toy.s_runs.load(r), 0, "a sibling ran with mode cut");
+    let whole = eng.values().str("whole");
+    eng.set_environment(vec![(f, whole)]);
+    eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(
+        toy.s_runs.load(r),
+        0,
+        "a sibling the run now claims ran on its own after its old continuation went"
+    );
+    let _ = a;
+}

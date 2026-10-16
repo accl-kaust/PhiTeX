@@ -17,6 +17,9 @@ use crate::api::{Cause, EvalError};
 thread_local! {
     /// This worker's queue shard index.
     static WORKER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// In a job (free running): whether one is, the first node it made
+    /// ready, how many it made ready.
+    static NEXT: std::cell::Cell<(bool, Slot, u32)> = const { std::cell::Cell::new((false, NIL, 0)) };
 }
 
 /// What validating a log found.
@@ -30,7 +33,34 @@ impl Shared {
     /// Queues a ready node while running free: on this worker's shard
     /// (what a worker makes ready, it likely runs next).
     #[allow(clippy::modulo_one)] // `QSHARDS` may be 1
-    pub(crate) fn push_ready(&self, s: Slot) {
+    /// Queues a ready node; `false`: kept for this worker to run next.
+    pub(crate) fn push_ready(&self, s: Slot) -> bool {
+        // Successor affinity: the one node a job makes ready runs next on
+        // the same worker (a chain of small nodes stays on a core that is
+        // up to speed); a second one sends both to the shared queue.
+        let kept = NEXT.with(|c| {
+            let (on, local, n) = c.get();
+            if !on {
+                return None;
+            }
+            c.set((on, if n == 0 { s } else { NIL }, n + 1));
+            Some((n, local))
+        });
+        if !self.affinity.load(Ordering::Relaxed) {
+            // (Counted only: every successor is queued.)
+            self.push_counted(s);
+            return true;
+        }
+        match kept {
+            Some((0, _)) => return false,
+            Some((1, prev)) => self.push_counted(prev),
+            _ => {}
+        }
+        self.push_counted(s);
+        true
+    }
+
+    fn push_counted(&self, s: Slot) {
         let i = WORKER.with(std::cell::Cell::get);
         self.qlen.fetch_add(1, Ordering::SeqCst);
         self.push_to(i % super::QSHARDS, s);
@@ -119,13 +149,38 @@ impl Shared {
                 idle_end(&mut idle_t);
                 return;
             }
-            if let Some(s) = self.pop() {
+            if let Some(mut s) = self.pop() {
                 #[cfg(feature = "profile")]
                 idle_end(&mut idle_t);
                 idle = 0;
-                {
-                    crate::obs::span!(RunBatch);
-                    self.process(s);
+                loop {
+                    NEXT.with(|c| c.set((true, NIL, 0)));
+                    {
+                        crate::obs::span!(RunBatch);
+                        self.process(s);
+                    }
+                    let (_, local, n) = NEXT.with(|c| c.replace((false, NIL, 0)));
+                    match n {
+                        0 => {}
+                        1 => {
+                            self.c.sole_successor.fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => {
+                            self.c.many_successors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    let kept = n == 1 && self.affinity.load(Ordering::Relaxed);
+                    if kept && !self.abort.load(Ordering::Relaxed) {
+                        self.c.kept_successors.fetch_add(1, Ordering::Relaxed);
+                        // Its one successor, still counted busy and queued.
+                        self.work.fetch_sub(1, Ordering::SeqCst);
+                        s = local;
+                        continue;
+                    }
+                    if kept {
+                        self.push_counted(local);
+                    }
+                    break;
                 }
                 self.work.fetch_sub(1, Ordering::SeqCst);
                 if self.busy.fetch_sub(1, Ordering::SeqCst) == 1 && self.qlen.load(Ordering::SeqCst) == 0 {
@@ -518,6 +573,15 @@ impl Shared {
             if self.loop_vals.read().contains_key(&f) {
                 continue;
             }
+            // An accumulator read: held while a contributor before it is in
+            // work (from the unit's start: a later anchor waits on more).
+            if self.accs.contains_key(&f) {
+                if let super::query::Q::Wait(mut w) = self.q_range(s, f, None, None, true, s) {
+                    w.kind = "gated";
+                    return Some(w);
+                }
+                continue;
+            }
             if let super::query::Q::Wait(mut w) = self.q_def(s, f, true, s) {
                 w.kind = "gated";
                 return Some(w);
@@ -777,6 +841,9 @@ impl Shared {
         {
             e.early_claim = None;
         }
+        if token.is_none() && r.has(super::F_PCLAIM) && !r.has(super::F_IN_PCLAIM) {
+            self.enter_work_lists(s);
+        }
         let mut cx = Ctx::new(self, s, token);
         // A resumed run keeps the reads its earlier attempts made.
         cx.log = prior;
@@ -854,6 +921,11 @@ impl Shared {
                 && r.has(super::F_PCLAIM)
             {
                 let old = r.data().ex().early_claim.replace(n);
+                if n == 0 {
+                    // Claims nothing while stopped: not a claimer later
+                    // nodes look past (it joins again when it runs anew).
+                    self.leave_pclaim(s);
+                }
                 if old != Some(n) {
                     let w = std::mem::take(&mut r.data().waiters);
                     for (x, q) in w {

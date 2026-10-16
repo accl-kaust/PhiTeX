@@ -180,3 +180,26 @@ fn relaxed_font_commands() {
         panic!("misc relaxed: {d}");
     }
 }
+
+/// A page whose writer meets an object number that is no object of the
+/// file (`\pdfannot useobjnum` of one never made): pdfTeX's error is the
+/// job's, logged where the output places the page, and named loudly with
+/// the node that wrote the page (exact mode).
+#[test]
+fn a_placed_pages_writer_error_is_the_jobs() {
+    let _turn = turn();
+    let dir = pdf_fixtures();
+    let src = "\\pdfoutput=1 \\pdfcompresslevel=0 \\catcode`\\{=1 \\catcode`\\}=2 \
+         \\font\\tenrm=cmr10 \\tenrm \\hsize=300pt \\vsize=400pt\n\
+         \\output={\\shipout\\box255}\n\
+         \\pdfannot useobjnum 999 width 10pt height 10pt depth 0pt {/Subtype /Text}x\\par\\end\n";
+    let b = common::build(common::options("./bad.tex", "bad", "", &dir), None, src);
+    let msgs: Vec<String> = b.diagnostics().iter().map(|d| d.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("invalid object number being reused")
+            && m.contains("written by node")),
+        "no placed-page error named: {msgs:?}"
+    );
+    let (_, log) = b.output();
+    assert!(log.contains("invalid object number being reused"), "not in the log");
+}

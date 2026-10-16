@@ -473,6 +473,8 @@ pub(crate) struct Data {
     pub born: u64,
     /// The committed kind of a kind-pending opener.
     pub kind_val: Option<ValueId>,
+    /// Per opened frame, outermost first (`Ctx::set_kinds`).
+    pub kind_vals: Vec<ValueId>,
     /// What few nodes use (boxed: most never need it).
     pub x: Option<Box<Extra>>,
 }
@@ -501,6 +503,9 @@ pub(crate) struct Extra {
     /// attempt's answer, so siblings past it are not held (cleared when it
     /// runs again from the start).
     pub early_claim: Option<usize>,
+    /// The claim its committed run made over a static `Claim::None` or
+    /// `Count` (a declaration is a guess the run may refute).
+    pub claim_run: Option<usize>,
     /// Where a check of the committed log that waited stopped: the next
     /// check starts there (reset by every touch).
     pub check_from: u32,
@@ -585,6 +590,7 @@ impl Data {
             snap_epoch: u32::MAX,
             born: 0,
             kind_val: None,
+            kind_vals: Vec::new(),
             x: None,
         }
     }
@@ -656,9 +662,9 @@ pub(crate) struct DefE {
     /// The frame the entry is filed under (its node's frame, or for a
     /// scope entry the scope the node opens).
     pub fk: u32,
-    /// A `Locality::Scope` entry: a node may have one of these and one
-    /// other entry for the same field.
-    pub scope: bool,
+    /// Which of the node's entries for the field (`Locality::entry_key`:
+    /// 0 its own level, others an opened frame's).
+    pub scope: u8,
 }
 
 /// A subscription of a reader at a position.
@@ -771,6 +777,12 @@ pub(crate) struct Counters {
     pub mispredictions: AtomicU64,
     pub fuel_outs: AtomicU64,
     pub spec_stops: AtomicU64,
+    pub claims_refuted: AtomicU64,
+    pub effects_refuted: AtomicU64,
+    pub claim_siblings: AtomicU64,
+    pub sole_successor: AtomicU64,
+    pub many_successors: AtomicU64,
+    pub kept_successors: AtomicU64,
     pub resumed: AtomicU64,
     pub restarted: AtomicU64,
     pub declarations_refuted: AtomicU64,
@@ -816,6 +828,8 @@ pub(crate) struct Shared {
     /// `NO_GUESS_AFTER`, reads of the field wait instead of guessing.
     pub no_guess: crate::sync::BrLock<FxHashMap<Field, u32>>,
     pub any_no_guess: AtomicBool,
+    /// Run a job's sole successor next on the same worker.
+    pub affinity: AtomicBool,
     pub by_id: Box<[Mutex<FxHashMap<u64, Slot>>]>,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     pub seqs: FxHashSet<Field>,
