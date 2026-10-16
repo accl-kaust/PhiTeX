@@ -29,8 +29,6 @@ struct Entry {
     th: Arc<TextHints>,
     /// Its slices' keys ([`Chunk::keys`]).
     keys: Arc<[u64]>,
-    /// [`Chunk::input`].
-    input: Input,
     /// The definitions after it (its key and set): the incoming ones
     /// when it defines nothing.
     out: (u64, Defs),
@@ -46,37 +44,9 @@ pub(crate) struct Chunk {
     /// Its slices' keys (`api::key`), a slice at the chunk's start
     /// taken as beginning a line: made when the chunk is analysed.
     pub keys: Arc<[u64]>,
-    /// Whether its text names `\\input`, and whether it defines it.
-    pub input: Input,
     /// The `\\everypar` the chunks before it leave pending
     /// ([`Everypar::after`]): a heading's next paragraphs run it.
     pub everypar: Everypar,
-}
-
-/// What a chunk's text does with `\\input`.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Input {
-    pub names: bool,
-    pub defines: bool,
-}
-
-impl Input {
-    fn of(text: &str) -> Input {
-        let names = text.contains("\\input");
-        Input {
-            names,
-            defines: names
-                && [
-                    "\\def\\input",
-                    "\\let\\input",
-                    "\\edef\\input",
-                    "\\gdef\\input",
-                    "\\xdef\\input",
-                ]
-                .iter()
-                .any(|d| text.contains(d)),
-        }
-    }
 }
 
 /// The document's units and their chunks' analyses.
@@ -108,11 +78,6 @@ impl Incr {
             next_file: 2_000_000_000,
             threads: 1,
         }
-    }
-
-    /// The format's definitions.
-    pub(crate) fn defs(&self) -> &Defs {
-        &self.defs
     }
 
     /// The document's slices, in the whole text's bytes.
@@ -326,7 +291,7 @@ impl Incr {
         };
         // (the analyses' summed time, for `PHITEX_TEX_TIME`)
         let busy = std::sync::atomic::AtomicU64::new(0);
-        let made: Vec<(Arc<TextHints>, Arc<[u64]>, Input)> =
+        let made: Vec<(Arc<TextHints>, Arc<[u64]>)> =
             crate::exec::map(threads, todo.len(), &|x| {
                 let t = std::time::Instant::now();
                 let r = analyse_todo(x);
@@ -345,13 +310,12 @@ impl Incr {
             let e = if let Some(e) = p.cached {
                 e
             } else {
-                let (th, keys, input) = made.next().expect("every chunk analysed");
+                let (th, keys) = made.next().expect("every chunk analysed");
                 Entry {
                     units: ids[p.units.clone()].to_vec(),
                     key: ins[k].0,
                     th,
                     keys,
-                    input,
                     out: outs[k].take().expect("the definitions after it"),
                     closed: p.closed,
                 }
@@ -360,7 +324,6 @@ impl Incr {
                 start: p.start,
                 th: e.th.clone(),
                 keys: e.keys.clone(),
-                input: e.input,
                 everypar,
             });
             everypar = everypar.after(&e.th);
@@ -402,8 +365,8 @@ fn walk_note(
 /// A chunk's analysis under the definitions `defs` before it (given its
 /// own, [`crate::hints::own_definitions`], when harvested already): its
 /// hints, its slices' keys (a slice at its start taken as beginning a
-/// line), and what it does with `\\input`.
-fn analyse(t: &str, defs: &Defs, own: Option<Definitions>) -> (Arc<TextHints>, Arc<[u64]>, Input) {
+/// line).
+fn analyse(t: &str, defs: &Defs, own: Option<Definitions>) -> (Arc<TextHints>, Arc<[u64]>) {
     let th = crate::hints::text_hints_with(t, FileKind::Document, defs, own);
     let keys = th
         .slices
@@ -413,7 +376,7 @@ fn analyse(t: &str, defs: &Defs, own: Option<Definitions>) -> (Arc<TextHints>, A
             crate::api::key(&t[s..e], starts)
         })
         .collect();
-    (th, keys, Input::of(t))
+    (th, keys)
 }
 
 /// A chunk of the units being walked: its units, where it begins and its

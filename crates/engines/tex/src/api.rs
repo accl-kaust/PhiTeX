@@ -97,9 +97,9 @@ pub struct Options {
     pub speculation_budget: usize,
     /// The round-one key sets of the read-back files that only define
     /// (`.aux`: `wkeys:<name>`), as [`Build::wkeys`] gave them in an
-    /// earlier session; a file not listed is guessed from the text
-    /// ([`guess_wkeys`]). A right guess saves the loop-back's second
-    /// round; a wrong one costs nothing more than no guess.
+    /// earlier session (the last build's values); a file not listed has
+    /// no guess. A right guess saves the loop-back's second round; a
+    /// wrong one costs nothing more than no guess.
     pub wkeys: Vec<(String, Vec<String>)>,
     /// The package loads' records ([`Build::export_pkgrec`]): kept
     /// machine-wide beside the format, keyed by the load and the files
@@ -225,8 +225,7 @@ struct Absorb<'a> {
     /// already: nothing applied, so not reported to the engine (its
     /// contract: `None` when nothing was applied); the result is for it.
     unchanged: Option<u64>,
-    /// The finder `\\input` files are sliced with, and the text applied.
-    finder: Finder,
+    /// The text applied.
     text: &'a mut String,
     /// The package loads' hints (`crate::pkgrec`).
     loads: Option<&'a crate::pkgrec::LoadHints>,
@@ -245,7 +244,6 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.nodes,
             &text,
             self.incr.as_deref_mut(),
-            Some(&self.finder),
             self.loads,
         );
         *self.text = text;
@@ -261,7 +259,6 @@ impl phitex_defuse::EditSource for Absorb<'_> {
 
 
 /// Edited texts of `\\input` files by name: the text and its bytes.
-type Overrides = Arc<Mutex<FxHashMap<String, (String, Vec<u8>)>>>;
 
 /// `PHITEX_TEX_TIME`: an edit's apply, its phases (`t`: slices, hints,
 /// diff, as elapsed since `t_all`) and slice counts (`n`: old, new, kept,
@@ -311,13 +308,11 @@ fn slice_keys(
     v: &Values,
     text: &str,
     incr: Option<&Incr>,
-    finder: Option<&Finder>,
-    read: &mut Vec<String>,
 ) -> Vec<(u64, DocNode)> {
     match incr {
         Some(inc) => {
             register_doc(reg, v, inc);
-            doc_nodes(reg, v, text, inc, finder, read)
+            doc_nodes(text, inc)
         }
         None if text.is_empty() => Vec::new(),
         None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
@@ -338,7 +333,6 @@ fn apply_text(
     nodes_now: &mut Vec<(u64, NodeId, Src)>,
     text: &str,
     mut incr: Option<&mut Incr>,
-    finder: Option<&Finder>,
     loads: Option<&crate::pkgrec::LoadHints>,
 ) -> bool {
     let t_all = std::time::Instant::now();
@@ -350,8 +344,7 @@ fn apply_text(
     }
     let incr = incr.as_deref();
     let t_slices = t_all.elapsed();
-    let mut read = Vec::new();
-    let new = slice_keys(reg, eng.values(), &text, incr, finder, &mut read);
+    let new = slice_keys(reg, eng.values(), &text, incr);
     let t_hints = t_all.elapsed();
     let old = &*nodes_now;
     if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
@@ -1377,11 +1370,6 @@ struct Graph {
     /// (name, field, value, hash), merged into `files`/`absent`/`reads`
     /// before the environment is set again (`Graph::provide`).
     provided: Arc<std::sync::Mutex<Vec<Provided>>>,
-    /// The document files sliced into the document's regions
-    /// (`crate::inputs`), and their texts as edited (`Build::edit_file`)
-    /// over the finder's.
-    inputs_read: Vec<String>,
-    overrides: Overrides,
     /// The package loads' records and hints (`crate::pkgrec`), once the
     /// build has set them.
     loads: Option<Arc<crate::pkgrec::LoadHints>>,
@@ -1469,8 +1457,6 @@ impl Graph {
             sched: Box::new(phitex_defuse::Greedy::default()),
             eval_errors: Vec::new(),
             provided: Arc::default(),
-            inputs_read: Vec::new(),
-            overrides: Arc::default(),
             loads: None,
         }
     }
@@ -1666,21 +1652,6 @@ impl Graph {
         }
     }
 
-    /// The finder the document's `\\input` files are sliced with: the
-    /// edited texts first ([`Build::edit_file`]).
-    fn input_finder(&self, base: &Finder) -> Finder {
-        let base = Arc::clone(base);
-        let over = Arc::clone(&self.overrides);
-        Arc::new(move |n: &str| {
-            let o = over
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(n)
-                .cloned();
-            o.or_else(|| base(n))
-        })
-    }
-
     /// The names of the files the job opened for writing.
     fn opened(&self, unit: UnitId) -> Vec<String> {
         let v = self.eng.values();
@@ -1696,14 +1667,10 @@ impl Graph {
             .collect()
     }
 
-    /// Round one's guesses for the loop-backs: the last session's
-    /// (`opts`), else from the text `document`.
-    fn guesses(&mut self, opts: &Options, document: &str) {
-        let aux = format!("{}.aux", opts.jobname);
+    /// Round one's guesses for the loop-backs: the last build's values
+    /// (`opts`); none without one.
+    fn guesses(&mut self, opts: &Options) {
         self.wkeys_guess.clone_from(&opts.wkeys);
-        if !self.wkeys_guess.iter().any(|(n, _)| *n == aux) {
-            self.wkeys_guess.push((aux, guess_wkeys(document)));
-        }
     }
 
     /// A file the job writes is read back: from the previous round
@@ -2107,23 +2074,21 @@ impl Graph {
         text: &str,
         defs: Defs,
         doc: bool,
-        finder: Option<&Finder>,
     ) -> (Vec<(u64, NodeId, Src)>, Incr) {
         let mut incr = Incr::new(defs);
         incr.threads = self.threads;
-        let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr), finder);
+        let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr));
         (nodes, incr)
     }
 
     /// The text's nodes pushed onto `unit`: a document's (`incr`) its
-    /// paragraph regions, an `\\input` file's in place of the command
-    /// (`crate::inputs`); a format's one node.
+    /// paragraph regions (an `\\input` file's are its run's, split where
+    /// the run reaches it, `Run::leftover`); a format's one node.
     fn push_text(
         &mut self,
         unit: UnitId,
         text: &str,
         mut incr: Option<&mut Incr>,
-        finder: Option<&Finder>,
     ) -> Vec<(u64, NodeId, Src)> {
         let t0 = std::time::Instant::now();
         if let Some(inc) = incr.as_deref_mut() {
@@ -2136,17 +2101,7 @@ impl Graph {
         let nodes: Vec<(u64, DocNode)> = match incr {
             Some(inc) => {
                 register_doc(&self.ops.hints, self.eng.values(), inc);
-                let mut read = Vec::new();
-                let n = doc_nodes(
-                    &self.ops.hints,
-                    self.eng.values(),
-                    text,
-                    inc,
-                    finder,
-                    &mut read,
-                );
-                self.inputs_read = read;
-                n
+                doc_nodes(text, inc)
             }
             None if text.is_empty() => Vec::new(),
             None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
@@ -2189,56 +2144,6 @@ impl Graph {
     }
 }
 
-/// Whether a job-written file's read-back only defines (its lines are
-/// read as definitions per field, never as text): `.aux`.
-/// The fields a LaTeX job's `.aux` read-back defines, guessed from the
-/// text, in the order the file's lines define them: `\r@<x>` for each
-/// `\label{x}` and `\b@<k>` for each `\bibitem{k}` (their `\newlabel`
-/// and `\bibcite` lines, in text order), then the kernel's
-/// `\@abspage@last` (the line `\enddocument` writes). Nothing without
-/// `\documentclass`: another job's `.aux` is its own.
-#[must_use]
-pub fn guess_wkeys(text: &str) -> Vec<String> {
-    if !text.contains("\\documentclass") {
-        return Vec::new();
-    }
-    let mut keys: Vec<String> = Vec::new();
-    let mut add = |k: String| {
-        if !keys.contains(&k) {
-            keys.push(k);
-        }
-    };
-    let mut rest = text;
-    while let Some(i) = rest.find('\\') {
-        rest = &rest[i + 1..];
-        let (prefix, after) = if let Some(a) = rest.strip_prefix("label{") {
-            ("r@", a)
-        } else if let Some(a) = rest.strip_prefix("bibitem") {
-            // `\bibitem[label]{key}`
-            let a = a.trim_start();
-            let a = if a.starts_with('[') {
-                a.find(']').map_or(a, |j| &a[j + 1..])
-            } else {
-                a
-            };
-            match a.trim_start().strip_prefix('{') {
-                Some(a) => ("b@", a),
-                None => continue,
-            }
-        } else {
-            continue;
-        };
-        if let Some(j) = after.find('}') {
-            let key = &after[..j];
-            if !key.is_empty() && !key.contains(['\\', '{', '#', '%']) {
-                add(format!("cs:{prefix}{key}"));
-            }
-        }
-    }
-    add("cs:@abspage@last".to_owned());
-    keys
-}
-
 /// The id of file `file`'s read-back definition of field `f`
 /// (`wdef:<id>`): per file, as two files that define one field (LaTeX's
 /// scratch macros, `\reserved@a`) each give their own value, the last
@@ -2258,15 +2163,13 @@ pub(crate) fn wdef_field(k: &str) -> &str {
     k.rsplit('\u{1}').next().unwrap_or(k)
 }
 
+/// Whether a job-written file's read-back only defines (its lines are
+/// read as definitions per field, never as text): `.aux`.
 fn defines_only(name: &str) -> bool {
     std::path::Path::new(name)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("aux"))
 }
-
-/// The extensions of the files a job is taken to write and read back
-/// (`\jobname.<ext>`), declared before its first evaluation.
-const WRITTEN_EXTS: [&str; 8] = ["aux", "toc", "lof", "lot", "out", "idx", "nav", "snm"];
 
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.
 const FORMAT_HINT: &str = "A\x1eformat: the whole text, run once\x1e";
@@ -2295,29 +2198,17 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
     }
 }
 
-/// A document node's text: a slice of the document (its bytes), or one
-/// of an `\\input` file sliced in its place (`crate::inputs`).
+/// A document node's text: a slice of the document (its bytes).
 enum DocNode {
     Doc(usize, usize),
-    File(crate::inputs::Piece),
 }
 
-/// The document's nodes, keyed: per chunk of its units, its slices; an
-/// `\\input` slice replaced by its file's ([`crate::inputs::pieces`],
-/// for the chunks that have one). `read` gets the files sliced in.
-fn doc_nodes(
-    reg: &crate::hints::Registry,
-    v: &Values,
-    text: &str,
-    inc: &Incr,
-    finder: Option<&Finder>,
-    read: &mut Vec<String>,
-) -> Vec<(u64, DocNode)> {
-    // (a text redefining `\\input` reads its files in its runs)
-    let finder = finder.filter(|_| !inc.chunks.iter().any(|c| c.input.defines));
+/// The document's nodes, keyed: per chunk of its units, its slices. (An
+/// `\\input` file's regions are made where a run reaches the file,
+/// whatever route reaches it: `Run::leftover`.)
+fn doc_nodes(text: &str, inc: &Incr) -> Vec<(u64, DocNode)> {
     let mut out = Vec::new();
     for c in &inc.chunks {
-        let end = c.start + c.th.slices.last().map_or(0, |x| x.1);
         let slices =
             c.th.slices
                 .iter()
@@ -2325,34 +2216,14 @@ fn doc_nodes(
                 .map(|(&(s, e), &k)| (c.start + s, c.start + e, k));
         // (the chunk's keys, made when it was analysed; a slice at its
         // start not beginning a line keyed again)
-        let doc_slice = |(s, e, k): (usize, usize, u64)| {
+        out.extend(slices.map(|(s, e, k)| {
             let k = if s == c.start && s > 0 && text.as_bytes()[s - 1] != b'\n' {
                 key(&text[s..e], false)
             } else {
                 k
             };
             (k, DocNode::Doc(s, e))
-        };
-        let Some(f) = finder.filter(|_| c.input.names) else {
-            out.extend(slices.map(doc_slice));
-            continue;
-        };
-        let mut slices = slices;
-        let chunk = &text[c.start..end];
-        for p in crate::inputs::pieces(reg, v, chunk, &c.th, inc.defs(), Some(f), read) {
-            if p.is_file() {
-                out.push((p.key, DocNode::File(p)));
-                continue;
-            }
-            // (the document's own slice it is: the next whose key it has)
-            for sl in slices.by_ref() {
-                let (k, n) = doc_slice(sl);
-                if k == p.key {
-                    out.push((k, n));
-                    break;
-                }
-            }
-        }
+        }));
     }
     out
 }
@@ -2367,7 +2238,6 @@ fn node_args(
     loads: Option<&crate::pkgrec::LoadHints>,
 ) -> Vec<ValueId> {
     match (n, incr) {
-        (DocNode::File(p), _) => p.args(v, DOC_NAME),
         (&DocNode::Doc(s, e), Some(inc)) => {
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
@@ -2402,17 +2272,12 @@ fn node_args(
 #[derive(Clone)]
 enum Src {
     Doc(usize, usize),
-    File(Arc<str>, usize, usize),
 }
 
 impl Src {
     fn of(n: &DocNode) -> Src {
         match n {
             &DocNode::Doc(s, e) => Src::Doc(s, e),
-            DocNode::File(p) => {
-                let (t, s, e) = p.span();
-                Src::File(t, s, e)
-            }
         }
     }
 
@@ -2420,7 +2285,6 @@ impl Src {
     fn text<'a>(&'a self, doc: &'a str) -> &'a str {
         match self {
             &Src::Doc(s, e) => doc.get(s..e.min(doc.len())).unwrap_or(""),
-            Src::File(t, s, e) => t.get(*s..*e).unwrap_or(""),
         }
     }
 }
@@ -2749,7 +2613,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             g.eng.set_env(unit, f, x);
         }
         // (the prelude's own slices: INITEX knows no definitions yet)
-        g.push_text(unit, &as_file(p), None, None);
+        g.push_text(unit, &as_file(p), None);
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
@@ -3080,7 +2944,7 @@ impl Build {
         for (n, _) in cached.reads.clone() {
             g.supply(&opts.finder, &n);
         }
-        g.guesses(&opts, document);
+        g.guesses(&opts);
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: supply the format's {} files (fonts, data) {:?}",
@@ -3088,16 +2952,9 @@ impl Build {
                 t_sup.elapsed()
             );
         }
-        // the files a LaTeX job writes and reads back: in-memory values
-        // from the start (`.bbl` and `.ind` stay files until their
-        // BibTeX and makeindex nodes publish them)
-        for ext in WRITTEN_EXTS {
-            g.written_file(
-                &format!("{}.{ext}", opts.jobname),
-                opts.fixpoint,
-                &opts.finder,
-            );
-        }
+        // (the files the job writes and reads back are loop-backs from
+        // the `\openout` that opens them, `wfiledecl:`: a read before it
+        // runs again on the loop-back)
         {
             g.absorb_provided();
             let env = g.environment(opts.fixpoint);
@@ -3124,7 +2981,6 @@ impl Build {
         }
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
-        let inputs = g.input_finder(&opts.finder);
         // the package loads' records (`crate::pkgrec`); a load never seen
         // runs optimistically under speculation
         let optimistic = opts.speculation != Speculation::Off
@@ -3132,7 +2988,7 @@ impl Build {
         let predict = opts.pkg_predict || crate::exec::env_flag!("PHITEX_PKG_PREDICT");
         g.loads = Some(Arc::new(crate::pkgrec::LoadHints::new(
             crate::pkgrec::parse(&opts.pkgrec),
-            inputs.clone(),
+            opts.finder.clone(),
             optimistic,
             predict,
         )));
@@ -3142,11 +2998,7 @@ impl Build {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone_from(&g.loads);
-        let (nodes, incr) = g.push_document(unit, document, defs, doc, Some(&inputs));
-        // (the files sliced in are read: listed, and watched)
-        for n in g.inputs_read.clone() {
-            g.supply(&opts.finder, &n);
-        }
+        let (nodes, incr) = g.push_document(unit, document, defs, doc);
         // (the pages: each piece places the finisher of a page that ends
         // in it, `crate::pages`; nothing of them is pushed here)
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
@@ -3242,14 +3094,6 @@ impl Build {
         self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
         self.g.queries.clear();
-        // (the files sliced into the document's regions were read)
-        let sliced: Vec<(String, bool)> = self
-            .g
-            .inputs_read
-            .iter()
-            .map(|n| (n.clone(), true))
-            .collect();
-        self.g.queries.extend(sliced);
         self.g
             .ops
             .pkg_log
@@ -3265,7 +3109,6 @@ impl Build {
             end: self.end,
             incr: self.doc.then_some(&mut self.incr),
             unchanged: None,
-            finder: self.g.input_finder(&self.opts.finder),
             text: &mut self.text,
             loads: loads.as_deref(),
         };
@@ -3447,29 +3290,6 @@ impl Build {
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());
         }
-        // a file sliced into the document's regions (`crate::inputs`):
-        // the document is applied again with the new text, so only the
-        // regions whose slices changed are replaced
-        let sliced = self.g.inputs_read.iter().any(|n| n == name);
-        {
-            let mut o = self
-                .g
-                .overrides
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            match (&found, text) {
-                (Some(x), Some(_)) => {
-                    o.insert(name.to_owned(), x.clone());
-                }
-                _ => {
-                    o.remove(name);
-                }
-            }
-        }
-        if sliced {
-            let t = self.text.clone();
-            self.edits.send(&t);
-        }
         // a package load whose record lists the file: its key no longer
         // matches, so its hint goes back to the unrecorded one
         // (`crate::pkgrec`)
@@ -3517,7 +3337,6 @@ impl Build {
             .iter()
             .map(|(_, n, src)| match src {
                 &Src::Doc(s, e) => (n.raw(), None, s, e),
-                Src::File(t, s, e) => (n.raw(), Some(t.clone()), *s, *e),
             })
             .collect()
     }

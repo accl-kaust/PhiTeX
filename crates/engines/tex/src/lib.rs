@@ -59,7 +59,6 @@ mod vprof;
 
 pub use api::{
     Build, Diagnostic, EditSender, Finder, Options, PageSettled, Severity, Speculation, Stats,
-    guess_wkeys,
 };
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
 pub use hints::{paragraph_units, set_hints_enabled};
