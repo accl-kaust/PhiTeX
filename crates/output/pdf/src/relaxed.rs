@@ -280,6 +280,8 @@ pub fn carry_after(prev: &Carry, page: &BoxNode, wh: &mut WhatsitSource<'_>) -> 
 }
 
 fn walk(c: &mut Carry, b: &BoxNode, level: i32, wh: &mut WhatsitSource<'_>) {
+    // (a run of characters in one font is one insert)
+    let mut last = None;
     for n in &b.list {
         match n {
             Node::Box(x) => walk(c, x, level + 1, wh),
@@ -328,10 +330,16 @@ fn walk(c: &mut Carry, b: &BoxNode, level: i32, wh: &mut WhatsitSource<'_>) {
                 }
             }
             Node::Char { font, .. } => {
-                c.used.insert(*font);
+                if last != Some(*font) {
+                    c.used.insert(*font);
+                    last = Some(*font);
+                }
             }
             Node::Lig(l) => {
-                c.used.insert(l.font);
+                if last != Some(l.font) {
+                    c.used.insert(l.font);
+                    last = Some(l.font);
+                }
             }
             Node::Glue(g) => {
                 if let Some(l) = &g.leader

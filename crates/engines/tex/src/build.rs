@@ -653,13 +653,21 @@ impl Run<'_, '_> {
     /// The fonts the nodes use.
     pub(crate) fn font_view(&mut self, list: &[Node]) -> R<crate::fonts::View> {
         fn walk(l: &[Node], ids: &mut std::collections::BTreeSet<u32>) {
+            // (a run of characters in one font is one insert)
+            let mut last = None;
             for n in l {
                 match n {
                     Node::Char { font, .. } => {
-                        ids.insert(*font);
+                        if last != Some(*font) {
+                            ids.insert(*font);
+                            last = Some(*font);
+                        }
                     }
                     Node::Lig(g) => {
-                        ids.insert(g.font);
+                        if last != Some(g.font) {
+                            ids.insert(g.font);
+                            last = Some(g.font);
+                        }
                     }
                     Node::Box(b) => walk(&b.list, ids),
                     Node::Unset(u) => walk(&u.list, ids),

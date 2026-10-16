@@ -497,8 +497,18 @@ pub(crate) fn vf_for(r: &mut Run<'_, '_>, b: &BoxNode) -> R<()> {
         use phitex_typeset::node::Node;
         for n in list {
             match n {
-                Node::Char { font, .. } => out.push(*font),
-                Node::Lig(l) => out.push(l.font),
+                // (a run of characters in one font is one entry: the
+                // fonts are taken in their first appearance's order)
+                Node::Char { font, .. } => {
+                    if out.last() != Some(font) {
+                        out.push(*font);
+                    }
+                }
+                Node::Lig(l) => {
+                    if out.last() != Some(&l.font) {
+                        out.push(l.font);
+                    }
+                }
                 Node::Box(b) => walk(&b.list, out),
                 Node::Glue(g) => {
                     if let Some(l) = &g.leader {
