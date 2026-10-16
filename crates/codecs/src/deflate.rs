@@ -1350,9 +1350,9 @@ mod tests {
     #[test]
     #[ignore = "needs PHITEX_DEFLATE_DIR"]
     #[allow(
+        clippy::cast_precision_loss,
         clippy::unchecked_time_subtraction,
-        clippy::format_collect,
-        clippy::cast_precision_loss
+        clippy::format_collect
     )]
     fn dir_digests() {
         extern crate std;
