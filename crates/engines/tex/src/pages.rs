@@ -2334,7 +2334,9 @@ impl Operation for Finish {
         if let Some(mut names) = known
             && !crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
         {
-            for n in [RTN, SHIPPED, "deadcycles", "param:outputpenalty", "inspen", "badness", "box:255"] {
+            // (and the writer's state the page's placement defines, the
+            // node this finisher places after itself: `pdfout::Place`)
+            for n in [RTN, SHIPPED, "deadcycles", "param:outputpenalty", "inspen", "badness", "box:255", "pdf:state", "pdf:pre"] {
                 names.push(v.field(n));
             }
             ops(&self.0).fields.add_record_fields(&mut names);

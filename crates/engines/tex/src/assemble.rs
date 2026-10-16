@@ -357,6 +357,8 @@ fn pdf_exact(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };
-    let bytes = crate::pdfout::finish_exact(v, &f, &xpages);
+    let chunks = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::CHUNKS), None)?);
+    let chars = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::CHARS), None)?);
+    let bytes = crate::pdfout::finish_exact(v, &f, &xpages, &chunks, &chars);
     Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
 }

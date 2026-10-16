@@ -1800,6 +1800,23 @@ impl Graph {
                     let v = self.eng.values();
                     let mut by = FxHashMap::<String, usize>::default();
                     let mut shown = 0;
+                    if crate::exec::env_flag!("PHITEX_RERUN_OPS") {
+                        // (each node run again: its operation, why, the field by name)
+                        for (n, c) in &r.rerun_causes {
+                            let f = match *c {
+                                Rr::Changed { field, .. }
+                                | Rr::Rebind { field }
+                                | Rr::Loop { field }
+                                | Rr::Environment { field } => crate::val::field_name(v, field),
+                                Rr::Refuted { field: Some(field) }
+                                | Rr::Woken { field: Some(field) }
+                                | Rr::Range { field: Some(field) } => crate::val::field_name(v, field),
+                                _ => String::new(),
+                            };
+                            let d: String = describe(&self.eng, *n).chars().take(60).collect();
+                            eprintln!("rerunop: {} [{d}] {c:?} {f}", n.raw());
+                        }
+                    }
                     for (n, c) in &r.rerun_causes {
                         if let Rr::Changed { field, old, new } = *c {
                             if std::env::var("PHITEX_RERUN_DIFF").ok().and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| shown < n) && crate::val::field_name(v, field) == "ps" {
@@ -4422,6 +4439,8 @@ fn declare_fields(eng: &mut Engine) {
         "gdefs",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
+        crate::pdfout::CHUNKS,
+        crate::pdfout::CHARS,
         crate::vprof::VPROF,
         crate::pages::PITEMS,
     ] {

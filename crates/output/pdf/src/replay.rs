@@ -434,6 +434,35 @@ impl PdfState {
         (r, pr)
     }
 
+    /// The characters marked used since the last call, by font, the
+    /// marks cleared: a caller that takes them after every step keeps
+    /// them out of the state (they are read only by the fonts' embedding
+    /// at the end, [`PdfState::add_chars`]), so that a page using one
+    /// more character leaves the state after it equal.
+    pub fn take_chars(&mut self) -> Vec<(FontId, [bool; 256])> {
+        let marked: Vec<FontId> = self
+            .fonts
+            .iter()
+            .filter(|(_, s)| s.chars.iter().any(|&c| c))
+            .map(|(&f, _)| f)
+            .collect();
+        marked
+            .into_iter()
+            .map(|f| (f, std::mem::replace(&mut self.font_mut(f).chars, [false; 256])))
+            .collect()
+    }
+
+    /// The characters `cs` of font `f` marked used (the union of what
+    /// [`PdfState::take_chars`] took, at the end); nothing for a font
+    /// not loaded here.
+    pub fn add_chars(&mut self, f: FontId, cs: &[bool; 256]) {
+        if self.fonts.get(&f).is_some() && cs.iter().any(|&c| c) {
+            for (a, &b) in self.font_mut(f).chars.iter_mut().zip(cs) {
+                *a |= b;
+            }
+        }
+    }
+
     /// The fonts used here, by id: what a later replay compares with
     /// ([`PdfState::replay_page`]'s `base`).
     #[must_use]
@@ -485,6 +514,23 @@ impl PdfState {
                     .get(from..(at + 60).min(rec.pre.len()))
                     .unwrap_or("")
             ));
+        }
+        // every font the walk set up is loaded here by the time it does
+        // (a state other than the recorded one's, e.g. a speculative
+        // run's, may lack a font the record found loaded)
+        {
+            let mut loaded: BTreeSet<FontId> = self.fonts.iter().map(|(&f, _)| f).collect();
+            for e in &rec.events {
+                match *e {
+                    FontEv::Load(f) => {
+                        loaded.insert(f);
+                    }
+                    FontEv::DoVf(f) | FontEv::Init(f) if !loaded.contains(&f) => {
+                        return Err(format!("font {f} not loaded here"));
+                    }
+                    _ => {}
+                }
+            }
         }
         // the objects TeX numbered are as they were where recorded, and
         // no destination the page defines was defined by a page before
@@ -598,8 +644,8 @@ impl PdfState {
                 .map(|&(f, k)| {
                     let s = self.fonts.get(&f);
                     format!(
-                        "{f}: ff {k} recorded, {} here (num {:?}, name {:?})",
-                        self.ff(f),
+                        "{f}: ff {k} recorded, {:?} here (num {:?}, name {:?})",
+                        s.map(|_| self.ff(f)),
                         s.map(|s| s.num),
                         s.map(|s| String::from_utf8_lossy(&s.name).into_owned())
                     )

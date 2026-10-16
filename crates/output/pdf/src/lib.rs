@@ -86,7 +86,7 @@ mod color;
 mod digest;
 pub mod enc;
 mod finish;
-pub use finish::{Chunk, PdfBytes, finish};
+pub use finish::{Chunk, PdfBytes, Tail, finish};
 mod encodings;
 mod epdffont;
 mod font;
@@ -448,7 +448,10 @@ struct Obj {
     info: i64,
     link: usize,
     /// Negative until written (-2 fresh, -1 scheduled), then the byte
-    /// offset, or the object stream's number.
+    /// offset, or the object stream's number. While the document is
+    /// written a direct object's offset is 0 here: its place is its
+    /// chunk's ([`Chunk::objs`](crate::Chunk)), known only when
+    /// [`Tail::link`](crate::Tail::link) places the chunks.
     offset: i64,
     /// `obj_os_idx`: the index in its object stream, -1 if not in one.
     os_idx: i32,
@@ -646,10 +649,16 @@ pub struct PdfState {
     p: PdfParams,
     /// The bytes written since the last [`PdfState::flush`].
     out: Vec<u8>,
-    /// The bytes flushed before `out`.
+    /// Where `out` begins in the file: 0 while the document is written
+    /// (offsets are within the step's chunk, kept by the chunk), the
+    /// bytes before when [`Tail::link`](crate::Tail::link) writes the
+    /// cross-reference section (`linking`).
     base: usize,
-    /// The objects begun in `out`.
-    chunk_objs: Vec<usize>,
+    linking: bool,
+    /// The chunks flushed (non-empty steps), the ordinal of the next one.
+    flushes: usize,
+    /// The objects begun in `out`, with their offsets in it.
+    chunk_objs: Vec<(usize, usize)>,
     /// The stream being compressed (`zip_write_state=zip_writing`).
     zip: Option<Vec<u8>>,
     stream_length_offset: usize,
@@ -794,6 +803,8 @@ impl PdfState {
             p: params,
             out: Vec::new(),
             base: 0,
+            linking: false,
+            flushes: 0,
             chunk_objs: Vec::new(),
             zip: None,
             stream_length_offset: 0,
