@@ -996,7 +996,6 @@ impl Run<'_, '_> {
                 return Ok(true);
             }
         }
-        let gids = self.st.gid_mark();
         let m0 = self.cand_marks[0];
         let mut defs: Vec<Loc> = self
             .st
@@ -1004,13 +1003,7 @@ impl Run<'_, '_> {
             .into_iter()
             .map(|d| d.0)
             .collect();
-        defs.extend(
-            self.st
-                .defined_since(v, 0, gids)
-                .into_iter()
-                .filter(|d| d.2 == Locality::Local)
-                .map(|d| d.0),
-        );
+        defs.extend(self.locals_unlike_at(m0));
         let mut defs: Vec<Field> = defs.into_iter().map(|l| self.loc_field(l)).collect();
         defs.extend(self.streams_since(m0.contribs));
         for f in defs {
@@ -1022,6 +1015,38 @@ impl Run<'_, '_> {
             }
         }
         Ok(false)
+    }
+
+    /// The local definitions in force at the run's end that a finisher
+    /// placed after the piece sees otherwise than the routine would at
+    /// candidate `m` (beyond those made after it, which
+    /// [`State::defined_since`] from the candidate names): every local
+    /// one when the run closed the scope it ran in (they are hidden
+    /// after the piece, in force at the candidate), else those in a
+    /// group of the run opened after the candidate and still open (in
+    /// force after the piece, not at the candidate). A local made before
+    /// the candidate at the run's base level, or in a group open at the
+    /// candidate and still open, is the same binding at both places.
+    fn locals_unlike_at(&mut self, m: CandMark) -> Vec<Loc> {
+        let v = self.v;
+        let all: Vec<Loc> = self
+            .st
+            .defined_since(v, 0, self.st.gid_mark())
+            .into_iter()
+            .filter(|d| d.2 == Locality::Local)
+            .map(|d| d.0)
+            .collect();
+        if self.effect == Effect::Close {
+            return all;
+        }
+        let before: Vec<Loc> = self
+            .st
+            .defined_since(v, 0, m.gids)
+            .into_iter()
+            .filter(|d| d.2 == Locality::Local)
+            .map(|d| d.0)
+            .collect();
+        all.into_iter().filter(|l| !before.contains(l)).collect()
     }
 
     /// The candidate the run passed last, when nothing happened after
@@ -1065,14 +1090,6 @@ impl Run<'_, '_> {
                     v.list(vec![f.0, opt_val(x)])
                 })
                 .collect();
-            let gids = self.st.gid_mark();
-            let locals: Vec<Field> = self
-                .st
-                .defined_since(v, 0, gids)
-                .into_iter()
-                .filter(|(_, _, l)| *l == Locality::Local)
-                .map(|(l, _, _)| self.loc_field(l))
-                .collect();
             let marks = self.cand_marks.clone();
             let mut per = Vec::with_capacity(n);
             for m in &marks {
@@ -1080,6 +1097,11 @@ impl Run<'_, '_> {
                     per.push(v.list(Vec::new()));
                     continue;
                 }
+                let locals: Vec<Field> = self
+                    .locals_unlike_at(*m)
+                    .into_iter()
+                    .map(|l| self.loc_field(l))
+                    .collect();
                 let mut names: Vec<(ValueId, bool)> =
                     locals.iter().map(|f| (f.0, false)).collect();
                 for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
