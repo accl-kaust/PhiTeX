@@ -1074,11 +1074,24 @@ pub struct Stats {
 fn print_round(t: std::time::Duration, r: &Report) {
     // (why nodes ran again, by kind: `Report::rerun_causes`)
     let mut causes = std::collections::BTreeMap::<String, usize>::new();
+    if crate::exec::env_flag!("PHITEX_RERUN_SHOW") {
+        for (n, c) in &r.rerun_causes {
+            eprintln!("rerun: node {} {c:?}", n.raw());
+        }
+    }
     for (_, c) in &r.rerun_causes {
         let k = format!("{c:?}");
         let k = k.split([' ', '(', '{']).next().unwrap_or("").to_owned();
         *causes.entry(k).or_default() += 1;
     }
+    eprintln!(
+        "finishers: {} created with a prediction, {} without; speculations {} confirmations {} mispredictions {}",
+        crate::pages::FIN_PREDICTED.load(std::sync::atomic::Ordering::Relaxed),
+        crate::pages::FIN_UNPREDICTED.load(std::sync::atomic::Ordering::Relaxed),
+        r.speculations,
+        r.confirmations,
+        r.mispredictions
+    );
     eprintln!(
         "round rerun causes: {} nodes, {causes:?}, realised cp {} nodes {:?}, longest runs {:?}",
         r.rerun_causes.len(),

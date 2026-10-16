@@ -76,6 +76,26 @@ use crate::val::{glue_of, glue_value, group, int_at, int_of, list_of, str_of, to
 /// on the main list and by every finisher, read where it reaches.
 pub(crate) const PS: &str = "ps";
 
+/// What a finisher's output routine gives back to the main list
+/// (§1026): `[markers, list]`, the run's own main-list items (page
+/// parameter markers) and the routine's list, without the held-over
+/// insertions (the fold continuation after the finisher has them).
+/// Read by that continuation; predicted (a routine that gives nothing
+/// back gives the same value every page).
+pub(crate) const RTN: &str = "rtn";
+
+/// What a fold that fired leaves to its continuation: `[held, carried,
+/// rest]` (a field, not the continuation's arguments: an edit in the
+/// rest of a piece re-runs the continuation instead of re-making it and
+/// everything it placed).
+pub(crate) const CONT: &str = "pages:cont";
+
+/// Whether the page chain runs through the finishers as before the
+/// predicted breaks (the finisher folds what its routine left).
+pub(crate) fn fold_chain() -> bool {
+    crate::exec::env_flag!("PHITEX_FOLD_CHAIN")
+}
+
 /// Defined by a `\shipout`: the mark that a page shipped before.
 pub(crate) const SHIPPED: &str = "pages:shipped";
 
@@ -85,7 +105,7 @@ pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
 /// The fields the pages define through a text piece (beyond what its
 /// hint can name).
 pub(crate) fn is_page_field(name: &str) -> bool {
-    name == PS || name == SHIPPED
+    name == PS || name == SHIPPED || name == CONT
 }
 
 /// What a run had done when it passed a candidate: at its end, a page
@@ -120,6 +140,10 @@ pub(crate) struct FinCtx {
     pub carried: Vec<ValueId>,
     pub pending: Vec<ValueId>,
     pub rest: Vec<ValueId>,
+    /// How many of `pending` are the held-over insertions (§1022).
+    pub held_n: usize,
+    /// The `rtn` the finisher defined.
+    pub rtn: Option<ValueId>,
 }
 
 // -------------------------------------------------------------- state
@@ -869,6 +893,9 @@ impl Run<'_, '_> {
         if piece && raw.is_empty() {
             return Ok(());
         }
+        if fin && !fold_chain() {
+            return self.define_rtn(raw);
+        }
         // (a pass stopped at its candidate folds here whatever it did
         // before it: the finisher and the resume are its to place)
         if piece && self.stop_at.is_none() && self.cut_req.is_none() && !self.needs_own_fold()? {
@@ -880,6 +907,38 @@ impl Run<'_, '_> {
             self.contribute_vprof(&ints);
         }
         Ok(())
+    }
+
+    /// A finisher's end: what its routine gives back to the main list
+    /// ([`RTN`]); the fold continuation placed after it folds that.
+    fn define_rtn(&mut self, raw: Vec<ValueId>) -> R<()> {
+        let v = self.v;
+        let c = self.fin.clone().unwrap_or_default();
+        let list = c.pending.get(c.held_n..).unwrap_or_default().to_vec();
+        let x = v.list(vec![v.list(raw), v.list(list)]);
+        self.cx.define_with(v.field(RTN), x, Locality::Global);
+        if let Some(c) = self.fin.as_mut() {
+            c.rtn = Some(x);
+        }
+        Ok(())
+    }
+
+    /// After a finisher placed by a fold: the fold continuation
+    /// ([`Fold`] with `last` -2) that folds what the routine gives back,
+    /// then `carried` and `rest`, the held-over insertions first
+    /// (§1026), the page state's next version.
+    fn place_continuation(&mut self, data: ValueId, carried: Vec<ValueId>, rest: Vec<ValueId>) {
+        if fold_chain() {
+            return;
+        }
+        let v = self.v;
+        let held = list_of(v, data).get(3).copied().unwrap_or_else(|| v.list(Vec::new()));
+        let x = v.list(vec![held, v.list(carried), v.list(rest)]);
+        self.cx.define_with(v.field(CONT), x, Locality::Global);
+        self.cx.follow(
+            self.ops.fold,
+            vec![v.list(Vec::new()), v.int(-2)],
+        );
     }
 
     /// The piece's vertical profile, one unit of [`crate::vprof::VPROF`]
@@ -1069,6 +1128,7 @@ impl Run<'_, '_> {
         defs.push(v.field(PS));
         defs.push(v.field(crate::build::VTAIL));
         defs.push(v.field(SHIPPED));
+        defs.push(v.field(CONT));
         if let Some(list) = crate::exec::env_str!("PHITEX_DEBUG_NODES")
             && list.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(self.cx.node().raw()))
         {
@@ -1166,10 +1226,13 @@ impl Run<'_, '_> {
             (Some(c), l)
         };
         let text = self.output_hint()?;
-        let mut fargs = vec![v.int(j), fire.data, v.list(fire.carried), v.list(locals)];
+        let mut fargs = vec![v.int(j), fire.data, v.list(if fold_chain() { fire.carried.clone() } else { Vec::new() }), v.list(locals)];
         fargs.extend([ValueId::UNIT; 5]);
         fargs.push(text);
         self.cx.follow(self.ops.finish, fargs);
+        if !fin {
+            self.place_continuation(fire.data, fire.carried, Vec::new());
+        }
         if let Some(cont) = cont {
             let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
             // (the cutting node: the finishers between it and the resume
@@ -1329,6 +1392,9 @@ impl Run<'_, '_> {
         let (b255, inserts, marks, held) =
             (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
+        if let Some(c) = self.fin.as_mut() {
+            c.held_n = held.len();
+        }
         // §1012: the marks
         let mut top = self
             .get_loc(crate::fields::cell::MARK_TOP)?
@@ -2084,6 +2150,9 @@ pub(crate) struct FinTouch {
 pub(crate) struct FinDefs {
     pub prev: Vec<(Field, ValueId)>,
     pub last: Vec<(Field, ValueId)>,
+    /// The pages of the runs `prev` and `last` were.
+    pub prev_j: i64,
+    pub last_j: i64,
     /// Every field a run of the routine defined so far: a routine
     /// defines some on some pages only (a float page, a page with a
     /// list continued), not on the last two.
@@ -2107,14 +2176,45 @@ impl FinDefs {
             .copied()
             .collect()
     }
+
+    /// [`FinDefs::stable`] for the finisher of page `j`, with the
+    /// integers that step uniformly by page (`\count0`, a page
+    /// counter) carried on to page `j` (spec-predicted-breaks §3).
+    fn predict(&self, v: &Values, j: i64) -> Vec<(Field, ValueId)> {
+        let dj = self.last_j - self.prev_j;
+        self.last
+            .iter()
+            .filter_map(|&(f, x)| {
+                // (the marks are the page's text: equal on two pages by
+                // chance; the scan knows them, spec §3)
+                let name = crate::val::field_name(v, f);
+                if name.starts_with("mark") || name == "param:outputpenalty" {
+                    return None;
+                }
+                let &(_, y) = self.prev.iter().find(|d| d.0 == f)?;
+                if x == y {
+                    return Some((f, x));
+                }
+                // (registers only: a page counter; not a hash, a penalty)
+                if !name.starts_with("count:") {
+                    return None;
+                }
+                let (a, b) = (v.as_int(y)?, v.as_int(x)?);
+                let d = b.checked_sub(a)?;
+                if dj <= 0 || d % dj != 0 {
+                    return None;
+                }
+                let x = (d / dj).checked_mul(j - self.last_j)?.checked_add(b)?;
+                Some((f, v.int(x)))
+            })
+            .collect()
+    }
 }
 
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
 const FINISHER_FIELDS: &[&str] = &[
-    PS,
     SHIPPED,
-    crate::build::VTAIL,
     "deadcycles",
     "mark:",
     "param:outputpenalty",
@@ -2124,6 +2224,28 @@ const FINISHER_FIELDS: &[&str] = &[
     "write:",
     "pdf:",
 ];
+
+/// Finishers created with a prediction of their definitions, and
+/// without (reported with `PHITEX_TEX_TIME`).
+pub(crate) static FIN_PREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FIN_UNPREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Finish {
+    fn predicted_defs_(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        let &t = args.get(9)?;
+        if t == ValueId::UNIT || crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT") {
+            return None;
+        }
+        let j = args.first().map_or(0, |&x| int_of(v, x));
+        let stable = ops(&self.0)
+            .fin_defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&t.raw())
+            .map(|d| if fold_chain() || crate::exec::env_flag!("PHITEX_NO_STEP") { d.stable() } else { d.predict(v, j) })?;
+        (!stable.is_empty()).then_some(stable)
+    }
+}
 
 impl Operation for Finish {
     fn name(&self) -> &'static str {
@@ -2156,7 +2278,8 @@ impl Operation for Finish {
         if let Some(mut names) = known
             && !crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
         {
-            for n in [PS, SHIPPED, "deadcycles", "param:outputpenalty", "inspen", "badness", "box:255"] {
+            let chain = if fold_chain() { PS } else { RTN };
+            for n in [chain, SHIPPED, "deadcycles", "param:outputpenalty", "inspen", "badness", "box:255"] {
                 names.push(v.field(n));
             }
             ops(&self.0).fields.add_record_fields(&mut names);
@@ -2170,6 +2293,12 @@ impl Operation for Finish {
             MayDefine::Nothing => Vec::new(),
         };
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
+        if fold_chain() {
+            ps.push(PS.to_owned());
+            ps.push(crate::build::VTAIL.to_owned());
+        } else {
+            ps.push(RTN.to_owned());
+        }
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
@@ -2177,18 +2306,11 @@ impl Operation for Finish {
     /// its values: the text after this one runs on them, and runs again
     /// only where a value differs (the page number's readers). The page
     /// state and the shipped mark are left out: the chain reads them.
-    fn predicted_defs(&self, args: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
-        let &t = args.get(9)?;
-        if t == ValueId::UNIT || crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT") {
-            return None;
-        }
-        let stable = ops(&self.0)
-            .fin_defs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&t.raw())
-            .map(FinDefs::stable)?;
-        (!stable.is_empty()).then_some(stable)
+    fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        let r = self.predicted_defs_(args, v);
+        let c = if r.is_some() { &FIN_PREDICTED } else { &FIN_UNPREDICTED };
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        r
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
@@ -2208,6 +2330,8 @@ impl Operation for Finish {
                     carried: list_of(v, a(2)),
                     pending: Vec::new(),
                     rest: list_of(v, a(4)),
+                    held_n: 0,
+                    rtn: None,
                 });
                 for e in list_of(v, a(3)) {
                     let ys = list_of(v, e);
@@ -2353,6 +2477,10 @@ impl Run<'_, '_> {
             }
             out.push((f, x));
         }
+        if let Some(x) = self.fin.as_ref().and_then(|c| c.rtn) {
+            out.push((v.field(RTN), x));
+        }
+        let j = args.first().map_or(0, |&x| int_of(v, x));
         let mut m = self
             .ops
             .fin_defs
@@ -2364,8 +2492,29 @@ impl Run<'_, '_> {
                 e.seen.push(f);
             }
         }
-        e.prev = std::mem::take(&mut e.last);
-        e.last = out;
+        if crate::exec::env_flag!("PHITEX_PRED_SHOW") {
+            for (f, x) in e.predict(v, j) {
+                let got = out.iter().find(|d| d.0 == f).map(|d| d.1);
+                if got != Some(x) {
+                    eprintln!(
+                        "pred page {j}: {} predicted {} got {}",
+                        crate::val::field_name(v, f),
+                        v.render(x),
+                        got.map_or_else(|| "nothing".to_owned(), |g| v.render(g))
+                    );
+                }
+            }
+        }
+        // (the two latest pages: finishers commit in any order)
+        if j >= e.last_j || e.last.is_empty() {
+            e.prev = std::mem::take(&mut e.last);
+            e.prev_j = e.last_j;
+            e.last = out;
+            e.last_j = j;
+        } else if j > e.prev_j || e.prev.is_empty() {
+            e.prev = out;
+            e.prev_j = j;
+        }
     }
 }
 
@@ -2386,11 +2535,17 @@ impl Operation for Fold {
         None
     }
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        MayDefine::Names(vec![v.field(PS), v.field(crate::build::VTAIL)])
+        MayDefine::Names(vec![v.field(PS), v.field(crate::build::VTAIL), v.field(CONT)])
     }
     /// The page state and `\deadcycles`: the node waits for them
     /// instead of starting and stopping.
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        // (not what a finisher defines, `deadcycles` and `rtn`: a fold
+        // waiting for them would wait for the finisher; it reads them
+        // as any read, on the finisher's prediction)
+        if !fold_chain() {
+            return Some(vec![v.field(PS), v.field(crate::build::VTAIL), v.field("pagepar")]);
+        }
         Some(vec![
             v.field(PS),
             v.field(crate::build::VTAIL),
@@ -2440,19 +2595,39 @@ impl Run<'_, '_> {
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
         let mut raw = list_of(v, a(0));
         let last = int_of(v, a(1));
+        let cont = last == -2;
         let f = self.ps_field();
         // (a stop at the read parks the run: it resumes here)
         self.begin_command();
         let ps_in = self.eng_read(f)?;
+        // a continuation: what the routine gave back (its markers, the
+        // held-over insertions, its list), then the material carried
+        // over, the page built again, the rest of the piece (§1026)
+        let mut own = None;
+        if cont {
+            let c = self.eng_read(v.field(CONT))?;
+            let cs = c.map(|x| list_of(v, x)).unwrap_or_default();
+            let part = |i: usize| cs.get(i).map(|&x| list_of(v, x)).unwrap_or_default();
+            let r = self.eng_read(v.field(RTN))?;
+            let rs = r.map(|x| list_of(v, x)).unwrap_or_default();
+            let markers = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
+            raw = markers.clone();
+            raw.extend(part(0));
+            raw.extend(rs.get(1).map(|&x| list_of(v, x)).unwrap_or_default());
+            raw.extend(part(1));
+            raw.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
+            raw.extend(part(2));
+            own = Some(markers);
+        }
         // (the scan check: the piece's profile, its unit of `vprof`)
-        let unit = if crate::vprof::checking() {
+        let unit = if crate::vprof::checking() && !cont {
             let pid = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, a(2)).to_ne_bytes()));
             let acc = self.cx.acc_range_to(v.field(crate::vprof::VPROF), None, Some(pid))?;
             v.seq_to_vec(acc).last().copied()
         } else {
             None
         };
-        self.define_vtail(&raw)?;
+        self.define_vtail(own.as_ref().unwrap_or(&raw))?;
         self.resolve_page_params(&mut raw)?;
         let dead = self.deadcycles_for(&raw)?;
         let mut timer = FoldTimer::new(raw.len());
@@ -2470,6 +2645,7 @@ impl Run<'_, '_> {
         if let Some(scan) = scan_in {
             let items = match unit {
                 Some(u) => crate::vprof::decode_value(v, u),
+                None if cont => crate::vprof::decode(&crate::vprof::encode(v, &raw)),
                 None => {
                     eprintln!("scan-check: fold node {}: no profile unit", self.cx.node().raw());
                     Vec::new()
@@ -2483,7 +2659,7 @@ impl Run<'_, '_> {
             cache.put(e, ps);
             return Ok(());
         };
-        let at_end = i64::from(fire.k) == last;
+        let at_end = cont || i64::from(fire.k) == last;
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             eprintln!(
                 "  fold {}: page {} fires at candidate {} (at end {at_end}, piece {})",
@@ -2497,7 +2673,7 @@ impl Run<'_, '_> {
         self.cx.define_with(f, e, Locality::Global);
         let j = ps.j - 1;
         cache.put(e, ps);
-        let mut fargs = vec![v.int(j), fire.data, v.list(fire.carried), v.list(Vec::new())];
+        let mut fargs = vec![v.int(j), fire.data, v.list(if fold_chain() { fire.carried.clone() } else { Vec::new() }), v.list(Vec::new())];
         if at_end {
             fargs.extend([ValueId::UNIT; 5]);
         } else {
@@ -2506,7 +2682,7 @@ impl Run<'_, '_> {
                 .copied()
                 .unwrap_or(ValueId::UNIT);
             fargs.extend([
-                v.list(fire.rest),
+                v.list(if fold_chain() { fire.rest.clone() } else { Vec::new() }),
                 a(2),
                 v.int(i64::from(fire.k)),
                 a(3),
@@ -2515,6 +2691,8 @@ impl Run<'_, '_> {
         }
         fargs.push(self.output_hint()?);
         self.cx.follow(self.ops.finish, fargs);
+        let rest = if at_end && !cont { Vec::new() } else { fire.rest };
+        self.place_continuation(fire.data, fire.carried, rest);
         Ok(())
     }
 
