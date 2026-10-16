@@ -352,12 +352,12 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };
-    // a placed page the writer could not write is the job's error, in
-    // the log and loudly, naming the node that wrote the page (a page
-    // written from another mode's handles is never placed: its run is
-    // run again, [`crate::pdfout::PagePiece`])
-    for (msg, node) in crate::pdfout::placed_errors(v, &xpages) {
-        let e = v.list(vec![v.str("error"), v.str(&msg), v.int(-1)]);
+    let l = crate::pdfout::finish_exact(v, &f, &xpages, &o.pdf_cmds);
+    // a page the link shipped and the writer could not write is the
+    // job's error, in the log and loudly, naming the node that shipped
+    // the page
+    for (msg, node) in &l.errors {
+        let e = v.list(vec![v.str("error"), v.str(msg), v.int(-1)]);
         cx.contribute(v.field("log"), v.seq_unit(e));
         let d = v.list(vec![
             v.int(1),
@@ -367,13 +367,12 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
             )),
             ValueId::UNIT,
             v.int(-1),
-            v.int(node),
+            v.int(*node),
             v.str(""),
             v.int(0),
         ]);
         cx.contribute(v.field("diags"), v.seq_unit(d));
     }
-    let l = crate::pdfout::finish_exact(v, &f, &xpages, &o.pdf_cmds);
     // (the loop-backs the link gives the next round)
     for (name, x) in [
         (crate::pdfout::OBJNUMS, l.objnums),

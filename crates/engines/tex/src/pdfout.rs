@@ -145,6 +145,8 @@ pub(crate) struct Cmd {
     f: Mutex<CmdFn>,
     fonts: Fonts,
     wparams: WParams,
+    /// The node that ran it (for the link's trace).
+    node: u64,
 }
 
 /// The build's read-time commands by serial ([`crate::run::Ops::pdf_cmds`]).
@@ -176,12 +178,8 @@ pub(crate) struct PagePiece {
     /// [`FontTags`].
     pj: i64,
     fcount: i64,
-    /// The writer's error writing it (pdfTeX's, `PDF-BACKEND-GAP`: a
-    /// fatal error there, here logged, the job going on) and the node
-    /// that wrote it: the job's error only where the end node places the
-    /// page ([`placed_errors`]); a run fed another mode's handles, which
-    /// the engine runs again with its own, leaves none in the job.
-    err: Option<(String, i64)>,
+    /// The node that shipped it, for the link's errors ([`Linked`]).
+    node: i64,
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
@@ -438,6 +436,95 @@ pub(crate) fn form_fonts(r: &mut Run<'_, '_>) -> R<Vec<u32>> {
         .iter()
         .map(|&f| u32::try_from(int_of(v, f)).unwrap_or(0))
         .collect())
+}
+
+/// The files the images made so far ask for where they are written (an
+/// included PDF's fonts replaced by the map's, `copyFont` off), found by
+/// each `\pdfximage` ([`note_image_files`]): every writer that may write
+/// an image (a page shipped, an `\immediate` image) is given them with
+/// the map.
+pub(crate) fn image_fonts(r: &mut Run<'_, '_>, fonts: &mut Fonts) -> R<()> {
+    let v = r.v;
+    let names: Vec<String> = r
+        .get_loc(crate::fields::cell::PDF_IMAGEFILES)?
+        .map(|x| list_of(v, x))
+        .unwrap_or_default()
+        .iter()
+        .map(|&n| str_of(v, n))
+        .collect();
+    if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+        eprintln!("  image fonts for node {}: {names:?}", r.cx.node().raw());
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
+    fonts.ps = default_ps_map(r)?;
+    for n in names {
+        if let Some(b) = file_bytes(r, &n)? {
+            fonts.files.insert(n.into_bytes(), b);
+        }
+    }
+    Ok(())
+}
+
+/// The files image `spec` asks for where it is written: dry writes on a
+/// writer of its own with the map, the files asked for and not given
+/// (each found given to the next: a file one font asks for may name
+/// another), added to the images' (`pdf:imagefiles`, [`image_fonts`]).
+pub(crate) fn note_image_files(
+    r: &mut Run<'_, '_>,
+    spec: &phitex_pdf::ImageSpec,
+    set: impl Fn(&mut PdfState),
+) -> R<()> {
+    let v = r.v;
+    let mut fonts = Fonts {
+        ps: default_ps_map(r)?,
+        ..Fonts::default()
+    };
+    let mut have: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for _ in 0..4 {
+        let mut st = PdfState::new(PdfParams::default());
+        set(&mut st);
+        if let Ok(n) = st.ximage(spec.clone()) {
+            let _ = st.write_ximage(n, &fonts);
+        }
+        let missed =
+            std::mem::take(&mut *fonts.missed.lock().unwrap_or_else(PoisonError::into_inner));
+        let new: Vec<Vec<u8>> = missed.into_iter().filter(|n| !have.contains(n)).collect();
+        if new.is_empty() {
+            break;
+        }
+        for n in new {
+            if let Some(b) = file_bytes(r, &String::from_utf8_lossy(&n))? {
+                fonts.files.insert(n.clone(), b);
+            }
+            have.insert(n);
+        }
+    }
+    if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+        eprintln!(
+            "  image files: {:?} (map {})",
+            have.iter().map(|n| String::from_utf8_lossy(n).into_owned()).collect::<Vec<_>>(),
+            fonts.ps.is_some()
+        );
+    }
+    if have.is_empty() {
+        return Ok(());
+    }
+    let mut all: BTreeSet<String> = r
+        .get_loc(crate::fields::cell::PDF_IMAGEFILES)?
+        .map(|x| list_of(v, x))
+        .unwrap_or_default()
+        .iter()
+        .map(|&n| str_of(v, n))
+        .collect();
+    let n0 = all.len();
+    all.extend(have.iter().map(|n| String::from_utf8_lossy(n).into_owned()));
+    if all.len() != n0 {
+        let x = v.list(all.iter().map(|n| v.str(n)).collect());
+        r.set_cell(crate::fields::cell::PDF_IMAGEFILES, x, true);
+    }
+    Ok(())
 }
 
 /// `ids` added to the fonts of the forms made so far (`\pdfxform`).
@@ -952,15 +1039,20 @@ pub(crate) fn command_forms(
         return Ok(None);
     }
     let v = r.v;
-    let fs = fonts_for(r, fonts, false)?;
+    let mut fs = fonts_for(r, fonts, false)?;
+    // (an image the command writes: the files its fonts ask for)
+    image_fonts(r, &mut fs)?;
     let wparams = writer_params(r)?;
-    // (the command's key: its node, its place among the node's
-    // commands, what it is; the same in every round the node runs as
-    // this run)
+    // (the command's key: its node and its place among the node's
+    // commands, the same in every round the node runs as this run; not
+    // what it is: its text may hold a number read back, which the
+    // round's answer changes, and a key that moved with it would never
+    // find the answer, `pdf:objbase` never settling)
+    let _ = input;
     r.pdf_occ += 1;
     let key = phitex_defuse::hash_words(
         0x6364_6d6b_6579_0001,
-        &[r.cx.node().raw(), r.pdf_occ as u64, input.raw()],
+        &[r.cx.node().raw(), r.pdf_occ as u64],
     )
     .max(1);
     let serial = CMD_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -974,6 +1066,7 @@ pub(crate) fn command_forms(
                 f: Mutex::new(Box::new(f)),
                 fonts: fs,
                 wparams,
+                node: r.cx.node().raw(),
             }),
         );
     let got = objnums_of(r, key)?;
@@ -1297,26 +1390,9 @@ pub(crate) fn ship(
     all.extend(form_fonts(r)?);
     let all: Vec<u32> = all.into_iter().collect();
     let mut fonts = fonts_for(r, &all, space)?;
-    let images = resolved
-        .values()
-        .any(|&d| list_of(v, d).first().map(|&k| str_of(v, k)).as_deref() == Some("pdf:refximage"));
-    if images {
-        // an included PDF's fonts replaced by the map's (`copyFont`
-        // off): the files a dry run of the page asks for, read now
-        fonts.ps = default_ps_map(r)?;
-        let wp = writer_params(r)?;
-        let (_, a) = ship_base(r, &p, wp)?;
-        let mut st = a.st;
-        page_params(v, st.params_mut(), &p);
-        let mut wh =
-            |h: u32, _l: bool| -> Option<Whatsit> { resolved.get(&h).and_then(|&d| whatsit(v, d)) };
-        let _ = st.ship_out_with(bx, &fonts, &mut wh);
-        for n in std::mem::take(&mut *fonts.missed.lock().unwrap_or_else(PoisonError::into_inner)) {
-            if let Some(b) = file_bytes(r, &String::from_utf8_lossy(&n))? {
-                fonts.files.insert(n, b);
-            }
-        }
-    }
+    // an included PDF's fonts replaced by the map's (`copyFont` off):
+    // the files the images ask for, found where they were made
+    image_fonts(r, &mut fonts)?;
     let margins = [
         r.param("pdflinkmargin")?,
         r.param("pdfdestmargin")?,
@@ -1393,7 +1469,7 @@ fn ship_apart(
         base: BTreeSet::new(),
         pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
         fcount: r.cint(crate::fields::cell::FONTCOUNT)?,
-        err: None,
+        node: i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
     };
     // the key: what the piece is made of, by the values' identities
     // (interned: equal values, equal ids), not by their bytes
@@ -1410,6 +1486,10 @@ fn ship_apart(
         u64::from(pc.fonts.space.is_some()),
         pc.pj.cast_unsigned(),
         pc.fcount.cast_unsigned(),
+        // (the fonts as the writer gets them, the files the images ask
+        // for among them: a run that read other ones writes another page)
+        pc.fonts.digest(),
+        u64::from(pc.fonts.ps.is_some()),
     ];
     words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
     words.extend(pc.wparams.iter().map(|&m| u64::from(m.cast_unsigned())));
@@ -1433,14 +1513,10 @@ fn ship_apart(
     let shown = phitex_defuse::hash_words(phitex_defuse::hash_bytes(0, content), &words);
     let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
     let shown = phitex_defuse::hash_bytes(shown, attr.as_bytes());
-    // (the writer's error goes with the page: the job's where the end
-    // node places it, [`placed_errors`])
-    pc.err = err.map(|e| {
-        (
-            format!("pdfTeX error: {e}"),
-            i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
-        )
-    });
+    // (the writer's error here is this writer's, not the file's: a page
+    // whose record is not placed as it is is shipped again by the link,
+    // whose error is the job's, [`Linked::errors`])
+    let _ = err;
     pieces()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1493,18 +1569,6 @@ pub(crate) struct EndFields {
     pub suppress_ptex_info: i32,
 }
 
-/// The writer's errors of the pages the end node places (`xpages`), with
-/// the node that wrote each: the job's errors ([`PagePiece::err`]).
-pub(crate) fn placed_errors(v: &Values, xpages: &[ValueId]) -> Vec<(String, i64)> {
-    let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
-    xpages
-        .iter()
-        .filter(|&&x| v.as_int(x).is_some())
-        .filter_map(|&x| m.get(&u64::from_ne_bytes(int_of(v, x).to_ne_bytes())))
-        .filter_map(|p| p.err.clone())
-        .collect()
-}
-
 /// What the link made: the file (empty: none), and the loop-backs it
 /// gives the next round: what each read-time command got ([`OBJNUMS`])
 /// and the fonts' names ([`FONT_TAGS`]).
@@ -1512,6 +1576,10 @@ pub(crate) struct Linked {
     pub file: Vec<u8>,
     pub objnums: ValueId,
     pub ftags: ValueId,
+    /// The writer's errors where the link shipped a page again (pdfTeX's,
+    /// `PDF-BACKEND-GAP`: a fatal error there, here logged, the job going
+    /// on), with the node that shipped the page.
+    pub errors: Vec<(String, i64)>,
 }
 
 /// The exact PDF file, linked (spec-redesign §1 `link`): one writer
@@ -1536,6 +1604,7 @@ pub(crate) fn finish_exact(
         file: Vec::new(),
         objnums: v.list(Vec::new()),
         ftags: v.list(Vec::new()),
+        errors: Vec::new(),
     };
     if xpages.is_empty() {
         return none;
@@ -1546,6 +1615,7 @@ pub(crate) fn finish_exact(
     let mut tags = FontTags::default();
     let mut bytes = PdfBytes::new();
     let mut got: Vec<ValueId> = Vec::new();
+    let mut errors: Vec<(String, i64)> = Vec::new();
     let (mut placed, mut shipped) = (0usize, 0usize);
     let pcs: Vec<Option<Arc<PagePiece>>> = {
         let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
@@ -1600,6 +1670,15 @@ pub(crate) fn finish_exact(
             }
             set_page_params(v, &mut st, &pc.params, pc.margins);
             let n0 = st.objects_numbered();
+            if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+                eprintln!(
+                    "  link page {}: copy fonts {}, map {}, files {}",
+                    pc.pj,
+                    st.params_mut().inclusion_copy_fonts,
+                    pc.fonts.ps.is_some(),
+                    pc.fonts.files.len()
+                );
+            }
             let res = st.replay_page(&pc.rec, &pc.fonts, &pc.base, None);
             if res.is_err() {
                 // (the node that wrote the page logged the writer's
@@ -1608,8 +1687,9 @@ pub(crate) fn finish_exact(
                 let mut side = crate::nodes::Side::default();
                 if let Some(phitex_typeset::node::Node::Box(bx)) =
                     crate::nodes::decode(v, pc.boxv, &mut side)
+                    && let Err(e) = st.ship_out_with(&bx, &pc.fonts, &mut wh)
                 {
-                    let _ = st.ship_out_with(&bx, &pc.fonts, &mut wh);
+                    errors.push((format!("pdfTeX error: {e}"), pc.node));
                 }
                 shipped += 1;
             } else {
@@ -1617,8 +1697,9 @@ pub(crate) fn finish_exact(
             }
             if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
                 eprintln!(
-                    "  link page {}: objects {n0} -> {} ({})",
+                    "  link page {} (shipped by node {}): objects {n0} -> {} ({})",
                     pc.pj,
+                    u64::from_ne_bytes(pc.node.to_ne_bytes()),
                     st.objects_numbered(),
                     match &res {
                         Ok(_) => "replayed".to_owned(),
@@ -1641,6 +1722,14 @@ pub(crate) fn finish_exact(
                     let mut g = c.f.lock().unwrap_or_else(PoisonError::into_inner);
                     (*g)(&mut st, &mut forms, &c.fonts)
                 };
+                if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+                    eprintln!(
+                        "  link command of node {}: {:?} (objects {})",
+                        c.node,
+                        out,
+                        st.objects_numbered()
+                    );
+                }
                 got.push(v.list(vec![key, out.value(v)]));
             } else {
                 apply_doc_op(v, &mut st, x);
@@ -1719,5 +1808,6 @@ pub(crate) fn finish_exact(
         file: out,
         objnums: v.list(got),
         ftags,
+        errors,
     }
 }

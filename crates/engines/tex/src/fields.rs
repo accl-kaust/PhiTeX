@@ -71,6 +71,7 @@ const STATIC: &[&str] = &[
     "pdf:exact",
     "pdf:fixed",
     "pdf:formfonts",
+    "pdf:imagefiles",
     "pdf:fontcount",
     "pdf:lastannot",
     "pdf:lastlink",
@@ -300,6 +301,7 @@ pub(crate) mod cell {
     pub(crate) const PDF_EXACT: u32 = (STATIC0 + static_index("pdf:exact")) as u32;
     pub(crate) const PDF_FIXED: u32 = (STATIC0 + static_index("pdf:fixed")) as u32;
     pub(crate) const PDF_FORMFONTS: u32 = (STATIC0 + static_index("pdf:formfonts")) as u32;
+    pub(crate) const PDF_IMAGEFILES: u32 = (STATIC0 + static_index("pdf:imagefiles")) as u32;
     pub(crate) const PDF_FONTCOUNT: u32 = (STATIC0 + static_index("pdf:fontcount")) as u32;
     pub(crate) const PDF_LASTANNOT: u32 = (STATIC0 + static_index("pdf:lastannot")) as u32;
     pub(crate) const PDF_LASTLINK: u32 = (STATIC0 + static_index("pdf:lastlink")) as u32;

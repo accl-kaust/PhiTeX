@@ -2715,6 +2715,7 @@ fn ximage_step(
     }
     let immediate = x.immediate;
     let set = move |st: &mut phitex_pdf::PdfState| image_params(st, &ps);
+    crate::pdfout::note_image_files(r, &spec, &set)?;
     let i = match ximage_own_info(&spec, &set) {
         Ok(i) => i,
         Err(e) => {

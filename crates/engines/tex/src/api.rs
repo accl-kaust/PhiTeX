@@ -2057,16 +2057,32 @@ impl Graph {
                     .acc_value(unit, v.field("cutreq"))
                     .map(|x| v.seq_to_vec(x))
                     .unwrap_or_default();
+                // (a piece's cut at the earliest candidate its finishers
+                // ask for now: a later page firing in it fires in its
+                // resume once it is cut there; and where an edit moved
+                // the page, the cut moves with it, never kept at a
+                // candidate no finisher asks for and the new one lost)
+                let mut asks: Vec<(i64, i64)> = Vec::new();
                 for e in reqs {
                     let xs = list_of(v, e);
                     if let [pid, k] = xs[..] {
                         let (pid, k) = (int_of(v, pid), int_of(v, k));
-                        if !self.cuts.iter().any(|(p, _)| *p == pid) {
-                            self.cuts.push((pid, k));
-                            stats.cuts += 1;
-                            asked = true;
+                        match asks.iter_mut().find(|(p, _)| *p == pid) {
+                            Some(a) => a.1 = a.1.min(k),
+                            None => asks.push((pid, k)),
                         }
                     }
+                }
+                // (the cuts are those asked for now: a finisher of a page
+                // firing at a cut asks for it again, and a cut no
+                // finisher asks for is no cut)
+                asks.sort_unstable();
+                let mut had = self.cuts.clone();
+                had.sort_unstable();
+                if asks != had {
+                    stats.cuts += asks.iter().filter(|a| !had.contains(a)).count() as u64;
+                    self.cuts = asks;
+                    asked = true;
                 }
             }
             let asked_names: Vec<String> = {
@@ -2854,7 +2870,7 @@ fn final_bindings(
                 t_name += t.elapsed();
                 // open files are not dumped
                 // nor is the PDF writer's state (pdfTeX dumps no objects)
-                if ["wopen:", "write:", "file:", "read:", "pdf:formfonts"]
+                if ["wopen:", "write:", "file:", "read:", "pdf:formfonts", "pdf:imagefiles"]
                     .iter()
                     .any(|p| name.starts_with(p))
                 {

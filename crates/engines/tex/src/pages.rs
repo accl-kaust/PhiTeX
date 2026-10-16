@@ -842,7 +842,12 @@ impl Run<'_, '_> {
     /// position as its arguments (`[j, …, routine hint, ordinary pages
     /// fired, special]`), and the scan's continuation after it. Nothing
     /// of the page's items: the finisher and the continuation assemble it
-    /// from the break ([`Run::assemble_page`]).
+    /// from the break ([`Run::assemble_page`]). `origin`: for a page
+    /// firing in a continuation's material, the piece whose items after
+    /// an earlier page's candidate that material holds (`[piece, its
+    /// last candidate, what it read, what it defined after each
+    /// candidate, its locals at its last]`): the page's finisher checks the piece there as for a
+    /// page firing in its own items ([`Run::check_cut`]).
     #[allow(clippy::too_many_arguments)]
     fn place_break(
         &mut self,
@@ -853,18 +858,21 @@ impl Run<'_, '_> {
         rest: usize,
         normal: i64,
         special: bool,
+        origin: Option<ValueId>,
     ) -> R<()> {
         let v = self.v;
         let text = self.output_hint()?;
         let at = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        let b = v.list(vec![
+        let mut b = vec![
             v.int(j),
             v.int(at),
             src,
             v.int(pid),
             v.int(i64::from(k)),
             v.int(i64::try_from(rest).unwrap_or(-1)),
-        ]);
+        ];
+        b.extend(origin);
+        let b = v.list(b);
         self.cx.define_with(v.field(BREAKS), b, Locality::Global);
         let mut pos = vec![v.int(j)];
         pos.extend([ValueId::UNIT; 8]);
@@ -1023,7 +1031,26 @@ impl Run<'_, '_> {
         let Some((_, fire, own)) = self.assemble_page(b)? else {
             return Ok(pos.to_vec());
         };
-        let pid = b.get(3).map_or(-2, |&x| int_of(v, x));
+        let mut pid = b.get(3).map_or(-2, |&x| int_of(v, x));
+        // (a page firing in the rest of a piece carried in a
+        // continuation's material: checked against that piece, its
+        // origin, `place_break`)
+        let own = match b.get(6).filter(|_| pid == -2) {
+            Some(&o) => {
+                let xs = list_of(v, o);
+                pid = xs.first().map_or(-2, |&x| int_of(v, x));
+                vec![
+                    xs.first().copied().unwrap_or(ValueId::UNIT),
+                    xs.get(1).copied().unwrap_or(ValueId::UNIT),
+                    ValueId::UNIT,
+                    xs.get(2).copied().unwrap_or(ValueId::UNIT),
+                    xs.get(3).copied().unwrap_or(ValueId::UNIT),
+                    xs.get(4).copied().unwrap_or(ValueId::UNIT),
+                    xs.get(5).copied().unwrap_or(ValueId::UNIT),
+                ]
+            }
+            None => own,
+        };
         let a = |i: usize| own.get(i).copied().unwrap_or(ValueId::UNIT);
         let at_end = pid == -2 || i64::from(fire.k) == int_of(v, a(1));
         let locals = if pid == -2 {
@@ -1038,6 +1065,15 @@ impl Run<'_, '_> {
             v.list(locals),
         ];
         if at_end {
+            // (a page firing where its piece was cut: the cut asked for
+            // again, so the client keeps it, `api::Graph::settle`; a cut
+            // no finisher asks for any more is dropped)
+            if pid != -2 && a(6) != ValueId::UNIT && int_of(v, a(6)) != 0 {
+                self.contribute(
+                    "cutreq",
+                    v.seq_unit(v.list(vec![v.int(pid), v.int(i64::from(fire.k))])),
+                );
+            }
             args.extend([ValueId::UNIT; 5]);
         } else {
             let defs_k = list_of(v, a(4))
@@ -1065,6 +1101,7 @@ impl Run<'_, '_> {
         reads: ValueId,
         defs: ValueId,
         locals: Vec<ValueId>,
+        cut: bool,
     ) {
         let v = self.v;
         let ints = crate::vprof::encode(v, raw);
@@ -1081,6 +1118,9 @@ impl Run<'_, '_> {
             reads,
             defs,
             v.list(locals),
+            // (cut at `last` where a finisher asked: the finisher of the
+            // page firing there asks again, [`Run::finisher_args`])
+            v.int(i64::from(cut)),
         ]);
         self.contribute(PITEMS, v.seq_unit(it));
     }
@@ -1369,7 +1409,7 @@ impl Run<'_, '_> {
         let (reads, defs) = self.check_data(last);
         self.pin_reaching_page_params(&mut raw)?;
         self.resolve_ins_markers(&mut raw)?;
-        self.contribute_units(&raw, last, reads, defs, Vec::new());
+        self.contribute_units(&raw, last, reads, defs, Vec::new(), false);
         self.cx.follow(self.ops.scan, vec![v.int(-3)]);
         Ok(())
     }
@@ -1424,7 +1464,7 @@ impl Run<'_, '_> {
             let (reads, defs) = self.check_data(last);
             self.pin_reaching_page_params(&mut raw)?;
             self.resolve_ins_markers(&mut raw)?;
-            self.contribute_units(&raw, last, reads, defs, Vec::new());
+            self.contribute_units(&raw, last, reads, defs, Vec::new(), false);
             self.cx.follow(self.ops.scan, vec![v.int(-3)]);
             return Ok(());
         }
@@ -1437,15 +1477,16 @@ impl Run<'_, '_> {
                 self.cut_req
             );
         }
+        // (the cut stands: the first pass goes again stopped at the
+        // candidate, which places it; the second, stopped there, is done)
+        self.cut = Some(k);
         if self.stop_at != Some(k) {
-            // the second pass, stopped at the candidate, places it
-            self.cut = Some(k);
             return Ok(());
         }
         self.pin_reaching_page_params(&mut raw)?;
         self.resolve_ins_markers(&mut raw)?;
         let (cont, locals) = self.cont_encode()?;
-        self.contribute_units(&raw, Some(k), ValueId::UNIT, ValueId::UNIT, locals);
+        self.contribute_units(&raw, Some(k), ValueId::UNIT, ValueId::UNIT, locals, true);
         self.cx.follow(self.ops.scan, vec![v.int(-3)]);
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
         // (the cutting node: the finishers between it and the resume
@@ -2675,7 +2716,7 @@ impl Operation for Finish {
                 let b = r
                     .eng_read(v.field(BREAKS))?
                     .map(|x| list_of(v, x))
-                    .filter(|xs| xs.len() == 6 && xs.first() == pos.first());
+                    .filter(|xs| xs.len() >= 6 && xs.first() == pos.first());
                 let args = match b {
                     Some(b) => r.finisher_args(&b, &pos)?,
                     None => pos.clone(),
@@ -3237,6 +3278,7 @@ impl Run<'_, '_> {
             sf.rest,
             st.normal,
             sf.output_penalty <= -10001,
+            None,
         )?;
         Ok(Placed::Page)
     }
@@ -3294,6 +3336,22 @@ impl Run<'_, '_> {
             material.push(m);
         }
         material.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
+        // (where the rest of a piece begins in the material, and that
+        // piece: a page firing in it is checked against the piece,
+        // `place_break`'s origin)
+        let rest_at = material.len();
+        let origin = if pid != -2 {
+            Some(v.list(vec![
+                b[3],
+                own.get(1).copied().unwrap_or(ValueId::UNIT),
+                own.get(3).copied().unwrap_or(ValueId::UNIT),
+                own.get(4).copied().unwrap_or(ValueId::UNIT),
+                own.get(5).copied().unwrap_or(ValueId::UNIT),
+                own.get(6).copied().unwrap_or(ValueId::UNIT),
+            ]))
+        } else {
+            b.get(6).copied()
+        };
         material.extend(rest);
         self.resolve_page_params(&mut material)?;
         let dead = self.deadcycles_for(&material)?;
@@ -3336,6 +3394,7 @@ impl Run<'_, '_> {
             }
             // (its break: the material from the state before it, which
             // the page's finisher and continuation fold again)
+            let in_rest = material.len() - fire.rest.len() > rest_at;
             let src = state(crate::vprof::value(v, &[]), material);
             self.place_break(
                 ps.j - 1,
@@ -3345,6 +3404,7 @@ impl Run<'_, '_> {
                 fire.rest.len(),
                 ps.normal,
                 fire_special(v, fire.data),
+                origin.filter(|_| in_rest),
             )?;
             return Ok(Placed::Page);
         }
