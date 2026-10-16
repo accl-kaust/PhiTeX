@@ -275,13 +275,18 @@ pub(crate) fn ship(
     wh: &mut dyn FnMut(u32) -> Option<Whatsit>,
 ) -> R<u64> {
     let v = r.v;
+    let t7 = std::time::Instant::now();
     let mut pm = params(r)?;
     crate::pdfout::page_params(v, &mut pm, p);
     pm.link_margin = r.param("pdflinkmargin")?;
     pm.dest_margin = r.param("pdfdestmargin")?;
     pm.thread_margin = r.param("pdfthreadmargin")?;
     let pm = fix(r, &pm)?;
+    phitex_pdf::phase::add(7, t7);
+    let t8 = std::time::Instant::now();
     let (carry, n) = carry_here(r)?;
+    phitex_pdf::phase::add(8, t8);
+    let t9 = std::time::Instant::now();
     // the whatsits once, for the objects they refer to
     let mut seen: FxHashMap<u32, Option<Whatsit>> = FxHashMap::default();
     let mut look = |h: u32| -> Option<Whatsit> { seen.entry(h).or_insert_with(|| wh(h)).clone() };
@@ -307,9 +312,12 @@ pub(crate) fn ship(
     // bytes, a prefix-free encoding, hashed once)
     let mut enc = Encoded(Vec::with_capacity(1024));
     (&pm, &whats, &maps, &ref_keys).hash(&mut enc);
+    let t19 = std::time::Instant::now();
+    let fd = fonts.digest();
+    phitex_pdf::phase::add(19, t19);
     let input = phitex_defuse::hash_bytes(
         phitex_defuse::hash_words(
-            fonts.digest(),
+            fd,
             &[carry.digest(), u64::try_from(n).unwrap_or(0), b.raw()],
         ),
         &enc.0,
@@ -319,6 +327,8 @@ pub(crate) fn ship(
         .unwrap_or_else(PoisonError::into_inner)
         .get(&input)
         .cloned();
+    phitex_pdf::phase::add(9, t9);
+    let t10 = std::time::Instant::now();
     let piece = if let Some(p) = memo {
         (*p).clone()
     } else {
@@ -337,6 +347,8 @@ pub(crate) fn ship(
             }
         }
     };
+    phitex_pdf::phase::add(10, t10);
+    let t16 = std::time::Instant::now();
     let next = relaxed::carry_after(&carry, bx, &mut whf);
     let ck = phitex_defuse::hash_words(next.digest(), &[u64::try_from(n + 1).unwrap_or(0)]);
     carries()
@@ -350,7 +362,11 @@ pub(crate) fn ship(
     {
         r.set_cell(crate::fields::cell::PDF_LASTPH, v.int(i64::from(h)), true);
     }
-    Ok(keep(r, true, piece))
+    phitex_pdf::phase::add(16, t16);
+    let t17 = std::time::Instant::now();
+    let k = keep(r, true, piece);
+    phitex_pdf::phase::add(17, t17);
+    Ok(k)
 }
 
 /// A [`Hasher`](std::hash::Hasher) that keeps the bytes written to it:

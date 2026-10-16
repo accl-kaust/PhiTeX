@@ -1019,7 +1019,15 @@ impl Run<'_, '_> {
     /// here parks the run: the fold is a command of its own
     /// ([`Run::begin_command`]).
     #[allow(clippy::too_many_lines)]
-    fn fold_here(&mut self, mut raw: Vec<ValueId>, fin: bool) -> R<()> {
+    fn fold_here(&mut self, raw: Vec<ValueId>, fin: bool) -> R<()> {
+        let t0 = std::time::Instant::now();
+        let r = self.fold_here_(raw, fin);
+        phitex_pdf::phase::add(18, t0);
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn fold_here_(&mut self, mut raw: Vec<ValueId>, fin: bool) -> R<()> {
         let v = self.v;
         // (its input read out: the siblings it takes are known, and so
         // are the fields it defines: what its state publishes and the
@@ -1430,6 +1438,8 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let t_decode = t0.elapsed();
+        phitex_pdf::phase::add(1, t0);
+        let t_p2 = std::time::Instant::now();
         // (the positions walk only for a whatsit that needs one: a
         // `\write` expands without positions; a plain page skips the
         // walk, the second copy of the box it makes and the font view)
@@ -1482,6 +1492,8 @@ impl Run<'_, '_> {
             }
         }
         let t_whats = t0.elapsed();
+        phitex_pdf::phase::add(2, t_p2);
+        let t_p3 = std::time::Instant::now();
         let page_box = Node::Box(bx);
         let view = self.font_view(std::slice::from_ref(&page_box))?;
         let mut fonts = Vec::new();
@@ -1504,10 +1516,13 @@ impl Run<'_, '_> {
         let pdf = self.pdf_page_params(pos.pdf)?;
         let page = v.list(vec![b, cs, v.list(fonts), pdf, v.list(pdf_data)]);
         let t_fonts = t0.elapsed();
+        phitex_pdf::phase::add(3, t_p3);
+        let t_p4 = std::time::Instant::now();
         let shown = match &page_box {
             Node::Box(bx) if pos.pdf => crate::pdfout::ship(self, page, bx, &side, &ids)?,
             _ => page.raw(),
         };
+        phitex_pdf::phase::add(4, t_p4);
         if timed {
             eprintln!(
                 "shipout: decode_us {} positions_us {} whatsits_us {} fonts_us {} pdf_us {}",
@@ -1526,6 +1541,7 @@ impl Run<'_, '_> {
         self.set_cell(crate::fields::cell::DEADCYCLES, v.int(0), true);
         let j = i64::try_from(self.page_index()).unwrap_or(-1);
         self.set(SHIPPED, v.int(j), true);
+        phitex_pdf::phase::add(15, t0);
         Ok(())
     }
 
@@ -2139,9 +2155,11 @@ impl Operation for Finish {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let t_fin = std::time::Instant::now();
+        let _ = phitex_pdf::phase::take();
         let args = cx.args();
         let o = ops(&self.0);
-        run_node_parking(cx, o, true, |r| {
+        let out = run_node_parking(cx, o, true, |r| {
             if !r.resumed {
                 let v = r.v;
                 let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -2187,7 +2205,14 @@ impl Operation for Finish {
             r.record_finisher_defs(&args, &olds);
             r.contribute_global_defs();
             Ok(())
-        })
+        });
+        if phitex_pdf::phase::on() {
+            phitex_pdf::phase::add(0, t_fin);
+            let a = phitex_pdf::phase::take();
+            let us: Vec<String> = a.iter().map(|&n| format!("{:.1}", n as f64 / 1000.0)).collect();
+            eprintln!("finphase: {}", us.join(" "));
+        }
+        out
     }
 }
 

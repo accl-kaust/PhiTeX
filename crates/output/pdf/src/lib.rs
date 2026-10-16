@@ -99,6 +99,38 @@ pub mod norm;
 pub mod num;
 mod objects;
 pub mod relaxed;
+/// (measure) `PHITEX_TEX_TIME`: per-thread phase clocks a finisher
+/// reads out (the engine's phases and the writer's).
+pub mod phase {
+    use std::cell::Cell;
+    /// The clocks.
+    pub const N: usize = 24;
+    thread_local! {
+        static T: Cell<[u64; N]> = const { Cell::new([0; N]) };
+    }
+    /// Whether the clocks run.
+    #[must_use]
+    pub fn on() -> bool {
+        static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *F.get_or_init(|| std::env::var_os("PHITEX_TEX_TIME").is_some_and(|v| !v.is_empty() && v != "0"))
+    }
+    /// Clock `i` gains the time since `t0`.
+    pub fn add(i: usize, t0: std::time::Instant) {
+        if on() {
+            let d = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0);
+            T.with(|t| {
+                let mut a = t.get();
+                a[i] += d;
+                t.set(a);
+            });
+        }
+    }
+    /// The clocks, reset.
+    #[must_use]
+    pub fn take() -> [u64; N] {
+        T.with(|t| t.replace([0; N]))
+    }
+}
 mod replay;
 pub use replay::PageRecord;
 mod ship;
@@ -985,7 +1017,9 @@ impl PdfState {
     /// `pdf_end_stream`, with `write_stream_length` (`utils.c`).
     fn end_stream(&mut self) {
         let length = if let Some(data) = self.zip.take() {
+            let t0 = std::time::Instant::now();
             let z = compress_memo(&data, self.p.compress_level);
+            phase::add(11, t0);
             self.out.extend_from_slice(&z);
             z.len()
         } else {

@@ -608,6 +608,7 @@ pub fn page(
     wh: &mut WhatsitSource<'_>,
     env: &PageEnv<'_>,
 ) -> Result<Piece, PdfError> {
+    let t_page = std::time::Instant::now();
     let mut st = node_state(params);
     for (file, t) in env.maps {
         if *file {
@@ -657,7 +658,11 @@ pub fn page(
         .into_iter()
         .map(|(h, w)| (h, translate(&mut st, w, env.pieces, &mut im, &mut fallback)))
         .collect();
+    crate::phase::add(12, t_page);
+    let t_ship = std::time::Instant::now();
     st.ship_out_with(page, fonts, &mut |h, _| ws.get(&h).cloned())?;
+    crate::phase::add(13, t_ship);
+    let t_piece = std::time::Instant::now();
     if st.total_pages % PAGES_TREE_KIDS_MAX == 1 {
         leaves.push(st.last_pages);
     }
@@ -679,6 +684,7 @@ pub fn page(
         fallback,
     )?;
     p.height = Some(ph);
+    crate::phase::add(14, t_piece);
     Ok(p)
 }
 

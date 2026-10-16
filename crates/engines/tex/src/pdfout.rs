@@ -1108,7 +1108,9 @@ pub(crate) fn ship(
             resolved.insert(u32::try_from(int_of(v, h)).unwrap_or(0), d);
         }
     }
+    let t5 = std::time::Instant::now();
     vf_for(r, bx)?;
+    phitex_pdf::phase::add(5, t5);
     let space = resolved.values().any(|&d| {
         matches!(
             list_of(v, d).first().map(|&k| str_of(v, k)).as_deref(),
@@ -1116,7 +1118,9 @@ pub(crate) fn ship(
         )
     });
     if crate::pdfrelaxed::on(r)? {
+        let t6 = std::time::Instant::now();
         let fonts = fonts_for(r, ids, space)?;
+        phitex_pdf::phase::add(6, t6);
         let whats = side.whats.clone();
         let mut wh = |h: u32| -> Option<Whatsit> {
             if let Some(&d) = resolved.get(&h) {
