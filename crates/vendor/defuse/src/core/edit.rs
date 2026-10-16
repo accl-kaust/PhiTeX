@@ -85,6 +85,7 @@ impl Shared {
             fields: (0..SHARDS).map(|_| RwLock::new(FxHashMap::default())).collect(),
             no_guess: crate::sync::BrLock::new(FxHashMap::default()),
             any_no_guess: AtomicBool::new(false),
+            affinity: AtomicBool::new(false),
             by_id: (0..256).map(|_| Mutex::new(FxHashMap::default())).collect(),
             accs: FxHashMap::default(),
             seqs: FxHashSet::default(),
@@ -675,6 +676,13 @@ impl Engine {
     #[inline]
     fn set_max_rounds_inner(&mut self, n: u64) {
         self.max_rounds = n;
+    }
+
+    /// Whether a free-running worker runs the one node a job made ready
+    /// itself, next, instead of queueing it (off by default; measured as
+    /// no gain on a client whose chain nodes have two dependencies).
+    pub fn set_successor_affinity(&mut self, on: bool) {
+        self.sh.affinity.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Bounds an evaluation (see [`Limits`]); exceeding one is an error.

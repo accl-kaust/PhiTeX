@@ -414,12 +414,15 @@ impl Shared {
                 KindSpec::None,
             );
         }
-        let eff = match &d.stat.effect {
-            Effect::Pending => d.res.as_ref().and_then(|c| c.effect).unwrap_or(Effect::None),
-            e => *e,
+        // A declared effect is a guess: the committed run's, when it set
+        // one, holds.
+        let eff = match (d.res.as_ref().and_then(|c| c.effect), &d.stat.effect) {
+            (Some(e), _) => e,
+            (None, Effect::Pending) => Effect::None,
+            (None, e) => *e,
         };
         let b = eff.brackets();
-        let kind = if b.kind_pending {
+        let kind = if b.kind_pending || (b.opens > 0 && (d.kind_val.is_some() || !d.kind_vals.is_empty())) {
             KindSpec::Pending
         } else {
             match b.kind {
@@ -459,7 +462,7 @@ impl Shared {
             KindSpec::None => (K_NONE, 0),
             KindSpec::Value(v) => (K_VALUE, v.raw()),
             KindSpec::Pending => {
-                let kv = self.rec(opener).data().kind_val;
+                let kv = self.opener_kind(opener, f);
                 (K_PENDING, kv.map_or(0, ValueId::raw))
             }
         };
@@ -904,12 +907,22 @@ impl Shared {
             MayDefineS::Names(ns) => Some(ns.clone()),
             _ => None,
         };
-        r.data().stat = stat;
+        {
+            let mut d = r.data();
+            // A changed declaration: the effect its last run set (under the
+            // old one) is not this declaration's refutation.
+            if d.stat.effect != stat.effect
+                && let Some(c) = d.res.as_mut()
+            {
+                c.effect = None;
+            }
+            d.stat = stat;
+        }
         if let Some(defs) = &defs {
             for &(f, loc) in defs {
                 let exists = super::rlock(self.shard(u, f))
                     .get(&(u, f))
-                    .is_some_and(|idx| self.def_pos_k(idx, s, loc == Locality::Scope).is_some());
+                    .is_some_and(|idx| self.def_pos_k(idx, s, loc.entry_key()).is_some());
                 if !exists {
                     self.insert_def(u, s, f, loc, DefVal::Pending, notes);
                 }
@@ -1139,11 +1152,11 @@ impl Shared {
     /// Where `s`'s entry is in `idx.defs`.
     /// `s`'s entry (its outer one, not a scope entry).
     pub(crate) fn def_pos(&self, idx: &super::FieldIdx, s: Slot) -> Option<usize> {
-        self.def_pos_k(idx, s, false)
+        self.def_pos_k(idx, s, 0)
     }
 
-    /// `s`'s scope entry (`scope`) or its other entry.
-    pub(crate) fn def_pos_k(&self, idx: &super::FieldIdx, s: Slot, scope: bool) -> Option<usize> {
+    /// `s`'s entry with key `scope` (`Locality::entry_key`).
+    pub(crate) fn def_pos_k(&self, idx: &super::FieldIdx, s: Slot, scope: u8) -> Option<usize> {
         let l = self.rec(s).lab();
         let mut i = idx.defs.partition_point(|e| self.rec(e.node).lab() < l);
         while i < idx.defs.len() && self.rec(idx.defs[i].node).lab() == l {
@@ -1158,17 +1171,22 @@ impl Shared {
     /// `s`'s entry filed under frame `g` (`NO_FRAME`: its global one).
     pub(crate) fn def_pos_at(&self, idx: &super::FieldIdx, s: Slot, g: u32) -> Option<usize> {
         if g != NO_FRAME
-            && let Some(i) = self.def_pos_k(idx, s, true)
-            && idx.defs[i].fk == g
+            && let Some(i) = self.def_positions(idx, s).find(|&i| idx.defs[i].scope != 0 && idx.defs[i].fk == g)
         {
             return Some(i);
         }
         self.def_pos(idx, s)
     }
 
-    /// Both of `s`'s entries (outer first).
+    /// All of `s`'s entries.
     pub(crate) fn def_positions(&self, idx: &super::FieldIdx, s: Slot) -> impl Iterator<Item = usize> {
-        [self.def_pos_k(idx, s, false), self.def_pos_k(idx, s, true)].into_iter().flatten()
+        let l = self.rec(s).lab();
+        let lo = idx.defs.partition_point(|e| self.rec(e.node).lab() < l);
+        let mut hi = lo;
+        while hi < idx.defs.len() && self.rec(idx.defs[hi].node).lab() == l {
+            hi += 1;
+        }
+        (lo..hi).filter(move |&i| idx.defs[i].node == s).collect::<Vec<_>>().into_iter()
     }
 
     fn ins_sorted(&self, v: &mut Vec<Slot>, s: Slot) {
@@ -1207,13 +1225,17 @@ impl Shared {
         }
     }
 
-    /// Unfiles `s`'s entry of kind `scope` (the other entry, if any, keeps
-    /// the lists it shares).
-    fn rm_def_keys(&self, idx: &mut super::FieldIdx, s: Slot, loc: Locality, fk: u32, scope: bool) {
+    /// Unfiles `s`'s entry with key `scope` (its other entries keep the
+    /// lists they share).
+    fn rm_def_keys(&self, idx: &mut super::FieldIdx, s: Slot, loc: Locality, fk: u32, scope: u8) {
         let root = self.unit(self.unit_of(s)).root_frame;
-        let other = self.def_pos_k(idx, s, !scope).map(|i| (idx.defs[i].fk, idx.defs[i].loc));
-        if let Some((ofk, oloc)) = other {
-            if ofk != fk
+        let others: Vec<(u32, Locality)> = self
+            .def_positions(idx, s)
+            .filter(|&i| idx.defs[i].scope != scope)
+            .map(|i| (idx.defs[i].fk, idx.defs[i].loc))
+            .collect();
+        if !others.is_empty() {
+            if !others.iter().any(|o| o.0 == fk)
                 && let Some(v) = idx.local.get_mut(&fk)
             {
                 self.rm_sorted(v, s);
@@ -1221,9 +1243,11 @@ impl Shared {
                     idx.local.remove(&fk);
                 }
             }
-            if loc == Locality::Global && oloc != Locality::Global {
-                self.rm_sorted(&mut idx.globals, s);
-            } else if loc != Locality::Global && (oloc == Locality::Global || ofk == root) {
+            if loc == Locality::Global {
+                if !others.iter().any(|o| o.1 == Locality::Global) {
+                    self.rm_sorted(&mut idx.globals, s);
+                }
+            } else if !others.iter().any(|o| o.1 != Locality::Global && o.0 != root) {
                 self.rm_sorted(&mut idx.nonroot, s);
             }
             return;
@@ -1325,7 +1349,7 @@ impl Shared {
         let fk_new = self.def_frame(s, loc);
         let mut sh = wlock(self.shard(u, f));
         let idx = sh.entry((u, f)).or_default();
-        let scope = loc == Locality::Scope;
+        let scope = loc.entry_key();
         if let Some(i) = self.def_pos_k(idx, s, scope) {
             let e = &mut idx.defs[i];
             if e.val != val || e.loc != loc {
@@ -1383,6 +1407,15 @@ impl Shared {
     /// node's frame, or for `Locality::Scope` the innermost scope the node
     /// opens after itself (its own frame while it opens none).
     pub(crate) fn def_frame(&self, s: Slot, loc: Locality) -> u32 {
+        if let Locality::ScopeAt(k) = loc {
+            let (br, _) = self.brackets_of(s);
+            let r = self.rec(s);
+            let n = u32::from(br.ob) + u32::from(br.oa);
+            if u32::from(k) < n && r.nframes.load(Ordering::Acquire) >= n {
+                return r.frames.load(Ordering::Acquire) + u32::from(k);
+            }
+            return self.frame_of(s);
+        }
         if loc == Locality::Scope {
             let (br, _) = self.brackets_of(s);
             if br.oa > 0 {
@@ -1402,7 +1435,18 @@ impl Shared {
             .data()
             .res
             .as_ref()
-            .is_some_and(|c| c.defs.iter().any(|d| d.loc == Locality::Scope))
+            .is_some_and(|c| c.defs.iter().any(|d| d.loc.entry_key() != 0))
+    }
+
+    /// The run-set kind of frame `f` that `opener` opens: its entry in
+    /// `set_kinds` by position, else `set_kind`'s.
+    pub(crate) fn opener_kind(&self, opener: Slot, f: u32) -> Option<ValueId> {
+        let r = self.rec(opener);
+        let base = r.frames.load(Ordering::Acquire);
+        let d = r.data();
+        f.checked_sub(base)
+            .and_then(|i| d.kind_vals.get(i as usize).copied())
+            .or(d.kind_val)
     }
 
     /// Files `s`'s entries again under its frame now (its frame changed),
@@ -1422,14 +1466,13 @@ impl Shared {
             v
         };
         let fk_node = self.frame_of(s);
-        let fk_scope = self.def_frame(s, Locality::Scope);
         for f in fields {
             let mut sh = wlock(self.shard(u, f));
             let Some(idx) = sh.get_mut(&(u, f)) else { continue };
-            for scope in [false, true] {
-                let Some(i) = self.def_pos_k(idx, s, scope) else { continue };
-                let (old, loc) = (idx.defs[i].fk, idx.defs[i].loc);
-                let fk = if scope { fk_scope } else { fk_node };
+            let is: Vec<usize> = self.def_positions(idx, s).collect();
+            for i in is {
+                let (old, loc, scope) = (idx.defs[i].fk, idx.defs[i].loc, idx.defs[i].scope);
+                let fk = if scope == 0 { fk_node } else { self.def_frame(s, loc) };
                 for (n, g) in std::mem::take(&mut idx.defs[i].users) {
                     notes.touch.push((n, g, Cause::Changed { site: None, field: f }));
                 }
@@ -1444,15 +1487,20 @@ impl Shared {
         }
     }
 
-    /// Removes `s`'s definitions of `f` (both kinds), notifying their
+    /// Removes `s`'s definitions of `f` (every entry), notifying their
     /// users and readers.
     pub(crate) fn remove_def(&self, u: u32, s: Slot, f: Field, notes: &mut Notes) {
-        self.remove_def_k(u, s, f, false, notes);
-        self.remove_def_k(u, s, f, true, notes);
+        let keys: Vec<u8> = {
+            let sh = super::rlock(self.shard(u, f));
+            sh.get(&(u, f)).map_or_else(Vec::new, |idx| self.def_positions(idx, s).map(|i| idx.defs[i].scope).collect())
+        };
+        for k in keys {
+            self.remove_def_k(u, s, f, k, notes);
+        }
     }
 
-    /// Removes `s`'s definition of `f` of kind `scope`.
-    pub(crate) fn remove_def_k(&self, u: u32, s: Slot, f: Field, scope: bool, notes: &mut Notes) {
+    /// Removes `s`'s definition of `f` with entry key `scope`.
+    pub(crate) fn remove_def_k(&self, u: u32, s: Slot, f: Field, scope: u8, notes: &mut Notes) {
         let mut sh = wlock(self.shard(u, f));
         let Some(idx) = sh.get_mut(&(u, f)) else { return };
         if let Some(i) = self.def_pos_k(idx, s, scope) {
@@ -1926,6 +1974,20 @@ impl Shared {
     }
 
     /// Recomputes a static count claim.
+    /// The first `n` following siblings of `s` (a run's claim).
+    pub(crate) fn run_claim_list(&self, s: Slot, n: usize) -> Vec<Slot> {
+        let mut list = Vec::new();
+        if n > 0 {
+            self.following(s, s, |x, skipped| {
+                if !skipped {
+                    list.push(x);
+                }
+                list.len() < n
+            });
+        }
+        list
+    }
+
     pub(crate) fn reclaim(&self, c: Slot, notes: &mut Notes) {
         let r = self.rec(c);
         let st = r.st();
@@ -1936,6 +1998,15 @@ impl Shared {
             let claimed = r.data().take_claimed();
             for x in claimed {
                 self.release(x, c, notes);
+            }
+            return;
+        }
+        // Its run's claim over the declared one: the first `n` again.
+        let run = r.data().x.as_ref().and_then(|e| e.claim_run);
+        if let Some(n) = run {
+            let list = self.run_claim_list(c, n);
+            if self.apply_claim(c, &list, notes) {
+                notes.touch.push((c, u32::MAX, Cause::Structure));
             }
             return;
         }
@@ -2381,8 +2452,9 @@ impl Shared {
             let mut q = lock(&self.q);
             q.next.push(s);
             self.qlen.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.push_ready(s);
+        } else if !self.push_ready(s) {
+            // Kept for this worker: nobody to wake.
+            return;
         }
         self.wake_idle(false);
     }

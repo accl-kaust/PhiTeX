@@ -10,7 +10,7 @@ use super::{
     ClaimS, Committed, DAns, DMode, Def, DefVal, F_APP, F_DONE, F_FWD, F_HAS_OUT, F_NEEDS_RUN, F_SENS, NIL, Pred,
     S_CLEAN, S_FREE, S_RUN, Shared, Slot, Sub, in_work, lock, wlock,
 };
-use crate::api::{Cause, EvalError, Locality};
+use crate::api::{Cause, EvalError};
 use crate::values::{Field, ValueId, hash_words};
 
 fn dans_hash(a: &DAns) -> u64 {
@@ -298,6 +298,7 @@ impl Shared {
                 || d.stat.claim == ClaimS::Pending
                 || (cx.effect.is_some() && d.res.as_ref().is_none_or(|c| c.effect != cx.effect))
                 || d.kind_val != cx.kind
+                || d.kind_vals != cx.kinds
         };
         if structural {
             // The new children's static facts: their hooks read only
@@ -392,10 +393,10 @@ impl Shared {
             let defined = |f: Field| made.contains(&f);
             // Of a field it still defines, the kind (scope-local or not)
             // it no longer makes.
-            let made_k: crate::values::FxHashSet<(Field, bool)> =
-                cx.defs.iter().map(|d| (d.f, d.loc == Locality::Scope)).collect();
+            let made_k: crate::values::FxHashSet<(Field, u8)> =
+                cx.defs.iter().map(|d| (d.f, d.loc.entry_key())).collect();
             for d in &old.defs {
-                let sc = d.loc == Locality::Scope;
+                let sc = d.loc.entry_key();
                 if defined(d.f) && !made_k.contains(&(d.f, sc)) {
                     self.remove_def_k(u, s, d.f, sc, &mut notes);
                 }
@@ -408,7 +409,7 @@ impl Shared {
             }
             if let Some(sd) = &stat_defs {
                 for &(f, loc) in sd {
-                    let sc = loc == Locality::Scope;
+                    let sc = loc.entry_key();
                     if !made_k.contains(&(f, sc)) {
                         self.remove_def_k(u, s, f, sc, &mut notes);
                     }
@@ -483,11 +484,22 @@ impl Shared {
                 }
             }
             // Effect and kind.
-            let eff_changed = cx.effect.is_some() && old.effect != cx.effect;
+            let stat_eff = r.data().stat.effect;
+            let eff_changed = if stat_eff == crate::api::Effect::Pending {
+                cx.effect.is_some() && old.effect != cx.effect
+            } else {
+                // Declared: the run's effect (if any) refutes it; one that
+                // sets none goes back to the declaration.
+                if cx.effect.is_some_and(|e| e != stat_eff) {
+                    self.c.effects_refuted.fetch_add(1, Ordering::Relaxed);
+                }
+                old.effect.unwrap_or(stat_eff) != cx.effect.unwrap_or(stat_eff)
+            };
             let kind_changed = {
                 let mut d = r.data();
-                let ch = d.kind_val != cx.kind;
+                let ch = d.kind_val != cx.kind || d.kind_vals != cx.kinds;
                 d.kind_val = cx.kind;
+                d.kind_vals = std::mem::take(&mut cx.kinds);
                 ch
             };
             // The application's environment.
@@ -531,7 +543,11 @@ impl Shared {
                 defs: cx.defs.clone(),
                 contribs: cx.contribs.clone(),
                 pubs: cx.pubs.clone(),
-                effect: cx.effect.or(old.effect),
+                effect: if r.data().stat.effect == crate::api::Effect::Pending {
+                    cx.effect.or(old.effect)
+                } else {
+                    cx.effect
+                },
                 output: out,
                 sig: hash_words(5, &sigw),
                 binds: hash_words(6, &bindw),
@@ -578,6 +594,11 @@ impl Shared {
             }
             #[cfg(feature = "profile")]
             let st0 = std::time::Instant::now();
+            // Unfolding (first: the old continuations' claims are released
+            // before its own claim may take those siblings).
+            let kids = std::mem::take(&mut cx.kids);
+            let conts = std::mem::take(&mut cx.conts);
+            self.set_unfolding(s, &kids, &conts, &mut notes);
             // Claims.
             if claim_kind == ClaimS::Pending {
                 let n = cx.claim.unwrap_or(0);
@@ -592,11 +613,36 @@ impl Shared {
                 }
                 // Its own view changes with what it claims: validate again.
                 restructured |= self.apply_claim(s, &list, &mut notes);
+            } else {
+                // A declared claim is a guess: the run's claim, when it
+                // made one, holds; one that makes none goes back to it.
+                let prev = r.data().x.as_ref().and_then(|e| e.claim_run);
+                match cx.claim {
+                    Some(n) => {
+                        r.data().ex().claim_run = Some(n);
+                        r.set(super::F_SCLAIM);
+                        let list = self.run_claim_list(s, n);
+                        let before = r.data().claimed();
+                        if list != before {
+                            self.c.claims_refuted.fetch_add(1, Ordering::Relaxed);
+                            let moved = list.iter().filter(|x| !before.contains(x)).count()
+                                + before.iter().filter(|x| !list.contains(x)).count();
+                            self.c.claim_siblings.fetch_add(moved as u64, Ordering::Relaxed);
+                        }
+                        restructured |= self.apply_claim(s, &list, &mut notes);
+                    }
+                    None if prev.is_some() => {
+                        r.data().ex().claim_run = None;
+                        if claim_kind == ClaimS::None {
+                            r.clear(super::F_SCLAIM);
+                            restructured |= self.apply_claim(s, &[], &mut notes);
+                        } else {
+                            notes.reclaim.push(s);
+                        }
+                    }
+                    None => {}
+                }
             }
-            // Unfolding.
-            let kids = std::mem::take(&mut cx.kids);
-            let conts = std::mem::take(&mut cx.conts);
-            self.set_unfolding(s, &kids, &conts, &mut notes);
             #[cfg(feature = "profile")]
             #[allow(clippy::cast_possible_truncation)]
             if structural {
