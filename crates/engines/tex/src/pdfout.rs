@@ -282,16 +282,42 @@ impl Fonts {
             h = phitex_defuse::hash_bytes(h, &x.name);
             h = phitex_defuse::hash_bytes(h, format!("{:?}", x.entry).as_bytes());
             for b in [&x.ff, &x.enc] {
-                h = phitex_defuse::hash_bytes(h, b.as_deref().unwrap_or_default());
+                h = phitex_defuse::hash_words(h, &[b.as_ref().map_or(0, blob_hash)]);
             }
         }
         let mut files: Vec<_> = self.files.iter().collect();
         files.sort_unstable_by(|a, b| a.0.cmp(b.0));
         for (n, b) in files {
-            h = phitex_defuse::hash_bytes(phitex_defuse::hash_bytes(h, n), b);
+            h = phitex_defuse::hash_words(phitex_defuse::hash_bytes(h, n), &[blob_hash(b)]);
         }
         phitex_defuse::hash_words(h, &[u64::from(self.space.unwrap_or(0))])
     }
+}
+
+/// The content hash of a file's bytes, memoized by their allocation
+/// (every page's fonts share the files' `Arc`s, [`file_bytes`]); a
+/// `Weak` checks the allocation is still the one hashed. The empty
+/// file hashes as no file.
+fn blob_hash(b: &Arc<[u8]>) -> u64 {
+    type Memo = Mutex<FxHashMap<usize, (std::sync::Weak<[u8]>, u64)>>;
+    static M: OnceLock<Memo> = OnceLock::new();
+    if b.is_empty() {
+        return 0;
+    }
+    let key = Arc::as_ptr(b).cast::<u8>() as usize;
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some((w, h)) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&key)
+        && w.upgrade().is_some_and(|a| Arc::ptr_eq(&a, b))
+    {
+        return *h;
+    }
+    let h = phitex_defuse::hash_bytes(0, b).max(1);
+    let mut m = m.lock().unwrap_or_else(PoisonError::into_inner);
+    if m.len() > 4096 {
+        m.retain(|_, (w, _)| w.strong_count() > 0);
+    }
+    m.insert(key, (Arc::downgrade(b), h));
+    h
 }
 
 /// `pdftex.map`'s `ps_tree`.
