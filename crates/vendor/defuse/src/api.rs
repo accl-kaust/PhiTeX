@@ -712,6 +712,9 @@ pub struct Report {
     /// Runs whose claim differed from the one in force (a static
     /// `Claim::None`/`Count` taken as a guess, or the run's last claim).
     pub claims_refuted: u64,
+    /// Definitions a run made outside its node's static list (`defs`):
+    /// the list widened, the field's later readers re-validated.
+    pub defs_refuted: u64,
     /// Runs whose scope effect differed from the declared one.
     pub effects_refuted: u64,
     /// Siblings claimed or released by those claims.

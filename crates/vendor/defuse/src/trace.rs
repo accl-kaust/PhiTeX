@@ -1,4 +1,3 @@
-#![cfg(feature = "observe")]
 //! `tracing` events for the `observe` build: spans per evaluation and step,
 //! events per select, park, wake, commit, round and failure, each with the
 //! node's id, operation, unit, depth and state.

@@ -1101,8 +1101,8 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.mispredictions
     );
     eprintln!(
-        "round guesses: {} claims refuted, {} effects refuted, {} claim siblings",
-        r.claims_refuted, r.effects_refuted, r.claim_siblings
+        "round guesses: {} claims refuted, {} effects refuted, {} claim siblings, {} definitions refuted",
+        r.claims_refuted, r.effects_refuted, r.claim_siblings, r.defs_refuted
     );
     eprintln!(
         "round rerun causes: {} nodes, {causes:?}, realised cp {} nodes {:?}, longest runs {:?}",
@@ -2281,13 +2281,7 @@ fn node_args(
                 a.push(v.str(&h));
             } else {
                 let (c, at) = inc.chunk_at(s);
-                a.push(crate::hints::hint_arg_after(
-                    v,
-                    &c.th,
-                    &text[c.start..],
-                    at,
-                    c.everypar,
-                ));
+                a.push(crate::hints::hint_arg(v, &c.th, at));
             }
             a
         }

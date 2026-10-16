@@ -1,5 +1,3 @@
-#![cfg(feature = "observe")]
-
 //! The `observe` build's watcher: a thread that lives for one evaluation
 //! and writes the scheduler dump every `DEFUSE_DUMP_EVERY` seconds and on
 //! SIGINT or SIGTERM (then exits with 128 + the signal), so a hung run

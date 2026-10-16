@@ -862,13 +862,6 @@ pub(crate) struct TextHints {
     /// Whether the text defines anything the pass harvests (a macro, an
     /// active character).
     pub defines: bool,
-    /// The pending `\\everypar` at the text's end, from none at its
-    /// start; and how many slices not blank come before the first that
-    /// sets one (all when none does): what a text after it starts with,
-    /// [`Everypar::after`].
-    everypar_end: Everypar,
-    everypar_nonblank: usize,
-    everypar_sets: bool,
 }
 
 impl TextHints {
@@ -2810,16 +2803,12 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         skip,
         pars,
         slice_hints: Vec::new(),
-        everypar_end: Everypar::default(),
-        everypar_nonblank: 0,
-        everypar_sets: false,
     };
     // each slice's hint: the union of its commands' bounds (a run
     // executes the whole slice); a paragraph's region also defines
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
     let mut pending: Vec<&'static str> = Vec::new();
-    let mut everypar = Everypar::default();
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         // (whether the run reads on into the next slice: a scan for a
@@ -2916,41 +2905,6 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // slice that may set one and ends no paragraph after it leaves
         // the reset pending, and the next slice ending a paragraph
         // declares it)
-        // (LaTeX's paragraph hooks assign `\\everypar` at every
-        // paragraph, the value it has: no definition. A heading's
-        // `\\@afterheading`, a list's `\\item` and an environment's
-        // end (`\\@doendpe`) set another, which the next paragraph
-        // consumes, §1091: a slice calling one declares it)
-        // (LaTeX 2025's `\\everypar` is a token register, `\\newtoks`,
-        // the primitive behind the paragraph hooks: a register's field)
-        // (the paragraph after it runs that `\\everypar`: the heading's
-        // sets `\\clubpenalty` and `\\if@nobreak`, `\\@doendpe`'s
-        // `\\if@endpe`, both `\\everypar` again)
-        // (`\\@afterheading`'s runs in two paragraphs: the first sets
-        // `\\clubpenalty` to 10000, the second sets it back and empties
-        // `\\everypar`)
-        // (blank lines between and after those paragraphs end them: they
-        // take the declaration without using it up)
-        let blank = text[s..e].trim().is_empty();
-        if everypar.step(blank) {
-            declare_everypar_run(&mut h);
-        }
-        // (a blank line in a list's scope before its first `\item` runs
-        // the list's `\par`, which counts `\par@deathcycles`, a count
-        // register: a blank slice given back into a scope may define one)
-        if blank && let Some(b) = h.bound.as_mut().or(h.guess.as_mut()) {
-            add_head(&mut b.state, "count:");
-        }
-        if sets_everypar(&text[s..e]) {
-            if let Some(b) = h.bound.as_mut().or(h.guess.as_mut()) {
-                add_head(&mut b.state, "param:everypar");
-                add_head(&mut b.state, "toks:");
-            }
-            everypar.pending = 2;
-            t.everypar_sets = true;
-        } else if !blank && !t.everypar_sets {
-            t.everypar_nonblank += 1;
-        }
         let mut out = pending.clone();
         let mut ends = false;
         let k0 = t.starts.partition_point(|&x| x < s);
@@ -2991,7 +2945,6 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         }
         slice_hints.push(intern(&h));
     }
-    t.everypar_end = everypar;
     // (`PHITEX_HINTS_DIGEST`: one line per text, a hash of every hint
     // a span reads (the atoms not skipped) and every slice's, encoded:
     // the check that a rework of the analysis keeps its answers byte
@@ -3520,144 +3473,6 @@ static OFF: AtomicBool = AtomicBool::new(false);
 /// same for a process.
 pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
-}
-
-/// A `\\everypar` a slice set for the paragraphs after it, which run it
-/// (LaTeX's `\\@afterheading`: two paragraphs).
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub(crate) struct Everypar {
-    /// How many slices not blank after the setting one still may run it.
-    pending: u8,
-    /// The slices running it are done: a blank line after the last ends
-    /// its paragraph (its `\\par`, LaTeX's redefined one included) and
-    /// takes the declaration without using it up.
-    tail: bool,
-}
-
-impl Everypar {
-    /// Whether a slice (blanks only: `blank`) runs the pending
-    /// `\\everypar`, before what the slice sets itself; the state after it.
-    fn step(&mut self, blank: bool) -> bool {
-        let runs = self.pending > 0 || (blank && self.tail);
-        if !blank {
-            if self.pending > 0 {
-                self.pending -= 1;
-                self.tail = self.pending == 0;
-            } else {
-                self.tail = false;
-            }
-        }
-        runs
-    }
-
-    /// The state after the text `t` analyses, this one before it (the
-    /// texts of a document analysed apart, `crate::incr`: a heading's
-    /// paragraphs are other texts than the heading's).
-    pub(crate) fn after(self, t: &TextHints) -> Everypar {
-        if t.everypar_sets {
-            return t.everypar_end;
-        }
-        let mut e = self;
-        // (three slices not blank leave none pending, whatever before)
-        for _ in 0..t.everypar_nonblank.min(3) {
-            e.step(false);
-        }
-        e
-    }
-}
-
-/// Add what running a pending `\\everypar` may define to a slice's hint.
-fn declare_everypar_run(h: &mut Hint) {
-    if let Some(b) = h.bound.as_mut().or(h.guess.as_mut()) {
-        for n in EVERYPAR_RUN {
-            // (a control sequence is bounded by name, the rest by the
-            // state's heads, `check_defs`)
-            if let Some(cs) = n.strip_prefix("cs:") {
-                let name = format!("cs:{cs}");
-                if !b.names.contains(&name) {
-                    b.names.push(name);
-                }
-            } else {
-                add_head(&mut b.state, n);
-            }
-        }
-    }
-}
-
-/// [`hint_arg`] for the slice at byte `at` of a text analysed apart
-/// (`text`, analysed as `t`), which starts with the `\\everypar` the texts
-/// before it left pending (`before`, [`Everypar::after`]): a slice before
-/// the text's own first setting one that runs it declares so too.
-pub(crate) fn hint_arg_after(
-    v: &Values,
-    t: &TextHints,
-    text: &str,
-    at: usize,
-    before: Everypar,
-) -> ValueId {
-    let k = t.slices.partition_point(|&(s, _)| s < at);
-    if t.slices.get(k).map(|x| x.0) != Some(at) {
-        return hint_arg(v, t, at);
-    }
-    let mut e = before;
-    for (j, &(s, end)) in t.slices[..=k].iter().enumerate() {
-        if e == Everypar::default() {
-            break;
-        }
-        let runs = e.step(text[s..end].trim().is_empty());
-        if j == k && runs {
-            let mut h = Hint::decode(&t.slice_hints[k]);
-            declare_everypar_run(&mut h);
-            return v.str(&h.encode());
-        }
-        // (from a slice setting one on, the text's own analysis has it)
-        if sets_everypar(&text[s..end]) {
-            break;
-        }
-    }
-    hint_arg(v, t, at)
-}
-
-/// What a paragraph running a heading's or an environment end's
-/// `\\everypar` may define (LaTeX's `\\@afterheading`, `\\@doendpe`),
-/// or a list item's (`\\@item`'s, the first paragraph of a trivlist
-/// environment: `\\@minipagefalse`, `\\global\\@newlistfalse`,
-/// `\\global\\@inlabelfalse`; a theorem's later paragraph, run in its
-/// scope: `\\@noparitemfalse`).
-const EVERYPAR_RUN: [&str; 11] = [
-    "cs:par",
-    "param:clubpenalty",
-    "param:everypar",
-    "toks:",
-    "cs:if@nobreak",
-    "cs:if@endpe",
-    "box:0",
-    "cs:if@minipage",
-    "cs:if@newlist",
-    "cs:if@inlabel",
-    "cs:if@noparitem",
-];
-
-/// Whether a slice calls a command that leaves `\\everypar` other
-/// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
-/// a list item, an environment's begin or end (`\\@doendpe`), a title.
-fn sets_everypar(slice: &str) -> bool {
-    const SETS: &[&str] = &[
-        "\\section",
-        "\\subsection",
-        "\\subsubsection",
-        "\\paragraph",
-        "\\subparagraph",
-        "\\chapter",
-        "\\part",
-        "\\@afterheading",
-        "\\@startsection",
-        "\\item",
-        "\\begin",
-        "\\end",
-        "\\maketitle",
-    ];
-    SETS.iter().any(|c| slice.contains(c))
 }
 
 /// Whether the node's text says its command opens and closes no scope.

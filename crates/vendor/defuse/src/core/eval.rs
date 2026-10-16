@@ -473,6 +473,7 @@ impl Engine {
             &c.fuel_outs,
             &c.spec_stops,
             &c.claims_refuted,
+            &c.defs_refuted,
             &c.effects_refuted,
             &c.claim_siblings,
             &c.sole_successor,

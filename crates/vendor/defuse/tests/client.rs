@@ -5,9 +5,7 @@
 
 use std::sync::Arc;
 
-use defuse::{
-    Claim, Ctx, Engine, EvalError, Field, Locality, MayDefine, NodeId, OpId, Operation, Stop, Value, ValueId, Values,
-};
+use defuse::{Claim, Ctx, Engine, Field, Locality, MayDefine, NodeId, OpId, Operation, Stop, Value, ValueId, Values};
 
 /// `["p"]` unfolds a child `["c"]`; `["c"]` outputs the text of its
 /// first following sibling (or "none") and claims it; `["s", x]` outputs x.
@@ -1805,14 +1803,12 @@ fn an_undeclared_definition_of_a_run_the_structure_undoes_is_withdrawn() {
         .expect("the transient run's error is withdrawn");
     assert_eq!(eng.output(b), Some(ValueId::UNIT), "the outer binding: {r:?}");
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
-    // A run contradicting a static definition list is reported when the
-    // evaluation ends with it standing.
+    // A run contradicting a static definition list refutes it (a list is
+    // a guess): the definition stands, counted.
     let (mut eng, _, p) = build(true);
-    let e = eng.evaluate_sequential().expect_err("p's definition stands");
-    assert!(
-        matches!(e, EvalError::UndeclaredDefinition { node, .. } if Some(node) == p),
-        "{e:?}"
-    );
+    let r = eng.evaluate_sequential().expect("p's definition stands");
+    assert!(p.is_some() && r.defs_refuted >= 1, "{r:?}");
+    assert!(eng.check_reads().is_empty(), "{:?}", eng.check_reads());
 }
 
 /// `["e", s]` defines `s`; `["d"]` defines `h = 0`; `["dk"]` defines

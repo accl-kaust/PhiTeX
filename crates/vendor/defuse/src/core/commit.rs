@@ -387,12 +387,27 @@ impl Shared {
             // Definitions (a run may make many thousands: sets, not scans).
             let declared: Option<crate::values::FxHashSet<Field>> =
                 stat_defs.as_ref().map(|sd| sd.iter().map(|e| e.0).collect());
+            // A static list is a guess too: a definition outside it widens
+            // it (the insertion re-validates the field's readers after the
+            // node, as a new definer's does).
+            let mut widened: Vec<(Field, crate::api::Locality)> = Vec::new();
             for d in &cx.defs {
                 self.insert_def(u, s, d.f, d.loc, d.val, &mut notes);
                 if let Some(sd) = &declared
                     && !sd.contains(&d.f)
                 {
-                    lock(&self.undeclared).insert(s, d.f);
+                    widened.push((d.f, d.loc));
+                }
+            }
+            if !widened.is_empty() {
+                self.c.defs_refuted.fetch_add(widened.len() as u64, Ordering::Relaxed);
+                let mut d = r.data();
+                let st = &mut d.stat;
+                if let Some(ds) = st.defs.as_mut() {
+                    ds.extend(widened.iter().copied());
+                }
+                if let super::MayDefineS::Names(ns) = &mut st.may {
+                    ns.extend(widened.iter().map(|w| w.0));
                 }
             }
             let made: crate::values::FxHashSet<Field> = cx.defs.iter().map(|d| d.f).collect();

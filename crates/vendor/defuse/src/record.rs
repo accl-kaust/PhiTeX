@@ -1,4 +1,3 @@
-#![cfg(feature = "observe")]
 //! Recording for replay (`observe` builds, `DEFUSE_RECORD=path`).
 //!
 //! Every public engine call, every answer an operation's static hooks

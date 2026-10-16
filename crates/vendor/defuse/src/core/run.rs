@@ -60,6 +60,7 @@ impl Shared {
         true
     }
 
+    #[allow(clippy::modulo_one)] // `QSHARDS` may be 1
     fn push_counted(&self, s: Slot) {
         let i = WORKER.with(std::cell::Cell::get);
         self.qlen.fetch_add(1, Ordering::SeqCst);
@@ -468,11 +469,7 @@ impl Shared {
                     // The rerun's cause is the read that broke (not the
                     // last touch, which may have held).
                     if let Some(f) = self.first_broken_field(s, &log) {
-                        let last = super::lock(&self.reruns)
-                            .iter()
-                            .rev()
-                            .find(|e| e.0 == s)
-                            .map(|e| e.1.clone());
+                        let last = super::lock(&self.reruns).iter().rev().find(|e| e.0 == s).map(|e| e.1);
                         if let Some(Some(crate::api::Rerun::Changed { field, .. })) = last
                             && field != f
                         {

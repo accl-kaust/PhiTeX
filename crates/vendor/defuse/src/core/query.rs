@@ -982,9 +982,17 @@ impl Shared {
     /// Whether `c`'s current text may define `f` (a definition entry it
     /// has may stem from an older text, until it commits again).
     pub(crate) fn may_define_now(&self, c: Slot, f: Field) -> bool {
-        let (op, args) = self.text(c);
-        match self.ops[op.0 as usize].defs(&args, &self.values) {
-            Some(ds) => ds.iter().any(|d| d.0 == f),
+        // The node's declaration as it stands (a run's definition outside
+        // its static list widened it).
+        let declared = self
+            .rec(c)
+            .data()
+            .stat
+            .defs
+            .as_ref()
+            .map(|ds| ds.iter().any(|d| d.0 == f));
+        match declared {
+            Some(b) => b,
             None => self.may_cover(c, f).is_some(),
         }
     }

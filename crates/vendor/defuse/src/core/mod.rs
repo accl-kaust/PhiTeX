@@ -778,6 +778,7 @@ pub(crate) struct Counters {
     pub fuel_outs: AtomicU64,
     pub spec_stops: AtomicU64,
     pub claims_refuted: AtomicU64,
+    pub defs_refuted: AtomicU64,
     pub effects_refuted: AtomicU64,
     pub claim_siblings: AtomicU64,
     pub sole_successor: AtomicU64,
