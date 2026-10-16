@@ -2350,6 +2350,10 @@ impl Operation for Finish {
         let args = cx.args();
         let o = ops(&self.0);
         let out = run_node_parking(cx, o, true, |r| {
+            if crate::exec::env_flag!("PHITEX_FIN_TRACE") {
+                let j = args.first().map_or(0, |&x| int_of(r.v, x));
+                eprintln!("fin-trace: node {} page {j} spec {} resumed {}", r.cx.node().raw(), r.cx.is_speculative(), r.resumed);
+            }
             if !r.resumed {
                 let v = r.v;
                 let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -2786,13 +2790,21 @@ impl Operation for Resume {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         let o = ops(&self.0);
-        run_node_parking(cx, o, true, |r| {
+        let t0 = std::time::Instant::now();
+        let out = run_node_parking(cx, o, true, |r| {
             if !r.resumed {
                 r.cont_load(args.first().copied().unwrap_or(ValueId::UNIT))?;
                 r.read_cut_request()?;
             }
             r.run_all()
-        })
+        });
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
+            let v = cx.values();
+            let text = v.render(args.first().copied().unwrap_or(ValueId::UNIT));
+            let cut: String = text.chars().take(600).collect();
+            eprintln!("longrun: resume {} {:.0} ms: {cut}", cx.node().raw(), t0.elapsed().as_secs_f64() * 1e3);
+        }
+        out
     }
 }
 

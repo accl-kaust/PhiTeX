@@ -29,6 +29,12 @@ fn reg(s: &Shared) -> &crate::hints::Registry {
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead.
+thread_local! {
+    /// (measure) the text of the exec node this thread runs, for the
+    /// `longrun:` line.
+    static LONG_TEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
 pub(crate) fn run_node(
     cx: &mut Ctx<'_>,
     o: Ops,
@@ -362,6 +368,11 @@ impl Operation for Exec {
         );
         let o = ops(&self.0);
         let log = o.pkg_log.clone();
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            let v = cx.values();
+            let fs = crate::run::decode_segs(v, &args);
+            LONG_TEXT.with(|c| *c.borrow_mut() = format!("{} segs, load {load}: {}", fs.len(), v.render(args.first().copied().unwrap_or(ValueId::UNIT)).chars().take(300).collect::<String>()));
+        }
         let res = run_node_parking(cx, o, true, |r| {
             // (a resumed run has done this, and continues its commands)
             if !r.resumed {
@@ -433,6 +444,10 @@ impl Operation for Exec {
             log.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((node, t0, std::time::Instant::now(), spec));
+        }
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
+            let text = LONG_TEXT.with(|c| c.borrow().clone());
+            eprintln!("longrun: exec {node} {:.0} ms (ok {}): {text}", t0.elapsed().as_secs_f64() * 1e3, res.is_ok());
         }
         res
     }

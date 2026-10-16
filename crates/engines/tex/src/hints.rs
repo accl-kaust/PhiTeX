@@ -559,7 +559,7 @@ impl Hint {
                 // defines the next page state (`crate::pages`), whatever
                 // its commands; a reader past a piece not declaring them
                 // would read an older version and run again
-                for f in [crate::pages::PS, crate::pages::SHIPPED] {
+                for f in [crate::pages::PS, crate::pages::SHIPPED, crate::pages::CONT] {
                     if !ps.iter().any(|p| f.starts_with(p.as_str())) {
                         ps.push(f.to_owned());
                     }
