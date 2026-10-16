@@ -140,7 +140,11 @@ impl Run<'_, '_> {
                             .and_then(|x| x.strip_suffix("\")"))
                             .map(|n| {
                                 let f = self.v.field(&format!("cs:{n}"));
-                                { let l = self.loc_of(f); let here = self.cx.use_field(f); format!("here {here:?}, local {}", self.st.debug_slot(l)) }
+                                {
+                                    let l = self.loc_of(f);
+                                    let here = self.cx.use_field(f);
+                                    format!("here {here:?}, local {}", self.st.debug_slot(l))
+                                }
                             })
                             .unwrap_or_default();
                         eprintln!(

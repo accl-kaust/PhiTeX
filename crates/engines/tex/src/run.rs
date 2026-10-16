@@ -179,8 +179,6 @@ pub(crate) struct Ops {
     pub not_virtual: std::sync::Arc<std::sync::Mutex<phitex_defuse::FxHashSet<String>>>,
 }
 
-
-
 /// A package load's finished run: its node, when it began and ended,
 /// and whether it ran speculatively.
 pub(crate) type PkgRun = (u64, std::time::Instant, std::time::Instant, bool);
@@ -311,7 +309,6 @@ fn heartbeat_enabled() -> bool {
 /// The size of a run's control-sequence name cache ([`Run::cs_cache`]).
 pub(crate) const CS_CACHE: usize = 1024;
 
-
 /// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`, §297).
 /// Its meaning is read from its slot when a command needs it
 /// ([`Run::cur_mean`]), as TeX reads `equiv(cur_cs)` (§389: a macro's
@@ -428,6 +425,15 @@ pub(crate) struct Run<'c, 'a> {
     /// `cat_gen`.
     cat_cache: [u8; 256],
     cat_gen: u64,
+    /// The code tables (`lc`, `uc`, `sf`, `mc`, `dc`) of characters
+    /// 0–255 as last read (`i32::MIN`: not read), valid while the
+    /// table's generation is `code_gen` (the catcodes' generation, which
+    /// every code change bumps too).
+    code_cache: Box<[[i32; 256]; 5]>,
+    code_gen: u64,
+    /// Fonts decoded in this run, with the table's change generation
+    /// they were decoded at ([`Run::font_entry`]).
+    pub font_memo: phitex_defuse::FxHashMap<u32, (u64, Option<std::rc::Rc<crate::fonts::Entry>>)>,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -606,6 +612,9 @@ impl<'c, 'a> Run<'c, 'a> {
             st: crate::runstate::State::new(),
             cat_cache: [u8::MAX; 256],
             cat_gen: u64::MAX,
+            code_cache: Box::new([[i32::MIN; 256]; 5]),
+            code_gen: u64::MAX,
+            font_memo: phitex_defuse::FxHashMap::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -945,7 +954,8 @@ impl<'c, 'a> Run<'c, 'a> {
             let mut defs = defs;
             let mut stale: Vec<(usize, Locality)> = Vec::new();
             for d in &defs {
-                if let (Locality::ScopeAt(_), Some(r)) = (d.2, crate::fields::record_of(d.0 as usize))
+                if let (Locality::ScopeAt(_), Some(r)) =
+                    (d.2, crate::fields::record_of(d.0 as usize))
                     && !stale.contains(&(r.0, d.2))
                 {
                     stale.push((r.0, d.2));
@@ -970,8 +980,11 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             let scoped = defs.iter().any(|d| d.2 == Locality::Scope && of_b(d));
             if scoped {
-                let outer: Vec<(Loc, ValueId, Locality)> =
-                    defs.iter().copied().filter(|d| d.2 != Locality::Scope).collect();
+                let outer: Vec<(Loc, ValueId, Locality)> = defs
+                    .iter()
+                    .copied()
+                    .filter(|d| d.2 != Locality::Scope)
+                    .collect();
                 let mut all = outer.clone();
                 all.extend(defs.iter().copied().filter(|d| d.2 == Locality::Scope));
                 let has_outer = outer.iter().any(of_b);
@@ -980,7 +993,9 @@ impl<'c, 'a> Run<'c, 'a> {
                     // (the scope's cells as the record reaching the run,
                     // the run's own record outside differing: stale in
                     // the scope, its readers read the cells)
-                    None if has_outer => self.rec_out.push((f, v.list(Vec::new()), Locality::Scope)),
+                    None if has_outer => {
+                        self.rec_out.push((f, v.list(Vec::new()), Locality::Scope));
+                    }
                     None => {}
                 }
                 if !has_outer {
@@ -988,7 +1003,10 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
             let defs_b: Vec<(Loc, ValueId, Locality)> = if scoped {
-                defs.iter().copied().filter(|d| d.2 != Locality::Scope).collect()
+                defs.iter()
+                    .copied()
+                    .filter(|d| d.2 != Locality::Scope)
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -1014,7 +1032,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     continue;
                 }
             }
-            let Some((x, global)) = self.record_after(b, &defs)? else {
+            let Some((x, global)) = self.record_after(b, defs)? else {
                 continue;
             };
             let l = if global {
@@ -1130,7 +1148,6 @@ impl<'c, 'a> Run<'c, 'a> {
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
     }
-
 
     /// A field this run defines after reading a job-written file back:
     /// its value at the read-back point (`wpre:<field>`, once), which a
@@ -1257,6 +1274,25 @@ impl<'c, 'a> Run<'c, 'a> {
     /// `sf`, 3 `mc`, 4 `dc`).
     pub(crate) fn code(&mut self, table: usize, c: impl TryInto<u32>) -> R<i32> {
         let c = c.try_into().unwrap_or(u32::MAX);
+        if c < 256 && table < 5 && self.interp.is_none() {
+            let g = self.st.cat_gen();
+            if self.code_gen != g {
+                *self.code_cache = [[i32::MIN; 256]; 5];
+                self.code_gen = g;
+            }
+            let x = self.code_cache[table][c as usize];
+            if x != i32::MIN {
+                return Ok(x);
+            }
+            let x = self.code_slow(table, c)?;
+            self.code_cache[table][c as usize] = x;
+            return Ok(x);
+        }
+        self.code_slow(table, c)
+    }
+
+    #[inline(never)]
+    fn code_slow(&mut self, table: usize, c: u32) -> R<i32> {
         let l = if let Some(s) = crate::fields::code_slot(table, c) {
             Loc::try_from(s).unwrap_or(0)
         } else {
@@ -1492,26 +1528,24 @@ impl<'c, 'a> Run<'c, 'a> {
         for x in raw.iter_mut() {
             let tag = crate::nodes::tag(v, *x);
             if tag == crate::nodes::T_PAGE_PARAMS && crate::val::list_of(v, *x).len() == 1 {
-                let m = match full {
-                    Some(m) => m,
-                    None => {
-                        let m = self.page_params_marker()?;
-                        full = Some(m);
-                        m
-                    }
+                let m = if let Some(m) = full {
+                    m
+                } else {
+                    let m = self.page_params_marker()?;
+                    full = Some(m);
+                    m
                 };
                 *x = m;
             } else if tag == crate::nodes::T_INS_PARAMS {
                 let xs = crate::val::list_of(v, *x);
                 if xs.len() == 2 {
                     let n = u16::try_from(int_of(v, xs[1])).unwrap_or(0);
-                    let m = match classes.iter().find(|c| c.0 == n) {
-                        Some(&(_, m)) => m,
-                        None => {
-                            let m = self.ins_params_marker(n)?;
-                            classes.push((n, m));
-                            m
-                        }
+                    let m = if let Some(&(_, m)) = classes.iter().find(|c| c.0 == n) {
+                        m
+                    } else {
+                        let m = self.ins_params_marker(n)?;
+                        classes.push((n, m));
+                        m
                     };
                     *x = m;
                 }
@@ -1895,8 +1929,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 .collect();
             // (stale in each frame the run opens with cells of it)
             let f = self.ops.fields.slot_field(crate::fields::record_loc(b));
-            let mut frames: Vec<Locality> =
-                mine.iter().copied().filter(|l| matches!(l, Locality::ScopeAt(_))).collect();
+            let mut frames: Vec<Locality> = mine
+                .iter()
+                .copied()
+                .filter(|l| matches!(l, Locality::ScopeAt(_)))
+                .collect();
             frames.sort_unstable();
             frames.dedup();
             for l in frames {
@@ -2417,7 +2454,10 @@ impl<'c, 'a> Run<'c, 'a> {
                     "readon: node {} pulled {}: nest {:?}, conds {}, effect {:?}, baselocal {}",
                     self.cx.node().raw(),
                     self.pulled,
-                    self.nest.iter().map(|l| (l.mode, l.group, l.owns)).collect::<Vec<_>>(),
+                    self.nest
+                        .iter()
+                        .map(|l| (l.mode, l.group, l.owns))
+                        .collect::<Vec<_>>(),
                     self.conds.len(),
                     self.effect,
                     self.st.has_base_local_def(self.v)
@@ -2688,7 +2728,11 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let n = self.claim_count();
         if crate::exec::env_flag!("PHITEX_DEBUG_CLAIMS") {
-            eprintln!("claim: node {} claims {n} (pulled {})", self.cx.node().raw(), self.pulled);
+            eprintln!(
+                "claim: node {} claims {n} (pulled {})",
+                self.cx.node().raw(),
+                self.pulled
+            );
         }
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             eprintln!(

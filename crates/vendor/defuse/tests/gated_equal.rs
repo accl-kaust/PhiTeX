@@ -45,7 +45,14 @@ impl Operation for Ops {
             "m" => {
                 let got = cx.use_field(x)?.and_then(|p| v.as_int(p)).unwrap_or(0);
                 cx.define(x, v.int(got + 100));
-                cx.follow(op, if self.remade { vec![v.str("f"), v.int(got)] } else { vec![v.str("f")] });
+                cx.follow(
+                    op,
+                    if self.remade {
+                        vec![v.str("f"), v.int(got)]
+                    } else {
+                        vec![v.str("f")]
+                    },
+                );
                 Ok(ValueId::UNIT)
             }
             "f" => {
@@ -62,7 +69,11 @@ impl Operation for Ops {
 }
 
 fn case(remade: bool) {
-    let ops = Arc::new(Ops { me: Mutex::new(None), remade, g_runs: AtomicU64::new(0) });
+    let ops = Arc::new(Ops {
+        me: Mutex::new(None),
+        remade,
+        g_runs: AtomicU64::new(0),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     *ops.me.lock().unwrap() = Some(op);
@@ -76,7 +87,12 @@ fn case(remade: bool) {
     let two = eng.values().int(2);
     eng.replace(pn, op, vec![p, two]);
     let rep = eng.evaluate_sequential().unwrap();
-    assert_eq!(ops.g_runs.load(Relaxed), before, "remade {remade}: G stands: {:?}", rep.rerun_causes);
+    assert_eq!(
+        ops.g_runs.load(Relaxed),
+        before,
+        "remade {remade}: G stands: {:?}",
+        rep.rerun_causes
+    );
 }
 
 #[test]

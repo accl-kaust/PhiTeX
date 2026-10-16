@@ -20,7 +20,11 @@ impl Operation for Ops {
         }
     }
     fn may_define(&self, a: &[ValueId], v: &Values) -> MayDefine {
-        if tag(v, a) == "f5" { MayDefine::Names(vec![v.field("c"), v.field("d")]) } else { MayDefine::Any }
+        if tag(v, a) == "f5" {
+            MayDefine::Names(vec![v.field("c"), v.field("d")])
+        } else {
+            MayDefine::Any
+        }
     }
     fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         (tag(v, a) == "f8").then(|| vec![v.field("c")])
@@ -50,7 +54,12 @@ impl defuse::Executor for Pool {
     fn parallelism(&self) -> usize {
         4
     }
-    fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> defuse::RunResult + Sync), out: &mut Vec<defuse::RunResult>) {
+    fn execute(
+        &mut self,
+        n: usize,
+        run: &(dyn Fn(usize) -> defuse::RunResult + Sync),
+        out: &mut Vec<defuse::RunResult>,
+    ) {
         let res: Vec<defuse::RunResult> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..n).map(|i| s.spawn(move || run(i))).collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
@@ -70,5 +79,9 @@ fn a_reader_released_by_a_narrow_sees_a_definition_outside_it() {
     eng.push(u, op, vec![f5]);
     let r = eng.push(u, op, vec![f8]);
     let _ = eng.evaluate(&mut defuse::Greedy::default(), &mut Pool);
-    assert_eq!(eng.output(r).and_then(|x| eng.values().as_int(x)), Some(5), "F8 reads F5's c");
+    assert_eq!(
+        eng.output(r).and_then(|x| eng.values().as_int(x)),
+        Some(5),
+        "F8 reads F5's c"
+    );
 }

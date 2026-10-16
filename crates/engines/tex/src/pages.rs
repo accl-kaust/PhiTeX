@@ -49,10 +49,8 @@ use phitex_defuse::{
 };
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{List, Node};
-use phitex_typeset::page::{
-    Contents, Fired, InsertClass, Outcome, PageBuilder, PageParams,
-};
 use phitex_typeset::pack::{PackParams, Spec};
+use phitex_typeset::page::{Contents, Fired, InsertClass, Outcome, PageBuilder, PageParams};
 
 use crate::build::{FoldState, IGNORE_DEPTH, Mode, fold_item};
 use crate::fields::Par;
@@ -61,7 +59,9 @@ use crate::nodes::{self, Side};
 use crate::ops::{Shared, ops, run_node_parking};
 use crate::run::{Halt, R, Run};
 use crate::runstate::{ContSaved, ContSlot, ContState, Loc, State};
-use crate::val::{glue_of, glue_value, group, int_at, int_of, list_of, str_of, toks_of, toks_value};
+use crate::val::{
+    glue_of, glue_value, group, int_at, int_of, list_of, str_of, toks_of, toks_value,
+};
 
 /// What a finisher's output routine gives back to the main list
 /// (§1026): `[markers, list]`, the run's own main-list items (page
@@ -127,7 +127,10 @@ pub(crate) const BREAKS: &str = "breaks";
 /// window, and its read hint's gate, do not wait for a scan step, a
 /// finisher or a page's placement still to run, only for the pieces.
 pub(crate) fn no_units(v: &Values) -> Vec<(Field, ValueId)> {
-    vec![(v.field(crate::vprof::VPROF), ValueId::NIL), (v.field(PITEMS), ValueId::NIL)]
+    vec![
+        (v.field(crate::vprof::VPROF), ValueId::NIL),
+        (v.field(PITEMS), ValueId::NIL),
+    ]
 }
 
 /// [`no_units`] as a run gives them (a run contributing otherwise than
@@ -375,11 +378,8 @@ impl PageState {
             let mut halt = None;
             let out = {
                 let mut class = |n: u16| {
-                    classes
-                        .iter()
-                        .find(|c| c.0 == n)
-                        .map(|c| c.1)
-                        .unwrap_or_else(|| match live(n) {
+                    classes.iter().find(|c| c.0 == n).map_or_else(
+                        || match live(n) {
                             Ok(c) => c,
                             Err(h) => {
                                 halt.get_or_insert(h);
@@ -391,7 +391,9 @@ impl PageState {
                                     skip: Glue::ZERO,
                                 }
                             }
-                        })
+                        },
+                        |c| c.1,
+                    )
                 };
                 self.pb.contribute(p, next.as_ref(), &params, &mut class)
             };
@@ -412,7 +414,8 @@ impl PageState {
                             self.j,
                             params.vsize,
                             params.max_depth,
-                            self.params.map_or_else(|| "none".to_owned(), |m| v.render(m))
+                            self.params
+                                .map_or_else(|| "none".to_owned(), |m| v.render(m))
                         );
                     }
                     // §1017: what the page could not take goes first
@@ -482,7 +485,9 @@ pub(crate) fn class_of(v: &Values, m: ValueId) -> (u16, InsertClass) {
 
 /// Whether a fired page's `\outputpenalty` is -10001 or less.
 fn fire_special(v: &Values, data: ValueId) -> bool {
-    list_of(v, data).get(4).is_some_and(|&x| int_of(v, x) <= -10001)
+    list_of(v, data)
+        .get(4)
+        .is_some_and(|&x| int_of(v, x) <= -10001)
 }
 
 /// A fired page as a finisher gets it: `[\box255, inserts, marks, held,
@@ -644,7 +649,9 @@ impl Run<'_, '_> {
                 let xs = list_of(v, e);
                 // (`[j, entry]`: an entry tagged with its page)
                 let entry = match xs.first() {
-                    Some(&j) if v.as_int(j).is_some() => xs.get(1).map(|&y| list_of(v, y)).unwrap_or_default(),
+                    Some(&j) if v.as_int(j).is_some() => {
+                        xs.get(1).map(|&y| list_of(v, y)).unwrap_or_default()
+                    }
                     _ => xs,
                 };
                 if let Some(&n) = entry.first() {
@@ -710,7 +717,12 @@ impl Run<'_, '_> {
     /// agreed). A piece that leaves them alone reads nothing here.
     fn pin_reaching_page_params(&mut self, raw: &mut [ValueId]) -> R<()> {
         let v = self.v;
-        let names = ["param:vsize", "param:maxdepth", "param:topskip", "param:holdinginserts"];
+        let names = [
+            "param:vsize",
+            "param:maxdepth",
+            "param:topskip",
+            "param:holdinginserts",
+        ];
         let mut defined = false;
         for n in names {
             let l = self.loc_of(v.field(n));
@@ -796,6 +808,7 @@ impl Run<'_, '_> {
 
     /// A finisher's end: what its routine gives back to the main list
     /// ([`RTN`]); the fold continuation placed after it folds that.
+    #[allow(clippy::unnecessary_wraps)]
     fn define_rtn(&mut self, raw: Vec<ValueId>) -> R<()> {
         let v = self.v;
         let c = self.fin.clone().unwrap_or_default();
@@ -843,13 +856,17 @@ impl Run<'_, '_> {
         fargs.push(text);
         fargs.push(v.int(ps.normal));
         fargs.push(v.int(i64::from(fire_special(v, fire.data))));
-        self.cx.define_with(v.field(FIRE), v.list(fargs.clone()), Locality::Global);
+        self.cx
+            .define_with(v.field(FIRE), v.list(fargs.clone()), Locality::Global);
         // (the finisher's own arguments: its position)
         for x in &mut fargs[1..9] {
             *x = ValueId::UNIT;
         }
         self.cx.follow(self.ops.finish, fargs);
-        let held = list_of(v, fire.data).get(3).copied().unwrap_or_else(|| v.list(Vec::new()));
+        let held = list_of(v, fire.data)
+            .get(3)
+            .copied()
+            .unwrap_or_else(|| v.list(Vec::new()));
         let rest_n = rest.len();
         let x = v.list(vec![held, v.list(fire.carried), v.list(rest)]);
         self.cx.define_with(v.field(CONT), x, Locality::Global);
@@ -861,13 +878,30 @@ impl Run<'_, '_> {
 
     /// The piece's units: its vertical profile ([`crate::vprof::VPROF`])
     /// and its items ([`PITEMS`]), at its position.
-    fn contribute_units(&mut self, raw: &[ValueId], last: Option<u32>, reads: ValueId, defs: ValueId, locals: Vec<ValueId>) {
+    fn contribute_units(
+        &mut self,
+        raw: &[ValueId],
+        last: Option<u32>,
+        reads: ValueId,
+        defs: ValueId,
+        locals: Vec<ValueId>,
+    ) {
         let v = self.v;
         let ints = crate::vprof::encode(v, raw);
         crate::vprof::count_unit(&ints);
         let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        self.contribute(crate::vprof::VPROF, v.seq_unit(crate::vprof::unit(v, pid, &ints)));
-        let it = v.list(vec![v.int(pid), v.int(last.map_or(-1, i64::from)), v.list(raw.to_vec()), reads, defs, v.list(locals)]);
+        self.contribute(
+            crate::vprof::VPROF,
+            v.seq_unit(crate::vprof::unit(v, pid, &ints)),
+        );
+        let it = v.list(vec![
+            v.int(pid),
+            v.int(last.map_or(-1, i64::from)),
+            v.list(raw.to_vec()),
+            reads,
+            defs,
+            v.list(locals),
+        ]);
         self.contribute(PITEMS, v.seq_unit(it));
     }
 
@@ -882,7 +916,9 @@ impl Run<'_, '_> {
         let v = self.v;
         let vt = v.field(crate::build::VTAIL);
         let own = crate::build::vtail_value(v, None, raw);
-        let x = if crate::build::vtail_value(v, Some(crate::build::vtail_probe(v, raw.len())), raw) == own {
+        let x = if crate::build::vtail_value(v, Some(crate::build::vtail_probe(v, raw.len())), raw)
+            == own
+        {
             own
         } else {
             let prev = self.eng_read(vt)?;
@@ -898,6 +934,7 @@ impl Run<'_, '_> {
     /// after its first candidate (or locally anywhere) a field a routine
     /// reads. Then the piece folds in its own run: a finisher's check
     /// would ask for the cut a round later, at the chain's cost.
+    #[allow(clippy::unnecessary_wraps)]
     fn needs_own_fold(&mut self) -> R<bool> {
         let n = self.cand_marks.len();
         if n == 0 || (n == 1 && self.last_candidate() == Some(0)) {
@@ -915,7 +952,11 @@ impl Run<'_, '_> {
             let f = self.loc_field(l);
             if t.defs.contains(&f) {
                 if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
-                    eprintln!("  own fold {}: reads {}", self.cx.node().raw(), str_of(v, f.0));
+                    eprintln!(
+                        "  own fold {}: reads {}",
+                        self.cx.node().raw(),
+                        str_of(v, f.0)
+                    );
                 }
                 return Ok(true);
             }
@@ -940,7 +981,11 @@ impl Run<'_, '_> {
         for f in defs {
             if t.reads.contains(&f) {
                 if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
-                    eprintln!("  own fold {}: defines {}", self.cx.node().raw(), str_of(v, f.0));
+                    eprintln!(
+                        "  own fold {}: defines {}",
+                        self.cx.node().raw(),
+                        str_of(v, f.0)
+                    );
                 }
                 return Ok(true);
             }
@@ -980,13 +1025,12 @@ impl Run<'_, '_> {
                 continue;
             }
             let n = u16::try_from(int_of(v, xs[1])).unwrap_or(0);
-            let m = match classes.iter().find(|c| c.0 == n) {
-                Some(&(_, m)) => m,
-                None => {
-                    let m = self.ins_params_marker(n)?;
-                    classes.push((n, m));
-                    m
-                }
+            let m = if let Some(&(_, m)) = classes.iter().find(|c| c.0 == n) {
+                m
+            } else {
+                let m = self.ins_params_marker(n)?;
+                classes.push((n, m));
+                m
             };
             *x = m;
         }
@@ -1005,21 +1049,21 @@ impl Run<'_, '_> {
         let n = crate::fields::record_len(b);
         let cells = match self.cx.use_field_at(rf, Some(at))? {
             phitex_defuse::FieldAt::Def(x, _) => Some(list_of(v, x)).filter(|xs| xs.len() == n),
-            phitex_defuse::FieldAt::Gone => return Ok(self.page_params_marker()?),
+            phitex_defuse::FieldAt::Gone => return self.page_params_marker(),
             phitex_defuse::FieldAt::Unset => None,
         };
         let absent = crate::fields::record_absent(v);
         let mut xs = Vec::with_capacity(n);
         for i in 0..n {
-            let x = match &cells {
-                Some(c) => (c[i] != absent).then_some(c[i]),
-                None => {
-                    let loc = crate::runstate::Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
-                    let f = self.loc_field(loc);
-                    match self.cx.use_field_at(f, Some(at))? {
-                        phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                        _ => None,
-                    }
+            let x = if let Some(c) = &cells {
+                (c[i] != absent).then_some(c[i])
+            } else {
+                let loc =
+                    crate::runstate::Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
+                let f = self.loc_field(loc);
+                match self.cx.use_field_at(f, Some(at))? {
+                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
+                    _ => None,
                 }
             };
             xs.push(x);
@@ -1041,13 +1085,12 @@ impl Run<'_, '_> {
         let mut m = None;
         for x in raw.iter_mut() {
             if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
-                let mm = match m {
-                    Some(mm) => mm,
-                    None => {
-                        let mm = self.page_params_at(pid)?;
-                        m = Some(mm);
-                        mm
-                    }
+                let mm = if let Some(mm) = m {
+                    mm
+                } else {
+                    let mm = self.page_params_at(pid)?;
+                    m = Some(mm);
+                    mm
                 };
                 *x = mm;
             }
@@ -1061,14 +1104,13 @@ impl Run<'_, '_> {
         let mut m = None;
         for x in items.iter_mut() {
             if let crate::vprof::PItem::Params(p @ None) = x {
-                let pp = match m {
-                    Some(pp) => pp,
-                    None => {
-                        let mm = self.page_params_at(pid)?;
-                        let pp = params_of(self.v, mm);
-                        m = Some(pp);
-                        pp
-                    }
+                let pp = if let Some(pp) = m {
+                    pp
+                } else {
+                    let mm = self.page_params_at(pid)?;
+                    let pp = params_of(self.v, mm);
+                    m = Some(pp);
+                    pp
                 };
                 *p = Some(pp);
             }
@@ -1118,15 +1160,21 @@ impl Run<'_, '_> {
                 let stands = self.st.def_stands(l);
                 names.push((self.loc_field(l).0, stands));
             }
-            names.extend(self.streams_since(m.contribs).into_iter().map(|f| (f.0, false)));
+            names.extend(
+                self.streams_since(m.contribs)
+                    .into_iter()
+                    .map(|f| (f.0, false)),
+            );
             names.sort_unstable_by_key(|x| (x.0.raw(), !x.1));
             names.dedup_by_key(|x| x.0);
-            per.push(v.list(
-                names
-                    .into_iter()
-                    .map(|(f, g)| v.list(vec![f, v.int(i64::from(g))]))
-                    .collect(),
-            ));
+            per.push(
+                v.list(
+                    names
+                        .into_iter()
+                        .map(|(f, g)| v.list(vec![f, v.int(i64::from(g))]))
+                        .collect(),
+                ),
+            );
         }
         (v.list(rs), v.list(per))
     }
@@ -1172,16 +1220,26 @@ impl Run<'_, '_> {
         // reader of another field, a piece's hint bound narrowed to them)
         let n = self.claim_count();
         if crate::exec::env_flag!("PHITEX_DEBUG_CLAIMS") {
-            eprintln!("claim: node {} claims {n} at its fold (pulled {})", self.cx.node().raw(), self.pulled);
+            eprintln!(
+                "claim: node {} claims {n} at its fold (pulled {})",
+                self.cx.node().raw(),
+                self.pulled
+            );
         }
         self.cx.claim(n);
         let mut defs = self.published_fields();
         defs.extend([crate::build::VTAIL, SHIPPED, RESUME].map(|f| v.field(f)));
         if let Some(list) = crate::exec::env_str!("PHITEX_DEBUG_NODES")
-            && list.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(self.cx.node().raw()))
+            && list
+                .split(',')
+                .any(|x| x.trim().parse::<u64>().ok() == Some(self.cx.node().raw()))
         {
             let names: Vec<String> = defs.iter().map(|f| crate::val::field_name(v, *f)).collect();
-            eprintln!("narrow {} (resumed {}): {names:?}", self.cx.node().raw(), self.resumed);
+            eprintln!(
+                "narrow {} (resumed {}): {names:?}",
+                self.cx.node().raw(),
+                self.resumed
+            );
         }
         self.cx.narrow(MayDefine::Names(defs));
         self.begin_command();
@@ -1192,7 +1250,9 @@ impl Run<'_, '_> {
         self.resolve_page_params(&mut raw)?;
         let s = ScanIn::decode(v, self.eng_read(v.field(SCAN))?);
         let units = v.seq_to_vec(self.cx.acc_range(v.field(PITEMS), s.anchor)?);
-        let dead = if [&s.material, &raw].iter().any(|r| has_end(v, r)) || units.iter().any(|&u| has_end(v, &unit_items(v, u))) {
+        let dead = if [&s.material, &raw].iter().any(|r| has_end(v, r))
+            || units.iter().any(|&u| has_end(v, &unit_items(v, u)))
+        {
             self.cint(crate::fields::cell::DEADCYCLES)?
         } else {
             0
@@ -1272,8 +1332,12 @@ impl Run<'_, '_> {
             // (the cutting node: the finishers between it and the resume
             // tell which fields they defined globally, `gdefs`)
             let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-            self.cx.define_with(v.field(RESUME), v.list(vec![cont, pid]), Locality::Global);
-            self.cx.follow(self.ops.resume, vec![ValueId::UNIT, v.int(flags), ValueId::UNIT]);
+            self.cx
+                .define_with(v.field(RESUME), v.list(vec![cont, pid]), Locality::Global);
+            self.cx.follow(
+                self.ops.resume,
+                vec![ValueId::UNIT, v.int(flags), ValueId::UNIT],
+            );
         }
         Ok(())
     }
@@ -1285,7 +1349,7 @@ impl Run<'_, '_> {
     pub(crate) fn read_cut_request(&mut self) -> R<()> {
         let args = self.cx.args();
         let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
-        if k & 3 == 0 {
+        if k.trailing_zeros() >= 2 {
             return Ok(());
         }
         let f = self.v.field(&format!("cut:{}", self.cx.node().raw()));
@@ -1364,7 +1428,14 @@ impl Run<'_, '_> {
             for f in restore {
                 let x = self.eng_read(f)?;
                 let loc = self.loc_of(f);
-                self.set_loc(loc, x.map_or(crate::runstate::Native::Absent, crate::runstate::Native::Raw), true);
+                self.set_loc(
+                    loc,
+                    x.map_or(
+                        crate::runstate::Native::Absent,
+                        crate::runstate::Native::Raw,
+                    ),
+                    true,
+                );
             }
             return Ok(());
         }
@@ -1466,7 +1537,11 @@ impl Run<'_, '_> {
         if top.is_some() && first.is_none() {
             first = top;
         }
-        for (name, m) in [("mark:top", top), ("mark:first", first), ("mark:bot", new_bot)] {
+        for (name, m) in [
+            ("mark:top", top),
+            ("mark:first", first),
+            ("mark:bot", new_bot),
+        ] {
             self.set(name, m.unwrap_or(ValueId::UNIT), true);
         }
         // §1018–§1021: the insertion boxes
@@ -1679,10 +1754,10 @@ impl Run<'_, '_> {
             eprintln!(
                 "shipout: decode_us {} positions_us {} whatsits_us {} fonts_us {} pdf_us {}",
                 t_decode.as_micros(),
-                (t_pos - t_decode).as_micros(),
-                (t_whats - t_pos).as_micros(),
-                (t_fonts - t_whats).as_micros(),
-                (t0.elapsed() - t_fonts).as_micros()
+                t_pos.checked_sub(t_decode).unwrap().as_micros(),
+                t_whats.checked_sub(t_pos).unwrap().as_micros(),
+                t_fonts.checked_sub(t_whats).unwrap().as_micros(),
+                t0.elapsed().checked_sub(t_fonts).unwrap().as_micros()
             );
         }
         let su = v.seq_unit(page);
@@ -1847,9 +1922,9 @@ impl Run<'_, '_> {
             .nest
             .iter()
             .map(|l| {
-                let (lang, packed) = l
-                    .par
-                    .map_or((ValueId::UNIT, ValueId::UNIT), |(a, b)| (v.int(a), v.int(b)));
+                let (lang, packed) = l.par.map_or((ValueId::UNIT, ValueId::UNIT), |(a, b)| {
+                    (v.int(a), v.int(b))
+                });
                 v.list(vec![
                     v.int(i64::from(l.mode)),
                     v.int(l.group),
@@ -1881,7 +1956,7 @@ impl Run<'_, '_> {
             .map(|l| l.gid)
             .collect();
         if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
-            let l = self.loc_of(v.field(&name));
+            let l = self.loc_of(v.field(name));
             eprintln!(
                 "cont {} at a cut: {name}: {} (open groups {open:?})",
                 self.cx.node().raw(),
@@ -1890,12 +1965,18 @@ impl Run<'_, '_> {
         }
         let c = self.st.cont(v, &open);
         if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
-            let l = self.loc_of(v.field(&name));
+            let l = self.loc_of(v.field(name));
             let hit = c.slots.iter().find(|s| s.loc == l);
             eprintln!(
                 "cont {} encodes {name}: {:?}",
                 self.cx.node().raw(),
-                hit.map(|s| (s.cur.map(|x| v.render(x)), s.loaded, s.save_gid, s.ldef, s.group_local))
+                hit.map(|s| (
+                    s.cur.map(|x| v.render(x)),
+                    s.loaded,
+                    s.save_gid,
+                    s.ldef,
+                    s.group_local
+                ))
             );
         }
         let mut slots = Vec::new();
@@ -2063,7 +2144,7 @@ impl Run<'_, '_> {
         ns.adopt_spill(&self.st);
         self.st = ns;
         if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
-            let l = self.loc_of(v.field(&name));
+            let l = self.loc_of(v.field(name));
             eprintln!(
                 "cont {} loaded: {name}: {}",
                 self.cx.node().raw(),
@@ -2074,9 +2155,13 @@ impl Run<'_, '_> {
         // defined globally (`gdefs`, the window after the cutting node)
         let gdefs: Vec<ValueId> = match Some(pid).filter(|&p| p != ValueId::UNIT) {
             Some(p) if self.cx.op() == self.ops.resume => {
-                let pid = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, p).to_ne_bytes()));
+                let pid =
+                    phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, p).to_ne_bytes()));
                 let acc = self.cx.acc_range(v.field("gdefs"), Some(pid))?;
-                v.seq_to_vec(acc).into_iter().flat_map(|e| list_of(v, e)).collect()
+                v.seq_to_vec(acc)
+                    .into_iter()
+                    .flat_map(|e| list_of(v, e))
+                    .collect()
             }
             _ => Vec::new(),
         };
@@ -2234,7 +2319,10 @@ impl FinDefs {
                 // (the marks are the page's text: equal on two pages by
                 // chance; the scan knows them, spec §3)
                 let name = crate::val::field_name(v, f);
-                if name.starts_with("mark") || name.starts_with("cs:g__mark_") || name == "param:outputpenalty" {
+                if name.starts_with("mark")
+                    || name.starts_with("cs:g__mark_")
+                    || name == "param:outputpenalty"
+                {
                     return None;
                 }
                 let &(_, y) = self.prev.iter().find(|d| d.0 == f)?;
@@ -2277,14 +2365,17 @@ const FINISHER_FIELDS: &[&str] = &[
 /// routine run (LaTeX's float and `\clearpage` handling) defines other
 /// things and ships nothing; predicted from runs of its own kind.
 fn fin_key(v: &Values, t: ValueId, args: &[ValueId]) -> u64 {
-    let special = crate::exec::env_flag!("PHITEX_FIN_KIND") && args.get(11).is_some_and(|&x| v.as_int(x) == Some(1));
+    let special = crate::exec::env_flag!("PHITEX_FIN_KIND")
+        && args.get(11).is_some_and(|&x| v.as_int(x) == Some(1));
     t.raw() ^ u64::from(special).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 /// Finishers created with a prediction of their definitions, and
 /// without (reported with `PHITEX_TEX_TIME`).
-pub(crate) static FIN_PREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub(crate) static FIN_UNPREDICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FIN_PREDICTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FIN_UNPREDICTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 impl Finish {
     fn predicted_defs_(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
@@ -2298,7 +2389,13 @@ impl Finish {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
-            .map(|d| if crate::exec::env_flag!("PHITEX_NO_STEP") { d.stable() } else { d.predict(v, j) })?;
+            .map(|d| {
+                if crate::exec::env_flag!("PHITEX_NO_STEP") {
+                    d.stable()
+                } else {
+                    d.predict(v, j)
+                }
+            })?;
         (!stable.is_empty()).then_some(stable)
     }
 }
@@ -2336,7 +2433,17 @@ impl Operation for Finish {
         {
             // (and the writer's state the page's placement defines, the
             // node this finisher places after itself: `pdfout::Place`)
-            for n in [RTN, SHIPPED, "deadcycles", "param:outputpenalty", "inspen", "badness", "box:255", "pdf:state", "pdf:pre"] {
+            for n in [
+                RTN,
+                SHIPPED,
+                "deadcycles",
+                "param:outputpenalty",
+                "inspen",
+                "badness",
+                "box:255",
+                "pdf:state",
+                "pdf:pre",
+            ] {
                 names.push(v.field(n));
             }
             ops(&self.0).fields.add_record_fields(&mut names);
@@ -2364,7 +2471,11 @@ impl Operation for Finish {
     /// state and the shipped mark are left out: the chain reads them.
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         let r = self.predicted_defs_(args, v);
-        let c = if r.is_some() { &FIN_PREDICTED } else { &FIN_UNPREDICTED };
+        let c = if r.is_some() {
+            &FIN_PREDICTED
+        } else {
+            &FIN_UNPREDICTED
+        };
         c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         r
     }
@@ -2384,7 +2495,12 @@ impl Operation for Finish {
         let out = run_node_parking(cx, o, true, |r| {
             if crate::exec::env_flag!("PHITEX_FIN_TRACE") {
                 let j = pos.first().map_or(0, |&x| int_of(r.v, x));
-                eprintln!("fin-trace: node {} page {j} spec {} resumed {}", r.cx.node().raw(), r.cx.is_speculative(), r.resumed);
+                eprintln!(
+                    "fin-trace: node {} page {j} spec {} resumed {}",
+                    r.cx.node().raw(),
+                    r.cx.is_speculative(),
+                    r.resumed
+                );
             }
             if !r.resumed {
                 let v = r.v;
@@ -2414,7 +2530,13 @@ impl Operation for Finish {
                     let mut shown = Vec::new();
                     for n in names.split(',') {
                         let x = r.get(n)?;
-                        shown.push(format!("{n}={}", x.map_or_else(|| "undefined".to_owned(), |x| crate::val::show_def(v, x))));
+                        shown.push(format!(
+                            "{n}={}",
+                            x.map_or_else(
+                                || "undefined".to_owned(),
+                                |x| crate::val::show_def(v, x)
+                            )
+                        ));
                     }
                     let locals: Vec<String> = list_of(v, a(3))
                         .iter()
@@ -2445,7 +2567,11 @@ impl Operation for Finish {
         if phitex_pdf::phase::on() {
             phitex_pdf::phase::add(0, t_fin);
             let a = phitex_pdf::phase::take();
-            let us: Vec<String> = a.iter().map(|&n| format!("{:.1}", n as f64 / 1000.0)).collect();
+            #[allow(clippy::cast_precision_loss)]
+            let us: Vec<String> = a
+                .iter()
+                .map(|&n| format!("{:.1}", n as f64 / 1000.0))
+                .collect();
             eprintln!("finphase: {}", us.join(" "));
         }
         out
@@ -2676,7 +2802,10 @@ impl Operation for Resume {
                 let (cont, pid) = if a(0) == ValueId::UNIT {
                     let x = r.eng_read(r.v.field(RESUME))?;
                     let xs = x.map(|x| list_of(r.v, x)).unwrap_or_default();
-                    (xs.first().copied().unwrap_or(ValueId::UNIT), xs.get(1).copied().unwrap_or(ValueId::UNIT))
+                    (
+                        xs.first().copied().unwrap_or(ValueId::UNIT),
+                        xs.get(1).copied().unwrap_or(ValueId::UNIT),
+                    )
                 } else {
                     (a(0), a(2))
                 };
@@ -2689,7 +2818,11 @@ impl Operation for Resume {
             let v = cx.values();
             let text = v.render(args.first().copied().unwrap_or(ValueId::UNIT));
             let cut: String = text.chars().take(600).collect();
-            eprintln!("longrun: resume {} {:.0} ms: {cut}", cx.node().raw(), t0.elapsed().as_secs_f64() * 1e3);
+            eprintln!(
+                "longrun: resume {} {:.0} ms: {cut}",
+                cx.node().raw(),
+                t0.elapsed().as_secs_f64() * 1e3
+            );
         }
         out
     }
@@ -2764,7 +2897,12 @@ impl Operation for Scan {
     /// waits for the steps before it still to run; a step's run narrows
     /// this to what it defined ([`Run::scan_node`]).
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        MayDefine::Names(vec![v.field(SCAN), v.field(BREAKS), v.field(FIRE), v.field(CONT)])
+        MayDefine::Names(vec![
+            v.field(SCAN),
+            v.field(BREAKS),
+            v.field(FIRE),
+            v.field(CONT),
+        ])
     }
     /// A step is held until the pieces before it have run (the profiles,
     /// an accumulator: the engine's gate waits for every contributor
@@ -2819,7 +2957,9 @@ impl ScanIn {
         }
         let n = |i: usize| int_of(v, xs[i]);
         ScanIn {
-            anchor: Some(phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n(0).to_ne_bytes()))),
+            anchor: Some(phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(
+                n(0).to_ne_bytes(),
+            ))),
             j: n(1),
             normal: n(2),
             fold: FoldState {
@@ -2828,14 +2968,22 @@ impl ScanIn {
                 since_bp: usize::try_from(n(5)).unwrap_or(0),
             },
             params: some(xs[6]),
-            prof: list_of(v, xs[7]).into_iter().map(|y| int_of(v, y)).collect(),
+            prof: list_of(v, xs[7])
+                .into_iter()
+                .map(|y| int_of(v, y))
+                .collect(),
             material: list_of(v, xs[8]),
         }
     }
 
     /// The scan's builder where the page began.
     fn state(&self, v: &Values) -> crate::vprof::ScanState {
-        crate::vprof::ScanState::fresh(self.j, self.normal, self.fold, self.params.map(|m| params_of(v, m)))
+        crate::vprof::ScanState::fresh(
+            self.j,
+            self.normal,
+            self.fold,
+            self.params.map(|m| params_of(v, m)),
+        )
     }
 
     /// The real builder where the page began.
@@ -2850,7 +2998,10 @@ impl ScanIn {
 
 /// A [`PITEMS`] unit's items.
 fn unit_items(v: &Values, u: ValueId) -> Vec<ValueId> {
-    list_of(v, u).get(2).map(|&x| list_of(v, x)).unwrap_or_default()
+    list_of(v, u)
+        .get(2)
+        .map(|&x| list_of(v, x))
+        .unwrap_or_default()
 }
 
 /// Whether items hold an `\end` marker (the builder then reads
@@ -2928,7 +3079,9 @@ impl Run<'_, '_> {
         for (pid, items) in &mut decoded {
             self.resolve_prof_of(*pid, items)?;
         }
-        let dead = if crate::vprof::has_end(&material) || decoded.iter().any(|d| crate::vprof::has_end(&d.1)) {
+        let dead = if crate::vprof::has_end(&material)
+            || decoded.iter().any(|d| crate::vprof::has_end(&d.1))
+        {
             self.cint(crate::fields::cell::DEADCYCLES)?
         } else {
             0
@@ -2974,7 +3127,9 @@ impl Run<'_, '_> {
         let fire = {
             let last = items.len() - 1;
             let mut live = |n: u16| self.insert_class(n);
-            let mut out = ps.fold_items(v, &s.material, dead, &mut live)?.map(|f| (usize::MAX, f));
+            let mut out = ps
+                .fold_items(v, &s.material, dead, &mut live)?
+                .map(|f| (usize::MAX, f));
             for (i, raw) in raws.iter().enumerate() {
                 if out.is_some() {
                     break;
@@ -2997,9 +3152,11 @@ impl Run<'_, '_> {
                 self.cx.node().raw(),
                 s.j + 1,
                 sf.k,
-                real.as_ref().map_or_else(|| "not".to_owned(), |r| format!("at candidate {}", r.0)),
+                real.as_ref()
+                    .map_or_else(|| "not".to_owned(), |r| format!("at candidate {}", r.0)),
                 match &real {
-                    Some((_, Some(d), _)) if *d != sf.decision => format!(": {}", crate::vprof::first_decision_diff(&sf.decision, d)),
+                    Some((_, Some(d), _)) if *d != sf.decision =>
+                        format!(": {}", crate::vprof::first_decision_diff(&sf.decision, d)),
                     _ => String::new(),
                 }
             );
@@ -3034,7 +3191,15 @@ impl Run<'_, '_> {
 
     /// Defines [`BREAKS`] for page `j` fired in piece `pid` at candidate
     /// `k` (`rest` profile items after it), `ps` the state after it.
-    fn define_breaks(&mut self, j: i64, pid: i64, k: u32, rest: usize, d: Option<&crate::vprof::Decision>, ps: &PageState) {
+    fn define_breaks(
+        &mut self,
+        j: i64,
+        pid: i64,
+        k: u32,
+        rest: usize,
+        d: Option<&crate::vprof::Decision>,
+        ps: &PageState,
+    ) {
         let v = self.v;
         let int = |x: i64| v.int(x);
         let usz = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
@@ -3068,7 +3233,10 @@ impl Run<'_, '_> {
     /// fired; the scan state defined, or the next page placed.
     fn scan_cont(&mut self) -> R<Placed> {
         let v = self.v;
-        let b = self.eng_read(v.field(BREAKS))?.map(|x| list_of(v, x)).unwrap_or_default();
+        let b = self
+            .eng_read(v.field(BREAKS))?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
         if b.len() < 16 {
             return Ok(Placed::Nothing);
         }
@@ -3124,7 +3292,12 @@ impl Run<'_, '_> {
         };
         if let Some(fire) = fire {
             if crate::exec::env_flag!("PHITEX_SCAN_TRACE") {
-                eprintln!("scan {}: page {} fires in the continuation at candidate {}", self.cx.node().raw(), ps.j, fire.k);
+                eprintln!(
+                    "scan {}: page {} fires in the continuation at candidate {}",
+                    self.cx.node().raw(),
+                    ps.j,
+                    fire.k
+                );
             }
             let rest = fire.rest.clone();
             self.place_page(&mut ps, fire, -2, None, Vec::new(), rest)?;

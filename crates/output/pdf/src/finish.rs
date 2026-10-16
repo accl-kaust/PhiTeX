@@ -85,7 +85,9 @@ impl PdfBytes {
     /// The chunk that object `n` begins in.
     #[must_use]
     pub fn chunk_of(&self, n: usize) -> Option<usize> {
-        self.chunks.iter().position(|c| c.objs.iter().any(|&(m, _)| m == n))
+        self.chunks
+            .iter()
+            .position(|c| c.objs.iter().any(|&(m, _)| m == n))
     }
 }
 
@@ -171,7 +173,11 @@ impl PdfState {
     /// # Panics
     /// If `bytes` are not the ones this state flushed before.
     pub fn flush(&mut self, bytes: &mut PdfBytes) {
-        assert_eq!(bytes.chunks.len(), self.flushes, "flush: not this state's bytes");
+        assert_eq!(
+            bytes.chunks.len(),
+            self.flushes,
+            "flush: not this state's bytes"
+        );
         if let Some(c) = self.flush_chunk() {
             bytes.push(c);
         }

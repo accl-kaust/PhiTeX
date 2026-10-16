@@ -329,31 +329,6 @@ thread_local! {
     static JOB_OPS: RefCell<Option<std::sync::Arc<OpCounters>>> = const { RefCell::new(None) };
 }
 
-/// `f(i)` for every `i < n`, from inside a node's run: on the workers of
-/// the executor running it (its pool, never other threads), in order
-/// where it has one thread or this target has none. A node's own
-/// parallel pass (the DVI writer's pages).
-pub(crate) fn par_each(n: usize, f: &(dyn Fn(usize) + Sync)) {
-    let t = JOB_THREADS.with(std::cell::Cell::get);
-    if t <= 1 || n < 2 || !threads_possible() {
-        (0..n).for_each(f);
-        return;
-    }
-    parallel(t, n, 1, f);
-}
-
-/// `f(i)` for every `i < n` through [`par_each`], in index order.
-pub(crate) fn par_map<T: Send + Sync>(n: usize, f: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
-    let slots: Vec<OnceLock<T>> = (0..n).map(|_| OnceLock::new()).collect();
-    par_each(n, &|i| {
-        let _ = slots[i].set(f(i));
-    });
-    slots
-        .into_iter()
-        .map(|s| s.into_inner().expect("every item ran"))
-        .collect()
-}
-
 /// The thread count: `given`, else `PHITEX_THREADS`, else the available
 /// parallelism; 1 where this target cannot run threads.
 pub(crate) fn threads(given: Option<usize>) -> usize {

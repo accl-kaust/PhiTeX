@@ -17,7 +17,11 @@ fn tag(v: &Values, a: &[ValueId]) -> String {
 
 impl Operation for Ops {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(if tag(v, a) == "d" { vec![(v.field("g"), Locality::Local)] } else { Vec::new() })
+        Some(if tag(v, a) == "d" {
+            vec![(v.field("g"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -33,7 +37,9 @@ impl Operation for Ops {
 
 #[test]
 fn an_equal_new_definer_keeps_an_environment_reader() {
-    let ops = Arc::new(Ops { reads: AtomicU64::new(0) });
+    let ops = Arc::new(Ops {
+        reads: AtomicU64::new(0),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     let u = eng.new_unit();

@@ -1450,6 +1450,7 @@ impl Run<'_, '_> {
     }
 
     /// `write_out` (§1370–§1371): the tokens expanded, to the log.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn write_out(&mut self, k: i32, body: &[Tok]) -> R<()> {
         let s = self.expand_late(body)?;
         // (web2c's §1370 change: stream 18 is a shell command)
@@ -1505,7 +1506,12 @@ impl Run<'_, '_> {
                         crate::input::kind::TOKS => ctx.push(format!("T{}", l.ty)),
                         crate::input::kind::LINE => {
                             let ln = self.input.line(*l);
-                            let t: String = ln.buf.iter().take(50).filter_map(|&c| char::from_u32(c)).collect();
+                            let t: String = ln
+                                .buf
+                                .iter()
+                                .take(50)
+                                .filter_map(|&c| char::from_u32(c))
+                                .collect();
                             ctx.push(format!("L[{t}]"));
                         }
                         _ => ctx.push("F".to_owned()),
@@ -1806,8 +1812,7 @@ impl Run<'_, '_> {
     /// (Exact mode only: in relaxed mode the fonts' names are free.)
     pub(crate) fn font_loaded(&mut self, f: i64) -> R<()> {
         let op = self.cx.op();
-        if op == self.ops.finish || crate::pdfrelaxed::on(self)?
-        {
+        if op == self.ops.finish || crate::pdfrelaxed::on(self)? {
             return Ok(());
         }
         let v = self.v;

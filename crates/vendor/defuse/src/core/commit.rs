@@ -90,7 +90,13 @@ impl Shared {
             let x = self.rec(n).rdep.load(Ordering::Acquire);
             if x >> 32 == ep { x & 0xffff_ffff } else { 0 }
         };
-        let time = |n: Slot| if dep(n) > 0 { self.rec(n).rtime.load(Ordering::Acquire) } else { 0 };
+        let time = |n: Slot| {
+            if dep(n) > 0 {
+                self.rec(n).rtime.load(Ordering::Acquire)
+            } else {
+                0
+            }
+        };
         let mut m = 0;
         let mut tm = 0;
         for p in log {
@@ -244,9 +250,9 @@ impl Shared {
             // checks the run again.
             super::query::sib_cursor_reset();
             let moved = cx.log.iter().any(|p| {
-                    matches!(p, Pred::Def { spec: Some(q), .. } if !in_work(self.rec(*q).st()))
-                        && !matches!(self.recheck(s, p, false), Ok(Ok(())))
-                });
+                matches!(p, Pred::Def { spec: Some(q), .. } if !in_work(self.rec(*q).st()))
+                    && !matches!(self.recheck(s, p, false), Ok(Ok(())))
+            });
             if moved {
                 r.set(super::F_STALE);
             }

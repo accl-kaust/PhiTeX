@@ -65,5 +65,8 @@ fn rounds_that_wake_nothing_are_cheap() {
         times.push(t.elapsed());
     }
     eprintln!("n {n}: first {first:?}, then {times:?}");
-    assert!(times.iter().all(|t| t.as_secs_f64() < 1.0), "rounds with nothing to run took {times:?} (first {first:?})");
+    assert!(
+        times.iter().all(|t| t.as_secs_f64() < 1.0),
+        "rounds with nothing to run took {times:?} (first {first:?})"
+    );
 }

@@ -1121,10 +1121,9 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             continue;
         }
         let name = a.name(text);
-        let loader = matches!(
-            name,
-            "documentclass" | "usepackage" | "RequirePackage" | "LoadClass" | "input" | "include"
-        );
+        // (no name is a loader: a command's run claims what it reads,
+        // and the engine verifies the claim)
+        let loader = false;
         let mut last = k;
         let mut j = k + 1;
         loop {
@@ -1645,8 +1644,6 @@ fn starts_par(name: &str) -> bool {
             | "valign"
             | " "
             | "noboundary"
-            | "tex_indent:D"
-            | "tex_noindent:D"
     )
 }
 

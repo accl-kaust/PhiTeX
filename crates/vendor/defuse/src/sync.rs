@@ -485,9 +485,15 @@ impl<T> BrLock<T> {
     }
 
     pub(crate) fn read(&self) -> BrRead<'_, T> {
-        let g = self.slots[br_slot()].0.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let g = self.slots[br_slot()]
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: a read slot is held: no writer holds every slot.
-        BrRead { _g: g, data: unsafe { &*self.data.get() } }
+        BrRead {
+            _g: g,
+            data: unsafe { &*self.data.get() },
+        }
     }
 
     pub(crate) fn write(&self) -> BrWrite<'_, T> {
@@ -497,10 +503,12 @@ impl<T> BrLock<T> {
             .map(|s| s.0.write().unwrap_or_else(std::sync::PoisonError::into_inner))
             .collect();
         // SAFETY: every slot is held for writing: no reader, no other writer.
-        BrWrite { _g: g, data: unsafe { &mut *self.data.get() } }
+        BrWrite {
+            _g: g,
+            data: unsafe { &mut *self.data.get() },
+        }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

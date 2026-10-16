@@ -83,12 +83,19 @@ fn an_edit_on_the_last_page_keeps_the_earlier_pages() {
     assert!(pages.len() >= 3, "{} pages for 40 paragraphs", pages.len());
     let runs_cold = b.stats.runs;
     // a word of the last paragraph, same length: no break moves
-    let at = src.rfind("Paragraph 39 has some").expect("the last paragraph") + 17;
+    let at = src
+        .rfind("Paragraph 39 has some")
+        .expect("the last paragraph")
+        + 17;
     let new = format!("{}sah{}", &src[..at], &src[at + 3..]);
     b.edit(&new);
     let after = b.pages();
     assert_eq!(pages.len(), after.len(), "the edit changed the page count");
-    assert_eq!(pages[..pages.len() - 1], after[..after.len() - 1], "an earlier page changed");
+    assert_eq!(
+        pages[..pages.len() - 1],
+        after[..after.len() - 1],
+        "an earlier page changed"
+    );
     let cold = common::build(opts(), Some(&common::plain()), &new);
     assert_eq!(cold.pages(), after, "edit != cold");
     eprintln!(
@@ -105,7 +112,11 @@ fn an_edit_on_the_last_page_keeps_the_earlier_pages() {
 fn fold_cost() {
     let (src, _) = common::plain_paragraphs(400, false);
     let dir = common::fixtures().join("plain/vsize");
-    let b = common::build(common::options("./pp.tex", "pp", "", &dir), Some(&common::plain()), &src);
+    let b = common::build(
+        common::options("./pp.tex", "pp", "", &dir),
+        Some(&common::plain()),
+        &src,
+    );
     eprintln!(
         "{} pages; {} nodes run, {} runs, realised cp {} nodes {:?}, wall {:?}, busy {:?}, peak {}, stops {} restarted {}",
         b.pages().len(),
@@ -126,12 +137,19 @@ fn fold_cost() {
 #[test]
 #[ignore = "a long build"]
 fn parallel_pages_equal_serial() {
-    let n = std::env::var("PHITEX_PARAS").ok().and_then(|s| s.parse().ok()).unwrap_or(1500);
+    let n = std::env::var("PHITEX_PARAS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1500);
     let (src, _) = common::plain_paragraphs(n, false);
     // (`PHITEX_PDF=1`: the PDF file instead, relaxed objects unless
     // `PHITEX_EXACT=1`)
     let pdf = std::env::var("PHITEX_PDF").is_ok();
-    let src = if pdf { format!("\\pdfoutput=1 {src}") } else { src };
+    let src = if pdf {
+        format!("\\pdfoutput=1 {src}")
+    } else {
+        src
+    };
     let dir = common::fixtures().join("plain/vsize");
     let at = |t: usize| {
         let mut o = common::options("./pp.tex", "pp", "", &dir);
@@ -140,9 +158,19 @@ fn parallel_pages_equal_serial() {
             o.exact_objects = std::env::var("PHITEX_EXACT").is_ok();
             let b = common::build(o, Some(&common::plain()), &src);
             let out = b.output().0;
-            eprintln!("{t} threads: {} bytes, {} runs for {} nodes", out.len(), b.stats.runs, b.stats.nodes_run);
+            eprintln!(
+                "{t} threads: {} bytes, {} runs for {} nodes",
+                out.len(),
+                b.stats.runs,
+                b.stats.nodes_run
+            );
             for d in b.diagnostics().iter().take(4) {
-                eprintln!("  diagnostic {}:{} {}", d.file, d.line, d.message.chars().take(300).collect::<String>());
+                eprintln!(
+                    "  diagnostic {}:{} {}",
+                    d.file,
+                    d.line,
+                    d.message.chars().take(300).collect::<String>()
+                );
             }
             vec![phitex_tex_hash(&out)]
         } else {
@@ -154,7 +182,11 @@ fn parallel_pages_equal_serial() {
         let many = at(8);
         assert_eq!(one.len(), many.len(), "rep {rep}: page count");
         if let Some(j) = (0..one.len()).find(|&j| one[j] != many[j]) {
-            panic!("rep {rep}: page {} of {} differs at 8 threads", j + 1, one.len());
+            panic!(
+                "rep {rep}: page {} of {} differs at 8 threads",
+                j + 1,
+                one.len()
+            );
         }
     }
 }
@@ -176,7 +208,8 @@ fn an_edit_that_moves_a_break_out_of_a_claimed_span() {
     use std::fmt::Write as _;
     let (src, _) = common::plain_paragraphs(30, false);
     let at = |k: usize| src.find(&format!("Paragraph {k} has")).expect("paragraph");
-    let mut block = String::from("\\csname begingroup\\endcsname\\csname begingroup\\endcsname\\obeylines\n");
+    let mut block =
+        String::from("\\csname begingroup\\endcsname\\csname begingroup\\endcsname\\obeylines\n");
     for j in 0..36 {
         let _ = writeln!(block, "Line {j} of the block, page \\the\\pageno");
         if j % 4 == 3 {
@@ -211,5 +244,8 @@ fn an_edit_that_moves_a_break_out_of_a_claimed_span() {
             bad.push(k);
         }
     }
-    assert!(bad.is_empty(), "edit != cold for the eject before paragraphs {bad:?}");
+    assert!(
+        bad.is_empty(),
+        "edit != cold for the eject before paragraphs {bad:?}"
+    );
 }

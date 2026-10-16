@@ -1345,7 +1345,8 @@ impl Operation for ToyCut {
                 Ok(ValueId::UNIT)
             }
             "s" => {
-                self.s_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.s_runs
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(a.get(1).copied().unwrap_or(ValueId::UNIT))
             }
             _ => Ok(ValueId::UNIT),
@@ -1364,7 +1365,9 @@ impl Operation for ToyCut {
 /// claimer).
 #[test]
 fn a_claim_that_takes_over_its_old_continuations_siblings() {
-    let toy = Arc::new(ToyCut { s_runs: std::sync::atomic::AtomicU64::new(0) });
+    let toy = Arc::new(ToyCut {
+        s_runs: std::sync::atomic::AtomicU64::new(0),
+    });
     let mut eng = Engine::new();
     let op = eng.register(toy.clone());
     let _ = CUT_OP.set(op);
@@ -1458,7 +1461,8 @@ impl Operation for Pred {
 /// evaluations, its prediction asked once). Every scheduler, many seeds.
 #[test]
 fn a_reader_on_a_prediction_ends_on_the_value_its_definer_commits() {
-    let schedulers: Vec<Box<dyn Fn(&mut Engine) -> phitex_defuse::Report>> = vec![
+    type Scheduler = Box<dyn Fn(&mut Engine) -> phitex_defuse::Report>;
+    let schedulers: Vec<Scheduler> = vec![
         Box::new(|e| e.evaluate_sequential().expect("evaluate")),
         Box::new(|e| {
             e.evaluate(
@@ -1491,10 +1495,19 @@ fn a_reader_on_a_prediction_ends_on_the_value_its_definer_commits() {
             let a = vec![eng.values().str("r")];
             let r = eng.push(u, op, a);
             let random = |e: &mut Engine, s: u64| {
-                e.evaluate(&mut phitex_defuse::RandomScheduler::new(s, true), &mut phitex_defuse::Sequential)
-                    .expect("evaluate")
+                e.evaluate(
+                    &mut phitex_defuse::RandomScheduler::new(s, true),
+                    &mut phitex_defuse::Sequential,
+                )
+                .expect("evaluate")
             };
-            let run = |e: &mut Engine| if seed % 2 == 0 { sched(e) } else { random(e, seed) };
+            let run = |e: &mut Engine| {
+                if seed % 2 == 0 {
+                    sched(e)
+                } else {
+                    random(e, seed)
+                }
+            };
             run(&mut eng);
             let out = |e: &Engine| e.output(r).and_then(|x| e.values().as_int(x));
             if out(&eng) != Some(5) {
@@ -1527,11 +1540,19 @@ fn a_reader_on_a_prediction_ends_on_the_value_its_definer_commits() {
             eng.set_env(u, fy, x);
             run(&mut eng);
             if out(&eng) != Some(7) {
-                bad.push(format!("sched {k} seed {seed} predicted, not defined: {:?}", out(&eng)));
+                bad.push(format!(
+                    "sched {k} seed {seed} predicted, not defined: {:?}",
+                    out(&eng)
+                ));
             }
         }
     }
-    assert!(bad.is_empty(), "{} wrong outputs: {:?}", bad.len(), &bad[..bad.len().min(8)]);
+    assert!(
+        bad.is_empty(),
+        "{} wrong outputs: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(8)]
+    );
 }
 
 /// The prediction [`PredMade`]'s definer gives (a client's running
@@ -1559,7 +1580,12 @@ impl Operation for PredMade {
         }
     }
     fn predicted_defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        (tag(v, a) == "d").then(|| vec![(v.field("f"), v.int(PRED_NOW.load(std::sync::atomic::Ordering::Relaxed)))])
+        (tag(v, a) == "d").then(|| {
+            vec![(
+                v.field("f"),
+                v.int(PRED_NOW.load(std::sync::atomic::Ordering::Relaxed)),
+            )]
+        })
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -1598,7 +1624,7 @@ impl Operation for PredMade {
 /// text is analysed again (its parent runs again and makes the same
 /// continuation) after a reader ran on its earlier prediction, and the
 /// new prediction equals what the definer then commits: the reader that
-/// took the earlier one runs again. (PhiTeX: a page's finisher is a
+/// took the earlier one runs again. (`PhiTeX`: a page's finisher is a
 /// positional node its scan step makes again; its predictions come from
 /// the finishers run so far, and a later finisher read a box register's
 /// predicted value from before the routine changed it: amsldoc shipped
@@ -1636,7 +1662,10 @@ fn a_reader_on_an_earlier_prediction_runs_again_when_the_text_is_analysed_again(
                     &mut phitex_defuse::Sequential,
                 )
             } else {
-                e.evaluate(&mut phitex_defuse::RandomScheduler::new(seed, true), &mut phitex_defuse::Sequential)
+                e.evaluate(
+                    &mut phitex_defuse::RandomScheduler::new(seed, true),
+                    &mut phitex_defuse::Sequential,
+                )
             }
             .expect("evaluate")
         };
@@ -1670,5 +1699,10 @@ fn a_reader_on_an_earlier_prediction_runs_again_when_the_text_is_analysed_again(
             bad.push(format!("seed {seed} same value: {:?}", out(&eng)));
         }
     }
-    assert!(bad.is_empty(), "{} wrong outputs: {:?}", bad.len(), &bad[..bad.len().min(8)]);
+    assert!(
+        bad.is_empty(),
+        "{} wrong outputs: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(8)]
+    );
 }

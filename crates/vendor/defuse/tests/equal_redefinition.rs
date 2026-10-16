@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
-use defuse::{Report, Ctx, Engine, Field, Locality, OpId, Operation, Stop, ValueId, Values};
+use defuse::{Ctx, Engine, Field, Locality, OpId, Operation, Report, Stop, ValueId, Values};
 
 struct Ops {
     me: Mutex<Option<OpId>>,
@@ -18,7 +18,11 @@ fn tag(v: &Values, a: &[ValueId]) -> String {
 
 impl Operation for Ops {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(if tag(v, a) == "q" { vec![(v.field("g"), Locality::Local)] } else { Vec::new() })
+        Some(if tag(v, a) == "q" {
+            vec![(v.field("g"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -44,7 +48,10 @@ impl Operation for Ops {
 
 #[test]
 fn an_equal_value_from_a_remade_node_keeps_readers() {
-    let ops = Arc::new(Ops { me: Mutex::new(None), reads: AtomicU64::new(0) });
+    let ops = Arc::new(Ops {
+        me: Mutex::new(None),
+        reads: AtomicU64::new(0),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     *ops.me.lock().unwrap() = Some(op);
@@ -64,7 +71,11 @@ fn an_equal_value_from_a_remade_node_keeps_readers() {
     let c = eng.values().str("c");
     eng.replace(pn, op, vec![p, c]);
     eng.evaluate_sequential().unwrap();
-    assert_eq!(eng.output(rn), Some(eng.values().int(8)), "a change at the new site reaches R");
+    assert_eq!(
+        eng.output(rn),
+        Some(eng.values().int(8)),
+        "a change at the new site reaches R"
+    );
 }
 
 struct Threads;
@@ -98,7 +109,6 @@ impl defuse::Executor for Threads {
     }
 }
 
-
 fn eval(eng: &mut Engine, sched: &str) -> Report {
     match sched {
         "seq" => eng.evaluate_sequential(),
@@ -115,14 +125,16 @@ fn eval(eng: &mut Engine, sched: &str) -> Report {
     .expect("evaluate")
 }
 
-
 /// The same under every schedule, with several readers after the re-made
 /// definer (a reader may be checked while the new definer is in work).
 #[test]
 fn an_equal_value_from_a_remade_node_keeps_readers_in_every_schedule() {
     for sched in ["seq", "spec", "random", "par"] {
         for _ in 0..if sched == "par" { 50 } else { 1 } {
-            let ops = Arc::new(Ops { me: Mutex::new(None), reads: AtomicU64::new(0) });
+            let ops = Arc::new(Ops {
+                me: Mutex::new(None),
+                reads: AtomicU64::new(0),
+            });
             let mut eng = Engine::new();
             let op = eng.register(ops.clone());
             *ops.me.lock().unwrap() = Some(op);
@@ -138,7 +150,12 @@ fn an_equal_value_from_a_remade_node_keeps_readers_in_every_schedule() {
             for &rn in &rs {
                 assert_eq!(eng.output(rn), Some(eng.values().int(7)));
             }
-            assert_eq!(ops.reads.load(Relaxed), before, "{sched}: readers stand: {:?}", rep.rerun_causes);
+            assert_eq!(
+                ops.reads.load(Relaxed),
+                before,
+                "{sched}: readers stand: {:?}",
+                rep.rerun_causes
+            );
         }
     }
 }

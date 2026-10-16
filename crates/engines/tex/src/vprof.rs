@@ -157,7 +157,10 @@ fn push_item(v: &Values, x: ValueId, out: &mut Vec<i64>, ilp: &mut Option<(Glue,
         }
         nodes::T_END => {
             let xs = list_of(v, x);
-            out.extend([P_END, i64::try_from(xs.len().saturating_sub(1)).unwrap_or(0)]);
+            out.extend([
+                P_END,
+                i64::try_from(xs.len().saturating_sub(1)).unwrap_or(0),
+            ]);
             for &y in xs.iter().skip(1) {
                 push_item(v, y, out, ilp);
             }
@@ -218,7 +221,12 @@ pub(crate) fn push_node(n: &Node, out: &mut Vec<i64>) {
 #[derive(Clone, Debug)]
 pub(crate) enum PItem {
     Node(Node),
-    VBox { node: Node, bs: Glue, ls: Glue, lsl: i32 },
+    VBox {
+        node: Node,
+        bs: Glue,
+        ls: Glue,
+        lsl: i32,
+    },
     Pd(i32),
     Delete,
     Build(u32),
@@ -404,11 +412,6 @@ pub(crate) fn decode(xs: &[i64]) -> Vec<PItem> {
     out
 }
 
-/// A unit's profile items ([`unit`]).
-pub(crate) fn decode_value(v: &Values, x: ValueId) -> Vec<PItem> {
-    decode(&unit_parts(v, x).1)
-}
-
 fn is_marker(x: &PItem) -> bool {
     match x {
         PItem::Params(_) | PItem::SetPage(..) | PItem::InsParams(..) => true,
@@ -480,7 +483,12 @@ pub(crate) trait Reaching {
 impl ScanState {
     /// The state just after a page fired (§1017: an empty page, the
     /// contributions all carried), as the scan state defines it.
-    pub(crate) fn fresh(j: i64, normal: i64, fold: FoldState, params: Option<PageParams>) -> ScanState {
+    pub(crate) fn fresh(
+        j: i64,
+        normal: i64,
+        fold: FoldState,
+        params: Option<PageParams>,
+    ) -> ScanState {
         let mut pb = PageBuilder::new();
         pb.measure_only = true;
         ScanState {
@@ -533,14 +541,18 @@ impl ScanState {
                 }
             }
             PItem::Params(_) | PItem::SetPage(..) | PItem::InsParams(..) => out.push(x.clone()),
-            PItem::Opaque(t) if matches!(*t, nodes::T_WRITE_AT | nodes::T_FONT_AT | nodes::T_PDFW_AT) => {
+            PItem::Opaque(t)
+                if matches!(*t, nodes::T_WRITE_AT | nodes::T_FONT_AT | nodes::T_PDFW_AT) =>
+            {
                 out.push(x.clone());
             }
             PItem::Build(_) => st.since_bp = 0,
             PItem::Pd(d) => st.pd = *d,
             PItem::VBox { node, bs, ls, lsl } => {
                 let ht = node.box_dims().map_or(0, |d| d.1);
-                if let Some(g) = phitex_typeset::linebreak::interline_glue(st.pd, ht, *bs, *ls, *lsl) {
+                if let Some(g) =
+                    phitex_typeset::linebreak::interline_glue(st.pd, ht, *bs, *ls, *lsl)
+                {
                     out.push(PItem::Node(g));
                     st.since_bp += 1;
                 }
@@ -707,7 +719,17 @@ pub(crate) fn first_decision_diff(a: &Decision, b: &Decision) -> String {
             })*
         };
     }
-    cmp!(best, least_cost, best_size, output_penalty, mark_at, ins_records, inserts, held, carried);
+    cmp!(
+        best,
+        least_cost,
+        best_size,
+        output_penalty,
+        mark_at,
+        ins_records,
+        inserts,
+        held,
+        carried
+    );
     String::from("decision")
 }
 

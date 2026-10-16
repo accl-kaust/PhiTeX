@@ -196,10 +196,14 @@ fn a_placed_pages_writer_error_is_the_jobs() {
     let b = common::build(common::options("./bad.tex", "bad", "", &dir), None, src);
     let msgs: Vec<String> = b.diagnostics().iter().map(|d| d.message.clone()).collect();
     assert!(
-        msgs.iter().any(|m| m.contains("invalid object number being reused")
-            && m.contains("written by node")),
+        msgs.iter()
+            .any(|m| m.contains("invalid object number being reused")
+                && m.contains("written by node")),
         "no placed-page error named: {msgs:?}"
     );
     let (_, log) = b.output();
-    assert!(log.contains("invalid object number being reused"), "not in the log");
+    assert!(
+        log.contains("invalid object number being reused"),
+        "not in the log"
+    );
 }

@@ -395,6 +395,7 @@ impl PdfState {
 
     /// `pdf_begin_string`; font `f`'s `pdf_font_size` (set by the
     /// font's first use, here at the latest).
+    #[allow(clippy::too_many_lines)]
     fn begin_string(&mut self, f: FontId, src: &dyn FontSource) -> Scaled {
         let mut must_end_string = false;
         let mut must_insert_space = false;

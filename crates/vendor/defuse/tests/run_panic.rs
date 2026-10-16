@@ -29,7 +29,12 @@ impl defuse::Executor for Pool {
     fn parallelism(&self) -> usize {
         self.0
     }
-    fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> defuse::RunResult + Sync), out: &mut Vec<defuse::RunResult>) {
+    fn execute(
+        &mut self,
+        n: usize,
+        run: &(dyn Fn(usize) -> defuse::RunResult + Sync),
+        out: &mut Vec<defuse::RunResult>,
+    ) {
         let res: Vec<defuse::RunResult> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..n).map(|i| s.spawn(move || run(i))).collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
@@ -45,7 +50,12 @@ fn a_panicking_run_fails_the_evaluation() {
         let mut eng = Engine::new();
         let op = eng.register(boom.clone());
         let u = eng.new_unit();
-        let ids: Vec<_> = (0..6).map(|i| { let x = eng.values().int(i); eng.push(u, op, vec![x]) }).collect();
+        let ids: Vec<_> = (0..6)
+            .map(|i| {
+                let x = eng.values().int(i);
+                eng.push(u, op, vec![x])
+            })
+            .collect();
         let r = if threads == 0 {
             eng.evaluate(&mut Greedy::default(), &mut Sequential)
         } else {

@@ -146,7 +146,10 @@ impl Speculation {
     /// with seed `n`, speculating: results must not depend on it)
     fn scheduler(self, budget: usize) -> Box<dyn phitex_defuse::Scheduler + Send> {
         use phitex_defuse::Speculation as S;
-        if let Some(seed) = std::env::var("PHITEX_SCHED_SEED").ok().and_then(|x| x.parse::<u64>().ok()) {
+        if let Some(seed) = std::env::var("PHITEX_SCHED_SEED")
+            .ok()
+            .and_then(|x| x.parse::<u64>().ok())
+        {
             return Box::new(phitex_defuse::RandomScheduler::new(seed, true));
         }
         let mode = match std::env::var("PHITEX_SPEC").ok().as_deref() {
@@ -256,9 +259,6 @@ impl phitex_defuse::EditSource for Absorb<'_> {
         }
     }
 }
-
-
-/// Edited texts of `\\input` files by name: the text and its bytes.
 
 /// `PHITEX_TEX_TIME`: an edit's apply, its phases (`t`: slices, hints,
 /// diff, as elapsed since `t_all`) and slice counts (`n`: old, new, kept,
@@ -371,13 +371,13 @@ fn apply_text(
             n
         } else {
             let args = args_of(eng, i);
-            let n = if let Some(&(_, p, _)) = nodes.last() {
+
+            if let Some(&(_, p, _)) = nodes.last() {
                 eng.insert_after(p, exec, args)
             } else {
                 let first = old.get(a + old_mid).map_or(end, |x| x.1);
                 eng.insert_before(first, exec, args)
-            };
-            n
+            }
         };
         nodes.push((new[i].0, n, Src::of(&new[i].1)));
     }
@@ -1233,7 +1233,8 @@ impl Stats {
             };
             let kind = format!("{c:?}");
             let kind = kind.split([' ', '(', '{']).next().unwrap_or("").to_owned();
-            let mut why = f.map_or_else(|| kind.clone(), |f| format!("{kind} {}", field_name(v, f)));
+            let mut why =
+                f.map_or_else(|| kind.clone(), |f| format!("{kind} {}", field_name(v, f)));
             if crate::exec::env_flag!("PHITEX_RUN_LOG") {
                 // (measure: where the value read differs from the one the
                 // run had read, and the round)
@@ -1251,10 +1252,16 @@ impl Stats {
             self.reruns.push((n.raw(), op, why));
         }
         if crate::exec::env_flag!("PHITEX_RUN_LOG") {
-            let log = std::mem::take(&mut *crate::ops::RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            let log = std::mem::take(
+                &mut *crate::ops::RUN_LOG
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
             let round = self.rounds;
             for (n, resumed, spec, how) in log {
-                let op = eng.node_info(phitex_defuse::NodeId::from_raw(n)).map_or("?", |i| i.op);
+                let op = eng
+                    .node_info(phitex_defuse::NodeId::from_raw(n))
+                    .map_or("?", |i| i.op);
                 self.run_log.push((n, op, resumed, spec, how, round));
             }
         }
@@ -1375,9 +1382,7 @@ struct Graph {
     loads: Option<Arc<crate::pkgrec::LoadHints>>,
 }
 
-impl Graph {
-
-}
+impl Graph {}
 
 /// A file the environment provider answered: name, field, the value
 /// (`None`: absent), and the finder's hash.
@@ -1796,7 +1801,10 @@ impl Graph {
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
-            let r = match self.eng.evaluate_absorbing(&mut *self.sched, &mut ex, edits) {
+            let r = match self
+                .eng
+                .evaluate_absorbing(&mut *self.sched, &mut ex, edits)
+            {
                 Ok(r) => r,
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
@@ -1835,10 +1843,12 @@ impl Graph {
                                 Rr::Changed { field, .. }
                                 | Rr::Rebind { field }
                                 | Rr::Loop { field }
-                                | Rr::Environment { field } => crate::val::field_name(v, field),
-                                Rr::Refuted { field: Some(field) }
+                                | Rr::Environment { field }
+                                | Rr::Refuted { field: Some(field) }
                                 | Rr::Woken { field: Some(field) }
-                                | Rr::Range { field: Some(field) } => crate::val::field_name(v, field),
+                                | Rr::Range { field: Some(field) } => {
+                                    crate::val::field_name(v, field)
+                                }
                                 _ => String::new(),
                             };
                             let d: String = describe(&self.eng, *n).chars().take(60).collect();
@@ -1846,16 +1856,32 @@ impl Graph {
                         }
                     }
                     for (n, c) in &r.rerun_causes {
-                        if let Rr::Changed { field, old, new } = *c {
-                            if std::env::var("PHITEX_RERUN_DIFF").ok().and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| shown < n) && crate::val::field_name(v, field) == "ps" {
-                                shown += 1;
-                                let (o, w) = (v.render(old), v.render(new));
-                                let i = o.bytes().zip(w.bytes()).take_while(|(a, b)| a == b).count();
-                                let cut = |x: &str| x.get(i.saturating_sub(80)..(i + 240).min(x.len())).unwrap_or("").to_owned();
-                                eprintln!("  changed ps at {} (len {} vs {}, first diff at {i}):\n    old ..{}\n    new ..{}", describe(&self.eng, *n), o.len(), w.len(), cut(&o), cut(&w));
-                                if let Some((path, a, b)) = structural_diff(v, old, new, String::new()) {
-                                    eprintln!("    leaf diff at {path}: old {a} | new {b}");
-                                }
+                        if let Rr::Changed { field, old, new } = *c
+                            && std::env::var("PHITEX_RERUN_DIFF")
+                                .ok()
+                                .and_then(|n| n.parse::<usize>().ok())
+                                .is_some_and(|n| shown < n)
+                            && crate::val::field_name(v, field) == "ps"
+                        {
+                            shown += 1;
+                            let (o, w) = (v.render(old), v.render(new));
+                            let i = o.bytes().zip(w.bytes()).take_while(|(a, b)| a == b).count();
+                            let cut = |x: &str| {
+                                x.get(i.saturating_sub(80)..(i + 240).min(x.len()))
+                                    .unwrap_or("")
+                                    .to_owned()
+                            };
+                            eprintln!(
+                                "  changed ps at {} (len {} vs {}, first diff at {i}):\n    old ..{}\n    new ..{}",
+                                describe(&self.eng, *n),
+                                o.len(),
+                                w.len(),
+                                cut(&o),
+                                cut(&w)
+                            );
+                            if let Some((path, a, b)) = structural_diff(v, old, new, String::new())
+                            {
+                                eprintln!("    leaf diff at {path}: old {a} | new {b}");
                             }
                         }
                         let (k, f) = match *c {
@@ -1865,15 +1891,21 @@ impl Graph {
                             Rr::Woken { field } => ("Woken", field),
                             _ => ("other", None),
                         };
-                        let name = f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
+                        let name =
+                            f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
                         *by.entry(format!("{k} {name}")).or_default() += 1;
                     }
                     if let Some(list) = crate::exec::env_str!("PHITEX_DEBUG_NODES") {
-                        let ids: Vec<u64> = list.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                        let ids: Vec<u64> = list
+                            .split(',')
+                            .filter_map(|s| s.trim().parse().ok())
+                            .collect();
                         for (n, c) in &r.rerun_causes {
                             if ids.contains(&n.raw()) {
                                 let f = match *c {
-                                    Rr::Changed { field, .. } | Rr::Rebind { field } => crate::val::field_name(v, field),
+                                    Rr::Changed { field, .. } | Rr::Rebind { field } => {
+                                        crate::val::field_name(v, field)
+                                    }
                                     _ => String::new(),
                                 };
                                 eprintln!("  rerun cause of {}: {c:?} ({f})", n.raw());
@@ -1882,7 +1914,7 @@ impl Graph {
                         eprintln!("  restarted by {:?}", r.restarted_by);
                     }
                     let mut by: Vec<_> = by.into_iter().collect();
-                    by.sort_by(|a, b| b.1.cmp(&a.1));
+                    by.sort_by_key(|a| std::cmp::Reverse(a.1));
                     by.truncate(12);
                     eprintln!("  reruns by field {by:?}");
                 }
@@ -2318,107 +2350,10 @@ fn is_tex_text(name: &str) -> bool {
 }
 
 /// The definitions the prelude's text and the files it read make, in
-/// load order: the format's macros, which the hints bound a document's
-/// calls with ([`crate::hints`]). Harvested once per prelude key (a text pass, no
+/// load order (the format's recorded reads, in the order it read them):
+/// the format's macros, which the hints bound a document's calls with
+/// ([`crate::hints`]). Harvested once per prelude key (a text pass, no
 /// evaluation), for a prelude evaluated here or imported from bytes.
-/// The names a text loads (`\\input name`, `\\input{name}`,
-/// `\\RequirePackage{a,b}`, `\\LoadClass{c}`, `\\documentclass{c}`),
-/// each with the extensions to try.
-fn loaded_names(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for (cmd, ext) in [
-        ("\\input", ""),
-        ("\\RequirePackage", ".sty"),
-        ("\\usepackage", ".sty"),
-        ("\\LoadClass", ".cls"),
-        ("\\documentclass", ".cls"),
-    ] {
-        let mut from = 0;
-        while let Some(k) = text[from..].find(cmd) {
-            let at = from + k + cmd.len();
-            from = at;
-            let rest = &text[at..];
-            // (a longer name, `\\inputlineno`)
-            if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
-                continue;
-            }
-            // (the line is not a comment)
-            let line = &text[text[..at].rfind('\n').map_or(0, |x| x + 1)..at];
-            if line.contains('%') {
-                continue;
-            }
-            let mut r = rest.trim_start();
-            if r.starts_with('[') {
-                r = r[r.find(']').map_or(r.len(), |x| x + 1)..].trim_start();
-            }
-            let names: Vec<&str> = if let Some(b) = r.strip_prefix('{') {
-                b[..b.find('}').unwrap_or(0)].split(',').collect()
-            } else {
-                vec![
-                    r.split(|c: char| c.is_whitespace() || c == '\\' || c == '}')
-                        .next()
-                        .unwrap_or(""),
-                ]
-            };
-            for n in names {
-                let n = n.trim();
-                if n.is_empty() || n.contains('#') {
-                    continue;
-                }
-                out.push(if n.contains('.') {
-                    n.to_owned()
-                } else {
-                    format!("{n}{}", if ext.is_empty() { ".tex" } else { ext })
-                });
-            }
-        }
-    }
-    out
-}
-
-/// Harvests the files `text` loads that the finder resolves, then
-/// theirs, to depth 8, each file once; when the prelude's reads are
-/// known (`read`), only those it read (a name in a body never run,
-/// `\\documentstyle`'s `latex209.def`, is not the format's).
-#[allow(clippy::too_many_arguments)]
-fn harvest_inputs(
-    text: &str,
-    depth: u32,
-    finder: &Finder,
-    read: &[String],
-    defs: &mut pass::Definitions,
-    order: &mut Vec<u32>,
-    seen: &mut phitex_defuse::FxHashSet<String>,
-    next_id: &mut u32,
-) {
-    if depth >= 8 {
-        return;
-    }
-    for name in loaded_names(text) {
-        if !read.is_empty()
-            && !read
-                .iter()
-                .any(|n| *n == name || n.ends_with(&format!("/{name}")))
-        {
-            continue;
-        }
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        let Some((_, bytes)) = finder(&name) else {
-            continue;
-        };
-        let t: String = bytes.iter().map(|&b| char::from(b)).collect();
-        let id = *next_id;
-        *next_id += 1;
-        let kind = crate::hints::kind_of(&t, pass::FileKind::from_path(&name));
-        // (what it loads comes first: its definitions precede the rest)
-        harvest_inputs(&t, depth + 1, finder, read, defs, order, seen, next_id);
-        defs.harvest(&t, kind, id);
-        order.push(id);
-    }
-}
-
 fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
     static C: OnceLock<Mutex<FxHashMap<[u8; 32], Defs>>> = OnceLock::new();
     let cache = C.get_or_init(|| Mutex::new(FxHashMap::default()));
@@ -2435,26 +2370,6 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
     if let Some(p) = prelude {
         defs.harvest(p, crate::hints::kind_of(p, pass::FileKind::Package), 0);
         order.push(0);
-        // (the files the prelude reads, transitively: `\\input tex.ini`
-        // reads plain.tex; depth 8, each file once)
-        let mut seen = phitex_defuse::FxHashSet::default();
-        let mut next_id = 1_000_000u32;
-        let read: Vec<String> = c
-            .reads
-            .iter()
-            .filter(|(_, h)| *h != 0)
-            .map(|(n, _)| n.clone())
-            .collect();
-        harvest_inputs(
-            p,
-            0,
-            finder,
-            &read,
-            &mut defs,
-            &mut order,
-            &mut seen,
-            &mut next_id,
-        );
     }
     for (k, (name, h)) in c.reads.iter().enumerate() {
         if *h == 0 || !is_tex_text(name) {
@@ -3134,6 +3049,18 @@ impl Build {
         if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
             crate::run::record_check(&self.g.eng, &self.g.start_env);
         }
+        // (debug, `PHITEX_CHECK_READS=1`: every committed read checked
+        // against the store; a read that no longer holds is a stale
+        // result, and in the tests a failure)
+        if crate::exec::env_flag!("PHITEX_CHECK_READS") {
+            let stale = self.g.eng.check_reads();
+            assert!(
+                stale.is_empty(),
+                "{} committed reads no longer hold:\n{}",
+                stale.len(),
+                stale.join("\n")
+            );
+        }
         self.pkg_stats(&mut stats);
         // the loads' records as this evaluation left them: a load
         // inserted by a later edit uses them
@@ -3311,7 +3238,7 @@ impl Build {
                             Some(&l),
                         ),
                     )),
-                    _ => None,
+                    Src::Doc(..) => None,
                 })
                 .collect();
             for (n, args) in redo {
@@ -3679,8 +3606,6 @@ impl Build {
             .map(|(n, ds)| (n, ds.into_iter().map(|(f, _)| f).collect()))
             .collect()
     }
-
-
 
     /// Whether the output is a PDF file (`\pdfoutput` at the first
     /// `\shipout`); else DVI.
@@ -4137,10 +4062,7 @@ impl Build {
         use phitex_defuse::Cause;
         let eng = &self.g.eng;
         let v = eng.values();
-        let step = |n: phitex_defuse::NodeId| {
-            eng.node_info(n)
-                .is_some_and(|i| i.op == "finish")
-        };
+        let step = |n: phitex_defuse::NodeId| eng.node_info(n).is_some_and(|i| i.op == "finish");
         let mut out = Vec::new();
         for (n, c) in eng.critical_chain() {
             let (w, f) = match c {
@@ -4321,7 +4243,6 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     }
 }
 
-
 /// The graph's accumulators and loop-backs (their round-one values).
 fn declare_fields(eng: &mut Engine) {
     for f in [
@@ -4368,7 +4289,6 @@ fn declare_fields(eng: &mut Engine) {
         eng.declare_accumulator(fld, Arc::new(SumMonoid));
     }
 }
-
 
 /// The `lines` accumulator: the lines of documents' pieces begun, by
 /// file name, as `[[name, count], ...]` sorted by name
@@ -4466,6 +4386,78 @@ fn env_trace(eng: &Engine, env: &[(Field, ValueId)]) {
     *l = Some(new);
 }
 
+/// (debug) The first leaf where two values differ: its path, and both
+/// leaves shown with their ids and kinds.
+fn structural_diff(
+    v: &Values,
+    a: ValueId,
+    b: ValueId,
+    path: String,
+) -> Option<(String, String, String)> {
+    use phitex_defuse::Value;
+    if a == b {
+        return None;
+    }
+    let (va, vb) = (v.get(a), v.get(b));
+    match (&*va, &*vb) {
+        (Value::List(xa), Value::List(xb)) => {
+            if xa.len() != xb.len() {
+                return Some((
+                    path,
+                    format!("list len {}", xa.len()),
+                    format!("list len {}", xb.len()),
+                ));
+            }
+            for (i, (&x, &y)) in xa.iter().zip(xb.iter()).enumerate() {
+                if let Some(d) = structural_diff(v, x, y, format!("{path}/{i}")) {
+                    return Some(d);
+                }
+            }
+            Some((
+                path,
+                format!("list {:?} (same elements)", a.raw()),
+                format!("list {:?}", b.raw()),
+            ))
+        }
+        _ => Some((
+            path,
+            format!("{:?} id {}", *va, a.raw())
+                .chars()
+                .take(120)
+                .collect(),
+            format!("{:?} id {}", *vb, b.raw())
+                .chars()
+                .take(120)
+                .collect(),
+        )),
+    }
+}
+
+/// Debug: `PHITEX_DEBUG_NODES=id,id,...` prints the engine's view of
+/// those nodes (`debug_node`: label, state, flags; the parent) at the
+/// evaluation's start and end.
+fn debug_nodes(eng: &Engine, when: &str) {
+    let Ok(list) = std::env::var("PHITEX_DEBUG_NODES") else {
+        return;
+    };
+    eprintln!("debug nodes {when}:");
+    for id in list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()) {
+        let n = phitex_defuse::NodeId::from_raw(id);
+        let parent = eng
+            .node_info(n)
+            .map(|i| i.parent.map(phitex_defuse::NodeId::raw));
+        let d = eng.debug_node(n);
+        let tail = d.rfind(" flags ").map_or(d.as_str(), |i| &d[i..]);
+        let head: String = d.chars().take(40).collect();
+        eprintln!("  {id}: parent {parent:?}; {head} ...{tail}");
+        for l in eng.debug_reads(n).lines() {
+            if l.contains("count:0") || l.starts_with("\"ps\"") || l.starts_with("ps ") {
+                eprintln!("    read: {}", l.chars().take(160).collect::<String>());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod prelude_tests {
     use super::*;
@@ -4488,57 +4480,5 @@ mod prelude_tests {
         assert!(deserialise(&other).is_none());
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
-    }
-}
-
-
-/// (debug) The first leaf where two values differ: its path, and both
-/// leaves shown with their ids and kinds.
-fn structural_diff(v: &Values, a: ValueId, b: ValueId, path: String) -> Option<(String, String, String)> {
-    use phitex_defuse::Value;
-    if a == b {
-        return None;
-    }
-    let (va, vb) = (v.get(a), v.get(b));
-    match (&*va, &*vb) {
-        (Value::List(xa), Value::List(xb)) => {
-            if xa.len() != xb.len() {
-                return Some((path, format!("list len {}", xa.len()), format!("list len {}", xb.len())));
-            }
-            for (i, (&x, &y)) in xa.iter().zip(xb.iter()).enumerate() {
-                if let Some(d) = structural_diff(v, x, y, format!("{path}/{i}")) {
-                    return Some(d);
-                }
-            }
-            Some((path, format!("list {:?} (same elements)", a.raw()), format!("list {:?}", b.raw())))
-        }
-        _ => Some((
-            path,
-            format!("{:?} id {}", &*va, a.raw()).chars().take(120).collect(),
-            format!("{:?} id {}", &*vb, b.raw()).chars().take(120).collect(),
-        )),
-    }
-}
-
-/// Debug: `PHITEX_DEBUG_NODES=id,id,...` prints the engine's view of
-/// those nodes (`debug_node`: label, state, flags; the parent) at the
-/// evaluation's start and end.
-fn debug_nodes(eng: &Engine, when: &str) {
-    let Ok(list) = std::env::var("PHITEX_DEBUG_NODES") else {
-        return;
-    };
-    eprintln!("debug nodes {when}:");
-    for id in list.split(',').filter_map(|s| s.trim().parse::<u64>().ok()) {
-        let n = phitex_defuse::NodeId::from_raw(id);
-        let parent = eng.node_info(n).map(|i| i.parent.map(|p| p.raw()));
-        let d = eng.debug_node(n);
-        let tail = d.rfind(" flags ").map_or(d.as_str(), |i| &d[i..]);
-        let head: String = d.chars().take(40).collect();
-        eprintln!("  {id}: parent {parent:?}; {head} ...{tail}");
-        for l in eng.debug_reads(n).lines() {
-            if l.contains("count:0") || l.starts_with("\"ps\"") || l.starts_with("ps ") {
-                eprintln!("    read: {}", l.chars().take(160).collect::<String>());
-            }
-        }
     }
 }

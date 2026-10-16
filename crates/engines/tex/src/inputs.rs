@@ -20,4 +20,3 @@ pub(crate) fn document_file(path: &str, text: &str) -> bool {
             .iter()
             .any(|c| text.contains(c))
 }
-

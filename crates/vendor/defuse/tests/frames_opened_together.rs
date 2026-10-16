@@ -6,10 +6,12 @@
 //! closer sees k1 and after it f is unset too. In every schedule, and an
 //! edit of `X` matches a cold build.
 
-use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
 
-use defuse::{Brackets, Ctx, Effect, Engine, Field, Locality, MayDefine, OpId, Operation, Report, Stop, ValueId, Values};
+use defuse::{
+    Brackets, Ctx, Effect, Engine, Field, Locality, MayDefine, OpId, Operation, Report, Stop, ValueId, Values,
+};
 
 struct Ops;
 
@@ -20,7 +22,10 @@ fn tag(v: &Values, a: &[ValueId]) -> String {
 impl Operation for Ops {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
         match tag(v, a).as_str() {
-            "x" => Some(vec![(v.field("f"), Locality::ScopeAt(0)), (v.field("g"), Locality::ScopeAt(1))]),
+            "x" => Some(vec![
+                (v.field("f"), Locality::ScopeAt(0)),
+                (v.field("g"), Locality::ScopeAt(1)),
+            ]),
             "y" => Some(vec![(v.field("h"), Locality::ScopeAt(0))]),
             _ => Some(Vec::new()),
         }
@@ -30,9 +35,18 @@ impl Operation for Ops {
     }
     fn effect(&self, a: &[ValueId], v: &Values) -> Effect {
         match tag(v, a).as_str() {
-            "x" => Effect::Scope(Brackets { opens: 2, kind_pending: true, ..Brackets::default() }),
+            "x" => Effect::Scope(Brackets {
+                opens: 2,
+                kind_pending: true,
+                ..Brackets::default()
+            }),
             // A continuation inside B: closes B, opens its own frame C.
-            "y" => Effect::Scope(Brackets { closes: 1, opens: 1, kind_pending: true, ..Brackets::default() }),
+            "y" => Effect::Scope(Brackets {
+                closes: 1,
+                opens: 1,
+                kind_pending: true,
+                ..Brackets::default()
+            }),
             "c" => Effect::Close,
             _ => Effect::None,
         }
@@ -101,14 +115,21 @@ impl defuse::Executor for Threads {
     }
 }
 
-
-
 fn eval(eng: &mut Engine, i: usize) -> Report {
     match i % 4 {
         0 => eng.evaluate_sequential(),
-        1 => eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::All, 256), &mut defuse::Sequential),
-        2 => eng.evaluate(&mut defuse::RandomScheduler::new(i as u64, true), &mut defuse::Sequential),
-        _ => eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::All, 256), &mut Threads),
+        1 => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut defuse::Sequential,
+        ),
+        2 => eng.evaluate(
+            &mut defuse::RandomScheduler::new(i as u64, true),
+            &mut defuse::Sequential,
+        ),
+        _ => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut Threads,
+        ),
     }
     .expect("evaluate")
 }
@@ -128,7 +149,9 @@ fn build(k: i64) -> (Engine, Vec<defuse::NodeId>, defuse::NodeId, OpId) {
 }
 
 fn outs(eng: &Engine, ns: &[defuse::NodeId]) -> Vec<i64> {
-    ns.iter().map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x)).unwrap_or(-9)).collect()
+    ns.iter()
+        .map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x)).unwrap_or(-9))
+        .collect()
 }
 
 #[test]
@@ -161,9 +184,15 @@ fn a_continuation_closes_an_inherited_frame_and_opens_its_own() {
         let k0 = eng.values().int(0);
         eng.push(u, op, vec![s(&eng, "x"), k0]);
         eng.push(u, op, vec![s(&eng, "y")]);
-        let ns: Vec<_> = ["h", "c", "h"].iter().map(|t| eng.push(u, op, vec![s(&eng, t)])).collect();
+        let ns: Vec<_> = ["h", "c", "h"]
+            .iter()
+            .map(|t| eng.push(u, op, vec![s(&eng, t)]))
+            .collect();
         eval(&mut eng, i);
-        let hs: Vec<i64> = ns.iter().map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x)).unwrap_or(-9)).collect();
+        let hs: Vec<i64> = ns
+            .iter()
+            .map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x)).unwrap_or(-9))
+            .collect();
         assert_eq!(hs, vec![103, 30, 99], "{i}");
     }
 }

@@ -448,7 +448,12 @@ impl PdfState {
             .collect();
         marked
             .into_iter()
-            .map(|f| (f, std::mem::replace(&mut self.font_mut(f).chars, [false; 256])))
+            .map(|f| {
+                (
+                    f,
+                    std::mem::replace(&mut self.font_mut(f).chars, [false; 256]),
+                )
+            })
             .collect()
     }
 

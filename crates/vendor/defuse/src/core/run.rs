@@ -468,12 +468,23 @@ impl Shared {
                     // The rerun's cause is the read that broke (not the
                     // last touch, which may have held).
                     if let Some(f) = self.first_broken_field(s, &log) {
-                        let last = super::lock(&self.reruns).iter().rev().find(|e| e.0 == s).map(|e| e.1.clone());
+                        let last = super::lock(&self.reruns)
+                            .iter()
+                            .rev()
+                            .find(|e| e.0 == s)
+                            .map(|e| e.1.clone());
                         if let Some(Some(crate::api::Rerun::Changed { field, .. })) = last
                             && field != f
                         {
                             let old = Self::read_value(&r.data(), f).unwrap_or(crate::values::ValueId::UNIT);
-                            self.note_rerun(s, crate::api::Rerun::Changed { field: f, old, new: crate::values::ValueId::UNIT });
+                            self.note_rerun(
+                                s,
+                                crate::api::Rerun::Changed {
+                                    field: f,
+                                    old,
+                                    new: crate::values::ValueId::UNIT,
+                                },
+                            );
                         }
                     }
                     if r.has(super::F_PREDREAD | super::F_PROJREAD) {
@@ -501,7 +512,9 @@ impl Shared {
     /// holds.
     fn first_broken_field(&self, s: Slot, log: &[super::Pred]) -> Option<crate::values::Field> {
         log.iter().find_map(|p| match p {
-            super::Pred::Def { f, .. } if matches!(self.check_log(s, std::slice::from_ref(p)), Check::Broke(_)) => Some(*f),
+            super::Pred::Def { f, .. } if matches!(self.check_log(s, std::slice::from_ref(p)), Check::Broke(_)) => {
+                Some(*f)
+            }
             _ => None,
         })
     }
@@ -547,11 +560,16 @@ impl Shared {
         let d = self.rec(s).data();
         let log = &d.res.as_ref()?.log;
         log.iter().find_map(|p| match p {
-            super::Pred::Def { f, ans: super::DAns::Site { node, .. }, .. }
-                if *node != s && self.busy(*node, s) && !self.guess_ok(*f) =>
-            {
-                Some(super::query::wait_node(*node, Some(*f), "gated", self.rec(*node).has(super::F_DONE)))
-            }
+            super::Pred::Def {
+                f,
+                ans: super::DAns::Site { node, .. },
+                ..
+            } if *node != s && self.busy(*node, s) && !self.guess_ok(*f) => Some(super::query::wait_node(
+                *node,
+                Some(*f),
+                "gated",
+                self.rec(*node).has(super::F_DONE),
+            )),
             _ => None,
         })
     }
@@ -849,7 +867,10 @@ impl Shared {
         cx.log = prior;
         // Its in-order sibling walk goes on where the earlier attempts left it.
         if let Some((i, x, gn)) = cx.log.iter().rev().find_map(|p| match p {
-            Pred::Sib { i, ans: Some((x, gn, _)) } => Some((*i as usize, *x, *gn)),
+            Pred::Sib {
+                i,
+                ans: Some((x, gn, _)),
+            } => Some((*i as usize, *x, *gn)),
             _ => None,
         }) {
             cx.sib_cur.set(Some((i, x, gn)));
@@ -996,7 +1017,12 @@ impl Shared {
         // progress: it runs. (A wait on a definition or a pending set is
         // settled by its definer, often the same way: it checks again.)
         let again = !matches!(w.kind, "claim" | "scope effect")
-            || self.rec(s).data().x.as_ref().is_none_or(|e| e.wait_on.is_none() || !e.check_stuck);
+            || self
+                .rec(s)
+                .data()
+                .x
+                .as_ref()
+                .is_none_or(|e| e.wait_on.is_none() || !e.check_stuck);
         self.park_with(s, w, None, 1, !again);
     }
 

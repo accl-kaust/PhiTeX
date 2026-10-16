@@ -51,6 +51,7 @@ enum Kind {
     ReadBack,
 }
 
+#[allow(clippy::struct_field_names)]
 struct Text {
     name: String,
     kind: Kind,
@@ -166,7 +167,11 @@ fn occurrences(t: &str, w: &str) -> Vec<usize> {
 fn changed(w: &str) -> String {
     let (head, last) = w.split_at(w.len() - 1);
     let l = last.as_bytes()[0];
-    let n = if l.eq_ignore_ascii_case(&b'e') { b'a' } else { b'e' };
+    let n = if l.eq_ignore_ascii_case(&b'e') {
+        b'a'
+    } else {
+        b'e'
+    };
     let n = if l.is_ascii_uppercase() {
         n.to_ascii_uppercase()
     } else {
@@ -217,7 +222,9 @@ fn texts(b: &Build, name: &str, dir: &Path, src: &str) -> Vec<Text> {
         if !found
             || seen.contains(&f)
             || back.iter().any(|(n, _)| *n == f)
-            || !lower.ends_with(".tex")
+            || std::path::Path::new(&lower)
+                .extension()
+                .is_none_or(|e| e != "tex")
             || !dir.join(&f).is_file()
         {
             continue;
@@ -406,19 +413,29 @@ fn granularity(b: &Build, t: &Text, content: &str, at: usize) -> Vec<String> {
 /// `known`: the nodes that had run before this edit (a node not in it
 /// is new: re-made by its parent). Returns the labels with their exec
 /// runs.
-fn census(b: &Build, ts: &[Text], known: &std::collections::HashSet<u64>, head: &str) -> Vec<(String, usize)> {
+#[allow(clippy::too_many_lines)]
+fn census(
+    b: &Build,
+    ts: &[Text],
+    known: &std::collections::HashSet<u64>,
+    head: &str,
+) -> Vec<(String, usize)> {
     use std::collections::BTreeMap;
     let spans = b.node_spans();
     let unit_of = |n: u64| -> Option<String> {
         let (_, f, s, _) = spans.iter().find(|x| x.0 == n)?;
         let t = match f {
             None => ts.iter().find(|t| t.kind == Kind::Main)?,
-            Some(x) => ts
-                .iter()
-                .find(|t| t.kind != Kind::Main && t.text.trim_end_matches('\n') == x.trim_end_matches('\n'))?,
+            Some(x) => ts.iter().find(|t| {
+                t.kind != Kind::Main && t.text.trim_end_matches('\n') == x.trim_end_matches('\n')
+            })?,
         };
         let u = t.units.iter().position(|&(a, z)| a <= *s && *s < z)?;
-        Some(if t.kind == Kind::Main { format!("u{u}") } else { format!("{}:u{u}", t.name) })
+        Some(if t.kind == Kind::Main {
+            format!("u{u}")
+        } else {
+            format!("{}:u{u}", t.name)
+        })
     };
     let mut causes: BTreeMap<u64, Vec<String>> = BTreeMap::new();
     for (n, _, why) in &b.stats.reruns {
@@ -431,14 +448,27 @@ fn census(b: &Build, ts: &[Text], known: &std::collections::HashSet<u64>, head: 
         let e = by_op.entry(op).or_default();
         e.0 += 1;
         if op == "exec" {
-            by_node.entry(n).or_default().push((resumed, spec, how, round));
+            by_node
+                .entry(n)
+                .or_default()
+                .push((resumed, spec, how, round));
         }
         if op == "resume" {
-            by_resume.entry(n).or_default().push((resumed, spec, how, round));
+            by_resume
+                .entry(n)
+                .or_default()
+                .push((resumed, spec, how, round));
         }
     }
     for (op, e) in &mut by_op {
-        e.1 = b.stats.run_log.iter().filter(|x| x.1 == *op).map(|x| x.0).collect::<std::collections::HashSet<_>>().len();
+        e.1 = b
+            .stats
+            .run_log
+            .iter()
+            .filter(|x| x.1 == *op)
+            .map(|x| x.0)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
     }
     let mut out = format!("census {head}: runs/nodes by op {by_op:?}\n");
     let mut labels: BTreeMap<String, usize> = BTreeMap::new();
@@ -458,7 +488,12 @@ fn census(b: &Build, ts: &[Text], known: &std::collections::HashSet<u64>, head: 
         let rs: Vec<String> = runs
             .iter()
             .map(|&(r, s, h, round)| {
-                format!("r{round}{}{}{}", if r { "+resumed" } else { "" }, if s { "+spec" } else { "" }, char::from(h))
+                format!(
+                    "r{round}{}{}{}",
+                    if r { "+resumed" } else { "" },
+                    if s { "+spec" } else { "" },
+                    char::from(h)
+                )
             })
             .collect();
         let _ = writeln!(
@@ -527,7 +562,14 @@ fn census(b: &Build, ts: &[Text], known: &std::collections::HashSet<u64>, head: 
 /// The sweep of one document in `src_dir` (its files copied to a
 /// directory of its own): the rows, and the cold build's check.
 #[allow(clippy::too_many_lines)]
-fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracle: Option<&Path>) -> (Vec<Row>, String) {
+fn sweep(
+    name: &str,
+    src_dir: &Path,
+    files: &[&str],
+    n: usize,
+    epoch: i64,
+    oracle: Option<&Path>,
+) -> (Vec<Row>, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("sweep-{name}"));
     let _ = std::fs::create_dir_all(&dir);
     for f in files {
@@ -559,7 +601,13 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
     let mut known: std::collections::HashSet<u64> = b.stats.run_log.iter().map(|x| x.0).collect();
     let mut totals: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for t in &ts {
-        let _ = write!(head, "\n  text {} ({:?}): {} units", t.name, t.kind, t.units.len());
+        let _ = write!(
+            head,
+            "\n  text {} ({:?}): {} units",
+            t.name,
+            t.kind,
+            t.units.len()
+        );
     }
     eprintln!("{head}");
     let mut rows = Vec::new();
@@ -580,7 +628,11 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
             let (u, e) = &plans[p];
             let at = &ts[e.at_text];
             let w2 = changed(&e.word);
-            let new = format!("{}{w2}{}", &at.text[..e.at], &at.text[e.at + e.word.len()..]);
+            let new = format!(
+                "{}{w2}{}",
+                &at.text[..e.at],
+                &at.text[e.at + e.word.len()..]
+            );
             let before = b.pages();
             let back_before = b.read_back_texts();
             let t1 = std::time::Instant::now();
@@ -638,7 +690,11 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
                         x,
                         " (second round by loop-back {:?}{}; read-back changed: {:?})",
                         shown,
-                        if loops.len() > 6 { format!(" +{} more", loops.len() - 6) } else { String::new() },
+                        if loops.len() > 6 {
+                            format!(" +{} more", loops.len() - 6)
+                        } else {
+                            String::new()
+                        },
                         back_changed
                     );
                 }
@@ -646,14 +702,27 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
             if census_on {
                 let h = format!("{} unit {} <{}>", t.name, u, e.word);
                 for (l, k) in census(&b, &ts, &known, &h) {
-                    *totals.entry(format!("{}: {l}", if t.kind == Kind::Main { "main" } else { "read-back" })).or_default() += k;
+                    *totals
+                        .entry(format!(
+                            "{}: {l}",
+                            if t.kind == Kind::Main {
+                                "main"
+                            } else {
+                                "read-back"
+                            }
+                        ))
+                        .or_default() += k;
                 }
             }
             known.extend(b.stats.run_log.iter().map(|x| x.0));
-            let content = if e.seen_text == e.at_text { new.as_str() } else { ts[e.seen_text].text.as_str() };
+            let content = if e.seen_text == e.at_text {
+                new.as_str()
+            } else {
+                ts[e.seen_text].text.as_str()
+            };
             v.extend(granularity(&b, &ts[e.seen_text], content, e.seen_at));
             edits += 1;
-            if edits % 5 == 0 {
+            if edits.is_multiple_of(5) {
                 let c = if at.kind == Kind::Main {
                     cold(name, &dir, epoch, &new)
                 } else {
@@ -671,10 +740,19 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
                 unit: *u,
                 excerpt: format!(
                     "{}{} <{}>",
-                    if e.seen_text == e.at_text { String::new() } else { format!("[via {}] ", at.name) },
+                    if e.seen_text == e.at_text {
+                        String::new()
+                    } else {
+                        format!("[via {}] ", at.name)
+                    },
                     {
                         let (us, ue) = t.units[*u];
-                        t.text[us..ue].trim_start().chars().take(20).collect::<String>().replace('\n', " ")
+                        t.text[us..ue]
+                            .trim_start()
+                            .chars()
+                            .take(20)
+                            .collect::<String>()
+                            .replace('\n', " ")
                     },
                     e.word
                 ),
@@ -704,7 +782,11 @@ fn sweep(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
 
 fn table(name: &str, head: &str, rows: &[Row]) -> String {
     let mut s = format!("{head}\n");
-    let _ = writeln!(s, "{:<18} {:>4}  {:<44} {:<46} {:<16} violation", "text", "unit", "excerpt", "runs by op", "pages/wall");
+    let _ = writeln!(
+        s,
+        "{:<18} {:>4}  {:<44} {:<46} {:<16} violation",
+        "text", "unit", "excerpt", "runs by op", "pages/wall"
+    );
     for r in rows {
         let _ = writeln!(
             s,
@@ -714,7 +796,11 @@ fn table(name: &str, head: &str, rows: &[Row]) -> String {
             r.excerpt.chars().take(44).collect::<String>(),
             r.runs,
             r.pages,
-            if r.violations.is_empty() { "-".to_owned() } else { r.violations.join("; ") }
+            if r.violations.is_empty() {
+                "-".to_owned()
+            } else {
+                r.violations.join("; ")
+            }
         );
     }
     let mut dist = std::collections::BTreeMap::<u64, usize>::new();
@@ -727,7 +813,11 @@ fn table(name: &str, head: &str, rows: &[Row]) -> String {
         *dist.entry(e).or_default() += 1;
     }
     let bad = rows.iter().filter(|r| !r.violations.is_empty()).count();
-    let _ = writeln!(s, "{name}: {} edits, {bad} with violations; exec runs per edit (runs: edits) {dist:?}", rows.len());
+    let _ = writeln!(
+        s,
+        "{name}: {} edits, {bad} with violations; exec runs per edit (runs: edits) {dist:?}",
+        rows.len()
+    );
     // per text: edits, edits with violations, exec runs, the most
     // frequent kinds of violation (numbers masked)
     let mut names: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
@@ -745,7 +835,13 @@ fn table(name: &str, head: &str, rows: &[Row]) -> String {
                 .unwrap_or(0);
             *dist.entry(e).or_default() += 1;
             for v in &r.violations {
-                let k: String = v.split(" (").next().unwrap_or(v).chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
+                let k: String = v
+                    .split(" (")
+                    .next()
+                    .unwrap_or(v)
+                    .chars()
+                    .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                    .collect();
                 let mut k = k.replace("##", "#");
                 while k.contains("##") {
                     k = k.replace("##", "#");
@@ -756,7 +852,11 @@ fn table(name: &str, head: &str, rows: &[Row]) -> String {
         let mut kinds: Vec<(String, usize)> = kinds.into_iter().collect();
         kinds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         kinds.truncate(5);
-        let _ = writeln!(s, "  per text {t}: {} edits, {bad} with violations, exec runs {dist:?}, top violations {kinds:?}", rs.len());
+        let _ = writeln!(
+            s,
+            "  per text {t}: {} edits, {bad} with violations, exec runs {dist:?}, top violations {kinds:?}",
+            rs.len()
+        );
     }
     s
 }
@@ -774,7 +874,12 @@ fn check(name: &str, src_dir: &Path, files: &[&str], n: usize, epoch: i64, oracl
                 .map(move |v| format!("{name}: {} unit {} ({}): {v}", r.text, r.unit, r.excerpt))
         })
         .collect();
-    assert!(red.is_empty(), "edit-locality sweep {name}: {} violations\n{}", red.len(), red.join("\n"));
+    assert!(
+        red.is_empty(),
+        "edit-locality sweep {name}: {} violations\n{}",
+        red.len(),
+        red.join("\n")
+    );
 }
 
 fn per_text(default: usize) -> usize {
@@ -821,5 +926,12 @@ fn sweep_index() {
 #[ignore = "slow: amsldoc, a cold build per 5 edits"]
 fn sweep_amsldoc() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bench/amsldoc");
-    check("amsldoc", &dir, &["amsldoc.tex"], per_text(5), 1_700_000_000, None);
+    check(
+        "amsldoc",
+        &dir,
+        &["amsldoc.tex"],
+        per_text(5),
+        1_700_000_000,
+        None,
+    );
 }

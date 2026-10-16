@@ -70,7 +70,10 @@ impl Operation for Ops {
 }
 
 fn build(ver: i64) -> (Engine, OpId, NodeId, Arc<Ops>) {
-    let ops = Arc::new(Ops { me: Mutex::new(None), saw: Mutex::new(Default::default()) });
+    let ops = Arc::new(Ops {
+        me: Mutex::new(None),
+        saw: Mutex::new(Default::default()),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     *ops.me.lock().unwrap() = Some(op);
@@ -103,10 +106,18 @@ struct Restarter {
 
 impl Operation for Restarter {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(if tag(v, a) == "f" { vec![(v.field("x"), Locality::Local)] } else { Vec::new() })
+        Some(if tag(v, a) == "f" {
+            vec![(v.field("x"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
     }
     fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(if tag(v, a) == "s" { vec![v.field("x")] } else { Vec::new() })
+        Some(if tag(v, a) == "s" {
+            vec![v.field("x")]
+        } else {
+            Vec::new()
+        })
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -135,7 +146,10 @@ impl Operation for Restarter {
 
 #[test]
 fn a_restarted_run_drops_its_first_pass_follows() {
-    let ops = Arc::new(Restarter { me: Mutex::new(None), saw: Mutex::new(Vec::new()) });
+    let ops = Arc::new(Restarter {
+        me: Mutex::new(None),
+        saw: Mutex::new(Vec::new()),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     *ops.me.lock().unwrap() = Some(op);
@@ -143,7 +157,11 @@ fn a_restarted_run_drops_its_first_pass_follows() {
     let r = eng.values().str("r");
     eng.push(u, op, vec![r]);
     eng.evaluate_sequential().unwrap();
-    assert_eq!(*ops.saw.lock().unwrap(), vec![Some("from f".to_string())], "one S, after F");
+    assert_eq!(
+        *ops.saw.lock().unwrap(),
+        vec![Some("from f".to_string())],
+        "one S, after F"
+    );
 }
 
 /// An edit that makes a parent place the same follows in another order
@@ -155,10 +173,18 @@ struct Swapper {
 
 impl Operation for Swapper {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(if tag(v, a) == "f" { vec![(v.field("x"), Locality::Local)] } else { Vec::new() })
+        Some(if tag(v, a) == "f" {
+            vec![(v.field("x"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
     }
     fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(if tag(v, a) == "s" { vec![v.field("x")] } else { Vec::new() })
+        Some(if tag(v, a) == "s" {
+            vec![v.field("x")]
+        } else {
+            Vec::new()
+        })
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -191,7 +217,10 @@ impl Operation for Swapper {
 
 #[test]
 fn an_edit_that_reorders_kept_follows_moves_them() {
-    let ops = Arc::new(Swapper { me: Mutex::new(None), saw: Mutex::new(Vec::new()) });
+    let ops = Arc::new(Swapper {
+        me: Mutex::new(None),
+        saw: Mutex::new(Vec::new()),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     *ops.me.lock().unwrap() = Some(op);
@@ -203,7 +232,11 @@ fn an_edit_that_reorders_kept_follows_moves_them() {
     let two = eng.values().int(2);
     eng.replace(an, op, vec![a, two]);
     eng.evaluate_sequential().unwrap();
-    assert_eq!(ops.saw.lock().unwrap().last(), Some(&Some("from f".to_string())), "S after F now");
+    assert_eq!(
+        ops.saw.lock().unwrap().last(),
+        Some(&Some("from f".to_string())),
+        "S after F now"
+    );
 }
 
 /// `A [v]` defines `y = v`, follows `F` (fixed args) then `S`; `F` follows
@@ -270,7 +303,10 @@ impl Operation for Kept {
 
 #[test]
 fn kept_follows_of_a_kept_follow_stay_before_a_rerun_sibling() {
-    let ops = Arc::new(Kept { me: Mutex::new(None), saw: Mutex::new(Vec::new()) });
+    let ops = Arc::new(Kept {
+        me: Mutex::new(None),
+        saw: Mutex::new(Vec::new()),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     *ops.me.lock().unwrap() = Some(op);
@@ -283,7 +319,10 @@ fn kept_follows_of_a_kept_follow_stay_before_a_rerun_sibling() {
     eng.replace(an, op, vec![a, two]);
     eng.evaluate_sequential().unwrap();
     let saw = ops.saw.lock().unwrap().clone();
-    assert!(saw.contains(&("s".to_string(), "ap".to_string())), "S reads P's x after the edit: {saw:?}");
+    assert!(
+        saw.contains(&("s".to_string(), "ap".to_string())),
+        "S reads P's x after the edit: {saw:?}"
+    );
 }
 
 /// A new follow placed after a kept one goes after the kept one's own
@@ -296,10 +335,18 @@ struct NewAfterKept {
 
 impl Operation for NewAfterKept {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(if tag(v, a) == "p" { vec![(v.field("x"), Locality::Local)] } else { Vec::new() })
+        Some(if tag(v, a) == "p" {
+            vec![(v.field("x"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
     }
     fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(if tag(v, a) == "s" { vec![v.field("x")] } else { Vec::new() })
+        Some(if tag(v, a) == "s" {
+            vec![v.field("x")]
+        } else {
+            Vec::new()
+        })
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -330,7 +377,10 @@ impl Operation for NewAfterKept {
 
 #[test]
 fn a_new_follow_after_a_kept_one_goes_after_its_follows() {
-    let ops = Arc::new(NewAfterKept { me: Mutex::new(None), saw: Mutex::new(Vec::new()) });
+    let ops = Arc::new(NewAfterKept {
+        me: Mutex::new(None),
+        saw: Mutex::new(Vec::new()),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     *ops.me.lock().unwrap() = Some(op);
@@ -341,5 +391,9 @@ fn a_new_follow_after_a_kept_one_goes_after_its_follows() {
     let two = eng.values().int(2);
     eng.replace(an, op, vec![a, two]);
     eng.evaluate_sequential().unwrap();
-    assert_eq!(ops.saw.lock().unwrap().last(), Some(&Some("from p".to_string())), "new S after P");
+    assert_eq!(
+        ops.saw.lock().unwrap().last(),
+        Some(&Some("from p".to_string())),
+        "new S after P"
+    );
 }

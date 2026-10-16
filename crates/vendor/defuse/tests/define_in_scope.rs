@@ -10,7 +10,9 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
-use defuse::{Brackets, Ctx, Effect, Engine, Field, Locality, MayDefine, OpId, Operation, Report, Stop, ValueId, Values};
+use defuse::{
+    Brackets, Ctx, Effect, Engine, Field, Locality, MayDefine, OpId, Operation, Report, Stop, ValueId, Values,
+};
 
 /// Bit 0: the opener defines `y` at both levels; bit 1: its effect is
 /// set by the run.
@@ -43,7 +45,10 @@ impl Operation for Ops {
     fn effect(&self, a: &[ValueId], v: &Values) -> Effect {
         match tag(v, a).as_str() {
             "o" if MODE.load(Relaxed) & 2 != 0 => Effect::Pending,
-            "o" => Effect::Scope(Brackets { opens: 1, ..Brackets::default() }),
+            "o" => Effect::Scope(Brackets {
+                opens: 1,
+                ..Brackets::default()
+            }),
             "c" => Effect::Close,
             _ => Effect::None,
         }
@@ -66,14 +71,21 @@ impl Operation for Ops {
                 }
                 cx.define_in_scope(v.field("y"), v.int(5 + k));
                 if MODE.load(Relaxed) & 2 != 0 {
-                    cx.set_effect(Effect::Scope(Brackets { opens: 1, ..Brackets::default() }));
+                    cx.set_effect(Effect::Scope(Brackets {
+                        opens: 1,
+                        ..Brackets::default()
+                    }));
                 }
                 Ok(ValueId::UNIT)
             }
             "c" => Ok(ValueId::UNIT),
             _ => {
-                let x = v.as_int(cx.use_field(v.field("x"))?.unwrap_or(ValueId::UNIT)).unwrap_or(-1);
-                let y = v.as_int(cx.use_field(v.field("y"))?.unwrap_or(ValueId::UNIT)).unwrap_or(-1);
+                let x = v
+                    .as_int(cx.use_field(v.field("x"))?.unwrap_or(ValueId::UNIT))
+                    .unwrap_or(-1);
+                let y = v
+                    .as_int(cx.use_field(v.field("y"))?.unwrap_or(ValueId::UNIT))
+                    .unwrap_or(-1);
                 Ok(v.int(x * 100 + y))
             }
         }
@@ -110,14 +122,21 @@ impl defuse::Executor for Threads {
     }
 }
 
-
-
 fn eval(eng: &mut Engine, i: usize) -> Report {
     match i % 4 {
         0 => eng.evaluate_sequential(),
-        1 => eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::All, 256), &mut defuse::Sequential),
-        2 => eng.evaluate(&mut defuse::RandomScheduler::new(i as u64, true), &mut defuse::Sequential),
-        _ => eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::All, 256), &mut Threads),
+        1 => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut defuse::Sequential,
+        ),
+        2 => eng.evaluate(
+            &mut defuse::RandomScheduler::new(i as u64, true),
+            &mut defuse::Sequential,
+        ),
+        _ => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut Threads,
+        ),
     }
     .expect("evaluate")
 }
@@ -139,7 +158,9 @@ fn build(k: i64) -> (Engine, Vec<defuse::NodeId>, defuse::NodeId, OpId) {
 }
 
 fn outs(eng: &Engine, rs: &[defuse::NodeId]) -> Vec<Option<i64>> {
-    rs.iter().map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x))).collect()
+    rs.iter()
+        .map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x)))
+        .collect()
 }
 
 #[test]
@@ -155,7 +176,11 @@ fn check() {
         let (mut eng, rs, o, op) = build(0);
         eval(&mut eng, i);
         let after = if MODE.load(Relaxed) & 1 != 0 { 203 } else { 201 };
-        assert_eq!(outs(&eng, &rs), vec![Some(205); 4].into_iter().chain([Some(after)]).collect::<Vec<_>>(), "cold {i}");
+        assert_eq!(
+            outs(&eng, &rs),
+            vec![Some(205); 4].into_iter().chain([Some(after)]).collect::<Vec<_>>(),
+            "cold {i}"
+        );
         // Edit the opener: the scope local changes, the readers inside follow.
         let (ov, k3) = (eng.values().str("o"), eng.values().int(3));
         eng.replace(o, op, vec![ov, k3]);

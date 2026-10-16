@@ -590,7 +590,9 @@ fn pdf_edit_reruns_one_page_step() {
 fn exact_pdf_edit_on_page_k_reruns_its_piece_finisher_place_and_the_link_only() {
     use std::fmt::Write as _;
     let fx = common::fixtures().join("dvi");
-    let mut src = String::from("\\pdfoutput=1 \\pdfcompresslevel=0 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+    let mut src = String::from(
+        "\\pdfoutput=1 \\pdfcompresslevel=0 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n",
+    );
     for k in 0..300 {
         let _ = writeln!(
             src,
@@ -609,7 +611,11 @@ fn exact_pdf_edit_on_page_k_reruns_its_piece_finisher_place_and_the_link_only() 
     assert!(b.is_pdf());
     let n = b.pages().len();
     let before = b.pages();
-    let text = src.replacen("Paragraph 150 has some words", "Paragraph 150 has some wordz", 1);
+    let text = src.replacen(
+        "Paragraph 150 has some words",
+        "Paragraph 150 has some wordz",
+        1,
+    );
     b.edit(&text);
     let touched = common::pages_touched(&before, &b.pages());
     eprintln!(
@@ -620,13 +626,19 @@ fn exact_pdf_edit_on_page_k_reruns_its_piece_finisher_place_and_the_link_only() 
     let d = common::first_difference(&b.output().0, &cold.output().0);
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert_eq!(touched.len(), 1, "one page's record changes");
-    assert!(touched[0] > 0 && touched[0] + 1 < n, "the edit is on a middle page");
+    assert!(
+        touched[0] > 0 && touched[0] + 1 < n,
+        "the edit is on a middle page"
+    );
     assert_eq!(common::runs_of(&b, "exec"), 1, "only the edited piece");
     assert_eq!(common::runs_of(&b, "finish"), 1, "only its page's finisher");
     // (the placement's node may start once and stop at a pending
     // definition set before it, then run: two runs of the one node; no
     // other page's placement runs)
-    assert!(common::runs_of(&b, "place") <= 2, "only its page's placement");
+    assert!(
+        common::runs_of(&b, "place") <= 2,
+        "only its page's placement"
+    );
     assert_eq!(common::runs_of(&b, "dvi"), 1, "one link");
 }
 
@@ -724,11 +736,17 @@ fn moving_breaks_rescan_touched_pages_and_one() {
         after.len(),
         b.stats.runs_by_op
     );
-    assert!(!touched.is_empty() && touched.len() <= 3, "pages touched {touched:?}");
+    assert!(
+        !touched.is_empty() && touched.len() <= 3,
+        "pages touched {touched:?}"
+    );
     let n = touched.len() as u64;
     let scans = common::runs_of(&b, "scan");
     let fins = common::runs_of(&b, "finish");
     let bound = per_page * (n + 1);
-    assert!(scans <= bound, "{scans} scan runs, bound {bound} ({per_page} a page, {n} pages and one)");
+    assert!(
+        scans <= bound,
+        "{scans} scan runs, bound {bound} ({per_page} a page, {n} pages and one)"
+    );
     assert!(fins <= n, "{fins} finisher runs, bound {n}");
 }

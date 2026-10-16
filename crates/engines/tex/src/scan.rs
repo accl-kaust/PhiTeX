@@ -481,6 +481,16 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn font_dimen(&mut self, f: i64, k: i32) -> R<i32> {
+        // (a font this run decoded since the table last changed: its
+        // parameters as read then)
+        if let (Ok(fu), Ok(ku)) = (u32::try_from(f), usize::try_from(k))
+            && let Some((g, Some(e))) = self.font_memo.get(&fu)
+            && *g == self.st.any_gen()
+            && self.interp.is_none()
+            && let Some(&d) = ku.checked_sub(1).and_then(|i| e.params.get(i))
+        {
+            return Ok(d);
+        }
         self.int32(&format!("fd:{f}:{k}"))
     }
 

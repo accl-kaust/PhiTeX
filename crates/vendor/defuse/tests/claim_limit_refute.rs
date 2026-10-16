@@ -14,12 +14,21 @@ fn tag(v: &Values, a: &[ValueId]) -> String {
 
 impl Operation for Ops {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(if tag(v, a) == "d" { vec![(v.field("x"), Locality::Local)] } else { Vec::new() })
+        Some(if tag(v, a) == "d" {
+            vec![(v.field("x"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
     }
     fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
         if tag(v, a) == "c" { Claim::Pending } else { Claim::None }
     }
-    fn claim_limit(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Option<usize> {
+    fn claim_limit(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Option<usize> {
         (tag(v, a) == "c").then_some(1)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
@@ -75,7 +84,11 @@ fn a_claim_past_its_limit_takes_back_what_ran() {
     // Predicted: the claimer waits; the sibling past the limit runs first.
     let (mut eng, rd) = build(false);
     eng.evaluate_sequential().unwrap();
-    assert_eq!(eng.output(rd), Some(eng.values().int(2)), "before the claim, r reads d 2");
+    assert_eq!(
+        eng.output(rd),
+        Some(eng.values().int(2)),
+        "before the claim, r reads d 2"
+    );
     let (f, x) = (eng.values().field("e"), eng.values().int(2));
     eng.set_environment([(f, x)]);
     eng.evaluate_sequential().unwrap();

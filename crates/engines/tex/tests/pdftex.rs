@@ -235,7 +235,6 @@ fn pdf_edits() {
     assert!(failed.is_empty(), "edits differing from cold: {failed:?}");
 }
 
-
 /// The executor's counters on plain documents (story.tex, pages.tex)
 /// at 1, 4 and 16 threads, with the same output at each.
 #[test]

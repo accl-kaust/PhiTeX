@@ -540,9 +540,6 @@ pub(crate) fn font_objnum(r: &mut Run<'_, '_>, f: u32) -> R<i64> {
     }
 }
 
-
-
-
 /// A piece by its key (the memo's), for the end node's assembly.
 pub(crate) fn piece(k: u64) -> Option<Arc<Piece>> {
     pieces()

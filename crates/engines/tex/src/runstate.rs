@@ -186,10 +186,16 @@ pub(crate) struct State {
     /// a group-local binding it republishes is no definition where it
     /// equals the value reaching the run ([`State::drop_publ`]).
     cont_locs: Vec<Loc>,
-    /// Bumped whenever a category code below 256 may have changed
+    /// Bumped whenever a category code or another code (`\\lccode`,
+    /// `\\uccode`, `\\sfcode`, `\\mathcode`, `\\delcode`) below 256 may
+    /// have changed
     /// ([`State::cat_gen`]); unique across tables of a thread, so a
     /// table put in place of another is never mistaken for it.
     cat_gen: u64,
+    /// Bumped whenever any slot's value may have changed (a definition,
+    /// a restore, a preload): the run's memos of decoded state
+    /// (`Run::font_entry`) are valid while it stands.
+    any_gen: u64,
 }
 
 thread_local! {
@@ -204,10 +210,12 @@ fn new_cat_gen() -> u64 {
     })
 }
 
-/// Whether `loc` is a category code below 256.
+/// Whether `loc` is a category code or another code table's entry
+/// below 256 (the run's flat copies, `Run::cat`, `Run::code`).
 #[inline]
 fn is_cat(loc: Loc) -> bool {
     (loc as usize).wrapping_sub(crate::fields::CAT0) < 256
+        || (loc as usize).wrapping_sub(crate::fields::CODE0) < 5 * 256
 }
 
 thread_local! {
@@ -237,6 +245,7 @@ impl Clone for State {
             next_gid: self.next_gid,
             cont_locs: self.cont_locs.clone(),
             cat_gen: new_cat_gen(),
+            any_gen: new_cat_gen(),
         }
     }
 }
@@ -278,6 +287,7 @@ impl State {
             next_gid: 0,
             cont_locs: Vec::new(),
             cat_gen: new_cat_gen(),
+            any_gen: new_cat_gen(),
         }
     }
 
@@ -286,6 +296,11 @@ impl State {
     #[inline]
     pub(crate) fn cat_gen(&self) -> u64 {
         self.cat_gen
+    }
+
+    /// The table's change generation ([`State`]'s `any_gen`).
+    pub(crate) fn any_gen(&self) -> u64 {
+        self.any_gen
     }
 
     #[inline]
@@ -322,7 +337,7 @@ impl State {
     /// locations were computed in, [`State::from_cont`]): a field past
     /// the static cells keeps its location, and its slot its field.
     pub(crate) fn adopt_spill(&mut self, prev: &State) {
-        self.spill_ix = prev.spill_ix.clone();
+        self.spill_ix.clone_from(&prev.spill_ix);
         let fields: Vec<(Field, u32)> = self.spill_ix.iter().map(|(&f, &i)| (f, i)).collect();
         for (f, i) in fields {
             self.slot(SPILL | i).field = Some(f);
@@ -361,7 +376,6 @@ impl State {
         let s = self.eq.get(loc as usize)?;
         (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
     }
-
 
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
@@ -407,11 +421,19 @@ impl State {
     pub(crate) fn debug_slot(&self, loc: Loc) -> String {
         self.slot_ref(loc).map_or_else(
             || "none".to_owned(),
-            |s| format!("absent {} id {:?} flags {:#x}", matches!(s.e.val, Native::Absent), s.e.id, s.e.flags),
+            |s| {
+                format!(
+                    "absent {} id {:?} flags {:#x}",
+                    matches!(s.e.val, Native::Absent),
+                    s.e.id,
+                    s.e.flags
+                )
+            },
         )
     }
 
     pub(crate) fn preload(&mut self, loc: Loc, x: Option<ValueId>) {
+        self.any_gen = new_cat_gen();
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }
@@ -423,7 +445,6 @@ impl State {
             chr: 0,
         };
     }
-
 
     /// The loaded entry of `loc` (call [`State::is_loaded`] first).
     #[inline]
@@ -660,6 +681,7 @@ impl State {
     /// before it inert. A definition outside every group of the run, or
     /// a global one, is the run's for its base level.
     pub(crate) fn set(&mut self, loc: Loc, val: Native, global: bool, grp: Option<u32>) {
+        self.any_gen = new_cat_gen();
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }
@@ -720,7 +742,6 @@ impl State {
         }
     }
 
-
     /// Notes a definition of `loc`, an `\advance` or not, when watching.
     pub(crate) fn note_kind(&mut self, loc: Loc, advance: bool) {
         if let Some(k) = &mut self.kinds {
@@ -729,8 +750,6 @@ impl State {
                 .or_insert(advance);
         }
     }
-
-
 
     /// Whether a page parameter changed since the last call
     /// ([`State::set`], [`State::close`]).
@@ -743,6 +762,7 @@ impl State {
     /// the run's definition there, `global` at level one), else a
     /// group's of the run.
     pub(crate) fn modify(&mut self, loc: Loc, val: Native, base: bool, global: bool) {
+        self.any_gen = new_cat_gen();
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
@@ -798,6 +818,7 @@ impl State {
             if slot.ginert > s.at {
                 continue;
             }
+            self.any_gen = new_cat_gen();
             if is_cat(s.loc) {
                 self.cat_gen = new_cat_gen();
             }
@@ -1011,7 +1032,6 @@ impl State {
         })
     }
 
-
     /// The value `m` publishes at the run's base level, if any (a local
     /// one equal to the engine's value it read publishes nothing, nor a
     /// global one at the top level, [`State::published`]).
@@ -1032,12 +1052,23 @@ impl State {
     /// definitions began at `def_base` (opened at `open_stamp`), each
     /// location whose latest definition is a local one made since, with
     /// its value.
-    fn group_locals(&self, v: &Values, def_base: usize, open_stamp: u64) -> Vec<(usize, Option<ValueId>)> {
+    fn group_locals(
+        &self,
+        v: &Values,
+        def_base: usize,
+        open_stamp: u64,
+    ) -> Vec<(usize, Option<ValueId>)> {
         let mut out = Vec::new();
         for &loc in &self.defined[def_base.min(self.defined.len())..] {
-            let Some(s) = self.slot_ref(loc) else { continue };
-            let Some(mi) = (s.meta as usize).checked_sub(1) else { continue };
-            let Some(m) = self.metas.get(mi) else { continue };
+            let Some(s) = self.slot_ref(loc) else {
+                continue;
+            };
+            let Some(mi) = (s.meta as usize).checked_sub(1) else {
+                continue;
+            };
+            let Some(m) = self.metas.get(mi) else {
+                continue;
+            };
             if m.ldef_local && m.ldef_stamp > open_stamp {
                 out.push((mi, s.e.val.encode(v)));
             }
@@ -1124,7 +1155,9 @@ impl State {
         let mut out: Vec<(Loc, Native, Locality)> = Vec::new();
         for (k, &(_, db, open_stamp)) in levels.iter().enumerate() {
             let next = levels.get(k + 1);
-            let de = next.map_or(self.defined.len(), |l| l.1).min(self.defined.len());
+            let de = next
+                .map_or(self.defined.len(), |l| l.1)
+                .min(self.defined.len());
             let se = next.map_or(self.save.len(), |l| l.0).min(self.save.len());
             let mut seen = phitex_defuse::FxHashSet::default();
             for i in db.min(de)..de {
@@ -1132,21 +1165,29 @@ impl State {
                 if !seen.insert(loc) {
                     continue;
                 }
-                let Some(s) = self.slot_ref(loc) else { continue };
+                let Some(s) = self.slot_ref(loc) else {
+                    continue;
+                };
                 let inner = self.save[se..]
                     .iter()
                     .find(|x| x.loc == loc && s.ginert <= x.at);
-                let (val, ldef) = match inner {
-                    Some(x) => (x.prev.val.clone(), x.ldef),
-                    None => {
-                        let Some(m) = (s.meta as usize).checked_sub(1).and_then(|mi| self.metas.get(mi)) else {
-                            continue;
-                        };
-                        (s.e.val.clone(), (m.ldef_stamp, m.ldef_local, m.ldef_gid))
-                    }
+                let (val, ldef) = if let Some(x) = inner {
+                    (x.prev.val.clone(), x.ldef)
+                } else {
+                    let Some(m) = (s.meta as usize)
+                        .checked_sub(1)
+                        .and_then(|mi| self.metas.get(mi))
+                    else {
+                        continue;
+                    };
+                    (s.e.val.clone(), (m.ldef_stamp, m.ldef_local, m.ldef_gid))
                 };
                 if ldef.1 && ldef.0 > open_stamp {
-                    out.push((loc, val, Locality::ScopeAt(u8::try_from(k).unwrap_or(u8::MAX - 2))));
+                    out.push((
+                        loc,
+                        val,
+                        Locality::ScopeAt(u8::try_from(k).unwrap_or(u8::MAX - 2)),
+                    ));
                 }
             }
         }
@@ -1318,6 +1359,7 @@ impl State {
         st.stamp = p.stamp;
         st.next_gid = p.next_gid;
         st.cat_gen = new_cat_gen();
+        st.any_gen = new_cat_gen();
         st
     }
 }
@@ -1460,9 +1502,8 @@ impl State {
                 .ok()
                 .filter(|&m| m > 0)
                 .and_then(|m| self.metas.get(m - 1));
-            let group_local = m.is_some_and(|m| {
-                m.ldef_local && m.ldef_gid.is_some_and(|g| open.contains(&g))
-            });
+            let group_local =
+                m.is_some_and(|m| m.ldef_local && m.ldef_gid.is_some_and(|g| open.contains(&g)));
             if s.save_gid == 0 && s.ginert == 0 && !group_local {
                 continue;
             }
@@ -1558,6 +1599,7 @@ impl State {
     /// finisher's) stands (§283): the binding is the engine's value now,
     /// and the open groups' saves of it are inert.
     pub(crate) fn override_global(&mut self, loc: Loc, x: Option<ValueId>) {
+        self.any_gen = new_cat_gen();
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }

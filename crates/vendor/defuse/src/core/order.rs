@@ -1190,7 +1190,9 @@ impl Shared {
     /// `s`'s entry filed under frame `g` (`NO_FRAME`: its global one).
     pub(crate) fn def_pos_at(&self, idx: &super::FieldIdx, s: Slot, g: u32) -> Option<usize> {
         if g != NO_FRAME
-            && let Some(i) = self.def_positions(idx, s).find(|&i| idx.defs[i].scope != 0 && idx.defs[i].fk == g)
+            && let Some(i) = self
+                .def_positions(idx, s)
+                .find(|&i| idx.defs[i].scope != 0 && idx.defs[i].fk == g)
         {
             return Some(i);
         }
@@ -1205,7 +1207,10 @@ impl Shared {
         while hi < idx.defs.len() && self.rec(idx.defs[hi].node).lab() == l {
             hi += 1;
         }
-        (lo..hi).filter(move |&i| idx.defs[i].node == s).collect::<Vec<_>>().into_iter()
+        (lo..hi)
+            .filter(move |&i| idx.defs[i].node == s)
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     fn ins_sorted(&self, v: &mut Vec<Slot>, s: Slot) {
@@ -1511,7 +1516,9 @@ impl Shared {
     pub(crate) fn remove_def(&self, u: u32, s: Slot, f: Field, notes: &mut Notes) {
         let keys: Vec<u8> = {
             let sh = super::rlock(self.shard(u, f));
-            sh.get(&(u, f)).map_or_else(Vec::new, |idx| self.def_positions(idx, s).map(|i| idx.defs[i].scope).collect())
+            sh.get(&(u, f)).map_or_else(Vec::new, |idx| {
+                self.def_positions(idx, s).map(|i| idx.defs[i].scope).collect()
+            })
         };
         for k in keys {
             self.remove_def_k(u, s, f, k, notes);

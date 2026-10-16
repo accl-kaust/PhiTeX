@@ -12,7 +12,11 @@ impl Operation for Ops {
         Some(Vec::new())
     }
     fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
-        if v.as_str(a[0]).as_deref() == Some("c") { Claim::Pending } else { Claim::None }
+        if v.as_str(a[0]).as_deref() == Some("c") {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -32,9 +36,15 @@ fn siblings_run_while_the_claimer_waits() {
         let mut eng = Engine::new();
         let op = eng.register(std::sync::Arc::new(Ops));
         let u = eng.new_unit();
-        let c = { let x = eng.values().str("c"); eng.push(u, op, vec![x]) };
+        let c = {
+            let x = eng.values().str("c");
+            eng.push(u, op, vec![x])
+        };
         let sibs: Vec<_> = (0..5)
-            .map(|i| { let (s, n) = (eng.values().str("s"), eng.values().int(i)); eng.push(u, op, vec![s, n]) })
+            .map(|i| {
+                let (s, n) = (eng.values().str("s"), eng.values().int(i));
+                eng.push(u, op, vec![s, n])
+            })
             .collect();
         let rep = if threads {
             eng.evaluate(&mut defuse::Greedy::default(), &mut defuse::Sequential)
@@ -46,7 +56,11 @@ fn siblings_run_while_the_claimer_waits() {
             assert_eq!(eng.output(s), Some(eng.values().int(i as i64)), "sibling {i} ran");
         }
         assert_eq!(eng.output(c), None, "the claimer still waits on the environment");
-        assert!(rep.waits_by_kind.iter().all(|(k, _)| *k != "claim"), "{:?}", rep.waits_by_kind);
+        assert!(
+            rep.waits_by_kind.iter().all(|(k, _)| *k != "claim"),
+            "{:?}",
+            rep.waits_by_kind
+        );
         // Supplied, the claimer finishes; the siblings stand.
         let (f, x) = (eng.values().field("e"), eng.values().int(9));
         eng.set_environment([(f, x)]);

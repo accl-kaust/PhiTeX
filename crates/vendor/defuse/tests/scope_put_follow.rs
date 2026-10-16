@@ -7,7 +7,9 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
-use defuse::{Brackets, Claim, Ctx, Effect, Engine, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values};
+use defuse::{
+    Brackets, Claim, Ctx, Effect, Engine, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
+};
 
 struct Ops {
     me: Mutex<Option<OpId>>,
@@ -35,13 +37,20 @@ impl Operation for Ops {
     fn effect(&self, a: &[ValueId], v: &Values) -> Effect {
         match tag(v, a).as_str() {
             "o" if std::env::var("EFFECT_PENDING").is_ok() => Effect::Pending,
-            "o" => Effect::Scope(Brackets { opens: 1, ..Brackets::default() }),
+            "o" => Effect::Scope(Brackets {
+                opens: 1,
+                ..Brackets::default()
+            }),
             "c" => Effect::Close,
             _ => Effect::None,
         }
     }
     fn claim(&self, a: &[ValueId], v: &Values, _f: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
-        if tag(v, a) == "o" && std::env::var("CLAIM_PENDING").is_ok() { Claim::Pending } else { Claim::None }
+        if tag(v, a) == "o" && std::env::var("CLAIM_PENDING").is_ok() {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -60,7 +69,10 @@ impl Operation for Ops {
                     cx.claim(0);
                 }
                 if std::env::var("EFFECT_PENDING").is_ok() {
-                    cx.set_effect(Effect::Scope(Brackets { opens: 1, ..Brackets::default() }));
+                    cx.set_effect(Effect::Scope(Brackets {
+                        opens: 1,
+                        ..Brackets::default()
+                    }));
                 }
                 Ok(ValueId::UNIT)
             }
@@ -104,8 +116,6 @@ impl defuse::Executor for Threads {
     }
 }
 
-
-
 #[test]
 fn readers_in_the_scope_see_the_follow_local_in_every_schedule() {
     let mut seen = std::collections::BTreeMap::<String, usize>::new();
@@ -123,11 +133,18 @@ fn readers_in_the_scope_see_the_follow_local_in_every_schedule() {
         let z = eng.push(u, op, vec![s(&eng, "z")]);
         let r = match i % 3 {
             0 => eng.evaluate_sequential(),
-            1 => eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::All, 256), &mut Threads),
+            1 => eng.evaluate(
+                &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                &mut Threads,
+            ),
             _ => eng.evaluate(&mut defuse::Greedy::default(), &mut Threads),
         };
         r.expect("evaluate");
-        let outs: Vec<_> = rs.iter().chain([&z]).map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x))).collect();
+        let outs: Vec<_> = rs
+            .iter()
+            .chain([&z])
+            .map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x)))
+            .collect();
         *seen.entry(format!("{outs:?}")).or_default() += 1;
     }
     eprintln!("{seen:?}");

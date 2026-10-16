@@ -143,7 +143,18 @@ pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
 /// Evaluates and checks the result against the interpreter and the
 /// engine's invariants.
 pub fn ok(eng: &mut Engine, p: &Program, sched: Sched) -> bool {
-    evaluate(eng, sched) && interpret(&p.lines).is_ok_and(|r| r == p.result(eng)) && eng.check_invariants().is_empty()
+    evaluate(eng, sched)
+        && interpret(&p.lines).is_ok_and(|r| r == p.result(eng))
+        && eng.check_invariants().is_empty()
+        && {
+            // Every committed read still holds (no result rests on a stale
+            // or unconfirmed answer).
+            let bad = eng.check_reads();
+            for b in bad.iter().take(3) {
+                println!("READ {b}");
+            }
+            bad.is_empty()
+        }
 }
 
 /// Whether `start` is fine cold, every edit but the last keeps it fine, and

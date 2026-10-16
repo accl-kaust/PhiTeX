@@ -20,8 +20,17 @@ impl Operation for Ops {
             _ => Vec::new(),
         })
     }
-    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (defuse::OpId, Vec<ValueId>)>) -> defuse::Claim {
-        if matches!(tag(v, a).as_str(), "f5" | "f8") { defuse::Claim::Pending } else { defuse::Claim::None }
+    fn claim(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (defuse::OpId, Vec<ValueId>)>,
+    ) -> defuse::Claim {
+        if matches!(tag(v, a).as_str(), "f5" | "f8") {
+            defuse::Claim::Pending
+        } else {
+            defuse::Claim::None
+        }
     }
     fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(match tag(v, a).as_str() {
@@ -70,7 +79,12 @@ impl defuse::Executor for Pool {
     fn parallelism(&self) -> usize {
         4
     }
-    fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> defuse::RunResult + Sync), out: &mut Vec<defuse::RunResult>) {
+    fn execute(
+        &mut self,
+        n: usize,
+        run: &(dyn Fn(usize) -> defuse::RunResult + Sync),
+        out: &mut Vec<defuse::RunResult>,
+    ) {
         let res: Vec<defuse::RunResult> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..n).map(|i| s.spawn(move || run(i))).collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
@@ -93,14 +107,20 @@ fn a_guessed_previous_value_is_refuted_by_the_new_one() {
             let wn = eng.push(u, op, vec![w, one]);
             eng.push(u, op, vec![f5]);
             let r = eng.push(u, op, vec![f8]);
-            eng.evaluate(&mut defuse::Greedy::speculative(mode, 256), &mut Pool).unwrap();
+            eng.evaluate(&mut defuse::Greedy::speculative(mode, 256), &mut Pool)
+                .unwrap();
             assert_eq!(eng.output(r).and_then(|x| eng.values().as_int(x)), Some(4));
             let four = eng.values().int(4);
             eng.replace(a, op, vec![f4, four]);
             let two = eng.values().int(2);
             eng.replace(wn, op, vec![w, two]);
-            eng.evaluate(&mut defuse::Greedy::speculative(mode, 256), &mut Pool).unwrap();
-            assert_eq!(eng.output(r).and_then(|x| eng.values().as_int(x)), Some(5), "{mode:?}: F8 sees F5's new c");
+            eng.evaluate(&mut defuse::Greedy::speculative(mode, 256), &mut Pool)
+                .unwrap();
+            assert_eq!(
+                eng.output(r).and_then(|x| eng.values().as_int(x)),
+                Some(5),
+                "{mode:?}: F8 sees F5's new c"
+            );
         }
     }
 }

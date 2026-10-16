@@ -279,7 +279,11 @@ impl Operation for PlayOp {
             }
             if live.is_empty() {
                 DIVERGED.fetch_add(1, Ordering::Relaxed);
-                let want: Vec<String> = runs.iter().filter(|r| r.0.len() > i).map(|r| r.0[i][2].to_string()).collect();
+                let want: Vec<String> = runs
+                    .iter()
+                    .filter(|r| r.0.len() > i)
+                    .map(|r| r.0[i][2].to_string())
+                    .collect();
                 eprintln!(
                     "play: {} {:?} diverged at call {i} ({m} {a}): got {ans}, recorded {}",
                     self.name,
@@ -563,7 +567,12 @@ fn main() {
                 };
                 let mut sched = Greedy::speculative(spec, budget);
                 eprintln!("play: evaluating {}", evals);
-                std::thread::sleep(std::time::Duration::from_millis(std::env::var("PLAY_PAUSE_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(0)));
+                std::thread::sleep(std::time::Duration::from_millis(
+                    std::env::var("PLAY_PAUSE_MS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0),
+                ));
                 let t0 = std::time::Instant::now();
                 let r = eng.evaluate_absorbing(&mut sched, &mut Threads(threads), &mut src);
                 let got = match &r {

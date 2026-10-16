@@ -58,6 +58,14 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
     loaded
 }
 
+/// A font as a run's state has it ([`crate::run::Run::font_entry`]).
+pub(crate) struct Entry {
+    pub loaded: Arc<Loaded>,
+    pub params: Vec<i32>,
+    pub hc: i32,
+    pub name: (String, i32),
+}
+
 /// The fonts a list uses, with their current `\fontdimen`s and
 /// `\hyphenchar`s.
 #[derive(Default)]

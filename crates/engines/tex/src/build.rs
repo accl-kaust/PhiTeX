@@ -231,7 +231,8 @@ impl Run<'_, '_> {
             }
         }
         if self.nest.len() > 1 {
-            return self.leave_frames(base, parent);
+            self.leave_frames(&base, parent);
+            return Ok(());
         }
         let Some(l) = self.nest.pop() else {
             return Ok(());
@@ -301,7 +302,7 @@ impl Run<'_, '_> {
     /// definitions are frame `k`'s (`Ctx::define_in_scope_at`), its
     /// `\aftergroup` tokens frame `k`'s `ag` list. The run's definitions
     /// at its base level lie outside them all.
-    fn leave_frames(&mut self, base: crate::build::Mode, parent: ValueId) -> R<()> {
+    fn leave_frames(&mut self, base: &crate::build::Mode, parent: ValueId) {
         let v = self.v;
         let levels = std::mem::take(&mut self.nest);
         let n = levels.len();
@@ -349,7 +350,6 @@ impl Run<'_, '_> {
             kind: None,
             kind_pending: true,
         });
-        Ok(())
     }
 
     /// What `unsave` does besides restoring: the `\aftergroup` tokens
@@ -416,6 +416,39 @@ impl Run<'_, '_> {
         }
         let x = nodes::encode(self.v, &node, &Side::default());
         self.append(lid, x);
+    }
+
+    /// [`Self::append`] of several items: to a list of the engine's
+    /// scope, one contribution holding them all (a paragraph's lines).
+    pub(crate) fn append_many(&mut self, lid: i64, nodes: Vec<ValueId>) {
+        let v = self.v;
+        if let Some(l) = self.level_of(lid) {
+            for x in nodes {
+                fold_item(v, lid, x, &mut l.fold, &mut l.list);
+            }
+            return;
+        }
+        if nodes.is_empty() {
+            return;
+        }
+        if lid == 0 {
+            if self.st.take_page_params() {
+                self.put_page_params();
+            }
+            for &x in &nodes {
+                if nodes::tag(v, x) == nodes::T_INS {
+                    let n = u16::try_from(nodes::int_field(v, x, 1)).unwrap_or(0);
+                    self.ins_pending.push(n);
+                }
+            }
+        }
+        let l = v.int(lid);
+        let units: Vec<ValueId> = nodes
+            .into_iter()
+            .map(|x| v.seq_unit(v.list(vec![l, x])))
+            .collect();
+        let s = seq_balanced(v, &units);
+        self.contribute("items", s);
     }
 
     pub(crate) fn append(&mut self, lid: i64, node: ValueId) {
@@ -788,24 +821,56 @@ impl Run<'_, '_> {
         if view.fonts.contains_key(&f) || f == 0 {
             return Ok(());
         }
-        let info = self.get(&format!("fontinfo:{f}"))?;
-        let Some(i) = crate::fonts::info(self.v, info) else {
+        let Some(e) = self.font_entry(f)? else {
             return Ok(());
         };
-        let Some(file) = i.file else { return Ok(()) };
-        let Some(l) = crate::fonts::load(self.v, file, i.s) else {
-            return Ok(());
-        };
-        let n = self.int32(&format!("fdn:{f}"))?;
-        let mut params = Vec::new();
-        for k in 1..=n {
-            params.push(self.int32(&format!("fd:{f}:{k}"))?);
-        }
-        let hc = self.int32(&format!("hc:{f}"))?;
-        view.hyphen.insert(f, hc);
-        view.names.insert(f, (i.name.clone(), i.size));
-        view.fonts.insert(f, (l, params));
+        view.hyphen.insert(f, e.hc);
+        view.names.insert(f, e.name.clone());
+        view.fonts.insert(f, (e.loaded.clone(), e.params.clone()));
         Ok(())
+    }
+
+    /// Font `f` as the state has it now: its metrics, `\fontdimen`s,
+    /// `\hyphenchar` and name, decoded once while no slot of the run's
+    /// table changes ([`crate::runstate::State::any_gen`]).
+    pub(crate) fn font_entry(&mut self, f: u32) -> R<Option<std::rc::Rc<crate::fonts::Entry>>> {
+        let g = self.st.any_gen();
+        if let Some((eg, e)) = self.font_memo.get(&f)
+            && *eg == g
+            && self.interp.is_none()
+        {
+            return Ok(e.clone());
+        }
+        let info = self.get(&format!("fontinfo:{f}"))?;
+        let e = match crate::fonts::info(self.v, info) {
+            Some(i) => match i
+                .file
+                .and_then(|file| crate::fonts::load(self.v, file, i.s))
+            {
+                Some(l) => {
+                    let n = self.int32(&format!("fdn:{f}"))?;
+                    let mut params = Vec::new();
+                    for k in 1..=n {
+                        params.push(self.int32(&format!("fd:{f}:{k}"))?);
+                    }
+                    let hc = self.int32(&format!("hc:{f}"))?;
+                    Some(std::rc::Rc::new(crate::fonts::Entry {
+                        loaded: l,
+                        params,
+                        hc,
+                        name: (i.name.clone(), i.size),
+                    }))
+                }
+                None => None,
+            },
+            None => None,
+        };
+        // (the reads above define nothing: the generation stands)
+        if self.interp.is_none() {
+            let g = self.st.any_gen();
+            self.font_memo.insert(f, (g, e.clone()));
+        }
+        Ok(e)
     }
 
     pub(crate) fn pack_params(&mut self, h: bool) -> R<PackParams> {
@@ -940,22 +1005,27 @@ impl Run<'_, '_> {
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
         crate::prof::add(crate::prof::LB_TS, t0);
         let t0 = crate::prof::start();
-        let mut vm = md.clone();
-        vm.lid = md.vlid;
         let just_box = para.lines.last().map(|l| l.packed.node.clone());
+        // (the interline glue parameters in force for every line, §679:
+        // nothing between the lines changes them)
+        let bs = crate::val::glue_value(v, &self.gpar(Par::baselineskip)?);
+        let ls = crate::val::glue_value(v, &self.gpar(Par::lineskip)?);
+        let lsl = v.int(i64::from(self.ipar(Par::lineskiplimit)?));
+        let tv = v.int(nodes::T_VBOX);
+        let mut out = Vec::with_capacity(para.lines.len() * 2);
         for line in para.lines {
             self.box_report(true, line.packed.report, true);
             let b = nodes::encode_box(v, &line.packed.node, &side);
-            self.append_to_vlist(&vm, b)?;
+            out.push(v.list(vec![tv, b, bs, ls, lsl]));
             for a in &line.packed.adjustments {
-                let x = nodes::encode(v, a, &side);
-                self.append(md.vlid, x);
+                out.push(nodes::encode(v, a, &side));
             }
             if let Some(p) = line.penalty {
-                let x = nodes::penalty_node(v, p);
-                self.append(md.vlid, x);
+                out.push(nodes::penalty_node(v, p));
             }
         }
+        // the paragraph's lines: one contribution
+        self.append_many(md.vlid, out);
         self.set_prev_graf(md, para.prev_graf);
         crate::prof::add(crate::prof::LB_COMMIT, t0);
         Ok(just_box)
@@ -1814,7 +1884,9 @@ impl Run<'_, '_> {
         // goes on the list as a transition before each space that needs
         // the factor, and at the end; the list's reader folds them
         let mut sf = SF_UNREAD;
-        let mut out: Vec<Node> = Vec::new();
+        // (the buffer of the worker's last character run, reused)
+        let mut out: Vec<Node> = CHAR_BUF.with(std::cell::Cell::take);
+        out.clear();
         // transitions and waiting spaces, each before `out[k]`
         let mut raws: Vec<(usize, ValueId)> = Vec::new();
         let mut cancel_boundary = cancel;
@@ -1897,12 +1969,13 @@ impl Run<'_, '_> {
         let side = Side::default();
         let mut raws = raws.into_iter().peekable();
         let _ = &side;
-        for (k, n) in out.into_iter().enumerate() {
+        for (k, n) in out.drain(..).enumerate() {
             while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
                 self.append(md.lid, r);
             }
             self.append_node(md.lid, n);
         }
+        CHAR_BUF.with(|c| c.set(out));
         for (_, r) in raws {
             self.append(md.lid, r);
         }
@@ -2545,6 +2618,12 @@ fn chars_of(list: &[Node], seen: &mut [bool; 256]) {
     }
 }
 
+thread_local! {
+    /// A character run's node buffer, kept for the worker's next run
+    /// ([`Run::char_run`]).
+    static CHAR_BUF: std::cell::Cell<Vec<Node>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
 /// The space factor not read yet in a run of characters.
 const SF_UNREAD: i32 = i32::MIN;
 
@@ -2775,6 +2854,20 @@ pub(crate) fn fold_entries(
     }
 }
 
+/// The concatenation of the sequences `xs`, as a balanced tree (the
+/// engine's sequences are associative on ids: any shape is the same
+/// value).
+fn seq_balanced(v: &Values, xs: &[ValueId]) -> ValueId {
+    match xs {
+        [] => ValueId::NIL,
+        [x] => *x,
+        _ => {
+            let (a, b) = xs.split_at(xs.len() / 2);
+            v.seq_concat(seq_balanced(v, a), seq_balanced(v, b))
+        }
+    }
+}
+
 /// Whether `x` is a marker for the page builder's fold
 /// (`T_PAGE_PARAMS`), not list material.
 pub(crate) fn is_marker(v: &Values, x: ValueId) -> bool {
@@ -2816,7 +2909,9 @@ pub(crate) fn vtail_value(v: &Values, prev: Option<ValueId>, items: &[ValueId]) 
 /// §418).
 pub(crate) fn vtail_probe(v: &Values, n: usize) -> ValueId {
     let k = i64::try_from(n + 1).unwrap_or(i64::MAX);
-    let tail: Vec<ValueId> = (0..k).map(|i| v.list(vec![v.int(-0x5e57), v.int(i)])).collect();
+    let tail: Vec<ValueId> = (0..k)
+        .map(|i| v.list(vec![v.int(-0x5e57), v.int(i)]))
+        .collect();
     v.list(vec![v.list(tail), v.int(1000), v.int(7_654_321), v.int(k)])
 }
 

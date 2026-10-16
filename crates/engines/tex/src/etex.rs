@@ -1143,9 +1143,6 @@ fn mark_field(kind: &str, n: i32) -> String {
     }
 }
 
-
-
-
 /// `\topmark` and its kin as read by a run (§386): the marks a
 /// finisher defined where it stands (TeX's `cur_mark` after `fire_up`,
 /// §1012), read by def-use as any value; inside a finisher, its own.

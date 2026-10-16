@@ -87,7 +87,9 @@ pub(crate) fn sib_cursor_reset() {
 pub(crate) fn same_value(a: &DAns, b: &DAns) -> bool {
     fn val(x: &DAns) -> Option<Option<ValueId>> {
         match x {
-            DAns::Site { val: DefVal::Val(v), .. } => Some(Some(*v)),
+            DAns::Site {
+                val: DefVal::Val(v), ..
+            } => Some(Some(*v)),
             DAns::Env(v) => Some(*v),
             _ => None,
         }
@@ -513,7 +515,11 @@ impl Shared {
                     guess = Some(q);
                 } else if !self.busy(q, me) {
                     // Done on a guess of its own: read as committed.
-                } else if e.val == DefVal::Pending || !(self.guess_ok(f) && (self.only_checking(q) || (!self.rec(q).has(super::F_NEEDS_RUN | super::F_PREDRUN) && self.take_guess()))) {
+                } else if e.val == DefVal::Pending
+                    || !(self.guess_ok(f)
+                        && (self.only_checking(q)
+                            || (!self.rec(q).has(super::F_NEEDS_RUN | super::F_PREDRUN) && self.take_guess())))
+                {
                     return Q::Wait(wait_node(q, Some(f), "definition", e.val != DefVal::Pending));
                 } else {
                     guess = Some(q);
@@ -524,7 +530,7 @@ impl Shared {
                 && let Some(x) = self.predicted(q, f)
                 && (e.val == DefVal::Val(x) || self.ran_now(q))
                 && self.guess_ok(f)
-                    && self.take_prediction()
+                && self.take_prediction()
             {
                 // Read as a prediction whether or not the definer has
                 // finished in this evaluation (what a run reads does not
@@ -760,7 +766,12 @@ impl Shared {
     /// static contributions to other fields is waited for as any other.
     fn contributes_statically(&self, x: Slot, f: Field) -> bool {
         self.rec(x).has(super::F_SCONTRIB)
-            && self.rec(x).data().stat.contribs().is_some_and(|c| c.iter().any(|e| e.0 == f))
+            && self
+                .rec(x)
+                .data()
+                .stat
+                .contribs()
+                .is_some_and(|c| c.iter().any(|e| e.0 == f))
     }
 
     /// The whole fold of `f` in unit `u`.
@@ -816,7 +827,13 @@ impl Shared {
 
     /// `q_sib` resumed: the walk goes on after `from`, `at`'s sibling number
     /// `k0 - 1` (`from == at`, `k0 == 0`: from the start).
-    pub(crate) fn q_sib_from(&self, at: Slot, from: Slot, k0: usize, i: usize) -> (Option<(Slot, u32, u64)>, Vec<Slot>) {
+    pub(crate) fn q_sib_from(
+        &self,
+        at: Slot,
+        from: Slot,
+        k0: usize,
+        i: usize,
+    ) -> (Option<(Slot, u32, u64)>, Vec<Slot>) {
         let mut seen = Vec::new();
         let mut got = None;
         let mut k = k0;
@@ -1040,7 +1057,9 @@ impl Shared {
 
     pub(crate) fn recheck(&self, me: Slot, p: &Pred, strict: bool) -> Result<Result<(), &'static str>, Wait> {
         match p {
-            Pred::Def { f, at, mode, ans, who, .. } => {
+            Pred::Def {
+                f, at, mode, ans, who, ..
+            } => {
                 if self.rec(*at).st() == S_FREE {
                     return Ok(Err("definition: gone"));
                 }

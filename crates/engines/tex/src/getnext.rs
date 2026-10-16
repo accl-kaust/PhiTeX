@@ -746,9 +746,7 @@ impl Run<'_, '_> {
                     if !f.has_lines() {
                         continue;
                     }
-                    if self.doc
-                        && (!self.open_span() || self.can_leave_scope())
-                        && self.doc_file(f)
+                    if self.doc && (!self.open_span() || self.can_leave_scope()) && self.doc_file(f)
                     {
                         return false;
                     }
@@ -767,9 +765,7 @@ impl Run<'_, '_> {
                     if !f.has_lines() {
                         continue;
                     }
-                    if self.doc
-                        && (!self.open_span() || self.can_leave_scope())
-                        && self.doc_file(f)
+                    if self.doc && (!self.open_span() || self.can_leave_scope()) && self.doc_file(f)
                     {
                         return false;
                     }

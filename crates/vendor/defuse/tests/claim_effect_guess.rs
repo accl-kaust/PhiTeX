@@ -30,7 +30,11 @@ impl Operation for Ops {
                 let on = v.as_int(a[1]).unwrap_or(0) != 0;
                 if on {
                     cx.claim(1);
-                    cx.set_effect(Effect::Scope(Brackets { opens: 1, kind: Some(v.int(7)), ..Brackets::default() }));
+                    cx.set_effect(Effect::Scope(Brackets {
+                        opens: 1,
+                        kind: Some(v.int(7)),
+                        ..Brackets::default()
+                    }));
                 }
                 Ok(ValueId::UNIT)
             }
@@ -73,14 +77,21 @@ impl defuse::Executor for Threads {
     }
 }
 
-
-
 fn eval(eng: &mut Engine, i: usize) -> Report {
     match i % 4 {
         0 => eng.evaluate_sequential(),
-        1 => eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::All, 256), &mut defuse::Sequential),
-        2 => eng.evaluate(&mut defuse::RandomScheduler::new(i as u64, true), &mut defuse::Sequential),
-        _ => eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::All, 256), &mut Threads),
+        1 => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut defuse::Sequential,
+        ),
+        2 => eng.evaluate(
+            &mut defuse::RandomScheduler::new(i as u64, true),
+            &mut defuse::Sequential,
+        ),
+        _ => eng.evaluate(
+            &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+            &mut Threads,
+        ),
     }
     .expect("evaluate")
 }
@@ -95,7 +106,9 @@ struct Built {
 }
 
 fn build(on: i64) -> Built {
-    let ops = Arc::new(Ops { q_runs: AtomicU64::new(0) });
+    let ops = Arc::new(Ops {
+        q_runs: AtomicU64::new(0),
+    });
     let mut eng = Engine::new();
     let op = eng.register(ops.clone());
     let u = eng.new_unit();

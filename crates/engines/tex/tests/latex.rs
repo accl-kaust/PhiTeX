@@ -465,12 +465,7 @@ fn latex_loop_rounds() {
             b.edit(&src.replacen("\\begin{document}", "\\begin{document}Hi ", 1));
             eprintln!(
                 "rounds {name} fixpoint={fixpoint}: cold {} loop rounds / {} evaluations / {} nodes run, edit {} / {} / {}; wkeys {keys:?}",
-                cold.0,
-                cold.1,
-                cold.2,
-                b.stats.loop_rounds,
-                b.stats.rounds,
-                b.stats.nodes_run,
+                cold.0, cold.1, cold.2, b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run,
             );
         }
     }
@@ -604,7 +599,6 @@ fn edit_check(name: &str, b: &Build, cold: &Build, (before, cold_folds): (&[u64]
     common::assert_edit_cost(name, b, 1, before, cold_folds);
 }
 
-
 /// The paragraphs of a LaTeX body: its blank-line-separated chunks
 /// between `\begin{document}` and `\end{document}`.
 fn paragraphs(src: &str) -> u64 {
@@ -648,13 +642,13 @@ fn latex_paragraph_nodes() {
 /// equals pdfTeX's cold and after an edit inside the itemize.
 #[test]
 fn latex_environments() {
+    // the paragraphs inside an environment that builds a box of its own
+    // (its float), by line: the box is one node, like a picture
+    const IN_BOX: &[usize] = &[67]; // \begin{figure}[t] ... \end{figure}
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("envs.tex"));
     let (mut b, regions) = cold_nodes("envs", &dir, &src);
     let pars = paragraphs(&src);
-    // the paragraphs inside an environment that builds a box of its own
-    // (its float), by line: the box is one node, like a picture
-    const IN_BOX: &[usize] = &[67]; // \begin{figure}[t] ... \end{figure}
     // (the nodes whose own slice is a paragraph region, not every node
     // reading text: a paragraph another node's run took outside a box is
     // not one)
@@ -946,7 +940,9 @@ fn latex_multicol_heading_written_once() {
             );
         }
     }
-    src.push_str("\\section*{Index}\\addcontentsline{toc}{section}{Index}\n\\begin{multicols}{2}\n");
+    src.push_str(
+        "\\section*{Index}\\addcontentsline{toc}{section}{Index}\n\\begin{multicols}{2}\n",
+    );
     for k in 0..400 {
         let _ = writeln!(src, "entry {k}, {}\\par", k * 7 % 97);
     }
@@ -960,7 +956,11 @@ fn latex_multicol_heading_written_once() {
             .map(|(_, t)| t.matches("{Index}").count())
             .sum::<usize>()
     };
-    eprintln!("mcindex: {} pages, files {:?}", b.pages().len(), files.iter().map(|f| &f.0).collect::<Vec<_>>());
+    eprintln!(
+        "mcindex: {} pages, files {:?}",
+        b.pages().len(),
+        files.iter().map(|f| &f.0).collect::<Vec<_>>()
+    );
     assert_eq!(count(".aux"), 1, "the index's toc line in the .aux");
     assert_eq!(count(".toc"), 1, "the index's toc line in the .toc");
 }

@@ -13,7 +13,7 @@
 //! the same and whose key is the same keeps its analysis, the others are
 //! analysed again.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -291,16 +291,15 @@ impl Incr {
         };
         // (the analyses' summed time, for `PHITEX_TEX_TIME`)
         let busy = std::sync::atomic::AtomicU64::new(0);
-        let made: Vec<(Arc<TextHints>, Arc<[u64]>)> =
-            crate::exec::map(threads, todo.len(), &|x| {
-                let t = std::time::Instant::now();
-                let r = analyse_todo(x);
-                busy.fetch_add(
-                    u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                r
-            });
+        let made: Vec<(Arc<TextHints>, Arc<[u64]>)> = crate::exec::map(threads, todo.len(), &|x| {
+            let t = std::time::Instant::now();
+            let r = analyse_todo(x);
+            busy.fetch_add(
+                u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            r
+        });
         let t_made = t0.elapsed();
         let analysed = todo.len();
         let mut made = made.into_iter();
@@ -455,20 +454,19 @@ const CONDS: [&str; 26] = [
     "ifabsdim",
 ];
 
-/// What a chunk leaves open at a unit's end (a syntactic count, on the
-/// safe side: what it cannot close keeps the chunk going).
+/// What a chunk leaves open at a unit's end, by primitives only (a
+/// syntactic count, on the safe side: a conditional not closed, or a
+/// `\catcode` assignment, keeps the chunk going; what a macro of a
+/// format changes is the hint pass's guess, verified by the runs).
 #[derive(Default)]
 struct Open {
     conds: usize,
-    at_letter: bool,
-    expl: bool,
     catcode: bool,
-    newifs: HashSet<String>,
 }
 
 impl Open {
     fn closed(&self) -> bool {
-        self.conds == 0 && !self.at_letter && !self.expl && !self.catcode
+        self.conds == 0 && !self.catcode
     }
 
     fn scan(&mut self, t: &str) {
@@ -478,7 +476,6 @@ impl Open {
         }
         let b = t.as_bytes();
         let mut k = 0;
-        let mut prev = String::new();
         while k < b.len() {
             match b[k] {
                 b'%' => {
@@ -490,9 +487,7 @@ impl Open {
                 b'\\' => {
                     let s = k + 1;
                     let mut e = s;
-                    while e < b.len()
-                        && (b[e].is_ascii_alphabetic() || (self.at_letter && b[e] == b'@'))
-                    {
+                    while e < b.len() && b[e].is_ascii_alphabetic() {
                         e += 1;
                     }
                     if e == s {
@@ -502,28 +497,13 @@ impl Open {
                     let name = &t[s..e];
                     match name {
                         "fi" => self.conds = self.conds.saturating_sub(1),
-                        "makeatletter" => self.at_letter = true,
-                        "makeatother" => self.at_letter = false,
-                        "ExplSyntaxOn" => self.expl = true,
-                        "ExplSyntaxOff" => self.expl = false,
                         "catcode" => self.catcode = true,
-                        _ if prev == "newif" => {
-                            self.newifs.insert(name.to_owned());
-                        }
-                        _ if CONDS.contains(&name) || self.newifs.contains(name) => {
-                            self.conds += 1;
-                        }
+                        _ if CONDS.contains(&name) => self.conds += 1,
                         _ => {}
                     }
-                    name.clone_into(&mut prev);
                     k = e;
                 }
-                c => {
-                    if !c.is_ascii_whitespace() {
-                        prev.clear();
-                    }
-                    k += 1;
-                }
+                _ => k += 1,
             }
         }
     }

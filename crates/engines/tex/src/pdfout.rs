@@ -352,17 +352,18 @@ fn pre_states() -> &'static PreStates {
 /// page-base digest reaching it (`pdf:pre`), else the state reaching it.
 /// The digest stands for the state's key in the page's memo key.
 fn page_base(r: &mut Run<'_, '_>) -> R<(u64, Option<Arc<Fold>>)> {
-    if in_page_step(r) && !folding(r)? {
-        if let Some(x) = r.get("pdf:pre")? {
-            let k = u64::from_ne_bytes(int_of(r.v, x).to_ne_bytes());
-            let a = pre_states()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&k)
-                .cloned();
-            if a.is_some() {
-                return Ok((k, a));
-            }
+    if in_page_step(r)
+        && !folding(r)?
+        && let Some(x) = r.get("pdf:pre")?
+    {
+        let k = u64::from_ne_bytes(int_of(r.v, x).to_ne_bytes());
+        let a = pre_states()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&k)
+            .cloned();
+        if a.is_some() {
+            return Ok((k, a));
         }
     }
     before(r)
@@ -871,6 +872,7 @@ pub(crate) fn step_forms<T>(
 
 /// [`step_forms`], the fonts' names over the pages placed in reach (a
 /// page's placement).
+#[allow(clippy::too_many_lines)]
 fn step_tags<T>(
     r: &mut Run<'_, '_>,
     input: ValueId,
@@ -938,7 +940,10 @@ fn step_tags<T>(
             .map(|(f, cs)| {
                 let mut xs = vec![v.int(i64::from(*f))];
                 for w in cs.chunks(64) {
-                    let bits = w.iter().enumerate().fold(0u64, |a, (i, &c)| a | (u64::from(c) << i));
+                    let bits = w
+                        .iter()
+                        .enumerate()
+                        .fold(0u64, |a, (i, &c)| a | (u64::from(c) << i));
                     xs.push(v.int(i64::from_ne_bytes(bits.to_ne_bytes())));
                 }
                 v.list(xs)
@@ -951,7 +956,11 @@ fn step_tags<T>(
     let mut wrote = 0;
     if let Some(c) = st.flush_chunk() {
         wrote = c.bytes.len();
-        let words: Vec<u64> = c.objs.iter().flat_map(|&(n, at)| [n as u64, at as u64]).collect();
+        let words: Vec<u64> = c
+            .objs
+            .iter()
+            .flat_map(|&(n, at)| [n as u64, at as u64])
+            .collect();
         let key = phitex_defuse::hash_words(
             phitex_defuse::hash_bytes(c.bytes.len() as u64, &c.bytes),
             &words,
@@ -962,7 +971,10 @@ fn step_tags<T>(
             .unwrap_or_else(PoisonError::into_inner)
             .entry(key)
             .or_insert(c);
-        r.contribute(CHUNKS, v.seq_unit(v.int(i64::from_ne_bytes(key.to_ne_bytes()))));
+        r.contribute(
+            CHUNKS,
+            v.seq_unit(v.int(i64::from_ne_bytes(key.to_ne_bytes()))),
+        );
     }
     // the key is the state the step made (the writer's, the forms', the
     // fonts' names), not how it was made nor the bytes before it: a step
@@ -972,7 +984,7 @@ fn step_tags<T>(
     let th = phitex_defuse::hash_bytes(0, format!("{tags:?}").as_bytes());
     let k1 = phitex_defuse::hash_words(st.digest(), &[fh, th]).max(1);
     if let Some(d) = crate::exec::env_str!("PHITEX_PDF_STATEDUMP") {
-        let _ = std::fs::write(format!("{d}/{:016x}.txt", k1), format!("{st:#?}\n{tags:#?}"));
+        let _ = std::fs::write(format!("{d}/{k1:016x}.txt"), format!("{st:#?}\n{tags:#?}"));
     }
     if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
         eprintln!(
@@ -1002,7 +1014,11 @@ fn step_tags<T>(
         v.int(i64::from_ne_bytes(k1.to_ne_bytes())),
         true,
     );
-    r.set("pdf:pre", v.int(i64::from_ne_bytes(pre.to_ne_bytes())), true);
+    r.set(
+        "pdf:pre",
+        v.int(i64::from_ne_bytes(pre.to_ne_bytes())),
+        true,
+    );
     Ok(out)
 }
 
@@ -1620,7 +1636,9 @@ impl Operation for Place {
 /// A [`Place`] node's run.
 fn place_node(r: &mut Run<'_, '_>, args: &[ValueId]) -> R<()> {
     let v = r.v;
-    let Some(&kx) = args.first() else { return Ok(()) };
+    let Some(&kx) = args.first() else {
+        return Ok(());
+    };
     let key = u64::from_ne_bytes(int_of(v, kx).to_ne_bytes());
     let Some(pc) = pieces()
         .lock()
@@ -1671,14 +1689,17 @@ fn place_node(r: &mut Run<'_, '_>, args: &[ValueId]) -> R<()> {
     })?;
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         match &res {
-            Err(why) => eprintln!("place: page {} shipped again ({:?}): {why}", pc.pj, t0.elapsed()),
+            Err(why) => eprintln!(
+                "place: page {} shipped again ({:?}): {why}",
+                pc.pj,
+                t0.elapsed()
+            ),
             Ok(Some(why)) => eprintln!("place: page {} ({:?}): {why}", pc.pj, t0.elapsed()),
             Ok(None) => eprintln!("place: page {} placed ({:?})", pc.pj, t0.elapsed()),
         }
     }
     Ok(())
 }
-
 
 /// The loop-back of the fonts' names the finish gave
 /// ([`FontTags`]): `[[engine number, name number], ...]` where they
@@ -1741,6 +1762,7 @@ pub(crate) fn placed_errors(v: &Values, xpages: &[ValueId]) -> Vec<(String, i64)
 /// the fonts' names in pdfTeX's order over all the pages
 /// ([`FontTags`]), then `phitex_pdf::finish`. The empty string: no
 /// file.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn finish_exact(
     v: &Values,
     f: &EndFields,
@@ -1801,7 +1823,9 @@ pub(crate) fn finish_exact(
     for &e in chars {
         for x in list_of(v, e) {
             let xs = list_of(v, x);
-            let Some((&fv, ws)) = xs.split_first() else { continue };
+            let Some((&fv, ws)) = xs.split_first() else {
+                continue;
+            };
             let mut cs = [false; 256];
             for (k, &w) in ws.iter().enumerate().take(4) {
                 let bits = u64::from_ne_bytes(int_of(v, w).to_ne_bytes());

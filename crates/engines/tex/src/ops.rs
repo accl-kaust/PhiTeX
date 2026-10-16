@@ -26,9 +26,6 @@ fn reg(s: &Shared) -> &crate::hints::Registry {
     &s.get().expect("operations registered").hints
 }
 
-/// Runs `body` as one node: its definitions, contributions and
-/// children go out only if it finishes; a starved or file-waiting run
-/// records its need for the client instead.
 thread_local! {
     /// (measure) the text of the exec node this thread runs, for the
     /// `longrun:` line.
@@ -39,28 +36,16 @@ thread_local! {
 /// node's raw id, whether it resumed a parked run, whether it ran
 /// speculatively, and how it ended (`o` finished, `s` stopped, `x`
 /// other); drained into [`crate::Stats::run_log`] per evaluation.
-pub(crate) static RUN_LOG: std::sync::Mutex<Vec<(u64, bool, bool, u8)>> = std::sync::Mutex::new(Vec::new());
+pub(crate) static RUN_LOG: std::sync::Mutex<Vec<(u64, bool, bool, u8)>> =
+    std::sync::Mutex::new(Vec::new());
 
-pub(crate) fn run_node(
-    cx: &mut Ctx<'_>,
-    o: Ops,
-    body: impl FnMut(&mut Run<'_, '_>) -> R<()>,
-) -> Result<ValueId, Stop> {
-    let t0 = std::time::Instant::now();
-    let op = cx.op();
-    let r = run_node_parking(cx, o, false, body);
-    // (a slow node named, for the edit path's phases)
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() >= 20 {
-        eprintln!("slow node: op {op:?} {:?}", t0.elapsed());
-    }
-    r
-}
-
-/// [`run_node`]; with `parks`, a run that stops inside a command parks
+/// Runs `body` as one node: its definitions, contributions and
+/// children go out only if it finishes; a starved or file-waiting run
+/// records its need for the client instead. With `parks`, a run that stops inside a command parks
 /// its state there ([`Run::park`], [`Ctx::park`]) and the next attempt,
 /// if the engine resumes it, continues at that command (`Run::resumed`:
 /// the body skips what it did before its commands).
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub(crate) fn run_node_parking(
     cx: &mut Ctx<'_>,
     o: Ops,
@@ -275,7 +260,6 @@ pub(crate) fn run_node_parking(
     }
 }
 
-
 /// One command (§1030) of the node's text: the first token decides; the
 /// command reads on into the siblings it claims; what it produced
 /// (expansion, tokens put back) and the text it did not read are its
@@ -402,7 +386,16 @@ impl Operation for Exec {
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             let v = cx.values();
             let fs = crate::run::decode_segs(v, &args);
-            LONG_TEXT.with(|c| *c.borrow_mut() = format!("{} segs, load {load}: {}", fs.len(), v.render(args.first().copied().unwrap_or(ValueId::UNIT)).chars().take(300).collect::<String>()));
+            LONG_TEXT.with(|c| {
+                *c.borrow_mut() = format!(
+                    "{} segs, load {load}: {}",
+                    fs.len(),
+                    v.render(args.first().copied().unwrap_or(ValueId::UNIT))
+                        .chars()
+                        .take(300)
+                        .collect::<String>()
+                );
+            });
         }
         let res = run_node_parking(cx, o, true, |r| {
             // (a resumed run has done this, and continues its commands)
@@ -478,7 +471,11 @@ impl Operation for Exec {
         }
         if crate::exec::env_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
             let text = LONG_TEXT.with(|c| c.borrow().clone());
-            eprintln!("longrun: exec {node} {:.0} ms (ok {}): {text}", t0.elapsed().as_secs_f64() * 1e3, res.is_ok());
+            eprintln!(
+                "longrun: exec {node} {:.0} ms (ok {}): {text}",
+                t0.elapsed().as_secs_f64() * 1e3,
+                res.is_ok()
+            );
         }
         res
     }

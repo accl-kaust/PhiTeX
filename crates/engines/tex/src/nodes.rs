@@ -365,7 +365,6 @@ fn decode_box_head(v: &Values, xs: &[ValueId]) -> BoxNode {
     }
 }
 
-
 /// A node as a reader that only measures it sees it: a box with its
 /// dimensions and glue setting, its list left encoded (one whatsit
 /// `LAZY + k` standing for `side.lazy[k]`, which [`encode`] with the

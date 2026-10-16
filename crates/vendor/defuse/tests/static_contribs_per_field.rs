@@ -73,8 +73,6 @@ impl defuse::Executor for Threads {
     }
 }
 
-
-
 fn build() -> (Engine, Vec<defuse::NodeId>) {
     let mut eng = Engine::new();
     let op = eng.register(Arc::new(Ops));
@@ -93,7 +91,9 @@ fn build() -> (Engine, Vec<defuse::NodeId>) {
 }
 
 fn outs(eng: &Engine, rs: &[defuse::NodeId]) -> Vec<Option<i64>> {
-    rs.iter().map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x))).collect()
+    rs.iter()
+        .map(|&n| eng.output(n).and_then(|x| eng.values().as_int(x)))
+        .collect()
 }
 
 #[test]
@@ -105,7 +105,10 @@ fn readers_wait_for_dynamic_contributors_of_their_field() {
     for _ in 0..5 {
         let (mut eng, rs) = build();
         let r: Report = eng
-            .evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::All, 256), &mut Threads)
+            .evaluate(
+                &mut defuse::Greedy::speculative(defuse::Speculation::All, 256),
+                &mut Threads,
+            )
             .unwrap();
         assert_eq!(outs(&eng, &rs), want);
         stops += r.stops;

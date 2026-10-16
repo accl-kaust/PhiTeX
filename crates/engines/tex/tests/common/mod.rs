@@ -142,7 +142,12 @@ pub fn pages_touched(before: &[u64], after: &[u64]) -> Vec<usize> {
 /// The runs of `op` in `b`'s last build or edit.
 #[must_use]
 pub fn runs_of(b: &Build, op: &str) -> u64 {
-    b.stats.runs_by_op.iter().filter(|x| x.0 == op).map(|x| x.1).sum()
+    b.stats
+        .runs_by_op
+        .iter()
+        .filter(|x| x.0 == op)
+        .map(|x| x.1)
+        .sum()
 }
 
 /// What an edit may run in the node model, by operation (runs, not
@@ -158,12 +163,7 @@ pub fn runs_of(b: &Build, op: &str) -> u64 {
 /// `cold_folds` and `before` are the cold build's scan runs and page
 /// hashes.
 #[must_use]
-pub fn edit_cost_failures(
-    b: &Build,
-    touched: u64,
-    before: &[u64],
-    cold_folds: u64,
-) -> Vec<String> {
+pub fn edit_cost_failures(b: &Build, touched: u64, before: &[u64], cold_folds: u64) -> Vec<String> {
     let after = b.pages();
     let pages = pages_touched(before, &after);
     let n = pages.len() as u64;
