@@ -9,16 +9,16 @@ S=$r/summary.txt
 git log --oneline -1 | cut -c1-100 > "$S"
 case $1 in
 suites)
-  PHITEX_CHECK_READS=1 cargo test -q --release -p phitex-tex --no-fail-fast --test pdftex --test edits --test pages \
+  PHITEX_CHECK_READS=fail cargo test -q --release -p phitex-tex --no-fail-fast --test pdftex --test edits --test pages \
     --test plain --test etex --test hints --test relaxed --test inputs --test defuse_gaps > "$r/suites.log" 2>&1
   echo "suites exit $?" >> "$S"; grep -E "^test result|FAILED|panicked at" "$r/suites.log" >> "$S" ;;
 latex)
-  PHITEX_CHECK_READS=1 cargo test -q --release -p phitex-tex --no-fail-fast --test latex -- --test-threads=4 > "$r/latex.log" 2>&1
+  PHITEX_CHECK_READS=fail cargo test -q --release -p phitex-tex --no-fail-fast --test latex -- --test-threads=4 > "$r/latex.log" 2>&1
   echo "latex exit $?" >> "$S"; grep -E "^test result|FAILED|panicked at" "$r/latex.log" >> "$S"
-  PHITEX_CHECK_READS=1 cargo test -q --release -p phitex-tex --test latex -- --ignored --exact latex_hello pdflatex_hello > "$r/hello.log" 2>&1
+  PHITEX_CHECK_READS=fail cargo test -q --release -p phitex-tex --test latex -- --ignored --exact latex_hello pdflatex_hello > "$r/hello.log" 2>&1
   echo "hello exit $?" >> "$S"; grep -E "^test result|FAILED|panicked at" "$r/hello.log" >> "$S" ;;
 sweep)
-  PHITEX_SWEEP_N=5 cargo test -q --release -p phitex-tex --test latex -- --ignored --exact sweep_amsldoc --nocapture > "$r/sweep.log" 2>&1
+  PHITEX_SWEEP_N=5 cargo test -q --release -p phitex-tex --test latex -- --ignored --exact sweep::sweep_amsldoc --nocapture > "$r/sweep.log" 2>&1
   echo "sweep exit $?" >> "$S"; grep -E "edits,|per text|^sweep|violat|test result|panicked at" "$r/sweep.log" | head -60 >> "$S" ;;
 docs)
   cargo build -q --release -p phitex-cli 2>&1 | grep -E "^error" -A5
@@ -36,11 +36,12 @@ docs)
   rm -rf "$w/amsw" && cp -a bench/amsldoc "$w/amsw" && (cd "$w/amsw" && "$B" build -j 8 amsldoc.tex > /dev/null 2>&1)
   for j in 1 8 16; do
     rm -rf "$w/ams$j" && cp -a bench/amsldoc "$w/ams$j"
-    (cd "$w/ams$j" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 timeout 900 \
+    (cd "$w/ams$j" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_CHECK_READS=1 timeout 900 \
       /usr/bin/time -f "WALL %e BUSY %U+%S RSS %M" "$B" build amsldoc.tex --exact-pdf -j $j > "$r/ams-j$j.log" 2>&1)
     cp "$w/ams$j/amsldoc.pdf" "$r/ams-j$j.pdf" 2>/dev/null
     echo "amsldoc j$j: $(grep -oE 'WALL.*' "$r/ams-j$j.log") md5 $(md5sum < "$w/ams$j/amsldoc.pdf" | cut -c1-32) (bar 98c96e004c1c82db1e3d562cf0181a3e)" >> "$S"
     grep -E "^round: |round rerun causes|guess" "$r/ams-j$j.log" | tail -3 | cut -c1-400 >> "$S"
+    grep -E "^check_reads: [0-9]+ stale" "$r/ams-j$j.log" | tr "\n" " " >> "$S"; echo >> "$S"; grep "^check_reads:" "$r/ams-j$j.log" | grep -v "stale$\|counters" | head -20 >> "$S"
   done ;;
 esac
 cat "$S"

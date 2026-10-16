@@ -1383,7 +1383,7 @@ impl Shared {
                 let fk = e.fk;
                 // A prediction the value bears out: its readers stand.
                 let kept = match (val, self.predicted(s, f)) {
-                    (DefVal::Val(x), Some(p)) if old_loc == loc && (x == p || self.pred_open(s)) => Some(p),
+                    (DefVal::Val(x), Some(p)) if old_loc == loc && x == p => Some(p),
                     _ => None,
                 };
                 let projs = !self.projs.is_empty() || self.any_proj.load(Ordering::Relaxed);

@@ -1828,6 +1828,25 @@ impl Graph {
             };
             t_eval += t0.elapsed();
             t_mark = std::time::Instant::now();
+            if crate::exec::env_flag!("PHITEX_CHECK_READS") {
+                // (debug: every committed node's reads checked again
+                // against the store after this evaluation; `=fail`: a
+                // stale one fails, the tests' setting)
+                eprintln!(
+                    "check_reads: counters claims_refuted {} effects_refuted {} claim_siblings {} defs_refuted {}",
+                    r.claims_refuted, r.effects_refuted, r.claim_siblings, r.defs_refuted
+                );
+                let lines = self.eng.check_reads();
+                for l in &lines {
+                    eprintln!("check_reads: {l}");
+                }
+                eprintln!("check_reads: {} stale", lines.len());
+                assert!(
+                    lines.is_empty() || crate::exec::env_str!("PHITEX_CHECK_READS") != Some("fail"),
+                    "{} committed reads no longer hold",
+                    lines.len()
+                );
+            }
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
                 {
@@ -3042,18 +3061,6 @@ impl Build {
         stats.live = self.g.eng.live_nodes();
         if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
             crate::run::record_check(&self.g.eng, &self.g.start_env);
-        }
-        // (debug, `PHITEX_CHECK_READS=1`: every committed read checked
-        // against the store; a read that no longer holds is a stale
-        // result, and in the tests a failure)
-        if crate::exec::env_flag!("PHITEX_CHECK_READS") {
-            let stale = self.g.eng.check_reads();
-            assert!(
-                stale.is_empty(),
-                "{} committed reads no longer hold:\n{}",
-                stale.len(),
-                stale.join("\n")
-            );
         }
         self.pkg_stats(&mut stats);
         // the loads' records as this evaluation left them: a load

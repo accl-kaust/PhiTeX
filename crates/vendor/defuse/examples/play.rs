@@ -588,6 +588,12 @@ fn main() {
                 if got != want {
                     println!("  recorded: {}", short(&want));
                 }
+                // Committed reads that no longer hold (none in a sound state).
+                let stale = eng.check_reads();
+                println!("  stale reads {}", stale.len());
+                for l in stale.iter().take(10) {
+                    println!("    {l}");
+                }
                 if let Ok(rep) = &r {
                     println!(
                         "  runs {} stops {} rounds {} steps {}",
