@@ -977,6 +977,16 @@ impl TextHints {
 /// ends there). Any other control sequence at depth 0 takes the
 /// `[...]`/`{...}` groups right after it into its slice
 /// (`\centerline{...}`).
+/// The units of a text as the hint pass slices a document's text
+/// ([`slices_of`] with no prelude definitions): byte ranges, in order.
+/// The edit-locality sweep (`tests/sweep`) edits one word in each.
+#[must_use]
+pub fn paragraph_units(text: &str) -> Vec<(usize, usize)> {
+    let kind = FileKind::Document;
+    let an = Analysis::with_own(text, kind, no_defs().clone(), own_definitions(text, kind));
+    slices_of(text, &an.p, kind).0
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
     if kind != FileKind::Document {

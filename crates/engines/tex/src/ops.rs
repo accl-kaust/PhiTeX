@@ -755,6 +755,31 @@ fn makeindex_runs(
     Ok(out)
 }
 
+/// The `.ind` each written `.idx` makes under `makeindex NAME.idx` (no
+/// style): what a read-back of the index reads, for
+/// [`crate::Build::read_back_texts`].
+pub(crate) fn makeindex_plain(texts: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (name, _) in texts {
+        let Some(base) = name.strip_suffix(".idx") else {
+            continue;
+        };
+        let mut files = MiFiles { texts, styles: &[] };
+        let o = phitex_makeindex::run(
+            &[latin1_bytes(name)],
+            b"version 2.18 [TeX Live 2026] (kpathsea + Thai support)",
+            &mut files,
+        );
+        if let Some(f) = o.ind {
+            out.push((
+                format!("{base}.ind"),
+                f.contents.iter().map(|&b| char::from(b)).collect(),
+            ));
+        }
+    }
+    out
+}
+
 /// TeX's characters as bytes (Latin-1; a character past 255 as `?`).
 fn latin1_bytes(s: &str) -> Vec<u8> {
     s.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect()
