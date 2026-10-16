@@ -19,8 +19,15 @@ Bars are tests; a section's test red = not done.
    mistake is a counted re-run, never output.
 3. No node value contains state another node does not read: no "page so
    far", no "writer state with bytes", no text in a node's identity.
-4. Node identity is positional (piece index, page index, unit index, file
-   name + unit index). An edit re-runs nodes; it never re-makes them.
+4. Node identity (engine answer 2026-10-16 16:00): the engine matches a
+   node's children by CONTENT key already: child id = hash(parent id, tag,
+   op, args, occurrence index among equal (op, args)). So args hold ONLY
+   what the child needs to run (its text slice / its page's inputs), never
+   a position, a running index or a node id. An insertion makes one new
+   child and shifts nothing; kept children keep their ids in their old
+   order (a reorder re-makes, an insertion does not). What re-made our
+   folds/resumes was a parent node id and the fold material in the args,
+   not content as such.
 5. Bytes identical to pdfTeX at every thread count on every fixture,
    amsldoc (md5 98c96e004c with SOURCE_DATE_EPOCH=1700000000) and para4000
    (md5 bf12c9ddee6407a005c5140fc8a4b5cd).
@@ -167,12 +174,5 @@ dependency discipline is measured and we take it:
   `parpar`, …) are an entry-state cache: allowed only as a *read hint*
   whose cells are still individually reaching definitions (a changed cell
   wakes only the readers of that cell), never as one value.
-- **Identity.** Main names a call by content (f + its inputs' versions),
-  never by position: a moved paragraph is the same call. §0.4 chose
-  positional identity because content in the *node id* re-made readers.
-  The reconciliation: the node's key is its position among its unit
-  siblings; its *memo* is content-keyed (the engine's own cutoff on equal
-  inputs); an inserted paragraph shifts positions but every shifted node's
-  inputs are equal and it costs a compare. If the engine's child matching
-  can match by content key instead, prefer it; it is an engine question,
-  not a client rule.
+- **Identity.** Main names a call by content, never by position; the engine
+  does the same for children (§0.4). Rule: args = the child's inputs only.
