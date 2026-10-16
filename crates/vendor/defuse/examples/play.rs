@@ -151,6 +151,7 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "acc_range_to" => return res(cx.acc_range_to(de(&g(0)), de(&g(1)), de(&g(2)))),
         "scope_kind" => return res(cx.scope_kind()),
         "set_kind" => json!(cx.set_kind(de(&g(0)))),
+        "set_kinds" => json!(cx.set_kinds(&de::<Vec<ValueId>>(&g(0)))),
         "set_effect" => json!(cx.set_effect(de::<Effect>(&g(0)))),
         "effect_pending" => json!(cx.effect_pending()),
         "narrow" => json!(cx.narrow(de::<MayDefine>(&g(0)))),

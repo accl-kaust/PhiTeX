@@ -40,6 +40,8 @@ pub struct Ctx<'a> {
     pub(crate) conts: Vec<Spec>,
     pub(crate) effect: Option<Effect>,
     pub(crate) kind: Option<ValueId>,
+    /// Per opened frame (outermost first; `set_kinds`).
+    pub(crate) kinds: Vec<ValueId>,
     pub(crate) claim: Option<usize>,
     /// The definition set this run narrowed its text's to.
     pub(crate) narrowed: Option<crate::api::MayDefine>,
@@ -58,7 +60,7 @@ pub struct Ctx<'a> {
     pub(crate) dup: FxHashMap<u64, u32>,
     /// Where each field is in `defs`, once there are many.
     /// The run's definitions by field and whether scope-local.
-    def_ix: FxHashMap<(Field, bool), usize>,
+    def_ix: FxHashMap<(Field, u8), usize>,
     pub(crate) static_claimed: Option<Vec<Slot>>,
     pub(crate) ask: Option<super::Ask>,
 }
@@ -91,6 +93,7 @@ impl<'a> Ctx<'a> {
             conts: Vec::new(),
             effect: None,
             kind: None,
+            kinds: Vec::new(),
             claim: None,
             narrowed: None,
             diag: Vec::new(),
@@ -407,6 +410,13 @@ impl<'a> Ctx<'a> {
         self.define_with(f, x, Locality::Scope);
     }
 
+    /// Defines `f` as a local of the `k`-th frame this node opens (0: the
+    /// outermost): readers in that frame and the frames within it see it;
+    /// after it closes, the node's own-level definition of `f` (if any).
+    pub fn define_in_scope_at(&mut self, f: Field, k: u8, x: ValueId) {
+        self.define_with(f, x, Locality::ScopeAt(k));
+    }
+
     #[inline]
     fn define_with_inner(&mut self, f: Field, x: ValueId, loc: Locality) {
         self.set_def(f, loc, DefVal::Val(x));
@@ -416,8 +426,8 @@ impl<'a> Ctx<'a> {
         const SCAN: usize = 16;
         // A scope-local definition and an outer one of the same field are
         // two entries.
-        let k = (f, loc == Locality::Scope);
-        let key = |d: &Def| (d.f, d.loc == Locality::Scope);
+        let k = (f, loc.entry_key());
+        let key = |d: &Def| (d.f, d.loc.entry_key());
         let at = if self.defs.len() <= SCAN {
             self.defs.iter().position(|d| key(d) == k)
         } else {
@@ -789,6 +799,17 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn set_kind_inner(&mut self, k: ValueId) {
         self.kind = Some(k);
+    }
+
+    /// Sets the kinds of the frames this node opens, outermost first (a
+    /// kind-pending effect opening several); frames past the list take the
+    /// kind of `set_kind`.
+    pub fn set_kinds(&mut self, ks: &[ValueId]) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&ks,)) } else { serde_json::Value::Null };
+        self.kinds = ks.to_vec();
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "set_kinds", a, serde_json::Value::Null);
     }
 
     /// Decides a pending effect.
@@ -1193,6 +1214,7 @@ impl<'a> Ctx<'a> {
         self.conts.clear();
         self.effect = None;
         self.kind = None;
+        self.kinds.clear();
         self.claim = None;
         self.narrowed = None;
         self.diag.clear();

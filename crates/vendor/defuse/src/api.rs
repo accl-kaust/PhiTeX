@@ -43,6 +43,23 @@ pub enum Locality {
     /// A local of the scope the node opens after itself (`Ctx::define_in_scope`):
     /// seen inside that scope, not after it closes.
     Scope,
+    /// A local of the `k`-th frame the node opens (0: the outermost;
+    /// `Ctx::define_in_scope_at`): seen inside that frame and the frames
+    /// within it, not after it closes.
+    ScopeAt(u8),
+}
+
+impl Locality {
+    /// The entry a definition of this locality is filed as (0: the node's
+    /// own level; one per opened frame otherwise).
+    #[must_use]
+    pub(crate) fn entry_key(self) -> u8 {
+        match self {
+            Locality::Local | Locality::Global => 0,
+            Locality::Scope => u8::MAX,
+            Locality::ScopeAt(k) => k.saturating_add(1).min(u8::MAX - 1),
+        }
+    }
 }
 
 /// What a node with a pending definition set may define.
@@ -692,6 +709,20 @@ pub struct Report {
     pub mispredictions: u64,
     pub fuel_outs: u64,
     pub spec_stops: u64,
+    /// Runs whose claim differed from the one in force (a static
+    /// `Claim::None`/`Count` taken as a guess, or the run's last claim).
+    pub claims_refuted: u64,
+    /// Runs whose scope effect differed from the declared one.
+    pub effects_refuted: u64,
+    /// Siblings claimed or released by those claims.
+    pub claim_siblings: u64,
+    /// Free-running jobs whose run made exactly one node ready.
+    pub sole_successor: u64,
+    /// Free-running jobs whose run made two or more ready.
+    pub many_successors: u64,
+    /// Sole successors run next on the same worker
+    /// (`Engine::set_successor_affinity`).
+    pub kept_successors: u64,
     pub refuted_by_field: Vec<(Field, u64)>,
     pub refuted_nodes: u64,
     pub refutations_max: u32,
