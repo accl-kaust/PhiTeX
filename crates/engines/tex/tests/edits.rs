@@ -578,6 +578,55 @@ fn pdf_edit_reruns_one_page_step() {
     common::assert_edit_cost("p400", &b, 1, &before, cold_folds);
 }
 
+/// Exact PDF, a one-word edit on page k of n with read-time writer
+/// commands (`\immediate\pdfobj`) on every page: the edited piece, its
+/// page's finisher and that page's placement run, then the end node links
+/// the chunks; no later page's placement and no later writer command runs
+/// again (the writer state after the edited page holds no byte offset and
+/// no used character, so it is the state the later steps read before). A
+/// new character (`z`) on the page changes only the fonts' union at the
+/// end. The PDF equals a cold build's.
+#[test]
+fn exact_pdf_edit_on_page_k_reruns_its_piece_finisher_place_and_the_link_only() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from("\\pdfoutput=1 \\pdfcompresslevel=0 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+    for k in 0..300 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+             with plain's macros, so that the paragraph builder has work to do and the \
+             pages fill up one after another.\n"
+        );
+        if k % 10 == 5 {
+            let _ = writeln!(src, "\\immediate\\pdfobj{{<< /K {k} >>}}\n");
+        }
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./pk.tex", "pk", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    assert!(b.is_pdf());
+    let n = b.pages().len();
+    let before = b.pages();
+    let text = src.replacen("Paragraph 150 has some words", "Paragraph 150 has some wordz", 1);
+    b.edit(&text);
+    let touched = common::pages_touched(&before, &b.pages());
+    eprintln!(
+        "page k edit: runs by op {:?}, pages touched {touched:?} of {n}",
+        b.stats.runs_by_op
+    );
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert_eq!(touched.len(), 1, "one page's record changes");
+    assert!(touched[0] > 0 && touched[0] + 1 < n, "the edit is on a middle page");
+    assert_eq!(common::runs_of(&b, "exec"), 1, "only the edited piece");
+    assert_eq!(common::runs_of(&b, "finish"), 1, "only its page's finisher");
+    assert_eq!(common::runs_of(&b, "place"), 1, "only its page's placement");
+    assert_eq!(common::runs_of(&b, "dvi"), 1, "one link");
+}
+
 /// A measure: 400 and 4000 plain paragraphs with `\pdfoutput=1`, cold
 /// and after a one-word edit on page 1 (page steps re-run, wall).
 #[test]
