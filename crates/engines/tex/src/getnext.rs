@@ -290,6 +290,9 @@ impl Run<'_, '_> {
                     // [`Run::has_input`] stops the run there; a command
                     // still scanning, `\count1=\input n`, reads on into
                     // the file, §362)
+                    if self.input.file(top).lazy() {
+                        self.load_written(top)?;
+                    }
                     let f = self.input.file_mut(top);
                     if f.has_lines() {
                         let line = f.take_line();
@@ -357,6 +360,7 @@ impl Run<'_, '_> {
         }
         match self.cx.following(self.pulled) {
             Some((op, args)) if op == self.ops.exec => {
+                let args = self.resolve_units(&args)?;
                 let segs = crate::run::decode_segs(self.v, &args);
                 // (where the sibling's text begins, unless its first
                 // segment continues the line before it)
@@ -782,6 +786,10 @@ impl Run<'_, '_> {
     /// Whether a file `\input` opened is a document's (its rest becomes
     /// paragraph regions), not a format's (run line by line).
     pub(crate) fn doc_file(&self, f: &crate::run::FileRest) -> bool {
+        // (a file the job writes: as its writer found it, `ops::Files`)
+        if f.units.is_some() {
+            return f.sliceable;
+        }
         // (the same test as for a file the text names, `inputs.rs`: a
         // file that ends itself early or reads its own line numbers is
         // read inline)

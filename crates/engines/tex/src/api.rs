@@ -1441,7 +1441,7 @@ impl Graph {
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
-        let files_op = eng.register(Arc::new(Files));
+        let files_op = eng.register(Arc::new(Files(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         // (handles held outside the graph: pinned, or a value sweep

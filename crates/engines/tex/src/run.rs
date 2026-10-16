@@ -198,6 +198,12 @@ pub(crate) struct FileRest {
     /// The lines before `off` (`line`, §304: the last line taken's
     /// number).
     pub line: u32,
+    /// A file the job writes, as its units (`ops::Files`): each unit's
+    /// field and whether it begins a line, and whether the file slices
+    /// into pieces; its text is read from the units only when a run
+    /// reads its lines itself ([`Run::load_written`]).
+    pub units: Option<std::sync::Arc<[(ValueId, bool)]>>,
+    pub sliceable: bool,
 }
 
 impl FileRest {
@@ -219,7 +225,40 @@ impl FileRest {
             name,
             pos,
             line,
+            units: None,
+            sliceable: false,
         }
+    }
+
+    /// A file the job writes, from its order value (`ops::Files`:
+    /// `[sliceable, [[unit field, starts], ...]]`), its text not read.
+    pub(crate) fn written(v: &Values, order: ValueId, name: ValueId) -> FileRest {
+        let xs = list_of(v, order);
+        let units: Vec<(ValueId, bool)> = xs
+            .get(1)
+            .map(|&l| list_of(v, l))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|&e| {
+                let ys = list_of(v, e);
+                Some((*ys.first()?, ys.get(1).is_some_and(|&s| int_of(v, s) != 0)))
+            })
+            .collect();
+        let mut f = FileRest::new(v, v.str(""), 0, name);
+        f.sliceable = xs.first().is_some_and(|&s| int_of(v, s) != 0);
+        f.units = Some(units.into());
+        f
+    }
+
+    /// Whether its text is still to be read from its units.
+    pub(crate) fn lazy(&self) -> bool {
+        self.units.as_ref().is_some_and(|u| !u.is_empty()) && self.str().is_empty()
+    }
+
+    /// Its text, read from its units ([`Run::load_written`]).
+    pub(crate) fn set_text(&mut self, v: &Values, id: ValueId) {
+        self.id = id;
+        self.text = v.get(id);
     }
 
     /// The file's name and the line number of the next line, for
@@ -238,7 +277,7 @@ impl FileRest {
 
     /// Whether lines are left.
     pub(crate) fn has_lines(&self) -> bool {
-        self.off < self.str().len()
+        self.off < self.str().len() || self.lazy()
     }
 
     pub(crate) fn pos_chars(&self) -> usize {
@@ -1400,11 +1439,105 @@ impl<'c, 'a> Run<'c, 'a> {
     /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
     /// writes and reads back is a loop-back field: the previous round's.
     pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
+        let Some(x) = self.file_lazy(key)? else {
+            return Ok(None);
+        };
+        // (a file the job writes: its text read from its units here)
+        let v = self.v;
+        let xs = list_of(v, x);
+        if let [path, t, order] = xs[..]
+            && t == ValueId::UNIT
+        {
+            let text = self.written_text(order)?;
+            return Ok(Some(v.list(vec![path, text])));
+        }
+        Ok(Some(x))
+    }
+
+    /// [`Run::file`], a file the job writes as `[path, UNIT, order]`
+    /// (its units' order, `ops::Files`), its text not read.
+    pub(crate) fn file_lazy(&mut self, key: &str) -> R<Option<ValueId>> {
         let r = self.file_inner(key);
         if r.is_err() {
             self.trace_stop(&format!("file {key}"));
         }
         r
+    }
+
+    /// A written file's text from its order (`ops::Files`): its units
+    /// read, each a field of its own.
+    pub(crate) fn written_text(&mut self, order: ValueId) -> R<ValueId> {
+        let v = self.v;
+        let entries = list_of(v, order)
+            .get(1)
+            .map(|&l| list_of(v, l))
+            .unwrap_or_default();
+        let mut text = String::new();
+        for e in entries {
+            let Some(&k) = list_of(v, e).first() else {
+                continue;
+            };
+            let f = v.field(&str_of(v, k));
+            if let Some(u) = self.cx.use_field(f)? {
+                text.push_str(&str_of(v, u));
+            }
+        }
+        Ok(v.str(&text))
+    }
+
+    /// A written file on the input stack read by this run's own lines:
+    /// its text from its units ([`FileRest::written`]).
+    pub(crate) fn load_written(&mut self, l: crate::input::Level) -> R<()> {
+        let v = self.v;
+        let Some(units) = self.input.file(l).units.clone() else {
+            return Ok(());
+        };
+        let mut text = String::new();
+        for &(k, _) in units.iter() {
+            let f = v.field(&str_of(v, k));
+            if let Some(u) = self.cx.use_field(f)? {
+                text.push_str(&str_of(v, u));
+            }
+        }
+        let id = v.str(&text);
+        self.input.file_mut(l).set_text(v, id);
+        Ok(())
+    }
+
+    /// A piece's arguments with its units' frames (`["w", field, file,
+    /// starts]`, [`Run::doc_file_regions`]) read: each the unit's text as
+    /// a document slice's frames of its file. Others as they are.
+    pub(crate) fn resolve_units(&mut self, args: &[ValueId]) -> R<Vec<ValueId>> {
+        let v = self.v;
+        let Some(&l) = args.first() else {
+            return Ok(args.to_vec());
+        };
+        let fs = list_of(v, l);
+        let is_w = |f: ValueId| list_of(v, f).first().is_some_and(|&t| str_of(v, t) == "w");
+        if !fs.iter().any(|&f| is_w(f)) {
+            return Ok(args.to_vec());
+        }
+        let mut frames = Vec::with_capacity(fs.len());
+        for f in fs {
+            if !is_w(f) {
+                frames.push(f);
+                continue;
+            }
+            let xs = list_of(v, f);
+            let field = v.field(&xs.get(1).map(|&k| str_of(v, k)).unwrap_or_default());
+            let text = self
+                .cx
+                .use_field(field)?
+                .map(|x| str_of(v, x))
+                .unwrap_or_default();
+            let name = xs.get(2).copied().unwrap_or(ValueId::UNIT);
+            let starts = xs.get(3).is_some_and(|&s| int_of(v, s) != 0);
+            let a = slice_args_in_file(v, &text, starts, name, 0);
+            frames.extend(a.first().map(|&x| list_of(v, x)).unwrap_or_default());
+        }
+        let mut out = args.to_vec();
+        out[0] = v.list(frames);
+        Ok(out)
     }
 
     /// (measure) `PHITEX_READS`: a stop that is not a field read's.
@@ -1435,15 +1568,16 @@ impl<'c, 'a> Run<'c, 'a> {
                 None
             }
         } else if self.cx.is_loopback(w) {
+            // (its units' order, `ops::Files`; none: absent)
             let x = self.cx.use_field(w)?;
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                let t = x.and_then(|x| list_of(v, x).get(1).map(|&t| str_of(v, t)));
                 eprintln!(
-                    "aux-trace: read wfile {key}: {:?} bytes",
-                    t.map(|t| t.len())
+                    "aux-trace: read wfile {key}: {:?} units",
+                    x.map(|x| list_of(v, x).get(1).map_or(0, |&l| list_of(v, l).len()))
                 );
             }
-            x
+            x.filter(|&x| !list_of(v, x).is_empty())
+                .map(|o| v.list(vec![v.str(&format!("./{key}")), ValueId::UNIT, o]))
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
@@ -1451,8 +1585,15 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
         // (the text's hash: its value's id, a content hash, so a font's
-        // or map's bytes are not copied and hashed again at every read)
-        if let Some(t) = x.and_then(|x| crate::val::list_of(v, x).get(1).copied()) {
+        // or map's bytes are not copied and hashed again at every read;
+        // a written file's, its units' order's)
+        if let Some(t) = x.and_then(|x| {
+            let xs = crate::val::list_of(v, x);
+            xs.get(1)
+                .copied()
+                .filter(|&t| t != ValueId::UNIT)
+                .or_else(|| xs.get(2).copied())
+        }) {
             self.fread.push((key.to_owned(), t.raw()));
         } else if self.rec_load && !self.fmiss.iter().any(|n| n == key) {
             self.fmiss.push(key.to_owned());
@@ -2436,6 +2577,18 @@ impl<'c, 'a> Run<'c, 'a> {
         let file_left = |f: &FileRest, out: &mut Vec<Vec<ValueId>>| {
             if f.has_lines() && self.doc && self.doc_file(f) {
                 out.extend(self.doc_file_regions(f));
+            } else if f.lazy()
+                && let Some(units) = &f.units
+            {
+                // (a file the job writes, not read here: its units, read
+                // by the one node its rest is, `Run::resolve_units`)
+                let ws = units
+                    .iter()
+                    .map(|&(k, starts)| {
+                        v.list(vec![v.str("w"), k, f.name, v.int(i64::from(starts))])
+                    })
+                    .collect();
+                out.push(vec![v.list(ws), v.int(0)]);
             } else if f.has_lines() {
                 let fr = v.list(vec![
                     tag_f,
@@ -2505,6 +2658,20 @@ impl<'c, 'a> Run<'c, 'a> {
     /// for its fragments' hints), each slice with its hint.
     fn doc_file_regions(&self, f: &FileRest) -> Vec<Vec<ValueId>> {
         let v = self.v;
+        // (a file the job writes, not read here: one piece per unit, its
+        // arguments the unit's field (its text's hash) alone, as a
+        // document slice's are its text; the piece reads its unit)
+        if f.lazy()
+            && let Some(units) = &f.units
+        {
+            return units
+                .iter()
+                .map(|&(k, starts)| {
+                    let w = v.list(vec![v.str("w"), k, f.name, v.int(i64::from(starts))]);
+                    vec![v.list(vec![w]), v.int(2)]
+                })
+                .collect();
+        }
         let text = str_of(v, f.id);
         let defs = self
             .ops

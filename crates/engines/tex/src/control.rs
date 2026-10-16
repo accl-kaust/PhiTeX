@@ -1766,10 +1766,24 @@ impl Run<'_, '_> {
     /// file); else the client's `file:` field (a loop-back field for a
     /// file the job writes: the previous round's text).
     pub(crate) fn read_file(&mut self, key: &str) -> R<Option<ValueId>> {
-        let v = self.v;
         if self.get(&format!("wopen:{key}"))?.is_none() {
             return self.file(key);
         }
+        self.read_own_written(key)
+    }
+
+    /// [`Run::read_file`], a file the job writes left as its units
+    /// (`[path, UNIT, order]`, [`Run::file_lazy`]).
+    pub(crate) fn read_file_lazy(&mut self, key: &str) -> R<Option<ValueId>> {
+        if self.get(&format!("wopen:{key}"))?.is_none() {
+            return self.file_lazy(key);
+        }
+        self.read_own_written(key)
+    }
+
+    /// A file this run wrote before this point: the text written so far.
+    fn read_own_written(&mut self, key: &str) -> R<Option<ValueId>> {
+        let v = self.v;
         let f = v.field("streams");
         let before = self.cx.acc_range(f, None);
         if before.is_err() {

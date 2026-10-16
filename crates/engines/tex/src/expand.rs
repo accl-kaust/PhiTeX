@@ -883,14 +883,14 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
-        let x = self.read_file(&key)?;
+        let x = self.read_file_lazy(&key)?;
         let x = match x {
             Some(x) => Some(x),
             None => {
                 if key == name {
                     None
                 } else {
-                    self.read_file(&name)?
+                    self.read_file_lazy(&name)?
                 }
             }
         };
@@ -915,8 +915,15 @@ impl Run<'_, '_> {
         let path = str_of(self.v, xs[0]);
         self.log("open", &path)?;
         self.push_toks([Tok::cs("\u{10FFFE}eof")]);
-        self.input
-            .push_file(crate::run::FileRest::new(self.v, text, 0, xs[0]));
+        // (a file the job writes: its units, read where a run reads its
+        // lines, a piece each where it slices, `Run::doc_file_regions`)
+        let f = match xs.get(2) {
+            Some(&order) if text == phitex_defuse::ValueId::UNIT => {
+                crate::run::FileRest::written(self.v, order, xs[0])
+            }
+            _ => crate::run::FileRest::new(self.v, text, 0, xs[0]),
+        };
+        self.input.push_file(f);
         Ok(())
     }
 

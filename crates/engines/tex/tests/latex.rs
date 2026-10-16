@@ -768,7 +768,7 @@ fn latex_write_file_ended() {
 /// fifteen cross-reference links: the `.aux` read-back defines only
 /// what reading the file defines (the labels, the contents' lines),
 /// never the writer's state the interpretation of a line touches
-/// (`pdf:lastlink`, `pdf:state`, `pg:`, `box:`, parameters); the build
+/// (`pdf:lastlink`, `pg:`, `box:`, parameters); the build
 /// settles in at most two evaluations.
 #[test]
 fn latex_links_aux_defines_only() {

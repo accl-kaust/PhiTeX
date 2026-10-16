@@ -535,12 +535,28 @@ impl Run<'_, '_> {
             .map(|(_, x)| *x)
             .collect();
         if lid == 0 {
-            // the main list as the nodes before left it: its tail, from
-            // the fold before this node (`vtail`, [`vtail_value`]), not
-            // every item since the start: a tail that comes out equal
-            // after an edit before it reruns no reader
-            let x = self.eng_read(v.field(VTAIL))?;
-            (out, st) = vtail_decode(v, x);
+            // the main list as the pieces before left it: its last item
+            // and the depth before this node ([`MAIN_LAST`],
+            // [`MAIN_PD`]), not every item since the start; a deletion
+            // of this run's reaching past that item reads the items
+            // themselves, a real dependency
+            let (last, since) = MainTail::of_last(v, self.eng_read(v.field(MAIN_LAST))?);
+            let deletes = own.iter().any(|&s| {
+                v.seq_to_vec(s).iter().any(|&x| {
+                    let xs = list_of(v, x);
+                    xs.len() == 2 && int_of(v, xs[0]) == 0 && nodes::tag(v, xs[1]) == T_DELETE
+                })
+            });
+            if deletes && since > 1 {
+                let all = self.cx.acc_range(f, None)?;
+                fold_entries(v, 0, &v.seq_to_vec(all), &mut st, &mut out);
+                // (this run's own items are in `all` only once it ends:
+                // they follow)
+            } else {
+                out.extend(last);
+                st.since_bp = since;
+                st.pd = self.main_pd_before()?;
+            }
         } else {
             // a list is this run's or the engine's (lid 0): no list is
             // opened by one node and read by another
@@ -573,7 +589,45 @@ impl Run<'_, '_> {
         if let Some(l) = self.level_of(md.vlid) {
             return Ok(l.fold.pd);
         }
+        if md.vlid == 0 {
+            // (the depth before this node and this run's own items: no
+            // other field read)
+            let pd = self.main_pd_before()?;
+            let own = self.own_main_items();
+            let t = MainTail {
+                pd,
+                ..MainTail::START
+            };
+            return Ok(t.after(self.v, &own).pd);
+        }
         Ok(self.list_fold(md.vlid)?.pd)
+    }
+
+    /// The main list's previous depth before this node ([`MAIN_PD`]).
+    fn main_pd_before(&mut self) -> R<i32> {
+        let v = self.v;
+        Ok(self.eng_read(v.field(MAIN_PD))?.map_or(IGNORE_DEPTH, |x| {
+            i32::try_from(int_of(v, x)).unwrap_or(IGNORE_DEPTH)
+        }))
+    }
+
+    /// This run's own items on the main list, in order.
+    fn own_main_items(&self) -> Vec<ValueId> {
+        let v = self.v;
+        let f = v.field("items");
+        let mut out = Vec::new();
+        for &(g, s) in &self.contribs {
+            if g != f {
+                continue;
+            }
+            for x in v.seq_to_vec(s) {
+                let xs = list_of(v, x);
+                if xs.len() == 2 && int_of(v, xs[0]) == 0 {
+                    out.push(xs[1]);
+                }
+            }
+        }
+        out
     }
 
     /// Sets the previous depth: a transition on the list, folded by its
@@ -588,6 +642,20 @@ impl Run<'_, '_> {
     pub(crate) fn space_factor(&mut self, md: &Mode) -> R<i32> {
         if let Some(l) = self.level_of(md.lid) {
             return Ok(l.fold.sf);
+        }
+        if md.lid == 0 {
+            // (the space factor before this node and this run's own
+            // items: no other field read)
+            let v = self.v;
+            let sf = self
+                .eng_read(v.field(MAIN_SF))?
+                .map_or(1000, |x| i32::try_from(int_of(v, x)).unwrap_or(1000));
+            let own = self.own_main_items();
+            let t = MainTail {
+                sf,
+                ..MainTail::START
+            };
+            return Ok(t.after(v, &own).sf);
         }
         Ok(self.list_fold(md.lid)?.sf)
     }
@@ -2892,76 +2960,90 @@ pub(crate) fn is_marker(v: &Values, x: ValueId) -> bool {
     )
 }
 
-/// The main list's tail as the nodes up to a fold left it: defined by
-/// every fold (`crate::pages`), read by a node that asks for the list's
-/// last item, `\\spacefactor` or `\\prevdepth` ([`Run::list_fold`]).
-pub(crate) const VTAIL: &str = "vtail";
+/// What a piece leaves the next piece of the main vertical list
+/// (spec-redesign §1, exec row; no list tail as a value): three fields
+/// each piece defines in its definition delta where its items change
+/// them ([`Run::define_main_tail`]) and a later piece reads on first
+/// touch, only the one it needs: the previous depth (`\\prevdepth`,
+/// §679), the space factor (§1034), and the last item with the count of
+/// contributions after the page builder's last call (`[item, since]`:
+/// what `\\lastskip`, `\\lastkern`, `\\lastpenalty`, `\\unskip`,
+/// `\\unkern`, `\\unpenalty`, `\\lastbox` see at a piece's start,
+/// §424, §1080, §1105).
+pub(crate) const MAIN_PD: &str = "vlist:pd";
+pub(crate) const MAIN_SF: &str = "vlist:sf";
+pub(crate) const MAIN_LAST: &str = "vlist:last";
 
-/// The main list's tail after `items` (a piece's own main-list items,
-/// as its fold gets them) folded onto `prev` (`vtail` reaching the
-/// fold): `[tail, sf, pd, since_bp]`, the tail being the items after the
-/// page builder's last call and the one before them (what a reader sees
-/// of the list: its last item, and what `\\unskip`, `\\lastbox` can
-/// take, which is never before that call, §1105, §1080).
-pub(crate) fn vtail_value(v: &Values, prev: Option<ValueId>, items: &[ValueId]) -> ValueId {
-    let (mut out, mut st) = vtail_decode(v, prev);
-    for &x in items {
-        fold_item(v, 0, x, &mut st, &mut out);
-    }
-    vtail_encode(v, &out, &st)
+/// The main list's end as a piece's reader sees it ([`MAIN_PD`],
+/// [`MAIN_SF`], [`MAIN_LAST`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MainTail {
+    pub last: Option<ValueId>,
+    pub since: usize,
+    pub sf: i32,
+    pub pd: i32,
 }
 
-/// A tail a piece's items cannot leave alone unread if they depend on
-/// it: `n` + 1 items of its own, a previous depth no box has, its
-/// `build_page` calls `n` + 1 items back ([`vtail_value`] onto it equal
-/// to onto the document's start: the items' tail is theirs alone, the
-/// space factor apart, which no reader of the main vertical list reads,
-/// §418).
-pub(crate) fn vtail_probe(v: &Values, n: usize) -> ValueId {
-    let k = i64::try_from(n + 1).unwrap_or(i64::MAX);
-    let tail: Vec<ValueId> = (0..k)
-        .map(|i| v.list(vec![v.int(-0x5e57), v.int(i)]))
-        .collect();
-    v.list(vec![v.list(tail), v.int(1000), v.int(7_654_321), v.int(k)])
-}
-
-fn vtail_encode(v: &Values, out: &[ValueId], st: &FoldState) -> ValueId {
-    let keep = st.since_bp + 1;
-    let mut tail: Vec<ValueId> = out
-        .iter()
-        .rev()
-        .filter(|&&x| !is_marker(v, x))
-        .take(keep)
-        .copied()
-        .collect();
-    tail.reverse();
-    v.list(vec![
-        v.list(tail),
-        v.int(i64::from(st.sf)),
-        v.int(i64::from(st.pd)),
-        v.int(i64::try_from(st.since_bp).unwrap_or(0)),
-    ])
-}
-
-fn vtail_decode(v: &Values, x: Option<ValueId>) -> (Vec<ValueId>, FoldState) {
-    let st0 = FoldState {
+impl MainTail {
+    /// The document's start (§215, §1083: a vertical list begins with
+    /// the depth ignored, the space factor 1000).
+    pub(crate) const START: MainTail = MainTail {
+        last: None,
+        since: 0,
         sf: 1000,
         pd: IGNORE_DEPTH,
-        since_bp: 0,
     };
-    let Some(x) = x else { return (Vec::new(), st0) };
-    let xs = list_of(v, x);
-    if xs.len() < 4 {
-        return (Vec::new(), st0);
+
+    /// A start no document has: what a piece's items leave unchanged
+    /// from it is the piece's own where it differs from [`Self::START`]'s
+    /// ([`Run::define_main_tail`]).
+    pub(crate) fn probe(v: &Values, n: usize) -> MainTail {
+        MainTail {
+            last: Some(v.list(vec![v.int(-0x5e57), v.int(i64::try_from(n).unwrap_or(0))])),
+            since: n + 1,
+            sf: 7777,
+            pd: 7_654_321,
+        }
     }
-    (
-        list_of(v, xs[0]),
-        FoldState {
-            sf: i32::try_from(int_of(v, xs[1])).unwrap_or(1000),
-            pd: i32::try_from(int_of(v, xs[2])).unwrap_or(IGNORE_DEPTH),
-            since_bp: usize::try_from(int_of(v, xs[3])).unwrap_or(0),
-        },
-    )
+
+    /// The main list's end after `items` (a piece's own main-list items)
+    /// folded onto this one.
+    pub(crate) fn after(self, v: &Values, items: &[ValueId]) -> MainTail {
+        let mut out: Vec<ValueId> = self.last.into_iter().collect();
+        let mut st = FoldState {
+            sf: self.sf,
+            pd: self.pd,
+            since_bp: self.since,
+        };
+        for &x in items {
+            fold_item(v, 0, x, &mut st, &mut out);
+        }
+        MainTail {
+            last: out.iter().rev().find(|&&x| !is_marker(v, x)).copied(),
+            since: st.since_bp,
+            sf: st.sf,
+            pd: st.pd,
+        }
+    }
+
+    /// [`MAIN_LAST`]'s value.
+    pub(crate) fn last_value(self, v: &Values) -> ValueId {
+        v.list(vec![
+            self.last.unwrap_or(ValueId::UNIT),
+            v.int(i64::try_from(self.since).unwrap_or(0)),
+        ])
+    }
+
+    /// [`MAIN_LAST`] read (`None`: the document's start).
+    pub(crate) fn of_last(v: &Values, x: Option<ValueId>) -> (Option<ValueId>, usize) {
+        let Some(x) = x else { return (None, 0) };
+        let xs = list_of(v, x);
+        (
+            xs.first().copied().filter(|&i| i != ValueId::UNIT),
+            xs.get(1)
+                .map_or(0, |&n| usize::try_from(int_of(v, n)).unwrap_or(0)),
+        )
+    }
 }
 
 /// A list's contents as its reader sees them ([`Run::list_fold`]).

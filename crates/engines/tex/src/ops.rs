@@ -7,7 +7,8 @@
 use std::sync::{Arc, OnceLock};
 
 use phitex_defuse::{
-    Claim, Ctx, Effect, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
+    Claim, Ctx, Effect, Field, FxHashMap, Locality, MayDefine, OpId, Operation, Stop, ValueId,
+    Values,
 };
 
 use crate::run::{Halt, Ops, R, Run};
@@ -409,6 +410,7 @@ impl Operation for Exec {
                     && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
                 r.read_cut_request()?;
+                let args = r.resolve_units(&args)?;
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
                 crate::hints::count(r, if tokens { 4 } else { 5 });
@@ -633,11 +635,19 @@ pub(crate) fn client_only(v: &Values, f: Field) -> bool {
     }
 }
 
-/// The files the job writes, read back by the next round: for each name
-/// in the client's `loopfiles`, the text its streams accumulated
-/// (`streams`, in the order the page builder's `wplan` gives) is
-/// published as the next round's `wfile:<name>`.
-pub(crate) struct Files;
+/// The files the job writes, read back by the next round
+/// (spec-redesign §1, `files(round)`): for each name in the client's
+/// `loopfiles`, the text its streams accumulated (`streams`, in the
+/// order the page builder's `wplan` gives) is sliced by the document's
+/// slicer into units, each published as its own loop-back,
+/// `wunit:<name>:<hash>:<n>` (its text's hash, `n` its occurrence among
+/// equal units), and the file as their order, `wfile:<name>`:
+/// `[sliceable, [[unit field, starts], ...]]` (none: the file absent).
+/// A reader of the file is a parent whose children are the units' pieces,
+/// keyed by content ([`crate::run::Run::doc_file_regions`]): an edit of
+/// one unit re-runs that unit's piece, and the order's readers only
+/// where the order changed. No value holds the file's whole text.
+pub(crate) struct Files(pub Shared);
 
 impl Operation for Files {
     fn name(&self) -> &'static str {
@@ -716,31 +726,74 @@ impl Operation for Files {
             }
             cx.publish(k, v.list(keys));
         }
+        let defs = ops(&self.0)
+            .defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         for name in names {
             let f = v.field(&format!("wfile:{name}"));
             if !cx.is_loopback(f) {
                 continue;
             }
             // a file the job did not write this round is absent next round
-            let x = texts
+            let Some(t) = texts
                 .iter()
                 .chain(&made)
                 .find(|(n, _)| *n == name)
-                .map_or_else(
-                    || v.list(Vec::new()),
-                    |(_, t)| v.list(vec![v.str(&format!("./{name}")), v.str(t)]),
-                );
+                .map(|(_, t)| t.as_str())
+            else {
+                cx.publish(f, v.list(Vec::new()));
+                continue;
+            };
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                let t = texts
-                    .iter()
-                    .find(|(n, _)| *n == name)
-                    .map_or("", |(_, t)| t.as_str());
                 eprintln!("aux-trace: publish wfile {name}: {} bytes:\n{t}", t.len());
             }
-            cx.publish(f, x);
+            let order = written_units(cx, &name, t, &defs);
+            cx.publish(f, order);
         }
         Ok(ValueId::UNIT)
     }
+}
+
+/// A written file's text as units ([`Files`]): each unit published as
+/// its loop-back (declared from here, the first round that has it), and
+/// the order value.
+fn written_units(cx: &mut Ctx<'_>, name: &str, text: &str, defs: &crate::hints::Defs) -> ValueId {
+    let v = cx.values();
+    let t = crate::hints::text_hints(text, phitex_source::pass::FileKind::Document, defs);
+    // (the units cover the text: each from the end of the one before to
+    // its slice's end, the last to the text's end)
+    let mut ends: Vec<usize> = t.slices.iter().map(|&(_, e)| e).collect();
+    ends.retain(|&e| e > 0 && e <= text.len());
+    ends.sort_unstable();
+    ends.dedup();
+    if ends.last() != Some(&text.len()) {
+        ends.push(text.len());
+    }
+    let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut entries = Vec::with_capacity(ends.len());
+    let mut at = 0;
+    for e in ends {
+        let Some(u) = text.get(at..e) else { continue };
+        let starts = at == 0 || text.as_bytes()[at - 1] == b'\n';
+        at = e;
+        if u.is_empty() {
+            continue;
+        }
+        let h = phitex_defuse::hash_bytes(0x7775_6e69_7400_0001, u.as_bytes());
+        let n = seen.entry(h).or_insert(0);
+        let key = format!("wunit:{name}:{h:016x}:{n}");
+        *n += 1;
+        let f = v.field(&key);
+        if !cx.is_loopback(f) {
+            cx.declare_loopback(f, v.str(""));
+        }
+        cx.publish(f, v.str(u));
+        entries.push(v.list(vec![v.str(&key), v.int(i64::from(starts))]));
+    }
+    let sliceable = crate::inputs::document_file(name, text);
+    v.list(vec![v.int(i64::from(sliceable)), v.list(entries)])
 }
 
 /// The makeindex runs of this round (`tools`: `[ind, [args…]]`), each in

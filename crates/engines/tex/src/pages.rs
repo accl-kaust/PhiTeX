@@ -6,9 +6,10 @@
 //!   parallel with every other, and never reads the page. The items it
 //!   puts on the main vertical list are its own contributions, delimited
 //!   by candidate markers at the points where tex.web calls `build_page`
-//!   (§994; [`Run::finish_candidate`]). At its end it defines its main
-//!   list's tail ([`crate::build::VTAIL`], read from the piece before
-//!   only when its items leave that tail standing), gives its vertical
+//!   (§994; [`Run::finish_candidate`]). At its end it defines what it
+//!   leaves the next piece of the main list (the previous depth, the
+//!   space factor, the last item: [`crate::build::MAIN_LAST`], read from
+//!   the piece before only where its items leave it standing), gives its vertical
 //!   profile and its items as units of two accumulators
 //!   ([`crate::vprof::VPROF`], [`PITEMS`]) and places its scan step
 //!   ([`Scan`]) after it.
@@ -163,10 +164,17 @@ pub(crate) fn is_page_field(name: &str) -> bool {
 }
 
 /// The fields a piece with items on the main list may define for the
-/// pages (its hint names them, `crate::hints`): its main list's tail,
-/// the shipped mark, and where its own run finds a page finishing inside
+/// pages (its hint names them, `crate::hints`): what it leaves the next
+/// piece of the main list (the previous depth, the space factor, the
+/// last item), the shipped mark, and where its own run finds a page finishing inside
 /// it, the cut's continuation.
-pub(crate) const PAGE_FIELDS: [&str; 3] = [crate::build::VTAIL, SHIPPED, RESUME];
+pub(crate) const PAGE_FIELDS: [&str; 5] = [
+    crate::build::MAIN_PD,
+    crate::build::MAIN_SF,
+    crate::build::MAIN_LAST,
+    SHIPPED,
+    RESUME,
+];
 
 /// What a run had done when it passed a candidate: at its end, a page
 /// finishing at its last candidate finishes at the end of the piece iff
@@ -766,7 +774,8 @@ impl Run<'_, '_> {
     }
 
     /// The run's end on the page. A piece with items for the main list
-    /// defines its main list's tail ([`crate::build::VTAIL`]), gives its
+    /// defines what it leaves the next piece of the main list
+    /// ([`Run::define_main_tail`]), gives its
     /// profile and its items as units ([`Run::contribute_units`]) and
     /// places its scan step ([`Scan`]) after it; its own run never reads
     /// the page. A piece a finisher asked to cut (`cut:<node>`,
@@ -807,7 +816,7 @@ impl Run<'_, '_> {
         // (a piece a finisher asked to cut, and its second pass stopped
         // at that candidate: the resume is its to place)
         if self.stop_at.is_none() && self.cut_req.is_none() {
-            self.define_vtail_piece(&raw)?;
+            self.define_main_tail(&raw)?;
             return self.fold_apart(raw);
         }
         self.fold_here(raw)
@@ -1076,26 +1085,78 @@ impl Run<'_, '_> {
         self.contribute(PITEMS, v.seq_unit(it));
     }
 
-    /// The piece's main list's tail ([`crate::build::VTAIL`]): its
-    /// items folded onto the tail before it ([`crate::build::vtail_value`]),
-    /// read only when its items leave something of it (no candidate
-    /// after them, a deletion reaching before them, the previous depth
-    /// their first box's interline glue reads standing in the tail): a
-    /// paragraph's tail is its own, and the pieces do not read one
-    /// another's (spec-predicted-breaks §8).
-    fn define_vtail_piece(&mut self, raw: &[ValueId]) -> R<()> {
+    /// What the piece leaves the next one of the main list
+    /// ([`crate::build::MAIN_PD`], [`crate::build::MAIN_SF`],
+    /// [`crate::build::MAIN_LAST`]): each defined where its items change
+    /// it, from its items alone where they decide it (equal folded onto
+    /// the document's start and onto a start no document has), else
+    /// folded onto the one value reaching the piece, read: a paragraph's
+    /// end is its own, and the pieces read one another's only where an
+    /// item leaves the previous standing (spec-redesign §1, exec row).
+    fn define_main_tail(&mut self, raw: &[ValueId]) -> R<()> {
+        use crate::build::{MAIN_LAST, MAIN_PD, MAIN_SF, MainTail};
         let v = self.v;
-        let vt = v.field(crate::build::VTAIL);
-        let own = crate::build::vtail_value(v, None, raw);
-        let x = if crate::build::vtail_value(v, Some(crate::build::vtail_probe(v, raw.len())), raw)
-            == own
-        {
-            own
-        } else {
-            let prev = self.eng_read(vt)?;
-            crate::build::vtail_value(v, prev, raw)
-        };
-        self.cx.define_with(vt, x, Locality::Global);
+        if raw.is_empty() {
+            return Ok(());
+        }
+        let p = MainTail::probe(v, raw.len());
+        let a = MainTail::START.after(v, raw);
+        let b = p.after(v, raw);
+        // (each field: the items' own value where they decide it;
+        // nothing where they leave it as it was, the definition before
+        // reaching on; else the value reaching here, read, folded)
+        if a.pd == b.pd {
+            self.cx
+                .define_with(v.field(MAIN_PD), v.int(i64::from(a.pd)), Locality::Global);
+        } else if b.pd != p.pd {
+            let pd = self
+                .eng_read(v.field(MAIN_PD))?
+                .map_or(MainTail::START.pd, |x| {
+                    i32::try_from(int_of(v, x)).unwrap_or(MainTail::START.pd)
+                });
+            let t = MainTail {
+                pd,
+                ..MainTail::START
+            }
+            .after(v, raw);
+            self.cx
+                .define_with(v.field(MAIN_PD), v.int(i64::from(t.pd)), Locality::Global);
+        }
+        if a.sf == b.sf {
+            self.cx
+                .define_with(v.field(MAIN_SF), v.int(i64::from(a.sf)), Locality::Global);
+        } else if b.sf != p.sf {
+            let sf = self
+                .eng_read(v.field(MAIN_SF))?
+                .map_or(1000, |x| i32::try_from(int_of(v, x)).unwrap_or(1000));
+            let t = MainTail {
+                sf,
+                ..MainTail::START
+            }
+            .after(v, raw);
+            self.cx
+                .define_with(v.field(MAIN_SF), v.int(i64::from(t.sf)), Locality::Global);
+        }
+        if (a.last, a.since) == (b.last, b.since) {
+            self.cx
+                .define_with(v.field(MAIN_LAST), a.last_value(v), Locality::Global);
+        } else if (b.last, b.since) != (p.last, p.since) {
+            let (last, since) = MainTail::of_last(v, self.eng_read(v.field(MAIN_LAST))?);
+            let pd = self
+                .eng_read(v.field(MAIN_PD))?
+                .map_or(MainTail::START.pd, |x| {
+                    i32::try_from(int_of(v, x)).unwrap_or(MainTail::START.pd)
+                });
+            let t = MainTail {
+                last,
+                since,
+                pd,
+                ..MainTail::START
+            }
+            .after(v, raw);
+            self.cx
+                .define_with(v.field(MAIN_LAST), t.last_value(v), Locality::Global);
+        }
         Ok(())
     }
 
@@ -1347,10 +1408,10 @@ impl Run<'_, '_> {
         }
         self.cx.claim(n);
         let mut defs = self.published_fields();
-        defs.extend([crate::build::VTAIL, SHIPPED, RESUME].map(|f| v.field(f)));
+        defs.extend(PAGE_FIELDS.map(|f| v.field(f)));
         self.cx.narrow(MayDefine::Names(defs));
         self.begin_command();
-        self.define_vtail_piece(&raw)?;
+        self.define_main_tail(&raw)?;
         let last = self.last_candidate();
         // (the candidate asked for, if this run passed it: a piece whose
         // text changed may no longer have it)
@@ -1899,13 +1960,23 @@ pub(crate) fn line_frame(v: &Values, s: &Line) -> Option<ValueId> {
     Some(v.list(xs))
 }
 
-fn file_frame(v: &Values, f: &crate::run::FileRest) -> ValueId {
-    v.list(vec![
+fn file_frames(v: &Values, f: &crate::run::FileRest) -> Vec<ValueId> {
+    // (a file the job writes, not read yet: its units' frames, read where
+    // the frames are, `Run::resolve_units`)
+    if f.lazy()
+        && let Some(units) = &f.units
+    {
+        return units
+            .iter()
+            .map(|&(k, starts)| v.list(vec![v.str("w"), k, f.name, v.int(i64::from(starts))]))
+            .collect();
+    }
+    vec![v.list(vec![
         v.str("f"),
         f.id,
         v.int(i64::try_from(f.off).unwrap_or(0)),
         f.name,
-    ])
+    ])]
 }
 
 fn opt_val(x: Option<ValueId>) -> ValueId {
@@ -1957,7 +2028,7 @@ impl Run<'_, '_> {
                         frames.push(f);
                     }
                 }
-                _ => frames.push(file_frame(v, self.input.file(*l))),
+                _ => frames.extend(file_frames(v, self.input.file(*l))),
             }
         }
         for s in self.input.text_rest() {
@@ -1972,7 +2043,7 @@ impl Run<'_, '_> {
                         frames.push(toks_frame(t));
                     }
                 }
-                Seg::File(f) => frames.push(file_frame(v, f)),
+                Seg::File(f) => frames.extend(file_frames(v, f)),
             }
         }
         let nest: Vec<ValueId> = self
@@ -2132,7 +2203,8 @@ impl Run<'_, '_> {
         let v = self.v;
         let xs = list_of(v, x);
         let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
-        self.input.text = crate::run::decode_segs(v, &[a(0)]);
+        let frames = self.resolve_units(&[a(0)])?;
+        self.input.text = crate::run::decode_segs(v, &frames);
         self.input.text_at = 0;
         // the state table first: the levels index its saves
         let st = list_of(v, a(4));
