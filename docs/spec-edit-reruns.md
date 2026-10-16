@@ -68,3 +68,34 @@ finish 5-9, fold 6-9 (`ps`).
    every change of the page above them.
 3. Third: resumes re-made (not re-run) by any change upstream, their
    children new nodes (3 exec runs per edit; resumes 7-16 nodes).
+
+## 2. Fixes and numbers (accl, release, amsldoc, `PHITEX_SWEEP_N=5`)
+
+| step | commit | exec runs, 5 main-text edits | cold rounds / runs | new resumes + new exec (5 edits) |
+|---|---|---|---|---|
+| baseline (census) | f5ca7e9e | 48/40/27/24/2 | 2 / ~2300 | 43 + 12 |
+| locals counted only where they differ at the candidate | 4bb78f85 | 46/40/27/25/2 | - | |
+| resume and fold positional identity (cherry-pick of profiles 4d1965e3) | 81df5e96 | 42/36/23/21/2 | 2 / 2306 | 0 + 0 |
+| defines-side own fold dropped entirely (rejected) | 5655c2c6 | 32/32/22/17/2 | 3 / 3013 | |
+| defined after a candidate counts only if its value differs from the one at the candidate | 8bb7a72a, a7cc35b4 | 39/36/23/21/2 -> 38/35/23/21/2 | 2 / 2348 | 0 + 0 |
+| own-fold prediction only on fields more than half of a routine's runs read | 9817cbf4, b0a4491d | 35/34/23/21/2 | 2 / 2463 | 0 + 0 |
+
+amsldoc `--exact-pdf` at j1 and j8 is byte-identical to the epoch oracle
+after every step. The sweep's comparisons against cold builds show no
+differences. The suites match the baseline: the edits reds
+one_word_edit_reruns_little and pdf_edit_reruns_one_page_step are red at
+6e710e39 too, and relaxed_page_edit, red at 6e710e39, is green.
+
+What is left on the main-text edits (11884): `pdf:state` 92 of 115 exec
+runs (edit-tail's split of the writer-state key) and `ps` 19. The
+remaining `ps` readers fold in their own run on real name-and-value
+dependencies: they define `if@newlist` or `parshape` after a candidate
+with another value, write to a stream a routine writes, or read
+`fontcount`/`count:0`, which routines define anew. Removing those reads
+needs the scan design, where a piece does not read the page state to
+learn whether a page ends inside it.
+
+The read-back edits' "speculative run, run again" (82 runs) are all
+`pdf:state` readers (98 Changed, 17 Refuted, nothing else). A .toc edit
+changes two pages, so every reader after the second runs once on each
+new key.
