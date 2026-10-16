@@ -46,5 +46,9 @@ else
     echo "amsldoc edit j$j: $(cat "$R/ams-e$j.log" | tail -1)"
     awk '/^incr walk/{w++} /^round: |^round rerun causes/{print (w<2?"  cold ":"  edit ") $0}' "$R/ams-e$j.err" | cut -c1-500
   done
+  grep -h 'phitex: scan step' "$R"/*.log "$R"/*.err 2>/dev/null | head -5
+  PHITEX_CACHE_DIR=$C cargo test -q -p phitex-tex --test latex -- --test-threads=4 > "$R/latex.txt" 2>&1
+  grep -E "^test result|^    [a-z_0-9]+$" "$R/latex.txt"
+  grep -E "differs|byte [0-9]+|phitex: scan step" "$R/latex.txt" | head -10
 fi
 echo done
