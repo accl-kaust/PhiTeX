@@ -1349,6 +1349,59 @@ impl Operation for ToyCut {
                 Ok(a.get(1).copied().unwrap_or(ValueId::UNIT))
             }
             _ => Ok(ValueId::UNIT),
+/// `["d"]` defines `f` from the environment field `x` (its run's value
+/// `x / 2`), declares it may define `f` only (a pending set), and
+/// predicts `f` = 100 (`predicted_defs`, asked once per text); `["r"]`
+/// reads `f` and the environment field `y`, outputs `f`; `["s"]`
+/// defines `x` from the environment field `z`.
+struct Pred;
+
+impl Operation for Pred {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        match tag(v, a).as_str() {
+            "d" | "s" => None,
+            _ => Some(Vec::new()),
+        }
+    }
+    fn may_define(&self, a: &[ValueId], v: &Values) -> phitex_defuse::MayDefine {
+        match tag(v, a).as_str() {
+            "d" => phitex_defuse::MayDefine::Names(vec![v.field("f")]),
+            "s" => phitex_defuse::MayDefine::Names(vec![v.field("x")]),
+            _ => phitex_defuse::MayDefine::Nothing,
+        }
+    }
+    fn predicted_defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        (tag(v, a) == "d").then(|| vec![(v.field("f"), v.int(100))])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let int = |x: Option<ValueId>| x.and_then(|x| v.as_int(x)).unwrap_or(0);
+        match tag(v, &a).as_str() {
+            "s" => {
+                let z = int(cx.use_field(v.field("z"))?);
+                cx.define(v.field("x"), v.int(z));
+                Ok(ValueId::UNIT)
+            }
+            "d" => {
+                // (some work: the reader can run meanwhile)
+                let mut h = 0u64;
+                for i in 0..200_000u64 {
+                    h = h.wrapping_mul(31).wrapping_add(i);
+                }
+                let x = int(cx.use_field(v.field("x"))?);
+                // (a multiple of 3: no definition, the value before it
+                // stands)
+                if x % 3 != 0 {
+                    cx.define(v.field("f"), v.int(x / 2 + i64::from(h == 7)));
+                }
+                Ok(ValueId::UNIT)
+            }
+            _ => {
+                let _ = cx.use_field(v.field("y"))?;
+                let f = int(cx.use_field(v.field("f"))?);
+                Ok(v.int(f))
+            }
         }
     }
 }
@@ -1391,4 +1444,225 @@ fn a_claim_that_takes_over_its_old_continuations_siblings() {
         "a sibling the run now claims ran on its own after its old continuation went"
     );
     let _ = a;
+/// A prediction changes speed, never results: a reader that ran on a
+/// definer's predicted value (100) outputs the value the definer
+/// defines, cold, and after edits where the definer runs again and
+/// commits a value equal to its previous commit while the reader runs
+/// again too (the definer's node and text the same across the
+/// evaluations, its prediction asked once). Every scheduler, many seeds.
+#[test]
+fn a_reader_on_a_prediction_ends_on_the_value_its_definer_commits() {
+    let schedulers: Vec<Box<dyn Fn(&mut Engine) -> phitex_defuse::Report>> = vec![
+        Box::new(|e| e.evaluate_sequential().expect("evaluate")),
+        Box::new(|e| {
+            e.evaluate(
+                &mut phitex_defuse::Greedy::speculative(phitex_defuse::Speculation::All, 256),
+                &mut phitex_defuse::Sequential,
+            )
+            .expect("evaluate")
+        }),
+    ];
+    let mut bad = Vec::new();
+    for (k, sched) in schedulers.iter().enumerate() {
+        for seed in 0..40u64 {
+            let mut eng = Engine::new();
+            let op = eng.register(Arc::new(Pred));
+            let u = eng.new_unit();
+            let f = |e: &Engine, n: &str| e.values().field(n);
+            let int = |e: &Engine, i: i64| e.values().int(i);
+            let (fy, fz) = (f(&eng, "y"), f(&eng, "z"));
+            let x = int(&eng, 10);
+            eng.set_env(u, fz, x);
+            let x = int(&eng, 0);
+            eng.set_env(u, fy, x);
+            let ff = f(&eng, "f");
+            let x = int(&eng, 7);
+            eng.set_env(u, ff, x);
+            for t in ["s", "d"] {
+                let a = vec![eng.values().str(t)];
+                eng.push(u, op, a);
+            }
+            let a = vec![eng.values().str("r")];
+            let r = eng.push(u, op, a);
+            let random = |e: &mut Engine, s: u64| {
+                e.evaluate(&mut phitex_defuse::RandomScheduler::new(s, true), &mut phitex_defuse::Sequential)
+                    .expect("evaluate")
+            };
+            let run = |e: &mut Engine| if seed % 2 == 0 { sched(e) } else { random(e, seed) };
+            run(&mut eng);
+            let out = |e: &Engine| e.output(r).and_then(|x| e.values().as_int(x));
+            if out(&eng) != Some(5) {
+                bad.push(format!("sched {k} seed {seed} cold: {:?}", out(&eng)));
+            }
+            // the definer runs again (x 10 -> 11) and commits 5 again; the
+            // reader runs again (y changed) while it is in work
+            let x = int(&eng, 11);
+            eng.set_env(u, fz, x);
+            let x = int(&eng, 1);
+            eng.set_env(u, fy, x);
+            run(&mut eng);
+            if out(&eng) != Some(5) {
+                bad.push(format!("sched {k} seed {seed} same value: {:?}", out(&eng)));
+            }
+            // and a different value
+            let x = int(&eng, 40);
+            eng.set_env(u, fz, x);
+            let x = int(&eng, 2);
+            eng.set_env(u, fy, x);
+            run(&mut eng);
+            if out(&eng) != Some(20) {
+                bad.push(format!("sched {k} seed {seed} new value: {:?}", out(&eng)));
+            }
+            // predicted and not defined: the value before the definer
+            // (the environment's 7) reaches the reader
+            let x = int(&eng, 9);
+            eng.set_env(u, fz, x);
+            let x = int(&eng, 3);
+            eng.set_env(u, fy, x);
+            run(&mut eng);
+            if out(&eng) != Some(7) {
+                bad.push(format!("sched {k} seed {seed} predicted, not defined: {:?}", out(&eng)));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{} wrong outputs: {:?}", bad.len(), &bad[..bad.len().min(8)]);
+}
+
+/// The prediction [`PredMade`]'s definer gives (a client's running
+/// memo: it changes between evaluations).
+static PRED_NOW: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(100);
+
+/// As [`Pred`], the definer made by a parent: `["p"]` reads the
+/// environment field `w` and places `["d"]` after it (`Ctx::follow`,
+/// the same text every run: the same node); `["d"]` predicts `f` =
+/// [`PRED_NOW`] as it stands when its text is analysed.
+struct PredMade(std::sync::OnceLock<OpId>);
+
+impl Operation for PredMade {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        match tag(v, a).as_str() {
+            "d" | "s" => None,
+            _ => Some(Vec::new()),
+        }
+    }
+    fn may_define(&self, a: &[ValueId], v: &Values) -> phitex_defuse::MayDefine {
+        match tag(v, a).as_str() {
+            "d" => phitex_defuse::MayDefine::Names(vec![v.field("f")]),
+            "s" => phitex_defuse::MayDefine::Names(vec![v.field("x")]),
+            _ => phitex_defuse::MayDefine::Nothing,
+        }
+    }
+    fn predicted_defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        (tag(v, a) == "d").then(|| vec![(v.field("f"), v.int(PRED_NOW.load(std::sync::atomic::Ordering::Relaxed)))])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let int = |x: Option<ValueId>| x.and_then(|x| v.as_int(x)).unwrap_or(0);
+        match tag(v, &a).as_str() {
+            "s" => {
+                let z = int(cx.use_field(v.field("z"))?);
+                cx.define(v.field("x"), v.int(z));
+                Ok(ValueId::UNIT)
+            }
+            "p" => {
+                let _ = cx.use_field(v.field("w"))?;
+                cx.follow(*self.0.get().expect("op"), vec![v.str("d")]);
+                Ok(ValueId::UNIT)
+            }
+            "d" => {
+                let mut h = 0u64;
+                for i in 0..200_000u64 {
+                    h = h.wrapping_mul(31).wrapping_add(i);
+                }
+                let x = int(cx.use_field(v.field("x"))?);
+                cx.define(v.field("f"), v.int(x / 2 + i64::from(h == 7)));
+                Ok(ValueId::UNIT)
+            }
+            _ => {
+                let _ = cx.use_field(v.field("y"))?;
+                let f = int(cx.use_field(v.field("f"))?);
+                Ok(v.int(f))
+            }
+        }
+    }
+}
+
+/// A prediction changes speed, never results, also when the definer's
+/// text is analysed again (its parent runs again and makes the same
+/// continuation) after a reader ran on its earlier prediction, and the
+/// new prediction equals what the definer then commits: the reader that
+/// took the earlier one runs again. (PhiTeX: a page's finisher is a
+/// positional node its scan step makes again; its predictions come from
+/// the finishers run so far, and a later finisher read a box register's
+/// predicted value from before the routine changed it: amsldoc shipped
+/// a two-column page's stored column twice.)
+#[test]
+fn a_reader_on_an_earlier_prediction_runs_again_when_the_text_is_analysed_again() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut bad = Vec::new();
+    for seed in 0..60u64 {
+        PRED_NOW.store(100, Relaxed);
+        let mut eng = Engine::new();
+        let ops = Arc::new(PredMade(std::sync::OnceLock::new()));
+        let op = eng.register(ops.clone());
+        let _ = ops.0.set(op);
+        let u = eng.new_unit();
+        let f = |e: &Engine, n: &str| e.values().field(n);
+        let int = |e: &Engine, i: i64| e.values().int(i);
+        let env = |e: &mut Engine, n: &str, i: i64| {
+            let (fl, x) = (f(e, n), int(e, i));
+            e.set_env(u, fl, x);
+        };
+        env(&mut eng, "z", 10);
+        env(&mut eng, "y", 0);
+        env(&mut eng, "w", 0);
+        for t in ["s", "p"] {
+            let a = vec![eng.values().str(t)];
+            eng.push(u, op, a);
+        }
+        let a = vec![eng.values().str("r")];
+        let r = eng.push(u, op, a);
+        let run = |e: &mut Engine| {
+            if seed % 3 == 0 {
+                e.evaluate(
+                    &mut phitex_defuse::Greedy::speculative(phitex_defuse::Speculation::All, 256),
+                    &mut phitex_defuse::Sequential,
+                )
+            } else {
+                e.evaluate(&mut phitex_defuse::RandomScheduler::new(seed, true), &mut phitex_defuse::Sequential)
+            }
+            .expect("evaluate")
+        };
+        let out = |e: &Engine| e.output(r).and_then(|x| e.values().as_int(x));
+        run(&mut eng);
+        if out(&eng) != Some(5) {
+            bad.push(format!("seed {seed} cold: {:?}", out(&eng)));
+        }
+        // the definer's value moves (x 10 -> 20, f 5 -> 10); the reader, the
+        // parent and the definer all run again; the memo now predicts 10,
+        // the value the definer commits
+        PRED_NOW.store(10, Relaxed);
+        env(&mut eng, "z", 20);
+        env(&mut eng, "y", 1);
+        env(&mut eng, "w", 1);
+        run(&mut eng);
+        if out(&eng) != Some(10) {
+            bad.push(format!("seed {seed} moved: {:?}", out(&eng)));
+        }
+        // the same value again (x 21: f 10), the memo predicting 3 first
+        // and 10 once the parent runs again
+        PRED_NOW.store(3, Relaxed);
+        env(&mut eng, "z", 21);
+        env(&mut eng, "y", 2);
+        run(&mut eng);
+        PRED_NOW.store(10, Relaxed);
+        env(&mut eng, "w", 2);
+        env(&mut eng, "y", 3);
+        run(&mut eng);
+        if out(&eng) != Some(10) {
+            bad.push(format!("seed {seed} same value: {:?}", out(&eng)));
+        }
+    }
+    assert!(bad.is_empty(), "{} wrong outputs: {:?}", bad.len(), &bad[..bad.len().min(8)]);
 }
