@@ -1133,8 +1133,19 @@ pub(crate) fn compress_memo(data: &[u8], level: i32) -> Vec<u8> {
     static MEMO: OnceLock<Memo> = OnceLock::new();
     /// The bytes kept before the memo starts again.
     const ROOM: usize = 256 << 20;
+    thread_local! {
+        /// The compressor's buffers, kept from stream to stream.
+        static SCRATCH: std::cell::RefCell<phitex_codecs::deflate::Scratch> =
+            std::cell::RefCell::default();
+    }
+    let compress = |data: &[u8]| {
+        SCRATCH.with(|sc| match sc.try_borrow_mut() {
+            Ok(mut sc) => phitex_codecs::deflate::compress_with(&mut sc, data, level),
+            Err(_) => phitex_codecs::deflate::compress(data, level),
+        })
+    };
     if data.len() < 512 {
-        return phitex_codecs::deflate::compress(data, level);
+        return compress(data);
     }
     let h = |seed: u64| {
         let mut s = std::hash::DefaultHasher::new();
@@ -1152,7 +1163,7 @@ pub(crate) fn compress_memo(data: &[u8], level: i32) -> Vec<u8> {
     {
         return z.to_vec();
     }
-    let z = phitex_codecs::deflate::compress(data, level);
+    let z = compress(data);
     let mut m = memo.lock().unwrap_or_else(PoisonError::into_inner);
     if m.1 + z.len() > ROOM {
         m.0.clear();

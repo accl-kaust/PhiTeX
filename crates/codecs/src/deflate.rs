@@ -13,7 +13,6 @@
 //! the lookahead).
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 const MIN_MATCH: usize = 3;
@@ -1176,18 +1175,49 @@ pub fn adler32(a: u32, data: &[u8]) -> u32 {
 /// within the 64K window, codes of at most 15 bits).
 #[must_use]
 pub fn compress(data: &[u8], level: i32) -> Vec<u8> {
+    compress_with(&mut Scratch::default(), data, level)
+}
+
+/// What one compression allocates, kept for the next by a caller that
+/// compresses many streams: the static trees and the window, hash
+/// chains and symbol buffer (zeroed again where zlib's fresh state is
+/// zero: the window, `head` and `prev`; the symbol buffer is written
+/// before it is read).
+#[derive(Default)]
+pub struct Scratch {
+    st: Option<Box<Static>>,
+    window: Vec<u8>,
+    prev: Vec<u16>,
+    head: Vec<u16>,
+    sym_buf: Vec<u8>,
+}
+
+/// A buffer of `n` zeros, reusing `v`'s allocation.
+fn zeroed<T: Copy + Default>(mut v: Vec<T>, n: usize) -> Vec<T> {
+    v.clear();
+    v.resize(n, T::default());
+    v
+}
+
+/// [`compress`] with the buffers of `sc` (the same bytes).
+///
+/// # Panics
+///
+/// As [`compress`]: never.
+#[must_use]
+pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
     let level = level.clamp(1, 9).unsigned_abs() as usize;
     let (good, lazy, nice, chain) = CONFIG[level];
     let mut s = State {
-        st: Static::new(),
+        st: sc.st.take().unwrap_or_else(Static::new),
         level,
         input: data,
         next_in: 0,
         adler: 1,
         out: Vec::with_capacity(data.len() / 2 + 64),
-        window: vec![0; WINDOW_SIZE + MAX_MATCH],
-        prev: vec![0; W_SIZE],
-        head: vec![0; HASH_SIZE],
+        window: zeroed(core::mem::take(&mut sc.window), WINDOW_SIZE + MAX_MATCH),
+        prev: zeroed(core::mem::take(&mut sc.prev), W_SIZE),
+        head: zeroed(core::mem::take(&mut sc.head), HASH_SIZE),
         ins_h: 0,
         block_start: 0,
         match_length: MIN_MATCH - 1,
@@ -1212,7 +1242,11 @@ pub fn compress(data: &[u8], level: i32) -> Vec<u8> {
         heap_len: 0,
         heap_max: 0,
         depth: [0; 2 * L_CODES + 1],
-        sym_buf: vec![0; LIT_BUFSIZE * 4],
+        sym_buf: {
+            let mut b = core::mem::take(&mut sc.sym_buf);
+            b.resize(LIT_BUFSIZE * 4, 0);
+            b
+        },
         sym_next: 0,
         sym_end: (LIT_BUFSIZE - 1) * 3,
         opt_len: 0,
@@ -1243,6 +1277,11 @@ pub fn compress(data: &[u8], level: i32) -> Vec<u8> {
     };
     let a = s.adler;
     s.out.extend(a.to_be_bytes());
+    sc.st = Some(s.st);
+    sc.window = s.window;
+    sc.prev = s.prev;
+    sc.head = s.head;
+    sc.sym_buf = s.sym_buf;
     s.out
 }
 
@@ -1293,6 +1332,67 @@ mod tests {
             }
         }
         assert!(checked == 2, "{checked} streams");
+    }
+
+    /// (measure, differential) Every file in `PHITEX_DEFLATE_DIR`
+    /// compressed at levels 1, 6 and 9: the MD5 of each stream (to
+    /// compare two builds of the compressor) and the time per call.
+    #[test]
+    #[ignore = "needs PHITEX_DEFLATE_DIR"]
+    fn dir_digests() {
+        extern crate std;
+        use alloc::string::String;
+        use std::{format, println};
+        let Some(dir) = std::env::var_os("PHITEX_DEFLATE_DIR") else {
+            return;
+        };
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .expect("a directory")
+            .map(|e| e.expect("an entry").path())
+            .collect();
+        names.sort();
+        let reps: usize = std::env::var("PHITEX_DEFLATE_REPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let mut total = std::time::Duration::ZERO;
+        let mut sc = Scratch::default();
+        for n in names {
+            let data = std::fs::read(&n).expect("a file");
+            for level in [1, 6, 9] {
+                let t0 = std::time::Instant::now();
+                let mut z = Vec::new();
+                for _ in 0..reps {
+                    z = compress_with(&mut sc, &data, level);
+                }
+                let t = t0.elapsed();
+                assert!(
+                    z == compress(&data, level),
+                    "{n:?} at {level}: a reused scratch"
+                );
+                let t0 = std::time::Instant::now() - t;
+                let t = t0.elapsed();
+                if level == 9 {
+                    total += t;
+                }
+                let d: String = crate::md5::md5(&z)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                println!(
+                    "{} {level} {} {d} {:.1}us",
+                    n.file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    z.len(),
+                    t.as_secs_f64() * 1e6 / reps as f64
+                );
+            }
+        }
+        println!(
+            "level 9 total {:.1} ms per rep",
+            total.as_secs_f64() * 1e3 / reps as f64
+        );
     }
 
     fn find(h: &[u8], n: &[u8]) -> Option<usize> {
