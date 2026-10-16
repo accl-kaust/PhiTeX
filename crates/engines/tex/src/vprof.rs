@@ -727,6 +727,8 @@ static DIFFS: AtomicU64 = AtomicU64::new(0);
 static UNITS: AtomicU64 = AtomicU64::new(0);
 static INTS: AtomicU64 = AtomicU64::new(0);
 static LINES: AtomicU64 = AtomicU64::new(0);
+static SCAN_NS: AtomicU64 = AtomicU64::new(0);
+static SCAN_ITEMS: AtomicU64 = AtomicU64::new(0);
 
 /// A profile contributed: counted for the size report (units, bytes,
 /// boxes appended with interline glue: the lines).
@@ -739,7 +741,7 @@ pub(crate) fn count_unit(ints: &[i64]) {
         let u = UNITS.fetch_add(1, Relaxed) + 1;
         INTS.fetch_add(ints.len() as u64, Relaxed);
         LINES.fetch_add(lines, Relaxed);
-        if u.is_power_of_two() || u % 1000 == 0 {
+        if u.is_power_of_two() || u.is_multiple_of(1000) {
             eprintln!("{}", size_report());
         }
     }
@@ -775,7 +777,10 @@ pub(crate) fn check(
 ) {
     FOLDS.fetch_add(1, Relaxed);
     let j = scan.j;
+    let t0 = std::time::Instant::now();
     let fire = scan.fold_items(items, dead, rd);
+    SCAN_NS.fetch_add(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0), Relaxed);
+    SCAN_ITEMS.fetch_add(items.len() as u64, Relaxed);
     let got = fire.as_ref().map(|f| (f.k, f.decision.clone(), f.rest));
     let mut diff: Option<String> = None;
     match (&got, &real.fire) {
@@ -809,11 +814,13 @@ pub(crate) fn check(
         eprintln!("scan-check DIFF #{n}: fold node {node}, page {}: {d}", j + 1);
     }
     let f = FOLDS.load(Relaxed);
-    if f.is_power_of_two() || f % 1000 == 0 || got.is_some() {
+    if f.is_power_of_two() || f.is_multiple_of(1000) || got.is_some() {
         eprintln!(
-            "scan-check: folds {f} fires {} diffs {} ({})",
+            "scan-check: folds {f} fires {} diffs {} scan {} items {} us ({})",
             FIRES.load(Relaxed),
             DIFFS.load(Relaxed),
+            SCAN_ITEMS.load(Relaxed),
+            SCAN_NS.load(Relaxed) / 1000,
             size_report()
         );
     }
