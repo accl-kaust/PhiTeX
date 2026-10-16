@@ -109,3 +109,22 @@ defuse_gaps), the latex target (sharded), sweep tests (bounds of §0.6),
 amsldoc exact j1/j8/j16 bytes + counters + cp, para4000 bytes + cp + wall
 j1/j8/j16 + µs per paragraph table, cold runs per node. One report, failures
 first, every number against its bar.
+
+## 7. What the node design does not decide: cold time and fixed per-edit cost (added 15:30)
+
+10. **Cold time is accounted by op class**, reported on every head for amsldoc
+    and para4000 at j1/j8/j16: format/preamble loads (package nodes), document
+    exec nodes, scan, finish, link, hint pass, engine (evaluate minus op
+    bodies, per round), rounds (count, and node-runs ÷ live nodes). Bars:
+    rounds = 1 warm and ≤ 3 cold; node-runs ÷ live nodes ≤ 1.1; hint pass
+    ≤ 10% of evaluation; engine per node ≤ the op's own cost at 8 threads.
+    Today (loop agent, accl 11885): 2 531 runs for 1 886 live nodes in 5
+    rounds; 1 thread 13.9 s, 8 threads 16.1 s. The breakdown of the seconds
+    is unknown and is the first number the gate machine prints.
+11. **Fixed per-edit cost ≤ 10 ms** beside the nodes that run: the hint pass
+    runs over the changed unit(s) only, with the document's analysis kept as
+    per-unit values (today 15 ms over the whole document); the engine's
+    per-evaluation bookkeeping (stats, guess bookkeeping: 33–55 ms today) is
+    proportional to what ran (engine request with the numbers); an
+    evaluation round's wall ≈ its critical path's busy time (92 ms wall for
+    ~50 ms busy today).
