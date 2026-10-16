@@ -707,6 +707,36 @@ impl Run<'_, '_> {
         out
     }
 
+    /// The files this run wrote, opened or closed (its `streams`
+    /// contributions from the `from`-th contribution on), as the fields
+    /// `wstream:<name>`: a page finishing at a candidate before them
+    /// ships its `\write`s before them in TeX's order ([`Run::check_cut`]).
+    fn streams_since(&self, from: usize) -> Vec<Field> {
+        let v = self.v;
+        let f = v.field("streams");
+        let mut out: Vec<Field> = Vec::new();
+        for &(g, x) in self.contribs.get(from..).unwrap_or_default() {
+            if g != f {
+                continue;
+            }
+            for e in v.seq_to_vec(x) {
+                let xs = list_of(v, e);
+                // (`[j, entry]`: an entry tagged with its page)
+                let entry = match xs.first() {
+                    Some(&j) if v.as_int(j).is_some() => xs.get(1).map(|&y| list_of(v, y)).unwrap_or_default(),
+                    _ => xs,
+                };
+                if let Some(&n) = entry.first() {
+                    let w = v.field(&format!("wstream:{}", str_of(v, n)));
+                    if !out.contains(&w) {
+                        out.push(w);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// A `T_INS_PARAMS` marker with class `n`'s registers as this run
     /// sees them (§1008).
     pub(crate) fn ins_params_marker(&mut self, n: u16) -> R<ValueId> {
@@ -880,8 +910,9 @@ impl Run<'_, '_> {
                 .filter(|d| d.2 == Locality::Local)
                 .map(|d| d.0),
         );
-        for l in defs {
-            let f = self.loc_field(l);
+        let mut defs: Vec<Field> = defs.into_iter().map(|l| self.loc_field(l)).collect();
+        defs.extend(self.streams_since(m0.contribs));
+        for f in defs {
             if t.reads.contains(&f) {
                 if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                     eprintln!("  own fold {}: defines {}", self.cx.node().raw(), str_of(v, f.0));
@@ -954,6 +985,7 @@ impl Run<'_, '_> {
                     let stands = self.st.def_stands(l);
                     names.push((self.loc_field(l).0, stands));
                 }
+                names.extend(self.streams_since(m.contribs).into_iter().map(|f| (f.0, false)));
                 names.sort_unstable_by_key(|x| (x.0.raw(), !x.1));
                 names.dedup_by_key(|x| x.0);
                 per.push(v.list(
@@ -1155,6 +1187,9 @@ impl Run<'_, '_> {
         if self.placed_page {
             read.push(v.field("pdf:state").0);
         }
+        // (the files the page's `\write`s went to: a write, open or
+        // close the piece made after the candidate came after them)
+        read.extend(self.streams_since(0).into_iter().map(|f| f.0));
         let mut why = None;
         for e in list_of(v, reads) {
             let xs = list_of(v, e);
@@ -2208,12 +2243,13 @@ impl Run<'_, '_> {
     fn record_finisher_defs(&mut self, args: &[ValueId], olds: &[(Loc, Option<ValueId>)]) {
         let v = self.v;
         {
-            let reads: Vec<Field> = self
+            let mut reads: Vec<Field> = self
                 .st
                 .read_locs()
                 .into_iter()
                 .map(|l| self.loc_field(l))
                 .collect();
+            reads.extend(self.streams_since(0));
             let mut gdefs: Vec<Field> = Vec::new();
             for (loc, x, l) in self.st.published(v, self.rec_load) {
                 if l != Locality::Global {
