@@ -2831,7 +2831,12 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|l| crate::val::field_name(v, self.loc_field(l)))
             .filter(|n| !n.starts_with("file:"))
             .collect();
-        let flags = i64::from(self.effect == Effect::None) | 2;
+        // ("took no sibling" only when it pulled none: a load that read
+        // a blank sibling (an operand's look-ahead) claims it, and its
+        // record's hint leaves that claim to the run, as the first
+        // build did, so the graph does not depend on the record's
+        // presence)
+        let flags = i64::from(self.effect == Effect::None) | (i64::from(self.pulled == 0) << 1);
         let node = self.cx.node().raw();
         // (the values published: a later build's prediction of this
         // load's outputs, `crate::pkgrec::LoadHints::prediction`)
