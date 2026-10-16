@@ -112,7 +112,9 @@ pub mod phase {
     #[must_use]
     pub fn on() -> bool {
         static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *F.get_or_init(|| std::env::var_os("PHITEX_TEX_TIME").is_some_and(|v| !v.is_empty() && v != "0"))
+        *F.get_or_init(|| {
+            std::env::var_os("PHITEX_TEX_TIME").is_some_and(|v| !v.is_empty() && v != "0")
+        })
     }
     /// Clock `i` gains the time since `t0`.
     pub fn add(i: usize, t0: std::time::Instant) {

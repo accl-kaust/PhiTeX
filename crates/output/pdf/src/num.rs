@@ -49,12 +49,26 @@ pub fn divide_scaled(s: Scaled, m: Scaled, dd: i32) -> (i32, Scaled) {
         m < MAX_INTEGER / 10,
         "pdfTeX error (arithmetic): number too big"
     );
-    let mut q = s / m;
-    let mut r = s % m;
-    for _ in 0..dd {
-        q = 10 * q + (10 * r) / m;
-        r = (10 * r) % m;
-    }
+    // pdfTeX's digit loop (`q:=10*q+(10*r) div m; r:=(10*r) mod m`,
+    // `dd` times after `q:=s div m; r:=s mod m`) keeps
+    // `s*10^k = q*m + r, 0 <= r < m`, so it ends with the quotient and
+    // remainder of `s*10^dd` by `m`: one division (`s < 2^31`, `dd <= 9`:
+    // `s*10^dd < 2^31*10^9 < 2^63`)
+    let (mut q, mut r) = match usize::try_from(dd) {
+        Ok(k) if k < TEN_POW.len() => {
+            let p = s * TEN_POW[k];
+            (p / m, p % m)
+        }
+        Ok(_) => {
+            let (mut q, mut r) = (s / m, s % m);
+            for _ in 0..dd {
+                q = 10 * q + (10 * r) / m;
+                r = (10 * r) % m;
+            }
+            (q, r)
+        }
+        Err(_) => (s / m, s % m),
+    };
     if 2 * r >= m {
         q += 1;
         r -= m;
@@ -129,6 +143,97 @@ pub fn bp(out: &mut Vec<u8>, s: Scaled, dd: i32) -> Scaled {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `divide_scaled` with pdfTeX's digit loop, as written in §689.
+    fn divide_scaled_loop(s: Scaled, m: Scaled, dd: i32) -> (i32, Scaled) {
+        let (mut s, mut m) = (i64::from(s), i64::from(m));
+        let mut sign = 1;
+        if s < 0 {
+            sign = -sign;
+            s = -s;
+        }
+        if m < 0 {
+            sign = -sign;
+            m = -m;
+        }
+        let mut q = s / m;
+        let mut r = s % m;
+        for _ in 0..dd {
+            q = 10 * q + (10 * r) / m;
+            r = (10 * r) % m;
+        }
+        if 2 * r >= m {
+            q += 1;
+            r -= m;
+        }
+        let dd = usize::try_from(dd).unwrap_or(0);
+        let out = sign * (s - r / TEN_POW[dd]);
+        (narrow(sign * q), narrow(out))
+    }
+
+    #[test]
+    fn divide_scaled_is_the_digit_loop() {
+        let mut ss: Vec<Scaled> = vec![
+            0,
+            1,
+            2,
+            5,
+            9,
+            10,
+            32767,
+            32768,
+            65535,
+            65536,
+            65781,
+            65782,
+            6_578_175,
+            6_578_176,
+            1 << 29,
+            (1 << 30) - 1,
+            1 << 30,
+            i32::MAX - 1,
+            i32::MAX,
+        ];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..4000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            ss.push(i32::try_from(x % (1 << 31)).unwrap_or(0) >> (x % 31));
+        }
+        let negs: Vec<Scaled> = ss.iter().map(|&s| -s).collect();
+        ss.extend(negs);
+        ss.push(i32::MIN + 1);
+        let ms: Vec<Scaled> = vec![
+            1,
+            2,
+            3,
+            7,
+            10,
+            655,
+            65536,
+            65782,
+            327_680,
+            655_360,
+            6_578_176,
+            9_999_999,
+            0x7FFF_FFFF / 10 - 1,
+            -1,
+            -65536,
+            -6_578_176,
+        ];
+        for &s in &ss {
+            for &m in &ms {
+                for dd in -1..=9 {
+                    assert_eq!(
+                        divide_scaled(s, m, dd),
+                        divide_scaled_loop(s, m, dd),
+                        "s {s} m {m} dd {dd}"
+                    );
+                }
+            }
+        }
+    }
 
     fn r(m: i32, d: i32) -> String {
         let mut v = Vec::new();

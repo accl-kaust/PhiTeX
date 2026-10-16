@@ -535,7 +535,12 @@ impl PdfState {
             self.font_mut(f).chars[usize::from(c)] = true;
         }
         if c <= 32 || c == 92 || c == 40 || c == 41 || c > 127 {
-            self.print(&[b'\\', b'0' + (c >> 6), b'0' + ((c >> 3) & 7), b'0' + (c & 7)]);
+            self.print(&[
+                b'\\',
+                b'0' + (c >> 6),
+                b'0' + ((c >> 3) & 7),
+                b'0' + (c & 7),
+            ]);
         } else {
             self.pdf_out(c);
         }
