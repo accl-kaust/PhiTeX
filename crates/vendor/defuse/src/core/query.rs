@@ -794,8 +794,7 @@ impl Shared {
                 if strict && self.busy(opener, me) {
                     return Q::Wait(wait_node(opener, None, "kind", self.rec(opener).has(super::F_DONE)));
                 }
-                let k = self.rec(opener).data().kind_val;
-                Q::Ans((k, opener))
+                Q::Ans((self.opener_kind(opener, fr), opener))
             }
             _ => Q::Ans((None, opener)),
         }

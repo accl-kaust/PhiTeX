@@ -10,7 +10,7 @@ use super::{
     ClaimS, Committed, DAns, DMode, Def, DefVal, F_APP, F_DONE, F_FWD, F_HAS_OUT, F_NEEDS_RUN, F_SENS, NIL, Pred,
     S_CLEAN, S_FREE, S_RUN, Shared, Slot, Sub, in_work, lock, wlock,
 };
-use crate::api::{Cause, EvalError, Locality};
+use crate::api::{Cause, EvalError};
 use crate::values::{Field, ValueId, hash_words};
 
 fn dans_hash(a: &DAns) -> u64 {
@@ -298,6 +298,7 @@ impl Shared {
                 || d.stat.claim == ClaimS::Pending
                 || (cx.effect.is_some() && d.res.as_ref().is_none_or(|c| c.effect != cx.effect))
                 || d.kind_val != cx.kind
+                || d.kind_vals != cx.kinds
         };
         if structural {
             // The new children's static facts: their hooks read only
@@ -392,10 +393,10 @@ impl Shared {
             let defined = |f: Field| made.contains(&f);
             // Of a field it still defines, the kind (scope-local or not)
             // it no longer makes.
-            let made_k: crate::values::FxHashSet<(Field, bool)> =
-                cx.defs.iter().map(|d| (d.f, d.loc == Locality::Scope)).collect();
+            let made_k: crate::values::FxHashSet<(Field, u8)> =
+                cx.defs.iter().map(|d| (d.f, d.loc.entry_key())).collect();
             for d in &old.defs {
-                let sc = d.loc == Locality::Scope;
+                let sc = d.loc.entry_key();
                 if defined(d.f) && !made_k.contains(&(d.f, sc)) {
                     self.remove_def_k(u, s, d.f, sc, &mut notes);
                 }
@@ -408,7 +409,7 @@ impl Shared {
             }
             if let Some(sd) = &stat_defs {
                 for &(f, loc) in sd {
-                    let sc = loc == Locality::Scope;
+                    let sc = loc.entry_key();
                     if !made_k.contains(&(f, sc)) {
                         self.remove_def_k(u, s, f, sc, &mut notes);
                     }
@@ -486,8 +487,9 @@ impl Shared {
             let eff_changed = cx.effect.is_some() && old.effect != cx.effect;
             let kind_changed = {
                 let mut d = r.data();
-                let ch = d.kind_val != cx.kind;
+                let ch = d.kind_val != cx.kind || d.kind_vals != cx.kinds;
                 d.kind_val = cx.kind;
+                d.kind_vals = std::mem::take(&mut cx.kinds);
                 ch
             };
             // The application's environment.

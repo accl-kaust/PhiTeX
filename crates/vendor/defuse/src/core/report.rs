@@ -67,6 +67,9 @@ impl Engine {
         rep.mispredictions = c.mispredictions.load(Ordering::Relaxed);
         rep.fuel_outs = c.fuel_outs.load(Ordering::Relaxed);
         rep.spec_stops = c.spec_stops.load(Ordering::Relaxed);
+        rep.sole_successor = c.sole_successor.load(Ordering::Relaxed);
+        rep.many_successors = c.many_successors.load(Ordering::Relaxed);
+        rep.kept_successors = c.kept_successors.load(Ordering::Relaxed);
         rep.resumed = c.resumed.load(Ordering::Relaxed);
         rep.restarted = c.restarted.load(Ordering::Relaxed);
         rep.declarations_refuted = c.declarations_refuted.load(Ordering::Relaxed);
