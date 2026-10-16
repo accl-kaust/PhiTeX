@@ -142,8 +142,13 @@ pub enum Speculation {
 impl Speculation {
     /// The engine's scheduler for `self` and `budget`, `PHITEX_SPEC`
     /// overriding.
-    fn scheduler(self, budget: usize) -> phitex_defuse::Greedy {
+    /// (debug: `PHITEX_SCHED_SEED=n` runs the engine's random schedule
+    /// with seed `n`, speculating: results must not depend on it)
+    fn scheduler(self, budget: usize) -> Box<dyn phitex_defuse::Scheduler + Send> {
         use phitex_defuse::Speculation as S;
+        if let Some(seed) = std::env::var("PHITEX_SCHED_SEED").ok().and_then(|x| x.parse::<u64>().ok()) {
+            return Box::new(phitex_defuse::RandomScheduler::new(seed, true));
+        }
         let mode = match std::env::var("PHITEX_SPEC").ok().as_deref() {
             Some("off") => S::Off,
             Some("predicted") => S::Predicted,
@@ -154,11 +159,11 @@ impl Speculation {
                 Speculation::All => S::All,
             },
         };
-        phitex_defuse::Greedy {
+        Box::new(phitex_defuse::Greedy {
             outstanding: 4096,
             fuel: 10_000,
             ..phitex_defuse::Greedy::speculative(mode, budget)
-        }
+        })
     }
 }
 
@@ -1311,7 +1316,7 @@ struct Graph {
     /// What the executor runs now, for readers on other threads.
     watch: crate::exec::Watch,
     /// The engine's scheduler ([`Options::speculation`]).
-    sched: phitex_defuse::Greedy,
+    sched: Box<dyn phitex_defuse::Scheduler + Send>,
     /// The files the environment provider found or missed during runs
     /// (name, field, value, hash), merged into `files`/`absent`/`reads`
     /// before the environment is set again (`Graph::provide`).
@@ -1406,7 +1411,7 @@ impl Graph {
             cuts: Vec::new(),
             wkeys_guess: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
-            sched: phitex_defuse::Greedy::default(),
+            sched: Box::new(phitex_defuse::Greedy::default()),
             eval_errors: Vec::new(),
             provided: Arc::default(),
             inputs_read: Vec::new(),
@@ -1769,7 +1774,7 @@ impl Graph {
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
-            let r = match self.eng.evaluate_absorbing(&mut self.sched, &mut ex, edits) {
+            let r = match self.eng.evaluate_absorbing(&mut *self.sched, &mut ex, edits) {
                 Ok(r) => r,
                 Err(e) => {
                     // the build ends here; the error is a diagnostic

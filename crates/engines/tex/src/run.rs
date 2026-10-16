@@ -2466,7 +2466,12 @@ impl<'c, 'a> Run<'c, 'a> {
     /// (`Ctx::define_in_scope`, `Ctx::define_in_scope_at`).
     pub(crate) fn can_leave_scope(&self) -> bool {
         let op = self.cx.op();
-        (op == self.ops.exec || op == self.ops.resume)
+        // (a document's runs only: a format's or INITEX text's run leaving
+        // frames gives a wrong value after their close, catrestore's
+        // `\show:` after `\endgroup` in the node continuing the closer;
+        // not yet understood, the engine's own semantics checked right)
+        self.doc
+            && (op == self.ops.exec || op == self.ops.resume)
             && !self.nest.is_empty()
             && self.nest.len() < usize::from(u8::MAX - 2)
             && self.conds.is_empty()
@@ -2526,13 +2531,15 @@ impl<'c, 'a> Run<'c, 'a> {
             .any(|p| word.starts_with(p))
     }
 
-    /// Whether a document run closed the engine scope it ran in, with
-    /// nothing of its own open but conditionals: it ends after that
-    /// command (`Effect::Close`, its reads and definitions inside the
-    /// scope), and what it has left of its input runs outside it as the
-    /// following nodes, the conditionals carried ([`Run::leftover`]).
+    /// Whether the run closed the engine scope it ran in, with nothing
+    /// of its own open but conditionals: it ends after that command
+    /// (`Effect::Close`, its reads and definitions inside the scope), and
+    /// what it has left of its input runs outside it as the following
+    /// nodes, the conditionals carried ([`Run::leftover`]). (Any run: a
+    /// run going on past the close would read on with its own bindings
+    /// of the closed scope, §282 not done.)
     fn closed_scope(&self) -> bool {
-        self.doc && self.effect == Effect::Close && self.nest.is_empty()
+        self.effect == Effect::Close && self.nest.is_empty()
     }
 
     /// Whether the run has something open that must close in this run:
