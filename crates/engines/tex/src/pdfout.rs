@@ -1435,11 +1435,19 @@ impl Operation for Place {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
+    /// No pieces' units (`crate::pages::no_units`): the scan steps after
+    /// it do not wait for it.
+    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(crate::pages::no_units(v))
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         let o = ops(&self.0);
-        run_node_parking(cx, o, true, |r| place_node(r, &args))
+        run_node_parking(cx, o, true, |r| {
+            crate::pages::give_no_units(r);
+            place_node(r, &args)
+        })
     }
 }
 

@@ -308,12 +308,7 @@ impl Operation for Exec {
     /// begins the sibling's lines too: its run refutes this, and the
     /// readers after it run again.)
     fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        // (and one piece for the scan steps' windows, `crate::pages::NPIECES`:
-        // its run contributes it with its profile, or nothing)
-        Some(vec![
-            (v.field("lines"), crate::run::text_lines(v, args)),
-            (v.field(crate::pages::NPIECES), v.int(1)),
-        ])
+        Some(vec![(v.field("lines"), crate::run::text_lines(v, args))])
     }
     /// No scope effect where the text says the command opens and closes
     /// nothing ([`crate::hints`]); otherwise known when it runs (the

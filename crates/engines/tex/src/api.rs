@@ -4438,10 +4438,6 @@ fn declare_fields(eng: &mut Engine) {
         decl_trace(eng, f, none);
         eng.declare_loopback(f, none);
     }
-    {
-        let fld = eng.values().field(crate::pages::NPIECES);
-        eng.declare_accumulator(fld, Arc::new(SumMonoid));
-    }
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));

@@ -122,18 +122,21 @@ pub(crate) const SCAN: &str = "scan:state";
 /// continuation).
 pub(crate) const BREAKS: &str = "breaks";
 
-/// The pieces that put items on the main list: 1 per piece with its
-/// [`crate::vprof::VPROF`] unit, and 1 statically per command node
-/// before it runs (`Exec::static_contribs`): a scan step whose window
-/// holds fewer units than this waits for the pieces still to run.
-pub(crate) const NPIECES: &str = "npieces";
+/// The page nodes' declared contributions: none to the pieces' units
+/// ([`crate::vprof::VPROF`], [`PITEMS`]), so a scan step's read of a
+/// window, and its read hint's gate, do not wait for a scan step, a
+/// finisher or a page's placement still to run, only for the pieces.
+pub(crate) fn no_units(v: &Values) -> Vec<(Field, ValueId)> {
+    vec![(v.field(crate::vprof::VPROF), ValueId::NIL), (v.field(PITEMS), ValueId::NIL)]
+}
 
-/// No node defines it: every piece may (its hint names it), so a scan
-/// step's read of it as a sequence ([`Ctx::prev_contribution`]) waits
-/// until no piece before the step in its scope is in work. A range of
-/// profiles does not wait for a command node not run yet (its declared
-/// contributions stand in for its run's, `Exec::static_contribs`).
-pub(crate) const BARRIER: &str = "pages:pieces";
+/// [`no_units`] as a run gives them (a run contributing otherwise than
+/// its text declared runs the windows' readers again).
+pub(crate) fn give_no_units(r: &mut Run<'_, '_>) {
+    for (f, x) in no_units(r.v) {
+        r.contribs.push((f, x));
+    }
+}
 
 /// Defined by a `\shipout`: the mark that a page shipped before.
 pub(crate) const SHIPPED: &str = "pages:shipped";
@@ -150,9 +153,8 @@ pub(crate) fn is_page_field(name: &str) -> bool {
 /// The fields a piece with items on the main list may define for the
 /// pages (its hint names them, `crate::hints`): its main list's tail,
 /// the shipped mark, and where its own run finds a page finishing inside
-/// it, the cut's continuation; the pieces' barrier ([`BARRIER`]) is
-/// never defined.
-pub(crate) const PAGE_FIELDS: [&str; 4] = [crate::build::VTAIL, SHIPPED, RESUME, BARRIER];
+/// it, the cut's continuation.
+pub(crate) const PAGE_FIELDS: [&str; 3] = [crate::build::VTAIL, SHIPPED, RESUME];
 
 /// What a run had done when it passed a candidate: at its end, a page
 /// finishing at its last candidate finishes at the end of the piece iff
@@ -857,16 +859,14 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// The piece's units: its vertical profile ([`crate::vprof::VPROF`],
-    /// with one [`NPIECES`]) and its items ([`PITEMS`]), at its
-    /// position.
+    /// The piece's units: its vertical profile ([`crate::vprof::VPROF`])
+    /// and its items ([`PITEMS`]), at its position.
     fn contribute_units(&mut self, raw: &[ValueId], last: Option<u32>, reads: ValueId, defs: ValueId, locals: Vec<ValueId>) {
         let v = self.v;
         let ints = crate::vprof::encode(v, raw);
         crate::vprof::count_unit(&ints);
         let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         self.contribute(crate::vprof::VPROF, v.seq_unit(crate::vprof::unit(v, pid, &ints)));
-        self.contribute(NPIECES, v.int(1));
         let it = v.list(vec![v.int(pid), v.int(last.map_or(-1, i64::from)), v.list(raw.to_vec()), reads, defs, v.list(locals)]);
         self.contribute(PITEMS, v.seq_unit(it));
     }
@@ -1190,8 +1190,6 @@ impl Run<'_, '_> {
         let (reads, defs) = self.check_data(last);
         self.pin_reaching_page_params(&mut raw)?;
         self.resolve_page_params(&mut raw)?;
-        // (the pieces before it run first: their items are in the range)
-        self.cx.prev_contribution(v.field(BARRIER))?;
         let s = ScanIn::decode(v, self.eng_read(v.field(SCAN))?);
         let units = v.seq_to_vec(self.cx.acc_range(v.field(PITEMS), s.anchor)?);
         let dead = if [&s.material, &raw].iter().any(|r| has_end(v, r)) || units.iter().any(|&u| has_end(v, &unit_items(v, u))) {
@@ -2354,10 +2352,9 @@ impl Operation for Finish {
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
-    /// Never the pieces' barrier ([`BARRIER`]): a scan step does not
-    /// wait for a finisher.
-    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
-        f != v.field(BARRIER)
+    /// No pieces' units ([`no_units`]).
+    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(no_units(v))
     }
     /// What the last finisher running the same routine defined, with
     /// its values: the text after this one runs on them, and runs again
@@ -2435,6 +2432,7 @@ impl Operation for Finish {
                 r.fire_page(a(1))?;
             }
             r.run_all()?;
+            give_no_units(r);
             let args = r.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
             let olds = r.fin_olds()?;
             r.check_cut(&args)?;
@@ -2725,13 +2723,13 @@ impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
 /// piece (the step of that piece), or -2, after a finisher (the scan's
 /// continuation).
 ///
-/// - A piece's step waits for the pieces before it ([`BARRIER`]), reads
-///   the scan state ([`SCAN`]) and the profiles of the pieces after the
-///   state's anchor up to its own (the [`crate::vprof::VPROF`] units of
-///   that window; [`NPIECES`] tells a window missing a piece still to
-///   run, which is not scanned: the step runs again when the unit
-///   comes), and runs the builder over the material the page began
-///   with and the units. A step that fires no page defines nothing: the
+/// - A piece's step is held until the pieces before it have run (its
+///   read hint names the profiles, [`crate::vprof::VPROF`]: the engine
+///   holds it while a contributor before it is in work; the page nodes
+///   declare they contribute none, [`no_units`]), reads the scan state
+///   ([`SCAN`]) and the profiles of the pieces after the state's anchor
+///   up to its own (the units of that window), and runs the builder
+///   over the material the page began with and the units. A step that fires no page defines nothing: the
 ///   scan's state has one version per page, not per piece. Where a page
 ///   fires in its own piece, the step reads the window's items
 ///   ([`PITEMS`]), builds the page from them as TeX does (the same
@@ -2759,16 +2757,18 @@ impl Operation for Scan {
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
         MayDefine::Names(vec![v.field(SCAN), v.field(BREAKS), v.field(FIRE), v.field(CONT)])
     }
+    /// A step is held until the pieces before it have run (the profiles,
+    /// an accumulator: the engine's gate waits for every contributor
+    /// before it in work) and the scan state is there.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         if args.first().is_some_and(|&x| int_of(v, x) == -2) {
             return Some(vec![v.field(BREAKS), v.field(CONT)]);
         }
-        Some(vec![v.field(SCAN)])
+        Some(vec![v.field(SCAN), v.field(crate::vprof::VPROF)])
     }
-    /// A step contributes nothing: a window holding it does not wait for
-    /// it.
-    fn static_contribs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
-        Some(Vec::new())
+    /// No pieces' units: a window holding a step does not wait for it.
+    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(no_units(v))
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
@@ -2868,6 +2868,7 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     fn scan_node(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
+        give_no_units(self);
         let placed = if args.first().is_some_and(|&x| int_of(v, x) == -2) {
             self.scan_cont()?
         } else {
@@ -2890,24 +2891,9 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     fn scan_step(&mut self) -> R<Placed> {
         let v = self.v;
-        // (the pieces before the step run first: their profiles are in
-        // the window)
-        self.cx.prev_contribution(v.field(BARRIER))?;
         let s = ScanIn::decode(v, self.eng_read(v.field(SCAN))?);
         let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
-        let n = self.cx.acc_range(v.field(NPIECES), s.anchor)?;
-        let expected = usize::try_from(v.as_int(n).unwrap_or(0)).unwrap_or(0);
         let trace = crate::exec::env_flag!("PHITEX_SCAN_TRACE");
-        if units.len() < expected {
-            if trace {
-                eprintln!(
-                    "scan {}: window holds {} units of {expected}: pieces still to run",
-                    self.cx.node().raw(),
-                    units.len()
-                );
-            }
-            return Ok(Placed::Nothing);
-        }
         if units.is_empty() {
             return Ok(Placed::Nothing);
         }
