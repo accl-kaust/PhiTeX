@@ -1037,7 +1037,7 @@ impl Run<'_, '_> {
             defs.extend(self.locals_unlike_at(m));
             let defs: Vec<Field> = defs.into_iter().map(|l| self.loc_field(l)).collect();
             for f in defs {
-                if t.reads.contains(&f) && !self.same_as_at(m, f)? {
+                if t.routine_reads(f) && !self.same_as_at(m, f)? {
                     if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") {
                         eprintln!("  own fold {}: defines {}", self.cx.node().raw(), str_of(v, f.0));
                     }
@@ -1045,7 +1045,7 @@ impl Run<'_, '_> {
                 }
             }
             for f in self.streams_since(m.contribs) {
-                if t.reads.contains(&f) {
+                if t.routine_reads(f) {
                     if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_OWNFOLD_SHOW") {
                         eprintln!("  own fold {}: writes {}", self.cx.node().raw(), str_of(v, f.0));
                     }
@@ -1066,7 +1066,7 @@ impl Run<'_, '_> {
                 .fin_touch
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            t.reads.iter().copied().collect()
+            t.reads.keys().copied().filter(|&f| t.routine_reads(f)).collect()
         };
         let v = self.v;
         let mut out = Vec::new();
@@ -2285,11 +2285,27 @@ impl Run<'_, '_> {
 /// page is shipped from here.
 pub(crate) struct Finish(pub Shared);
 
-/// What the finishers of a build read and defined (`Ops::fin_touch`).
+/// What the finishers of a build read and defined (`Ops::fin_touch`):
+/// per field read, the finisher runs that read it, of `runs`.
 #[derive(Default)]
 pub(crate) struct FinTouch {
-    pub reads: phitex_defuse::FxHashSet<Field>,
+    pub reads: phitex_defuse::FxHashMap<Field, u32>,
+    pub runs: u32,
     pub defs: phitex_defuse::FxHashSet<Field>,
+}
+
+impl FinTouch {
+    /// Whether most finisher runs so far read `f`: the routine a page
+    /// finishing inside a piece will run reads it, as far as the
+    /// finishers tell. A field only some routines read (a title page's,
+    /// an index's first page) is left to the finisher's check where such
+    /// a page does finish inside a piece ([`Run::check_cut`]): the
+    /// own-fold decision is a prediction, and a piece folding in its own
+    /// run reads the page state and runs again with every change of the
+    /// page above it.
+    pub(crate) fn routine_reads(&self, f: Field) -> bool {
+        self.reads.get(&f).is_some_and(|&n| 2 * n > self.runs)
+    }
 }
 
 /// What the last two finishers running one routine defined
@@ -2627,7 +2643,12 @@ impl Run<'_, '_> {
                 .fin_touch
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            t.reads.extend(reads);
+            reads.sort_unstable_by_key(|f| f.0.raw());
+            reads.dedup();
+            t.runs += 1;
+            for f in reads {
+                *t.reads.entry(f).or_default() += 1;
+            }
             t.defs.extend(gdefs);
         }
         let Some(&t) = args.get(9) else { return };
