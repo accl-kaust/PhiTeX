@@ -1373,6 +1373,13 @@ struct Graph {
     pdf_exact: Option<String>,
     /// Why the exact PDF writer folds the pages (`pdf:fold`), if it does.
     pdf_fold: Option<String>,
+    /// Whether the document's nodes hold its canonical text
+    /// ([`canonical_text`]): `doc:canon` in the environment, read by a
+    /// run that meets a comment's mark (`Run::canon_broken`).
+    canon: bool,
+    /// A run met a comment's mark as text (`needs` `rawtext`): the
+    /// document's own text is to be applied in place of the canonical.
+    raw_needed: bool,
     /// The `wdef:<field>` loop-backs declared: the fields the read-back
     /// of a job-written file defines.
     wdefs: Vec<String>,
@@ -1429,6 +1436,7 @@ impl Graph {
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
+        let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         // (handles held outside the graph: pinned, or a value sweep
         // frees them while a run still defines through them)
         for f in fields.handles() {
@@ -1450,6 +1458,7 @@ impl Graph {
             fin_defs: Arc::default(),
             fin_touch: Arc::default(),
             not_virtual: Arc::default(),
+            class_proj,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -1468,6 +1477,8 @@ impl Graph {
             threads: crate::exec::threads(threads),
             pdf_exact: None,
             pdf_fold: None,
+            canon: false,
+            raw_needed: false,
             wdefs: Vec::new(),
             cuts: Vec::new(),
             wkeys_guess: Vec::new(),
@@ -1780,6 +1791,7 @@ impl Graph {
         if self.pdf_fold.is_some() {
             env.push((v.field("pdf:fold"), v.int(1)));
         }
+        env.push((v.field("doc:canon"), v.int(i64::from(self.canon))));
         for &(pid, k) in &self.cuts {
             let name = format!("cut:{}", u64::from_ne_bytes(pid.to_ne_bytes()));
             env.push((v.field(&name), v.int(k)));
@@ -2087,6 +2099,12 @@ impl Graph {
                 }
                 // the exact writer's pages cannot be written apart:
                 // the build again, with the pages in the `pdf:state` fold
+                // a comment's mark read as text: the document's own text
+                // in place of the canonical, applied by the build
+                // ([`Build::settle`])
+                if kind == "rawtext" && self.canon {
+                    self.raw_needed = true;
+                }
                 if kind == "pdf:fold" && self.pdf_fold.is_none() {
                     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                         eprintln!("pdf: the pages folded again: {why}");
@@ -2844,8 +2862,11 @@ pub struct Build {
     /// Whether the job's text is a document's ([`is_doc`]).
     doc: bool,
     /// The document's text last applied (`edit_file` applies it again
-    /// when a file sliced into it changed).
+    /// when a file sliced into it changed): its canonical text
+    /// ([`canonical_text`]) while `g.canon`.
     text: String,
+    /// The document's own text last sent (`text` is made from it).
+    raw: String,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
 }

@@ -800,6 +800,36 @@ pub(crate) fn show_def(v: &Values, x: ValueId) -> String {
     s
 }
 
+/// The class of a meaning as a lookup that only stores its token needs
+/// it (spec-redesign §8, class reads; `\edef`'s expansion, §478): the
+/// command code of an unexpandable meaning, `\relax`'s for a
+/// `\protected` macro that is not `\outer` (e-TeX keeps it as its
+/// token), -1 where the meaning is needed in full (expandable, outer,
+/// undefined). A pure projection for the engine
+/// (`phitex_defuse::Engine::register_projection`): a redefinition with
+/// the same class leaves a class reader standing.
+pub(crate) fn class_projection(x: ValueId, v: &Values) -> ValueId {
+    let m = Mean::decode(v, Some(x));
+    let c = match &m {
+        Mean::Macro(mm) => {
+            if mm.flags & crate::etex::PROTECTED != 0 && mm.flags & 2 == 0 {
+                i64::from(cmd::RELAX)
+            } else {
+                -1
+            }
+        }
+        _ => {
+            let (c, _) = m.cmd_chr();
+            if c <= cmd::MAX_COMMAND {
+                i64::from(c)
+            } else {
+                -1
+            }
+        }
+    };
+    v.int(c)
+}
+
 /// A meaning (§222): what a control sequence or active character is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Mean {

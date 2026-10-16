@@ -846,9 +846,17 @@ impl Run<'_, '_> {
         let mut unbalance = 1;
         loop {
             if xpand {
-                // §478
+                // §478 (a token stored as it is needs only its meaning's
+                // class: `Run::class_lookup`; not inside an alignment,
+                // whose tab marks look at the meaning, nor while a line
+                // is interpreted or a load recorded, which read meanings
+                // in full)
+                let class = self.aopen == 0 && self.interp.is_none() && !self.rec_load;
                 loop {
-                    self.get_next_or_end()?;
+                    self.class_reads = class;
+                    let got = self.get_next_or_end();
+                    self.class_reads = false;
+                    got?;
                     if self.cur.cmd <= cmd::MAX_COMMAND || crate::etex::protect(self)? {
                         break;
                     }

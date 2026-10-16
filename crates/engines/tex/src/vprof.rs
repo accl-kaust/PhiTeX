@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use phitex_defuse::{ValueId, Values};
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{BoxKind, BoxNode, Insert, KernKind, List, Node, Rule, WhatsitSize};
-use phitex_typeset::page::{Fired, InsertClass, Outcome, PageBuilder, PageIns, PageParams};
+use phitex_typeset::page::{InsertClass, Outcome, PageBuilder, PageParams};
 
 use crate::build::FoldState;
 use crate::nodes::{self, Side};
@@ -422,42 +422,11 @@ fn is_marker(x: &PItem) -> bool {
 
 // --------------------------------------------------------------- scan
 
-/// The decisions of a page fired (§1012–§1022), as both builders give
-/// them.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Decision {
-    pub best: usize,
-    pub least_cost: i32,
-    pub best_size: i32,
-    pub output_penalty: i32,
-    pub mark_at: Vec<usize>,
-    pub ins_records: Vec<PageIns>,
-    pub inserts: Vec<(u16, usize)>,
-    pub held: usize,
-    pub carried: usize,
-}
-
-impl Decision {
-    pub(crate) fn of(f: &Fired, pb: &PageBuilder, carried: usize) -> Decision {
-        Decision {
-            best: f.best,
-            least_cost: pb.least_cost,
-            best_size: pb.best_size,
-            output_penalty: f.output_penalty,
-            mark_at: f.mark_at.clone(),
-            ins_records: f.ins_records.clone(),
-            inserts: f.inserts.iter().map(|(n, l)| (*n, l.len())).collect(),
-            held: f.held_inserts.len(),
-            carried,
-        }
-    }
-}
-
-/// A page fired by the scan: at candidate `k`, the decisions, the
-/// profile items after the candidate.
+/// A page fired by the scan: at candidate `k`, its `\outputpenalty`,
+/// the profile items after the candidate.
 pub(crate) struct ScanFire {
     pub k: u32,
-    pub decision: Decision,
+    pub output_penalty: i32,
     pub rest: usize,
 }
 
@@ -610,11 +579,9 @@ impl ScanState {
             saving_vdiscards: false,
         });
         let mut queue: VecDeque<PItem> = std::mem::take(buf).into();
-        let mut end_seen = false;
         while let Some(x) = queue.pop_front() {
             let p = match x {
                 PItem::End(ref ys) => {
-                    end_seen = true;
                     if self.pb.page.is_empty() && queue.is_empty() && dead == 0 {
                         continue;
                     }
@@ -654,8 +621,6 @@ impl ScanState {
                     break;
                 }
                 Outcome::Fire(f) => {
-                    let carried = f.contributions.len() + queue.len() + usize::from(end_seen);
-                    let decision = Decision::of(&f, &self.pb, carried);
                     self.pb = PageBuilder::new();
                     self.pb.measure_only = true;
                     self.j += 1;
@@ -666,7 +631,7 @@ impl ScanState {
                     buf.clear();
                     return Some(ScanFire {
                         k,
-                        decision,
+                        output_penalty: f.output_penalty,
                         rest: 0,
                     });
                 }
@@ -708,29 +673,6 @@ fn size_report() -> String {
         n * 8 / u.max(1),
         n * 8 / l.max(1)
     )
-}
-
-/// The first decision two builders differ in, for a diagnostic.
-pub(crate) fn first_decision_diff(a: &Decision, b: &Decision) -> String {
-    macro_rules! cmp {
-        ($($f:ident),*) => {
-            $(if a.$f != b.$f {
-                return format!("{}: scan {:?} real {:?}", stringify!($f), a.$f, b.$f);
-            })*
-        };
-    }
-    cmp!(
-        best,
-        least_cost,
-        best_size,
-        output_penalty,
-        mark_at,
-        ins_records,
-        inserts,
-        held,
-        carried
-    );
-    String::from("decision")
 }
 
 /// Whether profile items hold an `\end` marker (the scan then reads

@@ -172,6 +172,10 @@ pub(crate) struct Ops {
     /// (`Run::needs_own_fold`), instead of a finisher's check and a
     /// round (`crate::pages`).
     pub fin_touch: std::sync::Arc<std::sync::Mutex<crate::pages::FinTouch>>,
+    /// The class projection of meanings ([`crate::val::class_projection`],
+    /// registered with the engine): a lookup that only stores its token
+    /// reads the name's class, not its meaning ([`Run::class_lookup`]).
+    pub class_proj: phitex_defuse::ProjId,
     /// The names of fonts found not virtual (`pdfout::do_vf`): a memo
     /// of the build, not a field, so the finisher that found out does
     /// not define something every later finisher reads (an edit
@@ -434,6 +438,14 @@ pub(crate) struct Run<'c, 'a> {
     /// Fonts decoded in this run, with the table's change generation
     /// they were decoded at ([`Run::font_entry`]).
     pub font_memo: phitex_defuse::FxHashMap<u32, (u64, Option<std::rc::Rc<crate::fonts::Entry>>)>,
+    /// Set while a token is fetched only to be stored (`\edef`'s and
+    /// `\write`'s expansion, §478): an unexpandable meaning not read
+    /// in full is read by its class ([`Run::class_lookup`]).
+    pub class_reads: bool,
+    /// The meanings this run read by class only, with their command
+    /// codes (the engine holds the projected reads; this run's own
+    /// lookups and the cut checks need them).
+    pub class_memo: phitex_defuse::FxHashMap<Loc, u8>,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -615,6 +627,8 @@ impl<'c, 'a> Run<'c, 'a> {
             code_cache: Box::new([[i32::MIN; 256]; 5]),
             code_gen: u64::MAX,
             font_memo: phitex_defuse::FxHashMap::default(),
+            class_reads: false,
+            class_memo: phitex_defuse::FxHashMap::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -2229,7 +2243,52 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        if self.class_reads
+            && let Some(c) = self.class_lookup(tok)?
+        {
+            self.cur = Cur { tok, cmd: c, chr: 0 };
+            return Ok(());
+        }
         self.set_cur_cs_slow(tok)
+    }
+
+    /// A class read (spec-redesign §8): the command code of `tok`'s
+    /// meaning when only its class is needed (an unexpandable meaning
+    /// or a `\protected` macro, which a storing lookup keeps as its
+    /// token), read through the engine's projection
+    /// ([`crate::val::class_projection`]): a redefinition within the
+    /// class (another `\chardef` value, another protected body) leaves
+    /// this run standing. `None` where the meaning is needed in full
+    /// (expandable, undefined, this run's own binding).
+    #[inline(never)]
+    fn class_lookup(&mut self, tok: Tok) -> R<Option<u8>> {
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(None);
+        };
+        if self.st.is_loaded(l) {
+            return Ok(None);
+        }
+        if let Some(&c) = self.class_memo.get(&l) {
+            return Ok(Some(c));
+        }
+        let f = self.loc_field(l);
+        let Some(x) = self.cx.use_field_proj(f, self.ops.class_proj)? else {
+            return Ok(None);
+        };
+        let Ok(c) = u8::try_from(int_of(self.v, x)) else {
+            return Ok(None);
+        };
+        self.class_memo.insert(l, c);
+        Ok(Some(c))
+    }
+
+    /// The fields this run read by class only ([`Run::class_lookup`]):
+    /// for the cut checks, which take them as read (a routine's global
+    /// definition of one is taken to change what the run saw).
+    pub(crate) fn class_read_fields(&self) -> Vec<Field> {
+        let mut ls: Vec<Loc> = self.class_memo.keys().copied().collect();
+        ls.sort_unstable();
+        ls.into_iter().filter_map(|l| self.st.field(l)).collect()
     }
 
     #[inline(never)]
