@@ -135,10 +135,8 @@ pub(crate) fn record_check(
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
-    /// A piece's fold, a page's finisher and the rest of a cut piece
-    /// (`crate::pages`).
-    pub fold: OpId,
-    /// A scan step over the pieces' profiles (`crate::pages::Scan`).
+    /// A scan step over the pieces' profiles, a page's finisher and the
+    /// rest of a cut piece (`crate::pages`).
     pub scan: OpId,
     pub finish: OpId,
     pub resume: OpId,
@@ -162,8 +160,6 @@ pub(crate) struct Ops {
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::pkgrec::LoadHints>>>>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
-    /// The page states folds hand on (`crate::pages::PageStates`).
-    pub page_states: std::sync::Arc<crate::pages::PageStates>,
     /// What the last two finishers running each output routine defined,
     /// by the routine's hint value (the earlier run first): the next
     /// finisher's declared names, and its predicted definitions where

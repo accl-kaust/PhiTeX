@@ -1354,7 +1354,6 @@ impl Graph {
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
-        let fold = eng.register(Arc::new(crate::pages::Fold(shared.clone())));
         let scan = eng.register(Arc::new(crate::pages::Scan(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
@@ -1371,7 +1370,6 @@ impl Graph {
         let ops = Ops {
             exec,
             put,
-            fold,
             scan,
             finish,
             resume,
@@ -1382,7 +1380,6 @@ impl Graph {
             pkg_log: Arc::new(Mutex::new(Vec::new())),
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
-            page_states: Arc::default(),
             fin_defs: Arc::default(),
             fin_touch: Arc::default(),
             not_virtual: Arc::default(),
@@ -4426,6 +4423,7 @@ fn declare_fields(eng: &mut Engine) {
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
         crate::vprof::VPROF,
+        crate::pages::PITEMS,
     ] {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));

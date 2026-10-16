@@ -634,7 +634,7 @@ fn latex_paragraph_nodes() {
     let (mut b, regions) = cold_nodes("paras30", &dir, &src);
     assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
     let new = quack(&src, "Paragraph 17 of the text: the quick ");
-    let before = (b.pages(), common::runs_of(&b, "fold"));
+    let before = (b.pages(), common::runs_of(&b, "scan"));
     b.edit(&new);
     let cold = common::build(pdf_opts("paras30", &dir), Some(&prelude(true)), &new);
     edit_check("paras30", &b, &cold, (&before.0, before.1));
@@ -668,7 +668,7 @@ fn latex_environments() {
         "{own} paragraph nodes for {want} paragraphs outside a box, {taken} paragraphs taken by another node's run"
     );
     let new = quack(&src, "Item 3 of the list: the quick ");
-    let before = (b.pages(), common::runs_of(&b, "fold"));
+    let before = (b.pages(), common::runs_of(&b, "scan"));
     b.edit(&new);
     let cold = common::build(pdf_opts("envs", &dir), Some(&prelude(true)), &new);
     edit_check("envs", &b, &cold, (&before.0, before.1));
@@ -840,7 +840,7 @@ fn latex_input_include() {
     assert!(regions >= 10, "{regions} document nodes: chap1 not sliced");
     let chap1 = common::read(&dir.join("chap1.tex"));
     let new = quack(&chap1, "Paragraph 5 of chapter one: the quick ");
-    let before = (b.pages(), common::runs_of(&b, "fold"));
+    let before = (b.pages(), common::runs_of(&b, "scan"));
     b.edit_file("chap1.tex", Some(new.as_bytes()));
     std::fs::write(dir.join("chap1.tex"), &new).expect("write");
     let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
@@ -858,7 +858,7 @@ fn latex_one_paragraph() {
     let src = common::read(&dir.join("red02.tex"));
     let (mut b, _) = cold_nodes("red02", &dir, &src);
     let new = src.replace("Hello", "Hallo");
-    let before = (b.pages(), common::runs_of(&b, "fold"));
+    let before = (b.pages(), common::runs_of(&b, "scan"));
     b.edit(&new);
     let cold = common::build(pdf_opts("red02", &dir), Some(&prelude(true)), &new);
     edit_check("red02", &b, &cold, (&before.0, before.1));
@@ -874,7 +874,7 @@ fn latex_heading_paragraphs() {
     let src = common::read(&dir.join("secpars.tex"));
     let (mut b, _) = cold_nodes("secpars", &dir, &src);
     let new = quack(&src, "The first paragraph after the heading: the ");
-    let before = (b.pages(), common::runs_of(&b, "fold"));
+    let before = (b.pages(), common::runs_of(&b, "scan"));
     b.edit(&new);
     let cold = common::build(pdf_opts("secpars", &dir), Some(&prelude(true)), &new);
     edit_check("secpars", &b, &cold, (&before.0, before.1));
@@ -917,7 +917,7 @@ fn latex_utf8_edit() {
     let bytes = |w: &str| -> String { w.bytes().map(char::from).collect() };
     let new = src.replacen(&bytes("crème"), &bytes("crêpe"), 1);
     assert_ne!(new, src, "the edited word is in the text");
-    let before = (b.pages(), common::runs_of(&b, "fold"));
+    let before = (b.pages(), common::runs_of(&b, "scan"));
     b.edit(&new);
     let cold = common::build(pdf_opts("utf8", &dir), Some(&prelude(true)), &new);
     edit_check("utf8", &b, &cold, (&before.0, before.1));

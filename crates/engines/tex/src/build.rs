@@ -2652,6 +2652,18 @@ pub(crate) fn vtail_value(v: &Values, prev: Option<ValueId>, items: &[ValueId]) 
     vtail_encode(v, &out, &st)
 }
 
+/// A tail a piece's items cannot leave alone unread if they depend on
+/// it: `n` + 1 items of its own, a previous depth no box has, its
+/// `build_page` calls `n` + 1 items back ([`vtail_value`] onto it equal
+/// to onto the document's start: the items' tail is theirs alone, the
+/// space factor apart, which no reader of the main vertical list reads,
+/// §418).
+pub(crate) fn vtail_probe(v: &Values, n: usize) -> ValueId {
+    let k = i64::try_from(n + 1).unwrap_or(i64::MAX);
+    let tail: Vec<ValueId> = (0..k).map(|i| v.list(vec![v.int(-0x5e57), v.int(i)])).collect();
+    v.list(vec![v.list(tail), v.int(1000), v.int(7_654_321), v.int(k)])
+}
+
 fn vtail_encode(v: &Values, out: &[ValueId], st: &FoldState) -> ValueId {
     let keep = st.since_bp + 1;
     let mut tail: Vec<ValueId> = out

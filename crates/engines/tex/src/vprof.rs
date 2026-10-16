@@ -12,10 +12,10 @@
 //! [`ScanState::fold_items`] is the page builder over profiles: the same
 //! [`PageBuilder::contribute`] on reduced nodes (a box with no list),
 //! the box 255 not packaged ([`PageBuilder::measure_only`]); around it
-//! the fold's bookkeeping of [`crate::pages::PageState::fold_items`]
-//! (§679's interline glue from the previous depth, deletions, markers).
-//! With `PHITEX_SCAN_CHECK=1` every fold runs the scan beside the real
-//! builder and compares the decisions ([`check`]).
+//! the bookkeeping of [`crate::pages::PageState::fold_items`] (§679's
+//! interline glue from the previous depth, deletions, markers). The
+//! scan steps (`crate::pages::Scan`) run it; where a page fires, the
+//! step builds the page from the items and compares the decisions.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use phitex_defuse::{ValueId, Values};
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{BoxKind, BoxNode, Insert, KernKind, List, Node, Rule, WhatsitSize};
-use phitex_typeset::page::{Contents, Fired, InsertClass, Outcome, PageBuilder, PageIns, PageParams};
+use phitex_typeset::page::{Fired, InsertClass, Outcome, PageBuilder, PageIns, PageParams};
 
 use crate::build::FoldState;
 use crate::nodes::{self, Side};
@@ -55,10 +55,6 @@ const P_END: i64 = 19; // len, items
 const P_ABORT: i64 = 20;
 const P_SF: i64 = 21; // kind, n
 const P_OPAQUE: i64 = 22; // tag
-
-pub(crate) fn checking() -> bool {
-    crate::exec::env_flag!("PHITEX_SCAN_CHECK")
-}
 
 fn put_glue(out: &mut Vec<i64>, g: &Glue) {
     out.extend([
@@ -99,18 +95,6 @@ pub(crate) fn unit_parts(v: &Values, x: ValueId) -> (i64, Vec<i64>) {
         .map(|&p| list_of(v, p).into_iter().map(|y| int_of(v, y)).collect())
         .unwrap_or_default();
     (piece, ints)
-}
-
-/// The page parameters as a `T_PAGE_PARAMS` marker (the real fold's
-/// form, [`crate::pages::params_of`]).
-pub(crate) fn params_marker(v: &Values, p: &PageParams) -> ValueId {
-    v.list(vec![
-        v.int(nodes::T_PAGE_PARAMS),
-        v.int(i64::from(p.vsize)),
-        v.int(i64::from(p.max_depth)),
-        crate::val::glue_value(v, &p.top_skip),
-        v.int(i64::from(p.holding_inserts)),
-    ])
 }
 
 fn i32_at(v: &Values, x: ValueId, k: usize) -> i32 {
@@ -425,16 +409,6 @@ pub(crate) fn decode_value(v: &Values, x: ValueId) -> Vec<PItem> {
     decode(&unit_parts(v, x).1)
 }
 
-/// A node reduced to what the builder reads.
-fn reduce(n: &Node) -> Node {
-    let mut xs = Vec::new();
-    push_node(n, &mut xs);
-    match decode(&xs).pop() {
-        Some(PItem::Node(n)) => n,
-        _ => Node::Whatsit(0, None),
-    }
-}
-
 fn is_marker(x: &PItem) -> bool {
     match x {
         PItem::Params(_) | PItem::SetPage(..) | PItem::InsParams(..) => true,
@@ -503,85 +477,7 @@ pub(crate) trait Reaching {
     fn class(&mut self, n: u16) -> InsertClass;
 }
 
-/// The comparable scalars of a builder state.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Snapshot {
-    j: i64,
-    contents: u8,
-    so_far: [i32; 8],
-    max_depth: i32,
-    best_break: Option<usize>,
-    least_cost: i32,
-    best_size: i32,
-    last_glue: Option<Glue>,
-    last_penalty: i32,
-    last_kern: i32,
-    last_node_type: i32,
-    insert_penalties: i32,
-    ins: Vec<PageIns>,
-    page: usize,
-    discards: usize,
-    fold: FoldState,
-    params: Option<PageParams>,
-    pending: usize,
-}
-
-pub(crate) fn snapshot(
-    j: i64,
-    pb: &PageBuilder,
-    fold: FoldState,
-    params: Option<PageParams>,
-    pending: usize,
-) -> Snapshot {
-    Snapshot {
-        j,
-        contents: match pb.contents {
-            Contents::Empty => 0,
-            Contents::InsertsOnly => 1,
-            Contents::BoxThere => 2,
-        },
-        so_far: pb.so_far,
-        max_depth: pb.max_depth,
-        best_break: pb.best_break,
-        least_cost: pb.least_cost,
-        best_size: pb.best_size,
-        last_glue: pb.last_glue,
-        last_penalty: pb.last_penalty,
-        last_kern: pb.last_kern,
-        last_node_type: pb.last_node_type,
-        insert_penalties: pb.insert_penalties,
-        ins: pb.ins.clone(),
-        page: pb.page.len(),
-        discards: pb.discards.len(),
-        fold,
-        params,
-        pending,
-    }
-}
-
 impl ScanState {
-    /// The scan state of a page state (its page reduced, its pending
-    /// contributions as profile items).
-    pub(crate) fn of(v: &Values, ps: &crate::pages::PageState) -> ScanState {
-        let mut pb = ps.pb.clone();
-        pb.page = pb.page.iter().map(reduce).collect();
-        pb.discards = pb.discards.iter().map(reduce).collect();
-        pb.diags.clear();
-        pb.measure_only = true;
-        ScanState {
-            j: ps.j,
-            normal: ps.normal,
-            pb,
-            fold: ps.fold,
-            params: ps.params.map(|m| crate::pages::params_of(v, m)),
-            pending: decode(&encode(v, &ps.pending)),
-        }
-    }
-
-    pub(crate) fn snapshot(&self) -> Snapshot {
-        snapshot(self.j, &self.pb, self.fold, self.params, self.pending.len())
-    }
-
     /// The state just after a page fired (§1017: an empty page, the
     /// contributions all carried), as the scan state defines it.
     pub(crate) fn fresh(j: i64, normal: i64, fold: FoldState, params: Option<PageParams>) -> ScanState {
@@ -769,21 +665,16 @@ impl ScanState {
     }
 }
 
-// -------------------------------------------------------------- check
+// -------------------------------------------------------------- sizes
 
-static FOLDS: AtomicU64 = AtomicU64::new(0);
-static FIRES: AtomicU64 = AtomicU64::new(0);
-static DIFFS: AtomicU64 = AtomicU64::new(0);
 static UNITS: AtomicU64 = AtomicU64::new(0);
 static INTS: AtomicU64 = AtomicU64::new(0);
 static LINES: AtomicU64 = AtomicU64::new(0);
-static SCAN_NS: AtomicU64 = AtomicU64::new(0);
-static SCAN_ITEMS: AtomicU64 = AtomicU64::new(0);
 
 /// A profile contributed: counted for the size report (units, bytes,
 /// boxes appended with interline glue: the lines).
 pub(crate) fn count_unit(ints: &[i64]) {
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") || checking() {
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         let lines = decode(ints)
             .iter()
             .filter(|x| matches!(x, PItem::VBox { .. }))
@@ -807,76 +698,8 @@ fn size_report() -> String {
     )
 }
 
-/// The real fold's outcome, to compare: the page fired (candidate, the
-/// decisions, the raw items after the candidate) or not, and the state
-/// after.
-pub(crate) struct RealOutcome {
-    pub fire: Option<(u32, Decision, usize)>,
-    pub after: Snapshot,
-}
-
-/// Compares the scan over `items` from `scan` with the real fold's
-/// outcome; prints the first difference.
-pub(crate) fn check(
-    node: u64,
-    mut scan: ScanState,
-    items: &[PItem],
-    dead: i64,
-    rd: &mut dyn Reaching,
-    real: &RealOutcome,
-) {
-    FOLDS.fetch_add(1, Relaxed);
-    let j = scan.j;
-    let t0 = std::time::Instant::now();
-    let fire = scan.fold_items(items, dead, rd);
-    SCAN_NS.fetch_add(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0), Relaxed);
-    SCAN_ITEMS.fetch_add(items.len() as u64, Relaxed);
-    let got = fire.as_ref().map(|f| (f.k, f.decision.clone(), f.rest));
-    let mut diff: Option<String> = None;
-    match (&got, &real.fire) {
-        (None, None) => {}
-        (Some(_), None) | (None, Some(_)) => {
-            diff = Some(format!(
-                "fire: scan {:?} real {:?}",
-                got.as_ref().map(|g| g.0),
-                real.fire.as_ref().map(|g| g.0)
-            ));
-        }
-        (Some(a), Some(b)) => {
-            FIRES.fetch_add(1, Relaxed);
-            if a.0 != b.0 {
-                diff = Some(format!("candidate: scan {} real {}", a.0, b.0));
-            } else if a.1 != b.1 {
-                diff = Some(first_decision_diff(&a.1, &b.1));
-            } else if a.2 != b.2 {
-                diff = Some(format!("rest: scan {} real {}", a.2, b.2));
-            }
-        }
-    }
-    if diff.is_none() {
-        let after = scan.snapshot();
-        if after != real.after {
-            diff = Some(format!("state after: scan {after:?} real {:?}", real.after));
-        }
-    }
-    if let Some(d) = diff {
-        let n = DIFFS.fetch_add(1, Relaxed) + 1;
-        eprintln!("scan-check DIFF #{n}: fold node {node}, page {}: {d}", j + 1);
-    }
-    let f = FOLDS.load(Relaxed);
-    if f.is_power_of_two() || f.is_multiple_of(1000) || got.is_some() {
-        eprintln!(
-            "scan-check: folds {f} fires {} diffs {} scan {} items {} us ({})",
-            FIRES.load(Relaxed),
-            DIFFS.load(Relaxed),
-            SCAN_ITEMS.load(Relaxed),
-            SCAN_NS.load(Relaxed) / 1000,
-            size_report()
-        );
-    }
-}
-
-fn first_decision_diff(a: &Decision, b: &Decision) -> String {
+/// The first decision two builders differ in, for a diagnostic.
+pub(crate) fn first_decision_diff(a: &Decision, b: &Decision) -> String {
     macro_rules! cmp {
         ($($f:ident),*) => {
             $(if a.$f != b.$f {
@@ -886,77 +709,6 @@ fn first_decision_diff(a: &Decision, b: &Decision) -> String {
     }
     cmp!(best, least_cost, best_size, output_penalty, mark_at, ins_records, inserts, held, carried);
     String::from("decision")
-}
-
-// ------------------------------------------------- breaks check (S2)
-
-/// `PHITEX_BREAKS_CHECK=1`: the scan steps' fires compared with the
-/// real folds' page by page ([`record_break`]).
-pub(crate) fn breaks_checking() -> bool {
-    crate::exec::env_flag!("PHITEX_BREAKS_CHECK")
-}
-
-/// A page's break as one builder found it: the piece it fired in (its
-/// raw node id; -2 in a continuation), the candidate, the decisions, the
-/// items after the candidate.
-pub(crate) type Break = (i64, u32, Decision, usize);
-
-#[derive(Default)]
-struct Breaks {
-    real: phitex_defuse::FxHashMap<(u64, i64), Break>,
-    scan: phitex_defuse::FxHashMap<(u64, i64), Break>,
-    diff: phitex_defuse::FxHashSet<(u64, i64)>,
-    shown: u64,
-}
-
-static BREAKS: std::sync::Mutex<Option<Breaks>> = std::sync::Mutex::new(None);
-
-/// Page `j`'s break as the real fold (`real`) or the scan found it; the
-/// two compared once both are there (the last of each counts: a run
-/// again replaces its page's entry). Prints the first differences and
-/// the running count.
-pub(crate) fn record_break(v: &Values, real: bool, j: i64, b: Break) {
-    let j = (v.instance(), j);
-    let mut g = BREAKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let s = g.get_or_insert_with(Breaks::default);
-    if real {
-        s.real.insert(j, b);
-    } else {
-        s.scan.insert(j, b);
-    }
-    let (Some(a), Some(r)) = (s.scan.get(&j), s.real.get(&j)) else {
-        return;
-    };
-    let d = if a.0 != r.0 {
-        Some(format!("piece: scan {} real {}", a.0, r.0))
-    } else if a.1 != r.1 {
-        Some(format!("candidate: scan {} real {}", a.1, r.1))
-    } else if a.2 != r.2 {
-        Some(first_decision_diff(&a.2, &r.2))
-    } else if a.3 != r.3 {
-        Some(format!("rest: scan {} real {}", a.3, r.3))
-    } else {
-        None
-    };
-    match d {
-        Some(d) => {
-            s.diff.insert(j);
-            s.shown += 1;
-            if s.shown <= 20 {
-                eprintln!("breaks-check DIFF page {}: {d}", j.1 + 1);
-            }
-        }
-        None => {
-            s.diff.remove(&j);
-        }
-    }
-    let both = s.scan.keys().filter(|k| s.real.contains_key(k)).count();
-    eprintln!(
-        "breaks-check: pages real {} scan {} both {both} differing {}",
-        s.real.len(),
-        s.scan.len(),
-        s.diff.len()
-    );
 }
 
 /// Whether profile items hold an `\end` marker (the scan then reads

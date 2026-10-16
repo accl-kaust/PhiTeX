@@ -146,15 +146,16 @@ pub fn runs_of(b: &Build, op: &str) -> u64 {
 }
 
 /// What an edit may run in the node model, by operation (runs, not
-/// nodes): the touched pieces' `exec` (and one more); the `fold` of
-/// every piece on a touched page (a fold is per piece and chained on
-/// the page: the edited piece's and the ones after it on its page;
-/// pieces per page = the cold build's folds / its pages, rounded up);
+/// nodes): the touched pieces' `exec` (and one more); the `scan` step
+/// of every piece on a touched page (one per piece and one per page
+/// after its finisher: the edited piece's and the ones after it on its
+/// page; steps per page = the cold build's scan runs / its pages,
+/// rounded up);
 /// one `finish` and one `resume` per touched page; a `place` for every
 /// page from the first touched one to the last (in exact mode place
 /// replays the PDF state in order); the end node (`dvi`) once; nothing
 /// of any other operation; and at most 1.1 runs a node.
-/// `cold_folds` and `before` are the cold build's fold runs and page
+/// `cold_folds` and `before` are the cold build's scan runs and page
 /// hashes.
 #[must_use]
 pub fn edit_cost_failures(
@@ -172,7 +173,7 @@ pub fn edit_cost_failures(
         .map_or(0, |&k| (after.len().max(before.len()) - k) as u64);
     let bounds = [
         ("exec", touched + 1),
-        ("fold", per_page * n),
+        ("scan", per_page * n),
         ("finish", n),
         ("resume", n),
         ("place", to_end),
