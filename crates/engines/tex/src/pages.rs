@@ -1007,7 +1007,7 @@ impl Run<'_, '_> {
         let t = touch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if t.reads.is_empty() && t.defs.is_empty() {
+        if t.is_empty() {
             return Ok(false);
         }
         let v = self.v;
@@ -1066,7 +1066,7 @@ impl Run<'_, '_> {
                 .fin_touch
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            t.reads.keys().copied().filter(|&f| t.routine_reads(f)).collect()
+            t.read_fields()
         };
         let v = self.v;
         let mut out = Vec::new();
@@ -2286,25 +2286,50 @@ impl Run<'_, '_> {
 pub(crate) struct Finish(pub Shared);
 
 /// What the finishers of a build read and defined (`Ops::fin_touch`):
-/// per field read, the finisher runs that read it, of `runs`.
+/// per routine (`fin_key`, as `Ops::fin_defs`), its runs so far and per
+/// field the runs that read it; the fields some routine defined anew.
 #[derive(Default)]
 pub(crate) struct FinTouch {
-    pub reads: phitex_defuse::FxHashMap<Field, u32>,
-    pub runs: u32,
+    pub reads: crate::FxHashMap<u64, (u32, phitex_defuse::FxHashMap<Field, u32>)>,
     pub defs: phitex_defuse::FxHashSet<Field>,
 }
 
+/// The share of a routine's runs that must read a field for the
+/// own-fold decision to count it ([`FinTouch::routine_reads`]), as
+/// `READ_SHARE.0 / READ_SHARE.1`.
+const READ_SHARE: (u32, u32) = (1, 2);
+
 impl FinTouch {
-    /// Whether most finisher runs so far read `f`: the routine a page
-    /// finishing inside a piece will run reads it, as far as the
-    /// finishers tell. A field only some routines read (a title page's,
-    /// an index's first page) is left to the finisher's check where such
-    /// a page does finish inside a piece ([`Run::check_cut`]): the
-    /// own-fold decision is a prediction, and a piece folding in its own
-    /// run reads the page state and runs again with every change of the
-    /// page above it.
+    /// Whether more than [`READ_SHARE`] of some routine's runs so far
+    /// read `f`: the routine a page finishing inside a piece runs reads
+    /// it, as far as this document's finishers tell. A field only a few
+    /// runs read (a title page's, an index's first page) is left to the
+    /// finisher's check where such a page does finish inside a piece
+    /// ([`Run::check_cut`], exact): the own-fold decision is a
+    /// prediction, and a piece folding in its own run reads the page
+    /// state and runs again with every change of the page above it.
     pub(crate) fn routine_reads(&self, f: Field) -> bool {
-        self.reads.get(&f).is_some_and(|&n| 2 * n > self.runs)
+        self.reads
+            .values()
+            .any(|(runs, m)| m.get(&f).is_some_and(|&n| n * READ_SHARE.1 > runs * READ_SHARE.0))
+    }
+
+    /// Whether no routine has run yet.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.reads.is_empty() && self.defs.is_empty()
+    }
+
+    /// The fields [`FinTouch::routine_reads`] counts.
+    pub(crate) fn read_fields(&self) -> Vec<Field> {
+        let mut out: Vec<Field> = self
+            .reads
+            .values()
+            .flat_map(|(_, m)| m.keys().copied())
+            .filter(|&f| self.routine_reads(f))
+            .collect();
+        out.sort_unstable_by_key(|f| f.0.raw());
+        out.dedup();
+        out
     }
 }
 
@@ -2645,9 +2670,11 @@ impl Run<'_, '_> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             reads.sort_unstable_by_key(|f| f.0.raw());
             reads.dedup();
-            t.runs += 1;
+            let key = args.get(9).map_or(0, |&r| fin_key(v, r, args));
+            let e = t.reads.entry(key).or_default();
+            e.0 += 1;
             for f in reads {
-                *t.reads.entry(f).or_default() += 1;
+                *e.1.entry(f).or_default() += 1;
             }
             t.defs.extend(gdefs);
         }
