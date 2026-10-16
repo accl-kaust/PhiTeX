@@ -426,11 +426,15 @@ fn census(b: &Build, ts: &[Text], known: &std::collections::HashSet<u64>, head: 
     }
     let mut by_node: BTreeMap<u64, Vec<(bool, bool, u8, u64)>> = BTreeMap::new();
     let mut by_op: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    let mut by_resume: BTreeMap<u64, Vec<(bool, bool, u8, u64)>> = BTreeMap::new();
     for &(n, op, resumed, spec, how, round) in &b.stats.run_log {
         let e = by_op.entry(op).or_default();
         e.0 += 1;
         if op == "exec" {
             by_node.entry(n).or_default().push((resumed, spec, how, round));
+        }
+        if op == "resume" {
+            by_resume.entry(n).or_default().push((resumed, spec, how, round));
         }
     }
     for (op, e) in &mut by_op {
@@ -489,6 +493,17 @@ fn census(b: &Build, ts: &[Text], known: &std::collections::HashSet<u64>, head: 
                 *labels.entry(l).or_default() += 1;
             }
         }
+    }
+    for (n, runs) in &by_resume {
+        let cs = causes.get(n).cloned().unwrap_or_default();
+        let d = b.describe_node(*n);
+        let _ = writeln!(
+            out,
+            "  resume node {n}{} runs {} causes {cs:?} [{}]",
+            if known.contains(n) { "" } else { " NEW" },
+            runs.len(),
+            d.chars().take(70).collect::<String>()
+        );
     }
     // the other operations' causes, counted
     let mut other: BTreeMap<String, usize> = BTreeMap::new();
