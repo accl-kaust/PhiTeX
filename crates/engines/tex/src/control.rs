@@ -1550,10 +1550,7 @@ impl Run<'_, '_> {
             line.push('\n');
             // a file whose read-back only defines: the definitions this
             // line's read-back makes go with it (`wdef:<field>`)
-            let e = if self
-                .cx
-                .is_loopback(self.keyed(crate::fields::Fam::Wkeys, &name))
-            {
+            let e = if self.keys_loopback(&name)? {
                 // (a text the stream's earlier lines left open goes on
                 // with this one: the file is read back whole)
                 let text = match self.take_wpending(k)? {

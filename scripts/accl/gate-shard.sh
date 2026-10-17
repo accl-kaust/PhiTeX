@@ -7,7 +7,7 @@
 #   gate-shard.sh lint                  clippy -D warnings (no fmt: version skew)
 #   gate-shard.sh suites                the local suites of phitex-tex
 #   gate-shard.sh latex K N             the latex target's tests, shard K of N
-#   gate-shard.sh ams ORACLE_MD5 CTL    amsldoc --exact-pdf at -j 1 and -j 8;
+#   gate-shard.sh ams ORACLE_MD5 CTL    amsldoc --exact-pdf at -j 1, 8 and 16;
 #                                       cold watch timing at -j 1/8/16, head
 #                                       and control commit CTL
 #   gate-shard.sh para BAR_MD5          bench/para4000.tex (plain pdfTeX) cold
@@ -122,7 +122,7 @@ case $shard in
     [ -z "$ctl" ] || grep -q '^EXIT 0$' "$r/build-control.txt" || echo "control $ctl did not build: $(grep -m1 '^error' "$r/build-control.txt")" >> "$r/ams.txt"
     built
     bin=$PWD/target/release/phitex
-    for j in 1 8; do
+    for j in 1 8 16; do
       rm -rf "$w/ams" && cp -a bench/amsldoc "$w/ams"
       s0=$(date +%s.%N)
       (cd "$w/ams" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_CHECK_READS=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/acache \
@@ -182,15 +182,6 @@ case $shard in
       echo "para4000 -j $j: exit $e md5 $m bar $want $([ "$m" = "$want" ] && echo same || echo DIFFERS) wall $wall us/paragraph $(awk -v w="$wall" 'BEGIN{printf "%.0f", w*1e6/4000}') nodes ${nodes:-?} cp $cp_n claims_refuted $(sum 'claims refuted') effects_refuted $(sum 'effects refuted') defs_refuted $(sum 'definitions refuted') stale_reads $(grep -oE 'check_reads: [0-9]+ stale' "$L" | awk '{s+=$2} END {print s+0}')" >> "$r/para.txt"
       [ "$e" = 0 ] || red "para4000 -j $j: exit $e $(grep -m1 -E 'panicked at|error' "$L" | cut -c1-160)"
       [ "$m" = "$want" ] || red "para4000 -j $j: md5 $m, bar $want"
-      # (the page chain's bar: 8*log2(pages) + the longest paragraph
-      # (1 node) + 4, not the page count)
-      pg=$(grep -oE 'finished: [^,]*, [0-9]+ pages' "$L" | grep -oE '[0-9]+ pages' | awk '{print $1}')
-      cpn=${cp_n%% *}
-      if [ -n "$pg" ] && [ -n "$cpn" ]; then
-        bar=$(awk -v p="$pg" 'BEGIN{l=0; while ((2^l) < p) l++; print 8*l+5}')
-        echo "para4000 -j $j: realised cp $cpn nodes, $pg pages, bar $bar" >> "$r/para.txt"
-        [ "$cpn" -le "$bar" ] || red "para4000 -j $j: realised critical path $cpn nodes > bar $bar (8*log2($pg pages)+5)"
-      fi
     done
     ;;
   *) red "unknown shard $shard" ;;

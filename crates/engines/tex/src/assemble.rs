@@ -39,6 +39,7 @@ use crate::val::{int_of, list_of, str_of};
 pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
     let v = cx.values();
+    publish_cuts(cx)?;
     // the scan's last state first: every continuation before this node
     // may define it, so the read waits, parked, until the last page has
     // fired and placed its finisher; read first, the pages are all there
@@ -70,6 +71,38 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
         );
     }
     r
+}
+
+/// The cuts the finishers ask for now (`cutreq`, `crate::pages`), as
+/// loop-backs a piece reads at its start (`cut:<node>`,
+/// `Run::read_cut_request`): per piece the earliest candidate asked for
+/// (a later page firing in it fires in its resume once it is cut). Each
+/// is declared here the first time; a cut no finisher asks for any more
+/// is published by nobody and goes back to none. The pieces read their
+/// cut within the evaluation, a loop round later, not in another
+/// evaluation.
+fn publish_cuts(cx: &mut Ctx<'_>) -> Result<(), Stop> {
+    let v = cx.values();
+    let reqs = v.seq_to_vec(cx.acc_range(v.field("cutreq"), None)?);
+    let mut asks: Vec<(i64, i64)> = Vec::new();
+    for e in reqs {
+        let xs = list_of(v, e);
+        if let [pid, k] = xs[..] {
+            let (pid, k) = (int_of(v, pid), int_of(v, k));
+            match asks.iter_mut().find(|(p, _)| *p == pid) {
+                Some(a) => a.1 = a.1.min(k),
+                None => asks.push((pid, k)),
+            }
+        }
+    }
+    for (pid, k) in asks {
+        let f = v.field(&format!("cut:{}", u64::from_ne_bytes(pid.to_ne_bytes())));
+        if !cx.is_loopback(f) {
+            cx.declare_loopback(f, ValueId::UNIT);
+        }
+        cx.publish(f, v.int(k));
+    }
+    Ok(())
 }
 
 /// A field reaching the end node.

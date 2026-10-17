@@ -1464,6 +1464,69 @@ impl<'c, 'a> Run<'c, 'a> {
         r
     }
 
+    /// File `key` as a document's `\input` reads it: its units' order
+    /// (`units:<key>`, `api::file_units`, `[path, UNIT, order]` as a
+    /// written file's) when the file is cut into units, so this run reads
+    /// no unit's text; `None` (the reader reads the text) for a file the
+    /// job writes or one not cut.
+    pub(crate) fn read_units(&mut self, key: &str) -> R<Option<ValueId>> {
+        let v = self.v;
+        if self.get(&format!("wopen:{key}"))?.is_some() {
+            return Ok(None);
+        }
+        let w = self.keyed(crate::fields::Fam::Wfile, key);
+        let k = self.keyed(crate::fields::Fam::Wkeys, key);
+        if self.cx.is_loopback(k) || self.cx.is_loopback(w) {
+            return Ok(None);
+        }
+        // (bound as [`Run::file`] binds them: a run that writes the file
+        // later declares its loop-back and this runs again)
+        let _ = self.cx.use_field(k)?;
+        let _ = self.cx.use_field(w)?;
+        if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+            eprintln!("TMPF units {key} node {}", self.cx.node().raw());
+        }
+        let Some(x) = self.cx.use_env(v.field(&format!("units:{key}")))? else {
+            return Ok(None);
+        };
+        let Some(&order) = list_of(v, x).get(2) else {
+            return Ok(None);
+        };
+        if list_of(v, order).first().is_none_or(|&s| int_of(v, s) == 0) {
+            return Ok(None);
+        }
+        self.fread.push((key.to_owned(), order.raw()));
+        Ok(Some(x))
+    }
+
+    /// A unit's text and its offset in its file: a written file's
+    /// (`wunit:`, a loop-back `ops::Files` publishes, its text) or a
+    /// file's cut by the client (`unit:`, the environment's `[text,
+    /// offset]`, `api::file_units`).
+    pub(crate) fn unit_text(&mut self, key: ValueId) -> R<(String, usize)> {
+        let v = self.v;
+        let name = str_of(v, key);
+        let f = v.field(&name);
+        if name.starts_with("unit:") {
+            if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+                eprintln!("TMPF unit {name} node {}", self.cx.node().raw());
+            }
+            let Some(x) = self.cx.use_env(f)? else {
+                return Ok((String::new(), 0));
+            };
+            let xs = list_of(v, x);
+            let text = xs.first().map(|&t| str_of(v, t)).unwrap_or_default();
+            let at = xs
+                .get(1)
+                .map_or(0, |&o| usize::try_from(int_of(v, o)).unwrap_or(0));
+            return Ok((text, at));
+        }
+        Ok((
+            self.cx.use_field(f)?.map(|x| str_of(v, x)).unwrap_or_default(),
+            0,
+        ))
+    }
+
     /// A written file's text from its order (`ops::Files`): its units
     /// read, each a field of its own.
     pub(crate) fn written_text(&mut self, order: ValueId) -> R<ValueId> {
@@ -1477,10 +1540,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let Some(&k) = list_of(v, e).first() else {
                 continue;
             };
-            let f = v.field(&str_of(v, k));
-            if let Some(u) = self.cx.use_field(f)? {
-                text.push_str(&str_of(v, u));
-            }
+            text.push_str(&self.unit_text(k)?.0);
         }
         Ok(v.str(&text))
     }
@@ -1494,10 +1554,7 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let mut text = String::new();
         for &(k, _) in units.iter() {
-            let f = v.field(&str_of(v, k));
-            if let Some(u) = self.cx.use_field(f)? {
-                text.push_str(&str_of(v, u));
-            }
+            text.push_str(&self.unit_text(k)?.0);
         }
         let id = v.str(&text);
         self.input.file_mut(l).set_text(v, id);
@@ -1524,15 +1581,10 @@ impl<'c, 'a> Run<'c, 'a> {
                 continue;
             }
             let xs = list_of(v, f);
-            let field = v.field(&xs.get(1).map(|&k| str_of(v, k)).unwrap_or_default());
-            let text = self
-                .cx
-                .use_field(field)?
-                .map(|x| str_of(v, x))
-                .unwrap_or_default();
+            let (text, at) = self.unit_text(xs.get(1).copied().unwrap_or(ValueId::UNIT))?;
             let name = xs.get(2).copied().unwrap_or(ValueId::UNIT);
             let starts = xs.get(3).is_some_and(|&s| int_of(v, s) != 0);
-            let a = slice_args_in_file(v, &text, starts, name, 0);
+            let a = slice_args_in_file(v, &text, starts, name, at);
             frames.extend(a.first().map(|&x| list_of(v, x)).unwrap_or_default());
         }
         let mut out = args.to_vec();
@@ -1558,6 +1610,13 @@ impl<'c, 'a> Run<'c, 'a> {
         let w = self.keyed(crate::fields::Fam::Wfile, key);
         let f = self.keyed(crate::fields::Fam::File, key);
         let k = self.keyed(crate::fields::Fam::Wkeys, key);
+        // (neither declared yet: both bound, so a run that writes the
+        // file later in the evaluation, declaring its loop-back,
+        // `Run::written_decl`, runs this again on it)
+        if !self.cx.is_loopback(k) && !self.cx.is_loopback(w) {
+            let _ = self.cx.use_field(k)?;
+            let _ = self.cx.use_field(w)?;
+        }
         let x = if self.cx.is_loopback(k) {
             // a file whose read-back only defines: it exists (empty) once
             // a line of it defines something ([`Run::read_back`])
@@ -1581,6 +1640,9 @@ impl<'c, 'a> Run<'c, 'a> {
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
+            if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+                eprintln!("TMPF file {key} node {} op {:?}", self.cx.node().raw(), self.cx.op());
+            }
             self.cx.use_env(f)?
         };
         let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
@@ -1704,6 +1766,21 @@ impl<'c, 'a> Run<'c, 'a> {
                 .is_loopback(self.keyed(crate::fields::Fam::Wkeys, name))
     }
 
+    /// Whether `name`'s `wkeys:` loop-back is declared (a file whose
+    /// read-back only defines, [`Run::read_back`]). Not yet: for such a
+    /// file the field is bound, so this run goes again once the opening
+    /// run's declaration ([`Run::written_decl`]) is in effect.
+    pub(crate) fn keys_loopback(&mut self, name: &str) -> R<bool> {
+        let k = self.keyed(crate::fields::Fam::Wkeys, name);
+        if self.cx.is_loopback(k) {
+            return Ok(true);
+        }
+        if crate::api::defines_only(name) {
+            let _ = self.cx.use_field(k)?;
+        }
+        Ok(false)
+    }
+
     /// `\input` of a file whose read-back only defines (`.aux`): the
     /// definitions its lines make, from the per-field loop-backs
     /// `wdef:<field>` the writer publishes for the fields listed in
@@ -1724,11 +1801,10 @@ impl<'c, 'a> Run<'c, 'a> {
             let id = crate::api::wdef_id(key, &str_of(v, k));
             let name = crate::api::wdef_field(&id).to_owned();
             let wd = self.keyed(crate::fields::Fam::Wdef, &id);
+            // (a key whose loop-back the files node has not declared
+            // yet: the field bound, so this runs again when it does)
             if !self.cx.is_loopback(wd) {
-                self.cx
-                    .use_env(self.keyed(crate::fields::Fam::Wdefdecl, &id))?;
-            }
-            if !self.cx.is_loopback(wd) {
+                let _ = self.cx.use_field(wd)?;
                 continue;
             }
             let Some(x) = self.cx.use_field(wd)? else {
@@ -1942,14 +2018,35 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok((!short).then(|| v.list(made)))
     }
 
-    /// File `name` is opened for writing: unless its `wfile:<name>`
-    /// loop-back is declared, the run asks the client to declare it
-    /// (`wfiledecl:<name>`, answered by `api::Graph::settle`).
+    /// File `name` is opened for writing: where the build keeps the
+    /// files the job writes in memory (`loopfiles`, a watch's fixpoint),
+    /// its loop-back is declared here, from the run (spec-redesign §1
+    /// `files(round)`): `wkeys:<name>` for a read-back that only defines,
+    /// else `wfile:<name>`, none until the files node publishes one. A
+    /// reader that read the file before binds the field
+    /// ([`Run::file`]) and runs again within the evaluation; no
+    /// evaluation waits on the client for it.
     pub(crate) fn written_decl(&mut self, name: &str) -> R<()> {
-        if !self.written_known(name) {
-            self.cx
-                .use_env(self.keyed(crate::fields::Fam::Wfiledecl, name))?;
+        if self.written_known(name) {
+            return Ok(());
         }
+        let v = self.v;
+        // (read as the files node reads it: no wait where a build has
+        // none, a prelude's)
+        if self
+            .cx
+            .use_field(v.field("loopfiles"))?
+            .is_none_or(|x| x == ValueId::UNIT)
+        {
+            return Ok(());
+        }
+        let fam = if crate::api::defines_only(name) {
+            crate::fields::Fam::Wkeys
+        } else {
+            crate::fields::Fam::Wfile
+        };
+        let f = self.keyed(fam, name);
+        self.cx.declare_loopback(f, v.list(Vec::new()));
         Ok(())
     }
 

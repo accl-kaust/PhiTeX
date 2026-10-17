@@ -981,8 +981,6 @@ pub(crate) enum Fam {
     Wfile,
     Wkeys,
     Wdef,
-    Wfiledecl,
-    Wdefdecl,
 }
 
 const FAMS: usize = 8;
@@ -994,8 +992,6 @@ impl Fam {
             Fam::Wfile => "wfile",
             Fam::Wkeys => "wkeys",
             Fam::Wdef => "wdef",
-            Fam::Wfiledecl => "wfiledecl",
-            Fam::Wdefdecl => "wdefdecl",
         }
     }
 }

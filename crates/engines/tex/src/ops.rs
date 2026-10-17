@@ -598,6 +598,7 @@ impl Operation for Dvi {
                 "pages",
                 crate::pdfrelaxed::PIECES,
                 crate::pdfout::XPAGES,
+                "cutreq",
             ]
             .iter()
             .map(|&f| v.field(f))
@@ -656,19 +657,17 @@ impl Operation for Files {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
     }
+    #[allow(clippy::too_many_lines)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
-        let names: Vec<String> = cx
+        let Some(listed) = cx
             .use_field(v.field("loopfiles"))?
-            .map(|x| list_of(v, x).iter().map(|&n| str_of(v, n)).collect())
-            .unwrap_or_default();
-        if names.is_empty() {
+            .filter(|&x| x != ValueId::UNIT)
+        else {
             return Ok(ValueId::UNIT);
-        }
-        // (the `wdef:` loop-backs declared so far: a new one runs this
-        // again)
-        let _ = cx.use_env(v.field("wdefset"))?;
+        };
+        let mut names: Vec<String> = list_of(v, listed).iter().map(|&n| str_of(v, n)).collect();
         let plan = cx.acc_range(v.field("wplan"), None)?;
         let all = cx.acc_range(v.field("streams"), None)?;
         let texts = crate::api::written_texts(v, Some(plan), Some(all));
@@ -677,10 +676,29 @@ impl Operation for Files {
         // (`Run::shell_command`): each `.ind` made from the `.idx` text
         // this round wrote, published as that file's text
         let made = makeindex_runs(cx, &texts)?;
+        // (and the files this round wrote: their loop-backs declared by
+        // the runs that opened them, `Run::written_decl`)
+        for (n, _) in texts.iter().chain(&made) {
+            if !names.contains(n) {
+                names.push(n.clone());
+            }
+        }
+        for (n, _) in &defs {
+            if !names.contains(n) {
+                names.push(n.clone());
+            }
+        }
         for name in &names {
             let k = v.field(&format!("wkeys:{name}"));
             if !cx.is_loopback(k) {
-                continue;
+                // (a file whose read-back only defines, opened this
+                // round: declared here too, the opening run's
+                // declaration being in effect only once the evaluation
+                // is quiet)
+                if !crate::api::defines_only(name) {
+                    continue;
+                }
+                cx.declare_loopback(k, v.list(Vec::new()));
             }
             let ds = defs
                 .iter()
@@ -692,7 +710,13 @@ impl Operation for Files {
             for (f, val) in ds {
                 let id = crate::api::wdef_id(name, f);
                 let w = v.field(&format!("wdef:{id}"));
-                if cx.is_loopback(w) {
+                // (a key new this round: its loop-back declared here, its
+                // readers bound to it run again on it within the
+                // evaluation, `Run::read_back`)
+                if !cx.is_loopback(w) {
+                    cx.declare_loopback(w, v.list(Vec::new()));
+                }
+                {
                     // (a nested file's key names that file)
                     keys.push(v.str(if *val == ValueId::UNIT { &id } else { f }));
                     // (a key whose value another file's lines publish)
@@ -734,7 +758,10 @@ impl Operation for Files {
         for name in names {
             let f = v.field(&format!("wfile:{name}"));
             if !cx.is_loopback(f) {
-                continue;
+                if crate::api::defines_only(&name) {
+                    continue;
+                }
+                cx.declare_loopback(f, v.list(Vec::new()));
             }
             // a file the job did not write this round is absent next round
             let Some(t) = texts

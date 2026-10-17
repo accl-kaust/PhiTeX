@@ -1502,7 +1502,7 @@ impl Run<'_, '_> {
     }
 
     /// A piece's start: whether a finisher asked for a cut of this node
-    /// (`cut:<node>`, an environment field the client sets from the
+    /// (`cut:<node>`, a loop-back the end node publishes from the
     /// finishers' `cutreq` contributions, [`Run::check_cut`]), at which
     /// candidate.
     pub(crate) fn read_cut_request(&mut self) -> R<()> {
@@ -1515,6 +1515,7 @@ impl Run<'_, '_> {
         self.cut_req = self
             .cx
             .use_field(f)?
+            .filter(|&x| x != ValueId::UNIT)
             .and_then(|x| u32::try_from(int_of(self.v, x)).ok());
         Ok(())
     }
@@ -3290,6 +3291,7 @@ impl Run<'_, '_> {
     /// piece), its page parameter and insertion class markers resolved
     /// here; the page builder over it from the state after the page
     /// fired; the scan state defined, or the next page's break placed.
+    #[allow(clippy::too_many_lines)]
     fn scan_cont(&mut self) -> R<Placed> {
         let v = self.v;
         let b = self
@@ -3340,7 +3342,9 @@ impl Run<'_, '_> {
         // piece: a page firing in it is checked against the piece,
         // `place_break`'s origin)
         let rest_at = material.len();
-        let origin = if pid != -2 {
+        let origin = if pid == -2 {
+            b.get(6).copied()
+        } else {
             Some(v.list(vec![
                 b[3],
                 own.get(1).copied().unwrap_or(ValueId::UNIT),
@@ -3349,8 +3353,6 @@ impl Run<'_, '_> {
                 own.get(5).copied().unwrap_or(ValueId::UNIT),
                 own.get(6).copied().unwrap_or(ValueId::UNIT),
             ]))
-        } else {
-            b.get(6).copied()
         };
         material.extend(rest);
         self.resolve_page_params(&mut material)?;

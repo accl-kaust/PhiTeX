@@ -3024,6 +3024,10 @@ fn texts() -> &'static TextsCache {
 #[derive(Default)]
 pub(crate) struct Registry {
     by_name: Mutex<FxHashMap<u64, Arc<TextHints>>>,
+    /// The hint of each unit of a file `\\input` reads as units
+    /// (`api::file_units`), by the unit's field name (a string value):
+    /// the analysis of the whole file at the unit's slice.
+    units: Mutex<FxHashMap<u64, Arc<str>>>,
     hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
 }
 
@@ -3038,6 +3042,17 @@ pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
     if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, t)) {
         bn.insert(name.raw(), t.clone());
     }
+}
+
+/// Registers the hint of a file's unit (`key`, its field name as a
+/// string value): a node whose text is that unit (a `["w", key, ...]`
+/// frame) gets it from here, as the unit's slice of the whole file's
+/// analysis.
+pub(crate) fn register_unit(reg: &Registry, key: ValueId, hint: Arc<str>) {
+    reg.units
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key.raw(), hint);
 }
 
 /// Withdraws the analysis registered under `name` (a document whose
@@ -3146,13 +3161,17 @@ pub(crate) fn text_hints_with(
 }
 
 /// The hint of the document slice beginning at byte `s` of the text `t`
-/// analyses (looked up once per text by the caller), as
-/// the node's extra argument.
-pub(crate) fn hint_arg(v: &Values, t: &TextHints, s: usize) -> ValueId {
+/// analyses (looked up once per text by the caller), encoded.
+pub(crate) fn slice_hint_of(t: &TextHints, s: usize) -> Arc<str> {
     match t.slice_hint(s) {
-        Some(h) => v.str(h),
-        None => v.str(&Hint::any("slice not found", "").encode()),
+        Some(h) => h.clone(),
+        None => Hint::any("slice not found", "").encode().into(),
     }
+}
+
+/// [`slice_hint_of`] as the node's extra argument.
+pub(crate) fn hint_arg(v: &Values, t: &TextHints, s: usize) -> ValueId {
+    v.str(&slice_hint_of(t, s))
 }
 
 fn by_id() -> &'static Cache<u64> {
@@ -3383,6 +3402,23 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                     h
                 }
                 None => Hint::any("expansion tokens with unusual catcodes", &text),
+            }
+        }
+        "w" => {
+            // (a file's unit: its slice's hint in the whole file's
+            // analysis, registered when the file was cut into units;
+            // what the registry holds now, not cached by the arguments)
+            *registry = true;
+            let h = xs.get(1).and_then(|&k| {
+                reg.units
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&k.raw())
+                    .cloned()
+            });
+            match h {
+                Some(h) if frames.len() == 1 => Hint::decode(&h),
+                _ => Hint::any("unit not analysed", ""),
             }
         }
         _ => Hint::any("unknown frame", ""),

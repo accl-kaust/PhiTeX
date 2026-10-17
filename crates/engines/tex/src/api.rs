@@ -1391,10 +1391,6 @@ struct Graph {
     /// The `wdef:<field>` loop-backs declared: the fields the read-back
     /// of a job-written file defines.
     wdefs: Vec<String>,
-    /// The pieces a finisher asked to cut, at which candidate (`cutreq`,
-    /// `crate::pages`): each piece's `cut:<node>` is in the environment
-    /// from the next evaluation on.
-    cuts: Vec<(i64, i64)>,
     /// The round-one guesses of the `wkeys:<name>` loop-backs.
     wkeys_guess: Vec<(String, Vec<String>)>,
     /// What the executor runs now, for readers on other threads.
@@ -1405,6 +1401,9 @@ struct Graph {
     /// (name, field, value, hash), merged into `files`/`absent`/`reads`
     /// before the environment is set again (`Graph::provide`).
     provided: Arc<std::sync::Mutex<Vec<Provided>>>,
+    /// The fields of the files the provider cut into units
+    /// ([`file_units`]), merged into `files` with `provided`.
+    provided_units: Arc<std::sync::Mutex<Vec<ProvidedUnit>>>,
     /// The package loads' records and hints (`crate::pkgrec`), once the
     /// build has set them.
     loads: Option<Arc<crate::pkgrec::LoadHints>>,
@@ -1415,6 +1414,73 @@ impl Graph {}
 /// A file the environment provider answered: name, field, the value
 /// (`None`: absent), and the finder's hash.
 type Provided = (String, Field, Option<ValueId>, u64);
+
+/// A units field the provider cut ([`file_units`]): the field and its
+/// value (`None`: the file is absent).
+type ProvidedUnit = (Field, Option<ValueId>);
+
+/// The files the provider cut into units, by name: each cut once.
+type UnitCuts = std::sync::Mutex<FxHashMap<String, Arc<OnceLock<FxHashMap<u64, ValueId>>>>>;
+
+/// The file a units field names: `units:<name>` (the order) or
+/// `unit:<name>:<i>` (one unit).
+fn units_file(field: &str) -> Option<&str> {
+    if let Some(n) = field.strip_prefix("units:") {
+        return Some(n);
+    }
+    field.strip_prefix("unit:")?.rsplit_once(':').map(|(n, _)| n)
+}
+
+/// A file a document's `\input` reads, as units (spec-redesign §1
+/// `unit:<file>:<i>`): the file cut by the same analysis a document's
+/// text is cut by, each slice a field of the environment,
+/// `unit:<name>:<i>` = `[text, offset]`, and the order `units:<name>` =
+/// `[path, UNIT, [sliceable, [[unit field, starts], ...]]]` (a written
+/// file's shape, `ops::Files`). The reader of the file reads the order
+/// only, so an edit inside a unit re-runs the unit's piece, not the
+/// node that read the file; each unit's hint is registered by its field
+/// (`hints::register_unit`). A file that is not read as a document's
+/// text (`inputs::document_file`) is not cut: its order is empty and
+/// not sliceable, and the reader reads its text.
+fn file_units(
+    v: &Values,
+    reg: &crate::hints::Registry,
+    defs: &Defs,
+    name: &str,
+    path: &str,
+    bytes: &[u8],
+) -> Vec<(Field, ValueId)> {
+    let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+    let pv = v.str(path);
+    let order = |sliceable: bool, units: Vec<ValueId>| {
+        v.list(vec![
+            pv,
+            ValueId::UNIT,
+            v.list(vec![v.int(i64::from(sliceable)), v.list(units)]),
+        ])
+    };
+    let uf = v.field(&format!("units:{name}"));
+    if !crate::inputs::document_file(path, &text) {
+        return vec![(uf, order(false, Vec::new()))];
+    }
+    let t = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
+    crate::hints::register_text(reg, pv, &t);
+    let mut out = Vec::with_capacity(t.slices.len() + 1);
+    let mut units = Vec::with_capacity(t.slices.len());
+    for (i, &(s, e)) in t.slices.iter().enumerate() {
+        let Some(u) = text.get(s..e) else { continue };
+        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+        let key = v.str(&format!("unit:{name}:{i}"));
+        crate::hints::register_unit(reg, key, crate::hints::slice_hint_of(&t, s));
+        out.push((
+            v.field(&format!("unit:{name}:{i}")),
+            v.list(vec![v.str(u), v.int(i64::try_from(s).unwrap_or(0))]),
+        ));
+        units.push(v.list(vec![key, v.int(i64::from(starts))]));
+    }
+    out.insert(0, (uf, order(true, units)));
+    out
+}
 
 impl Graph {
     #[allow(clippy::too_many_lines)]
@@ -1484,19 +1550,19 @@ impl Graph {
             pdf_exact: None,
             marks: Marks::default(),
             wdefs: Vec::new(),
-            cuts: Vec::new(),
             wkeys_guess: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             sched: Box::new(phitex_defuse::Greedy::default()),
             eval_errors: Vec::new(),
             provided: Arc::default(),
+            provided_units: Arc::default(),
             loads: None,
         }
     }
 
     /// An evaluation error as a reader can act on it: the error, and
     /// each node it names with what it is.
-    fn diagnose(&self, e: &phitex_defuse::EvalError) -> String {
+    fn diagnose(&self, e: &phitex_defuse::EvalError, unit: UnitId) -> String {
         use phitex_defuse::EvalError as E;
         let mut ids: Vec<NodeId> = Vec::new();
         match e {
@@ -1542,7 +1608,16 @@ impl Graph {
         // (the engine does not say which loop-backs kept changing: the
         // job's read-back fields are the candidates)
         if let E::NonConvergence { .. } = e {
-            for name in &self.written {
+            // (the files the job wrote: its own runs declared their
+            // loop-backs, `Run::written_decl`, the client may not have
+            // seen them yet)
+            let mut names = self.written.clone();
+            for n in self.opened(unit) {
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+            for name in &names {
                 let _ = write!(out, "\n  written file {name}");
             }
             for f in &self.wdefs {
@@ -1621,9 +1696,41 @@ impl Graph {
         let answered: std::sync::Mutex<
             FxHashMap<String, Arc<std::sync::OnceLock<Option<ValueId>>>>,
         > = std::sync::Mutex::new(FxHashMap::default());
+        // (a file read as units, [`file_units`]: cut once, each of its
+        // fields answered from the cut)
+        let cut: UnitCuts = std::sync::Mutex::new(FxHashMap::default());
+        let units_log = Arc::clone(&self.provided_units);
+        let (reg, defs) = (Arc::clone(&self.ops.hints), Arc::clone(&self.ops.defs));
+        let finder_u = Arc::clone(&finder);
         self.eng.set_env_provider(Box::new(move |v, f| {
-            let name = v.as_str(f.0)?;
-            let name = name.strip_prefix("file:")?;
+            let field = v.as_str(f.0)?;
+            if let Some(name) = units_file(&field) {
+                if written.iter().any(|w| w == name) {
+                    return None;
+                }
+                let cell = cut
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .entry(name.to_owned())
+                    .or_default()
+                    .clone();
+                let m = cell.get_or_init(|| {
+                    let found = finder_u(name);
+                    let defs = defs.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                    let es = found
+                        .map(|(path, bytes)| file_units(v, &reg, &defs, name, &path, &bytes))
+                        .unwrap_or_default();
+                    if let Ok(mut l) = units_log.lock() {
+                        l.extend(es.iter().map(|&(g, x)| (g, Some(x))));
+                        if es.is_empty() {
+                            l.push((v.field(&format!("units:{name}")), None));
+                        }
+                    }
+                    es.into_iter().map(|(g, x)| (g.0.raw(), x)).collect()
+                });
+                return Some(m.get(&f.0.raw()).copied());
+            }
+            let name = field.strip_prefix("file:")?;
             if written.iter().any(|w| w == name) {
                 return None;
             }
@@ -1664,6 +1771,7 @@ impl Graph {
     /// Merges what the provider answered into the supplied files, so the
     /// next environment set is the whole environment.
     fn absorb_provided(&mut self) {
+        self.absorb_units();
         let got = self
             .provided
             .lock()
@@ -1683,6 +1791,43 @@ impl Graph {
                 None => self.absent.push(f),
             }
         }
+    }
+
+    /// Merges the units the provider cut ([`file_units`]) into the
+    /// supplied files (a file's, absent: into `absent`).
+    fn absorb_units(&mut self) {
+        let got = self
+            .provided_units
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default();
+        if got.is_empty() {
+            return;
+        }
+        let have: phitex_defuse::FxHashSet<Field> = self
+            .files
+            .iter()
+            .map(|&(g, _)| g)
+            .chain(self.absent.iter().copied())
+            .collect();
+        for (f, x) in got {
+            if have.contains(&f) {
+                continue;
+            }
+            match x {
+                Some(x) => self.files.push((f, x)),
+                None => self.absent.push(f),
+            }
+        }
+    }
+
+    /// A file's units ([`file_units`]) dropped from the environment:
+    /// the file the job writes, or one cut again.
+    fn drop_units(&mut self, name: &str) {
+        let v = self.eng.values();
+        let own = |f: Field| units_file(&field_name(v, f)).is_some_and(|n| n == name);
+        self.files.retain(|&(g, _)| !own(g));
+        self.absent.retain(|&g| !own(g));
     }
 
     /// The names of the files the job opened for writing.
@@ -1723,14 +1868,22 @@ impl Graph {
         self.files.retain(|(g, _)| *g != f);
         self.absent.retain(|g| *g != f);
         self.reads.retain(|(n, _)| n != name);
-        // (`file:<name>` given a value of its own, the empty list, which
-        // a run reads as no file: a run that read it absent before the
-        // `\openout` declared the loop-back, LaTeX's `\@input` of the
-        // `.aux` in `\document` and `\@starttoc`'s `.toc`, runs again
-        // and reads the loop-back; left absent, nothing it read changed
-        // and it kept the empty read)
-        let none = self.eng.values().list(Vec::new());
-        self.files.push((f, none));
+        self.drop_units(name);
+        // (with `fixpoint`, `file:<name>` given a value of its own, the
+        // empty list, which a run reads as no file: a run that read it
+        // absent before the `\openout` declared the loop-back, LaTeX's
+        // `\@input` of the `.aux` in `\document` and `\@starttoc`'s
+        // `.toc`, runs again and reads the loop-back; left absent,
+        // nothing it read changed and it kept the empty read. Without
+        // it the file stays absent, as the reader found it: the empty
+        // list would be a change of the environment at the next edit,
+        // and every reader of the file would run again on it)
+        if fixpoint {
+            let none = self.eng.values().list(Vec::new());
+            self.files.push((f, none));
+        } else {
+            self.absent.push(f);
+        }
         if fixpoint {
             // nothing reads the bytes on disk: a read-back that only
             // defines (`.aux`) is its key set `wkeys:<name>` and one
@@ -1781,25 +1934,17 @@ impl Graph {
     fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
         let v = self.eng.values();
         let mut env = self.files.clone();
-        for n in &self.written {
-            env.push((v.field(&format!("wfiledecl:{n}")), ValueId::UNIT));
-        }
-        for f in &self.wdefs {
-            env.push((v.field(&format!("wdefdecl:{f}")), ValueId::UNIT));
-        }
-        let set = self.wdefs.iter().map(|f| v.str(f)).collect();
-        env.push((v.field("wdefset"), v.list(set)));
         if self.pdf_exact.is_some() {
             env.push((v.field("pdf:exact"), v.int(1)));
         }
         env.push((v.field(DOC_MARKS), self.marks.value(v)));
-        for &(pid, k) in &self.cuts {
-            let name = format!("cut:{}", u64::from_ne_bytes(pid.to_ne_bytes()));
-            env.push((v.field(&name), v.int(k)));
-        }
+        // (the files the job writes kept in memory, a fixpoint's; none
+        // otherwise: `UNIT`, never a wait on the client)
         if fixpoint {
             let names = self.written.iter().map(|n| v.str(n)).collect();
             env.push((v.field("loopfiles"), v.list(names)));
+        } else {
+            env.push((v.field("loopfiles"), ValueId::UNIT));
         }
         env
     }
@@ -1848,7 +1993,7 @@ impl Graph {
                 Ok(r) => r,
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
-                    let m = self.diagnose(&e);
+                    let m = self.diagnose(&e, unit);
                     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                         eprintln!("{m}");
                     }
@@ -1962,9 +2107,9 @@ impl Graph {
                         for (n, c) in &r.rerun_causes {
                             if ids.contains(&n.raw()) {
                                 let f = match *c {
-                                    Rr::Changed { field, .. } | Rr::Rebind { field } => {
-                                        crate::val::field_name(v, field)
-                                    }
+                                    Rr::Changed { field, .. }
+                                    | Rr::Rebind { field }
+                                    | Rr::Environment { field } => crate::val::field_name(v, field),
                                     _ => String::new(),
                                 };
                                 eprintln!("  rerun cause of {}: {c:?} ({f})", n.raw());
@@ -1989,36 +2134,36 @@ impl Graph {
             stats.add_hints(&self.eng, unit, &self.eval_errors);
             let opened = self.opened(unit);
             let mut asked = false;
+            // (`PHITEX_TEX_TIME`: why the build evaluates again)
+            let ask_why = |why: &str| {
+                if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                    eprintln!("  evaluate again: {why}");
+                }
+            };
             // a file supplied from the finder that the job turns out to
             // write is read back instead
+            // (every file a run opened for writing is the job's: in a
+            // fixpoint the run declared its loop-back and its readers ran
+            // again on it within the evaluation, `Run::written_decl`; a
+            // file read from the finder before is read again only where
+            // there is no fixpoint, as absent)
+            // (what the provider answered counts as supplied: a file it
+            // found is read again as absent; one it did not find was read
+            // as absent already)
+            self.absorb_provided();
             for name in &opened {
                 if self.written.contains(name) {
                     continue;
                 }
                 let f = self.eng.values().field(&format!("file:{name}"));
-                if self.files.iter().any(|(g, _)| *g == f) || self.absent.contains(&f) {
-                    self.written_file(name, fixpoint, finder);
+                let supplied = self.files.iter().any(|&(g, x)| {
+                    g == f && !list_of(self.eng.values(), x).is_empty()
+                });
+                self.written_file(name, fixpoint, finder);
+                if supplied && !fixpoint {
                     asked = true;
+                    ask_why(&format!("supplied file written: {name}"));
                 }
-            }
-            // files a run opened for writing: their `wfile:` loop-backs
-            // declared (`wfiledecl:<name>`)
-            let wdecl: Vec<String> = {
-                let v = self.eng.values();
-                r.env_waits
-                    .iter()
-                    .filter_map(|&(_, f)| {
-                        field_name(v, f)
-                            .strip_prefix("wfiledecl:")
-                            .map(str::to_owned)
-                    })
-                    .collect()
-            };
-            for name in wdecl {
-                if !self.written.contains(&name) {
-                    self.written_file(&name, fixpoint, finder);
-                }
-                asked = true;
             }
             // the fields a job-written file's read-back defines: their
             // `wdef:<field>` loop-backs declared
@@ -2042,47 +2187,10 @@ impl Graph {
                         decl_trace(&self.eng, w, none);
                         self.eng.declare_loopback(w, none);
                     }
+                    // (declared by the files node within the
+                    // evaluation, its readers run again there: no
+                    // evaluation more)
                     self.wdefs.push(f);
-                    asked = true;
-                }
-            }
-            // the cuts the finishers asked for (`crate::pages`): each
-            // piece's `cut:<node>` put in the environment at its
-            // candidate, and the piece (its reader) runs again, folding
-            // in its own run
-            {
-                let v = self.eng.values();
-                let reqs = self
-                    .eng
-                    .acc_value(unit, v.field("cutreq"))
-                    .map(|x| v.seq_to_vec(x))
-                    .unwrap_or_default();
-                // (a piece's cut at the earliest candidate its finishers
-                // ask for now: a later page firing in it fires in its
-                // resume once it is cut there; and where an edit moved
-                // the page, the cut moves with it, never kept at a
-                // candidate no finisher asks for and the new one lost)
-                let mut asks: Vec<(i64, i64)> = Vec::new();
-                for e in reqs {
-                    let xs = list_of(v, e);
-                    if let [pid, k] = xs[..] {
-                        let (pid, k) = (int_of(v, pid), int_of(v, k));
-                        match asks.iter_mut().find(|(p, _)| *p == pid) {
-                            Some(a) => a.1 = a.1.min(k),
-                            None => asks.push((pid, k)),
-                        }
-                    }
-                }
-                // (the cuts are those asked for now: a finisher of a page
-                // firing at a cut asks for it again, and a cut no
-                // finisher asks for is no cut)
-                asks.sort_unstable();
-                let mut had = self.cuts.clone();
-                had.sort_unstable();
-                if asks != had {
-                    stats.cuts += asks.iter().filter(|a| !had.contains(a)).count() as u64;
-                    self.cuts = asks;
-                    asked = true;
                 }
             }
             let asked_names: Vec<String> = {
@@ -2092,6 +2200,50 @@ impl Graph {
                     .filter_map(|&(_, f)| field_name(v, f).strip_prefix("file:").map(str::to_owned))
                     .collect()
             };
+            // (a file asked for as units, [`file_units`], with no
+            // provider: cut here)
+            let asked_units: Vec<String> = {
+                let v = self.eng.values();
+                let mut ns: Vec<String> = r
+                    .env_waits
+                    .iter()
+                    .filter_map(|&(_, f)| units_file(&field_name(v, f)).map(str::to_owned))
+                    .collect();
+                ns.sort_unstable();
+                ns.dedup();
+                ns
+            };
+            for name in asked_units {
+                let uf = self.eng.values().field(&format!("units:{name}"));
+                if self.files.iter().any(|&(g, _)| g == uf)
+                    || self.absent.contains(&uf)
+                    || self.written.contains(&name)
+                {
+                    continue;
+                }
+                let defs = self
+                    .ops
+                    .defs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                match finder(&name) {
+                    Some((path, bytes)) => {
+                        let es = file_units(
+                            self.eng.values(),
+                            &self.ops.hints,
+                            &defs,
+                            &name,
+                            &path,
+                            &bytes,
+                        );
+                        self.files.extend(es);
+                    }
+                    None => self.absent.push(uf),
+                }
+                asked = true;
+                ask_why(&format!("units supplied: {name}"));
+            }
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 eprintln!("  waits: {} {:?}", r.env_stalled, asked_names);
             }
@@ -2133,10 +2285,12 @@ impl Graph {
                 if opened.contains(&name) {
                     self.written_file(&name, fixpoint, finder);
                     asked = true;
+                    ask_why(&format!("opened file: {name}"));
                     continue;
                 }
                 self.supply(finder, &name);
                 asked = true;
+                ask_why(&format!("file supplied: {name}"));
             }
             // what the provider answered in place joins the supplied
             // files (an edit of one replaces it, [`Build::edit_file`]),
@@ -2266,7 +2420,7 @@ pub(crate) fn wdef_field(k: &str) -> &str {
 
 /// Whether a job-written file's read-back only defines (its lines are
 /// read as definitions per field, never as text): `.aux`.
-fn defines_only(name: &str) -> bool {
+pub(crate) fn defines_only(name: &str) -> bool {
     std::path::Path::new(name)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("aux"))
@@ -3038,9 +3192,9 @@ impl Build {
             }
             None => document.to_owned(),
         };
-        // (the files the job writes and reads back are loop-backs from
-        // the `\openout` that opens them, `wfiledecl:`: a read before it
-        // runs again on the loop-back)
+        // (the files the job writes and reads back are loop-backs the
+        // `\openout` that opens them declares, `Run::written_decl`: a read
+        // before it runs again on the loop-back)
         {
             g.absorb_provided();
             let env = g.environment(opts.fixpoint);
@@ -3334,39 +3488,78 @@ impl Build {
     /// A file other than the document changed (`None`: as the finder
     /// gives it again): its `file:` field is replaced, and the nodes that
     /// read it run again.
+    #[allow(clippy::too_many_lines)]
     pub fn edit_file(&mut self, name: &str, text: Option<&[u8]>) {
+        // (the units the provider cut so far: a file read only as units
+        // is edited by its units)
+        self.g.absorb_units();
         let v = self.g.eng.values();
         let f = v.field(&format!("file:{name}"));
+        let uf = v.field(&format!("units:{name}"));
+        let unit_path = self
+            .g
+            .files
+            .iter()
+            .find(|&&(g, _)| g == uf)
+            .and_then(|&(_, x)| list_of(v, x).first().map(|&p| str_of(v, p)));
+        let cut = unit_path.is_some() || self.g.absent.contains(&uf);
         let k = if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
-            k
+            Some(k)
         } else if self.g.absent.contains(&f) {
             self.g.absent.retain(|g| *g != f);
             self.g.files.push((f, v.list(Vec::new())));
-            self.g.files.len() - 1
+            Some(self.g.files.len() - 1)
         } else {
-            return;
+            None
         };
-        let old = list_of(v, self.g.files[k].1);
+        if k.is_none() && !cut {
+            return;
+        }
+        let old = k.map(|k| list_of(v, self.g.files[k].1)).unwrap_or_default();
         let found = match text {
             Some(t) => Some((
                 old.first()
-                    .map_or_else(|| format!("./{name}"), |&p| str_of(v, p)),
+                    .map(|&p| str_of(v, p))
+                    .or(unit_path)
+                    .unwrap_or_else(|| format!("./{name}")),
                 t.to_vec(),
             )),
             None => (self.opts.finder)(name),
         };
-        let val = match &found {
-            Some((path, bytes)) => {
-                let t: String = bytes.iter().map(|&b| char::from(b)).collect();
-                v.list(vec![v.str(path), v.str(&t)])
+        if let Some(k) = k {
+            let val = match &found {
+                Some((path, bytes)) => {
+                    let t: String = bytes.iter().map(|&b| char::from(b)).collect();
+                    v.list(vec![v.str(path), v.str(&t)])
+                }
+                None => v.list(Vec::new()),
+            };
+            if found.is_none() {
+                self.g.files.remove(k);
+                self.g.absent.push(f);
+            } else {
+                self.g.files[k].1 = val;
             }
-            None => v.list(Vec::new()),
-        };
-        if found.is_none() {
-            self.g.files.remove(k);
-            self.g.absent.push(f);
-        } else {
-            self.g.files[k].1 = val;
+        }
+        // (a file read as units: cut again, each unit's field its new
+        // slice; a unit whose text is the same keeps its value)
+        if cut {
+            self.g.drop_units(name);
+            let v = self.g.eng.values();
+            let defs = self
+                .g
+                .ops
+                .defs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            match &found {
+                Some((path, bytes)) => {
+                    let es = file_units(v, &self.g.ops.hints, &defs, name, path, bytes);
+                    self.g.files.extend(es);
+                }
+                None => self.g.absent.push(uf),
+            }
         }
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());

@@ -883,7 +883,17 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
-        let x = self.read_file_lazy(&key)?;
+        // (a document's `\input`: the file as units when it is cut,
+        // `Run::read_units`; else its text)
+        let x = if self.doc {
+            self.read_units(&key)?
+        } else {
+            None
+        };
+        let x = match x {
+            Some(x) => Some(x),
+            None => self.read_file_lazy(&key)?,
+        };
         let x = match x {
             Some(x) => Some(x),
             None => {
