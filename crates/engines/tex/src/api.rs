@@ -2274,11 +2274,17 @@ impl Graph {
                     "check_reads: counters claims_refuted {} effects_refuted {} claim_siblings {} defs_refuted {}",
                     r.claims_refuted, r.effects_refuted, r.claim_siblings, r.defs_refuted
                 );
+                let tc = std::time::Instant::now();
                 let lines = self.eng.check_reads();
                 for l in &lines {
                     eprintln!("check_reads: {l}");
                 }
-                eprintln!("check_reads: {} stale", lines.len());
+                // (the check's own time: the gate's walls include it)
+                eprintln!(
+                    "check_reads: {} stale (checked in {:?})",
+                    lines.len(),
+                    tc.elapsed()
+                );
                 assert!(
                     lines.is_empty() || crate::exec::env_str!("PHITEX_CHECK_READS") != Some("fail"),
                     "{} committed reads no longer hold",
