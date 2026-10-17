@@ -1362,10 +1362,15 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             // (the slice holds a paragraph if one starts in it)
             // (or a horizontal atom at depth 0 outside conditionals that
             // only a macro's guessed operands cover: `\hello\ world.`)
-            let has_par = p.atoms.iter().enumerate().any(|(k, a)| {
-                a.start >= s
-                    && a.start < e
-                    && (par_at[k]
+            // (atoms are in text order: the slice's range only)
+            let lo = p.atoms.partition_point(|a| a.start < s);
+            let has_par = p.atoms[lo..]
+                .iter()
+                .take_while(|a| a.start < e)
+                .enumerate()
+                .any(|(j, a)| {
+                    let k = lo + j;
+                    par_at[k]
                         || (depth[k] == 0
                             && ifd[k] == 0
                             && !operand[k]
@@ -1373,8 +1378,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                                 AtomKind::Char(_) | AtomKind::Verb => true,
                                 AtomKind::Cs => starts_par(a.name(text)),
                                 _ => false,
-                            }))
-            });
+                            })
+                });
             out.push((s, e));
             pars.push(has_par);
         }

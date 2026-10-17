@@ -60,6 +60,60 @@ pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, 
 /// The exact PDF file the link made (`pdf:file`), read by the end node.
 pub(crate) const LINKED: &str = "pdf:file";
 
+/// The bytes of the files the link made, by their hash: the file's value
+/// is `["bytes", hash, length]`, not the file as a string (copied,
+/// interned and hashed as characters, then copied back to bytes: O(file)
+/// three times an edit). The latest few kept.
+fn linked_files() -> &'static LinkedFiles {
+    static M: std::sync::OnceLock<LinkedFiles> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// [`linked_files`]: (hash, bytes), the latest last.
+type LinkedFiles = std::sync::Mutex<std::collections::VecDeque<(u64, std::sync::Arc<Vec<u8>>)>>;
+
+/// The value standing for file bytes `b` ([`linked_files`]).
+fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>) -> ValueId {
+    let h = phitex_defuse::hash_bytes(0x6c69_6e6b_6564, &b);
+    let n = b.len();
+    let mut m = linked_files()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !m.iter().any(|e| e.0 == h) {
+        m.push_back((h, std::sync::Arc::new(b)));
+        while m.len() > 4 {
+            m.pop_front();
+        }
+    }
+    v.list(vec![
+        v.str("bytes"),
+        v.int(i64::from_ne_bytes(h.to_ne_bytes())),
+        v.int(i64::try_from(n).unwrap_or(0)),
+    ])
+}
+
+/// The bytes of an output value: a file's string, or the bytes a
+/// [`bytes_value`] stands for.
+pub(crate) fn file_bytes(v: &phitex_defuse::Values, x: ValueId) -> Vec<u8> {
+    if let phitex_defuse::Value::List(xs) = &*v.get(x)
+        && xs.len() == 3
+        && str_of(v, xs[0]) == "bytes"
+    {
+        let h = u64::from_ne_bytes(int_of(v, xs[1]).to_ne_bytes());
+        return linked_files()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|e| e.0 == h)
+            .map(|e| e.1.as_ref().clone())
+            .unwrap_or_default();
+    }
+    str_of(v, x)
+        .chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
+        .collect()
+}
+
 /// The format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`):
 /// a page entry is `[box, counts, fonts, pdf params, pdf data]`, the
 /// params' first element whether the file is PDF.
@@ -430,5 +484,5 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     ] {
         cx.publish(v.field(name), x);
     }
-    Ok(v.intern(Value::Str(latin1(&l.file).into_boxed_str())))
+    Ok(bytes_value(v, l.file))
 }

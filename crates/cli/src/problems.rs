@@ -412,7 +412,13 @@ pub fn rendered(
 ) -> Vec<String> {
     // (the engine's own diagnostics are shown with the warnings: they
     // are not TeX's errors)
-    r.diagnostics
+    // (each file's source read once, not once a diagnostic: the main
+    // text is the whole document)
+    let mut sources: std::collections::HashMap<&str, Option<Vec<u8>>> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for d in r
+        .diagnostics
         .iter()
         .filter(|d| (d.severity == phitex_tex::Severity::Error) != warnings)
         // (an engine failure has no place: shown on its own line)
@@ -421,13 +427,13 @@ pub fn rendered(
                 && d.range == (0, 0)
                 && d.context.is_empty())
         })
-        .map(|d| {
-            render(
-                &from_diagnostic(d, s.source(&d.file).as_deref(), verbose),
-                color,
-            )
-        })
-        .collect()
+    {
+        let src = sources
+            .entry(d.file.as_str())
+            .or_insert_with(|| s.source(&d.file));
+        out.push(render(&from_diagnostic(d, src.as_deref(), verbose), color));
+    }
+    out
 }
 
 /// An error without the piece it was met in (`piece K: …`).

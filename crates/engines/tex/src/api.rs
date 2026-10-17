@@ -4342,12 +4342,7 @@ impl Build {
             .g
             .eng
             .output(self.dvi)
-            .map(|x| {
-                str_of(v, x)
-                    .chars()
-                    .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
-                    .collect()
-            })
+            .map(|x| crate::assemble::file_bytes(v, x))
             .unwrap_or_default();
         let n = self.pages().len();
         // (pdfTeX §794: after a fatal error the PDF file is removed)
@@ -4437,24 +4432,60 @@ impl Build {
     #[must_use]
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         let v = self.g.eng.values();
-        // the document's text and its nodes' spans
-        let mut doc = String::new();
-        let mut spans = Vec::new();
+        // the document's text and its nodes' spans: the text itself where
+        // the nodes cover it in order (every document), not a copy
+        let contiguous = {
+            let mut at = 0;
+            self.nodes.iter().all(|(_, _, src)| {
+                let Src::Doc(s, e) = *src;
+                let ok = s == at;
+                at = e;
+                ok
+            }) && self.nodes.last().is_none_or(|(_, _, src)| {
+                let Src::Doc(_, e) = *src;
+                e >= self.text.len()
+            })
+        };
+        let mut owned = String::new();
+        let mut spans = Vec::with_capacity(self.nodes.len());
         for (_, _, src) in &self.nodes {
-            let piece = src.text(&self.text);
-            spans.push(doc.len());
-            doc.push_str(piece);
-        }
-        // every node under a node of the text, to that node
-        let mut top: phitex_defuse::FxHashMap<u64, usize> = phitex_defuse::FxHashMap::default();
-        for (i, (_, n, _)) in self.nodes.iter().enumerate() {
-            let mut stack = vec![*n];
-            while let Some(x) = stack.pop() {
-                if top.insert(x.raw(), i).is_none() {
-                    stack.extend(self.g.eng.children(x));
-                }
+            if contiguous {
+                let Src::Doc(s, _) = *src;
+                spans.push(s.min(self.text.len()));
+            } else {
+                spans.push(owned.len());
+                owned.push_str(src.text(&self.text));
             }
         }
+        let doc: &str = if contiguous { &self.text } else { &owned };
+        // (the document's line starts, once: a diagnostic's line by a
+        // search, not by counting the text before it)
+        let doc_lines: Vec<usize> = std::iter::once(0)
+            .chain(
+                doc.bytes()
+                    .enumerate()
+                    .filter(|&(_, c)| c == b'\n')
+                    .map(|(k, _)| k + 1),
+            )
+            .collect();
+        // every node under a node of the text, to that node: made only
+        // for a diagnostic placed by its node alone
+        let mut top_map: Option<phitex_defuse::FxHashMap<u64, usize>> = None;
+        let mut top = |node: u64| -> usize {
+            let m = top_map.get_or_insert_with(|| {
+                let mut top = phitex_defuse::FxHashMap::default();
+                for (i, (_, n, _)) in self.nodes.iter().enumerate() {
+                    let mut stack = vec![*n];
+                    while let Some(x) = stack.pop() {
+                        if top.insert(x.raw(), i).is_none() {
+                            stack.extend(self.g.eng.children(x));
+                        }
+                    }
+                }
+                top
+            });
+            m.get(&node).copied().unwrap_or(0)
+        };
         let docname = self.opts.name.clone();
         let mut out = Vec::new();
         // the control sequences defined, gathered at the first undefined one
@@ -4480,11 +4511,7 @@ impl Build {
                 // node's frame carries is the byte in the document
                 let at = usize::try_from(int(3)).unwrap_or(0)
                     + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
-                (
-                    docname.clone(),
-                    std::borrow::Cow::Borrowed(doc.as_str()),
-                    at,
-                )
+                (docname.clone(), std::borrow::Cow::Borrowed(doc), at)
             } else if int(3) >= 0
                 && let Some(&n) = xs.get(2)
                 && n != ValueId::UNIT
@@ -4499,18 +4526,14 @@ impl Build {
                 (name, std::borrow::Cow::Owned(text), at)
             } else {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());
-                let i = top.get(&node).copied().unwrap_or(0);
+                let i = top(node);
                 let from = spans.get(i).copied().unwrap_or(0);
                 let at = doc
                     .get(from..)
                     .and_then(|d| (!seg.is_empty()).then(|| d.find(&seg)).flatten())
                     .map_or(from, |k| from + k + before.len());
                 let at = if self.nodes.is_empty() { 0 } else { at };
-                (
-                    docname.clone(),
-                    std::borrow::Cow::Borrowed(doc.as_str()),
-                    at,
-                )
+                (docname.clone(), std::borrow::Cow::Borrowed(doc), at)
             };
             // the line around `at`, as characters; `at` in the file's
             // bytes (the document's text is UTF-8, a file's characters
@@ -4527,7 +4550,12 @@ impl Build {
                 text.char_indices().nth(at).map_or(text.len(), |(k, _)| k)
             };
             let head = &text[..b];
-            let line = head.bytes().filter(|&c| c == b'\n').count() + 1;
+            // (the document's line by its line starts; a file's counted)
+            let line = if file == docname {
+                doc_lines.partition_point(|&k| k <= b)
+            } else {
+                head.bytes().filter(|&c| c == b'\n').count() + 1
+            };
             let ls = head.rfind('\n').map_or(0, |k| k + 1);
             let le = text[b..].find('\n').map_or(text.len(), |k| b + k);
             let before: String = text[ls..b].to_owned();
