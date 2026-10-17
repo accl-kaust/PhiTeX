@@ -24,7 +24,7 @@ about 2,900 Ir per command, 63 Ir per token.
 
 | bar | measure | today (dcb6e93c / 566fb842) | finish line |
 |---|---|---|---|
-| bytes | md5 vs oracle, amsldoc and para4000, j1/j8/j16/j32 | amsldoc wrong at j1 and j8 | identical at every thread count, 0 stale reads (PHITEX_CHECK_READS=1), refuted counters reported |
+| bytes | md5 vs oracle, amsldoc and para4000, j1/j8/j16/j32, cold AND after an edit history (50 one-word edits at random places, then the PDF equal to a cold build of the final text, at j8 and j16) | amsldoc exact cold at j1/j8/j16 (31935925); edit histories at j8/j16 never run | identical at every thread count, cold and after edit histories, 0 stale reads (PHITEX_CHECK_READS=1), refuted counters reported |
 | cold | wall, release, pinned whole cores | para4000 4.71 s at j8; amsldoc 34.6 s at j8 | para4000 < 0.734 s at j8; amsldoc < 3 s at j8 |
 | scaling | wall at 1/4/8/16/32 vs busy | j8 = j1 | wall(N) ≤ 1.25 × busy/N + critical-path time, up to 32 |
 | edit | one-word edit, release, PDF written and equal to a cold build of the edited text | 0.2 s (mid-doc, edit-tail) | ≤ 16 ms on para4000 and amsldoc, of which fixed cost ≤ 10 ms |
