@@ -496,7 +496,9 @@ impl Executor for Inner {
     }
 
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        if self.0 <= 1 || n < 2 || !threads_possible() {
+        // (wasm32: `std::thread::spawn` is not there, whatever the host
+        // gives the executor's pool; the fan-out runs in order)
+        if self.0 <= 1 || n < 2 || !threads_possible() || cfg!(target_arch = "wasm32") {
             (0..n).for_each(f);
             return;
         }
