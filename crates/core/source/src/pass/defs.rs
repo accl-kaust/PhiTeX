@@ -308,7 +308,8 @@ impl Definitions {
 
     /// Every shape `name` is given.
     /// The register number a `\\countdef` (or kin) gave `name` as digits.
-    pub(crate) fn register(&self, name: &str) -> Option<u32> {
+    #[must_use]
+    pub fn register(&self, name: &str) -> Option<u32> {
         self.registers.get(name).copied()
     }
 
