@@ -36,7 +36,7 @@
 //!   page fires inside a piece checks its routine against what the
 //!   piece read and defined after the candidate ([`Run::check_cut`]);
 //!   only where the routine changes them it splits the piece
-//!   (`split:<piece>`, [`split_field`], a loop-back): the piece's next
+//!   (`split:<piece>:<k>`, [`split_field`], a loop-back): the piece's next
 //!   run ends at the candidate and its continuation
 //!   ([`Run::cont_encode`]) is the material of a `resume` piece
 //!   ([`Resume`], [`RESUME`]) placed after it, which reads the state
@@ -114,11 +114,11 @@ pub(crate) const SCAN: &str = "scan:state";
 pub(crate) const SCAN_BLOCK: &str = "scan:block";
 
 /// Page `j`'s continuation's scan state where it differed from what the
-/// block's scan predicted (`[state, material]`): a loop-back the
+/// block's scan `placer` predicted (`[state, material]`): a loop-back the
 /// continuation declares and publishes ([`Run::scan_cont`]), read by
 /// the scan the round after.
-fn scan_fix_field(v: &Values, j: i64) -> Field {
-    v.field(&format!("scan:fix:{j}"))
+fn scan_fix_field(v: &Values, j: i64, placer: i64) -> Field {
+    v.field(&format!("scan:fix:{j}:{}", placer.cast_unsigned()))
 }
 
 /// What the next page begins with as items (the routine's markers, the
@@ -149,14 +149,16 @@ pub(crate) fn give_no_units(r: &mut Run<'_, '_>) {
     }
 }
 
-/// Piece `pid`'s split (`split:<piece>`): the candidate a finisher found
-/// that the piece's run must end at (its output routine changes what the
-/// piece's commands after the candidate read), a loop-back the finisher
-/// declares and publishes ([`Run::check_cut`]); none while no finisher
-/// asked. The piece reads it ([`Run::finish_candidate`]): a split costs a
-/// round only where the routine really changes the rest of the piece.
-pub(crate) fn split_field(v: &Values, pid: i64) -> Field {
-    v.field(&format!("split:{}", pid.cast_unsigned()))
+/// Piece `pid`'s split at its candidate `k` (`split:<piece>:<k>`): the
+/// piece's run must end there (a finisher's output routine changes what
+/// the piece's commands after the candidate read), a loop-back the
+/// finisher declares and publishes ([`Run::check_cut`]); none while no
+/// finisher asked. The piece reads it at that candidate
+/// ([`Run::finish_candidate`]): a split costs a round only where the
+/// routine really changes the rest of the piece. One field a candidate:
+/// two pages that break inside the same piece each publish their own.
+pub(crate) fn split_field(v: &Values, pid: i64, k: i64) -> Field {
+    v.field(&format!("split:{}:{k}", pid.cast_unsigned()))
 }
 
 /// `max_dimen` (§421).
@@ -643,7 +645,7 @@ impl Run<'_, '_> {
         });
         // (a piece runs through its candidates; it ends at one only
         // where a page's finisher found that its routine changes what
-        // the piece read after it, `split:<piece>`, [`Run::check_cut`]:
+        // the piece read after it, `split:<piece>:<k>`, [`Run::check_cut`]:
         // the rest of its text is then a continuation placed after it,
         // which reads the state there forward and what the routine
         // leaves)
@@ -651,7 +653,7 @@ impl Run<'_, '_> {
         if (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
             && fresh
-            && self.split_at()? == Some(i64::from(k))
+            && self.split_at(i64::from(k))?
             && self.has_input()
         {
             self.cut = Some(k);
@@ -660,23 +662,13 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// The candidate a finisher asked this piece to end at
-    /// (`split:<piece>`, a loop-back a finisher declares, [`split_field`]),
-    /// read once a run.
-    fn split_at(&mut self) -> R<Option<i64>> {
-        if self.split_read {
-            return Ok(self.split);
-        }
+    /// Whether a finisher asked this piece to end at its candidate `k`
+    /// (`split:<piece>:<k>`, a loop-back a finisher declares,
+    /// [`split_field`]).
+    fn split_at(&mut self, k: i64) -> R<bool> {
         let v = self.v;
-        let f = split_field(v, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-        let x = if self.cx.is_loopback(f) {
-            self.eng_read(f)?.and_then(|x| v.as_int(x))
-        } else {
-            None
-        };
-        self.split = x;
-        self.split_read = true;
-        Ok(x)
+        let f = split_field(v, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()), k);
+        Ok(self.cx.is_loopback(f) && self.eng_read(f)?.and_then(|x| v.as_int(x)) == Some(k))
     }
 
     /// Whether this run put an item on the main list (a node, or the
@@ -1007,9 +999,14 @@ impl Run<'_, '_> {
         // (the continuation names its page: its guess is that page's,
         // [`Ops::scan_guess`])
         let (x, mat) = pred.unwrap_or((ValueId::UNIT, ValueId::UNIT));
-        let args = vec![v.int(-2), v.int(j), x, mat, b];
+        let mut args = vec![v.int(-2), v.int(j), x, mat, b];
         match at {
             Some(at) => {
+                // (the block's scan that placed it: the one its run's
+                // state goes back to, `scan:fix:<page>:<scan>`; two
+                // scans placing the same page each are told their own)
+                let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+                args.push(v.int(me));
                 self.cx.follow_after(at, self.ops.scan, args);
             }
             None => {
@@ -1652,7 +1649,7 @@ impl Run<'_, '_> {
     }
 
     /// A finisher's split of the piece its page's break is in
-    /// (`split:<piece>`, [`split_field`]): where the break is inside the
+    /// (`split:<piece>:<k>`, [`split_field`]): where the break is inside the
     /// piece and the routine changes what the piece's commands after it
     /// read ([`Run::check_cut`]), the candidate, declared a loop-back and
     /// published; where the break is at the piece's end and the piece was
@@ -1662,7 +1659,7 @@ impl Run<'_, '_> {
         let Some((pid, k, inside)) = self.fin.as_ref().and_then(|c| c.brk) else {
             return Ok(());
         };
-        let f = split_field(v, pid);
+        let f = split_field(v, pid, k);
         let keep = if inside {
             self.check_cut(args)?.is_some()
         } else {
@@ -3711,10 +3708,11 @@ impl Run<'_, '_> {
             )?;
             // (the continuation's scan state: as its run gave it where it
             // differed from what this scan gave it the round before
-            // (`scan:fix:<page>`, a loop-back the continuation declares),
+            // (`scan:fix:<page>:<scan>`, a loop-back the continuation declares),
             // else as the scan sees it, what the routine gives back its
             // finisher's prediction; the next page runs on it)
-            let fix = scan_fix_field(v, j);
+            let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+            let fix = scan_fix_field(v, j, me);
             let fixed = if self.cx.is_loopback(fix) {
                 self.eng_read(fix)?.and_then(|x| {
                     let xs = list_of(v, x);
@@ -3793,11 +3791,11 @@ impl Run<'_, '_> {
                 // told the real one the round after; told before, it is
                 // told again while it stands)
                 let args = self.cx.args();
-                if let (Some(&px), Some(&j)) = (args.get(2), args.get(1))
+                if let (Some(&px), Some(&j), Some(&by)) = (args.get(2), args.get(1), args.get(5))
                     && px != ValueId::UNIT
                 {
                     let j = int_of(v, j);
-                    let fix = scan_fix_field(v, j);
+                    let fix = scan_fix_field(v, j, int_of(v, by));
                     let real = v.list(vec![x, mat]);
                     let told = self.cx.is_loopback(fix) && self.eng_read(fix)? == Some(real);
                     if (px, args.get(3).copied().unwrap_or(ValueId::UNIT)) != (x, mat) || told {

@@ -650,10 +650,6 @@ pub(crate) struct Run<'c, 'a> {
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
     pub cut: Option<u32>,
-    /// This run's split (`crate::pages::split_field`), once read
-    /// (`split_read`).
-    pub split: Option<i64>,
-    pub split_read: bool,
     /// The records read ([`crate::fields::RECORDS`]), by record: `None`
     /// not read yet; `Some(None)` undefined or stale (its cells are read
     /// one by one); `Some(Some(cells))` each cell's value.
@@ -779,8 +775,6 @@ impl<'c, 'a> Run<'c, 'a> {
             ins_pending: Vec::new(),
             fin: None,
             cut: None,
-            split: None,
-            split_read: false,
             recs: std::array::from_fn(|_| None),
             rec_out: Vec::new(),
             rec_ready: false,
