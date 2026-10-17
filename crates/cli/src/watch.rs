@@ -989,6 +989,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             "diagnostics": r.engine_diagnostics(),
         }));
         let trep = std::time::Instant::now();
+        let tevent = trep;
         modern::report(
             t,
             s,
@@ -1036,6 +1037,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             if let Err(e) = view::open_with(cmd, out) {
                 ui.warning(&format!("can't start {cmd}: {e}"));
             }
+        }
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!("watch phases: after the event {:?}", tevent.elapsed());
         }
     };
     // (what came while a build ran and it could not take: done after it)
