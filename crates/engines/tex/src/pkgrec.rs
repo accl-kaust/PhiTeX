@@ -55,8 +55,29 @@ pub(crate) type Recs = FxHashMap<String, Rec>;
 /// of its arguments, blanks and comment lines dropped; `None` for any
 /// other slice.
 pub(crate) fn load_key(text: &str) -> Option<String> {
+    // (the body's head first: a slice that does not begin with a
+    // loader's name is no load, its whole text not copied; every
+    // paragraph of a document asks)
+    let head = load_body(text, 32);
+    let rest = head.strip_prefix('\\')?;
+    let name_len = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
+    if name_len < rest.len() && !LOADERS.contains(&&rest[..name_len]) {
+        return None;
+    }
+    let body = load_body(text, usize::MAX);
+    let rest = body.strip_prefix('\\')?;
+    let name_len = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
+    LOADERS.contains(&&rest[..name_len]).then_some(body)
+}
+
+/// [`load_key`]'s body: the text, blank and comment lines dropped before
+/// it, comments and blanks dropped, up to `max` characters.
+fn load_body(text: &str, max: usize) -> String {
     let mut body = String::new();
     for line in text.lines() {
+        if body.len() >= max {
+            break;
+        }
         let t = line.trim_start();
         if body.is_empty() && (t.is_empty() || t.starts_with('%')) {
             continue;
@@ -66,11 +87,10 @@ pub(crate) fn load_key(text: &str) -> Option<String> {
             Some(i) if i == 0 || t.as_bytes()[i - 1] != b'\\' => &t[..i],
             _ => t,
         };
-        body.extend(t.chars().filter(|c| !c.is_ascii_whitespace()));
+        let room = max.saturating_sub(body.len());
+        body.extend(t.chars().filter(|c| !c.is_ascii_whitespace()).take(room));
     }
-    let rest = body.strip_prefix('\\')?;
-    let name_len = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
-    LOADERS.contains(&&rest[..name_len]).then_some(body)
+    body
 }
 
 /// Whether a node's arguments are a top-level document slice that is a
