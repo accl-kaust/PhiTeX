@@ -122,6 +122,31 @@ fn scan_fix_field(v: &Values, j: i64, placer: i64) -> Field {
     v.field(&format!("scan:fix:{j}:{}", placer.cast_unsigned()))
 }
 
+/// Where the pages firing one after another in continuations' own
+/// material end: the scan state (with its material) the last of them
+/// defines, for the block's scan that placed the first continuation,
+/// `placer`, at page `j` without knowing its state; that scan reads it
+/// and goes on from it (`scan:chain:<j>:<placer>`). Defined by that
+/// continuation or the last of those it places, all before the scan.
+fn scan_chain_field(v: &Values, j: i64, placer: i64) -> Field {
+    v.field(&format!("scan:chain:{j}:{}", placer.cast_unsigned()))
+}
+
+/// A continuation's chain, `(j, placer)` of [`scan_chain_field`]: one
+/// placed without a predicted state, by a block's scan or by a
+/// continuation of that chain (arguments 5 and 6).
+fn cont_chain(v: &Values, args: &[ValueId]) -> Option<(i64, i64)> {
+    if args.first().is_none_or(|&x| int_of(v, x) != -2)
+        || args.get(2).is_none_or(|&x| x != ValueId::UNIT)
+    {
+        return None;
+    }
+    let (Some(&by), Some(&j0)) = (args.get(5), args.get(6)) else {
+        return None;
+    };
+    Some((int_of(v, j0), int_of(v, by)))
+}
+
 /// What the next page begins with as items (the routine's markers, the
 /// held-over insertions, its list, the material carried over, the rest
 /// of the piece), defined beside [`SCAN`] by the same continuation and
@@ -1021,24 +1046,30 @@ impl Run<'_, '_> {
         j: i64,
         pred: Option<(ValueId, ValueId)>,
         b: ValueId,
+        chain: Option<(i64, i64)>,
     ) {
         let v = self.v;
         // (the continuation names its page: its guess is that page's,
         // [`Ops::scan_guess`])
         let (x, mat) = pred.unwrap_or((ValueId::UNIT, ValueId::UNIT));
         let mut args = vec![v.int(-2), v.int(j), x, mat, b];
-        match at {
-            Some(at) => {
-                // (the block's scan that placed it: the one its run's
-                // state goes back to, `scan:fix:<page>:<scan>`; two
-                // scans placing the same page each are told their own)
-                let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-                args.push(v.int(me));
-                self.cx.follow_after(at, self.ops.scan, args);
+        if let Some(at) = at {
+            // (the block's scan that placed it: the one its run's state
+            // goes back to, `scan:fix:<page>:<scan>`; two scans placing
+            // the same page each are told their own; and its page, the
+            // chain's first, [`scan_chain_field`])
+            let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+            args.push(v.int(me));
+            args.push(v.int(j));
+            self.cx.follow_after(at, self.ops.scan, args);
+        } else {
+            // (a page firing in a continuation's material: the chain that
+            // continuation is in goes on)
+            if let Some((j0, by)) = chain {
+                args.push(v.int(by));
+                args.push(v.int(j0));
             }
-            None => {
-                self.cx.follow(self.ops.scan, args);
-            }
+            self.cx.follow(self.ops.scan, args);
         }
     }
 
@@ -1900,6 +1931,43 @@ impl Run<'_, '_> {
         };
         let (inserts, marks, held) = (list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
+        if crate::exec::env_flag!("PHITEX_FIRE_TEXT") {
+            // (the page's first letters, to tell the pages apart)
+            fn text(list: &[Node], out: &mut String) {
+                for n in list {
+                    if out.len() >= 60 {
+                        return;
+                    }
+                    match n {
+                        Node::Char { ch, .. } => {
+                            out.push(char::from_u32(u32::from(*ch)).unwrap_or('?'));
+                        }
+                        Node::Lig(l) => {
+                            for &c in &l.original {
+                                out.push(char::from_u32(u32::from(c)).unwrap_or('?'));
+                            }
+                        }
+                        Node::Box(b) => {
+                            text(&b.list, out);
+                            out.push(' ');
+                        }
+                        Node::Glue(_) => out.push(' '),
+                        _ => {}
+                    }
+                }
+            }
+            let mut t = String::new();
+            if let Some(Node::Box(b)) = nodes::decode(v, b255, &mut Side::default()) {
+                text(&b.list, &mut t);
+            }
+            eprintln!(
+                "fire-text: node {} page {} penalty {output_penalty} held {} spec {}: {t:?}",
+                self.cx.node().raw(),
+                self.fin.as_ref().map_or(-1, |c| c.j),
+                held.len(),
+                self.cx.is_speculative()
+            );
+        }
         if let Some(c) = self.fin.as_mut() {
             c.held_n = held.len();
         }
@@ -3496,7 +3564,11 @@ impl Operation for Scan {
         // scan, gated on that, waits for the scan of the block before
         // only)
         if args.first().is_some_and(|&x| int_of(v, x) == -2) {
-            return MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT)]);
+            let mut names = vec![v.field(SCAN), v.field(SCAN_MAT)];
+            if let Some((j0, by)) = cont_chain(v, args) {
+                names.push(scan_chain_field(v, j0, by));
+            }
+            return MayDefine::Names(names);
         }
         MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT), v.field(SCAN_BLOCK)])
     }
@@ -3720,6 +3792,9 @@ impl Run<'_, '_> {
             Placed::Nothing => Vec::new(),
             Placed::State | Placed::Page => vec![v.field(SCAN), v.field(SCAN_MAT)],
         };
+        if let (Placed::State, Some((j0, by))) = (&placed, cont_chain(v, args)) {
+            names.push(scan_chain_field(v, j0, by));
+        }
         if block {
             names.push(v.field(SCAN_BLOCK));
         }
@@ -3892,6 +3967,14 @@ impl Run<'_, '_> {
         // first block. Nothing its own continuations define is read: they
         // sit before it)
         let (mut src, mut mat) = match self.eng_read(v.field(SCAN_BLOCK))? {
+            // (the block before ended in pages firing in continuations'
+            // material whose end its scan does not know yet: nothing
+            // here until it does, not a scan from the document's start)
+            Some(x) if x == ValueId::UNIT => {
+                self.cx
+                    .define_with(v.field(SCAN_BLOCK), ValueId::UNIT, Locality::Global);
+                return Ok(Placed::Nothing);
+            }
             Some(x) => {
                 let xs = list_of(v, x);
                 (
@@ -3959,12 +4042,20 @@ impl Run<'_, '_> {
                     }
                 }
             };
-            self.place_cont(Some(at), j, pred, b);
+            self.place_cont(Some(at), j, pred, b, None);
             placed = Placed::Page;
+            // (the continuation's state not known here (a page firing in
+            // its own material, which it places): where the pages firing
+            // so end, as the last of them defines it, before this node)
+            let pred = match pred {
+                Some(p) => Some(p),
+                None => self
+                    .eng_read(scan_chain_field(v, j, me))?
+                    .map(|x| list_of(v, x))
+                    .and_then(|xs| Some((*xs.first()?, *xs.get(1)?)))
+                    .filter(|p| p.0 != ValueId::UNIT),
+            };
             let Some((x, m)) = pred else {
-                // (the continuation's state not known here (a page firing
-                // in its own material, which it places): the scan of the
-                // next block goes on from the scan state as it reaches it)
                 known = false;
                 break;
             };
@@ -4024,13 +4115,21 @@ impl Run<'_, '_> {
                 let (b, _) = self.place_break(
                     None, j, src, -2, k, rest, normal, special, origin, None, None,
                 )?;
-                self.place_cont(None, j, None, b);
+                let chain = cont_chain(v, &self.cx.args());
+                self.place_cont(None, j, None, b, chain);
                 Ok(Placed::Page)
             }
             Cont::State(x, mat) => {
                 self.cx.define_with(v.field(SCAN), x, Locality::Global);
                 self.cx
                     .define_with(v.field(SCAN_MAT), mat, Locality::Global);
+                if let Some((j0, by)) = cont_chain(v, &self.cx.args()) {
+                    self.cx.define_with(
+                        scan_chain_field(v, j0, by),
+                        v.list(vec![x, mat]),
+                        Locality::Global,
+                    );
+                }
                 // (placed with a prediction of this state that differs:
                 // the block's scan, which went on from the prediction, is
                 // told the real one the round after; told before, it is
