@@ -545,16 +545,14 @@ impl Operation for Dvi {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
     }
-    /// The scan's last state and the link's file: the node waits while
-    /// their definers before it are in work instead of starting. Not the
-    /// accumulators the file is made of: the engine's gate answers an
-    /// accumulator by combining it from the unit's start at every check
-    /// (quadratic over a cold build's steps); the range read stops on a
-    /// contributor still in work, which is the last page's finisher at
-    /// most once the scan's last state is there.
+    /// The scan's last state and the accumulators the file is made of:
+    /// the node waits while a page node or writer step before it is in
+    /// work instead of starting, stopping at a range and running again
+    /// (an edit's end node ran twice: once stopped at `pages` while the
+    /// edited page's finisher ran).
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [crate::pages::SCAN, crate::assemble::LINKED]
+            [crate::pages::SCAN, "pages", crate::assemble::LINKED]
                 .iter()
                 .map(|&f| v.field(f))
                 .collect(),
@@ -578,10 +576,15 @@ impl Operation for Link {
     fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(vec![(v.field(crate::assemble::LINKED), Locality::Global)])
     }
-    /// Held until the scan's last state is there (not the accumulators
-    /// it reads by range: [`Dvi::reads`]).
+    /// What the file is made of: held until the pages and the line's
+    /// records before it are done.
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(vec![v.field(crate::pages::SCAN)])
+        Some(
+            [crate::pages::SCAN, "pages", crate::pdfout::XPAGES]
+                .iter()
+                .map(|&f| v.field(f))
+                .collect(),
+        )
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());

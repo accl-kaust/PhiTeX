@@ -155,9 +155,19 @@ impl Speculation {
                 Speculation::All => S::All,
             },
         };
+        // (fuel 0: a run re-run after a commit reads a definer in work by
+        // waiting, not by guessing its committed value: on a chain of
+        // pieces each guess was refuted by the next commit before it and
+        // ran the piece again, 2,566 runs for 39 nodes on a one-paragraph
+        // document; a definer's prediction is still read, which takes no
+        // fuel. `PHITEX_SPEC_FUEL` sets it)
+        let fuel = std::env::var("PHITEX_SPEC_FUEL")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(0);
         Box::new(phitex_defuse::Greedy {
             outstanding: 4096,
-            fuel: 10_000,
+            fuel,
             ..phitex_defuse::Greedy::speculative(mode, budget)
         })
     }
