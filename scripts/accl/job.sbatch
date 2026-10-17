@@ -79,6 +79,7 @@ if [ -n "${ACCL_NO_CARGO:-}" ]; then
 elif [ -d "$cache/cargo-$key" ]; then
   # (beside the upstream copy below)
   cp -a "$cache/cargo-$key/." "$w/cargo/" &
+  cpid=$!
 else
   net cargo fetch -q
   # (jobs racing to fill it: each writes its own part; the first rename wins)
@@ -98,7 +99,8 @@ else
   p=$cache/upstream-$key.part-$SLURM_JOB_ID
   cp -a upstream "$p" && { mv -T "$p" "$cache/upstream-$key" 2>/dev/null || rm -rf "$p"; }
 fi
-wait
+# (that copy only: a bare `wait` would wait for the log's tee too)
+[ -z "${cpid:-}" ] || wait "$cpid"
 # the container is the sandbox
 cat > scripts/sandbox <<'EOF'
 #!/usr/bin/env bash
