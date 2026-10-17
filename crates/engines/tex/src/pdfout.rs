@@ -318,7 +318,7 @@ fn apply_doc_op(v: &Values, st: &mut PdfState, e: ValueId) {
 pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) kpathsea version 6.4.2";
 
 /// A font map by TFM name.
-type Map = BTreeMap<Vec<u8>, MapEntry>;
+type Map = phitex_pdf::map::MapIndex;
 
 /// A pure function's memo by a value's id, computed once: a key's
 /// first caller computes it, concurrent callers of the same key wait for
@@ -969,7 +969,9 @@ fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
         return Ok(None);
     };
     Ok(Some(once(maps(), m.raw(), || {
-        Arc::new(parse_map(&bytes_of(&str_of(v, m))))
+        Arc::new(phitex_pdf::map::MapIndex::new(Arc::from(bytes_of(
+            &str_of(v, m),
+        ))))
     })))
 }
 
@@ -1066,7 +1068,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             // `mapfile.c`: the line pdfTeX adds for its space font
             parse_line(b"pdftexspace PdfTeX-Space <pdftexspace.pfb")
         } else {
-            map.as_ref().and_then(|m| m.get(name.as_bytes()).cloned())
+            map.as_ref().and_then(|m| m.get(name.as_bytes()))
         };
         let mut get = |n: Option<&[u8]>| -> R<Option<Arc<[u8]>>> {
             match n {

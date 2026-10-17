@@ -368,6 +368,72 @@ pub fn parse_map_ps(bytes: &[u8]) -> BTreeMap<(Vec<u8>, i32, i32), MapEntry> {
     ps
 }
 
+/// A map file read on demand (`fm_read_info` as [`parse_map`] reads it,
+/// a line parsed when its TFM name is asked for): the lines by their
+/// first field, the first valid entry of a name kept (`FM_DUPIGNORE`).
+/// A document uses a few dozen of a map's thousands of lines.
+pub struct MapIndex {
+    bytes: std::sync::Arc<[u8]>,
+    lines: std::collections::HashMap<Vec<u8>, Vec<(usize, usize)>>,
+    got: std::sync::Mutex<std::collections::HashMap<Vec<u8>, Option<MapEntry>>>,
+}
+
+impl MapIndex {
+    /// The index of map file `bytes`: one pass over its lines' first
+    /// fields.
+    #[must_use]
+    pub fn new(bytes: std::sync::Arc<[u8]>) -> MapIndex {
+        let mut lines: std::collections::HashMap<Vec<u8>, Vec<(usize, usize)>> =
+            std::collections::HashMap::new();
+        let b = &bytes[..];
+        let mut pos = 0;
+        while pos < b.len() {
+            let end = b[pos..]
+                .iter()
+                .position(|&c| c == b'\n' || c == b'\r')
+                .map_or(b.len(), |i| pos + i);
+            let mut a = pos;
+            while a < end && matches!(b[a], b' ' | b'\t') {
+                a += 1;
+            }
+            if a < end && !is_cfg_comment(b[a]) {
+                let mut e = a;
+                while e < end && !matches!(b[e], b' ' | b'\t' | b'<' | b'"') {
+                    e += 1;
+                }
+                lines.entry(b[a..e].to_vec()).or_default().push((pos, end));
+            }
+            pos = end + 1;
+        }
+        MapIndex {
+            bytes,
+            lines,
+            got: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The entry of TFM name `name`, as [`parse_map`]'s.
+    #[must_use]
+    pub fn get(&self, name: &[u8]) -> Option<MapEntry> {
+        let mut got = self
+            .got
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(x) = got.get(name) {
+            return x.clone();
+        }
+        let x = self.lines.get(name).and_then(|ls| {
+            ls.iter().find_map(|&(a, b)| {
+                map_lines(&self.bytes[a..b])
+                    .into_iter()
+                    .find(|fm| fm.tfm_name == name)
+            })
+        });
+        got.insert(name.to_vec(), x.clone());
+        x
+    }
+}
+
 /// The entries of a map file's lines, in order.
 fn map_lines(bytes: &[u8]) -> Vec<MapEntry> {
     let mut map = Vec::new();

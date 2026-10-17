@@ -108,6 +108,19 @@ pub(crate) const GDEFS: &str = "gdefs";
 /// per piece: a step that fires no page defines nothing.
 pub(crate) const SCAN: &str = "scan:state";
 
+/// Where a block's scan ended its block ([`Run::scan_step`]): `[scan
+/// state, material]` after its last page, `()` where a continuation of it
+/// places the next page itself; read by the next block's scan.
+pub(crate) const SCAN_BLOCK: &str = "scan:block";
+
+/// Page `j`'s continuation's scan state where it differed from what the
+/// block's scan predicted (`[state, material]`): a loop-back the
+/// continuation declares and publishes ([`Run::scan_cont`]), read by
+/// the scan the round after.
+fn scan_fix_field(v: &Values, j: i64) -> Field {
+    v.field(&format!("scan:fix:{j}"))
+}
+
 /// What the next page begins with as items (the routine's markers, the
 /// held-over insertions, its list, the material carried over, the rest
 /// of the piece), defined beside [`SCAN`] by the same continuation and
@@ -3228,7 +3241,7 @@ impl Operation for Scan {
     /// waits for the steps before it still to run; a step's run narrows
     /// this to what it defined ([`Run::scan_node`]).
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT)])
+        MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT), v.field(SCAN_BLOCK)])
     }
     /// A step is held until the scan state is there and its piece has
     /// run (what the piece leaves the main list, which it defines at its
@@ -3443,10 +3456,14 @@ impl Run<'_, '_> {
         // (a page placed: the scan state too, until it commits the
         // continuation it places, which defines it, is not there for a
         // reader to wait for)
-        let names: Vec<Field> = match placed {
+        let block = args.first().is_some_and(|&x| int_of(v, x) == -3);
+        let mut names: Vec<Field> = match placed {
             Placed::Nothing => Vec::new(),
             Placed::State | Placed::Page => vec![v.field(SCAN), v.field(SCAN_MAT)],
         };
+        if block {
+            names.push(v.field(SCAN_BLOCK));
+        }
         self.cx.narrow(MayDefine::Names(names));
         Ok(())
     }
@@ -3589,24 +3606,23 @@ impl Run<'_, '_> {
     /// chain is the blocks', not the pages'.
     fn scan_step(&mut self) -> R<Placed> {
         let v = self.v;
-        let sc = self.ops.scan;
-        let before = self.cx.prev_sibling_where(&|op, a: &[ValueId]| {
-            op == sc && a.first().and_then(|&x| v.as_int(x)) == Some(-3)
-        });
-        let start =
-            |r: &mut Self, f: &str| -> R<Option<(ValueId, Option<phitex_defuse::NodeId>)>> {
-                Ok(match r.cx.use_field_at(v.field(f), before)? {
-                    phitex_defuse::FieldAt::Def(x, by) => Some((x, by)),
-                    _ => None,
-                })
-            };
-        let s0 = start(self, SCAN)?;
-        let m0 = start(self, SCAN_MAT)?;
-        let mut src = s0.map(|x| x.0);
-        let mut mat = m0.map(|x| x.0);
-        let mut seen: Vec<phitex_defuse::NodeId> = s0.and_then(|x| x.1).into_iter().collect();
+        // (where the block begins: the state the scan of the block
+        // before ended its block in, [`SCAN_BLOCK`]; none before the
+        // first block. Nothing its own continuations define is read: they
+        // sit before it)
+        let (mut src, mut mat) = match self.eng_read(v.field(SCAN_BLOCK))? {
+            Some(x) => {
+                let xs = list_of(v, x);
+                (
+                    xs.first().copied().filter(|&y| y != ValueId::UNIT),
+                    xs.get(1).copied().filter(|&y| y != ValueId::UNIT),
+                )
+            }
+            None => (None, None),
+        };
         let mut placed = Placed::Nothing;
         let trace = crate::exec::env_flag!("PHITEX_SCAN_TRACE");
+        let mut known = true;
         // (a bound on the pages one block fires: a page fires on some
         // item, and an item's page goes on in a later piece at most)
         for _ in 0..4096 {
@@ -3622,9 +3638,10 @@ impl Run<'_, '_> {
                 );
             }
             let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+            let j = st.j - 1;
             let (b, pos) = self.place_break(
                 Some(at),
-                st.j - 1,
+                j,
                 src.unwrap_or(ValueId::UNIT),
                 pid,
                 sf.k,
@@ -3634,38 +3651,54 @@ impl Run<'_, '_> {
                 None,
                 mat,
             )?;
-            // (the continuation's scan state as the scan sees it, what
-            // the routine gives back its finisher's prediction: the
-            // next page runs on it, and only a continuation that defines
-            // another runs this again)
-            let pred = if crate::exec::env_flag!("PHITEX_NO_CONT_PREDICT") {
-                None
+            // (the continuation's scan state: as its run gave it where it
+            // differed from what this scan gave it the round before
+            // (`scan:fix:<page>`, a loop-back the continuation declares),
+            // else as the scan sees it, what the routine gives back its
+            // finisher's prediction; the next page runs on it)
+            let fix = scan_fix_field(v, j);
+            let fixed = if self.cx.is_loopback(fix) {
+                self.eng_read(fix)?.and_then(|x| {
+                    let xs = list_of(v, x);
+                    Some((*xs.first()?, *xs.get(1)?))
+                })
             } else {
-                let rtn = rtn_guess(&self.ops, v, &pos);
-                match self.cont_state(&list_of(v, b), Some(rtn), mat)? {
-                    Cont::State(x, m) => Some((x, m)),
-                    _ => None,
-                }
+                None
             };
-            self.place_cont(Some(at), st.j - 1, pred, b);
-            placed = Placed::Page;
-            // (the next page from the state reaching the piece's end:
-            // the continuation's where it is there)
-            let here = match self.cx.use_field_at(v.field(SCAN), Some(at))? {
-                phitex_defuse::FieldAt::Def(x, Some(by)) if !seen.contains(&by) => {
-                    seen.push(by);
-                    let m = match self.cx.use_field_at(v.field(SCAN_MAT), Some(at))? {
-                        phitex_defuse::FieldAt::Def(m, _) => Some(m),
+            let pred = match fixed {
+                Some(p) => Some(p),
+                None if crate::exec::env_flag!("PHITEX_NO_CONT_PREDICT") => None,
+                None => {
+                    let rtn = rtn_guess(&self.ops, v, &pos);
+                    match self.cont_state(&list_of(v, b), Some(rtn), mat)? {
+                        Cont::State(x, m) => Some((x, m)),
                         _ => None,
-                    };
-                    Some((x, m))
+                    }
                 }
-                _ => pred.map(|(x, m)| (x, Some(m))),
             };
-            let Some((x, m)) = here else { break };
+            self.place_cont(Some(at), j, pred, b);
+            placed = Placed::Page;
+            let Some((x, m)) = pred else {
+                // (the continuation's state not known here (a page firing
+                // in its own material, which it places): the scan of the
+                // next block goes on from the scan state as it reaches it)
+                known = false;
+                break;
+            };
             src = Some(x);
-            mat = m;
+            mat = Some(m);
         }
+        // (where this block ends, for the next block's scan)
+        let end = if known {
+            v.list(vec![
+                src.unwrap_or(ValueId::UNIT),
+                mat.unwrap_or(ValueId::UNIT),
+            ])
+        } else {
+            ValueId::UNIT
+        };
+        self.cx
+            .define_with(v.field(SCAN_BLOCK), end, Locality::Global);
         Ok(placed)
     }
 
@@ -3697,6 +3730,23 @@ impl Run<'_, '_> {
                 self.cx.define_with(v.field(SCAN), x, Locality::Global);
                 self.cx
                     .define_with(v.field(SCAN_MAT), mat, Locality::Global);
+                // (placed with a prediction of this state that differs:
+                // the block's scan, which went on from the prediction, is
+                // told the real one the round after; told before, it is
+                // told again while it stands)
+                let args = self.cx.args();
+                if let (Some(&px), Some(&j)) = (args.get(2), args.get(1))
+                    && px != ValueId::UNIT
+                {
+                    let j = int_of(v, j);
+                    let fix = scan_fix_field(v, j);
+                    let real = v.list(vec![x, mat]);
+                    let told = self.cx.is_loopback(fix) && self.eng_read(fix)? == Some(real);
+                    if (px, args.get(3).copied().unwrap_or(ValueId::UNIT)) != (x, mat) || told {
+                        self.cx.declare_loopback(fix, ValueId::UNIT);
+                        self.cx.publish(fix, real);
+                    }
+                }
                 // (the guess cache: what this page's continuation defined)
                 if int_of(v, b.get(3).copied().unwrap_or(ValueId::UNIT)) != -2
                     && let Some(&j) = self.cx.args().get(1)
