@@ -1757,7 +1757,7 @@ impl Run<'_, '_> {
             items.push(x);
         }
         items.push(crate::vprof::decode(&crate::vprof::encode(v, &head)));
-        let mut rd = RunReaching(self);
+        let mut rd = RunReaching(self, None);
         for x in &items {
             if st.fold_items(x, dead, &mut rd).is_some() {
                 break;
@@ -2744,12 +2744,15 @@ impl Operation for Finish {
     fn name(&self) -> &'static str {
         "finish"
     }
-    /// What the last runs of the same routine defined, and the fields a
-    /// finisher sets itself (spec-final §9b): a definition list, so that
-    /// a reader after the finisher (the continuation reading [`RTN`])
-    /// finds its site and runs on the prediction instead of parking on a
-    /// pending set; a run defining outside it widens it at its commit
-    /// and its readers run again. None before any run of the routine.
+    /// What the last run of the same routine defined, and the fields a
+    /// finisher sets itself (spec-final §9b): a definition list, each
+    /// with its prediction ([`Finish::predicted_defs`]), so that a reader
+    /// after the finisher (the next finisher, the continuation reading
+    /// [`RTN`]) finds its site and runs on the prediction instead of
+    /// waiting; a run defining outside it widens it at its commit and
+    /// its readers run again (a field the routine defines on some pages
+    /// only is not claimed for every page). None before any run of the
+    /// routine.
     fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
         let t = *args.get(9)?;
         if t == ValueId::UNIT
@@ -2758,17 +2761,16 @@ impl Operation for Finish {
         {
             return None;
         }
-        let mut names = ops(&self.0)
+        let mut names: Vec<Field> = ops(&self.0)
             .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
-            .map(FinDefs::names)?;
-        for n in FIN_OWN {
-            let f = v.field(n);
-            if !names.contains(&f) {
-                names.push(f);
-            }
+            .map(|d| d.last.iter().map(|e| e.0).collect())?;
+        // (and what it gives back to the main list, always predicted)
+        let rtn = v.field(RTN);
+        if !names.contains(&rtn) {
+            names.push(rtn);
         }
         ops(&self.0).fields.add_record_fields(&mut names);
         Some(names.into_iter().map(|f| (f, Locality::Global)).collect())
@@ -3160,14 +3162,20 @@ impl Operation for Resume {
     }
 }
 
-/// What a scan reads where it runs: the node's run./// What a scan reads where a fold runs: the fold's run.
-struct RunReaching<'r, 'c, 'a>(&'r mut Run<'c, 'a>);
+/// What a scan reads where a fold runs: the fold's run, and the piece
+/// whose end the registers are read at (none: where the run is; a
+/// block's scan reads past nothing it placed itself).
+struct RunReaching<'r, 'c, 'a>(&'r mut Run<'c, 'a>, Option<i64>);
 
 impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
     fn params(&mut self) -> PageParams {
         self.0.reach_reads += 1;
         let v = self.0.v;
-        self.0.page_params_marker().map_or(
+        let m = match self.1 {
+            Some(at) => self.0.page_params_at(at),
+            None => self.0.page_params_marker(),
+        };
+        m.map_or(
             PageParams {
                 vsize: 0,
                 max_depth: 0,
@@ -3181,7 +3189,14 @@ impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
 
     fn class(&mut self, n: u16) -> InsertClass {
         self.0.reach_reads += 1;
-        self.0.insert_class(n).unwrap_or(InsertClass {
+        let c = match self.1 {
+            Some(at) => self.0.insert_class_at(
+                n,
+                phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(at.to_ne_bytes())),
+            ),
+            None => self.0.insert_class(n),
+        };
+        c.unwrap_or(InsertClass {
             box_height_plus_depth: None,
             box_is_hbox: false,
             count: 0,
@@ -3518,7 +3533,23 @@ impl Run<'_, '_> {
                 .flatten()
                 .any(|d| crate::vprof::has_end(&d.1))
         {
-            self.cint(crate::fields::cell::DEADCYCLES)?
+            // (where the window's last piece ends: what reaches this scan
+            // also holds what the finishers it placed before it define)
+            let last_pid = decoded.iter().flatten().last().map(|d| d.0);
+            match last_pid {
+                Some(p) => {
+                    let f = self.loc_field(crate::fields::cell::DEADCYCLES as Loc);
+                    let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(p.to_ne_bytes()));
+                    match self.cx.use_field_at(f, Some(at))? {
+                        phitex_defuse::FieldAt::Def(x, _) => int_of(v, x),
+                        phitex_defuse::FieldAt::Unset => 0,
+                        phitex_defuse::FieldAt::Gone => {
+                            self.cint(crate::fields::cell::DEADCYCLES)?
+                        }
+                    }
+                }
+                None => self.cint(crate::fields::cell::DEADCYCLES)?,
+            }
         } else {
             0
         };
@@ -3549,7 +3580,12 @@ impl Run<'_, '_> {
         };
         let mut clean = true;
         let (scan_fire, st) = {
-            let mut rd = RunReaching(self);
+            // (the registers a fold reads, as they reach the piece being
+            // folded: the material where the page before fired)
+            let mut rd = RunReaching(
+                self,
+                s.anchor.map(|a| i64::from_ne_bytes(a.raw().to_ne_bytes())),
+            );
             let mut st = if let Some(st) = memo {
                 st
             } else {
@@ -3570,6 +3606,7 @@ impl Run<'_, '_> {
                     continue;
                 };
                 rd.0.resolve_prof_of(pid, &mut items)?;
+                rd.1 = Some(pid);
                 let reads0 = rd.0.reach_reads;
                 let f = st.fold_items(&items, dead, &mut rd);
                 clean = clean && !needs[i] && rd.0.reach_reads == reads0;

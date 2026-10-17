@@ -10,8 +10,9 @@
 #   gate-shard.sh ams ORACLE_MD5 CTL    amsldoc --exact-pdf at -j 1, 8 and 16;
 #                                       cold watch timing at -j 1/8/16, head
 #                                       and control commit CTL
-#   gate-shard.sh cg                    para400 at one thread under callgrind:
-#                                       Ir per command, top 15 functions
+#   gate-shard.sh cg                    para4000 at one thread under callgrind:
+#                                       startup Ir, node bodies' Ir per
+#                                       command, top 15 functions
 #   gate-shard.sh para BAR_MD5          bench/para4000.tex (plain pdfTeX) cold
 #                                       at -j 1/8/16: md5 against BAR_MD5,
 #                                       wall, us per paragraph, realised
@@ -206,24 +207,36 @@ case $shard in
     python3 -I scripts/accl/gate-acct.py table para "$r" > "$r/table.txt" 2>&1
     ;;
   cg)
-    # cg: para400 at one thread under callgrind (the profiling build:
-    # release with symbols), the format made once unprofiled; Ir in all,
-    # the commands the runs did (`acct: commands`), Ir per command and
-    # the top 15 functions by exclusive Ir
+    # cg: para4000 at one thread under callgrind (the profiling build:
+    # release with symbols), the format made once unprofiled. Prints the
+    # Ir in all, the startup's (all but the evaluation, `Graph::settle`),
+    # the node bodies' (the operations' runs, inclusive) over the
+    # commands they did (`acct: commands`), and the top 15 functions by
+    # exclusive Ir
     cargo build -q --profile profiling -p phitex-cli > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt"
     grep -q '^EXIT 0$' "$r/build.txt" || red "build: $(grep -m1 '^error' "$r/build.txt")"
     built
     bin=$PWD/target/profiling/phitex
-    mkdir -p "$w/cg" && cp bench/para400.tex "$w/cg/"
-    (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex para400.tex > "$r/cg-warm.log" 2>&1)
+    doc=${GATE_CG_DOC:-para4000}
+    mkdir -p "$w/cg" && cp "bench/$doc.tex" "$w/cg/"
+    (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex "$doc.tex" > "$r/cg-warm.log" 2>&1)
     (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_THREADS=1 \
-      timeout 1800 valgrind --tool=callgrind --callgrind-out-file="$r/cg.out" "$bin" build -j 1 --output-dir=o1 --program pdftex para400.tex > "$r/cg-run.log" 2>&1) \
+      timeout 3000 valgrind --tool=callgrind --callgrind-out-file="$r/cg.out" "$bin" build -j 1 --output-dir=o1 --program pdftex "$doc.tex" > "$r/cg-run.log" 2>&1) \
       || red "cg: callgrind run exit $?"
     callgrind_annotate --threshold=100 "$r/cg.out" > "$r/cg.excl.txt" 2>&1
+    callgrind_annotate --inclusive=yes --threshold=100 "$r/cg.out" > "$r/cg.incl.txt" 2>&1
+    num() { grep -m1 -F "$1" "$r/cg.incl.txt" | awk '{print $1}' | tr -d ,; }
     total=$(grep -m1 'PROGRAM TOTALS' "$r/cg.excl.txt" | awk '{print $1}' | tr -d ,)
+    settle=$(num 'phitex_tex::api::Graph>::settle')
+    bodies=0
+    for op in 'ops::Exec as defuse::api::Operation>::run' 'pages::Resume as defuse::api::Operation>::run' \
+      'pages::Scan as defuse::api::Operation>::run' 'pages::Finish as defuse::api::Operation>::run' \
+      'ops::Link as defuse::api::Operation>::run' 'ops::Dvi as defuse::api::Operation>::run'; do
+      x=$(num "$op"); bodies=$((bodies + ${x:-0}))
+    done
     cmds=$(grep -oE 'acct: commands [0-9]+' "$r/cg-run.log" | tail -1 | awk '{print $3}')
     {
-      echo "para400 -j 1 under callgrind: Ir ${total:-?}, commands ${cmds:-?}, Ir per command $(awk -v a="${total:-0}" -v b="${cmds:-0}" 'BEGIN { if (b > 0) printf "%.0f", a / b; else print "?" }')"
+      echo "$doc -j 1 under callgrind: Ir ${total:-?}; startup (all but the evaluation) $(( ${total:-0} - ${settle:-0} )); evaluation ${settle:-?}, of which node bodies $bodies; commands ${cmds:-?}; node bodies per command $(awk -v a="$bodies" -v b="${cmds:-0}" 'BEGIN { if (b > 0) printf "%.0f", a / b; else print "?" }') Ir (pdfTeX about 2,900)"
       echo "top 15 by exclusive Ir:"
       grep -E '^ *[0-9,]+ +\(' "$r/cg.excl.txt" | grep -v 'PROGRAM TOTALS' | head -15 | cut -c1-200
     } > "$r/cg.txt"
