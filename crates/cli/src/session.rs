@@ -421,8 +421,14 @@ impl Absorb {
 
     /// [`Absorb::send`], the text shared.
     pub fn send_shared(&self, text: Arc<str>, came: Instant) -> u64 {
+        self.send_edit(text, None, came)
+    }
+
+    /// [`Absorb::send_shared`] with what is known of the change
+    /// ([`phitex_tex::Hint`]).
+    pub fn send_edit(&self, text: Arc<str>, hint: Option<phitex_tex::Hint>, came: Instant) -> u64 {
         let mut m = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
-        let v = self.tx.send_shared(text.clone());
+        let v = self.tx.send_edit(text.clone(), hint);
         m.insert(v, (text, came));
         v
     }
@@ -560,10 +566,17 @@ impl Session {
         let mut text = self.text_now();
         phitex_tex::timeline::lap("session: the text now (copied)");
         self.absorbed_at = None;
-        let mut edit_line = self
-            .built_text
-            .as_deref()
-            .and_then(|old| first_difference_line(old, &text));
+        // (what changed, against the text the last build took: the first
+        // changed line, and the engine told the ends the texts share)
+        let ends = self.built_text.as_ref().map(|old| {
+            (
+                old.clone(),
+                phitex_tex::byte_ends(old.as_bytes(), text.as_bytes()),
+            )
+        });
+        let mut edit_line = ends.as_ref().and_then(|(old, (p, _))| {
+            (old.len() != text.len() || *p < old.len()).then(|| lines_before(&text, *p) + 1)
+        });
         phitex_tex::timeline::lap("session: the first changed line (texts compared)");
         let changed = std::mem::take(&mut self.changed);
         let reread = self
@@ -592,7 +605,11 @@ impl Session {
                 }
                 // (sent as a version of its own: what another thread sends
                 // while it runs is taken between the engine's steps)
-                self.absorb.send_shared(text.clone(), Instant::now());
+                self.absorb.send_edit(
+                    text.clone(),
+                    ends.as_ref().map(|(old, (p, s))| (old.clone(), *p, *s)),
+                    Instant::now(),
+                );
                 phitex_tex::timeline::lap("session: the text sent to the engine (copied)");
                 b.absorb_pending();
                 phitex_tex::timeline::lap("engine: the rest of the edit");
@@ -1340,6 +1357,18 @@ fn dvi_comment(epoch: i64) -> String {
 /// Whether two texts are equal (the same shared text at once).
 fn same_text(a: &Arc<str>, b: &Arc<str>) -> bool {
     Arc::ptr_eq(a, b) || a == b
+}
+
+/// The line ends in the first `n` bytes of `t`, eight bytes at a time.
+fn lines_before(t: &str, n: usize) -> usize {
+    let (words, rest) = t.as_bytes()[..n].as_chunks::<8>();
+    let mut c = 0usize;
+    for w in words {
+        let v = u64::from_ne_bytes(*w) ^ 0x0a0a_0a0a_0a0a_0a0a;
+        let x = (v & 0x7f7f_7f7f_7f7f_7f7f).wrapping_add(0x7f7f_7f7f_7f7f_7f7f);
+        c += (!(x | v | 0x7f7f_7f7f_7f7f_7f7f)).count_ones() as usize;
+    }
+    c + rest.iter().map(|&b| usize::from(b == b'\n')).sum::<usize>()
 }
 
 /// The first line (from 1) where `b` differs from `a` (none: equal):

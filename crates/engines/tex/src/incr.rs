@@ -16,7 +16,6 @@
 //! the same and whose key is the same keeps its analysis, the others are
 //! analysed again.
 
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -28,6 +27,8 @@ use crate::hints::{Defs, TextHints};
 /// A chunk's analysis, under the key of the definitions before it.
 struct Entry {
     units: Vec<UnitId>,
+    /// Its length in bytes.
+    len: usize,
     key: u64,
     th: Arc<TextHints>,
     /// Its slices' keys ([`Chunk::keys`]).
@@ -59,7 +60,8 @@ pub(crate) struct Incr {
     text: String,
     /// The format's definitions.
     defs: Defs,
-    cache: HashMap<UnitId, Entry>,
+    /// The chunks' analyses, in the text's order (parallel to `chunks`).
+    cache: Vec<Entry>,
     /// The chunks of the text, in order.
     pub chunks: Vec<Chunk>,
     /// How many chunks the last text analysed again.
@@ -76,7 +78,7 @@ impl Incr {
             src: Source::with_split("", Arc::new(Paragraphs)),
             text: String::new(),
             defs,
-            cache: HashMap::new(),
+            cache: Vec::new(),
             chunks: Vec::new(),
             analysed: 0,
             next_file: 2_000_000_000,
@@ -126,6 +128,29 @@ impl Incr {
         }
     }
 
+    /// [`Incr::set_text`] where the text changed in one range only,
+    /// `(start, old end, new end)` (its bytes before and after the same):
+    /// the old text not compared, edited in place.
+    pub(crate) fn set_text_edit(&mut self, text: &str, (a, b, c): (usize, usize, usize)) {
+        let t0 = std::time::Instant::now();
+        if a == b && a == c && text.len() == self.text.len() {
+            if !self.chunks.is_empty() || text.is_empty() {
+                self.analysed = 0;
+                return;
+            }
+        } else if self.text.is_empty() || self.src.start().is_none() || b > self.text.len() {
+            return self.set_text(text);
+        } else {
+            let (Some(from), Some(to)) = (self.src.at_byte(a), self.src.at_byte(b)) else {
+                return self.set_text(text);
+            };
+            let _ = self.src.edit(from, to, &text[a..c]);
+            self.text.replace_range(a..b, &text[a..c]);
+        }
+        crate::timeline::note("incr: the units spliced (in place)", t0.elapsed());
+        self.walk();
+    }
+
     fn splice(&mut self, text: &str) {
         let old = &self.text;
         if old.is_empty() || self.src.start().is_none() {
@@ -149,17 +174,45 @@ impl Incr {
         let _ = self.src.edit(from, to, &text[p..b.len() - s]);
     }
 
-    /// The chunks of the units `ids`, with the cached analyses of their
-    /// first units (taken from `cache`) where the units are the same.
-    fn parts(&self, ids: &[UnitId], cache: &mut HashMap<UnitId, Entry>) -> Vec<Part> {
-        let mut parts: Vec<Part> = Vec::new();
+    /// The chunks of the units `ids`, with the cached analyses (`cache`,
+    /// the last walk's in order) of the chunks whose units are the same.
+    /// The cache is gone through in order beside the units: a chunk of
+    /// the units kept is found where the last walk had it, past those of
+    /// units the edit removed, without a search.
+    fn parts(&self, ids: &[UnitId], cache: Vec<Entry>) -> Vec<Part> {
+        let mut parts: Vec<Part> = Vec::with_capacity(cache.len() + 1);
+        let mut old: Vec<Option<Entry>> = cache.into_iter().map(Some).collect();
+        let mut oj = 0usize;
         let (mut i, mut off) = (0, 0);
         while i < ids.len() {
+            // (the cached chunk that would begin at unit `i`: the next one
+            // in order, those of removed units or of units before `i`
+            // passed)
+            while let Some(Some(e)) = old.get(oj) {
+                let u0 = e.units[0];
+                if u0 == ids[i] {
+                    break;
+                }
+                if self.src.contains(u0) && self.src.index(u0) > i {
+                    break;
+                }
+                oj += 1;
+            }
             // (a cached chunk of the same first unit is what a scan
             // finds when its units follow and it closed or ends the text)
-            let cached = cache.remove(&ids[i]).filter(|e| {
-                ids[i..].starts_with(&e.units) && (e.closed || i + e.units.len() == ids.len())
-            });
+            let cached = match old.get_mut(oj) {
+                Some(slot)
+                    if slot.as_ref().is_some_and(|e| {
+                        e.units[0] == ids[i]
+                            && ids[i..].starts_with(&e.units)
+                            && (e.closed || i + e.units.len() == ids.len())
+                    }) =>
+                {
+                    oj += 1;
+                    slot.take()
+                }
+                _ => None,
+            };
             let (j, closed) = if let Some(e) = &cached {
                 (i + e.units.len(), e.closed)
             } else {
@@ -174,7 +227,10 @@ impl Incr {
                 }
                 (j, st.closed())
             };
-            let len: usize = ids[i..j].iter().map(|&u| self.src.text(u).len()).sum();
+            let len: usize = match &cached {
+                Some(e) => e.len,
+                None => ids[i..j].iter().map(|&u| self.src.text(u).len()).sum(),
+            };
             parts.push(Part {
                 units: i..j,
                 start: off,
@@ -257,8 +313,8 @@ impl Incr {
     fn walk(&mut self) {
         let t0 = std::time::Instant::now();
         let ids: Vec<UnitId> = self.src.units().collect();
-        let mut cache = std::mem::take(&mut self.cache);
-        let mut parts = self.parts(&ids, &mut cache);
+        let cache = std::mem::take(&mut self.cache);
+        let mut parts = self.parts(&ids, cache);
         let t_parts = t0.elapsed();
         let text = self.text.as_str();
         let chunk_text = |p: &Part| &text[p.start..p.start + p.len];
@@ -327,6 +383,7 @@ impl Incr {
                 let (th, keys) = made.next().expect("every chunk analysed");
                 Entry {
                     units: ids[p.units.clone()].to_vec(),
+                    len: p.len,
                     key: ins[k].0,
                     th,
                     keys,
@@ -340,7 +397,7 @@ impl Incr {
                 th: e.th.clone(),
                 keys: e.keys.clone(),
             });
-            self.cache.insert(e.units[0], e);
+            self.cache.push(e);
         }
         self.chunks = chunks;
         self.analysed = analysed;

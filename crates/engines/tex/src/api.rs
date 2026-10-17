@@ -182,9 +182,14 @@ pub struct EditSender(Arc<Mutex<Pending>>);
 
 #[derive(Default)]
 struct Pending {
-    text: Option<Arc<str>>,
+    text: Option<(Arc<str>, Option<Hint>)>,
     version: u64,
 }
+
+/// What a sender knows of a text against the one it sent before: that
+/// text, and the lengths of the prefix and suffix they share (a check
+/// the engine then skips when that is the text it has).
+pub type Hint = (Arc<str>, usize, usize);
 
 impl EditSender {
     /// Sends the document's text: its version.
@@ -197,10 +202,22 @@ impl EditSender {
     }
 
     /// [`EditSender::send`], the text shared (not copied).
+    #[allow(
+        clippy::must_use_candidate,
+        reason = "a send; the version is for whoever wants it"
+    )]
     pub fn send_shared(&self, text: Arc<str>) -> u64 {
+        self.send_edit(text, None)
+    }
+
+    /// [`EditSender::send_shared`] with what the sender knows of the
+    /// change ([`Hint`]).
+    pub fn send_edit(&self, text: Arc<str>, hint: Option<Hint>) -> u64 {
         let mut p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         p.version += 1;
-        p.text = Some(text);
+        // (a hint against a text the engine has not taken is no hint)
+        let hint = if p.text.is_some() { None } else { hint };
+        p.text = Some((text, hint));
         p.version
     }
 
@@ -214,10 +231,10 @@ impl EditSender {
             .is_some()
     }
 
-    fn take(&self) -> Option<(Arc<str>, u64)> {
+    fn take(&self) -> Option<(Arc<str>, Option<Hint>, u64)> {
         let mut p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let v = p.version;
-        p.text.take().map(|t| (t, v))
+        p.text.take().map(|(t, h)| (t, h, v))
     }
 }
 
@@ -241,6 +258,8 @@ struct Absorb<'a> {
     /// The text sent that `text` is the canonical text of (the next
     /// one's is made where they differ only, [`canonical_splice`]).
     raw: &'a mut Option<Arc<str>>,
+    /// `text`'s line starts where known ([`Build::lines`]).
+    lines: &'a Mutex<Option<Vec<usize>>>,
     /// Whether the nodes hold the document's canonical text
     /// ([`canonical_text`]; off for good once a text cannot be), and its
     /// comments by line, for the environment (`doc:marks`).
@@ -254,40 +273,86 @@ struct Absorb<'a> {
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
-        let (raw, version) = self.edits.take()?;
+        let (raw, hint, version) = self.edits.take()?;
         crate::timeline::lap("engine: the edit taken");
+        // (the sender's prefix and suffix, where its last text is the one
+        // the canonical text is of: what changed is looked at alone)
+        let ends = hint
+            .filter(|h| self.raw.as_ref().is_some_and(|r| Arc::ptr_eq(r, &h.0)))
+            .map(|h| (h.1, h.2));
         let t0 = std::time::Instant::now();
-        let raw_marks = has_raw_marks(&raw);
+        let raw_marks = match ends {
+            Some((p, s)) => {
+                let b = raw.as_bytes();
+                let (a, z) = (
+                    p.saturating_sub(1),
+                    (b.len() - s.min(b.len()) + 1).min(b.len()),
+                );
+                let mid = &b[a.min(z)..z];
+                mid.contains(&0) || mid.windows(2).any(|w| w == b"^^")
+            }
+            None => has_raw_marks(&raw),
+        };
         crate::timeline::note("canonical: NUL and ^^ looked for", t0.elapsed());
+        // (the canonical text made in place where the last raw text is
+        // known: the range of it replaced)
+        let mut range = None;
         let canon = if *self.canon && !raw_marks {
             match self.raw.as_deref() {
                 Some(old) => {
                     let ms = self.marks.get();
-                    let r = canonical_splice(old, self.text, &ms, &raw);
+                    let (ms, r) = canonical_splice(old, self.text, &ms, &raw, ends);
                     // (`PHITEX_CANON_CHECK`: against the whole text's)
                     if crate::exec::env_flag!("PHITEX_CANON_CHECK") {
                         assert!(
-                            canonical_text(&raw).as_ref() == Some(&r),
+                            canonical_text(&raw).as_ref() == Some(&(self.text.clone(), ms.clone())),
                             "canonical_splice differs from canonical_text"
                         );
                     }
-                    Some(r)
+                    range = Some(r);
+                    // (the line starts: those in the range made again,
+                    // those after it moved)
+                    let mut ls = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(v) = ls.as_mut() {
+                        let (a, b, c) = r;
+                        let i = v.partition_point(|&k| k <= a);
+                        let j = v.partition_point(|&k| k <= b);
+                        let made: Vec<usize> = self.text.as_bytes()[a..c]
+                            .iter()
+                            .enumerate()
+                            .filter(|x| *x.1 == b'\n')
+                            .map(|x| a + x.0 + 1)
+                            .collect();
+                        let n = made.len();
+                        v.splice(i..j, made);
+                        for k in &mut v[i + n..] {
+                            *k = *k + c - b;
+                        }
+                        if crate::exec::env_flag!("PHITEX_CANON_CHECK") {
+                            assert!(*v == line_starts(self.text), "the line starts moved wrong");
+                        }
+                    }
+                    Some((None, ms))
                 }
-                None => canonical_text(&raw),
+                None => canonical_text(&raw).map(|(t, ms)| (Some(t), ms)),
             }
         } else {
             None
         };
-        let text = if let Some((t, ms)) = canon {
+        if let Some((t, ms)) = canon {
             self.marks.set(ms);
             *self.raw = Some(raw);
-            t
+            if let Some(t) = t {
+                *self.text = t;
+                *self.lines.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            }
         } else {
+            *self.lines.lock().unwrap_or_else(PoisonError::into_inner) = None;
             *self.canon = false;
             self.marks.set(Vec::new());
             *self.raw = None;
-            raw.to_string()
-        };
+            *self.text = raw.to_string();
+        }
         crate::timeline::lap("engine: the canonical text (comments marked)");
         let changed = apply_text(
             &self.hints,
@@ -295,12 +360,11 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.exec,
             self.end,
             self.nodes,
-            &text,
+            self.text,
+            range,
             self.incr.as_deref_mut(),
             self.loads,
         );
-        *self.text = text;
-        crate::timeline::lap("engine: the text kept");
         if changed {
             self.unchanged = None;
             Some(version)
@@ -383,6 +447,7 @@ fn apply_text(
     end: NodeId,
     nodes_now: &mut Vec<(u64, NodeId, Src)>,
     text: &str,
+    range: Option<(usize, usize, usize)>,
     mut incr: Option<&mut Incr>,
     loads: Option<&crate::pkgrec::LoadHints>,
 ) -> bool {
@@ -390,9 +455,13 @@ fn apply_text(
     let text = as_file(text);
     crate::timeline::lap("engine: the text as a file");
     // (the units spliced, the chunks whose text or incoming definitions
-    // changed analysed again)
+    // changed analysed again; the range that changed where it is known
+    // and the text is the file as it is)
     if let Some(inc) = incr.as_deref_mut() {
-        inc.set_text(&text);
+        match range.filter(|_| matches!(text, std::borrow::Cow::Borrowed(_))) {
+            Some(r) => inc.set_text_edit(&text, r),
+            None => inc.set_text(&text),
+        }
     }
     let incr = incr.as_deref();
     let t_slices = t_all.elapsed();
@@ -2911,6 +2980,19 @@ pub(crate) const DOC_MARKS: &str = "doc:marks";
 #[derive(Clone, Default)]
 pub(crate) struct Marks(Arc<Mutex<MarksState>>);
 
+/// [`Build`]'s memo of its output and pages, by the values they come
+/// from.
+#[derive(Default)]
+struct OutMemo {
+    #[allow(clippy::type_complexity)]
+    output: Option<(
+        (Option<ValueId>, Option<ValueId>, Option<ValueId>, usize),
+        (Arc<Vec<u8>>, String),
+    )>,
+    pages: Option<(Option<ValueId>, Vec<u64>)>,
+    log: crate::log::LayoutMemo,
+}
+
 /// The comments by line, and whether the environment lacks them.
 type MarksState = (Vec<(u32, String)>, bool);
 
@@ -3045,17 +3127,28 @@ fn line_starts(s: &str) -> Vec<usize> {
     v
 }
 
-/// [`canonical_text`] of `new`, from that of `old` (`canon`, `marks`):
-/// the lines where the texts differ made again, the rest kept (each
-/// line's canonical form is its own; the marks after them renumbered).
+/// [`canonical_text`] of `new`, made in `canon` from that of `old` (the
+/// text `canon` and its `marks` are made from): the lines where the
+/// texts differ made again in place, the rest kept (each line's
+/// canonical form is its own; the marks after them renumbered). The new
+/// marks, and the range of `canon` replaced, `(start, old end, new end)`.
 fn canonical_splice(
     old: &str,
-    canon: &str,
+    canon: &mut String,
     marks: &[(u32, String)],
     new: &str,
-) -> (String, Vec<(u32, String)>) {
-    const B: usize = 4096;
+    ends: Option<(usize, usize)>,
+) -> (Vec<(u32, String)>, (usize, usize, usize)) {
     let (o, n) = (old.as_bytes(), new.as_bytes());
+    let (p, s) = ends.unwrap_or_else(|| byte_ends(o, n));
+    canonical_lines_splice(old, canon, marks, new, p, s)
+}
+
+/// The lengths of the prefix and the suffix `o` and `n` share (not
+/// overlapping), compared a block at a time.
+#[must_use]
+pub fn byte_ends(o: &[u8], n: &[u8]) -> (usize, usize) {
+    const B: usize = 4096;
     // (the bytes both begin and end with, a block at a time)
     let mut p = 0;
     let m = o.len().min(n.len());
@@ -3073,6 +3166,20 @@ fn canonical_splice(
     while s < room && o[o.len() - 1 - s] == n[n.len() - 1 - s] {
         s += 1;
     }
+    (p, s)
+}
+
+/// [`canonical_splice`] where `old` and `new` share `p` bytes at their
+/// start and `s` at their end.
+fn canonical_lines_splice(
+    old: &str,
+    canon: &mut String,
+    marks: &[(u32, String)],
+    new: &str,
+    p: usize,
+    s: usize,
+) -> (Vec<(u32, String)>, (usize, usize, usize)) {
+    let (o, n) = (old.as_bytes(), new.as_bytes());
     // (whole lines: from the start of the line the first difference is
     // on to the end of the line the last one is on)
     let t0 = std::time::Instant::now();
@@ -3090,31 +3197,42 @@ fn canonical_splice(
             .map_or(n.len(), |k| q + k + 1)
     };
     let le_old = le + o.len() - n.len();
-    // (those lines in the canonical text: the same lines, by number)
-    let first = newlines(&o[..ls]);
     let old_lines = newlines(&o[ls..le_old]);
-    let cb = canon.as_bytes();
-    let line_at = |from: usize, k: usize| skip_lines(cb, from, k);
-    let cs = line_at(0, first);
-    let ce = if le_old == o.len() {
-        cb.len()
+    // (those lines in the canonical text: the same lines, by number;
+    // without comments it is the text itself)
+    let (first, cs, ce) = if marks.is_empty() {
+        (None, ls, le_old)
     } else {
-        line_at(cs, old_lines)
+        let first = newlines(&o[..ls]);
+        let cb = canon.as_bytes();
+        let cs = skip_lines(cb, 0, first);
+        let ce = if le_old == o.len() {
+            cb.len()
+        } else {
+            skip_lines(cb, cs, old_lines)
+        };
+        (Some(first), cs, ce)
     };
     crate::timeline::note(
-        &format!(
-            "canonical: lines {first}+{old_lines} found ({} bytes)",
-            le - ls
-        ),
+        &format!("canonical: the lines found ({} bytes)", le - ls),
         t0.elapsed(),
     );
     let t0 = std::time::Instant::now();
-    let mut out = String::with_capacity(canon.len() + n.len() - o.len().min(n.len()) + 16);
-    out.push_str(&canon[..cs]);
+    let mut out = String::with_capacity(le - ls + 16);
     let mut mid = Vec::new();
-    canonical_lines(&new[ls..le], first, &mut out, &mut mid);
-    out.push_str(&canon[ce..]);
-    crate::timeline::note("canonical: spliced", t0.elapsed());
+    canonical_lines(&new[ls..le], 0, &mut out, &mut mid);
+    // (the changed lines' marks numbered from their first line's)
+    let first = match first {
+        Some(f) => f,
+        None if mid.is_empty() => 0,
+        None => newlines(&o[..ls]),
+    };
+    let lift = u32::try_from(first).unwrap_or(u32::MAX);
+    for m in &mut mid {
+        m.0 = m.0.saturating_add(lift);
+    }
+    canon.replace_range(cs..ce, &out);
+    crate::timeline::note("canonical: spliced in place", t0.elapsed());
     // (the marks: before the lines, theirs made again, after them moved)
     let new_lines = newlines(&n[ls..le]);
     let lo = u32::try_from(first).unwrap_or(u32::MAX);
@@ -3132,7 +3250,7 @@ fn canonical_splice(
             .filter(|m| m.0 > hi && le_old < o.len())
             .map(|(l, c)| (shift(*l), c.clone())),
     );
-    (out, ms)
+    (ms, (cs, ce, cs + out.len()))
 }
 
 /// [`canonical_text`]'s lines of `text`, the first numbered `first`
@@ -3673,6 +3791,12 @@ pub struct Build {
     canon: bool,
     /// The text `text` is the canonical text of, while `canon`.
     raw: Option<Arc<str>>,
+    /// The output and the pages as last asked, by the values they come
+    /// from (asked again with those unchanged: given again, not made).
+    memo: Mutex<OutMemo>,
+    /// `text`'s line starts, made when a diagnostic asks and kept
+    /// through edits (`Absorb` moves them).
+    lines: Mutex<Option<Vec<usize>>>,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
 }
@@ -3814,6 +3938,8 @@ impl Build {
             text,
             canon: g_canon,
             raw: g_canon.then(|| Arc::from(document)),
+            memo: Mutex::default(),
+            lines: Mutex::default(),
         };
         b.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -3875,14 +4001,18 @@ impl Build {
 
     fn settle(&mut self) {
         let t_all = std::time::Instant::now();
-        // the text nodes' offsets in the document, for the progress
-        let mut offsets = FxHashMap::default();
-        let mut off = 0u64;
-        for (_, n, src) in &self.nodes {
-            offsets.insert(n.raw(), off);
-            off += u64::try_from(src.text(&self.text).len()).unwrap_or(0);
+        // the text nodes' offsets in the document, for the progress (an
+        // edit of a long document keeps the last ones: a place shown
+        // while it runs is off by the edit's length at most, and the map
+        // is not made again for every edit)
+        if self.g.watch.offsets.is_empty() || self.nodes.len() < 4096 {
+            let mut offsets = FxHashMap::default();
+            for (_, n, src) in &self.nodes {
+                let Src::Doc(s, _) = *src;
+                offsets.insert(n.raw(), u64::try_from(s).unwrap_or(0));
+            }
+            self.g.watch.offsets = Arc::new(offsets);
         }
-        self.g.watch.offsets = Arc::new(offsets);
         crate::timeline::lap("engine: the nodes' offsets (progress)");
         let mut stats = Stats::default();
         self.g.queries.clear();
@@ -3903,6 +4033,7 @@ impl Build {
             unchanged: None,
             text: &mut self.text,
             raw: &mut self.raw,
+            lines: &self.lines,
             canon: &mut self.canon,
             marks: self.g.marks.clone(),
             loads: loads.as_deref(),
@@ -4574,11 +4705,11 @@ impl Build {
             .eng
             .acc_value(self.unit, v.field("log"))
             .is_some_and(|e| {
-                v.seq_to_vec(e).into_iter().any(|x| {
-                    list_of(v, x)
-                        .first()
-                        .is_some_and(|&k| str_of(v, k) == "fatal")
-                })
+                // (the kind compared as a value: no string made per entry)
+                let fatal = v.str("fatal");
+                v.seq_to_vec(e)
+                    .into_iter()
+                    .any(|x| list_of(v, x).first() == Some(&fatal))
             })
     }
 
@@ -4590,10 +4721,10 @@ impl Build {
             .eng
             .acc_value(self.unit, v.field("log"))
             .is_some_and(|e| {
+                let (fatal, pdf) = (v.str("fatal"), v.str("pdf"));
                 v.seq_to_vec(e).into_iter().any(|x| {
                     let xs = list_of(v, x);
-                    xs.first().is_some_and(|&k| str_of(v, k) == "fatal")
-                        && xs.get(1).is_some_and(|&t| str_of(v, t) == "pdf")
+                    xs.first() == Some(&fatal) && xs.get(1) == Some(&pdf)
                 })
             })
     }
@@ -4610,15 +4741,45 @@ impl Build {
     #[must_use]
     pub fn output_shared(&self) -> (Arc<Vec<u8>>, String) {
         let v = self.g.eng.values();
+        let key = (
+            self.g.eng.output(self.dvi),
+            self.g.eng.acc_value(self.unit, v.field("log")),
+            self.g.eng.acc_value(self.unit, v.field("pagehash")),
+            self.g.eval_errors.len(),
+        );
+        if let Some((k, x)) = &self
+            .memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .output
+            && *k == key
+        {
+            return x.clone();
+        }
+        let x = self.output_made();
+        self.memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .output = Some((key, x.clone()));
+        x
+    }
+
+    fn output_made(&self) -> (Arc<Vec<u8>>, String) {
+        let v = self.g.eng.values();
         let mut dvi: Arc<Vec<u8>> = self
             .g
             .eng
             .output(self.dvi)
             .map(|x| crate::assemble::file_bytes_shared(v, x))
             .unwrap_or_default();
+        let t0 = std::time::Instant::now();
         let n = self.pages().len();
+        crate::timeline::note("output: the pages", t0.elapsed());
+        let t0 = std::time::Instant::now();
+        let fatal = self.fatal() && (dvi.starts_with(b"%PDF") || self.fatal_pdf());
+        crate::timeline::note("output: whether the job ended fatally", t0.elapsed());
         // (pdfTeX §794: after a fatal error the PDF file is removed)
-        let end = if self.fatal() && (dvi.starts_with(b"%PDF") || self.fatal_pdf()) {
+        let end = if fatal {
             dvi = Arc::default();
             "!  ==> Fatal error occurred, no output PDF file produced!".to_owned()
         } else if n == 0 {
@@ -4638,12 +4799,15 @@ impl Build {
             )
         };
         let log_f = v.field("log");
-        let log = crate::log::layout(
+        let t0 = std::time::Instant::now();
+        let log = crate::log::layout_with(
             v,
             &self.opts.name,
             self.g.eng.acc_value(self.unit, log_f),
             &end,
+            &mut self.memo.lock().unwrap_or_else(PoisonError::into_inner).log,
         );
+        crate::timeline::note("output: the log laid out", t0.elapsed());
         (dvi, log)
     }
 
@@ -4703,6 +4867,7 @@ impl Build {
     /// and the engine's evaluation errors; by file, then byte.
     #[must_use]
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        let t_spans = std::time::Instant::now();
         let v = self.g.eng.values();
         // the document's text and its nodes' spans: the text itself where
         // the nodes cover it in order (every document), not a copy
@@ -4732,8 +4897,16 @@ impl Build {
         let doc: &str = if contiguous { &self.text } else { &owned };
         // (the document's line starts, once: a diagnostic's line by a
         // search, not by counting the text before it)
+        crate::timeline::note("diagnostics: the nodes' spans", t_spans.elapsed());
         let t_lines = std::time::Instant::now();
-        let doc_lines = line_starts(doc);
+        let mut kept = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let made;
+        let doc_lines: &[usize] = if contiguous {
+            kept.get_or_insert_with(|| line_starts(doc))
+        } else {
+            made = line_starts(doc);
+            &made
+        };
         crate::timeline::note("diagnostics: the document's line starts", t_lines.elapsed());
         // every node under a node of the text, to that node: made only
         // for a diagnostic placed by its node alone
@@ -4764,10 +4937,8 @@ impl Build {
             .acc_value(self.unit, f)
             .map(|s| v.seq_to_vec(s))
             .unwrap_or_default();
-        crate::timeline::note(
-            &format!("diagnostics: {} entries", entries.len()),
-            std::time::Duration::from_millis(1),
-        );
+        let t_entries = std::time::Instant::now();
+        let n_entries = entries.len();
         // (an `\input` file's text, read once a call, not once an entry)
         let mut files: phitex_defuse::FxHashMap<String, Arc<str>> =
             phitex_defuse::FxHashMap::default();
@@ -4887,6 +5058,10 @@ impl Build {
                 help,
             });
         }
+        crate::timeline::note(
+            &format!("diagnostics: {n_entries} entries"),
+            t_entries.elapsed(),
+        );
         out.extend(self.prelude.diags.iter().cloned());
         for m in self.prelude.errors.iter().chain(&self.g.eval_errors) {
             out.push(Diagnostic {
@@ -5143,6 +5318,27 @@ impl Build {
     /// an edit leaves alone keeps its hash.
     #[must_use]
     pub fn pages(&self) -> Vec<u64> {
+        let v = self.g.eng.values();
+        let f = v.field("pagehash");
+        let acc = self.g.eng.acc_value(self.unit, f);
+        if let Some((k, x)) = &self
+            .memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pages
+            && *k == acc
+        {
+            return x.clone();
+        }
+        let x = self.pages_made();
+        self.memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pages = Some((acc, x.clone()));
+        x
+    }
+
+    fn pages_made(&self) -> Vec<u64> {
         let v = self.g.eng.values();
         let f = v.field("pagehash");
         self.g

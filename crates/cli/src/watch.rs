@@ -1338,7 +1338,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             // (while the build runs: the main file's edits sent to it, the
             // rest held for after it)
             let mut meanwhile = || {
-                let Ok((at, e)) = rx.recv_timeout(Duration::from_millis(5)) else {
+                let Ok((at, e)) = rx.recv_timeout(Duration::from_millis(1)) else {
                     return;
                 };
                 let send_main = |buffers: &HashMap<String, String>, file: &str| -> bool {
