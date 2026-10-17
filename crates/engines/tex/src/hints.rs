@@ -1699,8 +1699,14 @@ impl Analysis<'_> {
                 }
                 // (without a paragraph end: only a command whose every
                 // call the pass sees, none built by name, as an ending
-                // of the job may be)
-                if !par_end && !d.unbounded.is_empty() {
+                // of the job may be; and none that looks at the token
+                // after it, `\futurelet`, §1221, which is the next
+                // sibling's)
+                if !par_end
+                    && (!d.unbounded.is_empty()
+                        || n == "futurelet"
+                        || d.calls.iter().any(|c| c == "futurelet"))
+                {
                     return false;
                 }
             }
