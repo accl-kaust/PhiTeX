@@ -241,6 +241,41 @@ working set of a run:
 Finish line: per-run busy at 8 workers ≤ 1.15 × per-run busy at 1 worker
 on para4000; the §0 scaling bar.
 
+## 9b. The parallel shape: nothing waits that could have guessed
+
+Measured on redesign2 f53423cd, para4000 cold (gate 12285):
+
+| | j1 | j8 |
+|---|---|---|
+| evaluation round wall | 3.91 s | 4.38 s |
+| op bodies summed (exec 1.13 s, finish 0.83 s, scan 0.18 s, dvi 0.02 s at j1) | 2.16 s | 3.58 s |
+| raises (a run hit a field not yet defined and parked) | 0 | 30,254 |
+| pending waits / gated starts | 0 / 0 | 18,469 / 31,628 |
+| waits | none | 60–77 nodes waiting on one finisher, for most pages |
+| realised critical path | 0.86 s | 1.16 s |
+
+Two causes; both are bars of this shot:
+
+1. **Nodes start before their inputs.** Every field a node cannot run
+   without is in its `Operation::reads()`, so the engine's non-running
+   gate holds it; a node that must run on a value not yet defined reads
+   the definer's prediction (the engine's guessed read), never parks on
+   it. Pieces after a page's fire read that page's finisher's outgoing
+   state (page number, marks, routine definitions, page parameters) as
+   a prediction from the finisher's previous run or the previous
+   different page; only the link and the resume of a cut read finishers
+   for real.
+2. **Engine and boundary overhead per run.** Round wall minus op bodies
+   is 1.75 s over 11,791 runs at j1 (~150 µs per run). The gate prints
+   `round_times` (op, commit, check, idle) to split engine from client;
+   the client's share (entry loads, value encoding at publish) is cut by
+   §2.6; the engine's share is an engine request (§10).
+
+Finish line: raises ≤ 1% of runs and pending waits ≤ 1% of runs at j8 and
+j16; no node other than the link and cut resumes waits on a finisher
+(the "waited on" lines of the trace list none); round wall minus op time
+≤ 10 µs per run at j1; para4000 wall at j8 ≤ busy/8 + critical path.
+
 ## 10. Engine requests (engine vocabulary only, to IncEngine)
 
 1. Per-evaluation bookkeeping (statistics, guess sets, settle) costs in
@@ -249,7 +284,8 @@ on para4000; the §0 scaling bar.
    different value, and counted (dae6642; confirmed by our gate).
 3. Value storage with locality per worker, so a run's reads stay in its
    core's cache (the measured +24% per run at 4 workers).
-4. `round_times` printed by our gate; any round whose idle time exceeds
+4. Scheduling and commit overhead per run ≤ 10 µs (measured: ~150 µs per run of round wall beyond op bodies at one worker on 11,791 runs, split by `round_times`).
+5. `round_times` printed by our gate; any round whose idle time exceeds
    its op time is reported to IncEngine with the recording.
 
 ## 11. Deletions (same commit as the code that replaces them)
