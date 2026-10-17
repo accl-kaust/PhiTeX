@@ -3090,6 +3090,19 @@ impl Run<'_, '_> {
         // (the ordinary pages fired up to this one: page counters step
         // by them)
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
+        // (`PHITEX_FIN_FIELD=name`: what each finisher's run left of that
+        // field, for the predictions)
+        if let Ok(name) = std::env::var("PHITEX_FIN_FIELD") {
+            let f = v.field(&name);
+            eprintln!(
+                "fin-field page {j} node {}: {name} {}",
+                self.cx.node().raw(),
+                out.iter().find(|d| d.0 == f).map_or_else(
+                    || "not defined".to_owned(),
+                    |d| v.render(d.1).chars().take(80).collect()
+                )
+            );
+        }
         let mut m = self
             .ops
             .fin_defs
