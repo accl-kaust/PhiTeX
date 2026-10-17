@@ -177,7 +177,11 @@ impl PdfState {
 
     /// The font's state, from the caller's data the first time.
     pub(crate) fn load_font(&mut self, f: FontId, src: &dyn FontSource) {
+        if self.last_loaded == Some(f) {
+            return;
+        }
         if self.fonts.contains_key(&f) {
+            self.last_loaded = Some(f);
             return;
         }
         let name = src.name(f).to_vec();
@@ -381,6 +385,7 @@ impl PdfState {
             // pdfmaplinesp
             self.map_line(b"=pdftexspace PdfTeX-Space <pdftexspace.pfb");
             self.fonts.remove(&f);
+            self.last_loaded = None;
             self.load_font(f, src);
             self.font_mut(f).chars[32] = true;
         }
@@ -585,7 +590,17 @@ impl PdfState {
     /// font of `pdf_font_size` `size`.
     fn adv_width(&mut self, w: Scaled, size: Scaled) -> (i32, Scaled) {
         let (s, s_out) = if self.tm_a == 0 {
-            divide_scaled(w, size, 4)
+            // (0 by 0 is never asked: a font's size is positive)
+            #[allow(clippy::cast_sign_loss)]
+            let k = ((w as u32) ^ (size as u32).rotate_left(7)) as usize & 63;
+            let e = self.adv_memo[k];
+            if e.0 == w && e.1 == size && size != 0 {
+                (e.2, e.3)
+            } else {
+                let r = divide_scaled(w, size, 4);
+                self.adv_memo[k] = (w, size, r.0, r.1);
+                r
+            }
         } else {
             let (s, _) = divide_scaled(round_xn_over_d(w, 1000, 1000 + self.tm_a), size, 4);
             let mut out = round_xn_over_d(

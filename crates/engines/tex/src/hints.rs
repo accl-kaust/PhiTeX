@@ -459,6 +459,16 @@ fn head_of_pass_field(f: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether `f` is one register of a family named as the engine names
+/// it (`count:0`, `box:255`): its head is the field itself.
+fn register_by_number(f: &str) -> bool {
+    f.split_once(':').is_some_and(|(fam, n)| {
+        matches!(fam, "count" | "dimen" | "skip" | "muskip" | "toks" | "box")
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 /// Adds heads to a state set (`None`: every head already).
 fn add_heads(st: &mut Option<Vec<&'static str>>, heads: Option<&[&'static str]>) {
     match (st.as_mut(), heads) {
@@ -2513,7 +2523,13 @@ impl Analysis<'_> {
                 if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
                     eprintln!("slices: head {h} from name {f}");
                 }
-                add_head(&mut b.state, h);
+                if register_by_number(f) {
+                    // (a register by its number, the page number's
+                    // `count:0`: that register, not its whole family)
+                    add_head_dyn(&mut b.state, f);
+                } else {
+                    add_head(&mut b.state, h);
+                }
             }
         }
         for f in set.prefixes.keys() {
@@ -2756,7 +2772,13 @@ fn add_defs_with(an: &Analysis<'_>, ds: &[Def], prefixes: bool, b: &mut Bound) {
             if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
                 eprintln!("slices: head {h} from def {}", d.field);
             }
-            add_head(&mut b.state, h);
+            if register_by_number(&d.field) {
+                // (a register by its number, the page number's
+                // `count:0`: that register, not its whole family)
+                add_head_dyn(&mut b.state, &d.field);
+            } else {
+                add_head(&mut b.state, h);
+            }
         } else if prefixes {
             if let Some(p) = engine_prefix(&d.field)
                 && !b.prefixes.contains(&p)
@@ -4039,6 +4061,29 @@ mod tests {
             .position(|x| x.0 <= h && h < x.1)
             .expect("a slice");
         assert!(pars[k], "{sl:?} {pars:?}");
+    }
+
+    #[test]
+    fn routine_advancing_the_page_number_defines_that_register() {
+        // (plain's routine advances `\\pageno`, `\\countdef`'d to 0: the
+        // finisher may define count:0, never another count register)
+        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../oracle/fixtures/dvi/plaintext.tex");
+        let plain = std::fs::read_to_string(fx).expect("plaintext.tex");
+        let mut d = pass::Definitions::new();
+        d.harvest(&plain, kind_of(&plain, FileKind::Package), 0);
+        let defs: Defs = Arc::new(d);
+        let h = routine_hint("\\plainoutput", &defs);
+        eprintln!(
+            "{} {:?}",
+            h.cause,
+            h.bound
+                .as_ref()
+                .or(h.guess.as_ref())
+                .map(|b| (&b.names, &b.prefixes, &b.state))
+        );
+        assert!(h.may_define_field("count:0"));
+        assert!(!h.may_define_field("count:24"));
     }
 
     #[test]

@@ -775,6 +775,47 @@ pub(crate) fn keep_leaf(v: &Values, id: ValueId, n: &phitex_typeset::node::Node)
     });
 }
 
+/// Character nodes decoded on a thread, direct-mapped by id: the values
+/// table's instance, then `(id, font, character)` (an id is a content
+/// hash: its decoding never goes stale).
+type CharNodes = (u64, Vec<(u64, u32, u16)>);
+
+thread_local! {
+    static CHAR_NODES_DEC: std::cell::RefCell<CharNodes> =
+        const { std::cell::RefCell::new((u64::MAX, Vec::new())) };
+}
+
+const CHAR_NODES_DEC_SIZE: usize = 1 << 12;
+
+/// The character node `id` decoded before on this thread, if it is one.
+pub(crate) fn char_node_of(v: &Values, id: ValueId) -> Option<(u32, u16)> {
+    let raw = id.raw();
+    CHAR_NODES_DEC.with(|c| {
+        let c = c.borrow();
+        if c.0 != v.instance() {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let (k, f, ch) =
+            *c.1.get((raw ^ (raw >> 17)) as usize & (CHAR_NODES_DEC_SIZE - 1))?;
+        (k == raw).then_some((f, ch))
+    })
+}
+
+/// Keeps `id`'s decoding as the character node `(font, ch)`.
+pub(crate) fn keep_char_node(v: &Values, id: ValueId, font: u32, ch: u16) {
+    let raw = id.raw();
+    CHAR_NODES_DEC.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != v.instance() || c.1.is_empty() {
+            *c = (v.instance(), vec![(u64::MAX, 0, 0); CHAR_NODES_DEC_SIZE]);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let k = (raw ^ (raw >> 17)) as usize & (CHAR_NODES_DEC_SIZE - 1);
+        c.1[k] = (raw, font, ch);
+    });
+}
+
 /// `make()`, the decoding of `id`, through this thread's cache.
 fn decoded<T: Clone>(
     v: &Values,
