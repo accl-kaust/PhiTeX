@@ -126,7 +126,9 @@ impl Tail {
     /// # Errors
     /// `bytes` not the ones the state flushed.
     pub fn link(&self, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
+        let t0 = std::time::Instant::now();
         let mut st = self.st.clone();
+        let t_clone = t0.elapsed();
         let tail = std::mem::take(&mut st.out);
         let tail_objs = std::mem::take(&mut st.chunk_objs);
         if bytes.chunks.len() != st.flushes || st.base != 0 {
@@ -155,13 +157,25 @@ impl Tail {
         // its offsets are the file's
         st.base = sum;
         st.linking = true;
+        let t_off = t0.elapsed();
         let end = st.xref(self.root)?;
+        let t_xref = t0.elapsed();
         let mut out = Vec::with_capacity(st.base + end.len());
         for c in &bytes.chunks {
             out.extend_from_slice(&c.bytes);
         }
         out.extend_from_slice(&tail);
         out.extend_from_slice(&end);
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!(
+                "pdf tail link: state copied {t_clone:?}, offsets {:?}, xref {:?}, bytes {:?} ({} chunks, {} objects)",
+                t_off.saturating_sub(t_clone),
+                t_xref.saturating_sub(t_off),
+                t0.elapsed().saturating_sub(t_xref),
+                bytes.chunks.len(),
+                st.objs.len()
+            );
+        }
         Ok(out)
     }
 }
