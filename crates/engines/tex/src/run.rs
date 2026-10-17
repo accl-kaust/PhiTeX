@@ -29,10 +29,6 @@ pub(crate) enum Halt {
     /// The input ended for good inside a command (§360: in batch mode,
     /// "*** (job aborted, no legal \end found)").
     Fatal,
-    /// The run reached the candidate it stops at (`crate::pages`: its
-    /// second pass after a cut); it ends there, its continuation the
-    /// resume piece's.
-    Cut,
 }
 
 impl From<Stop> for Halt {
@@ -605,16 +601,17 @@ pub(crate) struct Run<'c, 'a> {
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
-    /// The pages (`crate::pages`): finish candidates passed so far, the
-    /// candidate the run stops at (its second pass after a cut), what it
-    /// had done at its last candidate, the insertion classes put on the
-    /// main list since, a finisher's page, and the cut its fold found.
+    /// The pages (`crate::pages`): finish candidates passed so far, what
+    /// the run had done at each, the insertion classes put on the main
+    /// list since, a finisher's page, and the continuations at the
+    /// candidates with input after them (candidate, continuation, the
+    /// groups' bindings, where the table's log of replaced values begins:
+    /// spec-final A1).
     pub cand: u32,
-    pub stop_at: Option<u32>,
     pub cand_marks: Vec<crate::pages::CandMark>,
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
-    pub cut: Option<u32>,
+    pub cand_conts: Vec<(u32, ValueId, ValueId, usize)>,
     /// The records read ([`crate::fields::RECORDS`]), by record: `None`
     /// not read yet; `Some(None)` undefined or stale (its cells are read
     /// one by one); `Some(Some(cells))` each cell's value.
@@ -632,9 +629,6 @@ pub(crate) struct Run<'c, 'a> {
     /// The engine reads a scan step's builder made through its run
     /// (`pages::RunReaching`): a prefix folded with none is memoized.
     pub reach_reads: u64,
-    /// The candidate a finisher asked this piece to cut at
-    /// (`Run::read_cut_request`): the piece folds in its own run.
-    pub cut_req: Option<u32>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -736,18 +730,16 @@ impl<'c, 'a> Run<'c, 'a> {
             mark: crate::getnext::Mark::default(),
             halt: None,
             cand: 0,
-            stop_at: None,
             cand_marks: Vec::new(),
             ins_pending: Vec::new(),
             fin: None,
-            cut: None,
+            cand_conts: Vec::new(),
             recs: std::array::from_fn(|_| None),
             rec_out: Vec::new(),
             rec_ready: false,
             rec_absent: None,
             cell_eng: phitex_defuse::FxHashMap::default(),
             rec_sig: (0, 0, 0, 0),
-            cut_req: None,
             reach_reads: 0,
         }
     }
@@ -3238,11 +3230,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a run cut at a candidate: its input left is its continuation,
         // the resume piece's, `crate::pages`)
-        let leftover = if self.cut.is_some() {
-            Vec::new()
-        } else {
-            self.leftover()
-        };
+        let leftover = self.leftover();
         for args in leftover {
             if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 let v = self.v;
@@ -3265,12 +3253,10 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             eprintln!(
-                "  end {}: claim {n} (pulled {}, rest {}), cut {:?}, stop_at {:?}",
+                "  end {}: claim {n} (pulled {}, rest {})",
                 self.cx.node().raw(),
                 self.pulled,
-                self.claim_rest,
-                self.cut,
-                self.stop_at
+                self.claim_rest
             );
         }
         self.cx.claim(n);
@@ -3664,11 +3650,10 @@ pub(crate) struct Parked {
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
     cand: u32,
-    stop_at: Option<u32>,
     cand_marks: Vec<crate::pages::CandMark>,
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
-    cut_req: Option<u32>,
+    cand_conts: Vec<(u32, ValueId, ValueId, usize)>,
 }
 
 impl Run<'_, '_> {
@@ -3784,11 +3769,10 @@ impl Run<'_, '_> {
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
             cand: self.cand,
-            stop_at: self.stop_at,
             cand_marks: std::mem::take(&mut self.cand_marks),
             ins_pending: std::mem::take(&mut self.ins_pending),
             fin: self.fin.take(),
-            cut_req: self.cut_req,
+            cand_conts: std::mem::take(&mut self.cand_conts),
         })
     }
 }
@@ -3861,11 +3845,10 @@ impl<'c, 'a> Run<'c, 'a> {
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
         r.cand = p.cand;
-        r.stop_at = p.stop_at;
         r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
-        r.cut_req = p.cut_req;
+        r.cand_conts = p.cand_conts;
         r.resumed = true;
         Ok(r)
     }

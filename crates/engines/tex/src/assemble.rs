@@ -151,12 +151,62 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
         .map(|x| str_of(v, x))
         .unwrap_or_default();
     let mag = i32::try_from(field(cx, "param:mag")?.map_or(1000, |x| int_of(v, x))).unwrap_or(1000);
-    let mut w = phitex_dvi::DviWriter::new(mag, &comment);
-    for &page in pages {
+    // (spec-final §6.3: the pages the last file of this build shipped,
+    // the same from its start, are not shipped again: the writer goes on
+    // from its state after them, kept every `DVI_SNAP` pages; the fonts
+    // defined before a page are the prefix's)
+    let head = phitex_defuse::hash_bytes(
+        phitex_defuse::hash_words(v.instance(), &[u64::from(mag.cast_unsigned())]),
+        comment.as_bytes(),
+    );
+    let ids: Vec<u64> = pages.iter().map(|p| p.raw()).collect();
+    let (mut w, start, mut snaps) = {
+        let m = dvi_memo()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let found = m.as_ref().filter(|m| m.head == head).and_then(|m| {
+            let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
+            m.snaps
+                .iter()
+                .rev()
+                .find(|s| s.0 <= same && s.0 > 0)
+                .map(|s| {
+                    (
+                        s.1.clone(),
+                        s.0,
+                        m.snaps.iter().filter(|x| x.0 <= s.0).cloned().collect(),
+                    )
+                })
+        });
+        found.unwrap_or_else(|| (phitex_dvi::DviWriter::new(mag, &comment), 0, Vec::new()))
+    };
+    for (i, &page) in pages.iter().enumerate().skip(start) {
+        if i > start && (i - start).is_multiple_of(DVI_SNAP) {
+            snaps.push((i, w.clone()));
+        }
         dvi_page(v, &mut w, page);
     }
+    *dvi_memo()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(DviMemo { head, ids, snaps });
     let bytes = w.finish();
     Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
+}
+
+/// The pages between two of the DVI writer's kept states ([`DviMemo`]).
+const DVI_SNAP: usize = 16;
+
+/// The last DVI file of the process: its pages (by value) and the writer
+/// every [`DVI_SNAP`] pages.
+struct DviMemo {
+    head: u64,
+    ids: Vec<u64>,
+    snaps: Vec<(usize, phitex_dvi::DviWriter)>,
+}
+
+fn dvi_memo() -> &'static std::sync::Mutex<Option<DviMemo>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<Option<DviMemo>>> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 /// One page shipped on `w` (§638–§640): the box decoded, its counts,

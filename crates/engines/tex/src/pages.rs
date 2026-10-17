@@ -31,16 +31,17 @@
 //!   continuation after it reads that on the finisher's prediction, so
 //!   the scan does not wait for the routine.
 //! - A page finishing at a candidate inside a piece, with the piece
-//!   going on after it, gets its finisher after the piece all the same.
-//!   That is the same as tex.web unless the routine changes what the
-//!   piece's commands after the candidate read, or reads what they
-//!   defined: the finisher checks ([`Run::check_cut`]) and asks for a cut
-//!   (`cut:<piece>`). The piece runs again stopped at that candidate, its
-//!   continuation ([`Run::cont_encode`]) the material of a `resume`
-//!   piece ([`Resume`], [`RESUME`]) placed after the page's nodes. A piece
-//!   whose finishers so far touch what it reads or defines finds a page
-//!   finishing inside it in its own run ([`Run::fold_here`]) and cuts at
-//!   once; its step places the page as any step does.
+//!   going on after it, gets its finisher after the piece all the same
+//!   (spec-final A1). The piece runs to its end; at each candidate with
+//!   input after it, it keeps its continuation and what it defines from
+//!   there on replaces ([`RESUME`], [`Run::define_conts`]). The finisher
+//!   runs its routine on the state at the candidate (those values read
+//!   in place of the piece's later ones) and checks whether the routine
+//!   changed what the piece's commands after the candidate read
+//!   ([`Run::check_cut`]); if so it says so ([`CUTAT`]) and the scan's
+//!   continuation after it leaves the piece's items after the candidate
+//!   out and places a `resume` piece ([`Resume`]) after itself, which
+//!   runs the rest of the piece on the state the routine left.
 //! - Nothing reads the whole list, nothing is replayed: one scan state
 //!   per page, one finisher per page, a step per piece reading only the
 //!   profiles since its page began.
@@ -58,7 +59,7 @@ use crate::fields::Par;
 use crate::input::{Line, Seg};
 use crate::nodes::{self, Side};
 use crate::ops::{Shared, ops, run_node_parking};
-use crate::run::{Halt, R, Run};
+use crate::run::{R, Run};
 use crate::runstate::{ContSaved, ContSlot, ContState, Loc, State};
 use crate::val::{
     glue_of, glue_value, group, int_at, int_of, list_of, str_of, toks_of, toks_value,
@@ -150,20 +151,11 @@ pub(crate) fn give_no_units(r: &mut Run<'_, '_>) {
     }
 }
 
-/// The prefix of the fields saying a finisher asked a cut of a piece
-/// (`cutd:<piece>`, [`Run::check_cut`]).
-pub(crate) const CUT_DONE: &str = "cutd:";
-
-/// `cutd:<piece>` of piece `pid` (its raw node id as an integer).
-pub(crate) fn cut_done_field(v: &Values, pid: i64) -> Field {
-    v.field(&format!(
-        "{CUT_DONE}{}",
-        u64::from_ne_bytes(pid.to_ne_bytes())
-    ))
-}
-
-/// Defined by a `\shipout`: the mark that a page shipped before.
-pub(crate) const SHIPPED: &str = "pages:shipped";
+/// A finisher's cut (spec-final A1): `[piece, candidate, page]` when the
+/// routine, run at the candidate, changes what the piece's commands after
+/// it read; else `()`. Defined by every finisher, read by the scan's
+/// continuation after it, which places the resume.
+pub(crate) const CUTAT: &str = "pages:cutat";
 
 /// `max_dimen` (§421).
 pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
@@ -177,13 +169,12 @@ pub(crate) fn is_page_field(name: &str) -> bool {
 /// The fields a piece with items on the main list may define for the
 /// pages (its hint names them, `crate::hints`): what it leaves the next
 /// piece of the main list (the previous depth, the space factor, the
-/// last item), the shipped mark, and where its own run finds a page finishing inside
-/// it, the cut's continuation.
-pub(crate) const PAGE_FIELDS: [&str; 6] = [
+/// last item), its continuations at its candidates (spec-final A1),
+/// the conditionals it leaves open.
+pub(crate) const PAGE_FIELDS: [&str; 5] = [
     crate::build::MAIN_PD,
     crate::build::MAIN_SF,
     crate::build::MAIN_LAST,
-    SHIPPED,
     RESUME,
     crate::run::COND_STACK,
 ];
@@ -626,8 +617,18 @@ impl Run<'_, '_> {
             sig: self.st.sig(),
             nest: self.nest.len(),
         });
-        if self.stop_at == Some(k) {
-            return Err(Halt::Cut);
+        // (spec-final A1: where a page may fire inside the piece, its
+        // continuation as it stands here and, from here on, what its
+        // definitions replace: a cut is the finisher's, by a resume
+        // placed after the page on this, never a second pass)
+        let op = self.cx.op();
+        if (op == self.ops.exec || op == self.ops.resume)
+            && (self.top || self.doc)
+            && self.has_input()
+        {
+            let (cont, locals) = self.cont_encode()?;
+            let at = self.st.log_from_here();
+            self.cand_conts.push((k, cont, v.list(locals), at));
         }
         Ok(())
     }
@@ -793,9 +794,8 @@ impl Run<'_, '_> {
     /// ([`Run::define_main_tail`]), gives its
     /// profile and its items as units ([`Run::contribute_units`]) and
     /// places its scan step ([`Scan`]) after it; its own run never reads
-    /// the page. A piece a finisher asked to cut (`cut:<node>`,
-    /// [`Run::read_cut_request`]) stops at that candidate and leaves its
-    /// rest to a resume piece ([`Run::fold_here`]). A piece with nothing
+    /// the page, and never stops at a candidate (a cut is a resume a
+    /// continuation places, spec-final A1). A piece with nothing
     /// for the main list touches nothing. A finisher's end defines what
     /// its routine gives back ([`RTN`]).
     pub(crate) fn page_fold(&mut self) -> R<()> {
@@ -810,31 +810,14 @@ impl Run<'_, '_> {
             self.end_open();
         }
         let raw = self.own_outer_items();
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE") && self.stop_at.is_some() {
-            eprintln!(
-                "  page fold {}: pass stopped at {:?}: {} items, {} candidates, piece {piece}, top {} doc {}, contribs {}",
-                self.cx.node().raw(),
-                self.stop_at,
-                raw.len(),
-                self.cand_marks.len(),
-                self.top,
-                self.doc,
-                self.contribs.len()
-            );
-        }
         if fin {
             return self.define_rtn(raw);
         }
         if raw.is_empty() {
             return Ok(());
         }
-        // (a piece a finisher asked to cut, and its second pass stopped
-        // at that candidate: the resume is its to place)
-        if self.stop_at.is_none() && self.cut_req.is_none() {
-            self.define_main_tail(&raw)?;
-            return self.fold_apart(raw);
-        }
-        self.fold_here(raw)
+        self.define_main_tail(&raw)?;
+        self.fold_apart(raw)
     }
 
     /// A finisher's end: what its routine gives back to the main list
@@ -1082,14 +1065,16 @@ impl Run<'_, '_> {
             v.list(locals),
         ];
         if at_end {
-            // (a page firing where its piece was cut: the cut asked for
-            // again, so the client keeps it, `api::Graph::settle`; a cut
-            // no finisher asks for any more is dropped)
-            if pid != -2 && a(6) != ValueId::UNIT && int_of(v, a(6)) != 0 {
-                self.publish_cut(pid, v.int(i64::from(fire.k)))?;
-            }
             args.extend([ValueId::UNIT; 5]);
         } else {
+            // (spec-final A1: the routine runs on the state at the
+            // candidate: what the piece defined after it read as it was
+            // there, and the bindings of its groups open there)
+            if let Some(e) = self.piece_cont(pid, i64::from(fire.k))? {
+                let mut ls = list_of(v, e[2]);
+                ls.extend(list_of(v, e[3]));
+                args[3] = v.list(ls);
+            }
             let defs_k = list_of(v, a(4))
                 .get(usize::try_from(fire.k).unwrap_or(usize::MAX))
                 .copied()
@@ -1424,113 +1409,61 @@ impl Run<'_, '_> {
         self.pin_reaching_page_params(&mut raw)?;
         self.resolve_ins_markers(&mut raw)?;
         self.contribute_units(&raw, last, reads, defs, Vec::new(), false);
+        self.define_conts()?;
         self.cx.follow(self.ops.scan, vec![v.int(-3)]);
         Ok(())
     }
 
-    /// A piece cut where a finisher asked ([`Run::check_cut`],
-    /// `cut:<node>`): the first pass that passed the candidate goes
-    /// again stopped there ([`Run::finish_candidate`]); the second gives
-    /// its items up to the candidate as its units, places its scan step
-    /// (the page is the scan's to find, as for any piece: the same nodes
-    /// whichever run finds it) and the resume piece after them, which
-    /// runs the rest from the continuation ([`RESUME`],
-    /// [`Run::cont_encode`]). Nothing here reads the page: a cut at a
-    /// candidate where no page finishes any more splits the piece and
-    /// changes nothing else. A stop here parks the run: the end is a
-    /// command of its own ([`Run::begin_command`]).
-    fn fold_here(&mut self, raw: Vec<ValueId>) -> R<()> {
-        let t0 = std::time::Instant::now();
-        let r = self.fold_here_(raw);
-        phitex_pdf::phase::add(18, t0);
-        r
-    }
-
-    fn fold_here_(&mut self, mut raw: Vec<ValueId>) -> R<()> {
+    /// The piece's continuations at its candidates with input after them
+    /// ([`RESUME`]: `[[k, cont, pre, locals, flags, piece], ...]`), `pre`
+    /// the values in force at the candidate of what the run defined
+    /// after it (`[[field, value], ...]`, `()` absent): what a finisher
+    /// reads in place of the piece's later definitions, and a resume
+    /// starts from (spec-final A1).
+    fn define_conts(&mut self) -> R<()> {
         let v = self.v;
-        // (its input read out: the siblings it takes are known, and so
-        // are the fields it defines: what its state publishes and the
-        // page's; a park below holds no other sibling and no reader of
-        // another field, a piece's hint bound narrowed to them)
-        let n = self.claim_count();
-        if crate::exec::env_flag!("PHITEX_DEBUG_CLAIMS") {
-            eprintln!(
-                "claim: node {} claims {n} at its cut (pulled {})",
-                self.cx.node().raw(),
-                self.pulled
-            );
-        }
-        self.cx.claim(n);
-        let mut defs = self.published_fields();
-        defs.extend(PAGE_FIELDS.map(|f| v.field(f)));
-        self.cx.narrow(MayDefine::Names(defs));
-        self.begin_command();
-        self.define_main_tail(&raw)?;
-        let last = self.last_candidate();
-        // (the candidate asked for, if this run passed it: a piece whose
-        // text changed may no longer have it)
-        let k = self
-            .stop_at
-            .or(self.cut_req)
-            .filter(|&k| self.cand_marks.iter().any(|m| m.k == k));
-        let at_end = k.is_none() || (self.stop_at.is_none() && last == k);
-        if at_end {
-            let (reads, defs) = self.check_data(last);
-            self.pin_reaching_page_params(&mut raw)?;
-            self.resolve_ins_markers(&mut raw)?;
-            self.contribute_units(&raw, last, reads, defs, Vec::new(), false);
-            self.cx.follow(self.ops.scan, vec![v.int(-3)]);
+        let conts = std::mem::take(&mut self.cand_conts);
+        if conts.is_empty() {
             return Ok(());
         }
-        let Some(k) = k else { return Ok(()) };
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
-            eprintln!(
-                "  cut {}: at candidate {k} (stop_at {:?}, cut asked {:?})",
-                self.cx.node().raw(),
-                self.stop_at,
-                self.cut_req
-            );
-        }
-        // (the cut stands: the first pass goes again stopped at the
-        // candidate, which places it; the second, stopped there, is done)
-        self.cut = Some(k);
-        if self.stop_at != Some(k) {
-            return Ok(());
-        }
-        self.pin_reaching_page_params(&mut raw)?;
-        self.resolve_ins_markers(&mut raw)?;
-        let (cont, locals) = self.cont_encode()?;
-        self.contribute_units(&raw, Some(k), ValueId::UNIT, ValueId::UNIT, locals, true);
-        self.cx.follow(self.ops.scan, vec![v.int(-3)]);
-        let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
-        // (the cutting node: the finishers between it and the resume
-        // tell which fields they defined globally, `gdefs`)
+        let flags = v.int(i64::from(self.top) | (i64::from(self.doc) << 1));
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+        let mut entries = Vec::with_capacity(conts.len());
+        for (k, cont, locals, at) in conts {
+            let mut pre = Vec::new();
+            for (loc, x) in self.st.pre_values(at, v) {
+                let f = self.loc_field(loc);
+                let x = match x {
+                    Some(x) => x,
+                    None => self.eng_read(f)?,
+                };
+                pre.push(v.list(vec![f.0, x.unwrap_or(ValueId::UNIT)]));
+            }
+            entries.push(v.list(vec![
+                v.int(i64::from(k)),
+                cont,
+                v.list(pre),
+                locals,
+                flags,
+                pid,
+            ]));
+        }
         self.cx
-            .define_with(v.field(RESUME), v.list(vec![cont, pid]), Locality::Global);
-        self.cx.follow(
-            self.ops.resume,
-            vec![ValueId::UNIT, v.int(flags), ValueId::UNIT],
-        );
+            .define_with(v.field(RESUME), v.list(entries), Locality::Global);
         Ok(())
     }
 
-    /// A piece's start: whether a finisher asked for a cut of this node
-    /// (`cut:<node>`, a loop-back the finisher publishes,
-    /// [`Run::check_cut`]), at which candidate.
-    pub(crate) fn read_cut_request(&mut self) -> R<()> {
-        let args = self.cx.args();
-        let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
-        if k.trailing_zeros() >= 2 {
-            return Ok(());
-        }
-        let f = self.v.field(&format!("cut:{}", self.cx.node().raw()));
-        self.cut_req = self
-            .cx
-            .use_field(f)?
-            .filter(|&x| x != ValueId::UNIT)
-            .and_then(|x| u32::try_from(int_of(self.v, x)).ok());
-        Ok(())
+    /// Piece `pid`'s continuation at candidate `k` ([`Run::define_conts`]),
+    /// as the node reading it finds [`RESUME`]: the entry's fields.
+    pub(crate) fn piece_cont(&mut self, pid: i64, k: i64) -> R<Option<Vec<ValueId>>> {
+        let v = self.v;
+        let Some(x) = self.eng_read(v.field(RESUME))? else {
+            return Ok(None);
+        };
+        Ok(list_of(v, x)
+            .into_iter()
+            .map(|e| list_of(v, e))
+            .find(|e| e.len() >= 6 && int_of(v, e[0]) == k && int_of(v, e[5]) == pid))
     }
 
     /// A finisher placed after the piece its page finished inside of
@@ -1540,11 +1473,11 @@ impl Run<'_, '_> {
     /// the candidate, changed what the piece's commands after it saw or
     /// saw what they defined. If so, a cut is asked for: the piece runs
     /// again next round with the routine between its two parts.
-    fn check_cut(&mut self, args: &[ValueId]) -> R<()> {
+    fn check_cut(&mut self, args: &[ValueId]) -> R<Option<(i64, i64)>> {
         let v = self.v;
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
         if args.len() < 9 {
-            return Ok(());
+            return Ok(None);
         }
         let (pid, k, reads, defs) = (a(5), a(6), a(7), a(8));
         let mut gdefs: Vec<(ValueId, ValueId)> = Vec::new();
@@ -1601,9 +1534,9 @@ impl Run<'_, '_> {
                 let loc = self.loc_of(f);
                 self.set_loc(loc, crate::runstate::Entry::raw(x), true);
             }
-            return Ok(());
+            return Ok(None);
         }
-        let Some(why) = why else { return Ok(()) };
+        let Some(why) = why else { return Ok(None) };
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "  cut asked: piece {} at candidate {} ({why})",
@@ -1611,7 +1544,7 @@ impl Run<'_, '_> {
                 int_of(v, k)
             );
         }
-        self.publish_cut(int_of(v, pid), k)
+        Ok(Some((int_of(v, pid), int_of(v, k))))
     }
 
     /// A cut of piece `pid` at candidate `k` asked (spec-final §4.4: the
@@ -1620,21 +1553,6 @@ impl Run<'_, '_> {
     /// loop-back `cut:<piece>`; a page after it in the same piece finds
     /// that it did (`cutd:<piece>`, a forward definition) and leaves it,
     /// so one node publishes the field.
-    fn publish_cut(&mut self, pid: i64, k: ValueId) -> R<()> {
-        let v = self.v;
-        let done = cut_done_field(v, pid);
-        if self.eng_read(done)?.is_some() {
-            return Ok(());
-        }
-        self.cx.define_with(done, k, Locality::Global);
-        let f = v.field(&format!("cut:{}", u64::from_ne_bytes(pid.to_ne_bytes())));
-        if !self.cx.is_loopback(f) {
-            self.cx.declare_loopback(f, ValueId::UNIT);
-        }
-        self.cx.publish(f, k);
-        Ok(())
-    }
-
     /// `\pagegoal`, `\pagetotal`, … (§421): the page state reaching this
     /// piece with its own items up to its last candidate folded in (the
     /// contributions after it are not on the page), read, not defined.
@@ -1817,8 +1735,8 @@ impl Run<'_, '_> {
 
     /// `ship_out` (§638–§640): the page goes to the `pages` accumulator
     /// with its `\count0..9` and fonts; its `\write`s and `\openout`s
-    /// happen now (§1366–§1374); [`SHIPPED`] is defined for the text
-    /// after.
+    /// happen now (§1366–§1374). It defines nothing for the text after
+    /// (spec-final §3.2: no shipped mark).
     #[allow(clippy::too_many_lines)]
     pub(crate) fn ship_out(&mut self, b: ValueId) -> R<()> {
         let v = self.v;
@@ -1951,8 +1869,6 @@ impl Run<'_, '_> {
         self.contribute("pagehash", h);
         self.log("shipend", "]")?;
         self.set_cell(crate::fields::cell::DEADCYCLES, v.int(0), true);
-        let j = i64::try_from(self.page_index()).unwrap_or(-1);
-        self.set(SHIPPED, v.int(j), true);
         phitex_pdf::phase::add(15, t0);
         Ok(())
     }
@@ -2263,7 +2179,7 @@ impl Run<'_, '_> {
     /// between the cut and here, the finisher's, replaces the binding and
     /// makes the groups' saves inert, §283).
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId, pre: ValueId) -> R<()> {
         let v = self.v;
         let xs = list_of(v, x);
         let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -2358,6 +2274,20 @@ impl Run<'_, '_> {
             }
             _ => Vec::new(),
         };
+        // (spec-final A1: what the piece defined after the candidate, as
+        // it was there, where the routine did not define it globally and
+        // the continuation's groups hold no binding of it)
+        for e in list_of(v, pre) {
+            let ys = list_of(v, e);
+            if let [f, x] = ys[..]
+                && !gdefs.contains(&f)
+            {
+                let loc = self.loc_of(Field(f));
+                if !self.st.is_loaded(loc) {
+                    self.st.preload(loc, some(x));
+                }
+            }
+        }
         for e in list_of(v, a(6)) {
             let ys = list_of(v, e);
             if ys.len() < 2 {
@@ -2510,10 +2440,7 @@ impl FinDefs {
                 // (the marks are the page's text: equal on two pages by
                 // chance; the scan knows them, spec §3)
                 let name = crate::val::field_name(v, f);
-                if name.starts_with("mark")
-                    || name.starts_with("cs:g__mark_")
-                    || name == "param:outputpenalty"
-                {
+                if name.starts_with("mark") || name == "param:outputpenalty" {
                     return None;
                 }
                 // (one run of the routine so far, spec-final §9b: its
@@ -2549,7 +2476,6 @@ impl FinDefs {
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
 const FINISHER_FIELDS: &[&str] = &[
-    SHIPPED,
     "deadcycles",
     "mark:",
     "param:outputpenalty",
@@ -2610,6 +2536,10 @@ impl Finish {
                 }
             })
             .unwrap_or_default();
+        // (no cut: what most pages do; a cut runs the continuation again)
+        let cutat = v.field(CUTAT);
+        out.retain(|e| e.0 != cutat);
+        out.push((cutat, ValueId::UNIT));
         let rtn = v.field(RTN);
         if !out.iter().any(|e| e.0 == rtn) {
             let last = d.and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1));
@@ -2673,7 +2603,6 @@ impl Operation for Finish {
         {
             for n in [
                 RTN,
-                SHIPPED,
                 "deadcycles",
                 "param:outputpenalty",
                 "inspen",
@@ -2682,10 +2611,7 @@ impl Operation for Finish {
             ] {
                 names.push(v.field(n));
             }
-            // (the cut it may ask of the piece its page finishes inside)
-            if let Some(&pid) = args.get(5) {
-                names.push(cut_done_field(v, int_of(v, pid)));
-            }
+            names.push(v.field(CUTAT));
             ops(&self.0).fields.add_record_fields(&mut names);
             return MayDefine::Names(names);
         }
@@ -2698,7 +2624,7 @@ impl Operation for Finish {
         };
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
         ps.push(RTN.to_owned());
-        ps.push(CUT_DONE.to_owned());
+        ps.push(CUTAT.to_owned());
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
@@ -2809,7 +2735,13 @@ impl Operation for Finish {
             r.run_all()?;
             give_no_units(r);
             let args = r.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
-            r.check_cut(&args)?;
+            let cut = r.check_cut(&args)?;
+            let v = r.v;
+            let j = r.fin.as_ref().map_or(0, |c| c.j);
+            let x = cut.map_or(ValueId::UNIT, |(pid, k)| {
+                v.list(vec![v.int(pid), v.int(k), v.int(j)])
+            });
+            r.cx.define_with(v.field(CUTAT), x, Locality::Global);
             let g = r.contribute_global_defs();
             r.record_finisher_defs(&args, g);
             Ok(())
@@ -3000,18 +2932,12 @@ impl Operation for Resume {
         let out = run_node_parking(cx, o, true, |r| {
             if !r.resumed {
                 let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
-                let (cont, pid) = if a(0) == ValueId::UNIT {
-                    let x = r.eng_read(r.v.field(RESUME))?;
-                    let xs = x.map(|x| list_of(r.v, x)).unwrap_or_default();
-                    (
-                        xs.first().copied().unwrap_or(ValueId::UNIT),
-                        xs.get(1).copied().unwrap_or(ValueId::UNIT),
-                    )
-                } else {
-                    (a(0), a(2))
-                };
-                r.cont_load(cont, pid)?;
-                r.read_cut_request()?;
+                // (`[(), flags, piece, candidate]`: the piece's
+                // continuation there, spec-final A1)
+                let (pid, k) = (int_of(r.v, a(2)), int_of(r.v, a(3)));
+                let e = r.piece_cont(pid, k)?.unwrap_or_default();
+                let at = |i: usize| e.get(i).copied().unwrap_or(ValueId::UNIT);
+                r.cont_load(at(1), a(2), at(2))?;
             }
             r.run_all()
         });
@@ -3233,6 +3159,22 @@ enum Placed {
     Page,
 }
 
+impl Run<'_, '_> {
+    /// The resume of piece `pid` cut at candidate `k` (spec-final A1),
+    /// after this continuation: `[(), flags, piece, candidate]`.
+    fn place_resume(&mut self, pid: ValueId, k: ValueId) -> R<()> {
+        let v = self.v;
+        let e = self.piece_cont(int_of(v, pid), int_of(v, k))?;
+        let flags = e
+            .as_ref()
+            .and_then(|e| e.get(4).copied())
+            .unwrap_or_else(|| v.int(2));
+        self.cx
+            .follow(self.ops.resume, vec![ValueId::UNIT, flags, pid, k]);
+        Ok(())
+    }
+}
+
 /// The scan's states after the prefixes of windows ([`Run::scan_step`]),
 /// by the window's start and its units' values.
 fn scan_memo() -> &'static std::sync::Mutex<phitex_defuse::FxHashMap<u64, crate::vprof::ScanState>>
@@ -3443,7 +3385,18 @@ impl Run<'_, '_> {
             && own
                 .get(1)
                 .is_some_and(|&x| int_of(v, x) == i64::from(fire.k));
-        let rest = if at_end { Vec::new() } else { fire.rest };
+        // (spec-final A1: the page's finisher cut the piece: its items
+        // after the candidate are the resume's to give, placed below)
+        let cut = self
+            .eng_read(v.field(CUTAT))?
+            .map(|x| list_of(v, x))
+            .filter(|c| c.len() == 3 && int_of(v, c[2]) == int_of(v, b[0]))
+            .map(|c| (c[0], c[1]));
+        let rest = if at_end || cut.is_some() {
+            Vec::new()
+        } else {
+            fire.rest
+        };
         let r = self.eng_read(v.field(RTN))?;
         let rs = r.map(|x| list_of(v, x)).unwrap_or_default();
         let mut material = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
@@ -3553,6 +3506,9 @@ impl Run<'_, '_> {
                 fire_special(v, fire.data),
                 origin.filter(|_| in_rest),
             )?;
+            if let Some((p, k)) = cut {
+                self.place_resume(p, k)?;
+            }
             return Ok(Placed::Page);
         }
         let prof = crate::vprof::encode(v, &material);
@@ -3570,6 +3526,9 @@ impl Run<'_, '_> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(int_of(v, j), (x, mat));
+        }
+        if let Some((p, k)) = cut {
+            self.place_resume(p, k)?;
         }
         Ok(Placed::State)
     }

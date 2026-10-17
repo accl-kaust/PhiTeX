@@ -158,7 +158,7 @@ pub fn runs_of(b: &Build, op: &str) -> u64 {
 /// rounded up);
 /// one `finish` and one `resume` per touched page; a `place` for every
 /// page from the first touched one to the last (in exact mode place
-/// replays the PDF state in order); the end node (`dvi`) once; nothing
+/// replays the PDF state in order); the link and the end node (`dvi`) once each; nothing
 /// of any other operation; and at most 1.1 runs a node.
 /// `cold_folds` and `before` are the cold build's scan runs and page
 /// hashes.
@@ -177,6 +177,7 @@ pub fn edit_cost_failures(b: &Build, touched: u64, before: &[u64], cold_folds: u
         ("finish", n),
         ("resume", n),
         ("place", to_end),
+        ("link", 1),
         ("dvi", 1),
     ];
     let mut f = Vec::new();

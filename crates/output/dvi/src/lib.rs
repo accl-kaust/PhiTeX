@@ -220,7 +220,9 @@ fn vet_round(glue_temp: f64) -> Scaled {
 }
 
 /// The DVI writer: the state `ship_out` keeps across pages (§595, §603,
-/// §605, §616, §646).
+/// §605, §616, §646). A clone goes on from the same state: what an
+/// edit's file keeps of the pages before the first that changed.
+#[derive(Clone)]
 pub struct DviWriter {
     out: Vec<u8>,
     buf_size: usize,
@@ -274,6 +276,7 @@ enum Ev {
     Gone { at: usize, e: usize, gone: bool },
 }
 
+#[derive(Clone)]
 struct Recording {
     start: usize,
     tape: Vec<Ev>,

@@ -99,60 +99,19 @@ pub(crate) fn run_node_parking(
     // reads another page state than the first finds the page finishing
     // elsewhere, or not at all, and the run goes again, stopping where
     // the state it now reads finishes it, or not stopping)
-    let mut passes = 1usize;
-    while matches!(res, Ok(()) | Err(Halt::Cut)) {
+    // (spec-final A1: one pass; a page firing inside the piece is the
+    // finisher's to cut, by a resume the continuation places, never a
+    // second pass of the piece)
+    if matches!(res, Ok(())) {
         let tf = pp.and_then(|_| crate::prof::start());
         res = r.page_fold();
         crate::prof::add(crate::prof::FOLD, tf);
-        let again = match (r.cut, r.stop_at) {
-            _ if res.is_err() => None,
-            (Some(k), s) if s != Some(k) => Some(Some(k)),
-            (None, Some(_)) => Some(None),
-            _ => None,
-        };
-        if trace {
-            eprintln!(
-                "  pass {passes} of {}: {}, cut {:?}, stop_at {:?} -> again {again:?}",
-                r.cx.node().raw(),
-                match &res {
-                    Ok(()) => "ok",
-                    Err(Halt::Cut) => "cut",
-                    Err(_) => "other",
-                },
-                r.cut,
-                r.stop_at
-            );
-        }
-        let Some(stop_at) = again else { break };
-        passes += 1;
-        // (the state a pass reads can change only as often as the nodes
-        // before it define it: the passes end; many of them is a sign
-        // worth seeing in the diagnostics)
-        if passes > 3 {
-            r.engine_diag(&format!("page fold: pass {passes} of this run"));
-        }
-        if passes > 16 {
-            // (the passes must end: the two outcomes alternate only on a
-            // defect; the run ends as it stands rather than never)
-            eprintln!(
-                "phitex: page fold of node {} did not settle in {passes} passes (cut {:?}, stop_at {:?})",
-                r.cx.node().raw(),
-                r.cut,
-                r.stop_at
-            );
-            break;
-        }
-        let cx = r.cx;
-        cx.restart();
-        r = Run::new(cx, o.clone());
-        r.stop_at = stop_at;
-        res = body(&mut r);
     }
     let t_body = t_body.elapsed();
     if crate::exec::env_flag!("PHITEX_RUN_LOG") {
         // (measure: every attempt, for `Stats::run_log`)
         let how = match &res {
-            Ok(()) | Err(Halt::Cut) => b'o',
+            Ok(()) => b'o',
             Err(Halt::Stop(_)) => b's',
             _ => b'x',
         };
@@ -171,7 +130,6 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => "stop",
                 Err(Halt::Starve) => "starve",
                 Err(Halt::Fatal) => "fatal",
-                Err(Halt::Cut) => "cut",
             },
             r.cx.is_speculative(),
             r.resumed,
@@ -186,17 +144,12 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => format!("stop (node {})", r.cx.node().raw()),
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
-                Err(Halt::Cut) => "cut".to_owned(),
             }
         );
     }
     match res {
-        Ok(()) | Err(Halt::Cut) => {
-            // (a run cut at a candidate keeps its open groups and lists:
-            // they are its continuation's)
-            if r.cut.is_none() {
-                r.end_open();
-            }
+        Ok(()) => {
+            r.end_open();
             // (what a continuation republishes and the records the run
             // defines, which may read: a stop here runs the node again
             // from its start)
@@ -410,7 +363,6 @@ impl Operation for Exec {
                     && !crate::exec::env_flag!("PHITEX_PKG_NONET")
                     && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
-                r.read_cut_request()?;
                 let args = r.resolve_units(&args)?;
                 let fs = crate::run::decode_segs(r.v, &args);
                 let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
