@@ -55,6 +55,12 @@ pub(crate) type Recs = FxHashMap<String, Rec>;
 /// of its arguments, blanks and comment lines dropped; `None` for any
 /// other slice.
 pub(crate) fn load_key(text: &str) -> Option<String> {
+    // (the text's first character that is no blank begins the first
+    // line kept, unless it begins a comment line: no line is split for
+    // a slice that does not begin with a command)
+    if !text.trim_start().starts_with(['\\', '%']) {
+        return None;
+    }
     let mut body = String::new();
     for line in text.lines() {
         let t = line.trim_start();
