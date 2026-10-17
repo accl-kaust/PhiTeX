@@ -1219,6 +1219,23 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         })
         .collect();
     eprintln!("acct: waited on (top {}): {waited:?}", waited.len());
+    let longest: Vec<String> = r
+        .run_times
+        .iter()
+        .take(8)
+        .map(|&(n, t)| {
+            let info = eng.node_info(n);
+            let op = info.as_ref().map_or("gone", |i| i.op);
+            let a = info
+                .and_then(|i| i.args.first().map(|&x| eng.values().render(x)))
+                .unwrap_or_default()
+                .chars()
+                .take(40)
+                .collect::<String>();
+            format!("{:.1} ms {op} {a}", t.as_secs_f64() * 1e3)
+        })
+        .collect();
+    eprintln!("acct: longest runs: {longest:?}");
     let refuted: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()
