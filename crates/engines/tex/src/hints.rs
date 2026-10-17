@@ -1691,13 +1691,16 @@ impl Analysis<'_> {
                 && at.kind == AtomKind::Cs
             {
                 let n = at.name(self.text);
+                let d = self.defset(n);
                 if matches!(n, "end" | "dump" | "bye")
-                    || self
-                        .defset(n)
-                        .calls
-                        .iter()
-                        .any(|c| matches!(c.as_str(), "end" | "dump"))
+                    || d.calls.iter().any(|c| matches!(c.as_str(), "end" | "dump"))
                 {
+                    return false;
+                }
+                // (without a paragraph end: only a command whose every
+                // call the pass sees, none built by name, as an ending
+                // of the job may be)
+                if !par_end && !d.unbounded.is_empty() {
                     return false;
                 }
             }
