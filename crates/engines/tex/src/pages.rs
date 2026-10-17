@@ -168,12 +168,13 @@ pub(crate) fn is_page_field(name: &str) -> bool {
 /// piece of the main list (the previous depth, the space factor, the
 /// last item), the shipped mark, and where its own run finds a page finishing inside
 /// it, the cut's continuation.
-pub(crate) const PAGE_FIELDS: [&str; 5] = [
+pub(crate) const PAGE_FIELDS: [&str; 6] = [
     crate::build::MAIN_PD,
     crate::build::MAIN_SF,
     crate::build::MAIN_LAST,
     SHIPPED,
     RESUME,
+    crate::run::COND_STACK,
 ];
 
 /// What a run had done when it passed a candidate: at its end, a page
@@ -2217,6 +2218,7 @@ impl Run<'_, '_> {
             v.int(i64::from(self.hint_void)),
             v.int(i64::from(self.no_pull)),
             v.int(i64::from(self.rec_load)),
+            v.int(i64::from(self.cond_loaded || self.cond_stop)),
         ]);
         let cont = v.list(vec![
             v.list(frames),
@@ -2415,6 +2417,7 @@ impl Run<'_, '_> {
         self.hint_void = n(15) != 0;
         self.no_pull = n(16) != 0;
         self.rec_load = n(17) != 0;
+        self.cond_loaded = n(18) != 0;
         Ok(())
     }
 }
@@ -2683,9 +2686,11 @@ impl Operation for Finish {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
-    /// Its page's break ([`BREAKS`]): the node waits for it.
+    /// Its page's break ([`BREAKS`]) and the material the page begins
+    /// with ([`SCAN_MAT`], [`Run::assemble_page`]): the node waits for
+    /// both, never runs on a value its definer has not committed.
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(vec![v.field(BREAKS)])
+        Some(vec![v.field(BREAKS), v.field(SCAN_MAT)])
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
@@ -3053,7 +3058,9 @@ impl Operation for Scan {
     /// before it in work) and the scan state is there.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         if args.first().is_some_and(|&x| int_of(v, x) == -2) {
-            return Some(vec![v.field(BREAKS)]);
+            // (it assembles its page as the finisher does: the break and
+            // the material the page began with)
+            return Some(vec![v.field(BREAKS), v.field(SCAN_MAT)]);
         }
         Some(vec![v.field(SCAN), v.field(crate::vprof::VPROF)])
     }

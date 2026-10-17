@@ -104,22 +104,7 @@ impl Run<'_, '_> {
                     self.push_toks(toks);
                 }
                 cmd::IF_TEST => self.conditional()?,
-                cmd::FI_OR_ELSE => {
-                    // §510
-                    let limit = self.conds.last().copied().unwrap_or(OUTSIDE_LIMIT);
-                    if self.cur.chr > i32::from(limit) {
-                        if limit == IF_CODE {
-                            self.insert_relax();
-                        }
-                        // "Extra \or/\else/\fi": ignored
-                    } else {
-                        while self.cur.chr != FI_CODE {
-                            self.pass_text()?;
-                        }
-                        self.conds.pop();
-                        self.if_codes.truncate(self.conds.len());
-                    }
-                }
+                cmd::FI_OR_ELSE => self.fi_or_else()?,
                 cmd::INPUT => {
                     if self.cur.chr > 0 {
                         self.end_input()?;
@@ -509,6 +494,28 @@ impl Run<'_, '_> {
         } else {
             false
         })
+    }
+
+    /// `\fi`, `\else`, `\or` (§510), a conditional begun before this
+    /// node ended from the stack it left ([`Run::load_cond_stack`]).
+    fn fi_or_else(&mut self) -> R<()> {
+        if self.conds.is_empty() {
+            self.load_cond_stack()?;
+        }
+        let limit = self.conds.last().copied().unwrap_or(OUTSIDE_LIMIT);
+        if self.cur.chr > i32::from(limit) {
+            if limit == IF_CODE {
+                self.insert_relax();
+            }
+            // "Extra \or/\else/\fi": ignored
+        } else {
+            while self.cur.chr != FI_CODE {
+                self.pass_text()?;
+            }
+            self.conds.pop();
+            self.if_codes.truncate(self.conds.len());
+        }
+        Ok(())
     }
 
     /// `conditional` (§498–§509).

@@ -750,8 +750,7 @@ impl Run<'_, '_> {
                     if !f.has_lines() {
                         continue;
                     }
-                    if self.doc && (!self.open_span() || self.can_leave_scope()) && self.doc_file(f)
-                    {
+                    if self.stops_at_doc_file() && self.doc_file(f) {
                         return false;
                     }
                     true
@@ -769,8 +768,7 @@ impl Run<'_, '_> {
                     if !f.has_lines() {
                         continue;
                     }
-                    if self.doc && (!self.open_span() || self.can_leave_scope()) && self.doc_file(f)
-                    {
+                    if self.stops_at_doc_file() && self.doc_file(f) {
                         return false;
                     }
                     true
@@ -778,6 +776,43 @@ impl Run<'_, '_> {
             };
             if more {
                 return true;
+            }
+        }
+        false
+    }
+
+    /// Whether a document file reached here stops the run (its lines
+    /// the region children, [`Run::leftover`]): a document's run with no
+    /// level of its own open, or with groups it leaves as scopes. Open
+    /// conditionals do not keep it reading: they are all in a branch
+    /// being taken (a skipped branch is passed within one command), and
+    /// the stack goes on as a field ([`crate::run::COND_STACK`]).
+    pub(crate) fn stops_at_doc_file(&self) -> bool {
+        self.doc && (self.nest.is_empty() || self.can_leave_scope())
+    }
+
+    /// Whether the next input left is a document file's lines (what
+    /// [`Run::has_input`] stops at).
+    pub(crate) fn next_is_doc_file(&self) -> bool {
+        for l in self.input.levels.iter().rev() {
+            match l.kind {
+                kind::TOKS if l.a < l.b => return false,
+                kind::LINE if self.input.line(*l).has_more() => return false,
+                kind::TOKS | kind::LINE => {}
+                _ => {
+                    let f = self.input.file(*l);
+                    if f.has_lines() {
+                        return self.doc_file(f);
+                    }
+                }
+            }
+        }
+        for s in self.input.text_rest() {
+            match s {
+                Seg::Toks(t) if !t.is_empty() => return false,
+                Seg::Line(l) if l.has_more() => return false,
+                Seg::File(f) if f.has_lines() => return self.doc_file(f),
+                _ => {}
             }
         }
         false

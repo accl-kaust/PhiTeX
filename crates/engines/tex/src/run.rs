@@ -43,6 +43,30 @@ impl From<Stop> for Halt {
 
 pub(crate) type R<T> = Result<T, Halt>;
 
+/// The conditionals a run left open where it stopped at a document file
+/// (spec-redesign §3: a file reached inside the taken branch of open
+/// conditionals is sliced like the document): `[[if_limit, cur_if],
+/// ...]`, bottom first, read on first touch by the run that ends one
+/// ([`Run::load_cond_stack`]).
+pub(crate) const COND_STACK: &str = "cond:stack";
+
+/// The names of the files the job's streams write, one entry per stream
+/// entry ([`Run::contribute_stream`]): what places the files' nodes
+/// (`ops::Files`), unchanged by an edit of what a file holds.
+pub(crate) const WNAMES: &str = "wnames";
+
+/// The accumulators the streams' entries are dealt into by their file's
+/// name ([`stream_bucket`]): a file's node reads its own one, and takes
+/// its file's entries from it.
+pub(crate) const STREAM_BUCKETS: u64 = 64;
+
+/// The accumulator file `name`'s stream entries go to
+/// (`wstreams:<k>`, [`STREAM_BUCKETS`]).
+pub(crate) fn stream_bucket(v: &Values, name: &str) -> Field {
+    let k = phitex_defuse::hash_bytes(0x7773_7472_6561_6d00, name.as_bytes()) % STREAM_BUCKETS;
+    v.field(&format!("wstreams:{k}"))
+}
+
 /// The runs that read a record whole (node, record), kept under
 /// `PHITEX_RECORD_CHECK=1` for [`record_check`].
 static RECORD_READERS: std::sync::Mutex<Vec<(phitex_defuse::NodeId, usize)>> =
@@ -482,6 +506,12 @@ pub(crate) struct Run<'c, 'a> {
     pub conds: Vec<u8>,
     /// The codes (`cur_if`) of `conds`, parallel to it.
     pub if_codes: Vec<i32>,
+    /// Whether this run read the conditionals a node before it left open
+    /// ([`COND_STACK`], [`Run::load_cond_stack`]).
+    pub cond_loaded: bool,
+    /// Whether this run stopped at a document file with conditionals
+    /// open ([`Run::run_all`]): it leaves them as [`COND_STACK`].
+    pub cond_stop: bool,
     /// The buffer a control sequence's name is scanned into (§356).
     pub(crate) name_buf: String,
     /// The scope kind last decoded (`Run::mode`, once a command): its
@@ -664,6 +694,8 @@ impl<'c, 'a> Run<'c, 'a> {
             },
             conds: Vec::new(),
             if_codes: Vec::new(),
+            cond_loaded: false,
+            cond_stop: false,
             name_buf: String::new(),
             kind_memo: None,
             astate: None,
@@ -1668,9 +1700,22 @@ impl<'c, 'a> Run<'c, 'a> {
     /// the writer places it with page `j`); from a document node, also a
     /// `T_WRITE_AT` marker on the main list, which the page builder's
     /// fold places among the pages (§1370, §1374).
+    /// The entry also goes to its file's stream accumulator
+    /// ([`stream_bucket`], read by that file's node alone, `ops::Files`)
+    /// and the file's name to the names written ([`WNAMES`]).
     pub(crate) fn contribute_stream(&mut self, e: ValueId) {
         let v = self.v;
         self.contribute("streams", v.seq_unit(e));
+        let xs = list_of(v, e);
+        let entry = match xs.first() {
+            Some(&j) if v.as_int(j).is_some() => xs.get(1).map(|&y| list_of(v, y)),
+            _ => Some(xs),
+        };
+        if let Some(&n) = entry.as_ref().and_then(|x| x.first()) {
+            let f = stream_bucket(v, &str_of(v, n));
+            self.contribs.push((f, v.seq_unit(e)));
+            self.contribute(WNAMES, v.seq_unit(n));
+        }
         let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
     }
@@ -1758,12 +1803,10 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether file `name` is one the job writes and reads back, with its
     /// loop-backs declared.
-    pub(crate) fn written_known(&self, name: &str) -> bool {
-        self.cx
-            .is_loopback(self.keyed(crate::fields::Fam::Wfile, name))
-            || self
-                .cx
-                .is_loopback(self.keyed(crate::fields::Fam::Wkeys, name))
+    pub(crate) fn written_known(&mut self, name: &str) -> bool {
+        let w = self.keyed(crate::fields::Fam::Wfile, name);
+        let k = self.keyed(crate::fields::Fam::Wkeys, name);
+        self.cx.is_loopback(w) || self.cx.is_loopback(k)
     }
 
     /// Whether `name`'s `wkeys:` loop-back is declared (a file whose
@@ -2825,6 +2868,18 @@ impl<'c, 'a> Run<'c, 'a> {
                     return Ok(());
                 }
             }
+            // a document file reached with conditionals of the run's own
+            // open and no other level: the run stops there, its
+            // conditionals left as a field the nodes after it read where
+            // they end them ([`COND_STACK`])
+            if self.doc
+                && self.nest.is_empty()
+                && !self.conds.is_empty()
+                && self.next_is_doc_file()
+            {
+                self.cond_stop = true;
+                return Ok(());
+            }
             // a region that ends with one group of its own still open
             // (an environment's `\begin`, a macro's `\begingroup` or
             // `\bgroup`), outside every paragraph, box and conditional,
@@ -2903,6 +2958,50 @@ impl<'c, 'a> Run<'c, 'a> {
         self.effect == Effect::Close && self.nest.is_empty()
     }
 
+    /// The conditionals a node before this one left open
+    /// ([`COND_STACK`]), read where this run ends one it did not begin
+    /// (its own stack empty): below its own, as TeX's one stack has them.
+    /// A document's run only.
+    pub(crate) fn load_cond_stack(&mut self) -> R<()> {
+        if self.cond_loaded || !self.doc || !self.conds.is_empty() {
+            return Ok(());
+        }
+        let v = self.v;
+        let x = self.cx.use_field(v.field(COND_STACK))?;
+        self.cond_loaded = true;
+        for e in x.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [l, c] = list_of(v, e)[..] {
+                self.conds.push(u8::try_from(int_of(v, l)).unwrap_or(0));
+                self.if_codes.push(i32::try_from(int_of(v, c)).unwrap_or(0));
+            }
+        }
+        Ok(())
+    }
+
+    /// The conditionals left open ([`COND_STACK`]): by a run that stopped
+    /// at a document file inside them, or one that read the stack before
+    /// it (what it ended taken off; none where it closed its scope, the
+    /// rest carried to its first child, [`Run::leftover`]).
+    fn publish_cond_stack(&mut self) {
+        if !self.cond_stop && !self.cond_loaded {
+            return;
+        }
+        let v = self.v;
+        let x = if self.closed_scope() {
+            v.list(Vec::new())
+        } else {
+            v.list(
+                self.conds
+                    .iter()
+                    .zip(&self.if_codes)
+                    .map(|(&l, &c)| v.list(vec![v.int(i64::from(l)), v.int(i64::from(c))]))
+                    .collect(),
+            )
+        };
+        self.cx
+            .define_with(v.field(COND_STACK), x, phitex_defuse::Locality::Global);
+    }
+
     /// Whether the run has something open that must close in this run:
     /// a level of the nest or a conditional.
     pub(crate) fn open_span(&self) -> bool {
@@ -2913,6 +3012,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        self.publish_cond_stack();
         // (a command node's, empty too: what its text declares,
         // `Exec::static_contribs`)
         if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
@@ -3186,18 +3286,17 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         // (the files the job writes and reads back are the document's,
         // never part of a load's key)
-        let mut files: Vec<(String, u64)> = self
-            .fread
-            .iter()
-            .filter(|(n, _)| !self.written_known(n))
-            .cloned()
-            .collect();
-        files.extend(
-            self.fmiss
-                .iter()
-                .filter(|n| !self.written_known(n))
-                .map(|n| (n.clone(), 0)),
-        );
+        let mut files: Vec<(String, u64)> = Vec::new();
+        for (n, h) in self.fread.clone() {
+            if !self.written_known(&n) {
+                files.push((n, h));
+            }
+        }
+        for n in self.fmiss.clone() {
+            if !self.written_known(&n) {
+                files.push((n, 0));
+            }
+        }
         files.dedup();
         let writes: Vec<String> = published
             .iter()
@@ -3508,6 +3607,8 @@ pub(crate) struct Parked {
     effect: Effect,
     conds: Vec<u8>,
     if_codes: Vec<i32>,
+    cond_loaded: bool,
+    cond_stop: bool,
     astate: Option<i64>,
     aopen: i64,
     lines_entered: i64,
@@ -3626,6 +3727,8 @@ impl Run<'_, '_> {
             effect: self.effect,
             conds: std::mem::take(&mut self.conds),
             if_codes: std::mem::take(&mut self.if_codes),
+            cond_loaded: self.cond_loaded,
+            cond_stop: self.cond_stop,
             astate: self.astate,
             aopen: self.aopen,
             lines_entered: self.lines_entered,
@@ -3701,6 +3804,8 @@ impl<'c, 'a> Run<'c, 'a> {
         r.effect = p.effect;
         r.conds = p.conds;
         r.if_codes = p.if_codes;
+        r.cond_loaded = p.cond_loaded;
+        r.cond_stop = p.cond_stop;
         r.astate = p.astate;
         r.aopen = p.aopen;
         r.lines_entered = p.lines_entered;

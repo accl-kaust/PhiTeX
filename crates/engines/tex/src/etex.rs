@@ -283,10 +283,10 @@ pub(crate) fn expand(r: &mut Run<'_, '_>) -> R<bool> {
     Ok(true)
 }
 
-/// After `expand` did a conditional or `\fi`: nothing. A conditional
-/// is never split across nodes (it runs to its `\fi` in one run), so
-/// the condition stack is the run's own `conds` (§489) and no record
-/// leaves the run.
+/// After `expand` did a conditional or `\fi`: nothing. The condition
+/// stack is the run's own `conds` (§489), below them the conditionals a
+/// node before it left open at a document file once this run ended one
+/// of them (`crate::run::COND_STACK`, `Run::load_cond_stack`).
 pub(crate) fn after_expand(_r: &mut Run<'_, '_>, _c: u8) {}
 
 /// `\unless` (pdfTeX §1758).

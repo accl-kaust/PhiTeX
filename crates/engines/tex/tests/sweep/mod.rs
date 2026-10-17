@@ -595,7 +595,7 @@ fn sweep(
             head.push_str("; cold equals the oracle");
         }
     }
-    let cold_folds = common::runs_of(&b, "fold");
+    let cold_folds = common::runs_of(&b, "scan");
     let ts = texts(&b, name, &dir, &src);
     let census_on = std::env::var_os("PHITEX_SWEEP_CENSUS").is_some();
     let mut known: std::collections::HashSet<u64> = b.stats.run_log.iter().map(|x| x.0).collect();

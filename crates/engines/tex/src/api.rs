@@ -1380,6 +1380,10 @@ struct Graph {
     /// The files the job writes and reads back: loop-back fields
     /// (`fixpoint`), or absent before the job writes them.
     written: Vec<String>,
+    /// The files the last evaluation's runs opened for writing: their
+    /// nodes are placed from the streams (`ops::Files`), so `loopfiles`
+    /// lists only the files written before and not opened now.
+    opened_last: Vec<String>,
     /// The executor's threads ([`Options::threads`]).
     threads: usize,
     /// Why the relaxed PDF mode gave way to exact mode, once it has.
@@ -1552,6 +1556,7 @@ impl Graph {
             marks: Marks::default(),
             wdefs: Vec::new(),
             wkeys_guess: Vec::new(),
+            opened_last: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             sched: Box::new(phitex_defuse::Greedy::default()),
             eval_errors: Vec::new(),
@@ -1996,9 +2001,18 @@ impl Graph {
         }
         env.push((v.field(DOC_MARKS), self.marks.value(v)));
         // (the files the job writes kept in memory, a fixpoint's; none
-        // otherwise: `UNIT`, never a wait on the client)
+        // otherwise: `UNIT`, never a wait on the client. Listed: the files
+        // written before that the last evaluation did not open, each
+        // published absent; a file the runs open is placed from its
+        // stream, so learning its name after the evaluation changes
+        // nothing here)
         if fixpoint {
-            let names = self.written.iter().map(|n| v.str(n)).collect();
+            let names = self
+                .written
+                .iter()
+                .filter(|n| !self.opened_last.contains(n))
+                .map(|n| v.str(n))
+                .collect();
             env.push((v.field("loopfiles"), v.list(names)));
         } else {
             env.push((v.field("loopfiles"), ValueId::UNIT));
@@ -2191,6 +2205,17 @@ impl Graph {
             stats.add_hints(&self.eng, unit, &self.eval_errors);
             let opened = self.opened(unit);
             let mut asked = false;
+            // (a file written before that no run opens any more: listed
+            // in `loopfiles` from now on, its node publishes it absent;
+            // an evaluation more where that happens)
+            let dropped = self
+                .opened_last
+                .iter()
+                .any(|n| !opened.contains(n) && self.written.contains(n));
+            self.opened_last.clone_from(&opened);
+            if fixpoint && dropped {
+                asked = true;
+            }
             // (`PHITEX_TEX_TIME`: why the build evaluates again)
             let ask_why = |why: &str| {
                 if crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -4731,6 +4756,14 @@ fn declare_fields(eng: &mut Engine) {
         crate::pages::PITEMS,
     ] {
         let fld = eng.values().field(f);
+        eng.declare_accumulator(fld, Arc::new(SeqMonoid));
+    }
+    // (the streams by file, `run::stream_bucket`, and the files' names)
+    let mut per: Vec<Field> = (0..crate::run::STREAM_BUCKETS)
+        .map(|k| eng.values().field(&format!("wstreams:{k}")))
+        .collect();
+    per.push(eng.values().field(crate::run::WNAMES));
+    for fld in per {
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
     }
     let lines = eng.values().field("lines");
