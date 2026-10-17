@@ -3054,6 +3054,18 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                     balanced(&an, text, s, e)
                 );
             }
+            if d.bound
+                .as_ref()
+                .is_some_and(|b| b.no_scope && b.claim.is_none())
+            {
+                let (s, e) = t.slices[k];
+                eprintln!(
+                    "slices: claim pending {:?}: starts a paragraph {}, {}",
+                    short(&text[s..e]),
+                    t.pars[k],
+                    d.cause
+                );
+            }
         }
     }
     t.slice_hints = slice_hints;

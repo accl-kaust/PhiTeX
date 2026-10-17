@@ -1343,22 +1343,40 @@ impl Run<'_, '_> {
         }
         let last_moves = !last_own && b.last != p.last;
         let since_moves = !since_own && b.since != p.since;
-        if last_moves || since_moves {
+        // (the count moved by the items' own number alone, no candidate
+        // among them and nothing before reached into, `\\bigskip` after
+        // a paragraph: at least that many, the count before not read,
+        // `MainTail::since_at_least`)
+        let adds = since_moves && !last_moves && b.since.checked_sub(p.since) == Some(a.since);
+        if adds {
+            self.cx.define_with(
+                v.field(MAIN_SINCE),
+                MainTail::since_at_least(v, a.since),
+                Locality::Global,
+            );
+        }
+        if last_moves || (since_moves && !adds) {
             let last = self.eng_read(v.field(MAIN_LAST))?;
             let since = self.eng_read(v.field(MAIN_SINCE))?;
-            let (last, since) = MainTail::of_last(v, last, since);
-            let pd = self
-                .eng_read(v.field(MAIN_PD))?
-                .map_or(MainTail::START.pd, |x| {
-                    i32::try_from(int_of(v, x)).unwrap_or(MainTail::START.pd)
-                });
-            let t = MainTail {
-                last,
-                since,
-                pd,
-                ..MainTail::START
-            }
-            .after(v, raw);
+            let (last, since, at_least) = MainTail::of_last(v, last, since);
+            let t = if at_least {
+                // (a deletion reaching back past a count known only as
+                // a lower bound: the list itself, a real dependency)
+                self.main_tail_full(raw)?
+            } else {
+                let pd = self
+                    .eng_read(v.field(MAIN_PD))?
+                    .map_or(MainTail::START.pd, |x| {
+                        i32::try_from(int_of(v, x)).unwrap_or(MainTail::START.pd)
+                    });
+                MainTail {
+                    last,
+                    since,
+                    pd,
+                    ..MainTail::START
+                }
+                .after(v, raw)
+            };
             if last_moves {
                 self.cx
                     .define_with(v.field(MAIN_LAST), t.last_value(), Locality::Global);

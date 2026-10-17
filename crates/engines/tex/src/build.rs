@@ -547,14 +547,16 @@ impl Run<'_, '_> {
             // themselves, a real dependency
             let last = self.eng_read(v.field(MAIN_LAST))?;
             let since = self.eng_read(v.field(MAIN_SINCE))?;
-            let (last, since) = MainTail::of_last(v, last, since);
+            let (last, since, at_least) = MainTail::of_last(v, last, since);
             let deletes = own.iter().any(|&s| {
                 v.seq_to_vec(s).iter().any(|&x| {
                     let xs = list_of(v, x);
                     xs.len() == 2 && int_of(v, xs[0]) == 0 && nodes::tag(v, xs[1]) == T_DELETE
                 })
             });
-            if deletes && since > 1 {
+            // (a count that is a lower bound, `MainTail::since_at_least`:
+            // the deletion may reach past the last item)
+            if deletes && (since > 1 || at_least) {
                 let all = self.cx.acc_range(f, None)?;
                 fold_entries(v, 0, &v.seq_to_vec(all), &mut st, &mut out);
                 // (this run's own items are in `all` only once it ends:
@@ -608,6 +610,31 @@ impl Run<'_, '_> {
             return Ok(t.after(self.v, &own).pd);
         }
         Ok(self.list_fold(md.vlid)?.pd)
+    }
+
+    /// The main list's end after `raw` (this run's own main-list items)
+    /// folded from the document's start, every item before read: where
+    /// the count since the last candidate reached here as a lower bound
+    /// only ([`MainTail::since_at_least`]) and a deletion reaches back.
+    pub(crate) fn main_tail_full(&mut self, raw: &[ValueId]) -> R<MainTail> {
+        let v = self.v;
+        let all = self.cx.acc_range(v.field("items"), None)?;
+        let mut out: Vec<ValueId> = Vec::new();
+        let mut st = FoldState {
+            sf: 1000,
+            pd: IGNORE_DEPTH,
+            since_bp: 0,
+        };
+        fold_entries(v, 0, &v.seq_to_vec(all), &mut st, &mut out);
+        for &x in raw {
+            fold_item(v, 0, x, &mut st, &mut out);
+        }
+        Ok(MainTail {
+            last: out.iter().rev().find(|&&x| !is_marker(v, x)).copied(),
+            since: st.since_bp,
+            sf: st.sf,
+            pd: st.pd,
+        })
     }
 
     /// The main list's previous depth before this node ([`MAIN_PD`]).
@@ -3057,16 +3084,29 @@ impl MainTail {
         v.int(i64::try_from(self.since).unwrap_or(0))
     }
 
+    /// [`MAIN_SINCE`]'s value where a piece's items only add `d` to the
+    /// count before it, no candidate among them (§1060: the glue after
+    /// the paragraph before): at least `d`, the count before not read.
+    /// Its readers ask whether it is zero (§424, §1080, §1105); a
+    /// deletion that may reach further folds the list
+    /// ([`Run::list_fold`]).
+    pub(crate) fn since_at_least(v: &Values, d: usize) -> ValueId {
+        v.int(-i64::try_from(d).unwrap_or(0))
+    }
+
     /// [`MAIN_LAST`] and [`MAIN_SINCE`] read (`None`: the document's
-    /// start).
+    /// start): the last item, the count, and whether the count is a
+    /// lower bound only ([`Self::since_at_least`]).
     pub(crate) fn of_last(
         v: &Values,
         last: Option<ValueId>,
         since: Option<ValueId>,
-    ) -> (Option<ValueId>, usize) {
+    ) -> (Option<ValueId>, usize, bool) {
+        let n = since.map_or(0, |n| int_of(v, n));
         (
             last.filter(|&i| i != ValueId::UNIT),
-            since.map_or(0, |n| usize::try_from(int_of(v, n)).unwrap_or(0)),
+            usize::try_from(n.unsigned_abs()).unwrap_or(0),
+            n < 0,
         )
     }
 }
