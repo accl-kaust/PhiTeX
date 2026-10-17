@@ -1715,6 +1715,27 @@ struct LinkMemo {
     snaps: Vec<LinkSnap>,
     got: Vec<ValueId>,
     errors: Vec<(String, i64)>,
+    /// The writer after the last record (before the file's end).
+    end: LinkSnap,
+}
+
+/// Whether the writer `st` with `nums` and `forms` is the one the last
+/// link had at snapshot `sn`: its records from there on are then the
+/// same bytes ([`finish_exact`]). The forms compared only when there are
+/// none (a document with forms runs on).
+fn same_writer(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &LinkSnap) -> bool {
+    let none = forms.whats.is_empty()
+        && forms.fonts.is_empty()
+        && sn.forms.whats.is_empty()
+        && sn.forms.fonts.is_empty();
+    if !none {
+        return false;
+    }
+    if format!("{nums:?}") != format!("{:?}", sn.nums) {
+        return false;
+    }
+    let mut theirs = sn.st.clone();
+    st.digest() == theirs.digest()
 }
 
 fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
@@ -1834,9 +1855,16 @@ pub(crate) fn finish_exact(
     let mut chunks_of: Vec<Vec<phitex_pdf::Chunk>> = Vec::with_capacity(xpages.len());
     let mut snaps: Vec<LinkSnap> = Vec::new();
     let mut start = 0usize;
+    // (the last link's memo, taken: an edit's records after the change
+    // that are the last link's again, from a writer state equal to the
+    // one it had there, are copied too, `resync` below)
+    let old: Option<LinkMemo> = link_memo()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .filter(|m| m.head == head);
     {
-        let memo = link_memo().lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(m) = memo.as_ref().filter(|m| m.head == head) {
+        if let Some(m) = old.as_ref() {
             let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
             if let Some(sn) = m.snaps.iter().rev().find(|sn| sn.at <= same && sn.at > 0) {
                 st = sn.st.clone();
@@ -1855,7 +1883,24 @@ pub(crate) fn finish_exact(
     // (each record's bytes from `start` on, a page's content still to
     // be rewritten and compressed among them)
     let mut parts: Vec<Vec<phitex_pdf::Part>> = Vec::with_capacity(xpages.len() - start);
+    // (where the records are the last link's again from a writer equal
+    // to its own there: the rest copied, spec-final §6.2 past the edit)
+    let mut resync: Option<usize> = None;
+    let mut tries = 0usize;
     for (i, (&x, pc)) in xpages.iter().zip(&pcs).enumerate().skip(start) {
+        if i > start
+            && tries < 8
+            && let Some(m) = old.as_ref()
+            && let Some(sn) = m.snaps.iter().find(|sn| sn.at == i)
+            && m.ids.len() == ids.len()
+            && m.ids[i..] == ids[i..]
+        {
+            tries += 1;
+            if same_writer(&mut st, &nums, &forms, sn) {
+                resync = Some(i);
+                break;
+            }
+        }
         if i > start && (i - start).is_multiple_of(LINK_SNAP) {
             snaps.push(LinkSnap {
                 at: i,
@@ -1996,9 +2041,34 @@ pub(crate) fn finish_exact(
         chunks_of.push(cs);
     }
     let t_parts = t_parts.elapsed();
+    let mut resynced = 0usize;
+    if let (Some(i), Some(m)) = (resync, old.as_ref())
+        && let Some(sn) = m.snaps.iter().find(|sn| sn.at == i)
+    {
+        resynced = xpages.len() - i;
+        chunks_of.extend(m.chunks[i..].iter().cloned());
+        snaps.extend(m.snaps.iter().filter(|x| x.at >= i).cloned());
+        got.extend(m.got[sn.got..].iter().copied());
+        errors.extend(m.errors[sn.errors..].iter().cloned());
+        placed += m.end.placed - sn.placed;
+        shipped += m.end.shipped - sn.shipped;
+        st = m.end.st.clone();
+        nums = m.end.nums.clone();
+        forms = m.end.forms.clone();
+    }
     for c in chunks_of.iter().flatten() {
         bytes.push(c.clone());
     }
+    let end = LinkSnap {
+        at: xpages.len(),
+        st: st.clone(),
+        nums: nums.clone(),
+        forms: forms.clone(),
+        got: got.len(),
+        errors: errors.len(),
+        placed,
+        shipped,
+    };
     *link_memo().lock().unwrap_or_else(PoisonError::into_inner) = Some(LinkMemo {
         head,
         ids,
@@ -2006,10 +2076,11 @@ pub(crate) fn finish_exact(
         snaps,
         got: got.clone(),
         errors: errors.clone(),
+        end,
     });
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "pdf link: {copied} of {} records copied from the last link; {rewritten} page contents rewritten in {t_parts:?}",
+            "pdf link: {copied} of {} records copied from the last link, {resynced} more after the change; {rewritten} page contents rewritten in {t_parts:?}",
             xpages.len()
         );
     }
