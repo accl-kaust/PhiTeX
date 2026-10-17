@@ -421,8 +421,6 @@ impl PdfState {
     /// `pdf_begin_string`; font `f`'s `pdf_font_size` (set by the
     /// font's first use, here at the latest).
     fn begin_string(&mut self, f: FontId, src: &dyn FontSource) -> Scaled {
-        let mut must_end_string = false;
-        let mut must_insert_space = false;
         let mut must_set_text_pos = false;
         if !self.doing_text {
             self.begin_text();
@@ -438,13 +436,30 @@ impl PdfState {
             self.end_string();
             self.set_font(f, src);
         }
-        // (font `f`'s fields read once: nothing below changes them but
-        // `chars`, read where it is set)
-        let st = self.font(f);
-        let size = st.size;
-        let a = st.auto_expand_ratio();
-        let (space, shrink) = (st.metrics.space(), st.metrics.space_shrink());
-        let has_space = st.has_space;
+        let bits = StringBits::of(self.font(f));
+        self.begin_string_tail(f, src, faked, must_set_text_pos, bits)
+    }
+
+    /// The rest of [`PdfState::begin_string`], with the text begun, the
+    /// font set if it switched, and font `f`'s fields read once (nothing
+    /// here changes them but `chars`, read where it is set).
+    fn begin_string_tail(
+        &mut self,
+        f: FontId,
+        src: &dyn FontSource,
+        faked: bool,
+        mut must_set_text_pos: bool,
+        bits: StringBits,
+    ) -> Scaled {
+        let mut must_end_string = false;
+        let mut must_insert_space = false;
+        let StringBits {
+            size,
+            a,
+            space,
+            shrink,
+            has_space,
+        } = bits;
         let (mut s, mut s_out) = self.tj_offset(size);
         let (v, v_out) = if (self.cur_v - self.pdf_v).abs() >= self.min_bp_val {
             divide_scaled(self.pdf_v - self.cur_v, ONE_HUNDRED_BP, self.dd + 2)
@@ -542,6 +557,11 @@ impl PdfState {
         if !self.font(f).chars[usize::from(c)] {
             self.font_mut(f).chars[usize::from(c)] = true;
         }
+        self.print_char_bytes(c);
+    }
+
+    /// The bytes of `pdf_print_char` (the character already marked).
+    fn print_char_bytes(&mut self, c: u8) {
         if c <= 32 || c == 92 || c == 40 || c == 41 || c > 127 {
             self.print(&[
                 b'\\',
@@ -732,11 +752,22 @@ impl PdfState {
         }
         if real {
             // (a real font's width is not changed by writing the
-            // character: read once)
+            // character: read once; a string going on in the same font,
+            // its fields read here, once)
             let w = st.width(c);
             let c8 = u8::try_from(c).unwrap_or(0);
-            let size = self.begin_string(f, src);
-            self.print_char(f, c8);
+            let marked = st.chars[usize::from(c8)];
+            let size = if self.doing_text && !self.faked_space && self.pdf_f == f {
+                let bits = StringBits::of(st);
+                self.begin_string_tail(f, src, false, false, bits)
+            } else {
+                self.begin_string(f, src)
+            };
+            if marked {
+                self.print_char_bytes(c8);
+            } else {
+                self.print_char(f, c8);
+            }
             self.adv_width(w, size);
             self.cur_h += w;
             return;
@@ -1616,5 +1647,27 @@ impl PdfState {
             self.print_ln(b" ]");
         }
         self.end_dict();
+    }
+}
+
+/// The fields of a font [`PdfState::begin_string`] reads.
+#[derive(Clone, Copy)]
+struct StringBits {
+    size: Scaled,
+    a: i32,
+    space: Scaled,
+    shrink: Scaled,
+    has_space: bool,
+}
+
+impl StringBits {
+    fn of(st: &crate::FontState) -> StringBits {
+        StringBits {
+            size: st.size,
+            a: st.auto_expand_ratio(),
+            space: st.metrics.space(),
+            shrink: st.metrics.space_shrink(),
+            has_space: st.has_space,
+        }
     }
 }

@@ -1580,7 +1580,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // later declares its loop-back and this runs again)
         let _ = self.cx.use_field(k)?;
         let _ = self.cx.use_field(w)?;
-        if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+        if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
             eprintln!("TMPF units {key} node {}", self.cx.node().raw());
         }
         let Some(x) = self.cx.use_env(v.field(&format!("units:{key}")))? else {
@@ -1606,7 +1606,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let name = str_of(v, key);
         let f = v.field(&name);
         if name.starts_with("unit:") {
-            if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+            if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
                 eprintln!("TMPF unit {name} node {}", self.cx.node().raw());
             }
             let Some(x) = self.cx.use_env(f)? else {
@@ -1741,7 +1741,7 @@ impl<'c, 'a> Run<'c, 'a> {
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
-            if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+            if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
                 eprintln!(
                     "TMPF file {key} node {} op {:?}",
                     self.cx.node().raw(),
@@ -3137,7 +3137,7 @@ impl<'c, 'a> Run<'c, 'a> {
         published.extend(recs.iter().copied());
         // (debug, `PHITEX_PUB_TRACE=<a>|<b>…`: the definitions of a run whose
         // first text segment contains one of the texts)
-        if let Ok(pat) = std::env::var("PHITEX_PUB_TRACE") {
+        if let Some(pat) = crate::exec::env_str!("PHITEX_PUB_TRACE") {
             let v = self.v;
             let first = self
                 .cx

@@ -917,9 +917,34 @@ impl Run<'_, '_> {
         walk(list, &mut ids);
         let mut view = crate::fonts::View::default();
         for f in ids {
-            self.add_font(&mut view, f)?;
+            self.add_font_metrics(&mut view, f)?;
         }
         Ok(view)
+    }
+
+    /// [`Self::add_font`] without the `\fontdimen`s: what measuring,
+    /// breaking and shipping a list need (the metrics, the hyphen
+    /// character, the name); only math reads the parameters through
+    /// the view (`Fonts::param`), and its view is made by `add_font`.
+    pub(crate) fn add_font_metrics(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
+        if view.fonts.contains_key(&f) || f == 0 {
+            return Ok(());
+        }
+        let info = self.font_get(f, crate::fields::FontCell::Info)?;
+        let Some(i) = crate::fonts::info(self.v, info) else {
+            return Ok(());
+        };
+        let Some(l) = i
+            .file
+            .and_then(|file| crate::fonts::load(self.v, file, i.s))
+        else {
+            return Ok(());
+        };
+        let hc = self.font_int(f, crate::fields::FontCell::Hc)?;
+        view.hyphen.insert(f, hc);
+        view.names.insert(f, (i.name, i.size));
+        view.fonts.insert(f, (l, Vec::new()));
+        Ok(())
     }
 
     pub(crate) fn add_font(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
@@ -1994,7 +2019,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
         let mut view = crate::fonts::View::default();
-        self.add_font(&mut view, f)?;
+        self.add_font_metrics(&mut view, f)?;
         // the space factor is never read: the run's effect on it so far
         // (`sf`: SF_UNREAD none, n >= 0 set to n, -s §1034's update by s)
         // goes on the list as a transition before each space that needs

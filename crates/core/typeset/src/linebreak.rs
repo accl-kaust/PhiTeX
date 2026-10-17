@@ -40,18 +40,89 @@ pub struct LangState {
 }
 
 /// The second pass's hook (§866 "Try to hyphenate the following word"):
-/// called after the glue at `list[at]` when breaks are automatic; it may
+/// asked about the glue at `list[at]` when breaks are automatic; it may
 /// rewrite the word that follows (nodes after `at` only).
 pub trait Hyphenator {
-    /// Hyphenate the word after `list[at]`.
-    fn hyphenate(&mut self, list: &mut List, at: usize, lang: LangState, fonts: &dyn Fonts);
+    /// The hyphenated form of the word after `list[at]`: the nodes that
+    /// replace `list[from..=to]`, as `(from, to, nodes)`; `None` leaves
+    /// the list as it is.
+    fn hyphenate(
+        &mut self,
+        list: &[Node],
+        at: usize,
+        lang: LangState,
+        fonts: &dyn Fonts,
+    ) -> Option<(usize, usize, List)>;
 }
 
 /// No hyphenation.
 pub struct NoHyphenation;
 
 impl Hyphenator for NoHyphenation {
-    fn hyphenate(&mut self, _: &mut List, _: usize, _: LangState, _: &dyn Fonts) {}
+    fn hyphenate(
+        &mut self,
+        _: &[Node],
+        _: usize,
+        _: LangState,
+        _: &dyn Fonts,
+    ) -> Option<(usize, usize, List)> {
+        None
+    }
+}
+
+/// The words of `list` hyphenated as the second pass meets them (§866,
+/// §891–§918), all at once: a word's hyphenation reads only the word and
+/// what follows it, and no break before it looks into it beyond its
+/// first node (§837 stops there), so the passes see the same list as
+/// when each word is hyphenated as its glue is passed. The glue, the
+/// language and whether breaks are automatic are followed as the pass
+/// follows them (no word holds a glue, language or math node).
+fn hyphenate_all(
+    list: List,
+    lang: LangState,
+    hyphenator: &mut dyn Hyphenator,
+    fonts: &dyn Fonts,
+) -> List {
+    let mut edits: Vec<(usize, usize, List)> = Vec::new();
+    let mut lang = lang;
+    let mut auto_breaking = true;
+    for (at, n) in list.iter().enumerate() {
+        match n {
+            Node::Language { lang: l, lhm, rhm } => {
+                lang = LangState {
+                    lang: *l,
+                    lhm: *lhm,
+                    rhm: *rhm,
+                };
+            }
+            Node::Math(kind, _) => auto_breaking = *kind == crate::node::MathKind::After,
+            Node::Glue(_) if auto_breaking => {
+                if let Some(e) = hyphenator.hyphenate(&list, at, lang, fonts) {
+                    edits.push(e);
+                }
+            }
+            _ => {}
+        }
+    }
+    if edits.is_empty() {
+        return list;
+    }
+    let extra: usize = edits.iter().map(|e| e.2.len()).sum();
+    let mut out = List::with_capacity(list.len() + extra);
+    let mut edits = edits.into_iter().peekable();
+    let mut skip_to = 0;
+    for (k, n) in list.into_iter().enumerate() {
+        if k < skip_to {
+            continue;
+        }
+        if let Some((_, to, nodes)) = edits.next_if(|e| e.0 == k) {
+            out.extend(nodes);
+            skip_to = to + 1;
+            continue;
+        }
+        out.push(n);
+    }
+    out
 }
 
 /// The parameters `line_break` reads from eqtb.
@@ -726,11 +797,15 @@ pub fn line_break(
         b.final_pass = params.emergency_stretch <= 0;
         pass = 2;
     }
+    let mut hyphenated = false;
     let best_bet = loop {
         if b.threshold > INF_BAD {
             b.threshold = INF_BAD;
         }
-        let mut lang = params.lang;
+        if b.second_pass && !hyphenated {
+            list = hyphenate_all(list, params.lang, hyphenator, fonts);
+            hyphenated = true;
+        }
         // §864
         b.active.clear();
         b.passive.clear();
@@ -758,20 +833,14 @@ pub fn line_break(
                 Node::Box(_) | Node::Rule(_) => {
                     b.add_width(list[cur].box_dims().map_or(0, |d| d.0));
                 }
-                Node::Language { lang: l, lhm, rhm } => {
-                    // §1362
-                    lang = LangState {
-                        lang: *l,
-                        lhm: *lhm,
-                        rhm: *rhm,
-                    };
-                }
                 Node::Whatsit(_, size) => {
                     // pdfTeX: "Advance past a whatsit node in the
                     // line_break loop"
                     b.add_width(size.map_or(0, |s| s.width));
                 }
-                Node::Mark(_) | Node::Ins(_) | Node::Adjust(_) => {}
+                // (§1362: a language node goes to the hyphenation, done
+                // before the pass, [`hyphenate_all`])
+                Node::Mark(_) | Node::Ins(_) | Node::Adjust(_) | Node::Language { .. } => {}
                 Node::Glue(_) => {
                     // §868
                     if auto_breaking {
@@ -790,9 +859,6 @@ pub fn line_break(
                         }
                         let spec = g.spec;
                         add_glue(&mut b.total, &spec, 1);
-                    }
-                    if b.second_pass && auto_breaking {
-                        hyphenator.hyphenate(&mut list, cur, lang, fonts);
                     }
                 }
                 Node::Kern(w, k) => {
@@ -881,7 +947,10 @@ pub fn line_break(
         }
     };
     let best = b.active[best_bet].clone();
-    // e-TeX: "Adjust the final line of the paragraph"
+    // e-TeX: "Adjust the final line of the paragraph" (`\parfillskip`,
+    // the list's last node)
+    let _ = last_line_fill;
+    let last_line_fill = list.len() - 1;
     if b.do_last_line_fit
         && best.short != 0
         && let Node::Glue(g) = &mut list[last_line_fill]
@@ -1109,8 +1178,15 @@ mod tests {
 
     struct Count(Vec<usize>);
     impl Hyphenator for Count {
-        fn hyphenate(&mut self, _: &mut List, at: usize, _: LangState, _: &dyn Fonts) {
+        fn hyphenate(
+            &mut self,
+            _: &[Node],
+            at: usize,
+            _: LangState,
+            _: &dyn Fonts,
+        ) -> Option<(usize, usize, List)> {
             self.0.push(at);
+            None
         }
     }
 

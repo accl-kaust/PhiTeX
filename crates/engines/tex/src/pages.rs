@@ -2621,6 +2621,10 @@ pub(crate) struct FinDefs {
     /// defines some on some pages only (a float page, a page with a
     /// list continued), not on the last two.
     pub seen: Vec<Field>,
+    /// Per field a run defined: the value the latest such run (by page)
+    /// left, its page, and whether the run before that defined it to
+    /// the same value ([`FinDefs::class_boxes`]).
+    pub recent: Vec<(Field, ValueId, i64, bool)>,
     /// What the last run contributed to `gdefs` (the fields it defined
     /// globally, [`Run::contribute_global_defs`]): the next finisher's
     /// declared contribution, a guess ([`Finish::static_contribs`]).
@@ -2631,6 +2635,27 @@ impl FinDefs {
     /// The fields any run of the routine defined.
     fn names(&self) -> Vec<Field> {
         self.seen.clone()
+    }
+
+    /// The boxes of the insertion classes on a page (`classes`, a
+    /// finisher's fourteenth argument): its fire defines each (§1018),
+    /// and the value the routine leaves is predicted where the last two
+    /// runs that defined it left the same (`\box\footins` emptied).
+    fn class_boxes(&self, v: &Values, classes: Option<ValueId>) -> Vec<(Field, Option<ValueId>)> {
+        let Some(cs) = classes else {
+            return Vec::new();
+        };
+        list_of(v, cs)
+            .iter()
+            .filter_map(|&c| {
+                let n = int_of(v, c);
+                (0..255).contains(&n).then(|| {
+                    let f = v.field(&format!("box:{n}"));
+                    let x = self.recent.iter().find(|r| r.0 == f && r.3).map(|r| r.1);
+                    (f, x)
+                })
+            })
+            .collect()
     }
 
     /// The definitions both runs made with the same value: stable
@@ -2832,6 +2857,15 @@ impl Finish {
             })
             .unwrap_or_default();
         out.retain(|e| fin_may_box(v, args, t, e.0));
+        if let Some(d) = d {
+            for (f, x) in d.class_boxes(v, args.get(13).copied()) {
+                if let Some(x) = x
+                    && !out.iter().any(|e| e.0 == f)
+                {
+                    out.push((f, x));
+                }
+            }
+        }
         let rtn = v.field(RTN);
         if !out.iter().any(|e| e.0 == rtn) {
             let last = d.and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1));
@@ -2889,11 +2923,18 @@ impl Operation for Finish {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
             .map(|d| {
-                d.last
+                let mut ns: Vec<Field> = d
+                    .last
                     .iter()
                     .map(|e| e.0)
                     .filter(|&f| fin_may_box(v, args, t, f))
-                    .collect()
+                    .collect();
+                for (f, _) in d.class_boxes(v, args.get(13).copied()) {
+                    if !ns.contains(&f) {
+                        ns.push(f);
+                    }
+                }
+                ns
             })?;
         // (and what it gives back to the main list, always predicted)
         let rtn = v.field(RTN);
@@ -3153,9 +3194,14 @@ impl Run<'_, '_> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let e = m.entry(fin_key(v, t, args)).or_default();
         e.gdefs = Some(gdefs);
-        for &(f, _) in &out {
+        for &(f, x) in &out {
             if !e.seen.contains(&f) {
                 e.seen.push(f);
+            }
+            match e.recent.iter_mut().find(|r| r.0 == f) {
+                Some(r) if j >= r.2 => *r = (f, x, j, r.1 == x),
+                Some(_) => {}
+                None => e.recent.push((f, x, j, true)),
             }
         }
         if crate::exec::env_flag!("PHITEX_PRED_SHOW") {

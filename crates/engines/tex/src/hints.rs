@@ -2388,7 +2388,16 @@ impl Analysis<'_> {
                     'g' => "skip:",
                     _ => "toks:",
                 };
-                add_heads(st, Some(&[fam, "aftertoken"]));
+                // (a `\countdef` that gave its number: that register)
+                let r = if self.defs.shape(name).is_some() {
+                    self.defs.register(name)
+                } else {
+                    self.prelude.register(name)
+                };
+                match r {
+                    Some(r) => add_heads(st, Some(&[head(&format!("{fam}{r}")), "aftertoken"])),
+                    None => add_heads(st, Some(&[fam, "aftertoken"])),
+                }
             }
             // (a character, or a brace whose `}` sets only the register
             // its `\\setbox` names, §1075, as the `egroup` row)

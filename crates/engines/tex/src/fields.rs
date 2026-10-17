@@ -810,6 +810,20 @@ impl Fields {
         if loc < NSLOT {
             return self.slot_field[loc];
         }
+        let key = u32::try_from(loc).unwrap_or(u32::MAX);
+        if let Some(f) = with_names(v, epoch, |c| c.fields.get(&key).copied()) {
+            return f;
+        }
+        let f = self.field_of_new(v, epoch, loc);
+        with_names(v, epoch, |c| {
+            bounded(&mut c.fields);
+            c.fields.insert(key, f);
+        });
+        f
+    }
+
+    /// [`Self::field_of`] past the fixed slots, made.
+    fn field_of_new(&self, v: &Values, epoch: u64, loc: usize) -> Field {
         if loc < MEAN_ACTIVE {
             let i = loc - FONT0;
             let f = i64::try_from(i / FONT_W).unwrap_or(0);
@@ -969,6 +983,9 @@ struct Named {
     /// The locations of fields that have one below the spill (`None`:
     /// the field has none), [`Fields::loc_of`].
     locs: FxHashMap<Field, Option<u32>>,
+    /// The fields of the locations past the fixed slots
+    /// ([`Fields::field_of`]): a font's cells, a meaning.
+    fields: FxHashMap<u32, Field>,
     /// The fields of the keyed families ([`Fam`]), by family and key.
     keyed: [FxHashMap<Box<str>, Field>; FAMS],
 }

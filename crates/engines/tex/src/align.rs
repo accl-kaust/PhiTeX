@@ -129,7 +129,7 @@ impl Run<'_, '_> {
             self.set_astate(if c == cmd::LEFT_BRACE { s + 1 } else { s - 1 });
             return Ok(false);
         }
-        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             eprintln!("    align: {:?} state {s}", self.cur.tok);
         }
         if s != 0 {

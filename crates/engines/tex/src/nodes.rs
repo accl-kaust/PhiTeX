@@ -202,7 +202,23 @@ fn kern_code(k: KernKind) -> i64 {
 }
 
 pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
-    v.list(list.iter().map(|n| encode(v, n, side)).collect())
+    // (a line's interword glue is one node many times: the last glue
+    // encoded is kept)
+    let mut seen: Option<(&Node, ValueId)> = None;
+    let mut xs = Vec::with_capacity(list.len());
+    for n in list {
+        let x = match (n, seen) {
+            (Node::Glue(g), Some((Node::Glue(h), x))) if g == h => x,
+            (Node::Glue(g), _) if g.leader.is_none() => {
+                let x = encode(v, n, side);
+                seen = Some((n, x));
+                x
+            }
+            _ => encode(v, n, side),
+        };
+        xs.push(x);
+    }
+    v.list(xs)
 }
 
 pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
@@ -369,9 +385,22 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
 pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
     let val = v.get(x);
     if let Value::List(xs) = &*val {
-        let mut out = Vec::with_capacity(xs.len());
+        let mut out: List = Vec::with_capacity(xs.len());
+        // (the last glue decoded, kept: a line's interword glue is one
+        // value many times)
+        let mut last: Option<(ValueId, usize)> = None;
         for &n in &**xs {
+            if let Some((id, k)) = last
+                && id == n
+            {
+                let g = out[k].clone();
+                out.push(g);
+                continue;
+            }
             if let Some(d) = decode(v, n, side) {
+                if matches!(&d, Node::Glue(g) if g.leader.is_none()) {
+                    last = Some((n, out.len()));
+                }
                 out.push(d);
             }
         }
