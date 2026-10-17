@@ -930,8 +930,8 @@ impl State<'_> {
         };
         let strend = self.strstart + MAX_MATCH;
         let w = &self.window;
-        let scan_end1 = w[scan0 + best_len - 1];
-        let scan_end = w[scan0 + best_len];
+        let mut scan_end1 = w[scan0 + best_len - 1];
+        let mut scan_end = w[scan0 + best_len];
         if self.prev_length >= self.good_match {
             chain_length >>= 2;
         }
@@ -939,19 +939,12 @@ impl State<'_> {
             nice_match = self.lookahead;
         }
         let mut match_start = self.match_start;
-        // (the chain as an array of its length: an index masked by
-        // `W_MASK` needs no bounds check)
-        let prev: &[u16; W_SIZE] = self.prev[..W_SIZE]
-            .try_into()
-            .expect("the hash chains are W_SIZE long");
-        // (two bytes compared at once, as zlib's UNALIGNED_OK build
-        // compares them: the same test)
-        let pair = |i: usize| u16::from_le_bytes([w[i], w[i + 1]]);
-        let start2 = pair(scan0);
-        let mut end2 = u16::from_le_bytes([scan_end1, scan_end]);
         loop {
             let m = cur_match;
-            let skip = pair(m + best_len - 1) != end2 || pair(m) != start2;
+            let skip = w[m + best_len] != scan_end
+                || w[m + best_len - 1] != scan_end1
+                || w[m] != w[scan0]
+                || w[m + 1] != w[scan0 + 1];
             if !skip {
                 // (the bytes from 3 on, as zlib's loop compares them: it
                 // steps eight at a time from `scan + 2` and stops at the
@@ -967,10 +960,11 @@ impl State<'_> {
                     if len >= nice_match {
                         break;
                     }
-                    end2 = pair(scan0 + best_len - 1);
+                    scan_end1 = w[scan0 + best_len - 1];
+                    scan_end = w[scan0 + best_len];
                 }
             }
-            cur_match = usize::from(prev[cur_match & W_MASK]);
+            cur_match = usize::from(self.prev[cur_match & W_MASK]);
             if cur_match <= limit {
                 break;
             }

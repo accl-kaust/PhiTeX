@@ -284,7 +284,7 @@ for l in open(sys.argv[1]):
     (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para4000.tex > "$r/para-warm.log" 2>&1)
     # (the node is shared: each -j runs three times, the min quoted,
     # the median beside it; the node and its load first)
-    echo "para node $(hostname) load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$r/para.txt"
+    echo "para node ${SLURMD_NODENAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null)} load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$r/para.txt"
     for j in 1 8 16; do
       walls=""
       best=""
