@@ -888,7 +888,7 @@ impl Shared {
                 x = self.next(x);
                 continue;
             }
-            if st == S_FREE || self.taken(x, me) {
+            if st == S_FREE || self.taken(x, me) || self.placed_after_view(x, me) {
                 seen.push((x, r.gn.load(Ordering::Acquire), 1));
                 x = self.next(x);
                 continue;

@@ -620,7 +620,7 @@ impl Shared {
                 return;
             }
             level = d;
-            if self.own_cont(x, claimer) {
+            if self.own_cont(x, claimer) || self.placed_after_view(x, claimer) {
                 x = self.next(x);
                 continue;
             }
@@ -632,6 +632,29 @@ impl Shared {
             }
             x = self.next(x);
         }
+    }
+
+    /// Whether `x` was placed here ([`crate::Ctx::follow_after`]) by a
+    /// node after `viewer` (or follows one so placed): it is that node's
+    /// output, not a sibling `viewer` sees (else placing after `viewer`
+    /// would change what `viewer` read).
+    pub(crate) fn placed_after_view(&self, x: Slot, viewer: Slot) -> bool {
+        let mut y = x;
+        for _ in 0..64 {
+            let (role, owner) = {
+                let d = self.rec(y).data();
+                (d.role, d.owner)
+            };
+            if role != Role::Cont || owner == NIL {
+                return false;
+            }
+            // A continuation before its owner was placed by it.
+            if self.before(y, owner) {
+                return viewer != owner && self.before(viewer, owner);
+            }
+            y = owner;
+        }
+        false
     }
 
     /// The last entry of `x`'s extent: its subtree, then its own follows
@@ -853,7 +876,7 @@ impl Shared {
                     return None;
                 }
                 level = d;
-                if self.own_cont(cur, s) || self.taken(cur, s) {
+                if self.own_cont(cur, s) || self.taken(cur, s) || self.placed_after_view(cur, s) {
                     continue;
                 }
                 let (op, a) = self.text(cur);
