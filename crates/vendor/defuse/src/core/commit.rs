@@ -47,6 +47,7 @@ fn pred_value_hash(sh: &Shared, p: &Pred) -> u64 {
         Pred::Range { f, val, .. } => hash_words(12, &[f.0.raw(), val.raw()]),
         Pred::Env { f, val } => hash_words(13, &[f.0.raw(), o(*val)]),
         Pred::Kind { val, .. } => hash_words(14, &[o(*val)]),
+        Pred::IsLoop { f, val } => hash_words(19, &[f.0.raw(), u64::from(*val)]),
         Pred::Sib { i, ans } => hash_words(15, &[u64::from(*i), ans.map_or(0, |a| a.2)]),
         // The run gets the node found, not the texts passed over.
         Pred::PrevSib { ans, .. } => hash_words(16, &[ans.map_or(u64::MAX, |a| sh.rec(a).id.load(Ordering::Acquire))]),
@@ -700,6 +701,9 @@ impl Shared {
                 r.out.store(out.raw(), Ordering::Release);
                 r.set(F_HAS_OUT | F_DONE);
                 r.clear(F_NEEDS_RUN);
+                if r.has(super::F_MARKED) {
+                    lock(&self.to_report).push(s);
+                }
                 if self.stepped() {
                     r.status.store(super::S_STEP, Ordering::Release);
                     lock(&self.step_done).push(s);
@@ -885,6 +889,9 @@ impl Shared {
                 }
                 Pred::Env { f, .. } => {
                     lock(&self.env_readers).entry(*f).or_default().push((s, gn));
+                }
+                Pred::IsLoop { f, .. } => {
+                    lock(&self.loop_readers).entry(*f).or_default().push((s, gn));
                 }
                 Pred::Kind { opener, .. } => {
                     if *opener != NIL {

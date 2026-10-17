@@ -1850,6 +1850,11 @@ impl Lang {
         let stmt = eng.register(stmt_op.clone());
         let apply = eng.register(Arc::new(ApplyOp(cell.clone())));
         let output = eng.register(Arc::new(OutputOp));
+        if std::env::var("MARK").is_ok() {
+            for op in [stmt, apply, output] {
+                eng.mark_op(op);
+            }
+        }
         let ops = Ops { stmt, apply, output };
         cell.set(ops).expect("fresh");
         let out = out_field(eng.values());

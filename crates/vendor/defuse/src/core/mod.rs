@@ -363,6 +363,11 @@ pub(crate) enum Pred {
         f: Field,
         val: Option<ValueId>,
     },
+    /// Whether a field was a loop-back field.
+    IsLoop {
+        f: Field,
+        val: bool,
+    },
     Kind {
         at: Slot,
         val: Option<ValueId>,
@@ -891,6 +896,9 @@ pub(crate) struct Shared {
     pub text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
     /// The marked nodes (some may since be unmarked or freed).
     pub marked: Mutex<Vec<Slot>>,
+    /// Marked nodes that committed (or were marked) since their last
+    /// report: the only ones a report can be due for at the same version.
+    pub to_report: Mutex<Vec<Slot>>,
     /// Operations whose new nodes are marked at creation.
     pub marked_ops: RwLock<Vec<OpId>>,
     /// Frame walks the edits left for the evaluation.

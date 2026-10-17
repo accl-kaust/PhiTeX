@@ -274,7 +274,9 @@ impl Operation for PlayOp {
                 Ok(j) => j.clone(),
                 Err(_) => json!("stop"),
             };
-            live.retain(|&c| runs[c].0.len() > i && runs[c].0[i][0] == c0[0] && runs[c].0[i][2] == ans);
+            live.retain(|&c| {
+                runs[c].0.len() > i && runs[c].0[i][0] == c0[0] && (runs[c].0[i][2] == ans || runs[c].0[i][2] == "*")
+            });
             if let Err(stop) = got {
                 return Err(stop);
             }
@@ -519,6 +521,27 @@ fn main() {
         }
     }
     for runs in book.runs.values_mut() {
+        // A resumed run (its first call answered `parked` true) is recorded
+        // from where it stopped; when the replay restarts it instead, the
+        // fresh run is the stopped run's calls up to its blocked read
+        // (answered now: any answer) followed by the resumed calls.
+        let mut fresh = Vec::new();
+        let mut stopped: Option<&Vec<J>> = None;
+        for (calls, r) in runs.iter() {
+            let resumed = calls.first().is_some_and(|c| c[0] == "parked" && c[2] == true);
+            if let (true, Some(prev)) = (resumed, stopped) {
+                if prev.len() >= 2 && prev[prev.len() - 1][0] == "park" {
+                    let mut c: Vec<J> = prev[..prev.len() - 1].to_vec();
+                    if let Some(last) = c.last_mut() {
+                        last[2] = json!("*");
+                    }
+                    c.extend(calls[1..].iter().cloned());
+                    fresh.push((c, r.clone()));
+                }
+            }
+            stopped = (*r == json!("stop")).then_some(calls);
+        }
+        runs.extend(fresh);
         runs.dedup();
     }
     let book = Arc::new(book);
@@ -600,6 +623,7 @@ fn main() {
                         "  runs {} stops {} rounds {} steps {}",
                         rep.nodes_run, rep.stops, rep.rounds, rep.steps
                     );
+                    println!("  restarted_by {:?} resumed {}", rep.restarted_by, rep.resumed);
                 }
             }
             "api" => apply(&mut eng, l, &book, &units),

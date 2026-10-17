@@ -142,6 +142,7 @@ impl Shared {
         if !marker && super::rlock(&self.marked_ops).contains(&op) {
             self.rec(s).set(super::F_MARKED);
             lock(&self.marked).push(s);
+            lock(&self.to_report).push(s);
         }
         s
     }
@@ -627,7 +628,10 @@ impl Shared {
             // Taken by another claimer: skipped. What the claimer's own
             // follows took is its own output: still a sibling to it.
             let by = r.claimed_by.load(Ordering::Acquire);
-            let skipped = r.st() == S_INERT && by != claimer && !(by != NIL && self.own_cont(by, claimer));
+            // One still running under a doom mark is taken already.
+            let skipped = (r.st() == S_INERT || (by != NIL && r.has(super::F_DOOM_INERT)))
+                && by != claimer
+                && !(by != NIL && self.own_cont(by, claimer));
             if !f(x, skipped) {
                 return;
             }

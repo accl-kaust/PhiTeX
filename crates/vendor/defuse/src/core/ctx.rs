@@ -1439,7 +1439,7 @@ impl<'a> Ctx<'a> {
 
     /// Whether `f` is a loop-back field.
     #[must_use]
-    pub fn is_loopback(&self, f: Field) -> bool {
+    pub fn is_loopback(&mut self, f: Field) -> bool {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() {
             crate::record::j(&(&f,))
@@ -1453,8 +1453,10 @@ impl<'a> Ctx<'a> {
     }
 
     #[inline]
-    fn is_loopback_inner(&self, f: Field) -> bool {
-        self.sh.loops.contains_key(&f)
+    fn is_loopback_inner(&mut self, f: Field) -> bool {
+        let val = self.sh.loops.contains_key(&f);
+        self.log.push(Pred::IsLoop { f, val });
+        val
     }
 
     /// Accounts `n` units of work.

@@ -1156,6 +1156,11 @@ impl Shared {
                     has_prev: false,
                 }),
             },
+            Pred::IsLoop { f, val } => Ok(if self.loops.contains_key(f) == *val {
+                Ok(())
+            } else {
+                Err("loop-back: declared")
+            }),
             Pred::Kind { at, val, .. } => match self.q_kind(*at, strict, me) {
                 Q::Ans((v, _)) => Ok(if v == *val { Ok(()) } else { Err("kind: changed") }),
                 Q::Wait(w) => Err(w),

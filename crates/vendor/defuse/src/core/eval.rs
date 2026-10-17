@@ -807,24 +807,47 @@ impl Engine {
         {
             return false;
         }
+        let cands = self.report_candidates();
+        if cands.is_empty() {
+            return false;
+        }
+        // Per unit, the settled prefix up to its last candidate (in order).
         let mut items = Vec::new();
-        for u in self.units.clone() {
-            let es = {
+        let mut left = Vec::new();
+        let mut i = 0;
+        while i < cands.len() {
+            let u = self.sh.unit_of(cands[i]);
+            let mut j = i;
+            while j < cands.len() && self.sh.unit_of(cands[j]) == u {
+                j += 1;
+            }
+            let want: crate::FxHashSet<Slot> = cands[i..j].iter().copied().collect();
+            let mut found = 0;
+            let mut reached = crate::FxHashSet::default();
+            {
                 let _g = rlock(&self.sh.unit(u).s);
-                self.sh.entries(u)
-            };
-            for s in es {
-                let r = self.sh.rec(s);
-                let st = r.st();
-                // An unconfirmed guess ends the settled prefix too.
-                if (st != super::S_CLEAN && st != S_INERT && st != super::S_MARKER) || r.has(super::F_GUESS) {
-                    break;
-                }
-                if st == super::S_CLEAN && r.has(F_MARKED) {
-                    self.settle_one(s, rep, &mut items);
+                let mut x = self.sh.unit(u).first.load(Ordering::Acquire);
+                while x != NIL && found < want.len() {
+                    let r = self.sh.rec(x);
+                    let st = r.st();
+                    // An unconfirmed guess ends the settled prefix too.
+                    if (st != super::S_CLEAN && st != S_INERT && st != super::S_MARKER) || r.has(super::F_GUESS) {
+                        break;
+                    }
+                    if want.contains(&x) {
+                        found += 1;
+                        if st == super::S_CLEAN {
+                            self.settle_one(x, rep, &mut items);
+                            reached.insert(x);
+                        }
+                    }
+                    x = self.sh.next(x);
                 }
             }
+            left.extend(cands[i..j].iter().copied().filter(|c| !reached.contains(c)));
+            i = j;
         }
+        lock(&self.sh.to_report).extend(left);
         rep.settled += items.len() as u64;
         if !items.is_empty() && !src.settled(self, &items) {
             self.settled_out.extend(items);
@@ -860,16 +883,30 @@ impl Engine {
     /// Marked nodes final at this version not yet reported.
     fn settled_items(&mut self, rep: &mut Report) -> Vec<Settled> {
         let mut items = Vec::new();
-        let sh = &self.sh;
-        let mut ms = std::mem::take(&mut *lock(&sh.marked));
-        ms.retain(|&s| sh.rec(s).has(F_MARKED) && sh.rec(s).st() != S_FREE);
-        ms.sort_by_key(|&s| (sh.unit_of(s), sh.rec(s).lab()));
-        ms.dedup();
-        for &s in &ms {
+        for s in self.report_candidates() {
             self.settle_one(s, rep, &mut items);
         }
-        *lock(&self.sh.marked) = ms;
         rep.settled += items.len() as u64;
         items
+    }
+
+    /// The marked nodes a report may be due for, in order: those that
+    /// committed or were marked since, and every marked node at a new
+    /// version.
+    fn report_candidates(&mut self) -> Vec<Slot> {
+        let sh = &self.sh;
+        let mut c = std::mem::take(&mut *lock(&sh.to_report));
+        if self.report_version != Some(self.version) {
+            self.report_version = Some(self.version);
+            let mut ms = lock(&sh.marked);
+            ms.retain(|&s| sh.rec(s).has(F_MARKED) && sh.rec(s).st() != S_FREE);
+            ms.sort_unstable();
+            ms.dedup();
+            c.extend(ms.iter().copied());
+        }
+        c.retain(|&s| sh.rec(s).has(F_MARKED) && sh.rec(s).st() != S_FREE);
+        c.sort_by_key(|&s| (sh.unit_of(s), sh.rec(s).lab(), s));
+        c.dedup();
+        c
     }
 }

@@ -91,8 +91,16 @@ fn eval(eng: &mut Engine, threads: usize, spec: bool) -> (Duration, Report) {
         (_, Ok("predicted")) | (true, Err(_)) => Greedy::speculative(Speculation::Predicted, 256),
         _ => Greedy::default(),
     };
+    // MARK=1: every node marked, evaluated through the settled hook (a
+    // client that consumes settled outputs).
+    let mark = std::env::var("MARK").is_ok();
     let t = Instant::now();
-    let r = eng.evaluate(&mut sched, &mut Threads(threads)).expect("evaluate");
+    let r = if mark {
+        eng.evaluate_absorbing(&mut sched, &mut Threads(threads), &mut defuse::NoEdits)
+    } else {
+        eng.evaluate(&mut sched, &mut Threads(threads))
+    }
+    .expect("evaluate");
     (t.elapsed(), r)
 }
 

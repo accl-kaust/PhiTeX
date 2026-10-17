@@ -152,3 +152,20 @@ fn a_rerun_keeps_the_siblings_its_old_continuation_held() {
         assert_eq!(own(&eng, &ss), 0, "cut after whole {i}");
     }
 }
+
+/// Threaded cold builds: the continuation `r` runs while `a`'s claim of
+/// `s1` waits on `s1`'s run (a doom mark); `r` must not count `s1`.
+#[test]
+fn a_continuation_skips_a_sibling_taken_while_it_runs() {
+    for k in 0..1500 {
+        let (mut eng, ss, _, _) = build("cut");
+        let r = eval(&mut eng, 3);
+        let owned: Vec<usize> = (0..3).filter(|&i| eng.output(ss[i]).is_some()).collect();
+        if !owned.is_empty() {
+            for &n in &ss {
+                eprintln!("{:?}", eng.node_info(n));
+            }
+            panic!("k {k}: s {owned:?} ran on their own; {r:?}");
+        }
+    }
+}

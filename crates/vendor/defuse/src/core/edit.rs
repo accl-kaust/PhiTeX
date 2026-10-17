@@ -60,6 +60,8 @@ pub struct Engine {
     pub(crate) max_rounds: u64,
     pub(crate) version: u64,
     pub(crate) settled_out: Vec<Settled>,
+    /// The version every marked node was last made a report candidate at.
+    pub(crate) report_version: Option<u64>,
     pub(crate) last_critical: u32,
     pub(crate) heights: super::report::Heights,
     pub(crate) limits: Limits,
@@ -125,6 +127,7 @@ impl Shared {
             diag_next: AtomicU64::new(1),
             text_memo: RwLock::new(FxHashMap::default()),
             marked: Mutex::new(Vec::new()),
+            to_report: Mutex::new(Vec::new()),
             marked_ops: RwLock::new(Vec::new()),
             deferred_frames: Mutex::new(Vec::new()),
             abort: AtomicBool::new(false),
@@ -218,6 +221,7 @@ impl Engine {
             max_rounds: 64,
             version: 0,
             settled_out: Vec::new(),
+            report_version: None,
             last_critical: 0,
             heights: super::report::Heights::default(),
             limits: Limits::default(),
@@ -662,6 +666,10 @@ impl Engine {
         // environment (nothing defined it).
         let mut notes = Notes::default();
         self.touch_field_readers(f, &mut notes);
+        let asked = lock(&self.sh.loop_readers).remove(&f).unwrap_or_default();
+        for (n, g) in asked {
+            self.sh.touch(n, g, &Cause::Loop { field: f }, false);
+        }
         let env = lock(&self.sh.env_readers).remove(&f).unwrap_or_default();
         for (n, g) in env {
             self.sh.touch(n, g, &Cause::Loop { field: f }, false);
@@ -1203,6 +1211,7 @@ impl Engine {
             if !self.sh.rec(s).has(F_MARKED) {
                 lock(&self.sh.marked).push(s);
             }
+            lock(&self.sh.to_report).push(s);
             self.sh.rec(s).set(F_MARKED);
             if let Some(e) = self.sh.rec(s).data().x.as_mut() {
                 e.reported = None;
