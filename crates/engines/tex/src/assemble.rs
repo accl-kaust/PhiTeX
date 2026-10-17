@@ -363,7 +363,12 @@ fn dvi_page(
 /// page 1's objects, then `B`'s object.
 fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let v = cx.values();
-    let xpages = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
+    // (in pdfTeX's order: a page firing inside a piece before the
+    // piece's records after it)
+    let xpages = crate::pdfout::order_line(
+        v,
+        &v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?),
+    );
     let date = field(cx, "pdfdate")?.map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
     let jobname = field(cx, "jobname")?
         .map(|x| str_of(v, x))

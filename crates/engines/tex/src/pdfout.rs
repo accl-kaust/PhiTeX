@@ -48,6 +48,90 @@ use crate::val::{int_of, list_of, str_of};
 /// this order ([`finish_exact`]).
 pub(crate) const XPAGES: &str = "pdf:xpages";
 
+/// Record `e` put in the line ([`XPAGES`]) where this run is; a piece's
+/// record after one of its page-builder candidates goes after a marker
+/// `["cand", piece, candidates passed]`: a page firing at an earlier
+/// candidate of the piece is placed (and numbered) before it by the
+/// link, as pdfTeX ships it there ([`order_line`]).
+pub(crate) fn line_push(r: &mut Run<'_, '_>, e: ValueId) {
+    let v = r.v;
+    let op = r.cx.op();
+    if (op == r.ops.exec || op == r.ops.resume) && r.cand > 0 {
+        let pid = i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes());
+        let m = v.list(vec![v.str("cand"), v.int(pid), v.int(i64::from(r.cand))]);
+        r.contribute(XPAGES, v.seq_unit(m));
+    }
+    r.contribute(XPAGES, v.seq_unit(e));
+}
+
+/// The line in pdfTeX's order: a page whose break is at candidate `k`
+/// of a piece the piece goes on after ([`PagePiece::brk`]) comes after
+/// the piece's records made before it and before those made after it
+/// (the record after each marker `["cand", piece, c]` with `c > k`,
+/// [`line_push`]), which the line holds before the page (the page's
+/// finisher is placed after the whole piece). Nothing is dropped.
+///
+/// Example: piece P with records a (before its candidates), b (after
+/// candidate 0), its page at candidate 0: the line `a, m0, b, page`
+/// becomes `a, page, m0, b`.
+pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
+    let brks: Vec<(ValueId, i64, i64)> = {
+        let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
+        xpages
+            .iter()
+            .filter_map(|&x| {
+                let k = v.as_int(x)?;
+                let (pid, c) = m.get(&u64::from_ne_bytes(k.to_ne_bytes()))?.brk?;
+                Some((x, pid, c))
+            })
+            .collect()
+    };
+    let mut line = xpages.to_vec();
+    for (page, pid, k) in brks {
+        let Some(p) = line.iter().position(|&x| x == page) else {
+            continue;
+        };
+        let mut keep = Vec::with_capacity(p);
+        let mut moved = Vec::new();
+        let mut take = false;
+        for &x in &line[..p] {
+            if let Some((mp, c)) = line_marker(v, x) {
+                take = mp == pid && c > k;
+                if take {
+                    moved.push(x);
+                } else {
+                    keep.push(x);
+                }
+                continue;
+            }
+            if take {
+                moved.push(x);
+                take = false;
+            } else {
+                keep.push(x);
+            }
+        }
+        if moved.is_empty() {
+            continue;
+        }
+        keep.push(page);
+        keep.extend(moved);
+        keep.extend_from_slice(&line[p + 1..]);
+        line = keep;
+    }
+    line
+}
+
+/// A line marker's piece and candidates passed ([`line_push`]).
+fn line_marker(v: &Values, x: ValueId) -> Option<(i64, i64)> {
+    if v.as_int(x).is_some() {
+        return None;
+    }
+    let xs = list_of(v, x);
+    (xs.len() == 3 && xs.first().map(|&k| str_of(v, k)).as_deref() == Some("cand"))
+        .then(|| (int_of(v, xs[1]), int_of(v, xs[2])))
+}
+
 /// The loop-back of the object numbers the link gave the read-time
 /// commands (spec-redesign §1, `pdf:objbase`: what a piece reads where
 /// TeX reads a number back, a guess from the round before):
@@ -176,6 +260,9 @@ pub(crate) struct PagePiece {
     pj: i64,
     /// The node that shipped it, for the link's errors ([`Linked`]).
     node: i64,
+    /// Its break inside a piece that goes on after it (`[piece,
+    /// candidate]`), for the line's order ([`order_line`]).
+    brk: Option<(i64, i64)>,
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
@@ -197,7 +284,7 @@ pub(crate) fn doc_op(r: &mut Run<'_, '_>, kind: &str, args: &[ValueId]) -> R<boo
     let v = r.v;
     let mut xs = vec![v.str(kind)];
     xs.extend_from_slice(args);
-    r.contribute(XPAGES, v.seq_unit(v.list(xs)));
+    line_push(r, v.list(xs));
     Ok(true)
 }
 
@@ -508,7 +595,7 @@ pub(crate) fn font_load(r: &mut Run<'_, '_>, name: &str, size: i32, id: i64) {
         v.int(i64::from(size)),
         v.int(id),
     ]);
-    r.contribute(XPAGES, v.seq_unit(e));
+    line_push(r, e);
 }
 
 /// The writer a page shipped here is written apart on, and its key: a
@@ -1119,7 +1206,7 @@ pub(crate) fn command_forms(
         v.int(i64::from_ne_bytes(key.to_ne_bytes())),
         v.int(i64::from_ne_bytes(serial.to_ne_bytes())),
     ]);
-    r.contribute(XPAGES, v.seq_unit(e));
+    line_push(r, e);
     Ok(got)
 }
 
@@ -1489,6 +1576,12 @@ fn ship_apart(
         base: BTreeSet::new(),
         pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
         node: i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
+        brk: r
+            .fin
+            .as_ref()
+            .and_then(|c| c.brk)
+            .filter(|b| b.2)
+            .map(|b| (b.0, b.1)),
     };
     // the key: what the piece is made of, by the values' identities
     // (interned: equal values, equal ids), not by their bytes
@@ -1504,6 +1597,8 @@ fn ship_apart(
         pdfmap,
         u64::from(pc.fonts.space.is_some()),
         pc.pj.cast_unsigned(),
+        pc.brk.map_or(0, |b| b.0.cast_unsigned()),
+        pc.brk.map_or(u64::MAX, |b| b.1.cast_unsigned()),
         // (the fonts as the writer gets them, the files the images ask
         // for among them: a run that read other ones writes another page)
         pc.fonts.digest(),
@@ -1544,7 +1639,7 @@ fn ship_apart(
     // shipped; the link numbers its objects after every record before
     // it and before every one after
     let k = v.int(i64::from_ne_bytes(key.to_ne_bytes()));
-    r.contribute(XPAGES, v.seq_unit(k));
+    line_push(r, k);
     Ok(shown)
 }
 

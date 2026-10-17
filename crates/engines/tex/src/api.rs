@@ -1182,6 +1182,10 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         r.realised_critical_time.as_secs_f64() * 1e3
     );
     eprintln!(
+        "acct: commands {}",
+        crate::ops::COMMANDS.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    eprintln!(
         "acct: stops by field (top 10): {:?}",
         crate::run::take_stops(eng.values(), 10)
     );

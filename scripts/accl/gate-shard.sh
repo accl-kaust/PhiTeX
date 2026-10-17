@@ -10,6 +10,8 @@
 #   gate-shard.sh ams ORACLE_MD5 CTL    amsldoc --exact-pdf at -j 1, 8 and 16;
 #                                       cold watch timing at -j 1/8/16, head
 #                                       and control commit CTL
+#   gate-shard.sh cg                    para400 at one thread under callgrind:
+#                                       Ir per command, top 15 functions
 #   gate-shard.sh para BAR_MD5          bench/para4000.tex (plain pdfTeX) cold
 #                                       at -j 1/8/16: md5 against BAR_MD5,
 #                                       wall, us per paragraph, realised
@@ -202,6 +204,29 @@ case $shard in
       grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "para4000 edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
     done
     python3 -I scripts/accl/gate-acct.py table para "$r" > "$r/table.txt" 2>&1
+    ;;
+  cg)
+    # cg: para400 at one thread under callgrind (the profiling build:
+    # release with symbols), the format made once unprofiled; Ir in all,
+    # the commands the runs did (`acct: commands`), Ir per command and
+    # the top 15 functions by exclusive Ir
+    cargo build -q --profile profiling -p phitex-cli > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt"
+    grep -q '^EXIT 0$' "$r/build.txt" || red "build: $(grep -m1 '^error' "$r/build.txt")"
+    built
+    bin=$PWD/target/profiling/phitex
+    mkdir -p "$w/cg" && cp bench/para400.tex "$w/cg/"
+    (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex para400.tex > "$r/cg-warm.log" 2>&1)
+    (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_THREADS=1 \
+      timeout 1800 valgrind --tool=callgrind --callgrind-out-file="$r/cg.out" "$bin" build -j 1 --output-dir=o1 --program pdftex para400.tex > "$r/cg-run.log" 2>&1) \
+      || red "cg: callgrind run exit $?"
+    callgrind_annotate --threshold=100 "$r/cg.out" > "$r/cg.excl.txt" 2>&1
+    total=$(grep -m1 'PROGRAM TOTALS' "$r/cg.excl.txt" | awk '{print $1}' | tr -d ,)
+    cmds=$(grep -oE 'acct: commands [0-9]+' "$r/cg-run.log" | tail -1 | awk '{print $3}')
+    {
+      echo "para400 -j 1 under callgrind: Ir ${total:-?}, commands ${cmds:-?}, Ir per command $(awk -v a="${total:-0}" -v b="${cmds:-0}" 'BEGIN { if (b > 0) printf "%.0f", a / b; else print "?" }')"
+      echo "top 15 by exclusive Ir:"
+      grep -E '^ *[0-9,]+ +\(' "$r/cg.excl.txt" | grep -v 'PROGRAM TOTALS' | head -15 | cut -c1-200
+    } > "$r/cg.txt"
     ;;
   *) red "unknown shard $shard" ;;
 esac

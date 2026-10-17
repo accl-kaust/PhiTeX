@@ -16,7 +16,8 @@
 # by op class, the head beside the control GATE_CONTROL, default
 # 566fb842, built and run in the same job: gate-time.py); para
 # (bench/para4000.tex, plain pdfTeX, md5 against GATE_PARA_MD5, wall,
-# us per paragraph and realised critical path at -j 1/8/16). Seven jobs.
+# us per paragraph and realised critical path at -j 1/8/16); cg (para400
+# at one thread under callgrind: Ir per command, top 15). Eight jobs.
 # GATE_LATEX_ORDER (test names, heaviest first) balances the latex shards.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -60,6 +61,8 @@ submit() {
   # (para4000: plain pdfTeX, bytes against its bar, wall and the
   # realised critical path at -j 1/8/16)
   if on para; then ids+=("$(sub "-c 18 --mem=48G -t 01:00:00 -J gf-para" para "${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}")"); fi
+  # (para400 at one thread under callgrind: Ir per command, the top 15)
+  if on cg; then ids+=("$(sub "-c 8 --mem=16G -t 01:00:00 -J gf-cg" cg)"); fi
   echo "gate-fast: commit $c, oracle md5 $want" >&2
   mkdir -p "$runs"
   echo "$c ${ids[*]}" >> "$runs/gate-fast.ids"
@@ -122,6 +125,7 @@ table() {
     if [ -f "$d/para.txt" ]; then echo "para4000:"; sed 's/^/  /' "$d/para.txt"; fi
     if [ -f "$d/table.txt" ]; then cat "$d/table.txt"; fi
     if [ -f "$d/acct.txt" ]; then cat "$d/acct.txt"; fi
+    if [ -f "$d/cg.txt" ]; then echo "callgrind:"; sed 's/^/  /' "$d/cg.txt"; fi
     if [ -f "$d/cold.txt" ]; then echo "amsldoc cold watch build by op class, head vs control (same node, same command):"; cat "$d/cold.txt"; fi
   done
   echo

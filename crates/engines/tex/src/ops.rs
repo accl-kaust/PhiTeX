@@ -40,6 +40,10 @@ thread_local! {
 pub(crate) static RUN_LOG: std::sync::Mutex<Vec<(u64, bool, bool, u8)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// The commands every run of the process did (attempts that stopped
+/// counted too): Ir per command is a profile's total over this.
+pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead. With `parks`, a run that stops inside a command parks
@@ -108,6 +112,7 @@ pub(crate) fn run_node_parking(
         crate::prof::add(crate::prof::FOLD, tf);
     }
     let t_body = t_body.elapsed();
+    COMMANDS.fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
     if crate::exec::env_flag!("PHITEX_RUN_LOG") {
         // (measure: every attempt, for `Stats::run_log`)
         let how = match &res {

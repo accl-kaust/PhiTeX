@@ -73,7 +73,7 @@ pub(crate) const RTN: &str = "rtn";
 /// The pieces' main-list items, one unit per piece beside its profile:
 /// `[piece, last, items, reads, defs, locals]` (its raw node id, its
 /// last candidate when nothing came after it, its items with their
-/// markers resolved, what a finisher's check needs, (the finisher's check, gone: spec-final A1),
+/// markers resolved, what a finisher's check needs, [`Run::check_cut`],
 /// and for a piece cut at its last candidate the bindings local to the
 /// groups open there, which the routine sees). Read by range where a
 /// page fires: the page's real items.
@@ -148,6 +148,16 @@ pub(crate) fn give_no_units(r: &mut Run<'_, '_>) {
     }
 }
 
+/// Piece `pid`'s split (`split:<piece>`): the candidate a finisher found
+/// that the piece's run must end at (its output routine changes what the
+/// piece's commands after the candidate read), a loop-back the finisher
+/// declares and publishes ([`Run::check_cut`]); none while no finisher
+/// asked. The piece reads it ([`Run::finish_candidate`]): a split costs a
+/// round only where the routine really changes the rest of the piece.
+pub(crate) fn split_field(v: &Values, pid: i64) -> Field {
+    v.field(&format!("split:{}", pid.cast_unsigned()))
+}
+
 /// `max_dimen` (§421).
 pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
 
@@ -205,6 +215,9 @@ pub(crate) struct FinCtx {
     pub rtn: Option<ValueId>,
     /// Its arguments in full ([`Run::finisher_args`]).
     pub args: Vec<ValueId>,
+    /// Its page's break in its piece (`[piece, candidate]`) and whether
+    /// the piece goes on after it (the break is inside it).
+    pub brk: Option<(i64, i64, bool)>,
 }
 
 // -------------------------------------------------------------- state
@@ -626,23 +639,42 @@ impl Run<'_, '_> {
             sig: self.st.sig(),
             nest: self.nest.len(),
         });
-        // (spec-final A1: a piece's run ends at every page-builder
-        // candidate with items contributed since the one before and
-        // input after it, whether or not a page fires
-        // there: the rest of its text is a continuation placed after it,
-        // which reads the state here forward and, where a page fires
-        // here, what its routine leaves; no command after the candidate
-        // runs in this run)
+        // (a piece runs through its candidates; it ends at one only
+        // where a page's finisher found that its routine changes what
+        // the piece read after it, `split:<piece>`, [`Run::check_cut`]:
+        // the rest of its text is then a continuation placed after it,
+        // which reads the state there forward and what the routine
+        // leaves)
         let op = self.cx.op();
         if (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
             && fresh
+            && self.split_at()? == Some(i64::from(k))
             && self.has_input()
         {
             self.cut = Some(k);
             return Err(Halt::Cut);
         }
         Ok(())
+    }
+
+    /// The candidate a finisher asked this piece to end at
+    /// (`split:<piece>`, a loop-back a finisher declares, [`split_field`]),
+    /// read once a run.
+    fn split_at(&mut self) -> R<Option<i64>> {
+        if self.split_read {
+            return Ok(self.split);
+        }
+        let v = self.v;
+        let f = split_field(v, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+        let x = if self.cx.is_loopback(f) {
+            self.eng_read(f)?.and_then(|x| v.as_int(x))
+        } else {
+            None
+        };
+        self.split = x;
+        self.split_read = true;
+        Ok(x)
     }
 
     /// Whether this run put an item on the main list (a node, or the
@@ -726,18 +758,14 @@ impl Run<'_, '_> {
     /// The files this run wrote, opened or closed (its `streams`
     /// contributions from the `from`-th contribution on), as the fields
     /// `wstream:<name>`: a page finishing at a candidate before them
-    /// ships its `\write`s before them in TeX's order ((the finisher's check, gone: spec-final A1)).
-    /// And the line of PDF records (`pdfout::XPAGES`) where the run put
-    /// one: a page finishing before it is linked before it.
+    /// ships its `\write`s before them in TeX's order ([`Run::check_cut`]).
+    /// (The line of PDF records is ordered by the link instead: a
+    /// piece's records carry their candidate, `pdfout::order_line`.)
     fn streams_since(&self, from: usize) -> Vec<Field> {
         let v = self.v;
         let f = v.field("streams");
-        let xp = v.field(crate::pdfout::XPAGES);
         let mut out: Vec<Field> = Vec::new();
         for &(g, x) in self.contribs.get(from..).unwrap_or_default() {
-            if g == xp && !out.contains(&xp) {
-                out.push(xp);
-            }
             if g != f {
                 continue;
             }
@@ -913,7 +941,7 @@ impl Run<'_, '_> {
     /// an earlier page's candidate that material holds (`[piece, its
     /// last candidate, what it read, what it defined after each
     /// candidate, its locals at its last]`): the page's finisher checks the piece there as for a
-    /// page firing in its own items ((the finisher's check, gone: spec-final A1)).
+    /// page firing in its own items ([`Run::check_cut`]).
     #[allow(clippy::too_many_arguments)]
     fn place_break(
         &mut self,
@@ -1113,7 +1141,7 @@ impl Run<'_, '_> {
     /// position (`pos`): `[j, data, carried, locals, rest, piece, k, reads,
     /// defs, hint, normal, special]`, the page assembled
     /// ([`Run::assemble_page`]); the check of a page finishing inside the
-    /// piece with commands after it ((the finisher's check, gone: spec-final A1)) from the piece's
+    /// piece with commands after it ([`Run::check_cut`]) from the piece's
     /// unit. Its position where the page cannot be assembled.
     fn finisher_args(&mut self, b: &[ValueId], pos: &[ValueId]) -> R<Vec<ValueId>> {
         let v = self.v;
@@ -1407,7 +1435,7 @@ impl Run<'_, '_> {
     }
 
     /// What a finisher's check needs when a page can finish inside the
-    /// piece with commands after it ((the finisher's check, gone: spec-final A1)): the locations
+    /// piece with commands after it ([`Run::check_cut`]): the locations
     /// the run read from the engine with the values it read, and per
     /// candidate the names the run defined after it (and its local
     /// definitions at any time: a scope closing after the candidate hides
@@ -1430,7 +1458,7 @@ impl Run<'_, '_> {
             .collect();
         // (a meaning read by its class only: no value a routine's
         // definition can equal, so any global definition of it by the
-        // routine counts as a change, (the finisher's check, gone: spec-final A1))
+        // routine counts as a change, [`Run::check_cut`])
         let class = v.str("\u{1}class");
         rs.extend(
             self.class_read_fields()
@@ -1495,7 +1523,7 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// A piece cut where a finisher asked ((the finisher's check, gone: spec-final A1),
+    /// A piece cut where a finisher asked ([`Run::check_cut`],
     /// `cut:<node>`): the first pass that passed the candidate goes
     /// again stopped there ([`Run::finish_candidate`]); the second gives
     /// its items up to the candidate as its units, places its scan step
@@ -1550,6 +1578,109 @@ impl Run<'_, '_> {
             vec![ValueId::UNIT, v.int(flags), ValueId::UNIT, v.int(rest)],
         );
         Ok(())
+    }
+
+    /// A finisher's split of the piece its page's break is in
+    /// (`split:<piece>`, [`split_field`]): where the break is inside the
+    /// piece and the routine changes what the piece's commands after it
+    /// read ([`Run::check_cut`]), the candidate, declared a loop-back and
+    /// published; where the break is at the piece's end and the piece was
+    /// split there, the same again (the split stands while its page does).
+    fn split_piece(&mut self, args: &[ValueId]) -> R<()> {
+        let v = self.v;
+        let Some((pid, k, inside)) = self.fin.as_ref().and_then(|c| c.brk) else {
+            return Ok(());
+        };
+        let f = split_field(v, pid);
+        let keep = if inside {
+            self.check_cut(args)?.is_some()
+        } else {
+            self.cx.is_loopback(f) && self.eng_read(f)?.and_then(|x| v.as_int(x)) == Some(k)
+        };
+        if keep {
+            self.cx.declare_loopback(f, ValueId::UNIT);
+            self.cx.publish(f, v.int(k));
+        }
+        Ok(())
+    }
+
+    /// A finisher placed after the piece its page finished inside of
+    /// (arguments past the fourth: the rest of the piece's items, the
+    /// piece's node, the candidate, what the piece read, what it defined
+    /// after the candidate): whether the routine, run here instead of at
+    /// the candidate, changed what the piece's commands after it saw or
+    /// saw what they defined. If so, the piece is split there
+    /// ([`Run::split_piece`]): it runs again next round ending at the
+    /// candidate, the rest of it a resume after the page.
+    fn check_cut(&mut self, args: &[ValueId]) -> R<Option<(i64, i64)>> {
+        let v = self.v;
+        let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
+        if args.len() < 9 || a(5) == ValueId::UNIT {
+            return Ok(None);
+        }
+        let (pid, k, reads, defs) = (a(5), a(6), a(7), a(8));
+        let mut gdefs: Vec<(ValueId, ValueId)> = Vec::new();
+        for (loc, x, l) in self.st.published(v, self.rec_load) {
+            if l == Locality::Global {
+                gdefs.push((self.loc_field(loc).0, x));
+            }
+        }
+        let mut read: Vec<ValueId> = self
+            .st
+            .read_locs()
+            .into_iter()
+            .map(|l| self.loc_field(l).0)
+            .collect();
+        read.extend(self.class_read_fields().into_iter().map(|f| f.0));
+        // (the files the page's `\write`s went to: a write, open or
+        // close the piece made after the candidate came after them)
+        read.extend(self.streams_since(0).into_iter().map(|f| f.0));
+        let mut why = None;
+        for e in list_of(v, reads) {
+            let xs = list_of(v, e);
+            if let [f, x] = xs[..]
+                && let Some(&(_, y)) = gdefs.iter().find(|(g, _)| *g == f)
+                && y != x
+            {
+                why = Some(format!("changed {}", str_of(v, f)));
+                break;
+            }
+        }
+        // (a location both defined, the piece's definition standing at
+        // its end: the piece's is the later one in tex.web, so the
+        // routine's gives way to it: the value reaching here put back)
+        let mut restore = Vec::new();
+        if why.is_none() {
+            for e in list_of(v, defs) {
+                let xs = list_of(v, e);
+                let Some(&f) = xs.first() else { continue };
+                let stands = xs.get(1).is_some_and(|&g| int_of(v, g) != 0);
+                if read.contains(&f) {
+                    why = Some(format!("after {}", str_of(v, f)));
+                    break;
+                }
+                if gdefs.iter().any(|(g, _)| *g == f) && stands {
+                    restore.push(Field(f));
+                }
+            }
+        }
+        if why.is_none() {
+            for f in restore {
+                let x = self.eng_read(f)?;
+                let loc = self.loc_of(f);
+                self.set_loc(loc, crate::runstate::Entry::raw(x), true);
+            }
+            return Ok(None);
+        }
+        let Some(why) = why else { return Ok(None) };
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "  split asked: piece {} at candidate {} ({why})",
+                int_of(v, pid),
+                int_of(v, k)
+            );
+        }
+        Ok(Some((int_of(v, pid), int_of(v, k))))
     }
 
     /// `\pagegoal`, `\pagetotal`, … (§421): the page state reaching this
@@ -2366,7 +2497,7 @@ impl Run<'_, '_> {
 /// cut (the routine runs inside them). A finisher placed after the
 /// piece its page finished inside of has five more: `[rest, piece,
 /// k, reads, defs]`, the piece's items after the candidate and what
-/// its check needs ((the finisher's check, gone: spec-final A1)). It reads what reaches its
+/// its check needs ([`Run::check_cut`]). It reads what reaches its
 /// place as any node does and defines what the routine defines; its
 /// page is shipped from here.
 pub(crate) struct Finish(pub Shared);
@@ -2686,9 +2817,19 @@ impl Operation for Finish {
                     .eng_read(v.field(BREAKS))?
                     .map(|x| list_of(v, x))
                     .filter(|xs| xs.len() >= 6 && xs.first() == pos.first());
+                let at = b
+                    .as_ref()
+                    .map(|b| (int_of(v, b[3]), int_of(v, b[4])))
+                    .filter(|x| x.0 != -2);
                 let args = match b {
                     Some(b) => r.finisher_args(&b, &pos)?,
                     None => pos.clone(),
+                };
+                let brk = match (args.get(5), args.get(6)) {
+                    (Some(&p), Some(&k)) if p != ValueId::UNIT && args.len() >= 9 => {
+                        Some((int_of(v, p), int_of(v, k), true))
+                    }
+                    _ => at.map(|(p, k)| (p, k, false)),
                 };
                 let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
                 r.fin = Some(FinCtx {
@@ -2697,6 +2838,7 @@ impl Operation for Finish {
                     held_n: 0,
                     rtn: None,
                     args: args.clone(),
+                    brk,
                 });
                 for e in list_of(v, a(3)) {
                     let ys = list_of(v, e);
@@ -2737,6 +2879,7 @@ impl Operation for Finish {
             r.run_all()?;
             give_no_units(r);
             let args = r.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
+            r.split_piece(&args)?;
             let g = r.contribute_global_defs();
             r.record_finisher_defs(&args, g);
             Ok(())
