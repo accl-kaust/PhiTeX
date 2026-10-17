@@ -1658,7 +1658,8 @@ impl Analysis<'_> {
     /// [`Analysis::slice_claims_nothing`]; `par_end` false for a slice
     /// that starts no paragraph and whose last item is a group or an
     /// argument closed inside it (`\\centerline{…}` in vertical mode): it
-    /// need not end in a paragraph end.
+    /// need not end in a paragraph end, and its macros' extents may be
+    /// the pass's predictions.
     fn slice_claims_nothing_(&self, k0: usize, e: usize, par_end: bool) -> bool {
         let atoms = self.atoms();
         let k1 = atoms.partition_point(|x| x.start < e);
@@ -1675,7 +1676,15 @@ impl Analysis<'_> {
             }
         }
         for it in self.p.items[i0..].iter().take_while(|it| it.atom < k1) {
-            if it.end > k1 || !matches!(it.hints.claim, pass::Claim::Known(_)) {
+            // (a macro's extent from its meaning in the format, the
+            // pass's prediction, is taken here: the engine checks the
+            // claim against the run and refutes it where the run read on)
+            let known = match it.hints.claim {
+                pass::Claim::Known(_) => true,
+                pass::Claim::Predicted { .. } => !par_end,
+                pass::Claim::Pending { .. } => false,
+            };
+            if it.end > k1 || !known {
                 return false;
             }
             if let Some(at) = atoms.get(it.atom)
@@ -3059,8 +3068,28 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                 .is_some_and(|b| b.no_scope && b.claim.is_none())
             {
                 let (s, e) = t.slices[k];
+                let atoms = an.atoms();
+                let (k0, k1) = (
+                    atoms.partition_point(|x| x.start < s),
+                    atoms.partition_point(|x| x.start < e),
+                );
+                let i0 = an.p.items.partition_point(|it| it.atom < k0);
+                let items: Vec<String> = an.p.items[i0..]
+                    .iter()
+                    .take_while(|it| it.atom < k1)
+                    .map(|it| {
+                        let c = match &it.hints.claim {
+                            pass::Claim::Known(n) => format!("known {n}"),
+                            pass::Claim::Predicted { n_tokens, .. } => {
+                                format!("predicted {n_tokens}")
+                            }
+                            pass::Claim::Pending { cause } => format!("pending ({cause})"),
+                        };
+                        format!("{}: {c}, end {} of {k1}", atoms[it.atom].name(text), it.end)
+                    })
+                    .collect();
                 eprintln!(
-                    "slices: claim pending {:?}: starts a paragraph {}, {}",
+                    "slices: claim pending {:?}: starts a paragraph {}, {}; items {items:?}",
                     short(&text[s..e]),
                     t.pars[k],
                     d.cause
