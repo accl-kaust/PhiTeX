@@ -1005,13 +1005,14 @@ impl Run<'_, '_> {
         let mut s = ScanIn::decode(v, b.get(2).copied().and_then(some));
         let mut raws = Vec::new();
         let mut own = Vec::new();
+        // (the step that found the break reads what it reads there where
+        // it is, for its continuation's prediction: a read at a node is
+        // of a node before the reader)
+        let here = at == self.cx.node();
         if pid != -2 {
             // (the material the page began with, as items, where the break
             // was found; a page firing in a continuation's material has it
             // in its `src`)
-            // (the step that found the break reads it where it is, for
-            // its continuation's prediction)
-            let here = at == self.cx.node();
             s.material = match if here {
                 self.eng_read(v.field(SCAN_MAT))?
                     .map_or(phitex_defuse::FieldAt::Unset, |x| {
@@ -1049,7 +1050,11 @@ impl Run<'_, '_> {
         }
         let dead = if has_end(v, &s.material) || raws.iter().any(|r| has_end(v, r)) {
             let f = self.loc_field(crate::fields::cell::DEADCYCLES as Loc);
-            match self.cx.use_field_at(f, Some(at))? {
+            match if here {
+                phitex_defuse::FieldAt::Gone
+            } else {
+                self.cx.use_field_at(f, Some(at))?
+            } {
                 phitex_defuse::FieldAt::Def(x, _) => int_of(v, x),
                 phitex_defuse::FieldAt::Unset => 0,
                 phitex_defuse::FieldAt::Gone => self.cint(crate::fields::cell::DEADCYCLES)?,
@@ -1107,8 +1112,11 @@ impl Run<'_, '_> {
     /// Insertion class `n`'s registers (§1008) as they reach the node
     /// `at` ([`phitex_defuse::Ctx::use_field_at`]), what the page
     /// builder read where the break was found; as they reach this run
-    /// where `at` is gone.
+    /// where `at` is gone or is this run's own node.
     fn insert_class_at(&mut self, n: u16, at: phitex_defuse::NodeId) -> R<InsertClass> {
+        if at == self.cx.node() {
+            return self.insert_class(n);
+        }
         let v = self.v;
         let mut xs = Vec::with_capacity(4);
         let bf = self.box_field(i64::from(n));
@@ -2531,10 +2539,10 @@ impl FinDefs {
     /// across pages, so a reader may run on them; a page number or a
     /// mark, changing every page, is not predicted (a wrong prediction
     /// runs its readers again).
-    fn stable(&self) -> Vec<(Field, ValueId)> {
+    fn stable(&self, v: &Values) -> Vec<(Field, ValueId)> {
         self.last
             .iter()
-            .filter(|d| self.prev.contains(d))
+            .filter(|d| self.prev.contains(d) && predictable(&crate::val::field_name(v, d.0)))
             .copied()
             .collect()
     }
@@ -2550,7 +2558,7 @@ impl FinDefs {
                 // (the marks are the page's text: equal on two pages by
                 // chance; the scan knows them, spec §3)
                 let name = crate::val::field_name(v, f);
-                if name.starts_with("mark") || name == "param:outputpenalty" {
+                if !predictable(&name) {
                     return None;
                 }
                 // (one run of the routine so far, spec-final §9b: its
@@ -2581,6 +2589,21 @@ impl FinDefs {
             })
             .collect()
     }
+}
+
+/// Whether a finisher's definition of field `name` is predicted from
+/// the last runs of its routine ([`FinDefs::predict`]). Not the marks
+/// (the page's text, which the scan knows, spec §3), not the penalty
+/// the page fired at, and not `\deadcycles`: the fire steps it and a
+/// `\shipout` clears it (§1012, §1023), so what a run leaves depends on
+/// the page and not on the routine's text, and at `\end` it decides
+/// whether the page chain goes on (§1054). Guessed as another page's
+/// run left it, a dead cycle predicts the next page fired by `\end`,
+/// whose finisher predicts another: the chain grew without end on
+/// guesses while the page it stood on was still to run. The scan reads
+/// it from its finisher instead.
+fn predictable(name: &str) -> bool {
+    !(name.starts_with("mark") || name == "param:outputpenalty" || name == "deadcycles")
 }
 
 /// What a finisher defines besides its routine's definitions
@@ -2650,7 +2673,7 @@ impl Finish {
         let mut out = d
             .map(|d| {
                 if crate::exec::env_flag!("PHITEX_NO_STEP") {
-                    d.stable()
+                    d.stable(v)
                 } else {
                     d.predict(v, j)
                 }
