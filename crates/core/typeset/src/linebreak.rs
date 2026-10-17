@@ -230,8 +230,8 @@ fn to_scaled(x: i64) -> Scaled {
 /// §870, §871).
 fn disc_item_width(n: &Node, fonts: &dyn Fonts) -> Scaled {
     match n {
-        Node::Char { font, ch } => fonts.char_info(*font, *ch).map_or(0, |i| i.width),
-        Node::Lig(l) => fonts.char_info(l.font, l.ch).map_or(0, |i| i.width),
+        Node::Char { font, ch } => fonts.char_width(*font, *ch),
+        Node::Lig(l) => fonts.char_width(l.font, l.ch),
         Node::Box(_) | Node::Rule(_) | Node::Kern(..) => n.box_dims().map_or_else(
             || match n {
                 Node::Kern(w, _) => *w,
@@ -753,7 +753,7 @@ pub fn line_break(
             // §866
             match &list[cur] {
                 Node::Char { font, ch } => {
-                    b.add_width(fonts.char_info(*font, *ch).map_or(0, |i| i.width));
+                    b.add_width(fonts.char_width(*font, *ch));
                 }
                 Node::Box(_) | Node::Rule(_) => {
                     b.add_width(list[cur].box_dims().map_or(0, |d| d.0));
@@ -803,7 +803,7 @@ pub fn line_break(
                         b.add_width(w);
                     }
                 }
-                Node::Lig(l) => b.add_width(fonts.char_info(l.font, l.ch).map_or(0, |i| i.width)),
+                Node::Lig(l) => b.add_width(fonts.char_width(l.font, l.ch)),
                 Node::Disc(d) => {
                     // §869
                     let pre: Scaled = d.pre.iter().map(|s| disc_item_width(s, fonts)).sum();
@@ -928,25 +928,38 @@ fn post_line_break(
     left_skip: Glue,
     right_skip: Glue,
 ) -> Vec<Line> {
-    let mut rest: std::collections::VecDeque<(Option<usize>, Node)> = list
-        .into_iter()
-        .enumerate()
-        .map(|(i, n)| (Some(i), n))
-        .collect();
-    let mut lines = Vec::new();
+    // (the nodes not yet placed: `front`, a discretionary's post-break
+    // material still to come, last first, then the list from `it`; a
+    // node from the list carries its index, the others none)
+    let mut it = list.into_iter().enumerate().peekable();
+    let mut front: Vec<Node> = Vec::new();
+    let mut lines = Vec::with_capacity(breaks.len());
     let mut cur_line = params.prev_graf + 1;
+    let mut last_at = 0usize;
     for (k, &brk) in breaks.iter().enumerate() {
         // §881
-        let mut line = List::new();
+        let mut line = List::with_capacity(match brk {
+            Some(at) => at.saturating_sub(last_at) + front.len() + 4,
+            None => it.len() + front.len() + 2,
+        });
         let mut disc_break = false;
         let mut post_disc_break = false;
         match brk {
             None => {
-                line.extend(rest.drain(..).map(|x| x.1));
+                line.extend(front.drain(..).rev());
+                line.extend(it.by_ref().map(|x| x.1));
                 line.push(Node::param_glue(param::RIGHT_SKIP, right_skip));
             }
             Some(at) => {
-                while let Some((idx, n)) = rest.pop_front() {
+                last_at = at;
+                loop {
+                    let (idx, n) = if let Some(n) = front.pop() {
+                        (None, n)
+                    } else if let Some((i, n)) = it.next() {
+                        (Some(i), n)
+                    } else {
+                        break;
+                    };
                     if idx != Some(at) {
                         line.push(n);
                         continue;
@@ -958,9 +971,7 @@ fn post_line_break(
                             line.push(Node::Disc(Disc::default()));
                             if !d.post.is_empty() {
                                 post_disc_break = true;
-                                for n in d.post.into_iter().rev() {
-                                    rest.push_front((None, n));
-                                }
+                                front.extend(d.post.into_iter().rev());
                             }
                             line.extend(d.pre);
                             disc_break = true;
@@ -1035,8 +1046,15 @@ fn post_line_break(
         if let Some(&next) = breaks.get(k + 1)
             && !post_disc_break
         {
-            while let Some((idx, n)) = rest.front() {
-                if next.is_some() && *idx == next {
+            loop {
+                let (idx, n) = if let Some(n) = front.last() {
+                    (None, n)
+                } else if let Some((i, n)) = it.peek() {
+                    (Some(*i), n)
+                } else {
+                    break;
+                };
+                if next.is_some() && idx == next {
                     break;
                 }
                 let prune = match n {
@@ -1046,7 +1064,9 @@ fn post_line_break(
                 if !prune {
                     break;
                 }
-                rest.pop_front();
+                if front.pop().is_none() {
+                    it.next();
+                }
             }
         }
     }

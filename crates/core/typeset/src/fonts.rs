@@ -90,6 +90,17 @@ pub enum Left {
 pub trait Fonts {
     /// The metrics of `ch` in `font`, or `None` if it doesn't exist.
     fn char_info(&self, font: FontId, ch: u16) -> Option<CharInfo>;
+    /// `char_width` alone (0 when the character doesn't exist): the
+    /// line breaker's per-character question.
+    fn char_width(&self, font: FontId, ch: u16) -> Scaled {
+        self.char_info(font, ch).map_or(0, |i| i.width)
+    }
+    /// Width, height and depth (0s when the character doesn't exist):
+    /// the packager's per-character question.
+    fn char_whd(&self, font: FontId, ch: u16) -> (Scaled, Scaled, Scaled) {
+        self.char_info(font, ch)
+            .map_or((0, 0, 0), |i| (i.width, i.height, i.depth))
+    }
     /// The lig/kern instruction for `left` followed by `right`, if any.
     fn lig_kern(&self, font: FontId, left: Left, right: u16) -> Option<LigKern>;
     /// Whether the font has a left boundary lig/kern program

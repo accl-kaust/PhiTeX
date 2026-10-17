@@ -515,8 +515,8 @@ pub(crate) struct Run<'c, 'a> {
     /// The category codes of characters 0–255 as last read (`u8::MAX`:
     /// not read), valid while the table's catcode generation is
     /// `cat_gen`.
-    cat_cache: [u8; 256],
-    cat_gen: u64,
+    pub(crate) cat_cache: [u8; 256],
+    pub(crate) cat_gen: u64,
     /// The code tables (`lc`, `uc`, `sf`, `mc`, `dc`) of characters
     /// 0–255 as last read (`i32::MIN`: not read), valid while the
     /// table's generation is `code_gen` (the catcodes' generation, which
@@ -670,6 +670,8 @@ pub(crate) struct Run<'c, 'a> {
     /// A finisher's `\box255`, native, from its page's assembly to its
     /// routine ([`crate::pages::Fire::b255`]).
     pub fin_box: Option<(phitex_typeset::node::BoxNode, crate::nodes::Side)>,
+    /// The main loop's `lig_stack`, kept between words (§1034).
+    pub(crate) lig_buf: Vec<crate::build::LigItem>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -782,6 +784,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cell_eng: phitex_defuse::FxHashMap::default(),
             rec_sig: (0, 0, 0, 0),
             fin_box: None,
+            lig_buf: Vec::new(),
             reach_reads: 0,
         }
     }
