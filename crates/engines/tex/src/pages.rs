@@ -2615,13 +2615,6 @@ pub(crate) struct FinDefs {
     /// defines some on some pages only (a float page, a page with a
     /// list continued), not on the last two.
     pub seen: Vec<Field>,
-    /// Per field a run defined: the value the latest such run (by page)
-    /// left, its page, and whether the run before that defined it to
-    /// the same value: a field some pages' runs define and others leave
-    /// (`\box\footins`, emptied on the pages with footnotes) is
-    /// predicted at its stable value for every page
-    /// ([`FinDefs::sometimes`]).
-    pub recent: Vec<(Field, ValueId, i64, bool)>,
     /// What the last run contributed to `gdefs` (the fields it defined
     /// globally, [`Run::contribute_global_defs`]): the next finisher's
     /// declared contribution, a guess ([`Finish::static_contribs`]).
@@ -2632,23 +2625,6 @@ impl FinDefs {
     /// The fields any run of the routine defined.
     fn names(&self) -> Vec<Field> {
         self.seen.clone()
-    }
-
-    /// The fields an earlier run defined and the last did not, at the
-    /// value the last two runs defining them agreed on: where this
-    /// page's run leaves one, the value reaching on is the earlier
-    /// run's, the same; where it defines one, as before.
-    fn sometimes(&self, v: &Values) -> Vec<(Field, ValueId)> {
-        self.recent
-            .iter()
-            .filter(|&&(f, x, _, stable)| {
-                stable && !self.last.iter().any(|d| d.0 == f) && {
-                    let name = crate::val::field_name(v, f);
-                    predictable(v, &name, x, Some(x)) && !varies_by_page(&name)
-                }
-            })
-            .map(|&(f, x, _, _)| (f, x))
-            .collect()
     }
 
     /// The definitions both runs made with the same value: stable
@@ -2813,13 +2789,11 @@ impl Finish {
             .flatten();
         let mut out = d
             .map(|d| {
-                let mut p = if crate::exec::env_flag!("PHITEX_NO_STEP") {
+                if crate::exec::env_flag!("PHITEX_NO_STEP") {
                     d.stable(v)
                 } else {
                     d.predict(v, j)
-                };
-                p.extend(d.sometimes(v));
-                p
+                }
             })
             .unwrap_or_default();
         let rtn = v.field(RTN);
@@ -2878,13 +2852,7 @@ impl Operation for Finish {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
-            .map(|d| {
-                d.last
-                    .iter()
-                    .map(|e| e.0)
-                    .chain(d.sometimes(v).into_iter().map(|e| e.0))
-                    .collect()
-            })?;
+            .map(|d| d.last.iter().map(|e| e.0).collect())?;
         // (and what it gives back to the main list, always predicted)
         let rtn = v.field(RTN);
         if !names.contains(&rtn) {
@@ -3129,14 +3097,9 @@ impl Run<'_, '_> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let e = m.entry(fin_key(v, t, args)).or_default();
         e.gdefs = Some(gdefs);
-        for &(f, x) in &out {
+        for &(f, _) in &out {
             if !e.seen.contains(&f) {
                 e.seen.push(f);
-            }
-            match e.recent.iter_mut().find(|r| r.0 == f) {
-                Some(r) if j >= r.2 => *r = (f, x, j, r.1 == x),
-                Some(_) => {}
-                None => e.recent.push((f, x, j, true)),
             }
         }
         if crate::exec::env_flag!("PHITEX_PRED_SHOW") {
