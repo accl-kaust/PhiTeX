@@ -25,9 +25,13 @@
 #                                       startup Ir, node bodies' Ir per
 #                                       command, top 15 functions
 #   gate-shard.sh para BAR_MD5          bench/para4000.tex (plain pdfTeX) cold
-#                                       at -j 1/8/16: md5 against BAR_MD5,
-#                                       wall, us per paragraph, realised
-#                                       critical path, guess counters
+#                                       at -j 1/8/16, three runs each (the
+#                                       node is shared: the min quoted, the
+#                                       median beside it; the node's name
+#                                       and load first): md5 of every run
+#                                       against BAR_MD5, wall, us per
+#                                       paragraph, realised critical path,
+#                                       guess counters
 #
 # The shards but build and lint build nothing: they run the build
 # shard's binaries from $w/bin (built at the same path, ACCL_ROOT). A test
@@ -278,23 +282,39 @@ for l in open(sys.argv[1]):
     bin=$w/bin/cli/phitex
     mkdir -p "$w/par" && cp bench/para4000.tex "$w/par/"
     (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para4000.tex > "$r/para-warm.log" 2>&1)
+    # (the node is shared: each -j runs three times, the min quoted,
+    # the median beside it; the node and its load first)
+    echo "para node $(hostname) load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$r/para.txt"
     for j in 1 8 16; do
+      walls=""
+      best=""
+      for k in 1 2 3; do
+        Lk=$r/para-j$j-r$k.log
+        rm -rf "$w/par/o$j"
+        s0=$(date +%s.%N)
+        (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_CHECK_READS=1 NO_COLOR=1 \
+          timeout 900 "$bin" build -j $j --output-dir=o$j --program pdftex para4000.tex > "$Lk" 2>&1)
+        ek=$?
+        s1=$(date +%s.%N)
+        mk=$(md5sum < "$w/par/o$j/para4000.pdf" 2>/dev/null | cut -c1-32)
+        [ -n "$mk" ] || mk=none
+        wk=$(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}')
+        walls="$walls $wk"
+        [ "$ek" = 0 ] || red "para4000 -j $j run $k: exit $ek $(grep -m1 -E 'panicked at|error' "$Lk" | cut -c1-160)"
+        [ "$mk" = "$want" ] || red "para4000 -j $j run $k: md5 $mk, bar $want"
+        # (the fastest run's log and result stand for the -j)
+        if [ -z "$best" ] || awk -v x="$wk" -v y="$best" 'BEGIN{exit !(x < y)}'; then
+          best=$wk e=$ek m=$mk
+          cp "$Lk" "$r/para-j$j.log"
+        fi
+      done
       L=$r/para-j$j.log
-      rm -rf "$w/par/o$j"
-      s0=$(date +%s.%N)
-      (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_CHECK_READS=1 NO_COLOR=1 \
-        timeout 900 "$bin" build -j $j --output-dir=o$j --program pdftex para4000.tex > "$L" 2>&1)
-      e=$?
-      s1=$(date +%s.%N)
-      m=$(md5sum < "$w/par/o$j/para4000.pdf" 2>/dev/null | cut -c1-32)
-      [ -n "$m" ] || m=none
+      wall=$best
+      med=$(echo $walls | tr ' ' '\n' | sort -n | sed -n 2p)
       sum() { grep -E 'round guesses: ' "$L" | grep -oE "[0-9]+ $1" | awk '{s+=$1} END {print s+0}'; }
       cp_n=$(grep -oE 'realised cp [0-9]+ nodes [^,]+' "$L" | awk '{if ($3+0 >= m) {m=$3+0; t=$5}} END {print m+0, t}')
       nodes=$(grep -oE '[0-9]+ nodes run of [0-9]+ live' "$L" | tail -1 | awk '{print $1"/"$5}')
-      wall=$(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}')
-      echo "para4000 -j $j: exit $e md5 $m bar $want $([ "$m" = "$want" ] && echo same || echo DIFFERS) wall $wall us/paragraph $(awk -v w="$wall" 'BEGIN{printf "%.0f", w*1e6/4000}') nodes ${nodes:-?} cp $cp_n claims_refuted $(sum 'claims refuted') effects_refuted $(sum 'effects refuted') defs_refuted $(sum 'definitions refuted') stale_reads $(grep -oE 'check_reads: [0-9]+ stale' "$L" | awk '{s+=$2} END {print s+0}')" >> "$r/para.txt"
-      [ "$e" = 0 ] || red "para4000 -j $j: exit $e $(grep -m1 -E 'panicked at|error' "$L" | cut -c1-160)"
-      [ "$m" = "$want" ] || red "para4000 -j $j: md5 $m, bar $want"
+      echo "para4000 -j $j: exit $e md5 $m bar $want $([ "$m" = "$want" ] && echo same || echo DIFFERS) wall $wall us/paragraph $(awk -v w="$wall" 'BEGIN{printf "%.0f", w*1e6/4000}') nodes ${nodes:-?} cp $cp_n claims_refuted $(sum 'claims refuted') effects_refuted $(sum 'effects refuted') defs_refuted $(sum 'definitions refuted') stale_reads $(grep -oE 'check_reads: [0-9]+ stale' "$L" | awk '{s+=$2} END {print s+0}') wall_min $wall wall_median $med walls$walls" >> "$r/para.txt"
       python3 -I scripts/accl/gate-acct.py acct "$L" "para4000 -j $j" >> "$r/acct.txt" 2>&1
     done
     # the edit histories (spec-final §0 bytes)

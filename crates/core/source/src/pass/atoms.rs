@@ -41,7 +41,8 @@ impl Atom {
 }
 
 pub(crate) fn atoms(text: &str, tokens: &[Token]) -> Vec<Atom> {
-    let mut out: Vec<Atom> = Vec::with_capacity(tokens.len() * 2);
+    // (at most one atom a byte: never grown)
+    let mut out: Vec<Atom> = Vec::with_capacity(text.len() + 1);
     let mut stack: Vec<usize> = Vec::new();
     let mut line_blank = true;
     let mut skip_space = false;
