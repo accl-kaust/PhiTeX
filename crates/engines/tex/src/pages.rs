@@ -659,17 +659,12 @@ impl Run<'_, '_> {
         // the rest of its text is then a continuation placed after it,
         // which reads the state there forward and what the routine
         // leaves)
-        // (never inside a group or a conditional of the run's own: its
-        // rest, run as a resume, cannot leave them as a scope and reads
-        // on into the text after it, claiming the document to the next
-        // page node; the piece runs on through the candidate instead)
         let op = self.cx.op();
         if (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
             && fresh
             && self.split_at(i64::from(k))?
             && self.has_input()
-            && !self.open_span()
         {
             self.cut = Some(k);
             return Err(Halt::Cut);
