@@ -1113,6 +1113,7 @@ pub struct Stats {
 /// finishers waited on), the op time by node kind, the realised
 /// critical path in nodes and time and the kinds on the engine's
 /// critical chain, and the environment pushes.
+#[allow(clippy::too_many_lines)]
 fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_calls: u64) {
     let ms = |ns: u64| {
         #[allow(clippy::cast_precision_loss)]
@@ -1200,6 +1201,24 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         ld(&crate::ops::EXEC_CLAIMS[1]),
         ld(&crate::ops::EXEC_CLAIMS[2])
     );
+    // (the nodes waited on most: the definers the waits are on, by
+    // operation, with the start of the text or arguments)
+    let waited: Vec<String> = r
+        .top_waited
+        .iter()
+        .map(|&(n, w)| {
+            let info = eng.node_info(n);
+            let op = info.as_ref().map_or("gone", |i| i.op);
+            let a = info
+                .and_then(|i| i.args.first().map(|&x| eng.values().render(x)))
+                .unwrap_or_default()
+                .chars()
+                .take(48)
+                .collect::<String>();
+            format!("{w}x {op} {a}")
+        })
+        .collect();
+    eprintln!("acct: waited on (top {}): {waited:?}", waited.len());
     eprintln!(
         "acct: stops by reader and field (top 15): {:?}; waits by kind {:?}; by reader {:?}",
         crate::run::take_stops(eng.values(), 15),
