@@ -40,6 +40,14 @@ thread_local! {
 pub(crate) static RUN_LOG: std::sync::Mutex<Vec<(u64, bool, bool, u8)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// The exec nodes' claims as their texts declare them: none, a count,
+/// pending (decided by the run, its followers waiting).
+pub(crate) static EXEC_CLAIMS: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
 /// The commands every run of the process did (attempts that stopped
 /// counted too): Ir per command is a profile's total over this.
 pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -312,7 +320,7 @@ impl Operation for Exec {
         if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
             return Claim::Pending;
         }
-        match crate::hints::hint_of_args(reg(&self.0), v, args)
+        let c = match crate::hints::hint_of_args(reg(&self.0), v, args)
             .bound
             .as_ref()
             .and_then(|b| b.claim)
@@ -320,7 +328,14 @@ impl Operation for Exec {
             Some(0) => Claim::None,
             Some(n) => Claim::Count(n),
             None => Claim::Pending,
-        }
+        };
+        let k = match c {
+            Claim::None => 0,
+            Claim::Count(_) => 1,
+            Claim::Pending => 2,
+        };
+        EXEC_CLAIMS[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        c
     }
     fn claim_limit(
         &self,

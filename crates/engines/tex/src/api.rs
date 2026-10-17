@@ -1196,9 +1196,13 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         r.realised_critical_path,
         r.realised_critical_time.as_secs_f64() * 1e3
     );
+    let ld = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
-        "acct: commands {}",
-        crate::ops::COMMANDS.load(std::sync::atomic::Ordering::Relaxed)
+        "acct: commands {}; exec claims declared: none {}, a count {}, pending {}",
+        ld(&crate::ops::COMMANDS),
+        ld(&crate::ops::EXEC_CLAIMS[0]),
+        ld(&crate::ops::EXEC_CLAIMS[1]),
+        ld(&crate::ops::EXEC_CLAIMS[2])
     );
     eprintln!(
         "acct: stops by reader and field (top 15): {:?}; waits by kind {:?}; by reader {:?}",
