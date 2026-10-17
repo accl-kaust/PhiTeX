@@ -363,6 +363,40 @@ pub(crate) enum FileLine {
     Piece(ValueId),
 }
 
+/// The engine reads that stopped a run, by field (spec-final §9b: what
+/// the raises are on), counted while `PHITEX_TEX_TIME` is set.
+static STOPS: std::sync::Mutex<Option<phitex_defuse::FxHashMap<Field, u64>>> =
+    std::sync::Mutex::new(None);
+
+/// A run stopped reading `f`.
+#[cold]
+pub(crate) fn note_stop(f: Field) {
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        let mut m = STOPS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *m.get_or_insert_with(Default::default).entry(f).or_default() += 1;
+    }
+}
+
+/// The fields runs stopped on most since the last call, with counts.
+pub(crate) fn take_stops(v: &Values, n: usize) -> Vec<(String, u64)> {
+    let m = STOPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .unwrap_or_default();
+    let mut xs: Vec<(String, u64)> = m
+        .into_iter()
+        .map(|(f, k)| (crate::val::field_name(v, f), k))
+        .collect();
+    // (fields by family: a field name's part before its last `:` and
+    // digits, so `cs:` names stay apart and numbered families merge)
+    xs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    xs.truncate(n);
+    xs
+}
+
 /// The size of a run's control-sequence name cache ([`Run::cs_cache`]).
 pub(crate) const CS_CACHE: usize = 1024;
 
@@ -847,7 +881,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 return Ok((x != self.absent()).then_some(x));
             }
         }
-        self.cx.use_field(f)
+        let r = self.cx.use_field(f);
+        if r.is_err() {
+            note_stop(f);
+        }
+        r
     }
 
     /// The value of an absent cell in a record (made once a run).
@@ -1136,6 +1174,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let f = self.loc_field(loc);
         let r = self.cx.use_field(f);
+        if r.is_err() {
+            note_stop(f);
+        }
         crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());

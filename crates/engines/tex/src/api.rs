@@ -1179,6 +1179,10 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         r.realised_critical_path,
         r.realised_critical_time.as_secs_f64() * 1e3
     );
+    eprintln!(
+        "acct: stops by field (top 10): {:?}",
+        crate::run::take_stops(eng.values(), 10)
+    );
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).

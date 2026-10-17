@@ -1826,22 +1826,11 @@ impl Run<'_, '_> {
         let t_p3 = std::time::Instant::now();
         let page_box = Node::Box(bx);
         let view = self.font_view(std::slice::from_ref(&page_box))?;
-        let mut fonts = Vec::new();
+        // (spec-final §3.2: the page's own font usage, by id; the end
+        // node resolves names and files from the fonts' fields)
         let mut ids: Vec<u32> = view.fonts.keys().copied().collect();
         ids.sort_unstable();
-        for &f in &ids {
-            let info = self.font_get(f, crate::fields::FontCell::Info)?;
-            let Some(i) = crate::fonts::info(v, info) else {
-                continue;
-            };
-            let Some(file) = i.file else { continue };
-            fonts.push(v.list(vec![
-                v.int(i64::from(f)),
-                v.str(&i.name),
-                file,
-                v.int(i64::from(i.s)),
-            ]));
-        }
+        let fonts: Vec<ValueId> = ids.iter().map(|&f| v.int(i64::from(f))).collect();
         let cs = v.list(counts.iter().map(|&c| v.int(i64::from(c))).collect());
         let pdf = self.pdf_page_params(pos.pdf)?;
         let page = v.list(vec![b, cs, v.list(fonts), pdf, v.list(pdf_data)]);
