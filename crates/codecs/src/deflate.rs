@@ -86,6 +86,7 @@ struct Ct {
 }
 
 /// The tables `tr_static_init` makes.
+#[derive(Clone)]
 struct Static {
     ltree: [Ct; L_CODES + 2],
     dtree: [Ct; D_CODES],
@@ -299,6 +300,12 @@ struct State<'a> {
     insert: usize,
     bi_buf: u16,
     bi_valid: u32,
+    /// The input read at most this many bytes at a time, the state kept
+    /// before each read past `snap_step` bytes after the last one kept
+    /// (0: read whole, nothing kept): see [`Resumable`].
+    snap_step: usize,
+    /// The states kept, each with the length of the output then.
+    snaps: Vec<(usize, State<'static>)>,
 }
 
 enum Block {
@@ -858,7 +865,10 @@ impl State<'_> {
     }
 
     fn read_buf(&mut self, at: usize, size: usize) -> usize {
-        let len = (self.input.len() - self.next_in).min(size);
+        let mut len = (self.input.len() - self.next_in).min(size);
+        if self.snap_step != 0 {
+            len = len.min(self.snap_step);
+        }
         if len == 0 {
             return 0;
         }
@@ -916,6 +926,69 @@ impl State<'_> {
         // (the window is zeroed beyond the data from the start: zlib's
         // `high_water` zeroing changes nothing a match can read, as the
         // matches are capped by the lookahead)
+    }
+
+    /// Before a read: the state kept if `snap_step` bytes were read
+    /// since the last one kept (a state that has read exactly
+    /// `next_in` bytes: it resumes on any input those bytes begin).
+    fn keep_state(&mut self) {
+        if self.snap_step == 0 || self.avail_in() == 0 {
+            return;
+        }
+        let last = self.snaps.last().map_or(0, |(_, s)| s.next_in);
+        if self.next_in >= last + self.snap_step {
+            let s = self.copy_static();
+            self.snaps.push((self.out.len(), s));
+        }
+    }
+
+    /// This state without its input, output and kept states.
+    fn copy_static(&self) -> State<'static> {
+        State {
+            st: self.st.clone(),
+            level: self.level,
+            input: &[],
+            next_in: self.next_in,
+            adler: self.adler,
+            out: Vec::new(),
+            window: self.window.clone(),
+            prev: self.prev.clone(),
+            head: self.head.clone(),
+            ins_h: self.ins_h,
+            block_start: self.block_start,
+            match_length: self.match_length,
+            prev_match: self.prev_match,
+            match_available: self.match_available,
+            strstart: self.strstart,
+            match_start: self.match_start,
+            lookahead: self.lookahead,
+            prev_length: self.prev_length,
+            max_chain_length: self.max_chain_length,
+            max_lazy_match: self.max_lazy_match,
+            good_match: self.good_match,
+            nice_match: self.nice_match,
+            dyn_ltree: self.dyn_ltree,
+            dyn_dtree: self.dyn_dtree,
+            bl_tree: self.bl_tree,
+            l_max_code: self.l_max_code,
+            d_max_code: self.d_max_code,
+            bl_max_code: self.bl_max_code,
+            bl_count: self.bl_count,
+            heap: self.heap,
+            heap_len: self.heap_len,
+            heap_max: self.heap_max,
+            depth: self.depth,
+            sym_buf: self.sym_buf.clone(),
+            sym_next: self.sym_next,
+            sym_end: self.sym_end,
+            opt_len: self.opt_len,
+            static_len: self.static_len,
+            insert: self.insert,
+            bi_buf: self.bi_buf,
+            bi_valid: self.bi_valid,
+            snap_step: self.snap_step,
+            snaps: Vec::new(),
+        }
     }
 
     fn longest_match(&mut self, mut cur_match: usize) -> usize {
@@ -996,6 +1069,7 @@ impl State<'_> {
     fn deflate_fast(&mut self, finish: bool) -> Block {
         loop {
             if self.lookahead < MIN_LOOKAHEAD {
+                self.keep_state();
                 self.fill_window();
                 if self.lookahead < MIN_LOOKAHEAD && !finish {
                     return Block::NeedMore;
@@ -1065,6 +1139,7 @@ impl State<'_> {
     fn deflate_slow(&mut self, finish: bool) -> Block {
         loop {
             if self.lookahead < MIN_LOOKAHEAD {
+                self.keep_state();
                 self.fill_window();
                 if self.lookahead < MIN_LOOKAHEAD && !finish {
                     return Block::NeedMore;
@@ -1200,6 +1275,89 @@ pub struct Scratch {
     prev: Vec<u16>,
     head: Vec<u16>,
     sym_buf: Vec<u8>,
+    /// ([`Resumable`]'s: the states to keep and those kept.)
+    snap_step: usize,
+    snaps: Vec<(usize, State<'static>)>,
+}
+
+impl State<'_> {
+    /// The rest of the compression: the input's end and the adler.
+    fn run(&mut self) {
+        let _ = if self.level <= 3 {
+            self.deflate_fast(true)
+        } else {
+            self.deflate_slow(true)
+        };
+        let a = self.adler;
+        self.out.extend(a.to_be_bytes());
+    }
+}
+
+/// A compression kept to be done again on an input that begins as the
+/// last one did: the states it went through, one every
+/// [`Resumable::STEP`] bytes of input, so that the next starts from the
+/// last state that read only bytes both inputs share. The bytes are
+/// [`compress`]'s (zlib's output does not depend on how the input is
+/// split into reads).
+#[derive(Default)]
+pub struct Resumable {
+    level: i32,
+    input: Vec<u8>,
+    out: Vec<u8>,
+    snaps: Vec<(usize, State<'static>)>,
+}
+
+impl Resumable {
+    /// The input bytes between two states kept.
+    pub const STEP: usize = 4096;
+
+    /// [`compress`] of `data` at `level`, resumed from the last state
+    /// kept that read no byte where `data` differs from the last input;
+    /// with the number of input bytes compressed again.
+    #[must_use]
+    pub fn compress(&mut self, data: &[u8], level: i32) -> (Vec<u8>, usize) {
+        let same = if level == self.level {
+            self.input
+                .iter()
+                .zip(data)
+                .position(|(a, b)| a != b)
+                .unwrap_or(self.input.len().min(data.len()))
+        } else {
+            0
+        };
+        if same == data.len() && same == self.input.len() && !self.out.is_empty() {
+            return (self.out.clone(), 0);
+        }
+        let keep = self.snaps.partition_point(|(_, s)| s.next_in <= same);
+        self.snaps.truncate(keep);
+        let last = self
+            .snaps
+            .last()
+            .map(|(at, snap)| (*at, snap.copy_static()));
+        let (out, from) = if let Some((at, mut s)) = last {
+            s.input = data;
+            s.out = Vec::with_capacity(data.len() / 2 + 64);
+            s.out.extend_from_slice(&self.out[..at]);
+            s.snaps = core::mem::take(&mut self.snaps);
+            let from = s.next_in;
+            s.run();
+            self.snaps = s.snaps;
+            (s.out, from)
+        } else {
+            let mut sc = Scratch {
+                snap_step: Self::STEP,
+                ..Scratch::default()
+            };
+            let out = compress_with(&mut sc, data, level);
+            self.snaps = sc.snaps;
+            (out, 0)
+        };
+        self.level = level;
+        self.input.clear();
+        self.input.extend_from_slice(data);
+        self.out.clone_from(&out);
+        (out, data.len() - from)
+    }
 }
 
 /// A buffer of `n` zeros, reusing `v`'s allocation.
@@ -1284,6 +1442,8 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
         insert: 0,
         bi_buf: 0,
         bi_valid: 0,
+        snap_step: 0,
+        snaps: Vec::new(),
     };
     s.init_block();
     // (the zlib header: deflate, a 32K window, the level's flags)
@@ -1300,13 +1460,9 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
     header |= level_flags << 6;
     header += 31 - header % 31;
     s.out.extend_from_slice(&header.to_be_bytes());
-    let _ = if s.level <= 3 {
-        s.deflate_fast(true)
-    } else {
-        s.deflate_slow(true)
-    };
-    let a = s.adler;
-    s.out.extend(a.to_be_bytes());
+    s.snap_step = sc.snap_step;
+    s.run();
+    sc.snaps = core::mem::take(&mut s.snaps);
     sc.st = Some(s.st);
     sc.window = s.window;
     sc.prev = s.prev;

@@ -478,6 +478,7 @@ impl PdfState {
 
     /// "Output the cross-reference stream dictionary".
     fn output_xref_stream(&mut self, root: usize) {
+        let t0 = std::time::Instant::now();
         let x = self.new_dict(OBJ_TYPE_OTHERS, 0, 0);
         let off = self.objs[x].offset;
         let w: usize = if off / 256 > 16_777_215 {
@@ -513,6 +514,7 @@ impl PdfState {
             let b = v.to_be_bytes();
             b[8 - w..].to_vec()
         };
+        let t_head = t0.elapsed();
         for k in 0..=self.sys_obj_ptr() {
             let o = self.objs[k];
             if !self.is_written(k) {
@@ -529,7 +531,17 @@ impl PdfState {
                 self.pdf_out(u8::try_from(o.os_idx).unwrap_or(0));
             }
         }
-        self.end_stream();
+        let t_rows = t0.elapsed();
+        let n = self.zip.as_ref().map_or(0, Vec::len);
+        self.end_stream_with(crate::compress_resumed);
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!(
+                "pdf xref stream: head {t_head:?}, rows {:?}, compressed {:?} ({n} bytes, level {})",
+                t_rows.saturating_sub(t_head),
+                t0.elapsed().saturating_sub(t_rows),
+                self.p.compress_level
+            );
+        }
     }
 
     /// "Output pages tree" (pdfTeX §802–§803).

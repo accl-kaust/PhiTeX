@@ -1056,9 +1056,14 @@ impl PdfState {
 
     /// `pdf_end_stream`, with `write_stream_length` (`utils.c`).
     fn end_stream(&mut self) {
+        self.end_stream_with(compress_memo);
+    }
+
+    /// [`Self::end_stream`] with the compressor `compress`.
+    fn end_stream_with(&mut self, compress: fn(&[u8], i32) -> Vec<u8>) {
         let length = if let Some(data) = self.zip.take() {
             let t0 = std::time::Instant::now();
-            let z = compress_memo(&data, self.p.compress_level);
+            let z = compress(&data, self.p.compress_level);
             phase::add(11, t0);
             self.out.extend_from_slice(&z);
             z.len()
@@ -1209,6 +1214,30 @@ pub(crate) fn compress_memo(data: &[u8], level: i32) -> Vec<u8> {
     }
     m.1 += z.len();
     m.0.insert(key, Arc::from(z.as_slice()));
+    z
+}
+
+/// The compression of a stream that the next link writes again with
+/// its beginning unchanged (the cross-reference stream: an edit moves the
+/// offsets after it only): resumed from the state the last compression
+/// had where the bytes first differ.
+pub(crate) fn compress_resumed(data: &[u8], level: i32) -> Vec<u8> {
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<phitex_codecs::deflate::Resumable>> = OnceLock::new();
+    let last = LAST.get_or_init(Mutex::default);
+    if let Some(p) = std::env::var_os("PHITEX_XREF_DUMP") {
+        let _ = std::fs::write(p, data);
+    }
+    let Ok(mut r) = last.try_lock() else {
+        return compress_memo(data, level);
+    };
+    let (z, again) = r.compress(data, level);
+    if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        eprintln!(
+            "pdf resumed compression: {again} of {} bytes compressed again",
+            data.len()
+        );
+    }
     z
 }
 
