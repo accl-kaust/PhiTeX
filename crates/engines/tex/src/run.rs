@@ -515,8 +515,8 @@ pub(crate) struct Run<'c, 'a> {
     /// The category codes of characters 0–255 as last read (`u8::MAX`:
     /// not read), valid while the table's catcode generation is
     /// `cat_gen`.
-    cat_cache: [u8; 256],
-    cat_gen: u64,
+    pub(crate) cat_cache: [u8; 256],
+    pub(crate) cat_gen: u64,
     /// The code tables (`lc`, `uc`, `sf`, `mc`, `dc`) of characters
     /// 0–255 as last read (`i32::MIN`: not read), valid while the
     /// table's generation is `code_gen` (the catcodes' generation, which
@@ -670,6 +670,8 @@ pub(crate) struct Run<'c, 'a> {
     /// A finisher's `\box255`, native, from its page's assembly to its
     /// routine ([`crate::pages::Fire::b255`]).
     pub fin_box: Option<(phitex_typeset::node::BoxNode, crate::nodes::Side)>,
+    /// The main loop's `lig_stack`, kept between words (§1034).
+    pub(crate) lig_buf: Vec<crate::build::LigItem>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -782,6 +784,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cell_eng: phitex_defuse::FxHashMap::default(),
             rec_sig: (0, 0, 0, 0),
             fin_box: None,
+            lig_buf: Vec::new(),
             reach_reads: 0,
         }
     }
@@ -1577,7 +1580,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // later declares its loop-back and this runs again)
         let _ = self.cx.use_field(k)?;
         let _ = self.cx.use_field(w)?;
-        if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+        if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
             eprintln!("TMPF units {key} node {}", self.cx.node().raw());
         }
         let Some(x) = self.cx.use_env(v.field(&format!("units:{key}")))? else {
@@ -1603,7 +1606,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let name = str_of(v, key);
         let f = v.field(&name);
         if name.starts_with("unit:") {
-            if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+            if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
                 eprintln!("TMPF unit {name} node {}", self.cx.node().raw());
             }
             let Some(x) = self.cx.use_env(f)? else {
@@ -1738,7 +1741,7 @@ impl<'c, 'a> Run<'c, 'a> {
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
-            if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
+            if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
                 eprintln!(
                     "TMPF file {key} node {} op {:?}",
                     self.cx.node().raw(),
@@ -3134,7 +3137,7 @@ impl<'c, 'a> Run<'c, 'a> {
         published.extend(recs.iter().copied());
         // (debug, `PHITEX_PUB_TRACE=<a>|<b>…`: the definitions of a run whose
         // first text segment contains one of the texts)
-        if let Ok(pat) = std::env::var("PHITEX_PUB_TRACE") {
+        if let Some(pat) = crate::exec::env_str!("PHITEX_PUB_TRACE") {
             let v = self.v;
             let first = self
                 .cx

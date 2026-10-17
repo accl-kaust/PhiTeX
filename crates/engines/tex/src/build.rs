@@ -917,9 +917,34 @@ impl Run<'_, '_> {
         walk(list, &mut ids);
         let mut view = crate::fonts::View::default();
         for f in ids {
-            self.add_font(&mut view, f)?;
+            self.add_font_metrics(&mut view, f)?;
         }
         Ok(view)
+    }
+
+    /// [`Self::add_font`] without the `\fontdimen`s: what measuring,
+    /// breaking and shipping a list need (the metrics, the hyphen
+    /// character, the name); only math reads the parameters through
+    /// the view (`Fonts::param`), and its view is made by `add_font`.
+    pub(crate) fn add_font_metrics(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
+        if view.fonts.contains_key(&f) || f == 0 {
+            return Ok(());
+        }
+        let info = self.font_get(f, crate::fields::FontCell::Info)?;
+        let Some(i) = crate::fonts::info(self.v, info) else {
+            return Ok(());
+        };
+        let Some(l) = i
+            .file
+            .and_then(|file| crate::fonts::load(self.v, file, i.s))
+        else {
+            return Ok(());
+        };
+        let hc = self.font_int(f, crate::fields::FontCell::Hc)?;
+        view.hyphen.insert(f, hc);
+        view.names.insert(f, (i.name, i.size));
+        view.fonts.insert(f, (l, Vec::new()));
+        Ok(())
     }
 
     pub(crate) fn add_font(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
@@ -1994,7 +2019,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
         let mut view = crate::fonts::View::default();
-        self.add_font(&mut view, f)?;
+        self.add_font_metrics(&mut view, f)?;
         // the space factor is never read: the run's effect on it so far
         // (`sf`: SF_UNREAD none, n >= 0 set to n, -s §1034's update by s)
         // goes on the list as a transition before each space that needs
@@ -2006,6 +2031,9 @@ impl Run<'_, '_> {
         // transitions and waiting spaces, each before `out[k]`
         let mut raws: Vec<(usize, ValueId)> = Vec::new();
         let mut cancel_boundary = cancel;
+        // (the space parameters, read once: no command of this loop
+        // changes them)
+        let mut space = SpaceMemo::default();
         loop {
             // reswitch
             let c = self.cur.cmd;
@@ -2044,14 +2072,20 @@ impl Run<'_, '_> {
                     if c == cmd::EX_SPACE || sf >= 0 {
                         // the factor is known here (or not needed)
                         let normal = c == cmd::EX_SPACE || sf == 1000;
-                        let g = self.space_glue(f, sf, normal)?;
+                        let g = self.space_glue_memo(f, sf, normal, &mut space)?;
                         out.push(g);
                     } else {
                         if sf != SF_UNREAD {
                             raws.push((out.len(), sf_value(v, sf)));
                             sf = SF_UNREAD;
                         }
-                        let p = self.waiting_space(f)?;
+                        let p = if let Some(p) = space.waiting {
+                            p
+                        } else {
+                            let p = self.waiting_space(f)?;
+                            space.waiting = Some(p);
+                            p
+                        };
                         raws.push((out.len(), p));
                     }
                 }
@@ -2061,11 +2095,13 @@ impl Run<'_, '_> {
                 }
             }
             // big_switch
-            if !self.has_input() {
-                break;
+            if !self.fast_char() {
+                if !self.has_input() {
+                    break;
+                }
+                self.get_x_token();
+                self.ck()?;
             }
-            self.get_x_token();
-            self.ck()?;
             if !matches!(
                 self.cur.cmd,
                 cmd::LETTER
@@ -2084,19 +2120,33 @@ impl Run<'_, '_> {
             raws.push((out.len(), sf_value(v, sf)));
         }
         let te = crate::prof::start();
-        let side = Side::default();
+        let lid = md.lid;
         let mut raws = raws.into_iter().peekable();
-        let _ = &side;
-        for (k, n) in out.drain(..).enumerate() {
-            while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
-                self.append(md.lid, r);
+        if let Some(l) = self.level_of(lid) {
+            // (the run's own list: the nodes go on it native, in one go)
+            l.list.reserve(out.len() + raws.len());
+            for (k, n) in out.drain(..).enumerate() {
+                while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
+                    fold_item(v, lid, r, &mut l.fold, &mut l.list);
+                }
+                l.list.push(crate::nest::Item::N(n));
+                l.fold.since_bp += 1;
             }
-            self.append_node(md.lid, n);
+            for (_, r) in raws {
+                fold_item(v, lid, r, &mut l.fold, &mut l.list);
+            }
+        } else {
+            for (k, n) in out.drain(..).enumerate() {
+                while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
+                    self.append(lid, r);
+                }
+                self.append_node(lid, n);
+            }
+            for (_, r) in raws {
+                self.append(lid, r);
+            }
         }
         CHAR_BUF.with(|c| c.set(out));
-        for (_, r) in raws {
-            self.append(md.lid, r);
-        }
         crate::prof::add(crate::prof::CHAR_ENC, te);
         Ok(())
     }
@@ -2117,6 +2167,45 @@ impl Run<'_, '_> {
             xs_v.push(v.int(i64::from(self.font_dimen(fi, k)?)));
         }
         Ok(v.list(xs_v))
+    }
+
+    /// [`Self::space_glue`] with the parameters read once a character
+    /// run (`m`).
+    fn space_glue_memo(&mut self, f: u32, sf: i32, normal: bool, m: &mut SpaceMemo) -> R<Node> {
+        let ss = if let Some(g) = m.ss {
+            g
+        } else {
+            let g = self.gpar(Par::spaceskip)?;
+            m.ss = Some(g);
+            g
+        };
+        let zero = |g: &Glue| g.width == 0 && g.stretch == 0 && g.shrink == 0;
+        if normal && !zero(&ss) {
+            return Ok(Node::param_glue(12, ss));
+        }
+        let xs = if normal {
+            Glue::ZERO
+        } else if let Some(g) = m.xs {
+            g
+        } else {
+            let g = self.gpar(Par::xspaceskip)?;
+            m.xs = Some(g);
+            g
+        };
+        let fi = i64::from(f);
+        let mut d = [0; 4];
+        for (k, n) in [2, 3, 4, 7].into_iter().enumerate() {
+            if (k < 3 && zero(&ss)) || (k == 3 && sf >= 2000) {
+                d[k] = if let Some(x) = m.d[k] {
+                    x
+                } else {
+                    let x = self.font_dimen(fi, n)?;
+                    m.d[k] = Some(x);
+                    x
+                };
+            }
+        }
+        Ok(space_node(&ss, &xs, d, sf, normal))
     }
 
     /// A space (§1041–§1044).
@@ -2197,6 +2286,7 @@ impl Run<'_, '_> {
         out: &mut Vec<Node>,
         cancel_boundary: &mut bool,
     ) -> R<bool> {
+        type Item = LigItem;
         #[derive(Clone, Copy, PartialEq)]
         enum L {
             Wrapup,
@@ -2207,13 +2297,7 @@ impl Run<'_, '_> {
             Lig,
             MoveLig,
         }
-        #[derive(Clone, Copy)]
-        struct Item {
-            ch: u32,
-            lig: bool,
-            ptr: Option<u32>,
-        }
-        let Some((loaded, _)) = view.fonts.get(&f).cloned() else {
+        let Some((loaded, _)) = view.fonts.get(&f) else {
             // the null font: every character is missing
             return Ok(false);
         };
@@ -2223,11 +2307,13 @@ impl Run<'_, '_> {
         let hyphen_char = view.hyphen.get(&f).copied().unwrap_or(-1);
         let para = md.m > 0;
         self.adjust_sf(md, ch, sf)?;
-        let mut lig_stack: Vec<Item> = vec![Item {
+        let mut lig_stack = std::mem::take(&mut self.lig_buf);
+        lig_stack.clear();
+        lig_stack.push(Item {
             ch,
             lig: false,
             ptr: None,
-        }];
+        });
         let mut cur_l: Option<u32> = Some(ch);
         let mut cur_r: Option<u32> = None;
         let mut cur_q = out.len();
@@ -2307,22 +2393,32 @@ impl Run<'_, '_> {
         loop {
             match at {
                 L::Wrapup => {
-                    wrapup(
-                        rt_hit,
-                        cur_l,
-                        cur_q,
-                        out,
-                        &mut lig_present,
-                        &mut lft_hit,
-                        &mut rt_hit,
-                        &mut ins_disc,
-                        lig_stack.is_empty(),
-                    );
+                    // (mostly a plain character: nothing to wrap up, no
+                    // call)
+                    let busy = cur_l.is_some()
+                        && (lig_present
+                            || ins_disc
+                            || (out.len() > cur_q
+                                && matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char)));
+                    if busy {
+                        wrapup(
+                            rt_hit,
+                            cur_l,
+                            cur_q,
+                            out,
+                            &mut lig_present,
+                            &mut lft_hit,
+                            &mut rt_hit,
+                            &mut ins_disc,
+                            lig_stack.is_empty(),
+                        );
+                    }
                     at = L::Move;
                 }
                 L::Move => {
                     // §1036
                     let Some(top) = lig_stack.last().copied() else {
+                        self.lig_buf = lig_stack;
                         return Ok(!input_done);
                     };
                     cur_q = out.len();
@@ -2359,7 +2455,12 @@ impl Run<'_, '_> {
                     // §1038; at the end of the node's text the next token
                     // is not a character (characters are one node)
                     let mut got: Option<u32> = None;
-                    if !self.has_input() {
+                    if self.fast_char() {
+                        // (a letter, other character or space)
+                        if self.cur.cmd != cmd::SPACER {
+                            got = Some(self.cur.chr.cast_unsigned());
+                        }
+                    } else if !self.has_input() {
                         input_done = true;
                     } else if self.next_ck()? {
                         if !matches!(
@@ -2747,6 +2848,26 @@ thread_local! {
 
 /// The space factor not read yet in a run of characters.
 const SF_UNREAD: i32 = i32::MIN;
+
+/// The space parameters a character run read ([`Run::char_run`]):
+/// `\\spaceskip`, `\\xspaceskip`, the font's dimensions 2, 3, 4 and 7,
+/// and a waiting space's value.
+#[derive(Default)]
+struct SpaceMemo {
+    ss: Option<Glue>,
+    xs: Option<Glue>,
+    d: [Option<i32>; 4],
+    waiting: Option<ValueId>,
+}
+
+/// An entry of the main loop's `lig_stack` (§1034): a character, whether
+/// it is a ligature's, and the character a ligature replaced.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LigItem {
+    ch: u32,
+    lig: bool,
+    ptr: Option<u32>,
+}
 
 /// The state of a list's fold: the space factor (§1034), the previous
 /// depth (§679), and the items since the last `build_page` marker.

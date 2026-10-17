@@ -202,7 +202,23 @@ fn kern_code(k: KernKind) -> i64 {
 }
 
 pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
-    v.list(list.iter().map(|n| encode(v, n, side)).collect())
+    // (a line's interword glue is one node many times: the last glue
+    // encoded is kept)
+    let mut seen: Option<(&Node, ValueId)> = None;
+    let mut xs = Vec::with_capacity(list.len());
+    for n in list {
+        let x = match (n, seen) {
+            (Node::Glue(g), Some((Node::Glue(h), x))) if g == h => x,
+            (Node::Glue(g), _) if g.leader.is_none() => {
+                let x = encode(v, n, side);
+                seen = Some((n, x));
+                x
+            }
+            _ => encode(v, n, side),
+        };
+        xs.push(x);
+    }
+    v.list(xs)
 }
 
 pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
@@ -244,7 +260,7 @@ fn encode_fixed(v: &Values, n: &Node) -> Option<ValueId> {
     Some(match n {
         Node::Char { font, ch } => {
             let (f, c) = (i64::from(*font), i64::from(*ch));
-            node_id(v, (T_CHAR, [f, c, 0], None), || {
+            crate::val::char_node_id(v, *font, *ch, || {
                 v.list(vec![i(v, T_CHAR), i(v, f), i(v, c)])
             })
         }
@@ -367,6 +383,29 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
 }
 
 pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
+    let val = v.get(x);
+    if let Value::List(xs) = &*val {
+        let mut out: List = Vec::with_capacity(xs.len());
+        // (the last glue decoded, kept: a line's interword glue is one
+        // value many times)
+        let mut last: Option<(ValueId, usize)> = None;
+        for &n in &**xs {
+            if let Some((id, k)) = last
+                && id == n
+            {
+                let g = out[k].clone();
+                out.push(g);
+                continue;
+            }
+            if let Some(d) = decode(v, n, side) {
+                if matches!(&d, Node::Glue(g) if g.leader.is_none()) {
+                    last = Some((n, out.len()));
+                }
+                out.push(d);
+            }
+        }
+        return out;
+    }
     list_of(v, x)
         .into_iter()
         .filter_map(|n| decode(v, n, side))
@@ -434,15 +473,32 @@ pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<
 }
 
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
+    // (a character, most of a list: its own direct-mapped cache)
+    if let Some((font, ch)) = crate::val::char_node_of(v, x) {
+        return Some(Node::Char { font, ch });
+    }
     if let Some(n) = crate::val::leaf_of(v, x) {
+        if let Node::Char { font, ch } = n {
+            crate::val::keep_char_node(v, x, font, ch);
+        }
         return Some(n);
     }
     let (marks, whats) = (side.marks.len(), side.whats.len());
     let n = decode_new(v, x, side)?;
     // a node that met no mark or whatsit decodes the same from its value
     // alone, a box or a list-holding node included
-    let leaf = side.marks.len() == marks && side.whats.len() == whats;
+    // (a node holding a list is decoded once where it is read: copying
+    // its tree into the cache and out again costs more than decoding it)
+    let leaf = side.marks.len() == marks
+        && side.whats.len() == whats
+        && !matches!(
+            n,
+            Node::Box(_) | Node::Unset(_) | Node::Ins(_) | Node::Adjust(_) | Node::Disc(_)
+        );
     if leaf {
+        if let Node::Char { font, ch } = n {
+            crate::val::keep_char_node(v, x, font, ch);
+        }
         crate::val::keep_leaf(v, x, &n);
     }
     Some(n)
@@ -450,10 +506,11 @@ pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
 
 #[allow(clippy::too_many_lines)]
 fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
-    let xs = match &*v.get(x) {
-        Value::List(xs) => xs.clone(),
-        _ => return None,
+    let val = v.get(x);
+    let Value::List(xs) = &*val else {
+        return None;
     };
+    let xs: &[ValueId] = xs;
     let g = |k: usize| xs.get(k).map_or(0, |&y| n32(v, y));
     let t = xs.first().map_or(-1, |&y| int_of(v, y));
     Some(match t {
@@ -461,7 +518,7 @@ fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             font: u32::try_from(g(1)).unwrap_or(0),
             ch: u16::try_from(g(2)).unwrap_or(0),
         },
-        T_BOX => Node::Box(decode_box(v, &xs, side)),
+        T_BOX => Node::Box(decode_box(v, xs, side)),
         T_RULE => Node::Rule(Rule {
             width: g(1),
             height: g(2),

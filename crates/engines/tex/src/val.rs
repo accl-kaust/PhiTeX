@@ -532,6 +532,52 @@ struct Encoded {
     /// while it is a key): a `\\let` of a macro encodes nothing.
     macros: FxHashMap<usize, (Rc<Macro>, ValueId)>,
     nodes: FxHashMap<NodeKey, ValueId>,
+    /// Character nodes, direct-mapped by `(font, character)`: the key
+    /// plus one (0: empty) and the value.
+    chars: Vec<(u64, ValueId)>,
+}
+
+/// The size of [`Encoded::chars`].
+const CHAR_NODES: usize = 1 << 12;
+
+/// The value of the character node `(font, ch)` (`make()` builds it),
+/// cached in a run.
+pub(crate) fn char_node_id(
+    v: &Values,
+    font: u32,
+    ch: u16,
+    make: impl FnOnce() -> ValueId,
+) -> ValueId {
+    let Some(epoch) = scope_epoch(v) else {
+        return make();
+    };
+    let key = (u64::from(font) << 16 | u64::from(ch)) + 1;
+    let slot = (usize::from(ch) ^ (font as usize).wrapping_mul(0x9E37)) & (CHAR_NODES - 1);
+    let hit = ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        if c.chars.is_empty() {
+            c.chars = vec![(0, ValueId::UNIT); CHAR_NODES];
+        }
+        let (k, x) = c.chars[slot];
+        (k == key).then_some(x)
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = make();
+    ENCODED.with(|c| {
+        if let Some(e) = c.borrow_mut().chars.get_mut(slot) {
+            *e = (key, x);
+        }
+    });
+    x
 }
 
 /// A node of fixed shape, as the key of its value: its tag, up to three
@@ -624,6 +670,10 @@ fn encoded<K: std::hash::Hash + Eq>(
 
 /// The value of integer `i` (cached in a run).
 pub(crate) fn int_id(v: &Values, i: i64) -> ValueId {
+    // (an integer of 60 bits is its id: no table, no cache)
+    if (-(1_i64 << 59)..(1_i64 << 59)).contains(&i) {
+        return v.int(i);
+    }
     encoded(v, |c| &mut c.ints, i, || v.int(i))
 }
 
@@ -722,6 +772,47 @@ pub(crate) fn keep_leaf(v: &Values, id: ValueId, n: &phitex_typeset::node::Node)
             c.leaves.clear();
         }
         c.leaves.insert(id, n.clone());
+    });
+}
+
+/// Character nodes decoded on a thread, direct-mapped by id: the values
+/// table's instance, then `(id, font, character)` (an id is a content
+/// hash: its decoding never goes stale).
+type CharNodes = (u64, Vec<(u64, u32, u16)>);
+
+thread_local! {
+    static CHAR_NODES_DEC: std::cell::RefCell<CharNodes> =
+        const { std::cell::RefCell::new((u64::MAX, Vec::new())) };
+}
+
+const CHAR_NODES_DEC_SIZE: usize = 1 << 12;
+
+/// The character node `id` decoded before on this thread, if it is one.
+pub(crate) fn char_node_of(v: &Values, id: ValueId) -> Option<(u32, u16)> {
+    let raw = id.raw();
+    CHAR_NODES_DEC.with(|c| {
+        let c = c.borrow();
+        if c.0 != v.instance() {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let (k, f, ch) =
+            *c.1.get((raw ^ (raw >> 17)) as usize & (CHAR_NODES_DEC_SIZE - 1))?;
+        (k == raw).then_some((f, ch))
+    })
+}
+
+/// Keeps `id`'s decoding as the character node `(font, ch)`.
+pub(crate) fn keep_char_node(v: &Values, id: ValueId, font: u32, ch: u16) {
+    let raw = id.raw();
+    CHAR_NODES_DEC.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != v.instance() || c.1.is_empty() {
+            *c = (v.instance(), vec![(u64::MAX, 0, 0); CHAR_NODES_DEC_SIZE]);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let k = (raw ^ (raw >> 17)) as usize & (CHAR_NODES_DEC_SIZE - 1);
+        c.1[k] = (raw, font, ch);
     });
 }
 

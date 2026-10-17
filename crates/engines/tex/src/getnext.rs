@@ -73,6 +73,65 @@ impl Run<'_, '_> {
         self.fetch_slow()
     }
 
+    /// The main loop's `get_next` (§343–§344, §347–§350) for the line on
+    /// top, already reached: a letter or other character next (by the
+    /// catcodes this run has cached) goes into `cur`, as does a space in
+    /// state `mid_line` (§348's spacer; blanks in another state are
+    /// skipped, §350), and the answer is true. Anything else (the line's
+    /// end, a control sequence, a catcode not cached) is the slow path's:
+    /// false, with nothing but skipped blanks read.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    pub(crate) fn fast_char(&mut self) -> bool {
+        if self.cat_gen != self.st.cat_gen() {
+            return false;
+        }
+        let Some(l) = self.input.levels.last() else {
+            return false;
+        };
+        if l.kind != input::kind::LINE {
+            return false;
+        }
+        let line = &mut self.input.lines[l.a as usize];
+        if line.endch == -2 {
+            return false;
+        }
+        loop {
+            let Some(&c) = line.buf.get(line.loc) else {
+                return false;
+            };
+            if c == 0 || c > 255 {
+                return false;
+            }
+            let cat = self.cat_cache[c as usize];
+            match cat {
+                cmd::LETTER | cmd::OTHER_CHAR => {
+                    line.loc += 1;
+                    line.state = MID_LINE;
+                    self.cur = Cur {
+                        tok: Tok::ch(cat, c),
+                        cmd: cat,
+                        chr: c.cast_signed(),
+                    };
+                    return true;
+                }
+                cmd::SPACER => {
+                    line.loc += 1;
+                    if line.state == MID_LINE {
+                        line.state = SKIP_BLANKS;
+                        self.cur = Cur {
+                            tok: Tok::ch(cmd::SPACER, 32),
+                            cmd: cmd::SPACER,
+                            chr: 32,
+                        };
+                        return true;
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+
     #[inline(never)]
     fn fetch_slow(&mut self) -> bool {
         match self.get_next_slow() {

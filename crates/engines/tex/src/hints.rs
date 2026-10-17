@@ -459,6 +459,16 @@ fn head_of_pass_field(f: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether `f` is one register of a family named as the engine names
+/// it (`count:0`, `box:255`): its head is the field itself.
+fn register_by_number(f: &str) -> bool {
+    f.split_once(':').is_some_and(|(fam, n)| {
+        matches!(fam, "count" | "dimen" | "skip" | "muskip" | "toks" | "box")
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 /// Adds heads to a state set (`None`: every head already).
 fn add_heads(st: &mut Option<Vec<&'static str>>, heads: Option<&[&'static str]>) {
     match (st.as_mut(), heads) {
@@ -861,7 +871,8 @@ pub(crate) struct TextHints {
     /// Byte starts of the atoms, and the encoded hint of the command
     /// beginning there.
     starts: Vec<usize>,
-    hints: Vec<Arc<Hint>>,
+    /// (`None` for a skipped atom: never read)
+    hints: Vec<Option<Arc<Hint>>>,
     /// Per atom: an operand an earlier command reads (never run on its
     /// own), or a character after the first of its run.
     skip: Vec<bool>,
@@ -895,6 +906,7 @@ impl TextHints {
         // has a guess: the span's guess is then the union)
         let mut any: Option<Hint> = None;
         let mut guessed = true;
+        let mut seen: phitex_defuse::FxHashSet<usize> = phitex_defuse::FxHashSet::default();
         let mut a = k;
         while let Some(&s) = self.starts.get(a)
             && s < end
@@ -903,7 +915,9 @@ impl TextHints {
             if self.skip[a - 1] {
                 continue;
             }
-            let h = &*self.hints[a - 1];
+            let Some(h) = self.hints[a - 1].as_deref() else {
+                continue;
+            };
             if first.is_none() {
                 first = Some(a - 1);
             }
@@ -917,6 +931,11 @@ impl TextHints {
                 let Some(g) = &h.guess else { continue };
                 g
             };
+            // (a bound already taken in adds nothing again: a union is
+            // idempotent, and a run's hint is shared by its repeats)
+            if !seen.insert(std::ptr::from_ref(part) as usize) {
+                continue;
+            }
             match &mut acc {
                 Some(acc) => union(acc, part),
                 None => acc = Some(part.clone()),
@@ -928,7 +947,7 @@ impl TextHints {
         }
         match (first, acc) {
             (Some(i), Some(b)) => {
-                let h = &*self.hints[i];
+                let h = self.hints[i].as_deref().expect("an atom not skipped");
                 Hint {
                     bound: Some(b),
                     cause: h.cause.clone(),
@@ -936,7 +955,10 @@ impl TextHints {
                     guess: h.guess.clone(),
                 }
             }
-            (Some(i), None) => (*self.hints[i]).clone(),
+            (Some(i), None) => self.hints[i]
+                .as_deref()
+                .cloned()
+                .expect("an atom not skipped"),
             // (a slice of blanks only: a space in vertical mode does
             // nothing, §1045)
             (None, _) if end != usize::MAX && off < end => Hint {
@@ -1340,10 +1362,15 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             // (the slice holds a paragraph if one starts in it)
             // (or a horizontal atom at depth 0 outside conditionals that
             // only a macro's guessed operands cover: `\hello\ world.`)
-            let has_par = p.atoms.iter().enumerate().any(|(k, a)| {
-                a.start >= s
-                    && a.start < e
-                    && (par_at[k]
+            // (atoms are in text order: the slice's range only)
+            let lo = p.atoms.partition_point(|a| a.start < s);
+            let has_par = p.atoms[lo..]
+                .iter()
+                .take_while(|a| a.start < e)
+                .enumerate()
+                .any(|(j, a)| {
+                    let k = lo + j;
+                    par_at[k]
                         || (depth[k] == 0
                             && ifd[k] == 0
                             && !operand[k]
@@ -1351,8 +1378,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                                 AtomKind::Char(_) | AtomKind::Verb => true,
                                 AtomKind::Cs => starts_par(a.name(text)),
                                 _ => false,
-                            }))
-            });
+                            })
+                });
             out.push((s, e));
             pars.push(has_par);
         }
@@ -2501,7 +2528,13 @@ impl Analysis<'_> {
                 if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
                     eprintln!("slices: head {h} from name {f}");
                 }
-                add_head(&mut b.state, h);
+                if register_by_number(f) {
+                    // (a register by its number, the page number's
+                    // `count:0`: that register, not its whole family)
+                    add_head_dyn(&mut b.state, f);
+                } else {
+                    add_head(&mut b.state, h);
+                }
             }
         }
         for f in set.prefixes.keys() {
@@ -2744,7 +2777,13 @@ fn add_defs_with(an: &Analysis<'_>, ds: &[Def], prefixes: bool, b: &mut Bound) {
             if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
                 eprintln!("slices: head {h} from def {}", d.field);
             }
-            add_head(&mut b.state, h);
+            if register_by_number(&d.field) {
+                // (a register by its number, the page number's
+                // `count:0`: that register, not its whole family)
+                add_head_dyn(&mut b.state, &d.field);
+            } else {
+                add_head(&mut b.state, h);
+            }
         } else if prefixes {
             if let Some(p) = engine_prefix(&d.field)
                 && !b.prefixes.contains(&p)
@@ -2764,6 +2803,52 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     analyse_with(text, kind, defs, own_definitions(text, kind))
 }
 
+thread_local! {
+    /// The bounds of runs of characters by their key ([`Analysis::run_key`]
+    /// with the regime's content for its index): a pure function of the
+    /// key, so one chunk's run serves the others.
+    static RUN_BOUNDS: std::cell::RefCell<FxHashMap<(u64, u64, u8), Bound>> =
+        std::cell::RefCell::default();
+}
+
+/// The hint of the run of characters at atom `a` (`key`: its text's
+/// hash, its regime's index and its place's flags, [`Analysis::run_key`]),
+/// its bound shared with every chunk that has the run under the same
+/// regime ([`RUN_BOUNDS`]).
+fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) -> Hint {
+    let reg = an.p.regimes.get(key.1).map_or(0, |r| {
+        let mut h = phitex_defuse::FxHasher::default();
+        std::hash::Hash::hash(&r.1, &mut h);
+        std::hash::Hasher::finish(&h)
+    });
+    let gkey = (key.0, reg, key.2);
+    let excerpt = short(excerpt_at(an.text, start));
+    if let Some(b) = RUN_BOUNDS.with(|c| c.borrow().get(&gkey).cloned()) {
+        return Hint {
+            bound: Some(b),
+            cause: "bounded".to_owned(),
+            excerpt,
+            guess: None,
+        };
+    }
+    let h = an.hint(a);
+    // (kept when it has the shape the hit rebuilds: bounded, no guess)
+    if let Some(b) = &h.bound
+        && h.guess.is_none()
+        && h.cause == "bounded"
+        && h.excerpt == excerpt
+    {
+        RUN_BOUNDS.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() >= 1 << 16 {
+                c.clear();
+            }
+            c.insert(gkey, b.clone());
+        });
+    }
+    h
+}
+
 /// [`analyse`] given the text's own definitions ([`own_definitions`]).
 // (one pass over the atoms, then one over the slices; splitting it
 // would only pass its tables around)
@@ -2772,7 +2857,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
     let an = Analysis::with_own(text, kind, defs.clone(), own);
     let (slices, pars) = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
-    let mut hints: Vec<Arc<Hint>> = Vec::with_capacity(an.p.atoms.len());
+    let mut hints: Vec<Option<Arc<Hint>>> = Vec::with_capacity(an.p.atoms.len());
     // (one value per distinct hint, keyed by the hash of its encoding:
     // no string keys in the pass, spec-final §5.2)
     let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
@@ -2798,7 +2883,6 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         }
     }
     let mut prev_char = false;
-    let blank = Arc::new(Hint::default());
     let mut runs: FxHashMap<(u64, usize, u8), Arc<Hint>> = FxHashMap::default();
     #[allow(clippy::needless_range_loop)]
     for a in 0..an.p.atoms.len() {
@@ -2808,7 +2892,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // (an atom inside a run of characters, or a space, is skipped
         // whatever its hint: no span reads it, so none is made)
         if (ch && prev_char) || at.kind == AtomKind::Space {
-            hints.push(blank.clone());
+            hints.push(None);
             skip.push(true);
             prev_char = ch;
             continue;
@@ -2823,9 +2907,9 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             );
             let h = runs
                 .entry(key)
-                .or_insert_with(|| Arc::new(an.hint(a)))
+                .or_insert_with(|| Arc::new(run_hint(&an, a, key, at.start)))
                 .clone();
-            hints.push(h);
+            hints.push(Some(h));
             skip.push(false);
             prev_char = ch;
             continue;
@@ -2838,7 +2922,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // (a guessed operand that is unbounded on its own is a value
         // read, not run: `\\headline={\\tenrm…}`)
         let unbounded_operand = an.claimed[a] && h.bound.is_none();
-        hints.push(Arc::new(h));
+        hints.push(Some(Arc::new(h)));
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
         skip.push(
@@ -2985,7 +3069,9 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             if t.skip[a] {
                 continue;
             }
-            let ah = &*t.hints[a];
+            let Some(ah) = t.hints[a].as_deref() else {
+                continue;
+            };
             for &n in NORMAL_PARAGRAPH {
                 if may_set(ah, n) && !out.contains(&n) {
                     out.push(n);
@@ -3054,7 +3140,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
     if crate::exec::env_flag!("PHITEX_HINTS_DIGEST") {
         let mut d = phitex_defuse::hash_bytes(0, text.as_bytes());
         for (h, &skip) in t.hints.iter().zip(&t.skip) {
-            if !skip {
+            if !skip && let Some(h) = h {
                 d = phitex_defuse::hash_bytes(d, h.encode().as_bytes());
             }
         }
@@ -3980,6 +4066,29 @@ mod tests {
             .position(|x| x.0 <= h && h < x.1)
             .expect("a slice");
         assert!(pars[k], "{sl:?} {pars:?}");
+    }
+
+    #[test]
+    fn routine_advancing_the_page_number_defines_that_register() {
+        // (plain's routine advances `\\pageno`, `\\countdef`'d to 0: the
+        // finisher may define count:0, never another count register)
+        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../oracle/fixtures/dvi/plaintext.tex");
+        let plain = std::fs::read_to_string(fx).expect("plaintext.tex");
+        let mut d = pass::Definitions::new();
+        d.harvest(&plain, kind_of(&plain, FileKind::Package), 0);
+        let defs: Defs = Arc::new(d);
+        let h = routine_hint("\\plainoutput", &defs);
+        eprintln!(
+            "{} {:?}",
+            h.cause,
+            h.bound
+                .as_ref()
+                .or(h.guess.as_ref())
+                .map(|b| (&b.names, &b.prefixes, &b.state))
+        );
+        assert!(h.may_define_field("count:0"));
+        assert!(!h.may_define_field("count:24"));
     }
 
     #[test]
