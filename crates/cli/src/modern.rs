@@ -614,7 +614,12 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         copy_pdf(m, d, ui);
     }
     cache_summary(t, ui);
-    i32::from(!r.out.errors.is_empty())
+    let code = i32::from(!r.out.errors.is_empty());
+    // (the process exits next: the session's engine and tables, hundreds
+    // of megabytes, are left to it instead of freed one by one)
+    std::mem::forget(s);
+    std::mem::forget(r);
+    code
 }
 
 /// The files a build of job `job` writes (`clean`).
