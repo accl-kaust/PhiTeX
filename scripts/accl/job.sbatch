@@ -64,8 +64,9 @@ net() {
 # answers DNS queries on some nodes even without a network: an empty
 # directory hides it)
 mkdir -p "$w/noresolve"
+ubind=""
 box() {
-  apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w:$root" --home "$root" --pwd "${PWD/#$w/$root}" \
+  apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w:$root" $ubind --home "$root" --pwd "${PWD/#$w/$root}" \
     --env CARGO_HOME="$root/cargo",CARGO_NET_OFFLINE=true,TEXMFVAR="$root/texmf-var",PHITEX_SANDBOX=1,w="$root",r="$root/results" \
     "$sif" "$@"
 }
@@ -76,7 +77,8 @@ key=$(sha256sum Cargo.lock | cut -c1-16)
 if [ -n "${ACCL_NO_CARGO:-}" ]; then
   :
 elif [ -d "$cache/cargo-$key" ]; then
-  cp -a "$cache/cargo-$key/." "$w/cargo/"
+  # (beside the upstream copy below)
+  cp -a "$cache/cargo-$key/." "$w/cargo/" &
 else
   net cargo fetch -q
   # (jobs racing to fill it: each writes its own part; the first rename wins)
@@ -85,13 +87,18 @@ else
 fi
 # the upstream sources, fetched once per version of the fetch script
 key=$(sha256sum scripts/fetch-upstream.sh | cut -c1-16)
-if [ -d "$cache/upstream-$key" ]; then
+if [ -d "$cache/upstream-$key" ] && [ -n "${ACCL_NO_CARGO:-}" ]; then
+  # (a job that builds nothing reads the sources where they are)
+  mkdir -p upstream
+  ubind="--bind $cache/upstream-$key:$root/phitex/upstream:ro"
+elif [ -d "$cache/upstream-$key" ]; then
   cp -a "$cache/upstream-$key" upstream
 else
   net scripts/fetch-upstream.sh
   p=$cache/upstream-$key.part-$SLURM_JOB_ID
   cp -a upstream "$p" && { mv -T "$p" "$cache/upstream-$key" 2>/dev/null || rm -rf "$p"; }
 fi
+wait
 # the container is the sandbox
 cat > scripts/sandbox <<'EOF'
 #!/usr/bin/env bash
@@ -109,7 +116,7 @@ EOF2
 chmod +x scripts/heavy
 
 export -f box
-export w sif r root
+export w sif r root ubind
 # (binaries another job built, and the recorded control timings)
 if [ -n "${ACCL_STORE_IN:-}" ]; then
   mkdir -p "$w/bin"

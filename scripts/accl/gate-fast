@@ -71,7 +71,7 @@ build_first() {
   if ssh $H "test -x $st/cli/phitex && test -x $st/tests/latex" 2>/dev/null; then
     echo "gate-fast: binaries of $c already built ($st)" >&2
   else
-    b=$(sub "-c 16 --mem=64G -t 00:40:00 -J gf-build --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st" build)
+    b=$(sub "-c 16 --mem=24G -t 00:40:00 -J gf-build --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st" build)
     ids+=("$b")
     dep="--dependency=afterok:$b --kill-on-invalid-dep=yes"
   fi
@@ -96,28 +96,29 @@ submit() {
   # (GATE_ONLY="lint ams": those shards only)
   on() { [ -z "${GATE_ONLY:-}" ] || [[ " $GATE_ONLY " == *" $1 "* ]]; }
   ids=()
-  if on lint; then ids+=("$(sub "-c 10 --mem=32G -t 00:20:00 -J gf-lint" lint)"); fi
+  # (the build first: everything but lint waits on it)
   build_first
+  if on lint; then ids+=("$(sub "-c 8 --mem=16G -t 00:20:00 -J gf-lint" lint)"); fi
   local T="tests/latex tests/build_s" S=tests C=cli
-  if on suites; then ids+=("$(sub "-c 12 --mem=48G -t 00:20:00 -J gf-suites $(on_bins "$S")" suites)"); fi
+  if on suites; then ids+=("$(sub "-c 8 --mem=16G -t 00:20:00 -J gf-suites $(on_bins "$S")" suites)"); fi
   if on latex; then
     for ((k = 0; k < n; k++)); do
-      ids+=("$(sub "-c 10 --mem=48G -t 00:20:00 -J gf-latex$k $(on_bins "$T")" latex "$k" "$n")")
+      ids+=("$(sub "-c 10 --mem=24G -t 00:20:00 -J gf-latex$k $(on_bins "$T")" latex "$k" "$n")")
     done
   fi
   # (the timing control: its timings as `gate-fast control` recorded
   # them, never built per gate; GATE_CONTROL= none)
   if on ams; then
-    ids+=("$(sub "-c 18 --mem=48G -t 00:30:00 -J gf-ams $(on_bins "$C")" ams "$want" "${GATE_CONTROL-566fb842}")")
-    ids+=("$(sub "-c 10 --mem=32G -t 00:30:00 -J gf-amsedit8 $(on_bins "$C")" amsedit 8)")
-    ids+=("$(sub "-c 18 --mem=48G -t 00:30:00 -J gf-amsedit16 $(on_bins "$C")" amsedit 16)")
+    ids+=("$(sub "-c 18 --mem=16G -t 00:30:00 -J gf-ams $(on_bins "$C")" ams "$want" "${GATE_CONTROL-566fb842}")")
+    ids+=("$(sub "-c 10 --mem=16G -t 00:30:00 -J gf-amsedit8 $(on_bins "$C")" amsedit 8)")
+    ids+=("$(sub "-c 18 --mem=16G -t 00:30:00 -J gf-amsedit16 $(on_bins "$C")" amsedit 16)")
   fi
   # (para4000: plain pdfTeX, bytes against its bar, wall and the
   # realised critical path at -j 1/8/16)
-  if on para; then ids+=("$(sub "-c 18 --mem=48G -t 00:30:00 -J gf-para $(on_bins "$C")" para "${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}")"); fi
+  if on para; then ids+=("$(sub "-c 18 --mem=16G -t 00:30:00 -J gf-para $(on_bins "$C")" para "${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}")"); fi
   # (para4000 at one thread under callgrind: startup, node bodies' Ir
   # per command, the top 15)
-  if on cg; then ids+=("$(sub "-c 8 --mem=24G -t 00:40:00 -J gf-cg $(on_bins "$C")" cg)"); fi
+  if on cg; then ids+=("$(sub "-c 2 --mem=8G -t 00:40:00 -J gf-cg $(on_bins "$C")" cg)"); fi
   echo "gate-fast: commit $c, oracle md5 $want" >&2
   mkdir -p "$runs"
   echo "$c ${ids[*]}" >> "$runs/gate-fast.ids"
