@@ -83,7 +83,8 @@ pub(crate) const RTN: &str = "rtn";
 /// page fires: the page's real items.
 pub(crate) const PITEMS: &str = "pitems";
 
-/// A cut's continuation, `[cont, cutting node, text kind, claim guess]`
+/// A cut's continuation, `[cont, cutting node, text kind, claim guess,
+/// candidate]`
 /// ([`Run::cont_encode`]): defined by the piece that cuts, read by the
 /// resume its page's finisher places after itself ([`Run::place_resume`]). A field, not the resume's arguments: the input left
 /// changes with any edit before the document's end, and a resume made
@@ -1688,7 +1689,13 @@ impl Run<'_, '_> {
         // [`Run::place_resume`])
         self.cx.define_with(
             v.field(RESUME),
-            v.list(vec![cont, pid, v.int(flags), v.int(rest)]),
+            v.list(vec![
+                cont,
+                pid,
+                v.int(flags),
+                v.int(rest),
+                v.int(i64::from(k)),
+            ]),
             Locality::Global,
         );
         Ok(())
@@ -1704,13 +1711,19 @@ impl Run<'_, '_> {
     /// routine left, and its first sibling, where the rest reads on into
     /// the text, was the finisher (a top piece's run ended there: no
     /// legal `\end`).
-    fn place_resume(&mut self, pid: i64) -> R<()> {
+    fn place_resume(&mut self, pid: i64, k: i64) -> R<()> {
         let v = self.v;
         let Some(x) = self.eng_read(v.field(RESUME))? else {
             return Ok(());
         };
         let xs = list_of(v, x);
-        if xs.len() < 4 || xs.get(1).map(|&p| int_of(v, p)) != Some(pid) {
+        // (the page whose break is the cut's own: a piece spanning
+        // pages is cut at one of their breaks, and only that page's
+        // continuation places its rest)
+        if xs.len() < 5
+            || xs.get(1).map(|&p| int_of(v, p)) != Some(pid)
+            || xs.get(4).map(|&c| int_of(v, c)) != Some(k)
+        {
             return Ok(());
         }
         self.cx.follow(
@@ -3992,8 +4005,9 @@ impl Run<'_, '_> {
         // finisher and this continuation, and the pages firing in the
         // material it carries)
         let pid = b.get(3).map_or(-2, |&x| int_of(v, x));
+        let k = b.get(4).map_or(-1, |&x| int_of(v, x));
         if pid != -2 {
-            self.place_resume(pid)?;
+            self.place_resume(pid, k)?;
         }
         Ok(placed)
     }
