@@ -83,9 +83,9 @@ pub(crate) const RTN: &str = "rtn";
 /// page fires: the page's real items.
 pub(crate) const PITEMS: &str = "pitems";
 
-/// A cut's continuation, `[cont, cutting node]` ([`Run::cont_encode`]):
-/// defined by the piece that cuts, read by the resume placed after its
-/// finisher. A field, not the resume's arguments: the input left
+/// A cut's continuation, `[cont, cutting node, text kind, claim guess]`
+/// ([`Run::cont_encode`]): defined by the piece that cuts, read by the
+/// resume its page's finisher places after itself ([`Run::place_resume`]). A field, not the resume's arguments: the input left
 /// changes with any edit before the document's end, and a resume made
 /// anew re-makes everything after it (spec-predicted-breaks §7).
 pub(crate) const RESUME: &str = "pages:resume";
@@ -1669,8 +1669,6 @@ impl Run<'_, '_> {
         self.cx.follow(self.ops.scan, vec![v.int(-3)]);
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-        self.cx
-            .define_with(v.field(RESUME), v.list(vec![cont, pid]), Locality::Global);
         // (the siblings the rest of the piece will take where the piece's
         // text says so: what it takes less what it took before the cut;
         // the nodes after the resume run on that instead of waiting for
@@ -1679,9 +1677,40 @@ impl Run<'_, '_> {
         let rest = self
             .claim_guess()
             .map_or(-1, |k| i64::try_from(k.saturating_sub(n)).unwrap_or(-1));
+        // (the resume is the finisher's to place, right after itself: it
+        // reads what the routine leaves, and the text siblings the rest
+        // of the piece reads on into follow it with no page node between,
+        // [`Run::place_resume`])
+        self.cx.define_with(
+            v.field(RESUME),
+            v.list(vec![cont, pid, v.int(flags), v.int(rest)]),
+            Locality::Global,
+        );
+        Ok(())
+    }
+
+    /// The continuation of a page whose break cut its piece (`pid`): the
+    /// resume of the piece's rest placed right after it (after the
+    /// page's finisher, and the pages firing in the material, which it
+    /// placed), with the piece's text kind and claim guess as the cut
+    /// gave them ([`RESUME`]); none while the piece has not cut there (its
+    /// cut defines [`RESUME`], and this run reads it again then). Placed
+    /// by the piece itself it sat before the finisher: it read nothing the
+    /// routine left, and its first sibling, where the rest reads on into
+    /// the text, was the finisher (a top piece's run ended there: no
+    /// legal `\end`).
+    fn place_resume(&mut self, pid: i64) -> R<()> {
+        let v = self.v;
+        let Some(x) = self.eng_read(v.field(RESUME))? else {
+            return Ok(());
+        };
+        let xs = list_of(v, x);
+        if xs.len() < 4 || xs.get(1).map(|&p| int_of(v, p)) != Some(pid) {
+            return Ok(());
+        }
         self.cx.follow(
             self.ops.resume,
-            vec![ValueId::UNIT, v.int(flags), ValueId::UNIT, v.int(rest)],
+            vec![ValueId::UNIT, xs[2], ValueId::UNIT, xs[3]],
         );
         Ok(())
     }
@@ -3953,6 +3982,22 @@ impl Run<'_, '_> {
             .get(4)
             .map(|&x| list_of(v, x))
             .unwrap_or_default();
+        let placed = self.scan_cont_(&b)?;
+        // (the rest of a piece cut at this page's break: after the page's
+        // finisher and this continuation, and the pages firing in the
+        // material it carries)
+        let pid = b.get(3).map_or(-2, |&x| int_of(v, x));
+        if pid != -2 {
+            self.place_resume(pid)?;
+        }
+        Ok(placed)
+    }
+
+    /// [`Run::scan_cont`] but the resume.
+    #[allow(clippy::too_many_lines)]
+    fn scan_cont_(&mut self, b: &[ValueId]) -> R<Placed> {
+        let v = self.v;
+        let b = b.to_vec();
         match self.cont_state(&b, None, None)? {
             Cont::Nothing => Ok(Placed::Nothing),
             Cont::Fire(j, src, k, rest, normal, special, origin) => {

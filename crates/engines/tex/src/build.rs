@@ -2393,17 +2393,26 @@ impl Run<'_, '_> {
         loop {
             match at {
                 L::Wrapup => {
-                    wrapup(
-                        rt_hit,
-                        cur_l,
-                        cur_q,
-                        out,
-                        &mut lig_present,
-                        &mut lft_hit,
-                        &mut rt_hit,
-                        &mut ins_disc,
-                        lig_stack.is_empty(),
-                    );
+                    // (mostly a plain character: nothing to wrap up, no
+                    // call)
+                    let busy = cur_l.is_some()
+                        && (lig_present
+                            || ins_disc
+                            || (out.len() > cur_q
+                                && matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char)));
+                    if busy {
+                        wrapup(
+                            rt_hit,
+                            cur_l,
+                            cur_q,
+                            out,
+                            &mut lig_present,
+                            &mut lft_hit,
+                            &mut rt_hit,
+                            &mut ins_disc,
+                            lig_stack.is_empty(),
+                        );
+                    }
                     at = L::Move;
                 }
                 L::Move => {

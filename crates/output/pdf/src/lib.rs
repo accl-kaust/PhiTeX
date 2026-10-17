@@ -746,6 +746,12 @@ pub struct PdfState {
     error: Option<PdfError>,
     stacks: color::Stacks,
     fonts: digest::TMap<FontId, Arc<FontState>>,
+    /// A font known to be in `fonts` (the last one `load_font` saw):
+    /// the per-character check is a compare.
+    last_loaded: Option<FontId>,
+    /// `divide_scaled(w, size, 4)` of characters' widths, direct-mapped
+    /// by width and size (a pure function: a line repeats its letters).
+    adv_memo: Box<[(Scaled, Scaled, i32, Scaled); 64]>,
     /// `fd_tree`'s descriptors of included PDF files' fonts.
     epdf_fds: digest::TMap<epdffont::FdKey, epdffont::EpdfFd>,
     /// `\pdfmapline` and `\pdfmapfile` entries: replacing (`=`) or
@@ -876,6 +882,8 @@ impl PdfState {
             stacks: color::Stacks::default(),
             epdf_fds: digest::TMap::new("epdf_fds"),
             fonts: digest::TMap::new("fonts"),
+            last_loaded: None,
+            adv_memo: Box::new([(0, 0, 0, 0); 64]),
             map_over: digest::TMap::new("map_over"),
             map_add: digest::TMap::new("map_add"),
             glyph_unicode: digest::TMap::new("glyph_unicode"),

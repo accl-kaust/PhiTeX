@@ -473,7 +473,14 @@ pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<
 }
 
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
+    // (a character, most of a list: its own direct-mapped cache)
+    if let Some((font, ch)) = crate::val::char_node_of(v, x) {
+        return Some(Node::Char { font, ch });
+    }
     if let Some(n) = crate::val::leaf_of(v, x) {
+        if let Node::Char { font, ch } = n {
+            crate::val::keep_char_node(v, x, font, ch);
+        }
         return Some(n);
     }
     let (marks, whats) = (side.marks.len(), side.whats.len());
@@ -489,6 +496,9 @@ pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             Node::Box(_) | Node::Unset(_) | Node::Ins(_) | Node::Adjust(_) | Node::Disc(_)
         );
     if leaf {
+        if let Node::Char { font, ch } = n {
+            crate::val::keep_char_node(v, x, font, ch);
+        }
         crate::val::keep_leaf(v, x, &n);
     }
     Some(n)
