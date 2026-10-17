@@ -404,6 +404,7 @@ impl Shared {
                     sig: 0,
                     binds: 0,
                     waits: Vec::new(),
+                    read_ix: None,
                 },
                 |b| *b,
             );
@@ -601,6 +602,7 @@ impl Shared {
                     .filter(|w| w.kind == "pending set")
                     .chain(hint_waits)
                     .collect(),
+                read_ix: None,
             };
             let sens = res.log.iter().any(|p| match p {
                 Pred::Def { sens, mode, .. } => *sens || *mode != DMode::Use,
@@ -753,6 +755,9 @@ impl Shared {
             // earlier run's value stayed) are checked against these.
             self.settle_predictions(s);
         }
+        // Against a touch that set the stale mark and then read the state
+        // (still running): one of the two sees the other's write.
+        std::sync::atomic::fence(Ordering::SeqCst);
         if restructured || r.has(super::F_STALE) {
             // Its own reads were made in the structure before its effect,
             // or something it read changed while it committed.

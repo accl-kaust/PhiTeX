@@ -61,6 +61,8 @@ pub struct Ctx<'a> {
     /// Where each field is in `defs`, once there are many.
     /// The run's definitions by field and whether scope-local.
     def_ix: FxHashMap<(Field, u8), usize>,
+    /// `stat_defs` by field, built on first use for a long list.
+    stat_ix: FxHashMap<Field, Locality>,
     pub(crate) static_claimed: Option<Vec<Slot>>,
     pub(crate) ask: Option<super::Ask>,
 }
@@ -107,6 +109,7 @@ impl<'a> Ctx<'a> {
             restart: false,
             dup: FxHashMap::default(),
             def_ix: FxHashMap::default(),
+            stat_ix: FxHashMap::default(),
             static_claimed,
             ask: None,
         }
@@ -403,11 +406,20 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn define_inner(&mut self, f: Field, x: ValueId) {
-        let loc = self
-            .stat_defs
-            .as_ref()
-            .and_then(|d| d.iter().find(|e| e.0 == f).map(|e| e.1))
-            .unwrap_or(Locality::Local);
+        let loc = match self.stat_defs.as_ref() {
+            Some(d) if d.len() > 16 => {
+                if self.stat_ix.is_empty() {
+                    // The first entry of a field wins, as in the scan.
+                    for e in d.iter().rev() {
+                        self.stat_ix.insert(e.0, e.1);
+                    }
+                }
+                self.stat_ix.get(&f).copied()
+            }
+            Some(d) => d.iter().find(|e| e.0 == f).map(|e| e.1),
+            None => None,
+        }
+        .unwrap_or(Locality::Local);
         self.define_with(f, x, loc);
     }
 

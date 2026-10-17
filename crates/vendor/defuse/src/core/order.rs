@@ -1401,13 +1401,21 @@ impl Shared {
                 };
                 let projs = !self.projs.is_empty() || self.any_proj.load(Ordering::Relaxed);
                 for (n, g) in std::mem::take(&mut e.users) {
-                    if let Some(x) = kept
+                    // Only a settled reader's committed log is the one this
+                    // subscription stands for (one committing has
+                    // subscribed its new run before storing its log).
+                    let settled = {
+                        let nr = self.rec(n);
+                        !super::in_work(nr.st()) && nr.lgen.load(Ordering::Acquire) == g
+                    };
+                    if settled
+                        && let Some(x) = kept
                         && self.read_from(n, s, f) == Some(x)
                     {
                         e.users.push((n, g));
                         continue;
                     }
-                    if projs && old_loc == loc && self.proj_stands(n, s, f, val) {
+                    if settled && projs && old_loc == loc && self.proj_stands(n, s, f, val) {
                         e.users.push((n, g));
                         continue;
                     }
@@ -2384,8 +2392,9 @@ impl Shared {
 
     /// The value `n`'s committed run read for `f` from `s`.
     fn read_from(&self, n: Slot, s: Slot, f: Field) -> Option<ValueId> {
-        let d = self.rec(n).data();
-        d.res.as_ref()?.log.iter().find_map(|p| match p {
+        let mut d = self.rec(n).data();
+        let res = d.res.as_mut()?;
+        let read = |p: &super::Pred| match p {
             super::Pred::Def {
                 f: g,
                 ans:
@@ -2395,9 +2404,21 @@ impl Shared {
                         ..
                     },
                 ..
-            } if *g == f && *node == s => Some(*v),
+            } => Some(((*g, *node), *v)),
             _ => None,
-        })
+        };
+        if res.log.len() <= 16 {
+            return res.log.iter().filter_map(read).find(|e| e.0 == (f, s)).map(|e| e.1);
+        }
+        let ix = res.read_ix.get_or_insert_with(|| {
+            let mut m = crate::FxHashMap::default();
+            for (k, v) in res.log.iter().filter_map(read) {
+                // The first read of a field from a site, as in the scan.
+                m.entry(k).or_insert(v);
+            }
+            Box::new(m)
+        });
+        ix.get(&(f, s)).copied()
     }
 
     /// Whether every read `n`'s committed run made of `f` from `s` was
@@ -2514,6 +2535,8 @@ impl Shared {
                 }
                 S_RUN => {
                     r.set(super::F_STALE);
+                    // Against the commit's state store then stale check.
+                    std::sync::atomic::fence(Ordering::SeqCst);
                     if r.st() == S_RUN {
                         return;
                     }

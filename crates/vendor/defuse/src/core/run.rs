@@ -723,6 +723,7 @@ impl Shared {
         let restore = |log: Vec<Pred>| {
             if let Some(c) = r.data().res.as_mut() {
                 c.log = log;
+                c.read_ix = None;
             }
         };
         let ok = self.sread(u, || {

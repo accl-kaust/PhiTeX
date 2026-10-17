@@ -430,6 +430,9 @@ pub(crate) struct Committed {
     pub sig: u64,
     pub binds: u64,
     pub waits: Vec<WaitRec>,
+    /// The values `log`'s plain uses read, by (field, site): built on the
+    /// first lookup of a long log, dropped when the log is replaced.
+    pub read_ix: Option<Box<crate::FxHashMap<(crate::values::Field, Slot), ValueId>>>,
 }
 
 /// A stopped run's state, taken up when its reads still hold.
