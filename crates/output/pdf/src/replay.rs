@@ -241,10 +241,13 @@ pub struct PageRecord {
     /// The characters the page used per font, and the fonts it
     /// initialized with their sharing key.
     chars: Vec<(FontId, [bool; 256])>,
-    /// `ff` of every font used after the page.
-    ffs: Vec<(FontId, FontId)>,
+    /// The font numbers in the content (`/F<n> ... Tf`): a symbolic
+    /// handle each, the page's font `n` names (its `ff` here), at a
+    /// place and length in the uncompressed content; the link rewrites
+    /// them as it numbers the fonts, exactly like object numbers.
+    holes: Vec<(usize, usize, FontId)>,
     /// The uncompressed content, width and height (`last_page_shown`).
-    shown: (Vec<u8>, i32, i32),
+    shown: (std::sync::Arc<[u8]>, i32, i32),
     /// The page's resources, page and contents objects where recorded.
     pre_nums: [usize; 3],
     /// The objects of the state recorded on (numbers up to it shared).
@@ -304,6 +307,8 @@ pub(crate) struct Recording {
     pub pre_nums: [usize; 3],
     /// Where the content object's bytes begin and end in `out`.
     pub blob: Option<(usize, usize)>,
+    /// The font numbers written in the content ([`PageRecord`]'s).
+    pub holes: Vec<(usize, usize, FontId)>,
     pub font_list: Vec<FontId>,
     /// Whether the page made anything but text, rules, annotations,
     /// links and destinations.
@@ -397,6 +402,9 @@ impl PdfState {
             pre_nums: rec.pre_nums,
             ..PageRecord::default()
         };
+        // (the fonts the walk read in, in order, kept for every page:
+        // the link numbers them, [`PageRecord::font_loads`])
+        pr.events.clone_from(&rec.events);
         let Some((a, b)) = rec.blob else {
             return (r, pr);
         };
@@ -412,15 +420,14 @@ impl PdfState {
         if pr.simple {
             pr.blob = self.out[a..b].to_vec();
             pr.post = Some(Box::new(self.scratch()));
-            pr.events = rec.events;
             pr.font_list = rec.font_list;
             pr.chars = page_chars;
-            for (&f, s) in self.fonts.iter() {
-                if s.used {
-                    pr.ffs.push((f, self.ff(f)));
-                }
-            }
-            pr.shown = self.page_shown.clone();
+            pr.holes = rec.holes;
+            pr.shown = (
+                std::sync::Arc::from(self.page_shown.0.as_slice()),
+                self.page_shown.1,
+                self.page_shown.2,
+            );
             pr.post_key = self.pre_key();
             pr.annots.clone_from(&self.annot_list);
             pr.links.clone_from(&self.link_list);
@@ -482,7 +489,11 @@ impl PdfState {
     /// The page `rec` recorded, placed on this state as `pdf_ship_out`
     /// would ship it here: false (the state untouched but for
     /// `init_output`) where the replay would not give the walk's bytes.
-    /// `base` is the fonts used on the state the page was recorded on.
+    /// `fmap` gives the font here a font of the record is (the record's
+    /// fonts are the page's own handles); the fonts' numbers in the
+    /// content are rewritten as here, and where any differs the content
+    /// goes to `parts` as a [`Part::Content`] after the bytes before it,
+    /// for the caller to compress (in parallel with the other pages').
     ///
     /// # Errors
     /// Why the page cannot be placed (the caller ships it).
@@ -491,8 +502,9 @@ impl PdfState {
         &mut self,
         rec: &PageRecord,
         fonts: &dyn FontSource,
-        base: &BTreeSet<FontId>,
+        fmap: &dyn Fn(FontId) -> FontId,
         known: Option<&str>,
+        parts: &mut Vec<Part>,
     ) -> Result<Option<String>, String> {
         let Some(post) = rec.post.as_deref().filter(|_| rec.simple) else {
             return Err("not only text and rules".to_owned());
@@ -528,9 +540,9 @@ impl PdfState {
             for e in &rec.events {
                 match *e {
                     FontEv::Load(f) => {
-                        loaded.insert(f);
+                        loaded.insert(fmap(f));
                     }
-                    FontEv::DoVf(f) | FontEv::Init(f) if !loaded.contains(&f) => {
+                    FontEv::DoVf(f) | FontEv::Init(f) if !loaded.contains(&fmap(f)) => {
                         return Err(format!("font {f} not loaded here"));
                     }
                     _ => {}
@@ -586,18 +598,25 @@ impl PdfState {
         // the walk's fonts, in its order
         for e in &rec.events {
             match *e {
-                FontEv::Load(f) => self.load_font(f, fonts),
+                FontEv::Load(f) => self.load_font(fmap(f), fonts),
                 FontEv::DoVf(f) => {
+                    let f = fmap(f);
                     if self.font(f).kind == FontType::New {
                         self.do_vf(f, fonts);
                     }
                 }
                 FontEv::Init(f) => {
+                    let f = fmap(f);
                     if !self.font(f).used {
                         self.init_font(f, fonts);
                     }
                 }
                 FontEv::New(t, i, n) => {
+                    let i = if t == crate::OBJ_TYPE_FONT {
+                        FontId::try_from(i).map_or(i, |f| i64::from(fmap(f)))
+                    } else {
+                        i
+                    };
                     let k = self.create_obj(t, i);
                     map.insert(n, k);
                 }
@@ -613,7 +632,6 @@ impl PdfState {
             }
         }
         let at = |n: usize| map.get(&n).copied().unwrap_or(n);
-        let _ = base;
         for (k, m) in &rec.marks {
             self.aux.marks.insert(at(*k), m.clone());
         }
@@ -621,62 +639,48 @@ impl PdfState {
             self.aux.dests.insert(at(*k), d.clone());
         }
         for (f, cs) in &rec.chars {
-            if let Some(s) = self.fonts.get(f)
+            let f = fmap(*f);
+            if let Some(s) = self.fonts.get(&f)
                 && s.chars.iter().zip(cs).any(|(&a, &b)| b && !a)
             {
-                let s = self.font_mut(*f);
+                let s = self.font_mut(f);
                 for (a, &b) in s.chars.iter_mut().zip(cs) {
                     *a |= b;
                 }
             }
         }
-        // the contents: as recorded, but where a font is shared here with
-        // another font than where it was recorded (`ff`), its tags
-        // (`/F<k> <size> Tf`) as here, the stream compressed again
-        let retag: std::collections::HashMap<FontId, FontId> = rec
-            .ffs
+        // the contents: as recorded, the fonts' numbers in it as here (a
+        // number the page wrote is its own handle of the font, `ff`
+        // there; here `ff` of the font it is, named as the caller numbers
+        // it); where one differs, the content is the caller's to
+        // compress, after the bytes so far
+        let subs: Vec<(usize, usize, Vec<u8>)> = rec
+            .holes
             .iter()
-            .filter(|(f, _)| self.fonts.get(f).is_some_and(|s| s.used))
-            .filter_map(|&(f, k)| {
-                let here = self.font_tag(self.ff(f));
-                (here != k).then_some((k, here))
+            .filter_map(|&(a, len, k)| {
+                let d = fmap(k);
+                let d = if self.fonts.contains_key(&d) {
+                    self.ff(d)
+                } else {
+                    d
+                };
+                let digits = Self::font_tag(d, fonts).to_string().into_bytes();
+                (rec.shown.0.get(a..a + len) != Some(&digits[..])).then_some((a, len, digits))
             })
             .collect();
-        let report = (!retag.is_empty()).then(|| {
-            let fonts: Vec<String> = rec
-                .ffs
-                .iter()
-                .map(|&(f, k)| {
-                    let s = self.fonts.get(&f);
-                    format!(
-                        "{f}: ff {k} recorded, {:?} here (num {:?}, name {:?})",
-                        s.map(|_| self.ff(f)),
-                        s.map(|s| s.num),
-                        s.map(|s| String::from_utf8_lossy(&s.name).into_owned())
-                    )
-                })
-                .collect();
-            format!("fonts renamed {retag:?}: {}", fonts.join("; "))
-        });
-        if retag.is_empty() {
+        let report = (!subs.is_empty()).then(|| format!("{} font numbers rewritten", subs.len()));
+        if subs.is_empty() {
             self.print(&rec.blob);
         } else {
-            let data = retag_fonts(&rec.shown.0, &retag);
-            let (body, filter) = if self.p.compress_level > 0 {
-                (crate::compress_memo(&data, self.p.compress_level), true)
-            } else {
-                (data, false)
-            };
-            let len = body.len().to_string();
-            let mut head = b"/Length           \n".to_vec();
-            head[8..8 + len.len()].copy_from_slice(len.as_bytes());
-            self.print(&head);
-            if filter {
-                self.print(b"/Filter /FlateDecode\n");
+            if let Some(c) = self.flush_chunk() {
+                parts.push(Part::Bytes(c));
             }
-            self.print(b">>\nstream\n");
-            self.print(&body);
-            self.print(b"\nendstream\nendobj\n");
+            self.flushes += 1;
+            parts.push(Part::Content {
+                data: rec.shown.0.clone(),
+                subs,
+                level: self.p.compress_level,
+            });
         }
         self.total_pages += 1;
         self.set_scratch(post);
@@ -686,7 +690,7 @@ impl PdfState {
         self.annot_list = rec.annots.iter().map(|&k| at(k)).collect();
         self.link_list = rec.links.iter().map(|&k| at(k)).collect();
         self.dest_list = rec.dests.iter().map(|&k| at(k)).collect();
-        self.page_shown.clone_from(&rec.shown);
+        self.page_shown = (Vec::new(), rec.shown.1, rec.shown.2);
         self.write_page_object(last_stream, last_resources);
         // "Write out resource lists": what no page before wrote
         self.obj_list = rec.obj_list.iter().map(|&k| at(k)).collect();
@@ -706,61 +710,70 @@ impl PdfState {
         }
         self.font_list.clone_from(&rec.font_list);
         self.write_page_marks();
-        self.write_resources(last_resources, true);
+        self.font_list = self.font_list.iter().map(|&f| fmap(f)).collect();
+        self.write_resources(last_resources, true, fonts);
         self.restore_resource_lists(saved);
         let links = std::mem::take(&mut self.link_stack);
         self.set_scratch(post);
         self.link_stack = links;
+        (self.pdf_f, self.last_f, self.dummy_font) =
+            (fmap(self.pdf_f), fmap(self.last_f), fmap(self.dummy_font));
         Ok(report)
     }
 }
 
-/// `content` with every font tag `/F<k> <size> Tf` whose `k` `map`
-/// gives renamed.
-fn retag_fonts(content: &[u8], map: &std::collections::HashMap<FontId, FontId>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(content.len() + 16);
-    let mut i = 0;
-    while i < content.len() {
-        if content[i] == b'/' && content.get(i + 1) == Some(&b'F') {
-            let mut e = i + 2;
-            while e < content.len() && content[e].is_ascii_digit() {
-                e += 1;
-            }
-            // `<digits> <real> Tf`
-            let mut t = e;
-            if e > i + 2 && content.get(t) == Some(&b' ') {
-                t += 1;
-                while t < content.len() && (content[t].is_ascii_digit() || content[t] == b'.') {
-                    t += 1;
-                }
-            }
-            let k = std::str::from_utf8(&content[i + 2..e])
-                .ok()
-                .and_then(|x| x.parse::<FontId>().ok());
-            if let Some(k) = k
-                && content[t..].starts_with(b" Tf")
-                && let Some(n) = map.get(&k)
-            {
-                out.extend_from_slice(format!("/F{n}").as_bytes());
-                i = e;
-                continue;
-            }
-        }
-        out.push(content[i]);
-        i += 1;
-    }
-    out
+/// Bytes the link places after the state's own (a page's content
+/// written apart, its font numbers rewritten and compressed by the
+/// caller, in parallel with the other pages': [`PdfState::replay_page`]).
+#[derive(Clone, Debug)]
+pub enum Part {
+    /// A chunk as the state flushed it.
+    Bytes(crate::Chunk),
+    /// A content stream's dictionary from its `/Length` on and its
+    /// stream: `data` uncompressed with `subs` (place, length, bytes)
+    /// put in, compressed at `level` (0: as it is).
+    Content {
+        data: std::sync::Arc<[u8]>,
+        subs: Vec<(usize, usize, Vec<u8>)>,
+        level: i32,
+    },
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn retags_font_tags_only() {
-        let map = std::collections::HashMap::from([(46, 42)]);
-        let got = super::retag_fonts(b"BT\n/F46 11.9552 Tf [(x)]TJ/F46 9 Tf (/F46 1)Tj ET", &map);
-        assert_eq!(
-            got,
-            b"BT\n/F42 11.9552 Tf [(x)]TJ/F42 9 Tf (/F46 1)Tj ET".to_vec()
-        );
+impl Part {
+    /// The chunk: as it is, or the content's bytes (no object begins in
+    /// them: the stream's header is the chunk's before).
+    #[must_use]
+    pub fn resolve(self) -> crate::Chunk {
+        match self {
+            Part::Bytes(c) => c,
+            Part::Content { data, subs, level } => {
+                let mut d = Vec::with_capacity(data.len() + 8 * subs.len());
+                let mut i = 0;
+                for (a, len, b) in &subs {
+                    d.extend_from_slice(&data[i..*a]);
+                    d.extend_from_slice(b);
+                    i = a + len;
+                }
+                d.extend_from_slice(&data[i..]);
+                let (body, filter) = if level > 0 {
+                    (crate::compress_memo(&d, level), true)
+                } else {
+                    (d, false)
+                };
+                let len = body.len().to_string();
+                let mut out = b"/Length           \n".to_vec();
+                out[8..8 + len.len()].copy_from_slice(len.as_bytes());
+                if filter {
+                    out.extend_from_slice(b"/Filter /FlateDecode\n");
+                }
+                out.extend_from_slice(b">>\nstream\n");
+                out.extend_from_slice(&body);
+                out.extend_from_slice(b"\nendstream\nendobj\n");
+                crate::Chunk {
+                    bytes: out.into(),
+                    objs: Vec::new(),
+                }
+            }
+        }
     }
 }

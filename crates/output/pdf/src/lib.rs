@@ -142,7 +142,7 @@ pub mod phase {
     }
 }
 mod replay;
-pub use replay::PageRecord;
+pub use replay::{PageRecord, Part};
 mod ship;
 pub mod t1;
 mod tounicode;
@@ -410,6 +410,12 @@ pub trait FontSource {
     /// `pdf_read_dummy_font`: the font `\pdfspacefont` names
     /// (`pdftexspace`), loaded now at its design size.
     fn space_font(&self) -> Option<FontId> {
+        None
+    }
+    /// The number in font `f`'s name (`/F<n>`) where it is not `f`
+    /// (pdfTeX's numbering, which a writer of pages apart learns when
+    /// they are linked).
+    fn tag(&self, _f: FontId) -> Option<FontId> {
         None
     }
 }
@@ -736,9 +742,6 @@ pub struct PdfState {
     running_link: bool,
     /// `pdf_dummy_font`.
     dummy_font: FontId,
-    /// The fonts' numbers in their names (`/F<n>`) where they are not
-    /// the engine's ([`PdfState::set_font_tags`]).
-    font_tags: Option<Arc<std::collections::HashMap<FontId, FontId>>>,
     /// The first fatal error met while walking a list.
     error: Option<PdfError>,
     stacks: color::Stacks,
@@ -869,7 +872,6 @@ impl PdfState {
             faked_space: false,
             running_link: true,
             dummy_font: 0,
-            font_tags: None,
             error: None,
             stacks: color::Stacks::default(),
             epdf_fds: digest::TMap::new("epdf_fds"),
@@ -1016,6 +1018,15 @@ impl PdfState {
     /// `pdf_offset`.
     fn offset(&self) -> usize {
         self.base + self.out.len()
+    }
+
+    /// Where the content stream being written is: the bytes of it so
+    /// far, uncompressed.
+    fn content_pos(&self) -> usize {
+        match &self.zip {
+            Some(z) => z.len(),
+            None => self.offset().saturating_sub(self.save_offset),
+        }
     }
 
     /// `pdf_begin_stream`.

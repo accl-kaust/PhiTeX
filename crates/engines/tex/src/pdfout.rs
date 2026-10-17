@@ -137,7 +137,7 @@ impl CmdOut {
 }
 
 /// A read-time command's step on the writer, as the link applies it.
-pub(crate) type CmdFn = Box<dyn FnMut(&mut PdfState, &mut Forms, &Fonts) -> CmdOut + Send>;
+pub(crate) type CmdFn = Box<dyn FnMut(&mut PdfState, &mut Forms, &dyn FontSource) -> CmdOut + Send>;
 
 /// A read-time command as the build keeps it for the link ([`command`]):
 /// its step, the fonts it names, the writer's parameters where it ran.
@@ -172,12 +172,8 @@ pub(crate) struct PagePiece {
     rec: phitex_pdf::PageRecord,
     /// The fonts used on the state the step wrote it on.
     base: BTreeSet<FontId>,
-    /// The page's index in the page chain and the fonts loaded when it
-    /// shipped (`fontcount`: the step's own, an output routine's and its
-    /// virtual fonts', numbered after the text's), for
-    /// [`FontTags`].
+    /// The page's index in the page chain (for traces and the key).
     pj: i64,
-    fcount: i64,
     /// The node that shipped it, for the link's errors ([`Linked`]).
     node: i64,
 }
@@ -300,93 +296,219 @@ fn tails() -> &'static TailMemo {
     T.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
-/// The fonts' numbers as pdfTeX gives them in their names (`/F<n>`),
-/// where they differ from the engine's, as a fold over the pages placed
-/// so far. The engine numbers the fonts in the order the line loads
-/// them (`fontcount`, a field every load defines for what follows it:
-/// the text's and a finisher's output routine's alike, a finisher being
-/// a node in the line), which is pdfTeX's order except where a
-/// `\shipout` loads fonts as its walk reads them in: a virtual font's
-/// local fonts at its `do_vf` (the engine loads them before the walk,
-/// [`vf_for`]) and `pdftexspace` ([`SPACE_FONT`]) where a faked space
-/// first needs it. Carried in the writer's fold, not read from every
-/// page before: an edited page changes no later placement's reads
-/// unless its fonts' order changed.
+/// The fonts as pdfTeX numbers them, a fold over the line (spec-final
+/// A3): every font load is a record where it ran (`fontload`,
+/// [`font_load`]: the text's, an output routine's), numbered in turn; a
+/// page's virtual fonts' local fonts, which its step knows by name and
+/// size only, are resolved where the walk reads them in (`do_vf`, in
+/// the record's order of its walk: [`PageRecord::font_loads`]) against
+/// the fonts loaded so far (`tfm_lookup`), else numbered as new ones
+/// (`read_font_info`); `pdftexspace` where a faked space first needs
+/// it. A text font loaded after a local font of its name and size is
+/// that font in pdfTeX (§1260 finds it): it takes its number.
 ///
-/// Example: text fonts 1 and 2, then a page whose virtual font 2 loads
-/// its local font 3 and whose walk needs the space font, then a text
-/// font 4: pdfTeX's numbers 1, 2, 3, space 4, then 5 for font 4.
-#[derive(Clone, Debug, Default, Hash)]
-pub(crate) struct FontTags {
-    done: BTreeSet<FontId>,
+/// Example: fonts 1 and 2 loaded, then a page whose virtual font 2 has
+/// the local font `cmr10` at 10pt (none so far) and whose walk needs the
+/// space font, then `\font\x=cmr10`: pdfTeX's numbers 1, 2, 3 for the
+/// local font, 4 for the space font, and the text's `cmr10` is 3.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FontNums {
+    /// The numbers given so far.
     next: FontId,
-    /// The fonts loaded before the pages placed so far.
-    steps: i64,
+    /// The fonts numbered, in their numbers' order: name, size, the id
+    /// the writer knows it by, whether a virtual font loaded it.
+    known: Vec<(Arc<str>, i32, FontId, bool)>,
+    /// Ids numbered (a writer's id, or one a load named).
+    done: BTreeSet<FontId>,
+    /// The numbers where they differ from the ids.
     map: BTreeMap<FontId, FontId>,
+    /// The local fonts this fold gave ids ([`LINK_LOCALS`] on).
+    locals: FontId,
 }
 
-impl FontTags {
-    fn put(&mut self, f: FontId) {
-        if self.done.insert(f) {
+impl FontNums {
+    fn put(&mut self, id: FontId, name: &str, size: i32, local: bool) {
+        if self.done.insert(id) {
             self.next += 1;
-            if f != self.next {
-                self.map.insert(f, self.next);
+            if id != self.next {
+                self.map.insert(id, self.next);
             }
+            self.known.push((Arc::from(name), size, id, local));
         }
     }
 
-    /// The page `pc` placed after the pages so far.
-    fn page(&mut self, pc: &PagePiece) {
-        let id = |f: i64| FontId::try_from(f).unwrap_or(0);
-        let steps = self.steps;
-        let mine = |f: FontId| i64::from(f) > steps && i64::from(f) <= pc.fcount;
-        // the fonts this page's virtual fonts loaded (at its walk)
-        let locals: BTreeSet<FontId> = pc
-            .fonts
-            .vfs
-            .values()
-            .flat_map(|vf| vf.fonts.iter().map(|&(_, g)| g))
-            .filter(|&g| mine(g))
-            .collect();
-        // the line's fonts loaded before this `\shipout`: the text's,
-        // the output routine's
-        for f in steps + 1..=pc.fcount {
-            if !locals.contains(&id(f)) {
-                self.put(id(f));
-            }
+    /// The fonts a format brought, numbered from 1.
+    fn seed(&mut self, fonts: &[(String, i32)]) {
+        for (i, (n, sz)) in fonts.iter().enumerate() {
+            self.put(FontId::try_from(i + 1).unwrap_or(0), n, *sz, false);
         }
-        // then as the walk reads them in
-        for (vf, f) in pc.rec.font_loads() {
+    }
+
+    /// A `fontload` record: font `id` of `name` at `size`.
+    fn load(&mut self, id: FontId, name: &str, size: i32) {
+        if self.done.contains(&id) {
+            return;
+        }
+        let local = self
+            .known
+            .iter()
+            .find(|k| k.3 && &*k.0 == name && k.1 == size)
+            .map(|k| k.2);
+        match local {
+            Some(d) => {
+                let n = self.tag(d);
+                self.done.insert(id);
+                if id != n {
+                    self.map.insert(id, n);
+                }
+            }
+            None => self.put(id, name, size, false),
+        }
+    }
+
+    /// A virtual font's local font `name` at `size`: the font loaded so
+    /// far of that name and size, else a new one; the writer's id.
+    fn local(&mut self, name: &str, size: i32) -> FontId {
+        if let Some(k) = self.known.iter().find(|k| &*k.0 == name && k.1 == size) {
+            return k.2;
+        }
+        let id = LINK_LOCALS + self.locals;
+        self.locals += 1;
+        self.put(id, name, size, true);
+        id
+    }
+
+    /// The fonts loaded after the last record, `t` in all (none but a
+    /// load without its record).
+    fn end(&mut self, t: i64) {
+        let mut f: FontId = 1;
+        while i64::from(f) <= t {
+            if !self.done.contains(&f) {
+                self.put(f, "", 0, false);
+            }
+            f += 1;
+        }
+    }
+
+    /// Font `id`'s number.
+    fn tag(&self, id: FontId) -> FontId {
+        self.map.get(&id).copied().unwrap_or(id)
+    }
+
+    /// The local fonts of a step's fonts resolved: by its record's walk
+    /// (`loads`, [`PageRecord::font_loads`]), else every virtual font's
+    /// in order (a command, written by the link). The step's handle →
+    /// the writer's id.
+    fn resolve(
+        &mut self,
+        fonts: &Fonts,
+        loads: Option<Vec<(bool, FontId)>>,
+    ) -> FxHashMap<FontId, FontId> {
+        let mut fwd = FxHashMap::default();
+        let loads = loads.unwrap_or_else(|| {
+            let mut vfs: Vec<FontId> = fonts.vfs.keys().copied().collect();
+            vfs.sort_unstable();
+            vfs.into_iter().map(|f| (true, f)).collect()
+        });
+        for (vf, f) in loads {
             if vf {
-                if let Some(x) = pc.fonts.vfs.get(&f) {
+                if let Some(x) = fonts.vfs.get(&f) {
                     for &(_, g) in &x.fonts {
-                        if mine(g) {
-                            self.put(g);
+                        if let Some((n, sz)) = fonts.local(g)
+                            && !fwd.contains_key(&g)
+                        {
+                            let d = self.local(n, sz);
+                            fwd.insert(g, d);
                         }
                     }
                 }
             } else if f == SPACE_FONT {
-                self.put(f);
+                self.put(SPACE_FONT, "pdftexspace", 0, false);
             }
         }
-        for f in steps + 1..=pc.fcount {
-            self.put(id(f));
+        fwd
+    }
+}
+
+/// A step's fonts as the link's writer asks for them: by the writer's
+/// ids (a local font's handle mapped, [`FontNums::resolve`]), named as
+/// pdfTeX numbers them ([`FontNums`]).
+struct Mapped<'a> {
+    fonts: &'a Fonts,
+    nums: &'a FontNums,
+    fwd: &'a FxHashMap<FontId, FontId>,
+    back: FxHashMap<FontId, FontId>,
+}
+
+impl<'a> Mapped<'a> {
+    fn new(fonts: &'a Fonts, nums: &'a FontNums, fwd: &'a FxHashMap<FontId, FontId>) -> Self {
+        Mapped {
+            fonts,
+            nums,
+            fwd,
+            back: fwd.iter().map(|(&a, &b)| (b, a)).collect(),
         }
-        self.steps = self.steps.max(pc.fcount);
     }
 
-    /// The fonts loaded after the last page, `t` in all.
-    fn end(&mut self, t: i64) {
-        for f in self.steps + 1..=t {
-            self.put(FontId::try_from(f).unwrap_or(0));
-        }
-        self.steps = self.steps.max(t);
+    fn step(&self, f: FontId) -> FontId {
+        self.back.get(&f).copied().unwrap_or(f)
     }
 
-    /// The names where they differ from the engine's numbers.
-    fn names(&self) -> Option<std::collections::HashMap<FontId, FontId>> {
-        (!self.map.is_empty()).then(|| self.map.iter().map(|(&a, &b)| (a, b)).collect())
+    fn doc(&self, f: FontId) -> FontId {
+        self.fwd.get(&f).copied().unwrap_or(f)
     }
+}
+
+impl FontSource for Mapped<'_> {
+    fn metrics(&self, f: FontId) -> &ScaledFont {
+        self.fonts.metrics(self.step(f))
+    }
+    fn name(&self, f: FontId) -> &[u8] {
+        self.fonts.name(self.step(f))
+    }
+    fn map_entry(&self, f: FontId) -> Option<MapEntry> {
+        self.fonts.map_entry(self.step(f))
+    }
+    fn font_file(&self, f: FontId) -> Option<Vec<u8>> {
+        self.fonts.font_file(self.step(f))
+    }
+    fn encoding_file(&self, f: FontId) -> Option<Vec<u8>> {
+        self.fonts.encoding_file(self.step(f))
+    }
+    fn file(&self, name: &[u8]) -> Option<Vec<u8>> {
+        self.fonts.file(name)
+    }
+    fn map_by_ps_name(&self, ps_name: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
+        self.fonts.map_by_ps_name(ps_name, slant, extend)
+    }
+    fn space_font(&self) -> Option<FontId> {
+        self.fonts.space_font()
+    }
+    fn virtual_font(&self, f: FontId) -> Option<VirtualFont> {
+        self.fonts.virtual_font(self.step(f)).map(|mut x| {
+            for e in &mut x.fonts {
+                e.1 = self.doc(e.1);
+            }
+            x
+        })
+    }
+    fn tag(&self, f: FontId) -> Option<FontId> {
+        Some(self.nums.tag(f))
+    }
+}
+
+/// A font load where it runs (spec-final A3): font `id` of `name` at
+/// `size`, a record of the line ([`XPAGES`]) the link numbers the fonts
+/// by ([`FontNums`]).
+pub(crate) fn font_load(r: &mut Run<'_, '_>, name: &str, size: i32, id: i64) {
+    let v = r.v;
+    let e = v.list(vec![
+        v.str("fontload"),
+        v.str(name),
+        v.int(i64::from(size)),
+        v.int(id),
+    ]);
+    r.contribute(XPAGES, v.seq_unit(e));
 }
 
 /// The writer a page shipped here is written apart on, and its key: a
@@ -561,11 +683,29 @@ pub(crate) struct Fonts {
     pub(crate) ps: Option<Arc<PsMap>>,
     /// The files asked for and not given (a dry run's findings).
     pub(crate) missed: Mutex<BTreeSet<Vec<u8>>>,
-    /// The virtual fonts `do_vf` read, by font.
+    /// The virtual fonts `do_vf` reads, by font.
     vfs: FxHashMap<FontId, VirtualFont>,
+    /// The virtual fonts' local fonts that are none of the step's own
+    /// (by name and size, never by number: [`LOCAL_FONTS`] + the index
+    /// is the step's handle of one, which the link resolves against the
+    /// fonts loaded before it, [`FontNums`]).
+    locals: Vec<(String, i32)>,
 }
 
+/// The first handle of a virtual font's local font in a step's fonts
+/// ([`Fonts::locals`]); the link's own for the local fonts it numbers
+/// ([`FontNums::local`]) begin at [`LINK_LOCALS`]. Both above any font
+/// the engine numbers and below [`SPACE_FONT`].
+const LOCAL_FONTS: FontId = 0x6000_0000;
+const LINK_LOCALS: FontId = 0x7000_0000;
+
 impl Fonts {
+    /// Local font `g`'s name and size, if `g` is a handle of one.
+    fn local(&self, g: FontId) -> Option<(&str, i32)> {
+        let i = usize::try_from(g.checked_sub(LOCAL_FONTS)?).ok()?;
+        self.locals.get(i).map(|(n, s)| (n.as_str(), *s))
+    }
+
     /// A digest of the fonts as the writer sees them (a memo key):
     /// names, sizes, map entries, the files' bytes.
     pub(crate) fn digest(&self) -> u64 {
@@ -719,118 +859,6 @@ fn store_scaled_f(sq: i32, z: i32) -> i32 {
     if a == 0 { sw } else { sw - alpha }
 }
 
-/// `do_vf`: font `f`'s virtual font read once, when the writer first
-/// outputs one of its characters; its local fonts are the TeX fonts of
-/// that name and size (`tfm_lookup`), else new ones (`read_font_info`:
-/// the next font numbers, as pdfTeX's are). `pdf:vf:<f>` holds the
-/// local fonts (`[k, font]`) of a virtual font; a font that is not
-/// virtual defines nothing: its name goes to the build's memo
-/// (`Ops::not_virtual`), and a reader finds no field (`None`: not
-/// virtual).
-pub(crate) fn do_vf(r: &mut Run<'_, '_>, f: u32) -> R<()> {
-    let v = r.v;
-    let key = format!("pdf:vf:{f}");
-    if r.get(&key)?.is_some() {
-        return Ok(());
-    }
-    let info = crate::fonts::info(v, r.font_get(f, crate::fields::FontCell::Info)?);
-    let Some(i) = info.filter(|i| i.file.is_some()) else {
-        return Ok(());
-    };
-    let memo = r.ops.not_virtual.clone();
-    if memo
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(&i.name)
-    {
-        return Ok(());
-    }
-    let not_virtual = |name: &str| {
-        memo.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(name.to_owned());
-    };
-    let Some(bytes) = file_bytes(r, &format!("{}.vf", i.name))? else {
-        not_virtual(&i.name);
-        return Ok(());
-    };
-    let Ok(vf) = phitex_tfm::parse_vf(&bytes) else {
-        not_virtual(&i.name);
-        return Ok(());
-    };
-    let mut locals = Vec::new();
-    for lf in &vf.fonts {
-        let fs = store_scaled_f(lf.scaled, i.size);
-        let name = String::from_utf8_lossy(&lf.name).into_owned();
-        let count = r.cint(crate::fields::cell::FONTCOUNT)?;
-        let mut found = None;
-        for g in 1..=count {
-            if let Some(j) = crate::fonts::info(v, r.font_get(g, crate::fields::FontCell::Info)?)
-                && j.name == name
-                && j.size == fs
-            {
-                found = Some(g);
-                break;
-            }
-        }
-        let g = match found {
-            Some(g) => g,
-            None => r.read_font_info(&name, fs)?,
-        };
-        locals.push(v.list(vec![v.int(i64::from(lf.number)), v.int(g)]));
-    }
-    r.set(&key, v.list(locals.clone()), true);
-    for l in locals {
-        let g = crate::val::int_at(v, l, 1);
-        if let Ok(g) = u32::try_from(g)
-            && g > 0
-        {
-            do_vf(r, g)?;
-        }
-    }
-    Ok(())
-}
-
-/// `do_vf` for the fonts of `b`, in the order the writer outputs them.
-pub(crate) fn vf_for(r: &mut Run<'_, '_>, b: &BoxNode) -> R<()> {
-    fn walk(list: &[phitex_typeset::node::Node], out: &mut Vec<FontId>) {
-        use phitex_typeset::node::Node;
-        for n in list {
-            match n {
-                // (a run of characters in one font is one entry: the
-                // fonts are taken in their first appearance's order)
-                Node::Char { font, .. } => {
-                    if out.last() != Some(font) {
-                        out.push(*font);
-                    }
-                }
-                Node::Lig(l) => {
-                    if out.last() != Some(&l.font) {
-                        out.push(l.font);
-                    }
-                }
-                Node::Box(b) => walk(&b.list, out),
-                Node::Glue(g) => {
-                    if let Some(l) = &g.leader {
-                        walk(std::slice::from_ref(&**l), out);
-                    }
-                }
-                Node::Disc(d) => walk(&d.replace, out),
-                _ => {}
-            }
-        }
-    }
-    let mut fonts = Vec::new();
-    walk(&b.list, &mut fonts);
-    let mut seen = BTreeSet::new();
-    for f in fonts {
-        if seen.insert(f) {
-            do_vf(r, f)?;
-        }
-    }
-    Ok(())
-}
-
 /// A file's bytes, `None` if absent.
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
     static M: OnceLock<Once<Arc<[u8]>>> = OnceLock::new();
@@ -865,51 +893,73 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     let v = r.v;
     let map = default_map(r)?;
     let mut out = Fonts::default();
-    let mut wanted: Vec<(u32, String, ValueId, i32)> = Vec::new();
-    // the virtual fonts' local fonts too
-    let mut all: Vec<u32> = ids.to_vec();
-    let mut k = 0;
-    while k < all.len() {
-        let f = all[k];
-        k += 1;
-        let Some(x) = r.get(&format!("pdf:vf:{f}"))? else {
-            continue;
-        };
-        let locals = list_of(v, x);
-        if locals.is_empty() {
-            continue;
-        }
-        let mut fonts = Vec::new();
-        for l in locals {
-            let n = u32::try_from(crate::val::int_at(v, l, 0)).unwrap_or(0);
-            let g = u32::try_from(crate::val::int_at(v, l, 1)).unwrap_or(0);
-            fonts.push((n, g));
-            if !all.contains(&g) {
-                all.push(g);
-            }
-        }
-        let name =
-            crate::fonts::info(v, r.font_get(f, crate::fields::FontCell::Info)?).map(|i| i.name);
-        if let Some(name) = name
-            && let Some(b) = file_bytes(r, &format!("{name}.vf"))?
-            && let Ok(vf) = phitex_tfm::parse_vf(&b)
-        {
-            let packets = vf
-                .chars
-                .iter()
-                .filter_map(|c| Some((u8::try_from(c.code).ok()?, c.dvi.to_vec())))
-                .collect();
-            out.vfs.insert(f, VirtualFont { fonts, packets });
-        }
-    }
-    let ids = &all[..];
+    // the fonts' fields, defined once at their loads (`[id, name, size,
+    // file, size asked]`), then the virtual fonts' local fonts
+    // (`vf_def_font`): a local font of a name and size this step has is
+    // that font, else a handle of its own ([`Fonts::locals`]); nothing of
+    // the document's font table is read, the link numbers the local fonts
+    let mut known: Vec<(u32, String, i32, ValueId, i32)> = Vec::new();
     for &f in ids {
         if let Some(i) = crate::fonts::info(v, r.font_get(f, crate::fields::FontCell::Info)?)
             && let Some(file) = i.file
+            && !known.iter().any(|x| x.0 == f)
         {
-            wanted.push((f, i.name, file, i.s));
+            known.push((f, i.name, i.size, file, i.s));
         }
     }
+    let memo = r.ops.not_virtual.clone();
+    let not_virtual = |name: &str| {
+        memo.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned());
+    };
+    let mut k = 0;
+    while k < known.len() {
+        let (f, name, size) = (known[k].0, known[k].1.clone(), known[k].2);
+        k += 1;
+        if memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&name)
+        {
+            continue;
+        }
+        let Some(b) = file_bytes(r, &format!("{name}.vf"))? else {
+            not_virtual(&name);
+            continue;
+        };
+        let Ok(vf) = phitex_tfm::parse_vf(&b) else {
+            not_virtual(&name);
+            continue;
+        };
+        let mut fonts = Vec::new();
+        for lf in &vf.fonts {
+            let fs = store_scaled_f(lf.scaled, size);
+            let lname = String::from_utf8_lossy(&lf.name).into_owned();
+            let g = if let Some(x) = known.iter().find(|x| x.1 == lname && x.2 == fs) {
+                x.0
+            } else if let Some(file) = r.file(&format!("{lname}.tfm"))? {
+                let g = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
+                out.locals.push((lname.clone(), fs));
+                known.push((g, lname, fs, file, fs));
+                g
+            } else {
+                // (`read_font_info` failing: the null font)
+                0
+            };
+            fonts.push((lf.number, g));
+        }
+        let packets = vf
+            .chars
+            .iter()
+            .filter_map(|c| Some((u8::try_from(c.code).ok()?, c.dvi.to_vec())))
+            .collect();
+        out.vfs.insert(f, VirtualFont { fonts, packets });
+    }
+    let mut wanted: Vec<(u32, String, ValueId, i32)> = known
+        .into_iter()
+        .map(|(f, name, _, file, s)| (f, name, file, s))
+        .collect();
     if space && let Some(x) = r.file("pdftexspace.tfm")? {
         // pdfTeX loads the space font at the shipout that first needs
         // it, as the next internal font number (the engine's
@@ -1016,7 +1066,7 @@ pub(crate) fn command(
     r: &mut Run<'_, '_>,
     input: ValueId,
     fonts: &[u32],
-    mut f: impl FnMut(&mut PdfState, &Fonts) -> CmdOut + Send + 'static,
+    mut f: impl FnMut(&mut PdfState, &dyn FontSource) -> CmdOut + Send + 'static,
 ) -> R<Option<CmdOut>> {
     command_forms(r, input, fonts, move |st, _, fs| f(st, fs))
 }
@@ -1026,7 +1076,7 @@ pub(crate) fn command_forms(
     r: &mut Run<'_, '_>,
     input: ValueId,
     fonts: &[u32],
-    f: impl FnMut(&mut PdfState, &mut Forms, &Fonts) -> CmdOut + Send + 'static,
+    f: impl FnMut(&mut PdfState, &mut Forms, &dyn FontSource) -> CmdOut + Send + 'static,
 ) -> R<Option<CmdOut>> {
     if r.param("pdfoutput")? <= 0 {
         return Ok(None);
@@ -1349,9 +1399,6 @@ pub(crate) fn ship(
             resolved.insert(u32::try_from(int_of(v, h)).unwrap_or(0), d);
         }
     }
-    let t5 = std::time::Instant::now();
-    vf_for(r, bx)?;
-    phitex_pdf::phase::add(5, t5);
     let space = resolved.values().any(|&d| {
         matches!(
             list_of(v, d).first().map(|&k| str_of(v, k)).as_deref(),
@@ -1441,7 +1488,6 @@ fn ship_apart(
         rec: phitex_pdf::PageRecord::default(),
         base: BTreeSet::new(),
         pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
-        fcount: r.cint(crate::fields::cell::FONTCOUNT)?,
         node: i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
     };
     // the key: what the piece is made of, by the values' identities
@@ -1458,7 +1504,6 @@ fn ship_apart(
         pdfmap,
         u64::from(pc.fonts.space.is_some()),
         pc.pj.cast_unsigned(),
-        pc.fcount.cast_unsigned(),
         // (the fonts as the writer gets them, the files the images ask
         // for among them: a run that read other ones writes another page)
         pc.fonts.digest(),
@@ -1538,6 +1583,9 @@ pub(crate) struct EndFields {
     pub g2u: Option<ValueId>,
     /// `fontcount`: the fonts loaded in all.
     pub fonts: i64,
+    /// The fonts loaded before the line's first `fontload` record (a
+    /// format's), name and size by number from 1 ([`FontNums::seed`]).
+    pub seed: Vec<(String, i32)>,
     pub info_omit_date: i32,
     pub suppress_ptex_info: i32,
 }
@@ -1550,7 +1598,7 @@ const LINK_SNAP: usize = 16;
 struct LinkSnap {
     at: usize,
     st: PdfState,
-    tags: FontTags,
+    nums: FontNums,
     forms: Forms,
     got: usize,
     errors: usize,
@@ -1559,14 +1607,14 @@ struct LinkSnap {
 }
 
 /// The last link of the process: its records (by value), each record's
-/// chunk, the writer every [`LINK_SNAP`] records, and what it gave the
+/// chunks, the writer every [`LINK_SNAP`] records, and what it gave the
 /// commands; an edit's link copies the records it shares from the start
 /// (spec-final §6.2).
 struct LinkMemo {
     /// The values' instance and what the writer starts from, hashed.
     head: u64,
     ids: Vec<u64>,
-    chunks: Vec<Option<phitex_pdf::Chunk>>,
+    chunks: Vec<Vec<phitex_pdf::Chunk>>,
     snaps: Vec<LinkSnap>,
     got: Vec<ValueId>,
     errors: Vec<(String, i64)>,
@@ -1592,15 +1640,18 @@ pub(crate) struct Linked {
 
 /// The exact PDF file, linked (spec-redesign §1 `link`): one writer
 /// state from the start, the line's records put on it in order
-/// ([`XPAGES`]): a page's record placed (`PdfState::replay_page`, its
-/// objects numbered after every record before it), or shipped again
-/// from its box where the replay cannot give the walk's bytes; a
-/// read-time command's step applied ([`Cmd`]); a document-level
-/// command applied ([`apply_doc_op`]). Each record's bytes are a chunk;
-/// the fonts' names in pdfTeX's order over the pages ([`FontTags`]);
-/// then the tail (the fonts embedded, the pages tree: by the final
-/// state's digest) and the cross-reference section, by the prefix sums
-/// of the chunks' lengths (`phitex_pdf::Tail::link`).
+/// ([`XPAGES`]): a font load numbered ([`FontNums`]); a page's record
+/// placed (`PdfState::replay_page`, its objects numbered after every
+/// record before it, its fonts' handles mapped and their numbers in its
+/// content rewritten), or shipped again from its box where the replay
+/// cannot give the walk's bytes; a read-time command's step applied
+/// ([`Cmd`]); a document-level command applied ([`apply_doc_op`]).
+/// Each record's bytes are chunks; a page's content whose font numbers
+/// changed is rewritten and compressed on the executor, the pages apart
+/// in parallel (spec-final §6.1); then the tail (the fonts embedded,
+/// the pages tree: by the final state's digest) and the cross-reference
+/// section, by the prefix sums of the chunks' lengths
+/// (`phitex_pdf::Tail::link`).
 #[allow(clippy::too_many_lines)]
 pub(crate) fn finish_exact(
     v: &Values,
@@ -1620,7 +1671,8 @@ pub(crate) fn finish_exact(
     let t0 = std::time::Instant::now();
     let mut st = fresh(v, f.date.clone(), &f.jobname, f.g2u);
     let mut forms = Forms::default();
-    let mut tags = FontTags::default();
+    let mut nums = FontNums::default();
+    nums.seed(&f.seed);
     let mut bytes = PdfBytes::new();
     let mut got: Vec<ValueId> = Vec::new();
     let mut errors: Vec<(String, i64)> = Vec::new();
@@ -1667,7 +1719,7 @@ pub(crate) fn finish_exact(
     // them, kept every `LINK_SNAP` records)
     let ids: Vec<u64> = xpages.iter().map(|x| x.raw()).collect();
     // (what the writer starts from: the same for the copy to stand)
-    let head = phitex_defuse::hash_bytes(
+    let mut head = phitex_defuse::hash_bytes(
         phitex_defuse::hash_words(
             v.instance(),
             &[f.g2u.map_or(0, ValueId::raw), f.date.len() as u64],
@@ -1676,7 +1728,13 @@ pub(crate) fn finish_exact(
             .concat()
             .as_slice(),
     );
-    let mut chunks_of: Vec<Option<phitex_pdf::Chunk>> = Vec::with_capacity(xpages.len());
+    for (n, sz) in &f.seed {
+        head = phitex_defuse::hash_words(
+            phitex_defuse::hash_bytes(head, n.as_bytes()),
+            &[u64::from(sz.cast_unsigned())],
+        );
+    }
+    let mut chunks_of: Vec<Vec<phitex_pdf::Chunk>> = Vec::with_capacity(xpages.len());
     let mut snaps: Vec<LinkSnap> = Vec::new();
     let mut start = 0usize;
     {
@@ -1685,14 +1743,11 @@ pub(crate) fn finish_exact(
             let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
             if let Some(sn) = m.snaps.iter().rev().find(|sn| sn.at <= same && sn.at > 0) {
                 st = sn.st.clone();
-                tags = sn.tags.clone();
+                nums = sn.nums.clone();
                 forms = sn.forms.clone();
                 got = m.got[..sn.got].to_vec();
                 errors = m.errors[..sn.errors].to_vec();
                 (placed, shipped) = (sn.placed, sn.shipped);
-                for c in m.chunks[..sn.at].iter().flatten() {
-                    bytes.push(c.clone());
-                }
                 chunks_of.extend(m.chunks[..sn.at].iter().cloned());
                 snaps.extend(m.snaps.iter().filter(|x| x.at <= sn.at).cloned());
                 start = sn.at;
@@ -1700,12 +1755,15 @@ pub(crate) fn finish_exact(
         }
     }
     let copied = start;
+    // (each record's bytes from `start` on, a page's content still to
+    // be rewritten and compressed among them)
+    let mut parts: Vec<Vec<phitex_pdf::Part>> = Vec::with_capacity(xpages.len() - start);
     for (i, (&x, pc)) in xpages.iter().zip(&pcs).enumerate().skip(start) {
         if i > start && (i - start).is_multiple_of(LINK_SNAP) {
             snaps.push(LinkSnap {
                 at: i,
                 st: st.clone(),
-                tags: tags.clone(),
+                nums: nums.clone(),
                 forms: forms.clone(),
                 got: got.len(),
                 errors: errors.len(),
@@ -1713,6 +1771,7 @@ pub(crate) fn finish_exact(
                 shipped,
             });
         }
+        let mut ps: Vec<phitex_pdf::Part> = Vec::new();
         if v.as_int(x).is_some() {
             // a page: no piece in the memo is a page written by a run
             // the engine threw away; nothing to place
@@ -1720,25 +1779,14 @@ pub(crate) fn finish_exact(
                 return none;
             };
             set_writer_params(&mut st, pc.wparams);
-            // the fonts' names as pdfTeX numbers them, over the pages
-            // placed so far (a page's numbers never change by a later
-            // page)
-            tags.page(pc);
-            if let Some(t) = tags.names() {
-                st.set_font_tags(t);
-            }
+            // its virtual fonts' local fonts numbered where its walk
+            // reads them in, after every font loaded before it
+            let fwd = nums.resolve(&pc.fonts, Some(pc.rec.font_loads()));
+            let src = Mapped::new(&pc.fonts, &nums, &fwd);
+            let fmap = |g: FontId| fwd.get(&g).copied().unwrap_or(g);
             set_page_params(v, &mut st, &pc.params, pc.margins);
             let n0 = st.objects_numbered();
-            if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
-                eprintln!(
-                    "  link page {}: copy fonts {}, map {}, files {}",
-                    pc.pj,
-                    st.params_mut().inclusion_copy_fonts,
-                    pc.fonts.ps.is_some(),
-                    pc.fonts.files.len()
-                );
-            }
-            let res = st.replay_page(&pc.rec, &pc.fonts, &pc.base, None);
+            let res = st.replay_page(&pc.rec, &src, &fmap, None, &mut ps);
             if res.is_err() {
                 // (the node that wrote the page logged the writer's
                 // error when it wrote it)
@@ -1746,7 +1794,7 @@ pub(crate) fn finish_exact(
                 let mut side = crate::nodes::Side::default();
                 if let Some(phitex_typeset::node::Node::Box(bx)) =
                     crate::nodes::decode(v, pc.boxv, &mut side)
-                    && let Err(e) = st.ship_out_with(&bx, &pc.fonts, &mut wh)
+                    && let Err(e) = st.ship_out_with(&bx, &src, &mut wh)
                 {
                     errors.push((format!("pdfTeX error: {e}"), pc.node));
                 }
@@ -1761,44 +1809,98 @@ pub(crate) fn finish_exact(
                     u64::from_ne_bytes(pc.node.to_ne_bytes()),
                     st.objects_numbered(),
                     match &res {
-                        Ok(_) => "replayed".to_owned(),
+                        Ok(r) => format!(
+                            "replayed{}",
+                            r.as_deref().map_or(String::new(), |r| format!(", {r}"))
+                        ),
                         Err(e) => format!("shipped again: {e}"),
                     }
                 );
             }
         } else {
             let xs = list_of(v, x);
-            if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("cmd") {
-                let key = xs.get(1).copied().unwrap_or(ValueId::UNIT);
-                let serial = xs
-                    .get(2)
-                    .map_or(0, |&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()));
-                let Some(c) = serials.get(&serial) else {
-                    return none;
-                };
-                set_writer_params(&mut st, c.wparams);
-                let out = {
-                    let mut g = c.f.lock().unwrap_or_else(PoisonError::into_inner);
-                    (*g)(&mut st, &mut forms, &c.fonts)
-                };
-                if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
-                    eprintln!(
-                        "  link command of node {}: {:?} (objects {})",
-                        c.node,
-                        out,
-                        st.objects_numbered()
+            match xs.first().map(|&k| str_of(v, k)).as_deref() {
+                Some("cmd") => {
+                    let key = xs.get(1).copied().unwrap_or(ValueId::UNIT);
+                    let serial = xs
+                        .get(2)
+                        .map_or(0, |&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()));
+                    let Some(c) = serials.get(&serial) else {
+                        return none;
+                    };
+                    set_writer_params(&mut st, c.wparams);
+                    let fwd = nums.resolve(&c.fonts, None);
+                    let src = Mapped::new(&c.fonts, &nums, &fwd);
+                    let out = {
+                        let mut g = c.f.lock().unwrap_or_else(PoisonError::into_inner);
+                        (*g)(&mut st, &mut forms, &src)
+                    };
+                    if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+                        eprintln!(
+                            "  link command of node {}: {:?} (objects {})",
+                            c.node,
+                            out,
+                            st.objects_numbered()
+                        );
+                    }
+                    got.push(v.list(vec![key, out.value(v)]));
+                }
+                Some("fontload") => {
+                    let name = xs.get(1).map(|&n| str_of(v, n)).unwrap_or_default();
+                    let size = xs.get(2).map_or(0, |&n| int_of(v, n));
+                    let id = xs.get(3).map_or(0, |&n| int_of(v, n));
+                    nums.load(
+                        FontId::try_from(id).unwrap_or(0),
+                        &name,
+                        i32::try_from(size).unwrap_or(0),
                     );
                 }
-                got.push(v.list(vec![key, out.value(v)]));
-            } else {
-                apply_doc_op(v, &mut st, x);
+                _ => apply_doc_op(v, &mut st, x),
             }
         }
-        let c = st.flush_chunk();
-        if let Some(c) = &c {
-            bytes.push(c.clone());
+        if let Some(c) = st.flush_chunk() {
+            ps.push(phitex_pdf::Part::Bytes(c));
         }
-        chunks_of.push(c);
+        parts.push(ps);
+    }
+    // (spec-final §6.1: the pages' contents whose font numbers moved,
+    // rewritten and compressed apart, on the executor)
+    let t_parts = std::time::Instant::now();
+    let jobs: Vec<(usize, usize)> = parts
+        .iter()
+        .enumerate()
+        .flat_map(|(i, ps)| {
+            ps.iter()
+                .enumerate()
+                .filter(|(_, p)| matches!(p, phitex_pdf::Part::Content { .. }))
+                .map(move |(k, _)| (i, k))
+        })
+        .collect();
+    let done: Vec<phitex_pdf::Chunk> = {
+        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(crate::exec::threads(None)));
+        crate::exec::map_on(&mut ex, jobs.len(), &|j| {
+            let (i, k) = jobs[j];
+            parts[i][k].clone().resolve()
+        })
+    };
+    let mut done = done.into_iter();
+    let mut rewritten = 0usize;
+    for ps in parts {
+        let mut cs = Vec::with_capacity(ps.len());
+        for p in ps {
+            cs.push(match p {
+                phitex_pdf::Part::Bytes(c) => c,
+                phitex_pdf::Part::Content { .. } => {
+                    rewritten += 1;
+                    done.next().unwrap_or_else(|| p.resolve())
+                }
+            });
+        }
+        chunks_of.push(cs);
+    }
+    let t_parts = t_parts.elapsed();
+    for c in chunks_of.iter().flatten() {
+        bytes.push(c.clone());
     }
     *link_memo().lock().unwrap_or_else(PoisonError::into_inner) = Some(LinkMemo {
         head,
@@ -1810,24 +1912,19 @@ pub(crate) fn finish_exact(
     });
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "pdf link: {copied} of {} records copied from the last link",
+            "pdf link: {copied} of {} records copied from the last link; {rewritten} page contents rewritten in {t_parts:?}",
             xpages.len()
         );
     }
-    // the fonts loaded after the last page named after them
-    tags.end(f.fonts);
-    if let Some(t) = tags.names() {
-        st.set_font_tags(t);
-    }
-    let ftags = {
-        let mut m: Vec<(FontId, FontId)> = tags.map.iter().map(|(&a, &b)| (a, b)).collect();
-        m.sort_unstable();
-        v.list(
-            m.into_iter()
-                .map(|(a, b)| v.list(vec![v.int(i64::from(a)), v.int(i64::from(b))]))
-                .collect(),
-        )
-    };
+    // the fonts loaded after the last record (none but a load without
+    // its record)
+    nums.end(f.fonts);
+    let ftags = v.list(
+        nums.map
+            .iter()
+            .map(|(&a, &b)| v.list(vec![v.int(i64::from(a)), v.int(i64::from(b))]))
+            .collect(),
+    );
     if let Some(c) = st.flush_chunk() {
         bytes.push(c);
     }

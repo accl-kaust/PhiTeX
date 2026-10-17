@@ -1141,6 +1141,7 @@ impl Run<'_, '_> {
         let f = self.cint(crate::fields::cell::FONTCOUNT)? + 1;
         self.set_cell(crate::fields::cell::FONTCOUNT, v.int(f), true);
         self.font_loaded(f);
+        crate::pdfout::font_load(self, name, l.at.size, f);
         let info = v.list(vec![
             v.str(name),
             v.int(i64::from(l.at.size)),

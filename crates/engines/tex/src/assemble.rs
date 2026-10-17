@@ -369,11 +369,31 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         .map(|x| str_of(v, x))
         .unwrap_or_default();
     let g2u = field(cx, "pdf:glyphtounicode")?;
+    let fonts = int_field(cx, "fontcount")?;
+    // (the fonts loaded before the line's first load record, a format's:
+    // numbered first, by their fields, defined once at their loads)
+    let first = xpages.iter().find_map(|&x| {
+        let xs = list_of(v, x);
+        (xs.first().map(|&k| str_of(v, k)).as_deref() == Some("fontload"))
+            .then(|| xs.get(3).map_or(0, |&n| int_of(v, n)))
+    });
+    let n0 = first.map_or(fonts, |k| k - 1);
+    let mut seed = Vec::new();
+    for id in 1..=n0 {
+        let name = crate::fields::font_cell_name(id, crate::fields::FontCell::Info);
+        let info = cx.use_field(v.field(&name))?;
+        seed.push(
+            crate::fonts::info(v, info)
+                .map(|i| (i.name, i.size))
+                .unwrap_or_default(),
+        );
+    }
     let f = crate::pdfout::EndFields {
         date,
         jobname,
         g2u,
-        fonts: int_field(cx, "fontcount")?,
+        fonts,
+        seed,
         info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };

@@ -30,8 +30,10 @@
 //!   after it, and what it gives back to the main list ([`RTN`]); the
 //!   continuation after it reads that on the finisher's prediction, so
 //!   the scan does not wait for the routine.
-//! - A piece's run ends at every page-builder candidate with input after
-//!   it (spec-final A1): its continuation ([`Run::cont_encode`]) is the
+//! - A piece's run ends at every page-builder candidate with items
+//!   contributed since the candidate before and input after it
+//!   (spec-final A1; a candidate with nothing contributed fires no page,
+//!   §994): its continuation ([`Run::cont_encode`]) is the
 //!   material of a `resume` piece ([`Resume`], [`RESUME`]) placed after
 //!   it, which reads the state there forward and, where a page fires
 //!   there, what the page's finisher leaves (its predictions first). No
@@ -574,6 +576,16 @@ impl Run<'_, '_> {
         }
         let v = self.v;
         let k = self.cand;
+        // (§994: `build_page` with nothing contributed does nothing, so a
+        // page fires only at a candidate with items contributed since the
+        // one before: the last of this run, or for a resume's first one
+        // the candidate its piece was cut at, where nothing was pending;
+        // a piece's first candidate otherwise may see items an earlier
+        // piece left after its last)
+        let fresh = match self.cand_marks.last() {
+            Some(m) => self.main_items_since(m.contribs),
+            None => self.cx.op() != self.ops.resume || self.main_items_since(0),
+        };
         if self.st.take_page_params() {
             if crate::exec::env_flag!("PHITEX_PAGE_TRACE") {
                 eprintln!(
@@ -615,7 +627,8 @@ impl Run<'_, '_> {
             nest: self.nest.len(),
         });
         // (spec-final A1: a piece's run ends at every page-builder
-        // candidate with input after it, whether or not a page fires
+        // candidate with items contributed since the one before and
+        // input after it, whether or not a page fires
         // there: the rest of its text is a continuation placed after it,
         // which reads the state here forward and, where a page fires
         // here, what its routine leaves; no command after the candidate
@@ -623,12 +636,63 @@ impl Run<'_, '_> {
         let op = self.cx.op();
         if (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
+            && fresh
             && self.has_input()
         {
             self.cut = Some(k);
             return Err(Halt::Cut);
         }
         Ok(())
+    }
+
+    /// Whether this run put an item on the main list (a node, or the
+    /// removal of one) in its contributions from the `from`-th on; the
+    /// markers for the builder and the writer are not items.
+    fn main_items_since(&self, from: usize) -> bool {
+        let v = self.v;
+        let f = v.field("items");
+        self.contribs
+            .get(from..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|&&(g, _)| g == f)
+            .any(|&(_, s)| {
+                v.seq_to_vec(s).iter().any(|&e| {
+                    let xs = list_of(v, e);
+                    xs.len() == 2
+                        && int_of(v, xs[0]) == 0
+                        && matches!(
+                            nodes::tag(v, xs[1]),
+                            0..=nodes::T_UNSET
+                                | nodes::T_DELETE
+                                | nodes::T_VBOX
+                                | nodes::T_END
+                                | nodes::T_ABORT
+                        )
+                })
+            })
+    }
+
+    /// The siblings this run's text says it takes: an exec node's hint
+    /// (`None` where the text does not say), a resume's guess (its
+    /// fourth argument).
+    pub(crate) fn claim_guess(&self) -> Option<usize> {
+        let v = self.v;
+        let args = self.cx.args();
+        let op = self.cx.op();
+        if op == self.ops.resume {
+            return args
+                .get(3)
+                .and_then(|&x| v.as_int(x))
+                .and_then(|n| usize::try_from(n).ok());
+        }
+        if op != self.ops.exec {
+            return None;
+        }
+        crate::hints::hint_of_args(&self.ops.hints, v, &args)
+            .bound
+            .as_ref()
+            .and_then(|b| b.claim)
     }
 
     /// Whether this run put a page parameter marker on the main list.
@@ -1452,9 +1516,17 @@ impl Run<'_, '_> {
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         self.cx
             .define_with(v.field(RESUME), v.list(vec![cont, pid]), Locality::Global);
+        // (the siblings the rest of the piece will take where the piece's
+        // text says so: what it takes less what it took before the cut;
+        // the nodes after the resume run on that instead of waiting for
+        // the resume's run, and a run that takes others restructures
+        // them; unknown, -1: decided by the resume's run)
+        let rest = self
+            .claim_guess()
+            .map_or(-1, |k| i64::try_from(k.saturating_sub(n)).unwrap_or(-1));
         self.cx.follow(
             self.ops.resume,
-            vec![ValueId::UNIT, v.int(flags), ValueId::UNIT],
+            vec![ValueId::UNIT, v.int(flags), ValueId::UNIT, v.int(rest)],
         );
         Ok(())
     }
@@ -2361,6 +2433,16 @@ impl FinDefs {
 
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
+/// The fields every finisher defines itself, whatever its routine.
+const FIN_OWN: [&str; 6] = [
+    RTN,
+    "deadcycles",
+    "param:outputpenalty",
+    "inspen",
+    "badness",
+    "box:255",
+];
+
 const FINISHER_FIELDS: &[&str] = &[
     "deadcycles",
     "mark:",
@@ -2456,8 +2538,34 @@ impl Operation for Finish {
     fn name(&self) -> &'static str {
         "finish"
     }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        None
+    /// What the last runs of the same routine defined, and the fields a
+    /// finisher sets itself (spec-final §9b): a definition list, so that
+    /// a reader after the finisher (the continuation reading [`RTN`])
+    /// finds its site and runs on the prediction instead of parking on a
+    /// pending set; a run defining outside it widens it at its commit
+    /// and its readers run again. None before any run of the routine.
+    fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        let t = *args.get(9)?;
+        if t == ValueId::UNIT
+            || crate::exec::env_flag!("PHITEX_HINTS_OFF")
+            || crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
+        {
+            return None;
+        }
+        let mut names = ops(&self.0)
+            .fin_defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&fin_key(v, t, args))
+            .map(FinDefs::names)?;
+        for n in FIN_OWN {
+            let f = v.field(n);
+            if !names.contains(&f) {
+                names.push(f);
+            }
+        }
+        ops(&self.0).fields.add_record_fields(&mut names);
+        Some(names.into_iter().map(|f| (f, Locality::Global)).collect())
     }
     /// The output routine's hint (encoded, the tenth argument:
     /// [`crate::hints::routine_hint`]) and the fields a finisher defines
@@ -2483,14 +2591,7 @@ impl Operation for Finish {
         if let Some(mut names) = known
             && !crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
         {
-            for n in [
-                RTN,
-                "deadcycles",
-                "param:outputpenalty",
-                "inspen",
-                "badness",
-                "box:255",
-            ] {
+            for n in FIN_OWN {
                 names.push(v.field(n));
             }
             ops(&self.0).fields.add_record_fields(&mut names);
@@ -2789,13 +2890,20 @@ impl Operation for Resume {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::Pending
     }
+    /// The siblings the rest of the cut piece takes, as the piece guessed
+    /// them (the fourth argument, [`Run::claim_guess`]): a guess, which
+    /// its run's claim replaces.
     fn claim(
         &self,
-        _: &[ValueId],
-        _: &Values,
+        args: &[ValueId],
+        v: &Values,
         _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Claim {
-        Claim::Pending
+        match args.get(3).and_then(|&x| v.as_int(x)) {
+            Some(0) => Claim::None,
+            Some(n) if n > 0 => Claim::Count(usize::try_from(n).unwrap_or(0)),
+            _ => Claim::Pending,
+        }
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
@@ -2905,16 +3013,19 @@ impl Operation for Scan {
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
         MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT), v.field(BREAKS)])
     }
-    /// A step is held until the pieces before it have run (the profiles,
-    /// an accumulator: the engine's gate waits for every contributor
-    /// before it in work) and the scan state is there.
+    /// A step is held until the scan state is there and its piece has
+    /// run (what the piece leaves the main list, which it defines at its
+    /// end). Not the profiles: the engine's gate answers an accumulator
+    /// by combining it from the unit's start at every check, quadratic
+    /// over a cold build; the step's range read stops on a piece of its
+    /// window still in work.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         if args.first().is_some_and(|&x| int_of(v, x) == -2) {
             // (it assembles its page as the finisher does: the break and
             // the material the page began with)
             return Some(vec![v.field(BREAKS), v.field(SCAN_MAT)]);
         }
-        Some(vec![v.field(SCAN), v.field(crate::vprof::VPROF)])
+        Some(vec![v.field(SCAN), v.field(crate::build::MAIN_LAST)])
     }
     /// No pieces' units: a window holding a step does not wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {

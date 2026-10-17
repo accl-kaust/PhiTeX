@@ -1639,6 +1639,7 @@ fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str) -> R<i64> {
     let nf = r.cint(crate::fields::cell::FONTCOUNT)? + 1;
     r.set_cell(crate::fields::cell::FONTCOUNT, v.int(nf), true);
     r.font_loaded(nf);
+    crate::pdfout::font_load(r, &format!("{}{suffix}", i.name), i.size, nf);
     let mut xs = vec![
         v.str(&format!("{}{suffix}", i.name)),
         v.int(i64::from(i.size)),
@@ -2707,12 +2708,8 @@ fn xform_step(
     let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
         return Ok(None);
     };
-    // PDF-BACKEND-GAP: pdfTeX reads a form's virtual fonts when it
-    // writes the form (`\immediate`: now; else after the first page that
-    // references it); here at `\pdfxform`, so a new local font of a
-    // later-written form may take a number a page's font takes in pdfTeX
-    // (`vfgap` in tests/pdftex.rs)
-    crate::pdfout::vf_for(r, &bx)?;
+    // (a form's virtual fonts' local fonts are numbered by the link where
+    // it writes the form, as pdfTeX reads them when it writes it)
     let mut data = Vec::new();
     for w in side.whats.clone() {
         data.push(crate::pdfout::writer_whatsit(r, w)?);

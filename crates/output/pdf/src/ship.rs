@@ -235,24 +235,15 @@ impl PdfState {
         );
     }
 
+    /// Font `k`'s number in its name (`/F<n>`): the caller's
+    /// ([`FontSource::tag`]: pdfTeX numbers fonts in the order it loads
+    /// them, which a writer shipping the pages apart knows only when
+    /// they are linked), else the font's own.
+    pub(crate) fn font_tag(k: FontId, src: &dyn FontSource) -> FontId {
+        src.tag(k).unwrap_or(k)
+    }
+
     /// `set_ff`.
-    /// The fonts' numbers in their names (`/F<n>`) from here on, where
-    /// they are not the engine's: pdfTeX numbers fonts in the order it
-    /// loads them, the virtual fonts' local fonts at the `\shipout`
-    /// that first uses them, which a writer shipping the pages apart
-    /// knows only at the end.
-    pub fn set_font_tags(&mut self, tags: std::collections::HashMap<FontId, FontId>) {
-        self.font_tags = Some(std::sync::Arc::new(tags));
-    }
-
-    /// Font `k`'s number in its name (`/F<n>`).
-    pub(crate) fn font_tag(&self, k: FontId) -> FontId {
-        self.font_tags
-            .as_ref()
-            .and_then(|m| m.get(&k).copied())
-            .unwrap_or(k)
-    }
-
     pub(crate) fn ff(&self, f: FontId) -> FontId {
         let n = self.font(f).num;
         if n < 0 {
@@ -348,7 +339,20 @@ impl PdfState {
             return;
         }
         self.print(b"/F");
-        self.print_int(i64::from(self.font_tag(k)));
+        // (a page written apart: the number is a handle the link
+        // rewrites, [`crate::PageRecord`]'s holes)
+        let at = self
+            .rec
+            .as_ref()
+            .filter(|r| r.walk)
+            .map(|_| self.content_pos());
+        self.print_int(i64::from(Self::font_tag(k, src)));
+        if let Some(a) = at {
+            let len = self.content_pos() - a;
+            if let Some(r) = &mut self.rec {
+                r.holes.push((a, len, k));
+            }
+        }
         self.pdf_out(b' ');
         let q = divide_scaled(size, ONE_HUNDRED_BP, 6).0;
         self.print_real(q, 4);
@@ -1410,7 +1414,7 @@ impl PdfState {
         if shipping_page {
             self.write_page_marks();
         }
-        self.write_resources(last_resources, shipping_page);
+        self.write_resources(last_resources, shipping_page, src);
         self.restore_resource_lists(saved);
         match self.error.take() {
             Some(e) => Err(e),
@@ -1541,7 +1545,12 @@ impl PdfState {
     }
 
     /// "Write out resources dictionary" (pdfTeX §762–§768).
-    pub(crate) fn write_resources(&mut self, last_resources: usize, shipping_page: bool) {
+    pub(crate) fn write_resources(
+        &mut self,
+        last_resources: usize,
+        shipping_page: bool,
+        src: &dyn FontSource,
+    ) {
         self.begin_dict(last_resources, 1);
         if shipping_page {
             if let Some(r) = self.p.page_resources.clone() {
@@ -1563,7 +1572,7 @@ impl PdfState {
             for f in self.font_list.clone() {
                 let k = self.ff(f);
                 self.print(b"/F");
-                self.print_int(i64::from(self.font_tag(k)));
+                self.print_int(i64::from(Self::font_tag(k, src)));
                 self.pdf_out(b' ');
                 self.print_int(self.font(k).num);
                 self.print(b" 0 R ");
