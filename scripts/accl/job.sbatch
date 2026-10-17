@@ -18,6 +18,18 @@
 #
 # Results: written to $w/results, copied at the end to
 # ~/code/flinner/phitex-runs/<task>-<job>/ (summary.txt, logs).
+#
+# Built binaries shared between jobs (scripts/accl/gate-fast; sbatch
+# --export=ALL,VAR=...):
+#   ACCL_ROOT=/gw        the workspace is seen at this fixed path inside the
+#                        container, so a test binary built in one job (its
+#                        crate paths compiled in) runs in another
+#   ACCL_STORE_OUT=DIR   after a `cmd` task that exits 0, its $r/store is
+#                        published as ~/DIR (atomically), not in the results
+#   ACCL_STORE_IN=A:B    before the task, ~/A, ~/B copied into $w/bin
+#   ACCL_NO_CARGO=1      the crates are not copied in (the task builds nothing)
+# and ~/code/flinner/phitex-accl/gate-control (the recorded control timings)
+# is copied to $w/gate-control.
 #SBATCH -J phitex -o phitex-%j.out
 set -euo pipefail
 commit=$1 task=$2
@@ -28,6 +40,7 @@ here=$HOME/code/flinner/phitex-accl
 w=/tmp/$USER-$SLURM_JOB_ID
 out=$HOME/code/flinner/phitex-runs/$task-$SLURM_JOB_ID
 r=$w/results
+root=${ACCL_ROOT:-$w}
 # (a full node disk corrupts results silently: fail at once below 20 GB free)
 free=$(df -Pk /tmp | awk 'NR==2{print $4}'); [ "$free" -ge 20971520 ] || { echo "FAILED: /tmp on $(hostname) has only $((free/1048576)) GB free (need 20); leftovers: $(ls -d /tmp/$USER-* 2>/dev/null | wc -l) of ours"; exit 75; }
 mkdir -p "$w/cargo" "$out" "$r"
@@ -52,15 +65,17 @@ net() {
 # directory hides it)
 mkdir -p "$w/noresolve"
 box() {
-  apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w" --home "$w" --pwd "$PWD" \
-    --env CARGO_HOME="$w/cargo",CARGO_NET_OFFLINE=true,TEXMFVAR="$w/texmf-var",PHITEX_SANDBOX=1,w="$w",r="$r" \
+  apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w:$root" --home "$root" --pwd "${PWD/#$w/$root}" \
+    --env CARGO_HOME="$root/cargo",CARGO_NET_OFFLINE=true,TEXMFVAR="$root/texmf-var",PHITEX_SANDBOX=1,w="$root",r="$root/results" \
     "$sif" "$@"
 }
 if box getent hosts export.arxiv.org >/dev/null 2>&1; then echo "FAILED: the box resolves names on $(hostname)"; exit 76; fi
 
 # the crates, fetched once per Cargo.lock
 key=$(sha256sum Cargo.lock | cut -c1-16)
-if [ -d "$cache/cargo-$key" ]; then
+if [ -n "${ACCL_NO_CARGO:-}" ]; then
+  :
+elif [ -d "$cache/cargo-$key" ]; then
   cp -a "$cache/cargo-$key/." "$w/cargo/"
 else
   net cargo fetch -q
@@ -94,7 +109,15 @@ EOF2
 chmod +x scripts/heavy
 
 export -f box
-export w sif r
+export w sif r root
+# (binaries another job built, and the recorded control timings)
+if [ -n "${ACCL_STORE_IN:-}" ]; then
+  mkdir -p "$w/bin"
+  for s in ${ACCL_STORE_IN//:/ }; do
+    cp -a "$HOME/$s" "$w/bin/" || { echo "FAILED: no store $s"; exit 77; }
+  done
+fi
+[ -d "$here/gate-control" ] && cp -a "$here/gate-control" "$w/gate-control"
 case $task in
   gate)
     # (the vendored engine is an archive of another tree: not formatted or linted here)
@@ -115,6 +138,16 @@ case $task in
     cp -a "$course/aux" "$w/aux"
     status=0
     box "$@" || status=$?
+    # (a build for other jobs: published whole or not at all, and kept
+    # out of the results)
+    if [ -n "${ACCL_STORE_OUT:-}" ] && [ -d "$r/store" ]; then
+      if [ "$status" = 0 ]; then
+        d=$HOME/$ACCL_STORE_OUT
+        mkdir -p "$(dirname "$d")"
+        cp -a "$r/store" "$d.part-$SLURM_JOB_ID" && { mv -T "$d.part-$SLURM_JOB_ID" "$d" 2>/dev/null || rm -rf "$d.part-$SLURM_JOB_ID"; }
+      fi
+      rm -rf "$r/store"
+    fi
     ;;
   *) echo "unknown task $task"; exit 2 ;;
 esac

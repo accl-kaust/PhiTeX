@@ -5,20 +5,34 @@
 #                                       prints the job ids
 #   scripts/accl/gate-fast wait ID...   wait for them, fetch, print the table
 #
+#   scripts/accl/gate-fast edits [COMMIT]   amsldoc's edit histories at
+#                                       -j 8 and 16 with 50 edits (the
+#                                       measurement; the gate runs 10)
+#   scripts/accl/gate-fast control CTL  build control commit CTL, time its
+#                                       cold watch builds, record them in
+#                                       scripts/accl/gate-control/CTL (commit
+#                                       that): the ams shard reads them
+#
 # Shards (scripts/accl/gate-shard.sh, passed as text to job.sbatch's cmd
-# task, so any commit can be gated): lint (clippy -D warnings; fmt is
-# local only, the image's rustfmt is another version);
-# suites (phitex-tex's pdftex edits pages plain etex hints relaxed inputs
-# defuse_gaps); latex 0..N-1 (the latex target's non-ignored tests dealt
-# out, GATE_LATEX_SHARDS, default 3); ams (amsldoc --exact-pdf at -j 1 and
-# -j 8, md5 against the epoch oracle on acclhead1, the round counters
-# with PHITEX_TEX_TIME=1; then the cold watch build at -j 1/8/16 timed
-# by op class, the head beside the control GATE_CONTROL, default
-# 566fb842, built and run in the same job: gate-time.py); para
-# (bench/para4000.tex, plain pdfTeX, md5 against GATE_PARA_MD5, wall,
-# us per paragraph and realised critical path at -j 1/8/16); cg (para4000
-# at one thread under callgrind: startup Ir, node bodies' Ir per command,
-# top 15). Eight jobs.
+# task, so any commit can be gated): build (once per commit: phitex-tex's
+# test binaries and the release CLI, published under
+# phitex-runs/gate-bin/COMMIT on accl; a commit built before is not built
+# again); lint (clippy -D warnings; fmt is local only, the image's rustfmt
+# is another version; it builds its own, no wait); and, after the build
+# (Slurm dependency, cancelled if it fails), on its binaries: suites
+# (phitex-tex's pdftex edits pages plain etex hints inputs defuse_gaps);
+# latex 0..N-1 (the latex target's non-ignored tests dealt out,
+# GATE_LATEX_SHARDS, default 3); ams (amsldoc --exact-pdf at -j 1, 8, 16,
+# md5 against the epoch oracle on acclhead1, the round counters with
+# PHITEX_TEX_TIME=1; then the cold watch build at -j 1/8/16 timed by op
+# class beside the control GATE_CONTROL's recorded timings, default
+# 566fb842: gate-time.py); amsedit 8, amsedit 16 (the edit histories,
+# GATE_AMS_EDITS edits, 10); para (bench/para4000.tex, plain pdfTeX, md5
+# against GATE_PARA_MD5, wall, us per paragraph and realised critical path
+# at -j 1/8/16, its edit histories); cg (para4000 at one thread under
+# callgrind: startup Ir, node bodies' Ir per command, top 15).
+# Every test runs in its own process, killed after GATE_TEST_TIMEOUT s
+# (120): a hang is a red line, not a shard's timeout.
 # GATE_LATEX_ORDER (test names, heaviest first) balances the latex shards.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -31,44 +45,113 @@ runs=$HOME/code/flinner/phitex-runs
 ORACLE=code/flinner/phitex-runs/amsldoc-oracle-epoch.pdf
 # the latex tests heaviest first (measured: test-walls.txt of the shards)
 ORDER_FILE=$here/gate-latex-order.txt
+# (the workspace's path inside the container, the same in every job: the
+# test binaries have their crates' paths compiled in)
+ROOT=/gw
+
+# the binaries of a commit on accl (gate-shard.sh build)
+store() { echo "code/flinner/phitex-runs/gate-bin/$1"; }
+
+# sub OPTS SHARD ARGS...: one shard of commit $c submitted, its job id
+sub() {
+  local opts=$1
+  shift
+  ACCL_COMMIT=$c ACCL_OPTS="$opts" "$here/accl" submit cmd \
+    env GATE_LATEX_ORDER="$order" GATE_TIME_PY="$(cat "$here/gate-time.py")" \
+    GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" \
+    bash -c "$script" gate-shard "$@" 2>/dev/null
+}
+
+# the build job for $c unless its binaries are there: sets $dep, the
+# sbatch options of a shard that runs on them (and appends the job to ids)
+build_first() {
+  local st b
+  st=$(store "$c")
+  dep=""
+  if ssh $H "test -x $st/cli/phitex && test -x $st/tests/latex" 2>/dev/null; then
+    echo "gate-fast: binaries of $c already built ($st)" >&2
+  else
+    b=$(sub "-c 16 --mem=64G -t 00:40:00 -J gf-build --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st" build)
+    ids+=("$b")
+    dep="--dependency=afterok:$b --kill-on-invalid-dep=yes"
+  fi
+}
+
+# the sbatch options of a shard on the binaries ($1: the store parts it copies in)
+on_bins() {
+  local st parts="" x
+  st=$(store "$c")
+  for x in $1; do parts="$parts${parts:+:}$st/$x"; done
+  echo "$dep --export=ALL,ACCL_ROOT=$ROOT,ACCL_NO_CARGO=1,ACCL_STORE_IN=$parts"
+}
 
 submit() {
-  local c want n k script order
+  local n k want
   c=$(git rev-parse "${1:-HEAD}^{commit}")
   want=$(ssh $H "md5sum $ORACLE" 2>/dev/null | cut -c1-32)
   [ -n "$want" ] || { echo "gate-fast: no oracle $ORACLE on $H" >&2; exit 1; }
   script=$(cat "$here/gate-shard.sh")
   n=${GATE_LATEX_SHARDS:-3}
   order=${GATE_LATEX_ORDER:-$( [ -f "$ORDER_FILE" ] && tr '\n' ' ' < "$ORDER_FILE" || true)}
-  sub() {
-    local opts=$1
-    shift
-    ACCL_COMMIT=$c ACCL_OPTS="$opts" "$here/accl" submit cmd \
-      env GATE_LATEX_ORDER="$order" GATE_TIME_PY="$(cat "$here/gate-time.py")" bash -c "$script" gate-shard "$@" 2>/dev/null
-  }
   # (GATE_ONLY="lint ams": those shards only)
   on() { [ -z "${GATE_ONLY:-}" ] || [[ " $GATE_ONLY " == *" $1 "* ]]; }
   ids=()
-  if on lint; then ids+=("$(sub "-c 10 --mem=32G -t 00:30:00 -J gf-lint" lint)"); fi
-  if on suites; then ids+=("$(sub "-c 12 --mem=48G -t 00:30:00 -J gf-suites" suites)"); fi
+  if on lint; then ids+=("$(sub "-c 10 --mem=32G -t 00:20:00 -J gf-lint" lint)"); fi
+  build_first
+  local T="tests/latex tests/build_s" S=tests C=cli
+  if on suites; then ids+=("$(sub "-c 12 --mem=48G -t 00:20:00 -J gf-suites $(on_bins "$S")" suites)"); fi
   if on latex; then
     for ((k = 0; k < n; k++)); do
-      ids+=("$(sub "-c 10 --mem=48G -t 00:30:00 -J gf-latex$k" latex "$k" "$n")")
+      ids+=("$(sub "-c 10 --mem=48G -t 00:20:00 -J gf-latex$k $(on_bins "$T")" latex "$k" "$n")")
     done
   fi
-  # (the timing control: 566fb842 as it is, the engine of the c13f152
-  # era vendored, built and timed in the same job; GATE_CONTROL= none)
-  if on ams; then ids+=("$(sub "-c 18 --mem=48G -t 01:30:00 -J gf-ams" ams "$want" "${GATE_CONTROL-566fb842}")"); fi
+  # (the timing control: its timings as `gate-fast control` recorded
+  # them, never built per gate; GATE_CONTROL= none)
+  if on ams; then
+    ids+=("$(sub "-c 18 --mem=48G -t 00:30:00 -J gf-ams $(on_bins "$C")" ams "$want" "${GATE_CONTROL-566fb842}")")
+    ids+=("$(sub "-c 10 --mem=32G -t 00:30:00 -J gf-amsedit8 $(on_bins "$C")" amsedit 8)")
+    ids+=("$(sub "-c 18 --mem=48G -t 00:30:00 -J gf-amsedit16 $(on_bins "$C")" amsedit 16)")
+  fi
   # (para4000: plain pdfTeX, bytes against its bar, wall and the
   # realised critical path at -j 1/8/16)
-  if on para; then ids+=("$(sub "-c 18 --mem=48G -t 01:00:00 -J gf-para" para "${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}")"); fi
+  if on para; then ids+=("$(sub "-c 18 --mem=48G -t 00:30:00 -J gf-para $(on_bins "$C")" para "${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}")"); fi
   # (para4000 at one thread under callgrind: startup, node bodies' Ir
   # per command, the top 15)
-  if on cg; then ids+=("$(sub "-c 8 --mem=24G -t 01:30:00 -J gf-cg" cg)"); fi
+  if on cg; then ids+=("$(sub "-c 8 --mem=24G -t 00:40:00 -J gf-cg $(on_bins "$C")" cg)"); fi
   echo "gate-fast: commit $c, oracle md5 $want" >&2
   mkdir -p "$runs"
   echo "$c ${ids[*]}" >> "$runs/gate-fast.ids"
   echo "${ids[*]}"
+}
+
+# the 50-edit histories (a measurement, not the gate)
+edits50() {
+  c=$(git rev-parse "${1:-HEAD}^{commit}")
+  script=$(cat "$here/gate-shard.sh")
+  order=""
+  ids=()
+  build_first
+  local C=cli
+  ids+=("$(GATE_AMS_EDITS=50 sub "-c 10 --mem=32G -t 01:00:00 -J gf-edits8 $(on_bins "$C")" amsedit 8)")
+  ids+=("$(GATE_AMS_EDITS=50 sub "-c 18 --mem=48G -t 01:00:00 -J gf-edits16 $(on_bins "$C")" amsedit 16)")
+  echo "${ids[*]}"
+}
+
+# the control's cold watch timings, recorded in scripts/accl/gate-control/CTL
+control() {
+  local ctl j d
+  ctl=${1:?control commit}
+  c=$(git rev-parse HEAD)
+  script=$(cat "$here/gate-shard.sh")
+  order=""
+  j=$(sub "-c 18 --mem=48G -t 00:40:00 -J gf-control" control "$ctl")
+  echo "gate-fast: control $ctl, job $j" >&2
+  wait_all "$j" > /dev/null
+  d=$here/gate-control/$ctl
+  mkdir -p "$d"
+  cp "$runs/cmd-$j"/cold-control-j*.json "$d/" || { echo "gate-fast: job $j recorded nothing" >&2; exit 1; }
+  echo "accl job $j, $(date -u +%Y-%m-%d), on $(sed -n 's/^node \([^,]*\),.*/\1/p' "$runs/cmd-$j/job.log" 2>/dev/null | head -1)" > "$d/recorded.txt"
+  ls "$d"
 }
 
 # S J: the job's sacct field
@@ -92,6 +175,14 @@ wait_all() {
 
 table() {
   set +e
+  # (the edit histories ran in their own shards: the ams shard's §0 table
+  # made again with them)
+  local x amsd=""
+  for x in "$@"; do grep -q '^ams ' "$runs/cmd-$x/shard.txt" 2>/dev/null && amsd=$runs/cmd-$x; done
+  if [ -n "$amsd" ]; then
+    for x in "$@"; do grep -q '^amsedit ' "$runs/cmd-$x/shard.txt" 2>/dev/null && cp "$runs/cmd-$x"/edits-j*.json "$amsd/" 2>/dev/null; done
+    python3 -I "$here/gate-acct.py" table ams "$amsd" > "$amsd/table.txt" 2>&1
+  fi
   local j d st sh status build wall el sub0 end first="" last="" reds=0
   printf '%-8s %-10s %-10s %-6s %7s %7s  %s\n' job shard state gate build_s wall_s red
   for j in "$@"; do
@@ -143,6 +234,8 @@ table() {
 
 case ${1:-} in
   wait) shift; wait_all "$@" ;;
+  edits) shift; edits50 "$@" ;;
+  control) shift; control "$@" ;;
   table) shift; table "$@" ;;
   -h | --help) sed -n '2,20p' "$0" ;;
   *) submit "${1:-HEAD}" ;;
