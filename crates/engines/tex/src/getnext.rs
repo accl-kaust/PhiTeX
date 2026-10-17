@@ -21,16 +21,34 @@ impl Run<'_, '_> {
     // --------------------------------------------------------- get_next
 
     /// `get_next` with the meaning (§357–§358): false at the end of all
-    /// input.
+    /// input. No `Result` (spec-final §2.2): a halt is raised
+    /// ([`Run::raise`]) and the current token is the sentinel; the
+    /// command loop takes it once a command ([`Run::ck`]).
     // the per-token hot path: inlined on purpose
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub(crate) fn get_next(&mut self) -> R<bool> {
-        let b = self.fetch();
+    pub(crate) fn get_next(&mut self) -> bool {
+        self.fetch()
+    }
+
+    /// The halt raised on the token path, if any, as a `Result`: what a
+    /// command's scanners check where they go on only with a token.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    pub(crate) fn ck(&mut self) -> R<()> {
         match self.halt.take() {
+            None => Ok(()),
             Some(h) => Err(h),
-            None => Ok(b),
         }
+    }
+
+    /// [`Run::get_next`] and [`Run::ck`]: for the commands that read a
+    /// token and stop on a halt.
+    #[inline]
+    pub(crate) fn next_ck(&mut self) -> R<bool> {
+        let b = self.get_next();
+        self.ck()?;
+        Ok(b)
     }
 
     /// `get_next` without a `Result`: a halt is raised ([`Run::raise`]).
@@ -129,26 +147,44 @@ impl Run<'_, '_> {
     }
 
     /// `get_next`, at the end of all input a `\relax` (the end of a
-    /// document without `\end` is the client's to report).
-    pub(crate) fn get_next_or_end(&mut self) -> R<()> {
-        if !self.get_next()? {
-            if self.eof {
-                if self.interp.is_some() {
-                    // §362: the file ends; §336 checks what it ended in
-                    if self.interp_eof && self.file_ended()? {
-                        return self.get_next_or_end();
-                    }
-                    self.interp_short = true;
-                }
-                return Err(Halt::Fatal);
-            }
-            self.cur = Cur {
-                tok: crate::expand::relax_tok(),
-                cmd: cmd::RELAX,
-                chr: 256,
-            };
+    /// document without `\end` is the client's to report). A halt is
+    /// raised, never returned.
+    #[inline]
+    pub(crate) fn next_or_end(&mut self) {
+        if self.get_next() || self.halt.is_some() {
+            return;
         }
-        Ok(())
+        self.at_end_of_input();
+    }
+
+    #[inline(never)]
+    fn at_end_of_input(&mut self) {
+        if self.eof {
+            if self.interp.is_some() {
+                // §362: the file ends; §336 checks what it ended in
+                if self.interp_eof {
+                    match self.file_ended() {
+                        Ok(true) => return self.next_or_end(),
+                        Ok(false) => {}
+                        Err(h) => return self.raise(h),
+                    }
+                }
+                self.interp_short = true;
+            }
+            return self.raise(Halt::Fatal);
+        }
+        self.cur = Cur {
+            tok: crate::expand::relax_tok(),
+            cmd: cmd::RELAX,
+            chr: 256,
+        };
+    }
+
+    /// [`Run::next_or_end`] and [`Run::ck`].
+    #[inline]
+    pub(crate) fn get_next_or_end(&mut self) -> R<()> {
+        self.next_or_end();
+        self.ck()
     }
 
     /// §336–§339 at the end of a file (§362), or of an interpreted one: a token list being
@@ -188,60 +224,69 @@ impl Run<'_, '_> {
     /// at `normal`).
     pub(crate) fn get_name_token(&mut self) -> R<()> {
         self.bare = self.aopen <= 0;
-        let r = self.get_token();
+        self.get_token();
         self.bare = false;
-        r
+        self.ck()
     }
 
-    /// `get_token` (§365).
+    /// `get_token` (§365): a halt is raised, never returned.
     #[inline]
-    pub(crate) fn get_token(&mut self) -> R<()> {
-        self.get_next_or_end()
+    pub(crate) fn get_token(&mut self) {
+        self.next_or_end();
     }
 
     /// `get_token`'s token alone (§365 for a macro's arguments, §392-§399:
     /// the meaning is not needed, every test there is on `cur_tok`); the
-    /// internal markers still go through the slow path.
+    /// internal markers still go through the slow path. A halt is raised
+    /// (the sentinel returned).
     #[inline]
-    pub(crate) fn get_token_tok(&mut self) -> R<Tok> {
+    pub(crate) fn get_token_tok(&mut self) -> Tok {
         // (an alignment of this run counts every brace, §342: the slow
         // path then)
         if self.aopen == 0
             && let Some(t) = self.input.next_plain_of_top()
         {
             self.cur.tok = t;
-            return Ok(t);
+            return t;
         }
-        self.get_next_or_end()?;
-        Ok(self.cur.tok)
+        self.next_or_end();
+        self.cur.tok
     }
 
-    /// `get_x_token` (§380).
-    pub(crate) fn get_x_token(&mut self) -> R<()> {
+    /// `get_x_token` (§380): a halt is raised, never returned.
+    pub(crate) fn get_x_token(&mut self) {
         loop {
-            self.get_next_or_end()?;
-            if self.cur.cmd <= cmd::MAX_COMMAND {
-                return Ok(());
+            self.next_or_end();
+            if self.cur.cmd <= cmd::MAX_COMMAND || self.halt.is_some() {
+                return;
             }
             // (a macro: its body goes on top here, no expansion level)
             if (cmd::CALL..cmd::END_TEMPLATE).contains(&self.cur.cmd) {
-                self.macro_call()?;
+                self.macro_call();
+                if self.halt.is_some() {
+                    return;
+                }
                 continue;
             }
             if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
-                return Ok(());
+                return;
             }
-            self.expand()?;
+            self.expand();
+            if self.halt.is_some() {
+                return;
+            }
         }
     }
 
-    /// `x_token` (§381).
-    pub(crate) fn x_token(&mut self) -> R<()> {
-        while self.cur.cmd > cmd::MAX_COMMAND {
-            self.expand()?;
-            self.get_next_or_end()?;
+    /// `x_token` (§381): a halt is raised, never returned.
+    pub(crate) fn x_token(&mut self) {
+        while self.cur.cmd > cmd::MAX_COMMAND && self.halt.is_none() {
+            self.expand();
+            if self.halt.is_some() {
+                return;
+            }
+            self.next_or_end();
         }
-        Ok(())
     }
 
     // ------------------------------------------------------- the levels
@@ -390,6 +435,7 @@ impl Run<'_, '_> {
                         self.pulled
                     );
                 }
+                self.muts += 1;
                 self.pulled += 1;
                 self.input.append_text(segs);
                 Ok(true)
@@ -404,6 +450,7 @@ impl Run<'_, '_> {
                     );
                 }
                 if self.top {
+                    self.muts += 1;
                     self.eof = true;
                     Ok(false)
                 } else {
@@ -632,6 +679,7 @@ impl Run<'_, '_> {
             _ => None,
         };
         if let Some(l) = begun {
+            self.muts += 1;
             self.lines_entered -= 1;
             self.lines_read -= 1;
             // (and in the lines the run contributes by file,
@@ -649,6 +697,7 @@ impl Run<'_, '_> {
         while self.input.pop().is_some() {}
         self.input.text.truncate(at);
         self.input.text_at = at;
+        self.muts += 1;
         self.pulled -= 1;
         self.pull_at.pop();
         self.pull_orig.pop();
@@ -735,7 +784,9 @@ impl Run<'_, '_> {
     }
 
     /// Whether there is input left without claiming more siblings.
-    pub(crate) fn has_input(&self) -> bool {
+    pub(crate) fn has_input(&mut self) -> bool {
+        // (spent lists popped first, §325: the level on top answers)
+        self.input.pop_spent();
         // (the levels on top: a list with tokens left, a line with
         // characters left, a file with lines; a document file's lines
         // left for the region children stop the run, also inside groups
@@ -851,12 +902,13 @@ impl Run<'_, '_> {
             // reaches the next line only: `\endlinechar=-1` on a line
             // still ends that line)
             let e = if ends {
-                i64::from(self.ipar(crate::fields::Par::endlinechar)?)
+                i64::from(self.endlinechar()?)
             } else {
                 -1
             };
             // §362: a line is counted as it begins
             if starts {
+                self.muts += 1;
                 self.lines_entered += 1;
                 self.lines_read += 1;
                 // (a `\read` line is no file's, §483: `line` stays)
@@ -954,6 +1006,21 @@ impl Run<'_, '_> {
                 return Ok(None);
             }
         }
+    }
+
+    /// `\endlinechar` (§360), cached while the table is unchanged (a
+    /// definition of any slot invalidates it: one compare a line).
+    #[inline]
+    pub(crate) fn endlinechar(&mut self) -> R<i32> {
+        let g = self.st.any_gen();
+        if let Some((at, e)) = self.elc
+            && at == g
+        {
+            return Ok(e);
+        }
+        let e = self.ipar(crate::fields::Par::endlinechar)?;
+        self.elc = Some((self.st.any_gen(), e));
+        Ok(e)
     }
 
     /// The line on top is the last segment of the text and a sibling's
@@ -1081,11 +1148,11 @@ impl Run<'_, '_> {
                 }
             }
             let Some(s) = self.input.top_line() else {
-                return Ok(Tok::cs(""));
+                return Ok(null_cs());
             };
             let (loc, limit_plus) = (s.loc, s.buf.len());
             if loc >= limit_plus {
-                return Ok(Tok::cs("")); // null_cs
+                return Ok(null_cs());
             }
             // start_cs
             let mut k = loc;
@@ -1123,14 +1190,12 @@ impl Run<'_, '_> {
             } else if self.reduce_expanded(k, cat) {
                 continue;
             }
-            let c = self.buf_at(loc);
+            // (a one-character name: through the run's cache, as a word)
+            let t = self.cs_of_buf(loc, loc + 1);
             if let Some(s) = self.input.top_line_mut() {
                 s.loc = loc + 1;
             }
-            let mut b = [0; 4];
-            return Ok(Tok::cs(
-                char::from_u32(c).unwrap_or('?').encode_utf8(&mut b),
-            ));
+            return Ok(t);
         }
     }
 
@@ -1139,7 +1204,7 @@ impl Run<'_, '_> {
     /// string), then the process-wide table (§259 `id_lookup`).
     fn cs_of_buf(&mut self, lo: usize, hi: usize) -> Tok {
         let Some(s) = self.input.top_line() else {
-            return Tok::cs("");
+            return null_cs();
         };
         let chars = &s.buf[lo..hi];
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1204,7 +1269,7 @@ impl Run<'_, '_> {
             c - 0o100
         };
         s.buf.drain(k..k + d);
-        self.irreversible += 1;
+        self.muts += 1;
         true
     }
 
@@ -1316,48 +1381,20 @@ impl Run<'_, '_> {
 
     // ------------------------------------------------- mark and rewind
 
-    /// What a stopped command must not have changed to be undone by
-    /// rewinding its input: the clocks and the sizes, copied (no hash).
+    /// The run's mutation counter (spec-final §2.4): bumped by every
+    /// change a rewind of the input cannot undo (the table's definitions,
+    /// saves and restores; the run's contributions, children, levels,
+    /// conditionals, files read, siblings claimed). Equal at a stop to
+    /// its value as the command began: nothing changed but the input.
     #[inline]
-    fn state_sig(&self) -> Sig {
-        let (a, b, c, d) = self.st.sig();
-        let top = self.nest.last();
-        Sig {
-            st: (a, b, c, d),
-            contribs: self.contribs.len(),
-            kids: self.kids.len(),
-            nest: self.nest.len(),
-            conds: self.conds.len(),
-            if_codes: self.if_codes.len(),
-            next_lid: self.next_lid,
-            irreversible: self.irreversible,
-            fread: self.fread.len(),
-            pulled: self.pulled,
-            eof: self.eof,
-            last_par: self.last_par,
-            claim_rest: self.claim_rest,
-            pdf_occ: self.pdf_occ,
-            lines_entered: self.lines_entered,
-            top_list: top.map_or(0, |l| l.list.len()),
-            top_last: top
-                .and_then(|l| l.list.last().map(crate::nest::Item::sig))
-                .unwrap_or(0),
-            top_ag: top.map_or(0, |l| l.ag.len()),
-            top_extra: top.map_or(0, |l| l.extra.len()),
-            top_prev_graf: top.map_or(0, |l| l.prev_graf),
-            below_list: self
-                .nest
-                .len()
-                .checked_sub(2)
-                .and_then(|i| self.nest.get(i))
-                .map_or(0, |l| l.list.len()),
-        }
+    pub(crate) fn mutations(&self) -> u64 {
+        self.muts.wrapping_add(self.st.muts())
     }
 
     /// A command begins: marks the input and the state it starts from.
     #[inline]
     pub(crate) fn begin_command(&mut self) {
-        let sig = self.state_sig();
+        let sig = self.mutations();
         let mut m = std::mem::take(&mut self.mark);
         self.input.snapshot(&mut m.snap);
         m.active = true;
@@ -1377,7 +1414,7 @@ impl Run<'_, '_> {
     /// else, or the input in a way not recorded.
     pub(crate) fn rewind(&mut self) -> bool {
         if !self.mark.active
-            || self.state_sig() != self.mark.sig
+            || self.mutations() != self.mark.sig
             || Some(self.effect) != self.mark.effect
         {
             return false;
@@ -1397,45 +1434,26 @@ impl Run<'_, '_> {
     }
 }
 
-/// The run's state as a command began ([`Run::state_sig`]).
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Sig {
-    st: (usize, usize, usize, u64),
-    contribs: usize,
-    kids: usize,
-    nest: usize,
-    conds: usize,
-    if_codes: usize,
-    next_lid: i64,
-    irreversible: u64,
-    fread: usize,
-    pulled: usize,
-    eof: bool,
-    last_par: (i64, i64),
-    claim_rest: bool,
-    pdf_occ: usize,
-    lines_entered: i64,
-    top_list: usize,
-    top_last: u64,
-    top_ag: usize,
-    top_extra: usize,
-    top_prev_graf: i64,
-    below_list: usize,
-}
-
 /// The command in progress (`Run::begin_command`): the input levels as
 /// it found them and a fingerprint of the rest of the run's state.
 #[derive(Default)]
 pub(crate) struct Mark {
     pub active: bool,
     pub snap: input::Snapshot,
-    pub sig: Sig,
+    /// The run's mutation counter then ([`Run::mutations`]).
+    pub sig: u64,
     pub effect: Option<phitex_defuse::Effect>,
     pub astate: Option<i64>,
     pub aopen: i64,
     pub radix: i32,
     pub cur_order: Option<phitex_typeset::glue::Order>,
     pub no_pull: bool,
+}
+
+/// `null_cs` (§258), named once a process.
+fn null_cs() -> Tok {
+    static C: std::sync::OnceLock<Tok> = std::sync::OnceLock::new();
+    *C.get_or_init(|| Tok::cs(""))
 }
 
 #[inline]

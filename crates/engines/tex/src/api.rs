@@ -1099,6 +1099,86 @@ pub struct Stats {
     pub pkg_predicted: u64,
     pub pkg_predict_right: u64,
     pub pkg_predict_wrong: Vec<String>,
+    /// spec-final §1: where each loop-back round's time went (the
+    /// engine's `Report::round_times`), over the evaluations.
+    pub round_times: Vec<phitex_defuse::RoundTimes>,
+    /// The operations' run time and runs by node kind
+    /// (`crate::exec::KINDS`), over the evaluations.
+    pub op_by_kind: Vec<(&'static str, std::time::Duration, u64)>,
+    /// The environment pushes made to the engine (spec-final §4.5).
+    pub env_calls: u64,
+}
+
+/// The cold accounting of an evaluation (spec-final §1), with
+/// `PHITEX_TEX_TIME`: per round the engine's split of its time, the
+/// runs per node, the parallel shape (§9b: raises, pending waits, the
+/// finishers waited on), the op time by node kind, the realised
+/// critical path in nodes and time and the kinds on the engine's
+/// critical chain, and the environment pushes.
+fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_calls: u64) {
+    let ms = |ns: u64| {
+        #[allow(clippy::cast_precision_loss)]
+        let x = ns as f64 / 1e6;
+        x
+    };
+    let (mut wall, mut op) = (0u64, 0u64);
+    for (i, t) in r.round_times.iter().enumerate() {
+        eprintln!(
+            "acct: round {i}: wall {:.3} ms, op {:.3} ms, commit {:.3} ms, check {:.3} ms, idle {:.3} ms",
+            ms(t.wall_ns),
+            ms(t.op_ns),
+            ms(t.commit_ns),
+            ms(t.check_ns),
+            ms(t.idle_ns)
+        );
+        wall += t.wall_ns;
+        op += t.op_ns;
+    }
+    let runs = r.runs.max(1);
+    let live = eng.live_nodes().max(1);
+    #[allow(clippy::cast_precision_loss)]
+    let pct = |n: u64| 100.0 * n as f64 / runs as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let per_run_us = (wall.saturating_sub(op)) as f64 / 1e3 / runs as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let rpn = r.runs as f64 / live as f64;
+    eprintln!(
+        "acct: {} rounds, {} runs, {} live nodes, {rpn:.2} runs/node, raises {} ({:.2}% of runs), pending waits {} ({:.2}% of runs), round wall minus op {per_run_us:.1} us/run at {} threads",
+        r.round_times.len(),
+        r.runs,
+        live,
+        r.raises,
+        pct(r.raises),
+        r.pending_waits,
+        pct(r.pending_waits),
+        ex.n
+    );
+    let kinds: Vec<String> = ex
+        .by_kind()
+        .into_iter()
+        .filter(|k| k.2 > 0)
+        .map(|(k, d, n)| format!("{k} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
+        .collect();
+    eprintln!("acct: op time by kind: {}", kinds.join(", "));
+    // (the kinds on the engine's critical chain, and the finishers waited
+    // on: §9b, only the link and a cut's resume wait on one)
+    let mut on_chain: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for (n, _) in eng.critical_chain() {
+        if let Some(i) = eng.node_info(n) {
+            *on_chain.entry(i.op).or_default() += 1;
+        }
+    }
+    let waited_fin = r
+        .top_waited
+        .iter()
+        .filter(|(n, _)| eng.node_info(*n).is_some_and(|i| i.op == "finish"))
+        .count();
+    eprintln!(
+        "acct: critical path {} nodes, {:.3} ms; chain kinds {on_chain:?}; finishers waited on {waited_fin}; env calls {env_calls}",
+        r.realised_critical_path,
+        r.realised_critical_time.as_secs_f64() * 1e3
+    );
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
@@ -1178,6 +1258,15 @@ impl Stats {
         }
         self.threads = ex.n;
         self.busy += ex.busy();
+        for (k, d, n) in ex.by_kind() {
+            match self.op_by_kind.iter_mut().find(|x| x.0 == k) {
+                Some(x) => {
+                    x.1 += d;
+                    x.2 += n;
+                }
+                None => self.op_by_kind.push((k, d, n)),
+            }
+        }
         self.peak_running = self.peak_running.max(ex.peak());
         let (b, bi, m) = ex.batches();
         self.batches += b;
@@ -1323,6 +1412,7 @@ impl Stats {
         self.mispredictions += r.mispredictions;
         self.predictions_confirmed += r.predictions_confirmed;
         self.predictions_refuted += r.predictions_refuted;
+        self.round_times.extend_from_slice(&r.round_times);
         self.realised_critical_path = self.realised_critical_path.max(r.realised_critical_path);
         if r.realised_critical_time >= self.realised_critical_time {
             self.realised_critical_time = r.realised_critical_time;
@@ -1369,6 +1459,17 @@ struct Graph {
     ops: Ops,
     mark: OpId,
     dvi: OpId,
+    /// The link (`crate::ops::Link`), pushed before the end node.
+    link: OpId,
+    /// The environment and the absent fields as last pushed to the
+    /// engine (sorted), and the engine calls the pushes made
+    /// ([`Graph::push_env`], spec-final §4.5).
+    env_pushed: Vec<(Field, ValueId)>,
+    absent_pushed: Vec<Field>,
+    pub(crate) env_calls: u64,
+    /// The job's bindings (the format's state, the job's names and
+    /// dates: [`job_env`]), pushed with the environment.
+    job: Vec<(Field, ValueId)>,
     files_op: OpId,
     /// The files supplied so far, with the hash of what the finder gave.
     files: Vec<(Field, ValueId)>,
@@ -1433,7 +1534,10 @@ fn units_file(field: &str) -> Option<&str> {
     if let Some(n) = field.strip_prefix("units:") {
         return Some(n);
     }
-    field.strip_prefix("unit:")?.rsplit_once(':').map(|(n, _)| n)
+    field
+        .strip_prefix("unit:")?
+        .rsplit_once(':')
+        .map(|(n, _)| n)
 }
 
 /// A file a document's `\input` reads, as units (spec-redesign §1
@@ -1511,6 +1615,7 @@ impl Graph {
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi(shared.clone())));
+        let link = eng.register(Arc::new(crate::ops::Link(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
@@ -1533,6 +1638,7 @@ impl Graph {
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
+            scan_guess: Arc::default(),
             not_virtual: Arc::default(),
             pdf_cmds: Arc::default(),
             class_proj,
@@ -1545,6 +1651,11 @@ impl Graph {
             ops,
             mark,
             dvi,
+            link,
+            env_pushed: Vec::new(),
+            absent_pushed: Vec::new(),
+            env_calls: 0,
+            job: Vec::new(),
             files_op,
             files: Vec::new(),
             reads: Vec::new(),
@@ -1992,6 +2103,31 @@ impl Graph {
         self.written.push(name.to_owned());
     }
 
+    /// Pushes the environment (spec-final §4.5): once per evaluation,
+    /// and only when it changed since the last push (the entries and the
+    /// absent fields compared as sorted lists; an unchanged one is no
+    /// call to the engine).
+    fn push_env(&mut self, env: Vec<(Field, ValueId)>) {
+        // (a field given twice: the later entry, as the engine's map has
+        // it; the job's bindings first)
+        let map: FxHashMap<Field, ValueId> = self.job.iter().copied().chain(env).collect();
+        let mut env: Vec<(Field, ValueId)> = map.into_iter().collect();
+        env.sort_unstable_by_key(|e| e.0.0.raw());
+        let mut absent = self.absent.clone();
+        absent.sort_unstable_by_key(|f| f.0.raw());
+        absent.dedup();
+        if env != self.env_pushed {
+            self.eng.set_environment(env.iter().copied());
+            self.env_calls += 1;
+            self.env_pushed = env;
+        }
+        if absent != self.absent_pushed {
+            self.eng.set_environment_absent(absent.iter().copied());
+            self.env_calls += 1;
+            self.absent_pushed = absent;
+        }
+    }
+
     /// The environment: the files supplied, and the loop-back files.
     fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
         let v = self.eng.values();
@@ -2051,8 +2187,7 @@ impl Graph {
             if self.marks.dirty() {
                 let env = self.environment(fixpoint);
                 env_trace(&self.eng, &env);
-                self.eng.set_environment(env);
-                self.eng.set_environment_absent(self.absent.clone());
+                self.push_env(env);
             }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
@@ -2105,6 +2240,7 @@ impl Graph {
             }
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
+                print_accounting(&self.eng, &r, &ex, self.env_calls);
                 {
                     // (the reruns by cause and field, most first)
                     use phitex_defuse::Rerun as Rr;
@@ -2199,6 +2335,7 @@ impl Graph {
                 }
             }
             stats.add(&r);
+            stats.env_calls = self.env_calls;
             stats.add_reruns(&self.eng, &r);
             stats.add_refuted(&self.eng, &r);
             stats.add_exec(&ex, c0, &self.eng);
@@ -2238,9 +2375,10 @@ impl Graph {
                     continue;
                 }
                 let f = self.eng.values().field(&format!("file:{name}"));
-                let supplied = self.files.iter().any(|&(g, x)| {
-                    g == f && !list_of(self.eng.values(), x).is_empty()
-                });
+                let supplied = self
+                    .files
+                    .iter()
+                    .any(|&(g, x)| g == f && !list_of(self.eng.values(), x).is_empty());
                 self.written_file(name, fixpoint, finder);
                 if supplied && !fixpoint {
                     asked = true;
@@ -2393,8 +2531,7 @@ impl Graph {
             let env = self.environment(fixpoint);
             let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
             env_trace(&self.eng, &env);
-            self.eng.set_environment(env);
-            self.eng.set_environment_absent(self.absent.clone());
+            self.push_env(env);
         }
         let v = self.eng.values();
         if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
@@ -2454,7 +2591,8 @@ impl Graph {
         let args = {
             let v = self.eng.values();
             let loads = self.loads.as_deref();
-            crate::exec::map(self.threads, nodes.len(), &|k| {
+            let mut ex = crate::exec::Threads::new(self.threads);
+            crate::exec::map_on(&mut ex, nodes.len(), &|k| {
                 node_args(v, text, incr, &nodes[k].1, loads)
             })
         };
@@ -2904,8 +3042,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         let env = g.environment(false);
         let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
         env_trace(&g.eng, &env);
-        g.eng.set_environment(env);
-        g.eng.set_environment_absent(g.absent.clone());
+        g.push_env(env);
     }
     let t_supply = t_start.elapsed();
     let m_supply = mem_mb();
@@ -3111,9 +3248,16 @@ fn final_bindings(
                 t_name += t.elapsed();
                 // open files are not dumped
                 // nor is the PDF writer's state (pdfTeX dumps no objects)
-                if ["wopen:", "write:", "file:", "read:", "pdf:formfonts", "pdf:imagefiles"]
-                    .iter()
-                    .any(|p| name.starts_with(p))
+                if [
+                    "wopen:",
+                    "write:",
+                    "file:",
+                    "read:",
+                    "pdf:formfonts",
+                    "pdf:imagefiles",
+                ]
+                .iter()
+                .any(|p| name.starts_with(p))
                 {
                     continue;
                 }
@@ -3287,8 +3431,7 @@ impl Build {
             let env = g.environment(opts.fixpoint);
             let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
             env_trace(&g.eng, &env);
-            g.eng.set_environment(env);
-            g.eng.set_environment_absent(g.absent.clone());
+            g.push_env(env);
         }
         job_env(&mut g, unit, &env, &opts);
         // §1337: `\everyjob`, before the job's first line
@@ -3328,10 +3471,12 @@ impl Build {
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
         // (the pages: each piece places the finisher of a page that ends
         // in it, `crate::pages`; nothing of them is pushed here)
+        // (the link, then the end node: new text pieces go before both)
+        let link = g.eng.push(unit, g.link, Vec::new());
+        g.eng.add_root(link);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
-        // (new text pieces go before the writer)
-        let end = dvi;
+        let end = link;
         let files_op = g.files_op;
         let files = g.eng.push(unit, files_op, Vec::new());
         g.eng.add_root(files);
@@ -3683,9 +3828,7 @@ impl Build {
         let env = self.g.environment(self.opts.fixpoint);
         let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
         env_trace(&self.g.eng, &env);
-        self.g.eng.set_environment(env);
-        let absent = self.g.absent.clone();
-        self.g.eng.set_environment_absent(absent);
+        self.g.push_env(env);
         self.settle();
     }
 
@@ -4726,9 +4869,14 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
         g.start_env.extend(sets.iter().copied());
     }
-    for (f, x) in sets {
-        g.eng.set_env(unit, f, x);
-    }
+    // (spec-final §4.5: the job's bindings go with the environment, one
+    // push for all of them, made again only where an entry changed; the
+    // graph has one unit, so the unit's start and the environment are
+    // one place to read them)
+    let _ = unit;
+    g.job = sets;
+    let env = g.environment(opts.fixpoint);
+    g.push_env(env);
 }
 
 /// The graph's accumulators and loop-backs (their round-one values).
@@ -4748,7 +4896,6 @@ fn declare_fields(eng: &mut Engine) {
         "fread",
         "tools",
         "pkgrecs",
-        "cutreq",
         "gdefs",
         crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,

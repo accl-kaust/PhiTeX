@@ -36,10 +36,13 @@ use crate::pdfout::BANNER;
 use crate::val::{int_of, list_of, str_of};
 
 /// The end node's run: the file as a string value (empty: no file, §642).
-pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
+/// In exact PDF mode the file is the link's ([`link`], the node before
+/// this one: `pdf:file`); the end node defines nothing a piece reads
+/// (spec-final §4.4: the cuts are the finishers', the link's loop-backs
+/// the link's).
+pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
     let v = cx.values();
-    publish_cuts(cx)?;
     // the scan's last state first: every continuation before this node
     // may define it, so the read waits, parked, until the last page has
     // fired and placed its finisher; read first, the pages are all there
@@ -47,20 +50,15 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     // again at each page added)
     cx.use_field(v.field(crate::pages::SCAN))?;
     let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
-    // the format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`):
-    // a page entry is `[box, counts, fonts, pdf params, pdf data]`, the
-    // params' first element whether the file is PDF
-    let pdf = pages.first().is_some_and(|&p| {
-        list_of(v, p)
-            .get(3)
-            .is_some_and(|&x| crate::val::int_at(v, x, 0) != 0)
-    });
+    let pdf = is_pdf(v, &pages);
     let r = if !pdf {
         dvi_file(cx, &pages)
     } else if relaxed_mode(cx)? {
         pdf_relaxed(cx, &pages)
     } else {
-        pdf_exact(cx, o)
+        Ok(field(cx, LINKED)?
+            .filter(|&x| x != ValueId::UNIT)
+            .unwrap_or_else(|| v.str("")))
     };
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -73,36 +71,44 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     r
 }
 
-/// The cuts the finishers ask for now (`cutreq`, `crate::pages`), as
-/// loop-backs a piece reads at its start (`cut:<node>`,
-/// `Run::read_cut_request`): per piece the earliest candidate asked for
-/// (a later page firing in it fires in its resume once it is cut). Each
-/// is declared here the first time; a cut no finisher asks for any more
-/// is published by nobody and goes back to none. The pieces read their
-/// cut within the evaluation, a loop round later, not in another
-/// evaluation.
-fn publish_cuts(cx: &mut Ctx<'_>) -> Result<(), Stop> {
+/// The exact PDF file the link made (`pdf:file`), read by the end node.
+pub(crate) const LINKED: &str = "pdf:file";
+
+/// The format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`):
+/// a page entry is `[box, counts, fonts, pdf params, pdf data]`, the
+/// params' first element whether the file is PDF.
+fn is_pdf(v: &Values, pages: &[ValueId]) -> bool {
+    pages.first().is_some_and(|&p| {
+        list_of(v, p)
+            .get(3)
+            .is_some_and(|&x| crate::val::int_at(v, x, 0) != 0)
+    })
+}
+
+/// The link's run (spec-redesign §1, `link`): in exact PDF mode the file
+/// from the line's records ([`pdf_exact`]), defined for the end node
+/// (`pdf:file`), and the loop-backs it gives the next round; nothing in
+/// any other mode.
+pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
+    let t0 = std::time::Instant::now();
     let v = cx.values();
-    let reqs = v.seq_to_vec(cx.acc_range(v.field("cutreq"), None)?);
-    let mut asks: Vec<(i64, i64)> = Vec::new();
-    for e in reqs {
-        let xs = list_of(v, e);
-        if let [pid, k] = xs[..] {
-            let (pid, k) = (int_of(v, pid), int_of(v, k));
-            match asks.iter_mut().find(|(p, _)| *p == pid) {
-                Some(a) => a.1 = a.1.min(k),
-                None => asks.push((pid, k)),
-            }
-        }
+    cx.use_field(v.field(crate::pages::SCAN))?;
+    let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
+    if !is_pdf(v, &pages) || relaxed_mode(cx)? {
+        // (its declared definition made in every mode: none here)
+        cx.define_with(
+            v.field(LINKED),
+            ValueId::UNIT,
+            phitex_defuse::Locality::Global,
+        );
+        return Ok(ValueId::UNIT);
     }
-    for (pid, k) in asks {
-        let f = v.field(&format!("cut:{}", u64::from_ne_bytes(pid.to_ne_bytes())));
-        if !cx.is_loopback(f) {
-            cx.declare_loopback(f, ValueId::UNIT);
-        }
-        cx.publish(f, v.int(k));
+    let file = pdf_exact(cx, o)?;
+    cx.define_with(v.field(LINKED), file, phitex_defuse::Locality::Global);
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!("link: {} pages, {:?}", pages.len(), t0.elapsed());
     }
-    Ok(())
+    Ok(ValueId::UNIT)
 }
 
 /// A field reaching the end node.

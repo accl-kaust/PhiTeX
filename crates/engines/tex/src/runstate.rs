@@ -1,5 +1,5 @@
 //! The run-local state table: every field a run reads or defines, in
-//! slots by location ([`Loc`]), in its native form ([`Native`]).
+//! slots by location ([`Loc`]), each a flat record ([`Entry`]).
 //!
 //! A run asks the engine for a field once, on its first read (the read
 //! set the engine tracks), decodes it once, and from then on reads and
@@ -27,36 +27,25 @@ pub(crate) type Loc = u32;
 /// The bit of a spill location (its index in the spill below it).
 pub(crate) const SPILL: Loc = 1 << 31;
 
-/// A slot's value in the run's own form. An engine value is kept as it
-/// is (`Raw`) until a typed read decodes it once.
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-pub(crate) enum Native {
-    /// The engine has no definition (an undefined control sequence, a
-    /// void register).
-    Absent,
-    Int(i32),
-    Glue(Glue),
-    /// A decoded meaning (a macro's body is shared, so a clone is cheap).
-    Mean(Mean),
-    Toks(Rc<[Tok]>),
-    /// Anything else, or not decoded yet: the engine value.
-    Raw(ValueId),
-}
-
-impl Native {
-    /// The engine value of this one (`None`: absent).
-    pub(crate) fn encode(&self, v: &Values) -> Option<ValueId> {
-        match self {
-            Native::Absent => None,
-            Native::Int(i) => Some(crate::val::int_id(v, i64::from(*i))),
-            Native::Glue(g) => Some(crate::val::glue_value(v, g)),
-            Native::Mean(m) => Some(m.encode(v)),
-            Native::Toks(t) => Some(crate::val::toks_value(v, t)),
-            Native::Raw(x) => Some(*x),
-        }
-    }
-}
+/// The kinds of a slot's value ([`Entry`]'s `kind`): an engine value
+/// not decoded yet, a typed one, or a meaning (`K_MEAN0` and above:
+/// `cmd` and `chr` hold its command code and modifier, `payload` its
+/// macro or primitive name).
+const K_ABSENT: u8 = 0;
+const K_RAW: u8 = 1;
+const K_INT: u8 = 2;
+const K_GLUE: u8 = 3;
+const K_TOKS: u8 = 4;
+const K_MEAN0: u8 = 8;
+const K_PRIM: u8 = 8;
+const K_MACRO: u8 = 9;
+const K_CHAR: u8 = 10;
+const K_UNDEF: u8 = 11;
+const K_FONT: u8 = 12;
+const K_CHARDEF: u8 = 13;
+const K_MATHCHARDEF: u8 = 14;
+const K_REG: u8 = 15;
+const K_NOTEXP: u8 = 16;
 
 const LOADED: u8 = 1;
 const HAS_ID: u8 = 2;
@@ -65,24 +54,55 @@ const PRELOADED: u8 = 4;
 /// (`eq_type`, `equiv`, §221).
 const CC: u8 = 8;
 
-/// A slot's value and what is known of it.
-#[derive(Clone, Debug)]
+/// One slot of the run's table (spec-final §2.1): a meaning's record,
+/// `cmd`, `chr` and a `payload` (a macro's handle in the table's macro
+/// store, a primitive's name, a glue's or a token list's handle), or an
+/// integer in `chr`; the engine value once known (`id`). Copied, never
+/// cloned: nothing in it is reference counted.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Entry {
-    val: Native,
-    /// The engine value of `val`, once known (`HAS_ID`).
-    id: Option<ValueId>,
+    kind: u8,
     flags: u8,
     cmd: u8,
     chr: i32,
+    payload: u32,
+    id: Option<ValueId>,
 }
 
 const UNLOADED: Entry = Entry {
-    val: Native::Absent,
-    id: None,
+    kind: K_ABSENT,
     flags: 0,
     cmd: 0,
     chr: 0,
+    payload: 0,
+    id: None,
 };
+
+impl Entry {
+    /// The engine's value as it is (`None`: absent), not decoded.
+    pub(crate) const fn raw(x: Option<ValueId>) -> Entry {
+        Entry {
+            kind: if x.is_some() { K_RAW } else { K_ABSENT },
+            flags: HAS_ID,
+            cmd: 0,
+            chr: 0,
+            payload: 0,
+            id: x,
+        }
+    }
+
+    /// An integer (a count, a dimension, a code).
+    pub(crate) const fn int(i: i32) -> Entry {
+        Entry {
+            kind: K_INT,
+            flags: 0,
+            cmd: 0,
+            chr: i,
+            payload: 0,
+            id: None,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Slot {
@@ -123,7 +143,7 @@ struct Meta {
     #[allow(clippy::option_option)]
     eng: Option<Option<ValueId>>,
     /// The definition in force at the run's base level, if any.
-    publ: Option<(Native, Locality)>,
+    publ: Option<(Entry, Locality)>,
     /// The stamp of the latest definition, and whether it was local.
     ldef_stamp: u64,
     ldef_local: bool,
@@ -163,7 +183,13 @@ pub(crate) struct State {
     /// ([`State::abandon_to_scope`]); with several frames left open, each
     /// frame's locals at its own frame ([`State::abandon_to_frames`],
     /// `Locality::ScopeAt`). Made as the run ends, never parked.
-    scope_extra: Vec<(Loc, Native, Locality)>,
+    scope_extra: Vec<(Loc, Entry, Locality)>,
+    /// The values the slots hold by handle (an entry's `payload`): the
+    /// glues, token lists and macros decoded or defined in this run,
+    /// and their engine values once encoded.
+    glues: Vec<Glue>,
+    toks: Vec<Rc<[Tok]>>,
+    macros: Vec<Rc<crate::val::Macro>>,
     save: Vec<Saved>,
     /// Locations defined locally inside a group of the run (for a group
     /// left open: its definitions become the run's).
@@ -196,6 +222,11 @@ pub(crate) struct State {
     /// a restore, a preload): the run's memos of decoded state
     /// (`Run::font_entry`) are valid while it stands.
     any_gen: u64,
+    /// Bumped by every change of the table a command could not undo by
+    /// rewinding its input (a definition, a save, a restore, a close):
+    /// the table's part of the run's mutation counter
+    /// (`Run::mutations`, spec-final §2.4).
+    muts: u64,
 }
 
 thread_local! {
@@ -244,8 +275,12 @@ impl Clone for State {
             kinds: self.kinds.clone(),
             next_gid: self.next_gid,
             cont_locs: self.cont_locs.clone(),
+            glues: self.glues.clone(),
+            toks: self.toks.clone(),
+            macros: self.macros.clone(),
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
+            muts: self.muts,
         }
     }
 }
@@ -286,8 +321,12 @@ impl State {
             kinds: None,
             next_gid: 0,
             cont_locs: Vec::new(),
+            glues: Vec::new(),
+            toks: Vec::new(),
+            macros: Vec::new(),
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
+            muts: 0,
         }
     }
 
@@ -296,6 +335,12 @@ impl State {
     #[inline]
     pub(crate) fn cat_gen(&self) -> u64 {
         self.cat_gen
+    }
+
+    /// The table's mutation counter ([`State`]'s `muts`).
+    #[inline]
+    pub(crate) fn muts(&self) -> u64 {
+        self.muts
     }
 
     /// The table's change generation ([`State`]'s `any_gen`).
@@ -370,26 +415,21 @@ impl State {
     /// decoded (one slot access, one flag test); `None` otherwise.
     #[inline]
     pub(crate) fn cmd_chr_fast(&self, loc: Loc) -> Option<(u8, i32)> {
-        if loc & SPILL != 0 {
-            return None;
-        }
+        // (a meaning's location is never a spill one: one bounds test)
         let s = self.eq.get(loc as usize)?;
         (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
     }
 
+    #[inline]
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }
 
     /// The engine's value of `loc`, read: `Unloaded -> Loaded`.
     pub(crate) fn fill(&mut self, loc: Loc, x: Option<ValueId>) {
-        self.slot(loc).e = Entry {
-            val: x.map_or(Native::Absent, Native::Raw),
-            id: x,
-            flags: LOADED | HAS_ID,
-            cmd: 0,
-            chr: 0,
-        };
+        let mut e = Entry::raw(x);
+        e.flags = LOADED | HAS_ID;
+        self.slot(loc).e = e;
     }
 
     /// A value read in place of the engine's (a page step's `\count0..9`
@@ -424,7 +464,7 @@ impl State {
             |s| {
                 format!(
                     "absent {} id {:?} flags {:#x}",
-                    matches!(s.e.val, Native::Absent),
+                    s.e.kind == K_ABSENT,
                     s.e.id,
                     s.e.flags
                 )
@@ -432,18 +472,110 @@ impl State {
         )
     }
 
+    /// Debug: an entry about to be defined, rendered.
+    pub(crate) fn debug_entry(&self, e: &Entry, v: &Values) -> String {
+        match e.kind {
+            K_INT => e.chr.to_string(),
+            _ => self
+                .encode(e, v)
+                .map_or_else(|| "absent".to_owned(), |x| v.render(x)),
+        }
+    }
+
     pub(crate) fn preload(&mut self, loc: Loc, x: Option<ValueId>) {
         self.any_gen = new_cat_gen();
+        self.muts += 1;
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }
-        self.slot(loc).e = Entry {
-            val: x.map_or(Native::Absent, Native::Raw),
-            id: x,
-            flags: LOADED | HAS_ID | PRELOADED,
+        let mut e = Entry::raw(x);
+        e.flags = LOADED | HAS_ID | PRELOADED;
+        self.slot(loc).e = e;
+    }
+
+    /// The engine value of entry `e` (`None`: absent), encoded from its
+    /// record and the table's stores.
+    pub(crate) fn encode(&self, e: &Entry, v: &Values) -> Option<ValueId> {
+        if e.flags & HAS_ID != 0 || e.kind == K_RAW {
+            return e.id;
+        }
+        match e.kind {
+            K_ABSENT => None,
+            K_INT => Some(crate::val::int_id(v, i64::from(e.chr))),
+            K_GLUE => Some(crate::val::glue_value(v, &self.glues[e.payload as usize])),
+            K_TOKS => Some(crate::val::toks_value(v, &self.toks[e.payload as usize])),
+            _ => Some(self.mean_of_entry(e).encode(v)),
+        }
+    }
+
+    /// The meaning a meaning entry holds (a macro's body shared).
+    fn mean_of_entry(&self, e: &Entry) -> Mean {
+        match e.kind {
+            K_PRIM => Mean::Prim(crate::val::prim_by_handle(e.payload), e.cmd, e.chr),
+            K_MACRO => Mean::Macro(self.macros[e.payload as usize].clone()),
+            K_CHAR => Mean::Char(e.cmd, e.chr.cast_unsigned()),
+            K_FONT => Mean::Font(i64::from(e.chr)),
+            K_CHARDEF => Mean::CharDef(i64::from(e.chr)),
+            K_MATHCHARDEF => Mean::MathCharDef(i64::from(e.chr)),
+            K_REG => Mean::Reg(e.cmd, e.chr),
+            K_NOTEXP => Mean::NotExpanded,
+            _ => Mean::Undefined,
+        }
+    }
+
+    /// The entry of glue `g` (kept in the table's glue store).
+    pub(crate) fn glue_entry(&mut self, g: Glue) -> Entry {
+        self.glues.push(g);
+        Entry {
+            kind: K_GLUE,
+            flags: 0,
             cmd: 0,
             chr: 0,
+            payload: u32::try_from(self.glues.len() - 1).unwrap_or(0),
+            id: None,
+        }
+    }
+
+    /// The entry of token list `t`.
+    #[allow(dead_code)]
+    pub(crate) fn toks_entry(&mut self, t: Rc<[Tok]>) -> Entry {
+        self.toks.push(t);
+        Entry {
+            kind: K_TOKS,
+            flags: 0,
+            cmd: 0,
+            chr: 0,
+            payload: u32::try_from(self.toks.len() - 1).unwrap_or(0),
+            id: None,
+        }
+    }
+
+    /// The entry of meaning `m`: its command code and modifier, its
+    /// macro kept in the table's macro store by handle.
+    pub(crate) fn mean_entry(&mut self, m: Mean) -> Entry {
+        let (cmd, chr) = m.cmd_chr();
+        let (kind, payload) = match m {
+            Mean::Prim(n, _, _) => (K_PRIM, crate::val::prim_handle(n)),
+            Mean::Macro(x) => {
+                self.macros.push(x);
+                (K_MACRO, u32::try_from(self.macros.len() - 1).unwrap_or(0))
+            }
+            Mean::Char(..) => (K_CHAR, 0),
+            Mean::Undefined => (K_UNDEF, 0),
+            Mean::Font(_) => (K_FONT, 0),
+            Mean::CharDef(_) => (K_CHARDEF, 0),
+            Mean::MathCharDef(_) => (K_MATHCHARDEF, 0),
+            Mean::Reg(..) => (K_REG, 0),
+            Mean::NotExpanded => (K_NOTEXP, 0),
         };
+        Entry {
+            kind,
+            flags: CC,
+            cmd,
+            chr,
+            payload,
+            id: None,
+        }
     }
 
     /// The loaded entry of `loc` (call [`State::is_loaded`] first).
@@ -471,7 +603,7 @@ impl State {
                 continue;
             };
             if let Some((val, Locality::Local)) = &m.publ
-                && let Some(x) = val.encode(v)
+                && let Some(x) = self.encode(val, v)
             {
                 out.push((l, x));
             }
@@ -482,6 +614,7 @@ impl State {
     /// `loc`'s local definition at the base level is no definition (its
     /// value is the one reaching the run): not published.
     pub(crate) fn drop_publ(&mut self, loc: Loc) {
+        self.muts += 1;
         let Some(m) = self
             .slot_ref(loc)
             .and_then(|s| usize::try_from(s.meta).ok())
@@ -521,11 +654,12 @@ impl State {
 
     /// The engine value of loaded `loc` (encoded once).
     pub(crate) fn id_of(&mut self, loc: Loc, v: &Values) -> Option<ValueId> {
-        let e = self.entry_mut(loc);
+        let e = *self.entry_mut(loc);
         if e.flags & HAS_ID != 0 {
             return e.id;
         }
-        let x = e.val.encode(v);
+        let x = self.encode(&e, v);
+        let e = self.entry_mut(loc);
         e.id = x;
         e.flags |= HAS_ID;
         x
@@ -535,12 +669,13 @@ impl State {
     #[inline]
     pub(crate) fn int_of(&mut self, loc: Loc, v: &Values) -> i32 {
         let e = self.entry_mut(loc);
-        match e.val {
-            Native::Int(i) => i,
-            Native::Absent => 0,
-            Native::Raw(x) => {
-                let i = crate::val::i32_of(v, Some(x));
-                e.val = Native::Int(i);
+        match e.kind {
+            K_INT => e.chr,
+            K_ABSENT => 0,
+            K_RAW => {
+                let i = crate::val::i32_of(v, e.id);
+                e.kind = K_INT;
+                e.chr = i;
                 i
             }
             _ => {
@@ -552,13 +687,17 @@ impl State {
 
     /// Loaded `loc` as glue (decoded once).
     pub(crate) fn glue_of(&mut self, loc: Loc, v: &Values) -> Glue {
-        let e = self.entry_mut(loc);
-        match e.val {
-            Native::Glue(g) => g,
-            Native::Absent => Glue::ZERO,
-            Native::Raw(x) => {
-                let g = crate::val::glue_of(v, Some(x));
-                e.val = Native::Glue(g);
+        let e = *self.entry_mut(loc);
+        match e.kind {
+            K_GLUE => self.glues[e.payload as usize],
+            K_ABSENT => Glue::ZERO,
+            K_RAW => {
+                let g = crate::val::glue_of(v, e.id);
+                self.glues.push(g);
+                let h = u32::try_from(self.glues.len() - 1).unwrap_or(0);
+                let e = self.entry_mut(loc);
+                e.kind = K_GLUE;
+                e.payload = h;
                 g
             }
             _ => {
@@ -572,27 +711,47 @@ impl State {
     #[inline]
     pub(crate) fn macro_at(&self, loc: Loc) -> Option<Rc<crate::val::Macro>> {
         let s = self.slot_ref(loc)?;
-        if s.e.flags & LOADED == 0 {
+        if s.e.flags & LOADED == 0 || s.e.kind != K_MACRO {
             return None;
         }
-        match &s.e.val {
-            Native::Mean(Mean::Macro(m)) => Some(m.clone()),
-            _ => None,
+        self.macros.get(s.e.payload as usize).cloned()
+    }
+
+    /// Decodes loaded meaning `loc` in place when it is the engine's
+    /// value as read: its command code, modifier and handle set (an
+    /// undefined name keeps its absence: it encodes as none).
+    fn decode_mean_at(&mut self, loc: Loc, v: &Values) {
+        let e = *self.entry_mut(loc);
+        match e.kind {
+            K_ABSENT => {
+                let (c, h) = Mean::Undefined.cmd_chr();
+                let e = self.entry_mut(loc);
+                e.cmd = c;
+                e.chr = h;
+                e.flags |= CC;
+            }
+            K_RAW => {
+                let mut n = self.mean_entry(Mean::decode(v, e.id));
+                n.flags = e.flags | CC;
+                n.id = e.id;
+                *self.entry_mut(loc) = n;
+            }
+            _ => {}
         }
     }
 
     /// Loaded `loc` as a meaning (decoded once).
     #[inline]
     pub(crate) fn mean_of(&mut self, loc: Loc, v: &Values) -> Mean {
-        let e = self.entry_mut(loc);
-        match &e.val {
-            Native::Mean(m) => m.clone(),
-            Native::Absent => Mean::Undefined,
-            Native::Raw(x) => {
-                let m = Mean::decode(v, Some(*x));
-                e.val = Native::Mean(m.clone());
-                m
+        let e = *self.entry_mut(loc);
+        match e.kind {
+            K_ABSENT => Mean::Undefined,
+            K_RAW => {
+                self.decode_mean_at(loc, v);
+                let e = *self.entry_mut(loc);
+                self.mean_of_entry(&e)
             }
+            k if k >= K_MEAN0 => self.mean_of_entry(&e),
             _ => {
                 let x = self.id_of(loc, v);
                 Mean::decode(v, x)
@@ -604,32 +763,34 @@ impl State {
     /// once; nothing cloned).
     #[inline]
     pub(crate) fn cmd_chr_of(&mut self, loc: Loc, v: &Values) -> (u8, i32) {
-        let e = self.entry_mut(loc);
+        let e = *self.entry_mut(loc);
         if e.flags & CC != 0 {
             return (e.cmd, e.chr);
         }
-        let (c, h) = match &e.val {
-            Native::Mean(m) => m.cmd_chr(),
-            Native::Absent => Mean::Undefined.cmd_chr(),
-            _ => self.mean_of(loc, v).cmd_chr(),
-        };
-        let e = self.entry_mut(loc);
-        e.cmd = c;
-        e.chr = h;
-        e.flags |= CC;
-        (c, h)
+        if e.kind == K_RAW || e.kind == K_ABSENT {
+            self.decode_mean_at(loc, v);
+            let e = *self.entry_mut(loc);
+            if e.flags & CC != 0 {
+                return (e.cmd, e.chr);
+            }
+        }
+        self.mean_of(loc, v).cmd_chr()
     }
 
     /// Loaded `loc` as a token list (decoded once).
     #[allow(dead_code)]
     pub(crate) fn toks_of(&mut self, loc: Loc, v: &Values) -> Rc<[Tok]> {
-        let e = self.entry_mut(loc);
-        match &e.val {
-            Native::Toks(t) => t.clone(),
-            Native::Absent => Rc::from([]),
-            Native::Raw(x) => {
-                let t = crate::val::toks_rc(v, Some(*x));
-                e.val = Native::Toks(t.clone());
+        let e = *self.entry_mut(loc);
+        match e.kind {
+            K_TOKS => self.toks[e.payload as usize].clone(),
+            K_ABSENT => Rc::from([]),
+            K_RAW => {
+                let t = crate::val::toks_rc(v, e.id);
+                self.toks.push(t.clone());
+                let h = u32::try_from(self.toks.len() - 1).unwrap_or(0);
+                let e = self.entry_mut(loc);
+                e.kind = K_TOKS;
+                e.payload = h;
                 t
             }
             _ => {
@@ -680,8 +841,9 @@ impl State {
     /// the next local one saves again); a global one makes the saves
     /// before it inert. A definition outside every group of the run, or
     /// a global one, is the run's for its base level.
-    pub(crate) fn set(&mut self, loc: Loc, val: Native, global: bool, grp: Option<u32>) {
+    pub(crate) fn set(&mut self, loc: Loc, val: Entry, global: bool, grp: Option<u32>) {
         self.any_gen = new_cat_gen();
+        self.muts += 1;
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }
@@ -700,7 +862,7 @@ impl State {
         {
             let saved = Saved {
                 loc,
-                prev: s.e.clone(),
+                prev: s.e,
                 gid: s.save_gid,
                 stamp: s.save_stamp,
                 at: st,
@@ -710,18 +872,8 @@ impl State {
             s.save_stamp = st;
             self.save.push(saved);
         }
-        let id = match val {
-            Native::Raw(x) => Some(x),
-            _ => None,
-        };
         let s = self.slot(loc);
-        s.e = Entry {
-            val: val.clone(),
-            id,
-            flags: LOADED | if id.is_some() { HAS_ID } else { 0 },
-            cmd: 0,
-            chr: 0,
-        };
+        s.e = stored(val);
         if !global && grp.is_some() {
             self.defined.push(loc);
         }
@@ -761,22 +913,13 @@ impl State {
     /// `base` when the binding is the run's base level's (then it is
     /// the run's definition there, `global` at level one), else a
     /// group's of the run.
-    pub(crate) fn modify(&mut self, loc: Loc, val: Native, base: bool, global: bool) {
+    pub(crate) fn modify(&mut self, loc: Loc, val: Entry, base: bool, global: bool) {
         self.any_gen = new_cat_gen();
+        self.muts += 1;
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
-        let id = match val {
-            Native::Raw(x) => Some(x),
-            _ => None,
-        };
-        self.slot(loc).e = Entry {
-            val: val.clone(),
-            id,
-            flags: LOADED | if id.is_some() { HAS_ID } else { 0 },
-            cmd: 0,
-            chr: 0,
-        };
+        self.slot(loc).e = stored(val);
         if !base {
             self.defined.push(loc);
         }
@@ -812,6 +955,7 @@ impl State {
     /// and `def_base`: its saves are restored (the inert ones, hidden by
     /// a global definition since, are not, §283).
     pub(crate) fn close(&mut self, save_base: usize, def_base: usize) {
+        self.muts += 1;
         while self.save.len() > save_base {
             let Some(s) = self.save.pop() else { break };
             let slot = self.slot(s.loc);
@@ -846,11 +990,12 @@ impl State {
     /// are not closed here (the engine's scope, or the end of the run),
     /// so the local definitions made inside them are the run's own.
     pub(crate) fn abandon(&mut self, save_base: usize, def_base: usize, open_stamp: u64) {
+        self.muts += 1;
         let locs: Vec<Loc> = self.defined[def_base.min(self.defined.len())..].to_vec();
         for loc in locs {
             let mi = self.meta(loc);
             if self.metas[mi].ldef_local && self.metas[mi].ldef_stamp > open_stamp {
-                let val = self.slot(loc).e.val.clone();
+                let val = self.slot(loc).e;
                 self.metas[mi].publ = Some((val, Locality::Local));
             }
         }
@@ -957,7 +1102,8 @@ impl State {
             .iter()
             .filter(|m| {
                 m.publ.as_ref().is_some_and(|(val, _)| {
-                    m.eng.is_some_and(|e| e.is_some() && val.encode(v) == e)
+                    m.eng
+                        .is_some_and(|e| e.is_some() && self.encode(val, v) == e)
                 })
             })
             .map(|m| m.loc)
@@ -1007,14 +1153,16 @@ impl State {
         let mut out = Vec::with_capacity(self.metas.len());
         for m in &self.metas {
             let Some((val, l)) = &m.publ else { continue };
-            let Some(x) = val.encode(v) else { continue };
+            let Some(x) = self.encode(val, v) else {
+                continue;
+            };
             if (top || *l != Locality::Global) && m.eng == Some(Some(x)) {
                 continue;
             }
             out.push((m.loc, x, *l));
         }
         for (loc, val, l) in &self.scope_extra {
-            if let Some(x) = val.encode(v) {
+            if let Some(x) = self.encode(val, v) {
                 out.push((*loc, x, *l));
             }
         }
@@ -1027,7 +1175,9 @@ impl State {
     /// definition inside it leaves `publ` as the base level's.
     pub(crate) fn has_base_local_def(&self, v: &Values) -> bool {
         self.metas.iter().any(|m| match &m.publ {
-            Some((val, Locality::Local)) => val.encode(v).is_some_and(|x| m.eng != Some(Some(x))),
+            Some((val, Locality::Local)) => {
+                self.encode(val, v).is_some_and(|x| m.eng != Some(Some(x)))
+            }
             _ => false,
         })
     }
@@ -1035,12 +1185,12 @@ impl State {
     /// The value `m` publishes at the run's base level, if any (a local
     /// one equal to the engine's value it read publishes nothing, nor a
     /// global one at the top level, [`State::published`]).
-    fn base_publish(m: &Meta, v: &Values, top: bool) -> Option<ValueId> {
+    fn base_publish(&self, m: &Meta, v: &Values, top: bool) -> Option<ValueId> {
         let (val, l) = m.publ.as_ref()?;
         if *l == Locality::Scope {
             return None;
         }
-        let x = val.encode(v)?;
+        let x = self.encode(val, v)?;
         if (top || *l == Locality::Local) && m.eng == Some(Some(x)) {
             None
         } else {
@@ -1070,7 +1220,7 @@ impl State {
                 continue;
             };
             if m.ldef_local && m.ldef_stamp > open_stamp {
-                out.push((mi, s.e.val.encode(v)));
+                out.push((mi, self.encode(&s.e, v)));
             }
         }
         out
@@ -1085,7 +1235,7 @@ impl State {
         self.slot_ref(loc)
             .and_then(|s| (s.meta as usize).checked_sub(1))
             .and_then(|mi| self.metas.get(mi))
-            .is_some_and(|m| Self::base_publish(m, v, top).is_some())
+            .is_some_and(|m| self.base_publish(m, v, top).is_some())
     }
 
     /// Leaves the group whose saves and definitions began at `save_base`
@@ -1103,19 +1253,20 @@ impl State {
         open_stamp: u64,
         top: bool,
     ) {
+        self.muts += 1;
         for (mi, x) in self.group_locals(v, def_base, open_stamp) {
             let Some(x) = x else { continue };
             let loc = self.metas[mi].loc;
-            match Self::base_publish(&self.metas[mi], v, top) {
+            match self.base_publish(&self.metas[mi], v, top) {
                 Some(y) if y == x => {}
                 Some(_) => {
                     if !self.scope_extra.iter().any(|e| e.0 == loc) {
-                        let val = self.slot(loc).e.val.clone();
+                        let val = self.slot(loc).e;
                         self.scope_extra.push((loc, val, Locality::Scope));
                     }
                 }
                 None => {
-                    let val = self.slot(loc).e.val.clone();
+                    let val = self.slot(loc).e;
                     self.metas[mi].publ = Some((val, Locality::Scope));
                 }
             }
@@ -1126,14 +1277,16 @@ impl State {
 
     /// A definition of `loc` in the scope the run opens after itself,
     /// beside the run's own one at its base level ([`State::scope_extra`]).
-    pub(crate) fn define_scope_extra(&mut self, loc: Loc, val: Native) {
+    pub(crate) fn define_scope_extra(&mut self, loc: Loc, val: Entry) {
+        self.muts += 1;
         self.scope_extra.retain(|e| e.0 != loc);
         self.scope_extra.push((loc, val, Locality::Scope));
     }
 
     /// A definition of `loc` in frame `k` of those the run opens after
     /// itself (0: the outermost; [`State::abandon_to_frames`]).
-    pub(crate) fn define_frame_extra(&mut self, loc: Loc, val: Native, k: u8) {
+    pub(crate) fn define_frame_extra(&mut self, loc: Loc, val: Entry, k: u8) {
+        self.muts += 1;
         let l = Locality::ScopeAt(k);
         self.scope_extra.retain(|e| !(e.0 == loc && e.2 == l));
         self.scope_extra.push((loc, val, l));
@@ -1149,10 +1302,11 @@ impl State {
     /// group's close restores, §282; a save hidden by a global
     /// definition since restores nothing, §283).
     pub(crate) fn abandon_to_frames(&mut self, levels: &[(usize, usize, u64)]) {
+        self.muts += 1;
         let Some(&(sb0, db0, _)) = levels.first() else {
             return;
         };
-        let mut out: Vec<(Loc, Native, Locality)> = Vec::new();
+        let mut out: Vec<(Loc, Entry, Locality)> = Vec::new();
         for (k, &(_, db, open_stamp)) in levels.iter().enumerate() {
             let next = levels.get(k + 1);
             let de = next
@@ -1172,7 +1326,7 @@ impl State {
                     .iter()
                     .find(|x| x.loc == loc && s.ginert <= x.at);
                 let (val, ldef) = if let Some(x) = inner {
-                    (x.prev.val.clone(), x.ldef)
+                    (x.prev, x.ldef)
                 } else {
                     let Some(m) = (s.meta as usize)
                         .checked_sub(1)
@@ -1180,7 +1334,7 @@ impl State {
                     else {
                         continue;
                     };
-                    (s.e.val.clone(), (m.ldef_stamp, m.ldef_local, m.ldef_gid))
+                    (s.e, (m.ldef_stamp, m.ldef_local, m.ldef_gid))
                 };
                 if ldef.1 && ldef.0 > open_stamp {
                     out.push((
@@ -1202,6 +1356,7 @@ impl State {
     /// The run's definition of `loc` at its base level made the scope's
     /// it opens after itself ([`State::abandon_to_scope`]).
     pub(crate) fn publish_in_scope(&mut self, loc: Loc) {
+        self.muts += 1;
         let mi = self.meta(loc);
         if let Some((_, l)) = &mut self.metas[mi].publ {
             *l = Locality::Scope;
@@ -1222,7 +1377,7 @@ impl State {
             let id = if e.flags & HAS_ID != 0 {
                 e.id
             } else {
-                e.val.encode(v)
+                self.encode(e, v)
             };
             PEntry {
                 id,
@@ -1239,7 +1394,7 @@ impl State {
                 let m = &self.metas[s.meta as usize - 1];
                 PMeta {
                     eng: m.eng,
-                    publ: m.publ.as_ref().map(|(x, l)| (x.encode(v), *l)),
+                    publ: m.publ.as_ref().map(|(x, l)| (self.encode(x, v), *l)),
                     ldef_stamp: m.ldef_stamp,
                     ldef_local: m.ldef_local,
                     ldef_gid: m.ldef_gid,
@@ -1295,12 +1450,10 @@ impl State {
                 PLoc::Spill(f) => st.spill_loc(f),
             }
         };
-        let ent = |e: PEntry| Entry {
-            val: e.id.map_or(Native::Absent, Native::Raw),
-            id: e.id,
-            flags: e.flags,
-            cmd: 0,
-            chr: 0,
+        let ent = |e: PEntry| {
+            let mut x = Entry::raw(e.id);
+            x.flags = e.flags;
+            x
         };
         for s in p.slots {
             let l = loc(&mut st, s.loc);
@@ -1308,9 +1461,7 @@ impl State {
                 st.metas.push(Meta {
                     loc: l,
                     eng: m.eng,
-                    publ: m
-                        .publ
-                        .map(|(x, lc)| (x.map_or(Native::Absent, Native::Raw), lc)),
+                    publ: m.publ.map(|(x, lc)| (Entry::raw(x), lc)),
                     ldef_stamp: m.ldef_stamp,
                     ldef_local: m.ldef_local,
                     ldef_gid: m.ldef_gid,
@@ -1417,6 +1568,14 @@ pub(crate) struct PState {
     next_gid: u32,
 }
 
+/// An entry as a definition stores it: loaded, its engine value and
+/// meaning record kept where known.
+fn stored(val: Entry) -> Entry {
+    let mut e = val;
+    e.flags = LOADED | (val.flags & (HAS_ID | CC));
+    e
+}
+
 /// Whether `loc` is one of the page builder's parameters (§980).
 fn is_page_param(loc: Loc) -> bool {
     use crate::fields::Par;
@@ -1485,7 +1644,7 @@ impl State {
             let id = if e.flags & HAS_ID != 0 {
                 e.id
             } else {
-                e.val.encode(v)
+                self.encode(e, v)
             };
             (id, e.flags & LOADED != 0)
         };
@@ -1509,7 +1668,7 @@ impl State {
             }
             let (cur, loaded) = ent(&s.e);
             let base = m.and_then(|m| match &m.publ {
-                Some((val, _)) => Some(val.encode(v)),
+                Some((val, _)) => Some(self.encode(val, v)),
                 None => m.eng,
             });
             slots.push(ContSlot {
@@ -1552,12 +1711,10 @@ impl State {
     /// The table of a resume piece ([`State::cont`]).
     pub(crate) fn from_cont(c: ContState) -> State {
         let mut st = State::new();
-        let ent = |x: Option<ValueId>, loaded: bool| Entry {
-            val: x.map_or(Native::Absent, Native::Raw),
-            id: x,
-            flags: if loaded { LOADED | HAS_ID } else { 0 },
-            cmd: 0,
-            chr: 0,
+        let ent = |x: Option<ValueId>, loaded: bool| {
+            let mut e = Entry::raw(x);
+            e.flags = if loaded { LOADED | HAS_ID } else { 0 };
+            e
         };
         for s in c.slots {
             st.cont_locs.push(s.loc);
@@ -1603,17 +1760,14 @@ impl State {
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }
+        self.muts += 1;
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
         let s = self.slot(loc);
-        s.e = Entry {
-            val: x.map_or(Native::Absent, Native::Raw),
-            id: x,
-            flags: LOADED | HAS_ID,
-            cmd: 0,
-            chr: 0,
-        };
+        let mut e = Entry::raw(x);
+        e.flags = LOADED | HAS_ID;
+        s.e = e;
         s.ginert = st;
         if is_page_param(loc) {
             self.pp_dirty = true;

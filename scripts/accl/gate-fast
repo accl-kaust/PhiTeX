@@ -56,10 +56,10 @@ submit() {
   fi
   # (the timing control: 566fb842 as it is, the engine of the c13f152
   # era vendored, built and timed in the same job; GATE_CONTROL= none)
-  if on ams; then ids+=("$(sub "-c 18 --mem=48G -t 00:45:00 -J gf-ams" ams "$want" "${GATE_CONTROL-566fb842}")"); fi
+  if on ams; then ids+=("$(sub "-c 18 --mem=48G -t 01:30:00 -J gf-ams" ams "$want" "${GATE_CONTROL-566fb842}")"); fi
   # (para4000: plain pdfTeX, bytes against its bar, wall and the
   # realised critical path at -j 1/8/16)
-  if on para; then ids+=("$(sub "-c 18 --mem=48G -t 00:30:00 -J gf-para" para "${GATE_PARA_MD5:-bf12c9ddee6407a005c5140fc8a4b5cd}")"); fi
+  if on para; then ids+=("$(sub "-c 18 --mem=48G -t 01:00:00 -J gf-para" para "${GATE_PARA_MD5:-bf12c9ddee6407a005c5140fc8a4b5cd}")"); fi
   echo "gate-fast: commit $c, oracle md5 $want" >&2
   mkdir -p "$runs"
   echo "$c ${ids[*]}" >> "$runs/gate-fast.ids"
@@ -120,6 +120,8 @@ table() {
     d=$runs/cmd-$j
     if [ -f "$d/ams.txt" ]; then echo "amsldoc:"; sed 's/^/  /' "$d/ams.txt"; fi
     if [ -f "$d/para.txt" ]; then echo "para4000:"; sed 's/^/  /' "$d/para.txt"; fi
+    if [ -f "$d/table.txt" ]; then cat "$d/table.txt"; fi
+    if [ -f "$d/acct.txt" ]; then cat "$d/acct.txt"; fi
     if [ -f "$d/cold.txt" ]; then echo "amsldoc cold watch build by op class, head vs control (same node, same command):"; cat "$d/cold.txt"; fi
   done
   echo

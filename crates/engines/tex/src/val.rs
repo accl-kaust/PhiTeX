@@ -190,10 +190,13 @@ pub(crate) mod group {
 /// value table do not depend on the order names were seen in.
 pub(crate) struct CsEntry {
     id: u32,
-    /// Whether the name is a frozen or internal one (`\u{10FFFE}…`).
-    frozen: bool,
     name: Box<str>,
 }
+
+/// The frozen and internal names (`\u{10FFFE}…`) are numbered below
+/// this, every other name from it up (spec-final §2.6): whether a
+/// control sequence is frozen is a range test on its number.
+pub(crate) const FROZEN_MAX: u32 = 1 << 15;
 
 /// The entries by number, in chunks made once (read without a lock).
 const CS_CHUNK_BITS: usize = 12;
@@ -213,7 +216,9 @@ impl CsId {
             static LOCAL: std::cell::RefCell<FxHashMap<Box<str>, CsId>> =
                 std::cell::RefCell::default();
         }
-        static TABLE: OnceLock<std::sync::Mutex<FxHashMap<&'static str, CsId>>> = OnceLock::new();
+        /// The names by text, and how many frozen and other ones there are.
+        type Table = (FxHashMap<&'static str, CsId>, u32, u32);
+        static TABLE: OnceLock<std::sync::Mutex<Table>> = OnceLock::new();
         if let Some(c) = LOCAL.with(|l| l.borrow().get(name).copied()) {
             return c;
         }
@@ -222,15 +227,23 @@ impl CsId {
                 .get_or_init(Default::default)
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(&c) = t.get(name) {
+            if let Some(&c) = t.0.get(name) {
                 c
             } else {
-                let id = t.len();
+                // (the name's class is read once, here, as it is first
+                // seen: its number says it from then on)
+                let id = if name.starts_with('\u{10FFFE}') && t.1 < FROZEN_MAX {
+                    t.1 += 1;
+                    t.1 - 1
+                } else {
+                    t.2 += 1;
+                    FROZEN_MAX + t.2 - 1
+                };
                 let e: &'static CsEntry = Box::leak(Box::new(CsEntry {
-                    id: u32::try_from(id).unwrap_or(u32::MAX),
-                    frozen: name.starts_with('\u{10FFFE}'),
+                    id,
                     name: Box::from(name),
                 }));
+                let id = id as usize;
                 let chunk = CS_BY_ID[(id >> CS_CHUNK_BITS) % CS_CHUNKS].get_or_init(|| {
                     Box::leak(
                         (0..CS_CHUNK)
@@ -241,7 +254,7 @@ impl CsId {
                 });
                 let _ = chunk[id & (CS_CHUNK - 1)].set(e);
                 let c = CsId(e);
-                t.insert(&e.name, c);
+                t.0.insert(&e.name, c);
                 c
             }
         };
@@ -269,10 +282,11 @@ impl CsId {
         self.0.id as usize
     }
 
-    /// Whether the name is a frozen or internal one (`\u{10FFFE}…`).
+    /// Whether the name is a frozen or internal one (`\u{10FFFE}…`):
+    /// its number is below [`FROZEN_MAX`].
     #[inline]
     pub(crate) fn frozen(self) -> bool {
-        self.0.frozen
+        self.0.id < FROZEN_MAX
     }
 
     pub(crate) fn name(self) -> &'static str {
@@ -315,10 +329,6 @@ impl std::fmt::Display for CsId {
 
 /// The bit of a control sequence token.
 const CS_BIT: u32 = 1 << 31;
-/// The bit of a frozen or internal control sequence token (its name
-/// starts with `\u{10FFFE}`): tested without touching the entry.
-const FROZEN_BIT: u32 = 1 << 30;
-const CS_MASK: u32 = CS_BIT | FROZEN_BIT;
 
 /// A token (§289) in one word: a character, `cat << 21 | char` (category
 /// 13 is an active character), or, with bit 31 set, a control sequence
@@ -352,8 +362,7 @@ impl Tok {
     }
 
     pub(crate) fn of_cs(c: CsId) -> Tok {
-        let f = if c.frozen() { FROZEN_BIT } else { 0 };
-        Tok(CS_BIT | f | u32::try_from(c.index()).unwrap_or(0))
+        Tok(CS_BIT | u32::try_from(c.index()).unwrap_or(0))
     }
 
     /// The word: `cat << 21 | char` for a character (so `raw() >> 21` is
@@ -372,13 +381,13 @@ impl Tok {
     /// The control sequence of a control sequence token.
     #[inline]
     pub(crate) fn as_cs(self) -> Option<CsId> {
-        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & !CS_MASK) as usize))
+        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & !CS_BIT) as usize))
     }
 
     /// The number of a control sequence token ([`CsId::index`]).
     #[inline]
     pub(crate) fn cs_index(self) -> Option<usize> {
-        (self.0 & CS_BIT != 0).then_some((self.0 & !CS_MASK) as usize)
+        (self.0 & CS_BIT != 0).then_some((self.0 & !CS_BIT) as usize)
     }
 
     #[inline]
@@ -386,11 +395,11 @@ impl Tok {
         self.0 & CS_BIT != 0
     }
 
-    /// Whether this is a frozen or internal control sequence (one bit,
-    /// no entry lookup).
+    /// Whether this is a frozen or internal control sequence: a range
+    /// test on its number ([`FROZEN_MAX`]), no entry lookup.
     #[inline]
     pub(crate) fn is_frozen_cs(self) -> bool {
-        self.0 & CS_MASK == CS_MASK
+        self.0 & CS_BIT != 0 && self.0 & !CS_BIT < FROZEN_MAX
     }
 
     /// The category of a character token.
@@ -950,6 +959,51 @@ pub(crate) fn prim(name: &str) -> Option<(&'static str, u8, i32)> {
             .map_or("", |p| p.0);
         (n, c, h)
     })
+}
+
+/// The internal primitives' names ([`prim`]'s own).
+const INTERNAL_PRIMS: [&str; 4] = [
+    "\u{10FFFE}endgraf",
+    "\u{10FFFE}notexpanded",
+    "\u{10FFFE}endv",
+    "\u{10FFFE}alignpeek",
+];
+
+/// Every primitive's name by a dense handle, and the handle by name
+/// (a meaning slot keeps a primitive's name as its handle,
+/// `crate::runstate::Entry`).
+fn prim_handles() -> &'static (
+    Vec<&'static str>,
+    phitex_defuse::FxHashMap<&'static str, u32>,
+) {
+    static M: OnceLock<(
+        Vec<&'static str>,
+        phitex_defuse::FxHashMap<&'static str, u32>,
+    )> = OnceLock::new();
+    M.get_or_init(|| {
+        let mut names: Vec<&'static str> = Vec::new();
+        let mut ix = phitex_defuse::FxHashMap::default();
+        for n in crate::etex::all_prims()
+            .map(|p| p.0)
+            .chain(INTERNAL_PRIMS.iter().copied())
+        {
+            ix.entry(n).or_insert_with(|| {
+                names.push(n);
+                u32::try_from(names.len() - 1).unwrap_or(0)
+            });
+        }
+        (names, ix)
+    })
+}
+
+/// The handle of primitive name `n` (as [`prim`] gives names).
+pub(crate) fn prim_handle(n: &'static str) -> u32 {
+    prim_handles().1.get(n).copied().unwrap_or(u32::MAX)
+}
+
+/// The primitive name of handle `h` ([`prim_handle`]).
+pub(crate) fn prim_by_handle(h: u32) -> &'static str {
+    prim_handles().0.get(h as usize).copied().unwrap_or("relax")
 }
 
 /// The name of the parameter or primitive at `(cmd, chr)`.

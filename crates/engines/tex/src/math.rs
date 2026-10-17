@@ -254,7 +254,8 @@ impl Run<'_, '_> {
 
     /// `init_math` (§1138–§1139, §1145).
     pub(crate) fn init_math(&mut self, md: &Mode) -> R<()> {
-        self.get_token()?;
+        self.get_token();
+        self.ck()?;
         if self.cur.cmd == cmd::MATH_SHIFT && md.m > 0 {
             return self.init_display(md);
         }
@@ -288,6 +289,7 @@ impl Run<'_, '_> {
             && l.mode == 102
         {
             let l = self.pop_level().expect("the paragraph's level");
+            self.muts += 1;
             self.last_par = l.par.unwrap_or((0, 0));
         } else if let Some(k) = self.par_level_under_groups() {
             self.end_graf_under_groups(k)?;
@@ -913,7 +915,8 @@ impl Run<'_, '_> {
 
     /// §1197: "Display math should end with $$".
     fn check_dollar(&mut self) -> R<()> {
-        self.get_x_token()?;
+        self.get_x_token();
+        self.ck()?;
         if self.cur.cmd != cmd::MATH_SHIFT {
             self.back_cur();
             self.log("error", "Display math should end with $$")?;
@@ -1124,7 +1127,8 @@ impl Run<'_, '_> {
             l.par = Some((lang, packed));
         }
         // §443: an optional space
-        self.get_x_token()?;
+        self.get_x_token();
+        self.ck()?;
         if self.cur.cmd != cmd::SPACER {
             self.back_cur();
         }

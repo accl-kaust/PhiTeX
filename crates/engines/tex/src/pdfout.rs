@@ -504,7 +504,9 @@ pub(crate) fn note_image_files(
     if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
         eprintln!(
             "  image files: {:?} (map {})",
-            have.iter().map(|n| String::from_utf8_lossy(n).into_owned()).collect::<Vec<_>>(),
+            have.iter()
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+                .collect::<Vec<_>>(),
             fonts.ps.is_some()
         );
     }
@@ -1049,6 +1051,7 @@ pub(crate) fn command_forms(
     // round's answer changes, and a key that moved with it would never
     // find the answer, `pdf:objbase` never settling)
     let _ = input;
+    r.muts += 1;
     r.pdf_occ += 1;
     let key = phitex_defuse::hash_words(
         0x6364_6d6b_6579_0001,
@@ -1569,6 +1572,41 @@ pub(crate) struct EndFields {
     pub suppress_ptex_info: i32,
 }
 
+/// The records between two of the link's kept states ([`LinkMemo`]).
+const LINK_SNAP: usize = 16;
+
+/// The writer as the link left it after a record (every [`LINK_SNAP`]).
+#[derive(Clone)]
+struct LinkSnap {
+    at: usize,
+    st: PdfState,
+    tags: FontTags,
+    forms: Forms,
+    got: usize,
+    errors: usize,
+    placed: usize,
+    shipped: usize,
+}
+
+/// The last link of the process: its records (by value), each record's
+/// chunk, the writer every [`LINK_SNAP`] records, and what it gave the
+/// commands; an edit's link copies the records it shares from the start
+/// (spec-final §6.2).
+struct LinkMemo {
+    /// The values' instance and what the writer starts from, hashed.
+    head: u64,
+    ids: Vec<u64>,
+    chunks: Vec<Option<phitex_pdf::Chunk>>,
+    snaps: Vec<LinkSnap>,
+    got: Vec<ValueId>,
+    errors: Vec<(String, i64)>,
+}
+
+fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
+    static M: OnceLock<Mutex<Option<LinkMemo>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(None))
+}
+
 /// What the link made: the file (empty: none), and the loop-backs it
 /// gives the next round: what each read-time command got ([`OBJNUMS`])
 /// and the fonts' names ([`FONT_TAGS`]).
@@ -1653,7 +1691,58 @@ pub(crate) fn finish_exact(
         }
         serials
     };
-    for (&x, pc) in xpages.iter().zip(&pcs) {
+    // (spec-final §6.2: the records the last link of this build placed,
+    // the same from the file's start, are not placed again: their chunks
+    // are copied, and the writer goes on from the state it had after
+    // them, kept every `LINK_SNAP` records)
+    let ids: Vec<u64> = xpages.iter().map(|x| x.raw()).collect();
+    // (what the writer starts from: the same for the copy to stand)
+    let head = phitex_defuse::hash_bytes(
+        phitex_defuse::hash_words(
+            v.instance(),
+            &[f.g2u.map_or(0, ValueId::raw), f.date.len() as u64],
+        ),
+        [f.date.as_bytes(), f.jobname.as_bytes()]
+            .concat()
+            .as_slice(),
+    );
+    let mut chunks_of: Vec<Option<phitex_pdf::Chunk>> = Vec::with_capacity(xpages.len());
+    let mut snaps: Vec<LinkSnap> = Vec::new();
+    let mut start = 0usize;
+    {
+        let memo = link_memo().lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(m) = memo.as_ref().filter(|m| m.head == head) {
+            let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
+            if let Some(sn) = m.snaps.iter().rev().find(|sn| sn.at <= same && sn.at > 0) {
+                st = sn.st.clone();
+                tags = sn.tags.clone();
+                forms = sn.forms.clone();
+                got = m.got[..sn.got].to_vec();
+                errors = m.errors[..sn.errors].to_vec();
+                (placed, shipped) = (sn.placed, sn.shipped);
+                for c in m.chunks[..sn.at].iter().flatten() {
+                    bytes.push(c.clone());
+                }
+                chunks_of.extend(m.chunks[..sn.at].iter().cloned());
+                snaps.extend(m.snaps.iter().filter(|x| x.at <= sn.at).cloned());
+                start = sn.at;
+            }
+        }
+    }
+    let copied = start;
+    for (i, (&x, pc)) in xpages.iter().zip(&pcs).enumerate().skip(start) {
+        if i > start && (i - start).is_multiple_of(LINK_SNAP) {
+            snaps.push(LinkSnap {
+                at: i,
+                st: st.clone(),
+                tags: tags.clone(),
+                forms: forms.clone(),
+                got: got.len(),
+                errors: errors.len(),
+                placed,
+                shipped,
+            });
+        }
         if v.as_int(x).is_some() {
             // a page: no piece in the memo is a page written by a run
             // the engine threw away; nothing to place
@@ -1735,9 +1824,25 @@ pub(crate) fn finish_exact(
                 apply_doc_op(v, &mut st, x);
             }
         }
-        if let Some(c) = st.flush_chunk() {
-            bytes.push(c);
+        let c = st.flush_chunk();
+        if let Some(c) = &c {
+            bytes.push(c.clone());
         }
+        chunks_of.push(c);
+    }
+    *link_memo().lock().unwrap_or_else(PoisonError::into_inner) = Some(LinkMemo {
+        head,
+        ids,
+        chunks: chunks_of,
+        snaps,
+        got: got.clone(),
+        errors: errors.clone(),
+    });
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "pdf link: {copied} of {} records copied from the last link",
+            xpages.len()
+        );
     }
     // the fonts loaded after the last page named after them
     tags.end(f.fonts);

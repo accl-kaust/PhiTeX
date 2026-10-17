@@ -291,12 +291,16 @@ impl Run<'_, '_> {
     /// `get_preamble_token` (§782).
     fn get_preamble_token(&mut self, tab: &mut Glue) -> R<()> {
         loop {
-            self.get_token()?;
+            self.get_token();
+            self.ck()?;
             while self.cur.cmd == cmd::TAB_MARK && self.cur.chr == SPAN_CODE {
-                self.get_token()?;
+                self.get_token();
+                self.ck()?;
                 if self.cur.cmd > cmd::MAX_COMMAND {
-                    self.expand()?;
-                    self.get_token()?;
+                    self.expand();
+                    self.ck()?;
+                    self.get_token();
+                    self.ck()?;
                 }
             }
             if self.cur.cmd == cmd::ASSIGN_GLUE && self.cur.chr == TABSKIP_LOC {
@@ -320,7 +324,8 @@ impl Run<'_, '_> {
         loop {
             self.set_astate(1_000_000);
             loop {
-                self.get_x_token()?;
+                self.get_x_token();
+                self.ck()?;
                 if self.cur.cmd != cmd::SPACER {
                     break;
                 }
@@ -511,7 +516,8 @@ impl Run<'_, '_> {
     fn next_col(&mut self, asid: i64, col: usize) -> R<bool> {
         self.set_astate(1_000_000);
         loop {
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             if self.cur.cmd != cmd::SPACER {
                 break;
             }
@@ -614,7 +620,8 @@ impl Run<'_, '_> {
         self.do_assignments()?;
         if self.cur.cmd == cmd::MATH_SHIFT {
             // §1197
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             if self.cur.cmd != cmd::MATH_SHIFT {
                 self.back_cur();
                 self.log("error", "Display math should end with $$")?;

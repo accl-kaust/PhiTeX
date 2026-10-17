@@ -35,7 +35,7 @@
 //!   That is the same as tex.web unless the routine changes what the
 //!   piece's commands after the candidate read, or reads what they
 //!   defined: the finisher checks ([`Run::check_cut`]) and asks for a cut
-//!   (`cutreq`). The piece runs again stopped at that candidate, its
+//!   (`cut:<piece>`). The piece runs again stopped at that candidate, its
 //!   continuation ([`Run::cont_encode`]) the material of a `resume`
 //!   piece ([`Resume`], [`RESUME`]) placed after the page's nodes. A piece
 //!   whose finishers so far touch what it reads or defines finds a page
@@ -44,8 +44,6 @@
 //! - Nothing reads the whole list, nothing is replayed: one scan state
 //!   per page, one finisher per page, a step per piece reading only the
 //!   profiles since its page began.
-
-use std::collections::VecDeque;
 
 use phitex_defuse::{
     Claim, Ctx, Effect, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
@@ -147,8 +145,21 @@ pub(crate) fn no_units(v: &Values) -> Vec<(Field, ValueId)> {
 /// its text declared runs the windows' readers again).
 pub(crate) fn give_no_units(r: &mut Run<'_, '_>) {
     for (f, x) in no_units(r.v) {
+        r.muts += 1;
         r.contribs.push((f, x));
     }
+}
+
+/// The prefix of the fields saying a finisher asked a cut of a piece
+/// (`cutd:<piece>`, [`Run::check_cut`]).
+pub(crate) const CUT_DONE: &str = "cutd:";
+
+/// `cutd:<piece>` of piece `pid` (its raw node id as an integer).
+pub(crate) fn cut_done_field(v: &Values, pid: i64) -> Field {
+    v.field(&format!(
+        "{CUT_DONE}{}",
+        u64::from_ne_bytes(pid.to_ne_bytes())
+    ))
 }
 
 /// Defined by a `\shipout`: the mark that a page shipped before.
@@ -351,9 +362,11 @@ impl PageState {
             },
             |m| params_of(v, m),
         );
-        let mut queue: VecDeque<ValueId> = std::mem::take(buf).into();
+        // (the contributions as a stack, the next on top: a `Vec`)
+        let mut queue: Vec<ValueId> = std::mem::take(buf);
+        queue.reverse();
         let mut end_seen = None;
-        while let Some(x) = queue.pop_front() {
+        while let Some(x) = queue.pop() {
             match nodes::tag(v, x) {
                 // §1054: `\end` ends the job once the page and the
                 // contributions are empty and no dead cycle pends; else
@@ -366,7 +379,7 @@ impl PageState {
                     }
                     let xs = list_of(v, x);
                     for &y in xs.iter().skip(1).rev() {
-                        queue.push_front(y);
+                        queue.push(y);
                     }
                     continue;
                 }
@@ -384,7 +397,7 @@ impl PageState {
             // §1000: only a kern looks at what follows it
             let next = if matches!(p, Node::Kern(..)) {
                 queue
-                    .front()
+                    .last()
                     .and_then(|&y| nodes::decode(v, y, &mut Side::default()))
             } else {
                 None
@@ -418,7 +431,7 @@ impl PageState {
                 Outcome::Done => {}
                 // the kern waits for its successor, with everything after
                 Outcome::Wait(_) => {
-                    queue.push_front(x);
+                    queue.push(x);
                     break;
                 }
                 Outcome::Fire(f) => {
@@ -438,7 +451,7 @@ impl PageState {
                         .iter()
                         .map(|n| nodes::encode(v, n, &self.side))
                         .collect();
-                    carried.extend(queue.drain(..));
+                    carried.extend(queue.drain(..).rev());
                     if let Some(e) = end_seen {
                         carried.push(e);
                     }
@@ -460,7 +473,8 @@ impl PageState {
                 }
             }
         }
-        *buf = queue.into();
+        queue.reverse();
+        *buf = queue;
         Ok(None)
     }
 }
@@ -879,7 +893,9 @@ impl Run<'_, '_> {
         pos.extend([ValueId::UNIT; 8]);
         pos.extend([text, v.int(normal), v.int(i64::from(special))]);
         self.cx.follow(self.ops.finish, pos);
-        self.cx.follow(self.ops.scan, vec![v.int(-2)]);
+        // (the continuation names its page: its guess is that page's,
+        // [`Ops::scan_guess`])
+        self.cx.follow(self.ops.scan, vec![v.int(-2), v.int(j)]);
         Ok(())
     }
 
@@ -1070,10 +1086,7 @@ impl Run<'_, '_> {
             // again, so the client keeps it, `api::Graph::settle`; a cut
             // no finisher asks for any more is dropped)
             if pid != -2 && a(6) != ValueId::UNIT && int_of(v, a(6)) != 0 {
-                self.contribute(
-                    "cutreq",
-                    v.seq_unit(v.list(vec![v.int(pid), v.int(i64::from(fire.k))])),
-                );
+                self.publish_cut(pid, v.int(i64::from(fire.k)))?;
             }
             args.extend([ValueId::UNIT; 5]);
         } else {
@@ -1503,9 +1516,8 @@ impl Run<'_, '_> {
     }
 
     /// A piece's start: whether a finisher asked for a cut of this node
-    /// (`cut:<node>`, a loop-back the end node publishes from the
-    /// finishers' `cutreq` contributions, [`Run::check_cut`]), at which
-    /// candidate.
+    /// (`cut:<node>`, a loop-back the finisher publishes,
+    /// [`Run::check_cut`]), at which candidate.
     pub(crate) fn read_cut_request(&mut self) -> R<()> {
         let args = self.cx.args();
         let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
@@ -1587,14 +1599,7 @@ impl Run<'_, '_> {
             for f in restore {
                 let x = self.eng_read(f)?;
                 let loc = self.loc_of(f);
-                self.set_loc(
-                    loc,
-                    x.map_or(
-                        crate::runstate::Native::Absent,
-                        crate::runstate::Native::Raw,
-                    ),
-                    true,
-                );
+                self.set_loc(loc, crate::runstate::Entry::raw(x), true);
             }
             return Ok(());
         }
@@ -1606,7 +1611,27 @@ impl Run<'_, '_> {
                 int_of(v, k)
             );
         }
-        self.contribute("cutreq", v.seq_unit(v.list(vec![pid, k])));
+        self.publish_cut(int_of(v, pid), k)
+    }
+
+    /// A cut of piece `pid` at candidate `k` asked (spec-final §4.4: the
+    /// cut is the finisher's to give, never the end node's): the
+    /// earliest page asking one of the piece gives it, as the piece's
+    /// loop-back `cut:<piece>`; a page after it in the same piece finds
+    /// that it did (`cutd:<piece>`, a forward definition) and leaves it,
+    /// so one node publishes the field.
+    fn publish_cut(&mut self, pid: i64, k: ValueId) -> R<()> {
+        let v = self.v;
+        let done = cut_done_field(v, pid);
+        if self.eng_read(done)?.is_some() {
+            return Ok(());
+        }
+        self.cx.define_with(done, k, Locality::Global);
+        let f = v.field(&format!("cut:{}", u64::from_ne_bytes(pid.to_ne_bytes())));
+        if !self.cx.is_loopback(f) {
+            self.cx.declare_loopback(f, ValueId::UNIT);
+        }
+        self.cx.publish(f, k);
         Ok(())
     }
 
@@ -2209,7 +2234,7 @@ impl Run<'_, '_> {
             v.int(i64::from(self.radix)),
             v.int(self.cur_order as i64),
             v.int(i64::try_from(self.pdf_occ).unwrap_or(0)),
-            v.int(i64::from_ne_bytes(self.irreversible.to_ne_bytes())),
+            v.int(i64::from_ne_bytes(self.muts.to_ne_bytes())),
             v.int(i64::from(self.read_back_done)),
             v.int(i64::from(self.astate.is_some())),
             v.int(self.astate.unwrap_or(0)),
@@ -2409,7 +2434,7 @@ impl Run<'_, '_> {
         self.radix = i32::try_from(n(6)).unwrap_or(0);
         self.cur_order = crate::val::order(n(7));
         self.pdf_occ = usize::try_from(n(8)).unwrap_or(0);
-        self.irreversible = u64::from_ne_bytes(n(9).to_ne_bytes());
+        self.muts = u64::from_ne_bytes(n(9).to_ne_bytes());
         self.read_back_done = n(10) != 0;
         self.astate = (n(11) != 0).then(|| n(12));
         self.aopen = n(13);
@@ -2491,7 +2516,17 @@ impl FinDefs {
                 {
                     return None;
                 }
-                let &(_, y) = self.prev.iter().find(|d| d.0 == f)?;
+                // (one run of the routine so far, spec-final §9b: its
+                // values carried on, a page counter stepping by the pages
+                // between; a wrong guess runs its readers again, a piece
+                // never parks on a finisher)
+                let Some(&(_, y)) = self.prev.iter().find(|d| d.0 == f) else {
+                    if !name.starts_with("count:") {
+                        return Some((f, x));
+                    }
+                    let b = v.as_int(x)?;
+                    return Some((f, v.int(b.checked_add(j - self.last_j)?)));
+                };
                 if x == y {
                     return Some((f, x));
                 }
@@ -2647,6 +2682,10 @@ impl Operation for Finish {
             ] {
                 names.push(v.field(n));
             }
+            // (the cut it may ask of the piece its page finishes inside)
+            if let Some(&pid) = args.get(5) {
+                names.push(cut_done_field(v, int_of(v, pid)));
+            }
             ops(&self.0).fields.add_record_fields(&mut names);
             return MayDefine::Names(names);
         }
@@ -2659,6 +2698,7 @@ impl Operation for Finish {
         };
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
         ps.push(RTN.to_owned());
+        ps.push(CUT_DONE.to_owned());
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
@@ -2929,6 +2969,12 @@ impl Operation for Resume {
     fn name(&self) -> &'static str {
         "resume"
     }
+    /// What it cannot run without (spec-final §9b): the continuation the
+    /// cut piece defined; the engine's gate holds it until that is there
+    /// instead of a run parking on it.
+    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(vec![v.field(RESUME)])
+    }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
     }
@@ -2988,6 +3034,7 @@ struct RunReaching<'r, 'c, 'a>(&'r mut Run<'c, 'a>);
 
 impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
     fn params(&mut self) -> PageParams {
+        self.0.reach_reads += 1;
         let v = self.0.v;
         self.0.page_params_marker().map_or(
             PageParams {
@@ -3002,6 +3049,7 @@ impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
     }
 
     fn class(&mut self, n: u16) -> InsertClass {
+        self.0.reach_reads += 1;
         self.0.insert_class(n).unwrap_or(InsertClass {
             box_height_plus_depth: None,
             box_is_hbox: false,
@@ -3067,6 +3115,21 @@ impl Operation for Scan {
     /// No pieces' units: a window holding a step does not wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         Some(no_units(v))
+    }
+    /// A continuation's scan state as the guess cache has it for its page
+    /// (spec-final §3.4): the steps after it run on that instead of
+    /// waiting; a different real one runs them again.
+    fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        if args.first().is_none_or(|&x| int_of(v, x) != -2) {
+            return None;
+        }
+        let j = int_of(v, *args.get(1)?);
+        let (st, mat) = *ops(&self.0)
+            .scan_guess
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&j)?;
+        Some(vec![(v.field(SCAN), st), (v.field(SCAN_MAT), mat)])
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
@@ -3170,6 +3233,16 @@ enum Placed {
     Page,
 }
 
+/// The scan's states after the prefixes of windows ([`Run::scan_step`]),
+/// by the window's start and its units' values.
+fn scan_memo() -> &'static std::sync::Mutex<phitex_defuse::FxHashMap<u64, crate::vprof::ScanState>>
+{
+    static M: std::sync::OnceLock<
+        std::sync::Mutex<phitex_defuse::FxHashMap<u64, crate::vprof::ScanState>>,
+    > = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
 /// Pages where the scan's decisions and the builder's on the items
 /// differed (a scan defect; the page is built from the items).
 static SCAN_REAL_DIFFS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3219,46 +3292,105 @@ impl Run<'_, '_> {
                 self.cx.is_speculative()
             );
         }
-        let mut st = s.state(v);
+        // (spec-final §3.3: a page's steps read one window from its
+        // anchor; each goes on from the longest prefix of it a step
+        // before folded, a memo of the scan over the profiles, so a page
+        // costs its profiles once and not once a step. What a prefix
+        // read from the engine as it was folded (a unit's page
+        // parameters, a class's registers) keeps it out of the memo: a
+        // step reads that itself)
+        let ids: Vec<u64> = units.iter().map(|u| u.raw()).collect();
         let material = crate::vprof::decode(&s.prof);
-        let mut decoded: Vec<(i64, Vec<crate::vprof::PItem>)> = units
-            .iter()
-            .map(|&u| {
-                let (pid, ints) = crate::vprof::unit_parts(v, u);
-                (pid, crate::vprof::decode(&ints))
-            })
-            .collect();
-        for (pid, items) in &mut decoded {
-            self.resolve_prof_of(*pid, items)?;
+        let mut decoded: Vec<Option<(i64, Vec<crate::vprof::PItem>)>> = vec![None; units.len()];
+        let mut needs = vec![false; units.len()];
+        for (i, &u) in units.iter().enumerate() {
+            let (pid, ints) = crate::vprof::unit_parts(v, u);
+            let items = crate::vprof::decode(&ints);
+            needs[i] = items
+                .iter()
+                .any(|x| matches!(x, crate::vprof::PItem::Params(None)) || crate::vprof::is_end(x));
+            decoded[i] = Some((pid, items));
         }
         let dead = if crate::vprof::has_end(&material)
-            || decoded.iter().any(|d| crate::vprof::has_end(&d.1))
+            || decoded
+                .iter()
+                .flatten()
+                .any(|d| crate::vprof::has_end(&d.1))
         {
             self.cint(crate::fields::cell::DEADCYCLES)?
         } else {
             0
         };
-        let scan_fire = {
+        let h0 = phitex_defuse::hash_words(
+            0x7363_616e_6d65_6d6f,
+            &[
+                v.instance(),
+                src.map_or(0, ValueId::raw),
+                dead.cast_unsigned(),
+            ],
+        );
+        let mut keys = Vec::with_capacity(ids.len() + 1);
+        keys.push(h0);
+        for &u in &ids {
+            let k = phitex_defuse::hash_words(*keys.last().unwrap_or(&h0), &[u]);
+            keys.push(k);
+        }
+        // the longest prefix folded before, short of this step's unit
+        let last = units.len() - 1;
+        let (mut from, memo) = {
+            let m = scan_memo()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (1..=last)
+                .rev()
+                .find_map(|k| m.get(&keys[k]).map(|st| (k, st.clone())))
+                .map_or((0, None), |(k, st)| (k, Some(st)))
+        };
+        let mut clean = true;
+        let (scan_fire, st) = {
             let mut rd = RunReaching(self);
-            if st.fold_items(&material, dead, &mut rd).is_some() {
-                // (the continuation fires on this material itself: a state
-                // this step read before that continuation ran)
-                None
+            let mut st = if let Some(st) = memo {
+                st
             } else {
-                let last = decoded.len() - 1;
-                let mut out = None;
-                for (i, (pid, items)) in decoded.iter().enumerate() {
-                    if let Some(f) = st.fold_items(items, dead, &mut rd) {
-                        // (a page firing in an earlier piece is that
-                        // piece's step's; this run read a state before it)
-                        if i == last {
-                            out = Some((*pid, f));
-                        }
-                        break;
-                    }
+                from = 0;
+                let mut st = s.state(rd.0.v);
+                let reads0 = rd.0.reach_reads;
+                if st.fold_items(&material, dead, &mut rd).is_some() {
+                    // (the continuation fires on this material itself: a
+                    // state this step read before that continuation ran)
+                    return Ok(Placed::Nothing);
                 }
-                out
+                clean = rd.0.reach_reads == reads0;
+                st
+            };
+            let mut out = None;
+            for i in from..units.len() {
+                let Some((pid, mut items)) = decoded[i].take() else {
+                    continue;
+                };
+                rd.0.resolve_prof_of(pid, &mut items)?;
+                let reads0 = rd.0.reach_reads;
+                let f = st.fold_items(&items, dead, &mut rd);
+                clean = clean && !needs[i] && rd.0.reach_reads == reads0;
+                if let Some(f) = f {
+                    // (a page firing in an earlier piece is that piece's
+                    // step's; this run read a state before it)
+                    if i == last {
+                        out = Some((pid, f));
+                    }
+                    break;
+                }
+                if clean && i < last {
+                    let mut m = scan_memo()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if m.len() > 1 << 16 {
+                        m.clear();
+                    }
+                    m.insert(keys[i + 1], st.clone());
+                }
             }
+            (out, st)
         };
         let Some((pid, sf)) = scan_fire else {
             return Ok(Placed::Nothing);
@@ -3368,7 +3500,18 @@ impl Run<'_, '_> {
             prof: Vec::new(),
             material: Vec::new(),
         };
-        let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        // (the window of the next page's steps begins after the piece
+        // the page fired in: nothing between it and this node gives
+        // units (its step, the finisher, this node), so the state names
+        // a node of the text, which an edit elsewhere keeps, and a
+        // continuation made anew can be given it as its guess,
+        // [`Ops::scan_guess`]; a page firing in a continuation's own
+        // material has no piece: this node)
+        let me = if pid == -2 {
+            i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes())
+        } else {
+            pid
+        };
         let state = |prof: ValueId, material: Vec<ValueId>| {
             v.list(vec![
                 v.int(me),
@@ -3414,9 +3557,20 @@ impl Run<'_, '_> {
         }
         let prof = crate::vprof::encode(v, &material);
         let x = state(crate::vprof::value(v, &prof), Vec::new());
+        let mat = v.list(material);
         self.cx.define_with(v.field(SCAN), x, Locality::Global);
         self.cx
-            .define_with(v.field(SCAN_MAT), v.list(material), Locality::Global);
+            .define_with(v.field(SCAN_MAT), mat, Locality::Global);
+        // (the guess cache: what this page's continuation defined)
+        if pid != -2
+            && let Some(&j) = self.cx.args().get(1)
+        {
+            self.ops
+                .scan_guess
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(int_of(v, j), (x, mat));
+        }
         Ok(Placed::State)
     }
 }

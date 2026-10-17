@@ -66,7 +66,7 @@ pub(crate) struct Incr {
     pub analysed: usize,
     /// File ids for the definitions of the document's chunks.
     next_file: u32,
-    /// The workers its chunks are analysed on (`crate::exec::each`).
+    /// The workers its chunks are analysed on (`crate::exec::Coarse`).
     pub threads: usize,
 }
 
@@ -267,12 +267,15 @@ impl Incr {
         let fresh: Vec<usize> = (0..parts.len())
             .filter(|&k| parts[k].cached.is_none())
             .collect();
-        let owns: Vec<Mutex<Option<Definitions>>> = crate::exec::map(threads, fresh.len(), &|x| {
-            Mutex::new(Some(crate::hints::own_definitions(
-                chunk_text(&parts[fresh[x]]),
-                FileKind::Document,
-            )))
-        });
+        // (on the executor, spec-final §5.1: no threads outside it)
+        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(threads));
+        let owns: Vec<Mutex<Option<Definitions>>> =
+            crate::exec::map_on(&mut ex, fresh.len(), &|x| {
+                Mutex::new(Some(crate::hints::own_definitions(
+                    chunk_text(&parts[fresh[x]]),
+                    FileKind::Document,
+                )))
+            });
         let t_owns = t0.elapsed();
         let mut own_of: Vec<Option<usize>> = vec![None; parts.len()];
         for (x, &k) in fresh.iter().enumerate() {
@@ -302,15 +305,16 @@ impl Incr {
         };
         // (the analyses' summed time, for `PHITEX_TEX_TIME`)
         let busy = std::sync::atomic::AtomicU64::new(0);
-        let made: Vec<(Arc<TextHints>, Arc<[u64]>)> = crate::exec::map(threads, todo.len(), &|x| {
-            let t = std::time::Instant::now();
-            let r = analyse_todo(x);
-            busy.fetch_add(
-                u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            r
-        });
+        let made: Vec<(Arc<TextHints>, Arc<[u64]>)> =
+            crate::exec::map_on(&mut ex, todo.len(), &|x| {
+                let t = std::time::Instant::now();
+                let r = analyse_todo(x);
+                busy.fetch_add(
+                    u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                r
+            });
         let t_made = t0.elapsed();
         let analysed = todo.len();
         let mut made = made.into_iter();

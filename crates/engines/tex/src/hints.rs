@@ -58,6 +58,16 @@ use crate::val::{Mean, Tok, int_of, list_of, str_of};
 /// the format's (shared by every text of a build).
 pub(crate) type Defs = Arc<pass::Definitions>;
 
+/// The strings `parts` one after another (the pass builds its texts
+/// without formatting, spec-final §5.3).
+fn cat(parts: &[&str]) -> String {
+    let mut s = String::with_capacity(parts.iter().map(|p| p.len()).sum());
+    for p in parts {
+        s.push_str(p);
+    }
+    s
+}
+
 /// No definitions (INITEX, a text analysed on its own).
 pub(crate) fn no_defs() -> &'static Defs {
     static D: OnceLock<Defs> = OnceLock::new();
@@ -401,7 +411,7 @@ fn param_row(name: &str) -> Option<&'static [&'static str]> {
             .iter()
             .filter(|p| matches!(p.1, 72..=76))
             .map(|p| {
-                let f: &'static str = Box::leak(format!("param:{}", p.0).into_boxed_str());
+                let f: &'static str = Box::leak(cat(&["param:", p.0]).into_boxed_str());
                 (p.0, [f])
             })
             .collect()
@@ -518,10 +528,10 @@ fn state_prefixes() -> &'static [String] {
         }
         for c in b'a'..=b'z' {
             if c != b's' {
-                v.push(format!("c{}", c as char));
+                v.push(cat(&["c", char::from(c).encode_utf8(&mut [0; 4])]));
             }
             if c != b'c' {
-                v.push(format!("a{}", c as char));
+                v.push(cat(&["a", char::from(c).encode_utf8(&mut [0; 4])]));
             }
         }
         v
@@ -797,7 +807,7 @@ fn caret_name(name: &str) -> String {
 fn engine_prefix(f: &str) -> Option<String> {
     let rest = f.strip_prefix("cs:")?;
     let name = rest.strip_prefix('\\').unwrap_or(rest);
-    Some(format!("cs:{name}"))
+    Some(cat(&["cs:", name]))
 }
 
 /// Names that read on by expansion before their command is known: the
@@ -1791,7 +1801,7 @@ impl Analysis<'_> {
         let n = f.strip_prefix("param:")?;
         let n = n.strip_prefix('\\').unwrap_or(n);
         if table_param(n) {
-            return Some(Some(format!("param:{n}")));
+            return Some(Some(cat(&["param:", n])));
         }
         if matches!(n, "spacefactor" | "prevdepth") {
             return Some(None);
@@ -2069,7 +2079,7 @@ impl Analysis<'_> {
             // (a character this text never makes active is defined as
             // one: the regime here is not the one the pass read)
             return Hint::any(
-                format!("{f}: an active character the text does not make"),
+                cat(&[f, ": an active character the text does not make"]),
                 excerpt,
             );
         }
@@ -2499,16 +2509,16 @@ impl Analysis<'_> {
             }
             // (`\global` then an active character, or the command in
             // text this one does not see)
-            *cause = format!("\\{name}: a prefix whose command follows elsewhere");
+            *cause = cat(&["\\", name, ": a prefix whose command follows elsewhere"]);
             return false;
         }
         if LOOKTHROUGH.contains(&name) {
-            *cause = format!("\\{name}: the command run here is computed");
+            *cause = cat(&["\\", name, ": the command run here is computed"]);
             return false;
         }
         let Some(&i) = self.item_of.get(&a) else {
             // (an operand of an earlier command: claimed, never run)
-            *cause = format!("\\{name}: operand of an earlier command");
+            *cause = cat(&["\\", name, ": operand of an earlier command"]);
             return false;
         };
         let it = &self.p.items[i];
@@ -2606,7 +2616,7 @@ impl Analysis<'_> {
                         })
                         .collect();
                     if let Some(u) = other.first() {
-                        *cause = format!("\\{name}: {u}");
+                        *cause = cat(&["\\", name, ": ", u]);
                         return false;
                     }
                     self.add_set_parts(&set, b);
@@ -2625,18 +2635,20 @@ impl Analysis<'_> {
             }
             pass::MayDefine::Any => {
                 *cause = it.hints.cause.map_or_else(
-                    || format!("\\{name}: unbounded"),
-                    |c| format!("\\{name}: {c}"),
+                    || cat(&["\\", name, ": unbounded"]),
+                    |c| cat(&["\\", name, ": ", c]),
                 );
                 if self.prelude.is_defined(name) {
                     // (why the format's body did not bound it)
                     let set = self.defset(name);
-                    *cause = format!(
-                        "{cause} (format closure: {})",
-                        set.unbounded.first().map_or("bounded", String::as_str)
-                    );
+                    *cause = cat(&[
+                        cause,
+                        " (format closure: ",
+                        set.unbounded.first().map_or("bounded", String::as_str),
+                        ")",
+                    ]);
                 }
-                if *cause == format!("\\{name}: unbounded") {
+                if *cause == cat(&["\\", name, ": unbounded"]) {
                     // (the reason the pass gives: the closure's)
                     let set = self.defset(name);
                     if let Some(u) = set.unbounded.first() {
@@ -2725,10 +2737,12 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
     let (slices, pars) = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<Hint>> = Vec::with_capacity(an.p.atoms.len());
-    let mut memo: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    // (one value per distinct hint, keyed by the hash of its encoding:
+    // no string keys in the pass, spec-final §5.2)
+    let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
     let mut intern = |h: &Hint| -> Arc<str> {
         let s = h.encode();
-        memo.entry(s.clone())
+        memo.entry(phitex_defuse::hash_bytes(0x6869_6e74, s.as_bytes()))
             .or_insert_with(|| Arc::from(s))
             .clone()
     };
@@ -2749,7 +2763,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
     }
     let mut prev_char = false;
     let blank = Arc::new(Hint::default());
-    let mut runs: FxHashMap<(&str, usize, u8), Arc<Hint>> = FxHashMap::default();
+    let mut runs: FxHashMap<(u64, usize, u8), Arc<Hint>> = FxHashMap::default();
     #[allow(clippy::needless_range_loop)]
     for a in 0..an.p.atoms.len() {
         let at = &an.p.atoms[a];
@@ -2766,7 +2780,11 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // (a run of characters whose hint depends on its text alone: one
         // hint per distinct run, shared)
         if let Some((s0, e0, reg, fl)) = an.run_key(a) {
-            let key = (&text[s0..e0], reg, fl);
+            let key = (
+                phitex_defuse::hash_bytes(0x7275_6e73, &text.as_bytes()[s0..e0]),
+                reg,
+                fl,
+            );
             let h = runs
                 .entry(key)
                 .or_insert_with(|| Arc::new(an.hint(a)))
@@ -2889,7 +2907,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                 add_heads(&mut b.state, Some(&["pg:"]));
                 "region".clone_into(&mut h.cause);
             } else {
-                h.cause = format!("region: {}", h.cause);
+                h.cause.insert_str(0, "region: ");
                 if let Some(g) = &mut h.guess {
                     add_head(&mut g.state, "pg:");
                 }
@@ -3311,7 +3329,7 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
             let mut h = text_hints(&text, FileKind::Document, no_defs()).at(0);
             if let Some(b) = &mut h.bound {
                 fragment_context(b);
-                h.cause = format!("{} (text on its own)", h.cause);
+                h.cause.push_str(" (text on its own)");
             }
             h
         }
@@ -3397,7 +3415,7 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                         // (the tokens are read already)
                         b.cats.clear();
                         fragment_context(b);
-                        h.cause = format!("{} (expansion tokens)", h.cause);
+                        h.cause.push_str(" (expansion tokens)");
                     }
                     h
                 }
@@ -3539,14 +3557,17 @@ pub(crate) fn may_define(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDef
     if crate::exec::env_flag!("PHITEX_HINTS") {
         let answer = match &h.bound {
             None => "Any".to_owned(),
-            Some(b) => format!(
-                "Prefixes({} + {:?} + {:?})",
-                b.state
+            Some(b) => cat(&[
+                "Prefixes(",
+                &b.state
                     .as_ref()
                     .map_or_else(|| "every head".to_owned(), |st| st.join(" ")),
-                b.names,
-                b.prefixes
-            ),
+                " + [",
+                &b.names.join(", "),
+                "] + [",
+                &b.prefixes.join(", "),
+                "])",
+            ]),
         };
         eprintln!("hint {:?}: {answer} ({})", h.excerpt, h.cause);
     }
@@ -3647,7 +3668,7 @@ const DEMOTED: &[&str] = &[
 ];
 
 fn demoted(class: &str, excerpt: &str) -> Hint {
-    Hint::any(format!("demoted: {class}"), excerpt)
+    Hint::any(cat(&["demoted: ", class]), excerpt)
 }
 
 /// Whether the hint answers `Any` because its class is demoted.
@@ -3661,13 +3682,20 @@ pub(crate) fn verify(r: &mut Run<'_, '_>, h: &Hint) -> R<Option<String>> {
     let Some(b) = &h.bound else {
         return Ok(None);
     };
-    for &(byte, cat) in b.cats.iter() {
+    for &(byte, cat_code) in b.cats.iter() {
         let got = r.cat(u32::from(byte))?;
-        if got != cat {
-            return Ok(Some(format!(
-                "catcode of {:?} is {got}, the hint read it as {cat} ({:?})",
-                byte as char, h.excerpt
-            )));
+        if got != cat_code {
+            return Ok(Some(cat(&[
+                "catcode of '",
+                char::from(byte).encode_utf8(&mut [0; 4]),
+                "' is ",
+                &got.to_string(),
+                ", the hint read it as ",
+                &cat_code.to_string(),
+                " (",
+                &h.excerpt,
+                ")",
+            ])));
         }
     }
     for (name, class) in &b.means {
@@ -3678,16 +3706,20 @@ pub(crate) fn verify(r: &mut Run<'_, '_>, h: &Hint) -> R<Option<String>> {
             _ => !matches!(m, Mean::Undefined),
         };
         if !ok {
-            return Ok(Some(format!(
-                "{name} is {} where the hint assumed {} ({:?})",
+            return Ok(Some(cat(&[
+                name,
+                " is ",
                 mean_kind(&m),
+                " where the hint assumed ",
                 if *class == 0 {
                     "a primitive"
                 } else {
                     "a definition"
                 },
-                h.excerpt
-            )));
+                " (",
+                &h.excerpt,
+                ")",
+            ])));
         }
     }
     Ok(None)

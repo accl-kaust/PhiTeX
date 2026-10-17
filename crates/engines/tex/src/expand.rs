@@ -19,17 +19,6 @@ pub(crate) const OR_CODE: i32 = 4;
 /// A conditional begun before this run is in its taken branch (§510).
 const OUTSIDE_LIMIT: u8 = 4;
 
-/// `macro_call`'s buffers, kept by each thread between calls.
-#[derive(Default)]
-pub(crate) struct MacroBufs {
-    /// The arguments' tokens, one after another.
-    args: Vec<Tok>,
-    /// Argument `#k` is `args[bounds[k-1].0..bounds[k-1].1]`.
-    bounds: Vec<(usize, usize)>,
-    /// The body with its arguments substituted.
-    out: Vec<Tok>,
-}
-
 thread_local! {
     static NAME: std::cell::Cell<String> = std::cell::Cell::default();
 }
@@ -49,17 +38,31 @@ cs_once!(notexpanded_tok, "\u{10FFFE}notexpanded");
 cs_once!(halt_tok, "\u{10FFFE}halt");
 
 impl Run<'_, '_> {
-    /// `expand` (§366): `cur` is expandable.
-    pub(crate) fn expand(&mut self) -> R<()> {
+    /// `expand` (§366): `cur` is expandable. A halt is raised, never
+    /// returned (spec-final §2.2).
+    pub(crate) fn expand(&mut self) {
+        let c = self.cur.cmd;
+        if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
+            // (the common case: no other state to keep)
+            let saved = (self.radix, self.cur_order);
+            self.macro_call();
+            (self.radix, self.cur_order) = saved;
+            return;
+        }
+        if let Err(h) = self.expand_other() {
+            self.raise(h);
+        }
+    }
+
+    /// `expand` of what is not a macro call.
+    fn expand_other(&mut self) -> R<()> {
         let saved = (self.radix, self.cur_order);
         let c = self.cur.cmd;
         if crate::etex::expand(self)? {
             (self.radix, self.cur_order) = saved;
             return Ok(());
         }
-        if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
-            self.macro_call()?;
-        } else {
+        {
             match c {
                 cmd::TOP_BOT_MARK => {
                     // §386
@@ -71,11 +74,14 @@ impl Run<'_, '_> {
                 }
                 cmd::EXPAND_AFTER => {
                     // §368
-                    self.get_token()?;
+                    self.get_token();
+                    self.ck()?;
                     let t = self.cur.tok;
-                    self.get_token()?;
+                    self.get_token();
+                    self.ck()?;
                     if self.cur.cmd > cmd::MAX_COMMAND {
-                        self.expand()?;
+                        self.expand();
+                        self.ck()?;
                     } else {
                         let u = self.cur.tok;
                         self.back_input(u);
@@ -87,9 +93,9 @@ impl Run<'_, '_> {
                     // read (`\everyeof{\noexpand}`: a file's end met here
                     // is no runaway, §336)
                     let was = self.scanner.take();
-                    let r = self.get_token();
+                    self.get_token();
                     self.scanner = was;
-                    r?;
+                    self.ck()?;
                     let t = self.cur.tok;
                     let cs = t.is_cs_or_active();
                     self.back_input(t);
@@ -100,7 +106,8 @@ impl Run<'_, '_> {
                 cmd::CS_NAME => self.cs_name()?,
                 cmd::CONVERT => self.conv_toks()?,
                 cmd::THE => {
-                    let toks = self.the_toks()?;
+                    let toks = self.the_toks();
+                    self.ck()?;
                     self.push_toks(toks);
                 }
                 cmd::IF_TEST => self.conditional()?,
@@ -192,7 +199,8 @@ impl Run<'_, '_> {
     /// §372: the characters of a `\\csname` into `name`.
     fn cs_name_chars(&mut self, name: &mut String) -> R<()> {
         loop {
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             if self.cur.is_cs() {
                 return Ok(());
             }
@@ -200,67 +208,46 @@ impl Run<'_, '_> {
         }
     }
 
-    /// `macro_call` (§389–§400): the arguments are scanned into one
-    /// per-thread buffer (ranges, no list per argument) and the body with
-    /// its arguments substituted is built in another, then pushed as one
-    /// shared list (one allocation a call).
-    pub(crate) fn macro_call(&mut self) -> R<()> {
-        let m = if let Some(m) = self.cur_macro() {
-            m
-        } else {
-            let Mean::Macro(m) = self.cur_mean()? else {
-                return Ok(());
-            };
-            m
+    /// `macro_call` (§389–§400) over the arena (spec-final §2.3): the
+    /// arguments are matched straight into the arena's scratch region
+    /// ([`crate::input::Arena::scratch`]), and the expansion is written
+    /// in one pass (the body with the argument ranges copied in) and
+    /// pushed as the macro's level. No list per argument, no buffer of
+    /// the run's own. A halt is raised, never returned.
+    pub(crate) fn macro_call(&mut self) {
+        let Some(m) = self.cur_macro() else {
+            return;
         };
         if m.params.is_empty() {
             // no arguments: the body is read in place (§390); a body
             // already in the arena is pushed by its range
             let r = self.body_range(&m.body);
             self.push_range(r, crate::input::ty::MACRO);
-            return Ok(());
+            return;
         }
-        let mut bufs = std::mem::take(&mut self.mbufs);
         // §389: `scanner_status:=matching; warning_index:=warning_index`
         let was = self
             .scanner
             .replace((crate::run::SCAN_MATCHING, self.cur.tok));
-        let r = self.macro_args(&m, &mut bufs);
+        let base = self.input.arena.scratch_begin();
+        let ok = self.macro_args(&m, base);
         self.scanner = was;
-        if matches!(r, Ok(true)) {
+        if ok && self.halt.is_none() {
             // §400: the body with its arguments substituted, written
             // straight into the arena as the macro's level
-            let MacroBufs { args, bounds, .. } = &mut bufs;
             self.input.pop_spent();
-            let start = self.input.arena.begin();
-            for s in &*m.segs {
-                self.input
-                    .arena
-                    .extend(&m.body[s.lo as usize..s.hi as usize]);
-                if s.param != 0
-                    && let Some(&(lo, hi)) = bounds.get(usize::from(s.param) - 1)
-                {
-                    self.input.arena.extend(&args[lo..hi]);
-                }
-            }
-            let range = self.input.arena.finish(start);
+            let range = self.input.arena.expand_body(&m.body, &m.segs, base);
             self.push_range(range, crate::input::ty::MACRO);
         }
-        bufs.args.clear();
-        bufs.bounds.clear();
-        bufs.out.clear();
-        self.mbufs = bufs;
-        r.map(|_| ())
+        self.input.arena.scratch_end(base);
     }
 
-    /// §391–§400: the arguments of `m` into `bufs` (`args` with their
-    /// `bounds`); false when the call was abandoned.
+    /// §391–§400: the arguments of `m` into the arena's scratch region
+    /// (from `base`: its tokens, each argument's bounds); false when the
+    /// call was abandoned or a halt raised.
     #[allow(clippy::too_many_lines)]
-    fn macro_args(&mut self, m: &Macro, bufs: &mut MacroBufs) -> R<bool> {
+    fn macro_args(&mut self, m: &Macro, base: crate::input::Scratch) -> bool {
         let name = self.cur.tok;
-        let MacroBufs { args, bounds, .. } = bufs;
-        args.clear();
-        bounds.clear();
         let p: &[Tok] = &m.params;
         let len = p.len();
         let is_match = |t: &Tok| t.raw() >> 21 == u32::from(MATCH_CAT);
@@ -276,11 +263,14 @@ impl Run<'_, '_> {
             } else {
                 None
             };
-            let start = args.len();
+            let start = self.input.arena.scratch_len(base);
             let mut m_count = 0usize;
             let mut rbrace: Option<usize> = None;
             'cont: loop {
-                let tok = self.get_token_tok()?;
+                let tok = self.get_token_tok();
+                if self.halt.is_some() {
+                    return false;
+                }
                 if r < len && !is_match(&p[r]) && tok == p[r] {
                     // §394
                     r += 1;
@@ -300,12 +290,12 @@ impl Run<'_, '_> {
                 if s != Some(r) {
                     let Some(s0) = s else {
                         // §398: "Use of \x doesn't match its definition"
-                        self.log("error", "doesn't match its definition")?;
-                        return Ok(false);
+                        self.lift(|r| r.log("error", "doesn't match its definition"));
+                        return false;
                     };
                     let mut t = s0;
                     loop {
-                        args.push(p[t]);
+                        self.input.arena.scratch_push(p[t]);
                         m_count += 1;
                         let mut u = t + 1;
                         let mut v = s0;
@@ -338,27 +328,30 @@ impl Run<'_, '_> {
                 if tok == par && (!long_state || self.outer_call) {
                     // §392: the `\par` §338 inserted ends the call quietly
                     if std::mem::take(&mut self.outer_call) {
-                        return Ok(false);
+                        return false;
                     }
                     // §396: a runaway argument; the \par is read again
-                    self.runaway(name)?;
+                    self.lift(|r| r.runaway(name));
                     self.back_input(tok);
-                    return Ok(false);
+                    return false;
                 }
                 match tok {
                     x if x.raw() >> 21 == 1 => {
                         // §399
                         let mut unbalance = 1;
-                        args.push(tok);
+                        self.input.arena.scratch_push(tok);
                         loop {
-                            let t2 = self.get_token_tok()?;
+                            let t2 = self.get_token_tok();
+                            if self.halt.is_some() {
+                                return false;
+                            }
                             if t2 == par && (!long_state || self.outer_call) {
                                 if std::mem::take(&mut self.outer_call) {
-                                    return Ok(false);
+                                    return false;
                                 }
-                                self.runaway(name)?;
+                                self.lift(|r| r.runaway(name));
                                 self.back_input(t2);
-                                return Ok(false);
+                                return false;
                             }
                             if let Some(y) = t2.as_char() {
                                 match y >> 21 {
@@ -366,15 +359,16 @@ impl Run<'_, '_> {
                                     2 => {
                                         unbalance -= 1;
                                         if unbalance == 0 {
-                                            rbrace = Some(args.len() - start);
-                                            args.push(t2);
+                                            rbrace =
+                                                Some(self.input.arena.scratch_len(base) - start);
+                                            self.input.arena.scratch_push(t2);
                                             break;
                                         }
                                     }
                                     _ => {}
                                 }
                             }
-                            args.push(t2);
+                            self.input.arena.scratch_push(t2);
                         }
                     }
                     x if x.raw() >> 21 == 2 => {
@@ -389,7 +383,7 @@ impl Run<'_, '_> {
                         if tok == space && (r >= len || is_match(&p[r])) {
                             continue 'cont;
                         }
-                        args.push(tok);
+                        self.input.arena.scratch_push(tok);
                     }
                 }
                 m_count += 1;
@@ -401,42 +395,50 @@ impl Run<'_, '_> {
             // found: §400
             if s.is_some() {
                 let mut lo = start;
-                let mut hi = args.len();
+                let mut hi = self.input.arena.scratch_len(base);
                 if m_count == 1
                     && let Some(rb) = rbrace
                     && hi > lo
-                    && args[hi - 1].raw() >> 21 == 2
+                    && self.input.arena.scratch_at(base, hi - 1).raw() >> 21 == 2
                     && rb == hi - lo - 1
                 {
                     lo += 1;
                     hi -= 1;
                 }
-                bounds.push((lo, hi));
+                self.input.arena.scratch_bound(lo, hi);
             }
             if r >= len {
                 break;
             }
         }
-        Ok(true)
+        true
+    }
+
+    /// A step that may stop, on the token path: its halt raised
+    /// ([`Run::raise`]), never returned.
+    #[inline]
+    pub(crate) fn lift<T>(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> Option<T> {
+        match f(self) {
+            Ok(x) => Some(x),
+            Err(h) => {
+                self.raise(h);
+                None
+            }
+        }
     }
 
     /// `pass_text` (§494): to the `\or`, `\else` or `\fi` at this level.
-    pub(crate) fn pass_text(&mut self) -> R<()> {
+    /// A halt is raised, never returned.
+    pub(crate) fn pass_text(&mut self) {
         self.in_skip = true;
-        let r = self.pass_text_in();
-        self.in_skip = false;
-        r
-    }
-
-    fn pass_text_in(&mut self) -> R<()> {
         let mut l = 0;
         loop {
-            if !self.get_next()? {
-                return Ok(());
+            if !self.get_next() || self.halt.is_some() {
+                break;
             }
             if self.cur.cmd == cmd::FI_OR_ELSE {
                 if l == 0 {
-                    return Ok(());
+                    break;
                 }
                 if self.cur.chr == FI_CODE {
                     l -= 1;
@@ -445,11 +447,13 @@ impl Run<'_, '_> {
                 l += 1;
             }
         }
+        self.in_skip = false;
     }
 
     /// `get_x_token_or_active_char` (§506): `(cmd, chr)` for `\if`.
     fn x_char_or_active(&mut self) -> R<(u8, i32)> {
-        self.get_x_token()?;
+        self.get_x_token();
+        self.ck()?;
         let (mut c, mut h) = (self.cur.cmd, self.cur.chr);
         if c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG {
             if self.cur.tok.cat() == Some(13) && !self.cur.tok.is_cs() {
@@ -468,11 +472,11 @@ impl Run<'_, '_> {
 
     /// §507: `\ifx`'s two tokens compared.
     fn if_x(&mut self) -> R<bool> {
-        Ok(if self.get_next()? {
+        Ok(if self.next_ck()? {
             let m1 = self.cur_mean()?;
             let t1 = self.cur.tok;
             let (p, q) = self.cur_cmd_chr_for_ifx(t1, &m1);
-            if self.get_next()? {
+            if self.next_ck()? {
                 let m2 = self.cur_mean()?;
                 let t2 = self.cur.tok;
                 let (c2, h2) = self.cur_cmd_chr_for_ifx(t2, &m2);
@@ -510,8 +514,10 @@ impl Run<'_, '_> {
             // "Extra \or/\else/\fi": ignored
         } else {
             while self.cur.chr != FI_CODE {
-                self.pass_text()?;
+                self.pass_text();
+                self.ck()?;
             }
+            self.muts += 1;
             self.conds.pop();
             self.if_codes.truncate(self.conds.len());
         }
@@ -521,6 +527,7 @@ impl Run<'_, '_> {
     /// `conditional` (§498–§509).
     #[allow(clippy::too_many_lines)]
     pub(crate) fn conditional(&mut self) -> R<()> {
+        self.muts += 1;
         self.conds.push(IF_CODE);
         let save = self.conds.len();
         crate::etex::if_begin(self, self.cur.chr);
@@ -607,7 +614,8 @@ impl Run<'_, '_> {
                 // §509
                 let mut n = self.scan_int()?;
                 while n != 0 {
-                    self.pass_text()?;
+                    self.pass_text();
+                    self.ck()?;
                     if self.conds.len() == save {
                         if self.cur.chr == OR_CODE {
                             n -= 1;
@@ -616,6 +624,7 @@ impl Run<'_, '_> {
                             return Ok(());
                         }
                     } else if self.cur.chr == FI_CODE {
+                        self.muts += 1;
                         self.conds.pop();
                         self.if_codes.truncate(self.conds.len());
                     }
@@ -630,7 +639,8 @@ impl Run<'_, '_> {
         }
         // §500
         loop {
-            self.pass_text()?;
+            self.pass_text();
+            self.ck()?;
             if !self.has_cur_cond(save) {
                 // the input ended
                 break;
@@ -641,6 +651,7 @@ impl Run<'_, '_> {
                 }
                 // "Extra \or": ignored
             } else if self.cur.chr == FI_CODE {
+                self.muts += 1;
                 self.conds.pop();
                 self.if_codes.truncate(self.conds.len());
             }
@@ -666,6 +677,7 @@ impl Run<'_, '_> {
 
     fn common_ending(&mut self, save: usize) {
         if self.cur.chr == FI_CODE {
+            self.muts += 1;
             self.conds.truncate(save - 1);
             self.if_codes.truncate(self.conds.len());
         } else {
@@ -679,12 +691,18 @@ impl Run<'_, '_> {
         }
     }
 
-    /// `the_toks` (§465–§466).
-    pub(crate) fn the_toks(&mut self) -> R<Vec<Tok>> {
+    /// `the_toks` (§465–§466): a halt is raised, never returned (the
+    /// list is then empty).
+    pub(crate) fn the_toks(&mut self) -> Vec<Tok> {
+        self.lift(Self::the_toks_r).unwrap_or_default()
+    }
+
+    fn the_toks_r(&mut self) -> R<Vec<Tok>> {
         if self.cur.cmd == cmd::THE && self.cur.chr != 0 {
             return crate::etex::the_toks(self);
         }
-        self.get_x_token()?;
+        self.get_x_token();
+        self.ck()?;
         let val = self.scan_something_internal(5, false)?;
         Ok(match val {
             crate::scan::IVal::Toks(t) => t,
@@ -718,7 +736,8 @@ impl Run<'_, '_> {
                 print::print_roman_int(&mut s, i64::from(n));
             }
             2 => {
-                self.get_token()?;
+                self.get_token();
+                self.ck()?;
                 let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
                 if self.cur.is_cs() {
                     print::sprint_cs(&mut s, self.cur.tok, esc);
@@ -727,7 +746,8 @@ impl Run<'_, '_> {
                 }
             }
             3 => {
-                self.get_token()?;
+                self.get_token();
+                self.ck()?;
                 let (t, m) = (self.cur.tok, self.cur_mean()?);
                 let (c, h) = (self.cur.cmd, self.cur.chr);
                 let _ = t;
@@ -968,7 +988,8 @@ impl Run<'_, '_> {
             } else {
                 print::push_code(&mut name, u32::try_from(self.cur.chr).unwrap_or(0));
             }
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
         }
         Ok(name)
     }

@@ -167,6 +167,7 @@ impl Run<'_, '_> {
             for mut l in above {
                 l.save_base = l.save_base.min(floor_s);
                 l.def_base = l.def_base.min(floor_d);
+                self.muts += 1;
                 self.nest.push(l);
             }
             return self.mode();
@@ -181,6 +182,7 @@ impl Run<'_, '_> {
     /// they own goes to the main list (lid 0). A format node closes its
     /// own groups; one open at its end is an error.
     pub(crate) fn end_open(&mut self) {
+        self.muts += 1;
         let nest = std::mem::take(&mut self.nest);
         self.abandon_levels(&nest);
         for l in nest {
@@ -197,6 +199,7 @@ impl Run<'_, '_> {
     /// paragraph's or a box's, ends with the job: none of it goes on the
     /// main list.
     pub(crate) fn end_fatal(&mut self) {
+        self.muts += 1;
         let nest = std::mem::take(&mut self.nest);
         self.abandon_levels(&nest);
         for l in nest {
@@ -234,6 +237,7 @@ impl Run<'_, '_> {
             self.leave_frames(&base, parent);
             return Ok(());
         }
+        self.muts += 1;
         let Some(l) = self.nest.pop() else {
             return Ok(());
         };
@@ -261,7 +265,7 @@ impl Run<'_, '_> {
             // scope's, stays: the scope's is the field's second entry)
             if self.st.base_publishes(v, f, Some(loc), self.rec_load) {
                 self.st
-                    .define_scope_extra(loc, crate::runstate::Native::Raw(v.list(xs)));
+                    .define_scope_extra(loc, crate::runstate::Entry::raw(Some(v.list(xs))));
             } else {
                 self.set("ag", v.list(xs), false);
                 self.st.publish_in_scope(loc);
@@ -304,6 +308,7 @@ impl Run<'_, '_> {
     /// at its base level lie outside them all.
     fn leave_frames(&mut self, base: &crate::build::Mode, parent: ValueId) {
         let v = self.v;
+        self.muts += 1;
         let levels = std::mem::take(&mut self.nest);
         let n = levels.len();
         let sid0 = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
@@ -338,7 +343,7 @@ impl Run<'_, '_> {
             xs.extend(l.ag.iter().map(|t| t.encode(v)));
             self.st.define_frame_extra(
                 loc,
-                crate::runstate::Native::Raw(v.list(xs)),
+                crate::runstate::Entry::raw(Some(v.list(xs))),
                 u8::try_from(k).unwrap_or(u8::MAX - 2),
             );
         }
@@ -784,6 +789,7 @@ impl Run<'_, '_> {
             let items = match self.top() {
                 Some(l) if l.group == 0 && l.mode == 102 => {
                     let l = self.pop_level().expect("the paragraph's level");
+                    self.muts += 1;
                     self.last_par = l.par.unwrap_or((0, 0));
                     l.list
                 }
@@ -830,11 +836,13 @@ impl Run<'_, '_> {
             let base = self.base_mode()?;
             (base.m, base.lid)
         };
+        self.muts += 1;
         let l = self.nest.remove(k);
         for g in &mut self.nest[k..] {
             g.mode = mode;
             g.lid = lid;
         }
+        self.muts += 1;
         self.last_par = l.par.unwrap_or((0, 0));
         Ok(l.list)
     }
@@ -1211,7 +1219,7 @@ impl Run<'_, '_> {
         let lvl = if global { 0 } else { md.depth };
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let l = self.box_loc(n);
-        self.set_loc(l, crate::runstate::Native::Raw(val), global);
+        self.set_loc(l, crate::runstate::Entry::raw(Some(val)), global);
     }
 
     /// A box register changed "at the same level" (§1079 `box(n):=null`,
@@ -1844,6 +1852,7 @@ impl Run<'_, '_> {
     pub(crate) fn outer_mode(&mut self, md: &Mode) -> R<Mode> {
         if let Some(l) = self.nest.pop_if(|l| l.group != 0) {
             let m = self.mode();
+            self.muts += 1;
             self.nest.push(l);
             return m;
         }
@@ -1992,7 +2001,8 @@ impl Run<'_, '_> {
                     }
                 }
                 cmd::NO_BOUNDARY => {
-                    self.get_x_token()?;
+                    self.get_x_token();
+                    self.ck()?;
                     if matches!(
                         self.cur.cmd,
                         cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM
@@ -2025,7 +2035,8 @@ impl Run<'_, '_> {
             if !self.has_input() {
                 break;
             }
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             if !matches!(
                 self.cur.cmd,
                 cmd::LETTER
@@ -2321,12 +2332,13 @@ impl Run<'_, '_> {
                     let mut got: Option<u32> = None;
                     if !self.has_input() {
                         input_done = true;
-                    } else if self.get_next()? {
+                    } else if self.next_ck()? {
                         if !matches!(
                             self.cur.cmd,
                             cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN
                         ) {
-                            self.x_token()?;
+                            self.x_token();
+                            self.ck()?;
                         }
                         match self.cur.cmd {
                             cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN => {
@@ -2596,6 +2608,7 @@ impl Run<'_, '_> {
         let m = v.list(vec![v.int(nodes::T_END), b, g, p]);
         self.append(0, m);
         // nothing after `\end` is read
+        self.muts += 1;
         self.claim_rest = true;
         self.input = crate::input::Input::new();
         // §1054: `build_page`
@@ -2652,6 +2665,7 @@ fn merge_sides(a: Side, b: Side) -> Side {
     s.marks.extend(b.marks);
     s.whats.extend(b.whats);
     s.lazy.extend(b.lazy);
+    s.lazy_box.extend(b.lazy_box);
     s
 }
 

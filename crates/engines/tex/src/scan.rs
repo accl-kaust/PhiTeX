@@ -76,7 +76,8 @@ impl Run<'_, '_> {
     /// §406: the next non-blank non-call token.
     pub(crate) fn skip_blanks_x(&mut self) -> R<()> {
         loop {
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             if self.cur.cmd != cmd::SPACER {
                 return Ok(());
             }
@@ -86,7 +87,8 @@ impl Run<'_, '_> {
     /// §404: the next non-blank non-relax non-call token.
     pub(crate) fn skip_blanks_relax_x(&mut self) -> R<()> {
         loop {
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             if self.cur.cmd != cmd::SPACER && self.cur.cmd != cmd::RELAX {
                 return Ok(());
             }
@@ -123,7 +125,8 @@ impl Run<'_, '_> {
         let bytes = s.as_bytes();
         let mut k = 0;
         while k < bytes.len() {
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             let c = bytes[k];
             if !self.cur.is_cs()
                 && (self.cur.chr == i32::from(c)
@@ -172,7 +175,8 @@ impl Run<'_, '_> {
         let mut val: i32;
         if self.is_other(b'`') {
             // §442
-            self.get_token()?;
+            self.get_token();
+            self.ck()?;
             let t = self.cur.tok;
             // (a brace taken as a constant does not count in
             // `align_state`: get_next counted it)
@@ -203,7 +207,8 @@ impl Run<'_, '_> {
                 self.back_cur();
             } else {
                 // §443
-                self.get_x_token()?;
+                self.get_x_token();
+                self.ck()?;
                 if self.cur.cmd != cmd::SPACER {
                     self.back_cur();
                 }
@@ -217,11 +222,13 @@ impl Run<'_, '_> {
             if self.is_other(b'\'') {
                 self.radix = 8;
                 m = 0o2000000000;
-                self.get_x_token()?;
+                self.get_x_token();
+                self.ck()?;
             } else if self.is_other(b'"') {
                 self.radix = 16;
                 m = 0o1000000000;
-                self.get_x_token()?;
+                self.get_x_token();
+                self.ck()?;
             }
             let mut vacuous = true;
             val = 0;
@@ -253,7 +260,8 @@ impl Run<'_, '_> {
                 } else {
                     val = val * self.radix + d;
                 }
-                self.get_x_token()?;
+                self.get_x_token();
+                self.ck()?;
             }
             if vacuous {
                 // "Missing number, treated as zero"
@@ -317,9 +325,11 @@ impl Run<'_, '_> {
                 if self.radix == 10 && self.is_other(b'.') {
                     // §452
                     let mut digits: Vec<u8> = Vec::new();
-                    self.get_token()?;
+                    self.get_token();
+                    self.ck()?;
                     loop {
-                        self.get_x_token()?;
+                        self.get_x_token();
+                        self.ck()?;
                         let c = self.cur.tok.chr();
                         if self.cur.is_cs()
                             || self.cur.tok.cat() != Some(12)
@@ -467,7 +477,8 @@ impl Run<'_, '_> {
 
     /// §443.
     pub(crate) fn optional_space(&mut self) -> R<()> {
-        self.get_x_token()?;
+        self.get_x_token();
+        self.ck()?;
         if self.cur.cmd != cmd::SPACER {
             self.back_cur();
         }
@@ -776,9 +787,15 @@ impl Run<'_, '_> {
     }
 
     /// `scan_toks` (§473–§479): the parameter text (for a macro) and the
-    /// body.
+    /// body. A halt is raised, never returned (spec-final §2.2: the
+    /// lists are then what was scanned; the caller's check stops it).
+    pub(crate) fn scan_toks(&mut self, macro_def: bool, xpand: bool) -> (Vec<Tok>, Vec<Tok>) {
+        self.lift(|r| r.scan_toks_r(macro_def, xpand))
+            .unwrap_or_default()
+    }
+
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn scan_toks(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
+    fn scan_toks_r(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
         // §473: `scanner_status:=defining` or `absorbing`;
         // `warning_index:=cur_cs`
         let status = if macro_def {
@@ -800,7 +817,8 @@ impl Run<'_, '_> {
         if macro_def {
             // §474
             loop {
-                self.get_token()?;
+                self.get_token();
+                self.ck()?;
                 let tok = self.cur.tok;
                 if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
                     if tok.cat() == Some(2) {
@@ -812,7 +830,8 @@ impl Run<'_, '_> {
                 if self.cur.cmd == cmd::MAC_PARAM {
                     // §476
                     let s = Tok::ch(MATCH_CAT, tok.chr());
-                    self.get_token()?;
+                    self.get_token();
+                    self.ck()?;
                     let nt = self.cur.tok;
                     if !nt.is_cs_or_active() && nt.cat() == Some(1) {
                         hash_brace = Some(nt);
@@ -870,21 +889,25 @@ impl Run<'_, '_> {
                         break;
                     }
                     if self.cur.cmd == cmd::THE {
-                        let q = self.the_toks()?;
+                        let q = self.the_toks();
+                        self.ck()?;
                         body.extend(q);
                     } else if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND
                     {
                         break;
                     } else {
-                        self.expand()?;
+                        self.expand();
+                        self.ck()?;
                     }
                 }
-                self.x_token()?;
+                self.x_token();
+                self.ck()?;
             } else {
                 // (§473: no meaning is needed here except a control
                 // sequence's in a `\def`, for §479's `#`; braces count
                 // by token alone)
-                let tok = self.get_token_tok()?;
+                let tok = self.get_token_tok();
+                self.ck()?;
                 // (a read that must wait stops the scan here: a raised
                 // halt would leave its sentinel in the body, and the
                 // definition made before the halt surfaced, so a run
@@ -913,9 +936,11 @@ impl Run<'_, '_> {
                 // §479
                 let s = tok;
                 if xpand {
-                    self.get_x_token()?;
+                    self.get_x_token();
+                    self.ck()?;
                 } else {
-                    self.get_token()?;
+                    self.get_token();
+                    self.ck()?;
                 }
                 if self.cur.cmd != cmd::MAC_PARAM {
                     let nt = self.cur.tok;

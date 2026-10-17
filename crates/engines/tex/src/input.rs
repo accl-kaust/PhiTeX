@@ -27,12 +27,16 @@ impl Range {
 }
 
 /// The run's token arena: a bump allocator of token lists. A list is a
-/// [`Range`]; nothing is freed until the run ends, except the scratch a
-/// macro call uses while matching its arguments ([`Arena::mark`],
-/// [`Arena::release`]).
+/// [`Range`]; nothing is freed until the run ends, except the scratch
+/// region a macro call matches its arguments into ([`Arena::scratch`]).
 #[derive(Default)]
 pub(crate) struct Arena {
     toks: Vec<Tok>,
+    /// The scratch region (spec-final §2.3): a macro call's arguments,
+    /// one after another, and each argument's bounds in it; emptied to
+    /// the call's start when the call is done ([`Arena::scratch_end`]).
+    scratch: Vec<Tok>,
+    sbounds: Vec<(u32, u32)>,
     /// The macro bodies copied in (§390: read in place), by their shared
     /// list: a range is only good in the arena that holds it, so the
     /// cache lives and dies with it.
@@ -43,6 +47,8 @@ impl Arena {
     pub(crate) fn with_capacity(n: usize) -> Arena {
         Arena {
             toks: Vec::with_capacity(n),
+            scratch: Vec::with_capacity(256),
+            sbounds: Vec::with_capacity(16),
             bodies: phitex_defuse::FxHashMap::default(),
         }
     }
@@ -99,25 +105,83 @@ impl Arena {
             end: self.mark(),
         }
     }
+}
 
-    /// Begins a list built token by token ([`Arena::push`]); its range is
-    /// `Range { start, end: self.mark() }` when done.
+/// Where a macro call's part of the arena's scratch region begins
+/// ([`Arena::scratch_begin`]): its tokens and its arguments' bounds.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Scratch {
+    toks: u32,
+    bounds: u32,
+}
+
+impl Arena {
+    /// A macro call's scratch begins here.
     #[inline]
-    pub(crate) fn begin(&self) -> u32 {
-        self.mark()
+    pub(crate) fn scratch_begin(&self) -> Scratch {
+        Scratch {
+            toks: u32::try_from(self.scratch.len()).unwrap_or(u32::MAX),
+            bounds: u32::try_from(self.sbounds.len()).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// The tokens matched so far since `b`.
+    #[inline]
+    pub(crate) fn scratch_len(&self, b: Scratch) -> usize {
+        self.scratch.len() - b.toks as usize
     }
 
     #[inline]
-    pub(crate) fn extend(&mut self, xs: &[Tok]) {
-        self.toks.extend_from_slice(xs);
+    pub(crate) fn scratch_push(&mut self, t: Tok) {
+        self.scratch.push(t);
     }
 
+    /// The `i`-th token matched since `b`.
     #[inline]
-    pub(crate) fn finish(&self, start: u32) -> Range {
+    pub(crate) fn scratch_at(&self, b: Scratch, i: usize) -> Tok {
+        self.scratch[b.toks as usize + i]
+    }
+
+    /// The next argument: tokens `lo..hi` since the call's start.
+    #[inline]
+    pub(crate) fn scratch_bound(&mut self, lo: usize, hi: usize) {
+        self.sbounds.push((
+            u32::try_from(lo).unwrap_or(u32::MAX),
+            u32::try_from(hi).unwrap_or(u32::MAX),
+        ));
+    }
+
+    /// §400: `body` with the call's arguments (since `b`) put in for its
+    /// parameters, by its segments, written as one list.
+    pub(crate) fn expand_body(
+        &mut self,
+        body: &[Tok],
+        segs: &[crate::val::Seg],
+        b: Scratch,
+    ) -> Range {
+        let start = self.mark();
+        let (t0, b0) = (b.toks as usize, b.bounds as usize);
+        for s in segs {
+            self.toks
+                .extend_from_slice(&body[s.lo as usize..s.hi as usize]);
+            if s.param != 0
+                && let Some(&(lo, hi)) = self.sbounds.get(b0 + usize::from(s.param) - 1)
+            {
+                self.toks
+                    .extend_from_slice(&self.scratch[t0 + lo as usize..t0 + hi as usize]);
+            }
+        }
         Range {
             start,
             end: self.mark(),
         }
+    }
+
+    /// The call begun at `b` is done: its scratch goes.
+    #[inline]
+    pub(crate) fn scratch_end(&mut self, b: Scratch) {
+        self.scratch.truncate(b.toks as usize);
+        self.sbounds.truncate(b.bounds as usize);
     }
 }
 

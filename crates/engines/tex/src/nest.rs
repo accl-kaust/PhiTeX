@@ -97,26 +97,6 @@ impl Item {
         }
     }
 
-    /// A cheap signature of the item, for a command's state signature
-    /// (`Run::state_sig`): a value's id, a native node's leading fields.
-    pub(crate) fn sig(&self) -> u64 {
-        match self {
-            Item::V(x) => x.raw(),
-            Item::N(n) => {
-                let (a, b) = match n {
-                    Node::Char { font, ch } => (u64::from(*font), u64::from(*ch)),
-                    Node::Lig(l) => (u64::from(l.font), u64::from(l.ch) | 1 << 20),
-                    Node::Glue(g) => (2, u64::from(g.spec.width.cast_unsigned())),
-                    Node::Kern(w, _) => (3, u64::from(w.cast_unsigned())),
-                    Node::Penalty(p) => (4, u64::from(p.cast_unsigned())),
-                    Node::Disc(d) => (5, d.replace.len() as u64),
-                    _ => (6, 0),
-                };
-                (1 << 63) | (a << 32) ^ b
-            }
-        }
-    }
-
     /// Whether the item is a page builder's marker
     /// ([`crate::build::is_marker`]); a native node never is.
     pub(crate) fn is_marker(&self, v: &Values) -> bool {
@@ -170,6 +150,7 @@ impl Level {
 impl Run<'_, '_> {
     /// A list id of this run's own: never a node's, never another run's.
     pub(crate) fn new_lid(&mut self) -> i64 {
+        self.muts += 1;
         self.next_lid -= 1;
         self.next_lid
     }
@@ -180,11 +161,13 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn top_mut(&mut self) -> Option<&mut Level> {
+        self.muts += 1;
         self.nest.last_mut()
     }
 
     /// The level that owns list `lid`, if it is one of this run's.
     pub(crate) fn level_of(&mut self, lid: i64) -> Option<&mut Level> {
+        self.muts += 1;
         self.nest.iter_mut().rev().find(|l| l.owns && l.lid == lid)
     }
 
@@ -199,6 +182,7 @@ impl Run<'_, '_> {
         let lid = self.new_lid();
         let mut l = Level::new(mode, group, lid, true, extra);
         self.open_level(&mut l);
+        self.muts += 1;
         self.nest.push(l);
         lid
     }
@@ -208,6 +192,7 @@ impl Run<'_, '_> {
     pub(crate) fn push_group(&mut self, mode: i32, lid: i64, group: i64, extra: Vec<ValueId>) {
         let mut l = Level::new(mode, group, lid, false, extra);
         self.open_level(&mut l);
+        self.muts += 1;
         self.nest.push(l);
     }
 
@@ -229,6 +214,7 @@ impl Run<'_, '_> {
     /// globals among them kept, §283), its `\aftergroup` tokens put
     /// back (§282); the level is returned with its list.
     pub(crate) fn pop_level(&mut self) -> Option<Level> {
+        self.muts += 1;
         let l = self.nest.pop()?;
         // (a paragraph is no group: its definitions are the level's below)
         if l.group != 0 {
@@ -243,6 +229,7 @@ impl Run<'_, '_> {
     /// the engine as a scope, the groups open at the end of the run):
     /// the local definitions made in their groups are the run's own.
     pub(crate) fn abandon_levels(&mut self, ls: &[Level]) {
+        self.muts += 1;
         if let Some(l) = ls.iter().find(|l| l.group != 0) {
             self.st.abandon(l.save_base, l.def_base, l.open_stamp);
         }
@@ -261,14 +248,18 @@ impl Run<'_, '_> {
         lvl: i64,
         base: i64,
     ) {
-        self.irreversible += 1;
+        self.muts += 1;
         // a binding made at or below the run's base level (outside every
         // group of the run) changes there: the run's definition at its
         // base level, which the closes of the run's groups keep (§1079);
         // at level one it is retained as a global one is (§283); else
         // the binding is a group's of this run
         let at_base = lvl <= base;
-        self.st
-            .modify(loc, crate::runstate::Native::Raw(val), at_base, lvl == 0);
+        self.st.modify(
+            loc,
+            crate::runstate::Entry::raw(Some(val)),
+            at_base,
+            lvl == 0,
+        );
     }
 }

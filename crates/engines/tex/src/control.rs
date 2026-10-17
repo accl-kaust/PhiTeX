@@ -9,7 +9,7 @@ use phitex_typeset::glue::Glue;
 
 use crate::fields::Par;
 use crate::run::{R, Run};
-use crate::runstate::{Loc, Native};
+use crate::runstate::{Entry, Loc};
 use crate::val::{
     CAT_CODE_BASE, DEL_CODE_BASE, MATH_CODE_BASE, Macro, Mean, OUTPUT_ROUTINE_LOC, SF_CODE_BASE,
     TOKS_BASE, Tok, cmd, glue_of, int_of, list_of, str_of, toks_value,
@@ -26,43 +26,73 @@ impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
     pub(crate) fn command(&mut self) -> R<()> {
         phitex_pdf::phase::bump(23);
-        if self.heartbeat_on {
-            self.heartbeat();
+        // (spec-final §2.4: a run-local count and one branch; the
+        // heartbeat's own work every `HB_BATCH` commands)
+        self.cmds += 1;
+        if self.cmds >= self.hb_at {
+            self.heartbeat_tick();
         }
         self.no_pull = true;
         let got = self.get_next();
         self.no_pull = false;
-        if !got? {
+        // (the command loop's one check of the token path's halt)
+        self.ck()?;
+        if !got {
             return Ok(());
         }
         if self.cur.cmd > cmd::MAX_COMMAND {
             if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
                 return Ok(());
             }
-            return self.expand();
+            self.expand();
+            return self.ck();
         }
-        self.dispatch()
+        self.dispatch()?;
+        self.ck()
+    }
+
+    /// The commands between two heartbeat ticks ([`Run::heartbeat_tick`]).
+    pub(crate) const HB_BATCH: u64 = 4096;
+
+    /// Where the heartbeat's first tick of a run is: every command
+    /// while a trace window is asked for (`PHITEX_HEARTBEAT_FROM`), every
+    /// [`Run::HB_BATCH`] commands with `PHITEX_HEARTBEAT=1`, never else.
+    pub(crate) fn heartbeat_start() -> u64 {
+        if !crate::exec::env_flag!("PHITEX_HEARTBEAT") {
+            return u64::MAX;
+        }
+        if std::env::var_os("PHITEX_HEARTBEAT_FROM").is_some() {
+            1
+        } else {
+            Self::HB_BATCH
+        }
     }
 
     /// With `PHITEX_HEARTBEAT=1`, every 100,000 commands on this thread:
     /// elapsed seconds, commands, the innermost file and line, and the
-    /// run's sizes, on stderr (a diagnostic for long serial runs).
-    fn heartbeat(&self) {
+    /// run's sizes, on stderr (a diagnostic for long serial runs). The
+    /// run's commands since the last tick are added to the thread's.
+    #[allow(clippy::too_many_lines)]
+    fn heartbeat_tick(&mut self) {
         use std::cell::Cell;
         use std::sync::OnceLock;
         use std::time::Instant;
-        static ON: OnceLock<bool> = OnceLock::new();
         static EXIT: OnceLock<u64> = OnceLock::new();
         thread_local! {
             static N: Cell<u64> = const { Cell::new(0) };
             static T0: Cell<Option<Instant>> = const { Cell::new(None) };
         }
-        if !*ON.get_or_init(|| std::env::var("PHITEX_HEARTBEAT").is_ok_and(|v| v == "1")) {
-            return;
-        }
-        let n = N.with(|c| {
-            c.set(c.get() + 1);
-            c.get()
+        let delta = self.cmds - self.hb_done;
+        self.hb_done = self.cmds;
+        self.hb_at = if Self::heartbeat_start() == 1 {
+            self.cmds + 1
+        } else {
+            self.cmds + Self::HB_BATCH
+        };
+        let (before, n) = N.with(|c| {
+            let b = c.get();
+            c.set(b + delta);
+            (b, b + delta)
         });
         let t0 = T0.with(|c| {
             let t = c.get().unwrap_or_else(Instant::now);
@@ -76,7 +106,7 @@ impl Run<'_, '_> {
                 .unwrap_or(u64::MAX)
         });
         let trace = n >= from && n < from.saturating_add(150_000);
-        if !n.is_multiple_of(100_000) && !trace {
+        if before / 100_000 == n / 100_000 && !trace {
             return;
         }
         // `PHITEX_HEARTBEAT_EXIT`: the process ends at this many commands
@@ -238,13 +268,15 @@ impl Run<'_, '_> {
                             break;
                         }
                         if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
-                            self.macro_call()?;
+                            self.macro_call();
+                            self.ck()?;
                             continue;
                         }
                         if c >= cmd::END_TEMPLATE && c != cmd::DONT_EXPAND {
                             break;
                         }
-                        self.expand()?;
+                        self.expand();
+                        self.ck()?;
                     }
                 } else {
                     self.skip_blanks_x()?;
@@ -410,7 +442,8 @@ impl Run<'_, '_> {
             }
             cmd::MARK => {
                 // §1101
-                let (_, body) = self.scan_toks(false, true)?;
+                let (_, body) = self.scan_toks(false, true);
+                self.ck()?;
                 let node = self.v.list(vec![
                     self.v.int(crate::nodes::T_MARK),
                     toks_value(self.v, &body),
@@ -463,13 +496,15 @@ impl Run<'_, '_> {
             cmd::TOKS_REGISTER..=cmd::SET_INTERACTION => self.prefixed_command()?,
             cmd::AFTER_ASSIGNMENT => {
                 // §1268
-                self.get_token()?;
+                self.get_token();
+                self.ck()?;
                 let t = self.cur.tok.encode(self.v);
                 self.set_cell(crate::fields::cell::AFTERTOKEN, t, true);
             }
             cmd::AFTER_GROUP => {
                 // §1271
-                self.get_token()?;
+                self.get_token();
+                self.ck()?;
                 let t = self.cur.tok;
                 // the innermost group's level keeps the tokens: one of
                 // this run's, else the engine scope the node runs in (its
@@ -477,6 +512,7 @@ impl Run<'_, '_> {
                 // the bottom level they are dropped (§1271
                 // `cur_level>level_one`)
                 if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
+                    self.muts += 1;
                     l.ag.push(t);
                 } else {
                     let base = self.base_mode()?;
@@ -493,7 +529,8 @@ impl Run<'_, '_> {
             cmd::MESSAGE => {
                 // §1279
                 let ch = self.cur.chr;
-                let (_, body) = self.scan_toks(false, true)?;
+                let (_, body) = self.scan_toks(false, true);
+                self.ck()?;
                 let mut s = String::new();
                 self.show_toks_into(&mut s, &body)?;
                 self.log(if ch == 0 { "msg" } else { "errmsg" }, &s)?;
@@ -501,7 +538,8 @@ impl Run<'_, '_> {
             cmd::CASE_SHIFT => {
                 // §1288
                 let b = self.cur.chr;
-                let (_, body) = self.scan_toks(false, false)?;
+                let (_, body) = self.scan_toks(false, false);
+                self.ck()?;
                 let table = usize::from(b != crate::val::LC_CODE_BASE);
                 let mut out = Vec::with_capacity(body.len());
                 for t in body {
@@ -581,7 +619,8 @@ impl Run<'_, '_> {
                 }
                 let e = ch >= 2;
                 let p = self.get_r_token()?;
-                let (params, body) = self.scan_toks(true, e)?;
+                let (params, body) = self.scan_toks(true, e);
+                self.ck()?;
                 let m = Mean::Macro(Rc::new(Macro::new(
                     u8::try_from(a % 4).unwrap_or(0)
                         | if protected { crate::etex::PROTECTED } else { 0 },
@@ -596,21 +635,26 @@ impl Run<'_, '_> {
                 let p = self.get_r_token()?;
                 if n == 0 {
                     loop {
-                        self.get_token()?;
+                        self.get_token();
+                        self.ck()?;
                         if self.cur.cmd != cmd::SPACER {
                             break;
                         }
                     }
                     if self.is_other(b'=') {
-                        self.get_token()?;
+                        self.get_token();
+                        self.ck()?;
                         if self.cur.cmd == cmd::SPACER {
-                            self.get_token()?;
+                            self.get_token();
+                            self.ck()?;
                         }
                     }
                 } else {
-                    self.get_token()?;
+                    self.get_token();
+                    self.ck()?;
                     let q = self.cur.tok;
-                    self.get_token()?;
+                    self.get_token();
+                    self.ck()?;
                     let t = self.cur.tok;
                     self.back_input(t);
                     self.back_input(q);
@@ -676,7 +720,8 @@ impl Run<'_, '_> {
                     }
                 }
                 self.back_cur();
-                let (_, mut body) = self.scan_toks(false, false)?;
+                let (_, mut body) = self.scan_toks(false, false);
+                self.ck()?;
                 if !body.is_empty() && loc == OUTPUT_ROUTINE_LOC {
                     body.insert(0, Tok::ch(1, u32::from(b'{')));
                     body.push(Tok::ch(2, u32::from(b'}')));
@@ -688,20 +733,21 @@ impl Run<'_, '_> {
                 let l = self.quantity_loc(cmd::ASSIGN_INT, self.cur.chr);
                 self.scan_optional_equals()?;
                 let n = self.scan_int()?;
-                self.set_loc(l, Native::Int(n), global);
+                self.set_loc(l, Entry::int(n), global);
             }
             cmd::ASSIGN_DIMEN => {
                 let l = self.quantity_loc(cmd::ASSIGN_DIMEN, self.cur.chr);
                 self.scan_optional_equals()?;
                 let n = self.scan_normal_dimen()?;
-                self.set_loc(l, Native::Int(n), global);
+                self.set_loc(l, Entry::int(n), global);
             }
             cmd::ASSIGN_GLUE | cmd::ASSIGN_MU_GLUE => {
                 let n = self.cur.cmd;
                 let l = self.quantity_loc(n, self.cur.chr);
                 self.scan_optional_equals()?;
                 let g = self.scan_glue(if n == cmd::ASSIGN_MU_GLUE { 3 } else { 2 })?;
-                self.set_loc(l, Native::Glue(g), global);
+                let e = self.st.glue_entry(g);
+                self.set_loc(l, e, global);
             }
             cmd::DEF_CODE => {
                 // §1232
@@ -739,7 +785,7 @@ impl Run<'_, '_> {
                     let f = self.v.field(&format!("{name}:{ch}"));
                     self.loc_of(f)
                 };
-                self.set_loc(l, Native::Int(val), global);
+                self.set_loc(l, Entry::int(val), global);
             }
             cmd::DEF_FAMILY => {
                 // §1234
@@ -748,7 +794,7 @@ impl Run<'_, '_> {
                 self.scan_optional_equals()?;
                 let f = self.scan_font_ident()?;
                 let l = crate::fields::fam_slot(size, n);
-                self.set_loc(l, crate::runstate::Native::Raw(v.int(f)), global);
+                self.set_loc(l, Entry::raw(Some(v.int(f))), global);
             }
             cmd::REGISTER | cmd::ADVANCE | cmd::MULTIPLY | cmd::DIVIDE => {
                 self.do_register_command(global)?;
@@ -919,7 +965,8 @@ impl Run<'_, '_> {
             let n = self.scan_eight_bit_int()?;
             (self.reg_field(usize::from(p.min(3)), n), p)
         } else {
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             if self.cur.cmd >= cmd::ASSIGN_INT && self.cur.cmd <= cmd::ASSIGN_MU_GLUE {
                 (
                     self.quantity(self.cur.cmd, self.cur.chr),
@@ -978,7 +1025,7 @@ impl Run<'_, '_> {
             };
             let l = self.loc_of(field);
             self.in_advance = q == cmd::ADVANCE;
-            self.set_loc(l, Native::Int(r), global);
+            self.set_loc(l, Entry::int(r), global);
             self.in_advance = false;
         } else {
             let s = glue_of(v, old);
@@ -1015,7 +1062,8 @@ impl Run<'_, '_> {
             };
             let Some(r) = r else { return Ok(()) };
             let l = self.loc_of(field);
-            self.set_loc(l, Native::Glue(r), global);
+            let e = self.st.glue_entry(r);
+            self.set_loc(l, e, global);
         }
         Ok(())
     }
@@ -1135,7 +1183,8 @@ impl Run<'_, '_> {
         let mut digit_sensed = false;
         let v = self.v;
         loop {
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             match self.cur.cmd {
                 cmd::LETTER | cmd::OTHER_CHAR => {
                     let c = u32::try_from(self.cur.chr).unwrap_or(0);
@@ -1181,7 +1230,8 @@ impl Run<'_, '_> {
         let mut words: Vec<ValueId> = Vec::new();
         let mut word = String::new();
         loop {
-            self.get_x_token()?;
+            self.get_x_token();
+            self.ck()?;
             match self.cur.cmd {
                 cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN => {
                     if self.cur.chr == i32::from(b'-') {
@@ -1352,7 +1402,8 @@ impl Run<'_, '_> {
         let mut s = String::from("> ");
         match self.cur.chr {
             0 => {
-                self.get_token()?;
+                self.get_token();
+                self.ck()?;
                 let esc = i64::from(self.ipar(Par::escapechar)?);
                 if self.cur.is_cs() {
                     crate::print::sprint_cs(&mut s, self.cur.tok, esc);
@@ -1362,7 +1413,8 @@ impl Run<'_, '_> {
                 self.print_meaning(&mut s, &m, c, h)?;
             }
             2 => {
-                let t = self.the_toks()?;
+                let t = self.the_toks();
+                self.ck()?;
                 self.show_toks_into(&mut s, &t)?;
             }
             1 => {
@@ -1399,7 +1451,8 @@ impl Run<'_, '_> {
             1 => {
                 // \write (§1352)
                 let k = self.scan_int()?;
-                let (_, body) = self.scan_toks(false, false)?;
+                let (_, body) = self.scan_toks(false, false);
+                self.ck()?;
                 let w = v.list(vec![
                     v.str("write"),
                     v.int(i64::from(k)),
@@ -1410,7 +1463,8 @@ impl Run<'_, '_> {
             }
             3 => {
                 // \special (§1354)
-                let (_, body) = self.scan_toks(false, true)?;
+                let (_, body) = self.scan_toks(false, true);
+                self.ck()?;
                 let mut s = String::new();
                 self.show_toks_into(&mut s, &body)?;
                 let w = v.list(vec![v.str("special"), v.str(&s)]);
@@ -1419,12 +1473,14 @@ impl Run<'_, '_> {
             }
             4 => {
                 // \immediate (§1375)
-                self.get_x_token()?;
+                self.get_x_token();
+                self.ck()?;
                 if self.cur.cmd == cmd::EXTENSION && self.cur.chr <= 2 {
                     match self.cur.chr {
                         1 => {
                             let k = self.scan_int()?;
-                            let (_, body) = self.scan_toks(false, false)?;
+                            let (_, body) = self.scan_toks(false, false);
+                            self.ck()?;
                             self.write_out(k, &body)?;
                         }
                         0 => {
@@ -1812,10 +1868,11 @@ impl Run<'_, '_> {
         self.push_toks(toks);
         // §1370: `mode:=0` while the list is expanded
         let old = std::mem::replace(&mut self.mode_zero, true);
-        let r = self.scan_toks(false, true);
+        let (_, expanded) = self.scan_toks(false, true);
         self.mode_zero = old;
-        let (_, expanded) = r?;
-        self.get_token()?;
+        self.ck()?;
+        self.get_token();
+        self.ck()?;
         let mut s = String::new();
         self.show_toks_into(&mut s, &expanded)?;
         Ok(s)

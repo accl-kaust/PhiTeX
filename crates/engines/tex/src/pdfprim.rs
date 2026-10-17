@@ -344,7 +344,8 @@ pub(crate) fn initex(v: &phitex_defuse::Values) -> Vec<(String, ValueId)> {
 /// `\pdfprimitive` (pdfTeX §1683): the next control sequence's
 /// primitive meaning, whatever it means now.
 pub(crate) fn pdf_primitive(r: &mut Run<'_, '_>) -> R<()> {
-    r.get_token()?;
+    r.get_token();
+    r.ck()?;
     let Some(name) = r.cur.tok.as_cs() else {
         r.log("error", "Missing primitive name")?;
         r.back_cur();
@@ -368,7 +369,8 @@ pub(crate) fn pdf_primitive(r: &mut Run<'_, '_>) -> R<()> {
 
 /// `\ifpdfprimitive` (pdfTeX §1684).
 pub(crate) fn if_pdf_primitive(r: &mut Run<'_, '_>) -> R<bool> {
-    r.get_token()?;
+    r.get_token();
+    r.ck()?;
     let t = r.cur.tok;
     let Some(name) = t.as_cs() else {
         return Ok(false);
@@ -384,7 +386,8 @@ pub(crate) fn if_pdf_primitive(r: &mut Run<'_, '_>) -> R<bool> {
 /// The token list of a `{...}` argument, expanded (`scan_pdf_ext_toks`),
 /// as a string (`tokens_to_string`).
 fn ext_string(r: &mut Run<'_, '_>) -> R<String> {
-    let (_, body) = r.scan_toks(false, true)?;
+    let (_, body) = r.scan_toks(false, true);
+    r.ck()?;
     let mut s = String::new();
     r.show_toks_into(&mut s, &body)?;
     Ok(s)
@@ -434,7 +437,8 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
     let v = r.v;
     let out: String = match c {
         cv::EXPANDED => {
-            let (_, body) = r.scan_toks(false, true)?;
+            let (_, body) = r.scan_toks(false, true);
+            r.ck()?;
             r.push_toks(body);
             return Ok(());
         }
@@ -1795,7 +1799,8 @@ fn action(r: &mut Run<'_, '_>) -> R<ValueId> {
     }
     if window > 0 {
         // pdfTeX §1546: "Scan an optional space"
-        r.get_x_token()?;
+        r.get_x_token();
+        r.ck()?;
         if r.cur.cmd != cmd::SPACER {
             r.back_cur();
         }
@@ -1912,7 +1917,8 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             };
             let text = if late {
                 // expanded when shipped out
-                let (_, body) = r.scan_toks(false, false)?;
+                let (_, body) = r.scan_toks(false, false);
+                r.ck()?;
                 crate::val::toks_value(v, &body)
             } else {
                 ext_value(r)?

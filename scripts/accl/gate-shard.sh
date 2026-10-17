@@ -140,7 +140,17 @@ case $shard in
       echo "build --exact-pdf -j $j: exit $e md5 $m oracle $want $([ "$m" = "$want" ] && echo same || echo DIFFERS) wall $(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}') pages ${pages:-?} nodes ${nodes:-?} claims_refuted $(sum 'claims refuted') effects_refuted $(sum 'effects refuted') claim_siblings $(sum 'claim siblings') defs_refuted $(sum 'definitions refuted') stale_reads $(grep -oE 'check_reads: [0-9]+ stale' "$L" | awk '{s+=$2} END {print s+0}') cp $cp_n" >> "$r/ams.txt"
       [ "$e" = 0 ] || red "amsldoc -j $j: exit $e $(grep -m1 -E 'panicked at|error' "$L" | cut -c1-160)"
       [ "$m" = "$want" ] || red "amsldoc -j $j: md5 $m, oracle $want"
+      python3 -I scripts/accl/gate-acct.py acct "$L" "amsldoc -j $j" >> "$r/acct.txt" 2>&1
     done
+    # the edit histories (spec-final §0 bytes): 50 one-word edits at
+    # random places, then the PDF equal to a cold build of the final text
+    for j in 8 16; do
+      rm -rf "$w/amsh" "$w/amsh-cold" && cp -a bench/amsldoc "$w/amsh"
+      (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/acache \
+        timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/amsh" amsldoc.tex $j 50 $j "$r/edits-j$j.json" --exact-pdf) >> "$r/ams.txt" 2>&1
+      grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "amsldoc edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
+    done
+    python3 -I scripts/accl/gate-acct.py table ams "$r" > "$r/table.txt" 2>&1
     # the cold watch builds, head and control alternating per -j (same
     # node, same command, a fresh cache each)
     for j in 1 8 16; do
@@ -182,7 +192,16 @@ case $shard in
       echo "para4000 -j $j: exit $e md5 $m bar $want $([ "$m" = "$want" ] && echo same || echo DIFFERS) wall $wall us/paragraph $(awk -v w="$wall" 'BEGIN{printf "%.0f", w*1e6/4000}') nodes ${nodes:-?} cp $cp_n claims_refuted $(sum 'claims refuted') effects_refuted $(sum 'effects refuted') defs_refuted $(sum 'definitions refuted') stale_reads $(grep -oE 'check_reads: [0-9]+ stale' "$L" | awk '{s+=$2} END {print s+0}')" >> "$r/para.txt"
       [ "$e" = 0 ] || red "para4000 -j $j: exit $e $(grep -m1 -E 'panicked at|error' "$L" | cut -c1-160)"
       [ "$m" = "$want" ] || red "para4000 -j $j: md5 $m, bar $want"
+      python3 -I scripts/accl/gate-acct.py acct "$L" "para4000 -j $j" >> "$r/acct.txt" 2>&1
     done
+    # the edit histories (spec-final §0 bytes)
+    for j in 8 16; do
+      rm -rf "$w/parh" "$w/parh-cold" && mkdir -p "$w/parh" && cp bench/para4000.tex "$w/parh/"
+      (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 \
+        timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parh" para4000.tex $j 50 $j "$r/edits-j$j.json" --program pdftex) >> "$r/para.txt" 2>&1
+      grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "para4000 edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
+    done
+    python3 -I scripts/accl/gate-acct.py table para "$r" > "$r/table.txt" 2>&1
     ;;
   *) red "unknown shard $shard" ;;
 esac

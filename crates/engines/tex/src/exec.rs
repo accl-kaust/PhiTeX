@@ -237,11 +237,20 @@ pub(crate) fn note(op: u16, node: u64) {
 pub(crate) struct OpCounters {
     /// the operations' run time, summed
     busy: AtomicU64,
+    /// the run time and the runs by node kind ([`KINDS`], spec-final §1)
+    kind_ns: [AtomicU64; KINDS.len()],
+    kind_runs: [AtomicU64; KINDS.len()],
     /// operations running now
     running: AtomicUsize,
     /// the most operations running at once
     peak: AtomicUsize,
 }
+
+/// The node kinds the cold accounting splits op time by (spec-final §1):
+/// a package load is an `exec` run of a load's text.
+pub(crate) const KINDS: [&str; 9] = [
+    "exec", "load", "scan", "finish", "resume", "files", "link", "dvi", "put",
+];
 
 /// The executor of an evaluation, with its counters: the time its
 /// operations ran (summed over runs), and the most runs at once.
@@ -287,6 +296,21 @@ impl Threads {
         w.progress.slots[i].store(0, Ordering::Relaxed);
         w.progress.done.fetch_add(1, Ordering::Relaxed);
         r
+    }
+
+    /// The operations' run time and runs by node kind ([`KINDS`]).
+    pub(crate) fn by_kind(&self) -> Vec<(&'static str, std::time::Duration, u64)> {
+        KINDS
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| {
+                (
+                    k,
+                    std::time::Duration::from_nanos(self.ops.kind_ns[i].load(Ordering::Relaxed)),
+                    self.ops.kind_runs[i].load(Ordering::Relaxed),
+                )
+            })
+            .collect()
     }
 
     /// The operations' summed run time (zero without a clock).
@@ -427,28 +451,44 @@ impl Threads {
     }
 }
 
-/// `f(i)` for every `i < n` on the pool of `threads` workers (inline
-/// with one worker, one job, or where this target runs no threads): the
-/// passes before an evaluation (a document's hint analysis per chunk,
-/// its nodes' arguments).
-pub(crate) fn each(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
-    if threads <= 1 || n < 2 || !threads_possible() {
-        (0..n).for_each(f);
-        return;
+/// The executor of a client pass whose items each cost a run's worth
+/// (the hint pass's chunks, spec-final §5.1): `Executor::for_each`
+/// splits any batch of two or more over the pool, one item a task.
+pub(crate) struct Coarse(pub Threads);
+
+impl Executor for Coarse {
+    fn execute(
+        &mut self,
+        n: usize,
+        run: &(dyn Fn(usize) -> RunResult + Sync),
+        out: &mut Vec<RunResult>,
+    ) {
+        self.0.execute(n, run, out);
     }
-    let grain = (n / (threads * 8)).max(1);
-    trace(n, threads);
-    parallel(threads, n, grain, f);
+
+    fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        if self.0.n <= 1 || n < 2 || !threads_possible() {
+            (0..n).for_each(f);
+            return;
+        }
+        trace(n, self.0.n);
+        parallel(self.0.n, n, 1, &|i| self.0.job(|| f(i)));
+    }
+
+    fn parallelism(&self) -> usize {
+        self.0.parallelism()
+    }
 }
 
-/// `f(i)` for every `i < n` ([`each`]), the results in order.
-pub(crate) fn map<T: Send + Sync>(
-    threads: usize,
+/// `f(i)` for every `i < n` on executor `ex` (its `for_each`), the
+/// results in order.
+pub(crate) fn map_on<T: Send + Sync>(
+    ex: &mut dyn Executor,
     n: usize,
     f: &(dyn Fn(usize) -> T + Sync),
 ) -> Vec<T> {
     let slots: Vec<OnceLock<T>> = (0..n).map(|_| OnceLock::new()).collect();
-    each(threads, n, &|i| {
+    ex.for_each(n, &|i| {
         let _ = slots[i].set(f(i));
     });
     slots
@@ -785,15 +825,16 @@ impl Drop for StepTrace {
 /// also its operation, node and wall time, printed when the run ends.
 pub(crate) struct NodeTimer {
     trace: Option<(std::time::Instant, &'static str, u64)>,
-    ops: Option<(std::sync::Arc<OpCounters>, Option<u64>)>,
+    ops: Option<(std::sync::Arc<OpCounters>, Option<u64>, usize)>,
 }
 
 impl NodeTimer {
     pub(crate) fn new(op: &'static str, node: u64) -> NodeTimer {
+        let kind = KINDS.iter().position(|&k| k == op).unwrap_or(0);
         let ops = JOB_OPS.with(|c| c.borrow().clone()).map(|o| {
             let c = o.running.fetch_add(1, Ordering::Relaxed) + 1;
             o.peak.fetch_max(c, Ordering::Relaxed);
-            (o, clock().now())
+            (o, clock().now(), kind)
         });
         let trace = env_flag!("PHITEX_TEX_TIME").then(|| (std::time::Instant::now(), op, node));
         NodeTimer { trace, ops }
@@ -802,10 +843,12 @@ impl NodeTimer {
 
 impl Drop for NodeTimer {
     fn drop(&mut self) {
-        if let Some((o, t0)) = self.ops.take() {
+        if let Some((o, t0, kind)) = self.ops.take() {
             if let (Some(a), Some(b)) = (t0, clock().now()) {
                 o.busy.fetch_add(b.saturating_sub(a), Ordering::Relaxed);
+                o.kind_ns[kind].fetch_add(b.saturating_sub(a), Ordering::Relaxed);
             }
+            o.kind_runs[kind].fetch_add(1, Ordering::Relaxed);
             o.running.fetch_sub(1, Ordering::Relaxed);
         }
         if let Some((t, op, node)) = self.trace {

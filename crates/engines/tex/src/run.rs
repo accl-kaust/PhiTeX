@@ -15,7 +15,7 @@ use crate::input::{Line, MID_LINE, NEW_LINE, Seg};
 use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Values};
 
 use crate::fields::Par;
-use crate::runstate::{Loc, Native};
+use crate::runstate::{Entry, Loc};
 use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
@@ -199,6 +199,12 @@ pub(crate) struct Ops {
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
+    /// The guess cache of the scan (spec-final §3.4): what the scan's
+    /// continuation after page `j` fired defined the last time it ran
+    /// (the scan state and its material), the prediction of a
+    /// continuation made anew for page `j` (an edit's: its steps run on
+    /// it in parallel, the engine confirms it when the real one comes).
+    pub scan_guess: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<i64, (ValueId, ValueId)>>>,
 }
 
 /// A package load's finished run: its node, when it began and ended,
@@ -286,7 +292,7 @@ impl FileRest {
     }
 
     /// The file's name and the line number of the next line, for
-    /// diagnostics ([`Run::heartbeat`]).
+    /// diagnostics ([`Run::heartbeat_tick`]).
     pub(crate) fn where_(&self, v: &Values) -> (String, usize) {
         let line = self.str()[..self.off].matches('\n').count() + 1;
         (crate::val::str_of(v, self.name), line)
@@ -361,12 +367,6 @@ pub(crate) enum FileLine {
     Piece(ValueId),
 }
 
-/// Whether `PHITEX_HEARTBEAT=1` (read once a process).
-fn heartbeat_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PHITEX_HEARTBEAT").is_ok_and(|v| v == "1"))
-}
-
 /// The size of a run's control-sequence name cache ([`Run::cs_cache`]).
 pub(crate) const CS_CACHE: usize = 1024;
 
@@ -413,10 +413,12 @@ pub(crate) struct Run<'c, 'a> {
     /// being expanded, which disables `\prevdepth`, `\spacefactor`,
     /// `\lastskip`, `\prevgraf`.
     pub mode_zero: bool,
-    /// `macro_call`'s buffers, kept between calls.
-    pub mbufs: crate::expand::MacroBufs,
-    /// `PHITEX_HEARTBEAT=1` (read once a process).
-    pub heartbeat_on: bool,
+    /// The commands this run began ([`Run::command`]), the count the
+    /// heartbeat's next tick is at (`u64::MAX`: off) and the count its
+    /// last tick took in.
+    pub cmds: u64,
+    pub hb_at: u64,
+    pub hb_done: u64,
     pub pulled: usize,
     /// Where each pulled sibling's text begins in the input's text (its
     /// first segment's index), or `None` when it joined the line before
@@ -514,6 +516,9 @@ pub(crate) struct Run<'c, 'a> {
     pub cond_stop: bool,
     /// The buffer a control sequence's name is scanned into (§356).
     pub(crate) name_buf: String,
+    /// `\endlinechar` as last read, with the table's change generation
+    /// then ([`Run::endlinechar`]).
+    pub(crate) elc: Option<(u64, i32)>,
     /// The scope kind last decoded (`Run::mode`, once a command): its
     /// value and its fields `(group, sid, lid, mode, depth, extra)`.
     pub kind_memo: Option<(ValueId, KindFields)>,
@@ -544,7 +549,7 @@ pub(crate) struct Run<'c, 'a> {
     /// Changes to the run's state a stopped command cannot undo (own
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
-    pub irreversible: u64,
+    pub muts: u64,
     /// While a job-written line is interpreted ([`Run::interpret_line`]):
     /// the read-back fields reverted so far in that line, to the value
     /// they had before this round's read-back (`wpre:<field>`), and
@@ -624,6 +629,9 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) rec_ready: bool,
     pub(crate) rec_absent: Option<ValueId>,
     pub(crate) rec_sig: (usize, usize, usize, u64),
+    /// The engine reads a scan step's builder made through its run
+    /// (`pages::RunReaching`): a prefix folded with none is memoized.
+    pub reach_reads: u64,
     /// The candidate a finisher asked this piece to cut at
     /// (`Run::read_cut_request`): the piece folds in its own run.
     pub cut_req: Option<u32>,
@@ -655,8 +663,9 @@ impl<'c, 'a> Run<'c, 'a> {
             lines_read: 0,
             doc_lines: Vec::new(),
             mode_zero: false,
-            mbufs: crate::expand::MacroBufs::default(),
-            heartbeat_on: heartbeat_enabled(),
+            cmds: 0,
+            hb_at: Run::heartbeat_start(),
+            hb_done: 0,
             pulled: 0,
             pull_at: Vec::new(),
             pull_lev: None,
@@ -697,6 +706,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cond_loaded: false,
             cond_stop: false,
             name_buf: String::new(),
+            elc: None,
             kind_memo: None,
             astate: None,
             aopen: 0,
@@ -708,7 +718,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cur_order: phitex_typeset::glue::Order::Normal,
             pdf_occ: 0,
             resumed: false,
-            irreversible: 0,
+            muts: 0,
             interp: None,
             interp_short: false,
             interp_nested: phitex_defuse::FxHashMap::default(),
@@ -738,6 +748,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cell_eng: phitex_defuse::FxHashMap::default(),
             rec_sig: (0, 0, 0, 0),
             cut_req: None,
+            reach_reads: 0,
         }
     }
 
@@ -1161,7 +1172,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines the state cell at `loc` ([`crate::fields::cell`]).
     pub(crate) fn set_cell(&mut self, loc: Loc, val: ValueId, global: bool) {
-        self.set_loc(loc, Native::Raw(val), global);
+        self.set_loc(loc, Entry::raw(Some(val)), global);
     }
 
     /// Location `loc` as glue.
@@ -1178,26 +1189,19 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
-    pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
+    pub(crate) fn set_loc(&mut self, loc: Loc, val: Entry, global: bool) {
         if crate::exec::env_flag!("PHITEX_AUX_TRACE")
             && self.interp.is_none()
             && loc == self.reg_loc(0, 0)
         {
-            let x = match &val {
-                Native::Raw(x) => self.v.render(*x),
-                _ => "?".to_owned(),
-            };
+            let x = self.st.debug_entry(&val, self.v);
             let cmd = self
                 .cur
                 .tok
                 .as_cs()
                 .map_or_else(|| format!("{:?}", self.cur.tok), |n| n.name().to_owned());
-            let int = match &val {
-                Native::Int(i) => i.to_string(),
-                _ => String::new(),
-            };
             eprintln!(
-                "aux-trace: count0 := {x}{int} global={global} by node {} op {:?} at \\{cmd}",
+                "aux-trace: count0 := {x} global={global} by node {} op {:?} at \\{cmd}",
                 self.cx.node().raw(),
                 self.cx.op()
             );
@@ -1216,7 +1220,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let grp = self.innermost_group();
         self.st.note_kind(loc, self.in_advance);
         self.st.set(loc, val, global, grp);
-        self.irreversible += 1;
+        self.muts += 1;
     }
 
     /// A field this run defines after reading a job-written file back:
@@ -1264,7 +1268,7 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         let grp = self.innermost_group();
-        self.st.set(pl, Native::Raw(old), true, grp);
+        self.st.set(pl, Entry::raw(Some(old)), true, grp);
     }
 
     /// The parameter `p`.
@@ -1285,7 +1289,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines the parameter `p`.
     pub(crate) fn set_par(&mut self, p: Par, val: ValueId, global: bool) {
-        self.set_loc(p as Loc, Native::Raw(val), global);
+        self.set_loc(p as Loc, Entry::raw(Some(val)), global);
     }
 
     /// The field of the primitive quantity at `(c, chr)` (§1224, §1228).
@@ -1527,6 +1531,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if list_of(v, order).first().is_none_or(|&s| int_of(v, s) == 0) {
             return Ok(None);
         }
+        self.muts += 1;
         self.fread.push((key.to_owned(), order.raw()));
         Ok(Some(x))
     }
@@ -1554,7 +1559,10 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok((text, at));
         }
         Ok((
-            self.cx.use_field(f)?.map(|x| str_of(v, x)).unwrap_or_default(),
+            self.cx
+                .use_field(f)?
+                .map(|x| str_of(v, x))
+                .unwrap_or_default(),
             0,
         ))
     }
@@ -1673,7 +1681,11 @@ impl<'c, 'a> Run<'c, 'a> {
             self.get_f(f)?
         } else {
             if std::env::var_os("PHITEX_TMP_FTRACE").is_some() {
-                eprintln!("TMPF file {key} node {} op {:?}", self.cx.node().raw(), self.cx.op());
+                eprintln!(
+                    "TMPF file {key} node {} op {:?}",
+                    self.cx.node().raw(),
+                    self.cx.op()
+                );
             }
             self.cx.use_env(f)?
         };
@@ -1688,6 +1700,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 .filter(|&t| t != ValueId::UNIT)
                 .or_else(|| xs.get(2).copied())
         }) {
+            self.muts += 1;
             self.fread.push((key.to_owned(), t.raw()));
         } else if self.rec_load && !self.fmiss.iter().any(|n| n == key) {
             self.fmiss.push(key.to_owned());
@@ -1713,6 +1726,7 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         if let Some(&n) = entry.as_ref().and_then(|x| x.first()) {
             let f = stream_bucket(v, &str_of(v, n));
+            self.muts += 1;
             self.contribs.push((f, v.seq_unit(e)));
             self.contribute(WNAMES, v.seq_unit(n));
         }
@@ -2046,6 +2060,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (what the line writes to other files is not kept: TeX writes
         // it as `\enddocument` reads the file back, which this run does
         // where it reads the text it wrote, `start_input`)
+        self.muts += 1;
         self.contribs.truncate(nc);
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
@@ -2149,7 +2164,7 @@ impl<'c, 'a> Run<'c, 'a> {
         global: bool,
     ) {
         let l = self.font_loc(f, c);
-        self.set_loc(l, Native::Raw(val), global);
+        self.set_loc(l, Entry::raw(Some(val)), global);
     }
 
     /// The parameter `name` (a name known only at run time; the fixed
@@ -2218,7 +2233,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn set_f(&mut self, f: Field, val: ValueId, global: bool) {
         let l = self.loc_of(f);
-        self.set_loc(l, Native::Raw(val), global);
+        self.set_loc(l, Entry::raw(Some(val)), global);
     }
 
     /// The fields the run publishes: its definitions at the base level
@@ -2301,10 +2316,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
         let f = self.v.field(name);
+        self.muts += 1;
         self.contribs.push((f, val));
     }
 
     pub(crate) fn kid(&mut self, op: OpId, args: Vec<ValueId>) {
+        self.muts += 1;
         self.kids.push((op, args));
     }
 
@@ -2446,17 +2463,37 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    /// The current token's macro when its slot is loaded with one (the
-    /// common case of `macro_call`: no decoding, no `Mean` built); `None`
-    /// sends the caller through [`Self::cur_mean`].
+    /// The current token's macro (spec-final §2.1: `macro_call` reads
+    /// the slot's macro by its handle, never a `Mean`): one slot access
+    /// when it is loaded with one; else read and decoded once. `None`
+    /// when the meaning is no macro, or a halt was raised.
     #[inline]
     pub(crate) fn cur_macro(&mut self) -> Option<Rc<crate::val::Macro>> {
         let t = self.cur.tok;
         if !t.is_cs_or_active() || self.cur.cmd == cmd::RELAX {
             return None;
         }
-        let l = Loc::try_from(crate::fields::mean_loc(t)?).ok()?;
-        self.st.macro_at(l)
+        if let Some(l) = crate::fields::mean_loc(t).and_then(|l| Loc::try_from(l).ok())
+            && let Some(m) = self.st.macro_at(l)
+        {
+            return Some(m);
+        }
+        self.cur_macro_slow(t)
+    }
+
+    #[inline(never)]
+    fn cur_macro_slow(&mut self, t: Tok) -> Option<Rc<crate::val::Macro>> {
+        let l = self.mean_loc(t)?;
+        if !self.st.is_loaded(l)
+            && let Err(h) = self.load_slow(l)
+        {
+            self.raise(h);
+            return None;
+        }
+        match self.st.mean_of(l, self.v) {
+            Mean::Macro(m) => Some(m),
+            _ => None,
+        }
     }
 
     /// The current token's meaning, read from its slot now (§389, §508):
@@ -2482,7 +2519,8 @@ impl<'c, 'a> Run<'c, 'a> {
     /// encoded only if the run publishes it.
     pub(crate) fn set_mean(&mut self, t: Tok, m: Mean, global: bool) {
         if let Some(l) = self.mean_loc(t) {
-            self.set_loc(l, Native::Mean(m), global);
+            let e = self.st.mean_entry(m);
+            self.set_loc(l, e, global);
         }
     }
 
@@ -2872,10 +2910,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // open and no other level: the run stops there, its
             // conditionals left as a field the nodes after it read where
             // they end them ([`COND_STACK`])
-            if self.doc
-                && self.nest.is_empty()
-                && !self.conds.is_empty()
-                && self.next_is_doc_file()
+            if self.doc && self.nest.is_empty() && !self.conds.is_empty() && self.next_is_doc_file()
             {
                 self.cond_stop = true;
                 return Ok(());
@@ -2914,6 +2949,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 // groups end with it (nothing after reads them), the
                 // node reports the error
                 self.diag(true, "format: group left open at end");
+                self.muts += 1;
                 let nest = std::mem::take(&mut self.nest);
                 self.abandon_levels(&nest);
                 for l in nest {
@@ -2969,6 +3005,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let x = self.cx.use_field(v.field(COND_STACK))?;
         self.cond_loaded = true;
+        self.muts += 1;
         for e in x.map(|x| list_of(v, x)).unwrap_or_default() {
             if let [l, c] = list_of(v, e)[..] {
                 self.conds.push(u8::try_from(int_of(v, l)).unwrap_or(0));
@@ -3017,7 +3054,11 @@ impl<'c, 'a> Run<'c, 'a> {
         // `Exec::static_contribs`)
         if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
             let m = lines_value(self.v, &self.doc_lines);
-            self.contribute("lines", m);
+            let f = self
+                .ops
+                .fields
+                .slot_field(crate::fields::cell::LINES as usize);
+            self.contribs.push((f, m));
         }
         // a page parameter this run set and no item of it carried
         if self.st.take_page_params() {
@@ -3144,6 +3185,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 .ops
                 .fields
                 .get_at(self.v, self.cx.values_epoch(), "defs");
+            self.muts += 1;
             self.contribs.push((defs, s));
         }
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
@@ -3618,7 +3660,7 @@ pub(crate) struct Parked {
     radix: i32,
     cur_order: phitex_typeset::glue::Order,
     pdf_occ: usize,
-    irreversible: u64,
+    muts: u64,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
     cand: u32,
@@ -3738,7 +3780,7 @@ impl Run<'_, '_> {
             radix: self.radix,
             cur_order: self.cur_order,
             pdf_occ: self.pdf_occ,
-            irreversible: self.irreversible,
+            muts: self.muts,
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
             cand: self.cand,
@@ -3815,7 +3857,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.radix = p.radix;
         r.cur_order = p.cur_order;
         r.pdf_occ = p.pdf_occ;
-        r.irreversible = p.irreversible;
+        r.muts = p.muts;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
         r.cand = p.cand;

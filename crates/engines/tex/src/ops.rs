@@ -246,6 +246,7 @@ pub(crate) fn run_node_parking(
             // claimed, and the main list ends here for the page builder
             // (the page it holds is not shipped)
             r.input = crate::input::Input::new();
+            r.muts += 1;
             r.claim_rest = true;
             // (for the output: pdfTeX writes no PDF file after one)
             // (`pdf`: pdfTeX says no PDF file was produced, §1335, pdfTeX
@@ -372,11 +373,11 @@ impl Operation for Exec {
             .and_then(|b| b.claim)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
-        let hint = crate::hints::hint_of_args(reg(&self.0), cx.values(), &args);
         // (a package load: its run recorded, `crate::pkgrec`)
         let load = crate::pkgrec::is_load(cx.values(), &args);
+        let _nt = crate::exec::NodeTimer::new(if load { "load" } else { "exec" }, cx.node().raw());
+        let hint = crate::hints::hint_of_args(reg(&self.0), cx.values(), &args);
         let (node, t0, spec) = (
             cx.node().raw(),
             std::time::Instant::now(),
@@ -597,8 +598,7 @@ impl Operation for Dvi {
                 crate::pages::SCAN,
                 "pages",
                 crate::pdfrelaxed::PIECES,
-                crate::pdfout::XPAGES,
-                "cutreq",
+                crate::assemble::LINKED,
             ]
             .iter()
             .map(|&f| v.field(f))
@@ -609,6 +609,34 @@ impl Operation for Dvi {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
         crate::assemble::output(cx, &o)
+    }
+}
+
+/// The link (spec-redesign §1): the exact PDF file from the pages'
+/// records, before the end node, which takes the file from it.
+pub(crate) struct Link(pub Shared);
+
+impl Operation for Link {
+    fn name(&self) -> &'static str {
+        "link"
+    }
+    fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(vec![(v.field(crate::assemble::LINKED), Locality::Global)])
+    }
+    /// What the file is made of: held until the pages and the line's
+    /// records before it are done.
+    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        Some(
+            [crate::pages::SCAN, "pages", crate::pdfout::XPAGES]
+                .iter()
+                .map(|&f| v.field(f))
+                .collect(),
+        )
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let o = ops(&self.0);
+        crate::assemble::link(cx, &o)
     }
 }
 
@@ -713,10 +741,7 @@ fn files_root(cx: &mut Ctx<'_>, listed: Vec<String>) -> Result<ValueId, Stop> {
 /// The text the job wrote to file `name` this round, from its stream's
 /// accumulator alone ([`crate::run::stream_bucket`]), and the
 /// definitions its read-back makes.
-fn stream_of(
-    cx: &mut Ctx<'_>,
-    name: &str,
-) -> Result<(Option<String>, Option<WrittenDefs>), Stop> {
+fn stream_of(cx: &mut Ctx<'_>, name: &str) -> Result<(Option<String>, Option<WrittenDefs>), Stop> {
     let v = cx.values();
     let acc = cx.acc_range(crate::run::stream_bucket(v, name), None)?;
     let text = crate::api::written_texts(v, None, Some(acc))

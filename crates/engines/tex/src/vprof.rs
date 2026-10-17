@@ -17,7 +17,6 @@
 //! scan steps (`crate::pages::Scan`) run it; where a page fires, the
 //! step builds the page from the items and compares the decisions.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use phitex_defuse::{ValueId, Values};
@@ -431,6 +430,7 @@ pub(crate) struct ScanFire {
 }
 
 /// The page builder's state over profiles.
+#[derive(Clone)]
 pub(crate) struct ScanState {
     pub j: i64,
     /// The pages fired so far whose `\outputpenalty` is above -10001
@@ -578,15 +578,17 @@ impl ScanState {
             holding_inserts: 0,
             saving_vdiscards: false,
         });
-        let mut queue: VecDeque<PItem> = std::mem::take(buf).into();
-        while let Some(x) = queue.pop_front() {
+        // (the contributions as a stack, the next on top: a `Vec`)
+        let mut queue: Vec<PItem> = std::mem::take(buf);
+        queue.reverse();
+        while let Some(x) = queue.pop() {
             let p = match x {
                 PItem::End(ref ys) => {
                     if self.pb.page.is_empty() && queue.is_empty() && dead == 0 {
                         continue;
                     }
                     for y in ys.iter().rev() {
-                        queue.push_front(y.clone());
+                        queue.push(y.clone());
                     }
                     continue;
                 }
@@ -598,7 +600,7 @@ impl ScanState {
                 _ => continue,
             };
             let next = if matches!(p, Node::Kern(..)) {
-                match queue.front() {
+                match queue.last() {
                     Some(PItem::Node(n)) => Some(n.clone()),
                     _ => None,
                 }
@@ -617,7 +619,7 @@ impl ScanState {
             match out {
                 Outcome::Done => {}
                 Outcome::Wait(_) => {
-                    queue.push_front(x);
+                    queue.push(x);
                     break;
                 }
                 Outcome::Fire(f) => {
@@ -637,7 +639,8 @@ impl ScanState {
                 }
             }
         }
-        *buf = queue.into();
+        queue.reverse();
+        *buf = queue;
         None
     }
 }
@@ -673,6 +676,12 @@ fn size_report() -> String {
         n * 8 / u.max(1),
         n * 8 / l.max(1)
     )
+}
+
+/// Whether `x` is an `\end` marker (the builder then reads
+/// `\deadcycles`, §1054).
+pub(crate) fn is_end(x: &PItem) -> bool {
+    matches!(x, PItem::End(_))
 }
 
 /// Whether profile items hold an `\end` marker (the scan then reads

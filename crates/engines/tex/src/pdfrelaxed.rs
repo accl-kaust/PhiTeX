@@ -83,6 +83,7 @@ pub(crate) fn fall_back(r: &mut Run<'_, '_>, why: &str) {
 /// The owner key of the next object this run makes at read time.
 fn next_key(r: &mut Run<'_, '_>) -> u64 {
     let k = relaxed::owner_key(r.cx.node().raw(), r.pdf_occ);
+    r.muts += 1;
     r.pdf_occ += 1;
     k
 }

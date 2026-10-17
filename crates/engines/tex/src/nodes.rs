@@ -92,6 +92,11 @@ pub(crate) struct Side {
     pub marks: Vec<ValueId>,
     pub whats: Vec<ValueId>,
     pub lazy: Vec<ValueId>,
+    /// Per shallow box (by `lazy`'s number): the box's own value and its
+    /// head as decoded, so the box goes back as that value while its
+    /// head is unchanged (spec-final §3.1: a line box the page builder
+    /// moves onto a page is never encoded again).
+    pub lazy_box: Vec<(ValueId, [i64; 8])>,
 }
 
 /// The handles of a shallow box's list stand-in: `LAZY + k` is
@@ -105,6 +110,38 @@ fn lazy_list(b: &BoxNode, side: &Side) -> Option<ValueId> {
         [Node::Whatsit(h, None)] if *h >= LAZY => side.lazy.get((*h - LAZY) as usize).copied(),
         _ => None,
     }
+}
+
+/// The value a shallow box was decoded from, while its head is as it
+/// was ([`Side::lazy_box`]).
+fn lazy_value(b: &BoxNode, side: &Side) -> Option<ValueId> {
+    match b.list.as_slice() {
+        [Node::Whatsit(h, None)] if *h >= LAZY => side
+            .lazy_box
+            .get((*h - LAZY) as usize)
+            .filter(|(_, head)| *head == head_words(b))
+            .map(|e| e.0),
+        _ => None,
+    }
+}
+
+/// A box's head as its value has it (the words after the tag, before
+/// the list).
+fn head_words(b: &BoxNode) -> [i64; 8] {
+    [
+        i64::from(b.kind != BoxKind::H),
+        i64::from(b.width),
+        i64::from(b.height),
+        i64::from(b.depth),
+        i64::from(b.shift),
+        match b.glue.sign {
+            GlueSign::Normal => 0,
+            GlueSign::Stretching => 1,
+            GlueSign::Shrinking => 2,
+        },
+        b.glue.order as i64,
+        i64::from_ne_bytes(b.glue.ratio.to_bits().to_ne_bytes()),
+    ]
 }
 
 fn i(v: &Values, x: i64) -> ValueId {
@@ -169,6 +206,9 @@ pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
 }
 
 pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
+    if let Some(x) = lazy_value(b, side) {
+        return x;
+    }
     if let Some(l) = lazy_list(b, side) {
         return encode_box_with(v, b, l);
     }
@@ -386,6 +426,7 @@ pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<
         let k = u32::try_from(side.lazy.len()).unwrap_or(0);
         side.lazy.push(xs[9]);
         let mut b = decode_box_head(v, &xs);
+        side.lazy_box.push((x, head_words(&b)));
         b.list = vec![Node::Whatsit(LAZY + k, None)];
         return Some(Node::Box(b));
     }

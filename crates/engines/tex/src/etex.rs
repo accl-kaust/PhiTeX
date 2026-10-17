@@ -291,7 +291,8 @@ pub(crate) fn after_expand(_r: &mut Run<'_, '_>, _c: u8) {}
 
 /// `\unless` (pdfTeX §1758).
 fn unless(r: &mut Run<'_, '_>) -> R<()> {
-    r.get_token()?;
+    r.get_token();
+    r.ck()?;
     if r.cur.cmd == cmd::IF_TEST && r.cur.chr != 16 {
         r.cur.chr += UNLESS_CODE;
         r.conditional()?;
@@ -329,6 +330,7 @@ fn if_stack(r: &Run<'_, '_>) -> Vec<IfRec> {
 /// §495): its limit is on `conds`, kept by `conditional`, its code on
 /// `if_codes`.
 pub(crate) fn if_begin(r: &mut Run<'_, '_>, code: i32) {
+    r.muts += 1;
     r.if_codes.push(code);
 }
 
@@ -337,7 +339,7 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
     Ok(match this_if {
         IF_DEF => {
             // pdfTeX §1759
-            if !r.get_next()? {
+            if !r.next_ck()? {
                 return Ok(false);
             }
             r.cur.cmd != cmd::UNDEFINED_CS
@@ -347,7 +349,8 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
             let _g = InCsname::enter();
             let mut name = String::new();
             loop {
-                r.get_x_token()?;
+                r.get_x_token();
+                r.ck()?;
                 if r.cur.is_cs() {
                     break;
                 }
@@ -820,7 +823,8 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
 /// `the_toks` for `\unexpanded` and `\detokenize` (pdfTeX §465).
 pub(crate) fn the_toks(r: &mut Run<'_, '_>) -> R<Vec<Tok>> {
     let c = r.cur.chr;
-    let (_, body) = r.scan_toks(false, false)?;
+    let (_, body) = r.scan_toks(false, false);
+    r.ck()?;
     if c == 1 {
         return Ok(body);
     }
@@ -837,7 +841,8 @@ const EOF_PSEUDO: &str = "\u{10FFFE}eofp";
 /// `\scantokens` (`pseudo_start`, pdfTeX §1766–§1771): the token list
 /// shown as a string, cut into lines at `\newlinechar`, read as a file.
 fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
-    let (_, body) = r.scan_toks(false, false)?;
+    let (_, body) = r.scan_toks(false, false);
+    r.ck()?;
     let mut s = String::new();
     r.show_toks_into(&mut s, &body)?;
     let nl = i64::from(r.ipar(Par::newlinechar)?);
@@ -1113,7 +1118,8 @@ pub(crate) fn command(r: &mut Run<'_, '_>, md: &Mode) -> R<bool> {
 /// `\marks` (pdfTeX §1101).
 fn marks(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     let c = r.scan_register_num()?;
-    let (_, body) = r.scan_toks(false, true)?;
+    let (_, body) = r.scan_toks(false, true);
+    r.ck()?;
     let v = r.v;
     let toks = toks_value(v, &body);
     let payload = if c == 0 {
@@ -1300,7 +1306,8 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
     match r.cur.chr {
         5 => {
             // \showtokens: the token list, `> ...`
-            let (_, body) = r.scan_toks(false, false)?;
+            let (_, body) = r.scan_toks(false, false);
+            r.ck()?;
             r.show_toks_into(&mut s, &body)?;
             s.push('.');
             return r.log("show", &s);
