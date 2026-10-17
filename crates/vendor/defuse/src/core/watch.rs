@@ -59,7 +59,8 @@ impl Watch {
                 let t0 = Instant::now();
                 let mut last = t0;
                 while !flag.load(Ordering::Acquire) {
-                    std::thread::sleep(Duration::from_millis(50));
+                    // (Woken at once when the evaluation ends: see `drop`.)
+                    std::thread::park_timeout(Duration::from_millis(50));
                     #[cfg(unix)]
                     {
                         let sig = crate::sync::signals::CAUGHT.swap(0, Ordering::SeqCst);
@@ -90,6 +91,7 @@ impl Drop for Watch {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
+            t.thread().unpark();
             let _ = t.join();
         }
         #[cfg(unix)]
