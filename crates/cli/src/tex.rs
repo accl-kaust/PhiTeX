@@ -308,6 +308,15 @@ fn os(b: &[u8]) -> &Path {
     Path::new(OsStr::from_bytes(b))
 }
 
+/// [`chars`] of bytes given away: ASCII bytes become the text without a
+/// copy.
+pub fn chars_owned(b: Vec<u8>) -> String {
+    if b.is_ascii() {
+        return String::from_utf8(b).unwrap_or_default();
+    }
+    chars(&b)
+}
+
 /// Bytes as TeX's characters, one each (what a `Build` reads).
 pub fn chars(b: &[u8]) -> String {
     // (ASCII bytes are their characters' UTF-8: copied at once)

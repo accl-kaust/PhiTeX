@@ -1088,7 +1088,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         if file == main_rel {
             let t = text.unwrap_or_else(|| {
                 std::fs::read(&main_file)
-                    .map(|b| tex::chars(&b))
+                    .map(tex::chars_owned)
                     .unwrap_or_default()
             });
             s.set_text(t);
@@ -1118,6 +1118,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let events = events.into_iter().map(|e| e.1);
         let mut why = Vec::new();
         let mut again = false;
+        let mut main_changed = false;
         for e in events {
             match e {
                 Event::Key(k) => match k {
@@ -1253,8 +1254,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                             buffers.remove(&rel);
                             set(&mut s, &buffers, &rel);
                         }
+                        // (the main file read once for all its events)
                         if rel == main_rel && !buffers.contains_key(&rel) {
-                            set(&mut s, &buffers, &rel);
+                            main_changed = true;
                         }
                         why.push(rel);
                         again = true;
@@ -1320,7 +1322,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         }
         // (a change the last build took while it ran: built already)
         // (r, or Rebuild in the viewer: built again whatever)
-        phitex_tex::timeline::lap("watch: the events taken (texts read and set)");
+        phitex_tex::timeline::lap("watch: the events taken");
+        if main_changed && !buffers.contains_key(&main_rel) {
+            set(&mut s, &buffers, &main_rel);
+            phitex_tex::timeline::lap("watch: the main file read and set");
+        }
         let asked = why.iter().any(|w| w.starts_with("asked"));
         if again && !asked && s.up_to_date() {
             again = false;
