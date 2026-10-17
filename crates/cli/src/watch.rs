@@ -590,6 +590,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                        since: Option<Instant>,
                        meanwhile: &mut dyn FnMut()| {
         builds += 1;
+        if let (Some(t), true) = (since, std::env::var_os("PHITEX_TEX_TIME").is_some()) {
+            eprintln!(
+                "watch phases: build {builds} starts {:?} after its change",
+                t.elapsed()
+            );
+        }
         last.borrow_mut().builds = builds;
         status.take();
         building.store(true, Ordering::Relaxed);
@@ -736,10 +742,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         // (a save that changed nothing the build reads (vim writes twice)
         // keeps the last change's time to the screen)
         let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
+        let tpl = std::time::Instant::now();
         let placed = (
             crate::problems::rendered(s, &r, false, st.color, ui.verbose > 0),
             crate::problems::rendered(s, &r, true, st.color, ui.verbose > 0),
         );
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!("watch phases: problems placed {:?}", tpl.elapsed());
+        }
         let warnings: usize = if r.diagnostics.is_empty() {
             crate::warnings::summarize(&r.log_text())
                 .iter()
@@ -978,6 +988,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             "errors": r.out.errors,
             "diagnostics": r.engine_diagnostics(),
         }));
+        let trep = std::time::Instant::now();
         modern::report(
             t,
             s,
@@ -990,6 +1001,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             ui,
             false,
         );
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!("watch phases: report {:?}", trep.elapsed());
+        }
         // (the status line: the build's facts, without the colours)
         let mut brief = vec![format!("build {builds}")];
         if failed {
