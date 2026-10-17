@@ -117,6 +117,8 @@ submit() {
   # (para4000: plain pdfTeX, bytes against its bar, wall and the
   # realised critical path at -j 1/8/16)
   if on para; then ids+=("$(sub "-c 18 --mem=16G -t 00:30:00 -J gf-para $(on_bins "$C")" para "${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}")"); fi
+  # (para40000: the scale run, only when named: GATE_ONLY="... big")
+  if [[ " ${GATE_ONLY:-} " == *" big "* ]]; then ids+=("$(sub "-c 18 --mem=48G -t 00:40:00 -J gf-big $(on_bins "$C")" big)"); fi
   # (para4000 at one thread under callgrind: startup, node bodies' Ir
   # per command, the top 15)
   if on cg; then ids+=("$(sub "-c 2 --mem=8G -t 00:40:00 -J gf-cg $(on_bins "$C")" cg)"); fi
@@ -236,6 +238,7 @@ table() {
     d=$runs/cmd-$j
     if [ -f "$d/ams.txt" ]; then echo "amsldoc:"; sed 's/^/  /' "$d/ams.txt"; fi
     if [ -f "$d/para.txt" ]; then echo "para4000:"; sed 's/^/  /' "$d/para.txt"; fi
+    if [ -f "$d/big.txt" ]; then echo "para40000:"; sed 's/^/  /' "$d/big.txt"; fi
     if [ -f "$d/table.txt" ]; then cat "$d/table.txt"; fi
     if [ -f "$d/acct.txt" ]; then cat "$d/acct.txt"; fi
     if [ -f "$d/cg.txt" ]; then echo "callgrind:"; sed 's/^/  /' "$d/cg.txt"; fi

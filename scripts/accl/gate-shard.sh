@@ -273,6 +273,29 @@ for l in open(sys.argv[1]):
         || red "cold control -j $j: exit $?"
     done
     ;;
+  big)
+    # big: bench/para40000.tex cold at -j 1, 8 and 16 (wall, the round's
+    # op, commit, check and idle, the link's phases), then three
+    # one-word edits at -j 8 timed from the save to the build's event
+    fetched
+    bin=$w/bin/cli/phitex
+    mkdir -p "$w/big" && cp bench/para40000.tex "$w/big/"
+    (cd "$w/big" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para40000.tex > "$r/big-warm.log" 2>&1)
+    for j in 1 8 16; do
+      L=$r/big-j$j.log
+      s0=$(date +%s.%N)
+      (cd "$w/big" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 NO_COLOR=1 \
+        timeout 900 "$bin" build -j $j --output-dir=o$j --program pdftex para40000.tex > "$L" 2>&1)
+      e=$?
+      s1=$(date +%s.%N)
+      echo "para40000 -j $j: exit $e wall $(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}') md5 $(md5sum < "$w/big/o$j/para40000.pdf" 2>/dev/null | cut -c1-32)" >> "$r/big.txt"
+      grep -E '^acct: (round|1 rounds)|^pdf exact|^link:' "$L" | sed 's/^/  /' >> "$r/big.txt"
+      [ "$e" = 0 ] || red "para40000 -j $j: exit $e"
+    done
+    rm -rf "$w/bige" && mkdir -p "$w/bige" && cp bench/para40000.tex "$w/bige/"
+    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 timeout 1800 python3 -I scripts/accl/edit-one.py "$bin" "$w/bige" para40000.tex 8 3 "$r/big-watch.err" --program pdftex) >> "$r/big.txt" 2>&1
+    grep -E '^(edit phases|session phases|pdf exact|link:)' "$r/big-watch.err" | tail -8 | sed 's/^/  /' >> "$r/big.txt"
+    ;;
   para)
     # para BAR_MD5: the head's release CLI; the format made once untimed,
     # then each -j cold in its own output directory (same cache: the
