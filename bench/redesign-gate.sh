@@ -28,7 +28,7 @@ docs)
   for j in 1 8 16; do
     (cd "$w/par" && rm -rf o$j && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_PAR_PROF=$([ $j = 1 ] && echo 1 || echo 0) \
       /usr/bin/time -f "WALL %e BUSY %U+%S RSS %M" "$B" build -j $j --output-dir=o$j --program pdftex para4000.tex > "$r/para-j$j.log" 2>&1)
-    echo "para4000 j$j: $(grep -oE 'WALL.*' "$r/para-j$j.log") md5 $(md5sum < "$w/par/o$j/para4000.pdf" | cut -c1-32) (bar bf12c9ddee6407a005c5140fc8a4b5cd)" >> "$S"
+    echo "para4000 j$j: $(grep -oE 'WALL.*' "$r/para-j$j.log") md5 $(md5sum < "$w/par/o$j/para4000.pdf" | cut -c1-32) (bar 4146793290dc0ea887d79a1d2d1b4c89)" >> "$S"
     grep -E "^round: |round rerun causes|guess" "$r/para-j$j.log" | tail -3 | cut -c1-400 >> "$S"
   done
   grep parprof "$r/para-j1.log" >> "$S"

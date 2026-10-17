@@ -30,7 +30,7 @@ Bars are tests; a section's test red = not done.
    not content as such.
 5. Bytes identical to pdfTeX at every thread count on every fixture,
    amsldoc (md5 98c96e004c with SOURCE_DATE_EPOCH=1700000000) and para4000
-   (md5 bf12c9ddee6407a005c5140fc8a4b5cd).
+   (md5 4146793290dc0ea887d79a1d2d1b4c89).
 6. A one-word edit re-runs: its piece, the scan steps until a fire whose
    breaks equal the old, the finishers of moved pages, the link. The sweep
    test (branch edit-sweep, tests/sweep) is the gate with bounds exec ≤ 2 +
