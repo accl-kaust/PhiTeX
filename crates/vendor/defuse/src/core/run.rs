@@ -599,6 +599,18 @@ impl Shared {
         self.sread(u, || self.gate_in(s))
     }
 
+    /// Narrows `s`'s may-define set; its waiters look again (those
+    /// outside the set go on).
+    fn narrow_now(&self, s: Slot, m: crate::api::MayDefine) {
+        let r = self.rec(s);
+        self.set_may(s, m.into());
+        r.set(super::F_NARROWED);
+        let w = std::mem::take(&mut r.data().waiters);
+        for (n, q) in w {
+            self.wake(n, q);
+        }
+    }
+
     fn gate_in(&self, s: Slot) -> Option<Wait> {
         // The hint is the text's: analysed once, not per attempt.
         let fields = self.rec(s).data().stat.reads().cloned()?;
@@ -936,18 +948,22 @@ impl Shared {
             }
         };
         cx.flush_side();
-        if let Some(m) = cx.narrowed.take() {
-            self.set_may(s, m.into());
-            r.set(super::F_NARROWED);
-            // Its waiters look again (those outside the set go on).
-            let w = std::mem::take(&mut r.data().waiters);
-            for (n, q) in w {
-                self.wake(n, q);
-            }
+        // A speculative run's narrowing rests on answers in work: it holds
+        // from its commit (its waiters stay held until then).
+        let narrowed = cx.narrowed.take();
+        let late = narrowed.is_some() && Self::spec_run();
+        if let Some(m) = narrowed.clone().filter(|_| !late) {
+            self.narrow_now(s, m);
         }
         if let Ok(out) = res {
             let tc = std::time::Instant::now();
             let committed = self.commit(&mut cx, out);
+            if committed
+                && late
+                && let Some(m) = narrowed
+            {
+                self.narrow_now(s, m);
+            }
             self.c
                 .commit_ns
                 .fetch_add(u64::try_from(tc.elapsed().as_nanos()).unwrap_or(0), Ordering::Relaxed);
