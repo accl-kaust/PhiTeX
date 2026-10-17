@@ -10,7 +10,7 @@ for k in range(n):
     if k % 9 == 0:
         b += bytes([2]) + (k // 9).to_bytes(3, "big") + bytes([k % 200])
     else:
-        b += bytes([1]) + off.to_bytes(3, "big") + bytes([0])
+        b += bytes([1]) + (off % (1 << 24)).to_bytes(3, "big") + bytes([0])
         off += r.randint(2000, 3000)
 open(sys.argv[1], "wb").write(b)
 best = 1e9
