@@ -641,6 +641,13 @@ impl Session {
             self.absorbed_at = Some(came);
             self.text.clone_from(&text);
         }
+        // (`PHITEX_TEX_TIME`: the session's phases after the engine's)
+        let mut phases: Vec<(&str, Duration)> = vec![("engine", t0.elapsed())];
+        let mut tp = Instant::now();
+        let mut lap = |phases: &mut Vec<(&'static str, Duration)>, name: &'static str| {
+            phases.push((name, tp.elapsed()));
+            tp = Instant::now();
+        };
         if let Some(b) = &self.build {
             self.store_wkeys(b);
             self.store_pkgrec(b);
@@ -683,6 +690,7 @@ impl Session {
                 );
             }
         }
+        lap(&mut phases, "records");
         // (a long session: what the old texts' runs memoized and nothing
         // reaches any more goes, so the tables stay bounded)
         let mut gc = (Duration::ZERO, 0);
@@ -693,12 +701,15 @@ impl Session {
             gc.1 = b.collect_garbage();
             gc.0 = t.elapsed();
         }
+        lap(&mut phases, "gc");
         self.status.set("output");
         let b = self.build.as_ref().expect("built above");
         let (bytes, log) = b.output();
+        lap(&mut phases, "output");
         let pdf = b.is_pdf();
         let s = &b.stats;
         let diagnostics = b.diagnostics();
+        lap(&mut phases, "diagnostics");
         // (and the evaluation's own errors — no fixpoint, a stop — which
         // the log does not have: errors at no place, without context)
         // (the format's own errors first, with their places: a format
@@ -737,6 +748,7 @@ impl Session {
             .collect();
         // (a PDF file's pages: not known until the engine reports them;
         // the viewer counts the PDF's itself and draws each page again)
+        lap(&mut phases, "errors");
         let hashes = b.pages();
         let pages = hashes.len();
         let writes = b
@@ -750,7 +762,12 @@ impl Session {
             .collect();
         self.page_hashes.clone_from(&hashes);
         self.built_text = Some(text);
+        lap(&mut phases, "pages and files");
         let wall = t0.elapsed();
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            let shown: Vec<String> = phases.iter().map(|(n, d)| format!("{n} {d:?}")).collect();
+            eprintln!("session phases ({why}): {}", shown.join(", "));
+        }
         Report {
             out: Output {
                 pdf: if pdf { bytes.clone() } else { Vec::new() },

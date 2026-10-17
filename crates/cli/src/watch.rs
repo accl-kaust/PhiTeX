@@ -643,6 +643,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         };
         let failed = !r.out.errors.is_empty();
+        // (`PHITEX_TEX_TIME`: the watch's own time after the build)
+        let tw = std::time::Instant::now();
         status.set("writing files");
         // (the watcher waits on the lock while the files are written, then
         // knows them as the watch's own)
@@ -664,6 +666,13 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         };
         drop(mine);
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!(
+                "watch phases: build {:?}, files written {:?}",
+                r.wall,
+                tw.elapsed()
+            );
+        }
         status.set("");
         if let Some(out) = &written {
             last.borrow_mut().good = Some(out.clone());
