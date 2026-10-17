@@ -86,38 +86,66 @@ pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
             })
             .collect()
     };
-    let mut line = xpages.to_vec();
-    for (page, pid, k) in brks {
-        let Some(p) = line.iter().position(|&x| x == page) else {
+    // (one pass: a marker of piece `pid` past candidate `c`, with the
+    // record after it, goes after the last page breaking inside `pid` at
+    // a candidate below `c` that follows it in the line; the pages of a
+    // piece come in the line in the order of their candidates, so moving
+    // after each in turn, as the pages are taken, ends there)
+    let mut pages_of: FxHashMap<i64, Vec<(usize, i64)>> = FxHashMap::default();
+    let pos: FxHashMap<u64, usize> = xpages
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| v.as_int(**x).is_some())
+        .map(|(i, x)| (x.raw(), i))
+        .collect();
+    for &(page, pid, k) in &brks {
+        if let Some(&p) = pos.get(&page.raw()) {
+            pages_of.entry(pid).or_default().push((p, k));
+        }
+    }
+    if pages_of.is_empty() {
+        return xpages.to_vec();
+    }
+    // (each record's anchor: the page it goes after, if any)
+    let mut anchor: Vec<Option<usize>> = vec![None; xpages.len()];
+    let mut i = 0;
+    while i < xpages.len() {
+        let Some((mp, c)) = line_marker(v, xpages[i]) else {
+            i += 1;
             continue;
         };
-        let mut keep = Vec::with_capacity(p);
-        let mut moved = Vec::new();
-        let mut take = false;
-        for &x in &line[..p] {
-            if let Some((mp, c)) = line_marker(v, x) {
-                take = mp == pid && c > k;
-                if take {
-                    moved.push(x);
-                } else {
-                    keep.push(x);
-                }
-                continue;
-            }
-            if take {
-                moved.push(x);
-                take = false;
-            } else {
-                keep.push(x);
-            }
-        }
-        if moved.is_empty() {
+        let to = pages_of.get(&mp).and_then(|ps| {
+            ps.iter()
+                .filter(|&&(p, k)| p > i && k < c)
+                .map(|&(p, _)| p)
+                .max()
+        });
+        anchor[i] = to;
+        if let Some(n) = xpages.get(i + 1)
+            && line_marker(v, *n).is_none()
+            && to.is_some()
+        {
+            anchor[i + 1] = to;
+            i += 2;
             continue;
         }
-        keep.push(page);
-        keep.extend(moved);
-        keep.extend_from_slice(&line[p + 1..]);
-        line = keep;
+        i += 1;
+    }
+    let mut after: FxHashMap<usize, Vec<ValueId>> = FxHashMap::default();
+    for (i, a) in anchor.iter().enumerate() {
+        if let Some(p) = a {
+            after.entry(*p).or_default().push(xpages[i]);
+        }
+    }
+    let mut line = Vec::with_capacity(xpages.len());
+    for (i, &x) in xpages.iter().enumerate() {
+        if anchor[i].is_some() {
+            continue;
+        }
+        line.push(x);
+        if let Some(m) = after.remove(&i) {
+            line.extend(m);
+        }
     }
     line
 }
