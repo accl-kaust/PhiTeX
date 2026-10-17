@@ -652,7 +652,12 @@ impl Shared {
                 .compare_exchange(to, S_RUN, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                self.doomed(s);
+                if self.doomed(s) {
+                    return false;
+                }
+                // The mark was taken back: on to `to` after all.
+                r.status.store(to, Ordering::Release);
+                return true;
             }
             return false;
         }
@@ -669,6 +674,10 @@ impl Shared {
         let mut notes = Notes::default();
         {
             let _g = self.wunit(u);
+            // A release may have taken the mark back before the lock.
+            if !r.has(F_DOOM_FREE | F_DOOM_INERT) {
+                return false;
+            }
             if r.has(F_DOOM_FREE) {
                 r.clear(F_DOOM_FREE | F_DOOM_INERT);
                 r.status.store(super::S_CLEAN, Ordering::Release);
@@ -690,8 +699,7 @@ impl Shared {
     fn settle_clean(&self, s: Slot) -> bool {
         let r = self.rec(s);
         let u = self.unit_of(s);
-        if r.has(F_DOOM_FREE | F_DOOM_INERT) {
-            self.doomed(s);
+        if r.has(F_DOOM_FREE | F_DOOM_INERT) && self.doomed(s) {
             return true;
         }
         r.clear(F_STALE);

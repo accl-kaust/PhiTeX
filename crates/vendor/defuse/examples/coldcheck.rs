@@ -12,6 +12,7 @@ fn main() {
     let sched = match args.next().as_deref() {
         Some("seq") => Sched::Seq,
         Some("random") => Sched::Random(1),
+        Some("par") => Sched::Par(4),
         _ => Sched::Spec(3),
     };
     let lines: Vec<String> = std::fs::read_to_string(path)

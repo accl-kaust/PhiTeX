@@ -620,18 +620,13 @@ impl Shared {
                 return;
             }
             level = d;
-            let r = self.rec(x);
             if self.own_cont(x, claimer) {
                 x = self.next(x);
                 continue;
             }
             // Taken by another claimer: skipped. What the claimer's own
             // follows took is its own output: still a sibling to it.
-            let by = r.claimed_by.load(Ordering::Acquire);
-            // One still running under a doom mark is taken already.
-            let skipped = (r.st() == S_INERT || (by != NIL && r.has(super::F_DOOM_INERT)))
-                && by != claimer
-                && !(by != NIL && self.own_cont(by, claimer));
+            let skipped = self.taken(x, claimer);
             if !f(x, skipped) {
                 return;
             }
@@ -672,6 +667,18 @@ impl Shared {
         false
     }
 
+    /// Whether `x` is taken from `claimer`'s view: inert, or claimed by
+    /// another claimer and still running under a doom mark (it turns inert
+    /// at its own commit). What the claimer's own follows took is its own
+    /// output: still a sibling to it.
+    pub(crate) fn taken(&self, x: Slot, claimer: Slot) -> bool {
+        let r = self.rec(x);
+        let by = r.claimed_by.load(Ordering::Acquire);
+        (r.st() == S_INERT || (by != NIL && r.has(super::F_DOOM_INERT)))
+            && by != claimer
+            && !(by != NIL && claimer != NIL && self.own_cont(by, claimer))
+    }
+
     /// The previous siblings of `s` in its own list, nearest first (stops
     /// at the list's start or an opening marker).
     pub(crate) fn preceding(&self, s: Slot, mut f: impl FnMut(Slot, bool) -> bool) {
@@ -686,7 +693,7 @@ impl Shared {
                 if self.is_marker(x) {
                     return;
                 }
-                let skipped = self.rec(x).st() == S_INERT;
+                let skipped = self.taken(x, NIL);
                 if !f(x, skipped) {
                     return;
                 }
@@ -846,9 +853,7 @@ impl Shared {
                     return None;
                 }
                 level = d;
-                let r = self.rec(cur);
-                let by = r.claimed_by.load(Ordering::Acquire);
-                if self.own_cont(cur, s) || (r.st() == S_INERT && by != s && !(by != NIL && self.own_cont(by, s))) {
+                if self.own_cont(cur, s) || self.taken(cur, s) {
                     continue;
                 }
                 let (op, a) = self.text(cur);
@@ -1388,9 +1393,10 @@ impl Shared {
                 e.val = val;
                 e.loc = loc;
                 let fk = e.fk;
-                // A prediction the value bears out: its readers stand.
-                let kept = match (val, self.predicted(s, f)) {
-                    (DefVal::Val(x), Some(p)) if old_loc == loc && x == p => Some(p),
+                // A reader that read this value from here (committed, in
+                // work or as a prediction the value bears out) stands.
+                let kept = match val {
+                    DefVal::Val(x) if old_loc == loc => Some(x),
                     _ => None,
                 };
                 let projs = !self.projs.is_empty() || self.any_proj.load(Ordering::Relaxed);
