@@ -681,6 +681,22 @@ impl Operation for Files {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
     }
+    /// The accumulators the node reads whole: the root the streams
+    /// opened and the tools' files, a file's node its stream's bucket.
+    /// Held until every contributor before it is done, instead of
+    /// starting and parking at the range again for each one still in
+    /// work (the root parked 349 times on para4000).
+    fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        let mut out = vec![v.field("loopfiles")];
+        match args.first() {
+            None => {
+                out.push(v.field(crate::run::WNAMES));
+                out.push(v.field("tools"));
+            }
+            Some(&n) => out.push(crate::run::stream_bucket(v, &str_of(v, n))),
+        }
+        Some(out)
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
