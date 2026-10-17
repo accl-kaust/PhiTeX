@@ -9,13 +9,6 @@
 //!   fonts (§638–§640 as `phitex_dvi` does them), one writer, the
 //!   postamble; the file is the node's output as a string of characters
 //!   0–255 ([`dvi_file`]).
-//! - **PDF, relaxed** (`pdf:relaxed` on, no `pdf:exact` need): every
-//!   page and every read-time object is already a piece with symbolic
-//!   handles (`crate::pdfrelaxed`, `pdf:pieces` in document order);
-//!   [`pdf_relaxed`] numbers them in one pass with
-//!   `phitex_pdf::relaxed::finish_relaxed` and writes the file. A
-//!   document the mode cannot write asks for exact mode (a `pdf:exact`
-//!   need) and the build evaluates again.
 //! - **PDF, exact** (byte-identical object numbers): [`pdf_exact`], the
 //!   link (spec-redesign §1): the line's records (`crate::pdfout::XPAGES`:
 //!   the pages written apart, the read-time commands, the document-level
@@ -23,16 +16,11 @@
 //!   them; what the commands and the pages' writers guessed given back
 //!   as loop-backs for the next round.
 
-use std::sync::Arc;
-
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
-use phitex_pdf::PdfParams;
-use phitex_pdf::relaxed::{DocCmd, Piece, finish_relaxed};
 use phitex_typeset::node::Node;
 
 use crate::fonts::bytes_of;
 use crate::nodes::{self, Side};
-use crate::pdfout::BANNER;
 use crate::val::{int_of, list_of, str_of};
 
 /// The end node's run: the file as a string value (empty: no file, §642).
@@ -51,14 +39,12 @@ pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, 
     cx.use_field(v.field(crate::pages::SCAN))?;
     let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
     let pdf = is_pdf(v, &pages);
-    let r = if !pdf {
-        dvi_file(cx, &pages)
-    } else if relaxed_mode(cx)? {
-        pdf_relaxed(cx, &pages)
-    } else {
+    let r = if pdf {
         Ok(field(cx, LINKED)?
             .filter(|&x| x != ValueId::UNIT)
             .unwrap_or_else(|| v.str("")))
+    } else {
+        dvi_file(cx, &pages)
     };
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -94,7 +80,7 @@ pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Sto
     let v = cx.values();
     cx.use_field(v.field(crate::pages::SCAN))?;
     let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
-    if !is_pdf(v, &pages) || relaxed_mode(cx)? {
+    if !is_pdf(v, &pages) {
         // (its declared definition made in every mode: none here)
         cx.define_with(
             v.field(LINKED),
@@ -120,12 +106,6 @@ fn field(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
 fn int_field(cx: &mut Ctx<'_>, name: &str) -> Result<i64, Stop> {
     let v = cx.values();
     Ok(field(cx, name)?.map_or(0, |x| int_of(v, x)))
-}
-
-/// Whether the relaxed PDF writer is on and no document asked for exact
-/// mode.
-fn relaxed_mode(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
-    Ok(int_field(cx, "pdf:relaxed")? == 1 && int_field(cx, "pdf:exact")? == 0)
 }
 
 /// Bytes as a string of characters 0–255 (the file as a value).
@@ -204,11 +184,41 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
             }
         }
     }
-    for (i, &page) in pages.iter().enumerate().skip(start) {
+    // (spec-final §6.3: each page written apart, on the executor, the
+    // fonts defined before it the prefix of the pages' own font use;
+    // then put in order, its bytes as they are but for the pointer to
+    // the previous page, or shipped again where they would differ)
+    let rest = &pages[start..];
+    let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for &page in &pages[..start] {
+        seen.extend(page_fonts(v, page));
+    }
+    let mut before: Vec<Vec<u32>> = Vec::with_capacity(rest.len());
+    for &page in rest {
+        let own = page_fonts(v, page);
+        before.push(own.iter().copied().filter(|f| seen.contains(f)).collect());
+        seen.extend(own);
+    }
+    let apart: Vec<Option<phitex_dvi::PageBytes>> = {
+        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(crate::exec::threads(None)));
+        crate::exec::map_on(&mut ex, rest.len(), &|i| {
+            let mut wi = phitex_dvi::DviWriter::new(mag, &comment);
+            for &f in &before[i] {
+                if let Some(d) = defs.get(&f) {
+                    wi.assume_defined(f, d.clone());
+                }
+            }
+            dvi_page_kept(v, &mut wi, rest[i], &defs)
+        })
+    };
+    for (i, (&page, pb)) in rest.iter().zip(apart).enumerate() {
+        let i = i + start;
         if i > start && (i - start).is_multiple_of(DVI_SNAP) {
             snaps.push((i, w.clone()));
         }
-        dvi_page(v, &mut w, page, &defs);
+        if !pb.is_some_and(|pb| w.ship_kept(&pb)) {
+            dvi_page(v, &mut w, page, &defs);
+        }
     }
     *dvi_memo()
         .lock()
@@ -233,15 +243,36 @@ fn dvi_memo() -> &'static std::sync::Mutex<Option<DviMemo>> {
     M.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-/// One page shipped on `w` (§638–§640): the box decoded, its counts,
-/// its fonts' definitions from the page's font list (`[id, name, file,
-/// size]` each), its `\special`s from its whatsits.
-fn dvi_page(
+/// The fonts page entry `page` uses, by id.
+fn page_fonts(v: &Values, page: ValueId) -> Vec<u32> {
+    list_of(v, page)
+        .get(2)
+        .map(|&l| list_of(v, l))
+        .unwrap_or_default()
+        .iter()
+        .map(|&f| u32::try_from(int_of(v, f)).unwrap_or(0))
+        .collect()
+}
+
+/// [`dvi_page`] on a writer of its own, its bytes kept
+/// (`DviWriter::ship_out_kept`); `None` where it could not be written.
+fn dvi_page_kept(
     v: &Values,
     w: &mut phitex_dvi::DviWriter,
     page: ValueId,
     defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
-) {
+) -> Option<phitex_dvi::PageBytes> {
+    let (bx, counts, whats) = dvi_parts(v, page)?;
+    let fonts = |f: u32| font_def_of(defs, f);
+    let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h);
+    w.ship_out_kept(&bx, counts, &fonts, &mut wh).ok()
+}
+
+/// A page entry's box (decoded), counts and whatsits.
+fn dvi_parts(
+    v: &Values,
+    page: ValueId,
+) -> Option<(phitex_typeset::node::BoxNode, [i32; 10], Vec<ValueId>)> {
     let xs = list_of(v, page);
     let mut side = Side::default();
     // (a page is decoded once: its nodes are not kept in this thread's
@@ -250,7 +281,7 @@ fn dvi_page(
     let bx = xs.first().and_then(|&b| nodes::decode(v, b, &mut side));
     crate::val::NO_KEEP.with(|c| c.set(was));
     let Some(Node::Box(bx)) = bx else {
-        return;
+        return None;
     };
     let mut counts = [0i32; 10];
     for (k, c) in xs
@@ -263,164 +294,52 @@ fn dvi_page(
     {
         counts[k] = i32::try_from(int_of(v, *c)).unwrap_or(0);
     }
-    let fonts = |f: u32| {
-        defs.get(&f).cloned().unwrap_or(phitex_dvi::FontDef {
-            checksum: [0; 4],
-            size: 0,
-            design_size: 0,
-            area: Vec::new(),
-            name: Vec::new(),
-            widths: Vec::new(),
-        })
+    Some((bx, counts, side.whats))
+}
+
+/// Font `f`'s definition as the DVI file needs it.
+fn font_def_of(
+    defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
+    f: u32,
+) -> phitex_dvi::FontDef {
+    defs.get(&f).cloned().unwrap_or(phitex_dvi::FontDef {
+        checksum: [0; 4],
+        size: 0,
+        design_size: 0,
+        area: Vec::new(),
+        name: Vec::new(),
+        widths: Vec::new(),
+    })
+}
+
+/// A `\special`'s bytes, for whatsit `h` of a page.
+fn special_of(v: &Values, whats: &[ValueId], h: u32) -> Option<Vec<u8>> {
+    let w = *whats.get(h as usize)?;
+    let ys = list_of(v, w);
+    if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
+        Some(bytes_of(
+            &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// One page shipped on `w` (§638–§640): the box decoded, its counts,
+/// its fonts' definitions from the page's font list (`[id, name, file,
+/// size]` each), its `\special`s from its whatsits.
+fn dvi_page(
+    v: &Values,
+    w: &mut phitex_dvi::DviWriter,
+    page: ValueId,
+    defs: &phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef>,
+) {
+    let Some((bx, counts, whats)) = dvi_parts(v, page) else {
+        return;
     };
-    let whats = side.whats.clone();
-    let mut wh = |h: u32, _leaders: bool| -> Option<Vec<u8>> {
-        let w = *whats.get(h as usize)?;
-        let ys = list_of(v, w);
-        if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
-            Some(bytes_of(
-                &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
-            ))
-        } else {
-            None
-        }
-    };
+    let fonts = |f: u32| font_def_of(defs, f);
+    let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h);
     let _ = w.ship_out(&bx, counts, &fonts, &mut wh);
-}
-
-// -------------------------------------------------------- PDF, relaxed
-
-/// The PDF file from the pieces: the pages' and the read-time objects'
-/// (`pdf:pieces`: `[0, key]` a page, `[1, key]` an object, in document
-/// order), the parameters the last page shipped with, the document-level
-/// commands as fields reaching here. `Err(reason)` from the writer is a
-/// `pdf:exact` need: the build evaluates again in exact mode.
-///
-/// Example: a two-page document with one `\pdfobj` between them gives
-/// pieces `[0,k1] [1,k3] [0,k2]`; the file numbers page 1's objects,
-/// page 2's, then the object, then the fonts, the page tree, the
-/// catalog and `/Info`.
-fn pdf_relaxed(cx: &mut Ctx<'_>, pages_shipped: &[ValueId]) -> Result<ValueId, Stop> {
-    let v = cx.values();
-    let all = v.seq_to_vec(cx.acc_range(v.field(crate::pdfrelaxed::PIECES), None)?);
-    let (mut pages, mut objs): (Vec<Arc<Piece>>, Vec<Arc<Piece>>) = (Vec::new(), Vec::new());
-    for e in all {
-        let xs = list_of(v, e);
-        let (Some(&kind), Some(&k)) = (xs.first(), xs.get(1)) else {
-            continue;
-        };
-        let Some(p) = crate::pdfrelaxed::piece(crate::pdfrelaxed::int_key(v, k)) else {
-            continue;
-        };
-        if int_of(v, kind) == 0 {
-            pages.push(p);
-        } else {
-            objs.push(p);
-        }
-    }
-    // the parameters: the last page's, the fixed ones the first write's
-    let date = field(cx, "pdfdate")?.map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
-    let jobname = field(cx, "jobname")?
-        .map(|x| str_of(v, x))
-        .unwrap_or_default();
-    let mut p = PdfParams {
-        date,
-        banner: BANNER.to_owned(),
-        output_file_name: format!("{jobname}.pdf"),
-        ..PdfParams::default()
-    };
-    if let Some(&last) = pages_shipped.last()
-        && let Some(&pp) = list_of(v, last).get(3)
-    {
-        crate::pdfout::page_params(v, &mut p, &list_of(v, pp));
-    }
-    if let Some(x) = field(cx, "pdf:fixed")? {
-        p = crate::pdfrelaxed::fixed_of(v, x, &p);
-    }
-    p.info_omit_date = i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0);
-    p.suppress_ptex_info = i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0);
-    let cmds = doc_cmds(cx)?;
-    match finish_relaxed(&p, &pages, &objs, &cmds) {
-        Ok(bytes) => Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str()))),
-        Err(why) => {
-            let id = v.int(i64::from_ne_bytes(cx.node().raw().to_ne_bytes()));
-            let e = v.list(vec![v.str("pdf:exact"), id, v.str(&why)]);
-            cx.contribute(v.field("needs"), v.seq_unit(e));
-            Ok(v.str(""))
-        }
-    }
-}
-
-/// The document-level commands (`\pdfinfo`, `\pdfcatalog`, `\pdfnames`,
-/// `\pdftrailer`, `\pdftrailerid`, `\pdfoutline`, the font commands),
-/// from the fields the text defined, as they reach the end.
-fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
-    let v = cx.values();
-    let mut out = Vec::new();
-    let texts = |cx: &mut Ctx<'_>, f: &str| -> Result<Vec<ValueId>, Stop> {
-        Ok(field(cx, f)?.map(|x| list_of(v, x)).unwrap_or_default())
-    };
-    let b = |x: ValueId| bytes_of(&str_of(v, x));
-    for t in texts(cx, "pdf:outlines")? {
-        let xs = list_of(v, t);
-        let (Some(&at), Some(&act), Some(&count), Some(&title)) =
-            (xs.first(), xs.get(1), xs.get(2), xs.get(3))
-        else {
-            continue;
-        };
-        if let Some(a) = crate::pdfout::action_of(v, act) {
-            let at = Some(b(at)).filter(|a| !a.is_empty());
-            let count = i32::try_from(int_of(v, count)).unwrap_or(0);
-            out.push(DocCmd::Outline(at, a, count, b(title)));
-        }
-    }
-    for t in texts(cx, "pdf:info")? {
-        out.push(DocCmd::Info(b(t)));
-    }
-    for t in texts(cx, "pdf:catalog")? {
-        out.push(DocCmd::Catalog(b(t), None));
-    }
-    if let Some(a) = field(cx, "pdf:openaction")?.and_then(|x| crate::pdfout::action_of(v, x)) {
-        out.push(DocCmd::Catalog(Vec::new(), Some(a)));
-    }
-    for t in texts(cx, "pdf:names")? {
-        out.push(DocCmd::Names(b(t)));
-    }
-    for t in texts(cx, "pdf:trailer")? {
-        out.push(DocCmd::Trailer(b(t)));
-    }
-    if let Some(t) = field(cx, "pdf:trailerid")? {
-        out.push(DocCmd::TrailerId(b(t)));
-    }
-    // the font commands: the last attributes of each font, the
-    // characters included, the fonts without built-in ToUnicode
-    let count = int_field(cx, "fontcount")?;
-    for f in 1..=count {
-        if let Some(t) = field(cx, &format!("pdf:fontattr:{f}"))? {
-            out.push(DocCmd::FontAttr(u32::try_from(f).unwrap_or(0), b(t)));
-        }
-    }
-    for t in texts(cx, "pdf:includecharslist")? {
-        let xs = list_of(v, t);
-        if let (Some(&f), Some(&c)) = (xs.first(), xs.get(1)) {
-            out.push(DocCmd::IncludeChars(
-                u32::try_from(int_of(v, f)).unwrap_or(0),
-                b(c),
-            ));
-        }
-    }
-    for t in texts(cx, "pdf:nobuiltinlist")? {
-        out.push(DocCmd::NoBuiltinToUnicode(
-            u32::try_from(int_of(v, t)).unwrap_or(0),
-        ));
-    }
-    for t in texts(cx, "pdf:glyphtounicode")? {
-        let xs = list_of(v, t);
-        if let (Some(&a), Some(&g)) = (xs.first(), xs.get(1)) {
-            out.push(DocCmd::GlyphToUnicode(b(a), b(g)));
-        }
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------- PDF, exact

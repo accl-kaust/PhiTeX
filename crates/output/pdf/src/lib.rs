@@ -95,10 +95,8 @@ mod macnames;
 pub mod map;
 mod marks;
 #[doc(hidden)]
-pub mod norm;
 pub mod num;
 mod objects;
-pub mod relaxed;
 /// (measure) `PHITEX_TEX_TIME`: per-thread phase clocks a finisher
 /// reads out (the engine's phases and the writer's).
 pub mod phase {

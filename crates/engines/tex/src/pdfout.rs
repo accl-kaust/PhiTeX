@@ -195,7 +195,7 @@ fn pieces() -> &'static PieceMemo {
 /// ([`XPAGES`]) where it ran, and applied by the link there. True when
 /// it was kept (the caller does nothing more).
 pub(crate) fn doc_op(r: &mut Run<'_, '_>, kind: &str, args: &[ValueId]) -> R<bool> {
-    if r.param("pdfoutput")? <= 0 || crate::pdfrelaxed::on(r)? {
+    if r.param("pdfoutput")? <= 0 {
         return Ok(false);
     }
     let v = r.v;
@@ -914,15 +914,10 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         // pdfTeX loads the space font at the shipout that first needs
         // it, as the next internal font number (the engine's
         // `fontcount` does not count it)
-        let id = if crate::pdfrelaxed::on(r)? {
-            let n = r.cint(crate::fields::cell::FONTCOUNT)?;
-            u32::try_from(n + 1).unwrap_or(u32::MAX - 1)
-        } else {
-            // a page written apart: one id for every page, outside the
+        let id = // a page written apart: one id for every page, outside the
             // fonts' range, numbered by the link where it is first
             // loaded ([`FontTags`])
-            SPACE_FONT
-        };
+            SPACE_FONT;
         wanted.push((id, "pdftexspace".to_owned(), x, -1000));
         out.space = Some(id);
     }
@@ -1034,10 +1029,6 @@ pub(crate) fn command_forms(
     f: impl FnMut(&mut PdfState, &mut Forms, &Fonts) -> CmdOut + Send + 'static,
 ) -> R<Option<CmdOut>> {
     if r.param("pdfoutput")? <= 0 {
-        return Ok(None);
-    }
-    if crate::pdfrelaxed::on(r)? {
-        crate::pdfrelaxed::fall_back(r, "a command the relaxed mode does not cover");
         return Ok(None);
     }
     let v = r.v;
@@ -1367,27 +1358,6 @@ pub(crate) fn ship(
             Some("iwon" | "fake")
         )
     });
-    if crate::pdfrelaxed::on(r)? {
-        let t6 = std::time::Instant::now();
-        let fonts = fonts_for(r, ids, space)?;
-        phitex_pdf::phase::add(6, t6);
-        let whats = side.whats.clone();
-        let mut wh = |h: u32| -> Option<Whatsit> {
-            if let Some(&d) = resolved.get(&h) {
-                return whatsit(v, d);
-            }
-            let w = *whats.get(h as usize)?;
-            let ys = list_of(v, w);
-            (ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special")).then(|| {
-                Whatsit::Special(bytes_of(
-                    &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
-                ))
-            })
-        };
-        let shown = crate::pdfrelaxed::ship(r, &p, xs[0], bx, &fonts, &mut wh)?;
-        let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
-        return Ok(phitex_defuse::hash_bytes(shown, attr.as_bytes()));
-    }
     // the fonts of the forms the page may ship too
     let mut all: BTreeSet<u32> = ids.iter().copied().collect();
     all.extend(form_fonts(r)?);
@@ -1543,7 +1513,7 @@ pub(crate) const FONT_TAGS: &str = "pdf:ftags";
 pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
     let v = r.v;
     let f = v.field(FONT_TAGS);
-    if !r.cx.is_loopback(f) || crate::pdfrelaxed::on(r)? {
+    if !r.cx.is_loopback(f) {
         return Ok(n);
     }
     let x = r.eng_read(f)?;

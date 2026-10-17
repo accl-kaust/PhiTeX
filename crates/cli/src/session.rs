@@ -588,10 +588,6 @@ impl Session {
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
                     threads: self.job.threads,
                     progress: Some(progress),
-                    // (--exact-pdf: pdfTeX's numbering; else the relaxed mode,
-                    // pages written apart, the same pages after renumbering:
-                    // crates/output/pdf/RELAXED.md)
-                    exact_objects: self.job.exact_pdf,
                     speculation: match self.job.spec.as_deref() {
                         Some("off") => phitex_tex::Speculation::Off,
                         Some("all") => phitex_tex::Speculation::All,
@@ -838,10 +834,6 @@ impl Session {
                     gc.1
                 )
             }))
-            .chain(
-                b.pdf_exact_reason()
-                    .map(|r| format!("PDF objects numbered as pdfTeX's: {r}")),
-            )
             .collect(),
             wall,
         }

@@ -368,13 +368,6 @@ impl PdfState {
         }
     }
 
-    /// The trailer's `/ID` entry (`print_ID`).
-    pub(crate) fn id_entry(&mut self) -> Vec<u8> {
-        let at = self.out.len();
-        self.print_id();
-        self.out.split_off(at)
-    }
-
     /// `print_ID` or `print_ID_alt`.
     fn print_id(&mut self) {
         if let Some(t) = self.trailer_id_toks.take() {

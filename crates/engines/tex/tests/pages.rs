@@ -155,7 +155,6 @@ fn parallel_pages_equal_serial() {
         let mut o = common::options("./pp.tex", "pp", "", &dir);
         o.threads = Some(t);
         if pdf {
-            o.exact_objects = std::env::var("PHITEX_EXACT").is_ok();
             let b = common::build(o, Some(&common::plain()), &src);
             let out = b.output().0;
             eprintln!(

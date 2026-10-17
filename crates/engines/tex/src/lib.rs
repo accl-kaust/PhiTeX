@@ -47,7 +47,6 @@ mod ops;
 mod pages;
 mod pdfout;
 mod pdfprim;
-mod pdfrelaxed;
 mod pkgrec;
 mod prims;
 mod print;
@@ -63,6 +62,5 @@ pub use api::{
 };
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
 pub use hints::{paragraph_units, set_hints_enabled};
-pub use pdfrelaxed::pages_written as pdf_pages_written;
 pub(crate) use phitex_defuse::FxHashMap;
 pub use pkgrec::summary as pkgrec_summary;

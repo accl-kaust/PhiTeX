@@ -99,10 +99,10 @@ pub(crate) fn run_node_parking(
     // reads another page state than the first finds the page finishing
     // elsewhere, or not at all, and the run goes again, stopping where
     // the state it now reads finishes it, or not stopping)
-    // (spec-final A1: one pass; a page firing inside the piece is the
-    // finisher's to cut, by a resume the continuation places, never a
-    // second pass of the piece)
-    if matches!(res, Ok(())) {
+    // (spec-final A1: one pass; a piece's run ends at its first
+    // page-builder candidate with input after it, `Halt::Cut`, and its
+    // fold places the continuation for the rest)
+    if matches!(res, Ok(()) | Err(Halt::Cut)) {
         let tf = pp.and_then(|_| crate::prof::start());
         res = r.page_fold();
         crate::prof::add(crate::prof::FOLD, tf);
@@ -111,7 +111,7 @@ pub(crate) fn run_node_parking(
     if crate::exec::env_flag!("PHITEX_RUN_LOG") {
         // (measure: every attempt, for `Stats::run_log`)
         let how = match &res {
-            Ok(()) => b'o',
+            Ok(()) | Err(Halt::Cut) => b'o',
             Err(Halt::Stop(_)) => b's',
             _ => b'x',
         };
@@ -130,6 +130,7 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => "stop",
                 Err(Halt::Starve) => "starve",
                 Err(Halt::Fatal) => "fatal",
+                Err(Halt::Cut) => "cut",
             },
             r.cx.is_speculative(),
             r.resumed,
@@ -144,12 +145,17 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Stop(_)) => format!("stop (node {})", r.cx.node().raw()),
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
+                Err(Halt::Cut) => "cut".to_owned(),
             }
         );
     }
     match res {
-        Ok(()) => {
-            r.end_open();
+        Ok(()) | Err(Halt::Cut) => {
+            // (a run cut at a candidate keeps its open groups and lists:
+            // they are its continuation's)
+            if r.cut.is_none() {
+                r.end_open();
+            }
             // (what a continuation republishes and the records the run
             // defines, which may read: a stop here runs the node again
             // from its start)
@@ -546,15 +552,10 @@ impl Operation for Dvi {
     /// edited page's finisher ran).
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [
-                crate::pages::SCAN,
-                "pages",
-                crate::pdfrelaxed::PIECES,
-                crate::assemble::LINKED,
-            ]
-            .iter()
-            .map(|&f| v.field(f))
-            .collect(),
+            [crate::pages::SCAN, "pages", crate::assemble::LINKED]
+                .iter()
+                .map(|&f| v.field(f))
+                .collect(),
         )
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {

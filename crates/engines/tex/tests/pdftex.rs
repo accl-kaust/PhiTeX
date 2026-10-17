@@ -281,58 +281,6 @@ fn parallel_counters() {
     }
 }
 
-/// Gate 2 of the relaxed PDF mode (`crates/output/pdf/RELAXED.md`): on
-/// every document of gate 1, the relaxed file equals pdfTeX's after
-/// renumbering (`phitex_pdf::norm`); a document the mode does not cover
-/// is built in exact mode and must say why.
-#[test]
-fn relaxed_documents() {
-    let dir = common::fixtures().join("pdf");
-    let only = std::env::var("PHITEX_GATE").ok();
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .expect("the fixtures")
-        .flatten()
-        .filter_map(|e| {
-            let f = e.file_name().to_string_lossy().into_owned();
-            f.strip_suffix(".tex").map(str::to_owned)
-        })
-        .filter(|n| dir.join(format!("{n}.pdf")).exists())
-        .filter(|n| !PENDING.contains(&n.as_str()) && !BACKEND_GAPS.contains(&n.as_str()))
-        .filter(|n| only.as_ref().is_none_or(|o| o == n))
-        .collect();
-    names.sort();
-    let mut failed = Vec::new();
-    for name in names {
-        let src = common::read(&dir.join(format!("{name}.tex")));
-        let want = std::fs::read(dir.join(format!("{name}.pdf"))).expect("the oracle");
-        let opts = phitex_tex::Options {
-            epoch: Some(0),
-            exact_objects: false,
-            ..common::options(&format!("./{name}.tex"), &name, "", &dir)
-        };
-        let b = common::build(opts, None, &src);
-        let (pdf, _) = b.output();
-        if let Some(why) = b.pdf_exact_reason() {
-            eprintln!("exact {name}: {why}");
-            if common::first_difference(&pdf, &want).is_some() {
-                failed.push(name);
-            }
-            continue;
-        }
-        if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
-            let _ = std::fs::write(format!("{d}/{name}.relaxed.pdf"), &pdf);
-        }
-        match phitex_pdf::norm::first_difference(&pdf, &want) {
-            None => eprintln!("ok {name}: equal after renumbering"),
-            Some(d) => {
-                eprintln!("FAIL {name}: {d}");
-                failed.push(name);
-            }
-        }
-    }
-    assert!(failed.is_empty(), "failed: {failed:?}");
-}
-
 /// `\openout` under TeX Live's `openout_any = p` (web2c §1374): an
 /// absolute name, a `../` name, and one at `\shipout` are refused, and
 /// the nonstop job ends there with no PDF file, as `pdftex -ini` does

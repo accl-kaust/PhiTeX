@@ -70,13 +70,6 @@ pub struct Options {
     /// `PHITEX_THREADS`, else the available parallelism; `Some(1)` runs
     /// them in order. The output is the same at any count.
     pub threads: Option<usize>,
-    /// Whether the PDF file's objects are numbered as pdfTeX numbers
-    /// them (the link of the line's records, byte-identical), or each page and
-    /// each object TeX makes is written on its own and numbered at the
-    /// end (`crates/output/pdf/RELAXED.md`: the same file up to object
-    /// numbers and resource names). A document the relaxed mode does
-    /// not cover is built in exact mode, with a warning in the log.
-    pub exact_objects: bool,
     /// Where the build reports what it runs ([`Build::progress`]), for
     /// a reader that polls it during the cold build; `None` makes one.
     pub progress: Option<Arc<crate::exec::Progress>>,
@@ -429,7 +422,6 @@ impl Default for Options {
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
             threads: None,
-            exact_objects: true,
             progress: None,
             edits: None,
             on_page_settled: None,
@@ -1491,8 +1483,6 @@ struct Graph {
     opened_last: Vec<String>,
     /// The executor's threads ([`Options::threads`]).
     threads: usize,
-    /// Why the relaxed PDF mode gave way to exact mode, once it has.
-    pdf_exact: Option<String>,
     /// The comments of the document's canonical text by line
     /// ([`canonical_text`]): `doc:marks` in the environment, read by a
     /// run that reads a comment's mark as text (`Run::splice_mark`).
@@ -1667,7 +1657,6 @@ impl Graph {
             absent: Vec::new(),
             written: Vec::new(),
             threads: crate::exec::threads(threads),
-            pdf_exact: None,
             marks: Marks::default(),
             wdefs: Vec::new(),
             wkeys_guess: Vec::new(),
@@ -2136,9 +2125,6 @@ impl Graph {
     fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
         let v = self.eng.values();
         let mut env = self.files.clone();
-        if self.pdf_exact.is_some() {
-            env.push((v.field("pdf:exact"), v.int(1)));
-        }
         env.push((v.field(DOC_MARKS), self.marks.value(v)));
         // (the files the job writes kept in memory, a fixpoint's; none
         // otherwise: `UNIT`, never a wait on the client. Listed: the files
@@ -2492,15 +2478,9 @@ impl Graph {
                     )
                 })
                 .collect();
-            for (kind, why) in &needs {
+            for (kind, _) in &needs {
                 if kind == "starve" {
                     stats.starved += 1;
-                }
-                // the relaxed PDF mode cannot write this document: the
-                // build again, in exact mode
-                if kind == "pdf:exact" && self.pdf_exact.is_none() {
-                    self.pdf_exact = Some(why.clone());
-                    asked = true;
                 }
             }
             for name in asked_names {
@@ -3685,14 +3665,6 @@ impl Build {
         self.g.watch.progress.clone()
     }
 
-    /// Why the PDF file was written in exact mode though
-    /// [`Options::exact_objects`] was off (the relaxed mode does not
-    /// cover the document), if it was.
-    #[must_use]
-    pub fn pdf_exact_reason(&self) -> Option<&str> {
-        self.g.pdf_exact.as_deref()
-    }
-
     /// Frees the engine's memoized applications nothing reaches any
     /// more (a long session calls it between edits); returns the nodes
     /// freed.
@@ -4857,10 +4829,6 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     sets.push((v.field("dvicomment"), v.str(&opts.comment)));
     sets.push((v.field("shellescape"), v.int(i64::from(opts.shell_escape))));
     sets.push((
-        v.field("pdf:relaxed"),
-        v.int(i64::from(!opts.exact_objects)),
-    ));
-    sets.push((
         v.field("pdfdate"),
         v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
     ));
@@ -4901,7 +4869,6 @@ fn declare_fields(eng: &mut Engine) {
         "tools",
         "pkgrecs",
         "gdefs",
-        crate::pdfrelaxed::PIECES,
         crate::pdfout::XPAGES,
         crate::vprof::VPROF,
         crate::pages::PITEMS,

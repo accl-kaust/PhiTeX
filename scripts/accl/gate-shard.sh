@@ -53,7 +53,7 @@ case $shard in
     fi
     ;;
   suites)
-    S="pdftex edits pages plain etex hints relaxed inputs defuse_gaps"
+    S="pdftex edits pages plain etex hints inputs defuse_gaps"
     a=()
     for s in $S; do a+=(--test "$s"); done
     $T "${a[@]}" --no-run > "$r/build.txt" 2>&1 || red "build: $(grep -m1 '^error' "$r/build.txt")"

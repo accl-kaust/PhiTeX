@@ -227,12 +227,6 @@ pub(crate) struct State {
     /// the table's part of the run's mutation counter
     /// (`Run::mutations`, spec-final §2.4).
     muts: u64,
-    /// From a page candidate with input after it on (spec-final A1):
-    /// each slot's entry before every change, in order (`log_on`), so
-    /// the values in force at the candidate of what changed after it are
-    /// known at the run's end ([`State::pre_values`]).
-    prelog: Vec<(Loc, Entry)>,
-    log_on: bool,
 }
 
 thread_local! {
@@ -287,8 +281,6 @@ impl Clone for State {
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
             muts: self.muts,
-            prelog: self.prelog.clone(),
-            log_on: self.log_on,
         }
     }
 }
@@ -335,8 +327,6 @@ impl State {
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
             muts: 0,
-            prelog: Vec::new(),
-            log_on: false,
         }
     }
 
@@ -345,39 +335,6 @@ impl State {
     #[inline]
     pub(crate) fn cat_gen(&self) -> u64 {
         self.cat_gen
-    }
-
-    /// The log of replaced values from here on: where it begins.
-    pub(crate) fn log_from_here(&mut self) -> usize {
-        self.log_on = true;
-        self.prelog.len()
-    }
-
-    /// Logs `loc`'s entry before a change (while logging).
-    #[inline]
-    fn log(&mut self, loc: Loc) {
-        if self.log_on {
-            let e = self.slot_ref(loc).map_or(UNLOADED, |s| s.e);
-            self.prelog.push((loc, e));
-        }
-    }
-
-    /// The values in force at log position `at` of the slots changed
-    /// since: each slot's entry before its first change after `at`,
-    /// encoded (`Some(None)` absent); `None` where the run had not read
-    /// the slot then (the value reaching the run, the caller's to read).
-    #[allow(clippy::option_option)]
-    pub(crate) fn pre_values(&self, at: usize, v: &Values) -> Vec<(Loc, Option<Option<ValueId>>)> {
-        let mut seen = phitex_defuse::FxHashSet::default();
-        let mut out = Vec::new();
-        for (loc, e) in self.prelog.get(at..).unwrap_or_default() {
-            if !seen.insert(*loc) {
-                continue;
-            }
-            let x = (e.flags & LOADED != 0).then(|| self.encode(e, v));
-            out.push((*loc, x));
-        }
-        out
     }
 
     /// The table's mutation counter ([`State`]'s `muts`).
@@ -887,7 +844,6 @@ impl State {
     pub(crate) fn set(&mut self, loc: Loc, val: Entry, global: bool, grp: Option<u32>) {
         self.any_gen = new_cat_gen();
         self.muts += 1;
-        self.log(loc);
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }
@@ -960,7 +916,6 @@ impl State {
     pub(crate) fn modify(&mut self, loc: Loc, val: Entry, base: bool, global: bool) {
         self.any_gen = new_cat_gen();
         self.muts += 1;
-        self.log(loc);
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
@@ -1014,7 +969,6 @@ impl State {
             if is_page_param(s.loc) {
                 self.pp_dirty = true;
             }
-            self.log(s.loc);
             let slot = self.slot(s.loc);
             slot.e = s.prev;
             slot.save_gid = s.gid;
@@ -1474,14 +1428,7 @@ impl State {
             .as_ref()
             .map(|k| k.iter().map(|(&l, &a)| (ploc(self, l), a)).collect());
         let cont_locs = self.cont_locs.iter().map(|&l| ploc(self, l)).collect();
-        let prelog = self
-            .prelog
-            .iter()
-            .map(|(l, e)| (ploc(self, *l), pent(e)))
-            .collect();
         PState {
-            prelog,
-            log_on: self.log_on,
             cont_locs,
             slots,
             save,
@@ -1551,11 +1498,6 @@ impl State {
             let l = loc(&mut st, d);
             st.cont_locs.push(l);
         }
-        for (d, e) in p.prelog {
-            let l = loc(&mut st, d);
-            st.prelog.push((l, ent(e)));
-        }
-        st.log_on = p.log_on;
         st.pp_dirty = p.pp_dirty;
         if let Some(ks) = p.kinds {
             let mut m = FxHashMap::default();
@@ -1615,8 +1557,6 @@ struct PSaved {
 
 /// A run's table, parked ([`State::park`]).
 pub(crate) struct PState {
-    prelog: Vec<(PLoc, PEntry)>,
-    log_on: bool,
     cont_locs: Vec<PLoc>,
     slots: Vec<PSlot>,
     save: Vec<PSaved>,
@@ -1817,7 +1757,6 @@ impl State {
     /// and the open groups' saves of it are inert.
     pub(crate) fn override_global(&mut self, loc: Loc, x: Option<ValueId>) {
         self.any_gen = new_cat_gen();
-        self.log(loc);
         if is_cat(loc) {
             self.cat_gen = new_cat_gen();
         }

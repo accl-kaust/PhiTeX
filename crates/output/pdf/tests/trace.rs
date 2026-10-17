@@ -1122,43 +1122,6 @@ impl Job {
         let want = oracle(&format!("{name}.pdf"));
         compare(name, &got, &want);
     }
-
-    /// The relaxed mode on the same pages (RELAXED.md, gate 2): each
-    /// page written on its own, the file equal to the oracle's after
-    /// renumbering; `inits` the colour stacks made.
-    fn check_relaxed(&self, inits: &[(bool, bool, Vec<u8>)]) {
-        use phitex_pdf::relaxed;
-        let mut carry = relaxed::Carry::default();
-        carry.sync_stacks(inits);
-        let mut pieces = Vec::new();
-        let none = |_: usize| None;
-        let first = self.pages.first().map(|x| x.1.clone()).unwrap_or_default();
-        for (n, (b, p)) in self.pages.iter().enumerate() {
-            let p = &relaxed::fixed_params(&first, p);
-            let ws = &self.ws;
-            let env = relaxed::PageEnv {
-                pieces: &none,
-                maps: &[],
-                carry: &carry,
-            };
-            let piece =
-                relaxed::page(p, n + 1, b, &self.src, &mut |h, _| ws[&h].clone(), &env).unwrap();
-            carry = relaxed::carry_after(&carry, b, &mut |h, _| ws[&h].clone());
-            pieces.push(std::sync::Arc::new(piece));
-        }
-        let p = self.pages.last().map(|x| x.1.clone()).unwrap_or_default();
-        let p = relaxed::fixed_params(&first, &p);
-        match relaxed::finish_relaxed(&p, &pieces, &[], &[]) {
-            Ok(got) => {
-                let want = oracle(&format!("{}.pdf", self.name));
-                if let Some(d) = phitex_pdf::norm::first_difference(&got, &want) {
-                    let _ = std::fs::write(format!("/tmp/relaxed-{}.pdf", self.name), &got);
-                    panic!("{} relaxed: {d}", self.name);
-                }
-            }
-            Err(why) => eprintln!("{} relaxed: falls back ({why})", self.name),
-        }
-    }
 }
 
 /// The first difference, with the objects it is in.
@@ -1194,7 +1157,6 @@ fn text_job(name: &'static str, fonts: &[(&str, &str, Option<Scaled>)], level: i
     }
     j.read();
     j.ship_all();
-    j.check_relaxed(&[]);
     j.finish();
 }
 
@@ -1241,7 +1203,6 @@ fn guess() {
     j.ship();
     j.w.params_mut().decimal_digits = 2;
     j.ship_all();
-    j.check_relaxed(&[]);
     j.finish();
 }
 
@@ -1256,7 +1217,6 @@ fn rules() {
     j.w.params_mut().v_offset = 5 * PT;
     j.read();
     j.ship_all();
-    j.check_relaxed(&[]);
     j.finish();
 }
 
@@ -1287,7 +1247,6 @@ fn objstm() {
     j.w.params_mut().obj_compress_level = 2;
     j.read();
     j.ship_all();
-    j.check_relaxed(&[]);
     j.finish();
 }
 
@@ -1304,7 +1263,6 @@ fn mag() {
     p.pages_attr = Some(b"/Rotate 0".to_vec());
     j.read();
     j.ship_all();
-    j.check_relaxed(&[]);
     j.finish();
 }
 
@@ -1322,11 +1280,6 @@ fn colorstack() {
     assert_eq!(j.w.colorstack_init(false, false, b"0 0 1 rg").unwrap(), 3);
     j.read();
     j.ship_all();
-    j.check_relaxed(&[
-        (true, true, b"0 g 0 G".to_vec()),
-        (false, true, b"1 0 0 rg".to_vec()),
-        (false, false, b"0 0 1 rg".to_vec()),
-    ]);
     j.finish();
 }
 
@@ -1417,7 +1370,6 @@ fn interword() {
     j.read();
     j.src.load_space();
     j.ship_all();
-    j.check_relaxed(&[]);
     j.finish();
 }
 

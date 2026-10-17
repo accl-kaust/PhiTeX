@@ -29,6 +29,10 @@ pub(crate) enum Halt {
     /// The input ended for good inside a command (§360: in batch mode,
     /// "*** (job aborted, no legal \end found)").
     Fatal,
+    /// The run reached a page-builder candidate with input after it
+    /// (`crate::pages`, spec-final A1): it ends there, its continuation
+    /// the resume piece's.
+    Cut,
 }
 
 impl From<Stop> for Halt {
@@ -390,8 +394,6 @@ pub(crate) fn take_stops(v: &Values, n: usize) -> Vec<(String, u64)> {
         .into_iter()
         .map(|(f, k)| (crate::val::field_name(v, f), k))
         .collect();
-    // (fields by family: a field name's part before its last `:` and
-    // digits, so `cs:` names stay apart and numbered families merge)
     xs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     xs.truncate(n);
     xs
@@ -635,17 +637,15 @@ pub(crate) struct Run<'c, 'a> {
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
-    /// The pages (`crate::pages`): finish candidates passed so far, what
-    /// the run had done at each, the insertion classes put on the main
-    /// list since, a finisher's page, and the continuations at the
-    /// candidates with input after them (candidate, continuation, the
-    /// groups' bindings, where the table's log of replaced values begins:
-    /// spec-final A1).
+    /// The pages (`crate::pages`): finish candidates passed so far, the
+    /// candidate the run stops at (its second pass after a cut), what it
+    /// had done at its last candidate, the insertion classes put on the
+    /// main list since, a finisher's page, and the cut its fold found.
     pub cand: u32,
     pub cand_marks: Vec<crate::pages::CandMark>,
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
-    pub cand_conts: Vec<(u32, ValueId, ValueId, usize)>,
+    pub cut: Option<u32>,
     /// The records read ([`crate::fields::RECORDS`]), by record: `None`
     /// not read yet; `Some(None)` undefined or stale (its cells are read
     /// one by one); `Some(Some(cells))` each cell's value.
@@ -663,6 +663,9 @@ pub(crate) struct Run<'c, 'a> {
     /// The engine reads a scan step's builder made through its run
     /// (`pages::RunReaching`): a prefix folded with none is memoized.
     pub reach_reads: u64,
+    /// A finisher's `\box255`, native, from its page's assembly to its
+    /// routine ([`crate::pages::Fire::b255`]).
+    pub fin_box: Option<(phitex_typeset::node::BoxNode, crate::nodes::Side)>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -767,13 +770,14 @@ impl<'c, 'a> Run<'c, 'a> {
             cand_marks: Vec::new(),
             ins_pending: Vec::new(),
             fin: None,
-            cand_conts: Vec::new(),
+            cut: None,
             recs: std::array::from_fn(|_| None),
             rec_out: Vec::new(),
             rec_ready: false,
             rec_absent: None,
             cell_eng: phitex_defuse::FxHashMap::default(),
             rec_sig: (0, 0, 0, 0),
+            fin_box: None,
             reach_reads: 0,
         }
     }
@@ -3271,7 +3275,11 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a run cut at a candidate: its input left is its continuation,
         // the resume piece's, `crate::pages`)
-        let leftover = self.leftover();
+        let leftover = if self.cut.is_some() {
+            Vec::new()
+        } else {
+            self.leftover()
+        };
         for args in leftover {
             if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 let v = self.v;
@@ -3294,10 +3302,11 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             eprintln!(
-                "  end {}: claim {n} (pulled {}, rest {})",
+                "  end {}: claim {n} (pulled {}, rest {}), cut {:?}",
                 self.cx.node().raw(),
                 self.pulled,
-                self.claim_rest
+                self.claim_rest,
+                self.cut
             );
         }
         self.cx.claim(n);
@@ -3694,7 +3703,6 @@ pub(crate) struct Parked {
     cand_marks: Vec<crate::pages::CandMark>,
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
-    cand_conts: Vec<(u32, ValueId, ValueId, usize)>,
 }
 
 impl Run<'_, '_> {
@@ -3813,7 +3821,6 @@ impl Run<'_, '_> {
             cand_marks: std::mem::take(&mut self.cand_marks),
             ins_pending: std::mem::take(&mut self.ins_pending),
             fin: self.fin.take(),
-            cand_conts: std::mem::take(&mut self.cand_conts),
         })
     }
 }
@@ -3889,7 +3896,6 @@ impl<'c, 'a> Run<'c, 'a> {
         r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
-        r.cand_conts = p.cand_conts;
         r.resumed = true;
         Ok(r)
     }
