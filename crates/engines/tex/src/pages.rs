@@ -2642,9 +2642,8 @@ impl FinDefs {
                 // (the next finisher reads the outgoing state of this one
                 // only as a prediction, spec-final §3.5: a value not
                 // stable across pages the last run's, a guess that runs
-                // its readers again where wrong; never a mark, the
-                // penalty the page fired at or `\deadcycles`,
-                // [`predictable`])
+                // its readers again where wrong; never `\deadcycles`,
+                // [`predictable`], nor a mark that changed, [`varies_by_page`])
                 let name = crate::val::field_name(v, f);
                 if !predictable(&name) {
                     return None;
@@ -2662,6 +2661,11 @@ impl FinDefs {
                 };
                 if x == y {
                     return Some((f, x));
+                }
+                // (a mark or the penalty the page fired at that differed
+                // between the last two runs: the page's own, not guessed)
+                if varies_by_page(&name) {
+                    return None;
                 }
                 // (registers only: a page counter; not a hash, a penalty)
                 if !name.starts_with("count:") {
@@ -2684,9 +2688,8 @@ impl FinDefs {
 }
 
 /// Whether a finisher's definition of field `name` is predicted from
-/// the last runs of its routine ([`FinDefs::predict`]). Not the marks
-/// (the page's text, which the scan knows, spec §3), not the penalty
-/// the page fired at, and not `\deadcycles`: the fire steps it and a
+/// the last runs of its routine ([`FinDefs::predict`]). Not
+/// `\deadcycles`: the fire steps it and a
 /// `\shipout` clears it (§1012, §1023), so what a run leaves depends on
 /// the page and not on the routine's text, and at `\end` it decides
 /// whether the page chain goes on (§1054). Guessed as another page's
@@ -2695,7 +2698,15 @@ impl FinDefs {
 /// guesses while the page it stood on was still to run. The scan reads
 /// it from its finisher instead.
 fn predictable(name: &str) -> bool {
-    !(name.starts_with("mark") || name == "param:outputpenalty" || name == "deadcycles")
+    name != "deadcycles"
+}
+
+/// The fields a page's own items decide (the marks, §1012, and the
+/// penalty the page fired at, §1013): predicted only where the last two
+/// runs left them equal (a document without marks), never as the last
+/// run's value where they differed ([`FinDefs::predict`]).
+fn varies_by_page(name: &str) -> bool {
+    name.starts_with("mark") || name == "param:outputpenalty"
 }
 
 /// What a finisher defines besides its routine's definitions

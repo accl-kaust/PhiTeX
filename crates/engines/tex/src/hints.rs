@@ -3025,6 +3025,12 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                     && text[s..e].trim_end().ends_with('}')
                     && an.slice_claims_nothing_(k0, e, false) =>
                 {
+                    if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                        eprintln!(
+                            "slices: claims nothing, no paragraph end: {:?}",
+                            short(&text[s..e])
+                        );
+                    }
                     Some(0)
                 }
                 None => par_next
