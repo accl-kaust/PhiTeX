@@ -332,6 +332,7 @@ impl PageState {
         // marker: the one the run put at this candidate), for every
         // contribution it takes
         let mut classes: Vec<(u16, InsertClass)> = Vec::new();
+        let mut unresolved: Vec<u16> = Vec::new();
         let mut page_params = None;
         let so_far = &mut self.pb.so_far;
         buf.retain(|&x| match nodes::tag(v, x) {
@@ -347,11 +348,19 @@ impl PageState {
                 false
             }
             nodes::T_INS_PARAMS => {
-                classes.push(class_of(v, x));
+                if list_of(v, x).len() == 2 {
+                    unresolved.push(u16::try_from(int_at(v, x, 1)).unwrap_or(0));
+                } else {
+                    classes.push(class_of(v, x));
+                }
                 false
             }
             _ => true,
         });
+        // (a marker no step resolved: the registers as the fold has them)
+        for n in unresolved {
+            classes.push((n, live(n)?));
+        }
         if page_params.is_some() {
             self.params = page_params;
         }
@@ -786,9 +795,14 @@ impl Run<'_, '_> {
     /// A `T_INS_PARAMS` marker with class `n`'s registers as this run
     /// sees them (§1008).
     pub(crate) fn ins_params_marker(&mut self, n: u16) -> R<ValueId> {
-        let v = self.v;
         let c = self.insert_class(n)?;
-        Ok(v.list(vec![
+        Ok(self.ins_marker(n, &c))
+    }
+
+    /// A `T_INS_PARAMS` marker with class `n`'s registers `c`.
+    fn ins_marker(&self, n: u16, c: &InsertClass) -> ValueId {
+        let v = self.v;
+        v.list(vec![
             v.int(nodes::T_INS_PARAMS),
             v.int(i64::from(n)),
             v.int(c.box_height_plus_depth.map_or(-1, i64::from)),
@@ -796,7 +810,7 @@ impl Run<'_, '_> {
             v.int(i64::from(c.count)),
             v.int(i64::from(c.dimen)),
             glue_value(v, &c.skip),
-        ]))
+        ])
     }
 
     /// Whether this run defined one of class `n`'s registers (its box,
@@ -1413,32 +1427,6 @@ impl Run<'_, '_> {
         })
     }
 
-    /// The `[tag, n]` insertion class markers of `raw` given class `n`'s
-    /// registers as this run leaves them ([`Run::ins_params_marker`]).
-    fn resolve_ins_markers(&mut self, raw: &mut [ValueId]) -> R<()> {
-        let v = self.v;
-        let mut classes: Vec<(u16, ValueId)> = Vec::new();
-        for x in raw.iter_mut() {
-            if nodes::tag(v, *x) != nodes::T_INS_PARAMS {
-                continue;
-            }
-            let xs = list_of(v, *x);
-            if xs.len() != 2 {
-                continue;
-            }
-            let n = u16::try_from(int_of(v, xs[1])).unwrap_or(0);
-            let m = if let Some(&(_, m)) = classes.iter().find(|c| c.0 == n) {
-                m
-            } else {
-                let m = self.ins_params_marker(n)?;
-                classes.push((n, m));
-                m
-            };
-            *x = m;
-        }
-        Ok(())
-    }
-
     /// The page parameters (§980) reaching the position just after node
     /// `at`, as a `T_PAGE_PARAMS` marker: what a piece's `[tag]` marker
     /// means, read where the piece is (the record `pagepar`, or its cells
@@ -1481,11 +1469,28 @@ impl Run<'_, '_> {
     }
 
     /// `raw`'s `[tag]` page parameter markers, of piece `pid`, given the
-    /// parameters reaching it ([`Run::page_params_at`]).
+    /// parameters reaching it ([`Run::page_params_at`]), and its `[tag,
+    /// n]` insertion class markers the class's registers reaching it
+    /// ([`Run::insert_class_at`]).
     fn resolve_params_of(&mut self, pid: i64, raw: &mut [ValueId]) -> R<()> {
         let v = self.v;
         let mut m = None;
+        let mut classes: Vec<(u16, ValueId)> = Vec::new();
         for x in raw.iter_mut() {
+            if nodes::tag(v, *x) == nodes::T_INS_PARAMS && list_of(v, *x).len() == 2 {
+                // (§1008: the class's registers as they reach the piece)
+                let n = u16::try_from(int_at(v, *x, 1)).unwrap_or(0);
+                *x = if let Some(&(_, c)) = classes.iter().find(|c| c.0 == n) {
+                    c
+                } else {
+                    let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+                    let c = self.insert_class_at(n, at)?;
+                    let c = self.ins_marker(n, &c);
+                    classes.push((n, c));
+                    c
+                };
+                continue;
+            }
             if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
                 let mm = if let Some(mm) = m {
                     mm
@@ -1602,8 +1607,12 @@ impl Run<'_, '_> {
         // (what its commands read, before the reads that resolve its
         // markers: those are no command's)
         let (reads, defs) = self.check_data(last);
+        // (its insertion class markers that are not its own stay `[tag,
+        // n]`: read where the piece is by the step that folds it,
+        // [`Run::resolve_params_of`], as its page parameters are; a
+        // piece with a footnote does not wait for the routine before it
+        // that empties the class's box)
         self.pin_reaching_page_params(&mut raw)?;
-        self.resolve_ins_markers(&mut raw)?;
         self.contribute_units(&raw, last, reads, defs, Vec::new(), false);
         // (the scan is a block's: the block's last piece places it, and
         // the document's last, `\end`; the pieces before fold in its
@@ -1649,7 +1658,6 @@ impl Run<'_, '_> {
             eprintln!("  cut {}: at candidate {k}", self.cx.node().raw());
         }
         self.pin_reaching_page_params(&mut raw)?;
-        self.resolve_ins_markers(&mut raw)?;
         let (cont, locals) = self.cont_encode()?;
         self.contribute_units(&raw, Some(k), ValueId::UNIT, ValueId::UNIT, locals, true);
         self.cx.follow(self.ops.scan, vec![v.int(-3)]);
@@ -2626,7 +2634,10 @@ impl FinDefs {
     fn stable(&self, v: &Values) -> Vec<(Field, ValueId)> {
         self.last
             .iter()
-            .filter(|d| self.prev.contains(d) && predictable(&crate::val::field_name(v, d.0)))
+            .filter(|d| {
+                self.prev.contains(d)
+                    && predictable(v, &crate::val::field_name(v, d.0), d.1, Some(d.1))
+            })
             .copied()
             .collect()
     }
@@ -2642,10 +2653,12 @@ impl FinDefs {
                 // (the next finisher reads the outgoing state of this one
                 // only as a prediction, spec-final §3.5: a value not
                 // stable across pages the last run's, a guess that runs
-                // its readers again where wrong; never `\deadcycles`,
-                // [`predictable`], nor a mark that changed, [`varies_by_page`])
+                // its readers again where wrong; `\deadcycles` only as a
+                // stable 0, [`predictable`], and no mark that changed,
+                // [`varies_by_page`])
                 let name = crate::val::field_name(v, f);
-                if !predictable(&name) {
+                let before = self.prev.iter().find(|d| d.0 == f).map(|d| d.1);
+                if !predictable(v, &name, x, before) {
                     return None;
                 }
                 // (one run of the routine so far, spec-final §9b: its
@@ -2687,18 +2700,19 @@ impl FinDefs {
     }
 }
 
-/// Whether a finisher's definition of field `name` is predicted from
-/// the last runs of its routine ([`FinDefs::predict`]). Not
-/// `\deadcycles`: the fire steps it and a
-/// `\shipout` clears it (§1012, §1023), so what a run leaves depends on
-/// the page and not on the routine's text, and at `\end` it decides
-/// whether the page chain goes on (§1054). Guessed as another page's
-/// run left it, a dead cycle predicts the next page fired by `\end`,
-/// whose finisher predicts another: the chain grew without end on
-/// guesses while the page it stood on was still to run. The scan reads
-/// it from its finisher instead.
-fn predictable(name: &str) -> bool {
-    name != "deadcycles"
+/// Whether a finisher's definition `x` of field `name`, which the run
+/// before left as `y` (`None`: no run before), is predicted
+/// ([`FinDefs::predict`]). `\deadcycles` only as 0 where both runs left
+/// it 0 (both shipped their page, §1023): the fire steps it and a
+/// `\shipout` clears it (§1012), so what a run leaves depends on the
+/// page, and at `\end` it decides whether the page chain goes on
+/// (§1054). Guessed as 1, as a page's run left it that shipped nothing,
+/// a dead cycle predicted the next page fired by `\end`, whose finisher
+/// predicted another: the chain grew without end on guesses while the
+/// page it stood on was still to run. A guessed 0 ends a chain at most,
+/// which the run, where wrong, starts again.
+fn predictable(v: &Values, name: &str, x: ValueId, y: Option<ValueId>) -> bool {
+    name != "deadcycles" || (y == Some(x) && v.as_int(x) == Some(0))
 }
 
 /// The fields a page's own items decide (the marks, §1012, and the
@@ -3076,6 +3090,19 @@ impl Run<'_, '_> {
         // (the ordinary pages fired up to this one: page counters step
         // by them)
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
+        // (`PHITEX_FIN_FIELD=name`: what each finisher's run left of that
+        // field, for the predictions)
+        if let Ok(name) = std::env::var("PHITEX_FIN_FIELD") {
+            let f = v.field(&name);
+            eprintln!(
+                "fin-field page {j} node {}: {name} {}",
+                self.cx.node().raw(),
+                out.iter().find(|d| d.0 == f).map_or_else(
+                    || "not defined".to_owned(),
+                    |d| v.render(d.1).chars().take(80).collect()
+                )
+            );
+        }
         let mut m = self
             .ops
             .fin_defs
@@ -3327,7 +3354,13 @@ impl Operation for Scan {
     /// a page and place a continuation that defines it, so a step's read
     /// waits for the steps before it still to run; a step's run narrows
     /// this to what it defined ([`Run::scan_node`]).
-    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
+    fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
+        // (a continuation never defines where a block ends: a block's
+        // scan, gated on that, waits for the scan of the block before
+        // only)
+        if args.first().is_some_and(|&x| int_of(v, x) == -2) {
+            return MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT)]);
+        }
         MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT), v.field(SCAN_BLOCK)])
     }
     /// A step is held until the scan state is there and its piece has
@@ -3345,8 +3378,10 @@ impl Operation for Scan {
         }
         // (not the scan state: the engine's gate does not take a
         // definer's prediction, a run's read does, and the continuation
-        // before it is predicted, [`Run::place_cont`])
-        Some(vec![v.field(crate::build::MAIN_LAST)])
+        // before it is predicted, [`Run::place_cont`]; the state where
+        // its block begins, which the block's scan before defines and
+        // nothing predicts: waited for at the gate, not parked on)
+        Some(vec![v.field(crate::build::MAIN_LAST), v.field(SCAN_BLOCK)])
     }
     /// No pieces' units: a window holding a step does not wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {

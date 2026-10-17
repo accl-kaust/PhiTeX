@@ -70,11 +70,20 @@ runtests() {
       e=$?
       s1=$(date +%s.%N)
       echo "EXIT $e" >> "$f"
-      echo "$t $(awk -v a="$s0" -v b="$s1" "BEGIN{printf \"%.3f\", b-a}") $e" >> "$d/walls.txt"' _ {} )
+      echo "$t $(awk -v a="$s0" -v b="$s1" "BEGIN{printf \"%.3f\", b-a}") $e" >> "$d/walls.txt"
+      # (a timeout: the test again under gdb, interrupted at the same
+      # limit, every thread'"'"'s backtrace kept beside its log: gdb as the
+      # parent may trace it, an attach may not)
+      if [ "$e" = 124 ] || [ "$e" = 137 ]; then
+        timeout -s INT -k 30 "$TO" gdb -batch -nx -ex "set pagination off" -ex run \
+          -ex "thread apply all bt 40" -ex kill --args "$bin" $RT_EXTRA --exact "$t" \
+          > "${f%.txt}.gdb" 2>&1
+        echo "backtraces after ${TO} s under gdb: ${f%.txt}.gdb ($(grep -c "^Thread " "${f%.txt}.gdb") threads)" >> "$f"
+      fi' _ {} )
   while read -r t _ e; do
     case $e in
       0) ;;
-      124 | 137) red "$pre$t (timed out after ${GATE_TEST_TIMEOUT:-120} s)" ;;
+      124 | 137) red "$pre$t (timed out after ${GATE_TEST_TIMEOUT:-120} s; every thread's backtrace under gdb: $(basename "$d")/$(tr ":/" "__" <<< "$t").gdb)" ;;
       *) red "$pre$t$(grep -q "^test $t \.\.\. FAILED" "$d/$(tr ":/" "__" <<< "$t").txt" || echo " (exit $e: $(grep -m1 -E 'panicked at|error(\[|:)|signal' "$d/$(tr ":/" "__" <<< "$t").txt" | cut -c1-140))")" ;;
     esac
   done < "$d/walls.txt"

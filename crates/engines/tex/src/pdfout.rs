@@ -1974,7 +1974,7 @@ pub(crate) fn finish_exact(
         })
         .collect();
     let done: Vec<phitex_pdf::Chunk> = {
-        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(crate::exec::threads(None)));
+        let mut ex = crate::exec::Inner(crate::exec::threads(None));
         crate::exec::map_on(&mut ex, jobs.len(), &|j| {
             let (i, k) = jobs[j];
             parts[i][k].clone().resolve()

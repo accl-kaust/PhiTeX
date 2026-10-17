@@ -1656,8 +1656,8 @@ impl Analysis<'_> {
     }
 
     /// [`Analysis::slice_claims_nothing`]; `par_end` false for a slice
-    /// that starts no paragraph and whose last item is a group or an
-    /// argument closed inside it (`\\centerline{…}` in vertical mode): it
+    /// that starts no paragraph (`\\centerline{…}`, `\\hsize=6in` in
+    /// vertical mode): it
     /// need not end in a paragraph end, and its macros' extents may be
     /// the pass's predictions.
     fn slice_claims_nothing_(&self, k0: usize, e: usize, par_end: bool) -> bool {
@@ -3016,15 +3016,13 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                 Some((n, end)) => an.slice_claims_nothing(k0, end).then_some(n - i),
                 None if reads_on => None,
                 None if an.slice_claims_nothing(k0, e) => Some(0),
-                // (a slice that starts no paragraph and ends in a closing
-                // brace: its last command's argument or group is whole
-                // in it, nothing it runs scans on into the next; a run
+                // (a slice that starts no paragraph and whose commands
+                // all end inside it by the pass's extents, the last one
+                // scanning on into nothing (`reads_on` above), `\hsize=6in`,
+                // `\centerline{…}`: nothing it runs reads the next; a run
                 // that does take a sibling refutes this, and its
                 // followers run again)
-                None if !t.pars[i]
-                    && text[s..e].trim_end().ends_with('}')
-                    && an.slice_claims_nothing_(k0, e, false) =>
-                {
+                None if !t.pars[i] && an.slice_claims_nothing_(k0, e, false) => {
                     if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
                         eprintln!(
                             "slices: claims nothing, no paragraph end: {:?}",

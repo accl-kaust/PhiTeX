@@ -200,7 +200,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
         seen.extend(own);
     }
     let apart: Vec<Option<phitex_dvi::PageBytes>> = {
-        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(crate::exec::threads(None)));
+        let mut ex = crate::exec::Inner(crate::exec::threads(None));
         crate::exec::map_on(&mut ex, rest.len(), &|i| {
             let mut wi = phitex_dvi::DviWriter::new(mag, &comment);
             for &f in &before[i] {
