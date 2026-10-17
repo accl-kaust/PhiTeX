@@ -4431,7 +4431,11 @@ impl Build {
                 // node's frame carries is the byte in the document
                 let at = usize::try_from(int(3)).unwrap_or(0)
                     + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
-                (docname.clone(), doc.clone(), at)
+                (
+                    docname.clone(),
+                    std::borrow::Cow::Borrowed(doc.as_str()),
+                    at,
+                )
             } else if int(3) >= 0
                 && let Some(&n) = xs.get(2)
                 && n != ValueId::UNIT
@@ -4443,7 +4447,7 @@ impl Build {
                     .unwrap_or_default();
                 let text: String = bytes.iter().map(|&b| char::from(b)).collect();
                 let at = usize::try_from(int(3)).unwrap_or(0) + loc;
-                (name, text, at)
+                (name, std::borrow::Cow::Owned(text), at)
             } else {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());
                 let i = top.get(&node).copied().unwrap_or(0);
@@ -4453,33 +4457,32 @@ impl Build {
                     .and_then(|d| (!seg.is_empty()).then(|| d.find(&seg)).flatten())
                     .map_or(from, |k| from + k + before.len());
                 let at = if self.nodes.is_empty() { 0 } else { at };
-                (docname.clone(), doc.clone(), at)
+                (
+                    docname.clone(),
+                    std::borrow::Cow::Borrowed(doc.as_str()),
+                    at,
+                )
             };
             // the line around `at`, as characters; `at` in the file's
             // bytes (the document's text is UTF-8, a file's characters
             // are its bytes)
-            let chars: Vec<char> = text.chars().collect();
-            let ci = if file == docname {
-                text.get(..at.min(text.len()))
-                    .map_or(0, |t| t.chars().count())
+            // (in the text's bytes: a line break is one byte; a file's
+            // characters are its bytes, `at` their count)
+            let b = if file == docname {
+                if text.is_char_boundary(at.min(text.len())) {
+                    at.min(text.len())
+                } else {
+                    0
+                }
             } else {
-                at.min(chars.len())
+                text.char_indices().nth(at).map_or(text.len(), |(k, _)| k)
             };
-            let line = chars[..ci].iter().filter(|&&c| c == '\n').count() + 1;
-            let ls = chars[..ci]
-                .iter()
-                .rposition(|&c| c == '\n')
-                .map_or(0, |k| k + 1);
-            let le = chars[ci..]
-                .iter()
-                .position(|&c| c == '\n')
-                .map_or(chars.len(), |k| ci + k);
-            let before: String = chars[ls..ci].iter().collect();
-            let after: String = chars[ci..le]
-                .iter()
-                .collect::<String>()
-                .trim_end_matches('\r')
-                .to_owned();
+            let head = &text[..b];
+            let line = head.bytes().filter(|&c| c == b'\n').count() + 1;
+            let ls = head.rfind('\n').map_or(0, |k| k + 1);
+            let le = text[b..].find('\n').map_or(text.len(), |k| b + k);
+            let before: String = text[ls..b].to_owned();
+            let after: String = text[b..le].trim_end_matches('\r').to_owned();
             let undefined = message == "Undefined control sequence";
             let start = if undefined {
                 before.rfind('\\').map_or(at, |k| at - (before.len() - k))
