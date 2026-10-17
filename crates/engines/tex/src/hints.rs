@@ -1652,6 +1652,14 @@ impl Analysis<'_> {
     /// Whether the items from atom `k0` to byte `e` all end before `e`
     /// by a known extent, and none ends the job.
     fn slice_claims_nothing(&self, k0: usize, e: usize) -> bool {
+        self.slice_claims_nothing_(k0, e, true)
+    }
+
+    /// [`Analysis::slice_claims_nothing`]; `par_end` false for a slice
+    /// that starts no paragraph and whose last item is a group or an
+    /// argument closed inside it (`\\centerline{…}` in vertical mode): it
+    /// need not end in a paragraph end.
+    fn slice_claims_nothing_(&self, k0: usize, e: usize, par_end: bool) -> bool {
         let atoms = self.atoms();
         let k1 = atoms.partition_point(|x| x.start < e);
         let i0 = self.p.items.partition_point(|it| it.atom < k0);
@@ -1660,7 +1668,7 @@ impl Analysis<'_> {
         // the siblings until something ends it, §1094, and a command at
         // its end that scans for a keyword or unit, `\\medskip`'s
         // `\\vskip`, reads the next sibling's first token, §407)
-        {
+        if par_end {
             let last = (k0..k1).rev().find(|&a| atoms[a].kind != AtomKind::Space);
             if !last.is_some_and(|a| self.ends_par_at(a)) {
                 return false;
@@ -2990,6 +2998,17 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                 Some((n, end)) => an.slice_claims_nothing(k0, end).then_some(n - i),
                 None if reads_on => None,
                 None if an.slice_claims_nothing(k0, e) => Some(0),
+                // (a slice that starts no paragraph and ends in a closing
+                // brace: its last command's argument or group is whole
+                // in it, nothing it runs scans on into the next; a run
+                // that does take a sibling refutes this, and its
+                // followers run again)
+                None if !t.pars[i]
+                    && text[s..e].trim_end().ends_with('}')
+                    && an.slice_claims_nothing_(k0, e, false) =>
+                {
+                    Some(0)
+                }
                 None => par_next
                     .filter(|&(_, ne)| an.slice_claims_nothing(k0, ne))
                     .map(|_| 1),
