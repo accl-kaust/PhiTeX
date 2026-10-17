@@ -315,7 +315,7 @@ impl Operation for Exec {
         &self,
         args: &[ValueId],
         v: &Values,
-        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+        following: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Claim {
         if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
             return Claim::Pending;
@@ -334,6 +334,26 @@ impl Operation for Exec {
             Claim::Count(_) => 1,
             Claim::Pending => 2,
         };
+        // (`PHITEX_CLAIM_TRACE`: a pending claim's text and its next
+        // sibling's, as the args render)
+        if k == 2 && crate::exec::env_flag!("PHITEX_CLAIM_TRACE") {
+            let next = following
+                .next()
+                .map(|(_, a)| a.first().map(|&x| v.render(x)).unwrap_or_default());
+            eprintln!(
+                "claim-trace: pending {:?} next {:?}",
+                args.first()
+                    .map(|&x| v.render(x))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(160)
+                    .collect::<String>(),
+                next.unwrap_or_default()
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
+            );
+        }
         EXEC_CLAIMS[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         c
     }
