@@ -208,6 +208,15 @@ table() {
     if [ -s "$d/red.txt" ]; then sed "s/^/  [$(cut -d' ' -f1 "$d/shard.txt")] /" "$d/red.txt"; fi
     [ -f "$d/status" ] || echo "  [$j] no result: $(tail -3 "$runs/phitex-$j.out" 2>/dev/null | tr '\n' ' ')"
   done
+  # (a test that timed out: its threads' backtraces, the frames in
+  # this tree's code first)
+  for j in "$@"; do
+    for g in "$runs/cmd-$j"/*/*.gdb; do
+      [ -f "$g" ] || continue
+      echo "  backtraces of $(basename "$g" .gdb) (cmd-$j/$(basename "$(dirname "$g")")):"
+      grep -E '^Thread |^#[0-9]+ ' "$g" | grep -E '^Thread |phitex|defuse' | head -80 | cut -c1-200 | sed 's/^/    /'
+    done
+  done
   for j in "$@"; do
     d=$runs/cmd-$j
     if [ -s "$d/known-red.txt" ]; then sed "s/^/  [known red, corpus fixture] /" "$d/known-red.txt"; fi
