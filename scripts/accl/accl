@@ -27,6 +27,10 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 H=acclhead1
 slurm='export PATH=/opt/slurm/current/bin:$PATH;'
+# (acclhead1 resets connections under load: every ssh, scp, rsync and
+# git call retried, sshmux/ssh)
+SSH=$here/sshmux/ssh
+export RSYNC_RSH=$SSH GIT_SSH_COMMAND=$SSH
 runs=$HOME/code/flinner/phitex-runs
 
 preset() {
@@ -62,7 +66,7 @@ snap() {
 
 sync_scripts() {
   rsync -a --delete --exclude=accl "$here/" "$H:code/flinner/phitex-accl/"
-  ssh $H "mkdir -p code/flinner/phitex-runs"
+  $SSH $H "mkdir -p code/flinner/phitex-runs"
 }
 
 submit() {
@@ -71,27 +75,43 @@ submit() {
   sync_scripts
   opts="$(preset "$@") ${ACCL_OPTS:-}"
   echo "accl: commit $c, $opts" >&2
-  ssh $H "$slurm cd code/flinner/phitex-runs && sbatch --parsable -J phitex-$task $opts \$HOME/code/flinner/phitex-accl/job.sbatch $c $(printf '%q ' "$@")"
+  $SSH $H "$slurm cd code/flinner/phitex-runs && sbatch --parsable -J phitex-$task $opts \$HOME/code/flinner/phitex-accl/job.sbatch $c $(printf '%q ' "$@")"
 }
 
-state() { ssh $H "$slurm sacct -j $1 -n -X -o State" | awk '{print $1}' | head -1; }
+# J...: "JobID|State" of all those jobs, one sacct call
+states() { $SSH $H "$slurm sacct -j $(IFS=,; echo "$*") -n -X -P -o JobID,State"; }
 
+# (the jobs not yet reported in one query a minute, each reported in
+# order once it and those before it ended; a query that fails, acclhead1
+# refusing connections, is a poll that saw nothing end)
 wait_jobs() {
-  local j s
-  for j in "$@"; do
-    while :; do
-      s=$(state "$j")
-      case $s in COMPLETED | FAILED | CANCELLED* | TIMEOUT | OUT_OF_ME* | NODE_FAIL) break ;; esac
-      sleep 20
+  local j s i=0 jobs=("$@")
+  local -A ended=()
+  while [ $i -lt $# ]; do
+    while IFS='|' read -r j s _; do
+      # (State as sacct's 10-column field prints it: CANCELLED+)
+      [ ${#s} -le 10 ] || s=${s:0:9}+
+      s=${s%% *}
+      case $s in COMPLETED | FAILED | CANCELLED* | TIMEOUT | OUT_OF_ME* | NODE_FAIL) ended[$j]=$s ;; esac
+    done < <(states "${jobs[@]:i}" || true)
+    while [ $i -lt $# ] && [ -n "${ended[${jobs[i]}]:-}" ]; do
+      j=${jobs[i]} s=${ended[${jobs[i]}]}
+      i=$((i + 1))
+      report "$j" "$s"
     done
-    mkdir -p "$runs"
-    rsync -a "$H:code/flinner/phitex-runs/*-$j" "$runs/" 2>/dev/null || true
-    rsync -a "$H:code/flinner/phitex-runs/phitex-$j.out" "$runs/" 2>/dev/null || true
-    local d
-    d=$(ls -d "$runs"/*-"$j" 2>/dev/null | head -1)
-    echo "== job $j: $s  ($d)"
-    if [ -n "$d" ] && [ -f "$d/summary.txt" ]; then cat "$d/summary.txt"; else tail -30 "$runs/phitex-$j.out" 2>/dev/null; fi
+    [ $i -ge $# ] || sleep 60
   done
+}
+
+report() {
+  local j=$1 s=$2
+  mkdir -p "$runs"
+  rsync -a "$H:code/flinner/phitex-runs/*-$j" "$runs/" 2>/dev/null || true
+  rsync -a "$H:code/flinner/phitex-runs/phitex-$j.out" "$runs/" 2>/dev/null || true
+  local d
+  d=$(ls -d "$runs"/*-"$j" 2>/dev/null | head -1)
+  echo "== job $j: $s  ($d)"
+  if [ -n "$d" ] && [ -f "$d/summary.txt" ]; then cat "$d/summary.txt"; else tail -30 "$runs/phitex-$j.out" 2>/dev/null; fi
 }
 
 CI=code/flinner/phitex-ci
@@ -99,14 +119,14 @@ CI=code/flinner/phitex-ci
 ci_sync() {
   local repo
   repo=$(git rev-parse --show-toplevel)
-  ssh $H "mkdir -p $CI/harness/ci $CI/harness/xetex $CI/harness/data $CI/runs"
+  $SSH $H "mkdir -p $CI/harness/ci $CI/harness/xetex $CI/harness/data $CI/runs"
   rsync -a --delete --exclude=__pycache__ "$repo/scripts/ci/" "$H:$CI/harness/ci/"
   rsync -a "$repo/scripts/xetex/fonts.conf" "$H:$CI/harness/xetex/"
   rsync -a --delete "$repo/ci/" "$H:$CI/harness/data/"
   rsync -a "$here/ci.sbatch" "$H:$CI/harness/"
 }
 # sb OPTS... STAGE RUN ARGS...: sbatch a stage, its job id
-sb() { ssh $H "$slurm cd $CI && sbatch --parsable --nice=1000 $*"; }
+sb() { $SSH $H "$slurm cd $CI && sbatch --parsable --nice=1000 $*"; }
 PERF_NODE=${CI_PERF_NODE:-acclnode04}
 
 cmd=${1:-}
@@ -116,15 +136,15 @@ case $cmd in
   submit) submit "$@" ;;
   run) j=$(submit "$@"); echo "accl: job $j" >&2; wait_jobs "$j" ;;
   wait) wait_jobs "$@" ;;
-  q) ssh $H "$slurm squeue -u \$USER -o '%.8i %.12j %.9T %.10M %.4C %.6m %R'" ;;
-  log) ssh $H "cat code/flinner/phitex-runs/phitex-$1.out" ;;
-  cancel) ssh $H "$slurm scancel $*" ;;
+  q) $SSH $H "$slurm squeue -u \$USER -o '%.8i %.12j %.9T %.10M %.4C %.6m %R'" ;;
+  log) $SSH $H "cat code/flinner/phitex-runs/phitex-$1.out" ;;
+  cancel) $SSH $H "$slurm scancel $*" ;;
   ci-oracle)
     ci_sync
     # (the list beside the harness, not in it: a sync would remove it)
     l=lists/$(date +%Y%m%d-%H%M%S)-$(basename "$1")
-    ssh $H "mkdir -p $CI/lists"
-    scp -q "$1" "$H:$CI/$l"
+    $SSH $H "mkdir -p $CI/lists"
+    scp -q -S "$SSH" "$1" "$H:$CI/$l"
     sb -J ci-oracle --array=0-${CI_SHARDS:-63}%24 -x "$PERF_NODE" -p build --qos=build4 -c 2 --mem=6G -t 12:00:00 \
       "\$HOME/$CI/harness/ci.sbatch" oracle "oracle-$(date +%Y%m%d-%H%M%S)" "\$HOME/$CI/$l" ;;
   ci-discover)

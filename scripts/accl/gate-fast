@@ -38,9 +38,10 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 H=acclhead1
 slurm='export PATH=/opt/slurm/current/bin:$PATH;'
-# (acclhead1 resets connections under load: one shared connection,
-# retried, for these scripts and the accl, rsync and git they run)
-export PATH="$here/sshmux":$PATH
+# (acclhead1 resets connections under load: every ssh, rsync and git
+# call here and in the accl it runs retried, sshmux/ssh)
+export SSH=$here/sshmux/ssh
+export RSYNC_RSH=$SSH GIT_SSH_COMMAND=$SSH
 runs=$HOME/code/flinner/phitex-runs
 ORACLE=code/flinner/phitex-runs/amsldoc-oracle-epoch.pdf
 # the latex tests heaviest first (measured: test-walls.txt of the shards)
@@ -68,7 +69,7 @@ build_first() {
   local st b
   st=$(store "$c")
   dep=""
-  if ssh $H "test -x $st/cli/phitex && test -x $st/tests/latex" 2>/dev/null; then
+  if $SSH $H "test -x $st/cli/phitex && test -x $st/tests/latex" 2>/dev/null; then
     echo "gate-fast: binaries of $c already built ($st)" >&2
   else
     b=$(sub "-c 16 --mem=24G -t 00:40:00 -J gf-build --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st" build)
@@ -88,7 +89,7 @@ on_bins() {
 submit() {
   local n k want
   c=$(git rev-parse "${1:-HEAD}^{commit}")
-  want=$(ssh $H "md5sum $ORACLE" 2>/dev/null | cut -c1-32)
+  want=$($SSH $H "md5sum $ORACLE" 2>/dev/null | cut -c1-32)
   [ -n "$want" ] || { echo "gate-fast: no oracle $ORACLE on $H" >&2; exit 1; }
   script=$(cat "$here/gate-shard.sh")
   n=${GATE_LATEX_SHARDS:-3}
@@ -155,21 +156,28 @@ control() {
   ls "$d"
 }
 
-# S J: the job's sacct field
-acct() { ssh $H "$slurm sacct -j $1 -n -X -P -o $2" 2>/dev/null | head -1; }
+# FIELDS J...: "JobID|FIELDS" lines of all those jobs, one sacct call
+acct() { local f=$1; shift; $SSH $H "$slurm sacct -j $(IFS=,; echo "$*") -n -X -P -o JobID,$f" 2>/dev/null; }
 secs() { awk -F'[-:]' '{ if (NF == 4) print $1*86400+$2*3600+$3*60+$4; else if (NF == 3) print $1*3600+$2*60+$3; else print $1*60+$2 }' <<< "$1"; }
 
+# (all the jobs still running in one query a minute; a query that fails,
+# acclhead1 refusing connections, is a poll that saw nothing end)
 wait_all() {
-  local j s d
-  for j in "$@"; do
-    while :; do
-      s=$(acct "$j" State | awk '{print $1}')
-      case $s in COMPLETED | FAILED | CANCELLED* | TIMEOUT | OUT_OF_ME* | NODE_FAIL) break ;; esac
-      sleep 20
+  local j s left=("$@") more
+  while [ ${#left[@]} -gt 0 ]; do
+    local -A ended=()
+    while IFS='|' read -r j s _; do
+      case ${s%% *} in COMPLETED | FAILED | CANCELLED* | TIMEOUT | OUT_OF_ME* | NODE_FAIL) ended[$j]=1 ;; esac
+    done < <(acct State "${left[@]}")
+    more=()
+    for j in "${left[@]}"; do
+      if [ -z "${ended[$j]:-}" ]; then more+=("$j"); continue; fi
+      mkdir -p "$runs"
+      rsync -a "$H:code/flinner/phitex-runs/cmd-$j" "$runs/" 2>/dev/null || true
+      rsync -a "$H:code/flinner/phitex-runs/phitex-$j.out" "$runs/" 2>/dev/null || true
     done
-    mkdir -p "$runs"
-    rsync -a "$H:code/flinner/phitex-runs/cmd-$j" "$runs/" 2>/dev/null || true
-    rsync -a "$H:code/flinner/phitex-runs/phitex-$j.out" "$runs/" 2>/dev/null || true
+    left=("${more[@]}")
+    [ ${#left[@]} = 0 ] || sleep 60
   done
   table "$@"
 }
@@ -185,13 +193,15 @@ table() {
     python3 -I "$here/gate-acct.py" table ams "$amsd" > "$amsd/table.txt" 2>&1
   fi
   local j d st sh status build wall el sub0 end first="" last="" reds=0
+  local -A S=() E=() U=() N=()
+  while IFS='|' read -r j st el sub0 end; do S[$j]=${st%% *}; E[$j]=$el; U[$j]=$sub0; N[$j]=$end; done < <(acct State,Elapsed,Submit,End "$@")
   printf '%-8s %-10s %-10s %-6s %7s %7s  %s\n' job shard state gate build_s wall_s red
   for j in "$@"; do
     d=$runs/cmd-$j
-    st=$(acct "$j" State | awk '{print $1}')
-    el=$(secs "$(acct "$j" Elapsed)")
-    sub0=$(acct "$j" Submit)
-    end=$(acct "$j" End)
+    st=${S[$j]:-}
+    el=$(secs "${E[$j]:-}")
+    sub0=${U[$j]:-}
+    end=${N[$j]:-}
     [ -z "$first" ] || [[ "$sub0" < "$first" ]] && first=$sub0
     [ -z "$last" ] || [[ "$end" > "$last" ]] && last=$end
     sh=$(cat "$d/shard.txt" 2>/dev/null || echo '?')
