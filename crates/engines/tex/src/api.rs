@@ -4342,12 +4342,7 @@ impl Build {
             .g
             .eng
             .output(self.dvi)
-            .map(|x| {
-                str_of(v, x)
-                    .chars()
-                    .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
-                    .collect()
-            })
+            .map(|x| crate::assemble::file_bytes(v, x))
             .unwrap_or_default();
         let n = self.pages().len();
         // (pdfTeX §794: after a fatal error the PDF file is removed)
