@@ -1880,6 +1880,7 @@ pub(crate) fn finish_exact(
         }
     }
     let copied = start;
+    let t_pre = t0.elapsed();
     // (each record's bytes from `start` on, a page's content still to
     // be rewritten and compressed among them)
     let mut parts: Vec<Vec<phitex_pdf::Part>> = Vec::with_capacity(xpages.len() - start);
@@ -2005,6 +2006,7 @@ pub(crate) fn finish_exact(
         }
         parts.push(ps);
     }
+    let t_loop = t0.elapsed();
     // (spec-final §6.1: the pages' contents whose font numbers moved,
     // rewritten and compressed apart, on the executor)
     let t_parts = std::time::Instant::now();
@@ -2080,8 +2082,10 @@ pub(crate) fn finish_exact(
     });
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "pdf link: {copied} of {} records copied from the last link, {resynced} more after the change; {rewritten} page contents rewritten in {t_parts:?}",
-            xpages.len()
+            "pdf link: {copied} of {} records copied from the last link, {resynced} more after the change; {rewritten} page contents rewritten in {t_parts:?}; before the records {t_pre:?}, records {:?}, after them {:?}",
+            xpages.len(),
+            t_loop.saturating_sub(t_pre),
+            t0.elapsed().saturating_sub(t_loop)
         );
     }
     // the fonts loaded after the last record (none but a load without

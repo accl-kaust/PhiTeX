@@ -417,12 +417,13 @@ fn dvi_page(
 /// page 1's objects, then `B`'s object.
 fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let v = cx.values();
+    let t0 = std::time::Instant::now();
     // (in pdfTeX's order: a page firing inside a piece before the
     // piece's records after it)
-    let xpages = crate::pdfout::order_line(
-        v,
-        &v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?),
-    );
+    let line = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
+    let t_acc = t0.elapsed();
+    let xpages = crate::pdfout::order_line(v, &line);
+    let t_order = t0.elapsed();
     let date = field(cx, "pdfdate")?.map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
     let jobname = field(cx, "jobname")?
         .map(|x| str_of(v, x))
@@ -456,7 +457,9 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };
+    let t_seed = t0.elapsed();
     let l = crate::pdfout::finish_exact(v, &f, &xpages, &o.pdf_cmds);
+    let t_fin = t0.elapsed();
     // a page the link shipped and the writer could not write is the
     // job's error, in the log and loudly, naming the node that shipped
     // the page
@@ -484,5 +487,15 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     ] {
         cx.publish(v.field(name), x);
     }
-    Ok(bytes_value(v, l.file))
+    let x = bytes_value(v, l.file);
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "pdf exact: line read {t_acc:?}, ordered {:?}, fields {:?}, link {:?}, value {:?}",
+            t_order.saturating_sub(t_acc),
+            t_seed.saturating_sub(t_order),
+            t_fin.saturating_sub(t_seed),
+            t0.elapsed().saturating_sub(t_fin)
+        );
+    }
+    Ok(x)
 }
