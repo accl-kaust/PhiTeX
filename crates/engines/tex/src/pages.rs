@@ -967,6 +967,7 @@ impl Run<'_, '_> {
         special: bool,
         origin: Option<ValueId>,
         mat: Option<ValueId>,
+        classes: Option<&[u16]>,
     ) -> R<(ValueId, Vec<ValueId>)> {
         let v = self.v;
         let text = self.output_hint()?;
@@ -987,6 +988,11 @@ impl Run<'_, '_> {
         let mut pos = vec![v.int(j)];
         pos.extend([ValueId::UNIT; 8]);
         pos.extend([text, v.int(normal), v.int(i64::from(special)), b]);
+        // (the insertion classes on the page, where the scan knows them:
+        // the boxes of the others its fire leaves alone, [`fin_classes`])
+        if let Some(cs) = classes {
+            pos.push(v.list(cs.iter().map(|&n| v.int(i64::from(n))).collect()));
+        }
         match at {
             Some(at) => {
                 self.cx.follow_after(at, self.ops.finish, pos.clone());
@@ -2723,6 +2729,35 @@ fn varies_by_page(name: &str) -> bool {
     name.starts_with("mark") || name == "param:outputpenalty"
 }
 
+/// Whether a finisher with arguments `args` may define field `f`, as
+/// far as its page's insertion classes tell (the fourteenth argument,
+/// [`Run::place_break`]): a box register below 255 is defined by the
+/// fire only for a class on the page (§1018), and by the routine only
+/// where its text may (its hint `t`); any other field, and any field
+/// where the classes are not known, may be.
+fn fin_may_box(v: &Values, args: &[ValueId], t: ValueId, f: Field) -> bool {
+    let Some(&cs) = args.get(13) else {
+        return true;
+    };
+    let name = crate::val::field_name(v, f);
+    let Some(n) = name
+        .strip_prefix("box:")
+        .and_then(|n| n.parse::<i64>().ok())
+        .filter(|&n| (0..255).contains(&n))
+    else {
+        return true;
+    };
+    if list_of(v, cs).iter().any(|&c| int_of(v, c) == n) {
+        return true;
+    }
+    match crate::hints::Hint::decode(&str_of(v, t)).may_define() {
+        MayDefine::Nothing => false,
+        MayDefine::Any => true,
+        MayDefine::Prefixes(ps) => ps.iter().any(|p| name.starts_with(p.as_str())),
+        MayDefine::Names(ns) => ns.contains(&f),
+    }
+}
+
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
 /// The fields every finisher defines itself, whatever its routine.
@@ -2796,6 +2831,7 @@ impl Finish {
                 }
             })
             .unwrap_or_default();
+        out.retain(|e| fin_may_box(v, args, t, e.0));
         let rtn = v.field(RTN);
         if !out.iter().any(|e| e.0 == rtn) {
             let last = d.and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1));
@@ -2852,7 +2888,13 @@ impl Operation for Finish {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
-            .map(|d| d.last.iter().map(|e| e.0).collect())?;
+            .map(|d| {
+                d.last
+                    .iter()
+                    .map(|e| e.0)
+                    .filter(|&f| fin_may_box(v, args, t, f))
+                    .collect()
+            })?;
         // (and what it gives back to the main list, always predicted)
         let rtn = v.field(RTN);
         if !names.contains(&rtn) {
@@ -2885,6 +2927,7 @@ impl Operation for Finish {
         if let Some(mut names) = known
             && !crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
         {
+            names.retain(|&f| fin_may_box(v, args, t, f));
             for n in FIN_OWN {
                 names.push(v.field(n));
             }
@@ -3794,6 +3837,7 @@ impl Run<'_, '_> {
                 sf.output_penalty <= -10001,
                 None,
                 mat,
+                Some(&sf.classes),
             )?;
             // (the continuation's scan state: as its run gave it where it
             // differed from what this scan gave it the round before
@@ -3866,8 +3910,9 @@ impl Run<'_, '_> {
         match self.cont_state(&b, None, None)? {
             Cont::Nothing => Ok(Placed::Nothing),
             Cont::Fire(j, src, k, rest, normal, special, origin) => {
-                let (b, _) =
-                    self.place_break(None, j, src, -2, k, rest, normal, special, origin, None)?;
+                let (b, _) = self.place_break(
+                    None, j, src, -2, k, rest, normal, special, origin, None, None,
+                )?;
                 self.place_cont(None, j, None, b);
                 Ok(Placed::Page)
             }

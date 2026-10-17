@@ -123,14 +123,21 @@ fn scan_hlist(
 
 fn char_dims(fonts: &dyn Fonts, font: u32, ch: u16, hdx: &mut (Scaled, Scaled, Scaled)) {
     // §654
-    let i = fonts.char_info(font, ch).unwrap_or_default();
-    hdx.2 += i.width;
-    hdx.0 = hdx.0.max(i.height);
-    hdx.1 = hdx.1.max(i.depth);
+    let (w, h, d) = fonts.char_whd(font, ch);
+    hdx.2 += w;
+    hdx.0 = hdx.0.max(h);
+    hdx.1 = hdx.1.max(d);
 }
 
 /// Moves insertions, marks and adjust material out of `list` (§655).
 fn take_adjustments(list: &mut List) -> List {
+    // (most lists have none: then nothing moves)
+    if !list
+        .iter()
+        .any(|n| matches!(n, Node::Adjust(_) | Node::Ins(_) | Node::Mark(_)))
+    {
+        return List::new();
+    }
     let mut out = List::new();
     let mut kept = List::with_capacity(list.len());
     for n in list.drain(..) {

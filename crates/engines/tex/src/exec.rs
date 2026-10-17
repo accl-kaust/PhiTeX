@@ -482,8 +482,7 @@ impl Executor for Coarse {
 
 /// The executor of a fan-out inside an operation's run (the exact
 /// PDF's page contents, the DVI file's pages): `for_each` splits a batch
-/// over `self.0` threads of a pool of its own, never the one the
-/// engine's workers run on ([`pool`]).
+/// over `self.0` threads of its own, never a pool's.
 pub(crate) struct Inner(pub usize);
 
 impl Executor for Inner {
@@ -502,10 +501,11 @@ impl Executor for Inner {
             return;
         }
         trace(n, self.0);
-        #[cfg(feature = "rayon")]
-        parallel_on(&pool(self.0, true), n, 1, f);
-        #[cfg(not(feature = "rayon"))]
-        parallel(self.0, n, 1, f);
+        // (threads of its own, not a pool's: a pool's `install` called
+        // from an engine worker's thread runs that pool's other jobs
+        // while it waits, an engine worker's loop among them, which
+        // waits for this run: the stack itself deadlocked)
+        scoped(self.0, n, 1, f);
     }
 
     fn parallelism(&self) -> usize {
@@ -538,13 +538,8 @@ fn trace(n: usize, threads: usize) {
 
 #[cfg(feature = "rayon")]
 fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
-    parallel_on(&pool(threads, false), n, grain, f);
-}
-
-/// [`parallel`] on the pool `pool`.
-#[cfg(feature = "rayon")]
-fn parallel_on(pool: &rayon::ThreadPool, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
     use rayon::prelude::*;
+    let pool = pool(threads);
     pool.install(|| {
         (0..n).into_par_iter().with_min_len(grain).for_each(f);
     });
@@ -556,30 +551,22 @@ fn parallel_on(pool: &rayon::ThreadPool, n: usize, grain: usize, f: &(dyn Fn(usi
     }
 }
 
-/// The persistent pool of `threads` workers; `inner`: the one an
-/// operation's run fans out on ([`Inner`]), never the pool whose
-/// threads host the engine's workers (they all wait for that run: a
-/// fan-out on their pool waited for them, every thread asleep).
+/// The persistent pool of `threads` workers, the engine's workers' (an
+/// operation's fan-out runs on threads of its own, [`Inner`]).
 #[cfg(feature = "rayon")]
-fn pool(threads: usize, inner: bool) -> std::sync::Arc<rayon::ThreadPool> {
+fn pool(threads: usize) -> std::sync::Arc<rayon::ThreadPool> {
     use std::sync::{Arc, Mutex, PoisonError};
-    type Pools = Mutex<phitex_defuse::FxHashMap<(usize, bool), Arc<rayon::ThreadPool>>>;
+    type Pools = Mutex<phitex_defuse::FxHashMap<usize, Arc<rayon::ThreadPool>>>;
     static POOLS: OnceLock<Pools> = OnceLock::new();
     let mut m = POOLS
         .get_or_init(|| Mutex::new(phitex_defuse::FxHashMap::default()))
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    m.entry((threads, inner))
+    m.entry(threads)
         .or_insert_with(|| {
             let b = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
-                .thread_name(move |i| {
-                    if inner {
-                        format!("phitex-op-{i}")
-                    } else {
-                        format!("phitex-{i}")
-                    }
-                });
+                .thread_name(|i| format!("phitex-{i}"));
             let pool = if let Some(spawn) = SPAWN.get() {
                 b.spawn_handler(move |t| {
                     spawn(Box::new(move || t.run()));
@@ -596,6 +583,12 @@ fn pool(threads: usize, inner: bool) -> std::sync::Arc<rayon::ThreadPool> {
 
 #[cfg(not(feature = "rayon"))]
 fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
+    scoped(threads, n, grain, f);
+}
+
+/// `f(i)` for every `i < n` on `threads` threads of its own, made for
+/// the call and joined at its end.
+fn scoped(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
     let work = || {

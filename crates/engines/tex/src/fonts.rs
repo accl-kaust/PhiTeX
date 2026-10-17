@@ -129,6 +129,18 @@ fn lig_op(op: u8) -> LigOp {
 }
 
 impl Fonts for View {
+    fn char_width(&self, font: FontId, ch: u16) -> i32 {
+        self.get(font)
+            .and_then(|(l, _)| l.at.chars.get(usize::from(ch)).copied().flatten())
+            .map_or(0, |d| d.width)
+    }
+
+    fn char_whd(&self, font: FontId, ch: u16) -> (i32, i32, i32) {
+        self.get(font)
+            .and_then(|(l, _)| l.at.chars.get(usize::from(ch)).copied().flatten())
+            .map_or((0, 0, 0), |d| (d.width, d.height, d.depth))
+    }
+
     fn char_info(&self, font: FontId, ch: u16) -> Option<CharInfo> {
         let (l, _) = self.get(font)?;
         let d = l.at.chars.get(usize::from(ch)).copied().flatten()?;

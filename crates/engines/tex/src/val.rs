@@ -532,6 +532,52 @@ struct Encoded {
     /// while it is a key): a `\\let` of a macro encodes nothing.
     macros: FxHashMap<usize, (Rc<Macro>, ValueId)>,
     nodes: FxHashMap<NodeKey, ValueId>,
+    /// Character nodes, direct-mapped by `(font, character)`: the key
+    /// plus one (0: empty) and the value.
+    chars: Vec<(u64, ValueId)>,
+}
+
+/// The size of [`Encoded::chars`].
+const CHAR_NODES: usize = 1 << 12;
+
+/// The value of the character node `(font, ch)` (`make()` builds it),
+/// cached in a run.
+pub(crate) fn char_node_id(
+    v: &Values,
+    font: u32,
+    ch: u16,
+    make: impl FnOnce() -> ValueId,
+) -> ValueId {
+    let Some(epoch) = scope_epoch(v) else {
+        return make();
+    };
+    let key = (u64::from(font) << 16 | u64::from(ch)) + 1;
+    let slot = (usize::from(ch) ^ (font as usize).wrapping_mul(0x9E37)) & (CHAR_NODES - 1);
+    let hit = ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        if c.chars.is_empty() {
+            c.chars = vec![(0, ValueId::UNIT); CHAR_NODES];
+        }
+        let (k, x) = c.chars[slot];
+        (k == key).then_some(x)
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = make();
+    ENCODED.with(|c| {
+        if let Some(e) = c.borrow_mut().chars.get_mut(slot) {
+            *e = (key, x);
+        }
+    });
+    x
 }
 
 /// A node of fixed shape, as the key of its value: its tag, up to three
@@ -624,6 +670,10 @@ fn encoded<K: std::hash::Hash + Eq>(
 
 /// The value of integer `i` (cached in a run).
 pub(crate) fn int_id(v: &Values, i: i64) -> ValueId {
+    // (an integer of 60 bits is its id: no table, no cache)
+    if (-(1_i64 << 59)..(1_i64 << 59)).contains(&i) {
+        return v.int(i);
+    }
     encoded(v, |c| &mut c.ints, i, || v.int(i))
 }
 
