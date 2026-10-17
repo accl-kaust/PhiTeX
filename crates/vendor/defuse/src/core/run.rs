@@ -433,7 +433,7 @@ impl Shared {
                 Check::Broke(why) => {
                     r.data().kept = None;
                     self.c.restarted.fetch_add(1, Ordering::Relaxed);
-                    *lock(&self.t).restarted_by.entry(why).or_default() += 1;
+                    *self.tal().restarted_by.entry(why).or_default() += 1;
                 }
                 Check::Holds => {
                     // Still waiting where it stopped: park again unrun.
@@ -644,7 +644,7 @@ impl Shared {
         }
         crate::obs::count!(Gated);
         self.c.gated.fetch_add(1, Ordering::Relaxed);
-        *lock(&self.t).waits_by_kind.entry(kind).or_default() += 1;
+        *self.tal().waits_by_kind.entry(kind).or_default() += 1;
         let _ = r;
         self.enqueue(s);
     }
@@ -868,7 +868,7 @@ impl Shared {
             _ => (Vec::new(), None),
         };
         let name = self.op_name(op);
-        *lock(&self.t).runs_by_op.entry(name).or_default() += 1;
+        *self.tal().runs_by_op.entry(name).or_default() += 1;
         r.clear(F_STALE);
         if r.has(super::F_NARROWED) {
             // Running again: the text's set until it narrows again.
@@ -921,7 +921,7 @@ impl Shared {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 cx.run_ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                *lock(&self.t).run_ns.entry(s).or_default() += cx.run_ns;
+                *self.tal().run_ns.entry(s).or_default() += cx.run_ns;
                 self.c.op_ns.fetch_add(cx.run_ns, Ordering::Relaxed);
             }
             Self::set_in_run(false);
@@ -1124,7 +1124,7 @@ impl Shared {
         }
         {
             let name = self.op_name(r.data().op);
-            let mut t = lock(&self.t);
+            let mut t = self.tal();
             *t.waits_by_op.entry(name).or_default() += 1;
             *t.waits_by_kind.entry(w.kind).or_default() += 1;
             if let Subj::Node(x) = w.on {

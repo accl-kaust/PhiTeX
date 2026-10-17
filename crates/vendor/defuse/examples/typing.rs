@@ -102,6 +102,10 @@ fn eval(eng: &mut Engine, threads: usize, spec: bool) -> (Duration, Report) {
     }
     .expect("evaluate");
     if std::env::var_os("ROUNDS").is_some() {
+        eprintln!(
+            "critical: realised {:?} ({} nodes) max_ready {} ready_total {}",
+            r.realised_critical_time, r.realised_critical_path, r.max_ready, r.ready_total
+        );
         let sum = |f: fn(&defuse::RoundTimes) -> u64| r.round_times.iter().map(f).sum::<u64>() as f64 / 1e6;
         eprintln!(
             "rounds {} wall {:.1} ms  op {:.1}  commit {:.1}  check {:.1}  idle {:.1} (ms, summed over workers)",

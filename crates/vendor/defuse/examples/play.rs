@@ -171,6 +171,7 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "contributions_before_me" => return res(cx.contributions_before_me(de(&g(0)))),
         "take_prev_contribution" => return res(cx.take_prev_contribution(de(&g(0)), de(&g(1)))),
         "set_env" => json!(cx.set_env(de(&g(0)), de(&g(1)))),
+        "follow_after" => json!(cx.follow_after(de(&g(0)), de(&g(1)), de(&g(2)))),
         "park" => json!(cx.park(Box::new(()))),
         "parked" => json!(cx.parked().is_some()),
         "restart" => json!(cx.restart()),
@@ -484,7 +485,12 @@ fn main() {
         eprintln!("play: the recording has no evaluation");
         std::process::exit(2);
     };
-    let lines: Vec<J> = lines.into_iter().filter(|l| l["e"].as_u64() == Some(engine)).collect();
+    // Values are recorded once, under the engine that first made them: a
+    // client may share its value table between engines.
+    let lines: Vec<J> = lines
+        .into_iter()
+        .filter(|l| l["e"].as_u64() == Some(engine) || l["k"] == "val")
+        .collect();
     let mut book = Book::default();
     for l in &lines {
         match l["k"].as_str().unwrap_or("") {

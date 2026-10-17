@@ -1029,6 +1029,8 @@ impl Shared {
             for &f in ns {
                 let mut sh = wlock(self.shard(u, f));
                 let idx = sh.entry((u, f)).or_default();
+                self.drain(idx);
+                self.drain(idx);
                 if !idx.named.contains(&s) {
                     let pos = self.sorted_pos(&idx.named, s);
                     idx.named.insert(pos, s);
@@ -1065,6 +1067,8 @@ impl Shared {
             for &f in ns {
                 let mut sh = wlock(self.shard(u, f));
                 let idx = sh.entry((u, f)).or_default();
+                self.drain(idx);
+                self.drain(idx);
                 if !idx.named.contains(&s) {
                     let pos = self.sorted_pos(&idx.named, s);
                     idx.named.insert(pos, s);
@@ -1387,6 +1391,49 @@ impl Shared {
     }
 
     /// Inserts a subscription by its position.
+    /// Files `idx`'s inbox into its lists (under the shard's write lock).
+    pub(crate) fn drain(&self, idx: &mut super::FieldIdx) {
+        let items = std::mem::take(idx.inbox.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner));
+        for it in items {
+            match it {
+                super::Inbox::Use { sub, chain } => {
+                    self.ins_sub(&mut idx.readers, sub);
+                    for &g in chain.iter() {
+                        self.ins_sub(idx.freaders.entry(g).or_default(), sub);
+                    }
+                }
+                super::Inbox::Seq { sub, frame } => {
+                    self.ins_sub(&mut idx.readers, sub);
+                    self.ins_sub(idx.sreaders.entry(frame).or_default(), sub);
+                }
+                super::Inbox::Range(sub) => self.ins_sub(&mut idx.range_readers, sub),
+                super::Inbox::User { node, reader, gn } => {
+                    let is: Vec<usize> = self.def_positions(idx, node).collect();
+                    for i in is {
+                        idx.defs[i].users.push((reader, gn));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Delivers subscriptions to field `f` of unit `u`: into its inbox
+    /// under the read lock, or (no index yet) filed under the write lock.
+    pub(crate) fn deliver(&self, u: u32, f: Field, items: Vec<super::Inbox>) {
+        {
+            let sh = super::rlock(self.shard(u, f));
+            if let Some(idx) = sh.get(&(u, f)) {
+                lock(&idx.inbox).extend(items);
+                return;
+            }
+        }
+        let mut sh = wlock(self.shard(u, f));
+        let idx = sh.entry((u, f)).or_default();
+        self.drain(idx);
+        lock(&idx.inbox).extend(items);
+        self.drain(idx);
+    }
+
     pub(crate) fn ins_sub(&self, v: &mut super::SubList, sub: super::Sub) {
         if !v.unsorted
             && let Some(last) = v.v.last()
@@ -1473,6 +1520,7 @@ impl Shared {
         let mut sh = wlock(self.shard(u, f));
         let fk_new = fk_scope.unwrap_or_else(|| self.frame_of(s));
         let idx = sh.entry((u, f)).or_default();
+        self.drain(idx);
         let scope = loc.entry_key();
         if let Some(i) = self.def_pos_k(idx, s, scope) {
             let e = &mut idx.defs[i];
@@ -1616,6 +1664,7 @@ impl Shared {
         for f in fields {
             let mut sh = wlock(self.shard(u, f));
             let Some(idx) = sh.get_mut(&(u, f)) else { continue };
+            self.drain(idx);
             let is: Vec<usize> = self.def_positions(idx, s).collect();
             for i in is {
                 let (old, loc, scope) = (idx.defs[i].fk, idx.defs[i].loc, idx.defs[i].scope);
@@ -1652,6 +1701,7 @@ impl Shared {
     pub(crate) fn remove_def_k(&self, u: u32, s: Slot, f: Field, scope: u8, notes: &mut Notes) {
         let mut sh = wlock(self.shard(u, f));
         let Some(idx) = sh.get_mut(&(u, f)) else { return };
+        self.drain(idx);
         if let Some(i) = self.def_pos_k(idx, s, scope) {
             let e = idx.defs.remove(i);
             for (n, g) in e.users {
@@ -1666,6 +1716,7 @@ impl Shared {
     pub(crate) fn set_contrib(&self, u: u32, s: Slot, f: Field, val: Option<ValueId>, notes: &mut Notes) {
         let mut sh = wlock(self.shard(u, f));
         let idx = sh.entry((u, f)).or_default();
+        self.drain(idx);
         let l = self.rec(s).lab();
         // Labels are not unique (a node freed keeps the label its
         // replacement takes): look through every entry at `l`.
@@ -2481,6 +2532,7 @@ impl Shared {
         for (f, p) in preds {
             let mut sh = wlock(self.shard(u, f));
             let Some(idx) = sh.get_mut(&(u, f)) else { continue };
+            self.drain(idx);
             let Some(i) = self.def_pos(idx, s) else { continue };
             // Not yet made (its commit's insertion compares then).
             let DefVal::Val(v) = idx.defs[i].val else { continue };
@@ -2516,7 +2568,7 @@ impl Shared {
         if r.flags.fetch_and(!super::F_GUESS, Ordering::AcqRel) & super::F_GUESS != 0 {
             self.outstanding.fetch_sub(1, Ordering::Relaxed);
             self.c.mispredictions.fetch_add(1, Ordering::Relaxed);
-            let mut t = super::lock(&self.t);
+            let mut t = self.tal();
             if let Some(f) = why {
                 *t.refuted_by_field.entry(f).or_default() += 1;
                 self.note_refuted(f);
@@ -2661,7 +2713,7 @@ impl Shared {
             refuted = true;
             self.outstanding.fetch_sub(1, Ordering::Relaxed);
             self.c.mispredictions.fetch_add(1, Ordering::Relaxed);
-            let mut t = super::lock(&self.t);
+            let mut t = self.tal();
             if let Cause::Changed { field: f, .. } = cause {
                 *t.refuted_by_field.entry(*f).or_default() += 1;
                 self.note_refuted(*f);

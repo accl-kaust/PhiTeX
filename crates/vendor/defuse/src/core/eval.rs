@@ -532,7 +532,9 @@ impl Engine {
         ] {
             a.store(0, Ordering::Relaxed);
         }
-        *lock(&sh.t) = super::Tallies::default();
+        for t in &*sh.t {
+            *lock(&t.0) = super::Tallies::default();
+        }
         {
             // Refutations carry over, fading by one an evaluation: a field
             // refuted in the last edit is not guessed in the next ones, and
