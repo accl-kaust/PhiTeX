@@ -1166,11 +1166,26 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
     // on: §9b, only the link and a cut's resume wait on one)
     let mut on_chain: std::collections::BTreeMap<&'static str, usize> =
         std::collections::BTreeMap::new();
-    for (n, _) in eng.critical_chain() {
-        if let Some(i) = eng.node_info(n) {
-            *on_chain.entry(i.op).or_default() += 1;
+    let chain = eng.critical_chain();
+    // (the chain's links by the node's kind and why the next one waited
+    // on it, and its first links in order)
+    let mut links: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut first = Vec::new();
+    for (n, c) in &chain {
+        let op = eng.node_info(*n).map_or("?", |i| i.op);
+        *on_chain.entry(op).or_default() += 1;
+        let c = format!("{c:?}");
+        let c = c.split([' ', '(', '{']).next().unwrap_or("").to_owned();
+        *links.entry(format!("{op} {c}")).or_default() += 1;
+        if first.len() < 40 {
+            first.push(format!("{op}:{c}"));
         }
     }
+    eprintln!(
+        "acct: critical chain {} links by kind and cause {links:?}; first: {}",
+        chain.len(),
+        first.join(" ")
+    );
     let waited_fin = r
         .top_waited
         .iter()

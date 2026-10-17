@@ -13,32 +13,36 @@
 //!   profile and its items as units of two accumulators
 //!   ([`crate::vprof::VPROF`], [`PITEMS`]) and places its scan step
 //!   ([`Scan`]) after it.
-//! - The scan is TeX's page builder (§980–§1010) over the profiles. A
-//!   step reads the scan state ([`SCAN`]), defined once per page by the
-//!   continuation after the page's finisher, and the profiles of the
-//!   pieces after it up to its own; a step that fires no page defines
-//!   nothing, so the steps of a page depend on the page's start, not on
-//!   one another. Where a page fires in its own piece, the step defines
-//!   the page's break ([`BREAKS`]: its range and candidate, no items)
-//!   and places the finisher ([`Finish`]) and the continuation; each of
-//!   them assembles the page from the pieces' items by the break's range
-//!   with the same builder ([`Run::assemble_page`],
-//!   [`PageState::fold_items`]: `\box255`, the insertions, the marks), so
-//!   an edit inside a page that moves no break runs no scan step.
+//! - The scan is TeX's page builder (§980–§1010) over the profiles, one
+//!   node a block of pieces ([`block_end`], [`Run::scan_step`]): from
+//!   the scan state ([`SCAN`]) where its block begins, defined by the
+//!   continuation of the page before, it folds the profiles; for each
+//!   page firing in them it places the page's finisher ([`Finish`]) and
+//!   continuation right after the piece the page fires in, its break
+//!   ([`Run::place_break`]: its range and candidate, no items) their
+//!   argument, and goes on from the continuation's state (its run's, or
+//!   its prediction: the finisher's routine giving back what it is
+//!   predicted to). The finisher and the continuation assemble the page
+//!   from the pieces' items by the break's range with the same builder
+//!   ([`Run::assemble_page`], [`PageState::fold_items`]: `\box255`, the
+//!   insertions, the marks), so an edit inside a page that moves no
+//!   break runs no scan.
 //! - A finisher runs the output routine (§1012–§1026) as one run of its
 //!   own on its page, defines what the routine defines for everything
 //!   after it, and what it gives back to the main list ([`RTN`]); the
 //!   continuation after it reads that on the finisher's prediction, so
 //!   the scan does not wait for the routine.
-//! - A piece's run ends at every page-builder candidate with items
-//!   contributed since the candidate before and input after it
-//!   (spec-final A1; a candidate with nothing contributed fires no page,
-//!   §994): its continuation ([`Run::cont_encode`]) is the
-//!   material of a `resume` piece ([`Resume`], [`RESUME`]) placed after
-//!   it, which reads the state there forward and, where a page fires
-//!   there, what the page's finisher leaves (its predictions first). No
-//!   command after a candidate runs in the run before it; nothing before
-//!   a finisher reads a finisher.
+//! - A piece runs through its page-builder candidates. A finisher whose
+//!   page fires inside a piece checks its routine against what the
+//!   piece read and defined after the candidate ([`Run::check_cut`]);
+//!   only where the routine changes them it splits the piece
+//!   (`split:<piece>`, [`split_field`], a loop-back): the piece's next
+//!   run ends at the candidate and its continuation
+//!   ([`Run::cont_encode`]) is the material of a `resume` piece
+//!   ([`Resume`], [`RESUME`]) placed after it, which reads the state
+//!   there forward and what the page's finisher leaves. The piece's PDF
+//!   records after the candidate go after the page in the line
+//!   (`crate::pdfout::order_line`).
 //! - Nothing reads the whole list, nothing is replayed: one scan state
 //!   per page, one finisher per page, a step per piece reading only the
 //!   profiles since its page began.
@@ -111,22 +115,6 @@ pub(crate) const SCAN: &str = "scan:state";
 /// fold): the steps read the profile in [`SCAN`] only, so a change in
 /// the items that leaves the profile alone wakes no step.
 pub(crate) const SCAN_MAT: &str = "scan:material";
-
-/// A page's break (spec-redesign §1, `breaks:p`): `[j, at, src, pid, k,
-/// rest]`, defined by the node that finds the page firing (a piece's
-/// scan step over the profiles, or the scan's continuation over its own
-/// material) and read by the page's finisher and the continuation after
-/// it, which each assemble the page from the items by the break's range
-/// ([`Run::assemble_page`]): the material the page began with and the
-/// state there (`src`, a [`SCAN`] value), the pieces' items after its
-/// anchor to piece `pid` (-2: the page fires in `src`'s material), the
-/// candidate `k`, the profile items after it, and `at`, the node whose
-/// position the page's eqtb reads are made at (`\deadcycles`, an
-/// insertion class's registers: what reaches the step, not what the
-/// routine left). No items in it: an edit inside a page that moves no
-/// break changes no break, and runs the page's finisher and
-/// continuation, not the scan.
-pub(crate) const BREAKS: &str = "breaks";
 
 /// The page nodes' declared contributions: none to the pieces' units
 /// ([`crate::vprof::VPROF`], [`PITEMS`]), so a scan step's read of a
@@ -931,20 +919,25 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// A page found firing (spec-redesign §1): its break defined
-    /// ([`BREAKS`]), its finisher placed after this node with its
-    /// position as its arguments (`[j, …, routine hint, ordinary pages
-    /// fired, special]`), and the scan's continuation after it. Nothing
-    /// of the page's items: the finisher and the continuation assemble it
-    /// from the break ([`Run::assemble_page`]). `origin`: for a page
+    /// A page found firing (spec-redesign §1): its break (`[j, read at,
+    /// src, piece, candidate, rest, origin, material]`:
+    /// [`Run::assemble_page`]) and its
+    /// finisher, placed right after the piece the page fires in (`at`,
+    /// [`Ctx::follow_after`]; after this node where it fires in this
+    /// node's own material), with its position and the break as its
+    /// arguments (`[j, …, routine hint, ordinary pages fired, special,
+    /// break]`). Nothing of the page's items: the finisher and the
+    /// continuation assemble it from the break. `origin`: for a page
     /// firing in a continuation's material, the piece whose items after
     /// an earlier page's candidate that material holds (`[piece, its
     /// last candidate, what it read, what it defined after each
-    /// candidate, its locals at its last]`): the page's finisher checks the piece there as for a
-    /// page firing in its own items ([`Run::check_cut`]).
+    /// candidate, its locals at its last]`): the page's finisher checks
+    /// the piece there as for a page firing in its own items
+    /// ([`Run::check_cut`]).
     #[allow(clippy::too_many_arguments)]
     fn place_break(
         &mut self,
+        at: Option<phitex_defuse::NodeId>,
         j: i64,
         src: ValueId,
         pid: i64,
@@ -953,43 +946,65 @@ impl Run<'_, '_> {
         normal: i64,
         special: bool,
         origin: Option<ValueId>,
+        mat: Option<ValueId>,
     ) -> R<(ValueId, Vec<ValueId>)> {
         let v = self.v;
         let text = self.output_hint()?;
-        let at = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        let mut b = vec![
+        // (where what the page's builder reads is read: right after the
+        // piece it fires in, before its finisher; this node for a page
+        // firing in this node's own material)
+        let read_at = at.unwrap_or_else(|| self.cx.node());
+        let b = v.list(vec![
             v.int(j),
-            v.int(at),
+            v.int(i64::from_ne_bytes(read_at.raw().to_ne_bytes())),
             src,
             v.int(pid),
             v.int(i64::from(k)),
             v.int(i64::try_from(rest).unwrap_or(-1)),
-        ];
-        b.extend(origin);
-        let b = v.list(b);
-        self.cx.define_with(v.field(BREAKS), b, Locality::Global);
+            origin.unwrap_or(ValueId::UNIT),
+            mat.unwrap_or(ValueId::UNIT),
+        ]);
         let mut pos = vec![v.int(j)];
         pos.extend([ValueId::UNIT; 8]);
-        pos.extend([text, v.int(normal), v.int(i64::from(special))]);
-        self.cx.follow(self.ops.finish, pos.clone());
+        pos.extend([text, v.int(normal), v.int(i64::from(special)), b]);
+        match at {
+            Some(at) => {
+                self.cx.follow_after(at, self.ops.finish, pos.clone());
+            }
+            None => {
+                self.cx.follow(self.ops.finish, pos.clone());
+            }
+        }
         Ok((b, pos))
     }
 
-    /// The continuation of page `j` placed after its finisher, with the
-    /// scan state it is predicted to define (`pred`, [`Scan::defs`]):
-    /// the next page's steps run on that instead of waiting for it.
-    fn place_cont(&mut self, j: i64, pred: Option<(ValueId, ValueId)>) {
+    /// The continuation of page `j` (break `b`) placed after its
+    /// finisher, with the scan state it is predicted to define (`pred`,
+    /// [`Scan::defs`]): the next page's scan runs on that instead of
+    /// waiting for it. Arguments `[-2, j, state, material, break]`.
+    fn place_cont(
+        &mut self,
+        at: Option<phitex_defuse::NodeId>,
+        j: i64,
+        pred: Option<(ValueId, ValueId)>,
+        b: ValueId,
+    ) {
         let v = self.v;
         // (the continuation names its page: its guess is that page's,
         // [`Ops::scan_guess`])
-        let mut args = vec![v.int(-2), v.int(j)];
-        if let Some((x, mat)) = pred {
-            args.extend([x, mat]);
+        let (x, mat) = pred.unwrap_or((ValueId::UNIT, ValueId::UNIT));
+        let args = vec![v.int(-2), v.int(j), x, mat, b];
+        match at {
+            Some(at) => {
+                self.cx.follow_after(at, self.ops.scan, args);
+            }
+            None => {
+                self.cx.follow(self.ops.scan, args);
+            }
         }
-        self.cx.follow(self.ops.scan, args);
     }
 
-    /// A page assembled from its break (`b`, a [`BREAKS`] value): the
+    /// A page assembled from its break (`b`, [`Run::place_break`]): the
     /// state where it began and its material (`src`), the items of the
     /// pieces after the anchor up to piece `pid` (the break's range: the
     /// window ends at its piece, whatever comes after it), folded with
@@ -997,11 +1012,16 @@ impl Run<'_, '_> {
     /// read where the break was found. `(state after, the fire, the piece's
     /// unit)`, the unit empty for a page firing in the material; `None`
     /// where the items fire no page at the break (a scan defect, said).
-    fn assemble_page(&mut self, b: &[ValueId]) -> R<Option<(PageState, Fire, Vec<ValueId>)>> {
+    fn assemble_page(
+        &mut self,
+        b: &[ValueId],
+        mat: Option<ValueId>,
+    ) -> R<Option<(PageState, Fire, Vec<ValueId>)>> {
         let v = self.v;
         let n = |i: usize| b.get(i).map_or(0, |&x| int_of(v, x));
         let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n(1).to_ne_bytes()));
         let (pid, k, rest) = (n(3), n(4), n(5));
+        let mat = mat.or_else(|| b.get(7).copied().filter(|&m| m != ValueId::UNIT));
         let mut s = ScanIn::decode(v, b.get(2).copied().and_then(some));
         let mut raws = Vec::new();
         let mut own = Vec::new();
@@ -1009,23 +1029,23 @@ impl Run<'_, '_> {
             // (the material the page began with, as items, where the break
             // was found; a page firing in a continuation's material has it
             // in its `src`)
-            // (the step that found the break reads it where it is, for
-            // its continuation's prediction)
-            let here = at == self.cx.node();
-            s.material = match if here {
-                self.eng_read(v.field(SCAN_MAT))?
-                    .map_or(phitex_defuse::FieldAt::Unset, |x| {
-                        phitex_defuse::FieldAt::Def(x, None)
-                    })
-            } else {
-                self.cx.use_field_at(v.field(SCAN_MAT), Some(at))?
-            } {
-                phitex_defuse::FieldAt::Def(x, _) => list_of(v, x),
-                phitex_defuse::FieldAt::Unset => Vec::new(),
-                phitex_defuse::FieldAt::Gone => self
+            // (as the scan that found the break had it, `mat`; else as it
+            // reaches here: a finisher and a continuation sit after the
+            // continuation of the page before, which defines it)
+            s.material = match mat {
+                Some(m) => list_of(v, m),
+                None if at == self.cx.node() => self
                     .eng_read(v.field(SCAN_MAT))?
                     .map(|x| list_of(v, x))
                     .unwrap_or_default(),
+                None => match self.cx.use_field_at(v.field(SCAN_MAT), Some(at))? {
+                    phitex_defuse::FieldAt::Def(x, _) => list_of(v, x),
+                    phitex_defuse::FieldAt::Unset => Vec::new(),
+                    phitex_defuse::FieldAt::Gone => self
+                        .eng_read(v.field(SCAN_MAT))?
+                        .map(|x| list_of(v, x))
+                        .unwrap_or_default(),
+                },
             };
             // (the window ends at the break's piece: neither the step
             // that found the break, nor this page's finisher, nor
@@ -1047,19 +1067,30 @@ impl Run<'_, '_> {
             }
             own = list_of(v, items[last]);
         }
-        let dead = if has_end(v, &s.material) || raws.iter().any(|r| has_end(v, r)) {
+        // (a node reads what reaches its own place by its own reads: a
+        // position read is of an earlier node)
+        let here = at == self.cx.node();
+        let dead = if !(has_end(v, &s.material) || raws.iter().any(|r| has_end(v, r))) {
+            0
+        } else if here {
+            self.cint(crate::fields::cell::DEADCYCLES)?
+        } else {
             let f = self.loc_field(crate::fields::cell::DEADCYCLES as Loc);
             match self.cx.use_field_at(f, Some(at))? {
                 phitex_defuse::FieldAt::Def(x, _) => int_of(v, x),
                 phitex_defuse::FieldAt::Unset => 0,
                 phitex_defuse::FieldAt::Gone => self.cint(crate::fields::cell::DEADCYCLES)?,
             }
-        } else {
-            0
         };
         let mut ps = s.page_state();
         let fire = {
-            let mut live = |c: u16| self.insert_class_at(c, at);
+            let mut live = |c: u16| {
+                if here {
+                    self.insert_class(c)
+                } else {
+                    self.insert_class_at(c, at)
+                }
+            };
             let last = raws.len();
             let mut out = ps
                 .fold_items(v, &s.material, dead, &mut live)?
@@ -1145,7 +1176,7 @@ impl Run<'_, '_> {
     /// unit. Its position where the page cannot be assembled.
     fn finisher_args(&mut self, b: &[ValueId], pos: &[ValueId]) -> R<Vec<ValueId>> {
         let v = self.v;
-        let Some((_, mut fire, own)) = self.assemble_page(b)? else {
+        let Some((_, mut fire, own)) = self.assemble_page(b, None)? else {
             return Ok(pos.to_vec());
         };
         self.fin_box = fire.b255.take();
@@ -1153,7 +1184,7 @@ impl Run<'_, '_> {
         // (a page firing in the rest of a piece carried in a
         // continuation's material: checked against that piece, its
         // origin, `place_break`)
-        let own = match b.get(6).filter(|_| pid == -2) {
+        let own = match b.get(6).filter(|&&o| pid == -2 && o != ValueId::UNIT) {
             Some(&o) => {
                 let xs = list_of(v, o);
                 pid = xs.first().map_or(-2, |&x| int_of(v, x));
@@ -1519,7 +1550,13 @@ impl Run<'_, '_> {
         self.pin_reaching_page_params(&mut raw)?;
         self.resolve_ins_markers(&mut raw)?;
         self.contribute_units(&raw, last, reads, defs, Vec::new(), false);
-        self.cx.follow(self.ops.scan, vec![v.int(-3)]);
+        // (the scan is a block's: the block's last piece places it, and
+        // the document's last, `\end`; the pieces before fold in its
+        // window)
+        if block_end(self.cx.node().raw()) || raw.iter().any(|&x| nodes::tag(v, x) == nodes::T_END)
+        {
+            self.cx.follow(self.ops.scan, vec![v.int(-3)]);
+        }
         Ok(())
     }
 
@@ -2547,12 +2584,12 @@ impl FinDefs {
         self.last
             .iter()
             .filter_map(|&(f, x)| {
-                // (the marks are the page's text: equal on two pages by
-                // chance; the scan knows them, spec §3)
+                // (every field: the next finisher reads the outgoing state
+                // of this one only as a prediction, spec-final §3.5; a
+                // mark, a penalty, any value not stable across pages, the
+                // last run's, a guess that runs its readers again where
+                // wrong)
                 let name = crate::val::field_name(v, f);
-                if name.starts_with("mark") || name == "param:outputpenalty" {
-                    return None;
-                }
                 // (one run of the routine so far, spec-final §9b: its
                 // values carried on, a page counter stepping by the pages
                 // between; a wrong guess runs its readers again, a piece
@@ -2569,12 +2606,16 @@ impl FinDefs {
                 }
                 // (registers only: a page counter; not a hash, a penalty)
                 if !name.starts_with("count:") {
-                    return None;
+                    return Some((f, x));
                 }
-                let (a, b) = (v.as_int(y)?, v.as_int(x)?);
-                let d = b.checked_sub(a)?;
+                let (Some(a), Some(b)) = (v.as_int(y), v.as_int(x)) else {
+                    return Some((f, x));
+                };
+                let Some(d) = b.checked_sub(a) else {
+                    return Some((f, x));
+                };
                 if dj <= 0 || d % dj != 0 {
-                    return None;
+                    return Some((f, x));
                 }
                 let x = (d / dj).checked_mul(j - self.last_j)?.checked_add(b)?;
                 Some((f, v.int(x)))
@@ -2785,11 +2826,12 @@ impl Operation for Finish {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
-    /// Its page's break ([`BREAKS`]) and the material the page begins
-    /// with ([`SCAN_MAT`], [`Run::assemble_page`]): the node waits for
-    /// both, never runs on a value its definer has not committed.
-    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(vec![v.field(BREAKS), v.field(SCAN_MAT)])
+    /// Nothing held: its break is its argument, and the material its
+    /// page begins with ([`SCAN_MAT`]) it reads in its run, where the
+    /// continuation before it is predicted ([`Scan::predicted_defs`]):
+    /// the engine's gate takes no prediction.
+    fn reads(&self, _: &[ValueId], _: &Values) -> Option<Vec<Field>> {
+        None
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
@@ -2813,9 +2855,9 @@ impl Operation for Finish {
                 // the node before it; the page assembled from the items
                 // by the break's range; its own arguments are its
                 // position)
-                let b = r
-                    .eng_read(v.field(BREAKS))?
-                    .map(|x| list_of(v, x))
+                let b = pos
+                    .get(12)
+                    .map(|&x| list_of(v, x))
                     .filter(|xs| xs.len() >= 6 && xs.first() == pos.first());
                 let at = b
                     .as_ref()
@@ -3171,19 +3213,22 @@ impl Operation for Scan {
     /// and fourth arguments, [`Run::place_cont`]) defines that state: a
     /// reader finds it and runs on the prediction ([`Scan::predicted_defs`]).
     fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        (args.len() >= 4 && args.first().is_some_and(|&x| int_of(v, x) == -2)).then(|| {
-            vec![
-                (v.field(SCAN), Locality::Global),
-                (v.field(SCAN_MAT), Locality::Global),
-            ]
-        })
+        (args.len() >= 4
+            && args.first().is_some_and(|&x| int_of(v, x) == -2)
+            && args[2] != ValueId::UNIT)
+            .then(|| {
+                vec![
+                    (v.field(SCAN), Locality::Global),
+                    (v.field(SCAN_MAT), Locality::Global),
+                ]
+            })
     }
     /// The page fields and the scan state: a step not run yet may fire
     /// a page and place a continuation that defines it, so a step's read
     /// waits for the steps before it still to run; a step's run narrows
     /// this to what it defined ([`Run::scan_node`]).
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT), v.field(BREAKS)])
+        MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT)])
     }
     /// A step is held until the scan state is there and its piece has
     /// run (what the piece leaves the main list, which it defines at its
@@ -3193,9 +3238,10 @@ impl Operation for Scan {
     /// window still in work.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         if args.first().is_some_and(|&x| int_of(v, x) == -2) {
-            // (it assembles its page as the finisher does: the break and
-            // the material the page began with)
-            return Some(vec![v.field(BREAKS), v.field(SCAN_MAT)]);
+            // (it assembles its page as the finisher does, reading the
+            // material the page began with in its run, on the prediction
+            // of the continuation before it; the break is its argument)
+            return None;
         }
         // (not the scan state: the engine's gate does not take a
         // definer's prediction, a run's read does, and the continuation
@@ -3213,7 +3259,9 @@ impl Operation for Scan {
         if args.first().is_none_or(|&x| int_of(v, x) != -2) {
             return None;
         }
-        if let (Some(&x), Some(&mat)) = (args.get(2), args.get(3)) {
+        if let (Some(&x), Some(&mat)) = (args.get(2), args.get(3))
+            && x != ValueId::UNIT
+        {
             return Some(vec![(v.field(SCAN), x), (v.field(SCAN_MAT), mat)]);
         }
         let j = int_of(v, *args.get(1)?);
@@ -3317,6 +3365,20 @@ fn has_end(v: &Values, raw: &[ValueId]) -> bool {
     raw.iter().any(|&x| nodes::tag(v, x) == nodes::T_END)
 }
 
+/// The pieces of a scan's block, about (spec-final §9b): a piece ends a
+/// block where its node's id says so ([`block_end`]), content-keyed (an
+/// edit moves no other block's end).
+const BLOCK: u64 = 64;
+
+/// Whether the piece `node` ends a block of pieces ([`BLOCK`]): it then
+/// places the block's scan ([`Run::scan_step`]).
+fn block_end(node: u64) -> bool {
+    let mut z = node.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    (z ^ (z >> 31)).is_multiple_of(BLOCK)
+}
+
 /// What a continuation does ([`Run::cont_state`]).
 enum Cont {
     Nothing,
@@ -3348,7 +3410,7 @@ enum Placed {
     Nothing,
     /// The scan state ([`SCAN`]).
     State,
-    /// A page's break ([`BREAKS`]).
+    /// A page's break ([`Run::place_break`]).
     Page,
 }
 
@@ -3378,28 +3440,31 @@ impl Run<'_, '_> {
             self.scan_step()?
         };
         // (what it defined: a reader after it no longer waits for it)
+        // (a page placed: the scan state too, until it commits the
+        // continuation it places, which defines it, is not there for a
+        // reader to wait for)
         let names: Vec<Field> = match placed {
             Placed::Nothing => Vec::new(),
-            Placed::State => vec![v.field(SCAN), v.field(SCAN_MAT)],
-            // (and the scan state: until it commits, the continuation it
-            // places, which defines it, is not there for a reader to
-            // wait for)
-            Placed::Page => vec![v.field(SCAN), v.field(SCAN_MAT), v.field(BREAKS)],
+            Placed::State | Placed::Page => vec![v.field(SCAN), v.field(SCAN_MAT)],
         };
         self.cx.narrow(MayDefine::Names(names));
         Ok(())
     }
 
-    /// A piece's scan step.
-    #[allow(clippy::too_many_lines)]
-    fn scan_step(&mut self) -> R<Placed> {
+    /// The profiles of the window from scan state `src`'s anchor to
+    /// this node folded with the page builder: the first page firing in
+    /// them, `(piece, the fire, the builder after it)`.
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
+    fn scan_window(
+        &mut self,
+        src: Option<ValueId>,
+    ) -> R<Option<(i64, crate::vprof::ScanFire, crate::vprof::ScanState)>> {
         let v = self.v;
-        let src = self.eng_read(v.field(SCAN))?;
         let s = ScanIn::decode(v, src);
         let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
         let trace = crate::exec::env_flag!("PHITEX_SCAN_TRACE");
         if units.is_empty() {
-            return Ok(Placed::Nothing);
+            return Ok(None);
         }
         if trace {
             eprintln!(
@@ -3477,7 +3542,7 @@ impl Run<'_, '_> {
                 if st.fold_items(&material, dead, &mut rd).is_some() {
                     // (the continuation fires on this material itself: a
                     // state this step read before that continuation ran)
-                    return Ok(Placed::Nothing);
+                    return Ok(None);
                 }
                 clean = rd.0.reach_reads == reads0;
                 st
@@ -3492,11 +3557,7 @@ impl Run<'_, '_> {
                 let f = st.fold_items(&items, dead, &mut rd);
                 clean = clean && !needs[i] && rd.0.reach_reads == reads0;
                 if let Some(f) = f {
-                    // (a page firing in an earlier piece is that piece's
-                    // step's; this run read a state before it)
-                    if i == last {
-                        out = Some((pid, f));
-                    }
+                    out = Some((pid, f));
                     break;
                 }
                 if clean && i < last {
@@ -3511,44 +3572,101 @@ impl Run<'_, '_> {
             }
             (out, st)
         };
-        let Some((pid, sf)) = scan_fire else {
-            return Ok(Placed::Nothing);
-        };
-        if trace {
-            eprintln!(
-                "scan {}: page {} fires in piece {pid} at candidate {}",
-                self.cx.node().raw(),
-                st.j,
-                sf.k
-            );
-        }
-        // (the break only: the finisher and the continuation assemble
-        // the page from the items by its range)
-        let (b, pos) = self.place_break(
-            st.j - 1,
-            src.unwrap_or(ValueId::UNIT),
-            pid,
-            sf.k,
-            sf.rest,
-            st.normal,
-            sf.output_penalty <= -10001,
-            None,
-        )?;
-        // (spec-final §9b: the continuation's scan state as this step
-        // sees it, what the routine gives back its finisher's prediction:
-        // the next page's steps run on it, and only a continuation that
-        // defines another runs them again; one chain node a page)
-        let pred = if crate::exec::env_flag!("PHITEX_NO_CONT_PREDICT") {
-            None
-        } else {
-            let rtn = rtn_guess(&self.ops, v, &pos);
-            match self.cont_state(&list_of(v, b), Some(rtn))? {
-                Cont::State(x, mat) => Some((x, mat)),
-                _ => None,
+        Ok(scan_fire.map(|(pid, sf)| (pid, sf, st)))
+    }
+
+    /// A block's scan (spec-final §9b): placed after the last piece of a
+    /// block of pieces ([`block_end`]); from the scan state where the
+    /// block begins (as it reaches the scan before, whose pages'
+    /// continuations all sit before it) the pieces' profiles folded with
+    /// the page builder, and for each page firing in them its finisher
+    /// and continuation placed right after the piece it fires in
+    /// ([`Ctx::follow_after`]); the next page goes on from the state that
+    /// continuation defines as it reaches here (the continuation's run,
+    /// or its prediction), else from its prediction made here (the
+    /// finisher's routine giving back what it is predicted to), which a
+    /// run of this node reads again once the continuation is there. The
+    /// chain is the blocks', not the pages'.
+    fn scan_step(&mut self) -> R<Placed> {
+        let v = self.v;
+        let sc = self.ops.scan;
+        let before = self.cx.prev_sibling_where(&|op, a: &[ValueId]| {
+            op == sc && a.first().and_then(|&x| v.as_int(x)) == Some(-3)
+        });
+        let start =
+            |r: &mut Self, f: &str| -> R<Option<(ValueId, Option<phitex_defuse::NodeId>)>> {
+                Ok(match r.cx.use_field_at(v.field(f), before)? {
+                    phitex_defuse::FieldAt::Def(x, by) => Some((x, by)),
+                    _ => None,
+                })
+            };
+        let s0 = start(self, SCAN)?;
+        let m0 = start(self, SCAN_MAT)?;
+        let mut src = s0.map(|x| x.0);
+        let mut mat = m0.map(|x| x.0);
+        let mut seen: Vec<phitex_defuse::NodeId> = s0.and_then(|x| x.1).into_iter().collect();
+        let mut placed = Placed::Nothing;
+        let trace = crate::exec::env_flag!("PHITEX_SCAN_TRACE");
+        // (a bound on the pages one block fires: a page fires on some
+        // item, and an item's page goes on in a later piece at most)
+        for _ in 0..4096 {
+            let Some((pid, sf, st)) = self.scan_window(src)? else {
+                break;
+            };
+            if trace {
+                eprintln!(
+                    "scan {}: page {} fires in piece {pid} at candidate {}",
+                    self.cx.node().raw(),
+                    st.j,
+                    sf.k
+                );
             }
-        };
-        self.place_cont(st.j - 1, pred);
-        Ok(Placed::Page)
+            let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+            let (b, pos) = self.place_break(
+                Some(at),
+                st.j - 1,
+                src.unwrap_or(ValueId::UNIT),
+                pid,
+                sf.k,
+                sf.rest,
+                st.normal,
+                sf.output_penalty <= -10001,
+                None,
+                mat,
+            )?;
+            // (the continuation's scan state as the scan sees it, what
+            // the routine gives back its finisher's prediction: the
+            // next page runs on it, and only a continuation that defines
+            // another runs this again)
+            let pred = if crate::exec::env_flag!("PHITEX_NO_CONT_PREDICT") {
+                None
+            } else {
+                let rtn = rtn_guess(&self.ops, v, &pos);
+                match self.cont_state(&list_of(v, b), Some(rtn), mat)? {
+                    Cont::State(x, m) => Some((x, m)),
+                    _ => None,
+                }
+            };
+            self.place_cont(Some(at), st.j - 1, pred, b);
+            placed = Placed::Page;
+            // (the next page from the state reaching the piece's end:
+            // the continuation's where it is there)
+            let here = match self.cx.use_field_at(v.field(SCAN), Some(at))? {
+                phitex_defuse::FieldAt::Def(x, Some(by)) if !seen.contains(&by) => {
+                    seen.push(by);
+                    let m = match self.cx.use_field_at(v.field(SCAN_MAT), Some(at))? {
+                        phitex_defuse::FieldAt::Def(m, _) => Some(m),
+                        _ => None,
+                    };
+                    Some((x, m))
+                }
+                _ => pred.map(|(x, m)| (x, Some(m))),
+            };
+            let Some((x, m)) = here else { break };
+            src = Some(x);
+            mat = m;
+        }
+        Ok(placed)
     }
 
     /// A scan continuation's run: its page assembled from the break
@@ -3562,14 +3680,17 @@ impl Run<'_, '_> {
     fn scan_cont(&mut self) -> R<Placed> {
         let v = self.v;
         let b = self
-            .eng_read(v.field(BREAKS))?
-            .map(|x| list_of(v, x))
+            .cx
+            .args()
+            .get(4)
+            .map(|&x| list_of(v, x))
             .unwrap_or_default();
-        match self.cont_state(&b, None)? {
+        match self.cont_state(&b, None, None)? {
             Cont::Nothing => Ok(Placed::Nothing),
             Cont::Fire(j, src, k, rest, normal, special, origin) => {
-                let (_, _) = self.place_break(j, src, -2, k, rest, normal, special, origin)?;
-                self.place_cont(j, None);
+                let (b, _) =
+                    self.place_break(None, j, src, -2, k, rest, normal, special, origin, None)?;
+                self.place_cont(None, j, None, b);
                 Ok(Placed::Page)
             }
             Cont::State(x, mat) => {
@@ -3598,7 +3719,7 @@ impl Run<'_, '_> {
     /// defined or placed; the state is `None` for a page firing in the
     /// continuation's own material (its node is not known here).
     #[allow(clippy::too_many_lines)]
-    fn cont_state(&mut self, b: &[ValueId], rtn: Option<ValueId>) -> R<Cont> {
+    fn cont_state(&mut self, b: &[ValueId], rtn: Option<ValueId>, mat: Option<ValueId>) -> R<Cont> {
         let v = self.v;
         if b.len() < 6 {
             return Ok(Cont::Nothing);
@@ -3607,7 +3728,7 @@ impl Run<'_, '_> {
         if rtn.is_some() && pid == -2 {
             return Ok(Cont::Nothing);
         }
-        let Some((after, fire, own)) = self.assemble_page(b)? else {
+        let Some((after, fire, own)) = self.assemble_page(b, mat)? else {
             return Ok(Cont::Nothing);
         };
         let at_end = pid != -2
@@ -3651,7 +3772,7 @@ impl Run<'_, '_> {
         // `place_break`'s origin)
         let rest_at = material.len();
         let origin = if pid == -2 {
-            b.get(6).copied()
+            b.get(6).copied().filter(|&o| o != ValueId::UNIT)
         } else {
             Some(v.list(vec![
                 b[3],
