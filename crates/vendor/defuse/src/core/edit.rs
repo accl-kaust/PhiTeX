@@ -133,7 +133,7 @@ impl Shared {
             abort: AtomicBool::new(false),
             error: Mutex::new(None),
             c: super::Counters::default(),
-            t: Mutex::new(super::Tallies::default()),
+            t: (0..super::STRIPES).map(|_| super::TallyShard::default()).collect(),
             #[cfg(feature = "observe")]
             selects: Mutex::new(crate::values::FxHashMap::default()),
             epoch: AtomicU64::new(1),
@@ -683,6 +683,11 @@ impl Engine {
             if let Some(idx) = sh.get(&(u, f)) {
                 for sub in &idx.readers.v {
                     notes.touch.push((sub.node, sub.gn, Cause::Loop { field: f }));
+                }
+                for it in super::lock(&idx.inbox).iter() {
+                    if let super::Inbox::Use { sub, .. } | super::Inbox::Seq { sub, .. } = it {
+                        notes.touch.push((sub.node, sub.gn, Cause::Loop { field: f }));
+                    }
                 }
             }
         }

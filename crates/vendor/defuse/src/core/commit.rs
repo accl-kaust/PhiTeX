@@ -502,7 +502,7 @@ impl Shared {
                             self.c.declarations_refuted.fetch_add(1, Ordering::Relaxed);
                         }
                         refuted = true;
-                        let mut t = lock(&self.t);
+                        let mut t = self.tal();
                         *t.refuted_by_field.entry(d.f).or_default() += 1;
                         *t.refuted_nodes.entry(s).or_default() += 1;
                     }
@@ -860,21 +860,23 @@ impl Shared {
                     if let DAns::Env(_) = ans {
                         lock(&self.env_readers).entry(*f).or_default().push((s, gn));
                     }
-                    let chain = self.scope_chain(*at);
-                    let mut sh = wlock(self.shard(u, *f));
-                    let idx = sh.entry((u, *f)).or_default();
                     let sub = Sub {
                         node: s,
                         gn,
                         at: *at,
                         from: NIL,
                     };
+                    let mut items = Vec::with_capacity(2);
                     if *mode == DMode::Use {
-                        self.subscribe_reader(idx, &chain, sub);
+                        items.push(super::Inbox::Use {
+                            sub,
+                            chain: self.scope_chain(*at).into_boxed_slice(),
+                        });
                     } else {
-                        self.ins_sub(&mut idx.readers, sub);
-                        let fp = self.frame_of(*at);
-                        self.ins_sub(idx.sreaders.entry(fp).or_default(), sub);
+                        items.push(super::Inbox::Seq {
+                            sub,
+                            frame: self.frame_of(*at),
+                        });
                     }
                     let one = match ans {
                         DAns::Site { node, .. } if *mode == DMode::Use => Some(*node),
@@ -882,11 +884,9 @@ impl Shared {
                     };
                     for node in sites.iter().map(|x| x.0).chain(one) {
                         // (Both of its entries: the answer names the node.)
-                        let is: Vec<usize> = self.def_positions(idx, node).collect();
-                        for i in is {
-                            idx.defs[i].users.push((s, gn));
-                        }
+                        items.push(super::Inbox::User { node, reader: s, gn });
                     }
+                    self.deliver(u, *f, items);
                 }
                 Pred::At { node, .. } => {
                     let xr = self.rec(*node);
@@ -907,16 +907,15 @@ impl Shared {
                 }
                 Pred::Range { f, at, from, .. } => {
                     let a = self.anchor(*at, *from);
-                    let mut sh = wlock(self.shard(u, *f));
-                    let idx = sh.entry((u, *f)).or_default();
-                    self.ins_sub(
-                        &mut idx.range_readers,
-                        Sub {
+                    self.deliver(
+                        u,
+                        *f,
+                        vec![super::Inbox::Range(Sub {
                             node: s,
                             gn,
                             at: *at,
                             from: a,
-                        },
+                        })],
                     );
                     if a != NIL {
                         self.sib_subscribe(a, s, gn);
@@ -964,6 +963,7 @@ impl Shared {
                         let chain = self.scope_chain(x);
                         let mut sh = wlock(self.shard(u, f));
                         let idx = sh.entry((u, f)).or_default();
+                        self.drain(idx);
                         self.subscribe_reader(
                             idx,
                             &chain,

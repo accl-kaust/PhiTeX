@@ -125,7 +125,7 @@ impl Engine {
         rep.created = c.created.load(Ordering::Relaxed);
         rep.freed = c.freed.load(Ordering::Relaxed);
         {
-            let t = lock(&sh.t);
+            let t = sh.tallies();
             rep.runs_by_op = sorted(&t.runs_by_op);
             let mut times: Vec<(NodeId, std::time::Duration)> = t
                 .run_ns

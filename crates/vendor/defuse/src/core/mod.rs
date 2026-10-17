@@ -715,6 +715,22 @@ pub(crate) struct FieldIdx {
     pub named: Vec<Slot>,
     pub contribs: Vec<(Slot, ValueId)>,
     pub range_readers: SubList,
+    /// Subscriptions made under the shard's read lock (a field many nodes
+    /// read takes its readers without excluding its other readers): filed
+    /// into the lists above by whoever next holds the write lock.
+    pub inbox: Mutex<Vec<Inbox>>,
+}
+
+/// A subscription waiting in a field's inbox.
+pub(crate) enum Inbox {
+    /// A plain use: the reader lists and its scope chain's.
+    Use { sub: Sub, chain: Box<[u32]> },
+    /// A sequence read: the reader list and its frame's.
+    Seq { sub: Sub, frame: u32 },
+    /// A range read.
+    Range(Sub),
+    /// A user of a definer's entries (`node`'s).
+    User { node: Slot, reader: Slot, gn: u32 },
 }
 
 pub(crate) const SHARDS: usize = 256;
@@ -810,6 +826,33 @@ pub(crate) struct Counters {
     pub created: AtomicU64,
     pub freed: AtomicU64,
     pub gated: AtomicU64,
+}
+
+/// A shard of the tallies on cache lines of its own.
+#[repr(align(64))]
+#[derive(Default)]
+pub(crate) struct TallyShard(pub Mutex<Tallies>);
+
+impl Tallies {
+    /// Adds `o` into this one.
+    pub(crate) fn merge(&mut self, o: &Tallies) {
+        fn add<K: std::hash::Hash + Eq + Copy, V: std::ops::AddAssign + Copy + Default>(
+            a: &mut FxHashMap<K, V>,
+            b: &FxHashMap<K, V>,
+        ) {
+            for (k, v) in b {
+                *a.entry(*k).or_default() += *v;
+            }
+        }
+        add(&mut self.runs_by_op, &o.runs_by_op);
+        add(&mut self.run_ns, &o.run_ns);
+        add(&mut self.waits_by_op, &o.waits_by_op);
+        add(&mut self.waits_by_kind, &o.waits_by_kind);
+        add(&mut self.waited, &o.waited);
+        add(&mut self.restarted_by, &o.restarted_by);
+        add(&mut self.refuted_by_field, &o.refuted_by_field);
+        add(&mut self.refuted_nodes, &o.refuted_nodes);
+    }
 }
 
 /// Counters keyed by name or node, merged at the end.
@@ -909,7 +952,8 @@ pub(crate) struct Shared {
     pub abort: AtomicBool,
     pub error: Mutex<Option<crate::api::EvalError>>,
     pub c: Counters,
-    pub t: Mutex<Tallies>,
+    /// The tallies, one shard per stripe of threads (merged by `tallies`).
+    pub t: Box<[TallyShard]>,
     /// How often each node was taken to run this evaluation (`observe`).
     #[cfg(feature = "observe")]
     pub selects: Mutex<FxHashMap<Slot, u32>>,
@@ -1036,6 +1080,20 @@ impl Drop for UnitR<'_> {
 }
 
 impl Shared {
+    /// This thread's shard of the tallies.
+    pub(crate) fn tal(&self) -> std::sync::MutexGuard<'_, Tallies> {
+        lock(&self.t[STRIPE.with(|s| *s) % self.t.len()].0)
+    }
+
+    /// The tallies of every shard, merged.
+    pub(crate) fn tallies(&self) -> Tallies {
+        let mut all = Tallies::default();
+        for sh in &*self.t {
+            all.merge(&lock(&sh.0));
+        }
+        all
+    }
+
     pub(crate) fn wunit(&self, u: u32) -> UnitW<'_> {
         let un = self.unit(u);
         let g = wlock(&un.s);
