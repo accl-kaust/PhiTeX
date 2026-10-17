@@ -113,6 +113,11 @@ pub struct Definitions {
     order: Option<HashMap<u32, u32>>,
     /// Names some `\\font` defines (their [`Shape::Quantity`] is `'c'`).
     fonts: HashSet<String>,
+    /// The register a name stands for where a `\\countdef` (or its
+    /// kin) gave its number as digits (`\\countdef\\pageno=0`): its
+    /// assignment defines that register alone. A later definition of
+    /// the name without one drops it.
+    registers: HashMap<String, u32>,
     /// Closures computed with these as the prelude ([`Closure`]): by
     /// name, the set and every name looked up for it. Shared by clones;
     /// dropped (a fresh table) by any change.
@@ -238,7 +243,9 @@ impl Definitions {
         ec.sort_unstable();
         let mut fonts: Vec<&String> = self.fonts.iter().collect();
         fonts.sort_unstable();
-        let _ = write!(s, "ec:{ec:?}\nf:{fonts:?}\na:{}", self.active);
+        let mut regs: Vec<(&String, &u32)> = self.registers.iter().collect();
+        regs.sort_unstable();
+        let _ = write!(s, "ec:{ec:?}\nf:{fonts:?}\na:{}\nr:{regs:?}", self.active);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         s.hash(&mut h);
         h.finish()
@@ -300,6 +307,11 @@ impl Definitions {
     }
 
     /// Every shape `name` is given.
+    /// The register number a `\\countdef` (or kin) gave `name` as digits.
+    pub(crate) fn register(&self, name: &str) -> Option<u32> {
+        self.registers.get(name).copied()
+    }
+
     pub(crate) fn shapes(&self, name: &str) -> Option<Vec<&Shape>> {
         self.macros
             .get(name)
@@ -752,7 +764,18 @@ impl Definitions {
                 if name == "font" {
                     self.fonts.insert(atoms[n].name(text).to_owned());
                 }
-                self.add(atoms[n].name(text), file, pos, Shape::Quantity(ty));
+                let target = atoms[n].name(text).to_owned();
+                match register_number(atoms, n + 1)
+                    .filter(|_| name.ends_with("def") && !matches!(name, "chardef" | "mathchardef"))
+                {
+                    Some(r) => {
+                        self.registers.insert(target.clone(), r);
+                    }
+                    None => {
+                        self.registers.remove(&target);
+                    }
+                }
+                self.add(&target, file, pos, Shape::Quantity(ty));
             }
             "newcounter" => {
                 let j = skip(atoms, a + 1);
@@ -765,6 +788,23 @@ impl Definitions {
             _ => {}
         }
     }
+}
+
+/// The number a register definition gives as digits from atom `j`
+/// (`=0`, ` 24 `): optional spaces, an optional `=`, spaces, then the
+/// digits ended by anything but a digit.
+fn register_number(atoms: &[Atom], j: usize) -> Option<u32> {
+    let mut j = skip(atoms, j);
+    if atoms.get(j).map(|a| a.kind) == Some(AtomKind::Char('=')) {
+        j = skip(atoms, j + 1);
+    }
+    let mut n: Option<u32> = None;
+    while let Some(AtomKind::Char(c)) = atoms.get(j).map(|a| a.kind) {
+        let Some(d) = c.to_digit(10) else { break };
+        n = Some(n.unwrap_or(0).checked_mul(10)?.checked_add(d)?);
+        j += 1;
+    }
+    n.filter(|&r| r < 32768)
 }
 
 /// Past the spaces from `j`.

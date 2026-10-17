@@ -427,6 +427,9 @@ pub(crate) struct ScanFire {
     pub k: u32,
     pub output_penalty: i32,
     pub rest: usize,
+    /// The insertion classes on the page (§1018: the boxes its fire
+    /// fills).
+    pub classes: Vec<u16>,
 }
 
 /// The page builder's state over profiles.
@@ -635,6 +638,7 @@ impl ScanState {
                         k,
                         output_penalty: f.output_penalty,
                         rest: 0,
+                        classes: f.ins_records.iter().map(|r| r.n).collect(),
                     });
                 }
             }

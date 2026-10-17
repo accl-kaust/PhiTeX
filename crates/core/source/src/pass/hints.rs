@@ -1501,9 +1501,18 @@ impl<'a> Closure<'a> {
             .or_else(|| self.prelude.shapes(name));
         match shapes.and_then(|v| v.last().copied()) {
             Some(Shape::Quantity(t)) => match family_of_type(*t) {
-                Some(f) => {
-                    s.prefixes.insert(format!("{f}:"), false);
-                }
+                // (a `\countdef` that gave its number: that register)
+                Some(f) => match self.document.shapes(name).map_or_else(
+                    || self.prelude.register(name),
+                    |_| self.document.register(name),
+                ) {
+                    Some(r) => {
+                        s.names.insert(format!("{f}:{r}"), false);
+                    }
+                    None => {
+                        s.prefixes.insert(format!("{f}:"), false);
+                    }
+                },
                 None => s
                     .unbounded
                     .push(format!("\\{name}: a quantity of unknown kind")),
