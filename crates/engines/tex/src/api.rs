@@ -182,16 +182,25 @@ pub struct EditSender(Arc<Mutex<Pending>>);
 
 #[derive(Default)]
 struct Pending {
-    text: Option<String>,
+    text: Option<Arc<str>>,
     version: u64,
 }
 
 impl EditSender {
     /// Sends the document's text: its version.
+    #[allow(
+        clippy::must_use_candidate,
+        reason = "a send; the version is for whoever wants it"
+    )]
     pub fn send(&self, text: &str) -> u64 {
+        self.send_shared(Arc::from(text))
+    }
+
+    /// [`EditSender::send`], the text shared (not copied).
+    pub fn send_shared(&self, text: Arc<str>) -> u64 {
         let mut p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         p.version += 1;
-        p.text = Some(text.to_owned());
+        p.text = Some(text);
         p.version
     }
 
@@ -205,7 +214,7 @@ impl EditSender {
             .is_some()
     }
 
-    fn take(&self) -> Option<(String, u64)> {
+    fn take(&self) -> Option<(Arc<str>, u64)> {
         let mut p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let v = p.version;
         p.text.take().map(|t| (t, v))
@@ -229,6 +238,9 @@ struct Absorb<'a> {
     unchanged: Option<u64>,
     /// The text applied.
     text: &'a mut String,
+    /// The text sent that `text` is the canonical text of (the next
+    /// one's is made where they differ only, [`canonical_splice`]).
+    raw: &'a mut Option<Arc<str>>,
     /// Whether the nodes hold the document's canonical text
     /// ([`canonical_text`]; off for good once a text cannot be), and its
     /// comments by line, for the environment (`doc:marks`).
@@ -243,14 +255,40 @@ struct Absorb<'a> {
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (raw, version) = self.edits.take()?;
-        let text = if let Some((t, ms)) = canonical_text(&raw).filter(|_| *self.canon) {
+        crate::timeline::lap("engine: the edit taken");
+        let t0 = std::time::Instant::now();
+        let raw_marks = has_raw_marks(&raw);
+        crate::timeline::note("canonical: NUL and ^^ looked for", t0.elapsed());
+        let canon = if *self.canon && !raw_marks {
+            match self.raw.as_deref() {
+                Some(old) => {
+                    let ms = self.marks.get();
+                    let r = canonical_splice(old, self.text, &ms, &raw);
+                    // (`PHITEX_CANON_CHECK`: against the whole text's)
+                    if crate::exec::env_flag!("PHITEX_CANON_CHECK") {
+                        assert!(
+                            canonical_text(&raw).as_ref() == Some(&r),
+                            "canonical_splice differs from canonical_text"
+                        );
+                    }
+                    Some(r)
+                }
+                None => canonical_text(&raw),
+            }
+        } else {
+            None
+        };
+        let text = if let Some((t, ms)) = canon {
             self.marks.set(ms);
+            *self.raw = Some(raw);
             t
         } else {
             *self.canon = false;
             self.marks.set(Vec::new());
-            raw
+            *self.raw = None;
+            raw.to_string()
         };
+        crate::timeline::lap("engine: the canonical text (comments marked)");
         let changed = apply_text(
             &self.hints,
             eng,
@@ -262,6 +300,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.loads,
         );
         *self.text = text;
+        crate::timeline::lap("engine: the text kept");
         if changed {
             self.unchanged = None;
             Some(version)
@@ -349,6 +388,7 @@ fn apply_text(
 ) -> bool {
     let t_all = std::time::Instant::now();
     let text = as_file(text);
+    crate::timeline::lap("engine: the text as a file");
     // (the units spliced, the chunks whose text or incoming definitions
     // changed analysed again)
     if let Some(inc) = incr.as_deref_mut() {
@@ -356,7 +396,9 @@ fn apply_text(
     }
     let incr = incr.as_deref();
     let t_slices = t_all.elapsed();
+    crate::timeline::lap("engine: the units spliced and walked");
     let new = slice_keys(reg, eng.values(), &text, incr);
+    crate::timeline::lap("engine: the slices and their keys");
     let t_hints = t_all.elapsed();
     let old = &*nodes_now;
     if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
@@ -367,6 +409,7 @@ fn apply_text(
     let old_len = old.len();
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
     let common = old_mid.min(new_mid);
+    crate::timeline::lap("engine: the slice-key diff");
     let t_diff = t_all.elapsed();
     for k in common..old_mid {
         eng.remove(old[a + k].1);
@@ -394,6 +437,7 @@ fn apply_text(
         nodes.push((new[i].0, n, Src::of(&new[i].1)));
     }
     *nodes_now = nodes;
+    crate::timeline::lap("engine: replace/insert/remove, the node list made");
     edit_apply_note(
         t_all,
         [t_slices, t_hints, t_diff],
@@ -2253,6 +2297,7 @@ impl Graph {
                 env_trace(&self.eng, &env);
                 self.push_env(env);
             }
+            crate::timeline::lap("engine: the provider, the comments' environment");
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
@@ -2282,6 +2327,26 @@ impl Graph {
                 }
             };
             t_eval += t0.elapsed();
+            for (k, d, n) in ex.by_kind() {
+                if n > 0 {
+                    crate::timeline::note(&format!("runs: {k} ×{n} (summed over threads)"), d);
+                }
+            }
+            for (i, t) in r.round_times.iter().enumerate() {
+                let ns = |x: u64| std::time::Duration::from_nanos(x);
+                crate::timeline::note(&format!("round {i}: wall"), ns(t.wall_ns));
+                crate::timeline::note(&format!("round {i}: commit (summed)"), ns(t.commit_ns));
+                crate::timeline::note(&format!("round {i}: check (summed)"), ns(t.check_ns));
+            }
+            {
+                let rounds: u64 = r.round_times.iter().map(|t| t.wall_ns).sum();
+                crate::timeline::note(
+                    "the evaluation outside its rounds (its end: the engine's watcher's sleep)",
+                    t0.elapsed()
+                        .saturating_sub(std::time::Duration::from_nanos(rounds)),
+                );
+            }
+            crate::timeline::lap("engine: evaluate (the runs, their commits)");
             t_mark = std::time::Instant::now();
             if crate::exec::env_flag!("PHITEX_CHECK_READS") {
                 // (debug: every committed node's reads checked again
@@ -2404,12 +2469,14 @@ impl Graph {
                     eprintln!("  waited on {w}x: {}", describe(&self.eng, n));
                 }
             }
+            crate::timeline::lap("engine: the accounting printed (PHITEX_TEX_TIME only)");
             stats.add(&r);
             stats.env_calls = self.env_calls;
             stats.add_reruns(&self.eng, &r);
             stats.add_refuted(&self.eng, &r);
             stats.add_exec(&ex, c0, &self.eng);
             stats.add_hints(&self.eng, unit, &self.eval_errors);
+            crate::timeline::lap("engine: the evaluation's stats");
             let opened = self.opened(unit);
             let mut asked = false;
             // (a file written before that no run opens any more: listed
@@ -2601,6 +2668,7 @@ impl Graph {
         if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
             stats.if_depth_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
         }
+        crate::timeline::lap("engine: after the rounds (files, loop-backs, stats)");
         if tm {
             eprintln!(
                 "settle phases: provider {t_prov:?}, evaluate (rounds, the writer's nodes among them) {t_eval:?}, after the rounds (files, loop-backs, stats) {t_after:?}"
@@ -2847,6 +2915,14 @@ pub(crate) struct Marks(Arc<Mutex<MarksState>>);
 type MarksState = (Vec<(u32, String)>, bool);
 
 impl Marks {
+    fn get(&self) -> Vec<(u32, String)> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+            .clone()
+    }
+
     fn set(&self, ms: Vec<(u32, String)>) {
         let mut m = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if m.0 != ms {
@@ -2882,12 +2958,188 @@ impl Marks {
 /// `None` for a text this cannot mark (one holding NUL, or `^^`, which
 /// can spell an escape or a `%`).
 pub(crate) fn canonical_text(text: &str) -> Option<(String, Vec<(u32, String)>)> {
-    if text.contains('\0') || text.contains("^^") {
+    if has_raw_marks(text) {
         return None;
     }
     let mut out = String::with_capacity(text.len());
     let mut marks = Vec::new();
+    canonical_lines(text, 0, &mut out, &mut marks);
+    Some((out, marks))
+}
+
+/// Whether `text` has what [`canonical_text`] cannot stand for (a NUL,
+/// `^^`).
+fn has_raw_marks(text: &str) -> bool {
+    text.contains('\0') || text.contains("^^")
+}
+
+/// The line ends among eight bytes `w` (little-endian): the top bit of
+/// each such byte set, exactly.
+fn nl_mask(w: [u8; 8]) -> u64 {
+    let x = u64::from_le_bytes(w) ^ 0x0a0a_0a0a_0a0a_0a0a;
+    let t = (x & 0x7f7f_7f7f_7f7f_7f7f).wrapping_add(0x7f7f_7f7f_7f7f_7f7f);
+    !(t | x | 0x7f7f_7f7f_7f7f_7f7f)
+}
+
+/// The number of line ends in `b`, eight bytes at a time.
+fn newlines(b: &[u8]) -> usize {
+    let (words, rest) = b.as_chunks::<8>();
+    let n: usize = words
+        .iter()
+        .map(|w| nl_mask(*w).count_ones() as usize)
+        .sum();
+    n + rest.iter().map(|&c| usize::from(c == b'\n')).sum::<usize>()
+}
+
+/// Where the `k`-th line after byte `from` of `b` begins (past its `k`
+/// line ends; `b.len()` if there are fewer), eight bytes at a time.
+fn skip_lines(b: &[u8], from: usize, mut k: usize) -> usize {
+    if k == 0 {
+        return from;
+    }
+    let (words, rest) = b[from..].as_chunks::<8>();
+    for (i, w) in words.iter().enumerate() {
+        let mut m = nl_mask(*w);
+        let c = m.count_ones() as usize;
+        if c < k {
+            k -= c;
+            continue;
+        }
+        while k > 1 {
+            m &= m - 1;
+            k -= 1;
+        }
+        return from + i * 8 + (m.trailing_zeros() / 8) as usize + 1;
+    }
+    let base = from + words.len() * 8;
+    for (i, &c) in rest.iter().enumerate() {
+        if c == b'\n' {
+            k -= 1;
+            if k == 0 {
+                return base + i + 1;
+            }
+        }
+    }
+    b.len()
+}
+
+/// The starts of `s`'s lines, eight bytes at a time.
+fn line_starts(s: &str) -> Vec<usize> {
+    let b = s.as_bytes();
+    let mut v = vec![0];
+    let (words, rest) = b.as_chunks::<8>();
+    for (i, w) in words.iter().enumerate() {
+        let mut m = nl_mask(*w);
+        while m != 0 {
+            v.push(i * 8 + (m.trailing_zeros() / 8) as usize + 1);
+            m &= m - 1;
+        }
+    }
+    let base = words.len() * 8;
+    v.extend(
+        rest.iter()
+            .enumerate()
+            .filter(|c| *c.1 == b'\n')
+            .map(|c| base + c.0 + 1),
+    );
+    v
+}
+
+/// [`canonical_text`] of `new`, from that of `old` (`canon`, `marks`):
+/// the lines where the texts differ made again, the rest kept (each
+/// line's canonical form is its own; the marks after them renumbered).
+fn canonical_splice(
+    old: &str,
+    canon: &str,
+    marks: &[(u32, String)],
+    new: &str,
+) -> (String, Vec<(u32, String)>) {
+    const B: usize = 4096;
+    let (o, n) = (old.as_bytes(), new.as_bytes());
+    // (the bytes both begin and end with, a block at a time)
+    let mut p = 0;
+    let m = o.len().min(n.len());
+    while p + B <= m && o[p..p + B] == n[p..p + B] {
+        p += B;
+    }
+    while p < m && o[p] == n[p] {
+        p += 1;
+    }
+    let mut s = 0;
+    let room = m - p;
+    while s + B <= room && o[o.len() - s - B..o.len() - s] == n[n.len() - s - B..n.len() - s] {
+        s += B;
+    }
+    while s < room && o[o.len() - 1 - s] == n[n.len() - 1 - s] {
+        s += 1;
+    }
+    // (whole lines: from the start of the line the first difference is
+    // on to the end of the line the last one is on)
+    let t0 = std::time::Instant::now();
+    let ls = n[..p]
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |k| k + 1);
+    let q = n.len() - s;
+    let le = if q == n.len() || (q > 0 && n[q - 1] == b'\n') {
+        q
+    } else {
+        n[q..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(n.len(), |k| q + k + 1)
+    };
+    let le_old = le + o.len() - n.len();
+    // (those lines in the canonical text: the same lines, by number)
+    let first = newlines(&o[..ls]);
+    let old_lines = newlines(&o[ls..le_old]);
+    let cb = canon.as_bytes();
+    let line_at = |from: usize, k: usize| skip_lines(cb, from, k);
+    let cs = line_at(0, first);
+    let ce = if le_old == o.len() {
+        cb.len()
+    } else {
+        line_at(cs, old_lines)
+    };
+    crate::timeline::note(
+        &format!(
+            "canonical: lines {first}+{old_lines} found ({} bytes)",
+            le - ls
+        ),
+        t0.elapsed(),
+    );
+    let t0 = std::time::Instant::now();
+    let mut out = String::with_capacity(canon.len() + n.len() - o.len().min(n.len()) + 16);
+    out.push_str(&canon[..cs]);
+    let mut mid = Vec::new();
+    canonical_lines(&new[ls..le], first, &mut out, &mut mid);
+    out.push_str(&canon[ce..]);
+    crate::timeline::note("canonical: spliced", t0.elapsed());
+    // (the marks: before the lines, theirs made again, after them moved)
+    let new_lines = newlines(&n[ls..le]);
+    let lo = u32::try_from(first).unwrap_or(u32::MAX);
+    let hi = u32::try_from(first + old_lines).unwrap_or(u32::MAX);
+    let shift = |l: u32| -> u32 {
+        let l = i64::from(l) + i64::try_from(new_lines).unwrap_or(0)
+            - i64::try_from(old_lines).unwrap_or(0);
+        u32::try_from(l).unwrap_or(u32::MAX)
+    };
+    let mut ms: Vec<(u32, String)> = marks.iter().filter(|m| m.0 <= lo).cloned().collect();
+    ms.extend(mid);
+    ms.extend(
+        marks
+            .iter()
+            .filter(|m| m.0 > hi && le_old < o.len())
+            .map(|(l, c)| (shift(*l), c.clone())),
+    );
+    (out, ms)
+}
+
+/// [`canonical_text`]'s lines of `text`, the first numbered `first`
+/// (from 0), onto `out` and `marks`.
+fn canonical_lines(text: &str, first: usize, out: &mut String, marks: &mut Vec<(u32, String)>) {
     for (n, line) in text.split_inclusive('\n').enumerate() {
+        let n = n + first;
         let (body, nl) = match line.strip_suffix('\n') {
             Some(b) => (b, "\n"),
             None => (line, ""),
@@ -2922,15 +3174,14 @@ pub(crate) fn canonical_text(text: &str) -> Option<(String, Vec<(u32, String)>)>
         }
         out.push_str(nl);
     }
-    Some((out, marks))
 }
 
 /// A text as TeX reads a file: every line ends (§31).
-fn as_file(text: &str) -> String {
+fn as_file(text: &str) -> std::borrow::Cow<'_, str> {
     if text.is_empty() || text.ends_with('\n') {
-        text.to_owned()
+        std::borrow::Cow::Borrowed(text)
     } else {
-        format!("{text}\n")
+        std::borrow::Cow::Owned(format!("{text}\n"))
     }
 }
 
@@ -3420,6 +3671,8 @@ pub struct Build {
     text: String,
     /// Whether `text` is the document's canonical text.
     canon: bool,
+    /// The text `text` is the canonical text of, while `canon`.
+    raw: Option<Arc<str>>,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
 }
@@ -3560,6 +3813,7 @@ impl Build {
             doc,
             text,
             canon: g_canon,
+            raw: g_canon.then(|| Arc::from(document)),
         };
         b.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -3629,6 +3883,7 @@ impl Build {
             off += u64::try_from(src.text(&self.text).len()).unwrap_or(0);
         }
         self.g.watch.offsets = Arc::new(offsets);
+        crate::timeline::lap("engine: the nodes' offsets (progress)");
         let mut stats = Stats::default();
         self.g.queries.clear();
         self.g
@@ -3647,11 +3902,13 @@ impl Build {
             incr: self.doc.then_some(&mut self.incr),
             unchanged: None,
             text: &mut self.text,
+            raw: &mut self.raw,
             canon: &mut self.canon,
             marks: self.g.marks.clone(),
             loads: loads.as_deref(),
         };
         let t_before = t_all.elapsed();
+        crate::timeline::lap("engine: the edit's inputs");
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
             self.g.eng.set_version(v);
@@ -3670,15 +3927,18 @@ impl Build {
             stats.version = stats.version.max(v);
         }
         stats.live = self.g.eng.live_nodes();
+        crate::timeline::lap("engine: live nodes counted");
         if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
             crate::run::record_check(&self.g.eng, &self.g.start_env);
         }
         self.pkg_stats(&mut stats);
+        crate::timeline::lap("engine: package load stats");
         // the loads' records as this evaluation left them: a load
         // inserted by a later edit uses them
         if let Some(l) = &self.g.loads {
             l.merge(self.fresh_records());
         }
+        crate::timeline::lap("engine: package load records merged");
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -3766,7 +4026,7 @@ impl Build {
     /// replaced, inserted or removed, and the graph re-evaluated.
     pub fn edit(&mut self, text: &str) {
         let t0 = std::time::Instant::now();
-        self.edits.send(text);
+        let _ = self.edits.send(text);
         self.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!("time: edit {:?}", t0.elapsed());
@@ -4298,7 +4558,11 @@ impl Build {
     /// `\shipout`); else DVI.
     #[must_use]
     pub fn is_pdf(&self) -> bool {
-        self.output().0.starts_with(b"%PDF")
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .output(self.dvi)
+            .is_some_and(|x| crate::assemble::file_bytes_shared(v, x).starts_with(b"%PDF"))
     }
 
     /// Whether the job ended on a fatal error (§93, `history =
@@ -4337,17 +4601,25 @@ impl Build {
     /// The output file (DVI or PDF) and the log.
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
+        let (b, log) = self.output_shared();
+        (b.as_ref().clone(), log)
+    }
+
+    /// [`Build::output`], the file's bytes shared with the engine's
+    /// (not copied).
+    #[must_use]
+    pub fn output_shared(&self) -> (Arc<Vec<u8>>, String) {
         let v = self.g.eng.values();
-        let mut dvi: Vec<u8> = self
+        let mut dvi: Arc<Vec<u8>> = self
             .g
             .eng
             .output(self.dvi)
-            .map(|x| crate::assemble::file_bytes(v, x))
+            .map(|x| crate::assemble::file_bytes_shared(v, x))
             .unwrap_or_default();
         let n = self.pages().len();
         // (pdfTeX §794: after a fatal error the PDF file is removed)
         let end = if self.fatal() && (dvi.starts_with(b"%PDF") || self.fatal_pdf()) {
-            dvi.clear();
+            dvi = Arc::default();
             "!  ==> Fatal error occurred, no output PDF file produced!".to_owned()
         } else if n == 0 {
             "No pages of output.".to_owned()
@@ -4460,14 +4732,9 @@ impl Build {
         let doc: &str = if contiguous { &self.text } else { &owned };
         // (the document's line starts, once: a diagnostic's line by a
         // search, not by counting the text before it)
-        let doc_lines: Vec<usize> = std::iter::once(0)
-            .chain(
-                doc.bytes()
-                    .enumerate()
-                    .filter(|&(_, c)| c == b'\n')
-                    .map(|(k, _)| k + 1),
-            )
-            .collect();
+        let t_lines = std::time::Instant::now();
+        let doc_lines = line_starts(doc);
+        crate::timeline::note("diagnostics: the document's line starts", t_lines.elapsed());
         // every node under a node of the text, to that node: made only
         // for a diagnostic placed by its node alone
         let mut top_map: Option<phitex_defuse::FxHashMap<u64, usize>> = None;
@@ -4497,6 +4764,13 @@ impl Build {
             .acc_value(self.unit, f)
             .map(|s| v.seq_to_vec(s))
             .unwrap_or_default();
+        crate::timeline::note(
+            &format!("diagnostics: {} entries", entries.len()),
+            std::time::Duration::from_millis(1),
+        );
+        // (an `\input` file's text, read once a call, not once an entry)
+        let mut files: phitex_defuse::FxHashMap<String, Arc<str>> =
+            phitex_defuse::FxHashMap::default();
         for e in entries {
             let xs = list_of(v, e);
             let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
@@ -4506,24 +4780,34 @@ impl Build {
             let loc = usize::try_from(int(6)).unwrap_or(0);
             let before: String = seg.chars().take(loc).collect();
             let in_doc = xs.get(2).is_some_and(|&n| str_of(v, n) == DOC_NAME);
-            let (file, text, at) = if int(3) >= 0 && in_doc {
+            let file_text: Arc<str>;
+            let (file, text, at): (String, &str, usize) = if int(3) >= 0 && in_doc {
                 // a line of the document's own text: the position the
                 // node's frame carries is the byte in the document
                 let at = usize::try_from(int(3)).unwrap_or(0)
                     + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
-                (docname.clone(), std::borrow::Cow::Borrowed(doc), at)
+                (docname.clone(), doc, at)
             } else if int(3) >= 0
                 && let Some(&n) = xs.get(2)
                 && n != ValueId::UNIT
             {
                 // a line of an `\input` file: its characters are bytes
                 let name = str_of(v, n);
-                let bytes = (self.opts.finder)(name.trim_start_matches("./"))
-                    .map(|(_, b)| b)
-                    .unwrap_or_default();
-                let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                file_text = files
+                    .entry(name.clone())
+                    .or_insert_with(|| {
+                        let bytes = (self.opts.finder)(name.trim_start_matches("./"))
+                            .map(|(_, b)| b)
+                            .unwrap_or_default();
+                        bytes
+                            .iter()
+                            .map(|&b| char::from(b))
+                            .collect::<String>()
+                            .into()
+                    })
+                    .clone();
                 let at = usize::try_from(int(3)).unwrap_or(0) + loc;
-                (name, std::borrow::Cow::Owned(text), at)
+                (name, &*file_text, at)
             } else {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());
                 let i = top(node);
@@ -4533,7 +4817,7 @@ impl Build {
                     .and_then(|d| (!seg.is_empty()).then(|| d.find(&seg)).flatten())
                     .map_or(from, |k| from + k + before.len());
                 let at = if self.nodes.is_empty() { 0 } else { at };
-                (docname.clone(), std::borrow::Cow::Borrowed(doc), at)
+                (docname.clone(), doc, at)
             };
             // the line around `at`, as characters; `at` in the file's
             // bytes (the document's text is UTF-8, a file's characters

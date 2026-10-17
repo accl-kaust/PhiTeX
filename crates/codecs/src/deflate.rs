@@ -255,6 +255,65 @@ enum Which {
     Bl,
 }
 
+/// The longest-match search of levels 8 and 9 without walking the hash
+/// chain candidate by candidate where it can be helped (an addition to
+/// zlib's state; the matches chosen are zlib's, [`State::fast_match`]):
+/// beside the three-byte chains, chains of the positions by their first
+/// `k` bytes for `k` = 4 to 8 (`head`, `prev`, as zlib's `head` and
+/// `prev`), and each position's place in its three-byte chain (`seq`,
+/// from the count of positions its chain had when it joined, `count`).
+#[derive(Clone)]
+struct Fast {
+    head: [Vec<u16>; 5],
+    prev: [Vec<u16>; 5],
+    seq: Vec<u32>,
+    count: Vec<u32>,
+}
+
+/// The `k`-byte chains' table size.
+const FAST_BITS: u32 = 15;
+
+impl Fast {
+    fn new() -> Box<Fast> {
+        Box::new(Fast {
+            head: core::array::from_fn(|_| alloc::vec![0; 1 << FAST_BITS]),
+            prev: core::array::from_fn(|_| alloc::vec![0; W_SIZE]),
+            seq: alloc::vec![0; W_SIZE],
+            count: alloc::vec![0; HASH_SIZE],
+        })
+    }
+
+    /// The first `k` bytes at `p` of `w`, as a number.
+    fn key(w: &[u8], p: usize, k: usize) -> u64 {
+        let x = u64::from_le_bytes(w[p..p + 8].try_into().unwrap_or([0; 8]));
+        if k == 8 { x } else { x & ((1u64 << (8 * k)) - 1) }
+    }
+
+    fn slot(key: u64) -> usize {
+        usize::try_from(key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - FAST_BITS)).unwrap_or(0)
+    }
+
+    /// Position `p` joins its chains (`h` its three-byte hash).
+    fn insert(&mut self, w: &[u8], p: usize, h: usize) {
+        self.count[h] = self.count[h].wrapping_add(1);
+        self.seq[p & W_MASK] = self.count[h];
+        for k in 4..=8 {
+            let i = Self::slot(Self::key(w, p, k));
+            self.prev[k - 4][p & W_MASK] = self.head[k - 4][i];
+            self.head[k - 4][i] = pos_u16(p);
+        }
+    }
+
+    fn slide(&mut self) {
+        let w = pos_u16(W_SIZE);
+        for v in self.head.iter_mut().chain(self.prev.iter_mut()) {
+            for p in v.iter_mut() {
+                *p = p.saturating_sub(w);
+            }
+        }
+    }
+}
+
 /// One compression: zlib's `deflate_state` with its `z_stream`'s input.
 struct State<'a> {
     st: Box<Static>,
@@ -306,6 +365,8 @@ struct State<'a> {
     snap_step: usize,
     /// The states kept, each with the length of the output then.
     snaps: Vec<(usize, State<'static>)>,
+    /// The search by longer prefixes ([`Fast`]), where it is kept.
+    fast: Option<Box<Fast>>,
 }
 
 enum Block {
@@ -853,6 +914,9 @@ impl State<'_> {
         let h = self.head[self.ins_h as usize];
         self.prev[s & W_MASK] = h;
         self.head[self.ins_h as usize] = pos_u16(s);
+        if let Some(f) = self.fast.as_mut() {
+            f.insert(&self.window, s, self.ins_h as usize);
+        }
         usize::from(h)
     }
 
@@ -861,6 +925,9 @@ impl State<'_> {
         let w = pos_u16(W_SIZE);
         for p in self.head.iter_mut().chain(&mut self.prev) {
             *p = p.saturating_sub(w);
+        }
+        if let Some(f) = self.fast.as_mut() {
+            f.slide();
         }
     }
 
@@ -912,6 +979,9 @@ impl State<'_> {
                     self.update_hash(c);
                     self.prev[str & W_MASK] = self.head[self.ins_h as usize];
                     self.head[self.ins_h as usize] = pos_u16(str);
+                    if let Some(f) = self.fast.as_mut() {
+                        f.insert(&self.window, str, self.ins_h as usize);
+                    }
                     str += 1;
                     self.insert -= 1;
                     if self.lookahead + self.insert < MIN_MATCH {
@@ -988,10 +1058,130 @@ impl State<'_> {
             bi_valid: self.bi_valid,
             snap_step: self.snap_step,
             snaps: Vec::new(),
+            fast: self.fast.clone(),
         }
     }
 
+    /// [`State::longest_match`] by the longer prefixes' chains ([`Fast`]):
+    /// the match zlib's walk finds is the first candidate, in chain order,
+    /// of the longest length beyond `prev_length` among the first
+    /// `chain_length` candidates of the three-byte chain (`hash_head`
+    /// first; the others past `limit`); a position with its first `k`
+    /// bytes equal to the current one's is found as the most recent of
+    /// its `k`-byte chain, and the candidates are a run of the most
+    /// recent ones, so the longest length below 8 is the largest `k` whose
+    /// most recent position is a candidate, and that position the match;
+    /// from 8 on, the candidates with 8 equal bytes are compared as zlib
+    /// does. `None` where this does not apply (no fast chains; a match
+    /// that can stop short of 258 bytes, near the input's end).
+    fn fast_match(&mut self, cur_match: usize) -> Option<usize> {
+        let f = self.fast.as_ref()?;
+        if self.nice_match < MAX_MATCH || self.lookahead < MIN_LOOKAHEAD {
+            return None;
+        }
+        let s = self.strstart;
+        let w = &self.window;
+        let mut chain = self.max_chain_length;
+        if self.prev_length >= self.good_match {
+            chain >>= 2;
+        }
+        let limit = if s > MAX_DIST { s - MAX_DIST } else { NIL };
+        let top = f.seq[cur_match & W_MASK];
+        // (a candidate: the head, or a later one past the limit, within
+        // the chain's length; `p` of the same three-byte chain)
+        let candidate = |p: usize| -> bool {
+            p != NIL
+                && (p == cur_match || (p > limit && p < cur_match))
+                && (top.wrapping_sub(f.seq[p & W_MASK]) as usize) < chain
+        };
+        // (the most recent position before `s` whose first `k` bytes are
+        // `s`'s, if a candidate)
+        let recent = |k: usize| -> Option<usize> {
+            let key = Fast::key(w, s, k);
+            let mut p = usize::from(f.head[k - 4][Fast::slot(key)]);
+            while p != NIL && (p >= s || Fast::key(w, p, k) != key) {
+                if p < s && p <= limit {
+                    return None;
+                }
+                p = usize::from(f.prev[k - 4][p & W_MASK]);
+            }
+            (p != NIL && candidate(p)).then_some(p)
+        };
+        // (three bytes: the three-byte chain from its head, the colliding
+        // positions passed over)
+        let mut p3 = None;
+        let mut p = cur_match;
+        for _ in 0..chain {
+            if w[p] == w[s] && w[p + 1] == w[s + 1] {
+                p3 = Some(p);
+                break;
+            }
+            p = usize::from(self.prev[p & W_MASK]);
+            if p <= limit {
+                break;
+            }
+        }
+        let mut best = (self.prev_length, self.match_start);
+        let Some(mut at) = p3.filter(|&p| candidate(p)) else {
+            return Some(best.0.min(self.lookahead));
+        };
+        let mut len = 3;
+        for k in 4..=8 {
+            match recent(k) {
+                Some(p) => {
+                    at = p;
+                    len = k;
+                }
+                None => break,
+            }
+        }
+        if len < 8 {
+            if len > best.0 {
+                best = (len, at);
+            }
+        } else {
+            // (eight bytes or more: each such candidate compared, from the
+            // most recent, as zlib's walk does)
+            let key = Fast::key(w, s, 8);
+            let mut p = at;
+            while p != NIL && p < s && (p > limit || p == cur_match) {
+                if Fast::key(w, p, 8) == key {
+                    if !candidate(p) {
+                        break;
+                    }
+                    let l = common_len(&w[s..=s + MAX_MATCH], &w[p..=p + MAX_MATCH]);
+                    if l > best.0 {
+                        best = (l, p);
+                        if l >= self.nice_match {
+                            break;
+                        }
+                    }
+                }
+                p = usize::from(f.prev[4][p & W_MASK]);
+            }
+        }
+        self.match_start = best.1;
+        Some(best.0.min(self.lookahead))
+    }
+
     fn longest_match(&mut self, mut cur_match: usize) -> usize {
+        let ms0 = self.match_start;
+        if let Some(n) = self.fast_match(cur_match) {
+            if cfg!(debug_assertions) || FAST_CHECK.load(core::sync::atomic::Ordering::Relaxed) {
+                let ms = self.match_start;
+                self.match_start = ms0;
+                let fast = self.fast.take();
+                let n2 = self.longest_match(cur_match);
+                self.fast = fast;
+                assert_eq!(
+                    (n, ms),
+                    (n2, self.match_start),
+                    "fast_match differs at {}",
+                    self.strstart
+                );
+            }
+            return n;
+        }
         let mut chain_length = self.max_chain_length;
         let scan0 = self.strstart;
         let mut best_len = self.prev_length;
@@ -1275,10 +1465,16 @@ pub struct Scratch {
     prev: Vec<u16>,
     head: Vec<u16>,
     sym_buf: Vec<u8>,
-    /// ([`Resumable`]'s: the states to keep and those kept.)
+    /// ([`Resumable`]'s: the states to keep and those kept, and whether
+    /// the search keeps its longer chains, [`Fast`].)
     snap_step: usize,
     snaps: Vec<(usize, State<'static>)>,
+    fast: bool,
 }
+
+/// Every [`Fast`] match checked against zlib's walk (a test's switch;
+/// always in debug builds).
+pub static FAST_CHECK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 impl State<'_> {
     /// The rest of the compression: the input's end and the adler.
@@ -1309,7 +1505,7 @@ pub struct Resumable {
 
 impl Resumable {
     /// The input bytes between two states kept.
-    pub const STEP: usize = 4096;
+    pub const STEP: usize = 16 << 10;
 
     /// [`compress`] of `data` at `level`, resumed from the last state
     /// kept that read no byte where `data` differs from the last input;
@@ -1346,6 +1542,7 @@ impl Resumable {
         } else {
             let mut sc = Scratch {
                 snap_step: Self::STEP,
+                fast: true,
                 ..Scratch::default()
             };
             let out = compress_with(&mut sc, data, level);
@@ -1444,6 +1641,7 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
         bi_valid: 0,
         snap_step: 0,
         snaps: Vec::new(),
+        fast: sc.fast.then(Fast::new),
     };
     s.init_block();
     // (the zlib header: deflate, a 32K window, the level's flags)

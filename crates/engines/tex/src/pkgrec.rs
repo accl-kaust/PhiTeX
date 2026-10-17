@@ -58,10 +58,19 @@ pub(crate) fn load_key(text: &str) -> Option<String> {
     // (the body's head first: a slice that does not begin with a
     // loader's name is no load, its whole text not copied; every
     // paragraph of a document asks)
-    let head = load_body(text, 32);
-    let rest = head.strip_prefix('\\')?;
+    // (its first command's name, past blanks and comment lines, read
+    // where it is: no copy, no look past it)
+    let mut t = text;
+    loop {
+        t = t.trim_start();
+        match t.strip_prefix('%') {
+            Some(r) => t = r.find('\n').map_or("", |k| &r[k..]),
+            None => break,
+        }
+    }
+    let rest = t.strip_prefix('\\')?;
     let name_len = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
-    if name_len < rest.len() && !LOADERS.contains(&&rest[..name_len]) {
+    if !LOADERS.contains(&&rest[..name_len]) {
         return None;
     }
     let body = load_body(text, usize::MAX);

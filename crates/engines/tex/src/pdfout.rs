@@ -1778,6 +1778,9 @@ fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
 /// and the fonts' names ([`FONT_TAGS`]).
 pub(crate) struct Linked {
     pub file: Vec<u8>,
+    /// The file's hash, from its chunks' ([`phitex_pdf::Tail::link_hashed`];
+    /// none: to be hashed whole).
+    pub hash: Option<u64>,
     pub objnums: ValueId,
     pub ftags: ValueId,
     /// The writer's errors where the link shipped a page again (pdfTeX's,
@@ -1809,6 +1812,7 @@ pub(crate) fn finish_exact(
 ) -> Linked {
     let none = Linked {
         file: Vec::new(),
+        hash: None,
         objnums: v.list(Vec::new()),
         ftags: v.list(Vec::new()),
         errors: Vec::new(),
@@ -2117,6 +2121,15 @@ pub(crate) fn finish_exact(
         end,
         chunk_base: 0,
     });
+    {
+        use crate::timeline::note;
+        note("link: linked: before the records", t_pre);
+        note("link: linked: the records", t_loop.saturating_sub(t_pre));
+        note(
+            "link: linked: after them (the tail, the xref, the bytes)",
+            t0.elapsed().saturating_sub(t_loop),
+        );
+    }
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "pdf link: {copied} of {} records copied from the last link, {resynced} more after the change; {rewritten} page contents rewritten in {t_parts:?}; before the records {t_pre:?}, records {:?}, after them {:?}",
@@ -2165,13 +2178,17 @@ pub(crate) fn finish_exact(
         }),
     };
     let t2 = std::time::Instant::now();
-    let out = tail
-        .and_then(|t| t.map_or(Ok(Vec::new()), |t| t.link(&bytes)))
+    let (out, hash) = tail
+        .and_then(|t| {
+            t.map_or(Ok((Vec::new(), None)), |t| {
+                t.link_hashed(&bytes).map(|(b, h)| (b, Some(h)))
+            })
+        })
         .unwrap_or_else(|e| {
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 eprintln!("pdf: {e}");
             }
-            Vec::new()
+            (Vec::new(), None)
         });
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -2187,6 +2204,7 @@ pub(crate) fn finish_exact(
     }
     Linked {
         file: out,
+        hash,
         objnums: v.list(got),
         ftags,
         errors,

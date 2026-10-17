@@ -88,7 +88,7 @@ fn watcher(
                     .get(p)
                     .or_else(|| p.canonicalize().ok().and_then(|c| ours.get(&c)));
                 match mine {
-                    Some(&h) => std::fs::read(p).map_or(true, |b| tex::Fnv::new().add(&b).0 != h),
+                    Some(&h) => tex::fingerprint_file(p) != Some(h),
                     None => true,
                 }
             });
@@ -345,8 +345,11 @@ struct Last {
     build: Option<(String, bool)>,
     /// Its errors and its log's text, for `p`.
     problems: Option<(Vec<String>, String)>,
-    /// Its errors and warnings at their places, rendered, for `p` and `w`.
-    placed: (Vec<String>, Vec<String>),
+    /// Its diagnostics, rendered at their places for `p` and `w` when
+    /// asked (not at every build: a long document's are many), and how
+    /// many errors and warnings among them are shown so.
+    diags: Vec<phitex_tex::Diagnostic>,
+    placed: (usize, usize),
     /// The last output written (errors or not, as pdfTeX writes it).
     good: Option<PathBuf>,
     viewers: usize,
@@ -590,6 +593,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                        since: Option<Instant>,
                        meanwhile: &mut dyn FnMut()| {
         builds += 1;
+        if let Some(t) = since
+            && !phitex_tex::timeline::active()
+        {
+            phitex_tex::timeline::begin_at(t);
+        }
+        phitex_tex::timeline::lap("watch: the build begins");
         if let (Some(t), true) = (since, std::env::var_os("PHITEX_TEX_TIME").is_some()) {
             eprintln!(
                 "watch phases: build {builds} starts {:?} after its change",
@@ -619,7 +628,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         };
-        let r = match ran {
+        let mut r = match ran {
             Ok(r) => r,
             Err(m) => {
                 spin.done();
@@ -648,6 +657,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 return;
             }
         };
+        phitex_tex::timeline::lap("watch: the build's thread joined");
         let failed = !r.out.errors.is_empty();
         // (`PHITEX_TEX_TIME`: the watch's own time after the build)
         let tw = std::time::Instant::now();
@@ -672,6 +682,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         };
         drop(mine);
+        phitex_tex::timeline::lap("watch: files written (the PDF, the log, the aux files)");
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
             eprintln!(
                 "watch phases: build {:?}, files written {:?}",
@@ -719,6 +730,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             });
             v.building(false);
             status.set("");
+            phitex_tex::timeline::lap("watch: the viewer's PDF and its diagnostics");
         }
         spin.done();
         building.store(false, Ordering::Relaxed);
@@ -744,9 +756,10 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
         let tpl = std::time::Instant::now();
         let placed = (
-            crate::problems::rendered(s, &r, false, st.color, ui.verbose > 0),
-            crate::problems::rendered(s, &r, true, st.color, ui.verbose > 0),
+            crate::problems::shown_count(&r.diagnostics, false),
+            crate::problems::shown_count(&r.diagnostics, true),
         );
+        phitex_tex::timeline::lap("watch: problems placed");
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
             eprintln!("watch phases: problems placed {:?}", tpl.elapsed());
         }
@@ -756,7 +769,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 .map(|w| w.1)
                 .sum()
         } else {
-            placed.1.len()
+            placed.1
         };
         last.borrow_mut().placed = placed;
         let live = r.runs.last().map_or(0, |x| x.live);
@@ -942,6 +955,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             );
             last.borrow_mut().summary = tree(st, head, &rows);
         }
+        phitex_tex::timeline::lap("watch: the build's line and summary");
         ui.event(&json!({
             "event": "build",
             "build": builds,
@@ -988,6 +1002,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             "errors": r.out.errors,
             "diagnostics": r.engine_diagnostics(),
         }));
+        phitex_tex::timeline::lap("watch: the build event written");
         let trep = std::time::Instant::now();
         let tevent = trep;
         modern::report(
@@ -1038,9 +1053,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 ui.warning(&format!("can't start {cmd}: {e}"));
             }
         }
+        phitex_tex::timeline::lap("watch: after the event (report, status)");
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
             eprintln!("watch phases: after the event {:?}", tevent.elapsed());
         }
+        last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
+        drop(r);
+        phitex_tex::timeline::lap("watch: the report dropped");
+        phitex_tex::timeline::end(&format!("build {builds}"));
     };
     // (what came while a build ran and it could not take: done after it)
     let mut held: VecDeque<(Instant, Event)> = VecDeque::new();
@@ -1093,6 +1113,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             .map(|e| e.0)
             .max()
             .unwrap_or_else(Instant::now);
+        phitex_tex::timeline::begin_at(came);
+        phitex_tex::timeline::lap("watch: the events gathered");
         let events = events.into_iter().map(|e| e.1);
         let mut why = Vec::new();
         let mut again = false;
@@ -1138,21 +1160,35 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                             ui.line(&e);
                         }
                     }
-                    Key::Problems if !last.borrow().placed.0.is_empty() => {
-                        for p in &last.borrow().placed.0 {
-                            ui.line(p);
+                    Key::Problems if last.borrow().placed.0 > 0 => {
+                        let l = last.borrow();
+                        for p in crate::problems::rendered_of(
+                            &s,
+                            &l.diags,
+                            false,
+                            st.color,
+                            ui.verbose > 0,
+                        ) {
+                            ui.line(&p);
                         }
                     }
-                    Key::Warnings if !last.borrow().placed.1.is_empty() => {
+                    Key::Warnings if last.borrow().placed.1 > 0 => {
                         let l = last.borrow();
                         let max = if ui.verbose > 0 { usize::MAX } else { 20 };
-                        for p in l.placed.1.iter().take(max) {
+                        let placed = crate::problems::rendered_of(
+                            &s,
+                            &l.diags,
+                            true,
+                            st.color,
+                            ui.verbose > 0,
+                        );
+                        for p in placed.iter().take(max) {
                             ui.line(p);
                         }
-                        if l.placed.1.len() > max {
+                        if placed.len() > max {
                             ui.line(&st.dim(&format!(
                                 "… {} warnings in all (-v shows every one)",
-                                l.placed.1.len()
+                                placed.len()
                             )));
                         }
                     }
@@ -1284,10 +1320,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         }
         // (a change the last build took while it ran: built already)
         // (r, or Rebuild in the viewer: built again whatever)
+        phitex_tex::timeline::lap("watch: the events taken (texts read and set)");
         let asked = why.iter().any(|w| w.starts_with("asked"));
         if again && !asked && s.up_to_date() {
             again = false;
         }
+        phitex_tex::timeline::lap("watch: whether the last build is up to date");
         if again {
             why.dedup();
             let absorb = s.absorb();

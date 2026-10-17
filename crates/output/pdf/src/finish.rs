@@ -126,6 +126,26 @@ impl Tail {
     /// # Errors
     /// `bytes` not the ones the state flushed.
     pub fn link(&self, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
+        self.link_hashed(bytes).map(|x| x.0)
+    }
+
+    /// [`Tail::link`] with a hash of the file's bytes, made from its
+    /// chunks' hashes (each chunk's hashed once, while a link keeps it:
+    /// an edit hashes its new chunks only).
+    ///
+    /// # Errors
+    /// As [`Tail::link`].
+    pub fn link_hashed(&self, bytes: &PdfBytes) -> Result<(Vec<u8>, u64), PdfError> {
+        let out = self.link_bytes(bytes)?;
+        let t0 = std::time::Instant::now();
+        let h = chunk_hashes(&bytes.chunks, &out[bytes.len..]);
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!("pdf tail link: hashed {:?}", t0.elapsed());
+        }
+        Ok((out, h))
+    }
+
+    fn link_bytes(&self, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
         let t0 = std::time::Instant::now();
         let mut st = self.st.clone();
         let t_clone = t0.elapsed();
@@ -178,6 +198,49 @@ impl Tail {
         }
         Ok(out)
     }
+}
+
+/// A hash of bytes, a word at a time.
+fn hash64(b: &[u8]) -> u64 {
+    let mut h = 0x243f_6a88_85a3_08d3u64 ^ b.len() as u64;
+    let (words, rest) = b.as_chunks::<8>();
+    for w in words {
+        h = (h ^ u64::from_le_bytes(*w))
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .rotate_left(29);
+    }
+    for &c in rest {
+        h = (h ^ u64::from(c)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    h
+}
+
+/// The file's hash from its chunks' and the rest's (`tail`): each chunk's
+/// hash kept by its bytes' address while a link has it.
+fn chunk_hashes(chunks: &[Chunk], tail: &[u8]) -> u64 {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    type Memo = Mutex<HashMap<usize, (Arc<[u8]>, u64)>>;
+    static MEMO: OnceLock<Memo> = OnceLock::new();
+    let mut m = MEMO
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut kept = HashMap::with_capacity(chunks.len());
+    let mut hs = Vec::with_capacity(chunks.len() + 1);
+    for c in chunks {
+        let k = c.bytes.as_ptr() as usize;
+        let h = match m.remove(&k) {
+            Some((a, h)) if Arc::ptr_eq(&a, &c.bytes) => h,
+            _ => hash64(&c.bytes),
+        };
+        hs.push(h);
+        kept.insert(k, (c.bytes.clone(), h));
+    }
+    *m = kept;
+    hs.push(hash64(tail));
+    let words: Vec<u8> = hs.iter().flat_map(|h| h.to_le_bytes()).collect();
+    hash64(&words)
 }
 
 impl PdfState {

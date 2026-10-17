@@ -410,6 +410,29 @@ pub fn rendered(
     color: bool,
     verbose: bool,
 ) -> Vec<String> {
+    rendered_of(s, &r.diagnostics, warnings, color, verbose)
+}
+
+/// The diagnostics shown (`warnings`: the warnings, else the errors),
+/// without rendering them: their count.
+pub fn shown_count(diagnostics: &[phitex_tex::Diagnostic], warnings: bool) -> usize {
+    diagnostics.iter().filter(|d| shown(d, warnings)).count()
+}
+
+fn shown(d: &phitex_tex::Diagnostic, warnings: bool) -> bool {
+    (d.severity == phitex_tex::Severity::Error) != warnings
+        // (an engine failure has no place: shown on its own line)
+        && !(d.severity == phitex_tex::Severity::Error && d.range == (0, 0) && d.context.is_empty())
+}
+
+/// [`rendered`] of the diagnostics `diagnostics` of a build of `s`.
+pub fn rendered_of(
+    s: &crate::session::Session,
+    diagnostics: &[phitex_tex::Diagnostic],
+    warnings: bool,
+    color: bool,
+    verbose: bool,
+) -> Vec<String> {
     // (the engine's own diagnostics are shown with the warnings: they
     // are not TeX's errors)
     // (each file's source read once, not once a diagnostic: the main
@@ -417,17 +440,7 @@ pub fn rendered(
     let mut sources: std::collections::HashMap<&str, Option<Vec<u8>>> =
         std::collections::HashMap::new();
     let mut out = Vec::new();
-    for d in r
-        .diagnostics
-        .iter()
-        .filter(|d| (d.severity == phitex_tex::Severity::Error) != warnings)
-        // (an engine failure has no place: shown on its own line)
-        .filter(|d| {
-            !(d.severity == phitex_tex::Severity::Error
-                && d.range == (0, 0)
-                && d.context.is_empty())
-        })
-    {
+    for d in diagnostics.iter().filter(|d| shown(d, warnings)) {
         let src = sources
             .entry(d.file.as_str())
             .or_insert_with(|| s.source(&d.file));

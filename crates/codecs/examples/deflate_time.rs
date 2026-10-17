@@ -8,6 +8,9 @@
 use phitex_codecs::deflate::Resumable;
 
 fn main() {
+    if std::env::var_os("PHITEX_FAST_CHECK").is_some() {
+        phitex_codecs::deflate::FAST_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let a: Vec<String> = std::env::args().collect();
     let data = std::fs::read(&a[1]).expect("the input");
     let level: i32 = a[2].parse().expect("a level");

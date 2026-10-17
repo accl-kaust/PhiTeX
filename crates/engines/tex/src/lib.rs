@@ -54,6 +54,7 @@ mod prof;
 mod run;
 mod runstate;
 mod scan;
+pub mod timeline;
 mod val;
 mod vprof;
 

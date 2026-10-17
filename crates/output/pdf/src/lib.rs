@@ -1225,6 +1225,9 @@ pub(crate) fn compress_resumed(data: &[u8], level: i32) -> Vec<u8> {
     use std::sync::{Mutex, OnceLock};
     static LAST: OnceLock<Mutex<phitex_codecs::deflate::Resumable>> = OnceLock::new();
     let last = LAST.get_or_init(Mutex::default);
+    if std::env::var_os("PHITEX_FAST_CHECK").is_some() {
+        phitex_codecs::deflate::FAST_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if let Some(p) = std::env::var_os("PHITEX_XREF_DUMP") {
         let _ = std::fs::write(p, data);
     }

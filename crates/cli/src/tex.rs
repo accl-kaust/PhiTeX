@@ -169,6 +169,55 @@ impl Fnv {
     }
 }
 
+/// The bytes a [`fingerprint`] reads past 1 MB: `(offset, length)`.
+fn samples(len: usize) -> Vec<(usize, usize)> {
+    const W: usize = 64 << 10;
+    let mut v = vec![(0, W)];
+    let mut at = 1 << 20;
+    while at + 256 < len.saturating_sub(W) {
+        v.push((at, 256));
+        at += 1 << 20;
+    }
+    v.push((len - W, W));
+    v
+}
+
+/// The watch's mark of a file it wrote, to know the file as its own when
+/// the system says it changed: the bytes' hash below 1 MB; past it the
+/// length and samples (its head, its tail, 256 bytes a megabyte), so
+/// that neither the write nor the check reads a large output whole.
+pub fn fingerprint(b: &[u8]) -> u64 {
+    if b.len() <= 1 << 20 {
+        return Fnv::new().add(b).0;
+    }
+    let mut h = Fnv::new().add(&(b.len() as u64).to_le_bytes());
+    for (at, n) in samples(b.len()) {
+        h = h.add(&b[at..at + n]);
+    }
+    h.0
+}
+
+/// [`fingerprint`] of the file at `p`, reading only what it needs.
+pub fn fingerprint_file(p: &std::path::Path) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(p).ok()?;
+    let len = usize::try_from(f.metadata().ok()?.len()).ok()?;
+    if len <= 1 << 20 {
+        let mut b = Vec::with_capacity(len);
+        f.read_to_end(&mut b).ok()?;
+        return Some(fingerprint(&b));
+    }
+    let mut h = Fnv::new().add(&(len as u64).to_le_bytes());
+    let mut buf = Vec::new();
+    for (at, n) in samples(len) {
+        buf.resize(n, 0);
+        f.seek(SeekFrom::Start(at as u64)).ok()?;
+        f.read_exact(&mut buf).ok()?;
+        h = h.add(&buf);
+    }
+    Some(h.0)
+}
+
 impl Default for Fnv {
     fn default() -> Self {
         Fnv::new()
@@ -261,11 +310,18 @@ fn os(b: &[u8]) -> &Path {
 
 /// Bytes as TeX's characters, one each (what a `Build` reads).
 pub fn chars(b: &[u8]) -> String {
+    // (ASCII bytes are their characters' UTF-8: copied at once)
+    if b.is_ascii() {
+        return String::from_utf8(b.to_vec()).unwrap_or_default();
+    }
     b.iter().map(|&c| char::from(c)).collect()
 }
 
 /// TeX's characters as bytes (a character past 255 as `?`).
 pub fn bytes(s: &str) -> Vec<u8> {
+    if s.is_ascii() {
+        return s.as_bytes().to_vec();
+    }
     s.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect()
 }
 

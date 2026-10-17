@@ -31,7 +31,29 @@ pub struct Status {
 pub struct Live {
     pub progress: Arc<phitex_tex::Progress>,
     pub file: String,
-    pub lines: Arc<Vec<usize>>,
+    /// The main text, and its line starts made when a place is first
+    /// shown (an edit too quick to show one never counts them).
+    pub text: Arc<str>,
+    pub lines: Arc<std::sync::OnceLock<Vec<usize>>>,
+}
+
+impl Live {
+    /// The line (from 1) of byte `at` of the main text.
+    pub fn line_of(&self, at: u64) -> usize {
+        self.lines
+            .get_or_init(|| {
+                std::iter::once(0)
+                    .chain(
+                        self.text
+                            .bytes()
+                            .enumerate()
+                            .filter(|c| c.1 == b'\n')
+                            .map(|c| c.0 + 1),
+                    )
+                    .collect()
+            })
+            .partition_point(|&b| b as u64 <= at)
+    }
 }
 
 #[derive(Default)]
@@ -216,10 +238,10 @@ impl RunInfo {
 /// What one build made.
 #[derive(Clone, Debug, Default)]
 pub struct Output {
-    /// The PDF (pdfTeX), else empty.
-    pub pdf: Vec<u8>,
+    /// The PDF (pdfTeX), else empty (the engine's bytes, shared).
+    pub pdf: Arc<Vec<u8>>,
     /// The DVI (TeX, e-TeX), else empty.
-    pub dvi: Vec<u8>,
+    pub dvi: Arc<Vec<u8>>,
     pub pages: usize,
     /// The pages (from 1) that differ from the last build's.
     pub pages_changed: Vec<usize>,
@@ -288,9 +310,9 @@ impl Report {
     /// The output file's extension and bytes (none: no pages).
     pub fn main_output(&self) -> Option<(&'static str, &[u8])> {
         if !self.out.pdf.is_empty() {
-            Some(("pdf", &self.out.pdf))
+            Some(("pdf", self.out.pdf.as_slice()))
         } else if !self.out.dvi.is_empty() {
-            Some(("dvi", &self.out.dvi))
+            Some(("dvi", self.out.dvi.as_slice()))
         } else {
             None
         }
@@ -343,12 +365,13 @@ pub struct Written {
 
 pub struct Session {
     pub job: Job,
-    /// The main file's text, as TeX's characters.
-    text: String,
+    /// The main file's text, as TeX's characters (shared, not copied,
+    /// on its way to the engine).
+    text: Arc<str>,
     /// The document's state: none before the first build.
     build: Option<Build>,
     /// The main text the last build built.
-    built_text: Option<String>,
+    built_text: Option<Arc<str>>,
     /// The last build's pages' hashes.
     page_hashes: Vec<u64>,
     /// kpathsea as the job's program: the build's finder.
@@ -360,6 +383,11 @@ pub struct Session {
     /// The hashes of the files the last write wrote (an unchanged file is
     /// not written again).
     written: Mutex<BTreeMap<PathBuf, u64>>,
+    /// The written keys and the package records last stored in the
+    /// cache ([`Session::store_wkeys`], [`Session::store_pkgrec`]).
+    stored: Mutex<(Option<Vec<u8>>, Option<Vec<u8>>)>,
+    /// The main output last written, and where ([`Session::write_main`]).
+    last_main: Mutex<Option<(PathBuf, Arc<Vec<u8>>)>>,
     /// What the session does now, for a spinner.
     status: Arc<Status>,
     /// Unsaved editor buffers, by file name (`None`: as on disk again),
@@ -382,20 +410,25 @@ pub struct Session {
 #[derive(Clone, Default)]
 pub struct Absorb {
     tx: phitex_tex::EditSender,
-    sent: Arc<Mutex<BTreeMap<u64, (String, Instant)>>>,
+    sent: Arc<Mutex<BTreeMap<u64, (Arc<str>, Instant)>>>,
 }
 
 impl Absorb {
     /// Sends the main text (TeX's characters): its version.
     pub fn send(&self, text: &str, came: Instant) -> u64 {
+        self.send_shared(Arc::from(text), came)
+    }
+
+    /// [`Absorb::send`], the text shared.
+    pub fn send_shared(&self, text: Arc<str>, came: Instant) -> u64 {
         let mut m = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
-        let v = self.tx.send(text);
-        m.insert(v, (text.to_owned(), came));
+        let v = self.tx.send_shared(text.clone());
+        m.insert(v, (text, came));
         v
     }
 
     /// Version `v`'s text and when it came, the earlier ones forgotten.
-    fn take(&self, v: u64) -> Option<(String, Instant)> {
+    fn take(&self, v: u64) -> Option<(Arc<str>, Instant)> {
         let mut m = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
         let got = m.get(&v).cloned();
         m.retain(|&k, _| k > v);
@@ -436,7 +469,7 @@ impl Session {
         }
         Ok(Session {
             job,
-            text: tex::chars(&text),
+            text: Arc::from(tex::chars(&text)),
             build: None,
             built_text: None,
             page_hashes: Vec::new(),
@@ -444,6 +477,8 @@ impl Session {
             format_tree,
             builds: 0,
             written: Mutex::new(BTreeMap::new()),
+            last_main: Mutex::new(None),
+            stored: Mutex::new((None, None)),
             status,
             buffers: Arc::default(),
             changed: Vec::new(),
@@ -455,7 +490,7 @@ impl Session {
 
     /// The main file's text from now on (TeX's characters).
     pub fn set_text(&mut self, text: String) {
-        self.text = text;
+        self.text = Arc::from(text);
     }
 
     /// File `name` changed: its text from now on is `text` (an editor's
@@ -480,7 +515,10 @@ impl Session {
     pub fn up_to_date(&self) -> bool {
         self.build.is_some()
             && self.changed.is_empty()
-            && self.built_text.as_deref() == Some(self.text_now().as_str())
+            && self
+                .built_text
+                .as_ref()
+                .is_some_and(|b| same_text(b, &self.text_now()))
     }
 
     /// When the latest change the last build took came, if it took one
@@ -520,11 +558,13 @@ impl Session {
             diagnostics: Vec::new(),
         };
         let mut text = self.text_now();
+        phitex_tex::timeline::lap("session: the text now (copied)");
         self.absorbed_at = None;
         let mut edit_line = self
             .built_text
             .as_deref()
             .and_then(|old| first_difference_line(old, &text));
+        phitex_tex::timeline::lap("session: the first changed line (texts compared)");
         let changed = std::mem::take(&mut self.changed);
         let reread = self
             .build
@@ -534,15 +574,13 @@ impl Session {
         // (an evaluation error panics, naming the nodes: the build is
         // reported failed and dropped, the next one cold)
         // (the main file's line starts: a worker's place as file:line)
-        let lines: Arc<Vec<usize>> = Arc::new(
-            std::iter::once(0)
-                .chain(text.char_indices().filter(|c| c.1 == '\n').map(|c| c.0 + 1))
-                .collect(),
-        );
+        let lines: Arc<std::sync::OnceLock<Vec<usize>>> = Arc::default();
+        phitex_tex::timeline::lap("session: files to read again, the line starts");
         let file = plain_name(&self.job.path.to_string_lossy());
         let live = |progress| Live {
             progress,
             file: file.clone(),
+            text: text.clone(),
             lines: lines.clone(),
         };
         let ran = crate::ui::catch(|| -> Result<(), String> {
@@ -554,8 +592,10 @@ impl Session {
                 }
                 // (sent as a version of its own: what another thread sends
                 // while it runs is taken between the engine's steps)
-                self.absorb.send(&text, Instant::now());
+                self.absorb.send_shared(text.clone(), Instant::now());
+                phitex_tex::timeline::lap("session: the text sent to the engine (copied)");
                 b.absorb_pending();
+                phitex_tex::timeline::lap("engine: the rest of the edit");
             } else {
                 self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
@@ -631,7 +671,7 @@ impl Session {
         // (the result is for the latest text the build took)
         if let Some(b) = &self.build
             && let Some((t, came)) = self.absorb.take(b.version())
-            && t != text
+            && !same_text(&t, &text)
         {
             edit_line = self
                 .built_text
@@ -641,11 +681,13 @@ impl Session {
             self.absorbed_at = Some(came);
             self.text.clone_from(&text);
         }
+        phitex_tex::timeline::lap("session: the text the result is for");
         // (`PHITEX_TEX_TIME`: the session's phases after the engine's)
         let mut phases: Vec<(&str, Duration)> = vec![("engine", t0.elapsed())];
         let mut tp = Instant::now();
         let mut lap = |phases: &mut Vec<(&'static str, Duration)>, name: &'static str| {
             phases.push((name, tp.elapsed()));
+            phitex_tex::timeline::lap(&format!("session: {name}"));
             tp = Instant::now();
         };
         if let Some(b) = &self.build {
@@ -704,7 +746,7 @@ impl Session {
         lap(&mut phases, "gc");
         self.status.set("output");
         let b = self.build.as_ref().expect("built above");
-        let (bytes, log) = b.output();
+        let (bytes, log) = b.output_shared();
         lap(&mut phases, "output");
         let pdf = b.is_pdf();
         let s = &b.stats;
@@ -763,6 +805,12 @@ impl Session {
         self.page_hashes.clone_from(&hashes);
         self.built_text = Some(text);
         lap(&mut phases, "pages and files");
+        // (the output's bytes moved to their place, not copied)
+        let (pdf_bytes, dvi_bytes) = if pdf {
+            (bytes, Arc::default())
+        } else {
+            (Arc::default(), bytes)
+        };
         let wall = t0.elapsed();
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
             let shown: Vec<String> = phases.iter().map(|(n, d)| format!("{n} {d:?}")).collect();
@@ -770,8 +818,8 @@ impl Session {
         }
         Report {
             out: Output {
-                pdf: if pdf { bytes.clone() } else { Vec::new() },
-                dvi: if pdf { Vec::new() } else { bytes },
+                pdf: pdf_bytes,
+                dvi: dvi_bytes,
                 writes,
                 pages,
                 pages_changed,
@@ -867,7 +915,7 @@ impl Session {
     }
 
     /// The main text with the editor's buffer for it, if there is one.
-    fn text_now(&self) -> String {
+    fn text_now(&self) -> Arc<str> {
         let name = plain_name(&self.job.path.to_string_lossy());
         self.buffers
             .lock()
@@ -875,7 +923,7 @@ impl Session {
             .iter()
             .rev()
             .find(|(n, _)| *n == plain_name(&self.job.file) || *n == name)
-            .and_then(|(_, t)| t.clone())
+            .and_then(|(_, t)| t.as_deref().map(Arc::from))
             .unwrap_or_else(|| self.text.clone())
     }
 
@@ -949,9 +997,16 @@ impl Session {
             }
             out.push('\n');
         }
+        // (the bytes last stored here: the cache's file not read again
+        // to see that nothing changed)
+        let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.0.as_deref() == Some(out.as_bytes()) {
+            return;
+        }
         if c.get(&p).as_deref() != Some(out.as_bytes()) {
             let _ = c.put(&p, out.as_bytes(), &[]);
         }
+        last.0 = Some(out.into_bytes());
     }
 
     /// The cache's file of the package loads' records
@@ -971,9 +1026,14 @@ impl Session {
             return;
         };
         let recs = b.export_pkgrec();
+        let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.1.as_deref() == Some(recs.as_slice()) {
+            return;
+        }
         if !recs.is_empty() && c.get(&p).as_deref() != Some(recs.as_slice()) {
             let _ = c.put(&p, &recs, &[]);
         }
+        last.1 = Some(recs);
     }
 
     fn store_prelude(&self, b: &Build, prelude: Option<&str>, had: Option<[u8; 32]>) {
@@ -1072,10 +1132,25 @@ impl Session {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let mut files = Vec::new();
         let mut main = None;
+        let ext = r
+            .main_output()
+            .map_or(self.job.engine.output.ext(), |(e, _)| e);
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((e, _)) = r.main_output().filter(|_| main_too) {
+            let shared = if r.out.pdf.is_empty() {
+                &r.out.dvi
+            } else {
+                &r.out.pdf
+            };
+            let p = dir.join(format!("{}.{e}", self.job.jobname));
+            let h = self.write_main(&p, shared)?;
+            written.insert(p.clone(), h);
+            files.push((p.clone(), h));
+            main = Some(p);
+        }
         let mut put = |name: &str, bytes: &[u8]| -> Result<PathBuf, String> {
             let p = dir.join(name);
-            let h = tex::Fnv::new().add(bytes).0;
+            let h = tex::fingerprint(bytes);
             // (bytes the last write wrote, still there: not written again)
             if written.get(&p) != Some(&h) || !p.is_file() {
                 let tmp = dir.join(format!(".{name}.phitex-tmp"));
@@ -1087,12 +1162,6 @@ impl Session {
             files.push((p.clone(), h));
             Ok(p)
         };
-        let ext = r
-            .main_output()
-            .map_or(self.job.engine.output.ext(), |(e, _)| e);
-        if let Some((e, b)) = r.main_output().filter(|_| main_too) {
-            main = Some(put(&format!("{}.{e}", self.job.jobname), b)?);
-        }
         for (n, t) in &r.out.writes {
             // (TeX Live's `openout_any = p`: never outside the output
             // directory, never a dot file; a document can't overwrite
@@ -1112,6 +1181,58 @@ impl Session {
             put(&format!("{}.fls", self.job.jobname), fls.as_bytes())?;
         }
         Ok(Written { main, files })
+    }
+
+    /// The main output written at `p`: where the file is the last one
+    /// written here (same length on disk), only from the first byte
+    /// that differs, in place; else whole (through a temporary file).
+    /// Its [`tex::fingerprint`].
+    fn write_main(&self, p: &Path, b: &Arc<Vec<u8>>) -> Result<u64, String> {
+        use std::io::{Seek, SeekFrom, Write};
+        const B: usize = 1 << 16;
+        let err = |e: std::io::Error| format!("can't write {}: {e}", p.display());
+        let mut last = self
+            .last_main
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let h = tex::fingerprint(b);
+        if let Some((lp, old)) = last.as_ref()
+            && lp == p
+            && std::fs::metadata(p).is_ok_and(|m| m.len() == old.len() as u64)
+        {
+            if Arc::ptr_eq(old, b) {
+                return Ok(h);
+            }
+            // (the first differing byte, a block at a time)
+            let n = old.len().min(b.len());
+            let mut at = 0;
+            while at < n && old[at..(at + B).min(n)] == b[at..(at + B).min(n)] {
+                at += B;
+            }
+            while at < n && old[at] == b[at] {
+                at += 1;
+            }
+            if at < b.len() || old.len() != b.len() {
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(p)
+                    .map_err(err)?;
+                f.seek(SeekFrom::Start(at as u64)).map_err(err)?;
+                f.write_all(&b[at..]).map_err(err)?;
+                f.set_len(b.len() as u64).map_err(err)?;
+            }
+            *last = Some((p.to_path_buf(), b.clone()));
+            return Ok(h);
+        }
+        let name = p
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let tmp = p.with_file_name(format!(".{name}.phitex-tmp"));
+        std::fs::write(&tmp, b.as_slice())
+            .and_then(|()| std::fs::rename(&tmp, p))
+            .map_err(err)?;
+        *last = Some((p.to_path_buf(), b.clone()));
+        Ok(h)
     }
 
     /// `JOB.fls` as `-recorder` writes it, of what is known: the main
@@ -1216,22 +1337,37 @@ fn dvi_comment(epoch: i64) -> String {
     )
 }
 
-/// The first line (from 1) where `b` differs from `a` (none: equal).
-#[allow(clippy::naive_bytecount, reason = "once a build, on one text")]
+/// Whether two texts are equal (the same shared text at once).
+fn same_text(a: &Arc<str>, b: &Arc<str>) -> bool {
+    Arc::ptr_eq(a, b) || a == b
+}
+
+/// The first line (from 1) where `b` differs from `a` (none: equal):
+/// the first differing byte found a block at a time, the line ends
+/// before it counted a word at a time.
 fn first_difference_line(a: &str, b: &str) -> Option<usize> {
-    let at = a.bytes().zip(b.bytes()).position(|(x, y)| x != y);
-    let at = match at {
-        Some(i) => i,
-        None if a.len() == b.len() => return None,
-        None => a.len().min(b.len()),
-    };
-    Some(
-        b.as_bytes()[..at.min(b.len())]
-            .iter()
-            .filter(|&&c| c == b'\n')
-            .count()
-            + 1,
-    )
+    const B: usize = 4096;
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    let m = x.len().min(y.len());
+    let mut at = 0;
+    while at + B <= m && x[at..at + B] == y[at..at + B] {
+        at += B;
+    }
+    while at < m && x[at] == y[at] {
+        at += 1;
+    }
+    if at == m && x.len() == y.len() {
+        return None;
+    }
+    let (words, rest) = y[..at].as_chunks::<8>();
+    let mut n = 0usize;
+    for w in words {
+        let v = u64::from_ne_bytes(*w) ^ 0x0a0a_0a0a_0a0a_0a0a;
+        let t = (v & 0x7f7f_7f7f_7f7f_7f7f).wrapping_add(0x7f7f_7f7f_7f7f_7f7f);
+        n += (!(t | v | 0x7f7f_7f7f_7f7f_7f7f)).count_ones() as usize;
+    }
+    n += rest.iter().map(|&c| usize::from(c == b'\n')).sum::<usize>();
+    Some(n + 1)
 }
 
 #[cfg(test)]

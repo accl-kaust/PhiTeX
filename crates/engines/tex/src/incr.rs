@@ -116,6 +116,7 @@ impl Incr {
             return;
         }
         let t1 = t0.elapsed();
+        crate::timeline::note("incr: the units spliced (texts compared, copied)", t1);
         self.walk();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -361,6 +362,15 @@ fn walk_note(
     t: [std::time::Duration; 5],
     busy: std::time::Duration,
 ) {
+    {
+        use crate::timeline::note;
+        let d = |k: usize| t[k].saturating_sub(t[k - 1]);
+        note(&format!("incr walk: {chunks} chunks' bounds"), t[0]);
+        note("incr walk: own definitions", d(1));
+        note("incr walk: the chain of definitions", d(2));
+        note(&format!("incr walk: {analysed} chunks analysed"), d(3));
+        note("incr walk: assembled", d(4));
+    }
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         let d = |k: usize| t[k].saturating_sub(t[k - 1]);
         eprintln!(

@@ -73,8 +73,8 @@ fn linked_files() -> &'static LinkedFiles {
 type LinkedFiles = std::sync::Mutex<std::collections::VecDeque<(u64, std::sync::Arc<Vec<u8>>)>>;
 
 /// The value standing for file bytes `b` ([`linked_files`]).
-fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>) -> ValueId {
-    let h = phitex_defuse::hash_bytes(0x6c69_6e6b_6564, &b);
+fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>, hash: Option<u64>) -> ValueId {
+    let h = hash.unwrap_or_else(|| phitex_defuse::hash_bytes(0x6c69_6e6b_6564, &b));
     let n = b.len();
     let mut m = linked_files()
         .lock()
@@ -93,8 +93,8 @@ fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>) -> ValueId {
 }
 
 /// The bytes of an output value: a file's string, or the bytes a
-/// [`bytes_value`] stands for.
-pub(crate) fn file_bytes(v: &phitex_defuse::Values, x: ValueId) -> Vec<u8> {
+/// [`bytes_value`] stands for (shared, not copied).
+pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::sync::Arc<Vec<u8>> {
     if let phitex_defuse::Value::List(xs) = &*v.get(x)
         && xs.len() == 3
         && str_of(v, xs[0]) == "bytes"
@@ -105,13 +105,15 @@ pub(crate) fn file_bytes(v: &phitex_defuse::Values, x: ValueId) -> Vec<u8> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|e| e.0 == h)
-            .map(|e| e.1.as_ref().clone())
+            .map(|e| e.1.clone())
             .unwrap_or_default();
     }
-    str_of(v, x)
-        .chars()
-        .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
-        .collect()
+    std::sync::Arc::new(
+        str_of(v, x)
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
+            .collect(),
+    )
 }
 
 /// The format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`):
@@ -487,7 +489,15 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     ] {
         cx.publish(v.field(name), x);
     }
-    let x = bytes_value(v, l.file);
+    let x = bytes_value(v, l.file, l.hash);
+    {
+        use crate::timeline::note;
+        note("link: the line read", t_acc);
+        note("link: ordered", t_order.saturating_sub(t_acc));
+        note("link: the fields", t_seed.saturating_sub(t_order));
+        note("link: linked", t_fin.saturating_sub(t_seed));
+        note("link: the value", t0.elapsed().saturating_sub(t_fin));
+    }
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "pdf exact: line read {t_acc:?}, ordered {:?}, fields {:?}, link {:?}, value {:?}",

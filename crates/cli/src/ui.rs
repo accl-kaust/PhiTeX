@@ -238,7 +238,7 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
             let place = if at == phitex_tex::Progress::INSIDE {
                 "inside a macro".to_owned()
             } else {
-                let line = live.lines.partition_point(|&b| b as u64 <= at);
+                let line = live.line_of(at);
                 format!("{}:{line}", live.file)
             };
             let row = format!("{} {place}", pad(what, 6, false));
@@ -554,7 +554,9 @@ impl Ui {
                     lock(&tap).tell(json!({"kind": "busy", "text": text}));
                 }
                 k += 1;
-                std::thread::sleep(Duration::from_millis(80));
+                // (woken at once when the build is done: its end does not
+                // wait for the next tick)
+                std::thread::park_timeout(Duration::from_millis(80));
             }
         }));
         Spin {
@@ -645,6 +647,7 @@ impl Spin {
     pub fn done(self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(u) = self.updater {
+            u.thread().unpark();
             let _ = u.join();
             let mut b = lock(&self.bottom);
             if !b.spin.is_empty() {
