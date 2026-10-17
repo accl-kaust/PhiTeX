@@ -1201,8 +1201,10 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         crate::ops::COMMANDS.load(std::sync::atomic::Ordering::Relaxed)
     );
     eprintln!(
-        "acct: stops by field (top 10): {:?}",
-        crate::run::take_stops(eng.values(), 10)
+        "acct: stops by reader and field (top 15): {:?}; waits by kind {:?}; by reader {:?}",
+        crate::run::take_stops(eng.values(), 15),
+        r.waits_by_kind,
+        r.waits_by_op
     );
 }
 
