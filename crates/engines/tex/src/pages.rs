@@ -3023,7 +3023,6 @@ impl Operation for Finish {
             give_no_units(r);
             let args = r.fin.as_ref().map(|c| c.args.clone()).unwrap_or_default();
             r.split_piece(&args)?;
-            r.define_seen_boxes(&args)?;
             let g = r.contribute_global_defs();
             r.record_finisher_defs(&args, g);
             Ok(())
@@ -3043,48 +3042,6 @@ impl Operation for Finish {
 }
 
 impl Run<'_, '_> {
-    /// The box registers an earlier run of this routine defined and
-    /// this one did not (`\box\footins`, which a page with footnotes
-    /// fills and the routine empties): defined here as they stand, so
-    /// every run of the routine defines them, at the value both last
-    /// runs agree on (void), and a finisher reading one runs on the
-    /// prediction of the one before instead of waiting for it.
-    fn define_seen_boxes(&mut self, args: &[ValueId]) -> R<()> {
-        let v = self.v;
-        let Some(&t) = args.get(9) else {
-            return Ok(());
-        };
-        if t == ValueId::UNIT {
-            return Ok(());
-        }
-        let seen: Vec<Field> = self
-            .ops
-            .fin_defs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&fin_key(v, t, args))
-            .map(FinDefs::names)
-            .unwrap_or_default();
-        for f in seen {
-            let name = crate::val::field_name(v, f);
-            let Some(n) = name
-                .strip_prefix("box:")
-                .and_then(|n| n.parse::<i64>().ok())
-                .filter(|&n| (0..256).contains(&n))
-            else {
-                continue;
-            };
-            let l = self.box_loc(n);
-            if self.st.defined_after(l, 0) {
-                continue;
-            }
-            if let Some(x) = self.get_loc(l)? {
-                self.set_cell(l, x, true);
-            }
-        }
-        Ok(())
-    }
-
     /// The fields this finisher defined globally, for the resume after
     /// it ([`Run::cont_load`]): a group-local value the resume carries
     /// is replaced by a global definition even of an equal value.
