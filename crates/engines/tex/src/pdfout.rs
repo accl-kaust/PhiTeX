@@ -1717,6 +1717,8 @@ struct LinkMemo {
     errors: Vec<(String, i64)>,
     /// The writer after the last record (before the file's end).
     end: LinkSnap,
+    /// The record `chunks[0]` is (its earlier records moved out).
+    chunk_base: usize,
 }
 
 /// Whether the writer `st` with `nums` and `forms` is the one the last
@@ -1858,25 +1860,29 @@ pub(crate) fn finish_exact(
     // (the last link's memo, taken: an edit's records after the change
     // that are the last link's again, from a writer state equal to the
     // one it had there, are copied too, `resync` below)
-    let old: Option<LinkMemo> = link_memo()
+    let mut old: Option<LinkMemo> = link_memo()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take()
         .filter(|m| m.head == head);
-    {
-        if let Some(m) = old.as_ref() {
-            let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
-            if let Some(sn) = m.snaps.iter().rev().find(|sn| sn.at <= same && sn.at > 0) {
-                st = sn.st.clone();
-                nums = sn.nums.clone();
-                forms = sn.forms.clone();
-                got = m.got[..sn.got].to_vec();
-                errors = m.errors[..sn.errors].to_vec();
-                (placed, shipped) = (sn.placed, sn.shipped);
-                chunks_of.extend(m.chunks[..sn.at].iter().cloned());
-                snaps.extend(m.snaps.iter().filter(|x| x.at <= sn.at).cloned());
-                start = sn.at;
-            }
+    if let Some(m) = old.as_mut() {
+        let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
+        if let Some(sn) = m.snaps.iter().rev().find(|sn| sn.at <= same && sn.at > 0) {
+            st = sn.st.clone();
+            nums = sn.nums.clone();
+            forms = sn.forms.clone();
+            got = m.got[..sn.got].to_vec();
+            errors = m.errors[..sn.errors].to_vec();
+            (placed, shipped) = (sn.placed, sn.shipped);
+            start = sn.at;
+            // (moved, not copied: the memo is this link's to replace)
+            chunks_of.extend(m.chunks.drain(..start));
+            let (before, after): (Vec<LinkSnap>, Vec<LinkSnap>) = std::mem::take(&mut m.snaps)
+                .into_iter()
+                .partition(|x| x.at <= start);
+            snaps.extend(before);
+            m.snaps = after;
+            m.chunk_base = start;
         }
     }
     let copied = start;
@@ -2044,19 +2050,21 @@ pub(crate) fn finish_exact(
     }
     let t_parts = t_parts.elapsed();
     let mut resynced = 0usize;
-    if let (Some(i), Some(m)) = (resync, old.as_ref())
+    if let Some(i) = resync
+        && let Some(mut m) = old.take()
         && let Some(sn) = m.snaps.iter().find(|sn| sn.at == i)
     {
+        let (sg, se, sp, ss) = (sn.got, sn.errors, sn.placed, sn.shipped);
         resynced = xpages.len() - i;
-        chunks_of.extend(m.chunks[i..].iter().cloned());
-        snaps.extend(m.snaps.iter().filter(|x| x.at >= i).cloned());
-        got.extend(m.got[sn.got..].iter().copied());
-        errors.extend(m.errors[sn.errors..].iter().cloned());
-        placed += m.end.placed - sn.placed;
-        shipped += m.end.shipped - sn.shipped;
-        st = m.end.st.clone();
-        nums = m.end.nums.clone();
-        forms = m.end.forms.clone();
+        chunks_of.extend(m.chunks.drain(i - m.chunk_base..));
+        snaps.extend(m.snaps.into_iter().filter(|x| x.at >= i));
+        got.extend(m.got[sg..].iter().copied());
+        errors.extend(m.errors.drain(se..));
+        placed += m.end.placed - sp;
+        shipped += m.end.shipped - ss;
+        st = m.end.st;
+        nums = m.end.nums;
+        forms = m.end.forms;
     }
     for c in chunks_of.iter().flatten() {
         bytes.push(c.clone());
@@ -2079,6 +2087,7 @@ pub(crate) fn finish_exact(
         got: got.clone(),
         errors: errors.clone(),
         end,
+        chunk_base: 0,
     });
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
