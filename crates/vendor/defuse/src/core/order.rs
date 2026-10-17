@@ -234,6 +234,7 @@ impl Shared {
 
     /// Spreads labels around `after` so that `k` entries fit after it.
     fn relabel(&self, u: u32, after: Slot, k: u64) {
+        self.escalate(u);
         let un = self.unit(u);
         un.label_epoch.fetch_add(1, Ordering::AcqRel);
         // The window: entries [l, r] around `after`.
@@ -313,6 +314,7 @@ impl Shared {
 
     /// Unlinks `s` from its unit's list.
     pub(crate) fn unlink(&self, s: Slot) {
+        self.escalate(self.unit_of(s));
         let u = self.unit_of(s);
         let un = self.unit(u);
         let r = self.rec(s);
@@ -497,6 +499,57 @@ impl Shared {
         stack
     }
 
+    /// A new entry's frames as `recompute_frames` gives them, set before it
+    /// is linked after `after` (its own scope frames are new: no reader
+    /// sees them before the entry).
+    fn preset_frames(&self, u: u32, after: Slot, x: Slot) {
+        let root = self.unit(u).root_frame;
+        let mut stack = self.stack_after(after, root);
+        let r = self.rec(x);
+        r.top_in.store(*stack.last().expect("root"), Ordering::Release);
+        let (br, kind) = self.brackets_of(x);
+        let n = u32::from(br.ob) + u32::from(br.oa);
+        let base = if n > 0 { self.ensure_frames(x, n) } else { 0 };
+        for _ in 0..br.cb {
+            if stack.len() > 1 {
+                stack.pop();
+            }
+        }
+        for k in 0..u32::from(br.ob) {
+            #[allow(clippy::cast_possible_truncation)]
+            let dep = stack.len() as u32;
+            self.set_frame(base + k, *stack.last().expect("root"), dep, kind, x);
+            stack.push(base + k);
+        }
+        r.frame.store(*stack.last().expect("root"), Ordering::Release);
+        for _ in 0..br.ca {
+            if stack.len() > 1 {
+                stack.pop();
+            }
+        }
+        for k in 0..u32::from(br.oa) {
+            let f = base + u32::from(br.ob) + k;
+            #[allow(clippy::cast_possible_truncation)]
+            let dep = stack.len() as u32;
+            self.set_frame(f, *stack.last().expect("root"), dep, kind, x);
+            stack.push(f);
+        }
+    }
+
+    /// Whether frame `f` differs from what `set_frame` would make it.
+    fn frame_differs(&self, f: u32, parent: u32, depth: u32, kind: KindSpec, opener: Slot) -> bool {
+        let fr = self.frame(f);
+        let (m, k) = match kind {
+            KindSpec::None => (K_NONE, 0),
+            KindSpec::Value(v) => (K_VALUE, v.raw()),
+            KindSpec::Pending => (K_PENDING, self.opener_kind(opener, f).map_or(0, ValueId::raw)),
+        };
+        fr.parent.load(Ordering::Acquire) != parent
+            || fr.depth.load(Ordering::Acquire) != depth
+            || fr.kmode.load(Ordering::Acquire) != m
+            || fr.kind.load(Ordering::Acquire) != k
+    }
+
     /// Recomputes frames from `start` on until the structure agrees with
     /// what it was; returns whether any existing entry's scopes changed.
     pub(crate) fn recompute_frames(&self, u: u32, start: Slot, moved: &mut Vec<Slot>) -> Option<Slot> {
@@ -527,8 +580,11 @@ impl Shared {
             last = x;
             first = false;
             let old_frame = r.frame.load(Ordering::Acquire);
-            r.top_in.store(top, Ordering::Release);
             let (br, kind) = self.brackets_of(x);
+            if old_top != top {
+                self.escalate(u);
+            }
+            r.top_in.store(top, Ordering::Release);
             let n = u32::from(br.ob) + u32::from(br.oa);
             let base = if n > 0 { self.ensure_frames(x, n) } else { 0 };
             for _ in 0..br.cb {
@@ -543,6 +599,9 @@ impl Shared {
                 let f = base + k;
                 #[allow(clippy::cast_possible_truncation)]
                 let dep = stack.len() as u32;
+                if self.is_light(u) && self.frame_differs(f, *stack.last().expect("root"), dep, kind, x) {
+                    self.escalate(u);
+                }
                 let ch = self.set_frame(f, *stack.last().expect("root"), dep, kind, x);
                 if ch {
                     re.insert(f);
@@ -554,6 +613,9 @@ impl Shared {
                 stack.push(f);
             }
             let fr = *stack.last().expect("root");
+            if old_frame != fr {
+                self.escalate(u);
+            }
             r.frame.store(fr, Ordering::Release);
             for _ in 0..br.ca {
                 if stack.len() > 1
@@ -567,6 +629,9 @@ impl Shared {
                 let f = base + u32::from(br.ob) + k;
                 #[allow(clippy::cast_possible_truncation)]
                 let dep = stack.len() as u32;
+                if self.is_light(u) && self.frame_differs(f, *stack.last().expect("root"), dep, kind, x) {
+                    self.escalate(u);
+                }
                 let ch = self.set_frame(f, *stack.last().expect("root"), dep, kind, x);
                 if ch {
                     re.insert(f);
@@ -1744,6 +1809,7 @@ impl Shared {
 
     /// Frees `s` and its subtree.
     pub(crate) fn free_entry(&self, s: Slot, notes: &mut Notes) {
+        self.escalate(self.unit_of(s));
         let r = self.rec(s);
         loop {
             let st = r.st();
@@ -1833,6 +1899,7 @@ impl Shared {
 
     /// Makes `s` inert: claimed by `by`.
     pub(crate) fn make_inert(&self, s: Slot, by: Slot, notes: &mut Notes) {
+        self.escalate(self.unit_of(s));
         if self.held_by_other(s, by) {
             return;
         }
@@ -1874,6 +1941,7 @@ impl Shared {
 
     /// Releases `s` from the claim of `by` (if it is still under it).
     pub(crate) fn release(&self, s: Slot, by: Slot, notes: &mut Notes) {
+        self.escalate(self.unit_of(s));
         let r = self.rec(s);
         if r.claimed_by.load(Ordering::Acquire) != by {
             return;
@@ -2086,6 +2154,21 @@ impl Shared {
                 }
             };
             out.push(s);
+            // A light writer's new entry is seen whole once linked: its
+            // frame first (an entry without brackets is in the frame after
+            // its predecessor; one with brackets needs the full writer).
+            if self.is_light(u) {
+                if after == NIL {
+                    self.escalate(u);
+                } else {
+                    // Its static facts first: its brackets come from them
+                    // (`register` files the rest after it is linked).
+                    if let Some(st) = notes.pre.get(&sp.id()) {
+                        self.rec(s).data().stat = st.clone();
+                    }
+                    self.preset_frames(u, after, s);
+                }
+            }
             // Link now so later specs find their place.
             self.link_after(u, after, &[s]);
             after = s;
@@ -2280,6 +2363,9 @@ impl Shared {
 
     pub(crate) fn settle_structure(&self, u: u32, notes: &mut Notes) {
         let mut guard = 0;
+        if !notes.reclaim.is_empty() {
+            self.escalate(u);
+        }
         while !notes.reclaim.is_empty() {
             let mut rs = std::mem::take(&mut notes.reclaim);
             rs.sort_by_key(|&x| self.rec(x).lab());

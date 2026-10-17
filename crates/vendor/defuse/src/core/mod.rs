@@ -978,13 +978,30 @@ impl Shared {
 }
 
 /// A unit's writer: excludes other writers; readers that overlap it retry.
+/// A light writer ([`Shared::wunit_light`]) excludes only other writers:
+/// readers and committing readers go on, and it becomes a full writer
+/// ([`Shared::escalate`]) before it changes what they read.
 pub(crate) struct UnitW<'a> {
     _g: std::sync::RwLockWriteGuard<'a, ()>,
     un: &'a Unit,
+    light: bool,
+}
+
+thread_local! {
+    /// The unit this thread holds as a light writer, and whether it has
+    /// become a full one.
+    static LIGHT: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((u32::MAX, false)) };
 }
 
 impl Drop for UnitW<'_> {
     fn drop(&mut self) {
+        if self.light {
+            let (_, full) = LIGHT.with(std::cell::Cell::get);
+            LIGHT.with(|c| c.set((u32::MAX, false)));
+            if !full {
+                return;
+            }
+        }
         self.un.sv.fetch_add(1, Ordering::Release);
         self.un.wflag.store(false, Ordering::SeqCst);
     }
@@ -1022,6 +1039,40 @@ impl Shared {
     pub(crate) fn wunit(&self, u: u32) -> UnitW<'_> {
         let un = self.unit(u);
         let g = wlock(&un.s);
+        self.exclude_readers(u);
+        UnitW {
+            _g: g,
+            un,
+            light: false,
+        }
+    }
+
+    /// A light writer of unit `u` (see [`UnitW`]): for a commit that only
+    /// adds new entries readers do not see until they are linked whole.
+    pub(crate) fn wunit_light(&self, u: u32) -> UnitW<'_> {
+        let un = self.unit(u);
+        let g = wlock(&un.s);
+        LIGHT.with(|c| c.set((u, false)));
+        UnitW { _g: g, un, light: true }
+    }
+
+    /// Makes this thread's light writer of `u` a full one (readers that
+    /// overlap it from now on retry); nothing for a full writer.
+    pub(crate) fn escalate(&self, u: u32) {
+        let (lu, full) = LIGHT.with(std::cell::Cell::get);
+        if lu == u && !full {
+            self.exclude_readers(u);
+            LIGHT.with(|c| c.set((u, true)));
+        }
+    }
+
+    /// Whether this thread is a light writer of `u` not yet escalated.
+    pub(crate) fn is_light(&self, u: u32) -> bool {
+        LIGHT.with(std::cell::Cell::get) == (u, false)
+    }
+
+    fn exclude_readers(&self, u: u32) {
+        let un = self.unit(u);
         // Committing readers come in only while no writer is flagged; wait
         // out those already in.
         un.wflag.store(true, Ordering::SeqCst);
@@ -1039,7 +1090,6 @@ impl Shared {
             }
         }
         un.sv.fetch_add(1, Ordering::AcqRel);
-        UnitW { _g: g, un }
     }
 
     /// Enters a commit that changes no structure of unit `u` (see `UnitR`).

@@ -101,6 +101,18 @@ fn eval(eng: &mut Engine, threads: usize, spec: bool) -> (Duration, Report) {
         eng.evaluate(&mut sched, &mut Threads(threads))
     }
     .expect("evaluate");
+    if std::env::var_os("ROUNDS").is_some() {
+        let sum = |f: fn(&defuse::RoundTimes) -> u64| r.round_times.iter().map(f).sum::<u64>() as f64 / 1e6;
+        eprintln!(
+            "rounds {} wall {:.1} ms  op {:.1}  commit {:.1}  check {:.1}  idle {:.1} (ms, summed over workers)",
+            r.round_times.len(),
+            sum(|t| t.wall_ns),
+            sum(|t| t.op_ns),
+            sum(|t| t.commit_ns),
+            sum(|t| t.check_ns),
+            sum(|t| t.idle_ns)
+        );
+    }
     (t.elapsed(), r)
 }
 

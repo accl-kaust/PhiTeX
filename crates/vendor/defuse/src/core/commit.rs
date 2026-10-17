@@ -322,8 +322,35 @@ impl Shared {
                 }
             }
         }
+        // Only new plain children (none before, no continuations, claims or
+        // effects): a light writer, readers go on (see `UnitW`).
+        let light = structural && {
+            let d = r.data();
+            d.kids.is_empty()
+                && d.conts.is_empty()
+                && cx.conts.is_empty()
+                && d.stat.claim != ClaimS::Pending
+                && cx.claim.is_none()
+                && d.x.as_ref().is_none_or(|e| e.claim_run.is_none())
+                && cx
+                    .effect
+                    .is_none_or(|e| d.res.as_ref().is_some_and(|c| c.effect == Some(e)))
+                && d.kind_val == cx.kind
+                && d.kind_vals == cx.kinds
+                && cx.kids.iter().all(|sp| match sp {
+                    // (Brackets known from the text: their frames are made
+                    // before the entry is linked.)
+                    super::order::Spec::Node { id, .. } => notes
+                        .pre
+                        .get(id)
+                        .is_some_and(|st| st.effect != crate::api::Effect::Pending),
+                    super::order::Spec::Marker { .. } => true,
+                })
+        };
         {
-            let guard = if structural {
+            let guard = if light {
+                Ok(self.wunit_light(u))
+            } else if structural {
                 Ok(self.wunit(u))
             } else {
                 Err(self.runit(u))
@@ -645,7 +672,12 @@ impl Shared {
             let kids = std::mem::take(&mut cx.kids);
             let conts = std::mem::take(&mut cx.conts);
             let anchors = std::mem::take(&mut cx.anchors);
+            #[cfg(feature = "profile")]
+            let su0 = std::time::Instant::now();
             self.set_unfolding(s, &kids, &conts, &anchors, &mut notes);
+            #[cfg(feature = "profile")]
+            #[allow(clippy::cast_possible_truncation)]
+            crate::obs::add_impl("commit_w_unfold", su0.elapsed().as_nanos() as u64);
             // Claims.
             if claim_kind == ClaimS::Pending {
                 let n = cx.claim.unwrap_or(0);

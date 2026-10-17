@@ -38,7 +38,10 @@ impl Operation for Ops {
                         .and_then(|x| v.as_int(x))
                         .unwrap_or(0)
                 };
-                std::thread::sleep(std::time::Duration::from_micros(200));
+                let t = std::time::Instant::now();
+                while t.elapsed() < std::time::Duration::from_micros(30) {
+                    std::hint::spin_loop();
+                }
                 cx.define(v.field(&format!("x{i}")), v.int(p + 1));
                 Ok(ValueId::UNIT)
             }
