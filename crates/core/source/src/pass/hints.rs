@@ -2022,6 +2022,19 @@ pub(crate) fn marks(
     let mut k = 0;
     while k < atoms.len() {
         let at = atoms[k];
+        // (plain text: a space, or a character other than `$` inside a
+        // run, makes no mark and changes nothing; its token is not read)
+        match at.kind {
+            AtomKind::Space => {
+                k += 1;
+                continue;
+            }
+            AtomKind::Char(c) if in_run && c != '$' => {
+                k += 1;
+                continue;
+            }
+            _ => {}
+        }
         let tok = tokens[at.tok];
         let mut emit = !tok.in_body && !claimed[k];
         let here = k;

@@ -868,13 +868,14 @@ fn is_prefix(name: &str) -> bool {
 /// the hint of the command at each atom.
 pub(crate) struct TextHints {
     pub slices: Vec<(usize, usize)>,
-    /// Byte starts of the atoms, and the encoded hint of the command
+    /// Byte starts of the atoms a span reads (no space, no character
+    /// after the first of its run), and the hint of the command
     /// beginning there.
-    starts: Vec<usize>,
+    starts: Vec<u32>,
     /// (`None` for a skipped atom: never read)
     hints: Vec<Option<Arc<Hint>>>,
     /// Per atom: an operand an earlier command reads (never run on its
-    /// own), or a character after the first of its run.
+    /// own).
     skip: Vec<bool>,
     /// Per slice: whether a paragraph starts in it (a region: its run
     /// begins and ends in the vertical list).
@@ -899,7 +900,7 @@ impl TextHints {
     /// the bounds of the commands in it (a run executes all of them: a
     /// line of a file read by `\input`, a region).
     pub(crate) fn at_until(&self, off: usize, end: usize) -> Hint {
-        let k = self.starts.partition_point(|&s| s < off);
+        let k = self.starts.partition_point(|&s| (s as usize) < off);
         let mut acc: Option<Bound> = None;
         let mut first: Option<usize> = None;
         // (the first unbounded command, and whether every unbounded one
@@ -909,7 +910,7 @@ impl TextHints {
         let mut seen: phitex_defuse::FxHashSet<usize> = phitex_defuse::FxHashSet::default();
         let mut a = k;
         while let Some(&s) = self.starts.get(a)
-            && s < end
+            && (s as usize) < end
         {
             a += 1;
             if self.skip[a - 1] {
@@ -1007,11 +1008,14 @@ impl TextHints {
 pub fn paragraph_units(text: &str) -> Vec<(usize, usize)> {
     let kind = FileKind::Document;
     let an = Analysis::with_own(text, kind, no_defs().clone(), own_definitions(text, kind));
-    slices_of(text, &an.p, kind).0
+    slices_of(text, &an, kind).0
 }
 
+// (every per-atom flag here is kept as its ranges, `Spans`, and every
+// loop walks the commands and braces only or jumps over the ranges: a
+// paragraph's plain text is never visited atom by atom)
 #[allow(clippy::too_many_lines)]
-pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
+fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
     if kind != FileKind::Document {
         return if text.is_empty() {
             (Vec::new(), Vec::new())
@@ -1019,41 +1023,35 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             (vec![(0, text.len())], vec![true])
         };
     }
+    let p = &an.p;
     let n = p.atoms.len();
     // brace depth before each atom
-    let mut depth = Vec::with_capacity(n);
-    let mut d: usize = 0;
-    for at in &p.atoms {
-        if at.kind == AtomKind::Close {
-            d = d.saturating_sub(1);
-        }
-        depth.push(d);
-        if at.kind == AtomKind::Open {
-            d += 1;
-        }
-    }
+    let depth = |k: usize| an.depth(k);
     // atoms an earlier item claims (operands: never a slice's start)
-    let mut claimed = vec![false; n];
-    for (i, it) in p.items.iter().enumerate() {
-        // (a value whose last token is a command the pass cannot read
-        // through, `\count1=\input inc-num`: the text up to the next
-        // command is the value's too, §440)
-        let end = match &it.hints.claim {
-            pass::Claim::Pending { cause, .. }
-                if matches!(*cause, "command in value position" | "value is a macro") =>
-            {
-                p.items.get(i + 1).map_or(it.end, |x| x.atom).max(it.end)
-            }
-            _ => it.end,
-        };
-        for c in claimed.iter_mut().take(end.min(n)).skip(it.atom + 1) {
-            *c = true;
-        }
-    }
+    let claimed = Spans::of(
+        p.items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                // (a value whose last token is a command the pass cannot
+                // read through, `\count1=\input inc-num`: the text up to
+                // the next command is the value's too, §440)
+                let end = match &it.hints.claim {
+                    pass::Claim::Pending { cause, .. }
+                        if matches!(*cause, "command in value position" | "value is a macro") =>
+                    {
+                        p.items.get(i + 1).map_or(it.end, |x| x.atom).max(it.end)
+                    }
+                    _ => it.end,
+                };
+                (u(it.atom + 1), u(end.min(n)))
+            })
+            .collect(),
+    );
     // (that extension runs in the command's own run: `\\vskip 1in
     // \\centerline{…}` expands the macro while it looks for `plus`,
     // §1094, and runs what it leaves; one slice)
-    let mut extended = vec![false; n];
+    let mut extended = Vec::new();
     for (i, it) in p.items.iter().enumerate() {
         if let pass::Claim::Pending { cause, .. } = &it.hints.claim
             && matches!(*cause, "command in value position" | "value is a macro")
@@ -1067,68 +1065,64 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                 None => it.end,
             }
             .max(it.end);
-            for c in extended
-                .iter_mut()
-                .take(end.min(n))
-                .skip(it.end.max(it.atom + 1))
-            {
-                *c = true;
-            }
+            extended.push((u(it.end.max(it.atom + 1)), u(end.min(n))));
         }
     }
     // the operands of a primitive (`\sfcode`\)=0`): never a slice's
     // start, so a command and what it reads are one node (a macro's
     // operands are the pass's guess and do not count)
-    let mut operand = vec![false; n];
-    for it in &p.items {
-        if is_prim(&it.name) {
-            for c in operand.iter_mut().take(it.end.min(n)).skip(it.atom + 1) {
-                *c = true;
-            }
-        }
-    }
-    for (o, &x) in operand.iter_mut().zip(&extended) {
-        *o |= x;
-    }
+    let operand = Spans::of(
+        p.items
+            .iter()
+            .filter(|it| is_prim(&it.name))
+            .map(|it| (u(it.atom + 1), u(it.end.min(n))))
+            .chain(extended)
+            .collect(),
+    );
     // the conditional nesting before each atom, by the text's items
-    // (`\if…` +1, `\fi` -1; an item an earlier one consumes not counted)
-    let mut ifd = vec![0i64; n + 1];
+    // (`\if…` +1, `\fi` -1; an item an earlier one consumes not counted):
+    // the nesting after each change, by its atom
+    let mut ifd_at: Vec<(usize, i64)> = Vec::new();
     {
         let mut consumed = 0;
         let mut cur = 0i64;
-        let mut k = 0;
-        let mut deltas: Vec<(usize, i64)> = Vec::new();
         for it in &p.items {
             if it.atom >= consumed {
-                if CONDITIONALS.contains(&it.name.as_str()) {
-                    deltas.push((it.atom, 1));
+                let d = if CONDITIONALS.contains(&it.name.as_str()) {
+                    1
                 } else if it.name == "fi" {
-                    deltas.push((it.atom, -1));
+                    -1
+                } else {
+                    0
+                };
+                if d != 0 {
+                    cur = (cur + d).max(0);
+                    ifd_at.push((it.atom, cur));
                 }
             }
             if it.consumes {
                 consumed = consumed.max(it.end);
             }
         }
-        for (a, x) in ifd.iter_mut().enumerate() {
-            while k < deltas.len() && deltas[k].0 < a {
-                cur = (cur + deltas[k].1).max(0);
-                k += 1;
-            }
-            *x = cur;
-        }
     }
+    let ifd = |a: usize| {
+        ifd_at
+            .partition_point(|x| x.0 < a)
+            .checked_sub(1)
+            .map_or(0, |i| ifd_at[i].1)
+    };
     // inside a brace group of the text opened at depth 0: the slice goes
     // on to its end (a brace group of the text is never split)
-    let mut inside = vec![false; n];
-    for (k, a) in p.atoms.iter().enumerate() {
+    let mut groups = Vec::new();
+    for &k in &an.structural {
+        let k = k as usize;
+        let a = &p.atoms[k];
         // (a brace knows its mate's atom index; `p.braces` indexes tokens)
-        if a.kind == AtomKind::Open && a.mate != usize::MAX && a.mate > k && depth[k] == 0 {
-            for x in inside.iter_mut().take(a.mate + 1).skip(k + 1) {
-                *x = true;
-            }
+        if a.kind == AtomKind::Open && a.mate != usize::MAX && a.mate > k && depth(k) == 0 {
+            groups.push((u(k + 1), u((a.mate + 1).min(n))));
         }
     }
+    let groups = Spans::of(groups);
     // (a `\\begingroup`...`\\endgroup` pair or an environment is no
     // bar to a cut: a paragraph end inside it at brace depth 0 of the
     // text is one, the region that leaves the group open leaves it to the
@@ -1138,9 +1132,17 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     // (with the spaces between): one slice; a loading command's are
     // never cut and end a paragraph before it
     let mut loaders: Vec<usize> = Vec::new();
-    for k in 0..n {
+    let mut commands = Spans::default();
+    for &k in &an.structural {
+        let k = k as usize;
         let a = &p.atoms[k];
-        if a.kind != AtomKind::Cs || depth[k] != 0 || ifd[k] != 0 || inside[k] || claimed[k] {
+        if a.kind != AtomKind::Cs
+            || depth(k) != 0
+            || ifd(k) != 0
+            || groups.has(k)
+            || commands.has(k)
+            || claimed.has(k)
+        {
             continue;
         }
         let name = a.name(text);
@@ -1159,7 +1161,7 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                 j = b.mate + 1;
             } else if b.kind == AtomKind::Char('[') {
                 let mut q = j + 1;
-                while q < n && !(p.atoms[q].kind == AtomKind::Char(']') && depth[q] == depth[j]) {
+                while q < n && !(p.atoms[q].kind == AtomKind::Char(']') && depth(q) == depth(j)) {
                     if p.atoms[q].kind == AtomKind::Par {
                         q = n;
                         break;
@@ -1173,7 +1175,7 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                 j = q + 1;
             } else if b.kind == AtomKind::Char('=')
                 && last == k
-                && claimed[j]
+                && claimed.has(j)
                 && p.atoms
                     .get(j + 1)
                     .is_some_and(|x| x.kind == AtomKind::Open && x.mate != usize::MAX)
@@ -1212,10 +1214,9 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                 }
             }
         }
-        for x in inside.iter_mut().take(last + 1).skip(k + 1) {
-            *x = true;
-        }
+        commands.push(k + 1, (last + 1).min(n));
     }
+    let inside = groups.union(&commands);
     // a paragraph: from its first horizontal atom at depth 0 (a
     // character, a command of §1090) to the end of the next item the
     // pass marks paragraph-ending (a blank line, `\par`, a vertical
@@ -1226,9 +1227,10 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         let mut consumed = 0;
         for it in &p.items {
             if it.atom >= consumed
-                && depth.get(it.atom) == Some(&0)
+                && it.atom < n
+                && depth(it.atom) == 0
                 && it.hints.implicit == pass::Implicit::EndsParagraph
-                && ifd[it.atom] == 0
+                && ifd(it.atom) == 0
                 // these read keywords or a number past their text, and
                 // put back what follows (§1094): the paragraph goes on
                 && !matches!(
@@ -1243,9 +1245,10 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             }
         }
         for m in &p.marks {
-            if depth.get(m.atom) == Some(&0)
+            if m.atom < n
+                && depth(m.atom) == 0
                 && m.hints.implicit == pass::Implicit::EndsParagraph
-                && ifd[m.atom] == 0
+                && ifd(m.atom) == 0
             {
                 ends.push(m.atom + 1);
             }
@@ -1255,10 +1258,17 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         ends.sort_unstable();
         ends.dedup();
     }
-    let mut par_at = vec![false; n];
+    let mut par_at: Vec<usize> = Vec::new();
+    let mut regions = Spans::default();
     {
         let mut k = 0;
         while k < n {
+            // (an atom inside a range never starts a paragraph: the range
+            // is passed whole)
+            if let Some(e) = inside.end_of(k).or_else(|| regions.end_of(k)) {
+                k = e;
+                continue;
+            }
             let a = &p.atoms[k];
             let horizontal = match a.kind {
                 AtomKind::Char(_) | AtomKind::Verb => true,
@@ -1273,8 +1283,10 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                             while p.atoms.get(j).is_some_and(|x| x.kind == AtomKind::Space) {
                                 j += 1;
                             }
-                            !claimed.get(j).copied().unwrap_or(true)
-                                && !inside.get(j).copied().unwrap_or(true)
+                            j < n
+                                && !claimed.has(j)
+                                && !inside.has(j)
+                                && !regions.has(j)
                                 && p.atoms.get(j).is_some_and(|x| match x.kind {
                                     AtomKind::Char(_) | AtomKind::Verb => true,
                                     AtomKind::Cs => starts_par(x.name(text)),
@@ -1286,40 +1298,39 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             };
             // (an operand a macro is guessed to read still starts one: the
             // guess is not the run, `\hello\ world.`)
-            if horizontal && depth[k] == 0 && ifd[k] == 0 && !inside[k] && !operand[k] {
+            if horizontal && depth(k) == 0 && ifd(k) == 0 && !operand.has(k) {
                 // the first atom after the paragraph's end, at depth 0
                 // and outside every conditional
                 let mut e = ends.partition_point(|&x| x <= k);
                 let mut end = ends.get(e).copied().unwrap_or(n);
-                while end < n && (depth[end] != 0 || ifd[end] != 0) {
+                while end < n && (depth(end) != 0 || ifd(end) != 0) {
                     end += 1;
                     e += 1;
                     if let Some(&x) = ends.get(e) {
                         end = end.max(x);
                     }
                 }
-                par_at[k] = true;
-                for x in inside.iter_mut().take(end.min(n)).skip(k + 1) {
-                    *x = true;
-                }
+                par_at.push(k);
+                regions.push(k + 1, end.min(n));
                 k = end.max(k + 1);
                 continue;
             }
             k += 1;
         }
     }
+    let inside = inside.union(&regions);
     if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
         for (k, a) in p.atoms.iter().enumerate() {
             eprintln!(
                 "slices: {k} {:?} {:?} depth {} ifd {} inside {} claimed {} operand {} par {}",
                 a.kind,
                 &text[a.start..a.end],
-                depth[k],
-                ifd[k],
-                inside[k],
-                claimed[k],
-                operand[k],
-                par_at[k]
+                depth(k),
+                ifd(k),
+                inside.has(k),
+                claimed.has(k),
+                operand.has(k),
+                par_at.binary_search(&k).is_ok()
             );
         }
         for it in &p.items {
@@ -1331,10 +1342,19 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     }
     let mut starts: Vec<usize> = vec![0];
     let mut prev_char = false;
-    for (k, a) in p.atoms.iter().enumerate() {
+    let mut k = 0;
+    while k < n {
+        // (no atom inside a range starts a slice: the range is passed
+        // whole)
+        if let Some(e) = inside.end_of(k) {
+            prev_char = matches!(p.atoms[e - 1].kind, AtomKind::Char(_) | AtomKind::Verb);
+            k = e;
+            continue;
+        }
+        let a = &p.atoms[k];
         let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
         let inside_if =
-            ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
+            ifd(k) > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
         // (a token after a catcode change the pass could not read, a
         // `\catcode` with a computed value, is tokenized by the run
         // alone, under the table as the commands before it on the line
@@ -1347,10 +1367,11 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             .is_some_and(|t| t.tz == pass::Status::Pending);
         // (an operand a primitive reads never starts a slice; a macro's
         // operand range is the pass's guess and does not cut)
-        if !(inside_if || inside[k] || operand[k] || pending || (ch && prev_char)) {
+        if !(inside_if || operand.has(k) || pending || (ch && prev_char)) {
             starts.push(a.start);
         }
         prev_char = ch;
+        k += 1;
     }
     starts.sort_unstable();
     starts.dedup();
@@ -1364,21 +1385,20 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             // only a macro's guessed operands cover: `\hello\ world.`)
             // (atoms are in text order: the slice's range only)
             let lo = p.atoms.partition_point(|a| a.start < s);
-            let has_par = p.atoms[lo..]
-                .iter()
-                .take_while(|a| a.start < e)
-                .enumerate()
-                .any(|(j, a)| {
-                    let k = lo + j;
-                    par_at[k]
-                        || (depth[k] == 0
-                            && ifd[k] == 0
-                            && !operand[k]
-                            && match a.kind {
-                                AtomKind::Char(_) | AtomKind::Verb => true,
-                                AtomKind::Cs => starts_par(a.name(text)),
-                                _ => false,
-                            })
+            let hi = lo + p.atoms[lo..].partition_point(|a| a.start < e);
+            let has_par = par_at
+                .get(par_at.partition_point(|&x| x < lo))
+                .is_some_and(|&x| x < hi)
+                || (lo..hi).any(|k| {
+                    let a = &p.atoms[k];
+                    depth(k) == 0
+                        && ifd(k) == 0
+                        && !operand.has(k)
+                        && match a.kind {
+                            AtomKind::Char(_) | AtomKind::Verb => true,
+                            AtomKind::Cs => starts_par(a.name(text)),
+                            _ => false,
+                        }
                 });
             out.push((s, e));
             pars.push(has_par);
@@ -1399,9 +1419,16 @@ fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
     // `\\egroup` of the `\\@foot` it hands to `\\aftergroup`)
     let mut calls: Vec<String> = Vec::new();
     // (atoms are in text order: the slice's range only)
+    // (only its commands and braces count)
     let lo = an.p.atoms.partition_point(|a| a.start < s);
     let hi = an.p.atoms.partition_point(|a| a.start < e);
-    for a in &an.p.atoms[lo..hi.max(lo)] {
+    let st = &an.structural;
+    let (c0, c1) = (
+        st.partition_point(|&x| (x as usize) < lo),
+        st.partition_point(|&x| (x as usize) < hi),
+    );
+    for &k in &st[c0..c1.max(c0)] {
+        let a = &an.p.atoms[k as usize];
         match a.kind {
             AtomKind::Open => brace += 1,
             AtomKind::Close => brace -= 1,
@@ -1627,6 +1654,62 @@ fn union(a: &mut Bound, b: &Bound) {
 }
 
 /// The analysis of one text under `kind`'s regime.
+/// An atom index as stored (a text's atoms number under 2^32).
+fn u(k: usize) -> u32 {
+    u32::try_from(k).unwrap_or(u32::MAX)
+}
+
+/// A set of atoms kept as its ranges `[s, e)`, sorted and disjoint: a
+/// flag of the atoms with no vector as long as the text (plain text is
+/// one range, or none).
+#[derive(Default)]
+struct Spans(Vec<(u32, u32)>);
+
+impl Spans {
+    /// The union of `ranges`, in any order.
+    fn of(mut ranges: Vec<(u32, u32)>) -> Spans {
+        ranges.retain(|r| r.0 < r.1);
+        ranges.sort_unstable();
+        let mut s = Spans::default();
+        for (a, b) in ranges {
+            s.push(a as usize, b as usize);
+        }
+        s
+    }
+
+    /// Adds `[s, e)`, starting at or after every range's start.
+    fn push(&mut self, s: usize, e: usize) {
+        if s >= e {
+            return;
+        }
+        let (s, e) = (u(s), u(e));
+        match self.0.last_mut() {
+            Some(l) if s < l.0 => {
+                let mut v = std::mem::take(&mut self.0);
+                v.push((s, e));
+                *self = Spans::of(v);
+            }
+            Some(l) if s <= l.1 => l.1 = l.1.max(e),
+            _ => self.0.push((s, e)),
+        }
+    }
+
+    /// The end of the range holding `k`.
+    fn end_of(&self, k: usize) -> Option<usize> {
+        let i = self.0.partition_point(|r| r.0 as usize <= k);
+        let r = self.0.get(i.checked_sub(1)?)?;
+        (k < r.1 as usize).then_some(r.1 as usize)
+    }
+
+    fn has(&self, k: usize) -> bool {
+        self.end_of(k).is_some()
+    }
+
+    fn union(&self, o: &Spans) -> Spans {
+        Spans::of(self.0.iter().chain(&o.0).copied().collect())
+    }
+}
+
 struct Analysis<'t> {
     text: &'t str,
     p: Pass,
@@ -1634,15 +1717,20 @@ struct Analysis<'t> {
     /// Item index by atom.
     item_of: FxHashMap<usize, usize>,
     /// Atoms an earlier item claims (operands: never run on their own).
-    claimed: Vec<bool>,
-    /// Per atom: the index of its regime in the pass's regimes.
-    reg: Vec<usize>,
+    claimed: Spans,
     /// Atoms textually inside an alignment's braces (`\\halign{`…`}`).
-    in_align: Vec<bool>,
-    /// Atoms inside a brace group of the text: a font they select is
-    /// the group's, restored at its `}` (§1217), never a definition of
-    /// the node.
-    inner: Vec<bool>,
+    in_align: Spans,
+    /// The braces' atoms, each with the brace depth TeX's text has at
+    /// it (a `}` after its close) and after it: the depth of every atom
+    /// ([`Analysis::depth`]). Atoms inside a brace group of the text: a
+    /// font they select is the group's, restored at its `}` (§1217),
+    /// never a definition of the node.
+    braces: Vec<(u32, u32, u32)>,
+    /// The atoms a span or a slice reads: every one but a space and a
+    /// character after the first of its run.
+    sig: Vec<u32>,
+    /// The control sequences' and braces' atoms, in order.
+    structural: Vec<u32>,
     memo: std::cell::RefCell<FxHashMap<String, DefSet>>,
     /// The names whose state [`Analysis::defined_state`] is reading.
     visiting: std::cell::RefCell<Vec<String>>,
@@ -1777,58 +1865,62 @@ impl Analysis<'_> {
             .enumerate()
             .map(|(i, it)| (it.atom, i))
             .collect();
-        let mut claimed = vec![false; p.atoms.len()];
-        for it in &p.items {
-            // (a scope opener, `\\hbox to 3pt{`, claims its operands up
-            // to its brace; the list inside runs, §1083, §1086)
-            let end = match (&it.hints.scope, &it.hints.claim) {
-                (pass::ScopeHint::Open(_), pass::Claim::Known(b)) => {
-                    let to = p.atoms.get(it.atom).map_or(0, |a| a.end) + b;
-                    p.atoms.partition_point(|a| a.start < to).min(it.end)
-                }
-                _ => it.end,
-            };
-            for c in claimed
-                .iter_mut()
-                .take(end.min(p.atoms.len()))
-                .skip(it.atom + 1)
-            {
-                *c = true;
-            }
-        }
-        let in_align = align_atoms(text, &p.atoms);
-        let mut inner = Vec::with_capacity(p.atoms.len());
-        let mut d = 0usize;
-        for a in &p.atoms {
-            if a.kind == AtomKind::Close {
-                d = d.saturating_sub(1);
-            }
-            inner.push(d > 0);
-            if a.kind == AtomKind::Open {
-                d += 1;
-            }
-        }
-        let reg: Vec<usize> = {
-            let mut k = 0;
-            p.atoms
+        let n = p.atoms.len();
+        let claimed = Spans::of(
+            p.items
                 .iter()
-                .map(|a| {
-                    while k + 1 < p.regimes.len() && p.regimes[k + 1].0 <= a.tok {
-                        k += 1;
-                    }
-                    k.min(p.regimes.len().saturating_sub(1))
+                .map(|it| {
+                    // (a scope opener, `\\hbox to 3pt{`, claims its operands
+                    // up to its brace; the list inside runs, §1083, §1086)
+                    let end = match (&it.hints.scope, &it.hints.claim) {
+                        (pass::ScopeHint::Open(_), pass::Claim::Known(b)) => {
+                            let to = p.atoms.get(it.atom).map_or(0, |a| a.end) + b;
+                            p.atoms.partition_point(|a| a.start < to).min(it.end)
+                        }
+                        _ => it.end,
+                    };
+                    (u(it.atom + 1), u(end.min(n)))
                 })
-                .collect()
-        };
+                .collect(),
+        );
+        // (one linear scan: the atoms that are not plain text, a space or
+        // a character inside its run, which no loop below reads)
+        let mut sig = Vec::new();
+        let mut structural = Vec::new();
+        let mut braces = Vec::new();
+        let mut d = 0u32;
+        let mut prev_char = false;
+        for (k, a) in p.atoms.iter().enumerate() {
+            let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
+            if !((ch && prev_char) || a.kind == AtomKind::Space) {
+                sig.push(u(k));
+            }
+            prev_char = ch;
+            match a.kind {
+                AtomKind::Open => {
+                    braces.push((u(k), d, d + 1));
+                    d += 1;
+                }
+                AtomKind::Close => {
+                    d = d.saturating_sub(1);
+                    braces.push((u(k), d, d));
+                }
+                AtomKind::Cs => {}
+                _ => continue,
+            }
+            structural.push(u(k));
+        }
+        let in_align = align_atoms(text, &p.atoms, &structural);
         Analysis {
             text,
             p,
             defs,
             item_of,
             claimed,
-            reg,
             in_align,
-            inner,
+            braces,
+            sig,
+            structural,
             memo: std::cell::RefCell::new(FxHashMap::default()),
             visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
@@ -1837,6 +1929,35 @@ impl Analysis<'_> {
 
     fn atoms(&self) -> &[Atom] {
         &self.p.atoms
+    }
+
+    fn claimed(&self, k: usize) -> bool {
+        self.claimed.has(k)
+    }
+
+    /// The brace depth at atom `k` (a `}`'s: after it closes).
+    fn depth(&self, k: usize) -> usize {
+        let i = self.braces.partition_point(|b| b.0 as usize <= k);
+        match i.checked_sub(1).map(|i| self.braces[i]) {
+            Some((a, at, _)) if a as usize == k => at as usize,
+            Some((_, _, after)) => after as usize,
+            None => 0,
+        }
+    }
+
+    /// Whether atom `k` is inside a brace group of the text.
+    fn inner(&self, k: usize) -> bool {
+        k < self.p.atoms.len() && self.depth(k) > 0
+    }
+
+    /// The index of atom `k`'s regime in the pass's regimes.
+    fn reg(&self, k: usize) -> usize {
+        let r = &self.p.regimes;
+        if r.len() <= 1 {
+            return 0;
+        }
+        let tok = self.p.atoms[k].tok;
+        r[1..].partition_point(|x| x.0 <= tok)
     }
 
     /// Whether the text or the format defines `name`.
@@ -1895,10 +2016,10 @@ impl Analysis<'_> {
         };
         // (the regimes by index, computed once per text: no compare of
         // two catcode tables)
-        if self.reg.get(first).is_some_and(|&f| f != self.reg[a]) {
+        if first < self.p.atoms.len() && self.reg(first) != self.reg(a) {
             return;
         }
-        let r = &self.p.regimes[self.reg[a]].1;
+        let r = &self.p.regimes[self.reg(a)].1;
         let t = self.text.as_bytes();
         let bytes: &[u8] = match at.kind {
             AtomKind::Cs => {
@@ -1945,7 +2066,7 @@ impl Analysis<'_> {
         };
         // (an operand an earlier command read, `\vsize=2.5in`, is not
         // text: the command before it decides)
-        while self.claimed[k] {
+        while self.claimed(k) {
             match self.prev(k) {
                 Some(p) => k = p,
                 None => return true,
@@ -1979,7 +2100,7 @@ impl Analysis<'_> {
             return Hint::any("end of text", "");
         };
         let excerpt = excerpt_at(self.text, at.start);
-        if self.claimed[a] {
+        if self.claimed(a) {
             return Hint::any(
                 "operand of an earlier command (claimed, never run)",
                 excerpt,
@@ -1994,7 +2115,7 @@ impl Analysis<'_> {
     fn selects_outside(&self, k: usize, head: &str) -> bool {
         let atoms = self.atoms();
         let Some(at) = atoms.get(k) else { return false };
-        if at.kind != AtomKind::Cs || (self.inner[k] && !self.after_global(k)) {
+        if at.kind != AtomKind::Cs || (self.inner(k) && !self.after_global(k)) {
             return false;
         }
         let name = at.name(self.text);
@@ -2042,7 +2163,7 @@ impl Analysis<'_> {
             && self.atoms()[p].kind == AtomKind::Cs
             // (a command that is itself an operand, `\\footnote\\dag{…}`,
             // reads nothing: its reader does)
-            && !self.claimed[p]
+            && !self.claimed(p)
             && {
                 let h = self.hint(p);
                 h.bound.is_none() && !is_demoted(&h)
@@ -2056,7 +2177,7 @@ impl Analysis<'_> {
             state: Some(Vec::new()),
             ..Bound::default()
         };
-        if self.in_align[a] {
+        if self.in_align.has(a) {
             add_head(&mut b.state, "align");
         }
         let mut cause = String::new();
@@ -2139,7 +2260,7 @@ impl Analysis<'_> {
         }
         // (a font selected inside a brace group, not `\\global`ly, is
         // the group's: no `font` definition reaches the engine)
-        if self.inner.get(a).copied().unwrap_or(false)
+        if self.inner(a)
             && !self.after_global(a)
             && let Some(st) = &mut b.state
         {
@@ -2180,7 +2301,7 @@ impl Analysis<'_> {
     fn run_key(&self, a: usize) -> Option<(usize, usize, usize, u8)> {
         let atoms = self.atoms();
         let at = atoms.get(a)?;
-        if !matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb) || self.claimed[a] {
+        if !matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb) || self.claimed(a) {
             return None;
         }
         if self.prev(a).is_some_and(|p| atoms[p].kind == AtomKind::Cs) {
@@ -2190,7 +2311,7 @@ impl Analysis<'_> {
         while let Some(x) = atoms.get(k)
             && matches!(x.kind, AtomKind::Char(_) | AtomKind::Verb)
         {
-            if self.reg[k] != self.reg[a] {
+            if self.atoms()[k].tok != at.tok && self.reg(k) != self.reg(a) {
                 return None;
             }
             if let AtomKind::Char(c) = x.kind
@@ -2203,9 +2324,9 @@ impl Analysis<'_> {
         if atoms.get(k).is_some_and(|x| x.kind == AtomKind::Cs) {
             return None;
         }
-        let flags = u8::from(self.in_align[a])
-            | (u8::from(self.inner.get(a).copied().unwrap_or(false) && !self.after_global(a)) << 1);
-        Some((at.start, atoms[k - 1].end, self.reg[a], flags))
+        let flags = u8::from(self.in_align.has(a))
+            | (u8::from(self.inner(a) && !self.after_global(a)) << 1);
+        Some((at.start, atoms[k - 1].end, self.reg(a), flags))
     }
 
     fn no_scope(&self, a: usize) -> bool {
@@ -2732,12 +2853,17 @@ impl Analysis<'_> {
 
 /// Which atoms are inside an alignment's braces: from the `{` after
 /// `\\halign` or `\\valign` (spec and keywords between) to its `}`.
-fn align_atoms(text: &str, atoms: &[Atom]) -> Vec<bool> {
-    let mut out = vec![false; atoms.len()];
+fn align_atoms(text: &str, atoms: &[Atom], structural: &[u32]) -> Spans {
+    // (only a command or a brace changes it: the atoms between keep the
+    // value of the one before)
+    let mut out = Spans::default();
+    let mut from: Option<usize> = None;
     let mut depth = 0usize;
     let mut open: Vec<usize> = Vec::new();
     let mut pending = false;
-    for (k, a) in atoms.iter().enumerate() {
+    for &k in structural {
+        let k = k as usize;
+        let a = &atoms[k];
         match a.kind {
             AtomKind::Cs
                 if matches!(
@@ -2762,7 +2888,17 @@ fn align_atoms(text: &str, atoms: &[Atom]) -> Vec<bool> {
             }
             _ => {}
         }
-        out[k] = !open.is_empty();
+        match (from, open.is_empty()) {
+            (None, false) => from = Some(k),
+            (Some(f), true) => {
+                out.push(f, k);
+                from = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(f) = from {
+        out.push(f, atoms.len());
     }
     out
 }
@@ -2855,9 +2991,9 @@ fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) ->
 #[allow(clippy::too_many_lines)]
 fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
     let an = Analysis::with_own(text, kind, defs.clone(), own);
-    let (slices, pars) = slices_of(text, &an.p, kind);
-    let mut starts = Vec::with_capacity(an.p.atoms.len());
-    let mut hints: Vec<Option<Arc<Hint>>> = Vec::with_capacity(an.p.atoms.len());
+    let (slices, pars) = slices_of(text, &an, kind);
+    let mut starts = Vec::with_capacity(an.sig.len());
+    let mut hints: Vec<Option<Arc<Hint>>> = Vec::with_capacity(an.sig.len());
     // (one value per distinct hint, keyed by the hash of its encoding:
     // no string keys in the pass, spec-final §5.2)
     let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
@@ -2867,36 +3003,24 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             .or_insert_with(|| Arc::from(s))
             .clone()
     };
-    let mut skip = Vec::with_capacity(an.p.atoms.len());
+    let mut skip = Vec::with_capacity(an.sig.len());
     // (the atoms a primitive reads: never run on their own; a command
     // a macro is only guessed to read runs in the slice, so it counts)
-    let mut prim_operand = vec![false; an.p.atoms.len()];
-    for it in &an.p.items {
-        if is_prim(&it.name) {
-            for c in prim_operand
-                .iter_mut()
-                .take(it.end.min(an.p.atoms.len()))
-                .skip(it.atom + 1)
-            {
-                *c = true;
-            }
-        }
-    }
-    let mut prev_char = false;
+    let n = an.p.atoms.len();
+    let prim_operand = Spans::of(
+        an.p.items
+            .iter()
+            .filter(|it| is_prim(&it.name))
+            .map(|it| (u(it.atom + 1), u(it.end.min(n))))
+            .collect(),
+    );
     let mut runs: FxHashMap<(u64, usize, u8), Arc<Hint>> = FxHashMap::default();
-    #[allow(clippy::needless_range_loop)]
-    for a in 0..an.p.atoms.len() {
+    // (an atom inside a run of characters, or a space, is never read:
+    // no span reads it, so it has no entry)
+    for &a in &an.sig {
+        let a = a as usize;
         let at = &an.p.atoms[a];
-        starts.push(at.start);
-        let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
-        // (an atom inside a run of characters, or a space, is skipped
-        // whatever its hint: no span reads it, so none is made)
-        if (ch && prev_char) || at.kind == AtomKind::Space {
-            hints.push(None);
-            skip.push(true);
-            prev_char = ch;
-            continue;
-        }
+        starts.push(u(at.start));
         // (a run of characters whose hint depends on its text alone: one
         // hint per distinct run, shared)
         if let Some((s0, e0, reg, fl)) = an.run_key(a) {
@@ -2911,24 +3035,22 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                 .clone();
             hints.push(Some(h));
             skip.push(false);
-            prev_char = ch;
             continue;
         }
-        let h = if an.claimed[a] && at.kind == AtomKind::Cs && !prim_operand[a] {
+        let claimed = an.claimed(a);
+        let prim_op = prim_operand.has(a);
+        let h = if claimed && at.kind == AtomKind::Cs && !prim_op {
             an.hint_run(a)
         } else {
             an.hint(a)
         };
         // (a guessed operand that is unbounded on its own is a value
         // read, not run: `\\headline={\\tenrm…}`)
-        let unbounded_operand = an.claimed[a] && h.bound.is_none();
+        let unbounded_operand = claimed && h.bound.is_none();
         hints.push(Some(Arc::new(h)));
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
-        skip.push(
-            an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand),
-        );
-        prev_char = ch;
+        skip.push(claimed && (at.kind != AtomKind::Cs || prim_op || unbounded_operand));
     }
     let mut t = TextHints {
         slices,
@@ -3026,10 +3148,13 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // inside the slice makes is local to that group: the slice
         // declares it only when a command outside every brace group of
         // the slice selects one, §1217)
+        // (the slice's atoms, `k0..k1`; of them only a command selects)
+        let k0 = an.atoms().partition_point(|x| x.start < s);
+        let k1 = an.atoms().partition_point(|x| x.start < e);
+        let cs = &an.structural[an.structural.partition_point(|&x| (x as usize) < k0)
+            ..an.structural.partition_point(|&x| (x as usize) < k1)];
         for head in GROUP_LOCAL {
-            let k0 = t.starts.partition_point(|&x| x < s);
-            let k1 = t.starts.partition_point(|&x| x < e);
-            let outside = (k0..k1).any(|k| an.selects_outside(k, head));
+            let outside = cs.iter().any(|&k| an.selects_outside(k as usize, head));
             if !outside {
                 for b in [h.bound.as_mut(), h.guess.as_mut()].into_iter().flatten() {
                     if let Some(st) = &mut b.state {
@@ -3057,12 +3182,13 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // declares it)
         let mut out = pending.clone();
         let mut ends = false;
-        let k0 = t.starts.partition_point(|&x| x < s);
-        for a in k0..t.starts.len() {
-            if t.starts[a] >= e {
+        // (a space or a character inside its run ends nothing and sets
+        // nothing: the entries of the atoms read only)
+        for a in t.starts.partition_point(|&x| (x as usize) < s)..t.starts.len() {
+            if t.starts[a] as usize >= e {
                 break;
             }
-            if an.ends_par_at(a) {
+            if an.ends_par_at(an.sig[a] as usize) {
                 ends = true;
                 out.clear();
             }
@@ -4058,7 +4184,7 @@ mod tests {
         d.harvest(&plain, kind_of(&plain, FileKind::Package), 0);
         let defs: Defs = Arc::new(d);
         let an = Analysis::new(t, FileKind::Document, defs);
-        let (sl, pars) = slices_of(t, &an.p, FileKind::Document);
+        let (sl, pars) = slices_of(t, &an, FileKind::Document);
         eprintln!("{sl:?} {pars:?}");
         let h = t.find("world").expect("world");
         let k = sl
