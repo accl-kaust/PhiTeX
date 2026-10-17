@@ -37,6 +37,128 @@ pub struct Patterns {
     tries: HashMap<u16, TrieNode>,
     exceptions: HashMap<(u16, Vec<u16>), Vec<usize>>,
     hyph_codes: HashMap<u16, Vec<u16>>,
+    /// The tries and exceptions laid flat for the search (made on the
+    /// first word, dropped by every change).
+    flat: FlatCache,
+}
+
+/// The tries packed into arrays (tex.web's `trie`, §920–§921, as a
+/// node table: each node's children are a run of keys and node numbers,
+/// its ops a run of `(position, value)`), and the exceptions sorted by
+/// a hash of the language and word.
+#[derive(Debug, Default)]
+struct Flat {
+    roots: Vec<(u16, u32)>,
+    /// Per node: first child, child count, first op, op count.
+    nodes: Vec<[u32; 4]>,
+    keys: Vec<u16>,
+    kids: Vec<u32>,
+    ops: Vec<(u8, u8)>,
+    exceptions: Vec<(u64, u16, Vec<u16>, Vec<usize>)>,
+}
+
+/// A derived value: no part of what the patterns are (equal, cloned
+/// empty).
+#[derive(Default)]
+struct FlatCache(std::sync::OnceLock<Flat>);
+
+impl Clone for FlatCache {
+    fn clone(&self) -> Self {
+        FlatCache::default()
+    }
+}
+
+impl PartialEq for FlatCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for FlatCache {}
+
+impl std::fmt::Debug for FlatCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FlatCache")
+    }
+}
+
+fn word_hash(lang: u16, word: &[u16]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ u64::from(lang);
+    for &c in word {
+        h ^= u64::from(c);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+impl Flat {
+    fn of(p: &Patterns) -> Flat {
+        fn put(f: &mut Flat, n: &TrieNode) -> u32 {
+            let me = u32::try_from(f.nodes.len()).unwrap_or(u32::MAX);
+            f.nodes.push([0; 4]);
+            let ops0 = u32::try_from(f.ops.len()).unwrap_or(u32::MAX);
+            f.ops.extend(
+                n.ops
+                    .iter()
+                    .map(|&(i, v)| (u8::try_from(i).unwrap_or(u8::MAX), v)),
+            );
+            // (the children's runs are contiguous: keys first, numbers
+            // filled in as each child is laid out)
+            let k0 = f.keys.len();
+            f.keys.extend(n.children.keys().copied());
+            f.kids.extend(std::iter::repeat_n(0, n.children.len()));
+            for (j, c) in n.children.values().enumerate() {
+                let x = put(f, c);
+                f.kids[k0 + j] = x;
+            }
+            f.nodes[me as usize] = [
+                u32::try_from(k0).unwrap_or(u32::MAX),
+                u32::try_from(n.children.len()).unwrap_or(u32::MAX),
+                ops0,
+                u32::try_from(n.ops.len()).unwrap_or(u32::MAX),
+            ];
+            me
+        }
+        let mut f = Flat::default();
+        let mut langs: Vec<&u16> = p.tries.keys().collect();
+        langs.sort_unstable();
+        for &l in langs {
+            let r = put(&mut f, &p.tries[&l]);
+            f.roots.push((l, r));
+        }
+        f.exceptions = p
+            .exceptions
+            .iter()
+            .map(|((l, w), pos)| (word_hash(*l, w), *l, w.clone(), pos.clone()))
+            .collect();
+        f.exceptions
+            .sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
+        f
+    }
+
+    fn exception(&self, lang: u16, word: &[u16]) -> Option<&[usize]> {
+        let h = word_hash(lang, word);
+        let at = self.exceptions.partition_point(|e| e.0 < h);
+        self.exceptions[at..]
+            .iter()
+            .take_while(|e| e.0 == h)
+            .find(|e| e.1 == lang && e.2 == word)
+            .map(|e| e.3.as_slice())
+    }
+
+    fn child(&self, z: u32, c: u16) -> Option<u32> {
+        let [k0, n, ..] = self.nodes[z as usize];
+        let (k0, n) = (k0 as usize, n as usize);
+        self.keys[k0..k0 + n]
+            .iter()
+            .position(|&k| k == c)
+            .map(|j| self.kids[k0 + j])
+    }
+
+    fn ops(&self, z: u32) -> &[(u8, u8)] {
+        let [.., o0, n] = self.nodes[z as usize];
+        &self.ops[o0 as usize..(o0 + n) as usize]
+    }
 }
 
 /// `set_cur_lang` (§934): languages outside 1..=255 are 0.
@@ -66,6 +188,7 @@ impl Patterns {
         if letters.last() == Some(&0) {
             digits[k] = 0;
         }
+        self.flat = FlatCache::default();
         let mut node = self.tries.entry(lang).or_default();
         for &c in letters {
             node = node.children.entry(c).or_default();
@@ -129,6 +252,7 @@ impl Patterns {
     /// positions `k` of hyphens after `k` letters (§939, §940); a later
     /// entry for the same word replaces the earlier one (web2c).
     pub fn add_exception(&mut self, lang: u16, word: Vec<u16>, positions: Vec<usize>) {
+        self.flat = FlatCache::default();
         self.exceptions.insert((lang, word), positions);
     }
 
@@ -188,7 +312,8 @@ impl Patterns {
     ) -> Option<Vec<u8>> {
         let hn = word.len();
         let mut hyf = vec![0u8; hn + 1];
-        if let Some(pos) = self.exceptions.get(&(lang, word.to_vec())) {
+        let f = self.flat.0.get_or_init(|| Flat::of(self));
+        if let Some(pos) = f.exception(lang, word) {
             // §932
             for &p in pos {
                 if p <= hn {
@@ -196,7 +321,7 @@ impl Patterns {
                 }
             }
         } else {
-            let root = self.tries.get(&lang)?;
+            let root = f.roots.iter().find(|r| r.0 == lang)?.1;
             let mut hc = Vec::with_capacity(hn + 3);
             hc.push(0);
             hc.extend_from_slice(word);
@@ -205,11 +330,14 @@ impl Patterns {
             for j in 0..=(hn + 1).saturating_sub(r_hyf) {
                 let mut z = root;
                 let mut l = j;
-                while let Some(next) = z.children.get(&hc[l]) {
+                while let Some(next) = f.child(z, hc[l]) {
                     z = next;
                     // §924: n_i goes between hc[j+i-1] and hc[j+i]
-                    for &(i, v) in &z.ops {
-                        if let Some(h) = (j + i).checked_sub(1).and_then(|x| hyf.get_mut(x)) {
+                    for &(i, v) in f.ops(z) {
+                        if let Some(h) = (j + usize::from(i))
+                            .checked_sub(1)
+                            .and_then(|x| hyf.get_mut(x))
+                        {
                             *h = (*h).max(v);
                         }
                     }
@@ -242,7 +370,13 @@ pub struct TexHyphenator<'a> {
 
 impl Hyphenator for TexHyphenator<'_> {
     #[allow(clippy::too_many_lines)]
-    fn hyphenate(&mut self, list: &mut List, at: usize, lang: LangState, fonts: &dyn Fonts) {
+    fn hyphenate(
+        &mut self,
+        list: &[Node],
+        at: usize,
+        lang: LangState,
+        fonts: &dyn Fonts,
+    ) -> Option<(usize, usize, List)> {
         let mut lang = lang;
         let code = |lang: u16, c: u16| self.patterns.hyph_code(lang, c, self.lc_code);
         // §896: skip to node ha
@@ -250,7 +384,7 @@ impl Hyphenator for TexHyphenator<'_> {
         let mut s = at + 1;
         let hf;
         loop {
-            let Some(n) = list.get(s) else { return };
+            let n = list.get(s)?;
             let (c, f) = match n {
                 Node::Char { font, ch } => (*ch, *font),
                 Node::Lig(l) => match l.original.first() {
@@ -277,7 +411,7 @@ impl Hyphenator for TexHyphenator<'_> {
                     s += 1;
                     continue;
                 }
-                _ => return,
+                _ => return None,
             };
             let lcc = code(lang.lang, c);
             if lcc != 0 {
@@ -285,22 +419,20 @@ impl Hyphenator for TexHyphenator<'_> {
                     hf = f;
                     break;
                 }
-                return;
+                return None;
             }
             prev_s = s;
             s += 1;
         }
         // done2
-        let Ok(hyf_char) = u16::try_from((self.hyphen_char)(hf)) else {
-            return;
-        };
+        let hyf_char = u16::try_from((self.hyphen_char)(hf)).ok()?;
         if hyf_char > 255 {
-            return;
+            return None;
         }
         let ha = prev_s;
         let (l_hyf, r_hyf) = (usize::from(lang.lhm), usize::from(lang.rhm));
         if l_hyf + r_hyf > 63 {
-            return;
+            return None;
         }
         let font_bchar = fonts.bchar(hf).unwrap_or(NON_CHAR);
         // §897
@@ -363,7 +495,7 @@ impl Hyphenator for TexHyphenator<'_> {
         // §899
         let hn = hc.len();
         if hn < l_hyf + r_hyf {
-            return;
+            return None;
         }
         loop {
             match list.get(s) {
@@ -378,17 +510,15 @@ impl Hyphenator for TexHyphenator<'_> {
                     | Node::Adjust(_)
                     | Node::Mark(_),
                 ) => break,
-                _ => return,
+                _ => return None,
             }
         }
         // §923
-        let Some(mut hyf) = self.patterns.hyphenate_word(lang.lang, &hc, l_hyf, r_hyf) else {
-            return;
-        };
+        let mut hyf = self.patterns.hyphenate_word(lang.lang, &hc, l_hyf, r_hyf)?;
         hyf.resize(66, 0);
         // §902
         if !(l_hyf..=hn - r_hyf).any(|j| hyf[j] & 1 != 0) {
-            return;
+            return None;
         }
         // §903
         let mut rc = Recon {
@@ -521,7 +651,7 @@ impl Hyphenator for TexHyphenator<'_> {
             }
         }
         let from = if keep_ha { ha + 1 } else { ha };
-        list.splice(from..=hb, out);
+        Some((from, hb, out))
     }
 }
 

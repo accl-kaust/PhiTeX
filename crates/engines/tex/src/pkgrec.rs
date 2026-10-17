@@ -66,7 +66,19 @@ pub(crate) fn load_key(text: &str) -> Option<String> {
             Some(i) if i == 0 || t.as_bytes()[i - 1] != b'\\' => &t[..i],
             _ => t,
         };
+        if body.is_empty() && !t.starts_with('\\') {
+            return None;
+        }
         body.extend(t.chars().filter(|c| !c.is_ascii_whitespace()));
+        // (the first command decides: a slice that does not begin with
+        // a loader's name is answered without copying the rest)
+        if !body.is_empty() {
+            let rest = body.strip_prefix('\\')?;
+            let n = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
+            if n < rest.len() && !LOADERS.contains(&&rest[..n]) {
+                return None;
+            }
+        }
     }
     let rest = body.strip_prefix('\\')?;
     let name_len = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
