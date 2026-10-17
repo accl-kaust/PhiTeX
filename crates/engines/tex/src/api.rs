@@ -1219,6 +1219,13 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         })
         .collect();
     eprintln!("acct: waited on (top {}): {waited:?}", waited.len());
+    let refuted: Vec<(String, u64)> = r
+        .refuted_by_field
+        .iter()
+        .take(12)
+        .map(|&(f, n)| (crate::val::field_name(eng.values(), f), n))
+        .collect();
+    eprintln!("acct: predictions refuted by field (top 12): {refuted:?}");
     eprintln!(
         "acct: stops by reader and field (top 15): {:?}; waits by kind {:?}; by reader {:?}",
         crate::run::take_stops(eng.values(), 15),
