@@ -82,9 +82,14 @@ the per-token and per-command path that is not an array access.
    `has_input()` is O(1) (spent levels popped eagerly, §325); the per-line
    `lines` contribution becomes one counter contributed at the end; the
    input stack is a `Vec`, never a `VecDeque`.
-5. **Frozen control sequences** are reserved dense indices below a
+5. **Open conditionals cross node boundaries** (decided 2026-10-17): a
+   run may stop at a file boundary inside the true branch of open
+   conditionals; it defines `cond:stack` (limit, if code, if line per
+   entry) like `vlist:pd`, read on first touch by the next piece, where
+   `\else`/`\fi` pop it. A run never stops while skipping a false branch.
+6. **Frozen control sequences** are reserved dense indices below a
    constant, tested by index range, never by string prefix.
-6. **Node boundary.** Entry load (records, first-touch slots) and publish
+7. **Node boundary.** Entry load (records, first-touch slots) and publish
    (definition delta, `lines:i`, `vprof:i`, effects) stay under 5% of a
    paragraph node's time.
 
@@ -140,11 +145,19 @@ on para4000 and amsldoc; finisher refutations 0 on amsldoc cold.
    from their initial values.
 3. A round re-runs only the readers of loop-back fields whose value
    changed; never the document.
-4. The client pushes its environment once per evaluation and only the
+4. **Cuts are forward definitions, never loop-backs.** Measured on
+   redesign2 f53423cd (amsldoc j8): 13 loop rounds, 5,397 runs for 2,100
+   live nodes, 931 speculation mispredictions, because the end node
+   publishes the cuts (`cut:<node>`) as loop-backs that pieces before it
+   read. The finisher of page p, which decides where its page ends inside
+   a piece, defines that piece's cut field itself; the resume node of the
+   cut reads it forward. No field written by the end node is read by a
+   piece.
+5. The client pushes its environment once per evaluation and only the
    entries that changed (the engine saw about 184,000 environment calls in
    one amsldoc build).
 
-Finish line: amsldoc cold ≤ 2 rounds with an empty guess cache and 1 with
+Finish line: no field defined by the end node is read by an exec, scan or resume node (a check in the census); amsldoc cold ≤ 2 rounds with an empty guess cache and 1 with
 a warm one; para4000 1 round; round-2 node runs ≤ the readers of changed
 loop-back fields; environment calls per evaluation ≤ the number of changed
 entries + 1.
