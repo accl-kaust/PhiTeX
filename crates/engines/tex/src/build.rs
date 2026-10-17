@@ -545,7 +545,9 @@ impl Run<'_, '_> {
             // [`MAIN_PD`]), not every item since the start; a deletion
             // of this run's reaching past that item reads the items
             // themselves, a real dependency
-            let (last, since) = MainTail::of_last(v, self.eng_read(v.field(MAIN_LAST))?);
+            let last = self.eng_read(v.field(MAIN_LAST))?;
+            let since = self.eng_read(v.field(MAIN_SINCE))?;
+            let (last, since) = MainTail::of_last(v, last, since);
             let deletes = own.iter().any(|&s| {
                 v.seq_to_vec(s).iter().any(|&x| {
                     let xs = list_of(v, x);
@@ -2987,6 +2989,11 @@ pub(crate) fn is_marker(v: &Values, x: ValueId) -> bool {
 pub(crate) const MAIN_PD: &str = "vlist:pd";
 pub(crate) const MAIN_SF: &str = "vlist:sf";
 pub(crate) const MAIN_LAST: &str = "vlist:last";
+/// The main list's contributions since the last candidate, as the pieces
+/// before left it: apart from [`MAIN_LAST`], so that a piece whose items
+/// change one and not the other (a blank line's candidate) reads
+/// neither.
+pub(crate) const MAIN_SINCE: &str = "vlist:since";
 
 /// The main list's end as a piece's reader sees it ([`MAIN_PD`],
 /// [`MAIN_SF`], [`MAIN_LAST`]).
@@ -3041,21 +3048,25 @@ impl MainTail {
     }
 
     /// [`MAIN_LAST`]'s value.
-    pub(crate) fn last_value(self, v: &Values) -> ValueId {
-        v.list(vec![
-            self.last.unwrap_or(ValueId::UNIT),
-            v.int(i64::try_from(self.since).unwrap_or(0)),
-        ])
+    pub(crate) fn last_value(self) -> ValueId {
+        self.last.unwrap_or(ValueId::UNIT)
     }
 
-    /// [`MAIN_LAST`] read (`None`: the document's start).
-    pub(crate) fn of_last(v: &Values, x: Option<ValueId>) -> (Option<ValueId>, usize) {
-        let Some(x) = x else { return (None, 0) };
-        let xs = list_of(v, x);
+    /// [`MAIN_SINCE`]'s value.
+    pub(crate) fn since_value(self, v: &Values) -> ValueId {
+        v.int(i64::try_from(self.since).unwrap_or(0))
+    }
+
+    /// [`MAIN_LAST`] and [`MAIN_SINCE`] read (`None`: the document's
+    /// start).
+    pub(crate) fn of_last(
+        v: &Values,
+        last: Option<ValueId>,
+        since: Option<ValueId>,
+    ) -> (Option<ValueId>, usize) {
         (
-            xs.first().copied().filter(|&i| i != ValueId::UNIT),
-            xs.get(1)
-                .map_or(0, |&n| usize::try_from(int_of(v, n)).unwrap_or(0)),
+            last.filter(|&i| i != ValueId::UNIT),
+            since.map_or(0, |n| usize::try_from(int_of(v, n)).unwrap_or(0)),
         )
     }
 }

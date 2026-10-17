@@ -173,10 +173,11 @@ pub(crate) fn is_page_field(name: &str) -> bool {
 /// piece of the main list (the previous depth, the space factor, the
 /// last item), its continuation where its run ends at a candidate, the
 /// conditionals it leaves open.
-pub(crate) const PAGE_FIELDS: [&str; 5] = [
+pub(crate) const PAGE_FIELDS: [&str; 6] = [
     crate::build::MAIN_PD,
     crate::build::MAIN_SF,
     crate::build::MAIN_LAST,
+    crate::build::MAIN_SINCE,
     RESUME,
     crate::run::COND_STACK,
 ];
@@ -1287,7 +1288,7 @@ impl Run<'_, '_> {
     /// end is its own, and the pieces read one another's only where an
     /// item leaves the previous standing (spec-redesign §1, exec row).
     fn define_main_tail(&mut self, raw: &[ValueId]) -> R<()> {
-        use crate::build::{MAIN_LAST, MAIN_PD, MAIN_SF, MainTail};
+        use crate::build::{MAIN_LAST, MAIN_PD, MAIN_SF, MAIN_SINCE, MainTail};
         let v = self.v;
         if raw.is_empty() {
             return Ok(());
@@ -1330,11 +1331,25 @@ impl Run<'_, '_> {
             self.cx
                 .define_with(v.field(MAIN_SF), v.int(i64::from(t.sf)), Locality::Global);
         }
-        if (a.last, a.since) == (b.last, b.since) {
+        // (the last item and the contributions since the last candidate
+        // apart: a piece that changes one and leaves the other reads
+        // nothing of the piece before)
+        let last_own = a.last == b.last;
+        let since_own = a.since == b.since;
+        if last_own {
             self.cx
-                .define_with(v.field(MAIN_LAST), a.last_value(v), Locality::Global);
-        } else if (b.last, b.since) != (p.last, p.since) {
-            let (last, since) = MainTail::of_last(v, self.eng_read(v.field(MAIN_LAST))?);
+                .define_with(v.field(MAIN_LAST), a.last_value(), Locality::Global);
+        }
+        if since_own {
+            self.cx
+                .define_with(v.field(MAIN_SINCE), a.since_value(v), Locality::Global);
+        }
+        let last_moves = !last_own && b.last != p.last;
+        let since_moves = !since_own && b.since != p.since;
+        if last_moves || since_moves {
+            let last = self.eng_read(v.field(MAIN_LAST))?;
+            let since = self.eng_read(v.field(MAIN_SINCE))?;
+            let (last, since) = MainTail::of_last(v, last, since);
             let pd = self
                 .eng_read(v.field(MAIN_PD))?
                 .map_or(MainTail::START.pd, |x| {
@@ -1347,8 +1362,14 @@ impl Run<'_, '_> {
                 ..MainTail::START
             }
             .after(v, raw);
-            self.cx
-                .define_with(v.field(MAIN_LAST), t.last_value(v), Locality::Global);
+            if last_moves {
+                self.cx
+                    .define_with(v.field(MAIN_LAST), t.last_value(), Locality::Global);
+            }
+            if since_moves {
+                self.cx
+                    .define_with(v.field(MAIN_SINCE), t.since_value(v), Locality::Global);
+            }
         }
         Ok(())
     }

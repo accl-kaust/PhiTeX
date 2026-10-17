@@ -274,9 +274,10 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "afterassignment" => &["aftertoken"],
         "aftergroup" => &[],
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
-        // the same node is packaged there and sets \\\\badness, §1086, §649)
-        "hbox" | "vbox" | "vtop" | "vcenter" => &["lvlfix", "badness", "markclasses"],
-        "setbox" | "vsplit" => &["box:", "lvlfix", "badness", "markclasses"],
+        // the same node is packaged there and sets \\\\badness, §1086, §649;
+        // no mark class: only `\\marks` makes one, its own row)
+        "hbox" | "vbox" | "vtop" | "vcenter" => &["lvlfix", "badness"],
+        "setbox" | "vsplit" => &["box:", "lvlfix", "badness"],
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
         | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
@@ -2828,6 +2829,10 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // (whether the run reads on into the next slice: a scan for a
         // keyword or unit there, below; its claim is then the run's)
         let mut reads_on = false;
+        // (where such a scan stops for sure: a blank line's `\\par` in a
+        // blanks-only slice after it, non-expandable, §407; the slice
+        // index and its end)
+        let mut scan_stop: Option<(usize, usize)> = None;
         // (a slice ending in a command that scans on for a keyword or a
         // unit, `\\vskip 1in`, expands what follows while it looks, and
         // runs what that leaves, §1094, §407: the next slice's commands
@@ -2843,10 +2848,22 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                     break;
                 }
                 let Some(first) = first_cs(&an.p, text, (ns, ne)) else {
-                    // (blanks between: the scan reads past them)
+                    // (blanks between: the scan reads past them, up to a
+                    // blank line, a `\\par`, where it stops: the run
+                    // takes the siblings to that one, no more)
                     if text[ns..ne].trim().is_empty() {
                         reads_on = true;
                         j += 1;
+                        let atoms = an.atoms();
+                        let a0 = atoms.partition_point(|x| x.start < ns);
+                        if atoms[a0..]
+                            .iter()
+                            .take_while(|x| x.start < ne)
+                            .any(|x| x.kind == AtomKind::Par)
+                        {
+                            scan_stop = Some((j, ne));
+                            break;
+                        }
                         continue;
                     }
                     break;
@@ -2955,7 +2972,28 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             && let Some(b) = &mut h.bound
             && b.no_scope
         {
-            b.claim = (!reads_on && an.slice_claims_nothing(k0, e)).then_some(0);
+            // (a slice that does not end its paragraph, or ends in a
+            // command scanning on, followed by a blank line alone: its
+            // run takes that sibling, whose `\\par` ends both, and no
+            // more)
+            let par_next = t.slices.get(i + 1).copied().filter(|&(ns, ne)| {
+                text[ns..ne].trim().is_empty() && {
+                    let atoms = an.atoms();
+                    let a0 = atoms.partition_point(|x| x.start < ns);
+                    atoms[a0..]
+                        .iter()
+                        .take_while(|x| x.start < ne)
+                        .any(|x| x.kind == AtomKind::Par)
+                }
+            });
+            b.claim = match scan_stop {
+                Some((n, end)) => an.slice_claims_nothing(k0, end).then_some(n - i),
+                None if reads_on => None,
+                None if an.slice_claims_nothing(k0, e) => Some(0),
+                None => par_next
+                    .filter(|&(_, ne)| an.slice_claims_nothing(k0, ne))
+                    .map(|_| 1),
+            };
         }
         slice_hints.push(intern(&h));
     }
