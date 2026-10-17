@@ -1209,6 +1209,14 @@ fn zeroed<T: Copy + Default>(mut v: Vec<T>, n: usize) -> Vec<T> {
     v
 }
 
+/// A buffer of `n` elements, reusing `v`'s allocation, zero below `k`
+/// (above it, what the last use left or zero).
+fn zeroed_to<T: Copy + Default>(mut v: Vec<T>, n: usize, k: usize) -> Vec<T> {
+    v.resize(n, T::default());
+    v[..k.min(n)].fill(T::default());
+    v
+}
+
 /// [`compress`] with the buffers of `sc` (the same bytes).
 ///
 /// # Panics
@@ -1218,6 +1226,10 @@ fn zeroed<T: Copy + Default>(mut v: Vec<T>, n: usize) -> Vec<T> {
 pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
     let level = level.clamp(1, 9).unsigned_abs() as usize;
     let (good, lazy, nice, chain) = CONFIG[level];
+    // (data the window holds whole, never slid: no read of the window
+    // or of `prev` goes past its length and a match's reach, so only
+    // that much is zeroed; `head` is zeroed whole)
+    let reach = (data.len() + MIN_LOOKAHEAD <= W_SIZE).then_some(data.len());
     let mut s = State {
         st: sc.st.take().unwrap_or_else(Static::new),
         level,
@@ -1225,8 +1237,16 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
         next_in: 0,
         adler: 1,
         out: Vec::with_capacity(data.len() / 2 + 64),
-        window: zeroed(core::mem::take(&mut sc.window), WINDOW_SIZE + MAX_MATCH),
-        prev: zeroed(core::mem::take(&mut sc.prev), W_SIZE),
+        window: zeroed_to(
+            core::mem::take(&mut sc.window),
+            WINDOW_SIZE + MAX_MATCH,
+            reach.map_or(WINDOW_SIZE + MAX_MATCH, |n| n + MAX_MATCH + MIN_MATCH),
+        ),
+        prev: zeroed_to(
+            core::mem::take(&mut sc.prev),
+            W_SIZE,
+            reach.map_or(W_SIZE, |n| n + 1),
+        ),
         head: zeroed(core::mem::take(&mut sc.head), HASH_SIZE),
         ins_h: 0,
         block_start: 0,
@@ -1342,6 +1362,37 @@ mod tests {
             }
         }
         assert!(checked == 2, "{checked} streams");
+    }
+
+    /// A scratch a long stream left (its window, chains and symbols
+    /// full) compresses short ones as a fresh state does.
+    #[test]
+    fn reused_scratch_after_long_stream() {
+        let mut x: u32 = 12345;
+        let mut word = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    b"abcde fghij\n()"[(x >> 16) as usize % 14]
+                })
+                .collect()
+        };
+        let long = word(200_000);
+        let mut sc = Scratch::default();
+        for n in [0, 1, 3, 100, 5000, 30_000, 32_500, 40_000] {
+            let _ = compress_with(&mut sc, &long, 9);
+            let short = word(n);
+            assert!(
+                compress_with(&mut sc, &short, 9) == compress(&short, 9),
+                "{n}"
+            );
+            let mut rep = short.clone();
+            rep.extend_from_slice(&short);
+            assert!(
+                compress_with(&mut sc, &rep, 9) == compress(&rep, 9),
+                "{n} twice"
+            );
+        }
     }
 
     /// (measure, differential) Every file in `PHITEX_DEFLATE_DIR`
