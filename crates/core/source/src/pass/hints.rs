@@ -2023,9 +2023,40 @@ pub(crate) fn marks(
     while k < atoms.len() {
         let at = atoms[k];
         let tok = tokens[at.tok];
-        let mut h = Hints::none();
         let mut emit = !tok.in_body && !claimed[k];
         let here = k;
+        // (most atoms are characters inside a run, spaces or commands:
+        // no mark, nothing made for them)
+        match at.kind {
+            AtomKind::Char(c) if c != '$' || tok.in_body => {
+                let implicit = implicit_of_char(c);
+                emit = emit && !in_run && implicit != Implicit::None;
+                in_run = true;
+                if emit {
+                    let mut h = Hints::none();
+                    h.implicit = implicit;
+                    // (what a mark reads: made only for a mark kept)
+                    h.reads.push(format!("catcode:{}", u32::from(c)));
+                    out.push(Mark {
+                        atom: here,
+                        hints: h,
+                    });
+                }
+                k += 1;
+                continue;
+            }
+            AtomKind::Space => {
+                k += 1;
+                continue;
+            }
+            AtomKind::Cs | AtomKind::Param(_) | AtomKind::Verb => {
+                in_run = false;
+                k += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let mut h = Hints::none();
         match at.kind {
             AtomKind::Open => {
                 math.push(0);
@@ -2092,20 +2123,12 @@ pub(crate) fn marks(
                     k += 1;
                 }
             }
-            AtomKind::Char(c) => {
-                h.implicit = implicit_of_char(c);
-                emit = emit && !in_run && h.implicit != Implicit::None;
-                in_run = true;
-                // (what a mark reads: made only for a mark kept)
-                if emit {
-                    h.reads.push(format!("catcode:{}", u32::from(c)));
-                }
-            }
-            AtomKind::Space => emit = false,
-            AtomKind::Cs | AtomKind::Param(_) | AtomKind::Verb => {
-                in_run = false;
-                emit = false;
-            }
+            // (taken above)
+            AtomKind::Char(_)
+            | AtomKind::Space
+            | AtomKind::Cs
+            | AtomKind::Param(_)
+            | AtomKind::Verb => emit = false,
         }
         if emit {
             out.push(Mark {

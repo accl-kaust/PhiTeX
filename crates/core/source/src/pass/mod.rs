@@ -181,7 +181,7 @@ pub struct Item {
 /// `_`, `:` letters; spaces ignored and `~` a space under expl3; the
 /// shaping characters the text changed; INITEX's others), or none where
 /// a `\catcode` of the text set a value the pass does not model.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Regime {
     cats: [Option<u8>; 128],
     /// Spaces are ignored (expl3's).
