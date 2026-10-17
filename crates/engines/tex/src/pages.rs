@@ -2003,15 +2003,10 @@ pub(crate) fn line_frame(v: &Values, s: &Line) -> Option<ValueId> {
 }
 
 fn file_frames(v: &Values, f: &crate::run::FileRest) -> Vec<ValueId> {
-    // (a file the job writes, not read yet: its units' frames, read where
-    // the frames are, `Run::resolve_units`)
-    if f.lazy()
-        && let Some(units) = &f.units
-    {
-        return units
-            .iter()
-            .map(|&(k, starts)| v.list(vec![v.str("w"), k, f.name, v.int(i64::from(starts))]))
-            .collect();
+    // (a file read as units, not read yet: the file as its units, a lazy
+    // file again where the frames are decoded, `crate::run::units_frame`)
+    if let Some(u) = crate::run::units_frame(v, f) {
+        return vec![u];
     }
     vec![v.list(vec![
         v.str("f"),

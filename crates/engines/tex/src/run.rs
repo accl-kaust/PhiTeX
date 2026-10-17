@@ -2674,18 +2674,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let file_left = |f: &FileRest, out: &mut Vec<Vec<ValueId>>| {
             if f.has_lines() && self.doc && self.doc_file(f) {
                 out.extend(self.doc_file_regions(f));
-            } else if f.lazy()
-                && let Some(units) = &f.units
-            {
-                // (a file the job writes, not read here: its units, read
-                // by the one node its rest is, `Run::resolve_units`)
-                let ws = units
-                    .iter()
-                    .map(|&(k, starts)| {
-                        v.list(vec![v.str("w"), k, f.name, v.int(i64::from(starts))])
-                    })
-                    .collect();
-                out.push(vec![v.list(ws), v.int(0)]);
+            } else if let Some(u) = units_frame(v, f) {
+                // (a file read as units, not read here: the one node its
+                // rest is reads it as a file, its units loaded when it
+                // reads a line, `Run::load_written`)
+                out.push(vec![v.list(vec![u]), v.int(0)]);
             } else if f.has_lines() {
                 let fr = v.list(vec![
                     tag_f,
@@ -3263,6 +3256,24 @@ impl<'c, 'a> Run<'c, 'a> {
 
 /// Spent token lists by length, for the next macro body of that length
 /// The segments of an `Exec` node's arguments.
+/// A file read as units whose text is not read yet (`f.lazy()`), as one
+/// frame `["u", name, [sliceable, [[unit field, starts], ...]]]`: decoded
+/// as that file again ([`FileRest::written`]), so a run reaching it reads
+/// it as a file (a document's run stops there, its units the region
+/// children, [`Run::leftover`]), never as its units' lines inline.
+pub(crate) fn units_frame(v: &Values, f: &FileRest) -> Option<ValueId> {
+    if !f.lazy() {
+        return None;
+    }
+    let units = f.units.as_ref()?;
+    let es = units
+        .iter()
+        .map(|&(k, starts)| v.list(vec![k, v.int(i64::from(starts))]))
+        .collect();
+    let order = v.list(vec![v.int(i64::from(f.sliceable)), v.list(es)]);
+    Some(v.list(vec![v.str("u"), f.name, order]))
+}
+
 pub(crate) fn decode_segs(v: &Values, args: &[ValueId]) -> Vec<Seg> {
     decode_segs_upto(v, args, usize::MAX)
 }
@@ -3328,6 +3339,12 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
                 out = Some(Seg::Toks(toks));
+            }
+            Some("u") => {
+                // (a file read as units, not read yet, [`units_frame`])
+                if let (Some(&name), Some(&order)) = (xs.get(1), xs.get(2)) {
+                    out = Some(Seg::File(FileRest::written(v, order, name)));
+                }
             }
             Some("f") => {
                 if let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) {

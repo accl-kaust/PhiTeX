@@ -1415,9 +1415,10 @@ impl Graph {}
 /// (`None`: absent), and the finder's hash.
 type Provided = (String, Field, Option<ValueId>, u64);
 
-/// A units field the provider cut ([`file_units`]): the field and its
-/// value (`None`: the file is absent).
-type ProvidedUnit = (Field, Option<ValueId>);
+/// A file the provider cut into units ([`file_units`]): its name, the
+/// finder's hash, and its fields with their values (none: the file is
+/// absent).
+type ProvidedUnit = (String, u64, Vec<(Field, ValueId)>);
 
 /// The files the provider cut into units, by name: each cut once.
 type UnitCuts = std::sync::Mutex<FxHashMap<String, Arc<OnceLock<FxHashMap<u64, ValueId>>>>>;
@@ -1716,17 +1717,16 @@ impl Graph {
                     .clone();
                 let m = cell.get_or_init(|| {
                     let found = finder_u(name);
+                    let hash = file_hash(found.as_ref());
                     let defs = defs.lock().unwrap_or_else(PoisonError::into_inner).clone();
                     let es = found
                         .map(|(path, bytes)| file_units(v, &reg, &defs, name, &path, &bytes))
                         .unwrap_or_default();
+                    let m = es.iter().map(|&(g, x)| (g.0.raw(), x)).collect();
                     if let Ok(mut l) = units_log.lock() {
-                        l.extend(es.iter().map(|&(g, x)| (g, Some(x))));
-                        if es.is_empty() {
-                            l.push((v.field(&format!("units:{name}")), None));
-                        }
+                        l.push((name.to_owned(), hash, es));
                     }
-                    es.into_iter().map(|(g, x)| (g.0.raw(), x)).collect()
+                    m
                 });
                 return Some(m.get(&f.0.raw()).copied());
             }
@@ -1810,15 +1810,72 @@ impl Graph {
             .map(|&(g, _)| g)
             .chain(self.absent.iter().copied())
             .collect();
-        for (f, x) in got {
-            if have.contains(&f) {
-                continue;
+        for (name, hash, es) in got {
+            // (a file read as units is a file the build read: listed, its
+            // hash kept, as [`Graph::supply`] keeps a file's)
+            if !self.reads.iter().any(|(n, _)| *n == name) {
+                self.queries.push((name.clone(), !es.is_empty()));
+                self.reads.push((name.clone(), hash));
             }
-            match x {
-                Some(x) => self.files.push((f, x)),
-                None => self.absent.push(f),
+            if es.is_empty() {
+                let uf = self.eng.values().field(&format!("units:{name}"));
+                if !have.contains(&uf) {
+                    self.absent.push(uf);
+                }
+            }
+            for (f, x) in es {
+                if !have.contains(&f) {
+                    self.files.push((f, x));
+                }
             }
         }
+    }
+
+    /// A unit's text and offset in its file, as the environment holds it
+    /// (`unit:<file>:<i>`, [`file_units`]).
+    fn unit_value(&self, key: &str) -> Option<(String, usize)> {
+        let v = self.eng.values();
+        let f = v.field(key);
+        let &(_, x) = self.files.iter().find(|&&(g, _)| g == f)?;
+        let xs = list_of(v, x);
+        let text = str_of(v, *xs.first()?);
+        let at = usize::try_from(int_of(v, *xs.get(1)?)).ok()?;
+        Some((text, at))
+    }
+
+    /// A file's whole text as the environment holds it: its `file:` value
+    /// (by its name or its path), else its units joined in order.
+    fn file_text(&self, name: &str) -> Option<Arc<str>> {
+        let v = self.eng.values();
+        for &(g, x) in &self.files {
+            let fname = field_name(v, g);
+            let xs = list_of(v, x);
+            if let Some(n) = fname.strip_prefix("file:")
+                && let [p, t] = xs[..]
+                && (n == name || str_of(v, p) == name)
+            {
+                return Some(str_of(v, t).into());
+            }
+        }
+        for &(g, x) in &self.files {
+            let fname = field_name(v, g);
+            let xs = list_of(v, x);
+            let Some(n) = fname.strip_prefix("units:") else {
+                continue;
+            };
+            if n != name && xs.first().is_none_or(|&p| str_of(v, p) != name) {
+                continue;
+            }
+            let order = xs.get(2).map(|&o| list_of(v, o)).unwrap_or_default();
+            let units = order.get(1).map(|&l| list_of(v, l)).unwrap_or_default();
+            let mut text = String::new();
+            for u in units {
+                let key = list_of(v, u).first().map(|&k| str_of(v, k))?;
+                text.push_str(&self.unit_value(&key)?.0);
+            }
+            return Some(text.into());
+        }
+        None
     }
 
     /// A file's units ([`file_units`]) dropped from the environment:
@@ -2227,7 +2284,12 @@ impl Graph {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .clone();
-                match finder(&name) {
+                let found = finder(&name);
+                if !self.reads.iter().any(|(n, _)| *n == name) {
+                    self.queries.push((name.clone(), found.is_some()));
+                    self.reads.push((name.clone(), file_hash(found.as_ref())));
+                }
+                match found {
                     Some((path, bytes)) => {
                         let es = file_units(
                             self.eng.values(),
@@ -3607,12 +3669,66 @@ impl Build {
     /// it is a slice of) and its byte range in it.
     #[must_use]
     pub fn node_spans(&self) -> Vec<(u64, Option<Arc<str>>, usize, usize)> {
-        self.nodes
+        let mut out: Vec<(u64, Option<Arc<str>>, usize, usize)> = self
+            .nodes
             .iter()
             .map(|(_, n, src)| match src {
                 &Src::Doc(s, e) => (n.raw(), None, s, e),
             })
-            .collect()
+            .collect();
+        // (the nodes a run made of a file's slices or units, under the
+        // document's nodes: each in its file's text, at the slice's
+        // place, [`Run::doc_file_regions`])
+        let v = self.g.eng.values();
+        let mut texts: FxHashMap<String, Option<Arc<str>>> = FxHashMap::default();
+        let mut seen: phitex_defuse::FxHashSet<u64> = phitex_defuse::FxHashSet::default();
+        let mut stack: Vec<NodeId> = self.nodes.iter().map(|(_, n, _)| *n).collect();
+        while let Some(x) = stack.pop() {
+            if !seen.insert(x.raw()) {
+                continue;
+            }
+            stack.extend(self.g.eng.children(x));
+            let Some(i) = self.g.eng.node_info(x) else {
+                continue;
+            };
+            let Some(&fs) = i.args.first() else { continue };
+            let mut span: Option<(String, usize, usize)> = None;
+            for f in list_of(v, fs) {
+                let xs = list_of(v, f);
+                let Some(&t) = xs.first() else { continue };
+                let (name, s, e) = match (str_of(v, t).as_str(), &xs[..]) {
+                    ("s", &[_, seg, _, _, _, name, pos]) => {
+                        let s = usize::try_from(int_of(v, pos)).unwrap_or(0);
+                        (str_of(v, name), s, s + str_of(v, seg).len() + 1)
+                    }
+                    ("w", &[_, key, _, _]) => {
+                        let key = str_of(v, key);
+                        let Some(file) = units_file(&key) else {
+                            continue;
+                        };
+                        let Some((u, at)) = self.g.unit_value(&key) else {
+                            continue;
+                        };
+                        (file.to_owned(), at, at + u.len())
+                    }
+                    _ => continue,
+                };
+                span = Some(match span {
+                    Some((n, a, z)) if n == name => (n, a.min(s), z.max(e)),
+                    Some(sp) => sp,
+                    None => (name, s, e),
+                });
+            }
+            let Some((name, s, e)) = span else { continue };
+            let text = texts
+                .entry(name.clone())
+                .or_insert_with(|| self.g.file_text(&name))
+                .clone();
+            if let Some(t) = text {
+                out.push((x.raw(), Some(t), s, e));
+            }
+        }
+        out
     }
 
     /// The files the job writes and reads back, with the text a read-back
