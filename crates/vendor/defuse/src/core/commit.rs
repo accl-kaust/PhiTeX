@@ -644,7 +644,8 @@ impl Shared {
             // before its own claim may take those siblings).
             let kids = std::mem::take(&mut cx.kids);
             let conts = std::mem::take(&mut cx.conts);
-            self.set_unfolding(s, &kids, &conts, &mut notes);
+            let anchors = std::mem::take(&mut cx.anchors);
+            self.set_unfolding(s, &kids, &conts, &anchors, &mut notes);
             // Claims.
             if claim_kind == ClaimS::Pending {
                 let n = cx.claim.unwrap_or(0);
@@ -781,9 +782,7 @@ impl Shared {
                 return true;
             }
         }
-        for (n, q) in waiters {
-            self.wake(n, q);
-        }
+        self.wake_waiters_of(waiters);
         self.guesses_settle(s);
         true
     }

@@ -38,6 +38,9 @@ pub struct Ctx<'a> {
     pub(crate) pubs: Vec<(Field, ValueId)>,
     pub(crate) kids: Vec<Spec>,
     pub(crate) conts: Vec<Spec>,
+    /// Per continuation: the earlier node it is placed after
+    /// ([`Ctx::follow_after`]), else after this one.
+    pub(crate) anchors: Vec<Option<Slot>>,
     pub(crate) effect: Option<Effect>,
     pub(crate) kind: Option<ValueId>,
     /// Per opened frame (outermost first; `set_kinds`).
@@ -93,6 +96,7 @@ impl<'a> Ctx<'a> {
             pubs: Vec::new(),
             kids: Vec::new(),
             conts: Vec::new(),
+            anchors: Vec::new(),
             effect: None,
             kind: None,
             kinds: Vec::new(),
@@ -590,6 +594,57 @@ impl<'a> Ctx<'a> {
             op,
             args: Arc::from(args),
         });
+        self.anchors.push(None);
+        i
+    }
+
+    /// A continuation placed right after an earlier node `at` of this
+    /// unit (after its subtree and its own continuations, and after the
+    /// ones placed there before it), at `at`'s level: its reads and
+    /// definitions sit at that point of the text. It is this node's, as a
+    /// [`Ctx::follow`]: made again or dropped when this node runs again.
+    /// The run reads `at`'s place (it runs again when `at` goes). An `at`
+    /// that is gone, in another unit or not before this node places it
+    /// after this one (as `follow`).
+    pub fn follow_after(&mut self, at: NodeId, op: OpId, args: Vec<ValueId>) -> usize {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() {
+            crate::record::j(&(&at, &op, &args))
+        } else {
+            serde_json::Value::Null
+        };
+        let r = self.follow_after_inner(at, op, args);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "follow_after", a, crate::record::j(&r));
+        r
+    }
+
+    #[inline]
+    fn follow_after_inner(&mut self, at: NodeId, op: OpId, args: Vec<ValueId>) -> usize {
+        let sh = self.sh;
+        let anchor = sh.slot_of(at.0).filter(|&a| {
+            !matches!(sh.rec(a).st(), super::S_FREE | super::S_MARKER)
+                && sh.unit_of(a) == self.unit
+                && sh.before(a, self.me)
+        });
+        let Some(a) = anchor else {
+            return self.follow_inner(op, args);
+        };
+        self.log.push(Pred::At {
+            node: a,
+            gn: sh.rec(a).gn.load(std::sync::atomic::Ordering::Acquire),
+        });
+        let mut key = Vec::with_capacity(args.len() + 1);
+        key.push(ValueId::from_raw(at.0));
+        key.extend_from_slice(&args);
+        let id = self.spec_id(3, op, &key);
+        let i = self.conts.len();
+        self.conts.push(Spec::Node {
+            id,
+            op,
+            args: Arc::from(args),
+        });
+        self.anchors.push(Some(a));
         i
     }
 
@@ -1388,6 +1443,7 @@ impl<'a> Ctx<'a> {
         self.pubs.clear();
         self.kids.clear();
         self.conts.clear();
+        self.anchors.clear();
         self.effect = None;
         self.kind = None;
         self.kinds.clear();

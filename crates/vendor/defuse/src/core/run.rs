@@ -1175,7 +1175,8 @@ impl Shared {
             // before what this run made (a prefix): simplest, the new list.
             let kids = cx.kids.clone();
             let conts = cx.conts.clone();
-            self.set_unfolding(s, &kids, &conts, &mut notes);
+            let anchors = cx.anchors.clone();
+            self.set_unfolding(s, &kids, &conts, &anchors, &mut notes);
             self.settle_structure(u, &mut notes);
         }
         self.dispatch(&mut notes, s);

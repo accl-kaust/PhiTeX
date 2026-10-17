@@ -31,6 +31,7 @@ const WRITES: &[&str] = &[
     "publish",
     "child",
     "follow",
+    "follow_after",
     "open_scope",
     "close_scope",
     "contribute",

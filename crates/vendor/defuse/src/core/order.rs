@@ -1903,7 +1903,14 @@ impl Shared {
     /// Makes `parent`'s children (with markers) and continuations those
     /// specified, reusing the ones with equal ids. Returns the new kids'
     /// slots in order.
-    pub(crate) fn set_unfolding(&self, parent: Slot, kids: &[Spec], conts: &[Spec], notes: &mut Notes) {
+    pub(crate) fn set_unfolding(
+        &self,
+        parent: Slot,
+        kids: &[Spec],
+        conts: &[Spec],
+        anchors: &[Option<Slot>],
+        notes: &mut Notes,
+    ) {
         let u = self.unit_of(parent);
         let (old_kids, old_conts) = {
             let d = self.rec(parent).data();
@@ -1929,6 +1936,7 @@ impl Shared {
                 parent,
                 &old_kids,
                 kids,
+                &[],
                 pdepth + 1,
                 parent,
                 parent,
@@ -1939,7 +1947,18 @@ impl Shared {
             self.notify_sib(parent, notes);
         }
         if !conts_same {
-            let new = self.respec(u, parent, &old_conts, conts, pdepth, grand, parent, Role::Cont, notes);
+            let new = self.respec(
+                u,
+                parent,
+                &old_conts,
+                conts,
+                anchors,
+                pdepth,
+                grand,
+                parent,
+                Role::Cont,
+                notes,
+            );
             self.rec(parent).data().conts = new;
         }
     }
@@ -1953,6 +1972,7 @@ impl Shared {
         parent: Slot,
         old: &[Slot],
         specs: &[Spec],
+        anchors: &[Option<Slot>],
         depth: u32,
         tree_parent: Slot,
         owner: Slot,
@@ -1978,7 +1998,30 @@ impl Shared {
         // specs now put before an earlier-kept one is made again where it
         // belongs (its old place is after it in the list).
         let mut last_old: Option<usize> = None;
-        for sp in specs {
+        // Placed after an earlier node: the last one placed there so far.
+        let mut at_end: crate::FxHashMap<Slot, Slot> = crate::FxHashMap::default();
+        for (k, sp) in specs.iter().enumerate() {
+            if let Some(a) = anchors.get(k).copied().flatten() {
+                let kept = self
+                    .slot_of(sp.id())
+                    .filter(|&x| self.rec(x).st() != S_FREE && old.contains(&x));
+                let x = if let Some(x) = kept {
+                    x
+                } else {
+                    let Spec::Node { id, op, args } = sp else { continue };
+                    let data = Data::new(Kind::Node, role, *op, args.clone(), owner);
+                    let s = self.alloc(u, *id, data, self.depth(a), self.rec(a).parent.load(Ordering::Acquire));
+                    let pos = at_end
+                        .get(&a)
+                        .map_or_else(|| self.extent_end(a), |&p| self.extent_end(p));
+                    self.link_after(u, pos, &[s]);
+                    notes.frames_from.push(s);
+                    s
+                };
+                at_end.insert(a, x);
+                out.push(x);
+                continue;
+            }
             let mut existing = self
                 .slot_of(sp.id())
                 .filter(|&x| self.rec(x).st() != S_FREE && old.contains(&x));
@@ -2673,6 +2716,38 @@ impl Shared {
             self.wake(n, q);
         }
         self.guesses_settle(s);
+    }
+
+    /// Wakes the waiters of a node that is done, except that one waiting
+    /// on its claim and now held by another pending claimer moves to that
+    /// claimer still parked (a chain of claimers wakes each follower once,
+    /// not once per claimer).
+    pub(crate) fn wake_waiters_of(&self, waiters: Vec<(Slot, u32)>) {
+        for (n, q) in waiters {
+            let r = self.rec(n);
+            let claim_wait = r.st() == super::S_PARK
+                && r.park_seq.load(Ordering::Acquire) == q
+                && r.data()
+                    .x
+                    .as_ref()
+                    .and_then(|e| e.wait_on.as_ref())
+                    .is_some_and(|w| w.kind == "claim");
+            if claim_wait && let Some(c) = self.held_by(n) {
+                let cr = self.rec(c);
+                if super::in_work(cr.st()) && cr.st() != super::S_STEP {
+                    cr.data().waiters.push((n, q));
+                    if let Some(w) = r.data().x.as_mut().and_then(|e| e.wait_on.as_mut()) {
+                        w.on = super::query::Subj::Node(c);
+                    }
+                    // Done meanwhile: its waiters were taken before this one.
+                    if !super::in_work(cr.st()) || cr.st() == super::S_STEP {
+                        self.wake(n, q);
+                    }
+                    continue;
+                }
+            }
+            self.wake(n, q);
+        }
     }
 
     pub(crate) fn wake(&self, s: Slot, seq: u32) {
