@@ -2283,9 +2283,21 @@ impl Shared {
             let walked = self.recompute_frames(u, x, &mut moved);
             // Scope-local definitions of the walked entries go under the
             // scopes they open now (their frames may be new).
+            let moved_set: crate::FxHashSet<Slot> = if moved.len() > 16 {
+                moved.iter().copied().collect()
+            } else {
+                crate::FxHashSet::default()
+            };
+            let is_moved = |y: Slot| {
+                if moved.len() > 16 {
+                    moved_set.contains(&y)
+                } else {
+                    moved.contains(&y)
+                }
+            };
             let mut y = x;
             loop {
-                if !moved.contains(&y) && self.scope_misfiled(u, y) {
+                if !is_moved(y) && self.scope_misfiled(u, y) {
                     self.refile_defs(u, y, notes);
                 }
                 if Some(y) == walked || walked.is_none() {
