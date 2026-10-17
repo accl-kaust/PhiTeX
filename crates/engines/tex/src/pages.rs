@@ -667,6 +667,7 @@ impl Run<'_, '_> {
         if (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
             && fresh
+            && !crate::exec::env_flag!("PHITEX_NO_CUT")
             && self.split_at(i64::from(k))?
             && self.has_input()
             && !self.open_span()
