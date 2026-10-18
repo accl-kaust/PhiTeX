@@ -599,7 +599,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             phitex_tex::timeline::begin_at(t);
         }
         phitex_tex::timeline::lap("watch: the build begins");
-        if let (Some(t), true) = (since, std::env::var_os("PHITEX_TEX_TIME").is_some()) {
+        if let (Some(t), true) = (since, phitex_tex::tex_time()) {
             eprintln!(
                 "watch phases: build {builds} starts {:?} after its change",
                 t.elapsed()
@@ -683,7 +683,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         };
         drop(mine);
         phitex_tex::timeline::lap("watch: files written (the PDF, the log, the aux files)");
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if phitex_tex::tex_time() {
             eprintln!(
                 "watch phases: build {:?}, files written {:?}",
                 r.wall,
@@ -760,7 +760,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             crate::problems::shown_count(&r.diagnostics, true),
         );
         phitex_tex::timeline::lap("watch: problems placed");
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if phitex_tex::tex_time() {
             eprintln!("watch phases: problems placed {:?}", tpl.elapsed());
         }
         let warnings: usize = if r.diagnostics.is_empty() {
@@ -1017,7 +1017,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             ui,
             false,
         );
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if phitex_tex::tex_time() {
             eprintln!("watch phases: report {:?}", trep.elapsed());
         }
         // (the status line: the build's facts, without the colours)
@@ -1054,7 +1054,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         }
         phitex_tex::timeline::lap("watch: after the event (report, status)");
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if phitex_tex::tex_time() {
             eprintln!("watch phases: after the event {:?}", tevent.elapsed());
         }
         last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);

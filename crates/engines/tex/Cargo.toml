@@ -23,9 +23,9 @@ default = ["rayon"]
 # the engine's batches on a persistent pool (else threads per batch)
 rayon = ["dep:rayon"]
 # the engine's probes, printed after each evaluation with PHITEX_OBS=1
-profile = ["phitex-defuse/profile"]
+profile = ["phitex-defuse/profile", "phitex-pdf/profile"]
 # the engine's scheduler dumps: DEFUSE_DUMP=<file>, DEFUSE_DUMP_EVERY=<s>
-observe = ["phitex-defuse/observe"]
+observe = ["phitex-defuse/observe", "phitex-pdf/observe"]
 
 [dev-dependencies]
 phitex-kpse = { path = "../../tools/kpse" }

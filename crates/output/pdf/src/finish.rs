@@ -139,7 +139,7 @@ impl Tail {
         let out = self.link_bytes(bytes)?;
         let t0 = std::time::Instant::now();
         let h = chunk_hashes(&bytes.chunks, &out[bytes.len..]);
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if crate::phase::on() {
             eprintln!("pdf tail link: hashed {:?}", t0.elapsed());
         }
         Ok((out, h))
@@ -186,7 +186,7 @@ impl Tail {
         }
         out.extend_from_slice(&tail);
         out.extend_from_slice(&end);
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if crate::phase::on() {
             eprintln!(
                 "pdf tail link: state copied {t_clone:?}, offsets {:?}, xref {:?}, bytes {:?} ({} chunks, {} objects)",
                 t_off.saturating_sub(t_clone),
@@ -597,7 +597,7 @@ impl PdfState {
         let t_rows = t0.elapsed();
         let n = self.zip.as_ref().map_or(0, Vec::len);
         self.end_stream_with(crate::compress_resumed);
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if crate::phase::on() {
             eprintln!(
                 "pdf xref stream: head {t_head:?}, rows {:?}, compressed {:?} ({n} bytes, level {})",
                 t_rows.saturating_sub(t_head),

@@ -110,9 +110,10 @@ pub mod phase {
     #[must_use]
     pub fn on() -> bool {
         static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *F.get_or_init(|| {
-            std::env::var_os("PHITEX_TEX_TIME").is_some_and(|v| !v.is_empty() && v != "0")
-        })
+        cfg!(feature = "profile")
+            && *F.get_or_init(|| {
+                std::env::var_os("PHITEX_TEX_TIME").is_some_and(|v| !v.is_empty() && v != "0")
+            })
     }
     /// Clock `i` gains the time since `t0`.
     pub fn add(i: usize, t0: std::time::Instant) {
@@ -1225,17 +1226,22 @@ pub(crate) fn compress_resumed(data: &[u8], level: i32) -> Vec<u8> {
     use std::sync::{Mutex, OnceLock};
     static LAST: OnceLock<Mutex<phitex_codecs::deflate::Resumable>> = OnceLock::new();
     let last = LAST.get_or_init(Mutex::default);
-    if std::env::var_os("PHITEX_FAST_CHECK").is_some() {
-        phitex_codecs::deflate::FAST_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-    if let Some(p) = std::env::var_os("PHITEX_XREF_DUMP") {
-        let _ = std::fs::write(p, data);
+    if cfg!(feature = "observe") {
+        // (`PHITEX_FAST_CHECK`, `PHITEX_XREF_DUMP=<file>`: read once)
+        static CHECK: OnceLock<bool> = OnceLock::new();
+        static DUMP: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
+        if *CHECK.get_or_init(|| std::env::var_os("PHITEX_FAST_CHECK").is_some()) {
+            phitex_codecs::deflate::FAST_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(p) = DUMP.get_or_init(|| std::env::var_os("PHITEX_XREF_DUMP")) {
+            let _ = std::fs::write(p, data);
+        }
     }
     let Ok(mut r) = last.try_lock() else {
         return compress_memo(data, level);
     };
     let (z, again) = r.compress(data, level);
-    if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+    if crate::phase::on() {
         eprintln!(
             "pdf resumed compression: {again} of {} bytes compressed again",
             data.len()

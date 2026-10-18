@@ -722,7 +722,7 @@ impl Session {
             self.store_pkgrec(b);
             // (`PHITEX_CHAIN_DUMP=1`: the critical chain in full, and its
             // waits, for measurements)
-            if std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {
+            if phitex_tex::OBSERVE && std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {
                 for l in b.critical_chain_lines() {
                     eprintln!("CHAIN {}", l.replace('\n', " | "));
                 }
@@ -734,7 +734,7 @@ impl Session {
                 }
             }
             // (the package loads' counters, for measurements)
-            if std::env::var_os("PHITEX_PKG_STATS").is_some() {
+            if phitex_tex::PROFILE && std::env::var_os("PHITEX_PKG_STATS").is_some() {
                 let s = &b.stats;
                 eprintln!(
                     "PKG loads {} claimed {} recorded {} optimistic {} runs {} at-once {} span {:.3} on-critical {} refuted {} undeclared {} critical-path {:?} threads {} engine-wall {:.3} speculations {} confirmations {} mispredictions {} predicted-confirmed {} predicted-refuted {}",
@@ -763,9 +763,7 @@ impl Session {
         // (a long session: what the old texts' runs memoized and nothing
         // reaches any more goes, so the tables stay bounded)
         let mut gc = (Duration::ZERO, 0);
-        if std::env::var_os("PHITEX_NO_GC").is_none()
-            && let Some(b) = &mut self.build
-        {
+        if let Some(b) = &mut self.build {
             let t = Instant::now();
             gc.1 = b.collect_garbage();
             gc.0 = t.elapsed();
@@ -795,7 +793,7 @@ impl Session {
                     && d.context.is_empty()
             })
             .map(|d| {
-                if std::env::var_os("PHITEX_EVAL_DUMP").is_some() {
+                if phitex_tex::OBSERVE && std::env::var_os("PHITEX_EVAL_DUMP").is_some() {
                     eprintln!("eval-dump: {}", d.message);
                 }
                 let m = d.message.lines().next().unwrap_or("");
@@ -839,7 +837,7 @@ impl Session {
             (Arc::default(), bytes)
         };
         let wall = t0.elapsed();
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if phitex_tex::tex_time() {
             let shown: Vec<String> = phases.iter().map(|(n, d)| format!("{n} {d:?}")).collect();
             eprintln!("session phases ({why}): {}", shown.join(", "));
         }
@@ -1077,7 +1075,7 @@ impl Session {
             };
             let exported = t.elapsed();
             let _ = c.put_format(&self.format_name(text), &key, &bytes);
-            if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            if phitex_tex::tex_time() {
                 eprintln!(
                     "time: format stored: export {exported:?}, write {:?} ({} bytes)",
                     t.elapsed().saturating_sub(exported),
@@ -1461,8 +1459,9 @@ mod out_name_tests {
 /// another) with how long the same job has been seen running (whether
 /// a build is spinning or stuck, from outside it).
 fn snapshots(progress: &Arc<phitex_tex::Progress>) {
-    let Some(secs) = std::env::var("PHITEX_SNAPSHOT_SECS")
-        .ok()
+    let Some(secs) = phitex_tex::OBSERVE
+        .then(|| std::env::var("PHITEX_SNAPSHOT_SECS").ok())
+        .flatten()
         .and_then(|x| x.parse::<u64>().ok())
         .filter(|&n| n > 0)
     else {

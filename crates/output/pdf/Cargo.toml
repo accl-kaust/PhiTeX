@@ -6,6 +6,12 @@ license.workspace = true
 publish = false
 description = "pdfTeX's PDF backend: pages from shipped boxes, Type 1 fonts embedded and subset"
 
+[features]
+# timing lines (`PHITEX_TEX_TIME`), compiled out of other builds
+profile = []
+# dumps and checks (`PHITEX_XREF_DUMP`, `PHITEX_FAST_CHECK`)
+observe = []
+
 [dependencies]
 phitex-codecs = { path = "../../codecs" }
 phitex-tfm = { path = "../../fonts/tfm" }

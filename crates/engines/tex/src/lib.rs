@@ -63,6 +63,18 @@ pub use api::{
     Stats, byte_ends,
 };
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
+
+/// Whether this build has the timing and counter lines (`profile`).
+pub const PROFILE: bool = cfg!(feature = "profile");
+/// Whether this build has the traces, dumps and checks (`observe`).
+pub const OBSERVE: bool = cfg!(feature = "observe");
+
+/// Whether the timing lines are asked for: a `profile` build with
+/// `PHITEX_TEX_TIME` set (read once).
+#[must_use]
+pub fn tex_time() -> bool {
+    exec::prof_flag!("PHITEX_TEX_TIME")
+}
 pub use hints::{paragraph_units, set_hints_enabled};
 pub(crate) use phitex_defuse::FxHashMap;
 pub use pkgrec::summary as pkgrec_summary;
