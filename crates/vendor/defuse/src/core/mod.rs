@@ -8,7 +8,6 @@ pub(crate) mod ctx;
 pub(crate) mod dump;
 pub(crate) mod edit;
 pub(crate) mod eval;
-pub(crate) mod ltrace;
 pub(crate) mod merge;
 pub(crate) mod order;
 pub(crate) mod query;

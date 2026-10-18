@@ -1852,9 +1852,6 @@ impl Shared {
             }
             (None, None) => false,
         };
-        if changed && super::ltrace::on() {
-            super::ltrace::contrib(self, s, f, val);
-        }
         if changed {
             // The range readers after it (by position) whose range starts
             // before it.
@@ -2809,9 +2806,6 @@ impl Shared {
 
     /// Marks a node for validation (or a re-run with `run`).
     pub(crate) fn touch(&self, s: Slot, gn: u32, cause: &Cause, run: bool) {
-        if super::ltrace::on() {
-            super::ltrace::touch(self, s, cause);
-        }
         let r = self.rec(s);
         // Something it read may have changed: its next check starts over.
         if let Some(e) = r.data().x.as_mut() {
