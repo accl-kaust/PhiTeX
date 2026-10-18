@@ -145,6 +145,10 @@ impl Shared {
             abort: AtomicBool::new(false),
             error: Mutex::new(None),
             hook_error: Mutex::new(None),
+            any_final: AtomicBool::new(false),
+            final_phase: AtomicBool::new(false),
+            held: Mutex::new(Vec::new()),
+            final_released: AtomicU64::new(0),
             c: super::Counters::default(),
             t: (0..super::STRIPES).map(|_| super::TallyShard::default()).collect(),
             #[cfg(feature = "observe")]

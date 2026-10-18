@@ -236,9 +236,16 @@ impl Engine {
             // Loop-back rounds.
             match self.next_round() {
                 Err(e) => break Err(e),
+                // The rounds had converged: a final node moved a loop-back.
+                Ok(ch) if !ch.is_empty() && self.sh.final_phase.load(Ordering::Acquire) => {
+                    break Err(EvalError::FinalMovedLoop {
+                        node: self.final_mover(ch[0]),
+                        field: ch[0],
+                    });
+                }
                 // (A round only when a changed value has a reader to run.)
-                Ok(true) if self.sh.qlen.load(Ordering::Acquire) == 0 => continue,
-                Ok(true) => {
+                Ok(ch) if !ch.is_empty() && self.sh.qlen.load(Ordering::Acquire) == 0 => continue,
+                Ok(ch) if !ch.is_empty() => {
                     rep.round_times.push(close(&self.sh, &mark));
                     mark = snap(&self.sh);
                     rounds += 1;
@@ -251,7 +258,17 @@ impl Engine {
                     }
                     continue;
                 }
-                Ok(false) => {}
+                Ok(_) => {}
+            }
+            // Converged: the final phase runs the held final nodes, then
+            // the rounds are asked once more.
+            if self.sh.any_final.load(Ordering::Relaxed)
+                && !self.sh.final_phase.load(Ordering::Acquire)
+                && !lock(&self.sh.held).is_empty()
+            {
+                self.sh.final_phase.store(true, Ordering::Release);
+                self.sh.release_final();
+                continue;
             }
             // Settled reports, again at each version absorbed with nothing
             // to run.
@@ -305,6 +322,7 @@ impl Engine {
         rep.round_times.push(close(&self.sh, &mark));
         rep.rounds = rounds;
         rep.restarts = restarts;
+        rep.final_nodes_run = self.sh.final_released.load(Ordering::Relaxed);
         rep.version = self.version;
         if self.sh.c.mispredictions.load(Ordering::Relaxed) > 0 || self.sh.c.speculations.load(Ordering::Relaxed) > 0 {
             self.collect_apps(true);
@@ -486,6 +504,8 @@ impl Engine {
 
     fn begin(&mut self, sched: &mut dyn Scheduler) {
         let sh = &self.sh;
+        sh.final_phase.store(false, Ordering::Release);
+        sh.final_released.store(0, Ordering::Relaxed);
         // 0: no speculation; 1: on nodes with a prediction; 2: on any.
         // (Free-running workers ask the policy once, with a candidate of
         // each kind; steps ask it for every batch.)
@@ -632,11 +652,11 @@ impl Engine {
         }
     }
 
-    /// Advances the loop-back fields to their published values; whether
-    /// any changed.
-    fn next_round(&mut self) -> Result<bool, EvalError> {
+    /// Advances the loop-back fields to their published values; the ones
+    /// that changed.
+    fn next_round(&mut self) -> Result<Vec<Field>, EvalError> {
         if self.sh.loops.is_empty() {
-            return Ok(false);
+            return Ok(Vec::new());
         }
         // Only the fields whose publications changed since the last round
         // can move; one nobody publishes is back at its initial value.
@@ -685,7 +705,15 @@ impl Engine {
         for &f in &changed {
             self.touch_loop_readers(f);
         }
-        Ok(!changed.is_empty())
+        Ok(changed)
+    }
+
+    /// The final node whose publication moved `f` (else any final node).
+    fn final_mover(&self, f: Field) -> NodeId {
+        let sh = &self.sh;
+        let fin = |s: Slot| sh.rec(s).st() != S_FREE && sh.rec(s).data().stat.fin();
+        let by_pub = lock(&sh.pubs).get(&f).and_then(|m| m.keys().copied().find(|&s| fin(s)));
+        sh.node_id(by_pub.unwrap_or(NIL))
     }
 
     fn queued_waiters(&self) -> Vec<Waiter> {

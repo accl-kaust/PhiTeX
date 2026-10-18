@@ -557,6 +557,11 @@ impl Shared {
                 }
             }
         }
+        // A final node waits for the final phase (its readers wait on it).
+        if self.any_final.load(Ordering::Relaxed) && !self.final_phase.load(Ordering::Acquire) && r.data().stat.fin() {
+            self.land(s, move |sh| sh.hold_final(s));
+            return;
+        }
         if let Some(w) = self.gate(s).or_else(|| self.hold_refuted(s)) {
             if let Subj::Node(x) = w.on
                 && self.rec(x).st() == super::S_STEP
@@ -1150,6 +1155,49 @@ impl Shared {
                 dflt()
             }
         }
+    }
+
+    /// Holds final node `s` until the final phase: parked, its readers
+    /// waiting on it; the evaluation releases it once the rounds converge.
+    pub(crate) fn hold_final(&self, s: Slot) {
+        let r = self.rec(s);
+        if !self.leave_run(s, super::S_PARK) {
+            return;
+        }
+        r.set(F_NEEDS_RUN);
+        r.data().ex().wait_on = Some(Wait {
+            on: Subj::Node(s),
+            field: None,
+            prefix: None,
+            kind: "final",
+            has_prev: false,
+        });
+        lock(&self.held).push(s);
+        // Released at once if the final phase began meanwhile.
+        if self.final_phase.load(Ordering::Acquire) {
+            self.release_final();
+        }
+    }
+
+    /// Releases the held final nodes (into the queue, to run).
+    pub(crate) fn release_final(&self) -> u64 {
+        let held = std::mem::take(&mut *lock(&self.held));
+        let mut n = 0;
+        for s in held {
+            let r = self.rec(s);
+            if r.status
+                .compare_exchange(super::S_PARK, super::S_DIRTY, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                if let Some(e) = r.data().x.as_mut() {
+                    e.wait_on = None;
+                }
+                self.enqueue(s);
+                n += 1;
+            }
+        }
+        self.final_released.fetch_add(n, Ordering::Relaxed);
+        n
     }
 
     pub(crate) fn fail(&self, e: EvalError) {

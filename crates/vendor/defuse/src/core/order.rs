@@ -952,11 +952,16 @@ impl Shared {
         if preds.is_some() {
             self.any_preds.store(true, Ordering::Relaxed);
         }
+        let fin = self.hook(who, op, "final_only", || false, || o.final_only(args, v));
+        if fin {
+            self.any_final.store(true, Ordering::Relaxed);
+        }
         let rare = StaticRare {
             limit: None,
             reads,
             contribs,
             preds,
+            fin,
         };
         Static {
             defs,
