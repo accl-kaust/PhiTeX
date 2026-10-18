@@ -258,6 +258,9 @@ thread_local! {
     /// Tables of finished runs, emptied, for the next run on the thread
     /// (a table spans every control sequence seen).
     static POOL: std::cell::RefCell<Vec<Vec<Slot>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The touched lists of finished runs, emptied (a run touches a few
+    /// hundred locations: the list is not grown again run after run).
+    static TOUCHED_POOL: std::cell::RefCell<Vec<Vec<Loc>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl Clone for State {
@@ -301,6 +304,14 @@ impl Drop for State {
                 *s = Slot::default();
             }
         }
+        let mut touched = std::mem::take(&mut self.touched);
+        touched.clear();
+        TOUCHED_POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.len() < 4 {
+                p.push(touched);
+            }
+        });
         POOL.with(|p| {
             let mut p = p.borrow_mut();
             if p.len() < 4 {
@@ -316,7 +327,9 @@ impl State {
             eq: POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default(),
             spill: Vec::new(),
             spill_ix: FxHashMap::default(),
-            touched: Vec::new(),
+            touched: TOUCHED_POOL
+                .with(|p| p.borrow_mut().pop())
+                .unwrap_or_else(|| Vec::with_capacity(256)),
             metas: Vec::new(),
             scope_extra: Vec::new(),
             save: Vec::new(),

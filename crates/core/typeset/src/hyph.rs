@@ -437,7 +437,8 @@ impl Hyphenator for TexHyphenator<'_> {
         let font_bchar = fonts.bchar(hf).unwrap_or(NON_CHAR);
         // §897
         let mut hu = [0u16; 66];
-        let mut hc: Vec<u16> = Vec::new();
+        // (a word is at most 63 letters: one allocation, never grown)
+        let mut hc: Vec<u16> = Vec::with_capacity(64);
         let mut hb = s;
         let mut hyf_bchar = NON_CHAR;
         loop {
@@ -681,7 +682,7 @@ impl Recon<'_> {
         let hf = self.hf;
         let ch = |c: u16| Node::Char { font: hf, ch: c };
         self.hyphen_passed = 0;
-        let mut t: List = Vec::new();
+        let mut t: List = Vec::with_capacity(n.saturating_sub(j) + self.init_list.len() + 2);
         let mut w = 0;
         // §908
         let mut cur_l = self.hu[j];
@@ -699,7 +700,7 @@ impl Recon<'_> {
             t.push(ch(cur_l));
         }
         // the ligature stack: (character, the char node of hu[j+1])
-        let mut lig_stack: Vec<(u16, Option<u16>)> = Vec::new();
+        let mut lig_stack: Vec<(u16, Option<u16>)> = Vec::with_capacity(4);
         let set_cur_r = |j: usize, hu: &[u16; 66], hyf: &[u8], bchar: u16, hchar: u16| {
             let cur_r = if j < n { hu[j + 1] } else { bchar };
             let cur_rh = if hyf[j] & 1 != 0 { hchar } else { NON_CHAR };
