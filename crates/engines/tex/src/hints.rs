@@ -4276,7 +4276,7 @@ fn mean_kind(m: &Mean) -> &'static str {
 /// each command sets.
 pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
     // (`PHITEX_HINTS=3`: each node's published fields, against its bound)
-    if std::env::var("PHITEX_HINTS").is_ok_and(|x| x == "3") {
+    if crate::exec::env_str!("PHITEX_HINTS") == Some("3") {
         let fs: Vec<String> = r
             .published_fields()
             .into_iter()
@@ -4290,7 +4290,7 @@ pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
             fs.join(",")
         );
     }
-    if std::env::var("PHITEX_HINTS").is_ok_and(|x| x == "2") {
+    if crate::exec::env_str!("PHITEX_HINTS") == Some("2") {
         let mut fs: Vec<String> = r
             .def_fields()
             .into_iter()
