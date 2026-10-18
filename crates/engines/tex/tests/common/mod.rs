@@ -199,6 +199,9 @@ pub fn edit_cost_failures(b: &Build, touched: u64, before: &[u64], cold_folds: u
         ("exec", touched + 1),
         ("scan", per_page * n),
         ("finish", n),
+        // (a page's PDF side, once the loop-backs settle: the pages
+        // touched)
+        ("pdfpage", n),
         ("resume", n),
         ("place", to_end),
         ("link", 1),

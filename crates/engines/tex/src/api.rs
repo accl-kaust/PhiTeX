@@ -2047,7 +2047,8 @@ impl Graph {
             E::RunawayNode { node, .. }
             | E::RunawayCreation { node, .. }
             | E::UndeclaredDefinition { node, .. }
-            | E::OpPanicked { node, .. } => ids.push(*node),
+            | E::OpPanicked { node, .. }
+            | E::FinalMovedLoop { node, .. } => ids.push(*node),
             E::HookPanicked { node, .. } => ids.extend(*node),
             E::NoProgress { waiters, .. } | E::Deadline { waiters, .. } => {
                 ids.extend(waiters.iter().take(20).map(|w| w.node));
@@ -2091,6 +2092,13 @@ impl Graph {
                 })
                 .collect();
             let _ = write!(out, "\n  causes named: {}", named.join(", "));
+        }
+        if let E::FinalMovedLoop { field, .. } = e {
+            let _ = write!(
+                out,
+                "\n  the loop-back moved: {}",
+                field_name(self.eng.values(), *field)
+            );
         }
         // (the engine does not say which loop-backs kept changing: the
         // job's read-back fields are the candidates)
@@ -4296,15 +4304,19 @@ impl Build {
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
         // (the pages: each piece places the finisher of a page that ends
         // in it, `crate::pages`; nothing of them is pushed here)
-        // (the link, then the end node: new text pieces go before both)
+        // (the files' node, then the link and the end node: new text
+        // pieces go before all three; the files' node, whose run gives the
+        // loop-backs, before the link and the end node, which run once
+        // the loop-backs settle (`final_only`): no range it reads holds
+        // them)
+        let files_op = g.files_op;
+        let files = g.eng.push(unit, files_op, Vec::new());
+        g.eng.add_root(files);
         let link = g.eng.push(unit, g.link, Vec::new());
         g.eng.add_root(link);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
-        let end = link;
-        let files_op = g.files_op;
-        let files = g.eng.push(unit, files_op, Vec::new());
-        g.eng.add_root(files);
+        let end = files;
         crate::timeline::lap("engine: the link, end and files nodes");
         // (the fields nearly every node reads and only the format or the
         // job's start defines: their reads kept per unit, not filed by
@@ -5929,10 +5941,8 @@ fn declare_fields(eng: &mut Engine) {
     }
     let lines = eng.values().field("lines");
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
-    for f in [crate::pdfout::ALLOCS, crate::pdfout::RECS] {
-        let fld = eng.values().field(f);
-        eng.declare_accumulator(fld, Arc::new(SeqMonoid));
-    }
+    let allocs = eng.values().field(crate::pdfout::ALLOCS);
+    eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));

@@ -2680,15 +2680,14 @@ impl Run<'_, '_> {
         let t_fonts = t0.elapsed();
         phitex_pdf::phase::add(3, t_p3);
         let t_p4 = std::time::Instant::now();
-        // (a PDF page's hash is its PDF side's, `pdfout::PdfPage`: what
-        // its content stream shows; another's, the page's value)
-        let shown = match &page_box {
-            Node::Box(bx) if pos.pdf => {
-                crate::pdfout::ship(self, page, bx, &side, &ids)?;
-                None
-            }
-            _ => Some(page.raw()),
-        };
+        // (the page's hash: its value, what it is made of, known on the
+        // write side every round; its PDF side runs once, at the end)
+        if let Node::Box(bx) = &page_box
+            && pos.pdf
+        {
+            crate::pdfout::ship(self, page, bx, &side, &ids)?;
+        }
+        let shown = Some(page.raw());
         phitex_pdf::phase::add(4, t_p4);
         if timed {
             crate::exec::later(format!(

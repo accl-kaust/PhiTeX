@@ -560,7 +560,13 @@ fn one_word_edit_reruns_little() {
         got.sort_unstable();
         assert_eq!(
             got,
-            [("dvi", 1), ("exec", 1), ("finish", 1), ("link", 1)],
+            [
+                ("dvi", 1),
+                ("exec", 1),
+                ("finish", 1),
+                ("link", 1),
+                ("pdfpage", 1)
+            ],
             "runs by op at {t} threads"
         );
         assert_eq!(st.runs, st.nodes_run, "a node ran twice at {t} threads");

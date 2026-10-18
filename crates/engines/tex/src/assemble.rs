@@ -424,7 +424,11 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     // piece's records after it)
     let line = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
     // (every page's PDF side has written its record, `pdfout::PdfPage`)
-    let _ = cx.acc_range(v.field(crate::pdfout::RECS), None)?;
+    for &x in &line {
+        if let Some(k) = v.as_int(x) {
+            let _ = cx.use_field(crate::pdfout::rec_field(v, k))?;
+        }
+    }
     let t_acc = t0.elapsed();
     let xpages = crate::pdfout::order_line(v, &line);
     let t_order = t0.elapsed();

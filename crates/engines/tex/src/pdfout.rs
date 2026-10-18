@@ -1607,16 +1607,19 @@ fn ship_apart(
     Ok(())
 }
 
-/// The records the pages' PDF sides wrote ([`PdfPage`]): the link reads
-/// them whole, so it runs after every one.
-pub(crate) const RECS: &str = "pdf:recs";
+/// The field a page's PDF side defines when its record is written
+/// (`pdf:rec:<key>`, [`PdfPage`]: the hash of what the page shows): the
+/// link reads it for each page of the line, so it runs after them.
+pub(crate) fn rec_field(v: &Values, key: i64) -> phitex_defuse::Field {
+    v.field(&format!("pdf:rec:{}", key.cast_unsigned()))
+}
 
 /// A page's PDF side (`[key]`, the [`PagePiece`] its finisher kept):
 /// the page written once, apart, on a writer of its own as the link's
 /// stands between two pages ([`base_fold`]), so that its content stream
 /// is compressed in parallel with the other pages' and the hash of what
-/// it shows is known (`pagehash`). Final ([`Operation::final_only`]): it
-/// runs once the loop-backs settle, and nothing it does feeds one.
+/// it shows is known ([`rec_field`]). Final (`Operation::final_only`):
+/// it runs once the loop-backs settle, and nothing it does feeds one.
 pub(crate) struct PdfPage;
 
 impl phitex_defuse::Operation for PdfPage {
@@ -1625,9 +1628,23 @@ impl phitex_defuse::Operation for PdfPage {
     }
     fn defs(
         &self,
+        args: &[ValueId],
+        v: &Values,
+    ) -> Option<Vec<(phitex_defuse::Field, phitex_defuse::Locality)>> {
+        Some(
+            args.first()
+                .and_then(|&x| v.as_int(x))
+                .map(|k| vec![(rec_field(v, k), phitex_defuse::Locality::Global)])
+                .unwrap_or_default(),
+        )
+    }
+    /// Nothing: a range read before the loop-backs settle never waits
+    /// for it.
+    fn static_contribs(
+        &self,
         _: &[ValueId],
         _: &Values,
-    ) -> Option<Vec<(phitex_defuse::Field, phitex_defuse::Locality)>> {
+    ) -> Option<Vec<(phitex_defuse::Field, ValueId)>> {
         Some(Vec::new())
     }
     fn final_only(&self, _: &[ValueId], _: &Values) -> bool {
@@ -1646,6 +1663,7 @@ impl phitex_defuse::Operation for PdfPage {
             .get(&key)
             .cloned();
         let Some(pc) = pc else {
+            cx.define_with(rec_field(v, k), v.int(0), phitex_defuse::Locality::Global);
             return Ok(ValueId::UNIT);
         };
         let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
@@ -1668,11 +1686,11 @@ impl phitex_defuse::Operation for PdfPage {
         let shown = phitex_defuse::hash_words(phitex_defuse::hash_bytes(0, content), &words);
         let shown = phitex_defuse::hash_bytes(shown, pc.attr.as_bytes());
         let _ = pc.made.set((rec, base));
-        cx.contribute(
-            v.field("pagehash"),
-            v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes()))),
+        cx.define_with(
+            rec_field(v, k),
+            v.int(i64::from_ne_bytes(shown.to_ne_bytes())),
+            phitex_defuse::Locality::Global,
         );
-        cx.contribute(v.field(RECS), v.seq_unit(v.int(k)));
         Ok(ValueId::UNIT)
     }
 }

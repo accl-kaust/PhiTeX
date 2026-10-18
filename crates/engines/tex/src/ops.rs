@@ -629,15 +629,10 @@ impl Operation for Link {
     /// records before it are done.
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [
-                crate::pages::SCAN,
-                "pages",
-                crate::pdfout::XPAGES,
-                crate::pdfout::RECS,
-            ]
-            .iter()
-            .map(|&f| v.field(f))
-            .collect(),
+            [crate::pages::SCAN, "pages", crate::pdfout::XPAGES]
+                .iter()
+                .map(|&f| v.field(f))
+                .collect(),
         )
     }
     /// The PDF side: linked once, after the loop-backs settle.
