@@ -673,6 +673,17 @@ impl Hint {
     }
 }
 
+/// `x` in decimal, as `{x}` formats it.
+fn push_u8(o: &mut String, x: u8) {
+    if x >= 100 {
+        o.push(char::from(b'0' + x / 100));
+    }
+    if x >= 10 {
+        o.push(char::from(b'0' + x / 10 % 10));
+    }
+    o.push(char::from(b'0' + x % 10));
+}
+
 /// A bound's fields after a hint's excerpt (`\x1e` before each).
 fn encode_bound(b: &Bound, o: &mut String) {
     o.push('\x1e');
@@ -680,19 +691,23 @@ fn encode_bound(b: &Bound, o: &mut String) {
     o.push('\x1e');
     o.push_str(&b.prefixes.join("\x1f"));
     o.push('\x1e');
-    // (written in place: no string per pair)
-    for (i, (c, k)) in b.cats.iter().enumerate() {
+    // (written in place: no string per pair, no formatting)
+    for (i, &(c, k)) in b.cats.iter().enumerate() {
         if i > 0 {
             o.push('\x1f');
         }
-        let _ = write!(o, "{c}\x1d{k}");
+        push_u8(o, c);
+        o.push('\x1d');
+        push_u8(o, k);
     }
     o.push('\x1e');
     for (i, (n, k)) in b.means.iter().enumerate() {
         if i > 0 {
             o.push('\x1f');
         }
-        let _ = write!(o, "{n}\x1d{k}");
+        o.push_str(n);
+        o.push('\x1d');
+        let _ = write!(o, "{k}");
     }
     o.push('\x1e');
     match &b.state {
@@ -4333,6 +4348,15 @@ mod tests {
         );
         assert!(h.may_define_field("count:0"));
         assert!(!h.may_define_field("count:24"));
+    }
+
+    #[test]
+    fn bytes_in_decimal_as_formatted() {
+        for x in 0..=255u8 {
+            let mut o = String::new();
+            push_u8(&mut o, x);
+            assert_eq!(o, x.to_string());
+        }
     }
 
     #[test]
