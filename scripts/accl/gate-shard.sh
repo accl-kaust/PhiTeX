@@ -290,8 +290,13 @@ for l in open(sys.argv[1]):
     fetched
     bin=$w/bin/cli/phitex
     rm -rf "$w/amsh" "$w/amsh-cold" && cp -a bench/amsldoc "$w/amsh"
+    # (each evaluation's runs and per-round memo hits by round,
+    # `acct-edit:` lines, PHITEX_ROUND_ACCT: the watch's cold build first,
+    # then one line an edit)
     (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/acache \
+      PHITEX_ROUND_ACCT=1 GATE_EDIT_STDERR="$r/edits-j$j.err" \
       timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/amsh" amsldoc.tex $j $n $j "$r/edits-j$j.json" --exact-pdf) >> "$r/ams.txt" 2>&1
+    grep -E '^acct-edit:' "$r/edits-j$j.err" 2>/dev/null | cut -c1-400 >> "$r/ams.txt"
     grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "amsldoc edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
     ;;
   control)

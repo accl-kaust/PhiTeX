@@ -2754,6 +2754,29 @@ impl Graph {
                 );
                 crate::timeline::lap("engine: the reads checked again (PHITEX_CHECK_READS only)");
             }
+            if crate::exec::prof_flag!("PHITEX_ROUND_ACCT") {
+                // (the edit's cost by round, cheap enough for the edit
+                // histories the gate times: the runs and the per-round
+                // memo's hits of each round, its bytes, the runs by
+                // operation)
+                let rounds: Vec<String> = r
+                    .round_times
+                    .iter()
+                    .map(|t| format!("{}/{}", t.runs, t.memo_hits))
+                    .collect();
+                let mut ops: Vec<(&str, u64)> =
+                    r.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
+                ops.sort_unstable();
+                eprintln!(
+                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits by round [{}], memo {} bytes, {} runs, {} nodes run, runs by op {ops:?}",
+                    t0.elapsed().as_secs_f64() * 1e3,
+                    r.rounds,
+                    rounds.join(" "),
+                    r.memo_bytes,
+                    r.runs,
+                    r.nodes_run
+                );
+            }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
                 crate::exec::flush_later();

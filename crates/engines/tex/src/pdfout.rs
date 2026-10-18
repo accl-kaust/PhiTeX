@@ -1632,6 +1632,12 @@ fn write_page(v: &Values, pc: &PagePiece) {
 /// nothing it does feeds one.
 pub(crate) struct PdfPage;
 
+/// The keys of the pages a run shipped ([`PagePiece`]s, in its shipouts'
+/// order), defined by that run and read by its [`PdfPage`] children,
+/// whose argument is their place in the list: a child's identity is
+/// the shipout's place, never the page's content.
+pub(crate) const PAGE_KEYS: &str = "pdf:pagekeys";
+
 impl phitex_defuse::Operation for PdfPage {
     fn name(&self) -> &'static str {
         "pdfpage"
@@ -1658,7 +1664,19 @@ impl phitex_defuse::Operation for PdfPage {
     fn run(&self, cx: &mut phitex_defuse::Ctx<'_>) -> Result<ValueId, phitex_defuse::Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
-        let Some(k) = cx.args().first().and_then(|&x| v.as_int(x)) else {
+        let Some(i) = cx
+            .args()
+            .first()
+            .and_then(|&x| v.as_int(x))
+            .and_then(|i| usize::try_from(i).ok())
+        else {
+            return Ok(ValueId::UNIT);
+        };
+        let keys = cx.use_field(v.field(PAGE_KEYS))?;
+        let Some(k) = keys
+            .and_then(|ks| list_of(v, ks).get(i).copied())
+            .and_then(|x| v.as_int(x))
+        else {
             return Ok(ValueId::UNIT);
         };
         let pc = pieces()

@@ -3436,8 +3436,30 @@ impl<'c, 'a> Run<'c, 'a> {
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);
         }
+        // (a page's PDF side is a child of the run that shipped it, named
+        // by its place among the run's shipouts, never by what it holds:
+        // the pages' keys are a definition of the run's, read by those
+        // children (`crate::pdfout::PAGE_KEYS`), so an edit that changes
+        // the page runs the same child again instead of making another,
+        // and the run keeps its shape)
+        let mut keys = Vec::new();
         for (op, args) in std::mem::take(&mut self.kids) {
-            self.cx.child(op, args);
+            if op == self.ops.pdfpage {
+                let v = self.v;
+                let i = v.int(i64::try_from(keys.len()).unwrap_or(i64::MAX));
+                keys.push(args.first().copied().unwrap_or(ValueId::UNIT));
+                self.cx.child(op, vec![i]);
+            } else {
+                self.cx.child(op, args);
+            }
+        }
+        if !keys.is_empty() {
+            let v = self.v;
+            self.cx.define_with(
+                v.field(crate::pdfout::PAGE_KEYS),
+                v.list(keys),
+                Locality::Global,
+            );
         }
         // (a run cut at a candidate: its input left is its continuation,
         // the resume piece's, `crate::pages`)
