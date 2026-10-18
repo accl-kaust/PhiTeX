@@ -2131,7 +2131,11 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         // (the read-time writes into object streams before the page
         // count toward a stream's 100; a link piece's and a bead
         // rectangle's object go into one too)
-        let os = if i(4) > 0 { i(4) + made.compressible } else { 0 };
+        let os = if i(4) > 0 {
+            i(4) + made.compressible
+        } else {
+            0
+        };
         for _ in 0..os {
             if (written + i(8)) % 100 == 0 {
                 out.objects += 1;

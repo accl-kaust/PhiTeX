@@ -1624,9 +1624,10 @@ impl Run<'_, '_> {
     /// `shell_cmd_is_allowed` judges it (texmfmp.c). No command runs as
     /// a process: an allowed command that is one of the tools
     /// ([`crate::tools`]) is a request for that tool's output, global
-    /// (`toolreq:<output>`, `[tool, [args...]]`): where the output is
-    /// opened, its text is the tool's run with those arguments on the
-    /// files the job wrote (the round before's); any other command is
+    /// (`toolreq:<output>`, `[tool, [args...], input text]`): where the
+    /// output is opened, its text is the tool's run with those arguments
+    /// on its input as this run had written it at the command (a file
+    /// this run did not open: the round before's); any other command is
     /// refused with a diagnostic.
     fn shell_command(&mut self, cmd: &str) -> R<()> {
         let restricted = self.int32("shellescape")? == 2;
@@ -1652,7 +1653,7 @@ impl Run<'_, '_> {
             );
             return Ok(());
         };
-        let Some((output, _)) = tool.command_files(&args[1..]) else {
+        let Some((output, input)) = tool.command_files(&args[1..]) else {
             return Ok(());
         };
         self.log(
@@ -1660,10 +1661,20 @@ impl Run<'_, '_> {
             &format!("runsystem({cmd})...executed safely (allowed)."),
         )?;
         let v = self.v;
-        let e = v.list(vec![
+        let mut e = vec![
             v.str(&name),
             v.list(args[1..].iter().map(|a| v.str(a)).collect()),
-        ]);
+        ];
+        // (the command runs here, in this run: an input this run opened
+        // for writing is read as written so far, as the program reads
+        // the file system now; else as the round before left it)
+        if self.get(&format!("wopen:{input}"))?.is_some()
+            && let Some(x) = self.read_own_written(&input)?
+            && let Some(&t) = list_of(v, x).get(1)
+        {
+            e.push(t);
+        }
+        let e = v.list(e);
         self.set(&format!("{}{output}", crate::tools::REQUEST), e, true);
         Ok(())
     }

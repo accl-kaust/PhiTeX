@@ -1364,7 +1364,10 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
     let per_run_us = (wall.saturating_sub(op)) as f64 / 1e3 / runs as f64;
     #[allow(clippy::cast_precision_loss)]
     let rpn = r.runs as f64 / live as f64;
-    eprintln!("acct: memo {} bytes (the previous evaluation's round results)", r.memo_bytes);
+    eprintln!(
+        "acct: memo {} bytes (the previous evaluation's round results)",
+        r.memo_bytes
+    );
     eprintln!(
         "acct: {} rounds, {} runs, {} live nodes, {rpn:.2} runs/node, raises {} ({:.2}% of runs), pending waits {} ({:.2}% of runs), round wall minus op {per_run_us:.1} us/run at {} threads",
         r.round_times.len(),

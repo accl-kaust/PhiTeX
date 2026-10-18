@@ -256,7 +256,8 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
 }
 
 /// A tool's run on the files the job wrote the round before
-/// (`Ctx::apply`): `[tool, output, input, [args...]]`, its output
+/// (`Ctx::apply`): `[tool, output, input, [args...]]` (and the input's
+/// text where a `\write18` in this round's run read it), its output
 /// `[path, text]` (TeX's characters), or `UNIT` where the tool makes
 /// none (its input not written, a bibliography asked for by none, a
 /// failed run). The output is `[path, text, 0]`: read inline where it is
@@ -289,8 +290,15 @@ impl Operation for ToolRun {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let mut served = Served::default();
-        // (the input first: none written, no run)
-        let Some((_, text)) = look_up(cx, &Need::File(input.clone()))? else {
+        // (the input first: as a `\write18` read it in its run, else as
+        // the round before wrote it; none written, no run)
+        let given = args
+            .get(4)
+            .map(|&t| (format!("./{input}"), bytes(&str_of(v, t))));
+        let Some((_, text)) = (match given {
+            Some(x) => Some(x),
+            None => look_up(cx, &Need::File(input.clone()))?,
+        }) else {
             return Ok(ValueId::UNIT);
         };
         if tool == Tool::Bibtex && !phitex_bibtex::requests_data(&text) {
@@ -374,7 +382,10 @@ pub(crate) fn run_args(
         if let Some(t) = tool
             && let Some((_, input)) = t.command_files(&args)
         {
-            return Ok(Some(mk(t, &input, args)));
+            let mut a = mk(t, &input, args);
+            // (the input as the command read it, where this run wrote it)
+            a.extend(xs.get(2).copied());
+            return Ok(Some(a));
         }
     }
     for (t, input) in claims(output) {
