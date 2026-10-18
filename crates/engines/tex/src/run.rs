@@ -187,15 +187,18 @@ pub(crate) struct Ops {
     /// finisher's declared names, and its predicted definitions where
     /// both agree (`crate::pages::Finish`).
     pub fin_defs: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, crate::pages::FinDefs>>>,
+    /// [`Ops::fin_defs`] as the evaluation began: what a finisher's
+    /// declarations, predictions and guesses read. A finisher's run
+    /// writes the live table, for the next evaluation: no node guesses
+    /// from what another node of the same evaluation ran (run counts
+    /// would follow the schedule, and the engine would not see it).
+    pub fin_defs_start: std::sync::Arc<
+        std::sync::Mutex<std::sync::Arc<crate::FxHashMap<u64, crate::pages::FinDefs>>>,
+    >,
     /// The class projection of meanings ([`crate::val::class_projection`],
     /// registered with the engine): a lookup that only stores its token
     /// reads the name's class, not its meaning ([`Run::class_lookup`]).
     pub class_proj: phitex_defuse::ProjId,
-    /// The names of fonts found not virtual (`pdfout::do_vf`): a memo
-    /// of the build, not a field, so the finisher that found out does
-    /// not define something every later finisher reads (an edit
-    /// replacing that finisher ran them all again).
-    pub not_virtual: std::sync::Arc<std::sync::Mutex<phitex_defuse::FxHashSet<String>>>,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -205,7 +208,12 @@ pub(crate) struct Ops {
     /// continuation made anew for page `j` (an edit's: its steps run on
     /// it in parallel, the engine confirms it when the real one comes).
     pub scan_guess: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<i64, (ValueId, ValueId)>>>,
+    /// [`Ops::scan_guess`] as the evaluation began (what guesses read).
+    pub scan_guess_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<ScanGuesses>>>,
 }
+
+/// The scan's guess table ([`Ops::scan_guess`]).
+pub(crate) type ScanGuesses = crate::FxHashMap<i64, (ValueId, ValueId)>;
 
 /// A package load's finished run: its node, when it began and ended,
 /// and whether it ran speculatively.
