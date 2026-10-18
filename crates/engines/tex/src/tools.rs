@@ -1,0 +1,384 @@
+//! The programs a job's reads run, as latexmk runs them between
+//! pdflatex's runs: BibTeX, biber and makeindex, in process
+//! (`phitex-bibtex`, `phitex-biber`, `phitex-makeindex`).
+//!
+//! A tool is driven by a read, never by a write. When TeX opens a name
+//! the job does not write itself ([`crate::run::Run::file`]), each tool's
+//! crate is asked whether that name is its default output for an input
+//! the job writes (makeindex: `X.ind` from `X.idx`); a `\write18` naming
+//! a tool asks for its output the same way, with its arguments
+//! ([`REQUEST`]). The read is then the output of a memoised application
+//! of [`ToolRun`] (`Ctx::apply`): it reads the input as the job wrote it
+//! the round before (`wtext:<name>`, a loop-back the files' node
+//! publishes, `ops::Files`) and its support files through the client's
+//! lookups for the tool ([`crate::api::ToolSearch`]). So a tool runs only
+//! where its output is read, and again only when what it read changed:
+//! the engine's memoisation, no step between rounds. A name no tool
+//! claims, or one whose input the job does not write, is read from the
+//! file system.
+
+use phitex_defuse::{Ctx, Field, Locality, Operation, Stop, ValueId, Values};
+
+use crate::api::ToolSearch;
+use crate::ops::{Shared, ops};
+use crate::val::{list_of, str_of};
+
+/// A request a `\write18` made for a tool's output (`toolreq:<output>`,
+/// global): `[tool, [args...]]`, read where the output is opened.
+pub(crate) const REQUEST: &str = "toolreq:";
+
+/// The loop-back of a file the job writes, its whole text as the round
+/// before wrote it (`UNIT`: not written), published by the files' node
+/// for the tools that read it.
+pub(crate) fn text_field(v: &Values, name: &str) -> Field {
+    v.field(&format!("wtext:{name}"))
+}
+
+/// The tools, in the order a name more than one claims is given to (the
+/// first whose input the job writes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tool {
+    Biber,
+    Bibtex,
+    Makeindex,
+}
+
+impl Tool {
+    const ALL: [Tool; 3] = [Tool::Biber, Tool::Bibtex, Tool::Makeindex];
+
+    /// The program's name (a `\write18` command's first word).
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Tool::Biber => "biber",
+            Tool::Bibtex => "bibtex",
+            Tool::Makeindex => "makeindex",
+        }
+    }
+
+    pub(crate) fn of_name(s: &str) -> Option<Tool> {
+        Tool::ALL.into_iter().find(|t| t.name() == s)
+    }
+
+    /// The input the tool makes `output` from by default (its crate's
+    /// predicate on the output's name).
+    fn default_input(self, output: &str) -> Option<String> {
+        match self {
+            Tool::Biber => phitex_biber::default_input_for(output),
+            Tool::Bibtex => phitex_bibtex::default_input_for(output),
+            Tool::Makeindex => phitex_makeindex::default_input_for(output),
+        }
+    }
+
+    /// The output and input of the tool run with `args` (its crate's
+    /// command line).
+    pub(crate) fn command_files(self, args: &[String]) -> Option<(String, String)> {
+        match self {
+            Tool::Biber => {
+                let f = args.iter().find(|a| !a.starts_with('-'))?;
+                let base = f.strip_suffix(".bcf").unwrap_or(f);
+                Some((format!("{base}.bbl"), format!("{base}.bcf")))
+            }
+            Tool::Bibtex => phitex_bibtex::command_files(args),
+            Tool::Makeindex => phitex_makeindex::command_files(args),
+        }
+    }
+}
+
+/// The tools that may make `output` by default, each with its input.
+pub(crate) fn claims(output: &str) -> Vec<(Tool, String)> {
+    Tool::ALL
+        .into_iter()
+        .filter_map(|t| t.default_input(output).map(|i| (t, i)))
+        .collect()
+}
+
+/// TeX Live 2026's `shell_escape_commands` (texmf.cnf): what restricted
+/// mode allows.
+pub(crate) const SHELL_ESCAPE_COMMANDS: &[&str] = &[
+    "bibtex",
+    "bibtex8",
+    "extractbb",
+    "gregorio",
+    "kpsewhich",
+    "makeindex",
+    "repstopdf",
+    "r-mpost",
+    "texosquery-jre8",
+];
+
+/// The tools' settings the client gives ([`crate::Options::bibtex`]).
+#[derive(Clone, Default)]
+pub(crate) struct ToolOptions {
+    pub bibtex: phitex_bibtex::Options,
+}
+
+/// makeindex's banner: 2.18 as TeX Live 2026 builds it.
+const MAKEINDEX_VERSION: &[u8] = b"version 2.18 [TeX Live 2026] (kpathsea + Thai support)";
+
+/// TeX's characters as bytes (Latin-1; a character past 255 as `?`).
+fn bytes(s: &str) -> Vec<u8> {
+    s.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect()
+}
+
+/// Bytes as TeX's characters (each byte one character).
+fn chars(b: &[u8]) -> String {
+    b.iter().map(|&c| char::from(c)).collect()
+}
+
+/// A file a tool asks for that the run has not looked up yet.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum Need {
+    /// By name as given: a file the job writes (its text the round
+    /// before), else the job's own lookup (`file:<name>`).
+    File(String),
+    /// Through the tool's search.
+    Support(ToolSearch, String),
+}
+
+/// The files a tool's run is served: what was looked up so far, and what
+/// it asked for that was not ([`ToolRun`] looks those up and runs the
+/// tool again, until it asks for nothing new).
+#[derive(Default)]
+struct Served {
+    got: crate::FxHashMap<Need, Option<(String, Vec<u8>)>>,
+    missing: Vec<Need>,
+}
+
+impl Served {
+    fn get(&mut self, n: Need) -> Option<(String, Vec<u8>)> {
+        if let Some(x) = self.got.get(&n) {
+            return x.clone();
+        }
+        if !self.missing.contains(&n) {
+            self.missing.push(n);
+        }
+        None
+    }
+
+    fn file(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        let n = chars(name);
+        let n = n.strip_prefix("./").unwrap_or(&n).to_owned();
+        self.get(Need::File(n)).map(|(_, b)| b)
+    }
+}
+
+impl phitex_bibtex::Files for Served {
+    fn aux(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        self.file(name)
+    }
+    fn bst(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        let n = chars(name);
+        let n = if n.contains('.') {
+            n
+        } else {
+            format!("{n}.bst")
+        };
+        self.get(Need::Support(ToolSearch::BibStyle, n))
+            .map(|(_, b)| b)
+    }
+    fn bib(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        let n = chars(name);
+        let n = if n.to_ascii_lowercase().ends_with(".bib") {
+            n
+        } else {
+            format!("{n}.bib")
+        };
+        self.get(Need::Support(ToolSearch::BibData, n))
+            .map(|(_, b)| b)
+    }
+}
+
+impl phitex_biber::Files for Served {
+    fn datasource(&mut self, name: &str) -> Option<(String, Vec<u8>)> {
+        if let Some((_, b)) = self.get(Need::File(name.to_owned())) {
+            return Some((name.to_owned(), b));
+        }
+        self.get(Need::Support(ToolSearch::BibData, name.to_owned()))
+    }
+}
+
+impl phitex_makeindex::Files for Served {
+    fn read(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        self.file(name)
+    }
+    fn readable(&mut self, name: &[u8]) -> bool {
+        self.file(name).is_some()
+    }
+    fn style(&mut self, name: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+        let n = chars(name);
+        self.get(Need::Support(ToolSearch::IndexStyle, n))
+            .map(|(p, b)| (bytes(&p), Some(b)))
+    }
+    fn out_name_ok(&mut self, _name: &[u8]) -> Result<(), Vec<u8>> {
+        Ok(())
+    }
+    fn stdin(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
+/// The environment field a support file is looked up by
+/// (`tfile:<search>:<name>`, answered by the client's lookup for tools,
+/// [`crate::Options::tool_finder`]).
+pub(crate) fn support_field(v: &Values, s: ToolSearch, name: &str) -> Field {
+    v.field(&format!("tfile:{}:{name}", s.code()))
+}
+
+/// Looks up what a run asked for: a file the job writes, by its text
+/// the round before; else through the job's or the tool's lookup.
+fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop> {
+    let v = cx.values();
+    let file = |x: Option<ValueId>| {
+        x.and_then(|x| {
+            let xs = list_of(v, x);
+            match (xs.first(), xs.get(1)) {
+                (Some(&p), Some(&t)) => Some((str_of(v, p), bytes(&str_of(v, t)))),
+                _ => None,
+            }
+        })
+    };
+    match n {
+        Need::File(name) => {
+            let w = text_field(v, name);
+            if cx.is_loopback(w) {
+                let x = cx.use_field(w)?;
+                return Ok(x
+                    .filter(|&x| x != ValueId::UNIT)
+                    .map(|x| (format!("./{name}"), bytes(&str_of(v, x)))));
+            }
+            // (bound: a job that writes it declares the loop-back later
+            // in the evaluation, and this runs again)
+            let _ = cx.use_field(w)?;
+            Ok(file(cx.use_env(v.field(&format!("file:{name}")))?))
+        }
+        Need::Support(s, name) => Ok(file(cx.use_env(support_field(v, *s, name))?)),
+    }
+}
+
+/// A tool's run on the files the job wrote the round before
+/// (`Ctx::apply`): `[tool, output, input, [args...]]`, its output
+/// `[path, text]` (TeX's characters), or `UNIT` where the tool makes
+/// none (its input not written, a bibliography asked for by none, a
+/// failed run).
+pub(crate) struct ToolRun(pub Shared);
+
+impl Operation for ToolRun {
+    fn name(&self) -> &'static str {
+        "tool"
+    }
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let v = cx.values();
+        let args = cx.args();
+        let s = |i: usize| args.get(i).map(|&x| str_of(v, x)).unwrap_or_default();
+        let Some(tool) = Tool::of_name(&s(0)) else {
+            return Ok(ValueId::UNIT);
+        };
+        let (output, input) = (s(1), s(2));
+        let targs: Vec<String> = args
+            .get(3)
+            .map(|&l| list_of(v, l).iter().map(|&a| str_of(v, a)).collect())
+            .unwrap_or_default();
+        let opts = ops(&self.0)
+            .tool_opts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut served = Served::default();
+        // (the input first: none written, no run)
+        let Some((_, text)) = look_up(cx, &Need::File(input.clone()))? else {
+            return Ok(ValueId::UNIT);
+        };
+        if tool == Tool::Bibtex && !phitex_bibtex::requests_data(&text) {
+            return Ok(ValueId::UNIT);
+        }
+        served.got.insert(
+            Need::File(input.clone()),
+            Some((format!("./{input}"), text.clone())),
+        );
+        // (run, then the files it asked for and had not looked up, and
+        // again until it asks for none new)
+        let made = loop {
+            let made = match tool {
+                Tool::Makeindex => {
+                    let a: Vec<Vec<u8>> = targs.iter().map(|a| bytes(a)).collect();
+                    phitex_makeindex::run(&a, MAKEINDEX_VERSION, &mut served)
+                        .ind
+                        .map(|f| f.contents)
+                }
+                Tool::Bibtex => phitex_bibtex::run(input.as_bytes(), &opts.bibtex, &mut served)
+                    .bbl
+                    .map(|f| f.contents),
+                Tool::Biber => phitex_biber::run(&text, &mut served)
+                    .bbl
+                    .map(String::into_bytes),
+            };
+            let missing = std::mem::take(&mut served.missing);
+            if missing.is_empty() {
+                break made;
+            }
+            for n in missing {
+                let x = look_up(cx, &n)?;
+                served.got.insert(n, x);
+            }
+        };
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "tool {} for {output}: read {:?}, made {:?} bytes",
+                tool.name(),
+                served.got.keys().collect::<Vec<_>>(),
+                made.as_ref().map(Vec::len)
+            );
+        }
+        Ok(made.map_or(ValueId::UNIT, |b| {
+            v.list(vec![v.str(&format!("./{output}")), v.str(&chars(&b))])
+        }))
+    }
+}
+
+/// The arguments of the tool run that makes `output`, if one does: a
+/// `\write18` request for it ([`REQUEST`]), else the first tool claiming
+/// it by name whose input the job writes. `None`: no tool makes it (the
+/// name is read from the file system).
+pub(crate) fn run_args(
+    cx: &mut Ctx<'_>,
+    request: Option<ValueId>,
+    output: &str,
+) -> Result<Option<Vec<ValueId>>, Stop> {
+    let v = cx.values();
+    let mk = |t: Tool, input: &str, args: Vec<String>| {
+        vec![
+            v.str(t.name()),
+            v.str(output),
+            v.str(input),
+            v.list(args.iter().map(|a| v.str(a)).collect()),
+        ]
+    };
+    if let Some(r) = request.filter(|&r| r != ValueId::UNIT) {
+        let xs = list_of(v, r);
+        let tool = xs.first().and_then(|&t| Tool::of_name(&str_of(v, t)));
+        let args: Vec<String> = xs
+            .get(1)
+            .map(|&l| list_of(v, l).iter().map(|&a| str_of(v, a)).collect())
+            .unwrap_or_default();
+        if let Some(t) = tool
+            && let Some((_, input)) = t.command_files(&args)
+        {
+            return Ok(Some(mk(t, &input, args)));
+        }
+    }
+    for (t, input) in claims(output) {
+        let w = text_field(v, &input);
+        // (a job that writes the input declares its loop-back; bound
+        // otherwise, so the read runs again once it does)
+        if !cx.is_loopback(w) {
+            let _ = cx.use_field(w)?;
+            continue;
+        }
+        return Ok(Some(mk(t, &input, vec![input.clone()])));
+    }
+    Ok(None)
+}

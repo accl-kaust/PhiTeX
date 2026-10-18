@@ -603,6 +603,10 @@ impl Operation for Dvi {
                 .collect(),
         )
     }
+    /// The output file is made once, after the loop-backs settle.
+    fn final_only(&self, _: &[ValueId], _: &Values) -> bool {
+        true
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
@@ -625,11 +629,20 @@ impl Operation for Link {
     /// records before it are done.
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [crate::pages::SCAN, "pages", crate::pdfout::XPAGES]
-                .iter()
-                .map(|&f| v.field(f))
-                .collect(),
+            [
+                crate::pages::SCAN,
+                "pages",
+                crate::pdfout::XPAGES,
+                crate::pdfout::RECS,
+            ]
+            .iter()
+            .map(|&f| v.field(f))
+            .collect(),
         )
+    }
+    /// The PDF side: linked once, after the loop-backs settle.
+    fn final_only(&self, _: &[ValueId], _: &Values) -> bool {
+        true
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
@@ -662,8 +675,8 @@ pub(crate) fn client_only(v: &Values, f: Field) -> bool {
 /// The files the job writes, read back by the next round
 /// (spec-redesign §1, `files(round)`): one node per written file, its
 /// name its argument, under a root node (no argument) that places them:
-/// for each name in the client's `loopfiles`, the streams opened
-/// (`wnames`) and the files a tool makes (`tools`). A file's node reads
+/// for each name in the client's `loopfiles` and the streams opened
+/// (`wnames`). A file's node reads
 /// its own stream only ([`crate::run::stream_bucket`]),
 /// so a change in one file's lines runs that file's node alone; its text
 /// is sliced by the document's slicer into units, each published as its
@@ -673,7 +686,9 @@ pub(crate) fn client_only(v: &Values, f: Field) -> bool {
 /// file absent). A reader of the file is a parent whose children are the
 /// units' pieces, keyed by content ([`crate::run::Run::doc_file_regions`]):
 /// an edit of one unit re-runs that unit's piece, and the order's readers
-/// only where the order changed. No value holds the file's whole text.
+/// only where the order changed. The file's whole text goes only to its
+/// tools' loop-back (`wtext:<name>`, [`crate::tools`]), which no TeX run
+/// reads.
 pub(crate) struct Files(pub Shared);
 
 impl Operation for Files {
@@ -684,17 +699,14 @@ impl Operation for Files {
         Some(Vec::new())
     }
     /// The accumulators the node reads whole: the root the streams
-    /// opened and the tools' files, a file's node its stream's bucket.
+    /// opened, a file's node its stream's bucket.
     /// Held until every contributor before it is done, instead of
     /// starting and parking at the range again for each one still in
     /// work (the root parked 349 times on para4000).
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         let mut out = vec![v.field("loopfiles")];
         match args.first() {
-            None => {
-                out.push(v.field(crate::run::WNAMES));
-                out.push(v.field("tools"));
-            }
+            None => out.push(v.field(crate::run::WNAMES)),
             Some(&n) => out.push(crate::run::stream_bucket(v, &str_of(v, n))),
         }
         Some(out)
@@ -721,23 +733,13 @@ impl Operation for Files {
 }
 
 /// The root of the files' nodes: one child per file the job writes
-/// (the client's `loopfiles`, the streams opened this round, the files
-/// a tool makes), in that order.
+/// (the client's `loopfiles`, the streams opened this round), in that
+/// order.
 fn files_root(cx: &mut Ctx<'_>, listed: Vec<String>) -> Result<ValueId, Stop> {
     let v = cx.values();
     let mut names = listed;
     let opened = cx.acc_range(v.field(crate::run::WNAMES), None)?;
-    let tools = cx.acc_range(v.field("tools"), None)?;
-    let made = v
-        .seq_to_vec(tools)
-        .into_iter()
-        .filter_map(|e| list_of(v, e).first().map(|&n| str_of(v, n)));
-    for n in v
-        .seq_to_vec(opened)
-        .into_iter()
-        .map(|n| str_of(v, n))
-        .chain(made)
-    {
+    for n in v.seq_to_vec(opened).into_iter().map(|n| str_of(v, n)) {
         if !names.contains(&n) {
             names.push(n);
         }
@@ -755,11 +757,11 @@ fn files_root(cx: &mut Ctx<'_>, listed: Vec<String>) -> Result<ValueId, Stop> {
 fn stream_of(cx: &mut Ctx<'_>, name: &str) -> Result<(Option<String>, Option<WrittenDefs>), Stop> {
     let v = cx.values();
     let acc = cx.acc_range(crate::run::stream_bucket(v, name), None)?;
-    let text = crate::api::written_texts(v, None, Some(acc))
+    let text = crate::api::written_texts(v, Some(acc))
         .into_iter()
         .find(|(n, _)| n == name)
         .map(|(_, t)| t);
-    let defs = crate::api::written_defs(v, None, Some(acc))
+    let defs = crate::api::written_defs(v, Some(acc))
         .into_iter()
         .find(|(n, _)| n == name)
         .map(|(_, d)| d);
@@ -779,18 +781,17 @@ fn file_node(
     defs_lock: &std::sync::Mutex<crate::hints::Defs>,
 ) -> Result<ValueId, Stop> {
     let v = cx.values();
-    let (written, ds) = stream_of(cx, name)?;
-    // the in-process makeindex run `\write18` asked for that makes this
-    // file (`Run::shell_command`), on the files this round wrote
-    let made = if written.is_none() {
-        makeindex_for(cx, name)?
-    } else {
-        None
-    };
-    let text = written.or(made);
+    let (text, ds) = stream_of(cx, name)?;
     if !listed && text.is_none() && ds.is_none() {
         return Ok(ValueId::UNIT);
     }
+    // (the whole text, for the tools that read the file next round,
+    // `crate::tools`: a loop-back nobody reads costs no round)
+    let wt = crate::tools::text_field(v, name);
+    if !cx.is_loopback(wt) {
+        cx.declare_loopback(wt, ValueId::UNIT);
+    }
+    publish_traced(cx, wt, text.as_deref().map_or(ValueId::UNIT, |t| v.str(t)));
     let k = v.field(&format!("wkeys:{name}"));
     let keys_on = if cx.is_loopback(k) {
         true
@@ -822,7 +823,7 @@ fn file_node(
             if *val == ValueId::UNIT {
                 continue;
             }
-            cx.publish(w, *val);
+            publish_traced(cx, w, *val);
             if trace {
                 let xs = list_of(v, *val);
                 let shown = xs
@@ -843,7 +844,7 @@ fn file_node(
                 text.as_deref().unwrap_or("")
             );
         }
-        cx.publish(k, v.list(keys));
+        publish_traced(cx, k, v.list(keys));
     }
     let f = v.field(&format!("wfile:{name}"));
     if !cx.is_loopback(f) {
@@ -854,7 +855,7 @@ fn file_node(
     }
     // a file the job did not write this round is absent next round
     let Some(t) = text else {
-        cx.publish(f, v.list(Vec::new()));
+        publish_traced(cx, f, v.list(Vec::new()));
         return Ok(ValueId::UNIT);
     };
     if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
@@ -865,7 +866,7 @@ fn file_node(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     let order = written_units(cx, name, &t, &defs);
-    cx.publish(f, order);
+    publish_traced(cx, f, order);
     Ok(ValueId::UNIT)
 }
 
@@ -902,180 +903,26 @@ fn written_units(cx: &mut Ctx<'_>, name: &str, text: &str, defs: &crate::hints::
         if !cx.is_loopback(f) {
             cx.declare_loopback(f, v.str(""));
         }
-        cx.publish(f, v.str(u));
+        publish_traced(cx, f, v.str(u));
         entries.push(v.list(vec![v.str(&key), v.int(i64::from(starts))]));
     }
     let sliceable = crate::inputs::document_file(name, text);
     v.list(vec![v.int(i64::from(sliceable)), v.list(entries)])
 }
 
-/// The file `ind` the makeindex runs of this round make (`tools`:
-/// `[ind, [args…]]`, the last run making it), each in process on the
-/// files the job wrote (TeX's characters), read from their streams as
-/// makeindex asks for them, and the styles found as the job finds files;
-/// none where no run makes it (the file stays absent).
-fn makeindex_for(cx: &mut Ctx<'_>, want: &str) -> Result<Option<String>, Stop> {
-    let v = cx.values();
-    let runs = cx.acc_range(v.field("tools"), None)?;
-    let mut out = None;
-    for e in v.seq_to_vec(runs) {
-        let xs = list_of(v, e);
-        let (Some(&ind), Some(&args)) = (xs.first(), xs.get(1)) else {
-            continue;
-        };
-        if str_of(v, ind) != want {
-            continue;
-        }
-        let args: Vec<String> = list_of(v, args).iter().map(|&a| str_of(v, a)).collect();
-        // (a style named with -s: read first, as the job reads a file)
-        let mut styles = Vec::new();
-        let mut it = args.iter();
-        while let Some(a) = it.next() {
-            if a == "-s"
-                && let Some(s) = it.next()
-            {
-                let name = if s.contains('.') {
-                    s.clone()
-                } else {
-                    format!("{s}.ist")
-                };
-                let f = v.field(&format!("file:{name}"));
-                let x = cx.use_env(f)?;
-                let text = x
-                    .and_then(|x| list_of(v, x).get(1).copied())
-                    .map(|t| str_of(v, t));
-                styles.push((s.clone(), name, text));
-            }
-        }
-        let mi_args: Vec<Vec<u8>> = args.iter().map(|a| latin1_bytes(a)).collect();
-        // (the written files makeindex asks for, each read from its
-        // stream when asked: run again until it asks for no new one)
-        let mut texts: Vec<(String, String)> = Vec::new();
-        let mut asked: Vec<String> = Vec::new();
-        let made = loop {
-            let mut files = MiFiles {
-                texts: &texts,
-                styles: &styles,
-                missing: Vec::new(),
-            };
-            let o = phitex_makeindex::run(
-                &mi_args,
-                b"version 2.18 [TeX Live 2026] (kpathsea + Thai support)",
-                &mut files,
-            );
-            let new: Vec<String> = files
-                .missing
-                .into_iter()
-                .filter(|n| !asked.contains(n))
-                .collect();
-            if new.is_empty() {
-                if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
-                    eprintln!(
-                        "makeindex for {want}: status {}, stderr {}",
-                        o.status,
-                        String::from_utf8_lossy(&o.stderr)
-                    );
-                }
-                break o.ind;
-            }
-            for n in new {
-                if let (Some(t), _) = stream_of(cx, &n)? {
-                    texts.push((n.clone(), t));
-                }
-                asked.push(n);
-            }
-        };
-        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
-            let read: Vec<(&str, usize)> =
-                texts.iter().map(|(n, t)| (n.as_str(), t.len())).collect();
-            eprintln!(
-                "makeindex for {want}: args {args:?}, read {read:?}, asked {asked:?}, made {:?} bytes",
-                made.as_ref().map(|f| f.contents.len())
-            );
-        }
-        if let Some(f) = made {
-            out = Some(f.contents.iter().map(|&b| char::from(b)).collect());
-        }
-    }
-    Ok(out)
-}
-
-/// The `.ind` each written `.idx` makes under `makeindex NAME.idx` (no
-/// style): what a read-back of the index reads, for
-/// [`crate::Build::read_back_texts`].
-pub(crate) fn makeindex_plain(texts: &[(String, String)]) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for (name, _) in texts {
-        let Some(base) = name.strip_suffix(".idx") else {
-            continue;
-        };
-        let mut files = MiFiles {
-            texts,
-            styles: &[],
-            missing: Vec::new(),
-        };
-        let o = phitex_makeindex::run(
-            &[latin1_bytes(name)],
-            b"version 2.18 [TeX Live 2026] (kpathsea + Thai support)",
-            &mut files,
+/// Publishes a loop-back's next round value; under `observe` with
+/// `PHITEX_ROUND_TRACE`, each publication is printed with its value's
+/// hash and the node (`round-trace: <field> <hash> node <n>`): the fields
+/// that changed between rounds are those printed with a new hash.
+fn publish_traced(cx: &mut Ctx<'_>, f: Field, x: ValueId) {
+    if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
+        let v = cx.values();
+        eprintln!(
+            "round-trace: {} {:016x} node {}",
+            crate::val::field_name(v, f),
+            x.raw(),
+            cx.node().raw()
         );
-        if let Some(f) = o.ind {
-            out.push((
-                format!("{base}.ind"),
-                f.contents.iter().map(|&b| char::from(b)).collect(),
-            ));
-        }
     }
-    out
-}
-
-/// TeX's characters as bytes (Latin-1; a character past 255 as `?`).
-fn latin1_bytes(s: &str) -> Vec<u8> {
-    s.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect()
-}
-
-/// makeindex's files: the job's written files, and the styles read.
-struct MiFiles<'a> {
-    texts: &'a [(String, String)],
-    styles: &'a [(String, String, Option<String>)],
-    /// The names asked for and not in `texts`.
-    missing: Vec<String>,
-}
-
-impl MiFiles<'_> {
-    fn text(&mut self, name: &[u8]) -> Option<&str> {
-        let n: String = name.iter().map(|&b| char::from(b)).collect();
-        let n = n.strip_prefix("./").unwrap_or(&n).to_owned();
-        let texts = self.texts;
-        let hit = texts.iter().find(|(m, _)| *m == n);
-        if hit.is_none() && !self.missing.contains(&n) {
-            self.missing.push(n);
-        }
-        hit.map(|(_, t)| t.as_str())
-    }
-}
-
-impl phitex_makeindex::Files for MiFiles<'_> {
-    fn read(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        self.text(name).map(latin1_bytes)
-    }
-    fn readable(&mut self, name: &[u8]) -> bool {
-        self.text(name).is_some()
-    }
-    fn style(&mut self, name: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-        let n: String = name.iter().map(|&b| char::from(b)).collect();
-        self.styles
-            .iter()
-            .find(|(s, f, _)| *s == n || *f == n)
-            .and_then(|(_, f, t)| {
-                t.as_ref()
-                    .map(|t| (latin1_bytes(&format!("./{f}")), Some(latin1_bytes(t))))
-            })
-    }
-    fn out_name_ok(&mut self, _name: &[u8]) -> Result<(), Vec<u8>> {
-        Ok(())
-    }
-    fn stdin(&mut self) -> Vec<u8> {
-        Vec::new()
-    }
+    cx.publish(f, x);
 }

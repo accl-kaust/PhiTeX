@@ -1720,6 +1720,8 @@ version = "0.0.0"
 name = "phitex-tex"
 version = "0.0.0"
 dependencies = [
+ "phitex-biber",
+ "phitex-bibtex",
  "phitex-codecs",
  "phitex-defuse",
  "phitex-dvi",

@@ -39,10 +39,6 @@ mod modern;
 mod problems;
 mod session;
 mod tex;
-#[expect(
-    dead_code,
-    reason = "BibTeX and makeindex between runs: the native session uses them next"
-)]
 mod tools;
 mod ui;
 mod view;

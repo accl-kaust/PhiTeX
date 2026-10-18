@@ -103,6 +103,17 @@ impl Outcome {
     }
 }
 
+/// The file biber makes by default from its control file, as latexmk
+/// runs it when a job reads `X.bbl` and writes `X.bcf`: the input for
+/// `output` (`X.bcf` for `X.bbl`), if `output` is that default output's
+/// name.
+#[must_use]
+pub fn default_input_for(output: &str) -> Option<String> {
+    let n = output.len();
+    (n > 4 && output.as_bytes()[n - 4..].eq_ignore_ascii_case(b".bbl"))
+        .then(|| alloc::format!("{}.bcf", &output[..n - 4]))
+}
+
 /// Run biber on a `.bcf` (its bytes) with data sources from `files`.
 pub fn run(bcf: &[u8], files: &mut dyn Files) -> Outcome {
     let mut b = biber::Biber::new(files);

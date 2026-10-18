@@ -971,3 +971,98 @@ fn latex_multicol_heading_written_once() {
     assert_eq!(count(".aux"), 1, "the index's toc line in the .aux");
     assert_eq!(count(".toc"), 1, "the index's toc line in the .toc");
 }
+
+/// `latexmk -pdf` from nothing (`oracle/fixtures/latexmk/NAME/`, its
+/// oracle `NAME.pdf` and latexmk's pdflatex runs `NAME.runs` from
+/// `scripts/bless-latexmk.sh`): the sources alone copied to an empty
+/// directory, the build's own rounds and the tool runs its reads make
+/// (BibTeX, biber, makeindex), the PDF byte-identical at `threads`, in
+/// at most as many rounds as latexmk ran pdflatex.
+fn latexmk_cold(name: &str, threads: usize) {
+    let fx = common::fixtures().join("latexmk");
+    let src_dir = fx.join(name);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("latexmk")
+        .join(format!("{name}-j{threads}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for e in std::fs::read_dir(&src_dir).expect("the sources").flatten() {
+        std::fs::copy(e.path(), dir.join(e.file_name())).expect("a source");
+    }
+    let want = std::fs::read(fx.join(format!("{name}.pdf"))).expect("the oracle");
+    let runs: u64 = std::fs::read_to_string(fx.join(format!("{name}.runs")))
+        .expect("latexmk's runs")
+        .trim()
+        .parse()
+        .expect("a count");
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let opts = Options {
+        fixpoint: true,
+        threads: Some(threads),
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts(name, &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), &src);
+    eprintln!(
+        "latexmk {name} -j {threads}: {} rounds (latexmk: {runs} pdflatex runs); {}",
+        b.stats.loop_rounds,
+        report(name, &b)
+    );
+    for d in b.diagnostics() {
+        if d.severity != phitex_tex::Severity::Error || d.range != (0, 0) {
+            continue;
+        }
+        eprintln!("{d:?}");
+    }
+    if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+        let _ = std::fs::write(format!("{d}/{name}-j{threads}.pdf"), b.output().0);
+        let _ = std::fs::write(format!("{d}/{name}-j{threads}.log"), b.output().1);
+    }
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("{name} -j {threads}: {d}");
+    }
+    assert!(
+        b.stats.loop_rounds <= runs,
+        "{name} -j {threads}: {} rounds, latexmk ran pdflatex {runs} times",
+        b.stats.loop_rounds
+    );
+}
+
+macro_rules! latexmk_tests {
+    ($($test:ident: $name:literal, $j:literal;)*) => {
+        $(
+            #[test]
+            fn $test() {
+                latexmk_cold($name, $j);
+            }
+        )*
+    };
+}
+
+// (a group-local binding around a read-back file, its close after the
+// file's units: restored there, and a written file's lines in TeX's
+// order; then the tools a read runs)
+latexmk_tests! {
+    latexmk_group_toc_j1: "group-toc", 1;
+    latexmk_group_toc_j8: "group-toc", 8;
+    latexmk_group_file_j1: "group-file", 1;
+    latexmk_group_file_j8: "group-file", 8;
+    latexmk_group_index_j1: "group-index", 1;
+    latexmk_group_index_j8: "group-index", 8;
+    latexmk_index_shell_j1: "index-shell", 1;
+    latexmk_index_shell_j8: "index-shell", 8;
+    latexmk_class_toc_j1: "class-toc", 1;
+    latexmk_class_toc_j8: "class-toc", 8;
+    latexmk_class_index_j1: "class-index", 1;
+    latexmk_class_index_j8: "class-index", 8;
+    latexmk_class_index_shell_j1: "class-index-shell", 1;
+    latexmk_class_index_shell_j8: "class-index-shell", 8;
+    latexmk_bibtex_j1: "bibtex", 1;
+    latexmk_bibtex_j8: "bibtex", 8;
+    latexmk_biber_j1: "biber", 1;
+    latexmk_biber_j8: "biber", 8;
+    latexmk_index_j1: "index", 1;
+    latexmk_index_j8: "index", 8;
+    latexmk_index_style_j1: "index-style", 1;
+    latexmk_index_style_j8: "index-style", 8;
+}

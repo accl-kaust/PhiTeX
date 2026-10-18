@@ -26,6 +26,42 @@ use crate::val::{field_name, int_of, list_of, str_of};
 /// bytes.
 pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 
+/// The searches a tool's support files are found by ([`Options::tool_finder`]):
+/// kpathsea's formats for them, as `bibtex`, `biber` and `makeindex` ask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ToolSearch {
+    /// A bibliography style (kpathsea's `bst` format).
+    BibStyle,
+    /// A bibliography database (kpathsea's `bib` format).
+    BibData,
+    /// An index style (kpathsea's `ist` format).
+    IndexStyle,
+}
+
+impl ToolSearch {
+    /// The search's code in its environment field (`tools::support_field`).
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            ToolSearch::BibStyle => 0,
+            ToolSearch::BibData => 1,
+            ToolSearch::IndexStyle => 2,
+        }
+    }
+
+    fn of_code(c: &str) -> Option<ToolSearch> {
+        match c {
+            "0" => Some(ToolSearch::BibStyle),
+            "1" => Some(ToolSearch::BibData),
+            "2" => Some(ToolSearch::IndexStyle),
+            _ => None,
+        }
+    }
+}
+
+/// Finds a tool's support file by its search and the name the tool asks
+/// for: the name to print and the bytes.
+pub type ToolFinder = Arc<dyn Fn(ToolSearch, &str) -> Option<(String, Vec<u8>)> + Send + Sync>;
+
 /// Whether the job may write a file under a name (`\openout`): the
 /// client's `kpse_out_name_ok` (its `openout_any`, its output
 /// directories).
@@ -115,10 +151,20 @@ pub struct Options {
     /// process (`phitex-makeindex`); the others are refused with a
     /// diagnostic.
     pub shell_escape: i32,
-    /// The loop-back rounds an evaluation may take before it ends with
-    /// a no-fixpoint error naming the loop-back fields (a document whose
-    /// written files oscillate), instead of running on.
+    /// The loop-back rounds an evaluation may take, as latexmk's
+    /// `max_repeat` bounds pdflatex's runs (5): a document whose files
+    /// read back still change then is finished on the values its last
+    /// round ran with, and a warning names the fields still moving
+    /// ([`Build::diagnostics`]).
     pub max_rounds: u64,
+    /// Where a tool's support files come from (bibliography styles and
+    /// databases, index styles: [`ToolSearch`]); `None` asks
+    /// [`Options::finder`] by name.
+    pub tool_finder: Option<ToolFinder>,
+    /// BibTeX's options and capacities (TeX Live's `texmf.cnf`:
+    /// `max_strings`, `ent_str_size`, ...), for the BibTeX runs a read
+    /// makes (`crate::tools`).
+    pub bibtex: phitex_bibtex::Options,
     /// Whether `\openout` may write a file under a name (pdfTeX asks
     /// kpathsea, §1374; a refused name ends a nonstop job); `None`:
     /// TeX Live's default, `openout_any = p` with no output directory
@@ -544,7 +590,9 @@ impl Default for Options {
             // commands answer `Any`
             speculation: Speculation::Predicted,
             speculation_budget: 256,
-            max_rounds: 64,
+            max_rounds: 5,
+            tool_finder: None,
+            bibtex: phitex_bibtex::Options::default(),
             out_name_ok: None,
         }
     }
@@ -641,6 +689,9 @@ pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, Stri
     let mut out: Vec<(String, String)> = Vec::new();
     let mut closed: Vec<String> = Vec::new();
     for &e in entries {
+        if is_cand_marker(v, e) {
+            continue;
+        }
         let xs = list_of(v, stream_entry(v, e));
         let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
         let k = if let Some(k) = out.iter().position(|(n, _)| *n == name) {
@@ -670,67 +721,136 @@ pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, Stri
     out
 }
 
-/// A `streams` entry without its page tag (`[j, entry]` from page
-/// step `j`, [`crate::run::Run::contribute_stream`]).
+/// The first element of a candidate marker among a stream's entries
+/// ([`crate::run::Run::contribute_stream`]).
+pub(crate) const CAND: &str = "cand";
+
+/// Whether `e` is a candidate marker `["cand", piece, c]`, not an entry.
+pub(crate) fn is_cand_marker(v: &Values, e: ValueId) -> bool {
+    let xs = list_of(v, e);
+    xs.len() == 3 && v.as_str(xs[0]).as_deref() == Some(CAND)
+}
+
+/// A `streams` entry without its page tag (`[j, entry]` or
+/// `[j, entry, piece, candidate]` from page step `j`,
+/// [`crate::run::Run::contribute_stream`]).
 pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
     let xs = list_of(v, e);
     match xs.as_slice() {
-        [j, x] if v.as_int(*j).is_some() => *x,
+        [j, x] | [j, x, _, _] if v.as_int(*j).is_some() => *x,
         _ => e,
     }
 }
 
-/// The `streams` entries in the order TeX writes them: the page
-/// builder's plan (`wplan`: an immediate write's entry where its marker
-/// stood, page `j` where it fired) with each page's entries in place.
-/// Without a plan entry for them, the document nodes' entries go first.
-pub(crate) fn ordered_entries(v: &Values, plan: &[ValueId], streams: &[ValueId]) -> Vec<ValueId> {
-    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> =
-        std::collections::BTreeMap::default();
-    let mut imm = Vec::new();
-    for &e in streams {
-        let xs = list_of(v, e);
-        match xs.as_slice() {
-            [j, x] if v.as_int(*j).is_some() => {
-                by_page
-                    .entry(v.as_int(*j).unwrap_or(0))
-                    .or_default()
-                    .push(*x);
+/// A page-tagged entry's page and, for a page whose break is inside a
+/// piece, that piece and candidate.
+fn page_tag(v: &Values, e: ValueId) -> Option<(i64, Option<(i64, i64)>)> {
+    let xs = list_of(v, e);
+    match xs.as_slice() {
+        [j, _] => Some((v.as_int(*j)?, None)),
+        [j, _, p, k] => Some((v.as_int(*j)?, Some((v.as_int(*p)?, v.as_int(*k)?)))),
+        _ => None,
+    }
+}
+
+/// The `streams` entries (an accumulator's, in the nodes' order) in the
+/// order TeX writes them, the candidate markers dropped: a page's
+/// entries where its finisher stands (right after the piece it fires
+/// in), the pages placed after one piece in their order, and a piece's
+/// entries after its candidate `c` after the entries of a page whose
+/// break is inside that piece at a candidate before `c` (the page shipped
+/// there first: its deferred `\write`s before a later `\closeout`,
+/// §1370, §1374). Nothing is dropped but the markers; no read depends on
+/// how the finishers placed after one piece are ordered among
+/// themselves.
+///
+/// Example: piece P writes a, passes its candidate 1, closes the file
+/// (`m1, close`); page 3 breaks in P at candidate 0 and writes b: the
+/// entries `a, m1, close, [3, b, P, 0]` are written `a, b, close`.
+pub(crate) fn doc_order(v: &Values, entries: &[ValueId]) -> Vec<ValueId> {
+    // (runs of consecutive page entries: the finishers placed after one
+    // piece, sorted by page, stable within one page)
+    let mut es: Vec<ValueId> = Vec::with_capacity(entries.len());
+    let mut i = 0;
+    while i < entries.len() {
+        if page_tag(v, entries[i]).is_none() {
+            es.push(entries[i]);
+            i += 1;
+            continue;
+        }
+        let a = i;
+        while i < entries.len() && page_tag(v, entries[i]).is_some() {
+            i += 1;
+        }
+        let mut run: Vec<ValueId> = entries[a..i].to_vec();
+        run.sort_by_key(|&e| page_tag(v, e).map_or(0, |t| t.0));
+        es.extend(run);
+    }
+    // (each page's last entry, by the piece its break is inside of)
+    let mut pages_of: FxHashMap<i64, Vec<(usize, i64)>> = FxHashMap::default();
+    for (p, &e) in es.iter().enumerate() {
+        if let Some((_, Some((pid, k)))) = page_tag(v, e) {
+            let last = es
+                .get(p + 1)
+                .and_then(|&n| page_tag(v, n))
+                .is_none_or(|t| t.0 != page_tag(v, e).map_or(-1, |u| u.0));
+            if last {
+                pages_of.entry(pid).or_default().push((p, k));
             }
-            _ => imm.push(e),
         }
     }
-    let mut out = Vec::new();
-    if !plan.iter().any(|&p| v.as_int(p).is_none()) {
-        out.extend(imm);
-    }
-    for &p in plan {
-        match v.as_int(p) {
-            Some(j) => out.extend(by_page.remove(&j).unwrap_or_default()),
-            None => out.push(p),
+    let mut anchor: Vec<Option<usize>> = vec![None; es.len()];
+    if !pages_of.is_empty() {
+        let mut i = 0;
+        while i < es.len() {
+            let xs = list_of(v, es[i]);
+            if !is_cand_marker(v, es[i]) {
+                i += 1;
+                continue;
+            }
+            let (pid, c) = (int_of(v, xs[1]), int_of(v, xs[2]));
+            let to = pages_of.get(&pid).and_then(|ps| {
+                ps.iter()
+                    .filter(|&&(p, k)| p > i && k < c)
+                    .map(|&(p, _)| p)
+                    .max()
+            });
+            if to.is_some() {
+                anchor[i] = to;
+                if let Some(&n) = es.get(i + 1)
+                    && !is_cand_marker(v, n)
+                {
+                    anchor[i + 1] = to;
+                    i += 2;
+                    continue;
+                }
+            }
+            i += 1;
         }
     }
-    for (_, es) in by_page {
-        out.extend(es);
+    let mut after: FxHashMap<usize, Vec<ValueId>> = FxHashMap::default();
+    for (i, a) in anchor.iter().enumerate() {
+        if let Some(p) = a {
+            after.entry(*p).or_default().push(es[i]);
+        }
+    }
+    let mut out = Vec::with_capacity(es.len());
+    for (i, &x) in es.iter().enumerate() {
+        if anchor[i].is_none() && !is_cand_marker(v, x) {
+            out.push(x);
+        }
+        if let Some(m) = after.remove(&i) {
+            out.extend(m.into_iter().filter(|&y| !is_cand_marker(v, y)));
+        }
     }
     out
 }
 
-/// The texts of the files the job wrote, from the accumulated `wplan`
-/// and `streams` sequences, in the order first opened.
-pub(crate) fn written_texts(
-    v: &Values,
-    wplan: Option<ValueId>,
-    streams: Option<ValueId>,
-) -> Vec<(String, String)> {
-    let plan: Vec<ValueId> = wplan
-        .map(|p| v.seq_to_vec(p))
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|p| list_of(v, p))
-        .collect();
+/// The texts of the files the job wrote, from an accumulated `streams`
+/// sequence, in the order first opened.
+pub(crate) fn written_texts(v: &Values, streams: Option<ValueId>) -> Vec<(String, String)> {
     let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
-    stream_texts(v, &ordered_entries(v, &plan, &streams))
+    stream_texts(v, &doc_order(v, &streams))
 }
 
 /// The definitions the read-back of each job-written file would make
@@ -739,18 +859,11 @@ pub(crate) fn written_texts(
 /// where it was first defined, with its last value.
 pub(crate) fn written_defs(
     v: &Values,
-    wplan: Option<ValueId>,
     streams: Option<ValueId>,
 ) -> Vec<(String, Vec<(String, ValueId)>)> {
-    let plan: Vec<ValueId> = wplan
-        .map(|p| v.seq_to_vec(p))
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|p| list_of(v, p))
-        .collect();
     let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
     let mut out: Vec<(String, Vec<(String, ValueId)>)> = Vec::new();
-    for e in ordered_entries(v, &plan, &streams) {
+    for e in doc_order(v, &streams) {
         let xs = list_of(v, stream_entry(v, e));
         let Some(&made) = xs.get(2) else { continue };
         let name = str_of(v, xs[0]);
@@ -1429,6 +1542,12 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.mispredictions
     );
     eprintln!(
+        "rounds: {}, final nodes run {}, capped at the round limit: {}",
+        r.rounds,
+        r.final_nodes_run,
+        r.capped.as_ref().map_or(0, Vec::len)
+    );
+    eprintln!(
         "round guesses: {} claims refuted, {} effects refuted, {} claim siblings, {} definitions refuted",
         r.claims_refuted, r.effects_refuted, r.claim_siblings, r.defs_refuted
     );
@@ -1681,6 +1800,11 @@ struct Graph {
     start_env: FxHashMap<Field, ValueId>,
     /// The evaluation errors met (the engine's), as messages.
     eval_errors: Vec<String>,
+    /// The warnings an evaluation ended with (the read-back files still
+    /// changing at the round cap), as messages.
+    eval_warnings: Vec<String>,
+    /// [`Options::tool_finder`].
+    tool_finder: Option<ToolFinder>,
     ops: Ops,
     mark: OpId,
     dvi: OpId,
@@ -1846,6 +1970,8 @@ impl Graph {
         let link = eng.register(Arc::new(crate::ops::Link(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files(shared.clone())));
+        let tool = eng.register(Arc::new(crate::tools::ToolRun(shared.clone())));
+        let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         // (handles held outside the graph: pinned, or a value sweep
@@ -1859,6 +1985,9 @@ impl Graph {
             scan,
             finish,
             resume,
+            tool,
+            pdfpage,
+            tool_opts: Arc::default(),
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             hints: Arc::default(),
@@ -1900,6 +2029,8 @@ impl Graph {
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             sched: Box::new(phitex_defuse::Greedy::default()),
             eval_errors: Vec::new(),
+            eval_warnings: Vec::new(),
+            tool_finder: None,
             provided: Arc::default(),
             provided_units: Arc::default(),
             loads: None,
@@ -2094,6 +2225,8 @@ impl Graph {
         let units_log = Arc::clone(&self.provided_units);
         let (reg, defs) = (Arc::clone(&self.ops.hints), Arc::clone(&self.ops.defs));
         let finder_u = Arc::clone(&finder);
+        let finder_t = Arc::clone(&finder);
+        let tools = self.tool_finder.clone();
         self.eng.set_env_provider(Box::new(move |v, f| {
             let field = v.as_str(f.0)?;
             if let Some(name) = units_file(&field) {
@@ -2120,6 +2253,25 @@ impl Graph {
                     m
                 });
                 return Some(m.get(&f.0.raw()).copied());
+            }
+            // (a tool's support file, `tfile:<search>:<name>`: the
+            // client's lookup for tools, else its finder by name)
+            if let Some(rest) = field.strip_prefix("tfile:") {
+                let (code, name) = rest.split_once(':')?;
+                let search = ToolSearch::of_code(code)?;
+                let found = match &tools {
+                    Some(t) => t(search, name),
+                    None => finder_t(name),
+                };
+                let hash = file_hash(found.as_ref());
+                let val = found.map(|(path, bytes)| {
+                    let text = latin1(&bytes);
+                    v.list(vec![v.str(&path), v.str(&text)])
+                });
+                if let Ok(mut l) = log.lock() {
+                    l.push((field.clone(), f, val, hash));
+                }
+                return Some(val);
             }
             let name = field.strip_prefix("file:")?;
             if written.iter().any(|w| w == name) {
@@ -2175,8 +2327,12 @@ impl Graph {
             {
                 continue;
             }
-            self.queries.push((name.clone(), val.is_some()));
-            self.reads.push((name, hash));
+            // (a tool's support file: in the environment, not among the
+            // names the finder is asked for again)
+            if !name.starts_with("tfile:") {
+                self.queries.push((name.clone(), val.is_some()));
+                self.reads.push((name, hash));
+            }
             match val {
                 Some(x) => self.files.push((f, x)),
                 None => self.absent.push(f),
@@ -2510,6 +2666,19 @@ impl Graph {
                 }
             };
             t_eval += t0.elapsed();
+            // (latexmk's `max_repeat` reached: the output is the last
+            // round's, and the fields still moving are said)
+            self.eval_warnings.clear();
+            if let Some(fs) = &r.capped {
+                let v = self.eng.values();
+                let mut names: Vec<String> = fs.iter().map(|&f| field_name(v, f)).collect();
+                names.sort();
+                self.eval_warnings.push(format!(
+                    "the files read back still changed after {} rounds (latexmk's limit); the output is the last round's; still changing: {}",
+                    r.rounds,
+                    names.join(", ")
+                ));
+            }
             for (k, d, n) in ex.by_kind() {
                 if n > 0 {
                     crate::timeline::note(&format!("runs: {k} ×{n} (summed over threads)"), d);
@@ -2717,7 +2886,7 @@ impl Graph {
             if fixpoint {
                 let v = self.eng.values();
                 let acc = |n: &str| self.eng.acc_value(unit, v.field(n));
-                let defs = written_defs(v, acc("wplan"), acc("streams"));
+                let defs = written_defs(v, acc("streams"));
                 let mut new = Vec::new();
                 for (name, ds) in defs {
                     for (f, _) in ds {
@@ -4024,8 +4193,19 @@ impl Build {
             std::sync::atomic::Ordering::Relaxed,
         );
         g.eng.set_max_rounds(opts.max_rounds);
+        // (latexmk's `max_repeat`: the document finished on its last
+        // round's values, the fields still moving a warning)
+        g.eng
+            .set_round_cap_policy(phitex_defuse::CapPolicy::Finalize);
         (*g.ops.out_ok.lock().unwrap_or_else(PoisonError::into_inner))
             .clone_from(&opts.out_name_ok);
+        g.ops
+            .tool_opts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bibtex
+            .clone_from(&opts.bibtex);
+        g.tool_finder.clone_from(&opts.tool_finder);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
@@ -4615,13 +4795,10 @@ impl Build {
         out
     }
 
-    /// The files the job writes and reads back, with the text a read-back
-    /// reads (an index's `.ind` as `makeindex` makes it from the `.idx`).
+    /// The files the job writes and reads back, with their text.
     #[must_use]
     pub fn read_back_texts(&self) -> Vec<(String, String)> {
         let mut t = self.files();
-        let made = crate::ops::makeindex_plain(&t);
-        t.extend(made);
         t.retain(|(n, _)| self.g.written.iter().any(|w| w == n));
         t
     }
@@ -4937,7 +5114,7 @@ impl Build {
     pub fn files(&self) -> Vec<(String, String)> {
         let v = self.g.eng.values();
         let acc = |n: &str| self.g.eng.acc_value(self.unit, v.field(n));
-        written_texts(v, acc("wplan"), acc("streams"))
+        written_texts(v, acc("streams"))
     }
 
     /// The key sets of the read-back files that only define (`.aux`),
@@ -4947,7 +5124,7 @@ impl Build {
     pub fn wkeys(&self) -> Vec<(String, Vec<String>)> {
         let v = self.g.eng.values();
         let acc = |n: &str| self.g.eng.acc_value(self.unit, v.field(n));
-        written_defs(v, acc("wplan"), acc("streams"))
+        written_defs(v, acc("streams"))
             .into_iter()
             .filter(|(n, _)| defines_only(n))
             .map(|(n, ds)| (n, ds.into_iter().map(|(f, _)| f).collect()))
@@ -5320,6 +5497,17 @@ impl Build {
             t_entries.elapsed(),
         );
         out.extend(self.prelude.diags.iter().cloned());
+        for m in &self.g.eval_warnings {
+            out.push(Diagnostic {
+                file: docname.clone(),
+                range: (0, 0),
+                line: 1,
+                severity: Severity::Warning,
+                message: m.clone(),
+                context: String::new(),
+                help: None,
+            });
+        }
         for m in self.prelude.errors.iter().chain(&self.g.eval_errors) {
             out.push(Diagnostic {
                 file: docname.clone(),
@@ -5721,9 +5909,7 @@ fn declare_fields(eng: &mut Engine) {
         "writes",
         "ifviol",
         "streams",
-        "wplan",
         "fread",
-        "tools",
         "pkgrecs",
         "gdefs",
         crate::pdfout::XPAGES,
@@ -5743,15 +5929,9 @@ fn declare_fields(eng: &mut Engine) {
     }
     let lines = eng.values().field("lines");
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
-    // the link's loop-backs, declared with the graph (spec-redesign §1
-    // `link`): the fonts' names as the writer gives them where they are
-    // not the engine's numbers (`\pdffontname`), what each read-time
-    // command got (`pdfout::finish_exact`)
-    for name in [crate::pdfout::FONT_TAGS, crate::pdfout::OBJNUMS] {
-        let f = eng.values().field(name);
-        let none = eng.values().list(Vec::new());
-        decl_trace(eng, f, none);
-        eng.declare_loopback(f, none);
+    for f in [crate::pdfout::ALLOCS, crate::pdfout::RECS] {
+        let fld = eng.values().field(f);
+        eng.declare_accumulator(fld, Arc::new(SeqMonoid));
     }
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);

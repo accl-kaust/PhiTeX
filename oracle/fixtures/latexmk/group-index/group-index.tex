@@ -1,0 +1,26 @@
+\documentclass{article}
+\usepackage{makeidx}
+\makeindex
+\makeatletter
+\newcommand*{\ai}[1]{\index{#1}[#1]}
+\def\@starttoc#1{\begingroup
+  \let\ai\@gobble
+  \makeatletter
+  \@input{\jobname.#1}\if@filesw
+  \expandafter\newwrite\csname tf@#1\endcsname
+  \immediate\openout\csname tf@#1\endcsname \jobname.#1\relax
+  \fi \global\@nobreakfalse \endgroup}
+\renewenvironment{theindex}{\section*{Index}\let\ai\@gobble
+  \parindent\z@\let\item\par}{\par}
+\makeatother
+\begin{document}
+\tableofcontents
+\section{Alpha}
+Text \ai{foo} here.
+
+Second paragraph \ai{bar}.
+\section{Beta}
+More \ai{baz} text.
+\printindex
+After the index \ai{qux}.
+\end{document}

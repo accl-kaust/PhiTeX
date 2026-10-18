@@ -646,6 +646,12 @@ impl Session {
                     comment: dvi_comment(self.job.pdf_date),
                     finder: self.finder(),
                     prelude_finder: Some(self.format_finder()),
+                    tool_finder: Some(self.tool_finder()),
+                    bibtex: crate::tools::bib_options(
+                        &mut crate::tex::kpse("bibtex", ""),
+                        false,
+                        2,
+                    ),
                     epoch: Some(self.job.pdf_date),
                     fixpoint: self.job.fixpoint,
                     prelude_jobname: self.job.engine.name.to_owned(),
@@ -776,6 +782,13 @@ impl Session {
         let pdf = b.is_pdf();
         let s = &b.stats;
         let diagnostics = b.diagnostics();
+        // (the engine's warnings at no place: the read-back files still
+        // changing at the round limit)
+        for d in diagnostics.iter().filter(|d| {
+            d.severity == phitex_tex::Severity::Warning && d.range == (0, 0) && d.context.is_empty()
+        }) {
+            eprintln!("warning: {}", d.message);
+        }
         lap(&mut phases, "diagnostics");
         // (and the evaluation's own errors — no fixpoint, a stop — which
         // the log does not have: errors at no place, without context)
@@ -1114,6 +1127,17 @@ impl Session {
         } else {
             format!("./{p}")
         }
+    }
+
+    /// The tools' support files (bibliography styles and databases,
+    /// index styles), by kpathsea in each one's format.
+    fn tool_finder(&self) -> phitex_tex::ToolFinder {
+        let tree = self.tree.clone();
+        Arc::new(move |search: phitex_tex::ToolSearch, name: &str| {
+            let p = tree.tool_input(search, name)?;
+            let bytes = std::fs::read(&p).ok()?;
+            Some((p.to_string_lossy().into_owned(), bytes))
+        })
     }
 
     /// The format's files, by kpathsea outside the document's directory.

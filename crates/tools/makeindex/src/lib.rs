@@ -897,17 +897,53 @@ impl Mk<'_> {
     }
 }
 
+/// The file `makeindex X.idx` makes by default from its input, as
+/// latexmk runs it when a job reads `X.ind` and writes `X.idx`: the
+/// input for `output` (`X.idx` for `X.ind`), if `output` is that
+/// default output's name.
+#[must_use]
+pub fn default_input_for(output: &str) -> Option<alloc::string::String> {
+    let n = output.len();
+    (n > 4 && output.as_bytes()[n - 4..].eq_ignore_ascii_case(b".ind"))
+        .then(|| alloc::format!("{}.idx", &output[..n - 4]))
+}
+
+/// The file `makeindex ARGS` writes and the file it reads first
+/// (2.18: `-o`, else the first input's base with `.ind`; an input named
+/// without an extension is `NAME.idx`): `(output, input)`.
+#[must_use]
+pub fn command_files(
+    args: &[alloc::string::String],
+) -> Option<(alloc::string::String, alloc::string::String)> {
+    let mut out = None;
+    let mut first: Option<&str> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-o" => out = it.next().cloned(),
+            "-s" | "-t" | "-p" => {
+                it.next();
+            }
+            s if s.starts_with('-') && s.len() > 1 => {}
+            s => {
+                if first.is_none() {
+                    first = Some(s);
+                }
+            }
+        }
+    }
+    let f = first?;
+    let last = f.rsplit('/').next().unwrap_or(f);
+    let (base, input) = match f.rsplit_once('.') {
+        Some((b, _)) if last.contains('.') => (b, alloc::string::String::from(f)),
+        _ => (f, alloc::format!("{f}.idx")),
+    };
+    Some((out.unwrap_or_else(|| alloc::format!("{base}.ind")), input))
+}
+
 /// Run `makeindex` with the command-line arguments `args` (after the
 /// program name). `version` is what the banner prints after the program
 /// name, e.g. `version 2.18 [TeX Live 2026] (kpathsea + Thai support)`.
-/// Whether a file named `name` is one makeindex takes as its input by
-/// default (its extension, 2.18's): a job writing one has it sorted
-/// between runs, as latexmk does.
-#[must_use]
-pub fn is_default_input(name: &str) -> bool {
-    name.len() > 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".idx")
-}
-
 pub fn run(args: &[Vec<u8>], version: &[u8], files: &mut dyn Files) -> Outcome {
     run_with(args, version, files, None).0
 }

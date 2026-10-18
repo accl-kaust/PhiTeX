@@ -1,49 +1,20 @@
-//! BibTeX, biber and makeindex, in process (`phitex-bibtex`, `phitex-biber`,
-//! `phitex-makeindex`):
-//! between the runs of a build's fixpoint, as latexmk runs them, on the
-//! `.aux` and `.idx` files the run wrote (held in memory, the build's
-//! written values), their outputs (`.bbl`, `.ind`) given to the next run
-//! as new versions of those files; and as the programs themselves when
-//! phitex is run as `bibtex` or `makeindex`.
+//! BibTeX and makeindex as the programs themselves, when phitex is run as
+//! `bibtex` or `makeindex` (`phitex-bibtex`, `phitex-makeindex`), and
+//! BibTeX's settings from `texmf.cnf`. A build runs the tools itself where
+//! its reads ask for their outputs (`phitex_tex`'s tools), on the files the
+//! job wrote, their support files found by [`crate::tex::Tree::tool_input`].
 
-use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
 use phitex_kpse::{Format, Kpse};
 
-/// What a tool made for the build: the file the next run reads (`.bbl`,
-/// `.ind`) and its text (TeX's characters), its other file (`.blg`,
-/// `.ilg`), and a line for the user.
-pub struct Made {
-    pub file: String,
-    pub text: Option<String>,
-    pub side: Option<(String, Vec<u8>)>,
-    pub line: String,
-}
-
-/// A lookup a run made and what it found, to know whether a run again
-/// would read the same.
-#[derive(Clone, PartialEq, Eq)]
-enum Lookup {
-    /// A file by name (relative names in the job's directory), its bytes.
-    Read(Vec<u8>, Option<Vec<u8>>),
-    /// A kpathsea lookup: the name, the format, the path and bytes found.
-    Find(Vec<u8>, Format, Option<(Vec<u8>, Option<Vec<u8>>)>),
-    /// `access(name, R_OK)`.
-    Readable(Vec<u8>, bool),
-    /// An `.aux` file's lines BibTeX reads.
-    Aux(Vec<u8>, Option<Vec<u8>>),
-}
-
-/// Files for the tools: kpathsea's lookups, the files the run wrote
-/// (`served`, by name), the rest from the job's directory `dir`.
+/// Files for the tools run as programs: kpathsea's lookups, the rest from
+/// the job's directory `dir`.
 struct ToolFiles<'a> {
     kpse: &'a mut Kpse,
     dir: PathBuf,
-    served: &'a HashMap<String, Vec<u8>>,
-    read: Vec<Lookup>,
 }
 
 fn read_path(p: &Path) -> Option<Vec<u8>> {
@@ -64,10 +35,7 @@ impl ToolFiles<'_> {
     }
 
     fn get(&self, name: &[u8]) -> Option<Vec<u8>> {
-        match self.served.get(&*String::from_utf8_lossy(name)) {
-            Some(d) => Some(d.clone()),
-            None => read_path(&self.at(name)),
-        }
+        read_path(&self.at(name))
     }
 
     fn find(&mut self, name: &[u8], format: Format) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
@@ -75,85 +43,33 @@ impl ToolFiles<'_> {
         let data = read_path(Path::new(std::ffi::OsStr::from_bytes(&found)));
         Some((found, data))
     }
-
-    /// Whether every lookup of `read` finds the same now.
-    fn unchanged(&mut self, read: &[Lookup]) -> bool {
-        read.iter().all(|l| match l {
-            Lookup::Read(n, was) => self.get(n) == *was,
-            Lookup::Find(n, f, was) => self.find(n, *f) == *was,
-            Lookup::Readable(n, was) => {
-                (self.served.contains_key(&*String::from_utf8_lossy(n)) || self.at(n).exists())
-                    == *was
-            }
-            Lookup::Aux(n, was) => self.get(n).map(|d| aux_digest(&d)) == *was,
-        })
-    }
 }
 
 impl phitex_bibtex::Files for ToolFiles<'_> {
     fn aux(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        let d = self.get(name);
-        self.read.push(Lookup::Aux(
-            name.to_vec(),
-            d.as_ref().map(|d| aux_digest(d)),
-        ));
-        d
+        self.get(name)
     }
 
     fn bst(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        let f = self.find(name, Format::Bst);
-        self.read
-            .push(Lookup::Find(name.to_vec(), Format::Bst, f.clone()));
-        f.and_then(|(_, d)| d)
+        self.find(name, Format::Bst).and_then(|(_, d)| d)
     }
 
     fn bib(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        let f = self.find(name, Format::Bib);
-        self.read
-            .push(Lookup::Find(name.to_vec(), Format::Bib, f.clone()));
-        f.and_then(|(_, d)| d)
-    }
-}
-
-impl phitex_biber::Files for ToolFiles<'_> {
-    /// biber's `locate_data_file`: the name as given (relative to the
-    /// job's directory), else kpathsea's `bib` lookup.
-    fn datasource(&mut self, name: &str) -> Option<(String, Vec<u8>)> {
-        let d = self.get(name.as_bytes());
-        self.read
-            .push(Lookup::Read(name.as_bytes().to_vec(), d.clone()));
-        if let Some(d) = d {
-            return Some((name.to_string(), d));
-        }
-        let f = self.find(name.as_bytes(), Format::Bib);
-        self.read.push(Lookup::Find(
-            name.as_bytes().to_vec(),
-            Format::Bib,
-            f.clone(),
-        ));
-        let (path, data) = f?;
-        Some((String::from_utf8_lossy(&path).into_owned(), data?))
+        self.find(name, Format::Bib).and_then(|(_, d)| d)
     }
 }
 
 impl phitex_makeindex::Files for ToolFiles<'_> {
     fn read(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        let d = self.get(name);
-        self.read.push(Lookup::Read(name.to_vec(), d.clone()));
-        d
+        self.get(name)
     }
 
     fn readable(&mut self, name: &[u8]) -> bool {
-        let r = self.served.contains_key(&*String::from_utf8_lossy(name)) || self.at(name).exists();
-        self.read.push(Lookup::Readable(name.to_vec(), r));
-        r
+        self.at(name).exists()
     }
 
     fn style(&mut self, name: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-        let s = self.find(name, Format::Ist);
-        self.read
-            .push(Lookup::Find(name.to_vec(), Format::Ist, s.clone()));
-        s
+        self.find(name, Format::Ist)
     }
 
     fn out_name_ok(&mut self, _name: &[u8]) -> Result<(), Vec<u8>> {
@@ -167,32 +83,6 @@ impl phitex_makeindex::Files for ToolFiles<'_> {
     }
 }
 
-/// What BibTeX depends on in an `.aux` file: its `\citation`, `\bibdata`,
-/// `\bibstyle` and `\@input` lines (as latexmk judges whether to rerun it).
-/// A tool's first lookup: the `.bcf` itself, as the run wrote it.
-fn alloc_read(name: &str, bcf: &[u8]) -> Vec<Lookup> {
-    vec![Lookup::Read(name.as_bytes().to_vec(), Some(bcf.to_vec()))]
-}
-
-fn aux_digest(data: &[u8]) -> Vec<u8> {
-    let mut d = Vec::new();
-    for line in data.split(|&c| c == b'\n') {
-        if [
-            &b"\\citation{"[..],
-            b"\\bibdata{",
-            b"\\bibstyle{",
-            b"\\@input{",
-        ]
-        .iter()
-        .any(|p| line.starts_with(p))
-        {
-            d.extend_from_slice(line);
-            d.push(b'\n');
-        }
-    }
-    d
-}
-
 /// bibtex.ch's `setup_params`: a capacity from `texmf.cnf`, at least its
 /// built-in value.
 fn bound(kpse: &mut Kpse, name: &str, default: i64) -> i64 {
@@ -203,8 +93,9 @@ fn bound(kpse: &mut Kpse, name: &str, default: i64) -> i64 {
         .max(default)
 }
 
-/// BibTeX's options, from `texmf.cnf` and the command line.
-fn bib_options(kpse: &mut Kpse, terse: bool, min_crossrefs: i64) -> phitex_bibtex::Options {
+/// BibTeX's options, from `texmf.cnf` and the command line (a build's
+/// BibTeX runs: [`phitex_tex::Options::bibtex`]).
+pub fn bib_options(kpse: &mut Kpse, terse: bool, min_crossrefs: i64) -> phitex_bibtex::Options {
     phitex_bibtex::Options {
         terse,
         min_crossrefs,
@@ -224,180 +115,6 @@ fn mi_version() -> Vec<u8> {
         .map(|(_, r)| r.chars().take_while(char::is_ascii_digit).collect())
         .unwrap_or_default();
     format!("version 2.18 [TeX Live {year}] (kpathsea + Thai support)").into_bytes()
-}
-
-/// The last non-empty line of a tool's terminal output.
-fn summary(term: &[u8], failed: bool) -> String {
-    let t = String::from_utf8_lossy(term);
-    let last = t
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .to_owned();
-    if failed {
-        format!("failed: {last}")
-    } else {
-        last
-    }
-}
-
-/// The tools of one build, across its runs (and a watch's builds): what
-/// each run read, to run again only when that changed.
-#[derive(Default)]
-pub struct Tools {
-    bib_kpse: Option<Kpse>,
-    mi_kpse: Option<Kpse>,
-    bib_last: HashMap<String, Vec<Lookup>>,
-    mi_last: HashMap<String, Vec<Lookup>>,
-    biber_last: HashMap<String, Vec<Lookup>>,
-}
-
-impl Tools {
-    /// After a run that wrote `writes` (TeX's characters) in directory
-    /// `dir`: BibTeX on each `.aux` file asking for it (`\bibdata`) and
-    /// makeindex on each `.idx` file, unless what their last run read is
-    /// the same. `known(name)` says whether the build has a version of
-    /// the tool's output (else it runs).
-    pub fn after_run(
-        &mut self,
-        writes: &[(String, String)],
-        dir: &Path,
-        known: &dyn Fn(&str) -> bool,
-    ) -> Vec<Made> {
-        let served: HashMap<String, Vec<u8>> = writes
-            .iter()
-            .map(|(n, t)| (n.clone(), crate::tex::bytes(t)))
-            .collect();
-        let mut made = Vec::new();
-        for (name, text) in writes {
-            if name.ends_with(".aux") && text.lines().any(|l| l.starts_with("\\bibdata{")) {
-                let kpse = self
-                    .bib_kpse
-                    .get_or_insert_with(|| crate::tex::kpse("bibtex", ""));
-                let bbl = format!("{}.bbl", name.trim_end_matches(".aux"));
-                let mut files = ToolFiles {
-                    kpse,
-                    dir: dir.to_path_buf(),
-                    served: &served,
-                    read: Vec::new(),
-                };
-                if known(&bbl) && self.bib_last.get(name).is_some_and(|r| files.unchanged(r)) {
-                    continue;
-                }
-                let t = std::time::Instant::now();
-                let opts = bib_options(files.kpse, false, 2);
-                let out = phitex_bibtex::run(name.as_bytes(), &opts, &mut files);
-                self.bib_last
-                    .insert(name.clone(), std::mem::take(&mut files.read));
-                made.push(Made {
-                    file: out
-                        .bbl
-                        .as_ref()
-                        .map_or(bbl, |f| String::from_utf8_lossy(&f.name).into_owned()),
-                    text: out.bbl.as_ref().map(|f| crate::tex::chars(&f.contents)),
-                    side: out.blg.as_ref().map(|f| {
-                        (
-                            String::from_utf8_lossy(&f.name).into_owned(),
-                            f.contents.clone(),
-                        )
-                    }),
-                    line: format!(
-                        "bibtex {name} in {:.1} ms: {}",
-                        t.elapsed().as_secs_f64() * 1e3,
-                        summary(&out.term, out.status != 0)
-                    ),
-                });
-            }
-            if name.ends_with(".idx") {
-                let kpse = self
-                    .mi_kpse
-                    .get_or_insert_with(|| crate::tex::kpse("makeindex", ""));
-                let ind = format!("{}.ind", name.trim_end_matches(".idx"));
-                let mut files = ToolFiles {
-                    kpse,
-                    dir: dir.to_path_buf(),
-                    served: &served,
-                    read: Vec::new(),
-                };
-                if known(&ind) && self.mi_last.get(name).is_some_and(|r| files.unchanged(r)) {
-                    continue;
-                }
-                let t = std::time::Instant::now();
-                let out =
-                    phitex_makeindex::run(&[name.as_bytes().to_vec()], &mi_version(), &mut files);
-                self.mi_last
-                    .insert(name.clone(), std::mem::take(&mut files.read));
-                made.push(Made {
-                    file: out
-                        .ind
-                        .as_ref()
-                        .map_or(ind, |f| String::from_utf8_lossy(&f.name).into_owned()),
-                    text: out.ind.as_ref().map(|f| crate::tex::chars(&f.contents)),
-                    side: out.ilg.as_ref().map(|f| {
-                        (
-                            String::from_utf8_lossy(&f.name).into_owned(),
-                            f.contents.clone(),
-                        )
-                    }),
-                    line: format!(
-                        "makeindex {name} in {:.1} ms: {}",
-                        t.elapsed().as_secs_f64() * 1e3,
-                        summary(&out.stderr, out.status != 0)
-                    ),
-                });
-            }
-            if name.ends_with(".bcf") {
-                let kpse = self
-                    .bib_kpse
-                    .get_or_insert_with(|| crate::tex::kpse("bibtex", ""));
-                let bbl = format!("{}.bbl", name.trim_end_matches(".bcf"));
-                let blg = format!("{}.blg", name.trim_end_matches(".bcf"));
-                let bcf = crate::tex::bytes(text);
-                let mut files = ToolFiles {
-                    kpse,
-                    dir: dir.to_path_buf(),
-                    served: &served,
-                    read: alloc_read(name, &bcf),
-                };
-                if known(&bbl)
-                    && self
-                        .biber_last
-                        .get(name)
-                        .is_some_and(|r| files.unchanged(r))
-                {
-                    continue;
-                }
-                let t = std::time::Instant::now();
-                let out = phitex_biber::run(&bcf, &mut files);
-                self.biber_last
-                    .insert(name.clone(), std::mem::take(&mut files.read));
-                let ms = t.elapsed().as_secs_f64() * 1e3;
-                let line = if !out.unsupported.is_empty() {
-                    format!(
-                        "biber {name}: not supported by the native biber: {} (no .bbl written)",
-                        out.unsupported.join("; ")
-                    )
-                } else if let Some(e) = out.errors.first().filter(|_| out.bbl.is_none()) {
-                    format!("biber {name} in {ms:.1} ms: ERROR - {e}")
-                } else {
-                    format!(
-                        "biber {name} in {ms:.1} ms: {} warning(s), {} error(s)",
-                        out.warnings.len(),
-                        out.errors.len()
-                    )
-                };
-                made.push(Made {
-                    file: bbl,
-                    text: out.bbl.as_ref().map(|b| crate::tex::chars(b.as_bytes())),
-                    side: Some((blg, out.blg.into_bytes())),
-                    line,
-                });
-            }
-        }
-        made
-    }
 }
 
 /// Whether this invocation is BibTeX (`bibtex`, or `phitex -bibtex`).
@@ -461,12 +178,9 @@ pub fn bibtex_main(args: &[String]) -> ! {
     }
     let mut kpse = crate::tex::kpse("bibtex", "");
     let opts = bib_options(&mut kpse, terse, min_crossrefs);
-    let served = HashMap::new();
     let mut fs = ToolFiles {
         kpse: &mut kpse,
         dir: PathBuf::from("."),
-        served: &served,
-        read: Vec::new(),
     };
     let out = phitex_bibtex::run(files[0].as_bytes(), &opts, &mut fs);
     for f in [&out.blg, &out.bbl].into_iter().flatten() {
@@ -490,12 +204,9 @@ pub fn makeindex_main(args: &[String]) -> ! {
         .map(|a| a.as_bytes().to_vec())
         .collect();
     let mut kpse = crate::tex::kpse("makeindex", "");
-    let served = HashMap::new();
     let mut fs = ToolFiles {
         kpse: &mut kpse,
         dir: PathBuf::from("."),
-        served: &served,
-        read: Vec::new(),
     };
     let out = phitex_makeindex::run(&args, &mi_version(), &mut fs);
     let mut failed = false;

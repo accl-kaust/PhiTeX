@@ -463,8 +463,10 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                     .and_then(|g| Some((g.at(0)?, g.at(1)?)))
                     .unwrap_or((name, obj));
                 if c == cv::FONT_NAME {
-                    // (the name the finish gives it, pdfTeX's number)
-                    crate::pdfout::font_tag_read(r, name)?.to_string()
+                    // (pdfTeX's number: the font's, after the fonts the
+                    // shipouts before loaded)
+                    let _ = name;
+                    crate::pdfout::font_tag_read(r, f)?.to_string()
                 } else {
                     obj.to_string()
                 }
@@ -777,11 +779,17 @@ fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
     Ok((n, o))
 }
 
-/// The next object number (`pdf_create_obj`): allocation order.
+/// The next object number (`pdf_create_obj`), as pdfTeX's counter
+/// gives it: the read-time allocations so far (TeX's count, a cell),
+/// and in PDF mode the objects the pages shipped before this run made
+/// (`pdfout::page_offset`, a fold of their write sides' allocations).
 fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
     let n = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
     let x = r.v.int(n);
     r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
+    if r.param("pdfoutput")? > 0 {
+        return Ok(n + crate::pdfout::page_offset(r)?);
+    }
     Ok(n)
 }
 

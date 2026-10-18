@@ -439,6 +439,36 @@ struct Bib<'f> {
     blt_in_loc: [Loc; builtins::NUM_BLT_IN_FNS],
 }
 
+/// The file BibTeX makes by default from its input, as latexmk runs it
+/// when a job reads `X.bbl` and writes `X.aux`: the input for `output`
+/// (`X.aux` for `X.bbl`), if `output` is that default output's name.
+#[must_use]
+pub fn default_input_for(output: &str) -> Option<alloc::string::String> {
+    let n = output.len();
+    (n > 4 && output.as_bytes()[n - 4..].eq_ignore_ascii_case(b".bbl"))
+        .then(|| alloc::format!("{}.aux", &output[..n - 4]))
+}
+
+/// The file `bibtex ARGS` writes and the file it reads (its one file
+/// argument, `.aux` added where it has no extension): `(output, input)`.
+#[must_use]
+pub fn command_files(
+    args: &[alloc::string::String],
+) -> Option<(alloc::string::String, alloc::string::String)> {
+    let f = args.iter().find(|a| !a.starts_with('-'))?;
+    let base = f.strip_suffix(".aux").unwrap_or(f);
+    Some((alloc::format!("{base}.bbl"), alloc::format!("{base}.aux")))
+}
+
+/// Whether an auxiliary file asks for a bibliography (a `\bibdata`
+/// line, bibtex.web's `aux_bib_data_command`): latexmk runs BibTeX
+/// only then.
+#[must_use]
+pub fn requests_data(aux: &[u8]) -> bool {
+    aux.split(|&c| c == b'\n')
+        .any(|l| l.starts_with(b"\\bibdata{"))
+}
+
 /// Run BibTeX on `aux` (as given on its command line) with `opts`.
 pub fn run(aux: &[u8], opts: &Options, files: &mut dyn Files) -> Outcome {
     let mut b = Bib::new(opts.clone(), files);

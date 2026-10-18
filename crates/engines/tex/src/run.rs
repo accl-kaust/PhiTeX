@@ -164,6 +164,13 @@ pub(crate) struct Ops {
     pub scan: OpId,
     pub finish: OpId,
     pub resume: OpId,
+    /// A tool's run that a read makes (`crate::tools::ToolRun`).
+    pub tool: OpId,
+    /// A page's PDF side, run once the loop-backs settle
+    /// (`crate::pdfout::PdfPage`).
+    pub pdfpage: OpId,
+    /// The tools' settings ([`crate::Options::bibtex`]).
+    pub tool_opts: std::sync::Arc<std::sync::Mutex<crate::tools::ToolOptions>>,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
     /// The format's definitions the build analyses document texts with
@@ -1598,6 +1605,10 @@ impl<'c, 'a> Run<'c, 'a> {
         // later declares its loop-back and this runs again)
         let _ = self.cx.use_field(k)?;
         let _ = self.cx.use_field(w)?;
+        // (a tool's output is read whole, [`Run::file`])
+        if self.tool_makes(key)? {
+            return Ok(None);
+        }
         if crate::exec::obs_flag!("PHITEX_TMP_FTRACE") {
             eprintln!("TMPF units {key} node {}", self.cx.node().raw());
         }
@@ -1766,7 +1777,12 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.cx.op()
                 );
             }
-            self.cx.use_env(f)?
+            // (a name a tool makes from a file the job writes: that
+            // tool's output, `crate::tools`; else the file system's)
+            match self.tool_output(key)? {
+                Some(x) => Some(x),
+                None => self.cx.use_env(f)?,
+            }
         };
         let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
         // (the text's hash: its value's id, a content hash, so a font's
@@ -1787,26 +1803,68 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(x)
     }
 
+    /// File `key` as a tool makes it, where one does ([`crate::tools`]):
+    /// a `\write18` request for it, or a tool whose default output it is
+    /// from a file the job writes; the output of the tool's memoised run
+    /// (`[path, text]`). `None`: no tool makes it, or the run made none.
+    fn tool_output(&mut self, key: &str) -> R<Option<ValueId>> {
+        let req = self.get(&format!("{}{key}", crate::tools::REQUEST))?;
+        let Some(args) = crate::tools::run_args(self.cx, req, key)? else {
+            return Ok(None);
+        };
+        let x = self.cx.apply(self.ops.tool, args)?;
+        Ok((x != ValueId::UNIT).then_some(x))
+    }
+
+    /// Whether a tool makes file `key` ([`Run::tool_output`]): its text is
+    /// then not the file system's units.
+    fn tool_makes(&mut self, key: &str) -> R<bool> {
+        let req = self.get(&format!("{}{key}", crate::tools::REQUEST))?;
+        Ok(crate::tools::run_args(self.cx, req, key)?.is_some())
+    }
+
     /// A `streams` entry (`[name]` opens the file empty, `[name, text]`
-    /// adds to it): from a page step, tagged with its page (`[j, entry]`,
-    /// the writer places it with page `j`); from a document node, also a
-    /// `T_WRITE_AT` marker on the main list, which the page builder's
-    /// fold places among the pages (§1370, §1374).
-    /// The entry also goes to its file's stream accumulator
+    /// adds to it, `[name, "", "close"]` closes it) where TeX makes it
+    /// ([`crate::api::doc_order`]): from a page step, tagged with its
+    /// page and, for a page whose break is inside a piece, that break
+    /// (`[j, entry]`, `[j, entry, piece, candidate]`); from a piece after
+    /// one of its page-builder candidates, after a marker
+    /// `["cand", piece, candidates passed]`, so that a page firing at an
+    /// earlier candidate of the piece writes before it (§1370, §1374).
+    /// From a document node, also a `T_WRITE_AT` marker on the main list.
+    /// The entries also go to the file's stream accumulator
     /// ([`stream_bucket`], read by that file's node alone, `ops::Files`)
     /// and the file's name to the names written ([`WNAMES`]).
     pub(crate) fn contribute_stream(&mut self, e: ValueId) {
         let v = self.v;
-        self.contribute("streams", v.seq_unit(e));
-        let xs = list_of(v, e);
-        let entry = match xs.first() {
-            Some(&j) if v.as_int(j).is_some() => xs.get(1).map(|&y| list_of(v, y)),
-            _ => Some(xs),
+        let op = self.cx.op();
+        let (marker, tagged) = if op == self.ops.finish {
+            let j = i64::try_from(self.page_index()).unwrap_or(i64::MAX);
+            let mut t = vec![v.int(j), e];
+            if let Some((pid, k, true)) = self.fin.as_ref().and_then(|c| c.brk) {
+                t.extend([v.int(pid), v.int(k)]);
+            }
+            (None, v.list(t))
+        } else if (op == self.ops.exec || op == self.ops.resume) && self.cand > 0 {
+            let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+            let m = v.list(vec![
+                v.str(crate::api::CAND),
+                v.int(pid),
+                v.int(i64::from(self.cand)),
+            ]);
+            (Some(m), e)
+        } else {
+            (None, e)
         };
-        if let Some(&n) = entry.as_ref().and_then(|x| x.first()) {
+        let entries = match marker {
+            Some(m) => v.seq_concat(v.seq_unit(m), v.seq_unit(tagged)),
+            None => v.seq_unit(tagged),
+        };
+        self.contribute("streams", entries);
+        if let Some(&n) = list_of(v, e).first() {
             let f = stream_bucket(v, &str_of(v, n));
             self.muts += 1;
-            self.contribs.push((f, v.seq_unit(e)));
+            self.contribs.push((f, entries));
             self.contribute(WNAMES, v.seq_unit(n));
         }
         let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);

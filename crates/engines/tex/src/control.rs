@@ -1530,32 +1530,10 @@ impl Run<'_, '_> {
             let t = self.get("toks:11")?.map(|x| self.v.render(x));
             eprintln!("aux-trace: empty write: body {shown:?}, toks:11 = {t:?}");
         }
-        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.contains("@writefile{toc}") {
-            let tf = self
-                .get("cs:tf@toc")?
-                .map(|x| crate::val::show_def(self.v, x));
-            let w3 = self.get("write:3")?.map(|x| self.v.render(x));
-            let pct = self
-                .get("cs:protected@file@percent")?
-                .map(|x| crate::val::show_def(self.v, x));
-            eprintln!(
-                "aux-trace: at a toc line: tf@toc = {tf:?}, write:3 = {w3:?}, protected@file@percent = {pct:?}"
-            );
-        }
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             let w = self
                 .get(&format!("write:{k}"))?
                 .map(|x| crate::val::show_def(self.v, x));
-            if k == 3 {
-                let mut shown = String::new();
-                self.show_toks_into(&mut shown, body)?;
-                let t = self.get("toks:11")?.map(|x| self.v.render(x));
-                eprintln!(
-                    "aux-trace: stream 3 write: interp={} body {shown:?} toks:11 {t:?} frames {}",
-                    self.interp.is_some(),
-                    self.input.depth()
-                );
-            }
             eprintln!(
                 "aux-trace: write_out stream {k} open={open} ({w:?}) node {} op {:?}: {s}",
                 self.cx.node().raw(),
@@ -1644,12 +1622,12 @@ impl Run<'_, '_> {
     /// in restricted mode (2) only a command of TeX Live's
     /// `shell_escape_commands` is allowed, as kpathsea's
     /// `shell_cmd_is_allowed` judges it (texmfmp.c). No command runs as
-    /// a process: an allowed `makeindex` is our makeindex, run by the
-    /// writer on the `.idx` text this round wrote (`tools`, `ops::Files`)
-    /// and its `.ind` read back as a file the job writes
-    /// (`wfile:<name>`, the next round's: imakeidx's `\\printindex`
-    /// inputs it right after); any other command is refused with a
-    /// diagnostic.
+    /// a process: an allowed command that is one of the tools
+    /// ([`crate::tools`]) is a request for that tool's output, global
+    /// (`toolreq:<output>`, `[tool, [args...]]`): where the output is
+    /// opened, its text is the tool's run with those arguments on the
+    /// files the job wrote (the round before's); any other command is
+    /// refused with a diagnostic.
     fn shell_command(&mut self, cmd: &str) -> R<()> {
         let restricted = self.int32("shellescape")? == 2;
         let Some(args) = shell_words(cmd) else {
@@ -1660,36 +1638,33 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let name = args.first().cloned().unwrap_or_default();
-        if restricted && !SHELL_ESCAPE_COMMANDS.contains(&name.as_str()) {
+        if restricted && !crate::tools::SHELL_ESCAPE_COMMANDS.contains(&name.as_str()) {
             self.log(
                 "wlog",
                 &format!("runsystem({cmd})...disabled (restricted)."),
             )?;
             return Ok(());
         }
-        if name != "makeindex" {
+        let Some(tool) = crate::tools::Tool::of_name(&name) else {
             self.diag(
                 false,
                 &format!("\\write18{{{cmd}}}: `{name}' has no in-process version here; not run"),
             );
             return Ok(());
-        }
-        let Some(ind) = makeindex_ind_name(&args[1..]) else {
+        };
+        let Some((output, _)) = tool.command_files(&args[1..]) else {
             return Ok(());
         };
         self.log(
             "wlog",
             &format!("runsystem({cmd})...executed safely (allowed)."),
         )?;
-        // (the `.ind` a file the job writes: its in-memory text the
-        // writer's, next round)
-        self.written_decl(&ind)?;
         let v = self.v;
         let e = v.list(vec![
-            v.str(&ind),
+            v.str(&name),
             v.list(args[1..].iter().map(|a| v.str(a)).collect()),
         ]);
-        self.contribute("tools", v.seq_unit(e));
+        self.set(&format!("{}{output}", crate::tools::REQUEST), e, true);
         Ok(())
     }
 
@@ -1811,16 +1786,6 @@ impl Run<'_, '_> {
         self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
         self.set(&format!("wopen:{name}"), v.int(1), true);
         self.contribute_stream(v.list(vec![v.str(&name)]));
-        // (a file makeindex takes as its input by default is sorted
-        // between runs, as latexmk does: its output made in process from
-        // the file's stream, read back next round)
-        if phitex_makeindex::is_default_input(&name)
-            && let Some(ind) = makeindex_ind_name(std::slice::from_ref(&name))
-        {
-            self.written_decl(&ind)?;
-            let e = v.list(vec![v.str(&ind), v.list(vec![v.str(&name)])]);
-            self.contribute("tools", v.seq_unit(e));
-        }
         Ok(())
     }
 
@@ -1861,7 +1826,7 @@ impl Run<'_, '_> {
                 .filter(|(g, _)| *g == f)
                 .flat_map(|(_, x)| v.seq_to_vec(*x)),
         );
-        let text = crate::api::stream_texts(v, &all)
+        let text = crate::api::stream_texts(v, &crate::api::doc_order(v, &all))
             .into_iter()
             .find(|(n, _)| n == key)
             .map(|(_, t)| t)
@@ -1985,20 +1950,6 @@ fn out_name_ok_p(name: &str) -> bool {
     !(b.first() == Some(&b'/') || b.starts_with(b"../") || b.windows(4).any(|w| w == b"/../"))
 }
 
-/// TeX Live 2026's `shell_escape_commands` (texmf.cnf): what restricted
-/// mode allows.
-const SHELL_ESCAPE_COMMANDS: &[&str] = &[
-    "bibtex",
-    "bibtex8",
-    "extractbb",
-    "gregorio",
-    "kpsewhich",
-    "makeindex",
-    "repstopdf",
-    "r-mpost",
-    "texosquery-jre8",
-];
-
 /// A command line split into words as kpathsea's `shell_cmd_is_allowed`
 /// reads it in restricted mode (texmfmp.c): blank-separated, a `"..."`
 /// quoted part taken literally (a word may join quoted and unquoted
@@ -2035,37 +1986,4 @@ pub(crate) fn shell_words(cmd: &str) -> Option<Vec<String>> {
         words.push(cur);
     }
     Some(words)
-}
-
-/// The `.ind` file `makeindex ARGS` writes (makeindex 2.18's `-o`, else
-/// the first input file's base with `.ind`; an input named without an
-/// extension is `NAME.idx`).
-pub(crate) fn makeindex_ind_name(args: &[String]) -> Option<String> {
-    let mut out = None;
-    let mut first = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "-o" => out = it.next().cloned(),
-            "-s" | "-t" | "-p" => {
-                it.next();
-            }
-            s if s.starts_with('-') && s.len() > 1 => {}
-            s => {
-                if first.is_none() {
-                    first = Some(s.to_owned());
-                }
-            }
-        }
-    }
-    if out.is_some() {
-        return out;
-    }
-    let f = first?;
-    let last = f.rsplit('/').next().unwrap_or(&f);
-    let base = match f.rsplit_once('.') {
-        Some((b, _)) if last.contains('.') => b.to_owned(),
-        _ => f.clone(),
-    };
-    Some(format!("{base}.ind"))
 }

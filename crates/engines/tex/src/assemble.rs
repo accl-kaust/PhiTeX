@@ -423,6 +423,8 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     // (in pdfTeX's order: a page firing inside a piece before the
     // piece's records after it)
     let line = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
+    // (every page's PDF side has written its record, `pdfout::PdfPage`)
+    let _ = cx.acc_range(v.field(crate::pdfout::RECS), None)?;
     let t_acc = t0.elapsed();
     let xpages = crate::pdfout::order_line(v, &line);
     let t_order = t0.elapsed();
@@ -481,13 +483,6 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
             v.int(0),
         ]);
         cx.contribute(v.field("diags"), v.seq_unit(d));
-    }
-    // (the loop-backs the link gives the next round)
-    for (name, x) in [
-        (crate::pdfout::OBJNUMS, l.objnums),
-        (crate::pdfout::FONT_TAGS, l.ftags),
-    ] {
-        cx.publish(v.field(name), x);
     }
     let x = bytes_value(v, l.file, l.hash);
     {

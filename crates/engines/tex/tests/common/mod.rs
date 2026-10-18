@@ -53,6 +53,30 @@ pub fn finder(dir: &Path) -> Finder {
     })
 }
 
+/// A tool's support files (`phitex_tex::ToolSearch`): from `dir`, else
+/// through kpathsea in the search's format.
+pub fn tool_finder(dir: &Path) -> phitex_tex::ToolFinder {
+    let dir = dir.to_path_buf();
+    Arc::new(move |search: phitex_tex::ToolSearch, name: &str| {
+        let (fmt, ext) = match search {
+            phitex_tex::ToolSearch::BibStyle => (phitex_kpse::Format::Bst, "bst"),
+            phitex_tex::ToolSearch::BibData => (phitex_kpse::Format::Bib, "bib"),
+            phitex_tex::ToolSearch::IndexStyle => (phitex_kpse::Format::Ist, "ist"),
+        };
+        for n in [name.to_owned(), format!("{name}.{ext}")] {
+            let p = dir.join(&n);
+            if p.is_file() {
+                return Some((format!("./{n}"), std::fs::read(&p).ok()?));
+            }
+        }
+        let mut k = kpse().lock().ok()?;
+        let path = k.as_mut()?.find_file(name.as_bytes(), fmt, false)?;
+        drop(k);
+        let path = String::from_utf8(path).ok()?;
+        Some((path.clone(), std::fs::read(&path).ok()?))
+    })
+}
+
 pub fn options(name: &str, jobname: &str, comment: &str, dir: &Path) -> Options {
     Options {
         name: name.to_owned(),

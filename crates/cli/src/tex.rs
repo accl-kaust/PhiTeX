@@ -292,6 +292,21 @@ impl Tree {
     }
 }
 
+impl Tree {
+    /// Where a tool's support file `name` is, by kpathsea in the format
+    /// of its search (`bst`, `bib`, `ist`, which add their suffixes).
+    pub fn tool_input(&self, search: phitex_tex::ToolSearch, name: &str) -> Option<PathBuf> {
+        let format = match search {
+            phitex_tex::ToolSearch::BibStyle => Format::Bst,
+            phitex_tex::ToolSearch::BibData => Format::Bib,
+            phitex_tex::ToolSearch::IndexStyle => Format::Ist,
+        };
+        let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
+        k.find_file(name.as_bytes(), format, false)
+            .map(|b| os(&b).to_path_buf())
+    }
+}
+
 /// The formats [`Tree::input`] looks files up in.
 const FORMATS: [Format; 8] = [
     Format::Tfm,

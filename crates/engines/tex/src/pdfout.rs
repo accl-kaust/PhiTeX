@@ -4,21 +4,26 @@
 //! - A page is written apart by the node that ships it ([`ship_apart`]:
 //!   the box decoded, the fonts, the content stream compressed, as a
 //!   record, `phitex_pdf::PageRecord`), on a writer of its own as the
-//!   link's stands between two pages ([`ship_base`]), and its key goes
+//!   link's stands between two pages ([`base_fold`]), and its key goes
 //!   to the line's accumulator ([`XPAGES`]).
 //! - A read-time command (`\pdfobj`, `\pdfxform`, `\pdfximage`,
 //!   `\pdfannot`, ...) records itself in the same accumulator where it
 //!   runs ([`command`]): the writer's step it stands for, kept by the
 //!   build ([`Cmd`]), and the key it is known by. What TeX reads back of
-//!   it (an object number, `\pdffontobjnum`, a stack's number) is what
-//!   the link gave that key the round before ([`OBJNUMS`], a loop-back):
-//!   a guess, refuted and run again when the link gives another.
+//!   it (an object number, `\pdffontobjnum`, a stack's number) is TeX's
+//!   own count, as pdfTeX's counters give it: the read-time allocations
+//!   before it plus the objects the pages shipped before it made, a fold
+//!   of their write sides' allocations over the line ([`ALLOCS`]); no
+//!   loop-back, no round.
+//! - A page's PDF side ([`PdfPage`]: the content stream, its
+//!   compression, the record) and the link run once, after the
+//!   loop-backs settle (`final_only`); nothing on that side feeds a
+//!   loop-back.
 //! - The end node links ([`finish_exact`]): one writer state from the
 //!   start, every record of the line put on it in order (a page by
 //!   `PdfState::replay_page`, its objects numbered as pdfTeX numbers
 //!   them; shipped again where the replay cannot give the walk's bytes;
-//!   a command's step applied), the fonts' names over the pages
-//!   ([`FontTags`]), then the tail and the cross-reference section by
+//!   a command's step applied), then the tail and the cross-reference section by
 //!   the prefix sums of the chunks' lengths.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -160,12 +165,6 @@ fn line_marker(v: &Values, x: ValueId) -> Option<(i64, i64)> {
         .then(|| (int_of(v, xs[1]), int_of(v, xs[2])))
 }
 
-/// The loop-back of the object numbers the link gave the read-time
-/// commands (spec-redesign §1, `pdf:objbase`: what a piece reads where
-/// TeX reads a number back, a guess from the round before):
-/// `[[key, [n, ...], error], ...]`, by the command's key ([`command`]).
-pub(crate) const OBJNUMS: &str = "pdf:objbase";
-
 /// The writer's parameters a step reads as it writes (the compression,
 /// the digits, the version: pdfTeX fixes them at the first write,
 /// §792), as TeX has them where the step runs.
@@ -232,20 +231,6 @@ impl CmdOut {
             self.err.as_deref().map_or(ValueId::UNIT, |e| v.str(e)),
         ])
     }
-
-    fn of_value(v: &Values, x: ValueId) -> CmdOut {
-        let xs = list_of(v, x);
-        CmdOut {
-            nums: xs
-                .first()
-                .map(|&l| list_of(v, l).iter().map(|&n| int_of(v, n)).collect())
-                .unwrap_or_default(),
-            err: xs
-                .get(1)
-                .filter(|&&e| e != ValueId::UNIT)
-                .map(|&e| str_of(v, e)),
-        }
-    }
 }
 
 /// A read-time command's step on the writer, as the link applies it.
@@ -280,10 +265,17 @@ pub(crate) struct PagePiece {
     margins: [i32; 3],
     whats: BTreeMap<u32, Whatsit>,
     fonts: Fonts,
-    /// The page as its step wrote it, for the finish to place.
-    rec: phitex_pdf::PageRecord,
-    /// The fonts used on the state the step wrote it on.
-    base: BTreeSet<FontId>,
+    /// The page's box, for its PDF side ([`PdfPage`]).
+    bx: Arc<BoxNode>,
+    /// What the writer it is written on starts from ([`base_fold`]).
+    base_in: BaseIn,
+    /// The page's `/PageAttr`-like attribute text, hashed into what it
+    /// shows.
+    attr: String,
+    /// The page as its PDF side wrote it, for the link to place, and the
+    /// fonts used on the state it was written on: set once, by the
+    /// page's [`PdfPage`] (final, after the loop-backs settle).
+    made: OnceLock<(phitex_pdf::PageRecord, BTreeSet<FontId>)>,
     /// The page's index in the page chain (for traces and the key).
     pj: i64,
     /// The node that shipped it, for the link's errors ([`Linked`]).
@@ -626,15 +618,13 @@ pub(crate) fn font_load(r: &mut Run<'_, '_>, name: &str, size: i32, id: i64) {
     line_push(r, e);
 }
 
-/// The writer a page shipped here is written apart on, and its key: a
-/// fresh one for the first page; for a later one, a fresh one that has
-/// shipped an empty page, as the link's writer stands between two pages
-/// (the header written, the version fixed): the record replays where
-/// the link's variables are these ([`PdfState::replay_page`]); a page
-/// whose are not (a link or a color running across, a form) is shipped
-/// again by the link, the same bytes either way. No other node's output
-/// is read.
-fn ship_base(r: &mut Run<'_, '_>, params: &[ValueId], wparams: WParams) -> R<(u64, Fold)> {
+/// What the writer a page is written on starts from ([`BaseIn`]), read
+/// where the page ships: the replay places the page where the link's
+/// writer's variables are these ([`PdfState::replay_page`]); a page whose
+/// are not (a link or a color running across, a form) is shipped again
+/// by the link, the same bytes either way. No other node's output is
+/// read.
+fn base_inputs(r: &mut Run<'_, '_>) -> R<BaseIn> {
     let v = r.v;
     let date = r
         .get_loc(crate::fields::cell::PDFDATE)?
@@ -644,9 +634,31 @@ fn ship_base(r: &mut Run<'_, '_>, params: &[ValueId], wparams: WParams) -> R<(u6
         .map(|x| str_of(v, x))
         .unwrap_or_default();
     let g2u = r.get("pdf:glyphtounicode")?;
-    let mut st = fresh(v, date, &jobname, g2u);
-    let first = r.page_index() == 0;
-    if !first {
+    Ok(BaseIn {
+        date,
+        jobname,
+        g2u,
+        first: r.page_index() == 0,
+    })
+}
+
+/// What a page's own writer starts from ([`base_fold`]): the file's date
+/// and job name, the glyph-to-unicode table, whether it is the first page.
+#[derive(Clone)]
+pub(crate) struct BaseIn {
+    date: String,
+    jobname: String,
+    g2u: Option<ValueId>,
+    first: bool,
+}
+
+/// The writer a page is written on apart ([`BaseIn`]): a fresh one for
+/// the first page; for a later one, a fresh one that has shipped an
+/// empty page, as the link's writer stands between two pages (the header
+/// written, the version fixed).
+fn base_fold(v: &Values, b: &BaseIn, params: &[ValueId], wparams: WParams) -> Fold {
+    let mut st = fresh(v, b.date.clone(), &b.jobname, b.g2u);
+    if !b.first {
         set_writer_params(&mut st, wparams);
         page_params(v, st.params_mut(), params);
         let empty = BoxNode::default();
@@ -654,13 +666,10 @@ fn ship_base(r: &mut Run<'_, '_>, params: &[ValueId], wparams: WParams) -> R<(u6
         let _ = st.ship_out_with(&empty, &Fonts::default(), &mut wh);
         let _ = st.flush_chunk();
     }
-    Ok((
-        u64::from(!first),
-        Fold {
-            st,
-            forms: Forms::default(),
-        },
-    ))
+    Fold {
+        st,
+        forms: Forms::default(),
+    }
 }
 
 /// The fonts of the forms made so far (`pdf:formfonts`, defined by each
@@ -1071,7 +1080,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         // `fontcount` does not count it)
         let id = // a page written apart: one id for every page, outside the
             // fonts' range, numbered by the link where it is first
-            // loaded ([`FontTags`])
+            // loaded ([`FontNums`])
             SPACE_FONT;
         wanted.push((id, "pdftexspace".to_owned(), x, -1000));
         out.space = Some(id);
@@ -1163,10 +1172,9 @@ fn fresh(v: &Values, date: String, jobname: &str, g2u: Option<ValueId>) -> PdfSt
 
 /// A read-time command on the writer in PDF mode, with the fonts it
 /// names: recorded in the line ([`XPAGES`]) where it runs, its step `f`
-/// kept for the link ([`Cmd`]); what the link gave it the round before
-/// ([`OBJNUMS`]), `None` before the link has (the caller's guess
-/// stands: TeX's own count, and the round after the link runs again
-/// what read another).
+/// kept for the link ([`Cmd`]). Nothing is read back: what TeX reads of
+/// it is the caller's own count, as pdfTeX's counters give it
+/// ([`page_offset`]); always `None`.
 pub(crate) fn command(
     r: &mut Run<'_, '_>,
     input: ValueId,
@@ -1192,10 +1200,7 @@ pub(crate) fn command_forms(
     image_fonts(r, &mut fs)?;
     let wparams = writer_params(r)?;
     // (the command's key: its node and its place among the node's
-    // commands, the same in every round the node runs as this run; not
-    // what it is: its text may hold a number read back, which the
-    // round's answer changes, and a key that moved with it would never
-    // find the answer, `pdf:objbase` never settling)
+    // commands, the same in every round the node runs as this run)
     let _ = input;
     r.muts += 1;
     r.pdf_occ += 1;
@@ -1218,63 +1223,17 @@ pub(crate) fn command_forms(
                 node: r.cx.node().raw(),
             }),
         );
-    let got = objnums_of(r, key)?;
     let e = v.list(vec![
         v.str("cmd"),
         v.int(i64::from_ne_bytes(key.to_ne_bytes())),
         v.int(i64::from_ne_bytes(serial.to_ne_bytes())),
     ]);
     line_push(r, e);
-    Ok(got)
+    Ok(None)
 }
 
 /// The commands' serials ([`command`]): one per run of a command.
 static CMD_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-type ObjnumsMemo = Mutex<FxHashMap<(u64, u64), Arc<FxHashMap<u64, CmdOut>>>>;
-
-/// What the link gave command `key` the round before ([`OBJNUMS`]).
-fn objnums_of(r: &mut Run<'_, '_>, key: u64) -> R<Option<CmdOut>> {
-    static M: OnceLock<ObjnumsMemo> = OnceLock::new();
-    let v = r.v;
-    let f = v.field(OBJNUMS);
-    if !r.cx.is_loopback(f) {
-        return Ok(None);
-    }
-    let Some(x) = r.eng_read(f)? else {
-        return Ok(None);
-    };
-    // (decoded once a value: a pure function's memo by its id)
-    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-    let k = (v.instance(), x.raw());
-    let hit = m
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&k)
-        .cloned();
-    let map = if let Some(h) = hit {
-        h
-    } else {
-        let mut out = FxHashMap::default();
-        for e in list_of(v, x) {
-            let xs = list_of(v, e);
-            if let (Some(&kx), Some(&o)) = (xs.first(), xs.get(1)) {
-                out.insert(
-                    u64::from_ne_bytes(int_of(v, kx).to_ne_bytes()),
-                    CmdOut::of_value(v, o),
-                );
-            }
-        }
-        let a = Arc::new(out);
-        let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
-        if g.len() > 1 << 12 {
-            g.clear();
-        }
-        g.insert(k, a.clone());
-        a
-    };
-    Ok(map.get(&key).cloned())
-}
 
 fn param(v: &Values, xs: &[ValueId], k: usize) -> i32 {
     xs.get(k)
@@ -1493,7 +1452,7 @@ pub(crate) fn ship(
     bx: &BoxNode,
     side: &Side,
     ids: &[u32],
-) -> R<u64> {
+) -> R<()> {
     let v = r.v;
     let xs = list_of(v, page);
     let p = xs.get(3).map(|&l| list_of(v, l)).unwrap_or_default();
@@ -1523,6 +1482,7 @@ pub(crate) fn ship(
         r.param("pdfdestmargin")?,
         r.param("pdfthreadmargin")?,
     ];
+    page_allocs(r, ids, &fonts, &side.whats)?;
     ship_apart(r, page, &p, bx, &side.whats, &resolved, fonts, margins)
 }
 
@@ -1544,11 +1504,12 @@ fn set_page_params(v: &Values, st: &mut PdfState, params: &[ValueId], margins: [
     pm.thread_margin = margins[2];
 }
 
-/// The page written on its own (no other page's state read): kept as a
-/// [`PagePiece`] for the `Dvi` node, which ships the pages in order;
-/// written once here, on the state the read-time commands left, so that
-/// its content stream is compressed in parallel with the other pages'
-/// and the hash of what it shows is known.
+/// The page's write side (spec: what TeX needs runs every round): its
+/// [`PagePiece`] (the box, its fonts, whatsits and parameters) kept for
+/// its PDF side, its key put in the line where it shipped, and that PDF
+/// side placed as a child ([`PdfPage`], run once the loop-backs settle):
+/// the box decoded into the content stream, compressed, the record the
+/// link places.
 #[allow(clippy::too_many_arguments)]
 fn ship_apart(
     r: &mut Run<'_, '_>,
@@ -1559,7 +1520,7 @@ fn ship_apart(
     resolved: &FxHashMap<u32, ValueId>,
     fonts: Fonts,
     margins: [i32; 3],
-) -> R<u64> {
+) -> R<()> {
     let v = r.v;
     let mut whats: BTreeMap<u32, Whatsit> = BTreeMap::new();
     for (&h, &d) in resolved {
@@ -1583,15 +1544,17 @@ fn ship_apart(
         }
     }
     let wparams = writer_params(r)?;
-    let mut pc = PagePiece {
+    let base_in = base_inputs(r)?;
+    let pc = PagePiece {
         wparams,
         boxv: list_of(v, page_v).first().copied().unwrap_or(ValueId::UNIT),
         params: p.to_vec(),
         margins,
         whats,
         fonts,
-        rec: phitex_pdf::PageRecord::default(),
-        base: BTreeSet::new(),
+        bx: Arc::new(bx.clone()),
+        attr: p.get(15).map(|&a| str_of(v, a)).unwrap_or_default(),
+        made: OnceLock::new(),
         pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
         node: i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
         brk: r
@@ -1600,17 +1563,21 @@ fn ship_apart(
             .and_then(|c| c.brk)
             .filter(|b| b.2)
             .map(|b| (b.0, b.1)),
+        base_in,
     };
     // the key: what the piece is made of, by the values' identities
     // (interned: equal values, equal ids), not by their bytes
-    let (k0, base) = ship_base(r, p, pc.wparams)?;
     let maps = r
         .get_loc(crate::fields::cell::PDF_MAPS)?
         .map_or(0, ValueId::raw);
     let pdfmap = r.file("pdftex.map")?.map_or(0, ValueId::raw);
+    let b = &pc.base_in;
     let mut words = vec![
         page_v.raw(),
-        k0,
+        u64::from(!b.first),
+        phitex_defuse::hash_bytes(0, b.date.as_bytes()),
+        phitex_defuse::hash_bytes(0, b.jobname.as_bytes()),
+        b.g2u.map_or(0, ValueId::raw),
         maps,
         pdfmap,
         u64::from(pc.fonts.space.is_some()),
@@ -1625,29 +1592,6 @@ fn ship_apart(
     words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
     words.extend(pc.wparams.iter().map(|&m| u64::from(m.cast_unsigned())));
     let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
-    // the page written once, apart, on a writer of its own (`ship_base`)
-    let Fold { mut st, forms } = base;
-    set_writer_params(&mut st, pc.wparams);
-    set_page_params(v, &mut st, &pc.params, pc.margins);
-    pc.base = st.fonts_used();
-    let (res, rec) = {
-        let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
-        st.ship_recorded(bx, &pc.fonts, &mut wh)
-    };
-    pc.rec = rec;
-    let err = res.err();
-    let (content, w, h) = st.last_page_shown();
-    let words = [
-        u64::from_ne_bytes(i64::from(w).to_ne_bytes()),
-        u64::from_ne_bytes(i64::from(h).to_ne_bytes()),
-    ];
-    let shown = phitex_defuse::hash_words(phitex_defuse::hash_bytes(0, content), &words);
-    let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
-    let shown = phitex_defuse::hash_bytes(shown, attr.as_bytes());
-    // (the writer's error here is this writer's, not the file's: a page
-    // whose record is not placed as it is is shipped again by the link,
-    // whose error is the job's, [`Linked::errors`])
-    let _ = err;
     pieces()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1658,30 +1602,237 @@ fn ship_apart(
     // it and before every one after
     let k = v.int(i64::from_ne_bytes(key.to_ne_bytes()));
     line_push(r, k);
-    Ok(shown)
+    let op = r.ops.pdfpage;
+    r.cx.child(op, vec![k]);
+    Ok(())
 }
 
-/// The loop-back of the fonts' names the finish gave
-/// ([`FontTags`]): `[[engine number, name number], ...]` where they
-/// differ.
-pub(crate) const FONT_TAGS: &str = "pdf:ftags";
+/// The records the pages' PDF sides wrote ([`PdfPage`]): the link reads
+/// them whole, so it runs after every one.
+pub(crate) const RECS: &str = "pdf:recs";
 
-/// Font `n`'s name number as the finish gives it (`\pdffontname`):
-/// the previous round's, a loop-back (exact mode).
+/// A page's PDF side (`[key]`, the [`PagePiece`] its finisher kept):
+/// the page written once, apart, on a writer of its own as the link's
+/// stands between two pages ([`base_fold`]), so that its content stream
+/// is compressed in parallel with the other pages' and the hash of what
+/// it shows is known (`pagehash`). Final ([`Operation::final_only`]): it
+/// runs once the loop-backs settle, and nothing it does feeds one.
+pub(crate) struct PdfPage;
+
+impl phitex_defuse::Operation for PdfPage {
+    fn name(&self) -> &'static str {
+        "pdfpage"
+    }
+    fn defs(
+        &self,
+        _: &[ValueId],
+        _: &Values,
+    ) -> Option<Vec<(phitex_defuse::Field, phitex_defuse::Locality)>> {
+        Some(Vec::new())
+    }
+    fn final_only(&self, _: &[ValueId], _: &Values) -> bool {
+        true
+    }
+    fn run(&self, cx: &mut phitex_defuse::Ctx<'_>) -> Result<ValueId, phitex_defuse::Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let v = cx.values();
+        let Some(k) = cx.args().first().and_then(|&x| v.as_int(x)) else {
+            return Ok(ValueId::UNIT);
+        };
+        let key = u64::from_ne_bytes(k.to_ne_bytes());
+        let pc = pieces()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        let Some(pc) = pc else {
+            return Ok(ValueId::UNIT);
+        };
+        let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
+        set_writer_params(&mut st, pc.wparams);
+        set_page_params(v, &mut st, &pc.params, pc.margins);
+        let base = st.fonts_used();
+        let (res, rec) = {
+            let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
+            st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
+        };
+        // (the writer's error here is this writer's, not the file's: a
+        // page whose record is not placed as it is is shipped again by
+        // the link, whose error is the job's, [`Linked::errors`])
+        let _ = res.err();
+        let (content, w, h) = st.last_page_shown();
+        let words = [
+            u64::from_ne_bytes(i64::from(w).to_ne_bytes()),
+            u64::from_ne_bytes(i64::from(h).to_ne_bytes()),
+        ];
+        let shown = phitex_defuse::hash_words(phitex_defuse::hash_bytes(0, content), &words);
+        let shown = phitex_defuse::hash_bytes(shown, pc.attr.as_bytes());
+        let _ = pc.made.set((rec, base));
+        cx.contribute(
+            v.field("pagehash"),
+            v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes()))),
+        );
+        cx.contribute(v.field(RECS), v.seq_unit(v.int(k)));
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// Each shipped page's allocations as pdfTeX makes them at `\\shipout`
+/// (pdfTeX §752–§768), contributed by the page's write side (its
+/// finisher, every round) where it ships: `[fixed, [font names],
+/// [destination names], [shipout fonts], compressible]`: the objects the
+/// page always takes (its object unless a `\\pdfpageref` made it, its
+/// contents, its resources), the fonts it uses by name (an object for
+/// each name first used), the destinations it makes or links to (an
+/// object for each first named), the fonts the shipout itself loads (a
+/// virtual font's local fonts, `pdftexspace`: pdfTeX's font numbers after
+/// them), and the objects it writes into object streams (a stream's own
+/// object every 100, `\\pdfobjcompresslevel` above 0). A read-time
+/// command's object number is TeX's count of the read-time allocations
+/// before it plus the fold of this over the line before it
+/// ([`page_offset`]): an in-round value, no loop-back.
+pub(crate) const ALLOCS: &str = "pdf:alloc";
+
+/// The page's allocations ([`ALLOCS`]), from the write side: its box's
+/// fonts (`fonts`, the writer's view), its whatsits and the parameters
+/// in force.
+pub(crate) fn page_allocs(
+    r: &mut Run<'_, '_>,
+    ids: &[u32],
+    fonts: &Fonts,
+    side_whats: &[ValueId],
+) -> R<()> {
+    let v = r.v;
+    let j = i64::try_from(r.page_index()).unwrap_or(0);
+    let pre = r.get(&format!("pdf:pageref:{}", j + 1))?.is_some();
+    let fixed = if pre { 2 } else { 3 };
+    let mut names: Vec<ValueId> = Vec::new();
+    for &f in ids {
+        let id = FontId::from(f);
+        if fonts.by_id.contains_key(&id) {
+            names.push(v.str(&String::from_utf8_lossy(phitex_pdf::FontSource::name(
+                fonts, id,
+            ))));
+        }
+    }
+    let mut dests: Vec<ValueId> = Vec::new();
+    let mut annots = 0i64;
+    for &w in side_whats {
+        let xs = list_of(v, w);
+        match xs.first().map(|&k| str_of(v, k)).as_deref() {
+            Some("pdf:dest") => {
+                if let Some(&id) = xs.get(1) {
+                    dests.push(id);
+                }
+            }
+            Some("pdf:annot" | "pdf:startlink") => annots += 1,
+            _ => {}
+        }
+    }
+    let mut ship_fonts: Vec<ValueId> = fonts
+        .locals
+        .iter()
+        .map(|(n, sz)| v.str(&format!("{n}@{sz}")))
+        .collect();
+    if fonts.space.is_some() {
+        ship_fonts.push(v.str("pdftexspace@0"));
+    }
+    // (the page's dictionary and resources, and each annotation it
+    // writes, go into an object stream where they compress)
+    let compressible = if r.param("pdfobjcompresslevel")? > 0 {
+        2 + annots
+    } else {
+        0
+    };
+    let e = v.list(vec![
+        v.int(fixed),
+        v.list(names),
+        v.list(dests),
+        v.list(ship_fonts),
+        v.int(compressible),
+    ]);
+    r.contribute(ALLOCS, v.seq_unit(e));
+    Ok(())
+}
+
+/// The fold of the pages' allocations ([`ALLOCS`]) over a range: the
+/// objects they made and the fonts the shipouts loaded.
+#[derive(Clone, Copy, Default)]
+struct AllocFold {
+    objects: i64,
+    ship_fonts: i64,
+}
+
+type AllocMemo = Mutex<FxHashMap<(u64, u64), AllocFold>>;
+
+fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
+    static M: OnceLock<AllocMemo> = OnceLock::new();
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    let k = (v.instance(), range.raw());
+    if let Some(&x) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&k) {
+        return x;
+    }
+    let mut out = AllocFold::default();
+    let mut written = 0i64;
+    let mut seen: BTreeSet<ValueId> = BTreeSet::new();
+    let mut seen_dest: BTreeSet<ValueId> = BTreeSet::new();
+    let mut seen_ship: BTreeSet<ValueId> = BTreeSet::new();
+    for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
+        let xs = list_of(v, e);
+        let i = |k: usize| xs.get(k).and_then(|&x| v.as_int(x)).unwrap_or(0);
+        let l = |k: usize| xs.get(k).map(|&x| list_of(v, x)).unwrap_or_default();
+        out.objects += i(0);
+        // (a pages-tree node every `pages_tree_kids_max` pages)
+        if pages % 6 == 0 {
+            out.objects += 1;
+        }
+        for n in l(1) {
+            if seen.insert(n) {
+                out.objects += 1;
+            }
+        }
+        for d in l(2) {
+            if seen_dest.insert(d) {
+                out.objects += 1;
+            }
+        }
+        for f in l(3) {
+            if seen_ship.insert(f) {
+                out.ship_fonts += 1;
+            }
+        }
+        for _ in 0..i(4) {
+            if written % 100 == 0 {
+                out.objects += 1;
+            }
+            written += 1;
+        }
+    }
+    let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
+    if g.len() > 1 << 12 {
+        g.clear();
+    }
+    g.insert(k, out);
+    out
+}
+
+/// The objects the pages shipped before this run made ([`ALLOCS`]): a
+/// read-time allocation's number is TeX's count of the read-time ones
+/// before it plus this. A fold of the accumulator's range before this
+/// node: no round, no loop-back.
+pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
+    let v = r.v;
+    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    Ok(fold_allocs(v, range).objects)
+}
+
+/// Font `n`'s name number as pdfTeX gives it (`\\pdffontname`): the
+/// engine's number after the fonts the shipouts before this run loaded
+/// ([`ALLOCS`]), which pdfTeX numbers as it loads them.
 pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
     let v = r.v;
-    let f = v.field(FONT_TAGS);
-    if !r.cx.is_loopback(f) {
-        return Ok(n);
-    }
-    let x = r.eng_read(f)?;
-    Ok(x.map(|x| list_of(v, x))
-        .unwrap_or_default()
-        .iter()
-        .map(|&e| list_of(v, e))
-        .find(|e| e.first().is_some_and(|&a| int_of(v, a) == n))
-        .and_then(|e| e.get(1).map(|&b| int_of(v, b)))
-        .unwrap_or(n))
+    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    Ok(n + fold_allocs(v, range).ship_fonts)
 }
 
 /// The id of `pdftexspace` in the pages written apart (none of the
@@ -1788,16 +1939,12 @@ fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
     M.get_or_init(|| Mutex::new(None))
 }
 
-/// What the link made: the file (empty: none), and the loop-backs it
-/// gives the next round: what each read-time command got ([`OBJNUMS`])
-/// and the fonts' names ([`FONT_TAGS`]).
+/// What the link made: the file (empty: none).
 pub(crate) struct Linked {
     pub file: Vec<u8>,
     /// The file's hash, from its chunks' ([`phitex_pdf::Tail::link_hashed`];
     /// none: to be hashed whole).
     pub hash: Option<u64>,
-    pub objnums: ValueId,
-    pub ftags: ValueId,
     /// The writer's errors where the link shipped a page again (pdfTeX's,
     /// `PDF-BACKEND-GAP`: a fatal error there, here logged, the job going
     /// on), with the node that shipped the page.
@@ -1828,8 +1975,6 @@ pub(crate) fn finish_exact(
     let none = Linked {
         file: Vec::new(),
         hash: None,
-        objnums: v.list(Vec::new()),
-        ftags: v.list(Vec::new()),
         errors: Vec::new(),
     };
     if xpages.is_empty() {
@@ -1993,12 +2138,15 @@ pub(crate) fn finish_exact(
             set_writer_params(&mut st, pc.wparams);
             // its virtual fonts' local fonts numbered where its walk
             // reads them in, after every font loaded before it
-            let fwd = nums.resolve(&pc.fonts, Some(pc.rec.font_loads()));
+            // (a page whose PDF side did not run: shipped again below)
+            let empty = phitex_pdf::PageRecord::default();
+            let rec = pc.made.get().map_or(&empty, |m| &m.0);
+            let fwd = nums.resolve(&pc.fonts, Some(rec.font_loads()));
             let src = Mapped::new(&pc.fonts, &nums, &fwd);
             let fmap = |g: FontId| fwd.get(&g).copied().unwrap_or(g);
             set_page_params(v, &mut st, &pc.params, pc.margins);
             let n0 = st.objects_numbered();
-            let res = st.replay_page(&pc.rec, &src, &fmap, None, &mut ps);
+            let res = st.replay_page(rec, &src, &fmap, None, &mut ps);
             if res.is_err() {
                 // (the node that wrote the page logged the writer's
                 // error when it wrote it)
@@ -2185,12 +2333,6 @@ pub(crate) fn finish_exact(
     // the fonts loaded after the last record (none but a load without
     // its record)
     nums.end(f.fonts);
-    let ftags = v.list(
-        nums.map
-            .iter()
-            .map(|(&a, &b)| v.list(vec![v.int(i64::from(a)), v.int(i64::from(b))]))
-            .collect(),
-    );
     if let Some(c) = st.flush_chunk() {
         bytes.push(c);
     }
@@ -2249,8 +2391,6 @@ pub(crate) fn finish_exact(
     Linked {
         file: out,
         hash,
-        objnums: v.list(got),
-        ftags,
         errors,
     }
 }

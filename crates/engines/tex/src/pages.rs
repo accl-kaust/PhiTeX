@@ -847,14 +847,12 @@ impl Run<'_, '_> {
                 continue;
             }
             for e in v.seq_to_vec(x) {
-                let xs = list_of(v, e);
-                // (`[j, entry]`: an entry tagged with its page)
-                let entry = match xs.first() {
-                    Some(&j) if v.as_int(j).is_some() => {
-                        xs.get(1).map(|&y| list_of(v, y)).unwrap_or_default()
-                    }
-                    _ => xs,
-                };
+                // (an entry tagged with its page: its own; a candidate
+                // marker: none)
+                if crate::api::is_cand_marker(v, e) {
+                    continue;
+                }
+                let entry = list_of(v, crate::api::stream_entry(v, e));
                 if let Some(&n) = entry.first() {
                     let w = v.field(&format!("wstream:{}", str_of(v, n)));
                     if !out.contains(&w) {
@@ -2682,9 +2680,14 @@ impl Run<'_, '_> {
         let t_fonts = t0.elapsed();
         phitex_pdf::phase::add(3, t_p3);
         let t_p4 = std::time::Instant::now();
+        // (a PDF page's hash is its PDF side's, `pdfout::PdfPage`: what
+        // its content stream shows; another's, the page's value)
         let shown = match &page_box {
-            Node::Box(bx) if pos.pdf => crate::pdfout::ship(self, page, bx, &side, &ids)?,
-            _ => page.raw(),
+            Node::Box(bx) if pos.pdf => {
+                crate::pdfout::ship(self, page, bx, &side, &ids)?;
+                None
+            }
+            _ => Some(page.raw()),
         };
         phitex_pdf::phase::add(4, t_p4);
         if timed {
@@ -2699,8 +2702,10 @@ impl Run<'_, '_> {
         }
         let su = v.seq_unit(page);
         self.contribute("pages", su);
-        let h = v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes())));
-        self.contribute("pagehash", h);
+        if let Some(shown) = shown {
+            let h = v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes())));
+            self.contribute("pagehash", h);
+        }
         self.log("shipend", "]")?;
         self.set_cell(crate::fields::cell::DEADCYCLES, v.int(0), true);
         phitex_pdf::phase::add(15, t0);
