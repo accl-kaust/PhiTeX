@@ -126,6 +126,12 @@ impl FontTable {
         self.get(f).is_some()
     }
 
+    /// Empties the table, its room kept.
+    pub(crate) fn clear(&mut self) {
+        self.direct.clear();
+        self.far.clear();
+    }
+
     pub(crate) fn insert(&mut self, f: FontId, x: (Arc<Loaded>, Vec<i32>)) {
         let i = f as usize;
         if i < Self::DIRECT {
@@ -151,6 +157,13 @@ impl FontTable {
 }
 
 impl View {
+    /// Empties the view, its room kept.
+    pub(crate) fn clear(&mut self) {
+        self.fonts.clear();
+        self.hyphen.clear();
+        self.names.clear();
+    }
+
     #[inline]
     fn get(&self, f: FontId) -> Option<&(Arc<Loaded>, Vec<i32>)> {
         self.fonts.get(f)
