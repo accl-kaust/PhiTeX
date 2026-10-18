@@ -254,12 +254,10 @@ fn an_edit_that_moves_a_break_out_of_a_claimed_span() {
 
 /// The bytes do not hang on the finishers' predictions: para4000 at 8
 /// threads with them off (the readers after a finisher wait for its run)
-/// equals the one-thread build. Red while a block's scan step that reads
-/// its page's field as unset and then places the continuation defining
-/// it (before itself) is not checked again when that continuation's real
-/// state arrives (the engine's stale reads, `PHITEX_CHECK_READS`).
+/// equals the one-thread build. A guard: it caught the engine's stale
+/// reads of a block step's own placed nodes, and a page assembly that
+/// carried short material when the guesses changed which node ran it.
 #[test]
-#[ignore = "red until the engine re-checks a read that nodes the reader placed before itself now answer"]
 fn para4000_bytes_without_finisher_predictions() {
     let fx = common::fixtures().join("dvi");
     let bench =
