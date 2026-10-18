@@ -80,7 +80,19 @@ pub(crate) fn atoms(text: &str, tokens: &[Token]) -> Vec<Atom> {
             TokKind::Text => {
                 line_blank = false;
                 skip_space = false;
-                for (o, c) in text[t.start..t.end].char_indices() {
+                let run = &text[t.start..t.end];
+                if !t.expl && run.is_ascii() {
+                    // (a byte a character: no decoding, no `~` to look for)
+                    out.extend(run.bytes().enumerate().map(|(o, c)| Atom {
+                        kind: AtomKind::Char(char::from(c)),
+                        tok: k,
+                        start: t.start + o,
+                        end: t.start + o + 1,
+                        mate: usize::MAX,
+                    }));
+                    continue;
+                }
+                for (o, c) in run.char_indices() {
                     if t.expl && c == '~' {
                         out.push(Atom {
                             start: t.start + o,
