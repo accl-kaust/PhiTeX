@@ -30,7 +30,7 @@ def acct(text):
     """The accounting lines of a log, summed over its evaluations."""
     r = {"rounds": [], "runs": 0, "live": 0, "raises": 0, "pending": 0,
          "kinds": {}, "cp_nodes": 0, "cp_ms": 0.0, "chain": "", "fin_waited": 0,
-         "env_calls": 0, "overhead_us": None, "threads": None, "hint_ms": 0.0}
+         "env_calls": 0, "overhead_us": None, "threads": None, "hint_ms": 0.0, "bodies_ms": 0.0}
     for m in re.finditer(r"^acct: round (\d+): wall ([0-9.]+) ms, op ([0-9.]+) ms, commit ([0-9.]+) ms, "
                          r"check ([0-9.]+) ms, idle ([0-9.]+) ms", text, re.M):
         r["rounds"].append(tuple(float(m.group(i)) for i in range(2, 7)))
@@ -54,6 +54,8 @@ def acct(text):
             r["cp_nodes"], r["cp_ms"], r["chain"] = int(m.group(1)), float(m.group(2)), m.group(3)
         r["fin_waited"] = max(r["fin_waited"], int(m.group(4)))
         r["env_calls"] = int(m.group(5))
+    for m in re.finditer(r"^acct: read_ns by kind: .*; op bodies \(op minus reads\) ([0-9.]+) ms", text, re.M):
+        r["bodies_ms"] += float(m.group(1))
     for m in re.finditer(r"^incr walk: .*?, analyses ([0-9.]+)(ms|µs|us|s|ns)", text, re.M):
         u = {"s": 1e3, "ms": 1.0, "µs": 1e-3, "us": 1e-3, "ns": 1e-6}[m.group(2)]
         r["hint_ms"] += float(m.group(1)) * u
@@ -111,6 +113,21 @@ def table(kind, d):
         if j in walls and j:
             sc.append(f"j{j} wall {walls[j]:.2f} s vs 1.25*busy/N+cp {1.25 * busy / j + a['cp_ms'] / 1e3:.2f} s")
     rows.append(("scaling", "; ".join(sc) or "-", "wall(N) <= 1.25 busy/N + cp"))
+    # (the parallel shape: walls, speedups, the SMT step j16 -> j32, the
+    # critical path and the j8 round's idle, commit and op bodies)
+    par = ", ".join(f"j{j} {walls[j]:.2f} s" for j in sorted(walls))
+    sp = []
+    for j in (8, 16, 32):
+        if 1 in walls and j in walls and walls[j]:
+            sp.append(f"j1/j{j} {walls[1] / walls[j]:.2f}x")
+    if 16 in walls and 32 in walls:
+        sp.append(f"j16->j32 {walls[16]:.2f} -> {walls[32]:.2f} s ({'faster' if walls[32] < walls[16] else 'NOT faster'})")
+    a8 = logs.get(8)
+    if a8:
+        idle = sum(x[4] for x in a8["rounds"])
+        commit = sum(x[2] for x in a8["rounds"])
+        sp.append(f"cp {a8['cp_ms']:.1f} ms; j8 idle {idle:.1f} ms, commit {commit:.1f} ms, op bodies {a8['bodies_ms']:.1f} ms")
+    rows.append(("parallel", par + "; " + "; ".join(sp), "j32 <= j16, then faster"))
     ew = []
     for j, e in sorted(edits.items()):
         ws = sorted(e.get("edit_walls_s") or [])

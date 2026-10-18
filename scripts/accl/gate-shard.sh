@@ -104,6 +104,32 @@ reds() {
     red "$pre(exit $(sed -n 's/^EXIT //p' "$log" | tail -1), no test named: $(grep -m1 -E 'panicked at|error(\[|:)|timed out|signal' "$log" | cut -c1-160))"
   fi
 }
+# One logical CPU per physical core of the allowed set (the lowest of
+# each core's siblings), comma-separated: the -j runs up to the core
+# count pin to it; the SMT run takes the whole set.
+one_per_core() {
+  python3 -I -c '
+import os
+def expand(s):
+    out = []
+    for part in s.split(","):
+        a, _, b = part.partition("-")
+        out.extend(range(int(a), int(b or a) + 1))
+    return out
+cpus = sorted(os.sched_getaffinity(0))
+seen, pick = set(), []
+for c in cpus:
+    try:
+        sib = expand(open(f"/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list").read().strip())
+    except OSError:
+        sib = [c]
+    key = min(sib)
+    if key not in seen:
+        seen.add(key)
+        pick.append(c)
+print(",".join(map(str, pick)))'
+}
+
 case $shard in
   lint)
     # (no fmt: the image's rustfmt is another version than the pinned
@@ -282,11 +308,14 @@ for l in open(sys.argv[1]):
     echo "big node ${SLURMD_NODENAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null)} cpus $(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)" >> "$r/big.txt"
     mkdir -p "$w/big" && cp bench/para40000.tex "$w/big/"
     (cd "$w/big" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para40000.tex > "$r/big-warm.log" 2>&1)
-    for j in 1 8 16; do
+    cores=$(one_per_core); all=$(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)
+    echo "big cores (one sibling each) $cores" >> "$r/big.txt"
+    for j in 1 8 16 32; do
       L=$r/big-j$j.log
+      pin=$cores; [ "$j" -gt 16 ] && pin=$all
       s0=$(date +%s.%N)
       (cd "$w/big" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 NO_COLOR=1 \
-        timeout 900 "$bin" build -j $j --output-dir=o$j --program pdftex para40000.tex > "$L" 2>&1)
+        timeout 900 taskset -c "$pin" "$bin" build -j $j --output-dir=o$j --program pdftex para40000.tex > "$L" 2>&1)
       e=$?
       s1=$(date +%s.%N)
       echo "shell: the process ran from $s0 to $s1" >> "$L"
@@ -310,7 +339,10 @@ for l in open(sys.argv[1]):
     # (the node is shared: each -j runs three times, the min quoted,
     # the median beside it; the node and its load first)
     echo "para node ${SLURMD_NODENAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null)} load $(cut -d' ' -f1-3 /proc/loadavg) cpus $(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)" >> "$r/para.txt"
-    for j in 1 8 16; do
+    cores=$(one_per_core); all=$(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)
+    echo "para cores (one sibling each) $cores" >> "$r/para.txt"
+    for j in 1 8 16 32; do
+      pin=$cores; [ "$j" -gt 16 ] && pin=$all
       walls=""
       best=""
       for k in 1 2 3; do
@@ -318,7 +350,7 @@ for l in open(sys.argv[1]):
         rm -rf "$w/par/o$j"
         s0=$(date +%s.%N)
         (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_CHECK_READS=1 NO_COLOR=1 \
-          timeout 900 "$bin" build -j $j --output-dir=o$j --program pdftex para4000.tex > "$Lk" 2>&1)
+          timeout 900 taskset -c "$pin" "$bin" build -j $j --output-dir=o$j --program pdftex para4000.tex > "$Lk" 2>&1)
         ek=$?
         s1=$(date +%s.%N)
         echo "shell: the process ran from $s0 to $s1" >> "$Lk"
