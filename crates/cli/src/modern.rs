@@ -316,6 +316,10 @@ impl Target {
 /// in its directory), then the file's magic comments. Without a
 /// `phitex.toml` the build runs in the main file's directory, as latexmk
 /// -cd does.
+/// The bytes of the main file its magic comments are looked for in
+/// (their twenty lines, [`config::magic_comments`]).
+const MAGIC_HEAD: u64 = 1 << 16;
+
 pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let found = config::find(&cwd)?;
@@ -340,24 +344,41 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         o.file.clone().or_else(|| cfg.main.clone()).ok_or(
             "no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned(),
         )?;
-    let read = |f: &str| {
-        std::fs::read(f)
-            .or_else(|_| std::fs::read(format!("{f}.tex")))
+    // (the magic comments are in the first lines: the whole file is read
+    // only when no engine is named and its text decides)
+    let read = |f: &str, whole: bool| {
+        let open = |p: &str| -> std::io::Result<Vec<u8>> {
+            if whole {
+                return std::fs::read(p);
+            }
+            let mut b = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(std::fs::File::open(p)?, MAGIC_HEAD),
+                &mut b,
+            )?;
+            // (a head without its twenty whole lines: the whole file)
+            if b.len() as u64 == MAGIC_HEAD && b.iter().filter(|&&c| c == b'\n').count() < 20 {
+                return std::fs::read(p);
+            }
+            Ok(b)
+        };
+        open(f)
+            .or_else(|_| open(&format!("{f}.tex")))
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .map_err(|e| format!("can't read {f}: {e}"))
     };
-    let mut text = read(&file)?;
+    let mut text = read(&file, false)?;
     let (mut program, root_comment) = config::magic_comments(&text);
     if let Some(r) = root_comment {
         let dir = Path::new(&file).parent().unwrap_or(Path::new(""));
         file = dir.join(r).to_string_lossy().into_owned();
-        text = read(&file)?;
+        text = read(&file, false)?;
         program = config::magic_comments(&text).0.or(program);
     }
     let named = o.engine.clone().or(cfg.engine).or(program);
     let mut engine = match named {
         Some(e) => tex::engine(&e)?,
-        None => tex::engine(config::default_engine(&text))?,
+        None => tex::engine(config::default_engine(&read(&file, true)?))?,
     };
     if let Some(out) = o.output {
         engine = engine.with_output(out)?;

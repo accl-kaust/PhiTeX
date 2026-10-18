@@ -1976,6 +1976,42 @@ impl Graph {
         }
     }
 
+    /// [`Graph::supply`] of every file of `names` in order, the files
+    /// found, read, hashed and made values on the pool (spec-final §9b:
+    /// the cold build's serial part), recorded in the same order.
+    fn supply_all(&mut self, finder: &Finder, names: &[String]) {
+        let mut seen = phitex_defuse::FxHashSet::default();
+        let todo: Vec<(&str, Field)> = names
+            .iter()
+            .filter(|n| seen.insert(n.as_str()))
+            .map(|n| (n.as_str(), self.eng.values().field(&format!("file:{n}"))))
+            .filter(|&(n, f)| {
+                !(self.files.iter().any(|(g, _)| *g == f)
+                    || self.absent.contains(&f)
+                    || self.written.iter().any(|w| w == n))
+            })
+            .collect();
+        let v = self.eng.values();
+        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(self.threads));
+        let got: Vec<(u64, Option<ValueId>)> = crate::exec::map_on(&mut ex, todo.len(), &|k| {
+            let found = finder(todo[k].0);
+            let hash = file_hash(found.as_ref());
+            let val = found.map(|(path, bytes)| {
+                let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                v.list(vec![v.str(&path), v.str(&text)])
+            });
+            (hash, val)
+        });
+        for (&(name, f), (hash, val)) in todo.iter().zip(got) {
+            self.queries.push((name.to_owned(), val.is_some()));
+            self.reads.push((name.to_owned(), hash));
+            match val {
+                Some(x) => self.files.push((f, x)),
+                None => self.absent.push(f),
+            }
+        }
+    }
+
     /// Installs the environment provider: a run reading a file the
     /// environment does not hold gets it from the finder in place, as
     /// [`Graph::supply`] would have supplied it, instead of stopping;
@@ -2796,9 +2832,12 @@ impl Graph {
         let args = {
             let v = self.eng.values();
             let loads = self.loads.as_deref();
+            let reg = &*self.ops.hints;
             let mut ex = crate::exec::Threads::new(self.threads);
             crate::exec::map_on(&mut ex, nodes.len(), &|k| {
-                node_args(v, text, incr, &nodes[k].1, loads)
+                let a = node_args(v, text, incr, &nodes[k].1, loads);
+                crate::hints::prepare(reg, v, &a);
+                a
             })
         };
         let t2 = t0.elapsed();
@@ -2810,6 +2849,7 @@ impl Graph {
         }
         // (one append of every node, in order)
         let ids = self.eng.push_many(unit, self.ops.exec, args);
+        crate::hints::prepared_done(&self.ops.hints);
         crate::timeline::lap("push: the engine's push");
         let out: Vec<(u64, NodeId, Src)> = nodes
             .iter()
@@ -3262,41 +3302,58 @@ fn canonical_lines_splice(
 /// [`canonical_text`]'s lines of `text`, the first numbered `first`
 /// (from 0), onto `out` and `marks`.
 fn canonical_lines(text: &str, first: usize, out: &mut String, marks: &mut Vec<(u32, String)>) {
-    for (n, line) in text.split_inclusive('\n').enumerate() {
-        let n = n + first;
-        let (body, nl) = match line.strip_suffix('\n') {
-            Some(b) => (b, "\n"),
-            None => (line, ""),
-        };
-        let b = body.as_bytes();
-        let mut i = 0;
-        let mut cut = None;
-        while i < b.len() {
-            match b[i] {
-                // (a control symbol's character, or a control word's first
-                // letter: never a comment)
-                b'\\' => i += 2,
-                b'%' => {
-                    cut = Some(i);
-                    break;
-                }
-                _ => i += 1,
-            }
+    // (only a line with a `%` can change: the lines between two such
+    // lines are copied at once, their ends counted, eight bytes at a time)
+    let b = text.as_bytes();
+    let (mut done, mut n, mut from) = (0, first, 0);
+    while let Some(p) = text[from..].find('%').map(|k| from + k) {
+        let ls = text[done..p].rfind('\n').map_or(done, |k| done + k + 1);
+        n += newlines(&b[done..ls]);
+        out.push_str(&text[done..ls]);
+        let le = text[p..].find('\n').map_or(text.len(), |k| p + k);
+        canonical_line(&text[ls..le], n, out, marks);
+        if le < text.len() {
+            out.push('\n');
+            n += 1;
+            done = le + 1;
+        } else {
+            done = le;
         }
-        match cut {
-            Some(k) if k + 1 < body.len() => {
-                out.push_str(&body[..=k]);
-                out.push('\0');
-                // (the comment as web2c's `input_line` keeps it: the
-                // line's end, then its trailing blanks removed, §31)
-                let c = body[k + 1..]
-                    .trim_end_matches(['\r', '\n'])
-                    .trim_end_matches([' ', '\t']);
-                marks.push((u32::try_from(n + 1).unwrap_or(u32::MAX), c.to_owned()));
+        from = done;
+    }
+    out.push_str(&text[done..]);
+}
+
+/// [`canonical_lines`] of one line `body` (its end not in it), line `n`
+/// (0-based) of the text.
+fn canonical_line(body: &str, n: usize, out: &mut String, marks: &mut Vec<(u32, String)>) {
+    let b = body.as_bytes();
+    let mut i = 0;
+    let mut cut = None;
+    while i < b.len() {
+        match b[i] {
+            // (a control symbol's character, or a control word's first
+            // letter: never a comment)
+            b'\\' => i += 2,
+            b'%' => {
+                cut = Some(i);
+                break;
             }
-            _ => out.push_str(body),
+            _ => i += 1,
         }
-        out.push_str(nl);
+    }
+    match cut {
+        Some(k) if k + 1 < body.len() => {
+            out.push_str(&body[..=k]);
+            out.push('\0');
+            // (the comment as web2c's `input_line` keeps it: the
+            // line's end, then its trailing blanks removed, §31)
+            let c = body[k + 1..]
+                .trim_end_matches(['\r', '\n'])
+                .trim_end_matches([' ', '\t']);
+            marks.push((u32::try_from(n + 1).unwrap_or(u32::MAX), c.to_owned()));
+        }
+        _ => out.push_str(body),
     }
 }
 
@@ -3849,9 +3906,10 @@ impl Build {
         // the files the format read (fonts, data) are supplied before the
         // document's first evaluation: a run reading one never stops
         let t_sup = std::time::Instant::now();
-        for (n, _) in cached.reads.clone() {
-            g.supply(&opts.finder, &n);
-        }
+        g.supply_all(
+            &opts.finder,
+            &cached.reads.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+        );
         crate::timeline::lap("engine: the format's files supplied (fonts, data)");
         g.guesses(&opts);
         crate::timeline::lap("engine: the guesses (read-back keys)");
@@ -4021,7 +4079,8 @@ impl Build {
         // while it runs is off by the edit's length at most, and the map
         // is not made again for every edit)
         if self.g.watch.offsets.is_empty() || self.nodes.len() < 4096 {
-            let mut offsets = FxHashMap::default();
+            let mut offsets =
+                FxHashMap::with_capacity_and_hasher(self.nodes.len(), Default::default());
             for (_, n, src) in &self.nodes {
                 let Src::Doc(s, _) = *src;
                 offsets.insert(n.raw(), u64::try_from(s).unwrap_or(0));
@@ -5686,5 +5745,49 @@ mod prelude_tests {
         assert!(deserialise(&other).is_none());
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod canonical_tests {
+    use super::*;
+
+    /// The marking line by line, as it was before the copy between
+    /// lines with comments (the invariant: the same text and marks).
+    fn by_lines(text: &str) -> (String, Vec<(u32, String)>) {
+        let (mut out, mut marks) = (String::new(), Vec::new());
+        for (n, line) in text.split_inclusive('\n').enumerate() {
+            let (body, nl) = match line.strip_suffix('\n') {
+                Some(b) => (b, "\n"),
+                None => (line, ""),
+            };
+            canonical_line(body, n, &mut out, &mut marks);
+            out.push_str(nl);
+        }
+        (out, marks)
+    }
+
+    #[test]
+    fn lines_without_comments_are_copied_as_they_are() {
+        for t in [
+            "",
+            "a\n",
+            "a",
+            "no comment\nat all\n",
+            "x % one\n\n\\% not one\n\\\\% one \t\r\nend",
+            "%\n% \n%%\n\\%%\n",
+            "a\nb\nc % c\nd\ne\\% f % g\n\n\nh\n% last",
+            "é % ü\nü\n",
+        ] {
+            assert_eq!(canonical_text(t).unwrap(), by_lines(t), "{t:?}");
+            let (mut out, mut marks) = (String::new(), Vec::new());
+            canonical_lines(t, 7, &mut out, &mut marks);
+            let (o, m) = by_lines(t);
+            assert_eq!(out, o);
+            assert_eq!(
+                marks,
+                m.into_iter().map(|(n, c)| (n + 7, c)).collect::<Vec<_>>()
+            );
+        }
     }
 }

@@ -550,7 +550,7 @@ pub struct Kpse {
     cnf: Option<HashMap<Bytes, Bytes>>,
     doing_cnf_init: bool,
     expanding: HashMap<Bytes, bool>,
-    db: Option<Db>,
+    db: Option<std::sync::Arc<Db>>,
     /// `kpse->followup_search`: false only for the `texmf.cnf` search.
     followup_search: bool,
     paths: HashMap<Format, Bytes>,
@@ -886,10 +886,33 @@ impl Kpse {
         path
     }
 
-    /// `db.c`, `kpathsea_init_db`.
+    /// `db.c`, `kpathsea_init_db`. The databases are read once per
+    /// process while their files stay as they were (by length and time):
+    /// another instance of the same tree (a format's finder beside the
+    /// document's) shares them.
     fn init_db(&mut self) {
+        type Dbs = std::sync::Mutex<HashMap<Vec<(Bytes, u64, u128)>, std::sync::Arc<Db>>>;
+        static DBS: std::sync::OnceLock<Dbs> = std::sync::OnceLock::new();
         let db_path = self.init_format(Format::Db);
         let files = self.search_list(&db_path, &[b"ls-R".to_vec(), b"ls-r".to_vec()], true, true);
+        let key: Vec<(Bytes, u64, u128)> = files
+            .iter()
+            .map(|f| {
+                let m = std::fs::metadata(os(f)).ok();
+                let len = m.as_ref().map_or(0, std::fs::Metadata::len);
+                let at = m
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                (f.clone(), len, at)
+            })
+            .collect();
+        let dbs = DBS.get_or_init(Dbs::default);
+        let mut held = dbs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(db) = held.get(&key) {
+            self.db = Some(db.clone());
+            return;
+        }
         let mut db = Db::default();
         let mut i = 0;
         while i < files.len() {
@@ -904,6 +927,8 @@ impl Kpse {
             db.build(&files[i]);
             i += 1;
         }
+        let db = std::sync::Arc::new(db);
+        held.insert(key, db.clone());
         self.db = Some(db);
     }
 

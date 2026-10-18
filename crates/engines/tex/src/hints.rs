@@ -3379,6 +3379,11 @@ pub(crate) struct Registry {
     /// the analysis of the whole file at the unit's slice.
     units: Mutex<FxHashMap<u64, Arc<str>>>,
     hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
+    /// The engine's answers ([`may_define`]) made ahead on the pool for
+    /// nodes about to be pushed ([`prepare`]), by their arguments' key:
+    /// each taken by the push's one question, the rest dropped after it
+    /// ([`prepared_done`]).
+    prepared: Mutex<FxHashMap<u64, MayDefine>>,
 }
 
 /// Registers a text's analysis under `name` (a string value) in the
@@ -3564,16 +3569,44 @@ pub(crate) fn file_hints(reg: &Registry, v: &Values, id: ValueId, name: ValueId)
     t
 }
 
+/// The key of a node's arguments in the registry's tables.
+fn args_key(args: &[ValueId]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for a in args {
+        a.raw().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The answers the engine asks of a node at its push, made now (on the
+/// pool, for the nodes of a text before they are pushed in order: the
+/// push's serial part is then the engine's own, spec-final §9b): its
+/// hint decoded and cached, its [`may_define`] kept until the push asks.
+pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
+    let _ = hint_of_args(reg, v, args);
+    if crate::exec::env_flag!("PHITEX_HINTS") {
+        return;
+    }
+    let m = may_define_now(reg, v, args);
+    reg.prepared
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(args_key(args), m);
+}
+
+/// The push the answers were [`prepare`]d for is done: those it did not
+/// take are dropped (a later node with the same arguments asks again).
+pub(crate) fn prepared_done(reg: &Registry) {
+    reg.prepared
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+}
+
 /// The hint of a node from its arguments: the extra argument when the
 /// slice carries one, else its first text frame.
 pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<Hint> {
-    let key = {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for a in args {
-            a.raw().hash(&mut h);
-        }
-        h.finish()
-    };
+    let key = args_key(args);
     if let Some(h) = reg
         .hints
         .lock()
@@ -3880,8 +3913,22 @@ pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<
     (!out.is_empty()).then_some(out)
 }
 
-/// The engine's question, answered from the text.
+/// The engine's question, answered from the text (made ahead when the
+/// node's push was [`prepare`]d).
 pub(crate) fn may_define(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
+    let ready = {
+        let mut p = reg.prepared.lock().unwrap_or_else(PoisonError::into_inner);
+        if p.is_empty() {
+            None
+        } else {
+            p.remove(&args_key(args))
+        }
+    };
+    ready.unwrap_or_else(|| may_define_now(reg, v, args))
+}
+
+/// [`may_define`], answered now.
+fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return MayDefine::Any;
     }
