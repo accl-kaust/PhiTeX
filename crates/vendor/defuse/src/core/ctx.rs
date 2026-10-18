@@ -275,14 +275,39 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.sampled(1, |cx| cx.use_field_at_inner(f, at));
+        let r = self.sampled(1, |cx| cx.use_field_at_inner(f, at, false));
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_field_at", a, crate::record::stop_or(&r));
         r
     }
 
+    /// The definition of `f` reaching the position just before node `at`
+    /// (at its start: what `at` itself would read), and the node that made
+    /// it. The counterpart of [`Ctx::use_field_at`], which reads just after
+    /// `at`'s subtree; for a node with a previous sibling the two differ
+    /// only when `at` is the first in its parent or unit. Subscribed,
+    /// verified, waited on and guessed as a read at that position; `at`
+    /// must be earlier in this node's unit (else
+    /// [`crate::EvalError::BadPosition`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] while the definition (or structure before it) is in work.
+    pub fn use_field_before(&mut self, f: Field, at: NodeId) -> Result<FieldAt, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() {
+            crate::record::j(&(&f, &at))
+        } else {
+            serde_json::Value::Null
+        };
+        let r = self.sampled(1, |cx| cx.use_field_at_inner(f, Some(at), true));
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "use_field_before", a, crate::record::stop_or(&r));
+        r
+    }
+
     #[inline]
-    fn use_field_at_inner(&mut self, f: Field, at: Option<NodeId>) -> Result<FieldAt, Stop> {
+    fn use_field_at_inner(&mut self, f: Field, at: Option<NodeId>, before: bool) -> Result<FieldAt, Stop> {
         let sh = self.sh;
         let pos = match at {
             None => sh.unit(self.unit).first.load(std::sync::atomic::Ordering::Acquire),
@@ -305,9 +330,14 @@ impl<'a> Ctx<'a> {
                     node: a,
                     gn: ar.gn.load(std::sync::atomic::Ordering::Acquire),
                 });
-                // Just after its subtree: before the node that follows it.
-                let nx = sh.next(sh.subtree_end(a));
-                if nx == super::NIL { self.me } else { nx }
+                if before {
+                    // At its start.
+                    a
+                } else {
+                    // Just after its subtree: before the node that follows it.
+                    let nx = sh.next(sh.subtree_end(a));
+                    if nx == super::NIL { self.me } else { nx }
+                }
             }
         };
         if pos == super::NIL || pos == self.me && at.is_none() {
