@@ -410,6 +410,35 @@ for l in open(sys.argv[1]):
         timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parh" para4000.tex $j 50 $j "$r/edits-j$j.json" --program pdftex) >> "$r/para.txt" 2>&1
       grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "para4000 edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
     done
+    # one edit's phases at -j 8: 10 edits with the watch's timelines
+    # (PHITEX_TEX_TIME), the median edit's table quoted (the engine's
+    # evaluation against the phases around it)
+    rm -rf "$w/parp" "$w/parp-cold" && mkdir -p "$w/parp" && cp bench/para4000.tex "$w/parp/"
+    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_TEX_TIME=1 GATE_EDIT_STDERR="$r/edit-phases-j8.log" \
+      timeout 900 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parp" para4000.tex 8 10 7 "$r/edits-phases-j8.json" --program pdftex) > /dev/null 2>&1
+    python3 -I - "$r/edit-phases-j8.log" >> "$r/para.txt" <<'PY'
+import re, sys
+blocks, cur = [], None
+for line in open(sys.argv[1], errors="replace"):
+    if line.startswith("timeline ("):
+        cur = [line.rstrip()]
+        blocks.append(cur)
+    elif cur is not None and line.startswith("  "):
+        cur.append(line.rstrip())
+        if line.startswith("  clock:"):
+            cur = None
+    else:
+        cur = None
+edits = [b for b in blocks[1:] if b]
+if not edits:
+    print("para4000 edit phases -j 8: no timeline")
+else:
+    total = lambda b: float(re.search(r"([0-9.]+) ms from", b[0]).group(1))
+    edits.sort(key=total)
+    b = edits[len(edits) // 2]
+    print("para4000 edit phases -j 8 (median of %d edits; totals %s ms):" % (len(edits), " ".join("%.1f" % total(x) for x in edits)))
+    print("\n".join(b[:40]))
+PY
     python3 -I scripts/accl/gate-acct.py table para "$r" > "$r/table.txt" 2>&1
     ;;
   cg)

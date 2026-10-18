@@ -57,8 +57,11 @@ def main():
     path = os.path.join(d, main_)
     pdf = os.path.join(d, os.path.splitext(main_)[0] + ".pdf")
     res = {"j": int(j), "edits": 0, "edit_walls_s": []}
+    # (GATE_EDIT_STDERR: the watch's stderr kept there, its timelines
+    # with PHITEX_TEX_TIME)
+    err = open(os.environ["GATE_EDIT_STDERR"], "w") if os.environ.get("GATE_EDIT_STDERR") else subprocess.DEVNULL
     p = subprocess.Popen([binary, "watch", "--no-view", "--json", *flags, "-j", j, main_], cwd=d,
-                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
 
     def next_build(timeout=900):
         t = time.monotonic()
