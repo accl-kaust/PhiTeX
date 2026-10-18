@@ -198,7 +198,11 @@ impl Engine {
         rep.pending_sets = rep.pending_waits;
         #[cfg(feature = "profile")]
         let th = std::time::Instant::now();
-        self.update_heights(exec);
+        if self.heights_on {
+            self.update_heights(exec);
+        } else {
+            lock(&self.sh.hdirty).clear();
+        }
         #[cfg(feature = "profile")]
         #[allow(clippy::cast_possible_truncation)]
         crate::obs::add_impl("report_heights", th.elapsed().as_nanos() as u64);

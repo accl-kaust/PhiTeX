@@ -64,6 +64,8 @@ pub struct Engine {
     pub(crate) report_version: Option<u64>,
     pub(crate) last_critical: u32,
     pub(crate) heights: super::report::Heights,
+    /// Whether reports compute heights (`Engine::set_heights`).
+    pub(crate) heights_on: bool,
     pub(crate) limits: Limits,
     pub(crate) units: Vec<u32>,
 }
@@ -192,6 +194,50 @@ impl Shared {
         NodeId(id)
     }
 
+    /// Appends nodes `op(args)` to unit `u` (see `Engine::push_many`).
+    fn push_batch(&self, u: u32, op: OpId, args: Vec<Vec<ValueId>>) -> Vec<NodeId> {
+        // Static facts first, in parallel (the hooks read only the texts).
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .min(8);
+        let chunk = args.len().div_ceil(threads);
+        let stats: Vec<super::Static> = std::thread::scope(|sc| {
+            let hs: Vec<_> = args
+                .chunks(chunk)
+                .map(|c| sc.spawn(move || c.iter().map(|a| self.analyze_text(op, a)).collect::<Vec<_>>()))
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().expect("static facts")).collect()
+        });
+        let mut notes = Notes::default();
+        let mut slots = Vec::with_capacity(args.len());
+        let mut ids = Vec::with_capacity(args.len());
+        for (a, st) in args.into_iter().zip(stats) {
+            let id = self.top_id();
+            let data = Data::new(Kind::Node, Role::Top, op, Arc::from(a), NIL);
+            let s = self.alloc(u, id, data, 0, NIL);
+            self.rec(s).set(F_NEEDS_RUN);
+            notes.pre.insert(id, st);
+            slots.push(s);
+            ids.push(NodeId(id));
+        }
+        {
+            let _g = self.wunit(u);
+            let last = self.unit(u).last.load(Ordering::Acquire);
+            self.link_after(u, last, &slots);
+            for &s in &slots {
+                self.notify_gap(s, &mut notes);
+                self.register(s, &mut notes);
+            }
+            notes.frames_from.push(slots[0]);
+            self.settle_structure_edit(u, &mut notes);
+        }
+        self.dispatch(&mut notes, NIL);
+        for &s in &slots {
+            self.enqueue(s);
+        }
+        ids
+    }
+
     /// The entry after `s`'s subtree and the continuations it made.
     fn after_all(&self, s: Slot) -> Slot {
         let mut end = self.subtree_end(s);
@@ -237,6 +283,7 @@ impl Engine {
             report_version: None,
             last_critical: 0,
             heights: super::report::Heights::default(),
+            heights_on: true,
             limits: Limits::default(),
             units: Vec::new(),
         };
@@ -345,8 +392,19 @@ impl Engine {
 
     /// Appends `n` nodes to the end of `unit`, in order: the same result
     /// as `n` calls of [`Engine::push`].
+    ///
+    /// A batch: the texts' static facts (the operation's hooks) are taken
+    /// on several threads, then the nodes are linked under one writer.
     pub fn push_many(&mut self, unit: UnitId, op: OpId, args: Vec<Vec<ValueId>>) -> Vec<NodeId> {
-        args.into_iter().map(|a| self.push(unit, op, a)).collect()
+        #[cfg(feature = "observe")]
+        let recording = crate::record::rec().is_some();
+        #[cfg(not(feature = "observe"))]
+        let recording = false;
+        if recording || args.len() < 64 {
+            // (Recorded as the pushes it is.)
+            return args.into_iter().map(|a| self.push(unit, op, a)).collect();
+        }
+        self.sh.push_batch(unit.0, op, args)
     }
 
     /// Keeps the node's applications alive across collections.
@@ -623,6 +681,18 @@ impl Engine {
     /// mean the hint is wrong, which costs speed, never correctness).
     pub fn set_stable(&mut self, f: Field) {
         self.sh.stable.insert(f);
+    }
+
+    /// Whether each evaluation's report computes the nodes' heights (on by
+    /// default): `Report::critical_path`, the level widths and
+    /// [`Engine::critical_chain`]. A pass over every node's reads on a cold
+    /// build (incremental after it); off, those report 0 or nothing, and
+    /// turning it on again recomputes them all at the next evaluation.
+    pub fn set_heights(&mut self, on: bool) {
+        if on && !self.heights_on {
+            self.heights = super::report::Heights::default();
+        }
+        self.heights_on = on;
     }
 
     pub fn declare_sequence(&mut self, f: Field) {

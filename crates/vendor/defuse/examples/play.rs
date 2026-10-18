@@ -554,6 +554,9 @@ fn main() {
     let book = Arc::new(book);
     let units = Arc::new(Mutex::new(Vec::new()));
     let mut eng = Engine::new();
+    if argv.iter().any(|a| a == "--no-heights") {
+        eng.set_heights(false);
+    }
     // `--stable N`: the N fields the recorded runs read most are marked
     // stable (`Engine::set_stable`).
     if let Some(n) = opt("--stable").map(|s| s.parse::<usize>().unwrap()) {
