@@ -1344,12 +1344,14 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
     let (mut wall, mut op) = (0u64, 0u64);
     for (i, t) in r.round_times.iter().enumerate() {
         eprintln!(
-            "acct: round {i}: wall {:.3} ms, op {:.3} ms, commit {:.3} ms, check {:.3} ms, idle {:.3} ms",
+            "acct: round {i}: wall {:.3} ms, op {:.3} ms, commit {:.3} ms, check {:.3} ms, idle {:.3} ms, runs {}, memo hits {}",
             ms(t.wall_ns),
             ms(t.op_ns),
             ms(t.commit_ns),
             ms(t.check_ns),
-            ms(t.idle_ns)
+            ms(t.idle_ns),
+            t.runs,
+            t.memo_hits
         );
         wall += t.wall_ns;
         op += t.op_ns;
@@ -1362,6 +1364,7 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
     let per_run_us = (wall.saturating_sub(op)) as f64 / 1e3 / runs as f64;
     #[allow(clippy::cast_precision_loss)]
     let rpn = r.runs as f64 / live as f64;
+    eprintln!("acct: memo {} bytes (the previous evaluation's round results)", r.memo_bytes);
     eprintln!(
         "acct: {} rounds, {} runs, {} live nodes, {rpn:.2} runs/node, raises {} ({:.2}% of runs), pending waits {} ({:.2}% of runs), round wall minus op {per_run_us:.1} us/run at {} threads",
         r.round_times.len(),
@@ -1957,9 +1960,15 @@ impl Graph {
             time,
             ..phitex_defuse::Limits::default()
         });
-        // our loop-backs (the read-back files) have a unique fixpoint, so
-        // an edit starts from the last values
-        eng.set_loop_start(phitex_defuse::LoopStart::Previous);
+        // the read-back files can have more than one fixpoint (a page
+        // number that moves a break that moves it back), so the fixpoint
+        // an edit reaches from the last values can differ from the cold
+        // build's: every evaluation's rounds start from the initial
+        // loop-back values, as a fresh engine's do, and a node is offered
+        // its result from the previous evaluation's same round, rechecked
+        // through the commit path (the memo saves work, never decides a
+        // value)
+        eng.set_loop_start(phitex_defuse::LoopStart::PerRound);
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
