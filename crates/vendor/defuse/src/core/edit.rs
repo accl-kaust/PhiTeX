@@ -574,12 +574,17 @@ impl Engine {
                 let old_decl = r.data().stat.defs.clone();
                 sh.register(s, &mut notes);
                 let new_decl = r.data().stat.defs.clone();
+                // (Per entry: a field declared at its own level and in a
+                // scope it opens has two, and a new text may keep one.)
                 if let Some(od) = old_decl {
-                    let defined: Vec<Field> = sh.defs_of(s).iter().map(|d| d.f).collect();
-                    for (f, _) in od {
-                        let still = new_decl.as_ref().is_some_and(|nd| nd.iter().any(|e| e.0 == f));
-                        if !still && !defined.contains(&f) {
-                            sh.remove_def(u, s, f, &mut notes);
+                    let defined: Vec<(Field, u8)> = sh.defs_of(s).iter().map(|d| (d.f, d.loc.entry_key())).collect();
+                    for (f, loc) in od {
+                        let k = loc.entry_key();
+                        let still = new_decl
+                            .as_ref()
+                            .is_some_and(|nd| nd.iter().any(|e| e.0 == f && e.1.entry_key() == k));
+                        if !still && !defined.contains(&(f, k)) {
+                            sh.remove_def_k(u, s, f, k, &mut notes);
                         }
                     }
                 }

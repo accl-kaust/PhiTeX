@@ -65,7 +65,15 @@ fn main() {
             return;
         }
         let mut hist: Vec<(Vec<String>, Ed)> = Vec::new();
-        for _ in 0..300 {
+        let all = std::env::var_os("FUZZ_DUMP_ALL").is_some();
+        // FUZZ_BATCH=k: evaluate (and check) after every k-th edit only, as
+        // a client applying several edits between evaluations.
+        let batch: usize = std::env::var("FUZZ_BATCH")
+            .ok()
+            .and_then(|b| b.parse().ok())
+            .unwrap_or(1)
+            .max(1);
+        for step in 0..300 {
             let pre = prog.lines.clone();
             let i = next(prog.lines.len() + 1);
             let e = match next(3) {
@@ -74,7 +82,11 @@ fn main() {
                 _ => Ed::Ins(i, pool[next(pool.len())].clone()),
             };
             apply(&mut eng, &mut prog, &e);
-            if ok(&mut eng, &prog) {
+            if (step + 1) % batch != 0 {
+                hist.push((pre, e));
+                continue;
+            }
+            if ok(&mut eng, &prog) || all {
                 hist.push((pre, e));
                 continue;
             }
@@ -92,10 +104,33 @@ fn main() {
                     "FAIL seed {seed}: pre-cold-ok {cold_ok}, one-edit-ok {one}, post-cold-ok {cold_post}\n{pre:?}\n{e:?}"
                 );
                 hist.push((pre, e));
+                dump(seed, &src, &hist);
                 shrink_history(&hist);
                 return;
             }
         }
+        if all {
+            dump(seed, &src, &hist);
+        }
     }
     println!("all ok");
+}
+
+/// `FUZZ_DUMP=DIR`: a seed's whole history (its program and every edit),
+/// for the repro example; at a failure, or with `FUZZ_DUMP_ALL` (which
+/// goes on past failures) for every seed.
+fn dump(seed: u64, src: &[String], hist: &[(Vec<String>, Ed)]) {
+    let Some(d) = std::env::var_os("FUZZ_DUMP") else { return };
+    let d = std::path::Path::new(&d);
+    let _ = std::fs::create_dir_all(d);
+    let _ = std::fs::write(d.join(format!("{seed}.prog")), src.join("\n") + "\n");
+    let eds: Vec<String> = hist
+        .iter()
+        .map(|(_, e)| match e {
+            Ed::Rm(i) => format!("rm {i}"),
+            Ed::Set(i, t) => format!("set {i}|{t}"),
+            Ed::Ins(i, t) => format!("ins {i}|{t}"),
+        })
+        .collect();
+    let _ = std::fs::write(d.join(format!("{seed}.eds")), eds.join("\n") + "\n");
 }
