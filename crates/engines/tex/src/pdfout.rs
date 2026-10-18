@@ -1796,6 +1796,14 @@ pub(crate) fn page_allocs(
         marks,
         v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())),
     ]);
+    if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
+        eprintln!(
+            "alloc: page {} (node {}): {}",
+            j + 1,
+            r.cx.node().raw(),
+            v.render(e)
+        );
+    }
     r.contribute(ALLOCS, v.seq_unit(e));
     Ok(())
 }
