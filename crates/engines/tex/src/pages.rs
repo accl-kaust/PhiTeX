@@ -745,6 +745,17 @@ impl Run<'_, '_> {
         // through the candidate, and a page firing there has its
         // finisher check the rest, [`Run::check_cut`])
         if cuttable {
+            if self.open_span() && crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+                eprintln!(
+                    "page-trace: node {} cut inside its own span at candidate {k}: nest {:?} conds {}",
+                    self.cx.node().raw(),
+                    self.nest
+                        .iter()
+                        .map(|l| (l.group, l.owns))
+                        .collect::<Vec<_>>(),
+                    self.conds.len()
+                );
+            }
             self.cut = Some(k);
             return Err(Halt::Cut);
         }
@@ -1318,6 +1329,9 @@ impl Run<'_, '_> {
                 },
                 raws.iter().map(Vec::len).collect::<Vec<_>>()
             );
+            if cfg!(feature = "observe") {
+                self.defect_explain(&s, &raws, &raw_pids, dead, b, mat.is_some())?;
+            }
             if crate::exec::obs_flag!("PHITEX_DEFECT_DUMP") {
                 let show = |raw: &[ValueId]| -> String {
                     raw.iter()
@@ -1643,6 +1657,133 @@ impl Run<'_, '_> {
     /// A page where the scan's decisions and the builder's on the items
     /// differ: said loudly, counted ([`SCAN_REAL_DIFFS`]); the page is
     /// the items'.
+    /// (`observe`) A page the profiles fire and the items do not: what
+    /// the two folds started from and where they part. The state's
+    /// profile against its material's, item by item, the differing ones
+    /// with both values; where each came from (the break's placer, the
+    /// state's anchor, the material's field or argument); then both
+    /// folds replayed side by side, piece by piece, with the candidate
+    /// each fires at, the first piece where they disagree named.
+    #[allow(clippy::too_many_lines)]
+    fn defect_explain(
+        &mut self,
+        s: &ScanIn,
+        raws: &[Vec<ValueId>],
+        raw_pids: &[i64],
+        dead: i64,
+        b: &[ValueId],
+        mat_arg: bool,
+    ) -> R<()> {
+        let v = self.v;
+        let n = |i: usize| b.get(i).map_or(0, |&x| int_of(v, x));
+        let me = self.cx.node().raw();
+        let short = |x: &crate::vprof::PItem| -> String {
+            let t = format!("{x:?}");
+            if t.len() > 140 {
+                format!("{}...", &t[..140])
+            } else {
+                t
+            }
+        };
+        // (1) the state's profile against its material's
+        let sp = crate::vprof::decode(&s.prof);
+        let mp = crate::vprof::decode(&crate::vprof::encode(v, &s.material));
+        eprintln!(
+            "defect {me}: page {} (break placed by node {}, piece {}, candidate {}); state: page {} anchor {:?}, {} profile items; material ({}): {} items, {} profile items",
+            n(0),
+            n(1).cast_unsigned(),
+            n(3),
+            n(4),
+            s.j,
+            s.anchor.map(phitex_defuse::NodeId::raw),
+            sp.len(),
+            if mat_arg {
+                "the step's argument".to_owned()
+            } else {
+                format!("field scan:mat:{}", n(0))
+            },
+            s.material.len(),
+            mp.len()
+        );
+        let mut shown = 0;
+        for i in 0..sp.len().max(mp.len()) {
+            let a = sp.get(i).map_or_else(|| "-".to_owned(), &short);
+            let c = mp.get(i).map_or_else(|| "-".to_owned(), &short);
+            if a != c {
+                eprintln!("defect {me}:   item {i}: state profile {a} | material {c}");
+                shown += 1;
+                if shown >= 16 {
+                    eprintln!("defect {me}:   ...");
+                    break;
+                }
+            }
+        }
+        // (3) both folds replayed: the profiles (as the scan) and the
+        // items (as the assembly), piece by piece
+        let mut pst = s.state(v);
+        let mut ps = s.page_state();
+        let anchor = s.anchor.map(|a| i64::from_ne_bytes(a.raw().to_ne_bytes()));
+        let pf = {
+            let mut rd = RunReaching(self, anchor);
+            pst.fold_items(&sp, dead, &mut rd).map(|f| f.k)
+        };
+        let mut pos = s.anchor;
+        let itf = {
+            let node = self.cx.node();
+            let mut live = |c: u16| match pos {
+                Some(p) if p != node => self.insert_class_at(c, p),
+                _ => self.insert_class(c),
+            };
+            ps.fold_items(v, &s.material, dead, &mut live)?.map(|f| f.k)
+        };
+        eprintln!(
+            "defect {me}:   material: profile fold total {} goal {} fires {pf:?} | items fold total {} goal {} fires {itf:?}",
+            pst.pb.so_far[1], pst.pb.so_far[0], ps.pb.so_far[1], ps.pb.so_far[0]
+        );
+        let mut split = pf != itf;
+        for (i, raw) in raws.iter().enumerate() {
+            let pid = raw_pids[i];
+            let mut pi = crate::vprof::decode(&crate::vprof::encode(v, raw));
+            self.resolve_prof_of(pid, &mut pi)?;
+            let pf = {
+                let mut rd = RunReaching(self, Some(pid));
+                pst.fold_items(&pi, dead, &mut rd).map(|f| (f.k, f.rest))
+            };
+            pos = Some(phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(
+                pid.to_ne_bytes(),
+            )));
+            let itf = {
+                let node = self.cx.node();
+                let mut live = |c: u16| match pos {
+                    Some(p) if p != node => self.insert_class_at(c, p),
+                    _ => self.insert_class(c),
+                };
+                ps.fold_items(v, raw, dead, &mut live)?
+                    .map(|f| (f.k, f.rest.len()))
+            };
+            let differ = pf != itf || pst.pb.so_far[1] != ps.pb.so_far[1];
+            eprintln!(
+                "defect {me}:   piece {pid}: profile total {} goal {} best {:?} fires {pf:?} | items total {} goal {} best {:?} fires {itf:?}{}",
+                pst.pb.so_far[1],
+                pst.pb.so_far[0],
+                pst.pb.best_break,
+                ps.pb.so_far[1],
+                ps.pb.so_far[0],
+                ps.pb.best_break,
+                if differ && !split {
+                    "  <-- the folds part here"
+                } else {
+                    ""
+                }
+            );
+            split |= differ;
+            if pf.is_some() || itf.is_some() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn scan_defect(&self, what: &str) {
         let n = SCAN_REAL_DIFFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         eprintln!(

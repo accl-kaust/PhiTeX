@@ -236,8 +236,10 @@ impl Shared {
     /// candidates in the reader's span (a definition set narrow enough to
     /// name the field, or a prefix few nodes declare) is likely to
     /// define the field: the read waits for it rather than guess past it.
+    /// Otherwise, under any speculation, it guesses past it (a definition
+    /// it makes after all refutes the read when the reader lands).
     fn optimistic_pset(&self, cands: usize) -> bool {
-        if self.spec.load(Ordering::Relaxed) == 2 && cands > PSET_FEW {
+        if self.spec.load(Ordering::Relaxed) >= 1 && cands > PSET_FEW {
             self.c.speculations.fetch_add(1, Ordering::Relaxed);
             true
         } else {
