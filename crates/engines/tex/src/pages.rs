@@ -32,8 +32,9 @@
 //!   after it, and what it gives back to the main list ([`RTN`]); the
 //!   continuation after it reads that on the finisher's prediction, so
 //!   the scan does not wait for the routine.
-//! - A piece ends at every page-builder candidate it can end at (none
-//!   inside a group or conditional of its own): its continuation
+//! - A piece ends at every page-builder candidate it can end at (inside
+//!   a group or conditional of its own only where the page is made to
+//!   fire, which the rest after the routine reads): its continuation
 //!   ([`Run::cont_encode`]) is the material of a `resume` piece
 //!   ([`Resume`], [`RESUME`]) placed after it (after the finisher of a
 //!   page firing there), which reads the state there forward and what
@@ -706,10 +707,19 @@ impl Run<'_, '_> {
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
         self.cand += 1;
         let op = self.cx.op();
+        // (inside a group or a conditional of the run's own only where
+        // the builder is made to fire: a penalty of `eject_penalty` or
+        // less put on the list since the candidate before, §1005; the
+        // routine runs there, and the rest reads what it defines (a page
+        // so far saved in a box, a column height), so the rest is a
+        // node after the routine. Never inside a list of the run's own)
+        let open_ok = !self.open_span()
+            || (self.nest.iter().all(|l| !l.owns && l.group != 0)
+                && self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs)));
         let cuttable = (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
             && fresh
-            && !self.open_span()
+            && open_ok
             && self.has_input();
         self.cand_marks.push(CandMark {
             k,
@@ -729,12 +739,10 @@ impl Run<'_, '_> {
         // which reads the state there forward and what a routine leaves.
         // Nothing decides it after the piece: no page's finisher reaches
         // back into the piece it fires in)
-        // (never inside a group or a conditional of the run's own: its
-        // rest, run as a resume, cannot leave them as a scope and reads
-        // on into the text after it, claiming the document to the next
-        // page node; the piece runs on through the candidate instead,
-        // and a page firing there has its finisher check the rest,
-        // [`Run::check_cut`])
+        // (inside a group or a conditional of the run's own, only where
+        // the page is made to fire, above: elsewhere the piece runs on
+        // through the candidate, and a page firing there has its
+        // finisher check the rest, [`Run::check_cut`])
         if cuttable {
             self.cut = Some(k);
             return Err(Halt::Cut);
@@ -766,6 +774,30 @@ impl Run<'_, '_> {
                                 | nodes::T_END
                                 | nodes::T_ABORT
                         )
+                })
+            })
+    }
+
+    /// Whether this run put a penalty of `eject_penalty` or less on the
+    /// main list in its contributions from the `from`-th on (§1005: the
+    /// builder fires the page there, unless the page holds no box).
+    fn forced_since(&self, from: usize) -> bool {
+        let v = self.v;
+        let f = v.field("items");
+        self.contribs
+            .get(from..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|&&(g, _)| g == f)
+            .any(|&(_, s)| {
+                v.seq_to_vec(s).iter().any(|&e| {
+                    let xs = list_of(v, e);
+                    xs.len() == 2
+                        && int_of(v, xs[0]) == 0
+                        && nodes::tag(v, xs[1]) == nodes::T_PENALTY
+                        && list_of(v, xs[1])
+                            .get(1)
+                            .is_some_and(|&p| int_of(v, p) <= -10_000)
                 })
             })
     }
