@@ -169,11 +169,18 @@ pub(crate) const fn mix(mut x: u64) -> u64 {
 /// A hash of `words` under `seed` (stable across runs and platforms).
 #[must_use]
 pub fn hash_words(seed: u64, words: &[u64]) -> u64 {
+    hash_word_iter(seed, words.iter().copied())
+}
+
+/// [`hash_words`] over an iterator: the same hash, no slice built.
+fn hash_word_iter(seed: u64, words: impl Iterator<Item = u64>) -> u64 {
     let mut h = mix(seed ^ 0x9e37_79b9_7f4a_7c15);
-    for &w in words {
+    let mut n = 0u64;
+    for w in words {
         h = mix(h ^ w).wrapping_add(0x9e37_79b9_7f4a_7c15);
+        n += 1;
     }
-    mix(h ^ words.len() as u64)
+    mix(h ^ n)
 }
 
 /// A hash of `bytes` under `seed` (stable across runs and platforms).
@@ -278,8 +285,7 @@ impl Values {
 
     /// A list.
     pub fn list(&self, xs: Vec<ValueId>) -> ValueId {
-        let words: Vec<u64> = xs.iter().map(|x| x.0).collect();
-        let id = hashed(T_LIST, hash_words(T_LIST, &words));
+        let id = hashed(T_LIST, hash_word_iter(T_LIST, xs.iter().map(|x| x.0)));
         self.put(id, || Entry::Plain(Arc::new(Value::List(xs.into_boxed_slice()))))
     }
 
