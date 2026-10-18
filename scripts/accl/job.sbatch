@@ -32,8 +32,8 @@
 # is copied to $w/gate-control.
 #
 # The compiler cache: a job that builds at a fixed root (ACCL_ROOT, the
-# gate's /gw) gets sccache, ~/shared-cache/bin/sccache-VERSION (made by
-# the first such job, `cargo install` with the network, then shared), on
+# gate's /gw) gets sccache, ~/shared-cache/bin/sccache-VERSION (the
+# release's static binary, fetched and checked by the first such job), on
 # a cache on the shared home, ~/shared-cache/sccache-phitex. Only at a
 # fixed root: an artifact keeps its absolute paths (a test's
 # CARGO_MANIFEST_DIR, the debug info), so one built under another root
@@ -114,21 +114,26 @@ fi
 [ -z "${cpid:-}" ] || wait "$cpid"
 # the compiler cache (see the header)
 scc_ver=0.18.0
+scc_sha256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
 scc_bin=$HOME/shared-cache/bin/sccache-$scc_ver
 scc_dir=$HOME/shared-cache/sccache-phitex
 sccbind="" sccenv=""
 if [ -z "${ACCL_NO_CARGO:-}" ] && [ -n "${ACCL_ROOT:-}" ] && [ -z "${ACCL_NO_SCCACHE:-}" ]; then
   if [ ! -x "$scc_bin" ]; then
-    # (made once, in a job, never on the head; jobs racing each install
-    # their own copy and the last rename wins, the same binary)
-    s0=$(date +%s)
-    if net cargo install -q --locked --no-default-features --version "$scc_ver" sccache --root "$w/sccache-inst" > "$w/sccache-install.log" 2>&1 \
+    # (fetched once, in a job, never on the head: the release's static
+    # binary, checked against its pinned SHA-256; jobs racing each
+    # fetch their own copy and the last rename wins, the same bytes)
+    tgz=sccache-v$scc_ver-x86_64-unknown-linux-musl.tar.gz
+    if net curl -fsSL --retry 3 -o "$w/$tgz" "https://github.com/mozilla/sccache/releases/download/v$scc_ver/$tgz" > "$r/sccache-fetch.log" 2>&1 \
+      && [ "$(sha256sum "$w/$tgz" | cut -d' ' -f1)" = "$scc_sha256" ] \
+      && tar -xzf "$w/$tgz" -C "$w" \
       && mkdir -p "$(dirname "$scc_bin")" \
-      && cp "$w/sccache-inst/bin/sccache" "$scc_bin.part-$SLURM_JOB_ID" \
+      && cp "$w/sccache-v$scc_ver-x86_64-unknown-linux-musl/sccache" "$scc_bin.part-$SLURM_JOB_ID" \
+      && chmod +x "$scc_bin.part-$SLURM_JOB_ID" \
       && mv -f "$scc_bin.part-$SLURM_JOB_ID" "$scc_bin"; then
-      echo "sccache $scc_ver installed at $scc_bin in $(( $(date +%s) - s0 )) s"
+      echo "sccache $scc_ver fetched to $scc_bin"
     else
-      echo "sccache $scc_ver not installed, building without it: $(tail -3 "$w/sccache-install.log" | tr '\n' ' ')"
+      echo "sccache $scc_ver not fetched, building without it: $(tail -2 "$r/sccache-fetch.log" | tr '\n' ' ')"
       rm -f "$scc_bin.part-$SLURM_JOB_ID"
     fi
   fi
