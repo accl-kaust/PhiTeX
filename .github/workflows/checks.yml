@@ -43,9 +43,13 @@ jobs:
       # (MuPDF's WebAssembly build, embedded in the CLI: fetched pinned, not committed)
       - run: scripts/fetch-mupdf.sh
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # (the vendored engine keeps its own lints)
+      - run: cargo clippy --workspace --exclude defuse --all-targets -- -D warnings
       - run: >-
           cargo check --target wasm32-unknown-unknown -p phitex-codecs -p phitex-otf
           -p phitex-xdvipdfmx
+      # (the engine as a WebAssembly program with threads, scripts/wasm.sh:
+      # linted here; its documents need TeX Live: `scripts/wasm.sh check`)
+      - run: cargo clippy --target wasm32-wasip1-threads -p phitex-wasm -- -D warnings
       # (without TeX Live: the tests that compare with it skip themselves)
       - run: cargo test --workspace --quiet

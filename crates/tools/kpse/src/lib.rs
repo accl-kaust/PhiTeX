@@ -14,7 +14,11 @@
 //! place, and the program formats', which name the program).
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+// (the WebAssembly build, `scripts/wasm.sh`: WASI's paths are bytes too)
+#[cfg(target_os = "wasi")]
+use std::os::wasi::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 type Bytes = Vec<u8>;
@@ -1371,12 +1375,19 @@ fn dirname(p: &[u8]) -> Bytes {
     }
 }
 
+#[cfg(unix)]
 fn same_file(a: &[u8], b: &[u8]) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::metadata(os(a)), std::fs::metadata(os(b))) {
         (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
         _ => false,
     }
+}
+
+/// WASI has no device and inode numbers: the same path is the same file.
+#[cfg(not(unix))]
+fn same_file(a: &[u8], b: &[u8]) -> bool {
+    a == b
 }
 
 /// `elt-dirs.c`, `kpathsea_normalize_path` (Unix): collapse leading
