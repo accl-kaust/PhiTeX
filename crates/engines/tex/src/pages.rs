@@ -120,10 +120,11 @@ pub(crate) const SCAN: &str = "scan:state";
 
 /// Where a block's scan ended its block ([`Run::scan_step`]): `[scan
 /// state, material]` after its last page, `()` where a continuation of it
-/// places the next page itself, `[BLOCK_AT_CONT]` where its last page's
-/// continuation sits after it (the page fired in the piece that placed
-/// the scan) and defines the state ([`SCAN`], [`SCAN_MAT`]) the next
-/// block's scan reads; read by the next block's scan.
+/// places the next page itself, `[BLOCK_AT_CONT, j, scan]` where its last
+/// page `j`'s continuation sits after it (the page fired in the piece
+/// that placed the scan) and defines the state the next block's scan
+/// reads, by its page's field ([`scan_page_field`]); read by the next
+/// block's scan.
 pub(crate) const SCAN_BLOCK: &str = "scan:block";
 
 /// [`SCAN_BLOCK`]'s mark for a block whose end is its last page's
@@ -4462,14 +4463,12 @@ impl Run<'_, '_> {
         for (i, &u) in units.iter().enumerate() {
             let (pid, ints) = crate::vprof::unit_parts(v, u);
             let items = crate::vprof::decode(&ints);
-            needs[i] = items
-                .iter()
-                .any(|x| {
-                    matches!(
-                        x,
-                        crate::vprof::PItem::Params(None) | crate::vprof::PItem::InsParams(_, None)
-                    ) || crate::vprof::is_end(x)
-                });
+            needs[i] = items.iter().any(|x| {
+                matches!(
+                    x,
+                    crate::vprof::PItem::Params(None) | crate::vprof::PItem::InsParams(_, None)
+                ) || crate::vprof::is_end(x)
+            });
             decoded[i] = Some((pid, items));
         }
         let dead = if crate::vprof::has_end(&material)
@@ -4610,12 +4609,33 @@ impl Run<'_, '_> {
                 return Ok(Placed::Nothing);
             }
             // (the block before ended in a page whose continuation sits
-            // after its scan: the state that continuation defines, on its
-            // prediction until it runs)
-            Some(x) if list_of(v, x).len() == 1 => (
-                self.eng_read(v.field(SCAN))?,
-                self.eng_read(v.field(SCAN_MAT))?,
-            ),
+            // after its scan: the state that continuation (or the last of
+            // the chain its material fires) leaves the scan in, on its
+            // prediction until it runs: its page's own field, read by
+            // name, not the scan state reaching this step, which the
+            // continuations this step places before itself define: a
+            // read of its own placements, another state each run)
+            Some(x)
+                if list_of(v, x)
+                    .first()
+                    .is_some_and(|&y| int_of(v, y) == BLOCK_AT_CONT) =>
+            {
+                let xs = list_of(v, x);
+                let p = match xs[..] {
+                    [_, j, by] => self.eng_read(scan_page_field(v, int_of(v, j), int_of(v, by)))?,
+                    _ => None,
+                };
+                let Some(p) = p else {
+                    self.cx
+                        .define_with(v.field(SCAN_BLOCK), ValueId::UNIT, Locality::Global);
+                    return Ok(Placed::Nothing);
+                };
+                let ps = list_of(v, p);
+                (
+                    ps.first().copied().filter(|&y| y != ValueId::UNIT),
+                    ps.get(1).copied().filter(|&y| y != ValueId::UNIT),
+                )
+            }
             Some(x) => {
                 let xs = list_of(v, x);
                 (
@@ -4629,6 +4649,7 @@ impl Run<'_, '_> {
         let trace = crate::exec::obs_flag!("PHITEX_SCAN_TRACE");
         let mut known = true;
         let mut after_me = false;
+        let mut last_page = 0;
         // (a bound on the pages one block fires: a page fires on some
         // item, and an item's page goes on in a later piece at most)
         for _ in 0..4096 {
@@ -4642,6 +4663,7 @@ impl Run<'_, '_> {
             // continuation defines instead of this step's prediction of
             // it, [`SCAN_BLOCK`])
             after_me = in_last;
+            last_page = st.j - 1;
             if trace {
                 eprintln!(
                     "scan {}: page {} fires in piece {pid} at candidate {}",
@@ -4723,7 +4745,8 @@ impl Run<'_, '_> {
         let end = if !known {
             ValueId::UNIT
         } else if after_me {
-            v.list(vec![v.int(BLOCK_AT_CONT)])
+            let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+            v.list(vec![v.int(BLOCK_AT_CONT), v.int(last_page), v.int(me)])
         } else {
             v.list(vec![
                 src.unwrap_or(ValueId::UNIT),
