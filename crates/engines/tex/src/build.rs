@@ -58,10 +58,11 @@ impl Run<'_, '_> {
     /// The mode and current list (§211): the innermost level of the nest,
     /// or, with none open, the scope kind the node runs in.
     pub(crate) fn mode(&mut self) -> R<Mode> {
-        let base = self.base_mode()?;
         if self.nest.is_empty() {
-            return Ok(base);
+            return self.base_mode();
         }
+        // (level 0's extra fields are the top level's here: not copied)
+        let base = self.base_mode_with(false)?;
         let groups = self.local_groups();
         // the vertical list a paragraph belongs to: the level below it
         let (vlid, vm) = self
@@ -94,11 +95,26 @@ impl Run<'_, '_> {
 
     /// Level 0: the scope kind the node runs in, decoded once per value.
     pub(crate) fn base_mode(&mut self) -> R<Mode> {
+        self.base_mode_with(true)
+    }
+
+    /// [`Self::base_mode`], its extra fields left empty unless `with_extra`.
+    fn base_mode_with(&mut self, with_extra: bool) -> R<Mode> {
         let k = self.scope_kind()?;
         let v = self.v;
+        let ex = |p: &crate::run::KindFields| {
+            (
+                p.0,
+                p.1,
+                p.2,
+                p.3,
+                p.4,
+                if with_extra { p.5.clone() } else { Vec::new() },
+            )
+        };
         let (group, sid, lid, km, depth, extra) = match k {
             Some(k) => match &self.kind_memo {
-                Some((kk, p)) if *kk == k => p.clone(),
+                Some((kk, p)) if *kk == k => ex(p),
                 _ => {
                     let xs = list_of(v, k);
                     let n = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
@@ -110,8 +126,9 @@ impl Run<'_, '_> {
                         n(4),
                         xs.get(6..).map(<[ValueId]>::to_vec).unwrap_or_default(),
                     );
-                    self.kind_memo = Some((k, p.clone()));
-                    p
+                    let r = ex(&p);
+                    self.kind_memo = Some((k, p));
+                    r
                 }
             },
             None => (0, 0, 0, 1, 0, Vec::new()),

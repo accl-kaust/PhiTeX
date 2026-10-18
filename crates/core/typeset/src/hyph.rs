@@ -604,19 +604,21 @@ impl Hyphenator for TexHyphenator<'_> {
         // (room for the letters, a discretionary per possible hyphen and
         // a few kerns: grown at most once)
         let mut out: List = Vec::with_capacity(hn + hn / 2 + 4);
-        // (a cut's translation before it is known to hold the hyphen;
-        // empty at each cut)
-        let mut hold: List = Vec::new();
         let mut j = j0;
         loop {
             let mut l = j;
-            j = rc.reconstitute(j, hn, bchar, hyf_char, &mut hold) + 1;
-            if rc.hyphen_passed == 0 {
-                out.append(&mut hold);
-                if rc.hyf[j - 1] & 1 != 0 {
-                    l = j;
-                    rc.hyphen_passed = j - 1;
-                }
+            // (a cut's translation goes on the output; one that holds the
+            // hyphen comes off it again, as the replacement)
+            let mark = out.len();
+            j = rc.reconstitute(j, hn, bchar, hyf_char, &mut out) + 1;
+            let mut hold: List = if rc.hyphen_passed == 0 {
+                Vec::new()
+            } else {
+                out.split_off(mark)
+            };
+            if rc.hyphen_passed == 0 && rc.hyf[j - 1] & 1 != 0 {
+                l = j;
+                rc.hyphen_passed = j - 1;
             }
             if rc.hyphen_passed > 0 {
                 // §914
