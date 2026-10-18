@@ -3248,7 +3248,10 @@ impl Finish {
     /// routine that ships its page, §1026); a wrong guess runs the
     /// continuation again.
     fn predicted_defs_(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        if false {
+        if !ops(&self.0)
+            .fin_predict
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return None;
         }
         let t = args.get(9).copied().unwrap_or(ValueId::UNIT);

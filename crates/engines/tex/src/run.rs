@@ -193,6 +193,8 @@ pub(crate) struct Ops {
     /// counts follow the schedule, and hide that dependency from the
     /// engine).
     pub fin_defs_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<FinTable>>>,
+    /// [`crate::Options::finisher_predictions`].
+    pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The class projection of meanings ([`crate::val::class_projection`],
     /// registered with the engine): a lookup that only stores its token
     /// reads the name's class, not its meaning ([`Run::class_lookup`]).

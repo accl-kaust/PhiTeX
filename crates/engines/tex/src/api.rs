@@ -104,6 +104,11 @@ pub struct Options {
     /// load whose key matches is given them as the prediction of its
     /// outputs (also `PHITEX_PKG_PREDICT=1`).
     pub pkg_predict: bool,
+    /// Whether a page's finisher is given the definitions the last
+    /// finisher running its routine made as its prediction (on by
+    /// default; off, the readers after it wait for its run: a test that
+    /// the build's bytes do not hang on the predictions).
+    pub finisher_predictions: bool,
     /// `\\pdfshellescape` (pdfTeX's `shellenabledp`): 0 off, 1 on,
     /// 2 restricted (TeX Live's `shell_escape = p`, the default). No
     /// command ever runs as a process: an allowed `makeindex` runs in
@@ -525,6 +530,7 @@ impl Default for Options {
             wkeys: Vec::new(),
             pkgrec: Vec::new(),
             pkg_predict: false,
+            finisher_predictions: true,
             shell_escape: 2,
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
@@ -1862,6 +1868,7 @@ impl Graph {
             fin_defs: Arc::default(),
             scan_guess: Arc::default(),
             fin_defs_start: Arc::default(),
+            fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             not_virtual: Arc::default(),
             pdf_cmds: Arc::default(),
             class_proj,
@@ -3621,6 +3628,10 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let m_check = mem_mb();
     let finder = opts.prelude_finder();
     let mut g = Graph::new(opts.time_limit, opts.threads);
+    g.ops.fin_predict.store(
+        opts.finisher_predictions,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     g.eng.set_max_rounds(opts.max_rounds);
     g.sched = opts.speculation.scheduler(opts.speculation_budget);
     let unit = g.eng.new_unit();
@@ -3990,6 +4001,10 @@ impl Build {
             );
         }
         let mut g = Graph::new(opts.time_limit, opts.threads);
+        g.ops.fin_predict.store(
+            opts.finisher_predictions,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         g.eng.set_max_rounds(opts.max_rounds);
         (*g.ops.out_ok.lock().unwrap_or_else(PoisonError::into_inner))
             .clone_from(&opts.out_name_ok);

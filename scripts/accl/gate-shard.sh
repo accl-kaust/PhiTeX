@@ -402,8 +402,20 @@ for l in open(sys.argv[1]):
       echo "para4000 release -j $j: md5 ${rm_:-none} $([ "$rm_" = "$want" ] && echo same || echo DIFFERS) wall_min $(echo $rw | tr ' ' '\n' | sort -n | head -1) walls$rw" >> "$r/para.txt"
       [ "$rm_" = "$want" ] || red "para4000 release -j $j: md5 ${rm_:-none}, bar $want"
     done
-    # the edit histories (spec-final §0 bytes), on the checks' build
+    # the committed reads checked again after a j8 build, on the checks'
+    # build (the profile CLI above has the check compiled out): a read
+    # that no longer holds is a missed invalidation, the gate fails
     bin=$w/bin/cli/phitex
+    rm -rf "$w/par/chk"
+    (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 PHITEX_CHECK_READS=1 NO_COLOR=1 \
+      timeout 900 taskset -c "$cores" "$bin" build -j 8 --output-dir=chk --program pdftex para4000.tex > "$r/para-check-reads.log" 2>&1)
+    stale=$(sed -n 's/^check_reads: \([0-9]*\) stale.*/\1/p' "$r/para-check-reads.log" | tail -1)
+    cm=$(md5sum < "$w/par/chk/para4000.pdf" 2>/dev/null | cut -c1-32)
+    echo "para4000 checked reads -j 8: ${stale:-none} stale, md5 ${cm:-none} $([ "$cm" = "$want" ] && echo same || echo DIFFERS)" >> "$r/para.txt"
+    grep '^check_reads: NodeId' "$r/para-check-reads.log" | head -5 >> "$r/para.txt"
+    [ "${stale:-x}" = 0 ] || red "para4000 -j 8 on the checks' build: ${stale:-no} stale reads (PHITEX_CHECK_READS)"
+    [ "$cm" = "$want" ] || red "para4000 -j 8 on the checks' build: md5 ${cm:-none}, bar $want"
+    # the edit histories (spec-final §0 bytes), on the checks' build
     for j in 8 16; do
       rm -rf "$w/parh" "$w/parh-cold" && mkdir -p "$w/parh" && cp bench/para4000.tex "$w/parh/"
       (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 \

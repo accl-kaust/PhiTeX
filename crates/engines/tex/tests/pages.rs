@@ -251,3 +251,33 @@ fn an_edit_that_moves_a_break_out_of_a_claimed_span() {
         "edit != cold for the eject before paragraphs {bad:?}"
     );
 }
+
+/// The bytes do not hang on the finishers' predictions: para4000 at 8
+/// threads with them off (the readers after a finisher wait for its run)
+/// equals the one-thread build. Red while a block's scan step that reads
+/// its page's field as unset and then places the continuation defining
+/// it (before itself) is not checked again when that continuation's real
+/// state arrives (the engine's stale reads, `PHITEX_CHECK_READS`).
+#[test]
+#[ignore = "red until the engine re-checks a read that nodes the reader placed before itself now answer"]
+fn para4000_bytes_without_finisher_predictions() {
+    let fx = common::fixtures().join("dvi");
+    let bench =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bench/para4000.tex");
+    let src = format!("\\pdfoutput=1 {}", common::read(&bench));
+    let prelude = common::plain();
+    let opts = |t: usize, pred: bool| phitex_tex::Options {
+        threads: Some(t),
+        finisher_predictions: pred,
+        ..common::options("./para4000.tex", "para4000", "", &fx)
+    };
+    let want = common::build(opts(1, true), Some(&prelude), &src);
+    for k in 0..3 {
+        let got = common::build(opts(8, false), Some(&prelude), &src);
+        let d = common::first_difference(&got.output().0, &want.output().0);
+        assert!(
+            d.is_none(),
+            "run {k} at 8 threads without finisher predictions differs: {d:?}"
+        );
+    }
+}
