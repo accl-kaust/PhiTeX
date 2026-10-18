@@ -430,9 +430,15 @@ fn is_prim(name: &str) -> bool {
 
 /// Whether `name` is an integer, dimen, glue or token parameter.
 fn table_param(name: &str) -> bool {
-    crate::prims::PRIMS
-        .iter()
-        .any(|p| p.0 == name && matches!(p.1, 72..=76))
+    static S: OnceLock<phitex_defuse::FxHashSet<&'static str>> = OnceLock::new();
+    S.get_or_init(|| {
+        crate::prims::PRIMS
+            .iter()
+            .filter(|p| matches!(p.1, 72..=76))
+            .map(|p| p.0)
+            .collect()
+    })
+    .contains(name)
 }
 
 /// The engine's state head of a field the pass names (`count:12`,
@@ -1641,28 +1647,42 @@ fn line_span_end(text: &str, off: usize) -> usize {
 /// The union of bounds: what a slice of several commands may define.
 /// `None` state in either is `None` (every head).
 fn union(a: &mut Bound, b: &Bound) {
-    for p in &b.prefixes {
-        if !a.prefixes.contains(p) {
-            a.prefixes.push(p.clone());
-        }
-    }
+    use phitex_defuse::FxHashSet;
+    // (each list kept in its order, each entry once: what `a` holds is
+    // looked up in a set made once, not searched per entry of `b`)
+    let prefixes: Vec<String> = {
+        let mut have: FxHashSet<&str> = a.prefixes.iter().map(String::as_str).collect();
+        b.prefixes
+            .iter()
+            .filter(|p| have.insert(p.as_str()))
+            .cloned()
+            .collect()
+    };
+    a.prefixes.extend(prefixes);
     for &c in b.cats.iter() {
-        {
-            a.cats.add(c);
-        }
+        a.cats.add(c);
     }
-    for m in &b.means {
-        // (a meaning an earlier command of the span defines is the
-        // run's own, not assumed of the state before it)
-        if !a.means.iter().any(|x| x.0 == m.0) && !a.names.contains(&m.0) {
-            a.means.push(m.clone());
-        }
-    }
-    for n in &b.names {
-        if !a.names.contains(n) {
-            a.names.push(n.clone());
-        }
-    }
+    // (a meaning an earlier command of the span defines is the run's
+    // own, not assumed of the state before it)
+    let means: Vec<(String, u8)> = {
+        let names: FxHashSet<&str> = a.names.iter().map(String::as_str).collect();
+        let mut have: FxHashSet<&str> = a.means.iter().map(|x| x.0.as_str()).collect();
+        b.means
+            .iter()
+            .filter(|m| !names.contains(m.0.as_str()) && have.insert(m.0.as_str()))
+            .cloned()
+            .collect()
+    };
+    a.means.extend(means);
+    let names: Vec<String> = {
+        let mut have: FxHashSet<&str> = a.names.iter().map(String::as_str).collect();
+        b.names
+            .iter()
+            .filter(|n| have.insert(n.as_str()))
+            .cloned()
+            .collect()
+    };
+    a.names.extend(names);
     match (&mut a.state, &b.state) {
         (Some(sa), Some(sb)) => {
             for h in sb {
@@ -3086,8 +3106,19 @@ fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>
 // would only pass its tables around)
 #[allow(clippy::too_many_lines)]
 fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
+    // (`PHITEX_TEX_TIME`: the analysis's phases, on the timeline)
+    let tm = crate::exec::prof_flag!("PHITEX_TEX_TIME");
+    let t0 = std::time::Instant::now();
     let an = Analysis::with_own(text, kind, defs.clone(), own);
+    if tm {
+        crate::timeline::note("hints: the pass (lex, atoms, classify)", t0.elapsed());
+    }
+    let t0 = std::time::Instant::now();
     let (slices, pars) = slices_of(text, &an, kind);
+    if tm {
+        crate::timeline::note("hints: the slices", t0.elapsed());
+    }
+    let t0 = std::time::Instant::now();
     // (one value per distinct hint, keyed by the hash of its encoding:
     // no string keys in the pass, spec-final §5.2)
     let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
@@ -3390,6 +3421,9 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         }
     }
     t.slice_hints = slice_hints;
+    if tm {
+        crate::timeline::note("hints: the atoms' and slices' hints", t0.elapsed());
+    }
     t
 }
 
