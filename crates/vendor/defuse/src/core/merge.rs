@@ -58,6 +58,8 @@ thread_local! {
     /// The keys the merge on this thread changed since its last flush
     /// (`None`: not merging, nothing is recorded).
     static CHANGED: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
+    /// `CHANGED`'s buffer between merges.
+    static SPARE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 // The kinds of keys.
@@ -267,13 +269,19 @@ impl Shared {
                 return;
             }
             let n = items.len();
-            CHANGED.with(|c| *c.borrow_mut() = Some(Vec::new()));
+            // (This thread's buffer, kept from list to list.)
+            CHANGED.with(|c| *c.borrow_mut() = Some(SPARE.with(|sp| std::mem::take(&mut *sp.borrow_mut()))));
             let t0 = std::time::Instant::now();
             for it in items {
                 it(self);
                 self.flush_changes();
             }
-            CHANGED.with(|c| *c.borrow_mut() = None);
+            CHANGED.with(|c| {
+                if let Some(mut v) = c.borrow_mut().take() {
+                    v.clear();
+                    SPARE.with(|sp| *sp.borrow_mut() = v);
+                }
+            });
             let dt = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0);
             self.c.commit_ns.fetch_add(dt, Ordering::Relaxed);
             self.c.merge_ns.fetch_add(dt, Ordering::Relaxed);
@@ -296,7 +304,7 @@ impl Shared {
             return;
         }
         let ver = self.ver.fetch_add(1, Ordering::AcqRel) + 1;
-        for k in ks {
+        for &k in &ks {
             let mut d = lock(&self.delta[shard_of(k)]);
             let e = d.last.entry(k).or_insert((0, 1));
             e.0 = ver;
@@ -307,6 +315,16 @@ impl Shared {
                 d.base = ver;
             }
         }
+        // (Its buffer goes back for the next item: no regrowth per item.)
+        let mut ks = ks;
+        ks.clear();
+        CHANGED.with(|c| {
+            if let Some(v) = c.borrow_mut().as_mut()
+                && v.is_empty()
+            {
+                *v = ks;
+            }
+        });
     }
 
     /// Forgets the delta (between evaluations no run is in flight).
