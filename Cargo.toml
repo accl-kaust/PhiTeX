@@ -12,6 +12,7 @@ members = [
     "crates/tools/*",
     "crates/editor/*",
     "crates/editor/diff/git",
+    "crates/wasm",
     "xtask",
 ]
 
