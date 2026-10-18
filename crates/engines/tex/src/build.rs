@@ -1567,11 +1567,7 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let xs = list_of(v, b);
-        for x in xs
-            .get(9)
-            .map(|&l| nodes::list_values(v, l))
-            .unwrap_or_default()
-        {
+        for x in xs.get(9).map(|&l| list_of(v, l)).unwrap_or_default() {
             self.append(md.lid, x);
         }
         if c == 0 {
