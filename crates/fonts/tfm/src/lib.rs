@@ -190,6 +190,12 @@ pub struct Tfm {
     params: Vec<[u8; 4]>,
     bchar: Option<u8>,
     bchar_label: Option<usize>,
+    /// The lig/kern step for each pair of characters, made once: per left
+    /// character with a program its row's offset in `pairs`, or
+    /// `u32::MAX`; a row is 256 cells, the matching step's index plus
+    /// one (0: none), as [`Tfm::lookup`] walks the program.
+    rows: Vec<u32>,
+    pairs: Vec<u16>,
 }
 
 /// A TFM file read byte by byte; reading past the end is `abort` (§564).
@@ -458,7 +464,10 @@ pub fn parse(bytes: &[u8]) -> Result<Tfm, TfmError> {
         params,
         bchar: u8::try_from(bchar).ok(),
         bchar_label: (bch_label < nl).then_some(bch_label),
-    })
+        rows: Vec::new(),
+        pairs: Vec::new(),
+    }
+    .with_pairs())
 }
 
 /// `xn_over_d(x, n, d)` (§107) for nonnegative `n` and positive `d`.
@@ -735,9 +744,43 @@ impl Tfm {
     #[must_use]
     pub fn lookup(&self, left: Option<u8>, right: Option<u8>) -> Option<LigKernStep> {
         let cur_r = right.or(self.bchar)?;
+        if let Some(c) = left {
+            let row = *self.rows.get(usize::from(c))?;
+            if row == u32::MAX {
+                return None;
+            }
+            let k = self.pairs[row as usize + usize::from(cur_r)];
+            return (k != 0).then(|| self.lig_kern[usize::from(k - 1)]);
+        }
         self.program(left)
             .map(|(_, j)| j)
             .find(|j| j.next == cur_r && j.skip <= STOP_FLAG)
+    }
+
+    /// The font with its pair table ([`Tfm::lookup`]): each left
+    /// character's program walked once, the first step for each right
+    /// character kept.
+    fn with_pairs(mut self) -> Tfm {
+        let mut rows = vec![u32::MAX; 256];
+        let mut pairs: Vec<u16> = Vec::new();
+        for c in 0..=255u8 {
+            let mut prog = self.program(Some(c)).peekable();
+            if prog.peek().is_none() {
+                continue;
+            }
+            let off = pairs.len();
+            pairs.resize(off + 256, 0);
+            for (k, j) in prog {
+                let cell = &mut pairs[off + usize::from(j.next)];
+                if *cell == 0 && j.skip <= STOP_FLAG {
+                    *cell = u16::try_from(k + 1).unwrap_or(0);
+                }
+            }
+            rows[usize::from(c)] = u32::try_from(off).unwrap_or(u32::MAX);
+        }
+        self.rows = rows;
+        self.pairs = pairs;
+        self
     }
 }
 
