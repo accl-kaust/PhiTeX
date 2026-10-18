@@ -793,18 +793,25 @@ impl Shared {
             return Q::Ans((ValueId::UNIT, NIL));
         };
         let v = &self.values;
-        let sh = rlock(self.shard(u, f));
-        let mut acc = m.empty(v);
+        // The window's values copied under the shard lock and folded after
+        // it: the client's combine can be slow, and every contributor's
+        // commit takes that lock to write.
+        let mut xs: Vec<ValueId> = Vec::new();
         let mut last = NIL;
-        if let Some(idx) = sh.get(&(u, f)) {
-            let i = idx.contribs.partition_point(|c| self.rec(c.0).lab() <= lo);
-            for &(s, x) in &idx.contribs[i..] {
-                if self.rec(s).lab() >= hi {
-                    break;
+        {
+            let sh = rlock(self.shard(u, f));
+            if let Some(idx) = sh.get(&(u, f)) {
+                let i = idx.contribs.partition_point(|c| self.rec(c.0).lab() <= lo);
+                let j = i + idx.contribs[i..].partition_point(|c| self.rec(c.0).lab() < hi);
+                xs.extend(idx.contribs[i..j].iter().map(|c| c.1));
+                if j > i {
+                    last = idx.contribs[j - 1].0;
                 }
-                acc = m.combine(v, acc, x);
-                last = s;
             }
+        }
+        let mut acc = m.empty(v);
+        for x in xs {
+            acc = m.combine(v, acc, x);
         }
         Q::Ans((acc, last))
     }
