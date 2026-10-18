@@ -286,7 +286,11 @@ impl Fast {
     /// The first `k` bytes at `p` of `w`, as a number.
     fn key(w: &[u8], p: usize, k: usize) -> u64 {
         let x = u64::from_le_bytes(w[p..p + 8].try_into().unwrap_or([0; 8]));
-        if k == 8 { x } else { x & ((1u64 << (8 * k)) - 1) }
+        if k == 8 {
+            x
+        } else {
+            x & ((1u64 << (8 * k)) - 1)
+        }
     }
 
     fn slot(key: u64) -> usize {
