@@ -1065,4 +1065,8 @@ latexmk_tests! {
     latexmk_index_j8: "index", 8;
     latexmk_index_style_j1: "index-style", 1;
     latexmk_index_style_j8: "index-style", 8;
+    // (a long index in two columns after a forced page: the rest after
+    // the routine reads the column height and page state it leaves)
+    latexmk_ams_index_j1: "amsidx", 1;
+    latexmk_ams_index_j8: "amsidx", 8;
 }
