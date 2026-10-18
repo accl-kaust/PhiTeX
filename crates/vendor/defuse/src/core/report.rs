@@ -85,6 +85,12 @@ impl Engine {
         rep.predictions_refuted = c.predictions_refuted.load(Ordering::Relaxed);
         rep.nodes_conservative = c.nodes_conservative.load(Ordering::Relaxed);
         rep.stable_scans = c.stable_scans.load(Ordering::Relaxed);
+        rep.read_ns = super::ctx::READ_KINDS
+            .iter()
+            .zip(&c.read_ns)
+            .map(|(k, n)| (*k, n.load(Ordering::Relaxed)))
+            .filter(|e| e.1 > 0)
+            .collect();
         rep.realised_critical_path = u32::try_from(c.realised.load(Ordering::Relaxed)).unwrap_or(u32::MAX);
         rep.realised_critical_time = std::time::Duration::from_nanos(c.realised_ns.load(Ordering::Relaxed));
         {

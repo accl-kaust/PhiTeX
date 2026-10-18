@@ -209,6 +209,24 @@ impl<'a> Ctx<'a> {
         NodeId(self.id)
     }
 
+    /// Times one read call in 64 (scaled), into `Report::read_ns` by kind.
+    #[inline]
+    fn sampled<T>(&mut self, k: usize, f: impl FnOnce(&mut Self) -> T) -> T {
+        let n = READ_TICK.with(|c| {
+            let v = c.get().wrapping_add(1);
+            c.set(v);
+            v
+        });
+        if !n.is_multiple_of(READ_SAMPLE) {
+            return f(self);
+        }
+        let t0 = std::time::Instant::now();
+        let r = f(self);
+        let dt = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0);
+        self.sh.c.read_ns[k].fetch_add(dt * READ_SAMPLE, std::sync::atomic::Ordering::Relaxed);
+        r
+    }
+
     /// The value of `f` reaching this node: the nearest earlier visible
     /// definition, a loop-back field's round value, or the environment.
     ///
@@ -222,7 +240,7 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.use_field_inner(f);
+        let r = self.sampled(0, |cx| cx.use_field_inner(f));
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_field", a, crate::record::stop_or(&r));
         r
@@ -257,7 +275,7 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.use_field_at_inner(f, at);
+        let r = self.sampled(1, |cx| cx.use_field_at_inner(f, at));
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_field_at", a, crate::record::stop_or(&r));
         r
@@ -380,7 +398,7 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.use_field_proj_inner(f, p);
+        let r = self.sampled(2, |cx| cx.use_field_proj_inner(f, p));
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_field_proj", a, crate::record::stop_or(&r));
         r
@@ -437,7 +455,7 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.use_env_inner(f);
+        let r = self.sampled(4, |cx| cx.use_env_inner(f));
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "use_env", a, crate::record::stop_or(&r));
         r
@@ -908,7 +926,7 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.acc_range_inner(f, from);
+        let r = self.sampled(5, |cx| cx.acc_range_inner(f, from));
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "acc_range", a, crate::record::stop_or(&r));
         r
@@ -935,7 +953,7 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.acc_range_to_inner(f, from, to);
+        let r = self.sampled(5, |cx| cx.acc_range_to_inner(f, from, to));
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "acc_range_to", a, crate::record::stop_or(&r));
         r
@@ -980,7 +998,7 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.scope_kind_inner();
+        let r = self.sampled(3, |cx| cx.scope_kind_inner());
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "scope_kind", a, crate::record::stop_or(&r));
         r
@@ -1580,7 +1598,7 @@ impl<'a> Ctx<'a> {
         } else {
             serde_json::Value::Null
         };
-        let r = self.is_loopback_inner(f);
+        let r = self.sampled(6, |cx| cx.is_loopback_inner(f));
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "is_loopback", a, crate::record::j(&r));
         r
@@ -1637,3 +1655,21 @@ impl Shared {
         s
     }
 }
+
+/// One read call in this many is timed for `Report::read_ns`.
+const READ_SAMPLE: u64 = 64;
+
+thread_local! {
+    static READ_TICK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The kinds of reads `Report::read_ns` breaks down.
+pub(crate) const READ_KINDS: [&str; 7] = [
+    "use_field",
+    "use_field_at",
+    "use_field_proj",
+    "scope_kind",
+    "use_env",
+    "acc_range",
+    "is_loopback",
+];
