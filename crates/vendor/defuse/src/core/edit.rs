@@ -61,6 +61,7 @@ pub struct Engine {
     pub(crate) roots: Vec<NodeId>,
     pub(crate) loop_start: LoopStart,
     pub(crate) max_rounds: u64,
+    pub(crate) cap_policy: crate::api::CapPolicy,
     pub(crate) version: u64,
     pub(crate) settled_out: Vec<Settled>,
     /// The version every marked node was last made a report candidate at.
@@ -329,6 +330,7 @@ impl Engine {
             roots: Vec::new(),
             loop_start: LoopStart::Initial,
             max_rounds: 64,
+            cap_policy: crate::api::CapPolicy::Error,
             version: 0,
             settled_out: Vec::new(),
             report_version: None,
@@ -884,6 +886,12 @@ impl Engine {
     #[inline]
     fn set_max_rounds_inner(&mut self, n: u64) {
         self.max_rounds = n;
+    }
+
+    /// What reaching the round cap does ([`crate::CapPolicy`]; default
+    /// `Error`).
+    pub fn set_round_cap_policy(&mut self, p: crate::api::CapPolicy) {
+        self.cap_policy = p;
     }
 
     /// Whether a free-running worker runs the one node a job made ready
