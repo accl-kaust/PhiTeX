@@ -198,8 +198,18 @@ impl Operation for PlayOp {
     fn may_define_field(&self, args: &[ValueId], _: &Values, f: Field) -> bool {
         self.st("may_define_field", args, json!(f), true)
     }
-    fn reads(&self, args: &[ValueId], _: &Values) -> Option<Vec<Field>> {
-        self.st("reads", args, J::Null, None)
+    fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        // `PLAY_DROP_READS=a,b`: those fields left out of the recorded
+        // hints (a client that no longer declares them).
+        let r: Option<Vec<Field>> = self.st("reads", args, J::Null, None);
+        match std::env::var("PLAY_DROP_READS") {
+            Ok(drop) => r.map(|fs| {
+                fs.into_iter()
+                    .filter(|f| v.as_str(f.0).is_none_or(|n| !drop.split(',').any(|d| d == n)))
+                    .collect()
+            }),
+            Err(_) => r,
+        }
     }
     fn static_contribs(&self, args: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
         self.st("static_contribs", args, J::Null, None)
@@ -724,6 +734,17 @@ fn main() {
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
+                    if std::env::var_os("DEFUSE_RCHAIN").is_some() {
+                        // The realised chain, deepest first: why each run
+                        // came after the next.
+                        for (n, d, k) in eng.realised_chain() {
+                            let what = eng.node_info(n).map_or(String::new(), |i| {
+                                let a: Vec<String> = i.args.iter().take(3).map(|&v| eng.values().render(v)).collect();
+                                format!("{} {}", i.op, a.join(" ")).chars().take(90).collect()
+                            });
+                            println!("    chain {d:>4} {k:<24} {what}");
+                        }
+                    }
                     println!(
                         "  bounds: busy/{threads} {:.1} ms, critical path {} runs = {:.1} ms",
                         ms(busy) / threads as f64,

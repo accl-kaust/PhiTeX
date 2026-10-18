@@ -1266,7 +1266,7 @@ impl Shared {
                 && needs_run
             {
                 let ep = self.epoch.load(Ordering::Relaxed);
-                d.ex().parked_on.push((x, ep));
+                d.ex().parked_on.push((x, ep, w.kind, w.field));
             }
             // (Only the waits a committed result keeps: see `commit`.)
             if let Subj::Node(x) = w.on
