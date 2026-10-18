@@ -375,7 +375,12 @@ pub(crate) fn rec_provider(p: Box<crate::api::EnvProvider>) -> Box<crate::api::E
     Box::new(move |values: &Values, f: Field| {
         let r = p(values, f);
         if let Some(rc) = rec() {
-            rc.line(values, json!({"k": "env", "f": j(&f), "r": j(&r)}), false);
+            // (`known`: `r` alone writes "absent" and "unknown" both as null.)
+            rc.line(
+                values,
+                json!({"k": "env", "f": j(&f), "known": r.is_some(), "r": j(&r.flatten())}),
+                false,
+            );
         }
         r
     })

@@ -403,7 +403,15 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "set_env_provider" => {
             let b = book.clone();
             eng.set_env_provider(Box::new(move |_: &Values, f: Field| {
-                b.env.get(&json!(f).to_string()).and_then(|r| de(r))
+                b.env.get(&json!(f).to_string()).and_then(|l| {
+                    // A recording with `known` says which null it was; an
+                    // older one wrote "absent" and "unknown" alike, and its
+                    // build completed: absent.
+                    match l["known"].as_bool() {
+                        Some(false) => None,
+                        _ => Some(de::<Option<ValueId>>(&l["r"])),
+                    }
+                })
             }));
         }
         "new_unit" => {
@@ -530,7 +538,7 @@ fn main() {
                 book.proj.insert(key(&[&l["p"], &l["a"]]), l["r"].clone());
             }
             "env" => {
-                book.env.insert(l["f"].to_string(), l["r"].clone());
+                book.env.insert(l["f"].to_string(), l.clone());
             }
             _ => {}
         }
