@@ -385,7 +385,8 @@ fn per_round_one_seed() {
             LoopStart::PerRound
         };
         let strict = start == LoopStart::PerRound;
-        if let Some(m) = histories(start, x..x + 1, strict, strict) {
+        // (Seeds from 20 000 on are the plain-heavy mix's.)
+        if let Some(m) = histories_mix(start, x..x + 1, strict, strict, x >= 20_000) {
             panic!("{m}");
         }
     }
@@ -436,8 +437,10 @@ fn per_round_quick_path_known_histories() {
     // after a failed evaluation) re-texted to `keep lb 2`; from the last
     // fixed point it publishes 3 again in one round, from the initial
     // value lb settles at 2: the quick path must not hold.
-    for seed in [2753] {
-        if let Some(m) = histories(LoopStart::PerRound, seed..seed + 1, true, true) {
+    // 27622: `inc lb 2` re-texted to `copy lc lb 2`: the same final
+    // publication (lb = 2), reached in fewer rounds.
+    for seed in [2753, 27622] {
+        if let Some(m) = histories_mix(LoopStart::PerRound, seed..seed + 1, true, true, seed >= 20_000) {
             panic!("{m}");
         }
     }
