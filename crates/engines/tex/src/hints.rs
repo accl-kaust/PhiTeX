@@ -3463,15 +3463,26 @@ pub(crate) fn unregister_text(reg: &Registry, name: ValueId) {
 /// after its own `\catcode` of `{` (plain.tex, latex.ltx, a document
 /// run without a format).
 fn looks_initex(text: &str) -> bool {
-    let brace = text.find('{');
-    let line = text
-        .find("\\catcode`\\{")
-        .or_else(|| text.find("\\catcode123"));
-    match (line, brace) {
-        (Some(l), Some(b)) => l < b,
-        (Some(_), None) => true,
-        _ => false,
+    // (the first `\catcode` of `{` written with a backquote, else the
+    // first written with its code; found in one pass over `\catcode`s)
+    let (mut quoted, mut coded) = (None, None);
+    let mut from = 0;
+    while let Some(k) = text[from..].find("\\catcode") {
+        let p = from + k;
+        let rest = &text[p + "\\catcode".len()..];
+        if rest.starts_with("`\\{") {
+            quoted = Some(p);
+            break;
+        }
+        if coded.is_none() && rest.starts_with("123") {
+            coded = Some(p);
+        }
+        from = p + 1;
     }
+    let Some(line) = quoted.or(coded) else {
+        return false;
+    };
+    text.find('{').is_none_or(|b| line < b)
 }
 
 /// The regime a text starts in: the kind its name says, unless the text
@@ -4319,6 +4330,36 @@ mod tests {
         );
         assert!(h.may_define_field("count:0"));
         assert!(!h.may_define_field("count:24"));
+    }
+
+    #[test]
+    fn initex_texts_as_before() {
+        // (the two searches it replaces)
+        fn before(text: &str) -> bool {
+            let brace = text.find('{');
+            let line = text
+                .find("\\catcode`\\{")
+                .or_else(|| text.find("\\catcode123"));
+            match (line, brace) {
+                (Some(l), Some(b)) => l < b,
+                (Some(_), None) => true,
+                _ => false,
+            }
+        }
+        for t in [
+            "",
+            "plain text",
+            "{\\catcode`\\{=1",
+            "\\catcode`\\{=1 {",
+            "\\catcode123=1 {",
+            "{ \\catcode123=1",
+            "\\catcode123=1 { \\catcode`\\{=1",
+            "\\catcode`\\}=2 \\catcode123=1",
+            "\\catcode\\catcode123 x",
+            "a \\catcode`\\{ b \\catcode123 {",
+        ] {
+            assert_eq!(looks_initex(t), before(t), "{t:?}");
+        }
     }
 
     #[test]
