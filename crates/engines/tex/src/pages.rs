@@ -138,6 +138,28 @@ fn cont_chain(v: &Values, args: &[ValueId]) -> Option<(i64, i64, ValueId)> {
     Some((int_of(v, j0), int_of(v, by), b0))
 }
 
+/// The continuations' predicted states ([`Run::place_cont`]), by
+/// [`cont_pred_key`].
+fn scan_pred() -> &'static std::sync::Mutex<phitex_defuse::FxHashMap<u64, (ValueId, ValueId)>> {
+    static M: std::sync::OnceLock<
+        std::sync::Mutex<phitex_defuse::FxHashMap<u64, (ValueId, ValueId)>>,
+    > = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// The key of a continuation's predicted state in [`scan_pred`]: its
+/// page, the scan that placed it and its break (and the values' table).
+fn cont_pred_key(v: &Values, args: &[ValueId]) -> Option<u64> {
+    let (j, by, b) = cont_chain(v, args)?;
+    let own = args.get(4) == Some(&b) && args.get(1).map(|&x| int_of(v, x)) == Some(j);
+    own.then(|| {
+        phitex_defuse::hash_words(
+            0x7363_616e_7072_6564,
+            &[v.instance(), j.cast_unsigned(), by.cast_unsigned(), b.raw()],
+        )
+    })
+}
+
 /// What the next page begins with as items (the routine's markers, the
 /// held-over insertions, its list, the material carried over, the rest
 /// of the piece), defined beside [`SCAN`] by the same continuation and
@@ -1066,17 +1088,24 @@ impl Run<'_, '_> {
         // (its page, the block's scan that placed it and its break: the
         // field it leaves the scan in, [`scan_page_field`]; a page firing
         // in a continuation's material: the chain that continuation is in
-        // goes on. The predicted state and material are its arguments 2
-        // and 3: its static hooks are a function of its text, and a scan
-        // running again on another prediction places another node)
+        // goes on. The predicted state is not an argument: a scan running
+        // again on the continuation's state places the same node)
         let chain = match at {
             Some(_) => Some((j, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()), b)),
             None => chain,
         };
-        let (px, pm) = pred.unwrap_or((ValueId::UNIT, ValueId::UNIT));
-        let mut args = vec![v.int(-2), v.int(j), px, pm, b];
+        let mut args = vec![v.int(-2), v.int(j), ValueId::UNIT, ValueId::UNIT, b];
         if let Some((j0, by, b0)) = chain {
             args.extend([v.int(by), v.int(j0), b0]);
+        }
+        if let (Some(p), Some(k)) = (pred, cont_pred_key(v, &args)) {
+            let mut m = scan_pred()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if m.len() > 1 << 16 {
+                m.clear();
+            }
+            m.insert(k, p);
         }
         match at {
             Some(at) => {
@@ -3265,11 +3294,10 @@ impl Finish {
         let t = args.get(9).copied().unwrap_or(ValueId::UNIT);
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
         let o = ops(&self.0);
-        let m = std::sync::Arc::clone(
-            &o.fin_defs_start
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let m = o
+            .fin_defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let d = (t != ValueId::UNIT)
             .then(|| m.get(&fin_key(v, t, args)))
             .flatten();
@@ -3335,7 +3363,7 @@ impl Operation for Finish {
             return None;
         }
         let mut names: Vec<Field> = ops(&self.0)
-            .fin_defs_start
+            .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
@@ -3377,7 +3405,7 @@ impl Operation for Finish {
         // outside them refutes the declaration, as any node's does, and
         // only its readers run again)
         let known = ops(&self.0)
-            .fin_defs_start
+            .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
@@ -3879,18 +3907,23 @@ impl Operation for Scan {
         "scan"
     }
     /// A continuation placed with its predicted scan state
-    /// ([`Run::place_cont`], in its arguments 2 and 3) defines that state and its
+    /// ([`Run::place_cont`], [`scan_pred`]) defines that state and its
     /// page's field: a reader finds them and runs on the prediction
     /// ([`Scan::predicted_defs`]).
     fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        let k = cont_pred_key(v, args)?;
         let (j, by, _) = cont_chain(v, args)?;
-        (args.get(2).is_some_and(|&x| x != ValueId::UNIT)).then(|| {
-            vec![
-                (v.field(SCAN), Locality::Global),
-                (v.field(SCAN_MAT), Locality::Global),
-                (scan_page_field(v, j, by), Locality::Global),
-            ]
-        })
+        scan_pred()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&k)
+            .then(|| {
+                vec![
+                    (v.field(SCAN), Locality::Global),
+                    (v.field(SCAN_MAT), Locality::Global),
+                    (scan_page_field(v, j, by), Locality::Global),
+                ]
+            })
     }
     /// The page fields and the scan state: a step not run yet may fire
     /// a page and place a continuation that defines it, so a step's read
@@ -3934,7 +3967,7 @@ impl Operation for Scan {
         Some(no_units(v))
     }
     /// A continuation's scan state as the block's scan that placed it
-    /// predicted it (its arguments 2 and 3), with its page's field; else as the
+    /// predicted it ([`scan_pred`]), with its page's field; else as the
     /// guess cache has it for its page (spec-final §3.4): the steps after
     /// it run on that instead of waiting; a different real one runs them
     /// again.
@@ -3942,9 +3975,11 @@ impl Operation for Scan {
         if args.first().is_none_or(|&x| int_of(v, x) != -2) {
             return None;
         }
-        if let (Some((j, by, b)), Some(&x), Some(&mat)) =
-            (cont_chain(v, args), args.get(2), args.get(3))
-            && x != ValueId::UNIT
+        if let (Some(k), Some((j, by, b))) = (cont_pred_key(v, args), cont_chain(v, args))
+            && let Some(&(x, mat)) = scan_pred()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&k)
         {
             return Some(vec![
                 (v.field(SCAN), x),
@@ -3954,7 +3989,7 @@ impl Operation for Scan {
         }
         let j = int_of(v, *args.get(1)?);
         let (st, mat) = *ops(&self.0)
-            .scan_guess_start
+            .scan_guess
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&j)?;

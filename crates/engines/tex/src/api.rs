@@ -1868,8 +1868,8 @@ impl Graph {
             fin_defs: Arc::default(),
             scan_guess: Arc::default(),
             fin_defs_start: Arc::default(),
-            scan_guess_start: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            not_virtual: Arc::default(),
             pdf_cmds: Arc::default(),
             class_proj,
         };
@@ -2462,14 +2462,6 @@ impl Graph {
                 *o.fin_defs_start
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = Arc::new(fd);
-                let sg = o
-                    .scan_guess
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                *o.scan_guess_start
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Arc::new(sg);
             }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
