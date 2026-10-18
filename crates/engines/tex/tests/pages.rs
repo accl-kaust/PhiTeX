@@ -100,6 +100,17 @@ fn an_edit_on_the_last_page_keeps_the_earlier_pages() {
         "an earlier page changed"
     );
     let cold = common::build(opts(), Some(&common::plain()), &new);
+    if cold.pages() != after {
+        for (n, op, why) in &b.stats.reruns {
+            eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+        }
+        if let Ok(o) = std::env::var("PHITEX_GATE_OUT") {
+            let _ = std::fs::write(format!("{o}/lastpage-edit.dvi"), b.output().0);
+            let _ = std::fs::write(format!("{o}/lastpage-cold.dvi"), cold.output().0);
+            let _ = std::fs::write(format!("{o}/lastpage-edit.log"), b.output().1);
+            let _ = std::fs::write(format!("{o}/lastpage-cold.log"), cold.output().1);
+        }
+    }
     assert_eq!(cold.pages(), after, "edit != cold");
     eprintln!(
         "{} pages; cold {runs_cold} runs, edit {} runs",
