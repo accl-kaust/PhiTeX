@@ -159,7 +159,8 @@ module's memory. There is no wasm-bindgen and no `unsafe` code.
 
 `check` makes both formats in wasm and compares each PDF with pdfTeX's,
 byte for byte. It needs the pinned toolchain's `wasm32-wasip1-threads`
-target (`rust-toolchain.toml` lists it), Node 22 or later, and TeX Live.
+target (`rustup target add wasm32-wasip1-threads --toolchain
+nightly-2026-08-08`, once), Node 22 or later, and TeX Live.
 
 ## License
 
