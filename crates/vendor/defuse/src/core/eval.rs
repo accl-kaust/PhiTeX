@@ -568,14 +568,28 @@ impl Engine {
         sh.env.write().unknown.clear();
         *lock(&sh.error) = None;
         sh.abort.store(false, Ordering::Relaxed);
-        // Parked nodes from an earlier evaluation try again.
+        // Parked nodes from an earlier evaluation try again, unless what
+        // each waits on is a node still in work: that node's commit wakes
+        // it, and a change to what it read touches it (a node still parked
+        // was touched by nothing since it parked). Re-checking every such
+        // wait each evaluation cost a pass over their kept logs.
         let parked = std::mem::take(&mut *lock(&sh.parked));
+        let mut still = Vec::new();
         for s in parked {
-            if sh.rec(s).st() == S_PARK {
-                let seq = sh.rec(s).park_seq.load(Ordering::Acquire);
-                sh.wake(s, seq);
+            if sh.rec(s).st() != S_PARK {
+                continue;
             }
+            let on = sh.rec(s).data().wait_on().map(|w| w.on.clone());
+            if let Some(super::query::Subj::Node(x)) = on
+                && super::in_work(sh.rec(x).st())
+            {
+                still.push(s);
+                continue;
+            }
+            let seq = sh.rec(s).park_seq.load(Ordering::Acquire);
+            sh.wake(s, seq);
         }
+        lock(&sh.parked).extend(still);
     }
 
     /// Back to the declared initial loop values; whether any changed.
