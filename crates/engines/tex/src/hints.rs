@@ -649,7 +649,7 @@ impl Hint {
     /// unbounded node its guess (what its commands' rows and the bodies
     /// of its calls define); `true` without one.
     pub(crate) fn may_define_field(&self, f: &str) -> bool {
-        if crate::exec::env_flag!("PHITEX_NO_GUESS") {
+        if false {
             return true;
         }
         // (a record: where the node may define one of its cells)
@@ -788,9 +788,9 @@ fn excerpt_at(text: &str, s: usize) -> &str {
 
 /// Whether a trace that prints hints' excerpts is on.
 fn excerpts() -> bool {
-    crate::exec::env_flag!("PHITEX_HINTS")
-        || crate::exec::env_flag!("PHITEX_SLICES_TRACE")
-        || crate::exec::env_flag!("PHITEX_TEX_TRACE")
+    crate::exec::obs_flag!("PHITEX_HINTS")
+        || crate::exec::obs_flag!("PHITEX_SLICES_TRACE")
+        || crate::exec::obs_flag!("PHITEX_TEX_TRACE")
 }
 
 // ---------------------------------------------------------------------
@@ -1334,7 +1334,7 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
         }
     }
     let inside = inside.union(&regions);
-    if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+    if crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
         for (k, a) in p.atoms.iter().enumerate() {
             eprintln!(
                 "slices: {k} {:?} {:?} depth {} ifd {} inside {} claimed {} operand {} par {}",
@@ -1456,7 +1456,7 @@ fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
                     "egroup" => bg -= 1,
                     _ if is_prim(n) => {}
                     _ => {
-                        if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                        if crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
                             let set = an.defset(n);
                             let g: Vec<&str> = ["begingroup", "endgroup", "bgroup", "egroup"]
                                 .into_iter()
@@ -2529,16 +2529,16 @@ impl Analysis<'_> {
                 // value that may be undefined, `\\let\\next\\undefined`;
                 // a call of it is unbounded in the may-define set, not
                 // in the state)
-                if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                if crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
                     eprintln!("slices: state skips undefined \\{c}");
                 }
                 continue;
             }
-            if row.is_none() && crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+            if row.is_none() && crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
                 eprintln!("slices: state every head from \\{c}");
             }
             if row.is_some_and(|r| r.contains(&"param:"))
-                && crate::exec::env_flag!("PHITEX_SLICES_TRACE")
+                && crate::exec::obs_flag!("PHITEX_SLICES_TRACE")
             {
                 eprintln!("slices: param: from the row of \\{c}");
             }
@@ -2622,7 +2622,7 @@ impl Analysis<'_> {
                         return;
                     }
                 }
-                if st.is_some() && crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                if st.is_some() && crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
                     eprintln!(
                         "slices: state every head from defined \\{name}: {:?}",
                         self.shape(name)
@@ -2674,7 +2674,7 @@ impl Analysis<'_> {
                     add_head_dyn(&mut b.state, &p);
                 }
             } else if let Some(h) = head_of_pass_field(f) {
-                if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                if crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
                     eprintln!("slices: head {h} from name {f}");
                 }
                 if register_by_number(f) {
@@ -2696,7 +2696,7 @@ impl Analysis<'_> {
                     add_head_dyn(&mut b.state, &p);
                 }
             } else if let Some(h) = head_of_pass_field(f) {
-                if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                if crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
                     eprintln!("slices: head {h} from prefix {f}");
                 }
                 add_head(&mut b.state, h);
@@ -2938,7 +2938,7 @@ fn add_defs_with(an: &Analysis<'_>, ds: &[Def], prefixes: bool, b: &mut Bound) {
                 add_head_dyn(&mut b.state, &p);
             }
         } else if let Some(h) = head_of_pass_field(&d.field) {
-            if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
                 eprintln!("slices: head {h} from def {}", d.field);
             }
             if register_by_number(&d.field) {
@@ -3292,7 +3292,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
                 // that does take a sibling refutes this, and its
                 // followers run again)
                 None if !t.pars[i] && an.slice_claims_nothing_(k0, e, false) => {
-                    if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                    if crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
                         eprintln!(
                             "slices: claims nothing, no paragraph end: {:?}",
                             short(&text[s..e])
@@ -3311,7 +3311,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
     // a span reads (the atoms not skipped) and every slice's, encoded:
     // the check that a rework of the analysis keeps its answers byte
     // for byte)
-    if crate::exec::env_flag!("PHITEX_HINTS_DIGEST") {
+    if crate::exec::obs_flag!("PHITEX_HINTS_DIGEST") {
         let mut d = phitex_defuse::hash_bytes(0, text.as_bytes());
         for (h, &skip) in t.hints.iter().zip(&t.skip) {
             if !skip && let Some(h) = h {
@@ -3327,7 +3327,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             slice_hints.len()
         );
     }
-    if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+    if crate::exec::obs_flag!("PHITEX_SLICES_TRACE") {
         let open = slice_hints
             .iter()
             .filter(|h| !Hint::decode(h).bound.is_some_and(|b| b.no_scope))
@@ -3532,7 +3532,7 @@ pub(crate) fn kind_of(text: &str, named: FileKind) -> FileKind {
 pub(crate) fn routine_hint(text: &str, defs: &Defs) -> Hint {
     let t = text_hints(text, FileKind::Document, defs);
     let mut h = t.at_until(0, text.len());
-    if crate::exec::env_flag!("PHITEX_HINTS") {
+    if crate::exec::obs_flag!("PHITEX_HINTS") {
         eprintln!(
             "hint (output routine) {:?}: {:?} ({})",
             short(text),
@@ -3667,7 +3667,7 @@ pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
     let _ = hint_of_args(reg, v, args);
     let p = Prepared {
         // (`PHITEX_HINTS` prints each answer where the engine asks)
-        may: (!crate::exec::env_flag!("PHITEX_HINTS")).then(|| may_define_now(reg, v, args)),
+        may: (!crate::exec::obs_flag!("PHITEX_HINTS")).then(|| may_define_now(reg, v, args)),
         reads: Kept::Ready(reads_now(reg, v, args)),
         lines: Some(crate::run::text_lines(v, args)),
     };
@@ -3855,7 +3855,7 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                     guess: None,
                 };
             }
-            if !crate::exec::env_flag!("PHITEX_HINTS_FRAGMENTS") {
+            if !crate::exec::obs_flag!("PHITEX_HINTS_FRAGMENTS") {
                 return demoted("expansion tokens", "");
             }
             // (tokens already read: faithful as text when every
@@ -4007,7 +4007,7 @@ pub fn set_hints_enabled(on: bool) {
 
 /// Whether the node's text says its command opens and closes no scope.
 pub(crate) fn effect_none(reg: &Registry, v: &Values, args: &[ValueId]) -> bool {
-    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
+    if OFF.load(Ordering::Relaxed) {
         return false;
     }
     hint_of_args(reg, v, args)
@@ -4029,7 +4029,7 @@ pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<
 
 /// [`reads`], answered now.
 fn reads_now(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
-    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
+    if OFF.load(Ordering::Relaxed) {
         return None;
     }
     let h = hint_of_args(reg, v, args);
@@ -4060,11 +4060,11 @@ pub(crate) fn may_define(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDef
 
 /// [`may_define`], answered now.
 fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
-    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
+    if OFF.load(Ordering::Relaxed) {
         return MayDefine::Any;
     }
     // (an answer is the hint's alone: made once per hint string)
-    let hv = hint_value(v, args).filter(|_| !crate::exec::env_flag!("PHITEX_HINTS"));
+    let hv = hint_value(v, args).filter(|_| !crate::exec::obs_flag!("PHITEX_HINTS"));
     if let Some(hv) = hv
         && let Some(m) = reg
             .answers
@@ -4088,7 +4088,7 @@ fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
 /// [`may_define_now`], made.
 fn may_define_answer(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     let h = hint_of_args(reg, v, args);
-    if crate::exec::env_flag!("PHITEX_HINTS") {
+    if crate::exec::obs_flag!("PHITEX_HINTS") {
         let answer = match &h.bound {
             None => "Any".to_owned(),
             Some(b) => cat(&[
@@ -4276,7 +4276,7 @@ fn mean_kind(m: &Mean) -> &'static str {
 /// each command sets.
 pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
     // (`PHITEX_HINTS=3`: each node's published fields, against its bound)
-    if crate::exec::env_str!("PHITEX_HINTS") == Some("3") {
+    if crate::exec::obs_str!("PHITEX_HINTS") == Some("3") {
         let fs: Vec<String> = r
             .published_fields()
             .into_iter()
@@ -4290,7 +4290,7 @@ pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
             fs.join(",")
         );
     }
-    if crate::exec::env_str!("PHITEX_HINTS") == Some("2") {
+    if crate::exec::obs_str!("PHITEX_HINTS") == Some("2") {
         let mut fs: Vec<String> = r
             .def_fields()
             .into_iter()

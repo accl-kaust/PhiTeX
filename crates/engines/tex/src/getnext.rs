@@ -480,7 +480,7 @@ impl Run<'_, '_> {
                     self.pull_box.push(in_box);
                     self.pull_lev = None;
                 }
-                if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && self.doc {
+                if crate::exec::obs_flag!("PHITEX_GIVEBACK_TRACE") && self.doc {
                     let first: String = args
                         .first()
                         .map(|&x| self.v.render(x))
@@ -500,7 +500,7 @@ impl Run<'_, '_> {
                 Ok(true)
             }
             other => {
-                if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+                if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
                     eprintln!(
                         "  pull {} stops: sibling {} is {:?}",
                         self.cx.node().raw(),
@@ -535,7 +535,7 @@ impl Run<'_, '_> {
         static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let all =
             *ALL.get_or_init(|| std::env::var("PHITEX_GIVEBACK_TRACE").is_ok_and(|x| x == "all"));
-        let trace = crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && (self.rec_load || all);
+        let trace = crate::exec::obs_flag!("PHITEX_GIVEBACK_TRACE") && (self.rec_load || all);
         let pulled = self.pulled;
         let node = self.cx.node().raw();
         let refuse = |why: &str| {
@@ -687,7 +687,7 @@ impl Run<'_, '_> {
             seen.push(sib.clone());
             seen.len() - 1
         });
-        if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_GIVEBACK_TRACE") {
             eprintln!(
                 "giveback-only: candidate {} (allowed {}): {}",
                 i + 1,

@@ -271,7 +271,7 @@ impl Run<'_, '_> {
                 self.st.publish_in_scope(loc);
             }
         }
-        if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_GIVEBACK_TRACE") {
             let ds: Vec<String> = self
                 .st
                 .published(v, self.rec_load)

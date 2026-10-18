@@ -689,7 +689,7 @@ pub(crate) fn image_fonts(r: &mut Run<'_, '_>, fonts: &mut Fonts) -> R<()> {
         .iter()
         .map(|&n| str_of(v, n))
         .collect();
-    if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+    if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
         eprintln!("  image fonts for node {}: {names:?}", r.cx.node().raw());
     }
     if names.is_empty() {
@@ -738,7 +738,7 @@ pub(crate) fn note_image_files(
             have.insert(n);
         }
     }
-    if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+    if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
         eprintln!(
             "  image files: {:?} (map {})",
             have.iter()
@@ -1989,7 +1989,7 @@ pub(crate) fn finish_exact(
             } else {
                 placed += 1;
             }
-            if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
                 eprintln!(
                     "  link page {} (shipped by node {}): objects {n0} -> {} ({})",
                     pc.pj,
@@ -2022,7 +2022,7 @@ pub(crate) fn finish_exact(
                         let mut g = c.f.lock().unwrap_or_else(PoisonError::into_inner);
                         (*g)(&mut st, &mut forms, &src)
                     };
-                    if crate::exec::env_flag!("PHITEX_PDF_TRACE") {
+                    if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
                         eprintln!(
                             "  link command of node {}: {:?} (objects {})",
                             c.node,
@@ -2145,7 +2145,7 @@ pub(crate) fn finish_exact(
             t0.elapsed().saturating_sub(t_loop),
         );
     }
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "pdf link: {copied} of {} records copied from the last link, {resynced} more after the change; {rewritten} page contents rewritten in {t_parts:?}; before the records {t_pre:?}, records {:?}, after them {:?}",
             xpages.len(),
@@ -2200,12 +2200,12 @@ pub(crate) fn finish_exact(
             })
         })
         .unwrap_or_else(|e| {
-            if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!("pdf: {e}");
             }
             (Vec::new(), None)
         });
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "pdf link: {} records, {placed} pages placed, {shipped} shipped again, {} commands; \
              line {:?}, tail {:?}, file {} bytes in {:?}",

@@ -31,7 +31,7 @@ fn with(f: impl FnOnce(&mut Line)) {
 
 /// An edit's timeline begins at `t`, its event (with `PHITEX_TEX_TIME`).
 pub fn begin_at(t: Instant) {
-    if !crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if !crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         return;
     }
     let now = std::time::SystemTime::now()

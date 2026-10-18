@@ -46,7 +46,7 @@ pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, 
     } else {
         dvi_file(cx, &pages)
     };
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "output file: {} pages, {:?}{}",
             pages.len(),
@@ -147,7 +147,7 @@ pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Sto
     }
     let file = pdf_exact(cx, o)?;
     cx.define_with(v.field(LINKED), file, phitex_defuse::Locality::Global);
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!("link: {} pages, {:?}", pages.len(), t0.elapsed());
     }
     Ok(ValueId::UNIT)
@@ -498,7 +498,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         note("link: linked", t_fin.saturating_sub(t_seed));
         note("link: the value", t0.elapsed().saturating_sub(t_fin));
     }
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "pdf exact: line read {t_acc:?}, ordered {:?}, fields {:?}, link {:?}, value {:?}",
             t_order.saturating_sub(t_acc),

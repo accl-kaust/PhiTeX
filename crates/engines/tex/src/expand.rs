@@ -121,8 +121,8 @@ impl Run<'_, '_> {
                 }
                 _ => {
                     // §370: "Undefined control sequence" (dropped)
-                    if crate::exec::env_flag!("PHITEX_TEX_TRACE")
-                        || crate::exec::env_flag!("PHITEX_UNDEF_TRACE")
+                    if crate::exec::obs_flag!("PHITEX_TEX_TRACE")
+                        || crate::exec::obs_flag!("PHITEX_UNDEF_TRACE")
                     {
                         // (debug: what the engine has for the name where
                         // this node stands, and who defined it)

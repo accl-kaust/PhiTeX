@@ -54,6 +54,65 @@ macro_rules! env_str {
 }
 pub(crate) use env_str;
 
+/// A trace, dump or debug check's switch (`observe` builds): `$name` set
+/// ([`env_flag`]); compiled out of other builds, its code with it.
+macro_rules! obs_flag {
+    ($name:literal) => {
+        cfg!(feature = "observe") && $crate::exec::env_flag!($name)
+    };
+}
+pub(crate) use obs_flag;
+
+/// Lines the runs print with `PHITEX_TEX_TIME` (a node's time, a page's
+/// phases), kept and printed after the evaluation ([`flush_later`]):
+/// stderr written inside the round would be in its walls.
+static LATER: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Keeps `line` for [`flush_later`].
+#[cold]
+#[inline(never)]
+pub(crate) fn later(line: String) {
+    LATER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(line);
+}
+
+/// Prints the lines kept by [`later`], in order.
+#[cold]
+#[inline(never)]
+pub(crate) fn flush_later() {
+    let lines = std::mem::take(
+        &mut *LATER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for l in lines {
+        eprintln!("{l}");
+    }
+}
+
+/// A trace or dump's text switch (`observe` builds, [`env_str`]).
+macro_rules! obs_str {
+    ($name:literal) => {
+        if cfg!(feature = "observe") {
+            $crate::exec::env_str!($name)
+        } else {
+            None
+        }
+    };
+}
+pub(crate) use obs_str;
+
+/// A timing or counter switch (`profile` builds): `$name` set
+/// ([`env_flag`]); compiled out of other builds, its code with it.
+macro_rules! prof_flag {
+    ($name:literal) => {
+        cfg!(feature = "profile") && $crate::exec::env_flag!($name)
+    };
+}
+pub(crate) use prof_flag;
+
 /// Below this many items an engine pass runs on the calling thread
 /// (its items cost microseconds).
 const GRAIN: usize = 64;
@@ -61,16 +120,9 @@ const GRAIN: usize = 64;
 /// Below this many jobs a batch of runs goes inline. A run is a
 /// paragraph region, a page step or a format (hundreds of microseconds
 /// to seconds), so any batch of two or more is worth a hand-off to the
-/// pool. `PHITEX_GRAIN` overrides it (for measurements; the schedule
-/// never changes the output).
+/// pool.
 fn job_grain() -> usize {
-    static G: OnceLock<usize> = OnceLock::new();
-    *G.get_or_init(|| {
-        std::env::var("PHITEX_GRAIN")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2)
-    })
+    2
 }
 
 /// How the host starts a worker thread: it runs the closure on a new
@@ -356,15 +408,19 @@ thread_local! {
 /// The thread count: `given`, else `PHITEX_THREADS`, else the available
 /// parallelism; 1 where this target cannot run threads.
 pub(crate) fn threads(given: Option<usize>) -> usize {
+    // (`PHITEX_THREADS`, read once)
+    static ENV: OnceLock<Option<usize>> = OnceLock::new();
     if !threads_possible() {
         return 1;
     }
     given.filter(|&n| n > 0).unwrap_or_else(|| {
-        std::env::var("PHITEX_THREADS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+        ENV.get_or_init(|| {
+            std::env::var("PHITEX_THREADS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|&n| n > 0)
+        })
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
     })
 }
 
@@ -383,7 +439,7 @@ impl Drop for Threads {
     fn drop(&mut self) {
         widths::print();
         crate::prof::print();
-        if phitex_defuse::obs::enabled() && env_flag!("PHITEX_OBS") {
+        if phitex_defuse::obs::enabled() && prof_flag!("PHITEX_OBS") {
             eprint!("probes (evaluation):\n{}", phitex_defuse::obs::snapshot());
             phitex_defuse::obs::reset();
         }
@@ -533,7 +589,7 @@ pub(crate) fn map_on<T: Send + Sync>(
 }
 
 fn trace(n: usize, threads: usize) {
-    if env_flag!("PHITEX_EXEC_TRACE") {
+    if obs_flag!("PHITEX_EXEC_TRACE") {
         eprintln!("exec: {n} jobs on {threads} threads");
     }
 }
@@ -631,7 +687,7 @@ pub(crate) mod widths {
     use phitex_defuse::Field;
 
     pub(crate) fn on() -> bool {
-        super::env_flag!("PHITEX_WIDTHS")
+        super::prof_flag!("PHITEX_WIDTHS")
     }
 
     /// Power-of-two buckets: bucket `b` holds values in `[2^(b-1), 2^b)`,
@@ -835,7 +891,7 @@ static STEP_LAST: std::sync::Mutex<Option<(std::time::Instant, usize)>> =
 
 impl StepTrace {
     fn enter(n: usize) -> StepTrace {
-        if !env_flag!("PHITEX_STEP_TRACE") {
+        if !obs_flag!("PHITEX_STEP_TRACE") {
             return StepTrace(None);
         }
         let now = std::time::Instant::now();
@@ -878,7 +934,7 @@ impl NodeTimer {
             o.peak.fetch_max(c, Ordering::Relaxed);
             (o, clock().now(), kind)
         });
-        let trace = env_flag!("PHITEX_TEX_TIME").then(|| (std::time::Instant::now(), op, node));
+        let trace = prof_flag!("PHITEX_TEX_TIME").then(|| (std::time::Instant::now(), op, node));
         NodeTimer { trace, ops }
     }
 }
@@ -894,10 +950,10 @@ impl Drop for NodeTimer {
             o.running.fetch_sub(1, Ordering::Relaxed);
         }
         if let Some((t, op, node)) = self.trace {
-            eprintln!(
+            later(format!(
                 "nodetime: {op} {node} {:.3}",
                 t.elapsed().as_secs_f64() * 1e3
-            );
+            ));
         }
     }
 }

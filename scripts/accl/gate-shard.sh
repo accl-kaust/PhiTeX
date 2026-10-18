@@ -52,7 +52,7 @@ echo "$shard $*" > "$r/shard.txt"
 status=green
 red() { echo "$1" >> "$r/red.txt"; status=red; }
 built() { echo "build_s $(( $(date +%s) - t0 ))" >> "$r/times.txt"; }
-T="cargo test --profile fastdev -p phitex-tex"
+T="cargo test --profile fastdev -p phitex-tex --features profile,observe"
 # the test targets the shards run (the build shard builds them)
 SUITES="pdftex edits pages plain etex hints inputs defuse_gaps"
 # the build's compile time, as the shard's build_s
@@ -148,7 +148,7 @@ case $shard in
     a=()
     for s in latex $SUITES; do a+=(--test "$s"); done
     ( $T "${a[@]}" --no-run --message-format=json-render-diagnostics > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
-    ( CARGO_TARGET_DIR=$PWD/target-cli cargo build -q --release -p phitex-cli > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt" ) &
+    ( CARGO_TARGET_DIR=$PWD/target-cli cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt" ) &
     wait
     built
     grep -q '^EXIT 0$' "$r/build-tests.txt" || red "build (tests): $(grep -m1 '^error' "$r/build-tests.txt")"
@@ -289,7 +289,7 @@ for l in open(sys.argv[1]):
     printf '%s\n' "$GATE_TIME_PY" > "$w/gate-time.py"
     rm -rf "$w/control" && mkdir -p "$w/control" && git archive "$ctl" | tar -x -C "$w/control"
     ln -s "$PWD/upstream" "$w/control/upstream"
-    ( cd "$w/control" && cargo build -q --release -p phitex-cli > "$r/build-control.txt" 2>&1 ) || red "control $ctl did not build: $(grep -m1 '^error' "$r/build-control.txt")"
+    ( cd "$w/control" && cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build-control.txt" 2>&1 ) || red "control $ctl did not build: $(grep -m1 '^error' "$r/build-control.txt")"
     built
     b=$w/control/target/release/phitex
     for j in 1 8 16; do

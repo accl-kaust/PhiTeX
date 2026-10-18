@@ -37,7 +37,7 @@ static RUNS: AtomicU64 = AtomicU64::new(0);
 /// Whether the probes run.
 #[inline]
 pub(crate) fn on() -> bool {
-    crate::exec::env_flag!("PHITEX_PAR_PROF")
+    crate::exec::prof_flag!("PHITEX_PAR_PROF")
 }
 
 /// A probe's start (`None` when off).

@@ -58,7 +58,7 @@ impl Run<'_, '_> {
     /// while a trace window is asked for (`PHITEX_HEARTBEAT_FROM`), every
     /// [`Run::HB_BATCH`] commands with `PHITEX_HEARTBEAT=1`, never else.
     pub(crate) fn heartbeat_start() -> u64 {
-        if !crate::exec::env_flag!("PHITEX_HEARTBEAT") {
+        if !crate::exec::obs_flag!("PHITEX_HEARTBEAT") {
             return u64::MAX;
         }
         if std::env::var_os("PHITEX_HEARTBEAT_FROM").is_some() {
@@ -1524,13 +1524,13 @@ impl Run<'_, '_> {
             && self
                 .get(&format!("write:{k}"))?
                 .is_some_and(|x| x != ValueId::UNIT);
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") && s.is_empty() && self.interp.is_some() {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.is_empty() && self.interp.is_some() {
             let mut shown = String::new();
             self.show_toks_into(&mut shown, body)?;
             let t = self.get("toks:11")?.map(|x| self.v.render(x));
             eprintln!("aux-trace: empty write: body {shown:?}, toks:11 = {t:?}");
         }
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") && s.contains("@writefile{toc}") {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.contains("@writefile{toc}") {
             let tf = self
                 .get("cs:tf@toc")?
                 .map(|x| crate::val::show_def(self.v, x));
@@ -1542,7 +1542,7 @@ impl Run<'_, '_> {
                 "aux-trace: at a toc line: tf@toc = {tf:?}, write:3 = {w3:?}, protected@file@percent = {pct:?}"
             );
         }
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             let w = self
                 .get(&format!("write:{k}"))?
                 .map(|x| crate::val::show_def(self.v, x));
@@ -1618,7 +1618,7 @@ impl Run<'_, '_> {
                     None => line.clone(),
                 };
                 let r = self.interpret_line(&text)?;
-                if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                     eprintln!(
                         "aux-trace: interpreted {name} {text:?}: {}",
                         r.map_or_else(|| "needs more".to_owned(), |x| crate::val::show_def(v, x))
@@ -1742,7 +1742,7 @@ impl Run<'_, '_> {
                 v.int(1),
             ]));
         }
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!("aux-trace: {name} ends inside a command: {errs:?}");
         }
         self.contribute_stream(v.list(vec![v.str(&name), v.str(""), v.list(ds)]));

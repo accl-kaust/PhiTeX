@@ -133,19 +133,10 @@ impl Rec {
     pub(crate) fn hint(&self) -> Option<String> {
         (self.writes.iter().chain(&self.reads).all(|n| encodable(n))).then(|| {
             // (`PHITEX_PKG_NOREADS=1`: the definitions only, for comparison)
-            let reads: &[String] = if crate::exec::env_flag!("PHITEX_PKG_NOREADS") {
-                &[]
-            } else {
-                &self.reads
-            };
+            let reads: &[String] = if false { &[] } else { &self.reads };
             // (`PHITEX_PKG_NOSCOPE=1`, `PHITEX_PKG_NOCLAIM=1`: the record's
             // effect, its claim left to the run, for comparison)
-            crate::hints::record_hint(
-                &self.writes,
-                reads,
-                self.no_scope && !crate::exec::env_flag!("PHITEX_PKG_NOSCOPE"),
-                self.claim0 && !crate::exec::env_flag!("PHITEX_PKG_NOCLAIM"),
-            )
+            crate::hints::record_hint(&self.writes, reads, self.no_scope, self.claim0)
         })
     }
 
@@ -354,7 +345,7 @@ impl LoadHints {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&k)
             .cloned();
-        if crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
             match &rec {
                 None => eprintln!("pkgrec: {k}: no record"),
                 Some(r) => {

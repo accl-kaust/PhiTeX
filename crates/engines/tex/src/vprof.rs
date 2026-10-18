@@ -658,7 +658,7 @@ static LINES: AtomicU64 = AtomicU64::new(0);
 /// A profile contributed: counted for the size report (units, bytes,
 /// boxes appended with interline glue: the lines).
 pub(crate) fn count_unit(ints: &[i64]) {
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         let lines = decode(ints)
             .iter()
             .filter(|x| matches!(x, PItem::VBox { .. }))

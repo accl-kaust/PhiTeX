@@ -376,7 +376,7 @@ static STOPS: std::sync::Mutex<Option<StopTable>> = std::sync::Mutex::new(None);
 /// A run of kind `op` stopped reading `f`.
 #[cold]
 pub(crate) fn note_stop(op: &'static str, f: Field) {
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         let mut m = STOPS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -683,7 +683,7 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn new(cx: &'c mut Ctx<'a>, ops: Ops) -> Self {
         let v = cx.values();
         let op = cx.op();
-        if crate::exec::env_flag!("PHITEX_LOOP_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_LOOP_TRACE") {
             eprintln!("lb-run node {:x} op {op:?}", cx.node().raw());
         }
         let code = if op == ops.exec {
@@ -871,7 +871,7 @@ impl<'c, 'a> Run<'c, 'a> {
             p
         };
         if let Some(p) = pre {
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 let name = crate::val::field_name(self.v, self.loc_field(loc));
                 eprintln!("aux-trace: revert {name} for the line's read");
             }
@@ -948,7 +948,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (debug, `PHITEX_RECORD_CHECK=1`: the record's readers, whose
         // record is compared with its cells after the evaluation,
         // [`record_check`])
-        if cells.is_some() && crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
+        if cells.is_some() && crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
             RECORD_READERS
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1024,7 +1024,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (debug, `PHITEX_REC_TRACE=1`: each record a run defines, the
         // cells it changes)
-        if crate::exec::env_flag!("PHITEX_REC_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_REC_TRACE") {
             let ch: Vec<String> = (0..cells.len())
                 .filter(|&i| cells[i] != base[i])
                 .map(|i| {
@@ -1211,7 +1211,7 @@ impl<'c, 'a> Run<'c, 'a> {
             note_stop(self.op_name(), f);
         }
         crate::exec::widths::read(f);
-        if crate::exec::env_flag!("PHITEX_READS") {
+        if crate::exec::obs_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
         self.st.fill(loc, r?);
@@ -1256,7 +1256,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set_loc(&mut self, loc: Loc, val: Entry, global: bool) {
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE")
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE")
             && self.interp.is_none()
             && loc == self.reg_loc(0, 0)
         {
@@ -1273,7 +1273,7 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         if self.read_back_done && self.interp.is_none() {
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 let f = self.loc_field(loc);
                 eprintln!(
                     "aux-trace: after read-back node {} defines {}",
@@ -1326,7 +1326,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return;
         }
         let old = self.st.id_of(loc, v).unwrap_or(ValueId::UNIT);
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: wpre {name} = {} (node {})",
                 crate::val::show_def(v, old),
@@ -1483,7 +1483,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let name = crate::val::field_name(self.v, f);
         // (`PHITEX_READS=<field>`: that field's reads, with the current
         // token and the token lists being read)
-        if let Some(want) = crate::exec::env_str!("PHITEX_READS")
+        if let Some(want) = crate::exec::obs_str!("PHITEX_READS")
             && want == name
         {
             let v = self.v;
@@ -1585,7 +1585,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // later declares its loop-back and this runs again)
         let _ = self.cx.use_field(k)?;
         let _ = self.cx.use_field(w)?;
-        if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
+        if crate::exec::obs_flag!("PHITEX_TMP_FTRACE") {
             eprintln!("TMPF units {key} node {}", self.cx.node().raw());
         }
         let Some(x) = self.cx.use_env(v.field(&format!("units:{key}")))? else {
@@ -1611,7 +1611,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let name = str_of(v, key);
         let f = v.field(&name);
         if name.starts_with("unit:") {
-            if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
+            if crate::exec::obs_flag!("PHITEX_TMP_FTRACE") {
                 eprintln!("TMPF unit {name} node {}", self.cx.node().raw());
             }
             let Some(x) = self.cx.use_env(f)? else {
@@ -1700,7 +1700,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// (measure) `PHITEX_READS`: a stop that is not a field read's.
     pub(crate) fn trace_stop(&self, what: &str) {
-        if crate::exec::env_flag!("PHITEX_READS") {
+        if crate::exec::obs_flag!("PHITEX_READS") {
             eprintln!(
                 "reads: node {} op {:?} {what} PARKED",
                 self.cx.node().raw(),
@@ -1735,7 +1735,7 @@ impl<'c, 'a> Run<'c, 'a> {
         } else if self.cx.is_loopback(w) {
             // (its units' order, `ops::Files`; none: absent)
             let x = self.cx.use_field(w)?;
-            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
                     "aux-trace: read wfile {key}: {:?} units",
                     x.map(|x| list_of(v, x).get(1).map_or(0, |&l| list_of(v, l).len()))
@@ -1746,7 +1746,7 @@ impl<'c, 'a> Run<'c, 'a> {
         } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
-            if crate::exec::env_flag!("PHITEX_TMP_FTRACE") {
+            if crate::exec::obs_flag!("PHITEX_TMP_FTRACE") {
                 eprintln!(
                     "TMPF file {key} node {} op {:?}",
                     self.cx.node().raw(),
@@ -1945,7 +1945,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 } else if self.get(&format!("wopen:{key}"))?.is_none()
                     && let Some(&ms) = xs.first()
                 {
-                    if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                    if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                         eprintln!(
                             "aux-trace: read-back {key} gives {name} in node {}",
                             self.cx.node().raw()
@@ -1965,7 +1965,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 let pre = format!("wpre:{name}");
                 if self.get(&pre)?.is_none() {
                     let was = self.get(&name)?;
-                    if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                    if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                         eprintln!(
                             "aux-trace: read-back {key} {name} = {} (was {:?})",
                             crate::val::show_def(v, *val),
@@ -1987,7 +1987,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .find(|l| l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO)
             .copied();
         self.read_back_done = self.read_back_at.is_some();
-        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: read back {key} in node {} ({:?}): levels {:?}",
                 self.cx.node().raw(),
@@ -2999,7 +2999,7 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             // a paragraph, a group or a conditional still open reads on
             // into the next sibling, claimed
-            if crate::exec::env_flag!("PHITEX_GIVEBACK_TRACE") && self.doc && self.open_span() {
+            if crate::exec::obs_flag!("PHITEX_GIVEBACK_TRACE") && self.doc && self.open_span() {
                 eprintln!(
                     "readon: node {} pulled {}: nest {:?}, conds {}, effect {:?}, baselocal {}",
                     self.cx.node().raw(),
@@ -3148,7 +3148,7 @@ impl<'c, 'a> Run<'c, 'a> {
         published.extend(recs.iter().copied());
         // (debug, `PHITEX_PUB_TRACE=<a>|<b>…`: the definitions of a run whose
         // first text segment contains one of the texts)
-        if let Some(pat) = crate::exec::env_str!("PHITEX_PUB_TRACE") {
+        if let Some(pat) = crate::exec::obs_str!("PHITEX_PUB_TRACE") {
             let v = self.v;
             let first = self
                 .cx
@@ -3189,7 +3189,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (debug, `PHITEX_ITEMS_TRACE=1`: every run's items, after its
         // text's first segment and its claim)
-        if crate::exec::env_flag!("PHITEX_ITEMS_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_ITEMS_TRACE") {
             let v = self.v;
             let first = self
                 .cx
@@ -3220,7 +3220,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a load whose run went on into its siblings is not one load:
         // no record of it)
-        if self.rec_load && crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+        if self.rec_load && crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
             eprintln!(
                 "pkgrec: load run {} finishes: pulled {} (blanks only {}), rest claimed {}, effect {:?}, {} definitions",
                 self.cx.node().raw(),
@@ -3240,7 +3240,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 crate::exec::widths::def(f);
                 self.cx.define_with(f, x, l);
             }
-            if n >= 10_000 && crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            if n >= 10_000 && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!(
                     "run finish: {n} definitions published: listed {t_list:?}, define_with {:?}",
                     t_pub.elapsed().checked_sub(t_list).unwrap_or_default()
@@ -3260,7 +3260,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.muts += 1;
             self.contribs.push((defs, s));
         }
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
             let v = self.v;
             let items = v.field("items");
             for (f, x) in &self.contribs {
@@ -3316,7 +3316,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.leftover()
         };
         for args in leftover {
-            if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
                 let v = self.v;
                 eprintln!(
                     "  follow {}",
@@ -3328,14 +3328,14 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.follow(self.ops.exec, args);
         }
         let n = self.claim_count();
-        if crate::exec::env_flag!("PHITEX_DEBUG_CLAIMS") {
+        if crate::exec::obs_flag!("PHITEX_DEBUG_CLAIMS") {
             eprintln!(
                 "claim: node {} claims {n} (pulled {})",
                 self.cx.node().raw(),
                 self.pulled
             );
         }
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
             eprintln!(
                 "  end {}: claim {n} (pulled {}, rest {}), cut {:?}",
                 self.cx.node().raw(),
@@ -3348,7 +3348,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if n != 0 {
             self.cx.claim(n);
         }
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE")
+        if crate::exec::obs_flag!("PHITEX_TEX_TRACE")
             && self.effect != Effect::None
             && crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
         {
@@ -3444,7 +3444,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .iter()
             .map(|&(f, x, l)| (crate::val::field_name(v, f), l == Locality::Global, x))
             .collect();
-        if crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
             let skips: Vec<String> = self
                 .skip_first
                 .clone()

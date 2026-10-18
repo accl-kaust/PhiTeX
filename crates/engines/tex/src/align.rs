@@ -129,7 +129,7 @@ impl Run<'_, '_> {
             self.set_astate(if c == cmd::LEFT_BRACE { s + 1 } else { s - 1 });
             return Ok(false);
         }
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
             eprintln!("    align: {:?} state {s}", self.cur.tok);
         }
         if s != 0 {

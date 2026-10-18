@@ -65,7 +65,7 @@ pub(crate) fn run_node_parking(
     parks: bool,
     mut body: impl FnMut(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
-    let trace = crate::exec::env_flag!("PHITEX_TEX_TRACE");
+    let trace = crate::exec::obs_flag!("PHITEX_TEX_TRACE");
     if trace {
         let a = cx
             .args()
@@ -78,7 +78,6 @@ pub(crate) fn run_node_parking(
             a.chars().take(70).collect::<String>()
         );
     }
-    let parks = parks && !crate::exec::env_flag!("PHITEX_NO_PARK");
     let pp = if cx.op() == o.exec {
         crate::prof::start()
     } else {
@@ -121,7 +120,7 @@ pub(crate) fn run_node_parking(
     }
     let t_body = t_body.elapsed();
     COMMANDS.fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
-    if crate::exec::env_flag!("PHITEX_RUN_LOG") {
+    if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
         // (measure: every attempt, for `Stats::run_log`)
         let how = match &res {
             Ok(()) | Err(Halt::Cut) => b'o',
@@ -134,7 +133,7 @@ pub(crate) fn run_node_parking(
             .push((r.cx.node().raw(), r.resumed, r.cx.is_speculative(), how));
     }
     // (a long run, the format's: its commands' time, then its finish)
-    let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
+    let timed = t_body.as_secs() >= 1 && crate::exec::prof_flag!("PHITEX_TEX_TIME");
     if timed {
         eprintln!(
             "run: commands {t_body:?} ({}, speculative {}, resumed {}), memory MB resident/peak {:?}",
@@ -319,7 +318,7 @@ impl Operation for Exec {
         v: &Values,
         following: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Claim {
-        if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
+        if false {
             return Claim::Pending;
         }
         let c = match crate::hints::hint_of_args(reg(&self.0), v, args)
@@ -338,7 +337,7 @@ impl Operation for Exec {
         };
         // (`PHITEX_CLAIM_TRACE`: a pending claim's text and its next
         // sibling's, as the args render)
-        if k == 2 && crate::exec::env_flag!("PHITEX_CLAIM_TRACE") {
+        if k == 2 && crate::exec::obs_flag!("PHITEX_CLAIM_TRACE") {
             let next = following
                 .next()
                 .map(|(_, a)| a.first().map(|&x| v.render(x)).unwrap_or_default());
@@ -365,7 +364,7 @@ impl Operation for Exec {
         v: &Values,
         _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Option<usize> {
-        if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
+        if false {
             return None;
         }
         crate::hints::hint_of_args(reg(&self.0), v, args)
@@ -386,7 +385,7 @@ impl Operation for Exec {
         );
         let o = ops(&self.0);
         let log = o.pkg_log.clone();
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             let v = cx.values();
             let fs = crate::run::decode_segs(v, &args);
             LONG_TEXT.with(|c| {
@@ -407,9 +406,7 @@ impl Operation for Exec {
                 // definition back to the value in force is no effect, and
                 // the run publishes its net effect, `State::published`)
                 // (`PHITEX_PKG_NONET=1`: no load recorded, for comparison)
-                r.rec_load = load
-                    && !crate::exec::env_flag!("PHITEX_PKG_NONET")
-                    && r.scope_kind()?.is_none();
+                r.rec_load = load && r.scope_kind()?.is_none();
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
                 let args = r.resolve_units(&args)?;
                 let fs = crate::run::decode_segs(r.v, &args);
@@ -471,13 +468,13 @@ impl Operation for Exec {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((node, t0, std::time::Instant::now(), spec));
         }
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
             let text = LONG_TEXT.with(|c| c.borrow().clone());
-            eprintln!(
+            crate::exec::later(format!(
                 "longrun: exec {node} {:.0} ms (ok {}): {text}",
                 t0.elapsed().as_secs_f64() * 1e3,
                 res.is_ok()
-            );
+            ));
         }
         res
     }
@@ -806,7 +803,7 @@ fn file_node(
     if keys_on {
         let ds = ds.as_deref().unwrap_or_default();
         let mut keys = Vec::new();
-        let trace = crate::exec::env_flag!("PHITEX_AUX_TRACE");
+        let trace = crate::exec::obs_flag!("PHITEX_AUX_TRACE");
         for (f, val) in ds {
             let id = crate::api::wdef_id(name, f);
             let w = v.field(&format!("wdef:{id}"));
@@ -857,7 +854,7 @@ fn file_node(
         cx.publish(f, v.list(Vec::new()));
         return Ok(ValueId::UNIT);
     };
-    if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+    if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
         eprintln!("aux-trace: publish wfile {name}: {} bytes:\n{t}", t.len());
     }
     let defs = defs_lock

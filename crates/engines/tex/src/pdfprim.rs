@@ -719,12 +719,21 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
 fn creation_date(r: &mut Run<'_, '_>) -> R<String> {
     let t = match r.get("env:SOURCE_DATE_EPOCH")? {
         Some(x) => int_of(r.v, x),
-        None => std::env::var("SOURCE_DATE_EPOCH")
-            .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .unwrap_or(0),
+        None => source_date_epoch(),
     };
     Ok(pdf_date(t))
+}
+
+/// `SOURCE_DATE_EPOCH` as the process was started with it (0 unset),
+/// read once.
+fn source_date_epoch() -> i64 {
+    static T: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+    })
 }
 
 /// `D:YYYYMMDDHHmmSSZ` for UTC seconds `t`.
@@ -1479,10 +1488,7 @@ fn random_state(r: &mut Run<'_, '_>) -> R<Random> {
             a,
         });
     }
-    let t = std::env::var("SOURCE_DATE_EPOCH")
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
+    let t = source_date_epoch();
     Ok(Random::new(i32::try_from(t % 1_000_000).unwrap_or(0)))
 }
 

@@ -496,7 +496,7 @@ impl PageState {
                     break;
                 }
                 Outcome::Fire(f) => {
-                    if crate::exec::env_flag!("PHITEX_PAGE_TRACE") {
+                    if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
                         eprintln!(
                             "page-trace: page {} fires at candidate {k}: vsize {} maxdepth {} (marker {})",
                             self.j,
@@ -662,7 +662,7 @@ impl Run<'_, '_> {
             None => self.cx.op() != self.ops.resume || self.main_items_since(0),
         };
         if self.st.take_page_params() {
-            if crate::exec::env_flag!("PHITEX_PAGE_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
                 eprintln!(
                     "page-trace: node {} candidate {k}: page params changed, vsize {}",
                     self.cx.node().raw(),
@@ -719,7 +719,7 @@ impl Run<'_, '_> {
         // rest, run as a resume, cannot leave them as a scope and reads
         // on into the text after it, claiming the document to the next
         // page node; the piece runs on through the candidate instead)
-        if cuttable && !crate::exec::env_flag!("PHITEX_NO_CUT") && self.split_at(i64::from(k))? {
+        if cuttable && self.split_at(i64::from(k))? {
             self.cut = Some(k);
             return Err(Halt::Cut);
         }
@@ -1747,7 +1747,7 @@ impl Run<'_, '_> {
         self.begin_command();
         self.define_main_tail(&raw)?;
         let Some(k) = self.cut else { return Ok(()) };
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
             eprintln!("  cut {}: at candidate {k}", self.cx.node().raw());
         }
         self.pin_reaching_page_params(&mut raw)?;
@@ -1926,7 +1926,8 @@ impl Run<'_, '_> {
             self.set_loc(loc, crate::runstate::Entry::raw(x), true);
         }
         let Some(why) = why else { return Ok(None) };
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::obs_flag!("PHITEX_TEX_TRACE") || crate::exec::prof_flag!("PHITEX_TEX_TIME")
+        {
             eprintln!(
                 "  split asked: piece {} at candidate {} ({why})",
                 int_of(v, pid),
@@ -1999,7 +2000,7 @@ impl Run<'_, '_> {
         };
         let (inserts, marks, held) = (list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
-        if crate::exec::env_flag!("PHITEX_FIRE_TEXT") {
+        if crate::exec::obs_flag!("PHITEX_FIRE_TEXT") {
             // (the page's first letters, to tell the pages apart)
             fn text(list: &[Node], out: &mut String) {
                 for n in list {
@@ -2181,7 +2182,7 @@ impl Run<'_, '_> {
             }
         }
         self.log("ship", &s)?;
-        let timed = crate::exec::env_flag!("PHITEX_TEX_TIME");
+        let timed = crate::exec::prof_flag!("PHITEX_TEX_TIME");
         let t0 = std::time::Instant::now();
         let mut side = Side::default();
         // (the page's boxes are decoded once, here, for the writer: their
@@ -2268,14 +2269,14 @@ impl Run<'_, '_> {
         };
         phitex_pdf::phase::add(4, t_p4);
         if timed {
-            eprintln!(
+            crate::exec::later(format!(
                 "shipout: decode_us {} positions_us {} whatsits_us {} fonts_us {} pdf_us {}",
                 t_decode.as_micros(),
                 t_pos.checked_sub(t_decode).unwrap().as_micros(),
                 t_whats.checked_sub(t_pos).unwrap().as_micros(),
                 t_fonts.checked_sub(t_whats).unwrap().as_micros(),
                 t0.elapsed().checked_sub(t_fonts).unwrap().as_micros()
-            );
+            ));
         }
         let su = v.seq_unit(page);
         self.contribute("pages", su);
@@ -2476,7 +2477,7 @@ impl Run<'_, '_> {
             .filter(|l| l.group != 0)
             .map(|l| l.gid)
             .collect();
-        if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
+        if let Some(name) = crate::exec::obs_str!("PHITEX_CONT_SHOW") {
             let l = self.loc_of(v.field(name));
             eprintln!(
                 "cont {} at a cut: {name}: {} (open groups {open:?})",
@@ -2485,7 +2486,7 @@ impl Run<'_, '_> {
             );
         }
         let c = self.st.cont(v, &open);
-        if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
+        if let Some(name) = crate::exec::obs_str!("PHITEX_CONT_SHOW") {
             let l = self.loc_of(v.field(name));
             let hit = c.slots.iter().find(|s| s.loc == l);
             eprintln!(
@@ -2666,7 +2667,7 @@ impl Run<'_, '_> {
         });
         ns.adopt_spill(&self.st);
         self.st = ns;
-        if let Some(name) = crate::exec::env_str!("PHITEX_CONT_SHOW") {
+        if let Some(name) = crate::exec::obs_str!("PHITEX_CONT_SHOW") {
             let l = self.loc_of(v.field(name));
             eprintln!(
                 "cont {} loaded: {name}: {}",
@@ -2704,7 +2705,7 @@ impl Run<'_, '_> {
                 self.st.override_global(loc, x1);
                 continue;
             }
-            if crate::exec::env_flag!("PHITEX_PAGE_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
                 eprintln!(
                     "page-trace: resume {} override check {}: at the cut {:?}, now {:?}",
                     self.cx.node().raw(),
@@ -2990,15 +2991,9 @@ const FINISHER_FIELDS: &[&str] = &[
     "pdf:",
 ];
 
-/// A finisher's entry in `Ops::fin_defs`: its routine (the hint `t`)
-/// and whether its page is an ordinary one or one fired at a penalty
-/// of -10001 or less (`\outputpenalty` is in the page data): such a
-/// routine run (LaTeX's float and `\clearpage` handling) defines other
-/// things and ships nothing; predicted from runs of its own kind.
-fn fin_key(v: &Values, t: ValueId, args: &[ValueId]) -> u64 {
-    let special = crate::exec::env_flag!("PHITEX_FIN_KIND")
-        && args.get(11).is_some_and(|&x| v.as_int(x) == Some(1));
-    t.raw() ^ u64::from(special).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+/// A finisher's entry in `Ops::fin_defs`: its routine (the hint `t`).
+fn fin_key(_: &Values, t: ValueId, _: &[ValueId]) -> u64 {
+    t.raw()
 }
 
 /// Finishers created with a prediction of their definitions, and
@@ -3018,7 +3013,7 @@ impl Finish {
     /// routine that ships its page, §1026); a wrong guess runs the
     /// continuation again.
     fn predicted_defs_(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        if crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT") {
+        if false {
             return None;
         }
         let t = args.get(9).copied().unwrap_or(ValueId::UNIT);
@@ -3032,13 +3027,7 @@ impl Finish {
             .then(|| m.get(&fin_key(v, t, args)))
             .flatten();
         let mut out = d
-            .map(|d| {
-                if crate::exec::env_flag!("PHITEX_NO_STEP") {
-                    d.stable(v)
-                } else {
-                    d.predict(v, j)
-                }
-            })
+            .map(|d| if false { d.stable(v) } else { d.predict(v, j) })
             .unwrap_or_default();
         out.retain(|e| fin_may_box(v, args, t, e.0));
         if let Some(d) = d {
@@ -3095,10 +3084,7 @@ impl Operation for Finish {
     /// routine.
     fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
         let t = *args.get(9)?;
-        if t == ValueId::UNIT
-            || crate::exec::env_flag!("PHITEX_HINTS_OFF")
-            || crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
-        {
+        if t == ValueId::UNIT {
             return None;
         }
         let mut names: Vec<Field> = ops(&self.0)
@@ -3136,7 +3122,7 @@ impl Operation for Finish {
         let Some(&t) = args.get(9) else {
             return MayDefine::Any;
         };
-        if t == ValueId::UNIT || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
+        if t == ValueId::UNIT {
             return MayDefine::Any;
         }
         // (a finisher ran this routine before: what it defined then,
@@ -3149,9 +3135,7 @@ impl Operation for Finish {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
             .map(FinDefs::names);
-        if let Some(mut names) = known
-            && !crate::exec::env_flag!("PHITEX_NO_FIN_PREDICT")
-        {
+        if let Some(mut names) = known {
             names.retain(|&f| fin_may_box(v, args, t, f));
             for n in FIN_OWN {
                 names.push(v.field(n));
@@ -3209,7 +3193,7 @@ impl Operation for Finish {
         let pos = cx.args();
         let o = ops(&self.0);
         let out = run_node_parking(cx, o, true, |r| {
-            if crate::exec::env_flag!("PHITEX_FIN_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_FIN_TRACE") {
                 let j = pos.first().map_or(0, |&x| int_of(r.v, x));
                 eprintln!(
                     "fin-trace: node {} page {j} spec {} resumed {}",
@@ -3252,7 +3236,7 @@ impl Operation for Finish {
                     brk,
                 });
                 r.preload_candidate(&args)?;
-                if let Some(names) = crate::exec::env_str!("PHITEX_FIN_SHOW") {
+                if let Some(names) = crate::exec::obs_str!("PHITEX_FIN_SHOW") {
                     let mut shown = Vec::new();
                     for n in names.split(',') {
                         let x = r.get(n)?;
@@ -3297,7 +3281,7 @@ impl Operation for Finish {
                 .iter()
                 .map(|&n| format!("{:.1}", n as f64 / 1000.0))
                 .collect();
-            eprintln!("finphase: {}", us.join(" "));
+            crate::exec::later(format!("finphase: {}", us.join(" ")));
         }
         out
     }
@@ -3321,7 +3305,7 @@ impl Run<'_, '_> {
                 self.st.preload(loc, some(x));
             }
         }
-        if args.len() < 9 || crate::exec::env_flag!("PHITEX_NO_CAND_PRELOAD") {
+        if args.len() < 9 {
             return Ok(());
         }
         let piece =
@@ -3398,7 +3382,7 @@ impl Run<'_, '_> {
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
         // (`PHITEX_FIN_FIELD=name`: what each finisher's run left of that
         // field, for the predictions)
-        if let Some(name) = crate::exec::env_str!("PHITEX_FIN_FIELD") {
+        if let Some(name) = crate::exec::obs_str!("PHITEX_FIN_FIELD") {
             let f = v.field(name);
             eprintln!(
                 "fin-field page {j} node {}: {name} {}",
@@ -3426,7 +3410,7 @@ impl Run<'_, '_> {
                 None => e.recent.push((f, x, j, true)),
             }
         }
-        if crate::exec::env_flag!("PHITEX_PRED_SHOW") {
+        if crate::exec::obs_flag!("PHITEX_PRED_SHOW") {
             for (f, x) in e.predict(v, j) {
                 let got = out.iter().find(|d| d.0 == f).map(|d| d.1);
                 if got != Some(x) {
@@ -3558,15 +3542,15 @@ impl Operation for Resume {
             }
             r.run_all()
         });
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
             let v = cx.values();
             let text = v.render(args.first().copied().unwrap_or(ValueId::UNIT));
             let cut: String = text.chars().take(600).collect();
-            eprintln!(
+            crate::exec::later(format!(
                 "longrun: resume {} {:.0} ms: {cut}",
                 cx.node().raw(),
                 t0.elapsed().as_secs_f64() * 1e3
-            );
+            ));
         }
         out
     }
@@ -3933,7 +3917,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let s = ScanIn::decode(v, src);
         let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
-        let trace = crate::exec::env_flag!("PHITEX_SCAN_TRACE");
+        let trace = crate::exec::obs_flag!("PHITEX_SCAN_TRACE");
         if units.is_empty() {
             return Ok(None);
         }
@@ -4105,7 +4089,7 @@ impl Run<'_, '_> {
             None => (None, None),
         };
         let mut placed = Placed::Nothing;
-        let trace = crate::exec::env_flag!("PHITEX_SCAN_TRACE");
+        let trace = crate::exec::obs_flag!("PHITEX_SCAN_TRACE");
         let mut known = true;
         // (a bound on the pages one block fires: a page fires on some
         // item, and an item's page goes on in a later piece at most)
@@ -4149,7 +4133,7 @@ impl Run<'_, '_> {
             });
             let pred = match defined {
                 Some(p) => Some(p),
-                None if crate::exec::env_flag!("PHITEX_NO_CONT_PREDICT") => None,
+                None if false => None,
                 None => {
                     let rtn = rtn_guess(&self.ops, v, &pos);
                     // (the material its page begins with as this step
@@ -4400,7 +4384,7 @@ impl Run<'_, '_> {
             ps.fold_items(v, &material, dead, &mut live)?
         };
         if let Some(fire) = fire {
-            if crate::exec::env_flag!("PHITEX_SCAN_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
                 eprintln!(
                     "scan {}: page {} fires in the continuation at candidate {}",
                     self.cx.node().raw(),

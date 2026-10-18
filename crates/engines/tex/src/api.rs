@@ -133,37 +133,26 @@ pub enum Speculation {
 }
 
 impl Speculation {
-    /// The engine's scheduler for `self` and `budget`, `PHITEX_SPEC`
-    /// overriding.
-    /// (debug: `PHITEX_SCHED_SEED=n` runs the engine's random schedule
-    /// with seed `n`, speculating: results must not depend on it)
+    /// The engine's scheduler for `self` and `budget`.
+    /// (debug, `observe` builds: `PHITEX_SCHED_SEED=n` runs the engine's
+    /// random schedule with seed `n`, speculating: results must not
+    /// depend on it)
     fn scheduler(self, budget: usize) -> Box<dyn phitex_defuse::Scheduler + Send> {
         use phitex_defuse::Speculation as S;
-        if let Some(seed) = std::env::var("PHITEX_SCHED_SEED")
-            .ok()
-            .and_then(|x| x.parse::<u64>().ok())
+        if let Some(seed) =
+            crate::exec::obs_str!("PHITEX_SCHED_SEED").and_then(|x| x.parse::<u64>().ok())
         {
             return Box::new(phitex_defuse::RandomScheduler::new(seed, true));
         }
-        let mode = match std::env::var("PHITEX_SPEC").ok().as_deref() {
-            Some("off") => S::Off,
-            Some("predicted") => S::Predicted,
-            Some("all") => S::All,
-            _ => match self {
-                Speculation::Off => S::Off,
-                Speculation::Predicted => S::Predicted,
-                Speculation::All => S::All,
-            },
+        let mode = match self {
+            Speculation::Off => S::Off,
+            Speculation::Predicted => S::Predicted,
+            Speculation::All => S::All,
         };
-        // (`PHITEX_SPEC_FUEL` sets the step limit of a guessing run;
-        // 10,000 by default)
-        let fuel = std::env::var("PHITEX_SPEC_FUEL")
-            .ok()
-            .and_then(|x| x.parse().ok())
-            .unwrap_or(10_000);
+        // (the step limit of a guessing run)
         Box::new(phitex_defuse::Greedy {
             outstanding: 4096,
-            fuel,
+            fuel: 10_000,
             ..phitex_defuse::Greedy::speculative(mode, budget)
         })
     }
@@ -303,7 +292,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
                     let ms = self.marks.get();
                     let (ms, r) = canonical_splice(old, self.text, &ms, &raw, ends);
                     // (`PHITEX_CANON_CHECK`: against the whole text's)
-                    if crate::exec::env_flag!("PHITEX_CANON_CHECK") {
+                    if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
                         assert!(
                             canonical_text(&raw).as_ref() == Some(&(self.text.clone(), ms.clone())),
                             "canonical_splice differs from canonical_text"
@@ -328,7 +317,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
                         for k in &mut v[i + n..] {
                             *k = *k + c - b;
                         }
-                        if crate::exec::env_flag!("PHITEX_CANON_CHECK") {
+                        if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
                             assert!(*v == line_starts(self.text), "the line starts moved wrong");
                         }
                     }
@@ -379,7 +368,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
 /// diff, as elapsed since `t_all`) and slice counts (`n`: old, new, kept,
 /// replaced, removed, inserted, text bytes).
 fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [usize; 7]) {
-    if !crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if !crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         return;
     }
     let [t_slices, t_hints, t_diff] = t;
@@ -1396,7 +1385,7 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
 fn print_round(t: std::time::Duration, r: &Report) {
     // (why nodes ran again, by kind: `Report::rerun_causes`)
     let mut causes = std::collections::BTreeMap::<String, usize>::new();
-    if crate::exec::env_flag!("PHITEX_RERUN_SHOW") {
+    if crate::exec::obs_flag!("PHITEX_RERUN_SHOW") {
         for (n, c) in &r.rerun_causes {
             eprintln!("rerun: node {} {c:?}", n.raw());
         }
@@ -1557,7 +1546,7 @@ impl Stats {
             let kind = kind.split([' ', '(', '{']).next().unwrap_or("").to_owned();
             let mut why =
                 f.map_or_else(|| kind.clone(), |f| format!("{kind} {}", field_name(v, f)));
-            if crate::exec::env_flag!("PHITEX_RUN_LOG") {
+            if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
                 // (measure: where the value read differs from the one the
                 // run had read, and the round)
                 if let Rr::Changed { old, new, .. } = c {
@@ -1573,7 +1562,7 @@ impl Stats {
             }
             self.reruns.push((n.raw(), op, why));
         }
-        if crate::exec::env_flag!("PHITEX_RUN_LOG") {
+        if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
             let log = std::mem::take(
                 &mut *crate::ops::RUN_LOG
                     .lock()
@@ -1804,6 +1793,9 @@ impl Graph {
     #[allow(clippy::too_many_lines)]
     fn new(time: Option<std::time::Duration>, threads: Option<usize>) -> Graph {
         let mut eng = Engine::new();
+        // (the report's critical path and chain, a serial pass: `profile`
+        // builds only)
+        eng.set_heights(cfg!(feature = "profile"));
         eng.set_limits(phitex_defuse::Limits {
             // a node's children are bounded by the text it reads (one per
             // `\hyphenation` word, per character of a long run), not by a
@@ -2114,7 +2106,7 @@ impl Graph {
                 }
                 let ns = u64::try_from(t1.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 let all = spent.fetch_add(ns, std::sync::atomic::Ordering::Relaxed) + ns;
-                if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                     #[allow(clippy::cast_precision_loss)]
                     let all = all as f64 / 1e9;
                     eprintln!(
@@ -2409,7 +2401,7 @@ impl Graph {
         edits: &mut dyn phitex_defuse::EditSource,
     ) {
         let needs_f = self.eng.values().field("needs");
-        let tm = crate::exec::env_flag!("PHITEX_TEX_TIME");
+        let tm = crate::exec::prof_flag!("PHITEX_TEX_TIME");
         debug_nodes(&self.eng, "before the evaluation");
         let (mut t_prov, mut t_eval, mut t_after) = (
             std::time::Duration::ZERO,
@@ -2420,9 +2412,7 @@ impl Graph {
         loop {
             t_after += t_mark.elapsed();
             let tp = std::time::Instant::now();
-            if !crate::exec::env_flag!("PHITEX_NO_PROVIDER") {
-                self.provide(finder);
-            }
+            self.provide(finder);
             t_prov += tp.elapsed();
             // (the comments of a text applied before this evaluation)
             if self.marks.dirty() {
@@ -2442,7 +2432,7 @@ impl Graph {
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
                     let m = self.diagnose(&e, unit);
-                    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                         eprintln!("{m}");
                     }
                     // (what the evaluation did before it ended counts: its
@@ -2487,7 +2477,7 @@ impl Graph {
                 eprintln!("stable fields: {} scans", r.stable_scans);
             }
             crate::timeline::lap("engine: the evaluation's report");
-            if crate::exec::env_flag!("PHITEX_CHECK_READS") {
+            if crate::exec::obs_flag!("PHITEX_CHECK_READS") {
                 // (debug: every committed node's reads checked again
                 // against the store after this evaluation; `=fail`: a
                 // stale one fails, the tests' setting)
@@ -2507,14 +2497,15 @@ impl Graph {
                     tc.elapsed()
                 );
                 assert!(
-                    lines.is_empty() || crate::exec::env_str!("PHITEX_CHECK_READS") != Some("fail"),
+                    lines.is_empty() || crate::exec::obs_str!("PHITEX_CHECK_READS") != Some("fail"),
                     "{} committed reads no longer hold",
                     lines.len()
                 );
                 crate::timeline::lap("engine: the reads checked again (PHITEX_CHECK_READS only)");
             }
-            if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
+                crate::exec::flush_later();
                 print_accounting(&self.eng, &r, &ex, self.env_calls);
                 {
                     // (the reruns by cause and field, most first)
@@ -2522,7 +2513,7 @@ impl Graph {
                     let v = self.eng.values();
                     let mut by = FxHashMap::<String, usize>::default();
                     let mut shown = 0;
-                    if crate::exec::env_flag!("PHITEX_RERUN_OPS") {
+                    if crate::exec::obs_flag!("PHITEX_RERUN_OPS") {
                         // (each node run again: its operation, why, the field by name)
                         for (n, c) in &r.rerun_causes {
                             let f = match *c {
@@ -2543,7 +2534,7 @@ impl Graph {
                     }
                     for (n, c) in &r.rerun_causes {
                         if let Rr::Changed { field, old, new } = *c
-                            && crate::exec::env_str!("PHITEX_RERUN_DIFF")
+                            && crate::exec::obs_str!("PHITEX_RERUN_DIFF")
                                 .and_then(|n| n.parse::<usize>().ok())
                                 .is_some_and(|n| shown < n)
                             && crate::val::field_name(v, field) == "ps"
@@ -2580,7 +2571,7 @@ impl Graph {
                             f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
                         *by.entry(format!("{k} {name}")).or_default() += 1;
                     }
-                    if let Some(list) = crate::exec::env_str!("PHITEX_DEBUG_NODES") {
+                    if let Some(list) = crate::exec::obs_str!("PHITEX_DEBUG_NODES") {
                         let ids: Vec<u64> = list
                             .split(',')
                             .filter_map(|s| s.trim().parse().ok())
@@ -2631,7 +2622,7 @@ impl Graph {
             }
             // (`PHITEX_TEX_TIME`: why the build evaluates again)
             let ask_why = |why: &str| {
-                if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                     eprintln!("  evaluate again: {why}");
                 }
             };
@@ -2745,7 +2736,7 @@ impl Graph {
                 asked = true;
                 ask_why(&format!("units supplied: {name}"));
             }
-            if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!("  waits: {} {:?}", r.env_stalled, asked_names);
             }
             let v = self.eng.values();
@@ -2874,7 +2865,7 @@ impl Graph {
         };
         let t2 = t0.elapsed();
         crate::timeline::lap("push: the nodes' arguments (on the pool)");
-        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_TEX_TRACE") {
             for (k, _) in &nodes {
                 eprintln!("node {k:?}");
             }
@@ -2889,7 +2880,7 @@ impl Graph {
             .map(|((k, n), id)| (*k, id, Src::of(n)))
             .collect();
         let t3 = t0.elapsed();
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "push_text: slices {t1:?}, push {:?} (arguments {:?}, engine push {:?}, loop-back declarations {:?}), {} nodes",
                 t0.elapsed().checked_sub(t1).unwrap(),
@@ -3479,7 +3470,7 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         order.push(file);
     }
     defs.set_load_order(&order);
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "prelude definitions: {} names from {} files in {:?}",
             defs.len(),
@@ -3519,7 +3510,7 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
         .and_then(deserialise)
         .filter(|c| c.text_key == key)
         .map(Arc::new);
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") && opts.prelude_bytes.is_some() {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") && opts.prelude_bytes.is_some() {
         eprintln!(
             "format deserialise: {:?} ({} bytes, {})",
             t0.elapsed(),
@@ -3544,7 +3535,7 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
         })
         .into_iter()
         .all(|x| x);
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "format check: {} files found and hashed in {:?} ({})",
                 c.reads.len(),
@@ -3578,7 +3569,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         phitex_defuse::hash_bytes(7, &b)
     });
     let t_start = std::time::Instant::now();
-    let time = crate::exec::env_flag!("PHITEX_TEX_TIME");
+    let time = crate::exec::prof_flag!("PHITEX_TEX_TIME");
     let known = match cached_prelude(key, opts) {
         Ok(c) => {
             if time {
@@ -3842,7 +3833,7 @@ fn final_bindings(
             }
         }
     }
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "final bindings: defs fold {t_acc:?}, {raw} entries, {} fields; names {t_name:?}, reaching_def {t_reach:?}, def_value {t_value:?}, total {:?}",
             seen.len(),
@@ -3957,7 +3948,7 @@ impl Build {
         let defs = prelude_defs(&cached, prelude, opts.prelude_finder());
         let t1 = t0.elapsed();
         crate::timeline::lap("engine: the format's definitions");
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: prelude env (format load or build) {t_env:?}, prelude definitions {:?}",
                 t1.checked_sub(t_env).unwrap_or_default()
@@ -3987,7 +3978,7 @@ impl Build {
         crate::timeline::lap("engine: the format's files supplied (fonts, data)");
         g.guesses(&opts);
         crate::timeline::lap("engine: the guesses (read-back keys)");
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: supply the format's {} files (fonts, data) {:?}",
                 cached.reads.len(),
@@ -3996,7 +3987,7 @@ impl Build {
         }
         // (a document's nodes hold its canonical text, [`canonical_text`],
         // unless it has none: a comment-only edit changes no node)
-        let canon_text = (is_doc(prelude, document) && !crate::exec::env_flag!("PHITEX_NO_CANON"))
+        let canon_text = (is_doc(prelude, document))
             .then(|| canonical_text(document))
             .flatten();
         let g_canon = canon_text.is_some();
@@ -4039,9 +4030,8 @@ impl Build {
         let doc = is_doc(prelude, document);
         // the package loads' records (`crate::pkgrec`); a load never seen
         // runs optimistically under speculation
-        let optimistic = opts.speculation != Speculation::Off
-            && crate::exec::env_str!("PHITEX_PKG_OPTIMISTIC") != Some("0");
-        let predict = opts.pkg_predict || crate::exec::env_flag!("PHITEX_PKG_PREDICT");
+        let optimistic = opts.speculation != Speculation::Off;
+        let predict = opts.pkg_predict;
         g.loads = Some(Arc::new(crate::pkgrec::LoadHints::new(
             crate::pkgrec::parse(&opts.pkgrec),
             opts.finder.clone(),
@@ -4070,13 +4060,10 @@ impl Build {
         crate::timeline::lap("engine: the link, end and files nodes");
         // (the fields nearly every node reads and only the format or the
         // job's start defines: their reads kept per unit, not filed by
-        // scope, [`STABLE_FIELDS`]; `PHITEX_STABLE=0` leaves them, for
-        // the comparison)
-        if crate::exec::env_str!("PHITEX_STABLE") != Some("0") {
-            for f in STABLE_FIELDS {
-                let f = g.eng.values().field(f);
-                g.eng.set_stable(f);
-            }
+        // scope, [`STABLE_FIELDS`])
+        for f in STABLE_FIELDS {
+            let f = g.eng.values().field(f);
+            g.eng.set_stable(f);
         }
         let edits = opts.edits.clone().unwrap_or_default();
         let mut b = Build {
@@ -4099,7 +4086,7 @@ impl Build {
             lines: Mutex::default(),
         };
         b.settle();
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: prelude {t1:?}, document {:?}",
                 t0.elapsed().checked_sub(t1).unwrap()
@@ -4113,7 +4100,7 @@ impl Build {
     /// it (the environment, or the nodes defining it): the data the
     /// stable fields ([`STABLE_FIELDS`]) are chosen from.
     fn dump_readers(&self) {
-        if !crate::exec::env_flag!("PHITEX_READERS") {
+        if !crate::exec::obs_flag!("PHITEX_READERS") {
             return;
         }
         let eng = &self.g.eng;
@@ -4165,7 +4152,7 @@ impl Build {
     fn dump_claims(&self) {
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
         // their claims and their descendants' (a debugging dump)
-        if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
+        if let Some(want) = crate::exec::obs_str!("PHITEX_CLAIMS") {
             fn dump(eng: &Engine, v: &Values, n: NodeId, depth: usize) {
                 let Some(i) = eng.node_info(n) else { return };
                 let a = i
@@ -4202,7 +4189,7 @@ impl Build {
             let v = self.g.eng.values();
             let eng = &self.g.eng;
             for (_, n, src) in &self.nodes {
-                if src.text(&self.text).contains(&want) {
+                if src.text(&self.text).contains(want) {
                     dump(eng, v, *n, 0);
                 }
             }
@@ -4272,7 +4259,7 @@ impl Build {
         }
         stats.live = self.g.eng.live_nodes();
         crate::timeline::lap("engine: live nodes counted");
-        if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
+        if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
             crate::run::record_check(&self.g.eng, &self.g.start_env);
         }
         self.pkg_stats(&mut stats);
@@ -4284,7 +4271,7 @@ impl Build {
         }
         crate::timeline::lap("engine: package load records merged");
         self.stats = stats;
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "edit phases: before the apply (offsets, inputs) {t_before:?}, apply (intake, hint pass, slice-key diff, engine replace/insert/remove: `edit apply`) {:?}, settle (`settle phases`) {:?}, after (stats, guesses kept) {:?}",
                 t_apply.saturating_sub(t_before),
@@ -4373,7 +4360,7 @@ impl Build {
         let t0 = std::time::Instant::now();
         let _ = self.edits.send(text);
         self.settle();
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!("time: edit {:?}", t0.elapsed());
         }
     }
@@ -4689,7 +4676,7 @@ impl Build {
                         .is_some_and(|i| i.state == phitex_defuse::NodeState::Inert)
             })
             .count() as u64;
-        if crate::exec::env_flag!("PHITEX_PKG_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
             let fresh = self.fresh_records();
             for (_, n, src) in &self.nodes {
                 let Some(k) = crate::pkgrec::load_key(src.text(&self.text)) else {
@@ -4842,7 +4829,7 @@ impl Build {
             _ => std::time::Duration::ZERO,
         };
         // the loads on the critical chain (a walk of it: asked for)
-        if !crate::exec::env_flag!("PHITEX_PKG_STATS") {
+        if !crate::exec::prof_flag!("PHITEX_PKG_STATS") {
             return;
         }
         let on: phitex_defuse::FxHashSet<u64> = self
@@ -5640,7 +5627,7 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
             sets.push((v.field(k), v.int(x)));
         }
     }
-    if crate::exec::env_flag!("PHITEX_RECORD_CHECK") {
+    if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
         g.start_env.extend(sets.iter().copied());
     }
     // (spec-final §4.5: the job's bindings go with the environment, one
@@ -5744,7 +5731,7 @@ impl phitex_defuse::Monoid for LinesMonoid {
 fn decl_trace(eng: &Engine, f: Field, init: ValueId) {
     static LAST: std::sync::Mutex<Option<FxHashMap<Field, ValueId>>> = std::sync::Mutex::new(None);
 
-    if !crate::exec::env_flag!("PHITEX_DECL_TRACE") {
+    if !crate::exec::obs_flag!("PHITEX_DECL_TRACE") {
         return;
     }
     let mut l = LAST
@@ -5766,7 +5753,7 @@ fn decl_trace(eng: &Engine, f: Field, init: ValueId) {
 fn env_trace(eng: &Engine, env: &[(Field, ValueId)]) {
     static LAST: std::sync::Mutex<Option<FxHashMap<Field, ValueId>>> = std::sync::Mutex::new(None);
 
-    if !crate::exec::env_flag!("PHITEX_DECL_TRACE") {
+    if !crate::exec::obs_flag!("PHITEX_DECL_TRACE") {
         return;
     }
     let mut l = LAST
@@ -5851,7 +5838,7 @@ fn structural_diff(
 /// those nodes (`debug_node`: label, state, flags; the parent) at the
 /// evaluation's start and end.
 fn debug_nodes(eng: &Engine, when: &str) {
-    let Ok(list) = std::env::var("PHITEX_DEBUG_NODES") else {
+    let Some(list) = crate::exec::obs_str!("PHITEX_DEBUG_NODES") else {
         return;
     };
     eprintln!("debug nodes {when}:");
