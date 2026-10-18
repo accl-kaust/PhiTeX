@@ -453,7 +453,7 @@ impl Shared {
                 if let super::order::Spec::Node { id, op, args } = sp
                     && self.slot_of(*id).is_none()
                 {
-                    notes.pre.insert(*id, self.analyze_text(*op, args));
+                    notes.pre.insert(*id, self.analyze_text(None, *op, args));
                 }
             }
         }

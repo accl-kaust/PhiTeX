@@ -355,7 +355,13 @@ impl Shared {
                 let (cop, cargs) = self.text(c);
                 let (sop, sargs) = self.text(s);
                 if matches!(
-                    self.ops[cop.0 as usize].until(&cargs, &self.values, sop, &sargs),
+                    self.hook(
+                        Some(c),
+                        cop,
+                        "until",
+                        || crate::api::Until::No,
+                        || self.ops[cop.0 as usize].until(&cargs, &self.values, sop, &sargs)
+                    ),
                     crate::api::Until::Yes
                 ) {
                     continue;
@@ -1112,6 +1118,38 @@ impl Shared {
 
     pub(crate) fn past_deadline(&self) -> bool {
         self.deadline.is_some_and(|d| std::time::Instant::now() >= d)
+    }
+
+    /// Calls one of `op`'s static hooks for node `who` (when placed):
+    /// a panic fails the evaluation, or the next one when none is under
+    /// way, naming the node and hook; the hook then answers `dflt`.
+    pub(crate) fn hook<T>(
+        &self,
+        who: Option<Slot>,
+        op: crate::api::OpId,
+        hook: &'static str,
+        dflt: impl FnOnce() -> T,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            Ok(x) => x,
+            Err(p) => {
+                let message = p
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "(non-string panic)".into());
+                let e = EvalError::HookPanicked {
+                    node: who.map(|s| self.node_id(s)),
+                    op: self.op_name(op).to_string(),
+                    hook,
+                    message,
+                };
+                lock(&self.hook_error).get_or_insert_with(|| e.clone());
+                self.fail(e);
+                dflt()
+            }
+        }
     }
 
     pub(crate) fn fail(&self, e: EvalError) {

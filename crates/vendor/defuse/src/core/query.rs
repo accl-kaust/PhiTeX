@@ -304,7 +304,13 @@ impl Shared {
             }
             (d.op, d.args.clone())
         };
-        self.ops[op.0 as usize].may_define_field(&args, &self.values, f)
+        self.hook(
+            Some(x),
+            op,
+            "may_define_field",
+            || true,
+            || self.ops[op.0 as usize].may_define_field(&args, &self.values, f),
+        )
     }
 
     pub(crate) fn may_cover(&self, x: Slot, f: Field) -> Option<Option<String>> {
@@ -325,7 +331,13 @@ impl Shared {
             (d.op, d.args.clone(), hit)
         };
         let hit = hit?;
-        if self.ops[op.0 as usize].may_define_field(&args, &self.values, f) {
+        if self.hook(
+            Some(x),
+            op,
+            "may_define_field",
+            || true,
+            || self.ops[op.0 as usize].may_define_field(&args, &self.values, f),
+        ) {
             Some(hit)
         } else {
             None
@@ -970,7 +982,10 @@ impl Shared {
             if strict && self.busy(x, me) {
                 // A delimiter by its text alone ends the stream whatever it unfolds.
                 let (cop, cargs) = self.text(x);
-                if matches!(o.until(&args, v, cop, &cargs), Until::Yes) {
+                if matches!(
+                    self.hook(Some(at), op, "until", || Until::No, || o.until(&args, v, cop, &cargs)),
+                    Until::Yes
+                ) {
                     seen.push((x, r.gn.load(Ordering::Acquire), self.text_hash(x) ^ 3));
                     break;
                 }
@@ -991,7 +1006,7 @@ impl Shared {
                 continue;
             }
             let (cop, cargs) = self.text(x);
-            let until = o.until(&args, v, cop, &cargs);
+            let until = self.hook(Some(at), op, "until", || Until::No, || o.until(&args, v, cop, &cargs));
             if let Until::Read(f) = until {
                 reads.push((x, f));
             }
@@ -999,7 +1014,13 @@ impl Shared {
                 Until::No => false,
                 Until::Yes => true,
                 Until::Read(f) => match self.read_at(x, f, strict, me) {
-                    Q::Ans(val) => o.until_value(&args, v, cop, &cargs, val),
+                    Q::Ans(val) => self.hook(
+                        Some(at),
+                        op,
+                        "until_value",
+                        || false,
+                        || o.until_value(&args, v, cop, &cargs, val),
+                    ),
                     Q::Wait(w) => return Q::Wait(w),
                 },
                 Until::ReadEach(fs) => {
@@ -1011,7 +1032,13 @@ impl Shared {
                             Q::Wait(w) => return Q::Wait(w),
                         }
                     }
-                    o.until_values(&args, v, cop, &cargs, &vals)
+                    self.hook(
+                        Some(at),
+                        op,
+                        "until_values",
+                        || false,
+                        || o.until_values(&args, v, cop, &cargs, &vals),
+                    )
                 }
             };
             let h = self.text_hash(x);

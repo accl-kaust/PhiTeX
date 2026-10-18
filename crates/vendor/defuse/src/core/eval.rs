@@ -178,6 +178,12 @@ impl Engine {
             crate::obs::add_impl("end_step", te.elapsed().as_nanos() as u64);
             let err = lock(&self.sh.error).take();
             if let Some(e) = err {
+                // (A hook's panic is reported once.)
+                let mut h = lock(&self.sh.hook_error);
+                if h.as_ref() == Some(&e) {
+                    *h = None;
+                }
+                drop(h);
                 break Err(self.finish_error(e));
             }
             let after = self.sh.c.runs.load(Ordering::Relaxed) + self.sh.c.commits.load(Ordering::Relaxed);
@@ -568,6 +574,9 @@ impl Engine {
         sh.env.write().unknown.clear();
         *lock(&sh.error) = None;
         sh.abort.store(false, Ordering::Relaxed);
+        if let Some(e) = lock(&sh.hook_error).take() {
+            sh.fail(e);
+        }
         // Parked nodes from an earlier evaluation try again, unless what
         // each waits on is a node still in work: that node's commit wakes
         // it, and a change to what it read touches it (a node still parked

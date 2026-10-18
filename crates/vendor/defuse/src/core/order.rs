@@ -863,7 +863,7 @@ impl Shared {
     /// Runs the operation's static hooks on `s`'s text.
     pub(crate) fn analyze(&self, s: Slot) -> Static {
         let (op, args) = self.text(s);
-        let mut st = self.analyze_text(op, &args);
+        let mut st = self.analyze_text(Some(s), op, &args);
         self.analyze_claim(s, op, &args, &mut st);
         st
     }
@@ -873,10 +873,18 @@ impl Shared {
         let o = &self.ops[op.0 as usize];
         let v = &self.values;
         let mut it = self.following_texts(s);
-        st.claim = o.claim(args, v, &mut it).into();
+        st.claim = self
+            .hook(
+                Some(s),
+                op,
+                "claim",
+                || crate::api::Claim::None,
+                || o.claim(args, v, &mut it),
+            )
+            .into();
         let limit = if st.claim == ClaimS::Pending {
             let mut it = self.following_texts(s);
-            o.claim_limit(args, v, &mut it)
+            self.hook(Some(s), op, "claim_limit", || None, || o.claim_limit(args, v, &mut it))
         } else {
             None
         };
@@ -887,19 +895,28 @@ impl Shared {
 
     /// The static hooks that read the text alone (no claim): what a
     /// commit can find before it takes its unit's structural lock.
-    pub(crate) fn analyze_text(&self, op: OpId, args: &[ValueId]) -> Static {
+    /// (`who`: the node, when the text is placed; for a hook's panic.)
+    pub(crate) fn analyze_text(&self, who: Option<Slot>, op: OpId, args: &[ValueId]) -> Static {
         // (Borrowed: a clone's count is one line every thread writes.)
         let o = &self.ops[op.0 as usize];
         let v = &self.values;
-        let defs = o.defs(args, v);
+        let defs = self.hook(who, op, "defs", || None, || o.defs(args, v));
         let may = if defs.is_some() {
             MayDefineS::Nothing
         } else {
-            o.may_define(args, v).into()
+            self.hook(
+                who,
+                op,
+                "may_define",
+                || crate::api::MayDefine::Any,
+                || o.may_define(args, v),
+            )
+            .into()
         };
-        let effect = o.effect(args, v);
-        let reads = o.reads(args, v);
-        let contribs = o.static_contribs(args, v).map(|mut cs| {
+        let effect = self.hook(who, op, "effect", || Effect::Pending, || o.effect(args, v));
+        let reads = self.hook(who, op, "reads", || None, || o.reads(args, v));
+        let contribs = self.hook(who, op, "static_contribs", || None, || o.static_contribs(args, v));
+        let contribs = contribs.map(|mut cs| {
             // One per field (later ones combine as a run's would).
             let mut out: Vec<(Field, ValueId)> = Vec::new();
             for (f, x) in cs.drain(..) {
@@ -911,7 +928,9 @@ impl Shared {
             }
             out
         });
-        let preds = o.predicted_defs(args, v).map(Vec::into_boxed_slice);
+        let preds = self
+            .hook(who, op, "predicted_defs", || None, || o.predicted_defs(args, v))
+            .map(Vec::into_boxed_slice);
         if preds.is_some() {
             self.any_preds.store(true, Ordering::Relaxed);
         }

@@ -144,6 +144,7 @@ impl Shared {
             deferred_frames: Mutex::new(Vec::new()),
             abort: AtomicBool::new(false),
             error: Mutex::new(None),
+            hook_error: Mutex::new(None),
             c: super::Counters::default(),
             t: (0..super::STRIPES).map(|_| super::TallyShard::default()).collect(),
             #[cfg(feature = "observe")]
@@ -210,9 +211,21 @@ impl Shared {
         let stats: Vec<super::Static> = std::thread::scope(|sc| {
             let hs: Vec<_> = args
                 .chunks(chunk)
-                .map(|c| sc.spawn(move || c.iter().map(|a| self.analyze_text(op, a)).collect::<Vec<_>>()))
+                .map(|c| {
+                    (
+                        c,
+                        sc.spawn(move || c.iter().map(|a| self.analyze_text(None, op, a)).collect::<Vec<_>>()),
+                    )
+                })
                 .collect();
-            hs.into_iter().flat_map(|h| h.join().expect("static facts")).collect()
+            // (The hooks' panics are caught in `analyze_text`; a helper
+            // that died anyway is redone here.)
+            hs.into_iter()
+                .flat_map(|(c, h)| {
+                    h.join()
+                        .unwrap_or_else(|_| c.iter().map(|a| self.analyze_text(None, op, a)).collect())
+                })
+                .collect()
         });
         let mut notes = Notes::default();
         let mut slots = Vec::with_capacity(args.len());

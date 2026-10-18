@@ -539,6 +539,19 @@ pub enum EvalError {
         op: String,
         message: String,
     },
+    /// One of an operation's static hooks (`defs`, `may_define`,
+    /// `may_define_field`, `effect`, `claim`, `claim_limit`, `reads`,
+    /// `static_contribs`, `predicted_defs`, `until`, `until_value`,
+    /// `until_values`) panicked: the node
+    /// when known (a text analysed before it is placed has none), the
+    /// operation's name, the hook and the panic message. A panic outside
+    /// an evaluation (in `push`) is reported by the next one.
+    HookPanicked {
+        node: Option<NodeId>,
+        op: String,
+        hook: &'static str,
+        message: String,
+    },
     Deadline {
         runs: u64,
         waiters: Vec<Waiter>,
@@ -583,6 +596,14 @@ impl std::fmt::Display for EvalError {
             }
             EvalError::OpPanicked { node, op, message } => {
                 write!(f, "node {node:?} ({op}) panicked: {message}")
+            }
+            EvalError::HookPanicked {
+                node,
+                op,
+                hook,
+                message,
+            } => {
+                write!(f, "{op}::{hook} panicked (node {node:?}): {message}")
             }
             EvalError::Deadline { runs, waiters, .. } => write!(
                 f,
