@@ -119,7 +119,7 @@ build_first() {
   local st b prev state
   st=$(store "$c")
   dep=""
-  if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/phitex-prof && test -x $st/cli/phitex-rel && test -x $st/tests/latex" 2>/dev/null; then
+  if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/prof/phitex && test -x $st/cli/rel/phitex && test -x $st/tests/latex" 2>/dev/null; then
     echo "gate-fast: binaries of $c already built ($st)" >&2
     return
   fi

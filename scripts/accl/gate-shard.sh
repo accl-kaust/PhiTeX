@@ -172,8 +172,11 @@ for l in open(sys.argv[1]):
     if m.get("reason") == "compiler-artifact" and m.get("executable") and "test" in m["target"]["kind"]:
         shutil.copy2(m["executable"], os.path.join(sys.argv[2], m["target"]["name"]))' "$r/build-tests.json" "$r/store.tmp/tests"
       cp target-cli/release/phitex "$r/store.tmp/cli/phitex"
-      cp target-cli-prof/release/phitex "$r/store.tmp/cli/phitex-prof"
-      cp target-cli-rel/release/phitex "$r/store.tmp/cli/phitex-rel"
+      # (each under the name `phitex`: the CLI is a TeX-compatible
+      # command line under any other name)
+      mkdir -p "$r/store.tmp/cli/prof" "$r/store.tmp/cli/rel"
+      cp target-cli-prof/release/phitex "$r/store.tmp/cli/prof/phitex"
+      cp target-cli-rel/release/phitex "$r/store.tmp/cli/rel/phitex"
       sed -n 's/^build_s //p' "$r/times.txt" | tee "$r/store.tmp/tests/build_s" > "$r/store.tmp/cli/build_s"
       ls -la "$r/store.tmp/tests" "$r/store.tmp/cli" > "$r/store.txt"
       mv "$r/store.tmp" "$r/store"
@@ -313,7 +316,7 @@ for l in open(sys.argv[1]):
     # op, commit, check and idle, the link's phases), then three
     # one-word edits at -j 8 timed from the save to the build's event
     fetched
-    bin=$w/bin/cli/phitex-prof
+    bin=$w/bin/cli/prof/phitex
     echo "big node ${SLURMD_NODENAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null)} cpus $(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)" >> "$r/big.txt"
     mkdir -p "$w/big" && cp bench/para40000.tex "$w/big/"
     (cd "$w/big" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para40000.tex > "$r/big-warm.log" 2>&1)
@@ -342,7 +345,7 @@ for l in open(sys.argv[1]):
     # format's, not the document's)
     want=$1
     fetched
-    bin=$w/bin/cli/phitex-prof
+    bin=$w/bin/cli/prof/phitex
     mkdir -p "$w/par" && cp bench/para4000.tex "$w/par/"
     (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para4000.tex > "$r/para-warm.log" 2>&1)
     # (the node is shared: each -j runs three times, the min quoted,
@@ -391,7 +394,7 @@ for l in open(sys.argv[1]):
         rm -rf "$w/par/rel$j"
         s0=$(date +%s.%N)
         (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 \
-          timeout 900 taskset -c "$cores" "$w/bin/cli/phitex-rel" build -j $j --output-dir=rel$j --program pdftex para4000.tex > "$r/para-rel-j$j.log" 2>&1)
+          timeout 900 taskset -c "$cores" "$w/bin/cli/rel/phitex" build -j $j --output-dir=rel$j --program pdftex para4000.tex > "$r/para-rel-j$j.log" 2>&1)
         s1=$(date +%s.%N)
         rw="$rw $(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}')"
       done
@@ -419,7 +422,7 @@ for l in open(sys.argv[1]):
     # commands they did (`acct: commands`), and the top 15 functions by
     # exclusive Ir
     fetched
-    bin=$w/bin/cli/phitex-prof
+    bin=$w/bin/cli/prof/phitex
     doc=${GATE_CG_DOC:-para4000}
     mkdir -p "$w/cg" && cp "bench/$doc.tex" "$w/cg/"
     (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex "$doc.tex" > "$r/cg-warm.log" 2>&1)
