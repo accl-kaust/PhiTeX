@@ -13,7 +13,7 @@
 #                                       scripts/accl/gate-control/CTL (commit
 #                                       that): the ams shard reads them
 #
-# Shards (scripts/accl/gate-shard.sh, passed as text to job.sbatch's cmd
+# Shards (scripts/accl/gate-shard.sh, staged on accl and run by job.sbatch's cmd
 # task, so any commit can be gated): build (once per commit: phitex-tex's
 # test binaries and the release CLI, published under
 # phitex-runs/gate-bin/COMMIT on accl; a commit built before is not built
@@ -53,19 +53,58 @@ ROOT=/gw
 # the binaries of a commit on accl (gate-shard.sh build)
 store() { echo "code/flinner/phitex-runs/gate-bin/$1"; }
 
+# the shard script, gate-time.py and the latex order staged once on the
+# head under a key of their contents (sets $sdir and $boot): a job copies
+# them in as a store part and $boot runs them. (The command line stays
+# small: the sandbox's ssh broker cuts a request of tens of kilobytes.)
+stage() {
+  local key tmp
+  tmp=$(mktemp -d)
+  cp "$here/gate-shard.sh" "$tmp/gate-shard.sh"
+  cp "$here/gate-time.py" "$tmp/gate-time.py"
+  printf '%s\n' "$order" > "$tmp/order"
+  key=$(cat "$tmp/gate-shard.sh" "$tmp/gate-time.py" "$tmp/order" | sha256sum | cut -c1-16)
+  sdir=code/flinner/phitex-runs/gate-scripts/gs-$key
+  if ! $SSH $H "mkdir -p $sdir.part && tar -xf - -C $sdir.part && rm -rf $sdir && mv -T $sdir.part $sdir" < <(tar -cf - -C "$tmp" .) 2>/dev/null; then
+    rm -rf "$tmp"
+    echo "gate-fast: staging the shard scripts at $sdir failed" >&2
+    exit 1
+  fi
+  rm -rf "$tmp"
+  boot='d=$w/bin/gs-'$key'; GATE_TIME_PY=$(cat "$d/gate-time.py") GATE_LATEX_ORDER=$(cat "$d/order") exec bash "$d/gate-shard.sh" "$@"'
+}
+
+# sbatch options OPTS with the staged scripts added to the store parts
+with_scripts() {
+  case $1 in
+    *ACCL_STORE_IN=*) echo "${1/ACCL_STORE_IN=/ACCL_STORE_IN=$sdir:}" ;;
+    *--export=ALL*) echo "${1/--export=ALL/--export=ALL,ACCL_STORE_IN=$sdir}" ;;
+    *) echo "$1 --export=ALL,ACCL_STORE_IN=$sdir" ;;
+  esac
+}
+
 # sub OPTS SHARD ARGS...: one shard of commit $c submitted, its job id
 sub() {
-  local opts=$1 out err id
+  local opts=$1 out err id tag try
   shift
   err=$(mktemp)
-  out=$(ACCL_COMMIT=$c ACCL_OPTS="$opts" "$here/accl" submit cmd \
-    env GATE_LATEX_ORDER="$order" GATE_TIME_PY="$(cat "$here/gate-time.py")" \
-    GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" \
-    bash -c "$script" gate-shard "$@" 2> "$err") || true
-  id=$(tail -1 <<< "$out")
+  # (a submission whose connection drops is tried again, at most three
+  # times; one that went through before the drop is found by its tag,
+  # not submitted twice)
+  tag="gf-$c-$1-$$-$RANDOM"
+  for try in 1 2 3; do
+    out=$(ACCL_COMMIT=$c ACCL_OPTS="$(with_scripts "$opts") --comment=$tag" "$here/accl" submit cmd \
+      env GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" \
+      bash -c "$boot" gate-shard "$@" 2> "$err") || true
+    id=$(tail -1 <<< "$out")
+    [[ "$id" =~ ^[0-9]+$ ]] && break
+    sleep $((15 * try))
+    id=$($SSH $H "${slurm} squeue -h -u \$USER -o '%i %k'" 2>/dev/null | awk -v t="$tag" '$2 == t {print $1}' | head -1 || true)
+    [[ "$id" =~ ^[0-9]+$ ]] && break
+  done
   # (a submission that gave no job id is an error, said with its reason)
   if ! [[ "$id" =~ ^[0-9]+$ ]]; then
-    echo "gate-fast: submitting shard $1 of $c failed: $(grep -v 'post-quantum\|store now\|upgraded' "$err" | tail -5 | tr '\n' ' ')" >&2
+    echo "gate-fast: submitting shard $1 of $c failed: $(grep -v 'post-quantum\|store now\|upgraded' "$err" | tail -20)" >&2
     rm -f "$err"
     kill -TERM $$
     exit 1
@@ -114,9 +153,9 @@ submit() {
   c=$(git rev-parse "${1:-HEAD}^{commit}")
   want=$($SSH $H "md5sum $ORACLE" 2>/dev/null | cut -c1-32)
   [ -n "$want" ] || { echo "gate-fast: no oracle $ORACLE on $H" >&2; exit 1; }
-  script=$(cat "$here/gate-shard.sh")
   n=${GATE_LATEX_SHARDS:-3}
   order=${GATE_LATEX_ORDER:-$( [ -f "$ORDER_FILE" ] && tr '\n' ' ' < "$ORDER_FILE" || true)}
+  stage
   # (GATE_ONLY="lint ams": those shards only)
   on() { [ -z "${GATE_ONLY:-}" ] || [[ " $GATE_ONLY " == *" $1 "* ]]; }
   ids=()
@@ -154,8 +193,8 @@ submit() {
 # the 50-edit histories (a measurement, not the gate)
 edits50() {
   c=$(git rev-parse "${1:-HEAD}^{commit}")
-  script=$(cat "$here/gate-shard.sh")
   order=""
+  stage
   ids=()
   build_first
   local C=cli
@@ -169,8 +208,8 @@ control() {
   local ctl j d
   ctl=${1:?control commit}
   c=$(git rev-parse HEAD)
-  script=$(cat "$here/gate-shard.sh")
   order=""
+  stage
   j=$(sub "-c 18 --mem=48G -t 00:40:00 -J gf-control" control "$ctl")
   echo "gate-fast: control $ctl, job $j" >&2
   wait_all "$j" > /dev/null
