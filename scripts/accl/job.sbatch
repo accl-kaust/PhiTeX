@@ -153,7 +153,13 @@ case $task in
       if [ "$status" = 0 ]; then
         d=$HOME/$ACCL_STORE_OUT
         mkdir -p "$(dirname "$d")"
-        cp -a "$r/store" "$d.part-$SLURM_JOB_ID" && { mv -T "$d.part-$SLURM_JOB_ID" "$d" 2>/dev/null || rm -rf "$d.part-$SLURM_JOB_ID"; }
+        # (a store already there, an older build's with fewer binaries,
+        # is replaced: published whole)
+        cp -a "$r/store" "$d.part-$SLURM_JOB_ID" && {
+          mv -T "$d.part-$SLURM_JOB_ID" "$d" 2>/dev/null || {
+            rm -rf "$d.old-$SLURM_JOB_ID" && mv -T "$d" "$d.old-$SLURM_JOB_ID" && mv -T "$d.part-$SLURM_JOB_ID" "$d" && rm -rf "$d.old-$SLURM_JOB_ID"
+          } || rm -rf "$d.part-$SLURM_JOB_ID"
+        }
       fi
       rm -rf "$r/store"
     fi

@@ -55,27 +55,50 @@ store() { echo "code/flinner/phitex-runs/gate-bin/$1"; }
 
 # sub OPTS SHARD ARGS...: one shard of commit $c submitted, its job id
 sub() {
-  local opts=$1
+  local opts=$1 out err id
   shift
-  ACCL_COMMIT=$c ACCL_OPTS="$opts" "$here/accl" submit cmd \
+  err=$(mktemp)
+  out=$(ACCL_COMMIT=$c ACCL_OPTS="$opts" "$here/accl" submit cmd \
     env GATE_LATEX_ORDER="$order" GATE_TIME_PY="$(cat "$here/gate-time.py")" \
     GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" \
-    bash -c "$script" gate-shard "$@" 2>/dev/null
+    bash -c "$script" gate-shard "$@" 2> "$err") || true
+  id=$(tail -1 <<< "$out")
+  # (a submission that gave no job id is an error, said with its reason)
+  if ! [[ "$id" =~ ^[0-9]+$ ]]; then
+    echo "gate-fast: submitting shard $1 of $c failed: $(grep -v 'post-quantum\|store now\|upgraded' "$err" | tail -5 | tr '\n' ' ')" >&2
+    rm -f "$err"
+    kill -TERM $$
+    exit 1
+  fi
+  rm -f "$err"
+  echo "$id"
 }
 
 # the build job for $c unless its binaries are there: sets $dep, the
 # sbatch options of a shard that runs on them (and appends the job to ids)
 build_first() {
-  local st b
+  local st b prev state
   st=$(store "$c")
   dep=""
   if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/phitex-prof && test -x $st/cli/phitex-rel && test -x $st/tests/latex" 2>/dev/null; then
     echo "gate-fast: binaries of $c already built ($st)" >&2
-  else
-    b=$(sub "-c 16 --mem=24G -t 00:40:00 -J gf-build --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st" build)
-    ids+=("$b")
-    dep="--dependency=afterok:$b --kill-on-invalid-dep=yes"
+    return
   fi
+  # (a build of $c already queued or running: wait on it, not a second)
+  mkdir -p "$runs"
+  prev=$(awk -v c="$c" '$1 == c {id = $2} END {print id}' "$runs/gate-builds" 2>/dev/null)
+  if [ -n "$prev" ]; then
+    state=$($SSH $H "${slurm} squeue -h -j $prev -o %T" 2>/dev/null | tail -1)
+    if [ "$state" = PENDING ] || [ "$state" = RUNNING ] || [ "$state" = CONFIGURING ]; then
+      echo "gate-fast: binaries of $c being built by job $prev" >&2
+      dep="--dependency=afterok:$prev --kill-on-invalid-dep=yes"
+      return
+    fi
+  fi
+  b=$(sub "-c 16 --mem=24G -t 00:40:00 -J gf-build --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st" build)
+  echo "$c $b" >> "$runs/gate-builds"
+  ids+=("$b")
+  dep="--dependency=afterok:$b --kill-on-invalid-dep=yes"
 }
 
 # the sbatch options of a shard on the binaries ($1: the store parts it copies in)
