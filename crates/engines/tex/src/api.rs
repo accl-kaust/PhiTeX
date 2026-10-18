@@ -4071,9 +4071,9 @@ impl Build {
         crate::timeline::lap("engine: the link, end and files nodes");
         // (the fields nearly every node reads and only the format or the
         // job's start defines: their reads kept per unit, not filed by
-        // scope, [`STABLE_FIELDS`]; with `PHITEX_STABLE=1` only, until
-        // the engine's answer on it)
-        if crate::exec::env_flag!("PHITEX_STABLE") {
+        // scope, [`STABLE_FIELDS`]; `PHITEX_STABLE=0` leaves them, for
+        // the comparison)
+        if crate::exec::env_str!("PHITEX_STABLE") != Some("0") {
             for f in STABLE_FIELDS {
                 let f = g.eng.values().field(f);
                 g.eng.set_stable(f);
