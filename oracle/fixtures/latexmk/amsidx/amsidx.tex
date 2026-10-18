@@ -1,0 +1,1078 @@
+%
+% Copyright (C) 1995, 2000, 2013 American Mathematical Society.
+% Copyright (C) 2016-2026 LaTeX Project and American Mathematical Society.
+%
+% This work may be distributed and/or modified under the
+% conditions of the LaTeX Project Public License, either version 1.3c
+% of this license or (at your option) any later version.
+% The latest version of this license is in
+%   https://www.latex-project.org/lppl.txt
+% and version 1.3c or later is part of all distributions of LaTeX
+% version 2005/12/01 or later.
+%
+% This work has the LPPL maintenance status `maintained'.
+%
+% The Current Maintainer of this work is the LaTeX Project.
+%
+\documentclass[leqno,titlepage,openany]{amsldoc}[1999/12/13]
+
+\def\MaintainedByLaTeXTeam#1{%
+\begin{center}%
+\fbox{\fbox{\begin{tabular}{@{}l@{}}%
+This file is maintained by the \LaTeX{} Project team.\\%
+Bug reports can be opened (category \texttt{#1}) at\\%
+\url{https://latex-project.org/bugs/}.\end{tabular}}}\end{center}}
+
+\ifx\UndEfiNed\url
+  \ClassError{amsldoc}{%
+    This version of amsldoc.tex must be processed\MessageBreak
+    with a newer version of amsldoc.cls (2.02 or later).}{}
+\fi
+
+\renewcommand\bibname{References}
+
+%    Definitions that should be moved to amsldoc.cls
+%    when it is next updated
+\makeatletter
+\let\cleardouble@page\cleardoublepage
+\AtBeginDocument{%
+  \ifx\cleardouble@page\cleardoublepage
+    \def\cleardoublepage{\clearpage{\pagestyle{empty}\cleardouble@page}}
+  \fi
+}
+
+% #1 is empty or one of class, environment, option, package
+% could use different font in each case
+\makeatletter
+\def\@category@index#1#2{%
+    \autoindex{%
+        #2\actualchar\string\index#1font{#2}%
+        \ifx\@nil#1\@nil\else\space#1\fi
+    }%
+}
+
+\let\indexpackagefont\textsf
+\let\indexclassfont\textsf
+\let\indexoptionfont\texttt
+\let\indexenvironmentfont\texttt
+\let\indexfont\texttt
+\makeatother
+%    For a package that won't be indexed, i.e. amsmath
+\newcommand{\nipkg}{\textsf}
+\def\tikz/{Ti\textit{k}Z}
+%    End definitions for amsldoc.cls
+
+\title{User's Guide for the \nipkg{amsmath} Package (Version~2.1)}
+\author{American Mathematical Society, \LaTeX\ Project}
+\date{1999-12-13\\(revised 2002-02-25, 2016-11-14, 2018-04-05, 2019-10-14, 2020-02-18)}
+\makeatletter
+\def\@thanks{\bigskip\MaintainedByLaTeXTeam{amslatex}}
+\makeatother
+
+% Very minor changes are not listed in the \date above:
+%
+% 2021-08-22: reported typo fixed mathools -> mathtools
+% 2025-05-23: drop spurious option list
+
+
+%    Use the amsmath package and amscd package in order to print
+%    examples.
+\usepackage{amsmath}
+\usepackage{amscd}
+
+\usepackage{imakeidx}
+%    Need alternate coding for vertical bar to get it into index.
+%    Based on \qcbang and \cnbang in amsldoc.cls, refined by David Carlisle.
+%    Give it a sort field that will be at the end of the symbols;
+%    must avoid " and | which have special meanings.
+\DeclareRobustCommand{\qcvert}{\qc\|\index{{z1}@{\ntt\char'174}}}
+\DeclareRobustCommand{\cnvert}{%
+  \ncn{\|}\index{{z0}@{\ntt\bslchar\char'174}}}
+%    Need alternate index sort field for bang to allow & to sort first
+\DeclareRobustCommand{\altcnbang}{%
+  \ncn{\!}\index{"!b@{\ntt\bslchar\qcbang}}}
+\DeclareRobustCommand{\cnamp}{%
+  \index{"!a@\texttt{\&}}}
+
+\makeindex[intoc] % generate index data
+\providecommand{\see}[2]{\textit{see} #1}
+
+%    The amsldoc class includes a number of features useful for
+%    documentation about TeX, including:
+%
+%    ---Commands \tex/, \amstex/, \latex/, ... for uniform treatment
+%    of the various logos and easy handling of following spaces.
+%
+%    ---Commands for printing various common elements: \cn for command
+%    names, \fn for file names (including font-file names), \env for
+%    environments, \pkg and \cls for packages and classes, etc.
+
+%    Many of the command names used here are rather long and will
+%    contribute to poor linebreaking if we follow the \latex/ practice
+%    of not hyphenating anything set in tt font; instead we selectively
+%    allow some hyphenation.
+\allowtthyphens % defined in amsldoc.cls
+
+\hyphenation{ac-cent-ed-sym-bol add-to-counter add-to-length align-at
+  aligned-at allow-dis-play-breaks ams-art ams-cd ams-la-tex amsl-doc
+  ams-symb ams-tex ams-text ams-xtra bmatrix bold-sym-bol cen-ter-tags
+  eqn-ar-ray idots-int int-lim-its latex med-space neg-med-space
+  neg-thick-space neg-thin-space no-int-lim-its no-name-lim-its
+  over-left-arrow over-left-right-arrow over-right-arrow pmatrix
+  qed-sym-bol set-length side-set small-er tbinom the-equa-tion
+  thick-space thin-space un-der-left-arrow un-der-left-right-arrow
+  un-der-right-arrow use-pack-age var-inj-lim var-proj-lim vmatrix
+  xalign-at xx-align-at}
+
+%    Prepare for illustrating the \vec example
+\newcommand{\vect}[1]{\mathbf{#1}}
+
+\newcommand{\booktitle}[1]{\textit{#1}}
+\newcommand{\journalname}[1]{\textit{#1}}
+\newcommand{\seriesname}[1]{\textit{#1}}
+
+%    Command to insert and index a particular phrase. Doesn't work for
+%    certain kinds of special characters in the argument.
+\newcommand{\ii}[1]{#1\index{#1}}
+
+\newcommand{\vstrut}[1]{\vrule width0pt height#1\relax}
+
+%    An environment for presenting comprehensive address information:
+\newenvironment{infoaddress}{%
+  \par\topsep\medskipamount
+  \trivlist\centering
+  \item[]%
+  \begin{minipage}{.7\columnwidth}%
+  \raggedright
+}{%
+  \end{minipage}%
+  \endtrivlist
+}
+
+\newenvironment{eqxample}{%
+  \par\addvspace\medskipamount
+  \noindent\begin{minipage}{.5\columnwidth}%
+  \def\producing{\end{minipage}\begin{minipage}{.5\columnwidth}%
+    \hbox\bgroup\kern-.2pt\vrule width.2pt%
+      \vbox\bgroup\parindent0pt\relax
+%    The 3pt is to cancel the -\lineskip from \displ@y
+    \abovedisplayskip3pt \abovedisplayshortskip\abovedisplayskip
+    \belowdisplayskip0pt \belowdisplayshortskip\belowdisplayskip
+    \noindent}
+}{%
+  \par
+%    Ensure that a lonely \[\] structure doesn't take up width less than
+%    \hsize.
+  \hrule height0pt width\hsize
+  \egroup\vrule width.2pt\kern-.2pt\egroup
+  \end{minipage}%
+  \par\addvspace\medskipamount
+}
+
+%    Errors in output shouldn't be \texttt, and they may also be longer
+%    than one line, but they should be identified by the "errorbullet".
+%    (They were formerly labeled as aubsections.)
+\newenvironment{erroro}[1]{%
+  \par\addvspace\medskipamount
+  \noindent\hangindent\parindent
+  \hbox to\parindent{\errorbullet\hfil}\ignorespaces
+  #1\par\vspace{\smallskipamount}
+}{%
+  \par\addvspace\medskipamount
+}
+
+%    The chapters are so short, perhaps we shouldn't call them by the
+%    name `Chapter'. We make \chaptername read an argument in order to
+%    remove a following \space or "{} " (both possibilities are present
+%    in book.cls).
+
+\renewcommand{\chaptername}[1]{}
+\newcommand{\chapnum}[1]{\mdash #1\mdash }
+\makeatletter
+\def\@makechapterhead#1{%
+  \vspace{1.5\baselineskip}%
+  {\parindent \z@ \raggedright \reset@font
+    \ifnum \c@secnumdepth >\m@ne
+      \large\bfseries \chapnum{\thechapter}%
+      \par\nobreak
+      \vskip.5\baselineskip\relax
+    \fi
+    #1\par\nobreak
+    \vskip\baselineskip
+  }}
+\makeatother
+
+%    A command for ragged-right parbox in a tabular.
+\newcommand{\rp}{\let\PBS\\\raggedright\let\\\PBS}
+
+%    Non-indexed file name
+\newcommand{\nfn}[1]{\texttt{#1}}
+
+%    For the examples in the math spacing table.
+%%\newcommand{\lspx}{\mbox{\rule{5pt}{.6pt}\rule{.6pt}{6pt}}}
+%%\newcommand{\rspx}{\mbox{\rule[-1pt]{.6pt}{7pt}%
+%%  \rule[-1pt]{5pt}{.6pt}}}
+\newcommand{\lspx}{\mathord{\Rightarrow\mkern-1mu}}
+\newcommand{\rspx}{\mathord{\mkern-1mu\Leftarrow}}
+\newcommand{\spx}[1]{$\lspx #1\rspx$}
+
+%    For a list of characters representing document input.
+\newcommand{\clist}[1]{%
+  \mbox{\ntt\spaceskip.2em plus.1em \xspaceskip\spaceskip#1}}
+
+%    Fix weird \latex/ definition of rightmark.
+\makeatletter
+\def\rightmark{\expandafter\@rightmark\botmark{}{}}
+%    Also turn off section marks.
+\let\sectionmark\@gobble
+\renewcommand{\chaptermark}[1]{%
+  \uppercase{\markboth{\rhcn#1}{\rhcn#1}}}
+\newcommand{\rhcn}{\thechapter. }
+\makeatother
+
+%    Include down to \section but not \subsection, in toc:
+\setcounter{tocdepth}{1}
+
+%    Subheadings for the bibliography
+\newif\iffirstbibsubhead \firstbibsubheadtrue
+\newcommand{\bibsubhead}[1]{%
+  \iffirstbibsubhead \firstbibsubheadfalse
+  \else \addvspace{\medskipamount}
+  \fi
+  \item[]\hspace*{-\leftmargin}\textbf{#1}\par
+  \vspace{\smallskipamount}
+}
+
+\DeclareMathOperator{\ix}{ix}
+\DeclareMathOperator{\nul}{nul}
+\DeclareMathOperator{\End}{End}
+\DeclareMathOperator{\xxx}{xxx}
+
+\usepackage{hyperref}
+\hypersetup{pdfborder=0 0 0}
+\makeatletter
+\let\oldcs\cs
+\def\cs#1{\texorpdfstring{\oldcs{#1}}{\@backslashchar\@backslashchar#1}}
+\let\cn\cs
+\makeatother
+\begin{document}
+\mainmatter
+\index{amsmath@\texttt{amsmath} package|(}
+\index{amsbsy@\indexpackagefont{amsbsy} package}
+\index{amsopn@\indexpackagefont{amsopn} package}
+\index{amsxtra@\indexpackagefont{amsxtra} package}
+\index{amscd@\indexpackagefont{amscd} package}
+\index{amstext@\indexpackagefont{amstext} package}
+\index{amsthm@\indexpackagefont{amsthm} package}
+\index{amsart@\indexclassfont{amsart} class}
+\index{amsbook@\indexclassfont{amsbook} class}
+\index{sin@\texttt{\detokenize{\sin}}}
+\index{lim@\texttt{\detokenize{\lim}}}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\null\newpage
+\index{amstext@\indexpackagefont{amstext} package}
+\index{text@\texttt{\detokenize{\text}}}
+\index{amsopn@\indexpackagefont{amsopn} package}
+\index{DeclareMathOperator@\texttt{\detokenize{\DeclareMathOperator}}}
+\index{sin@\texttt{\detokenize{\sin}}}
+\index{lim@\texttt{\detokenize{\lim}}}
+\index{amsbsy@\indexpackagefont{amsbsy} package}
+\index{bm@\indexpackagefont{bm} package}
+\index{amscd@\indexpackagefont{amscd} package}
+\index{CD@\indexenvironmentfont{CD} environment}
+\index{amsxtra@\indexpackagefont{amsxtra} package}
+\index{fracwithdelims@\texttt{\detokenize{\fracwithdelims}}}
+\index{accentedsymbol@\texttt{\detokenize{\accentedsymbol}}}
+\index{amstext@\indexpackagefont{amstext} package}
+\index{amsopn@\indexpackagefont{amsopn} package}
+\index{amsbsy@\indexpackagefont{amsbsy} package}
+\index{amscd@\indexpackagefont{amscd} package}
+\index{amsxtra@\indexpackagefont{amsxtra} package}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{options!amsmath@\texttt{amsmath} package options|(}
+\index{centertags@\indexoptionfont{centertags} option}
+\index{split@\indexenvironmentfont{split} environment}
+\index{equationn@equation numbers!vertical placement}
+\index{tbtags@\indexoptionfont{tbtags} option}
+\index{split@\indexenvironmentfont{split} environment}
+\index{equationn@equation numbers!vertical placement}
+\index{sumlimits@\indexoptionfont{sumlimits} option}
+\index{subscripts and superscripts!placement}
+\index{limits|see{subscripts and superscripts}}
+\index{nosumlimits@\indexoptionfont{nosumlimits} option}
+\index{intlimits@\indexoptionfont{intlimits} option}
+\index{sumlimits@\indexoptionfont{sumlimits} option}
+\index{integrals!placement of limits}
+\index{nointlimits@\indexoptionfont{nointlimits} option}
+\index{intlimits@\indexoptionfont{intlimits} option}
+\index{namelimits@\indexoptionfont{namelimits} option}
+\index{sumlimits@\indexoptionfont{sumlimits} option}
+\index{subscripts and superscripts!placement}
+\index{nonamelimits@\indexoptionfont{nonamelimits} option}
+\index{namelimits@\indexoptionfont{namelimits} option}
+\null\newpage
+\index{usepackage@\texttt{\detokenize{\usepackage}}}
+\index{documentclass@\texttt{\detokenize{\documentclass}}}
+\index{documentclass@\texttt{\detokenize{\documentclass}}}
+\index{usepackage@\texttt{\detokenize{\usepackage}}}
+\index{leqno@\indexoptionfont{leqno} option}
+\index{equationn@equation numbers!left or right placement}
+\index{reqno@\indexoptionfont{reqno} option}
+\index{fleqn@\indexoptionfont{fleqn} option}
+\index{displayed equations!centering}
+\index{aligned@\indexenvironmentfont{aligned} environment}
+\index{gathered@\indexenvironmentfont{gathered} environment}
+\index{"!b@{\normalfont  \ttfamily  \bslchar \qcbang  }}
+\index{alignedleftspaceyes@\indexoptionfont{alignedleftspaceyes} option}
+\index{,@\texttt{\detokenize{\,}}}
+\index{aligned@\indexenvironmentfont{aligned} environment}
+\index{gathered@\indexenvironmentfont{gathered} environment}
+\index{alignedleftspaceno@\indexoptionfont{alignedleftspaceno} option}
+\index{,@\texttt{\detokenize{\,}}}
+\index{aligned@\indexenvironmentfont{aligned} environment}
+\index{gathered@\indexenvironmentfont{gathered} environment}
+\index{alignedleftspaceyesifneg@\indexoptionfont{alignedleftspaceyesifneg} option}
+\index{,@\texttt{\detokenize{\,}}}
+\index{options!amsmath@\texttt{amsmath} package options|)}
+\index{displayed equations}
+\index{equations|see{displayed equations}}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{horizontal spacing}
+\null\newpage
+\index{qed@\texttt{\detokenize{\qed}}}
+\index{qedhere@\texttt{\detokenize{\qedhere}}}
+\index{split@\indexenvironmentfont{split} environment}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{notag@\texttt{\detokenize{\notag}}}
+\index{notag@\texttt{\detokenize{\notag}}}
+\index{equationn@equation numbers!overriding}
+\index{tag@\texttt{\detokenize{\tag}}}
+\index{hyperref@\indexpackagefont{hyperref} package}
+\index{ref*@\texttt{\detokenize{\ref*}}}
+\index{ref@\texttt{\detokenize{\ref}}}
+\index{tag*@\texttt{\detokenize{\tag*}}}
+\index{tag@\texttt{\detokenize{\tag}}}
+\index{tag*@\texttt{\detokenize{\tag*}}}
+\index{tag@\texttt{\detokenize{\tag}}}
+\index{testmath.tex@\indexfont{testmath.tex}}
+\index{subeqn.tex@\indexfont{subeqn.tex}}
+\index{split@\indexenvironmentfont{split} environment}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{aligned@\indexenvironmentfont{aligned} environment}
+\index{alignedat@\indexenvironmentfont{alignedat} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{\@\texttt{\detokenize{\\}}}
+\index{\@\texttt{\detokenize{\\}}}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{equation*@\indexenvironmentfont{equation*} environment}
+\index{equation*@\indexenvironmentfont{equation*} environment}
+\index{[@\texttt{\detokenize{\[ ... \]}}}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{multlinegap@\texttt{\detokenize{\multlinegap}}}
+\index{fleqn@\indexoptionfont{fleqn} option}
+\index{options!behavior of particular options}
+\index{equation*@\indexenvironmentfont{equation*} environment}
+\index{displaymath@\indexenvironmentfont{displaymath} environment}
+\null\newpage
+\null\newpage
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{notag@\texttt{\detokenize{\notag}}}
+\index{reqno@\indexoptionfont{reqno} option}
+\index{leqno@\indexoptionfont{leqno} option}
+\index{split@\indexenvironmentfont{split} environment}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{options!behavior of particular options}
+\index{shoveleft@\texttt{\detokenize{\shoveleft}}}
+\index{shoveright@\texttt{\detokenize{\shoveright}}}
+\index{\@\texttt{\detokenize{\\}}}
+\index{multlinegap@\texttt{\detokenize{\multlinegap}}}
+\index{setlength@\texttt{\detokenize{\setlength}}}
+\index{addtolength@\texttt{\detokenize{\addtolength}}}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{label@\texttt{\detokenize{\label}}}
+\null\newpage
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{\@\texttt{\detokenize{\\}}}
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{text@\texttt{\detokenize{\text}}}
+\index{align@\indexenvironmentfont{align} environment}
+\null\newpage
+\index{alignat@\indexenvironmentfont{alignat} environment}
+\index{flalign@\indexenvironmentfont{flalign} environment}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{alignat@\indexenvironmentfont{alignat} environment}
+\index{ed env@\texttt{-ed} environments|(}
+\index{gathered@\indexenvironmentfont{gathered} environment}
+\index{aligned@\indexenvironmentfont{aligned} environment}
+\index{alignedat@\indexenvironmentfont{alignedat} environment}
+\null\newpage
+\index{array@\indexenvironmentfont{array} environment}
+\index{options!positioning of \texttt{-ed} environments}
+\index{t option@\texttt{t} (top) option}
+\index{b option@\texttt{b} (bottom) option}
+\index{c option@\texttt{c} (center) option}
+\index{options!space before \texttt{[}}
+\index{line break}
+\index{cases@\indexenvironmentfont{cases} environment}
+\index{text@\texttt{\detokenize{\text}}}
+\index{cases@\indexenvironmentfont{cases} environment}
+\index{textstyle@\texttt{\detokenize{\textstyle}}}
+\index{displaystyle@\texttt{\detokenize{\displaystyle}}}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{dcases@\indexenvironmentfont{dcases} environment}
+\index{ed env@\texttt{-ed} environments|)}
+\index{cases@\indexenvironmentfont{cases} environment}
+\index{raisetag@\texttt{\detokenize{\raisetag}}}
+\index{equation@\indexenvironmentfont{equation} environment}
+\null\newpage
+\index{\@\texttt{\detokenize{\\}}}
+\index{options!extra vertical space after \cn{\\}}
+\index{options!space before \texttt{[}}
+\index{\@\texttt{\detokenize{\\}}}
+\index{page breaks}
+\index{displaybreak@\texttt{\detokenize{\displaybreak}}}
+\index{displaybreak@\texttt{\detokenize{\displaybreak}}}
+\index{\@\texttt{\detokenize{\\}}}
+\index{pagebreak@\texttt{\detokenize{\pagebreak}}}
+\index{displaybreak@\texttt{\detokenize{\displaybreak}}}
+\index{options!behavior of particular options}
+\index{displaybreak@\texttt{\detokenize{\displaybreak}}}
+\index{allowdisplaybreaks@\texttt{\detokenize{\allowdisplaybreaks}}}
+\index{options!behavior of particular options}
+\index{allowdisplaybreaks@\texttt{\detokenize{\allowdisplaybreaks}}}
+\index{\*@\texttt{\detokenize{\\*}}}
+\index{displaybreak@\texttt{\detokenize{\displaybreak}}}
+\index{allowdisplaybreaks@\texttt{\detokenize{\allowdisplaybreaks}}}
+\index{split@\indexenvironmentfont{split} environment}
+\index{aligned@\indexenvironmentfont{aligned} environment}
+\index{gathered@\indexenvironmentfont{gathered} environment}
+\index{alignedat@\indexenvironmentfont{alignedat} environment}
+\index{intertext@\texttt{\detokenize{\intertext}}}
+\index{text fragments inside math}
+\index{text@\texttt{\detokenize{\text}}}
+\index{intertext@\texttt{\detokenize{\intertext}}}
+\index{\@\texttt{\detokenize{\\}}}
+\index{\*@\texttt{\detokenize{\\*}}}
+\null\newpage
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{shortintertext@\texttt{\detokenize{\shortintertext}}}
+\index{intertext@\texttt{\detokenize{\intertext}}}
+\index{equationn@equation numbers!left or right placement}
+\index{theequation@\texttt{\detokenize{\theequation}}}
+\index{setcounter@\texttt{\detokenize{\setcounter}}}
+\index{equationn@equation numbers!hierarchy}
+\index{numberwithin@\texttt{\detokenize{\numberwithin}}}
+\index{numberwithin@\texttt{\detokenize{\numberwithin}}}
+\index{eqref@\texttt{\detokenize{\eqref}}}
+\index{equationn@equation numbers!cross-references}
+\index{eqref@\texttt{\detokenize{\eqref}}}
+\index{subequations@\indexenvironmentfont{subequations} environment}
+\index{equationn@equation numbers!subordinate numbering}
+\index{align@\texttt{\detokenize{\align}}}
+\null\newpage
+\index{label@\texttt{\detokenize{\label}}}
+\index{ref@\texttt{\detokenize{\ref}}}
+\index{addtocounter@\texttt{\detokenize{\addtocounter}}}
+\index{setcounter@\texttt{\detokenize{\setcounter}}}
+\index{value@\texttt{\detokenize{\value}}}
+\index{theequation@\texttt{\detokenize{\theequation}}}
+\index{normalfont@\texttt{\detokenize{\normalfont}}}
+\index{matrices}
+\index{array@\indexenvironmentfont{array} environment}
+\index{pmatrix@\indexenvironmentfont{pmatrix} environment}
+\index{bmatrix@\indexenvironmentfont{bmatrix} environment}
+\index{Bmatrix@\indexenvironmentfont{Bmatrix} environment}
+\index{vmatrix@\indexenvironmentfont{vmatrix} environment}
+\index{Vmatrix@\indexenvironmentfont{Vmatrix} environment}
+\index{delimiters}
+\index{matrix@\indexenvironmentfont{matrix} environment}
+\index{array@\indexenvironmentfont{array} environment}
+\index{array@\indexenvironmentfont{array} environment}
+\index{array@\indexenvironmentfont{array} environment}
+\index{array@\indexenvironmentfont{array} environment}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{setcounter@\texttt{\detokenize{\setcounter}}}
+\index{addtocounter@\texttt{\detokenize{\addtocounter}}}
+\null\newpage
+\index{matrix@\indexenvironmentfont{matrix} environment!\texttt{\detokenize{*}} variants}
+\index{smallmatrix@\indexenvironmentfont{smallmatrix} environment}
+\index{delimiters}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{smallmatrix@\indexenvironmentfont{smallmatrix} environment}
+\index{smallmatrix@\indexenvironmentfont{smallmatrix} environment!variant delimiters}
+\index{smallmatrix@\indexenvironmentfont{smallmatrix} environment!\texttt{\detokenize{*}} variants}
+\index{hdotsfor@\texttt{\detokenize{\hdotsfor}}}
+\index{matrices!ellipsis dots}
+\index{ellipsis dots!in matrices}
+\index{dots|see{ellipsis dots}}
+\index{options!behavior of particular options}
+\index{horizontal spacing}
+\index{,@\texttt{\detokenize{\,}}}
+\index{thinspace@\texttt{\detokenize{\thinspace}}}
+\index{"!b@{\normalfont  \ttfamily  \bslchar \qcbang  }}
+\index{negthinspace@\texttt{\detokenize{\negthinspace}}}
+\index{:@\texttt{\detokenize{\:}}}
+\index{medspace@\texttt{\detokenize{\medspace}}}
+\index{negmedspace@\texttt{\detokenize{\negmedspace}}}
+\index{;@\texttt{\detokenize{\;}}}
+\index{thickspace@\texttt{\detokenize{\thickspace}}}
+\index{negthickspace@\texttt{\detokenize{\negthickspace}}}
+\index{quad@\texttt{\detokenize{\quad}}}
+\index{qquad@\texttt{\detokenize{\qquad}}}
+\index{mspace@\texttt{\detokenize{\mspace}}}
+\index{quad@\texttt{\detokenize{\quad}}}
+\null\newpage
+\index{dotsc@\texttt{\detokenize{\dotsc}}}
+\index{dotsb@\texttt{\detokenize{\dotsb}}}
+\index{dotsm@\texttt{\detokenize{\dotsm}}}
+\index{dotsi@\texttt{\detokenize{\dotsi}}}
+\index{dotso@\texttt{\detokenize{\dotso}}}
+\index{ldots@\texttt{\detokenize{\ldots}}}
+\index{cdots@\texttt{\detokenize{\cdots}}}
+\index{dots@\texttt{\detokenize{\dots}}}
+\index{nobreakdash@\texttt{\detokenize{\nobreakdash}}}
+\index{line break|(}
+\index{nobreakdash@\texttt{\detokenize{\nobreakdash}}}
+\index{line break|)}
+\index{hat@\texttt{\detokenize{\hat}}}
+\null\newpage
+\index{dddot@\texttt{\detokenize{\dddot}}}
+\index{ddddot@\texttt{\detokenize{\ddddot}}}
+\index{dot@\texttt{\detokenize{\dot}}}
+\index{ddot@\texttt{\detokenize{\ddot}}}
+\index{amsxtra@\indexpackagefont{amsxtra} package}
+\index{sphat@\texttt{\detokenize{\sphat}}}
+\index{sptilde@\texttt{\detokenize{\sptilde}}}
+\index{accents@\indexpackagefont{accents} package}
+\index{accents@\indexpackagefont{accents} package}
+\index{leftroot@\texttt{\detokenize{\leftroot}}}
+\index{uproot@\texttt{\detokenize{\uproot}}}
+\index{options!adjust positioning}
+\index{leftroot@\texttt{\detokenize{\leftroot}}}
+\index{boxed@\texttt{\detokenize{\boxed}}}
+\index{fbox@\texttt{\detokenize{\fbox}}}
+\index{overrightarrow@\texttt{\detokenize{\overrightarrow}}}
+\index{overleftarrow@\texttt{\detokenize{\overleftarrow}}}
+\index{overleftarrow@\texttt{\detokenize{\overleftarrow}}}
+\index{underleftarrow@\texttt{\detokenize{\underleftarrow}}}
+\index{overrightarrow@\texttt{\detokenize{\overrightarrow}}}
+\index{underrightarrow@\texttt{\detokenize{\underrightarrow}}}
+\index{overleftrightarrow@\texttt{\detokenize{\overleftrightarrow}}}
+\index{underleftrightarrow@\texttt{\detokenize{\underleftrightarrow}}}
+\index{xleftarrow@\texttt{\detokenize{\xleftarrow}}}
+\index{xrightarrow@\texttt{\detokenize{\xrightarrow}}}
+\index{arrows!extensible}
+\index{options!behavior of particular options}
+\null\newpage
+\index{stackrel@\texttt{\detokenize{\stackrel}}}
+\index{subscripts and superscripts}
+\index{overset@\texttt{\detokenize{\overset}}}
+\index{underset@\texttt{\detokenize{\underset}}}
+\index{underset@\texttt{\detokenize{\underset}}}
+\index{overunderset@\texttt{\detokenize{\overunderset}}}
+\index{sideset@\texttt{\detokenize{\sideset}}}
+\index{frac@\texttt{\detokenize{\frac}}}
+\index{dfrac@\texttt{\detokenize{\dfrac}}}
+\index{tfrac@\texttt{\detokenize{\tfrac}}}
+\index{frac@\texttt{\detokenize{\frac}}}
+\index{fractions|(}
+\index{dfrac@\texttt{\detokenize{\dfrac}}}
+\index{tfrac@\texttt{\detokenize{\tfrac}}}
+\index{textstyle@\texttt{\detokenize{\textstyle}}}
+\index{displaystyle@\texttt{\detokenize{\displaystyle}}}
+\index{binom@\texttt{\detokenize{\binom}}}
+\index{dbinom@\texttt{\detokenize{\dbinom}}}
+\index{tbinom@\texttt{\detokenize{\tbinom}}}
+\index{binomials}
+\index{binom@\texttt{\detokenize{\binom}}}
+\index{dbinom@\texttt{\detokenize{\dbinom}}}
+\index{tbinom@\texttt{\detokenize{\tbinom}}}
+\index{genfrac@\texttt{\detokenize{\genfrac}}}
+\index{frac@\texttt{\detokenize{\frac}}}
+\index{binom@\texttt{\detokenize{\binom}}}
+\index{genfrac@\texttt{\detokenize{\genfrac}}}
+\index{frac@\texttt{\detokenize{\frac}}}
+\index{delimiters}
+\index{binom@\texttt{\detokenize{\binom}}}
+\index{binom@\texttt{\detokenize{\binom}}}
+\index{displaystyle@\texttt{\detokenize{\displaystyle}}}
+\index{textstyle@\texttt{\detokenize{\textstyle}}}
+\index{scriptstyle@\texttt{\detokenize{\scriptstyle}}}
+\index{scriptscriptstyle@\texttt{\detokenize{\scriptscriptstyle}}}
+\index{frac@\texttt{\detokenize{\frac}}}
+\index{tfrac@\texttt{\detokenize{\tfrac}}}
+\index{binom@\texttt{\detokenize{\binom}}}
+\null\newpage
+\index{genfrac@\texttt{\detokenize{\genfrac}}}
+\index{frac@\texttt{\detokenize{\frac}}}
+\index{binom@\texttt{\detokenize{\binom}}}
+\index{over@\texttt{\detokenize{\over}}}
+\index{overwithdelims@\texttt{\detokenize{\overwithdelims}}}
+\index{atop@\texttt{\detokenize{\atop}}}
+\index{atopwithdelims@\texttt{\detokenize{\atopwithdelims}}}
+\index{above@\texttt{\detokenize{\above}}}
+\index{abovewithdelims@\texttt{\detokenize{\abovewithdelims}}}
+\index{technote.tex@\indexfont{technote.tex}}
+\index{continued fractions}
+\index{frac@\texttt{\detokenize{\frac}}}
+\index{cfrac@\texttt{\detokenize{\cfrac}}}
+\index{cfrac@\texttt{\detokenize{\cfrac}}}
+\index{cfrac@\texttt{\detokenize{\cfrac}}}
+\index{options!adjust positioning}
+\index{fractions|)}
+\index{smash@\texttt{\detokenize{\smash}}}
+\index{smash@\texttt{\detokenize{\smash}}}
+\index{options!behavior of particular options}
+\index{t option@\texttt{t} (top) option}
+\index{b option@\texttt{b} (bottom) option}
+\index{smash@\texttt{\detokenize{\smash}}}
+\index{delimiters|(}
+\index{left@\texttt{\detokenize{\left}}}
+\index{right@\texttt{\detokenize{\right}}}
+\null\newpage
+\index{delimiters!fixed size|(}
+\index{left@\texttt{\detokenize{\left}}}
+\index{right@\texttt{\detokenize{\right}}}
+\index{big@\cn{big}, \cn{Big}, \cn{bigg}, \dots\ delimiters}
+\index{left@\texttt{\detokenize{\left}}}
+\index{right@\texttt{\detokenize{\right}}}
+\index{left@\texttt{\detokenize{\left}}}
+\index{right@\texttt{\detokenize{\right}}}
+\index{big@\cn{big}, \cn{Big}, \cn{bigg}, \dots\ delimiters}
+\index{delimiters!fixed size|)}
+\index{lvert@\texttt{\detokenize{\lvert}}}
+\index{rvert@\texttt{\detokenize{\rvert}}}
+\index{lVert@\texttt{\detokenize{\lVert}}}
+\index{rVert@\texttt{\detokenize{\rVert}}}
+\index{langle@\texttt{\detokenize{\langle}}}
+\index{rangle@\texttt{\detokenize{\rangle}}}
+\index{{z1}@{\normalfont  \ttfamily  \char '174}}
+\null\newpage
+\index{{z1}@{\normalfont  \ttfamily  \char '174}}
+\index{{z0}@{\normalfont  \ttfamily  \bslchar \char '174}}
+\index{{z0}@{\normalfont  \ttfamily  \bslchar \char '174}}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{DeclarePairedDelimiter@\texttt{\detokenize{\DeclarePairedDelimiter}}}
+\index{delimiters|)}
+\index{operator names}
+\index{function names|see{operator names}}
+\index{log@\texttt{\detokenize{\log}}}
+\index{sin@\texttt{\detokenize{\sin}}}
+\index{lim@\texttt{\detokenize{\lim}}}
+\index{sin@\texttt{\detokenize{\sin}}}
+\index{horizontal spacing!around operator names}
+\index{DeclareMathOperator@\texttt{\detokenize{\DeclareMathOperator}}}
+\index{DeclareMathOperator@\texttt{\detokenize{\DeclareMathOperator}}}
+\null\newpage
+\index{arccos@\texttt{\detokenize{\arccos}}}
+\index{deg@\texttt{\detokenize{\deg}}}
+\index{lg@\texttt{\detokenize{\lg}}}
+\index{projlim@\texttt{\detokenize{\projlim}}}
+\index{arcsin@\texttt{\detokenize{\arcsin}}}
+\index{det@\texttt{\detokenize{\det}}}
+\index{lim@\texttt{\detokenize{\lim}}}
+\index{sec@\texttt{\detokenize{\sec}}}
+\index{arctan@\texttt{\detokenize{\arctan}}}
+\index{dim@\texttt{\detokenize{\dim}}}
+\index{liminf@\texttt{\detokenize{\liminf}}}
+\index{sin@\texttt{\detokenize{\sin}}}
+\index{arg@\texttt{\detokenize{\arg}}}
+\index{exp@\texttt{\detokenize{\exp}}}
+\index{limsup@\texttt{\detokenize{\limsup}}}
+\index{sinh@\texttt{\detokenize{\sinh}}}
+\index{cos@\texttt{\detokenize{\cos}}}
+\index{gcd@\texttt{\detokenize{\gcd}}}
+\index{ln@\texttt{\detokenize{\ln}}}
+\index{sup@\texttt{\detokenize{\sup}}}
+\index{cosh@\texttt{\detokenize{\cosh}}}
+\index{hom@\texttt{\detokenize{\hom}}}
+\index{log@\texttt{\detokenize{\log}}}
+\index{tan@\texttt{\detokenize{\tan}}}
+\index{cot@\texttt{\detokenize{\cot}}}
+\index{inf@\texttt{\detokenize{\inf}}}
+\index{max@\texttt{\detokenize{\max}}}
+\index{tanh@\texttt{\detokenize{\tanh}}}
+\index{coth@\texttt{\detokenize{\coth}}}
+\index{injlim@\texttt{\detokenize{\injlim}}}
+\index{min@\texttt{\detokenize{\min}}}
+\index{csc@\texttt{\detokenize{\csc}}}
+\index{ker@\texttt{\detokenize{\ker}}}
+\index{Pr@\texttt{\detokenize{\Pr}}}
+\index{varinjlim@\texttt{\detokenize{\varinjlim}}}
+\index{varliminf@\texttt{\detokenize{\varliminf}}}
+\index{varprojlim@\texttt{\detokenize{\varprojlim}}}
+\index{varlimsup@\texttt{\detokenize{\varlimsup}}}
+\index{operatorname@\texttt{\detokenize{\operatorname}}}
+\index{DeclareMathOperator@\texttt{\detokenize{\DeclareMathOperator}}}
+\index{operatorname*@\texttt{\detokenize{\operatorname*}}}
+\index{mod@\texttt{\detokenize{\mod}}}
+\index{mod@\texttt{\detokenize{\mod}}}
+\index{bmod@\texttt{\detokenize{\bmod}}}
+\index{pmod@\texttt{\detokenize{\pmod}}}
+\index{pod@\texttt{\detokenize{\pod}}}
+\index{bmod@\texttt{\detokenize{\bmod}}}
+\index{pmod@\texttt{\detokenize{\pmod}}}
+\index{pmod@\texttt{\detokenize{\pmod}}}
+\index{mod@\texttt{\detokenize{\mod}}}
+\index{pod@\texttt{\detokenize{\pod}}}
+\index{pmod@\texttt{\detokenize{\pmod}}}
+\index{mod@\texttt{\detokenize{\mod}}}
+\index{pod@\texttt{\detokenize{\pod}}}
+\index{text@\texttt{\detokenize{\text}}}
+\index{text@\texttt{\detokenize{\text}}}
+\index{text fragments inside math}
+\index{mbox@\texttt{\detokenize{\mbox}}}
+\index{mbox@\texttt{\detokenize{\mbox}}}
+\index{textrm@\texttt{\detokenize{\textrm}}}
+\index{text@\texttt{\detokenize{\text}}}
+\null\newpage
+\index{text@\texttt{\detokenize{\text}}}
+\index{text@\texttt{\detokenize{\text}}}
+\index{text@\texttt{\detokenize{\text}}}
+\index{text@\texttt{\detokenize{\text}}}
+\index{mathrm@\texttt{\detokenize{\mathrm}}}
+\index{DeclareMathOperator@\texttt{\detokenize{\DeclareMathOperator}}}
+\index{horizontal spacing!around operator names}
+\index{substack@\texttt{\detokenize{\substack}}}
+\index{subscripts and superscripts!multiline}
+\index{superscripts|see{subscripts and superscripts}}
+\index{subarray@\indexenvironmentfont{subarray} environment}
+\index{sideset@\texttt{\detokenize{\sideset}}}
+\index{sideset@\texttt{\detokenize{\sideset}}}
+\index{subscripts and superscripts!on sums}
+\null\newpage
+\index{nolimits@\texttt{\detokenize{\nolimits}}}
+\index{sideset@\texttt{\detokenize{\sideset}}}
+\index{sideset@\texttt{\detokenize{\sideset}}}
+\index{sideset@\texttt{\detokenize{\sideset}}}
+\index{intlimits@\indexoptionfont{intlimits} option}
+\index{options!behavior of particular options}
+\index{limits@\texttt{\detokenize{\limits}}}
+\index{nolimits@\texttt{\detokenize{\nolimits}}}
+\index{sum@\texttt{\detokenize{\sum}}}
+\index{displaylimits@\texttt{\detokenize{\displaylimits}}}
+\index{limits@\texttt{\detokenize{\limits}}}
+\index{nolimits@\texttt{\detokenize{\nolimits}}}
+\index{displaylimits@\texttt{\detokenize{\displaylimits}}}
+\index{iint@\texttt{\detokenize{\iint}}}
+\index{iiint@\texttt{\detokenize{\iiint}}}
+\index{iiiint@\texttt{\detokenize{\iiiint}}}
+\index{integrals!multiple}
+\index{idotsint@\texttt{\detokenize{\idotsint}}}
+\null\newpage
+\index{commutative diagrams}
+\index{amscd@\indexpackagefont{amscd} package}
+\index{TikZ@\tikz/ package}
+\index{tikz-cd@\indexpackagefont{tikz-cd} package}
+\index{XY-pic@\xypic/ package}
+\index{arrows!in commutative diagrams}
+\index{amscd@\indexpackagefont{amscd} package}
+\index{CD@\indexenvironmentfont{CD} environment}
+\index{fntguide.tex@\indexfont{fntguide.tex}}
+\null\newpage
+\index{math fonts}
+\index{math symbols|see{math fonts}}
+\index{mathbf@\texttt{\detokenize{\mathbf}}}
+\index{mathrm@\texttt{\detokenize{\mathrm}}}
+\index{mathcal@\texttt{\detokenize{\mathcal}}}
+\index{mathsf@\texttt{\detokenize{\mathsf}}}
+\index{mathtt@\texttt{\detokenize{\mathtt}}}
+\index{mathit@\texttt{\detokenize{\mathit}}}
+\index{mathbb@\texttt{\detokenize{\mathbb}}}
+\index{mathfrak@\texttt{\detokenize{\mathfrak}}}
+\index{mathscr@\texttt{\detokenize{\mathscr}}}
+\index{amsfonts@\indexpackagefont{amsfonts} package}
+\index{euscript@\indexpackagefont{euscript} package}
+\index{mathbf@\texttt{\detokenize{\mathbf}}}
+\index{newcommand@\texttt{\detokenize{\newcommand}}}
+\index{mathbf@\texttt{\detokenize{\mathbf}}}
+\index{C@\texttt{\detokenize{\C}}}
+\index{R@\texttt{\detokenize{\R}}}
+\index{mathbb@\texttt{\detokenize{\mathbb}}}
+\index{mathbf@\texttt{\detokenize{\mathbf}}}
+\index{mathbf@\texttt{\detokenize{\mathbf}}}
+\index{boldsymbol@\texttt{\detokenize{\boldsymbol}}}
+\index{pmb@\texttt{\detokenize{\pmb}}}
+\index{boldsymbol@\texttt{\detokenize{\boldsymbol}}}
+\index{mathbf@\texttt{\detokenize{\mathbf}}}
+\null\newpage
+\index{pmb@\texttt{\detokenize{\pmb}}}
+\index{pmb@\texttt{\detokenize{\pmb}}}
+\index{sum@\texttt{\detokenize{\sum}}}
+\index{delimiters}
+\index{amssymb@\indexpackagefont{amssymb} package}
+\index{boldsymbol@\texttt{\detokenize{\boldsymbol}}}
+\index{bm@\indexpackagefont{bm} package}
+\index{varGamma@\texttt{\detokenize{\varGamma}}}
+\index{varSigma@\texttt{\detokenize{\varSigma}}}
+\index{varDelta@\texttt{\detokenize{\varDelta}}}
+\index{varUpsilon@\texttt{\detokenize{\varUpsilon}}}
+\index{varTheta@\texttt{\detokenize{\varTheta}}}
+\index{varPhi@\texttt{\detokenize{\varPhi}}}
+\index{varLambda@\texttt{\detokenize{\varLambda}}}
+\index{varPsi@\texttt{\detokenize{\varPsi}}}
+\index{varXi@\texttt{\detokenize{\varXi}}}
+\index{varOmega@\texttt{\detokenize{\varOmega}}}
+\index{varPi@\texttt{\detokenize{\varPi}}}
+\null\newpage
+\index{split@\indexenvironmentfont{split} environment}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{alignat@\indexenvironmentfont{alignat} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{gather@\indexenvironmentfont{gather} environment}
+\null\newpage
+\index{alignat@\indexenvironmentfont{alignat} environment}
+\index{\@\texttt{\detokenize{\\}}}
+\index{amsfont@AMSFonts collection}
+\index{cmex7@\indexfont{cmex7}}
+\index{cmmib5@\indexfont{cmmib5}}
+\index{cmbsy5@\indexfont{cmbsy5}}
+\index{Metafont source files}
+\index{BaKoMa fonts}
+\index{PostScript fonts}
+\index{cmex@\indexfont{cmex}}
+\index{options!behavior of particular options}
+\index{cmex10@\indexoptionfont{cmex10} option}
+\index{usepackage@\texttt{\detokenize{\usepackage}}}
+\index{cmex@\indexfont{cmex}}
+\null\newpage
+\index{alignat@\indexenvironmentfont{alignat} environment}
+\null\newpage
+\index{line break}
+\index{\@\texttt{\detokenize{\\}}}
+\index{array@\indexenvironmentfont{array} environment}
+\index{tabular@\indexenvironmentfont{tabular} environment}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{relax@\texttt{\detokenize{\relax}}}
+\index{line break}
+\index{"!a@\texttt  {\&}}
+\index{left@\texttt{\detokenize{\left}}}
+\index{right@\texttt{\detokenize{\right}}}
+\index{delimiters}
+\index{split@\indexenvironmentfont{split} environment}
+\index{left@\texttt{\detokenize{\left}}}
+\index{right@\texttt{\detokenize{\right}}}
+\index{delimiters!fixed size}
+\index{bigl@\texttt{\detokenize{\bigl}}}
+\index{bigr@\texttt{\detokenize{\bigr}}}
+\index{biggl@\texttt{\detokenize{\biggl}}}
+\index{biggr@\texttt{\detokenize{\biggr}}}
+\null\newpage
+\index{delimiters!null}
+\index{left@\texttt{\detokenize{\left}}}
+\index{right@\texttt{\detokenize{\right}}}
+\index{delimiters!mismatched sizes}
+\index{vphantom@\texttt{\detokenize{\vphantom}}}
+\index{smash@\texttt{\detokenize{\smash}}}
+\index{vphantom@\texttt{\detokenize{\vphantom}}}
+\null\newpage
+\index{pmatrix@\texttt{\detokenize{\pmatrix}}}
+\index{matrix@\texttt{\detokenize{\matrix}}}
+\index{cases@\texttt{\detokenize{\cases}}}
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\index{technote.tex@\indexfont{technote.tex}}
+\index{options!unknown}
+\null\newpage
+\index{split@\indexenvironmentfont{split} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{over@\texttt{\detokenize{\over}}}
+\index{atop@\texttt{\detokenize{\atop}}}
+\index{above@\texttt{\detokenize{\above}}}
+\index{technote.tex@\indexfont{technote.tex}}
+\index{numberwithin@\texttt{\detokenize{\numberwithin}}}
+\index{numberwithin@\texttt{\detokenize{\numberwithin}}}
+\index{aligned@\indexenvironmentfont{aligned} environment}
+\index{gathered@\indexenvironmentfont{gathered} environment}
+\index{ed env@\texttt{-ed} environments}
+\index{options!positioning of \texttt{-ed} environments}
+\index{options!space before \texttt{[}}
+\index{\@\texttt{\detokenize{\\}}}
+\null\newpage
+\index{aligned@\indexenvironmentfont{aligned} environment}
+\index{gathered@\indexenvironmentfont{gathered} environment}
+\index{relax@\texttt{\detokenize{\relax}}}
+\index{bm@\indexpackagefont{bm} package}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{rcases@\indexenvironmentfont{rcases} environment}
+\index{cases@\indexenvironmentfont{cases} environment}
+\index{multlined@\indexenvironmentfont{multlined} environment}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{shortintertext@\texttt{\detokenize{\shortintertext}}}
+\index{intertext@\texttt{\detokenize{\intertext}}}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\index{unicode-math@\indexpackagefont{unicode-math} package}
+\index{lineno@\indexpackagefont{lineno} package}
+\index{breqn@\indexpackagefont{breqn} package}
+\index{breqn@\indexpackagefont{breqn} package}
+\index{wasysym@\indexpackagefont{wasysym} package}
+\index{mathabx@\indexpackagefont{mathabx} package}
+\index{integrals!multiple}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{gather@\indexenvironmentfont{gather} environment}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{eqnarray@\indexenvironmentfont{eqnarray} environment}
+\index{align@\indexenvironmentfont{align} environment}
+\index{multline@\indexenvironmentfont{multline} environment}
+\index{equation@\indexenvironmentfont{equation} environment}
+\index{split@\indexenvironmentfont{split} environment}
+\null\newpage
+\index{diffs-m.txt@\indexfont{diffs-m.txt}}
+\index{technote.tex@\indexfont{technote.tex}}
+\index{amsart@\indexclassfont{amsart} class}
+\index{amsbook@\indexclassfont{amsbook} class}
+\index{amsproc@\indexclassfont{amsproc} class}
+\index{online Q\,\&\,A forum}
+\index{comp.text.tex@\indexfont{comp.text.tex}}
+\index{www.ams.org@\indexfont{www.ams.org}}
+\index{CTAN (Comprehensive \TeX\ Archive Network)}
+\index{TEX Live@\TeX\,Live}
+\index{TeX Users@\tex/ Users Group}
+\index{TUGboat@\journalname{TUGboat}}
+\index{amsmath@\texttt{amsmath} package|)}
+\null\newpage
+\index{amsthm@\indexpackagefont{amsthm} package}
+\index{mathtools@\indexpackagefont{mathtools} package}
+\chapter{Additional information}
+\section{Of possible interest}\label{a:possible-interest}
+Information about obtaining AMSFonts or other \tex/-related
+software from the AMS web server at \fn{www.ams.org}
+can be obtained by sending an email request to
+\mail{tech-support@ams.org}.  This software is also posted on
+CTAN\index{CTAN (Comprehensive \TeX\ Archive Network)} and included
+in distributions based on \TeX\,Live\index{TEX Live@\TeX\,Live}.
+
+The \tex/ Users Group\index{TeX Users@\tex/ Users Group} is a nonprofit
+organization that publishes a journal
+(\journalname{TUGboat}\index{TUGboat@\journalname{TUGboat}}), holds
+meetings, and serves as a clearinghouse for general information about
+\tex/ and \tex/-related software.
+\begin{infoaddress}
+\tex/ Users Group\\
+PO Box 2311\\
+Portland, OR 97208-2311\\
+USA\\[3pt]
+Phone: +1-503-223-9994\\
+Email: \mail{office@tug.org}
+\end{infoaddress}
+Membership in the \tex/ Users Group is a good way to support continued
+development of free \tex/-related software. There are also many local
+\tex/ user groups in other countries; information about contacting a
+local user group can be gotten from the \tex/ Users Group.
+
+\index{amsmath@\texttt{amsmath} package|)}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+
+\begin{thebibliography}{10}
+\addcontentsline{toc}{chapter}{\bibname}
+
+\raggedright
+
+\bibsubhead{References in print}
+
+\bibitem{mil} George Gr\"atzer, \booktitle{More Math into \latex/}, fifth ed.,
+Springer, New York, 2016.
+% Deal with a line breaking problem
+%\begin{raggedright}
+%\bibitem{mil} G. Gr\"{a}tzer,
+%\emph{Math into \LaTeX{}: An Introduction to \LaTeX{} and AMS-\LaTeX{}}
+%  \url{https://www.ams.org/cgi-bin/bookstore/bookpromo?fn=91&arg1=bookvideo&itmc=MLTEX},
+%Birkh\"{a}user, Boston, 1995.\par
+%\end{raggedright}
+
+\bibitem{kn} Donald E. Knuth, \booktitle{The \tex/book},
+Addison-Wesley, Reading, MA, 1984.
+
+\bibitem{lamport} Leslie Lamport, \booktitle{\latex/: A document preparation
+system}, 2nd revised ed., Addison-Wesley, Reading, MA, 1994.
+
+\bibitem{tlc2} Frank Mittelbach, Michel Goossens, et al.,
+\booktitle{The \latex/ companion}, second ed., Addison-Wesley, Reading,
+MA, 2004.  This is now also available as an ebook, in both English and
+German; see \url{https://www.latex-project.org/help/books/}.
+The front matter, including the full Table of Contents, can be viewed
+online, from a link on the same page.
+%Michel Goossens, Frank Mittelbach, and Alexander Samarin,
+%\booktitle{The \latex/ companion}, Addison-Wesley, Reading, MA, 1994.
+%  [\emph{Note: The 1994 edition is not a reliable guide for the
+%    \nipkg{amsmath} package unless you refer to the errata for Chapter
+%    8\mdash file \fn{compan.err}, distributed with \LaTeX{}.}]
+
+\bibitem{msf} Frank Mittelbach and Rainer Sch\"opf,
+\textit{The new font family selection\mdash user
+interface to standard \latex/}, \journalname{TUGboat} \textbf{11},
+no.~2 (June 1990), pp.~297\ndash 305.
+
+\bibitem{jt} Michael Spivak, \booktitle{The joy of \tex/}, 2nd revised ed.,
+Amer. Math. Soc., Providence, RI, 1990.
+
+\bibsubhead{Package documentation}
+
+\bibitem{amshandbk}\booktitle{AMS author handbook}, separate versions
+for journal articles, monographs and proceedings articles, Amer. Math.
+Soc., Providence, RI, 2017;
+\url{https://www.ams.org/publications/authors/tex/author-handbook}.
+
+\bibitem{amsfonts}\booktitle{AMSFonts version \textup{2.2d}\mdash user's guide},
+Amer. Math. Soc., Providence, RI, 2002; distributed
+with the AMSFonts package
+\url{http://mirror.ctan.org/tex-archive/fonts/amsfonts/doc/amsfndoc.pdf}.
+
+\bibitem{amsthdoc}\booktitle{Using the \pkg{amsthm} Package}, version 2.20.3,
+Amer. Math. Soc., Providence, RI, 2017;
+\url{http://mirror.ctan.org/tex-archive/macros/latex/required/amscls/doc/amsthdoc.pdf}.
+
+\bibitem{mt} Morten H{\o}gholm, Lars Madsen, \booktitle{The \pkg{mathtools}
+package}, 2018;
+\url{http://mirror.ctan.org/tex-archive/macros/latex/contrib/mathtools/mathtools.pdf}.
+
+\bibsubhead{Online resources}
+
+\bibitem{ltx-team} The \latex/ Project, \url{https://www.latex-project.org}.
+
+\bibitem{ctt} Online discussion group \texttt{comp.text.tex},
+\url{https://groups.google.com/forum/\#!forum/comp.text.tex}.
+
+\bibitem{tex-sx} Online question and answer forum \texttt{tex.stackexchange},
+\url{https://tex.stackexchange.com}.
+
+\end{thebibliography}
+
+\printindex
+\end{document}
