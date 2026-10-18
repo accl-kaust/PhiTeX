@@ -30,6 +30,17 @@
 #   ACCL_NO_CARGO=1      the crates are not copied in (the task builds nothing)
 # and ~/code/flinner/phitex-accl/gate-control (the recorded control timings)
 # is copied to $w/gate-control.
+#
+# The compiler cache: a job that builds at a fixed root (ACCL_ROOT, the
+# gate's /gw) gets sccache, ~/shared-cache/bin/sccache-VERSION (the
+# release's static binary, fetched and checked by the first such job), on
+# a cache on the shared home, ~/shared-cache/sccache-phitex. Only at a
+# fixed root: an artifact keeps its absolute paths (a test's
+# CARGO_MANIFEST_DIR, the debug info), so one built under another root
+# must not be reused. In the box it is PHITEX_SCCACHE; the gate's shards
+# put it in RUSTC_WRAPPER once its server starts (gate-shard.sh). Nothing
+# of it is in the image or rust-toolchain.toml: without it a job builds
+# as before. ACCL_NO_SCCACHE=1 turns it off.
 #SBATCH -J phitex -o phitex-%j.out
 set -euo pipefail
 commit=$1 task=$2
@@ -64,10 +75,10 @@ net() {
 # answers DNS queries on some nodes even without a network: an empty
 # directory hides it)
 mkdir -p "$w/noresolve"
-ubind=""
+ubind="" sccbind="" sccenv=""
 box() {
-  apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w:$root" $ubind --home "$root" --pwd "${PWD/#$w/$root}" \
-    --env CARGO_HOME="$root/cargo",CARGO_NET_OFFLINE=true,TEXMFVAR="$root/texmf-var",PHITEX_SANDBOX=1,w="$root",r="$root/results" \
+  apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w:$root" $ubind $sccbind --home "$root" --pwd "${PWD/#$w/$root}" \
+    --env CARGO_HOME="$root/cargo",CARGO_NET_OFFLINE=true,TEXMFVAR="$root/texmf-var",PHITEX_SANDBOX=1,w="$root",r="$root/results$sccenv" \
     "$sif" "$@"
 }
 if box getent hosts export.arxiv.org >/dev/null 2>&1; then echo "FAILED: the box resolves names on $(hostname)"; exit 76; fi
@@ -101,6 +112,37 @@ else
 fi
 # (that copy only: a bare `wait` would wait for the log's tee too)
 [ -z "${cpid:-}" ] || wait "$cpid"
+# the compiler cache (see the header)
+scc_ver=0.18.0
+scc_sha256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
+scc_bin=$HOME/shared-cache/bin/sccache-$scc_ver
+scc_dir=$HOME/shared-cache/sccache-phitex
+sccbind="" sccenv=""
+if [ -z "${ACCL_NO_CARGO:-}" ] && [ -n "${ACCL_ROOT:-}" ] && [ -z "${ACCL_NO_SCCACHE:-}" ]; then
+  if [ ! -x "$scc_bin" ]; then
+    # (fetched once, in a job, never on the head: the release's static
+    # binary, checked against its pinned SHA-256; jobs racing each
+    # fetch their own copy and the last rename wins, the same bytes)
+    tgz=sccache-v$scc_ver-x86_64-unknown-linux-musl.tar.gz
+    if net curl -fsSL --retry 3 -o "$w/$tgz" "https://github.com/mozilla/sccache/releases/download/v$scc_ver/$tgz" > "$r/sccache-fetch.log" 2>&1 \
+      && [ "$(sha256sum "$w/$tgz" | cut -d' ' -f1)" = "$scc_sha256" ] \
+      && tar -xzf "$w/$tgz" -C "$w" \
+      && mkdir -p "$(dirname "$scc_bin")" \
+      && cp "$w/sccache-v$scc_ver-x86_64-unknown-linux-musl/sccache" "$scc_bin.part-$SLURM_JOB_ID" \
+      && chmod +x "$scc_bin.part-$SLURM_JOB_ID" \
+      && mv -f "$scc_bin.part-$SLURM_JOB_ID" "$scc_bin"; then
+      echo "sccache $scc_ver fetched to $scc_bin"
+    else
+      echo "sccache $scc_ver not fetched, building without it: $(tail -2 "$r/sccache-fetch.log" | tr '\n' ' ')"
+      rm -f "$scc_bin.part-$SLURM_JOB_ID"
+    fi
+  fi
+  if [ -x "$scc_bin" ]; then
+    mkdir -p "$scc_dir"
+    sccbind="--bind $scc_bin:/opt/sccache/sccache:ro --bind $scc_dir:/opt/sccache/cache"
+    sccenv=",PHITEX_SCCACHE=/opt/sccache/sccache,SCCACHE_DIR=/opt/sccache/cache,SCCACHE_CACHE_SIZE=60G,SCCACHE_IDLE_TIMEOUT=0"
+  fi
+fi
 # the container is the sandbox
 cat > scripts/sandbox <<'EOF'
 #!/usr/bin/env bash
@@ -118,7 +160,7 @@ EOF2
 chmod +x scripts/heavy
 
 export -f box
-export w sif r root ubind
+export w sif r root ubind sccbind sccenv
 # (binaries another job built, and the recorded control timings)
 if [ -n "${ACCL_STORE_IN:-}" ]; then
   mkdir -p "$w/bin"

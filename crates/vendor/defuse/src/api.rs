@@ -696,6 +696,12 @@ pub enum LoopStart {
     /// and the final phase included); round k reuses what each node
     /// committed in the previous evaluation's round k whenever the reads
     /// it made there still hold (checked as a commit checks them).
+    /// After value edits the edits are first evaluated from the last
+    /// fixpoint (the quick path), kept when every round would see the
+    /// same change: each node that committed, and each reader of a value
+    /// that changed, committed the same in every round and read no
+    /// loop-back that moved ([`Report::quick_held`],
+    /// [`Report::quick_refused`]).
     PerRound,
 }
 
@@ -752,6 +758,19 @@ pub struct RoundTimes {
     /// Results reused from the previous evaluation's same round
     /// ([`LoopStart::PerRound`]).
     pub memo_hits: u64,
+}
+
+/// Why a node ran instead of reusing its per-round memo entry
+/// ([`LoopStart::PerRound`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MemoMiss {
+    pub node: NodeId,
+    /// The round (1-based; `u32::MAX` for the final phase).
+    pub round: u32,
+    /// What failed: no entry, its text changed, a node its entry names is
+    /// gone, or the first read that no longer holds (its kind, the field
+    /// and the node it names, where it has them).
+    pub why: String,
 }
 
 /// What an evaluation did. The first seven counters (`nodes_run` ..
@@ -897,6 +916,16 @@ pub struct Report {
     /// Bytes held by the per-round store after the evaluation
     /// ([`LoopStart::PerRound`]; an estimate).
     pub memo_bytes: u64,
+    /// Under [`LoopStart::PerRound`], after edits: why the evaluation ran
+    /// the rounds from the initial values instead of keeping the quick
+    /// path's result (`None`: the quick path held, or no edits).
+    pub quick_refused: Option<String>,
+    /// Under [`LoopStart::PerRound`]: the quick path held (the edits were
+    /// evaluated from the last fixed point only).
+    pub quick_held: bool,
+    /// Under [`LoopStart::PerRound`], outside the quick path: every memo
+    /// entry not reused, and why (a node offered no entry included).
+    pub memo_misses: Vec<MemoMiss>,
     pub resettled: u64,
 }
 

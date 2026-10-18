@@ -116,15 +116,29 @@ impl Engine {
         src: &mut dyn EditSource,
     ) -> Result<Report, EvalError> {
         let memo = &self.sh.memo;
+        let mut refused: Option<String> = None;
+        if self.loop_start == LoopStart::PerRound && memo.edited.load(Ordering::Acquire) && !memo.quick_eligible() {
+            refused = Some(if memo.structural.load(Ordering::Acquire) {
+                "an edit the quick path cannot judge (a claimed text, a changed scope effect, claim or finality, push_many)"
+            } else {
+                "no per-round memo yet"
+            }
+            .into());
+        }
         if self.loop_start == LoopStart::PerRound && memo.quick_eligible() {
             memo.quick.store(true, Ordering::Release);
             memo.edited.store(false, Ordering::Release);
             let r = self.evaluate_inner(sched, exec, src);
             let memo = &self.sh.memo;
             memo.quick.store(false, Ordering::Release);
-            let held = matches!(&r, Ok(rep) if rep.rounds == 1)
-                && !memo.edited.load(Ordering::Acquire)
-                && self.sh.quick_holds();
+            let why = match &r {
+                Err(_) => Err("the quick path's evaluation failed".to_string()),
+                Ok(rep) if rep.rounds != 1 => Err("a loop-back value moved".to_string()),
+                Ok(_) if memo.edited.load(Ordering::Acquire) => Err("edits arrived during the evaluation".to_string()),
+                Ok(_) => self.sh.quick_holds(),
+            };
+            let held = why.is_ok();
+            refused = why.err();
             if held {
                 let sh = &self.sh;
                 memo.finish_quick(&|x| sh.rec(x).parent.load(Ordering::Acquire));
@@ -133,14 +147,18 @@ impl Engine {
                 rep.rounds = memo.prev_rounds.load(Ordering::Relaxed);
                 rep.capped = lock(&memo.prev_capped).clone();
                 rep.memo_bytes = memo.bytes();
+                rep.quick_held = true;
                 return Ok(rep);
             }
             // The rounds from the start (as after any edit).
             lock(memo.cur_ref()).clear();
             memo.edited.store(true, Ordering::Release);
         }
-        let r = self.evaluate_inner(sched, exec, src);
+        let mut r = self.evaluate_inner(sched, exec, src);
         self.sh.memo.structural.store(false, Ordering::Release);
+        if let Ok(rep) = &mut r {
+            rep.quick_refused = refused;
+        }
         r
     }
 
@@ -395,6 +413,17 @@ impl Engine {
             sh.memo
                 .finish(rounds, capped.clone(), &|x| sh.rec(x).parent.load(Ordering::Acquire));
             rep.memo_bytes = self.sh.memo.bytes();
+        }
+        if self.sh.memo.on.load(Ordering::Relaxed) {
+            let m = std::mem::take(&mut *lock(&self.sh.memo.misses));
+            rep.memo_misses = m
+                .into_iter()
+                .map(|(id, round, why)| crate::api::MemoMiss {
+                    node: NodeId(id),
+                    round,
+                    why,
+                })
+                .collect();
         }
         let stalled = match self.classify_parked(&mut rep) {
             Ok(s) => s,
