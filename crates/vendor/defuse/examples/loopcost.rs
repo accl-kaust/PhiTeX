@@ -5,7 +5,10 @@
 //! paragraph (its page, which reads it and `refs`, runs again). Prints
 //! runs, memo hits, wall and memo bytes per start.
 //!
-//! `cargo run --release --example loopcost -- [n] [rounds] [work_us]`
+//! `cargo run --release --example loopcost -- [n] [rounds] [work_us] [split]`
+//!
+//! With `split` the edits alternately insert a paragraph after the middle
+//! one and remove it (a paragraph split and join).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -56,7 +59,8 @@ impl Operation for Ops {
 }
 
 fn main() {
-    let a: Vec<u64> = std::env::args().skip(1).map(|x| x.parse().unwrap()).collect();
+    let a: Vec<u64> = std::env::args().skip(1).filter_map(|x| x.parse().ok()).collect();
+    let split = std::env::args().any(|x| x == "split");
     let (n, rounds, work) = (
         a.first().copied().unwrap_or(500),
         a.get(1).copied().unwrap_or(4),
@@ -87,9 +91,20 @@ fn main() {
         let cold = t.elapsed();
         let mut walls = Vec::new();
         let mut last = None;
-        for k in 0..5i64 {
-            let p = vec![eng.values().str("para"), eng.values().int(-1 - k)];
-            eng.replace(paras[n as usize / 2], op, p);
+        let mut extra = None;
+        for k in 0..6i64 {
+            if split {
+                match extra.take() {
+                    None => {
+                        let p = vec![eng.values().str("para"), eng.values().int(-1 - k)];
+                        extra = Some(eng.insert_after(paras[n as usize / 2], op, p));
+                    }
+                    Some(x) => eng.remove(x),
+                }
+            } else {
+                let p = vec![eng.values().str("para"), eng.values().int(-1 - k)];
+                eng.replace(paras[n as usize / 2], op, p);
+            }
             let t = Instant::now();
             let r = eng.evaluate_sequential().expect("edit");
             walls.push(t.elapsed().as_secs_f64() * 1e3);

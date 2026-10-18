@@ -178,9 +178,20 @@ impl Rng {
     }
 }
 
-fn random_text(r: &mut Rng, flips: bool) -> Text {
+/// `plain`: mostly texts that publish nothing (the quick path's ground).
+fn random_text_mix(r: &mut Rng, flips: bool, plain_heavy: bool) -> Text {
     let lp = |r: &mut Rng| A::S(LOOPS[r.next(LOOPS.len())]);
     let plain = |r: &mut Rng| A::S(["pa", "pb"][r.next(2)]);
+    if plain_heavy && r.next(5) != 0 {
+        return match r.next(6) {
+            0 => vec![A::S("def"), plain(r), lp(r), A::I(i64::try_from(r.next(4)).unwrap())],
+            1 => vec![A::S("dyn"), lp(r), A::I(i64::try_from(r.next(3)).unwrap())],
+            2 => vec![A::S("acc"), lp(r), A::I(i64::try_from(r.next(3)).unwrap())],
+            3 => vec![A::S("sum")],
+            4 => vec![A::S("rd"), plain(r)],
+            _ => vec![A::S("rd"), lp(r)],
+        };
+    }
     match r.next(12) {
         9 => vec![A::S("dyn"), lp(r), A::I(i64::try_from(r.next(3)).unwrap())],
         10 => vec![A::S("acc"), lp(r), A::I(i64::try_from(r.next(3)).unwrap())],
@@ -266,6 +277,16 @@ fn cold(texts: &[Text], sched: usize) -> Seen {
 
 /// Random histories under `start`; the first mismatch, if any.
 fn histories(start: LoopStart, seeds: std::ops::Range<u64>, strict: bool, flips: bool) -> Option<String> {
+    histories_mix(start, seeds, strict, flips, false)
+}
+
+fn histories_mix(
+    start: LoopStart,
+    seeds: std::ops::Range<u64>,
+    strict: bool,
+    flips: bool,
+    plain_heavy: bool,
+) -> Option<String> {
     // (Not strict: outputs and capped only; strict adds the round count.)
     let norm = |x: Seen| if strict { x } else { x.map(|(o, _, c, f)| (o, 0, c, f)) };
     // (Not strict: a capped cold build is not compared.)
@@ -275,7 +296,9 @@ fn histories(start: LoopStart, seeds: std::ops::Range<u64>, strict: bool, flips:
         let sched = usize::try_from(seed % 3).unwrap();
         let batch = 1 + r.next(3);
         let (mut eng, op, u) = engine(start);
-        let mut texts: Vec<Text> = (0..6 + r.next(6)).map(|_| random_text(&mut r, flips)).collect();
+        let mut texts: Vec<Text> = (0..6 + r.next(6))
+            .map(|_| random_text_mix(&mut r, flips, plain_heavy))
+            .collect();
         let mut ids: Vec<NodeId> = texts
             .iter()
             .map(|t| {
@@ -300,13 +323,13 @@ fn histories(start: LoopStart, seeds: std::ops::Range<u64>, strict: bool, flips:
                     ids.remove(k);
                 }
                 1 => {
-                    let t = random_text(&mut r, flips);
+                    let t = random_text_mix(&mut r, flips, plain_heavy);
                     let a = args(&eng, &t);
                     ids.insert(k + 1, eng.insert_after(ids[k], op, a));
                     texts.insert(k + 1, t);
                 }
                 _ => {
-                    let t = random_text(&mut r, flips);
+                    let t = random_text_mix(&mut r, flips, plain_heavy);
                     let a = args(&eng, &t);
                     eng.replace(ids[k], op, a);
                     texts[k] = t;
@@ -373,6 +396,17 @@ fn per_round_many_histories() {
         .and_then(|x| x.parse().ok())
         .unwrap_or(2000);
     if let Some(m) = histories(LoopStart::PerRound, 1000..1000 + n, true, true) {
+        panic!("{m}");
+    }
+    if let Some(m) = histories_mix(LoopStart::PerRound, 20_000..20_000 + n, true, true, true) {
+        panic!("{m}");
+    }
+}
+
+#[test]
+fn per_round_quick_path_histories_equal_cold_builds() {
+    // (Few publishers: most edits take the quick path.)
+    if let Some(m) = histories_mix(LoopStart::PerRound, 5000..5300, true, true, true) {
         panic!("{m}");
     }
 }

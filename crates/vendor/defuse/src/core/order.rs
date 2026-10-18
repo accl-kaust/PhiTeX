@@ -1998,6 +1998,14 @@ impl Shared {
     pub(crate) fn free_entry(&self, s: Slot, notes: &mut Notes) {
         self.escalate(self.unit_of(s));
         let r = self.rec(s);
+        if self.memo.on.load(Ordering::Relaxed) && r.st() != S_FREE {
+            let bad = {
+                let d = r.data();
+                d.stat.effect != crate::api::Effect::None || d.stat.claim != ClaimS::None
+            };
+            let parent = r.parent.load(Ordering::Acquire);
+            lock(&self.memo.removed).push((self.node_id(s).0, s, parent, bad));
+        }
         loop {
             let st = r.st();
             if st == S_FREE {
