@@ -1475,18 +1475,19 @@ impl Shared {
 
     /// Delivers subscriptions to field `f` of unit `u`: into its inbox
     /// under the read lock, or (no index yet) filed under the write lock.
-    pub(crate) fn deliver(&self, u: u32, f: Field, items: Vec<super::Inbox>) {
+    /// (`items` is drained: its buffer stays the caller's.)
+    pub(crate) fn deliver(&self, u: u32, f: Field, items: &mut Vec<super::Inbox>) {
         {
             let sh = super::rlock(self.shard(u, f));
             if let Some(idx) = sh.get(&(u, f)) {
-                lock(&idx.inbox).extend(items);
+                lock(&idx.inbox).extend(items.drain(..));
                 return;
             }
         }
         let mut sh = self.wshard(u, f);
         let idx = sh.entry((u, f)).or_default();
         self.drain(idx);
-        lock(&idx.inbox).extend(items);
+        lock(&idx.inbox).extend(items.drain(..));
         self.drain(idx);
     }
 

@@ -285,6 +285,28 @@ impl Shared {
 
     /// Whether a pending-set node may define `f`, and through which prefix.
     #[allow(clippy::option_option)]
+    /// Whether `x`'s definition set may cover `f` (`may_cover` without the
+    /// matched prefix: nothing cloned).
+    pub(crate) fn covers(&self, x: Slot, f: Field) -> bool {
+        let (op, args) = {
+            let d = self.rec(x).data();
+            let hit = match &d.stat.may {
+                super::MayDefineS::Nothing => false,
+                super::MayDefineS::Any => true,
+                super::MayDefineS::Names(ns) => ns.contains(&f),
+                super::MayDefineS::Prefixes(ps) => self
+                    .values
+                    .with_str(f.0, |name| ps.iter().any(|p| name.starts_with(p.as_str())))
+                    .unwrap_or(false),
+            };
+            if !hit {
+                return false;
+            }
+            (d.op, d.args.clone())
+        };
+        self.ops[op.0 as usize].may_define_field(&args, &self.values, f)
+    }
+
     pub(crate) fn may_cover(&self, x: Slot, f: Field) -> Option<Option<String>> {
         let (op, args, hit) = {
             let d = self.rec(x).data();
@@ -1019,7 +1041,7 @@ impl Shared {
             .map(|ds| ds.iter().any(|d| d.0 == f));
         match declared {
             Some(b) => b,
-            None => self.may_cover(c, f).is_some(),
+            None => self.covers(c, f),
         }
     }
 

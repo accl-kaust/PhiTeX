@@ -52,6 +52,9 @@ impl Operation for CloseOp {
     }
 }
 
+/// A classification of the parked nodes (`Engine::parked_memo`).
+pub(crate) type ParkedMemo = (Vec<(Slot, u32)>, Vec<(NodeId, Field)>, u64);
+
 /// An incremental evaluator over units of text.
 pub struct Engine {
     pub(crate) sh: Shared,
@@ -66,6 +69,9 @@ pub struct Engine {
     pub(crate) heights: super::report::Heights,
     /// Whether reports compute heights (`Engine::set_heights`).
     pub(crate) heights_on: bool,
+    /// The last classification of the parked nodes: (each parked node and
+    /// its park sequence, the environment waits, how many stalled on it).
+    pub(crate) parked_memo: Option<ParkedMemo>,
     pub(crate) limits: Limits,
     pub(crate) units: Vec<u32>,
 }
@@ -312,6 +318,7 @@ impl Engine {
             last_critical: 0,
             heights: super::report::Heights::default(),
             heights_on: true,
+            parked_memo: None,
             limits: Limits::default(),
             units: Vec::new(),
         };

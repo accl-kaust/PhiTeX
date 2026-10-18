@@ -75,6 +75,9 @@ struct PlayOp {
 
 impl PlayOp {
     fn st<T: serde::de::DeserializeOwned>(&self, m: &str, args: &[ValueId], x: J, dflt: T) -> T {
+        self.st_inner(m, args, x, dflt)
+    }
+    fn st_inner<T: serde::de::DeserializeOwned>(&self, m: &str, args: &[ValueId], x: J, dflt: T) -> T {
         match self
             .book
             .statics
@@ -248,6 +251,11 @@ impl Operation for PlayOp {
         self.take("until_predict", args, it, None)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.run_inner(cx)
+    }
+}
+impl PlayOp {
+    fn run_inner(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let k = key(&[&json!(self.id), &json!(cx.args())]);
         let Some(runs) = self.book.runs.get(&k) else {
             DIVERGED.fetch_add(1, Ordering::Relaxed);

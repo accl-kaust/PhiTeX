@@ -560,9 +560,21 @@ impl Shared {
                 },
                 |b| *b,
             );
-            // Definitions (a run may make many thousands: sets, not scans).
-            let declared: Option<crate::values::FxHashSet<Field>> =
-                stat_defs.as_ref().map(|sd| sd.iter().map(|e| e.0).collect());
+            // Definitions (a run may make many thousands: sets past a few,
+            // scans below, which allocate nothing).
+            const FEW: usize = 16;
+            let declared_set: Option<crate::values::FxHashSet<Field>> = stat_defs
+                .as_ref()
+                .filter(|sd| sd.len() > FEW)
+                .map(|sd| sd.iter().map(|e| e.0).collect());
+            // (`None`: no static list.)
+            let declared = |f: Field| -> Option<bool> {
+                stat_defs.as_ref().map(|sd| {
+                    declared_set
+                        .as_ref()
+                        .map_or_else(|| sd.iter().any(|e| e.0 == f), |set| set.contains(&f))
+                })
+            };
             // A static list is a guess too: a definition outside it widens
             // it (the insertion re-validates the field's readers after the
             // node, as a new definer's does).
@@ -570,13 +582,12 @@ impl Shared {
             // reader skips a busy node's entry its declaration does not
             // cover (`q_def`), and one that subscribed after the insertion
             // would not be told when the cover came.
-            let widened: Vec<(Field, crate::api::Locality)> = declared.as_ref().map_or_else(Vec::new, |sd| {
-                cx.defs
-                    .iter()
-                    .filter(|d| !sd.contains(&d.f))
-                    .map(|d| (d.f, d.loc))
-                    .collect()
-            });
+            let widened: Vec<(Field, crate::api::Locality)> = cx
+                .defs
+                .iter()
+                .filter(|d| declared(d.f) == Some(false))
+                .map(|d| (d.f, d.loc))
+                .collect();
             if !widened.is_empty() {
                 self.c.defs_refuted.fetch_add(widened.len() as u64, Ordering::Relaxed);
                 let mut d = r.data();
@@ -593,7 +604,7 @@ impl Shared {
                 // unbounded from then on.
                 let mut refuted = false;
                 for d in &cx.defs {
-                    if self.may_cover(s, d.f).is_none() {
+                    if !self.covers(s, d.f) {
                         if !refuted {
                             self.c.declarations_refuted.fetch_add(1, Ordering::Relaxed);
                         }
@@ -612,28 +623,37 @@ impl Shared {
             for d in &cx.defs {
                 self.insert_def(u, s, d.f, d.loc, d.val, &mut notes);
             }
-            let made: crate::values::FxHashSet<Field> = cx.defs.iter().map(|d| d.f).collect();
-            let defined = |f: Field| made.contains(&f);
+            let big = cx.defs.len() > FEW;
+            let made_f: Option<crate::values::FxHashSet<Field>> = big.then(|| cx.defs.iter().map(|d| d.f).collect());
+            let made_set: Option<crate::values::FxHashSet<(Field, u8)>> =
+                big.then(|| cx.defs.iter().map(|d| (d.f, d.loc.entry_key())).collect());
+            let defs_made = &cx.defs;
+            let defined = |f: Field| match &made_f {
+                Some(set) => set.contains(&f),
+                None => defs_made.iter().any(|d| d.f == f),
+            };
             // Of a field it still defines, the kind (scope-local or not)
             // it no longer makes.
-            let made_k: crate::values::FxHashSet<(Field, u8)> =
-                cx.defs.iter().map(|d| (d.f, d.loc.entry_key())).collect();
+            let made_k = |f: Field, k: u8| match &made_set {
+                Some(set) => set.contains(&(f, k)),
+                None => defs_made.iter().any(|d| d.f == f && d.loc.entry_key() == k),
+            };
             for d in &old.defs {
                 let sc = d.loc.entry_key();
-                if defined(d.f) && !made_k.contains(&(d.f, sc)) {
+                if defined(d.f) && !made_k(d.f, sc) {
                     self.remove_def_k(u, s, d.f, sc, &mut notes);
                 }
             }
             if let Some(sd) = &stat_defs {
                 for &(f, loc) in sd {
                     let sc = loc.entry_key();
-                    if !made_k.contains(&(f, sc)) {
+                    if !made_k(f, sc) {
                         self.remove_def_k(u, s, f, sc, &mut notes);
                     }
                 }
             }
             for d in &old.defs {
-                if !defined(d.f) && declared.as_ref().is_none_or(|sd| !sd.contains(&d.f)) {
+                if !defined(d.f) && declared(d.f) != Some(true) {
                     self.remove_def(u, s, d.f, &mut notes);
                 }
             }
@@ -956,7 +976,14 @@ impl Shared {
     /// The frames whose entries a read at `at` sees: its frame and its
     /// ancestors (none while its frame is unknown).
     pub(crate) fn scope_chain(&self, at: Slot) -> Vec<u32> {
-        let mut v = Vec::new();
+        // (Sized first: it is boxed as it is, without a shrinking copy.)
+        let mut n = 0;
+        let mut g = self.frame_of(at);
+        while g != super::order::NO_FRAME && n < 1 << 12 {
+            n += 1;
+            g = self.frame_parent(g);
+        }
+        let mut v = Vec::with_capacity(n);
         let mut g = self.frame_of(at);
         while g != super::order::NO_FRAME && v.len() < 1 << 12 {
             v.push(g);
@@ -977,6 +1004,8 @@ impl Shared {
     /// Subscribes the reads of a committed log.
     pub(crate) fn subscribe(&self, s: Slot, u: u32, gn: u32, log: &[Pred]) {
         let mut fwd = false;
+        // (One buffer for the items of every read: delivered by draining.)
+        let mut items: Vec<super::Inbox> = Vec::new();
         for p in log {
             match p {
                 Pred::Def {
@@ -1006,7 +1035,7 @@ impl Shared {
                         at: *at,
                         from: NIL,
                     };
-                    let mut items = Vec::with_capacity(2);
+                    items.clear();
                     if *mode == DMode::Use {
                         items.push(super::Inbox::Use {
                             sub,
@@ -1026,7 +1055,7 @@ impl Shared {
                         // (Both of its entries: the answer names the node.)
                         items.push(super::Inbox::User { node, reader: s, gn });
                     }
-                    self.deliver(u, *f, items);
+                    self.deliver(u, *f, &mut items);
                 }
                 Pred::At { node, .. } => {
                     let xr = self.rec(*node);
@@ -1050,7 +1079,7 @@ impl Shared {
                     self.deliver(
                         u,
                         *f,
-                        vec![super::Inbox::Range(Sub {
+                        &mut vec![super::Inbox::Range(Sub {
                             node: s,
                             gn,
                             at: *at,

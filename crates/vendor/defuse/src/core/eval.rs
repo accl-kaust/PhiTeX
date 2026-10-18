@@ -745,6 +745,24 @@ impl Engine {
         if parked.is_empty() {
             return Ok(0);
         }
+        // The same nodes parked on the same parks as last time: the same
+        // waits, the same verdicts (a stall that never moves is classified
+        // once, not on every evaluation).
+        let key: Vec<(Slot, u32)> = parked
+            .iter()
+            .map(|&s| (s, self.sh.rec(s).park_seq.load(Ordering::Acquire)))
+            .collect();
+        if let Some((k, waits, env)) = &self.parked_memo
+            && *k == key
+        {
+            for w in waits {
+                if !rep.env_waits.contains(w) {
+                    rep.env_waits.push(*w);
+                }
+            }
+            rep.env_stalled = *env;
+            return Ok(*env);
+        }
         // Follow each node's wait chain.
         let mut fate: crate::values::FxHashMap<Slot, u8> = crate::values::FxHashMap::default(); // 1 env, 2 cycle, 3 other
         let mut cycle: Vec<Slot> = Vec::new();
@@ -819,6 +837,7 @@ impl Engine {
                 report: Box::default(),
             });
         }
+        self.parked_memo = Some((key, rep.env_waits.clone(), env));
         Ok(env)
     }
 
