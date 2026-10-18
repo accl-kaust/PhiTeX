@@ -228,7 +228,7 @@ pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
     if let Some(l) = lazy_list(b, side) {
         return encode_box_with(v, b, l);
     }
-    encode_box_with(v, b, encode_list(v, &b.list, side))
+    encode_box_with(v, b, flat_list(v, &b.list, side))
 }
 
 /// Box `b` with `list`, the value of its list (already encoded).
@@ -385,6 +385,15 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
 pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
     let val = v.get(x);
     if let Value::List(xs) = &*val {
+        if let Some(Value::Str(b)) = xs.first().map(|&f| v.get(f)).as_deref() {
+            let mut out = Vec::new();
+            let mut rd = Flat {
+                b: b.as_bytes(),
+                at: 0,
+            };
+            flat_decode(v, &mut rd, &xs[1..], side, &mut out);
+            return out;
+        }
         let mut out: List = Vec::with_capacity(xs.len());
         // (the last glue decoded, kept: a line's interword glue is one
         // value many times)
@@ -693,5 +702,333 @@ pub(crate) fn int_field(v: &Values, x: ValueId, k: usize) -> i32 {
     match &*v.get(x) {
         Value::List(xs) => xs.get(k).map_or(0, |&y| n32(v, y)),
         _ => 0,
+    }
+}
+
+// ------------------------------------------------------------- flat
+
+/// A box's list as one value (spec-final A4, the line handed over as flat
+/// bytes): `[text, refs…]`, the nodes written one after another into the
+/// text as small numbers (six bits a character, the seventh saying more
+/// follow, so the text is ASCII), and the values the list holds by
+/// reference (a mark's or a whatsit's tokens, a node kept as its own
+/// value) after it, numbered in the text. No value per node: a line of
+/// fifty characters and glues is one string, hashed once.
+pub(crate) fn flat_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
+    let mut out = Vec::with_capacity(list.len() * 4);
+    let mut refs = Vec::new();
+    flat_encode(v, list, side, &mut out, &mut refs);
+    // (the text is ASCII: `flat_put` writes characters below 128 only)
+    let text = String::from_utf8(out).unwrap_or_default();
+    let mut xs = Vec::with_capacity(refs.len() + 1);
+    xs.push(v.str(&text));
+    xs.extend(refs);
+    v.list(xs)
+}
+
+/// The node values of the list value `l`, either form ([`flat_list`]).
+pub(crate) fn list_values(v: &Values, l: ValueId) -> Vec<ValueId> {
+    let flat = match &*v.get(l) {
+        Value::List(xs) => xs
+            .first()
+            .is_some_and(|&f| matches!(&*v.get(f), Value::Str(_))),
+        _ => false,
+    };
+    if !flat {
+        return list_of(v, l);
+    }
+    let mut side = Side::default();
+    let nodes = decode_list(v, l, &mut side);
+    nodes.iter().map(|n| encode(v, n, &side)).collect()
+}
+
+const F_CHAR: i64 = 0;
+const F_GLUE: i64 = 1;
+const F_KERN: i64 = 2;
+const F_PENALTY: i64 = 3;
+const F_BOX: i64 = 4;
+const F_RULE: i64 = 5;
+const F_LIG: i64 = 6;
+const F_DISC: i64 = 7;
+const F_MATH: i64 = 8;
+const F_LANGUAGE: i64 = 9;
+const F_MARK: i64 = 10;
+const F_WHATSIT: i64 = 11;
+/// A node kept as its own value (an insertion, an unset box, leaders, a
+/// box read shallow): its reference's number.
+const F_REF: i64 = 12;
+
+/// `x` as six-bit groups, low first, each a character with bit 6 set
+/// while more follow (zigzag: small negatives stay short).
+fn flat_put(out: &mut Vec<u8>, x: i64) {
+    let mut u = ((x << 1) ^ (x >> 63)).cast_unsigned();
+    while u >= 64 {
+        out.push(u8::try_from(u & 63).unwrap_or(0) | 64);
+        u >>= 6;
+    }
+    out.push(u8::try_from(u).unwrap_or(0));
+}
+
+fn flat_glue(out: &mut Vec<u8>, g: &Glue) {
+    flat_put(out, i64::from(g.width));
+    flat_put(out, i64::from(g.stretch));
+    flat_put(out, g.stretch_order as i64);
+    flat_put(out, i64::from(g.shrink));
+    flat_put(out, g.shrink_order as i64);
+}
+
+fn flat_encode(v: &Values, list: &[Node], side: &Side, out: &mut Vec<u8>, refs: &mut Vec<ValueId>) {
+    flat_put(out, i64::try_from(list.len()).unwrap_or(0));
+    for n in list {
+        match n {
+            Node::Char { font, ch } => {
+                flat_put(out, F_CHAR);
+                flat_put(out, i64::from(*font));
+                flat_put(out, i64::from(*ch));
+            }
+            Node::Glue(g) if g.leader.is_none() => {
+                flat_put(out, F_GLUE);
+                flat_glue(out, &g.spec);
+                flat_put(out, glue_kind_code(g.kind));
+            }
+            Node::Kern(w, k) => {
+                flat_put(out, F_KERN);
+                flat_put(out, i64::from(*w));
+                flat_put(out, kern_code(*k));
+            }
+            Node::Penalty(p) => {
+                flat_put(out, F_PENALTY);
+                flat_put(out, i64::from(*p));
+            }
+            Node::Box(b) if lazy_list(b, side).is_none() => {
+                flat_put(out, F_BOX);
+                for w in head_words(b) {
+                    flat_put(out, w);
+                }
+                flat_encode(v, &b.list, side, out, refs);
+            }
+            Node::Rule(r) => {
+                flat_put(out, F_RULE);
+                flat_put(out, i64::from(r.width));
+                flat_put(out, i64::from(r.height));
+                flat_put(out, i64::from(r.depth));
+            }
+            Node::Lig(l) => {
+                flat_put(out, F_LIG);
+                flat_put(out, i64::from(l.font));
+                flat_put(out, i64::from(l.ch));
+                flat_put(out, i64::try_from(l.original.len()).unwrap_or(0));
+                for &c in &l.original {
+                    flat_put(out, i64::from(c));
+                }
+                flat_put(out, i64::from(l.left_hit) | (i64::from(l.right_hit) << 1));
+            }
+            Node::Disc(d) => {
+                flat_put(out, F_DISC);
+                flat_encode(v, &d.pre, side, out, refs);
+                flat_encode(v, &d.post, side, out, refs);
+                flat_encode(v, &d.replace, side, out, refs);
+            }
+            Node::Math(k, w) => {
+                flat_put(out, F_MATH);
+                flat_put(out, i64::from(*k == MathKind::After));
+                flat_put(out, i64::from(*w));
+            }
+            Node::Language { lang, lhm, rhm } => {
+                flat_put(out, F_LANGUAGE);
+                flat_put(out, i64::from(*lang));
+                flat_put(out, i64::from(*lhm));
+                flat_put(out, i64::from(*rhm));
+            }
+            Node::Mark(k) => {
+                flat_put(out, F_MARK);
+                flat_put(out, i64::try_from(refs.len()).unwrap_or(0));
+                refs.push(
+                    side.marks
+                        .get(*k as usize)
+                        .copied()
+                        .unwrap_or(ValueId::UNIT),
+                );
+            }
+            Node::Whatsit(k, dims) if *k < LAZY => {
+                flat_put(out, F_WHATSIT);
+                flat_put(out, i64::try_from(refs.len()).unwrap_or(0));
+                refs.push(
+                    side.whats
+                        .get(*k as usize)
+                        .copied()
+                        .unwrap_or(ValueId::UNIT),
+                );
+                match dims {
+                    Some(s) => {
+                        flat_put(out, 1);
+                        flat_put(out, i64::from(s.width));
+                        flat_put(out, i64::from(s.height));
+                        flat_put(out, i64::from(s.depth));
+                    }
+                    None => flat_put(out, 0),
+                }
+            }
+            _ => {
+                flat_put(out, F_REF);
+                flat_put(out, i64::try_from(refs.len()).unwrap_or(0));
+                refs.push(encode(v, n, side));
+            }
+        }
+    }
+}
+
+/// A reader of a flat list's text.
+struct Flat<'a> {
+    b: &'a [u8],
+    at: usize,
+}
+
+impl Flat<'_> {
+    fn get(&mut self) -> i64 {
+        let mut u: u64 = 0;
+        let mut sh = 0;
+        while let Some(&c) = self.b.get(self.at) {
+            self.at += 1;
+            u |= u64::from(c & 63) << sh;
+            if c & 64 == 0 {
+                break;
+            }
+            sh += 6;
+        }
+        (u >> 1).cast_signed() ^ -((u & 1).cast_signed())
+    }
+
+    fn i32(&mut self) -> i32 {
+        i32::try_from(self.get()).unwrap_or(0)
+    }
+
+    fn glue(&mut self) -> Glue {
+        Glue {
+            width: self.i32(),
+            stretch: self.i32(),
+            stretch_order: crate::val::order(self.get()),
+            shrink: self.i32(),
+            shrink_order: crate::val::order(self.get()),
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn flat_decode(v: &Values, rd: &mut Flat<'_>, refs: &[ValueId], side: &mut Side, out: &mut List) {
+    let n = usize::try_from(rd.get()).unwrap_or(0);
+    out.reserve(n);
+    for _ in 0..n {
+        let node = match rd.get() {
+            F_CHAR => Node::Char {
+                font: u32::try_from(rd.get()).unwrap_or(0),
+                ch: u16::try_from(rd.get()).unwrap_or(0),
+            },
+            F_GLUE => {
+                let spec = rd.glue();
+                Node::Glue(GlueNode {
+                    spec,
+                    kind: glue_kind(rd.get()),
+                    leader: None,
+                })
+            }
+            F_KERN => {
+                let w = rd.i32();
+                Node::Kern(w, kern_kind(rd.get()))
+            }
+            F_PENALTY => Node::Penalty(rd.i32()),
+            F_BOX => {
+                let mut h = [0i64; 8];
+                for w in &mut h {
+                    *w = rd.get();
+                }
+                let mut list = Vec::new();
+                flat_decode(v, rd, refs, side, &mut list);
+                Node::Box(BoxNode {
+                    kind: if h[0] == 0 { BoxKind::H } else { BoxKind::V },
+                    width: i32::try_from(h[1]).unwrap_or(0),
+                    height: i32::try_from(h[2]).unwrap_or(0),
+                    depth: i32::try_from(h[3]).unwrap_or(0),
+                    shift: i32::try_from(h[4]).unwrap_or(0),
+                    glue: GlueSet {
+                        sign: match h[5] {
+                            1 => GlueSign::Stretching,
+                            2 => GlueSign::Shrinking,
+                            _ => GlueSign::Normal,
+                        },
+                        order: crate::val::order(h[6]),
+                        ratio: f64::from_bits(u64::from_ne_bytes(h[7].to_ne_bytes())),
+                    },
+                    list,
+                })
+            }
+            F_RULE => Node::Rule(Rule {
+                width: rd.i32(),
+                height: rd.i32(),
+                depth: rd.i32(),
+            }),
+            F_LIG => {
+                let font = u32::try_from(rd.get()).unwrap_or(0);
+                let ch = u16::try_from(rd.get()).unwrap_or(0);
+                let k = usize::try_from(rd.get()).unwrap_or(0);
+                let original = (0..k)
+                    .map(|_| u16::try_from(rd.get()).unwrap_or(0))
+                    .collect();
+                let hits = rd.get();
+                Node::Lig(Ligature {
+                    font,
+                    ch,
+                    original,
+                    left_hit: hits & 1 != 0,
+                    right_hit: hits & 2 != 0,
+                })
+            }
+            F_DISC => {
+                let (mut pre, mut post, mut replace) = (Vec::new(), Vec::new(), Vec::new());
+                flat_decode(v, rd, refs, side, &mut pre);
+                flat_decode(v, rd, refs, side, &mut post);
+                flat_decode(v, rd, refs, side, &mut replace);
+                Node::Disc(Disc { pre, post, replace })
+            }
+            F_MATH => {
+                let k = if rd.get() == 0 {
+                    MathKind::Before
+                } else {
+                    MathKind::After
+                };
+                Node::Math(k, rd.i32())
+            }
+            F_LANGUAGE => Node::Language {
+                lang: u16::try_from(rd.get()).unwrap_or(0),
+                lhm: u8::try_from(rd.get()).unwrap_or(0),
+                rhm: u8::try_from(rd.get()).unwrap_or(0),
+            },
+            F_MARK => {
+                let r = usize::try_from(rd.get()).unwrap_or(0);
+                side.marks
+                    .push(refs.get(r).copied().unwrap_or(ValueId::UNIT));
+                Node::Mark(u32::try_from(side.marks.len() - 1).unwrap_or(0))
+            }
+            F_WHATSIT => {
+                let r = usize::try_from(rd.get()).unwrap_or(0);
+                side.whats
+                    .push(refs.get(r).copied().unwrap_or(ValueId::UNIT));
+                let dims = (rd.get() != 0).then(|| phitex_typeset::node::WhatsitSize {
+                    width: rd.i32(),
+                    height: rd.i32(),
+                    depth: rd.i32(),
+                });
+                Node::Whatsit(u32::try_from(side.whats.len() - 1).unwrap_or(0), dims)
+            }
+            F_REF => {
+                let r = usize::try_from(rd.get()).unwrap_or(0);
+                match refs.get(r).and_then(|&x| decode(v, x, side)) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            }
+            _ => break,
+        };
+        out.push(node);
     }
 }
