@@ -5484,10 +5484,19 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
 /// PDF options and the date (§241), set on `unit` before the first line.
 fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     let v = g.eng.values();
-    let mut sets: Vec<(Field, ValueId)> = Vec::new();
-    for (k, t) in env.iter() {
-        sets.push((v.field(k), import(v, t)));
-    }
+    // (the format's bindings made values on the pool, in their order)
+    let mut ex = crate::exec::Coarse(crate::exec::Threads::new(g.threads));
+    let chunk = env.len().div_ceil(g.threads.max(1) * 4).max(1);
+    let mut sets: Vec<(Field, ValueId)> =
+        crate::exec::map_on(&mut ex, env.len().div_ceil(chunk), &|c| {
+            env[c * chunk..((c + 1) * chunk).min(env.len())]
+                .iter()
+                .map(|(k, t)| (v.field(k), import(v, t)))
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect();
     sets.push((v.field("jobname"), v.str(&opts.jobname)));
     sets.push((v.field("dvicomment"), v.str(&opts.comment)));
     sets.push((v.field("shellescape"), v.int(i64::from(opts.shell_escape))));
