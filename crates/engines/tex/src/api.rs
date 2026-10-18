@@ -4205,8 +4205,10 @@ impl Build {
         // while it runs is off by the edit's length at most, and the map
         // is not made again for every edit)
         if self.g.watch.offsets.is_empty() || self.nodes.len() < 4096 {
-            let mut offsets =
-                FxHashMap::with_capacity_and_hasher(self.nodes.len(), std::hash::BuildHasherDefault::default());
+            let mut offsets = FxHashMap::with_capacity_and_hasher(
+                self.nodes.len(),
+                std::hash::BuildHasherDefault::default(),
+            );
             for (_, n, src) in &self.nodes {
                 let Src::Doc(s, _) = *src;
                 offsets.insert(n.raw(), u64::try_from(s).unwrap_or(0));

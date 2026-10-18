@@ -455,7 +455,8 @@ impl std::hash::Hasher for Fnv {
         if !rest.is_empty() {
             let mut w = [0u8; 8];
             w[..rest.len()].copy_from_slice(rest);
-            h = (h.rotate_left(5) ^ u64::from_le_bytes(w) ^ (rest.len() as u64) << 59).wrapping_mul(K);
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(w) ^ (rest.len() as u64) << 59)
+                .wrapping_mul(K);
         }
         self.0 = h;
     }
