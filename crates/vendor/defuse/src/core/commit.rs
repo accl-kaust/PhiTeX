@@ -170,7 +170,7 @@ impl Shared {
                 self.c.predictions_refuted.fetch_add(1, Ordering::Relaxed);
                 r.set(super::F_PREDREF);
             }
-            self.land(move |sh| sh.not_committed(s, wait));
+            self.land(s, move |sh| sh.not_committed(s, wait));
             return;
         }
         let lgen = r.lgen.load(Ordering::Acquire).wrapping_add(1) & 0x7fff_ffff;
@@ -179,7 +179,7 @@ impl Shared {
         let keys = self.keys_of(&cx.log);
         let mut o = cx.take_out(ver, keys, pread);
         o.narrowed = narrowed;
-        self.land(move |sh| sh.merge_commit(o, out));
+        self.land(s, move |sh| sh.merge_commit(o, out));
     }
 
     /// Asks the reads of `log` again (`refresh`: a held read follows an
@@ -237,8 +237,9 @@ impl Shared {
         let narrowed = o.narrowed.take();
         let s = o.me;
         let r = self.rec(s);
-        if r.st() != S_RUN || r.has(super::F_DOOM_FREE | super::F_DOOM_INERT) {
-            self.doomed(s);
+        // Doomed: freed or made inert here. A mark another merge took back
+        // meanwhile leaves it to commit after all.
+        if (r.has(super::F_DOOM_FREE | super::F_DOOM_INERT) && self.doomed(s)) || r.st() != S_RUN {
             return;
         }
         let late = narrowed.is_some();

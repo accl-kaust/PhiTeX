@@ -1048,9 +1048,6 @@ pub(crate) struct Shared {
     pub landed: AtomicUsize,
     /// The landing lists that may hold items (bit per list).
     pub land_mask: AtomicU64,
-    /// Held by whoever merges: one merge at a time (an item checks and
-    /// then writes, which a concurrent merge would interleave).
-    pub merging: std::sync::Mutex<()>,
     /// The merges' changes by version.
     pub delta: Mutex<merge::Delta>,
 }

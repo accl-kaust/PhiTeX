@@ -1,9 +1,10 @@
 //! Continuous versioned merges (docs/round-core.md). A run reads the store
 //! without locks and writes nothing to it: when it ends, its worker lands
-//! the result (a commit, a park, a check that held, a run again) on its
-//! own landing list. Whoever finds the merger free merges everything
-//! landed, in landing order, and publishes the next version. Every write
-//! to the store happens in a merge (or in an edit, between evaluations).
+//! the result (a commit, a park, a check that held, a run again) on the
+//! landing list of its node. Workers merge the lists, any number at once,
+//! each list in landing order (so one node's items never merge at once),
+//! and every merged item publishes the next version. Every write to the
+//! store happens in a merge (or in an edit, between evaluations).
 //!
 //! A merge records the keys it changes (a field of a unit, a unit's
 //! structure, a node's output, an environment field) under its version.
@@ -24,9 +25,9 @@ pub(crate) type Land = Box<dyn FnOnce(&Shared) + Send>;
 /// One worker's landing list, on cache lines of its own.
 #[repr(align(64))]
 #[derive(Default)]
-pub(crate) struct LandSlot(pub std::sync::Mutex<Vec<Land>>);
+pub(crate) struct LandSlot(pub std::sync::Mutex<Vec<Land>>, pub std::sync::Mutex<()>);
 
-/// Landing lists (a worker lands on its own; the merger takes them all).
+/// Landing lists (a node's items all land on one, in order).
 pub(crate) const LANDS: usize = 64;
 
 /// The changes the merges made, for verification: each key's last
@@ -50,11 +51,6 @@ thread_local! {
     /// The keys the merge on this thread changed since its last flush
     /// (`None`: not merging, nothing is recorded).
     static CHANGED: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
-    /// This thread's landing list.
-    static SLOT: usize = {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        NEXT.fetch_add(1, Ordering::Relaxed) % LANDS
-    };
 }
 
 // The kinds of keys.
@@ -211,53 +207,55 @@ impl Shared {
 
     /// Lands `f` for the merger: merged when the job that landed it ends,
     /// by its worker or by whoever is merging then.
-    pub(crate) fn land(&self, f: impl FnOnce(&Shared) + Send + 'static) {
+    pub(crate) fn land(&self, s: Slot, f: impl FnOnce(&Shared) + Send + 'static) {
         // The item counts as work until merged: the evaluation is not
         // quiet while it waits.
         self.work.fetch_add(1, Ordering::SeqCst);
         self.landed.fetch_add(1, Ordering::SeqCst);
-        let i = SLOT.with(|s| *s);
+        // By node: a node's items stay in landing order and are never
+        // merged at once (two lists merge concurrently).
+        let i = (s as usize).wrapping_mul(0x9E37_79B9) >> 7 & (LANDS - 1);
         lock(&self.lands[i].0).push(Box::new(f));
         self.land_mask.fetch_or(1 << i, Ordering::SeqCst);
         // (Merged by the worker once its job is done: see `Shared::work`.)
     }
 
-    /// Merges what has landed. Whoever finds the merger free merges, one
-    /// at a time (an item checks the store and then writes to it: two at
-    /// once would interleave); a worker that finds it taken goes on, and
-    /// the merger looks again after letting go, so nothing is left behind.
+    /// Merges what has landed: any number of workers merge at once, each
+    /// taking a landing list nobody else is merging (a node's items are
+    /// all on one list, so one node's items never merge at once); a list
+    /// being merged is left to its merger, never waited for.
     pub(crate) fn merge(&self) {
         while self.landed.load(Ordering::SeqCst) != 0 {
-            let Ok(_g) = self.merging.try_lock() else { return };
-            self.merge_all();
+            let mask = self.land_mask.load(Ordering::SeqCst);
+            if mask == 0 {
+                return;
+            }
+            let mut took = false;
+            for i in 0..LANDS {
+                if mask & (1 << i) == 0 {
+                    continue;
+                }
+                let Ok(_g) = self.lands[i].1.try_lock() else { continue };
+                self.merge_list(i);
+                took = true;
+            }
+            if !took {
+                return;
+            }
         }
     }
 
     /// Merges everything landed (nobody else runs: the step's end).
     pub(crate) fn merge_held(&self) {
         while self.landed.load(Ordering::SeqCst) != 0 {
-            let _g = lock(&self.merging);
-            self.merge_all();
-        }
-    }
-
-    /// Merges every landing list (the merger held), this thread's first.
-    fn merge_all(&self) {
-        let me = SLOT.with(|s| *s);
-        loop {
-            let mask = self.land_mask.load(Ordering::SeqCst);
-            if mask == 0 {
-                return;
-            }
-            for i in std::iter::once(me).chain((0..LANDS).filter(|&i| i != me)) {
-                if mask & (1 << i) != 0 {
-                    self.merge_list(i);
-                }
+            for i in 0..LANDS {
+                let _g = lock(&self.lands[i].1);
+                self.merge_list(i);
             }
         }
     }
 
-    /// Merges landing list `i` (the merger held).
+    /// Merges landing list `i` (its merge lock held).
     fn merge_list(&self, i: usize) {
         loop {
             self.land_mask.fetch_and(!(1 << i), Ordering::SeqCst);

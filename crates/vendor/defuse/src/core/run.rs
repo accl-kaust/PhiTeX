@@ -427,14 +427,14 @@ impl Shared {
             }
         };
         if r.has(F_DOOM_FREE | F_DOOM_INERT) {
-            self.land(move |sh| {
+            self.land(s, move |sh| {
                 sh.doomed(s);
             });
             return;
         }
         if let Some(c) = self.held_by(s) {
             if self.rec(c).st() == super::S_STEP {
-                self.land(move |sh| sh.defer_step(s, "claim"));
+                self.land(s, move |sh| sh.defer_step(s, "claim"));
                 return;
             }
             let w = Wait {
@@ -449,7 +449,7 @@ impl Shared {
             // when woken.
             let run = r.has(F_NEEDS_RUN) || r.data().res.is_none();
             let kept = r.data().kept.take().map(|k| *k);
-            self.land(move |sh| sh.park_with(s, w, kept, 1, run));
+            self.land(s, move |sh| sh.park_with(s, w, kept, 1, run));
             return;
         }
         let has_res = r.data().res.is_some();
@@ -458,7 +458,7 @@ impl Shared {
             match self.check_log(s, &log) {
                 Check::Wait(w) => {
                     let token = r.data().kept.take().and_then(|k| k.token);
-                    self.land(move |sh| sh.park(s, w, Some(Kept { log, token }), 0));
+                    self.land(s, move |sh| sh.park(s, w, Some(Kept { log, token }), 0));
                     return;
                 }
                 Check::Broke(why) => {
@@ -471,7 +471,7 @@ impl Shared {
                     let ask = r.data().x.as_ref().and_then(|e| e.ask);
                     if let Some(w) = ask.and_then(|a| self.reask(s, a)) {
                         let kept = r.data().kept.take().map(|k| *k);
-                        self.land(move |sh| sh.park(s, w, kept, 1));
+                        self.land(s, move |sh| sh.park(s, w, kept, 1));
                         return;
                     }
                     self.c.resumed.fetch_add(1, Ordering::Relaxed);
@@ -510,7 +510,7 @@ impl Shared {
                 Check::Wait(w) => {
                     // Validation parks with nothing kept: it re-validates.
                     r.clear(super::F_CHECKING);
-                    self.land(move |sh| sh.park_validation(s, w));
+                    self.land(s, move |sh| sh.park_validation(s, w));
                     return;
                 }
                 Check::Broke(_) => {
@@ -544,11 +544,11 @@ impl Shared {
             if let Subj::Node(x) = w.on
                 && self.rec(x).st() == super::S_STEP
             {
-                self.land(move |sh| sh.defer_step(s, "gated"));
+                self.land(s, move |sh| sh.defer_step(s, "gated"));
                 return;
             }
             let kept = r.data().kept.take().map(|k| *k);
-            self.land(move |sh| sh.park(s, w, kept, 1));
+            self.land(s, move |sh| sh.park(s, w, kept, 1));
             return;
         }
         self.run_node(s, ver);
@@ -758,7 +758,7 @@ impl Shared {
         r.lgen.store(lgen, Ordering::Release);
         self.subscribe(s, u, lgen, &log);
         let keys = self.keys_of(&log);
-        self.land(move |sh| sh.merge_clean(s, ver, keys, log));
+        self.land(s, move |sh| sh.merge_clean(s, ver, keys, log));
         true
     }
 
@@ -767,8 +767,8 @@ impl Shared {
     fn merge_clean(&self, s: Slot, ver: u64, keys: Vec<u64>, mut log: Vec<Pred>) {
         let r = self.rec(s);
         let u = self.unit_of(s);
-        if r.st() != S_RUN || r.has(F_DOOM_FREE | F_DOOM_INERT) {
-            self.doomed(s);
+        // (As in `merge_commit`: a mark taken back leaves it to go on.)
+        if (r.has(F_DOOM_FREE | F_DOOM_INERT) && self.doomed(s)) || r.st() != S_RUN {
             return;
         }
         let stale = r.flags.fetch_and(!F_STALE, Ordering::AcqRel) & F_STALE != 0;
@@ -872,7 +872,7 @@ impl Shared {
                 kind: "limit",
                 has_prev: false,
             };
-            self.land(move |sh| sh.park(s, w, None, 0));
+            self.land(s, move |sh| sh.park(s, w, None, 0));
             return;
         }
         self.c.runs.fetch_add(1, Ordering::Relaxed);
@@ -893,7 +893,7 @@ impl Shared {
                 });
             }
             drop(e);
-            self.land(move |sh| sh.requeue(s, false));
+            self.land(s, move |sh| sh.requeue(s, false));
             return;
         }
         let (op, kept) = {
@@ -979,7 +979,7 @@ impl Shared {
                         message,
                     });
                     drop(cx);
-                    self.land(move |sh| sh.requeue(s, true));
+                    self.land(s, move |sh| sh.requeue(s, true));
                     return;
                 }
             }
@@ -999,7 +999,7 @@ impl Shared {
                 // woken by the merger.
                 self.set_may(s, m.into());
                 r.set(super::F_NARROWED);
-                self.land(move |sh| sh.wake_all_waiters(s));
+                self.land(s, move |sh| sh.wake_all_waiters(s));
             }
         }
         if let Ok(out) = res {
@@ -1040,7 +1040,7 @@ impl Shared {
             // The children it made before it stopped on one of them: made
             // now, so that they can run.
             let partial = matches!(w.on, Subj::Child(id) if id != 0).then(|| cx.take_out(ver, Vec::new(), false));
-            self.land(move |sh| sh.merge_stop(s, early, w, kept, ask, partial));
+            self.land(s, move |sh| sh.merge_stop(s, early, w, kept, ask, partial));
         }
     }
 

@@ -154,7 +154,6 @@ impl Shared {
                 .collect(),
             landed: AtomicUsize::new(0),
             land_mask: AtomicU64::new(0),
-            merging: std::sync::Mutex::new(()),
             delta: Mutex::new(super::merge::Delta::default()),
         }
     }
