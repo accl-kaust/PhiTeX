@@ -583,6 +583,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     }
     let status = Arc::new(Status::default());
     let spin = ui.spin(what(t, &job), status.clone());
+    phitex_tex::timeline::lap("cli: the job, the spinner");
     let mut s = match Session::new(job, status.clone(), &mut |n: &str| ui.note(n)) {
         Ok(s) => s,
         Err(e) => {
@@ -600,6 +601,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         }
     };
     status.set("writing the outputs");
+    phitex_tex::timeline::lap("cli: the build returned");
     let main = match s.write(&r, true) {
         Ok(w) => w.main,
         Err(e) => {
@@ -609,16 +611,20 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         }
     };
     spin.done();
+    phitex_tex::timeline::lap("cli: the spinner stopped");
     report(t, &s, &r, main.as_deref(), o, ui, true);
+    phitex_tex::timeline::lap("cli: the report");
     if let (Some(m), Some(d), true) = (&main, &t.copy_pdf, r.out.errors.is_empty()) {
         copy_pdf(m, d, ui);
     }
     cache_summary(t, ui);
+    phitex_tex::timeline::lap("cli: the cache's summary");
     let code = i32::from(!r.out.errors.is_empty());
     // (the process exits next: the session's engine and tables, hundreds
     // of megabytes, are left to it instead of freed one by one)
     std::mem::forget(s);
     std::mem::forget(r);
+    phitex_tex::timeline::end("cold build");
     code
 }
 
@@ -737,6 +743,12 @@ pub fn main(args: &[String]) -> ! {
     if o.all {
         clean_all(&ui);
     }
+    // (`PHITEX_TEX_TIME`: a cold build's phases from the process's start)
+    if matches!(o.command, Some(Command::Build))
+        && let Some(&t0) = crate::START.get()
+    {
+        phitex_tex::timeline::begin_at(t0);
+    }
     let Some(command) = o.command else {
         ui.error("no command given: build, watch or clean (`phitex --help`)");
         std::process::exit(crate::EXIT_USAGE);
@@ -745,6 +757,7 @@ pub fn main(args: &[String]) -> ! {
         ui.error(&e);
         std::process::exit(crate::EXIT_USAGE);
     });
+    phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");
     match command {
         Command::Build => std::process::exit(build(&t, &o, &ui)),
         Command::Clean => std::process::exit(clean(&t, &ui)),

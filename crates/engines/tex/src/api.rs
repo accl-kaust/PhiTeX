@@ -2417,6 +2417,7 @@ impl Graph {
             }
             crate::timeline::lap("engine: evaluate (the runs, their commits)");
             t_mark = std::time::Instant::now();
+            crate::timeline::lap("engine: the evaluation's report");
             if crate::exec::env_flag!("PHITEX_CHECK_READS") {
                 // (debug: every committed node's reads checked again
                 // against the store after this evaluation; `=fail`: a
@@ -2441,6 +2442,7 @@ impl Graph {
                     "{} committed reads no longer hold",
                     lines.len()
                 );
+                crate::timeline::lap("engine: the reads checked again (PHITEX_CHECK_READS only)");
             }
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
@@ -2774,6 +2776,7 @@ impl Graph {
         if let Some(inc) = incr.as_deref_mut() {
             inc.set_text(text);
         }
+        crate::timeline::lap("hints: the units and the hint pass");
         let incr = incr.as_deref();
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
@@ -2787,6 +2790,7 @@ impl Graph {
             None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
         };
         let t1 = t0.elapsed();
+        crate::timeline::lap("push: the nodes' slices and keys");
         // (the nodes' arguments made on the pool: values are named by
         // their content, whichever worker makes them)
         let args = {
@@ -2798,6 +2802,7 @@ impl Graph {
             })
         };
         let t2 = t0.elapsed();
+        crate::timeline::lap("push: the nodes' arguments (on the pool)");
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             for (k, _) in &nodes {
                 eprintln!("node {k:?}");
@@ -2805,6 +2810,7 @@ impl Graph {
         }
         // (one append of every node, in order)
         let ids = self.eng.push_many(unit, self.ops.exec, args);
+        crate::timeline::lap("push: the engine's push");
         let out: Vec<(u64, NodeId, Src)> = nodes
             .iter()
             .zip(ids)
@@ -3819,9 +3825,11 @@ impl Build {
         let t0 = std::time::Instant::now();
         let cached = prelude_env(prelude, &opts);
         let t_env = t0.elapsed();
+        crate::timeline::lap("engine: the format loaded (its environment)");
         let env = cached.env.clone();
         let defs = prelude_defs(&cached, prelude, opts.prelude_finder());
         let t1 = t0.elapsed();
+        crate::timeline::lap("engine: the format's definitions");
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: prelude env (format load or build) {t_env:?}, prelude definitions {:?}",
@@ -3837,13 +3845,16 @@ impl Build {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
         }
         let unit = g.eng.new_unit();
+        crate::timeline::lap("engine: the graph made");
         // the files the format read (fonts, data) are supplied before the
         // document's first evaluation: a run reading one never stops
         let t_sup = std::time::Instant::now();
         for (n, _) in cached.reads.clone() {
             g.supply(&opts.finder, &n);
         }
+        crate::timeline::lap("engine: the format's files supplied (fonts, data)");
         g.guesses(&opts);
+        crate::timeline::lap("engine: the guesses (read-back keys)");
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: supply the format's {} files (fonts, data) {:?}",
@@ -3864,6 +3875,7 @@ impl Build {
             }
             None => document.to_owned(),
         };
+        crate::timeline::lap("engine: the canonical text");
         // (the files the job writes and reads back are loop-backs the
         // `\openout` that opens them declares, `Run::written_decl`: a read
         // before it runs again on the loop-back)
@@ -3874,6 +3886,7 @@ impl Build {
             env_trace(&g.eng, &env);
             g.push_env(env);
         }
+        crate::timeline::lap("engine: the environment pushed");
         job_env(&mut g, unit, &env, &opts);
         // §1337: `\everyjob`, before the job's first line
         let every = env
@@ -3909,6 +3922,7 @@ impl Build {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone_from(&g.loads);
+        crate::timeline::lap("engine: the job's environment, the loads' records");
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
         // (the pages: each piece places the finisher of a page that ends
         // in it, `crate::pages`; nothing of them is pushed here)
@@ -3921,6 +3935,7 @@ impl Build {
         let files_op = g.files_op;
         let files = g.eng.push(unit, files_op, Vec::new());
         g.eng.add_root(files);
+        crate::timeline::lap("engine: the link, end and files nodes");
         let edits = opts.edits.clone().unwrap_or_default();
         let mut b = Build {
             g,

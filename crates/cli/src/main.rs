@@ -59,7 +59,12 @@ pub const EXIT_USAGE: i32 = 2;
 /// The exit status of a failure inside PhiTeX (a panic caught).
 pub const EXIT_INTERNAL: i32 = 3;
 
+/// When the process reached `main` (the cold build's timeline begins
+/// here, `PHITEX_TEX_TIME`).
+pub static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 fn main() {
+    START.get_or_init(std::time::Instant::now);
     let mut raw = std::env::args();
     let argv0 = raw.next().unwrap_or_default();
     let args: Vec<String> = raw.collect();

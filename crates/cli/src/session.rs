@@ -465,9 +465,14 @@ impl Session {
         note: &mut dyn FnMut(&str),
     ) -> Result<Session, String> {
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
+        phitex_tex::timeline::lap("session: the main file read");
+        let text = Arc::from(tex::chars_owned(text));
+        phitex_tex::timeline::lap("session: its characters");
         let tree = Arc::new(tex::Tree::open(&job.engine));
         let format_tree = Arc::new(tex::Tree::open_format(&job.engine));
+        phitex_tex::timeline::lap("session: kpathsea opened (texmf.cnf)");
         let cache = Cache::open(job.cache_limit).ok();
+        phitex_tex::timeline::lap("session: the cache opened");
         if let Some(c) = &cache
             && let Some(w) = c.unkept()
         {
@@ -475,7 +480,7 @@ impl Session {
         }
         Ok(Session {
             job,
-            text: Arc::from(tex::chars(&text)),
+            text,
             build: None,
             built_text: None,
             page_hashes: Vec::new(),
@@ -616,6 +621,7 @@ impl Session {
             } else {
                 self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
+                phitex_tex::timeline::lap("session: the format found, read from the cache");
                 // (a format not cached is built first, in this build: slow
                 // until the kernel is fast, so a longer time limit for it;
                 // none would leave a stuck evaluation running for ever)
@@ -669,8 +675,11 @@ impl Session {
                     },
                     ..opts
                 };
+                phitex_tex::timeline::lap("session: the options (records read)");
                 let b = Build::with(opts, prelude.as_deref(), &text);
+                phitex_tex::timeline::lap("engine: the build returned");
                 self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
+                phitex_tex::timeline::lap("session: the format stored (when new)");
                 self.build = Some(b);
             }
             Ok(())
@@ -1147,6 +1156,7 @@ impl Session {
     pub fn write(&self, r: &Report, main_too: bool) -> Result<Written, String> {
         let dir = &self.job.out_dir;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        phitex_tex::timeline::lap("write: the output directory");
         let mut files = Vec::new();
         let mut main = None;
         let ext = r
@@ -1161,6 +1171,7 @@ impl Session {
             };
             let p = dir.join(format!("{}.{e}", self.job.jobname));
             let h = self.write_main(&p, shared)?;
+            phitex_tex::timeline::lap("write: the main output");
             written.insert(p.clone(), h);
             files.push((p.clone(), h));
             main = Some(p);
@@ -1197,6 +1208,7 @@ impl Session {
             let fls = self.recorder(r, &format!("{}.{ext}", self.job.jobname));
             put(&format!("{}.fls", self.job.jobname), fls.as_bytes())?;
         }
+        phitex_tex::timeline::lap("write: the log, the files TeX wrote");
         Ok(Written { main, files })
     }
 

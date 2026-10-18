@@ -2,8 +2,9 @@
 //! (`PHITEX_TEX_TIME`): the watch begins it at the edit's event, each
 //! step on the way marks the end of its phase ([`lap`]), work counted
 //! inside a phase on other threads is noted beside it ([`note`]), and
-//! the watch prints it when the event goes out ([`end`]). A build no
-//! edit began (the cold one) marks nothing.
+//! the watch prints it when the event goes out ([`end`]). The cold
+//! `build` command begins one at the process's start and prints it when
+//! its files are written.
 
 use std::fmt::Write as _;
 use std::sync::{Mutex, PoisonError};
@@ -69,7 +70,7 @@ pub fn end(label: &str) {
     let min = Duration::from_micros(300);
     let total = l.last - l.start;
     let mut out = format!(
-        "edit timeline ({label}): {:.2} ms from the event\n",
+        "timeline ({label}): {:.2} ms from its start\n",
         ms(total)
     );
     let mut small = (Duration::ZERO, 0usize);
