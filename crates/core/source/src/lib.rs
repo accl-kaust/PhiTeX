@@ -115,7 +115,28 @@ pub struct Source {
     units: Vec<Unit>,
     /// id → its place in `units` (the order index: a B-tree or a tree of
     /// lengths when a splice shifting a `Vec` costs too much).
-    index: HashMap<UnitId, usize>,
+    index: HashMap<UnitId, usize, std::hash::BuildHasherDefault<IdHasher>>,
+}
+
+/// The hasher of the index: a unit's id is a counter, spread by one
+/// multiplication (the default hasher's rounds cost more than the lookup).
+#[derive(Default)]
+struct IdHasher(u64);
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(b)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+    }
+
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0 ^ x).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
 }
 
 impl std::fmt::Debug for Source {
@@ -139,7 +160,10 @@ impl Source {
         let mut s = Source {
             split,
             units: Vec::with_capacity(ends.len()),
-            index: HashMap::with_capacity(ends.len()),
+            index: HashMap::with_capacity_and_hasher(
+                ends.len(),
+                std::hash::BuildHasherDefault::default(),
+            ),
         };
         let mut from = 0;
         for e in ends {

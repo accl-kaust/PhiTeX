@@ -2982,7 +2982,8 @@ fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) ->
     }
     let h = an.hint(a);
     // (kept when it has the shape the hit rebuilds: bounded, no guess)
-    let keep = h.bound.is_some() && h.guess.is_none() && h.cause == "bounded" && h.excerpt == excerpt;
+    let keep =
+        h.bound.is_some() && h.guess.is_none() && h.cause == "bounded" && h.excerpt == excerpt;
     let h = Arc::new(h);
     if keep {
         RUN_BOUNDS.with(|c| {
@@ -3221,13 +3222,15 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             let Some(ah) = t.hints[a].as_deref() else {
                 continue;
             };
-            let m = *sets.entry(std::ptr::from_ref(ah) as usize).or_insert_with(|| {
-                NORMAL_PARAGRAPH
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, n)| may_set(ah, n))
-                    .fold(0, |m, (k, _)| m | 1 << k)
-            });
+            let m = *sets
+                .entry(std::ptr::from_ref(ah) as usize)
+                .or_insert_with(|| {
+                    NORMAL_PARAGRAPH
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, n)| may_set(ah, n))
+                        .fold(0, |m, (k, _)| m | 1 << k)
+                });
             for (k, &n) in NORMAL_PARAGRAPH.iter().enumerate() {
                 if m >> k & 1 == 1 && !out.contains(&n) {
                     out.push(n);

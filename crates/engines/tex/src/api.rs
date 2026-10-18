@@ -3914,7 +3914,11 @@ impl Build {
         let t_sup = std::time::Instant::now();
         g.supply_all(
             &opts.finder,
-            &cached.reads.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            &cached
+                .reads
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>(),
         );
         crate::timeline::lap("engine: the format's files supplied (fonts, data)");
         g.guesses(&opts);

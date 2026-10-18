@@ -76,10 +76,7 @@ pub fn end(label: &str) {
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let min = Duration::from_micros(300);
     let total = l.last - l.start;
-    let mut out = format!(
-        "timeline ({label}): {:.2} ms from its start\n",
-        ms(total)
-    );
+    let mut out = format!("timeline ({label}): {:.2} ms from its start\n", ms(total));
     let mut small = (Duration::ZERO, 0usize);
     // (a note is shown under the phase it was made in: the next lap)
     let mut pending = String::new();

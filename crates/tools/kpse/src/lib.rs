@@ -908,7 +908,9 @@ impl Kpse {
             })
             .collect();
         let dbs = DBS.get_or_init(Dbs::default);
-        let mut held = dbs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut held = dbs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(db) = held.get(&key) {
             self.db = Some(db.clone());
             return;
