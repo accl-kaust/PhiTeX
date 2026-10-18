@@ -1983,6 +1983,7 @@ impl Graph {
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files(shared.clone())));
         let tool = eng.register(Arc::new(crate::tools::ToolRun(shared.clone())));
+        let toolnode = eng.register(Arc::new(crate::tools::ToolNode(shared.clone())));
         let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
@@ -1998,6 +1999,7 @@ impl Graph {
             finish,
             resume,
             tool,
+            toolnode,
             pdfpage,
             tool_opts: Arc::default(),
             fields,

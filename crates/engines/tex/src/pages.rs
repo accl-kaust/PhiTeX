@@ -800,7 +800,7 @@ impl Run<'_, '_> {
 
     /// The items this run put on the main list, in order (its `items`
     /// contributions tagged with list 0).
-    fn own_outer_items(&self) -> Vec<ValueId> {
+    pub(crate) fn own_outer_items(&self) -> Vec<ValueId> {
         let v = self.v;
         let f = v.field("items");
         let mut out = Vec::new();
@@ -2177,13 +2177,14 @@ impl Run<'_, '_> {
         // else the scan step's after the piece)
         self.cx.define_with(
             v.field(RESUME),
-            v.list(vec![
-                cont,
-                pid,
-                v.int(flags),
-                v.int(rest),
-                v.int(i64::from(k)),
-            ]),
+            v.list(
+                [cont, pid, v.int(flags), v.int(rest), v.int(i64::from(k))]
+                    .into_iter()
+                    // (a `\write18`'s tool node the run ended at: placed
+                    // right before the resume, `Run::tool_command`)
+                    .chain(self.tool_cut)
+                    .collect(),
+            ),
             Locality::Global,
         );
         Ok(())
@@ -2217,13 +2218,19 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let args = vec![ValueId::UNIT, xs[2], ValueId::UNIT, xs[3]];
-        match after {
-            Some(at) => {
-                self.cx.follow_after(at, self.ops.resume, args);
+        // (a `\write18`'s tool node the piece ended at: right before
+        // the resume, `Run::tool_command`)
+        let tool = xs.get(5).map(|&t| list_of(v, t));
+        if let Some(at) = after {
+            if let Some(t) = tool {
+                self.cx.follow_after(at, self.ops.toolnode, t);
             }
-            None => {
-                self.cx.follow(self.ops.resume, args);
+            self.cx.follow_after(at, self.ops.resume, args);
+        } else {
+            if let Some(t) = tool {
+                self.cx.follow(self.ops.toolnode, t);
             }
+            self.cx.follow(self.ops.resume, args);
         }
         Ok(())
     }
