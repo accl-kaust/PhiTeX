@@ -510,7 +510,8 @@ fn oscillating_written_file() {
 #[test]
 fn one_word_edit_reruns_little() {
     let fx = common::fixtures().join("dvi");
-    let bench = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bench/para4000.tex");
+    let bench =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bench/para4000.tex");
     let src = format!("\\pdfoutput=1 {}", common::read(&bench));
     // (paragraph 2000's first " line ": `line` to `liue`)
     let par = src.match_indices("\n\n").nth(2000).expect("a paragraph").0;

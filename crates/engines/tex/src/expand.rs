@@ -605,7 +605,7 @@ impl Run<'_, '_> {
             13 => {
                 let n = self.scan_four_bit_int()?;
                 let st = self.get(&format!("read:{n}"))?;
-                st.is_none_or(|x| matches!(&*self.v.get(x), Value::Unit))
+                st.is_none_or(|x| self.v.with(x, |y| matches!(y, Value::Unit)))
             }
             14 => true,
             15 => false,

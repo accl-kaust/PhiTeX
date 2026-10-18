@@ -446,11 +446,11 @@ impl Tok {
     }
 
     pub(crate) fn decode(v: &Values, id: ValueId) -> Tok {
-        match &*v.get(id) {
-            Value::Int(i) => Tok::c(u32::try_from(*i).unwrap_or(0)),
-            Value::Str(s) => Tok::cs(s.strip_prefix('\\').unwrap_or(s)),
-            _ => Tok::c(0),
+        if let Some(i) = v.as_int(id) {
+            return Tok::c(u32::try_from(i).unwrap_or(0));
         }
+        v.with_str(id, |s| Tok::cs(s.strip_prefix('\\').unwrap_or(s)))
+            .unwrap_or_else(|| Tok::c(0))
     }
 }
 
@@ -483,9 +483,9 @@ pub(crate) fn toks_rc(v: &Values, id: Option<ValueId>) -> Rc<[Tok]> {
             v,
             id,
             |d| &mut d.toks,
-            || match &*v.get(id) {
-                Value::List(xs) => xs.iter().map(|&x| Tok::decode(v, x)).collect(),
-                _ => Rc::from([]),
+            || {
+                v.with_list(id, |xs| xs.iter().map(|&x| Tok::decode(v, x)).collect())
+                    .unwrap_or_else(|| Rc::from([]))
             },
         ),
         None => Rc::from([]),
@@ -849,11 +849,13 @@ fn decoded<T: Clone>(
 }
 
 pub(crate) fn list_of(v: &Values, id: ValueId) -> Vec<ValueId> {
-    match &*v.get(id) {
-        Value::List(xs) => xs.to_vec(),
-        Value::Seq(_) | Value::Nil => v.seq_to_vec(id),
-        _ => Vec::new(),
-    }
+    // (borrowed: no `Arc` of the value per call)
+    v.with(id, |x| match x {
+        Value::List(xs) => Some(xs.to_vec()),
+        Value::Seq(_) | Value::Nil => None,
+        _ => Some(Vec::new()),
+    })
+    .unwrap_or_else(|| v.seq_to_vec(id))
 }
 
 pub(crate) fn int_of(v: &Values, id: ValueId) -> i64 {
@@ -861,17 +863,12 @@ pub(crate) fn int_of(v: &Values, id: ValueId) -> i64 {
 }
 
 pub(crate) fn int_at(v: &Values, id: ValueId, k: usize) -> i64 {
-    match &*v.get(id) {
-        Value::List(xs) => xs.get(k).map_or(0, |&x| int_of(v, x)),
-        _ => 0,
-    }
+    v.with_list(id, |xs| xs.get(k).map_or(0, |&x| int_of(v, x)))
+        .unwrap_or(0)
 }
 
 pub(crate) fn str_of(v: &Values, id: ValueId) -> String {
-    match &*v.get(id) {
-        Value::Str(s) => s.to_string(),
-        _ => String::new(),
-    }
+    v.with_str(id, str::to_owned).unwrap_or_default()
 }
 
 pub(crate) fn field_name(v: &Values, f: Field) -> String {
@@ -1172,9 +1169,8 @@ impl Mean {
     }
 
     fn decode_new(v: &Values, id: ValueId) -> Mean {
-        let xs = match &*v.get(id) {
-            Value::List(xs) => xs.clone(),
-            _ => return Mean::Undefined,
+        let Some(xs) = v.with_list(id, <[ValueId]>::to_vec) else {
+            return Mean::Undefined;
         };
         let Some(&t) = xs.first() else {
             return Mean::Undefined;
@@ -1342,7 +1338,11 @@ pub(crate) fn glue_of(v: &Values, id: Option<ValueId>) -> Glue {
 }
 
 fn glue_new(v: &Values, id: ValueId) -> Glue {
-    match &*v.get(id) {
+    v.with(id, |x| glue_from(v, x))
+}
+
+fn glue_from(v: &Values, x: &Value) -> Glue {
+    match x {
         Value::List(xs) if xs.len() == 5 => {
             let n = |k: usize| i32::try_from(int_of(v, xs[k])).unwrap_or(0);
             Glue {

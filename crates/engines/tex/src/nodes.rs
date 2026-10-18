@@ -153,10 +153,8 @@ fn n32(v: &Values, x: ValueId) -> i32 {
 }
 
 pub(crate) fn tag(v: &Values, x: ValueId) -> i64 {
-    match &*v.get(x) {
-        Value::List(xs) => xs.first().map_or(-1, |&t| int_of(v, t)),
-        _ => -1,
-    }
+    v.with_list(x, |xs| xs.first().map_or(-1, |&t| int_of(v, t)))
+        .unwrap_or(-1)
 }
 
 fn glue_kind_code(k: GlueKind) -> i64 {
@@ -383,13 +381,12 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
 }
 
 pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
-    let val = v.get(x);
-    if let Value::List(xs) = &*val {
+    let got = v.with_list(x, |xs| {
         let mut out: List = Vec::with_capacity(xs.len());
         // (the last glue decoded, kept: a line's interword glue is one
         // value many times)
         let mut last: Option<(ValueId, usize)> = None;
-        for &n in &**xs {
+        for &n in xs {
             if let Some((id, k)) = last
                 && id == n
             {
@@ -404,6 +401,9 @@ pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
                 out.push(d);
             }
         }
+        out
+    });
+    if let Some(out) = got {
         return out;
     }
     list_of(v, x)
@@ -451,14 +451,9 @@ fn decode_box_head(v: &Values, xs: &[ValueId]) -> BoxNode {
 /// ([`decode`]). Its readers do not look into the boxes (packaging,
 /// the page builder): the writers and `\unvbox` decode a box's value.
 pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
-    let head = match &*v.get(x) {
-        Value::List(xs) if xs.len() == 10 => {
-            let mut h = [ValueId::UNIT; 10];
-            h.copy_from_slice(xs);
-            Some(h)
-        }
-        _ => None,
-    };
+    let head = v
+        .with_list(x, |xs| <[ValueId; 10]>::try_from(xs).ok())
+        .flatten();
     if let Some(xs) = head
         && int_of(v, xs[0]) == T_BOX
     {
@@ -506,11 +501,12 @@ pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
 
 #[allow(clippy::too_many_lines)]
 fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
-    let val = v.get(x);
-    let Value::List(xs) = &*val else {
-        return None;
-    };
-    let xs: &[ValueId] = xs;
+    v.with_list(x, |xs| decode_items(v, xs, side)).flatten()
+}
+
+/// [`decode_new`] on the value's elements, borrowed.
+#[allow(clippy::too_many_lines)]
+fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
     let g = |k: usize| xs.get(k).map_or(0, |&y| n32(v, y));
     let t = xs.first().map_or(-1, |&y| int_of(v, y));
     Some(match t {
@@ -621,10 +617,8 @@ fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
 
 /// Whether the box value `b` is an hbox.
 pub(crate) fn box_is_h(v: &Values, b: ValueId) -> bool {
-    match &*v.get(b) {
-        Value::List(xs) => xs.get(1).is_some_and(|&k| int_of(v, k) == 0),
-        _ => false,
-    }
+    v.with_list(b, |xs| xs.get(1).is_some_and(|&k| int_of(v, k) == 0))
+        .unwrap_or(false)
 }
 
 /// A box's width (`m=1`), depth (2) or height (3) (§420).
@@ -634,10 +628,8 @@ pub(crate) fn box_dim(v: &Values, b: ValueId, m: i32) -> i32 {
         3 => 3,
         _ => 4,
     };
-    match &*v.get(b) {
-        Value::List(xs) => xs.get(k).map_or(0, |&x| n32(v, x)),
-        _ => 0,
-    }
+    v.with_list(b, |xs| xs.get(k).map_or(0, |&x| n32(v, x)))
+        .unwrap_or(0)
 }
 
 /// The box with one dimension replaced.
@@ -683,15 +675,17 @@ pub(crate) fn marker(v: &Values, t: i64) -> ValueId {
 
 /// The glue of a glue node value.
 pub(crate) fn glue_of_node(v: &Values, x: ValueId) -> Glue {
-    match &*v.get(x) {
-        Value::List(xs) if tag(v, x) == T_GLUE => glue_of(v, xs.get(1).copied()),
-        _ => Glue::ZERO,
-    }
+    v.with_list(x, |xs| {
+        if xs.first().is_some_and(|&t| int_of(v, t) == T_GLUE) {
+            glue_of(v, xs.get(1).copied())
+        } else {
+            Glue::ZERO
+        }
+    })
+    .unwrap_or(Glue::ZERO)
 }
 
 pub(crate) fn int_field(v: &Values, x: ValueId, k: usize) -> i32 {
-    match &*v.get(x) {
-        Value::List(xs) => xs.get(k).map_or(0, |&y| n32(v, y)),
-        _ => 0,
-    }
+    v.with_list(x, |xs| xs.get(k).map_or(0, |&y| n32(v, y)))
+        .unwrap_or(0)
 }

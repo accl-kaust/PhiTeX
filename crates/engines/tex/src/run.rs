@@ -3501,15 +3501,14 @@ pub(crate) fn first_seg(v: &Values, args: &[ValueId]) -> Option<Seg> {
 fn decode_segs_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Seg> {
     let mut out = Vec::new();
     let Some(&l) = args.first() else { return out };
-    let Value::List(fs) = &*v.get(l) else {
-        return out;
-    };
-    for &f in fs {
-        if out.len() >= limit {
-            break;
+    v.with_list(l, |fs| {
+        for &f in fs {
+            if out.len() >= limit {
+                break;
+            }
+            out.extend(crate::val::frame_of(v, f, || decode_seg(v, f)));
         }
-        out.extend(crate::val::frame_of(v, f, || decode_seg(v, f)));
-    }
+    });
     out
 }
 
@@ -3518,17 +3517,13 @@ fn decode_segs_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Seg> {
 /// `(if_limit, cur_if)` each.
 pub(crate) fn carried_conds(v: &Values, args: &[ValueId]) -> Option<(Vec<u8>, Vec<i32>)> {
     let &l = args.first()?;
-    let Value::List(fs) = &*v.get(l) else {
-        return None;
-    };
-    let &f = fs.first()?;
-    let Value::List(xs) = &*v.get(f) else {
-        return None;
-    };
-    if xs.first().map(|&t| str_of(v, t)).as_deref() != Some("c") {
-        return None;
-    }
-    let ns: Vec<i64> = xs[1..].iter().map(|&x| int_of(v, x)).collect();
+    let f = v.with_list(l, |fs| fs.first().copied()).flatten()?;
+    let ns: Vec<i64> = v
+        .with_list(f, |xs| {
+            (xs.first().and_then(|&t| v.with_str(t, |s| s == "c")) == Some(true))
+                .then(|| xs[1..].iter().map(|&x| int_of(v, x)).collect())
+        })
+        .flatten()?;
     let k = ns.iter().position(|&x| x < 0)?;
     let conds = ns[..k]
         .iter()

@@ -573,11 +573,13 @@ impl Run<'_, '_> {
             fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
         }
         let mut push = |x: ValueId, out: &mut Vec<ValueId>| {
-            let Value::List(xs) = &*v.get(x) else { return };
-            if xs.len() != 2 || int_of(v, xs[0]) != lid {
+            let Some((l, item)) = entry_pair(v, x) else {
+                return;
+            };
+            if int_of(v, l) != lid {
                 return;
             }
-            fold_item(v, lid, xs[1], &mut st, out);
+            fold_item(v, lid, item, &mut st, out);
         };
         for s in own {
             for x in v.seq_to_vec(s) {
@@ -1261,9 +1263,9 @@ impl Run<'_, '_> {
             self.get_loc(l)?
         };
         let v = self.v;
-        Ok(x.and_then(|x| match &*v.get(x) {
-            Value::List(xs) => xs.get(1).copied().filter(|&b| b != ValueId::UNIT),
-            _ => None,
+        Ok(x.and_then(|x| {
+            v.with_list(x, |xs| xs.get(1).copied().filter(|&b| b != ValueId::UNIT))
+                .flatten()
         }))
     }
 
@@ -2777,6 +2779,12 @@ fn fil(order: i64, _w: i32) -> Glue {
     }
 }
 
+/// A list entry `[list id, item]`, borrowed.
+fn entry_pair(v: &phitex_defuse::Values, x: ValueId) -> Option<(ValueId, ValueId)> {
+    v.with_list(x, |xs| (xs.len() == 2).then(|| (xs[0], xs[1])))
+        .flatten()
+}
+
 fn with_shift(v: &phitex_defuse::Values, b: ValueId, s: i32) -> ValueId {
     match &*v.get(b) {
         Value::List(xs) if nodes::tag(v, b) == nodes::T_BOX => {
@@ -3009,14 +3017,14 @@ pub(crate) fn fold_entries(
     out: &mut Vec<ValueId>,
 ) {
     let push = |x: ValueId, st: &mut FoldState, out: &mut Vec<ValueId>| -> bool {
-        let Value::List(xs) = &*v.get(x) else {
+        let Some((l, item)) = entry_pair(v, x) else {
             return true;
         };
-        if xs.len() != 2 || int_of(v, xs[0]) != lid {
+        if int_of(v, l) != lid {
             return true;
         }
-        let deletes = nodes::tag(v, xs[1]) == T_DELETE;
-        fold_item(v, lid, xs[1], st, out);
+        let deletes = nodes::tag(v, item) == T_DELETE;
+        fold_item(v, lid, item, st, out);
         !deletes
     };
     let mut at = 0;
@@ -3060,13 +3068,9 @@ pub(crate) fn fold_entries(
         // the items the entries hold pass as they are; the rest were made
         let mut given = phitex_defuse::FxHashSet::default();
         for &x in block {
-            if let Value::List(xs) = &*v.get(x)
-                && let Some(&n) = xs.get(1)
-            {
+            if let Some(n) = v.with_list(x, |xs| xs.get(1).copied()).flatten() {
                 given.insert(n);
-                if let Value::List(ys) = &*v.get(n)
-                    && let Some(&b) = ys.get(1)
-                {
+                if let Some(b) = v.with_list(n, |ys| ys.get(1).copied()).flatten() {
                     given.insert(b);
                 }
             }

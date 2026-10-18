@@ -1276,6 +1276,25 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         ms(read_total),
         ms(op.saturating_sub(read_total))
     );
+    // (what stays parked at the end: the nodes whose wait chains end at
+    // the environment, and each chain's head with the field it asks)
+    let waits: Vec<String> = r
+        .env_waits
+        .iter()
+        .take(20)
+        .map(|&(n, f)| {
+            format!(
+                "{} on {}",
+                describe(eng, n),
+                crate::val::field_name(eng.values(), f)
+            )
+        })
+        .collect();
+    eprintln!(
+        "acct: parked at the end: {} nodes stalled on the environment, {} chain heads: {waits:?}",
+        r.env_stalled,
+        r.env_waits.len()
+    );
     // (the progress guarantee: nodes run conservatively after a refutation,
     // and the refutations by field, most first)
     let mut by_field: Vec<(String, u64)> = r

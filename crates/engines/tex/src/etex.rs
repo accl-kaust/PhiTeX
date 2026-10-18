@@ -1159,10 +1159,7 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
 /// A mark's class and text (a class mark is `[-1, class, text]`).
 pub(crate) fn mark_class(v: &phitex_defuse::Values, m: ValueId) -> (i32, ValueId) {
     let xs = list_of(v, m);
-    if xs.len() == 3
-        && int_of(v, xs[0]) == -1
-        && matches!(&*v.get(xs[0]), phitex_defuse::Value::Int(_))
-    {
+    if xs.len() == 3 && int_of(v, xs[0]) == -1 && v.as_int(xs[0]).is_some() {
         (i32::try_from(int_of(v, xs[1])).unwrap_or(0), xs[2])
     } else {
         (0, m)
