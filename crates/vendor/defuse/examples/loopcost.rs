@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use defuse::{Ctx, Engine, Field, Locality, LoopStart, Operation, Stop, ValueId, Values};
 
-struct Ops(u64);
+struct Ops(u64, std::sync::OnceLock<defuse::OpId>);
 
 fn spin(us: u64) {
     let t = Instant::now();
@@ -28,6 +28,7 @@ impl Operation for Ops {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(match v.as_str(a[0]).unwrap_or_default().as_str() {
             "para" => vec![(v.field("text"), Locality::Local)],
+            "piece" => vec![(v.field("piece"), Locality::Local)],
             _ => Vec::new(),
         })
     }
@@ -47,7 +48,24 @@ impl Operation for Ops {
                 let x = cx.use_field(refs)?.and_then(|x| v.as_int(x)).unwrap_or(0);
                 // Its paragraph's text (the nearest before it).
                 let t = cx.use_field(v.field("text"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+                if std::env::var_os("PLACED").is_some() {
+                    // Pieces placed after itself, which ones by the round.
+                    let me = self.1.get().copied().unwrap();
+                    for j in 0..2 {
+                        cx.follow(me, vec![v.str("piece"), v.int(x + j), v.int(t)]);
+                    }
+                }
                 Ok(v.int(x * 1000 + t))
+            }
+            "piece" => {
+                spin(self.0);
+                let k = v.as_int(a[1]).unwrap() + v.as_int(a[2]).unwrap();
+                cx.define(v.field("piece"), v.int(k));
+                Ok(v.int(k))
+            }
+            "reader" => {
+                spin(self.0);
+                Ok(cx.use_field(v.field("piece"))?.unwrap_or(ValueId::UNIT))
             }
             _ => {
                 spin(self.0);
@@ -69,7 +87,9 @@ fn main() {
     println!("{n} pages + {n} paragraphs, {rounds} rounds cold, {work} us per run");
     for start in [LoopStart::Previous, LoopStart::PerRound] {
         let mut eng = Engine::new();
-        let op = eng.register(Arc::new(Ops(work)));
+        let ops = Arc::new(Ops(work, std::sync::OnceLock::new()));
+        let op = eng.register(ops.clone());
+        let _ = ops.1.set(op);
         let u = eng.new_unit();
         let (refs, zero) = (eng.values().field("refs"), eng.values().int(0));
         eng.declare_loopback(refs, zero);
@@ -85,6 +105,10 @@ fn main() {
             paras.push(eng.push(u, op, p));
             let g = vec![eng.values().str("page"), eng.values().int(i64::try_from(i).unwrap())];
             eng.push(u, op, g);
+            if std::env::var_os("PLACED").is_some() {
+                let r = vec![eng.values().str("reader")];
+                eng.push(u, op, r);
+            }
         }
         let t = Instant::now();
         let r = eng.evaluate_sequential().expect("cold");
@@ -124,5 +148,21 @@ fn main() {
             e.rounds,
             e.memo_bytes / 1024
         );
+        if let Some(q) = &e.quick_refused {
+            println!("  quick path refused: {q}");
+        }
+        // Misses by reason, numbers folded.
+        let mut by: std::collections::BTreeMap<String, usize> = Default::default();
+        for m in &e.memo_misses {
+            let w: String = m
+                .why
+                .chars()
+                .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                .collect();
+            *by.entry(format!("round {}: {w}", m.round)).or_default() += 1;
+        }
+        for (w, c) in by {
+            println!("  miss {c:>6} {w}");
+        }
     }
 }

@@ -26,9 +26,78 @@ pub(crate) const FINAL: u32 = u32::MAX;
 pub(crate) struct Entry {
     ro: RunOut,
     anchors: Vec<Option<u64>>,
+    /// The node id behind every slot its reads name (in visiting order):
+    /// offered, the reads are translated to the nodes' current slots and
+    /// generations (a node a run places is made again, same id, in a new
+    /// slot, when its placer runs again), their values still checked.
+    read_ids: Vec<u64>,
     out: ValueId,
     /// A final node's (its loop-back reads make no round).
     fin: bool,
+}
+
+impl Entry {
+    /// Committed the same as `o`: the same reads (by node id) with the same
+    /// answers, and the same results.
+    fn same(&self, o: &Entry) -> bool {
+        if self.out != o.out
+            || self.read_ids != o.read_ids
+            || self.ro.defs != o.ro.defs
+            || self.ro.contribs != o.ro.contribs
+            || self.ro.pubs != o.ro.pubs
+            || self.ro.env != o.ro.env
+            || self.ro.kind != o.ro.kind
+            || self.ro.kinds != o.ro.kinds
+            || self.ro.log.len() != o.ro.log.len()
+        {
+            return false;
+        }
+        self.ro.log.iter().zip(&o.ro.log).all(|(a, b)| {
+            let (mut a, mut b) = (a.clone(), b.clone());
+            for p in [&mut a, &mut b] {
+                visit_slots(p, &mut |x, g| {
+                    *x = 0;
+                    if let Some(g) = g {
+                        *g = 0;
+                    }
+                });
+            }
+            a == b
+        })
+    }
+}
+
+/// The loop-back fields a log reads.
+fn loop_fields(log: &[Pred]) -> Vec<crate::values::Field> {
+    log.iter()
+        .filter_map(|p| match p {
+            Pred::Def {
+                f,
+                ans: super::DAns::Loop(_),
+                ..
+            } => Some(*f),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The fields whose (field, value) lists differ between `a` and `b`.
+fn changed_fields(
+    a: &[(crate::values::Field, ValueId)],
+    b: &[(crate::values::Field, ValueId)],
+) -> Vec<crate::values::Field> {
+    if a == b {
+        return Vec::new();
+    }
+    let mut fs: Vec<crate::values::Field> = a.iter().chain(b).map(|x| x.0).collect();
+    fs.sort_unstable();
+    fs.dedup();
+    fs.retain(|f| {
+        let pa: Vec<_> = a.iter().filter(|x| x.0 == *f).collect();
+        let pb: Vec<_> = b.iter().filter(|x| x.0 == *f).collect();
+        pa != pb
+    });
+    fs
 }
 
 /// Per node id, its committed results by round (ascending).
@@ -46,6 +115,8 @@ pub(crate) struct Memo {
     cur: std::sync::Mutex<Rounds>,
     /// Nodes whose entry broke this round (they run).
     tried: std::sync::Mutex<FxHashSet<Slot>>,
+    /// Entries not reused this evaluation: (node id, round, why).
+    pub misses: std::sync::Mutex<Vec<(u64, u32, String)>>,
     /// Hits (entries committed) so far.
     pub hits: AtomicU64,
     /// Edited since the last evaluation.
@@ -79,6 +150,7 @@ pub(crate) struct Memo {
 /// A loop-back change at the end of a round: the fields, whether a round
 /// was counted for it, and the live readers that made it count.
 pub(crate) struct Change {
+    fields: Vec<crate::values::Field>,
     counted: bool,
     readers: Vec<u64>,
 }
@@ -169,9 +241,13 @@ impl Index {
 
 impl Memo {
     /// A loop-back change at the end of the current round.
-    pub(crate) fn note_change(&self, _ch: Vec<crate::values::Field>, counted: bool, readers: Vec<u64>) {
+    pub(crate) fn note_change(&self, ch: Vec<crate::values::Field>, counted: bool, readers: Vec<u64>) {
         if self.on.load(Ordering::Relaxed) {
-            lock(&self.changes).push(Change { counted, readers });
+            lock(&self.changes).push(Change {
+                fields: ch,
+                counted,
+                readers,
+            });
         }
     }
 
@@ -184,6 +260,7 @@ impl Memo {
     /// A new evaluation: no changes noted yet.
     pub(crate) fn begin(&self) {
         lock(&self.changes).clear();
+        lock(&self.misses).clear();
     }
 
     /// The evaluation ended well: its results are the next one's memo.
@@ -232,11 +309,11 @@ impl Memo {
             let Some((k, e)) = v.into_iter().last() else { continue };
             ix.add(id, &e, parent);
             ix.uncertain.insert(id);
+            // (Round-invariant, or new, when the quick path held: one
+            // entry serves every round.)
             let p = prev.entry(id).or_default();
-            match p.last_mut() {
-                Some(last) if last.0 == k => last.1 = e,
-                _ => p.push((k, e)),
-            }
+            let k = p.first().map_or(if k == FINAL { k } else { 1 }, |x| x.0);
+            *p = vec![(k, e)];
         }
         // (A node removed is no change's reader any more.)
         for &(id, ..) in lock(&self.removed).iter() {
@@ -305,7 +382,19 @@ impl Shared {
         ro.pread = false;
         ro.narrowed = None;
         let fin = self.rec(s).data().stat.fin();
-        let e = Arc::new(Entry { ro, anchors, out, fin });
+        let mut read_ids = Vec::new();
+        for p in &mut ro.log {
+            visit_slots(p, &mut |x, _| {
+                read_ids.push(if *x == super::NIL { u64::MAX } else { self.node_id(*x).0 })
+            });
+        }
+        let e = Arc::new(Entry {
+            ro,
+            anchors,
+            read_ids,
+            out,
+            fin,
+        });
         let id = self.node_id(s).0;
         let mut cur = lock(&self.memo.cur);
         let v = cur.entry(id).or_default();
@@ -323,9 +412,14 @@ impl Shared {
             return false;
         }
         let id = self.node_id(s).0;
+        let miss = |why: String| lock(&self.memo.misses).push((id, k, why));
         let e = {
             let prev = self.memo.prev.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(v) = prev.get(&id) else { return false };
+            let Some(v) = prev.get(&id) else {
+                drop(prev);
+                miss("no entry".into());
+                return false;
+            };
             // The last entry at or before the round (the final phase's only
             // in the final phase).
             let e = if k == FINAL {
@@ -333,13 +427,32 @@ impl Shared {
             } else {
                 v.iter().rev().find(|x| x.0 <= k).map(|x| &x.1)
             };
-            let Some(e) = e else { return false };
+            let Some(e) = e else {
+                drop(prev);
+                miss("no entry at or before the round".into());
+                return false;
+            };
             e.clone()
         };
         let r = self.rec(s);
         {
             let d = r.data();
             if d.op != e.ro.op || d.args != e.ro.args {
+                let which = if d.op != e.ro.op {
+                    "its operation".to_string()
+                } else {
+                    let i = d.args.iter().zip(e.ro.args.iter()).position(|(a, b)| a != b);
+                    match i {
+                        Some(i) => format!(
+                            "arg {i}: {} -> {}",
+                            self.values.render(e.ro.args[i]),
+                            self.values.render(d.args[i])
+                        ),
+                        None => format!("its arg count {} -> {}", e.ro.args.len(), d.args.len()),
+                    }
+                };
+                drop(d);
+                miss(format!("text changed ({which})"));
                 return false;
             }
         }
@@ -350,11 +463,42 @@ impl Shared {
                 None => anchors.push(None),
                 Some(id) => match self.slot_of(*id) {
                     Some(x) if self.rec(x).st() != super::S_FREE => anchors.push(Some(x)),
-                    _ => return false,
+                    _ => {
+                        miss(format!("anchor node {id} gone"));
+                        return false;
+                    }
                 },
             }
         }
         let mut ro = e.ro.clone();
+        // Its reads to the nodes' current slots and generations (a node
+        // gone: no offer).
+        let mut ids = e.read_ids.iter();
+        let mut gone = false;
+        for p in &mut ro.log {
+            visit_slots(p, &mut |x, gn| {
+                let Some(&id) = ids.next() else {
+                    gone = true;
+                    return;
+                };
+                if id == u64::MAX {
+                    return;
+                }
+                match self.slot_of(id) {
+                    Some(y) if self.rec(y).st() != super::S_FREE => {
+                        *x = y;
+                        if let Some(g) = gn {
+                            *g = self.rec(y).gn.load(Ordering::Acquire);
+                        }
+                    }
+                    _ => gone = true,
+                }
+            });
+        }
+        if gone {
+            miss("a node its reads name is gone".into());
+            return false;
+        }
         ro.me = s;
         ro.anchors = anchors;
         // Its reads as committed reads, all of them checked at the commit.
@@ -375,175 +519,257 @@ impl Shared {
     }
 
     /// After the quick path (the edits evaluated from the last fixed point):
-    /// whether no committed change can reach a loop-back publication in
-    /// any round of the last evaluation, so its round sequence stands and
-    /// the state reached is the cold one. Conservative: what the nodes
-    /// committed now and in any round before (fields defined, contributed,
-    /// published), read by any entry's log in any round (by field, or by a
-    /// node it names), closed transitively; a publisher reached, a changed
-    /// unfolding, effect or claim, or a node without an entry, fails it.
-    pub(crate) fn quick_holds(&self) -> bool {
+    /// whether every round of the last evaluation would see the same
+    /// change, so its round sequence stands and the state reached is the
+    /// cold one. By value: the nodes the quick path committed are compared
+    /// with their last entries; every node that committed, and every reader
+    /// (in any round) of a value that changed, must have committed the same
+    /// in every round of the last evaluation (round-invariant: what it read
+    /// did not depend on the round), read nothing new that is not, and
+    /// publish nothing changed. A reader of an unchanged value is not
+    /// looked at (the cone stops there, as the quick path's runs did).
+    pub(crate) fn quick_holds(&self) -> Result<(), String> {
         let cur = lock(&self.memo.cur);
         let prev = self.memo.prev.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let ix = lock(&self.memo.ix);
+        let name = |id: u64| -> String {
+            match self.slot_of(id) {
+                Some(x) => {
+                    let d = self.rec(x).data();
+                    let a: Vec<String> = d.args.iter().map(|&v| self.values.render(v)).collect();
+                    format!("node {id} ({})", a.join(" "))
+                }
+                None => format!("node {id} (gone)"),
+            }
+        };
+        let fname = |f: crate::values::Field| self.values.render(f.0);
+        let moving: FxHashSet<crate::values::Field> = lock(&self.memo.prev_changes)
+            .iter()
+            .flat_map(|c| c.fields.iter().copied())
+            .collect();
+        // Round-invariant in the last evaluation: committed the same in
+        // every round, reading no loop-back that moved (one entry alone
+        // does not say so: a round may have started from values other than
+        // the initial ones). (New: judged by its own reads, below.)
+        let invariant = |id: u64| {
+            prev.get(&id).is_none_or(|v| {
+                v.iter().all(|(_, e)| {
+                    e.same(&v[0].1) && (e.fin || loop_fields(&e.ro.log).iter().all(|f| !moving.contains(f)))
+                })
+            })
+        };
         let mut seen: FxHashSet<u64> = FxHashSet::default();
-        let mut work: Vec<Key> = Vec::new();
-        let mut new_loop_read = false;
+        let mut work: Vec<(Key, u64)> = Vec::new();
         for (id, v) in cur.iter() {
             let Some((_, new)) = v.last() else { continue };
-            if !new.ro.pubs.is_empty() || ix.publishers.contains(id) {
-                return false;
-            }
-            let Some((_, last)) = prev.get(id).and_then(|o| o.last()) else {
-                // New (inserted, or made by a run): judged when it has no
-                // scope effect, claim or unfolding of its own; its fields are
-                // walked (readers may resolve to it now).
-                let Some(x) = self.slot_of(*id) else { return false };
-                let plain = {
-                    let d = self.rec(x).data();
-                    d.stat.effect == crate::api::Effect::None && d.stat.claim == super::ClaimS::None
-                };
-                if !plain || new.ro.claim.is_some() || !new.ro.kids.is_empty() || !new.ro.conts.is_empty() {
-                    return false;
-                }
-                new_loop_read |= !new.fin && reads_loop(&new.ro.log, None);
-                work.extend(new.ro.contribs.iter().map(|c| Key::F(c.0)));
-                for d in &new.ro.defs {
-                    self.def_window(&ix, x, d.f, &mut work);
-                }
-                seen.insert(*id);
-                continue;
-            };
-            if new.ro.effect != last.ro.effect
-                || new.ro.claim != last.ro.claim
-                || new.ro.kids.len() != last.ro.kids.len()
-                || new.ro.conts.len() != last.ro.conts.len()
-                || new.ro.kids.iter().zip(&last.ro.kids).any(|(a, b)| a.id() != b.id())
-                || new.ro.conts.iter().zip(&last.ro.conts).any(|(a, b)| a.id() != b.id())
-            {
-                return false;
-            }
-            new_loop_read |= !new.fin && reads_loop(&new.ro.log, None);
-            // Its contributions reach range readers by window (by field
-            // here); its definitions reach readers by the node that
-            // answered them, and by field where its set of fields moved.
-            work.extend(new.ro.contribs.iter().map(|c| Key::F(c.0)));
-            let old_defs: FxHashSet<crate::values::Field> = ix
-                .defs_of
-                .get(id)
-                .map(|v| v.iter().copied().collect())
-                .unwrap_or_default();
-            let new_defs: FxHashSet<crate::values::Field> = new.ro.defs.iter().map(|d| d.f).collect();
-            for &f in old_defs.symmetric_difference(&new_defs) {
-                if let Some(x) = self.slot_of(*id) {
-                    self.def_window(&ix, x, f, &mut work);
-                } else {
-                    work.push(Key::F(f));
-                }
-            }
             seen.insert(*id);
+            let last = prev.get(id).and_then(|o| o.last()).map(|x| &x.1);
+            let x = self.slot_of(*id);
+            match last {
+                None => {
+                    // New (inserted, or made by a run): no scope effect,
+                    // claim or unfolding of its own.
+                    let Some(x) = x else {
+                        return Err(format!("{} is new and gone", name(*id)));
+                    };
+                    let plain = {
+                        let d = self.rec(x).data();
+                        d.stat.effect == crate::api::Effect::None && d.stat.claim == super::ClaimS::None
+                    };
+                    if !plain || new.ro.claim.is_some() || !new.ro.kids.is_empty() || !new.ro.conts.is_empty() {
+                        return Err(format!("{} is new with a scope effect, claim or unfolding", name(*id)));
+                    }
+                }
+                Some(last) => {
+                    // (A changed text is judged by its new reads alone.)
+                    let same_text = last.ro.op == new.ro.op && last.ro.args == new.ro.args;
+                    if same_text && !invariant(*id) {
+                        return Err(format!(
+                            "{} sees a changed input and committed differently in a later round",
+                            name(*id)
+                        ));
+                    }
+                    if new.ro.effect != last.ro.effect
+                        || new.ro.claim != last.ro.claim
+                        || new.ro.kids.len() != last.ro.kids.len()
+                        || new.ro.conts.len() != last.ro.conts.len()
+                        || new.ro.kids.iter().zip(&last.ro.kids).any(|(a, b)| a.id() != b.id())
+                        || new.ro.conts.iter().zip(&last.ro.conts).any(|(a, b)| a.id() != b.id())
+                    {
+                        return Err(format!("{}'s scope effect, claim or unfolding changed", name(*id)));
+                    }
+                }
+            }
+            if !new.fin {
+                let old_pubs = last.map_or(&[][..], |l| &l.ro.pubs[..]);
+                if new.ro.pubs != old_pubs {
+                    let f = new
+                        .ro
+                        .pubs
+                        .iter()
+                        .chain(old_pubs)
+                        .find(|p| !(new.ro.pubs.contains(p) && old_pubs.contains(p)))
+                        .map_or(String::new(), |p| fname(p.0));
+                    return Err(format!("{} changed its loop-back publication of {f}", name(*id)));
+                }
+                // A loop-back that moved between rounds: its value differs
+                // by round.
+                if let Some(f) = loop_fields(&new.ro.log).into_iter().find(|f| moving.contains(f)) {
+                    return Err(format!(
+                        "{} reads the loop-back {}, which moved between rounds",
+                        name(*id),
+                        fname(f)
+                    ));
+                }
+            }
+            // What it reads anew must not depend on the round.
+            // (A changed text's old reads say nothing of its new ones.)
+            let old_ids: FxHashSet<u64> = last
+                .filter(|l| l.ro.op == new.ro.op && l.ro.args == new.ro.args)
+                .map_or_else(FxHashSet::default, |l| l.read_ids.iter().copied().collect());
+            for &r in &new.read_ids {
+                if r != u64::MAX && r != *id && !old_ids.contains(&r) && !cur.contains_key(&r) && !invariant(r) {
+                    return Err(format!(
+                        "{} now reads {}, which committed differently by round",
+                        name(*id),
+                        name(r)
+                    ));
+                }
+            }
+            // What changed, to its readers.
+            let (l_out, l_kind, l_kinds, l_contribs, l_env, l_defs) = match last {
+                Some(l) => (
+                    Some(l.out),
+                    l.ro.kind,
+                    &l.ro.kinds[..],
+                    &l.ro.contribs[..],
+                    &l.ro.env[..],
+                    &l.ro.defs[..],
+                ),
+                None => (None, None, &[][..], &[][..], &[][..], &[][..]),
+            };
+            if (Some(new.out) != l_out || new.ro.kind != l_kind || new.ro.kinds != l_kinds)
+                && let Some(x) = x
+            {
+                work.push((Key::N(x), *id));
+            }
+            for f in changed_fields(&new.ro.contribs, l_contribs) {
+                work.push((Key::F(f), *id));
+            }
+            for f in changed_fields(&new.ro.env, l_env) {
+                work.push((Key::F(f), *id));
+            }
+            let mut df: Vec<crate::values::Field> = new
+                .ro
+                .defs
+                .iter()
+                .filter(|d| !l_defs.contains(d))
+                .chain(l_defs.iter().filter(|d| !new.ro.defs.contains(d)))
+                .map(|d| d.f)
+                .collect();
+            df.sort_unstable();
+            df.dedup();
+            for f in df {
+                match x {
+                    Some(x) => {
+                        let mut w = Vec::new();
+                        self.def_window(&ix, x, f, &mut w);
+                        work.extend(w.into_iter().map(|k| (k, *id)));
+                        work.push((Key::N(x), *id));
+                    }
+                    None => work.push((Key::F(f), *id)),
+                }
+            }
         }
         // Inserts and removals: under a parent whose children a read
         // walked, they shift what it saw; a removed node with a scope effect
-        // or a claim, or that published, is not judged; otherwise what it
-        // defined, contributed or was named by is walked, and it is in
-        // reach (a change it read made a round count).
-        // (Removed nodes: walked here, not again by field below.)
-        let mut gone: FxHashSet<u64> = FxHashSet::default();
+        // or a claim, or that published, is not judged; otherwise the
+        // readers of what it defined, contributed or was named by are.
         for p in lock(&self.memo.insert_parents).iter() {
             if ix.sib_parents.contains(p) {
-                return false;
+                return Err("an insert under a parent whose children a read walked".into());
             }
         }
         for &(id, x, parent, bad) in lock(&self.memo.removed).iter() {
             if bad || ix.publishers.contains(&id) || ix.sib_parents.contains(&parent) {
-                return false;
+                return Err(format!(
+                    "removed {} had a scope effect, claim or publication, or its parent's children were walked",
+                    name(id)
+                ));
             }
-            // (A reader that resolved to it names it; one that went past it
-            // sees nothing new.)
-            if let Some(fs) = ix.contribs_of.get(&id) {
-                work.extend(fs.iter().map(|&f| Key::F(f)));
+            for &f in ix.contribs_of.get(&id).into_iter().flatten() {
+                work.push((Key::F(f), id));
             }
-            work.push(Key::N(x));
+            for &f in ix.defs_of.get(&id).into_iter().flatten() {
+                work.push((Key::F2(f), id));
+            }
+            work.push((Key::N(x), id));
             seen.insert(id);
-            gone.insert(id);
         }
-        // Readers in any round, to a fixed point.
-        for id in seen.clone() {
-            if !gone.contains(&id) {
-                self.quick_keys(&ix, id, &mut work);
-            }
-        }
+        // The readers of a changed value (not further: what they changed
+        // in turn, the quick path committed, and was compared above).
         let mut done_f: FxHashSet<crate::values::Field> = FxHashSet::default();
-        let mut done_n: FxHashSet<Slot> = FxHashSet::default();
         let mut done_f2: FxHashSet<crate::values::Field> = FxHashSet::default();
-        while let Some(k) = work.pop() {
-            let readers = match k {
+        let mut done_n: FxHashSet<Slot> = FxHashSet::default();
+        let check = |w: u64, why: &dyn Fn() -> String, seen: &mut FxHashSet<u64>| -> Result<(), String> {
+            if !seen.insert(w) || cur.contains_key(&w) {
+                return Ok(());
+            }
+            if !invariant(w) {
+                return Err(format!(
+                    "{} reads {} and committed differently in a later round",
+                    name(w),
+                    why()
+                ));
+            }
+            Ok(())
+        };
+        while let Some((k, src)) = work.pop() {
+            let (readers, why): (Option<&Vec<u64>>, String) = match k {
                 Key::F(f) => {
                     if !done_f.insert(f) {
                         continue;
                     }
-                    // (By field: every reader, by use too.)
-                    if let Some(v) = ix.by_field_use.get(&f) {
-                        work.extend(
-                            v.iter()
-                                .filter(|&&w| self.rec(w).st() != super::S_FREE)
-                                .map(|&w| Key::R(self.node_id(w).0)),
-                        );
+                    let why = format!("{} (changed by {})", fname(f), name(src));
+                    for &ws in ix.by_field_use.get(&f).into_iter().flatten() {
+                        if self.rec(ws).st() != super::S_FREE {
+                            check(self.node_id(ws).0, &|| why.clone(), &mut seen)?;
+                        }
                     }
-                    ix.by_field.get(&f)
+                    (ix.by_field.get(&f), why)
                 }
                 Key::F2(f) => {
                     if done_f.contains(&f) || !done_f2.insert(f) {
                         continue;
                     }
-                    ix.by_field.get(&f)
+                    (ix.by_field.get(&f), format!("{} (changed by {})", fname(f), name(src)))
                 }
                 Key::R(w) => {
-                    if !seen.insert(w) {
-                        continue;
-                    }
-                    if ix.publishers.contains(&w) {
-                        return false;
-                    }
-                    self.quick_keys(&ix, w, &mut work);
+                    check(w, &|| format!("a definition changed by {}", name(src)), &mut seen)?;
                     continue;
                 }
                 Key::N(x) => {
                     if !done_n.insert(x) {
                         continue;
                     }
-                    ix.by_slot.get(&x)
+                    (ix.by_slot.get(&x), format!("{}, changed", name(src)))
                 }
             };
             for &w in readers.into_iter().flatten() {
-                if !seen.insert(w) {
-                    continue;
-                }
-                if ix.publishers.contains(&w) {
-                    return false;
-                }
-                self.quick_keys(&ix, w, &mut work);
+                check(w, &|| why.clone(), &mut seen)?;
             }
         }
         // The round count: a counted round stands while a reader of the
         // change it followed is out of reach (it read the same in every
-        // round); an uncounted change stays so while nothing in reach reads
-        // a loop-back at all.
-        let in_reach_reads_loops = new_loop_read || seen.iter().any(|id| ix.loop_readers.contains(id));
+        // round). (An uncounted one stays so: no node in reach reads a
+        // loop-back anew, and one that read a moving one is not
+        // round-invariant.)
         for c in lock(&self.memo.prev_changes).iter() {
-            let (counted, readers) = (c.counted, &c.readers);
-            if !counted {
-                if in_reach_reads_loops {
-                    return false;
-                }
-                continue;
-            }
-            if !readers.iter().any(|r| !seen.contains(r) && !ix.uncertain.contains(r)) {
-                return false;
+            if c.counted && !c.readers.iter().any(|r| !seen.contains(r) && !ix.uncertain.contains(r)) {
+                return Err("a counted round's readers are all in reach".into());
             }
         }
-        true
+        Ok(())
     }
 
     /// The readers by use of `f` a new definition of it by `x` can reach:
@@ -580,25 +806,37 @@ impl Shared {
         }
     }
 
-    /// What a node in reach can change for others: its contributions (by
-    /// field), the reads naming it, and, when its set of definitions is not
-    /// static, its defined fields by field.
-    fn quick_keys(&self, ix: &Index, id: u64, work: &mut Vec<Key>) {
-        if let Some(fs) = ix.contribs_of.get(&id) {
-            work.extend(fs.iter().map(|&f| Key::F(f)));
-        }
-        let Some(x) = self.slot_of(id) else {
-            // (Gone: anything it defined.)
-            if let Some(fs) = ix.defs_of.get(&id) {
-                work.extend(fs.iter().map(|&f| Key::F(f)));
+    /// A read, for a miss's reason: its kind, the field and the node it
+    /// names.
+    fn describe_read(&self, p: &Pred) -> String {
+        let f = |f: crate::values::Field| self.values.render(f.0);
+        let n = |x: Slot| {
+            if x == super::NIL || self.rec(x).st() == super::S_FREE {
+                "-".to_string()
+            } else {
+                self.node_id(x).0.to_string()
             }
-            return;
         };
-        work.push(Key::N(x));
-        if self.rec(x).data().stat.defs.is_none()
-            && let Some(fs) = ix.defs_of.get(&id)
-        {
-            work.extend(fs.iter().map(|&f| Key::F(f)));
+        match p {
+            Pred::Def { f: g, ans, .. } => match ans {
+                super::DAns::Site { node, .. } => format!("read value changed: {} (from node {})", f(*g), n(*node)),
+                super::DAns::Loop(_) => format!("read value changed: loop-back {}", f(*g)),
+                super::DAns::Env(_) => format!("read value changed: environment {}", f(*g)),
+                _ => format!("read value changed: {}", f(*g)),
+            },
+            Pred::Range { f: g, .. } => format!("range changed: {}", f(*g)),
+            Pred::Out { node, .. } => format!("output changed: node {}", n(*node)),
+            Pred::At { node, .. } => format!("position changed: node {}", n(*node)),
+            Pred::App { node, .. } => format!("application changed: node {}", n(*node)),
+            Pred::Env { f: g, .. } => format!("environment changed: {}", f(*g)),
+            Pred::IsLoop { f: g, .. } => format!("loop-back declaration changed: {}", f(*g)),
+            Pred::Kind { opener, .. } => format!("kind changed: opener {}", n(*opener)),
+            Pred::Sib { .. } => "following sibling changed".into(),
+            Pred::PrevSib { .. } => "preceding siblings changed".into(),
+            Pred::Claimed { .. } => "claimed siblings changed".into(),
+            Pred::Stream { .. } => "stream changed".into(),
+            #[allow(unreachable_patterns)]
+            _ => "a read changed".into(),
         }
     }
 
@@ -617,22 +855,17 @@ impl Shared {
             let w = o.wait.take();
             if w.is_none() {
                 lock(&self.memo.tried).insert(s);
+                let k = self.memo.round.load(Ordering::Acquire);
+                let why = o
+                    .log
+                    .iter()
+                    .find(|p| matches!(self.check_log(s, std::slice::from_ref(*p)), super::run::Check::Broke(_)))
+                    .map_or_else(|| "its reads changed meanwhile".to_string(), |p| self.describe_read(p));
+                lock(&self.memo.misses).push((self.node_id(s).0, k, why));
             }
             self.not_committed(s, w);
         }
     }
-}
-
-/// Whether a log reads a loop-back value (of one of `fields`, if given).
-fn reads_loop(log: &[Pred], fields: Option<&Vec<crate::values::Field>>) -> bool {
-    log.iter().any(|p| match p {
-        Pred::Def {
-            f,
-            ans: super::DAns::Loop(_),
-            ..
-        } => fields.is_none_or(|fs| fs.contains(f)),
-        _ => false,
-    })
 }
 
 /// What a read depends on: a field, or a node it names; or a reader
@@ -691,6 +924,56 @@ fn read_keys(p: &Pred, k: &mut impl FnMut(Key)) {
             }
         }
         // (Environment and loop-back reads are not a node's to change.)
+        _ => {}
+    }
+}
+
+/// Calls `f` with every slot a read names (the reader's own position
+/// too), and its generation where the read keeps one.
+fn visit_slots(p: &mut Pred, f: &mut impl FnMut(&mut Slot, Option<&mut u32>)) {
+    match p {
+        Pred::Def { at, ans, sites, .. } => {
+            f(at, None);
+            if let super::DAns::Site { node, gn, .. } = ans {
+                f(node, Some(gn));
+            }
+            for (x, g) in sites.iter_mut() {
+                f(x, Some(g));
+            }
+        }
+        Pred::At { node, gn } | Pred::Out { node, gn, .. } | Pred::App { node, gn, .. } => f(node, Some(gn)),
+        Pred::Range { at, last, .. } => {
+            f(at, None);
+            f(last, None);
+        }
+        Pred::Kind { at, opener, .. } => {
+            f(at, None);
+            f(opener, None);
+        }
+        Pred::Sib {
+            ans: Some((x, g, _)), ..
+        } => f(x, Some(g)),
+        Pred::PrevSib { seen, ans } => {
+            for (x, g, _) in seen.iter_mut() {
+                f(x, Some(g));
+            }
+            if let Some(x) = ans {
+                f(x, None);
+            }
+        }
+        Pred::Claimed { list } => {
+            for (x, g, _) in list.iter_mut() {
+                f(x, Some(g));
+            }
+        }
+        Pred::Stream { seen, reads, .. } => {
+            for (x, g, _) in seen.iter_mut() {
+                f(x, Some(g));
+            }
+            for (x, _) in reads.iter_mut() {
+                f(x, None);
+            }
+        }
         _ => {}
     }
 }

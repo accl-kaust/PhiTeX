@@ -55,6 +55,25 @@ built() { echo "build_s $(( $(date +%s) - t0 ))" >> "$r/times.txt"; }
 T="cargo test --profile fastdev -p phitex-tex --features profile,observe"
 # the test targets the shards run (the build shard builds them)
 SUITES="pdftex edits pages plain etex hints inputs defuse_gaps"
+# The compiler cache (job.sbatch's PHITEX_SCCACHE, on the shared home):
+# the compiler's wrapper once its server starts, else none (the build as
+# before). Incremental builds are not cacheable, and a fresh target
+# directory gains nothing from them: off with the cache.
+cache_on() {
+  [ -n "${PHITEX_SCCACHE:-}" ] || return 0
+  if "$PHITEX_SCCACHE" --start-server > "$r/sccache-start.txt" 2>&1; then
+    export RUSTC_WRAPPER=$PHITEX_SCCACHE CARGO_INCREMENTAL=0
+  else
+    echo "sccache: no server, building without it: $(tail -1 "$r/sccache-start.txt")"
+  fi
+}
+# its counters in $r/sccache.txt, and the server stopped (its writes done)
+cache_off() {
+  [ -n "${RUSTC_WRAPPER:-}" ] || return 0
+  "$RUSTC_WRAPPER" --show-stats > "$r/sccache.txt" 2>&1
+  "$RUSTC_WRAPPER" --stop-server > /dev/null 2>&1
+  echo "sccache: $(grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable calls) ' "$r/sccache.txt" | sed -E 's/  +/ /g' | tr '\n' ',' | sed 's/,$//')"
+}
 # the build's compile time, as the shard's build_s
 fetched() { echo "build_s $(cat "$w/bin/build_s" "$w/bin/tests/build_s" "$w/bin/cli/build_s" 2>/dev/null | head -1 | grep . || echo 0)" >> "$r/times.txt"; }
 # runtests BIN PREFIX LIST DIR: each test of LIST (names, one a line) its
@@ -136,15 +155,18 @@ case $shard in
     # nightly's and reflows what the local one keeps, as job.sbatch's
     # gate since b2fbf61a; clippy skips the vendored engine)
     built
+    cache_on
     if ! cargo clippy --workspace --exclude defuse --all-targets --keep-going -q --message-format short -- -D warnings > "$r/clippy.txt" 2>&1; then
       grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|warning)' "$r/clippy.txt" | sort -u | head -60 | while IFS= read -r l; do echo "clippy: $l"; done >> "$r/red.txt"
       grep -q . "$r/red.txt" || echo "clippy: $(grep -m1 '^error' "$r/clippy.txt")" >> "$r/red.txt"
       status=red
     fi
+    cache_off
     ;;
   build)
     # (the test binaries and the CLI in their own target directories,
     # side by side: one cargo would hold the other's lock)
+    cache_on
     a=()
     for s in latex $SUITES; do a+=(--test "$s"); done
     ( $T "${a[@]}" --no-run --message-format=json-render-diagnostics > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
@@ -156,6 +178,7 @@ case $shard in
     ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
     wait
     built
+    cache_off
     grep -q '^EXIT 0$' "$r/build-tests.txt" || red "build (tests): $(grep -m1 '^error' "$r/build-tests.txt")"
     grep -q '^EXIT 0$' "$r/build.txt" || red "build (cli): $(grep -m1 '^error' "$r/build.txt")"
     grep -q '^EXIT 0$' "$r/build-prof.txt" || red "build (cli, profile): $(grep -m1 '^error' "$r/build-prof.txt")"
