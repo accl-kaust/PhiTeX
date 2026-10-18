@@ -1064,6 +1064,8 @@ pub(crate) struct Shared {
     pub deferred_frames: Mutex<Vec<Slot>>,
     pub abort: AtomicBool,
     pub error: Mutex<Option<crate::api::EvalError>>,
+    /// A static hook's panic outside an evaluation, reported by the next.
+    pub hook_error: Mutex<Option<crate::api::EvalError>>,
     pub c: Counters,
     /// The tallies, one shard per stripe of threads (merged by `tallies`).
     pub t: Box<[TallyShard]>,
