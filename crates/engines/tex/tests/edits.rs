@@ -499,40 +499,68 @@ fn oscillating_written_file() {
     );
 }
 
-/// A one-word edit on a generated plain document of 40 paragraphs:
-/// what re-runs is the node model's (`common::assert_edit_cost`: the
-/// edited paragraph, and the fold, finisher, place and resume of each
-/// page whose content changed), no loop round, and the PDF equals a
-/// cold build of the edited text.
+/// A one-letter, same-length edit inside a paragraph of para4000 whose
+/// lines come out the same size (`n` to `u` in a four-letter word: the
+/// same width, height and depth, no kern or ligature, too short to
+/// hyphenate), so the paragraph's vertical profile is unchanged: the edit
+/// runs exactly that paragraph's exec, its page's finisher, the link and
+/// the end node, once each, at 1 and at 8 threads. No block scan, no node
+/// run twice, no speculative run dropped; the PDF equals a cold build of
+/// the edited text. Every rerun's cause is printed.
 #[test]
 fn one_word_edit_reruns_little() {
     let fx = common::fixtures().join("dvi");
-    let words = [
-        "galley", "proof", "margin", "printer", "ligature", "kern", "reader", "spacing",
-    ];
-    let mut src = String::from("\\pdfoutput=1 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
-    for p in 0..40 {
-        for w in 0..90 {
-            src.push_str(words[(p * 7 + w * 3 + w / 5) % words.len()]);
-            src.push(if w == 89 { '.' } else { ' ' });
-        }
-        src.push_str("\n\n");
-    }
-    src.push_str("\\bye\n");
+    let bench = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bench/para4000.tex");
+    let src = format!("\\pdfoutput=1 {}", common::read(&bench));
+    // (paragraph 2000's first " line ": `line` to `liue`)
+    let par = src.match_indices("\n\n").nth(2000).expect("a paragraph").0;
+    let at = par + src[par..].find(" line ").expect("a word `line`") + 3;
+    let text = format!("{}u{}", &src[..at], &src[at + 1..]);
+    assert_eq!(&src[at - 2..at + 2], "line");
     let prelude = common::plain();
-    let opts = || common::options("./w.tex", "w", "", &fx);
-    let mut b = common::build(opts(), Some(&prelude), &src);
-    assert!(b.is_pdf());
-    let (before, cold_folds) = (b.pages(), common::runs_of(&b, "scan"));
-    let at = src.match_indices("\n\n").nth(37).expect("a paragraph").0 + 2;
-    let text = format!("{}Q{}", &src[..at], &src[at + 1..]);
-    b.edit(&text);
-    let rounds = b.stats.loop_rounds;
-    let cold = common::build(opts(), Some(&prelude), &text);
-    let d = common::first_difference(&b.output().0, &cold.output().0);
-    assert!(d.is_none(), "edit differs from cold: {d:?}");
-    assert!(rounds <= 1, "{rounds} loop rounds");
-    common::assert_edit_cost("one word", &b, 1, &before, cold_folds);
+    let opts = |t: usize| phitex_tex::Options {
+        threads: Some(t),
+        ..common::options("./para4000.tex", "para4000", "", &fx)
+    };
+    let cold = common::build(opts(8), Some(&prelude), &text);
+    assert!(cold.is_pdf());
+    for t in [1, 8] {
+        let mut b = common::build(opts(t), Some(&prelude), &src);
+        let before = b.pages();
+        b.edit(&text);
+        let st = &b.stats;
+        eprintln!(
+            "para4000 edit at {t} threads: runs by op {:?}, {} runs of {} nodes, pages touched {:?} of {}, speculations {} mispredicted {} stopped {} reshaped {}, loop rounds {}",
+            st.runs_by_op,
+            st.runs,
+            st.nodes_run,
+            common::pages_touched(&before, &b.pages()),
+            b.pages().len(),
+            st.speculations,
+            st.mispredictions,
+            st.spec_stops,
+            st.spec_shape_changes,
+            st.loop_rounds
+        );
+        for (n, op, why) in &st.reruns {
+            eprintln!("  rerun {op} {n}: {why}");
+        }
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(d.is_none(), "edit at {t} threads differs from cold: {d:?}");
+        let mut got: Vec<(&str, u64)> = st.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            [("dvi", 1), ("exec", 1), ("finish", 1), ("link", 1)],
+            "runs by op at {t} threads"
+        );
+        assert_eq!(st.runs, st.nodes_run, "a node ran twice at {t} threads");
+        assert_eq!(
+            (st.mispredictions, st.spec_stops, st.spec_shape_changes),
+            (0, 0, 0),
+            "speculative runs dropped at {t} threads"
+        );
+    }
 }
 
 /// An edit on page 1 of 400 plain paragraphs in PDF mode re-runs that
