@@ -544,10 +544,18 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
             original: xs
                 .get(3)
                 .map(|&l| {
-                    list_of(v, l)
-                        .into_iter()
-                        .map(|c| u16::try_from(int_of(v, c)).unwrap_or(0))
-                        .collect()
+                    // (borrowed: the characters straight into the node)
+                    v.with_list(l, |cs| {
+                        cs.iter()
+                            .map(|&c| u16::try_from(int_of(v, c)).unwrap_or(0))
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        list_of(v, l)
+                            .into_iter()
+                            .map(|c| u16::try_from(int_of(v, c)).unwrap_or(0))
+                            .collect()
+                    })
                 })
                 .unwrap_or_default(),
             left_hit: g(4) != 0,

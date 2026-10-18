@@ -657,9 +657,14 @@ impl Run<'_, '_> {
                 continue;
             }
             for x in v.seq_to_vec(s) {
-                let xs = list_of(v, x);
-                if xs.len() == 2 && int_of(v, xs[0]) == 0 {
-                    out.push(xs[1]);
+                // (the pair borrowed: no list copied per item)
+                let pair = v
+                    .with_list(x, |xs| (xs.len() == 2).then(|| (xs[0], xs[1])))
+                    .flatten();
+                if let Some((l, y)) = pair
+                    && int_of(v, l) == 0
+                {
+                    out.push(y);
                 }
             }
         }
@@ -1139,7 +1144,7 @@ impl Run<'_, '_> {
         // (the last line, for a display that interrupts the paragraph:
         // moved out once encoded)
         let mut just_box = None;
-        let last = para.lines.len().wrapping_sub(1);
+        let last_k = para.lines.len().wrapping_sub(1);
         // (the interline glue parameters in force for every line, §679:
         // nothing between the lines changes them)
         let bs = crate::val::glue_value(v, &self.gpar(Par::baselineskip)?);
@@ -1157,7 +1162,7 @@ impl Run<'_, '_> {
             if let Some(p) = line.penalty {
                 out.push(nodes::penalty_node(v, p));
             }
-            if display && k == last {
+            if display && k == last_k {
                 just_box = Some(line.packed.node);
             }
         }
@@ -2930,10 +2935,16 @@ pub(crate) fn fold_item(
         }
         T_PD => st.pd = i32::try_from(crate::val::int_at(v, n, 1)).unwrap_or(0),
         T_VBOX => {
-            let ys = list_of(v, n);
-            let b = ys.get(1).copied().unwrap_or(ValueId::UNIT);
-            let bs = crate::val::glue_of(v, ys.get(2).copied());
-            let ls = crate::val::glue_of(v, ys.get(3).copied());
+            // (the fields borrowed: no list copied per line)
+            let ys: [Option<ValueId>; 4] = v
+                .with_list(n, |xs| std::array::from_fn(|k| xs.get(k).copied()))
+                .unwrap_or_else(|| {
+                    let xs = list_of(v, n);
+                    std::array::from_fn(|k| xs.get(k).copied())
+                });
+            let b = ys[1].unwrap_or(ValueId::UNIT);
+            let bs = crate::val::glue_of(v, ys[2]);
+            let ls = crate::val::glue_of(v, ys[3]);
             let lsl = i32::try_from(crate::val::int_at(v, n, 4)).unwrap_or(0);
             let ht = nodes::box_dim(v, b, 3);
             if let Some(g) = phitex_typeset::linebreak::interline_glue(st.pd, ht, bs, ls, lsl) {
