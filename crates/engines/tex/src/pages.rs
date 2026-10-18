@@ -1691,7 +1691,9 @@ impl Run<'_, '_> {
         // (its input read up to the candidate: the siblings it takes are
         // known, and so are the fields it defines)
         let n = self.claim_count();
-        self.cx.claim(n);
+        if n != 0 {
+            self.cx.claim(n);
+        }
         let mut defs = self.published_fields();
         defs.extend(PAGE_FIELDS.map(|f| v.field(f)));
         self.cx.narrow(MayDefine::Names(defs));

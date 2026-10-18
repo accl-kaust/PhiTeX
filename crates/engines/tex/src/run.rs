@@ -3333,7 +3333,10 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cut
             );
         }
-        self.cx.claim(n);
+        // (nothing to claim, no effect: no call, the engine's default)
+        if n != 0 {
+            self.cx.claim(n);
+        }
         if crate::exec::env_flag!("PHITEX_TEX_TRACE")
             && self.effect != Effect::None
             && crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
@@ -3344,7 +3347,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cx.node().raw()
             );
         }
-        self.cx.set_effect(self.effect);
+        if self.effect != Effect::None {
+            self.cx.set_effect(self.effect);
+        }
         ValueId::UNIT
     }
 
@@ -3449,8 +3454,6 @@ impl<'c, 'a> Run<'c, 'a> {
         let id = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         let e = v.list(vec![v.str(need), id, what]);
         self.cx.contribute(v.field("needs"), v.seq_unit(e));
-        self.cx.claim(0);
-        self.cx.set_effect(Effect::None);
         ValueId::UNIT
     }
 }
