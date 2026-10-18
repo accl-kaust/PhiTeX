@@ -144,11 +144,96 @@ impl Incr {
             let (Some(from), Some(to)) = (self.src.at_byte(a), self.src.at_byte(b)) else {
                 return self.set_text(text);
             };
-            let _ = self.src.edit(from, to, &text[a..c]);
+            let splice = self.src.edit(from, to, &text[a..c]);
             self.text.replace_range(a..b, &text[a..c]);
+            crate::timeline::note("incr: the units spliced (in place)", t0.elapsed());
+            // (an edit inside one chunk that keeps its bounds and what it
+            // defines: that chunk analysed again, the others kept where
+            // they are, no walk over the text)
+            if self.walk_one(&splice, a, b, c) {
+                crate::timeline::note("incr: one chunk analysed again", t0.elapsed());
+                return;
+            }
         }
-        crate::timeline::note("incr: the units spliced (in place)", t0.elapsed());
         self.walk();
+    }
+
+    /// [`Incr::walk`] for an edit of the old bytes `a..b` (now `a..c`)
+    /// whose spliced units (`splice`) are all in one chunk: that chunk's
+    /// bounds scanned again, its own definitions made again, and, where
+    /// it still ends at its last unit and defines what it defined, it is
+    /// analysed again under the definitions before it; the chunks after
+    /// it move by the length's change. `false`: the edit reaches another
+    /// chunk, or the chunk's bounds or definitions changed (a whole walk).
+    fn walk_one(&mut self, splice: &phitex_source::Splice, a: usize, b: usize, c: usize) -> bool {
+        if self.chunks.len() != self.cache.len() || self.chunks.is_empty() {
+            return false;
+        }
+        let k = self.chunks.partition_point(|ch| ch.start <= a).max(1) - 1;
+        let (start, len) = (self.chunks[k].start, self.cache[k].len);
+        if b >= start + len {
+            return false;
+        }
+        // (the removed units are a run of the chunk's)
+        let units = &self.cache[k].units;
+        let Some(i) = splice
+            .removed
+            .first()
+            .and_then(|r| units.iter().position(|u| u == r))
+        else {
+            return false;
+        };
+        let n = splice.removed.len();
+        if i + n > units.len() || units[i..i + n] != splice.removed[..] {
+            return false;
+        }
+        let mut new_units = units[..i].to_vec();
+        new_units.extend_from_slice(&splice.inserted);
+        new_units.extend_from_slice(&units[i + n..]);
+        if new_units.is_empty() || new_units.iter().any(|&u| !self.src.contains(u)) {
+            return false;
+        }
+        // (its bounds: closed first at its last unit, or open at the
+        // text's end as before)
+        let last = k + 1 == self.chunks.len();
+        let mut st = Open::default();
+        for (j, &u) in new_units.iter().enumerate() {
+            st.scan(self.src.text(u));
+            if st.closed() && j + 1 < new_units.len() {
+                return false;
+            }
+        }
+        let closed = st.closed();
+        if !closed && !last {
+            return false;
+        }
+        let new_len = len + c - b;
+        let t = &self.text[start..start + new_len];
+        let own = crate::hints::own_definitions(t, FileKind::Document);
+        let digest = crate::hints::defines_any(&own).then(|| own.digest());
+        if digest != self.cache[k].own {
+            return false;
+        }
+        let defs = if k == 0 {
+            self.defs.clone()
+        } else {
+            self.cache[k - 1].out.1.clone()
+        };
+        let (th, keys) = analyse(t, &defs, Some(own));
+        let e = &mut self.cache[k];
+        e.units = new_units;
+        e.len = new_len;
+        e.th = th.clone();
+        e.keys = keys.clone();
+        e.closed = closed;
+        self.chunks[k] = Chunk { start, th, keys };
+        if c != b {
+            for ch in &mut self.chunks[k + 1..] {
+                ch.start = ch.start + c - b;
+            }
+        }
+        self.analysed = 1;
+        true
     }
 
     fn splice(&mut self, text: &str) {
