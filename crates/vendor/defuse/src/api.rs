@@ -185,6 +185,18 @@ pub trait Operation: Send + Sync {
         None
     }
 
+    /// Whether the node runs only in the evaluation's final phase: held,
+    /// unrun, while loop-back fields still move, and run once the rounds
+    /// have converged (`next_round` found nothing changed), after which the
+    /// evaluation ends. Its readers wait for it as for any node in work. A
+    /// final node whose publication moves a loop-back field fails the
+    /// evaluation ([`EvalError::FinalMovedLoop`]). An evaluation without
+    /// rounds runs it once at its end; an edited final node runs again only
+    /// in the final phase. Asked once per text.
+    fn final_only(&self, _args: &[ValueId], _values: &Values) -> bool {
+        false
+    }
+
     /// The definitions this text is predicted to make, with their values,
     /// before it runs (for example from an earlier run on the same
     /// inputs). Under any speculation but [`crate::Speculation::Off`], a
@@ -552,6 +564,12 @@ pub enum EvalError {
         hook: &'static str,
         message: String,
     },
+    /// A final node's ([`Operation::final_only`]) publication moved
+    /// loop-back field `field` after the rounds had converged.
+    FinalMovedLoop {
+        node: NodeId,
+        field: Field,
+    },
     Deadline {
         runs: u64,
         waiters: Vec<Waiter>,
@@ -604,6 +622,9 @@ impl std::fmt::Display for EvalError {
                 message,
             } => {
                 write!(f, "{op}::{hook} panicked (node {node:?}): {message}")
+            }
+            EvalError::FinalMovedLoop { node, field } => {
+                write!(f, "final node {node:?} moved loop-back field {field:?}")
             }
             EvalError::Deadline { runs, waiters, .. } => write!(
                 f,
@@ -843,6 +864,9 @@ pub struct Report {
     pub version: u64,
     pub edits_applied: Vec<(u64, u64)>,
     pub settled: u64,
+    /// Final nodes ([`Operation::final_only`]) released and run in the
+    /// final phase.
+    pub final_nodes_run: u64,
     pub resettled: u64,
 }
 

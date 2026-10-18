@@ -234,6 +234,8 @@ pub(crate) struct StaticRare {
     /// The definitions the text is predicted to make
     /// (`Operation::predicted_defs`).
     pub preds: Option<Box<[(Field, ValueId)]>>,
+    /// Runs only in the final phase (`Operation::final_only`).
+    pub fin: bool,
 }
 
 impl Static {
@@ -248,6 +250,9 @@ impl Static {
     }
     pub(crate) fn preds(&self) -> Option<&[(Field, ValueId)]> {
         self.rare.as_ref().and_then(|r| r.preds.as_deref())
+    }
+    pub(crate) fn fin(&self) -> bool {
+        self.rare.as_ref().is_some_and(|r| r.fin)
     }
 }
 
@@ -1086,6 +1091,14 @@ pub(crate) struct Shared {
     pub error: Mutex<Option<crate::api::EvalError>>,
     /// A static hook's panic outside an evaluation, reported by the next.
     pub hook_error: Mutex<Option<crate::api::EvalError>>,
+    /// Some text is final only (`Operation::final_only`).
+    pub any_final: AtomicBool,
+    /// The evaluation's final phase: the rounds converged, final nodes run.
+    pub final_phase: AtomicBool,
+    /// Final nodes held until the final phase.
+    pub held: Mutex<Vec<Slot>>,
+    /// Final nodes released this evaluation.
+    pub final_released: AtomicU64,
     pub c: Counters,
     /// The tallies, one shard per stripe of threads (merged by `tallies`).
     pub t: Box<[TallyShard]>,
