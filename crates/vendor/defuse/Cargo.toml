@@ -21,6 +21,9 @@ profile = []
 # select counts; the dump is also written when an evaluation fails with
 # NoProgress, Deadline or a runaway. Off by default.
 observe = ["dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber"]
+# The light trace (`DEFUSE_LTRACE`, see `core::ltrace`): off by default,
+# when release builds carry no hook and read no environment.
+ltrace = []
 
 [profile.release]
 debug = 1
@@ -34,3 +37,7 @@ debug = true
 [[example]]
 name = "play"
 required-features = ["observe"]
+
+[[test]]
+name = "ltrace"
+required-features = ["ltrace"]
