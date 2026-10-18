@@ -169,6 +169,7 @@ impl Shared {
             if pread && wait.is_none() {
                 self.c.predictions_refuted.fetch_add(1, Ordering::Relaxed);
                 r.set(super::F_PREDREF);
+                self.go_conservative(s);
             }
             self.land(s, move |sh| sh.not_committed(s, wait));
             return;
@@ -276,6 +277,7 @@ impl Shared {
                 if pread && wait.is_none() {
                     self.c.predictions_refuted.fetch_add(1, Ordering::Relaxed);
                     r.set(super::F_PREDREF);
+                    self.go_conservative(s);
                 }
                 cx.wait = wait;
                 return false;

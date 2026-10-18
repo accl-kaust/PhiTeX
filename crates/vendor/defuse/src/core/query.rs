@@ -499,9 +499,13 @@ impl Shared {
             let q = e.node;
             let mut guess = None;
             let mut val = e.val;
+            // Refuted once this evaluation: reads only committed values
+            // (waits where it would guess or predict).
+            let cons = strict && self.conservative(me);
             let open = strict && q != me && self.any_preds.load(Ordering::Relaxed) && self.pred_open(q);
             if strict && (self.busy(q, me) || open) {
-                if let Some(x) = self.predicted(q, f)
+                if !cons
+                    && let Some(x) = self.predicted(q, f)
                     // (Not once it committed another value: that one is
                     // what a guess takes now.)
                     && !matches!(e.val, DefVal::Val(v) if v != x)
@@ -519,6 +523,7 @@ impl Shared {
                 } else if !self.busy(q, me) {
                     // Done on a guess of its own: read as committed.
                 } else if e.val == DefVal::Pending
+                    || cons
                     || !(self.guess_ok(f)
                         && (self.only_checking(q)
                             || (!self.rec(q).has(super::F_NEEDS_RUN | super::F_PREDRUN) && self.take_guess())))
@@ -528,6 +533,7 @@ impl Shared {
                     guess = Some(q);
                 }
             } else if strict
+                && !cons
                 && self.any_preds.load(Ordering::Relaxed)
                 && !self.rec(me).has(super::F_PREDREF)
                 && let Some(x) = self.predicted(q, f)

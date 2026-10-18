@@ -779,6 +779,10 @@ pub struct Report {
     pub predictions_confirmed: u64,
     /// Speculative runs that read a predicted value and were refuted.
     pub predictions_refuted: u64,
+    /// Nodes refuted this evaluation (a guess or prediction broke): each
+    /// ran conservatively afterwards, on committed values only. High
+    /// counts mean a hint or prediction is costing parallelism.
+    pub nodes_conservative: u64,
     pub env_stalled: u64,
     pub env_waits: Vec<(NodeId, Field)>,
     pub env_provided: u64,

@@ -403,7 +403,8 @@ impl Shared {
         // other run guesses on a definer in work as the mode allows.
         let chosen = r.flags.fetch_and(!super::F_SPECJOB, Ordering::AcqRel) & super::F_SPECJOB != 0;
         let spec = chosen || mode == 2 || (mode == 1 && r.data().res.is_some());
-        self.set_spec_run(spec && mode != 0);
+        // (Refuted once this evaluation: no guesses at all.)
+        self.set_spec_run(spec && mode != 0 && !self.conservative(s));
         // The version its reads start at (a check of its kept or committed
         // log included).
         let ver = self.version();
@@ -916,6 +917,7 @@ impl Shared {
         // inputs while other work is in flight: a guess, refuted if an
         // input changes.
         if self.spec.load(Ordering::Relaxed) >= 1
+            && !self.conservative(s)
             && r.data().res.is_some()
             && (self.qlen.load(Ordering::Acquire) > 0
                 || self.busy.load(Ordering::Acquire) > 1

@@ -123,6 +123,7 @@ impl Shared {
             rtime: AtomicU64::new(0),
             park_seq: AtomicU32::new(0),
             claimed_by: AtomicU32::new(NIL),
+            cons: AtomicU32::new(u32::MAX),
             d: std::sync::Mutex::new(Box::new(data.take().expect("one record"))),
         });
         #[allow(clippy::cast_possible_truncation)]
@@ -2568,6 +2569,7 @@ impl Shared {
         if pred {
             self.c.predictions_refuted.fetch_add(1, Ordering::Relaxed);
         }
+        self.go_conservative(s);
         if r.flags.fetch_and(!super::F_GUESS, Ordering::AcqRel) & super::F_GUESS != 0 {
             self.outstanding.fetch_sub(1, Ordering::Relaxed);
             self.c.mispredictions.fetch_add(1, Ordering::Relaxed);
@@ -2714,6 +2716,7 @@ impl Shared {
             && r.flags.fetch_and(!super::F_GUESS, Ordering::AcqRel) & super::F_GUESS != 0
         {
             refuted = true;
+            self.go_conservative(s);
             self.outstanding.fetch_sub(1, Ordering::Relaxed);
             self.c.mispredictions.fetch_add(1, Ordering::Relaxed);
             let mut t = self.tal();
@@ -2816,6 +2819,24 @@ impl Shared {
     /// A guess of `f` was refuted: past `NO_GUESS_AFTER` of them in this
     /// evaluation, reads of `f` wait for their definer instead (on a
     /// chain whose every link changes, each guess is wrong).
+    /// A run of `s` was refuted: it runs conservatively (no predictions,
+    /// no guesses) for the rest of the evaluation, so it is refuted at
+    /// most once and the evaluation cannot livelock on guesses.
+    pub(crate) fn go_conservative(&self, s: Slot) {
+        #[allow(clippy::cast_possible_truncation)]
+        let ep = self.epoch.load(Ordering::Relaxed) as u32;
+        if self.rec(s).cons.swap(ep, Ordering::AcqRel) != ep {
+            self.c.nodes_conservative.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether `s` runs conservatively in this evaluation.
+    pub(crate) fn conservative(&self, s: Slot) -> bool {
+        #[allow(clippy::cast_possible_truncation)]
+        let ep = self.epoch.load(Ordering::Relaxed) as u32;
+        self.rec(s).cons.load(Ordering::Acquire) == ep
+    }
+
     pub(crate) fn note_refuted(&self, f: Field) {
         let mut m = self.no_guess.write();
         let n = m.entry(f).or_default();
