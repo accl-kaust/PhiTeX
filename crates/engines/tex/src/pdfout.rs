@@ -1768,6 +1768,33 @@ fn same_writer(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &LinkSnap)
     *nums == sn.nums && st.digest() == sn.dg
 }
 
+/// [`same_writer`] but for the characters the pages used: `st` has used
+/// every character the snapshot's writer had (and maybe more), and is
+/// that writer otherwise. The records after it are then the same bytes
+/// (the characters used are read at the file's end only, the fonts'
+/// subsets), and the end's writer is the last link's with `st`'s
+/// characters added.
+fn same_writer_but_chars(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &LinkSnap) -> bool {
+    let none = forms.whats.is_empty()
+        && forms.fonts.is_empty()
+        && sn.forms.whats.is_empty()
+        && sn.forms.fonts.is_empty();
+    if !none || *nums != sn.nums {
+        return false;
+    }
+    let mine = st.used_chars();
+    let covers = sn.st.used_chars().iter().all(|(f, c)| {
+        mine.iter()
+            .find(|m| m.0 == *f)
+            .is_some_and(|m| c.iter().zip(&m.1).all(|(&a, &b)| !a || b))
+    });
+    if !covers {
+        return false;
+    }
+    let mut theirs = sn.st.clone();
+    st.digest_sans_chars() == theirs.digest_sans_chars()
+}
+
 fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
     static M: OnceLock<Mutex<Option<LinkMemo>>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(None))
@@ -1925,6 +1952,9 @@ pub(crate) fn finish_exact(
     // (where the records are the last link's again from a writer equal
     // to its own there: the rest copied, spec-final §6.2 past the edit)
     let mut resync: Option<usize> = None;
+    // (where the writer there had used other characters: those of the
+    // pages before, added to the last link's end, [`same_writer_but_chars`])
+    let mut chars_added: Option<Vec<(FontId, [bool; 256])>> = None;
     let mut tries = 0usize;
     let (mut t_try, mut t_snap) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     for (i, (&x, pc)) in xpages.iter().zip(&pcs).enumerate().skip(start) {
@@ -1939,6 +1969,12 @@ pub(crate) fn finish_exact(
             tries += 1;
             if same_writer(&mut st, &nums, &forms, sn) {
                 resync = Some(i);
+                t_try += tt.elapsed();
+                break;
+            }
+            if same_writer_but_chars(&mut st, &nums, &forms, sn) {
+                resync = Some(i);
+                chars_added = Some(st.used_chars());
                 t_try += tt.elapsed();
                 break;
             }
@@ -2113,6 +2149,9 @@ pub(crate) fn finish_exact(
         st = m.end.st;
         nums = m.end.nums;
         forms = m.end.forms;
+        if let Some(c) = &chars_added {
+            st.add_used_chars(c);
+        }
     }
     for c in chunks_of.iter().flatten() {
         bytes.push(c.clone());

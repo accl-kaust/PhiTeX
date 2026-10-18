@@ -90,6 +90,49 @@ impl PdfState {
         &self.fonts[&f]
     }
 
+    /// Every font's characters used so far (`pdf_char_used`), by font.
+    #[must_use]
+    pub fn used_chars(&self) -> Vec<(FontId, [bool; 256])> {
+        self.fonts.iter().map(|(&k, s)| (k, s.chars)).collect()
+    }
+
+    /// [`PdfState::digest`] of the state with no character marked used
+    /// in any font: two states that differ only in the characters their
+    /// pages used (what only the end of the file, the fonts' subsets,
+    /// reads) have equal ones.
+    pub fn digest_sans_chars(&mut self) -> u64 {
+        let saved = self.used_chars();
+        for &(f, c) in &saved {
+            if c.iter().any(|&x| x) {
+                self.font_mut(f).chars = [false; 256];
+            }
+        }
+        let d = self.digest();
+        for (f, c) in saved {
+            if c.iter().any(|&x| x) {
+                self.font_mut(f).chars = c;
+            }
+        }
+        d
+    }
+
+    /// The characters `chars` (by font, [`PdfState::used_chars`]) marked
+    /// used too.
+    pub fn add_used_chars(&mut self, chars: &[(FontId, [bool; 256])]) {
+        for (f, c) in chars {
+            let more = self
+                .fonts
+                .get(f)
+                .is_some_and(|s| s.chars.iter().zip(c).any(|(&a, &b)| b && !a));
+            if more {
+                let s = self.font_mut(*f);
+                for (a, &b) in s.chars.iter_mut().zip(c) {
+                    *a |= b;
+                }
+            }
+        }
+    }
+
     pub(crate) fn font_mut(&mut self, f: FontId) -> &mut FontState {
         self.fonts
             .get_mut(&f)
