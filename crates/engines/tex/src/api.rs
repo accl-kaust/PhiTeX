@@ -1882,9 +1882,12 @@ type ProvidedUnit = (String, u64, Vec<(Field, ValueId)>);
 type UnitCuts = std::sync::Mutex<FxHashMap<String, Arc<OnceLock<FxHashMap<u64, ValueId>>>>>;
 
 /// The file a units field names: `units:<name>` (the order) or
-/// `unit:<name>:<i>` (one unit).
+/// `unit:<name>:<i>` (one unit) or `fsize:<name>` (its size).
 fn units_file(field: &str) -> Option<&str> {
-    if let Some(n) = field.strip_prefix("units:") {
+    if let Some(n) = field
+        .strip_prefix("units:")
+        .or_else(|| field.strip_prefix("fsize:"))
+    {
         return Some(n);
     }
     field
@@ -1941,6 +1944,11 @@ fn file_units(
         units.push(v.list(vec![key, v.int(i64::from(starts))]));
     }
     out.insert(0, (uf, order(true, units)));
+    // (its size, `\pdffilesize`'s answer, read without its text)
+    out.push((
+        v.field(&format!("fsize:{name}")),
+        v.int(i64::try_from(bytes.len()).unwrap_or(i64::MAX)),
+    ));
     out
 }
 
