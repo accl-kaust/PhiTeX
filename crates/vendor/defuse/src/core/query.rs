@@ -352,14 +352,30 @@ impl Shared {
         }
         // Prefix pending sets: the lists of the prefixes of `f`'s name.
         // (Locks in the writers' order: the map, then the lengths.)
-        let m = self.unit(u).pfx.read();
-        let lens = self.unit(u).pfx_lens.read();
-        if !lens.is_empty()
-            && let Value::Str(name) = &*self.values.get(f.0)
-        {
-            for &n in lens.iter() {
-                let Some(p) = name.get(..n) else { continue };
-                let Some(v) = m.get(p) else { continue };
+        let un = self.unit(u);
+        let ver = un.pfx_ver.load(Ordering::Acquire);
+        let cached = un.pfx_of.read().get(&f).filter(|e| e.0 == ver).map(|e| e.1.clone());
+        let ps = cached.unwrap_or_else(|| {
+            let ps: std::sync::Arc<[String]> = {
+                let m = un.pfx.read();
+                let lens = un.pfx_lens.read();
+                match &*self.values.get(f.0) {
+                    Value::Str(name) if !lens.is_empty() => lens
+                        .iter()
+                        .filter_map(|&n| name.get(..n))
+                        .filter(|p| m.contains_key(*p))
+                        .map(String::from)
+                        .collect(),
+                    _ => std::sync::Arc::from([]),
+                }
+            };
+            un.pfx_of.write().insert(f, (ver, ps.clone()));
+            ps
+        });
+        if !ps.is_empty() {
+            let m = un.pfx.read();
+            for p in ps.iter() {
+                let Some(v) = m.get(p.as_str()) else { continue };
                 let sp = self.span(v, lo, hi);
                 for &x in sp.iter().rev() {
                     let l = self.rec(x).lab();
