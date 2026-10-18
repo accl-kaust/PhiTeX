@@ -5,17 +5,22 @@
 //! A tool is driven by a read, never by a write. When TeX opens a name
 //! the job does not write itself ([`crate::run::Run::file`]), each tool's
 //! crate is asked whether that name is its default output for an input
-//! the job writes (makeindex: `X.ind` from `X.idx`); a `\write18` naming
-//! a tool asks for its output the same way, with its arguments
-//! ([`REQUEST`]). The read is then the output of a memoised application
-//! of [`ToolRun`] (`Ctx::apply`): it reads the input as the job wrote it
-//! the round before (`wtext:<name>`, a loop-back the files' node
-//! publishes, `ops::Files`) and its support files through the client's
-//! lookups for the tool ([`crate::api::ToolSearch`]). So a tool runs only
-//! where its output is read, and again only when what it read changed:
-//! the engine's memoisation, no step between rounds. A name no tool
-//! claims, or one whose input the job does not write, is read from the
-//! file system.
+//! the job writes (makeindex: `X.ind` from `X.idx`). The read is then the
+//! output of a memoised application of [`ToolRun`] (`Ctx::apply`): it
+//! reads the input as the job wrote it the round before (`wtext:<name>`,
+//! a loop-back the files' node publishes, `ops::Files`) and its support
+//! files through the client's lookups for the tool
+//! ([`crate::api::ToolSearch`]). So a tool runs only where its output is
+//! read, and again only when what it read changed: the engine's
+//! memoisation, no step between rounds. A name no tool claims, or one
+//! whose input the job does not write, is read from the file system.
+//!
+//! A `\write18` naming a tool is a node of its own ([`ToolNode`]),
+//! placed where the command is in this round (the run making it ends
+//! there, its rest a resume after the node, `crate::pages`): it reads the
+//! input's stream as the job wrote it up to there, this round, and
+//! defines the output's field (`toolout:<name>`, [`out_field`]), which a
+//! later read of that name reads.
 
 use phitex_defuse::{Ctx, Field, Locality, Operation, Stop, ValueId, Values};
 
@@ -23,9 +28,12 @@ use crate::api::ToolSearch;
 use crate::ops::{Shared, ops};
 use crate::val::{list_of, str_of};
 
-/// A request a `\write18` made for a tool's output (`toolreq:<output>`,
-/// global): `[tool, [args...]]`, read where the output is opened.
-pub(crate) const REQUEST: &str = "toolreq:";
+/// The output a `\write18`'s tool node made of a name ([`ToolNode`]):
+/// its [`ToolRun`] value (`UNIT`: it made none), read where the name is
+/// opened after the node.
+pub(crate) fn out_field(v: &Values, name: &str) -> Field {
+    v.field(&format!("toolout:{name}"))
+}
 
 /// The loop-back of a file the job writes, its whole text as the round
 /// before wrote it (`UNIT`: not written), published by the files' node
@@ -239,16 +247,15 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
     };
     match n {
         Need::File(name) => {
+            // (a file the job writes: its text the round before, from its
+            // loop-back, never the file system's copy the job is writing;
+            // one it does not write: the job's lookup)
             let w = text_field(v, name);
-            if cx.is_loopback(w) {
-                let x = cx.use_field(w)?;
-                return Ok(x
-                    .filter(|&x| x != ValueId::UNIT)
-                    .map(|x| (format!("./{name}"), bytes(&str_of(v, x)))));
+            if let Some(x) = cx.use_field(w)? {
+                return Ok(
+                    (x != ValueId::UNIT).then(|| (format!("./{name}"), bytes(&str_of(v, x))))
+                );
             }
-            // (bound: a job that writes it declares the loop-back later
-            // in the evaluation, and this runs again)
-            let _ = cx.use_field(w)?;
             Ok(file(cx.use_env(v.field(&format!("file:{name}")))?))
         }
         Need::Support(s, name) => Ok(file(cx.use_env(support_field(v, *s, name))?)),
@@ -257,7 +264,7 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
 
 /// A tool's run on the files the job wrote the round before
 /// (`Ctx::apply`): `[tool, output, input, [args...]]` (and the input's
-/// text where a `\write18` in this round's run read it), its output
+/// text where a `\write18`'s node read it, [`ToolNode`]), its output
 /// `[path, text]` (TeX's characters), or `UNIT` where the tool makes
 /// none (its input not written, a bibliography asked for by none, a
 /// failed run). The output is `[path, text, 0]`: read inline where it is
@@ -290,8 +297,8 @@ impl Operation for ToolRun {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let mut served = Served::default();
-        // (the input first: as a `\write18` read it in its run, else as
-        // the round before wrote it; none written, no run)
+        // (the input first: as a `\write18`'s node read it, else as the
+        // round before wrote it; none written, no run)
         let given = args
             .get(4)
             .map(|&t| (format!("./{input}"), bytes(&str_of(v, t))));
@@ -354,40 +361,15 @@ impl Operation for ToolRun {
     }
 }
 
-/// The arguments of the tool run that makes `output`, if one does: a
-/// `\write18` request for it ([`REQUEST`]), else the first tool claiming
-/// it by name whose input the job writes. `None`: no tool makes it (the
-/// name is read from the file system).
-pub(crate) fn run_args(
-    cx: &mut Ctx<'_>,
-    request: Option<ValueId>,
-    output: &str,
-) -> Result<Option<Vec<ValueId>>, Stop> {
+/// The arguments of the tool run that makes `output` by default, if one
+/// does: the first tool claiming it by name whose input the job writes,
+/// with the input's text as the round before wrote it (its loop-back,
+/// read here, by the reader: a later publication runs the reader again,
+/// and the run is memoised on the text). `None`: no tool makes it, or
+/// the job wrote none of its input the round before (the name is read
+/// from the file system).
+pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<ValueId>>, Stop> {
     let v = cx.values();
-    let mk = |t: Tool, input: &str, args: Vec<String>| {
-        vec![
-            v.str(t.name()),
-            v.str(output),
-            v.str(input),
-            v.list(args.iter().map(|a| v.str(a)).collect()),
-        ]
-    };
-    if let Some(r) = request.filter(|&r| r != ValueId::UNIT) {
-        let xs = list_of(v, r);
-        let tool = xs.first().and_then(|&t| Tool::of_name(&str_of(v, t)));
-        let args: Vec<String> = xs
-            .get(1)
-            .map(|&l| list_of(v, l).iter().map(|&a| str_of(v, a)).collect())
-            .unwrap_or_default();
-        if let Some(t) = tool
-            && let Some((_, input)) = t.command_files(&args)
-        {
-            let mut a = mk(t, &input, args);
-            // (the input as the command read it, where this run wrote it)
-            a.extend(xs.get(2).copied());
-            return Ok(Some(a));
-        }
-    }
     for (t, input) in claims(output) {
         let w = text_field(v, &input);
         // (a job that writes the input declares its loop-back; bound
@@ -396,7 +378,77 @@ pub(crate) fn run_args(
             let _ = cx.use_field(w)?;
             continue;
         }
-        return Ok(Some(mk(t, &input, vec![input.clone()])));
+        let Some(text) = cx.use_field(w)?.filter(|&x| x != ValueId::UNIT) else {
+            return Ok(None);
+        };
+        let mut a = command_args(v, t, output, &input, std::slice::from_ref(&input));
+        a.push(text);
+        return Ok(Some(a));
     }
     Ok(None)
+}
+
+/// A tool run's arguments (`[tool, output, input, [args...]]`).
+pub(crate) fn command_args(
+    v: &Values,
+    t: Tool,
+    output: &str,
+    input: &str,
+    args: &[String],
+) -> Vec<ValueId> {
+    vec![
+        v.str(t.name()),
+        v.str(output),
+        v.str(input),
+        v.list(args.iter().map(|a| v.str(a)).collect()),
+    ]
+}
+
+/// A `\write18` naming a tool, where the command is in the round
+/// (`[tool, output, input, [args...]]`, placed by the run making it,
+/// [`crate::run::Run::tool_command`]): the input as the job wrote it up
+/// to here this round, from its stream's accumulator alone
+/// ([`crate::run::stream_bucket`]; a file not written before here: as
+/// [`ToolRun`] reads it), the tool's memoised run on it, its output the
+/// output's field ([`out_field`]).
+pub(crate) struct ToolNode(pub Shared);
+
+impl Operation for ToolNode {
+    fn name(&self) -> &'static str {
+        "toolnode"
+    }
+    fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        let out = args.get(1).map(|&x| str_of(v, x))?;
+        Some(vec![(out_field(v, &out), Locality::Global)])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let v = cx.values();
+        let args = cx.args();
+        let (Some(&out), Some(&input)) = (args.get(1), args.get(2)) else {
+            return Ok(ValueId::UNIT);
+        };
+        let (out, input) = (str_of(v, out), str_of(v, input));
+        let acc = cx.acc_range(crate::run::stream_bucket(v, &input), None)?;
+        let text = crate::api::written_texts(v, Some(acc))
+            .into_iter()
+            .find(|(n, _)| *n == input)
+            .map(|(_, t)| t);
+        let mut a: Vec<ValueId> = args.iter().take(4).copied().collect();
+        a.extend(text.map(|t| v.str(&t)));
+        let made = cx.apply(ops(&self.0).tool, a)?;
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "tool node {} for {out}: made {}",
+                cx.node().raw(),
+                if made == ValueId::UNIT {
+                    "none"
+                } else {
+                    "output"
+                }
+            );
+        }
+        cx.define_with(out_field(v, &out), made, Locality::Global);
+        Ok(ValueId::UNIT)
+    }
 }

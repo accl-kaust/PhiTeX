@@ -166,6 +166,8 @@ pub(crate) struct Ops {
     pub resume: OpId,
     /// A tool's run that a read makes (`crate::tools::ToolRun`).
     pub tool: OpId,
+    /// A `\write18`'s tool node (`crate::tools::ToolNode`).
+    pub toolnode: OpId,
     /// A page's PDF side, run once the loop-backs settle
     /// (`crate::pdfout::PdfPage`).
     pub pdfpage: OpId,
@@ -684,6 +686,17 @@ pub(crate) struct Run<'c, 'a> {
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
     pub cut: Option<u32>,
+    /// While a character run's lookahead expands (§1038): its list and
+    /// its effect on the space factor so far, its nodes not on the list
+    /// yet; the tail is its last character ([`Run::space_factor`],
+    /// [`Run::last_item`]).
+    pub chars_live: Option<(i64, i32)>,
+    /// A character run's effect on the space factor from the transitions
+    /// it holds for the list ([`crate::build::sf_compose`]).
+    pub chars_eff: i32,
+    /// A `\write18`'s tool node this run ends at ([`Run::tool_command`]):
+    /// placed before its resume.
+    pub tool_cut: Option<ValueId>,
     /// The records read ([`crate::fields::RECORDS`]), by record: `None`
     /// not read yet; `Some(None)` undefined or stale (its cells are read
     /// one by one); `Some(Some(cells))` each cell's value.
@@ -812,6 +825,9 @@ impl<'c, 'a> Run<'c, 'a> {
             ins_pending: Vec::new(),
             fin: None,
             cut: None,
+            chars_live: None,
+            chars_eff: i32::MIN,
+            tool_cut: None,
             recs: std::array::from_fn(|_| None),
             rec_out: Vec::new(),
             rec_ready: false,
@@ -1814,12 +1830,15 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// File `key` as a tool makes it, where one does ([`crate::tools`]):
-    /// a `\write18` request for it, or a tool whose default output it is
-    /// from a file the job writes; the output of the tool's memoised run
+    /// the output a `\write18`'s tool node before here made of it
+    /// ([`crate::tools::out_field`]), else the output of the memoised run
+    /// of a tool whose default output it is from a file the job writes
     /// (`[path, text]`). `None`: no tool makes it, or the run made none.
     fn tool_output(&mut self, key: &str) -> R<Option<ValueId>> {
-        let req = self.get(&format!("{}{key}", crate::tools::REQUEST))?;
-        let Some(args) = crate::tools::run_args(self.cx, req, key)? else {
+        if let Some(x) = self.eng_read(crate::tools::out_field(self.v, key))? {
+            return Ok((x != ValueId::UNIT).then_some(x));
+        }
+        let Some(args) = crate::tools::run_args(self.cx, key)? else {
             return Ok(None);
         };
         let x = self.cx.apply(self.ops.tool, args)?;
@@ -1829,8 +1848,36 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether a tool makes file `key` ([`Run::tool_output`]): its text is
     /// then not the file system's units.
     fn tool_makes(&mut self, key: &str) -> R<bool> {
-        let req = self.get(&format!("{}{key}", crate::tools::REQUEST))?;
-        Ok(crate::tools::run_args(self.cx, req, key)?.is_some())
+        if let Some(x) = self.eng_read(crate::tools::out_field(self.v, key))? {
+            return Ok(x != ValueId::UNIT);
+        }
+        Ok(crate::tools::run_args(self.cx, key)?.is_some())
+    }
+
+    /// A `\write18` naming a tool (`[tool, output, input, [args...]]`,
+    /// [`crate::tools::ToolNode`]): a node placed where the command is.
+    /// A piece of the main list ends here, its rest a resume placed after
+    /// the node, and the node after the pages firing in the piece before
+    /// it, whose `\write`s come before the command (`crate::pages`, the
+    /// request in [`crate::pages::RESUME`]); a later read of the output
+    /// in the rest reads the node's. Any other run (or a piece with
+    /// nothing for the main list, or nothing left to read) places the
+    /// node as its child, for the reads after the run.
+    pub(crate) fn tool_command(&mut self, args: Vec<ValueId>) -> R<()> {
+        let op = self.cx.op();
+        let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
+        if piece
+            && self.tool_cut.is_none()
+            && self.has_input()
+            && !self.own_outer_items().is_empty()
+        {
+            self.tool_cut = Some(self.v.list(args));
+            self.cut = Some(self.cand);
+            return Err(Halt::Cut);
+        }
+        let op = self.ops.toolnode;
+        self.kid(op, args);
+        Ok(())
     }
 
     /// A `streams` entry (`[name]` opens the file empty, `[name, text]`

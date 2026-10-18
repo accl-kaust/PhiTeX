@@ -698,6 +698,16 @@ impl Run<'_, '_> {
     /// `\\spacefactor` (§1034): the fold of list `md.lid`'s transitions
     /// so far.
     pub(crate) fn space_factor(&mut self, md: &Mode) -> R<i32> {
+        let base = self.space_factor_listed(md)?;
+        // (inside a character run's lookahead: its effect so far, §1034)
+        Ok(match self.chars_live {
+            Some((lid, e)) if lid == md.lid => sf_apply(base, e),
+            _ => base,
+        })
+    }
+
+    /// [`Run::space_factor`] of the list's items alone.
+    fn space_factor_listed(&mut self, md: &Mode) -> R<i32> {
         if let Some(l) = self.level_of(md.lid) {
             return Ok(l.fold.sf);
         }
@@ -2042,7 +2052,9 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn char_run(&mut self, md: &Mode, cancel: bool) -> R<()> {
         let t0 = crate::prof::start();
+        self.chars_eff = SF_UNREAD;
         let r = self.char_run_(md, cancel);
+        self.chars_live = None;
         crate::prof::add(crate::prof::CHAR, t0);
         r
     }
@@ -2093,6 +2105,12 @@ impl Run<'_, '_> {
                     }
                 }
                 cmd::NO_BOUNDARY => {
+                    if sf != SF_UNREAD {
+                        raws.push((out.len(), sf_value(v, sf)));
+                        sf = SF_UNREAD;
+                    }
+                    self.flush_chars(md.lid, &mut out, std::mem::take(&mut raws));
+                    self.chars_eff = SF_UNREAD;
                     self.get_x_token();
                     self.ck()?;
                     if matches!(
@@ -2112,6 +2130,7 @@ impl Run<'_, '_> {
                     } else {
                         if sf != SF_UNREAD {
                             raws.push((out.len(), sf_value(v, sf)));
+                            self.chars_eff = sf_compose(self.chars_eff, sf);
                             sf = SF_UNREAD;
                         }
                         let p = if let Some(p) = space.waiting {
@@ -2134,6 +2153,14 @@ impl Run<'_, '_> {
                 if !self.has_input() {
                     break;
                 }
+                // (what the expansion reads of the list, its tail and the
+                // space factor, §1034: the run's nodes so far on it)
+                if sf != SF_UNREAD {
+                    raws.push((out.len(), sf_value(v, sf)));
+                    sf = SF_UNREAD;
+                }
+                self.flush_chars(md.lid, &mut out, std::mem::take(&mut raws));
+                self.chars_eff = SF_UNREAD;
                 self.get_x_token();
                 self.ck()?;
             }
@@ -2155,7 +2182,17 @@ impl Run<'_, '_> {
             raws.push((out.len(), sf_value(v, sf)));
         }
         let te = crate::prof::start();
-        let lid = md.lid;
+        self.flush_chars(md.lid, &mut out, raws);
+        CHAR_BUF.with(|c| c.set(out));
+        CHAR_VIEW.with(|c| c.set(Some(view)));
+        crate::prof::add(crate::prof::CHAR_ENC, te);
+        Ok(())
+    }
+
+    /// A character run's nodes and transitions (each transition before
+    /// `out[k]`) put on list `lid`, `out` emptied.
+    fn flush_chars(&mut self, lid: i64, out: &mut Vec<Node>, raws: Vec<(usize, ValueId)>) {
+        let v = self.v;
         let mut raws = raws.into_iter().peekable();
         if let Some(l) = self.level_of(lid) {
             // (the run's own list: the nodes go on it native, in one go)
@@ -2181,10 +2218,6 @@ impl Run<'_, '_> {
                 self.append(lid, r);
             }
         }
-        CHAR_BUF.with(|c| c.set(out));
-        CHAR_VIEW.with(|c| c.set(Some(view)));
-        crate::prof::add(crate::prof::CHAR_ENC, te);
-        Ok(())
     }
 
     /// A space whose glue waits for the space factor: the parameters in
@@ -2499,19 +2532,31 @@ impl Run<'_, '_> {
                     } else if !self.has_input() {
                         input_done = true;
                     } else if self.next_ck()? {
+                        // (§1038: the characters so far are on the list, the
+                        // last one its tail, the space factor after it:
+                        // what an expansion here reads, [`Run::chars_live`])
+                        self.chars_live = Some((md.lid, sf_compose(self.chars_eff, *sf)));
                         if !matches!(
                             self.cur.cmd,
                             cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN
                         ) {
                             self.x_token();
-                            self.ck()?;
                         }
+                        let r = self.ck().and_then(|()| {
+                            if self.cur.cmd == cmd::CHAR_NUM {
+                                self.scan_char_num().map(Some)
+                            } else {
+                                Ok(None)
+                            }
+                        });
+                        self.chars_live = None;
+                        let n = r?;
                         match self.cur.cmd {
                             cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN => {
                                 got = Some(u32::try_from(self.cur.chr).unwrap_or(0));
                             }
                             cmd::CHAR_NUM => {
-                                got = Some(u32::try_from(self.scan_char_num()?).unwrap_or(0));
+                                got = Some(u32::try_from(n.unwrap_or(0)).unwrap_or(0));
                             }
                             cmd::NO_BOUNDARY => bchar = None,
                             _ => {}
@@ -2717,8 +2762,9 @@ impl Run<'_, '_> {
             }));
         }
         let md = self.mode()?;
-        // (`mode = 0` in a `\write`, §1370: no tail)
-        let last = if self.mode_zero {
+        // (`mode = 0` in a `\write`, §1370: no tail; a character run's
+        // lookahead: its last character, §1038)
+        let last = if self.mode_zero || self.chars_live.is_some_and(|(l, _)| l == md.lid) {
             None
         } else {
             self.list_last(md.lid)?.0
@@ -2892,6 +2938,35 @@ thread_local! {
 
 /// The space factor not read yet in a run of characters.
 const SF_UNREAD: i32 = i32::MIN;
+
+/// Two space factor effects one after the other (each `SF_UNREAD`
+/// none, `n >= 0` set to `n`, `-s` §1034's update by an `sf_code` `s`
+/// above 1000): after an update the factor is 1000 or more, so a second
+/// update sets it.
+pub(crate) fn sf_compose(a: i32, b: i32) -> i32 {
+    if b == SF_UNREAD {
+        a
+    } else if b >= 0 || a == SF_UNREAD {
+        b
+    } else if (0..1000).contains(&a) {
+        1000
+    } else {
+        -b
+    }
+}
+
+/// Effect `e` ([`sf_compose`]) on the factor `base`.
+pub(crate) fn sf_apply(base: i32, e: i32) -> i32 {
+    if e == SF_UNREAD {
+        base
+    } else if e >= 0 {
+        e
+    } else if base >= 1000 {
+        -e
+    } else {
+        1000
+    }
+}
 
 /// The space parameters a character run read ([`Run::char_run`]):
 /// `\\spaceskip`, `\\xspaceskip`, the font's dimensions 2, 3, 4 and 7,

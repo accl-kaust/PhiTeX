@@ -1623,12 +1623,10 @@ impl Run<'_, '_> {
     /// `shell_escape_commands` is allowed, as kpathsea's
     /// `shell_cmd_is_allowed` judges it (texmfmp.c). No command runs as
     /// a process: an allowed command that is one of the tools
-    /// ([`crate::tools`]) is a request for that tool's output, global
-    /// (`toolreq:<output>`, `[tool, [args...], input text]`): where the
-    /// output is opened, its text is the tool's run with those arguments
-    /// on its input as this run had written it at the command (a file
-    /// this run did not open: the round before's); any other command is
-    /// refused with a diagnostic.
+    /// ([`crate::tools`]) is that tool's node, placed where the command
+    /// is ([`Run::tool_command`]): a later read of its output reads what
+    /// it made of its input as written up to the command this round; any
+    /// other command is refused with a diagnostic.
     fn shell_command(&mut self, cmd: &str) -> R<()> {
         let restricted = self.int32("shellescape")? == 2;
         let Some(args) = shell_words(cmd) else {
@@ -1660,23 +1658,10 @@ impl Run<'_, '_> {
             "wlog",
             &format!("runsystem({cmd})...executed safely (allowed)."),
         )?;
-        let v = self.v;
-        let mut e = vec![
-            v.str(&name),
-            v.list(args[1..].iter().map(|a| v.str(a)).collect()),
-        ];
-        // (the command runs here, in this run: an input this run opened
-        // for writing is read as written so far, as the program reads
-        // the file system now; else as the round before left it)
-        if self.get(&format!("wopen:{input}"))?.is_some()
-            && let Some(x) = self.read_own_written(&input)?
-            && let Some(&t) = list_of(v, x).get(1)
-        {
-            e.push(t);
-        }
-        let e = v.list(e);
-        self.set(&format!("{}{output}", crate::tools::REQUEST), e, true);
-        Ok(())
+        // (the command runs here, in this round: a node of its own where
+        // the command is, reading the input as written up to there)
+        let a = crate::tools::command_args(self.v, tool, &output, &input, &args[1..]);
+        self.tool_command(a)
     }
 
     /// Stream `k`'s written text still incomplete (`\@writeckpt`'s
