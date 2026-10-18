@@ -1257,6 +1257,20 @@ impl Run<'_, '_> {
                     _ => self.insert_class(c),
                 };
                 out = ps.fold_items(v, raw, dead, &mut live)?.map(|f| (i + 1, f));
+                if crate::exec::obs_str!("PHITEX_DEFECT_PAGE").and_then(|x| x.parse::<i64>().ok())
+                    == Some(n(0))
+                {
+                    eprintln!(
+                        "item folds unit {i} at {} (node {}): page {} goal {} total {} best {:?} fired {:?}",
+                        raw_pids[i],
+                        self.cx.node().raw(),
+                        ps.pb.page.len(),
+                        ps.pb.so_far[0],
+                        ps.pb.so_far[1],
+                        ps.pb.best_break,
+                        out.as_ref().map(|(_, f)| (f.k, f.best))
+                    );
+                }
             }
             match out {
                 Some((i, f)) if i == last => Some(f),
@@ -1309,6 +1323,40 @@ impl Run<'_, '_> {
                         .join(" ")
                 };
                 eprintln!("defect dump material: {}", show(&s.material));
+                // (both folds again, side by side, unit by unit)
+                {
+                    let mut ips = s.page_state();
+                    let mut pst = s.state(v);
+                    let mut rd = RunReaching(
+                        self,
+                        s.anchor.map(|a| i64::from_ne_bytes(a.raw().to_ne_bytes())),
+                    );
+                    let mprof = crate::vprof::decode(&s.prof);
+                    let pf = pst.fold_items(&mprof, dead, &mut rd).map(|f| f.k);
+                    let mut lv = |c: u16| rd.0.insert_class(c);
+                    let _ = (&mut lv, pf);
+                    eprintln!(
+                        "defect folds material: profile page {} total {} fired {:?}",
+                        pst.pb.page.len(),
+                        pst.pb.so_far[1],
+                        pf
+                    );
+                    for (i, raw) in raws.iter().enumerate() {
+                        let mut pi = crate::vprof::decode(&crate::vprof::encode(v, raw));
+                        rd.0.resolve_prof_of(raw_pids[i], &mut pi)?;
+                        rd.1 = Some(raw_pids[i]);
+                        let f = pst.fold_items(&pi, dead, &mut rd).map(|f| (f.k, f.best));
+                        eprintln!(
+                            "defect folds unit {i}: profile page {} goal {} total {} best {:?} fired {:?}",
+                            pst.pb.page.len(),
+                            pst.pb.so_far[0],
+                            pst.pb.so_far[1],
+                            pst.pb.best_break,
+                            f
+                        );
+                    }
+                    let _ = &mut ips;
+                }
                 for (i, raw) in raws.iter().enumerate() {
                     eprintln!("defect dump unit {i}: {}", show(raw));
                     eprintln!(
