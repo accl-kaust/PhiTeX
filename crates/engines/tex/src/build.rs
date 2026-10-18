@@ -1071,12 +1071,14 @@ impl Run<'_, '_> {
         let v = self.v;
         let t0 = crate::prof::start();
         let mut side = Side::default();
-        // (room for the two nodes line breaking appends, §816)
-        let mut list: List = List::with_capacity(items.len() + 2);
-        list.extend(items.into_iter().filter_map(|x| match x {
-            crate::nest::Item::N(n) => Some(n),
-            crate::nest::Item::V(x) => nodes::decode(v, x, &mut side),
-        }));
+        // (collected in place: the items' buffer becomes the list's)
+        let list: List = items
+            .into_iter()
+            .filter_map(|x| match x {
+                crate::nest::Item::N(n) => Some(n),
+                crate::nest::Item::V(x) => nodes::decode(v, x, &mut side),
+            })
+            .collect();
         crate::prof::add(crate::prof::LB_DEC, t0);
         let t0 = crate::prof::start();
         let view = self.font_view(&list)?;
