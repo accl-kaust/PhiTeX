@@ -4490,6 +4490,7 @@ impl Run<'_, '_> {
     /// finisher's routine giving back what it is predicted to), which a
     /// run of this node reads again once the continuation is there. The
     /// chain is the blocks', not the pages'.
+    #[allow(clippy::too_many_lines)]
     fn scan_step(&mut self) -> R<Placed> {
         let v = self.v;
         // (where the block begins: the state the scan of the block
