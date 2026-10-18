@@ -1272,6 +1272,19 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         .map(|(k, d, n)| format!("{k} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
         .collect();
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
+    // (the progress guarantee: nodes run conservatively after a refutation,
+    // and the refutations by field, most first)
+    let mut by_field: Vec<(String, u64)> = r
+        .refuted_by_field
+        .iter()
+        .map(|&(f, n)| (crate::val::field_name(eng.values(), f), n))
+        .collect();
+    by_field.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    by_field.truncate(20);
+    eprintln!(
+        "acct: {} nodes conservative, {} nodes refuted (at most {} times); refuted by field {by_field:?}",
+        r.nodes_conservative, r.refuted_nodes, r.refutations_max
+    );
     // (the kinds on the engine's critical chain, and the finishers waited
     // on: §9b, only the link and a cut's resume wait on one)
     let mut on_chain: std::collections::BTreeMap<&'static str, usize> =
