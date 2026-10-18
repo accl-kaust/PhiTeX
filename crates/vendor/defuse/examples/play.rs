@@ -135,6 +135,7 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
     Ok(match m {
         "use_field" => return res(cx.use_field(de(&g(0)))),
         "use_field_at" => return res(cx.use_field_at(de(&g(0)), de::<Option<NodeId>>(&g(1)))),
+        "use_field_before" => return res(cx.use_field_before(de(&g(0)), de::<NodeId>(&g(1)))),
         "use_field_proj" => return res(cx.use_field_proj(de(&g(0)), de::<ProjId>(&g(1)))),
         "use_env" => return res(cx.use_env(de(&g(0)))),
         "define" => json!(cx.define(de(&g(0)), de(&g(1)))),
