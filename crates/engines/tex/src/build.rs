@@ -2032,7 +2032,9 @@ impl Run<'_, '_> {
     fn char_run_(&mut self, md: &Mode, cancel: bool) -> R<()> {
         let v = self.v;
         let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
-        let mut view = crate::fonts::View::default();
+        // (the view of the worker's last character run, emptied)
+        let mut view = CHAR_VIEW.with(std::cell::Cell::take).unwrap_or_default();
+        view.clear();
         self.add_font_metrics(&mut view, f)?;
         // the space factor is never read: the run's effect on it so far
         // (`sf`: SF_UNREAD none, n >= 0 set to n, -s §1034's update by s)
@@ -2164,6 +2166,7 @@ impl Run<'_, '_> {
         }
         CHAR_BUF.with(|c| c.set(out));
         CHAR_RAWS.with(|c| c.set(raws_buf));
+        CHAR_VIEW.with(|c| c.set(Some(view)));
         crate::prof::add(crate::prof::CHAR_ENC, te);
         Ok(())
     }
@@ -2869,6 +2872,8 @@ thread_local! {
     static CHAR_BUF: std::cell::Cell<Vec<Node>> = const { std::cell::Cell::new(Vec::new()) };
     /// Its transitions and waiting spaces, kept the same way.
     static CHAR_RAWS: std::cell::Cell<Vec<(usize, ValueId)>> = const { std::cell::Cell::new(Vec::new()) };
+    /// Its font view, kept the same way.
+    static CHAR_VIEW: std::cell::Cell<Option<crate::fonts::View>> = const { std::cell::Cell::new(None) };
 }
 
 /// The space factor not read yet in a run of characters.
