@@ -148,11 +148,18 @@ case $shard in
     a=()
     for s in latex $SUITES; do a+=(--test "$s"); done
     ( $T "${a[@]}" --no-run --message-format=json-render-diagnostics > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
+    # (three CLIs: the checks' (profile and observe: CHECK_READS, the
+    # recordings, amsldoc), the timings' (profile: the acct lines without
+    # the engine's recorder) and the users' (no feature))
     ( CARGO_TARGET_DIR=$PWD/target-cli cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build.txt" 2>&1; echo "EXIT $?" >> "$r/build.txt" ) &
+    ( CARGO_TARGET_DIR=$PWD/target-cli-prof cargo build -q --release -p phitex-cli --features phitex-tex/profile > "$r/build-prof.txt" 2>&1; echo "EXIT $?" >> "$r/build-prof.txt" ) &
+    ( CARGO_TARGET_DIR=$PWD/target-cli-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
     wait
     built
     grep -q '^EXIT 0$' "$r/build-tests.txt" || red "build (tests): $(grep -m1 '^error' "$r/build-tests.txt")"
     grep -q '^EXIT 0$' "$r/build.txt" || red "build (cli): $(grep -m1 '^error' "$r/build.txt")"
+    grep -q '^EXIT 0$' "$r/build-prof.txt" || red "build (cli, profile): $(grep -m1 '^error' "$r/build-prof.txt")"
+    grep -q '^EXIT 0$' "$r/build-rel.txt" || red "build (cli, release): $(grep -m1 '^error' "$r/build-rel.txt")"
     if [ $status = green ]; then
       mkdir -p "$r/store.tmp/tests" "$r/store.tmp/cli"
       python3 -I -c '
@@ -165,6 +172,8 @@ for l in open(sys.argv[1]):
     if m.get("reason") == "compiler-artifact" and m.get("executable") and "test" in m["target"]["kind"]:
         shutil.copy2(m["executable"], os.path.join(sys.argv[2], m["target"]["name"]))' "$r/build-tests.json" "$r/store.tmp/tests"
       cp target-cli/release/phitex "$r/store.tmp/cli/phitex"
+      cp target-cli-prof/release/phitex "$r/store.tmp/cli/phitex-prof"
+      cp target-cli-rel/release/phitex "$r/store.tmp/cli/phitex-rel"
       sed -n 's/^build_s //p' "$r/times.txt" | tee "$r/store.tmp/tests/build_s" > "$r/store.tmp/cli/build_s"
       ls -la "$r/store.tmp/tests" "$r/store.tmp/cli" > "$r/store.txt"
       mv "$r/store.tmp" "$r/store"
@@ -304,7 +313,7 @@ for l in open(sys.argv[1]):
     # op, commit, check and idle, the link's phases), then three
     # one-word edits at -j 8 timed from the save to the build's event
     fetched
-    bin=$w/bin/cli/phitex
+    bin=$w/bin/cli/phitex-prof
     echo "big node ${SLURMD_NODENAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null)} cpus $(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)" >> "$r/big.txt"
     mkdir -p "$w/big" && cp bench/para40000.tex "$w/big/"
     (cd "$w/big" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para40000.tex > "$r/big-warm.log" 2>&1)
@@ -333,7 +342,7 @@ for l in open(sys.argv[1]):
     # format's, not the document's)
     want=$1
     fetched
-    bin=$w/bin/cli/phitex
+    bin=$w/bin/cli/phitex-prof
     mkdir -p "$w/par" && cp bench/para4000.tex "$w/par/"
     (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para4000.tex > "$r/para-warm.log" 2>&1)
     # (the node is shared: each -j runs three times, the min quoted,
@@ -375,7 +384,23 @@ for l in open(sys.argv[1]):
       echo "para4000 -j $j: exit $e md5 $m bar $want $([ "$m" = "$want" ] && echo same || echo DIFFERS) wall $wall us/paragraph $(awk -v w="$wall" 'BEGIN{printf "%.0f", w*1e6/4000}') nodes ${nodes:-?} cp $cp_n claims_refuted $(sum 'claims refuted') effects_refuted $(sum 'effects refuted') defs_refuted $(sum 'definitions refuted') stale_reads $(grep -oE 'check_reads: [0-9]+ stale' "$L" | awk '{s+=$2} END {print s+0}') wall_min $wall wall_median $med walls$walls" >> "$r/para.txt"
       python3 -I scripts/accl/gate-acct.py acct "$L" "para4000 -j $j" >> "$r/acct.txt" 2>&1
     done
-    # the edit histories (spec-final §0 bytes)
+    # the users' build (no feature): j1 and j8, three runs each, the min
+    for j in 1 8; do
+      rw=""
+      for k in 1 2 3; do
+        rm -rf "$w/par/rel$j"
+        s0=$(date +%s.%N)
+        (cd "$w/par" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 \
+          timeout 900 taskset -c "$cores" "$w/bin/cli/phitex-rel" build -j $j --output-dir=rel$j --program pdftex para4000.tex > "$r/para-rel-j$j.log" 2>&1)
+        s1=$(date +%s.%N)
+        rw="$rw $(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}')"
+      done
+      rm_=$(md5sum < "$w/par/rel$j/para4000.pdf" 2>/dev/null | cut -c1-32)
+      echo "para4000 release -j $j: md5 ${rm_:-none} $([ "$rm_" = "$want" ] && echo same || echo DIFFERS) wall_min $(echo $rw | tr ' ' '\n' | sort -n | head -1) walls$rw" >> "$r/para.txt"
+      [ "$rm_" = "$want" ] || red "para4000 release -j $j: md5 ${rm_:-none}, bar $want"
+    done
+    # the edit histories (spec-final §0 bytes), on the checks' build
+    bin=$w/bin/cli/phitex
     for j in 8 16; do
       rm -rf "$w/parh" "$w/parh-cold" && mkdir -p "$w/parh" && cp bench/para4000.tex "$w/parh/"
       (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 \
@@ -394,7 +419,7 @@ for l in open(sys.argv[1]):
     # commands they did (`acct: commands`), and the top 15 functions by
     # exclusive Ir
     fetched
-    bin=$w/bin/cli/phitex
+    bin=$w/bin/cli/phitex-prof
     doc=${GATE_CG_DOC:-para4000}
     mkdir -p "$w/cg" && cp "bench/$doc.tex" "$w/cg/"
     (cd "$w/cg" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 1 --output-dir=warm --program pdftex "$doc.tex" > "$r/cg-warm.log" 2>&1)
