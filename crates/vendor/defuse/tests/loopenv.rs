@@ -346,7 +346,11 @@ fn loop_keys_counts_and_the_environment() {
             b.client.absorbs
         );
         assert!(r.rounds <= 3, "{sched}: {r:?}");
-        assert!(cold.iter().all(|&n| (1..=3).contains(&n)), "{sched}: {cold:?}");
+        // (On threads under Speculation::All a guess may be refuted under
+        // load and its node run again: at most once refuted, as in
+        // tests/progress.rs.)
+        let most = if sched == "par" { 5 } else { 3 };
+        assert!(cold.iter().all(|&n| (1..=most).contains(&n)), "{sched}: {cold:?}");
         assert_eq!(r.env_provided, b.calls.load(Relaxed), "{sched}: env_provided");
         assert_eq!(r.env_provided, 13, "{sched}: one answer per file");
         assert_eq!(r.nodes_run, u64::try_from(IX_L + 1).unwrap(), "{sched}: nodes_run");

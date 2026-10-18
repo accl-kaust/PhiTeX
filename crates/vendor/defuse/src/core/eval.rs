@@ -134,6 +134,8 @@ impl Engine {
         };
         let mut mark = snap(&self.sh);
         let mut idle: u64 = 0;
+        // Fields still moving when the round cap stopped the rounds.
+        let mut capped: Option<Vec<Field>> = None;
         let mut restarts = 0u64;
         if let Some(v) = src.absorb(self) {
             self.version = v;
@@ -233,8 +235,16 @@ impl Engine {
                     continue;
                 }
             }
-            // Loop-back rounds.
-            match self.next_round() {
+            // Loop-back rounds (none past a cap: the final phase runs on
+            // the values the last round ran with).
+            let before_round = (self.cap_policy == crate::api::CapPolicy::Finalize && capped.is_none())
+                .then(|| self.sh.loop_vals.read().clone());
+            let next = if capped.is_some() {
+                Ok(Vec::new())
+            } else {
+                self.next_round()
+            };
+            match next {
                 Err(e) => break Err(e),
                 // The rounds had converged: a final node moved a loop-back.
                 Ok(ch) if !ch.is_empty() && self.sh.final_phase.load(Ordering::Acquire) => {
@@ -252,9 +262,17 @@ impl Engine {
                     #[cfg(feature = "observe")]
                     tracing::debug!(target: "defuse", event = "round", round = rounds);
                     if rounds > self.max_rounds {
-                        break Err(EvalError::NonConvergence {
-                            rounds: self.max_rounds,
-                        });
+                        let Some(vals) = before_round else {
+                            break Err(EvalError::NonConvergence {
+                                rounds: self.max_rounds,
+                            });
+                        };
+                        // Finalize: back to the last round's values (its
+                        // readers, touched for the next one, run again on
+                        // them and change nothing); the final phase next.
+                        *self.sh.loop_vals.write() = vals;
+                        rounds = self.max_rounds;
+                        capped = Some(ch);
                     }
                     continue;
                 }
@@ -323,6 +341,7 @@ impl Engine {
         rep.rounds = rounds;
         rep.restarts = restarts;
         rep.final_nodes_run = self.sh.final_released.load(Ordering::Relaxed);
+        rep.capped = capped;
         rep.version = self.version;
         if self.sh.c.mispredictions.load(Ordering::Relaxed) > 0 || self.sh.c.speculations.load(Ordering::Relaxed) > 0 {
             self.collect_apps(true);
@@ -708,12 +727,19 @@ impl Engine {
         Ok(changed)
     }
 
-    /// The final node whose publication moved `f` (else any final node).
+    /// The node whose publication moved `f` in the final phase: a final
+    /// node, else a node that ran after them (it read one); first by id.
     fn final_mover(&self, f: Field) -> NodeId {
         let sh = &self.sh;
-        let fin = |s: Slot| sh.rec(s).st() != S_FREE && sh.rec(s).data().stat.fin();
-        let by_pub = lock(&sh.pubs).get(&f).and_then(|m| m.keys().copied().find(|&s| fin(s)));
-        sh.node_id(by_pub.unwrap_or(NIL))
+        let live = |s: &Slot| sh.rec(*s).st() != S_FREE;
+        let pubs = lock(&sh.pubs);
+        let mut cands: Vec<Slot> = pubs
+            .get(&f)
+            .map(|m| m.keys().copied().filter(live).collect())
+            .unwrap_or_default();
+        drop(pubs);
+        cands.sort_unstable_by_key(|&s| (!sh.rec(s).data().stat.fin(), sh.node_id(s).0));
+        cands.first().map_or(NodeId(0), |&s| sh.node_id(s))
     }
 
     fn queued_waiters(&self) -> Vec<Waiter> {

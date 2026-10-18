@@ -57,6 +57,13 @@ impl Operation for Ops {
                 }
                 Ok(out)
             }
+            "rp" => {
+                // Not final, but reads the writer: it runs in the final
+                // phase, and its publication moves `m` there.
+                let out = cx.use_field(v.field("out"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+                cx.publish(v.field("m"), v.int(out));
+                Ok(v.int(out))
+            }
             _ => Ok(cx.use_field(v.field("out"))?.unwrap_or(ValueId::UNIT)),
         }
     }
@@ -200,5 +207,47 @@ fn a_final_node_moving_a_loop_back_fails() {
             }
             r => panic!("{i}: expected FinalMovedLoop, got {r:?}"),
         }
+    }
+}
+
+#[test]
+fn a_reader_of_a_final_node_moving_a_loop_back_fails_naming_it() {
+    for i in 0..9 {
+        let mut b = build(true, 3);
+        let a = vec![b.eng.values().str("rp")];
+        b.eng.replace(b.r, b.op, a);
+        match eval(&mut b.eng, i) {
+            Err(EvalError::FinalMovedLoop { node, field }) => {
+                assert_eq!(node, b.r, "{i}");
+                assert_eq!(field, b.eng.values().field("m"), "{i}");
+            }
+            r => panic!("{i}: expected FinalMovedLoop, got {r:?}"),
+        }
+    }
+}
+
+#[test]
+fn at_the_round_cap_finalize_runs_the_final_phase_on_the_last_round() {
+    for i in 0..9 {
+        // `inc 1000` never converges within the cap.
+        let mut b = build(true, 1000);
+        b.eng.set_max_rounds(5);
+        b.eng.set_round_cap_policy(defuse::CapPolicy::Finalize);
+        let rep = eval(&mut b.eng, i).expect("finalized at the cap");
+        assert_eq!(rep.rounds, 5, "{i}");
+        assert_eq!(rep.capped, Some(vec![b.eng.values().field("n")]), "{i}");
+        assert_eq!(b.ops.writer_runs.load(Relaxed), 1, "{i}");
+        assert_eq!(rep.final_nodes_run, 1, "{i}");
+        // Round 5 ran with n = 4.
+        assert_eq!(int(&b.eng, b.w), Some(401), "{i}: writer");
+        assert_eq!(int(&b.eng, b.r), Some(401), "{i}: reader");
+        // The default policy fails there.
+        let mut b = build(true, 1000);
+        b.eng.set_max_rounds(5);
+        assert!(
+            matches!(eval(&mut b.eng, i), Err(EvalError::NonConvergence { rounds: 5 })),
+            "{i}"
+        );
+        assert_eq!(b.ops.writer_runs.load(Relaxed), 0, "{i}: no final phase after an error");
     }
 }

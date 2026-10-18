@@ -496,6 +496,18 @@ impl WaitKind {
     }
 }
 
+/// What reaching [`crate::Engine::set_max_rounds`]'s cap does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CapPolicy {
+    /// The evaluation fails with [`EvalError::NonConvergence`].
+    #[default]
+    Error,
+    /// The rounds stop: the final phase ([`Operation::final_only`]) runs
+    /// on the loop-back values of the last round run, and the evaluation
+    /// ends with the fields still moving in [`Report::capped`].
+    Finalize,
+}
+
 /// Why an evaluation ended without a result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvalError {
@@ -564,8 +576,9 @@ pub enum EvalError {
         hook: &'static str,
         message: String,
     },
-    /// A final node's ([`Operation::final_only`]) publication moved
-    /// loop-back field `field` after the rounds had converged.
+    /// A publication moved loop-back field `field` after the rounds had
+    /// converged: by final node `node` ([`Operation::final_only`]), or by
+    /// a node that ran in the final phase because it read one.
     FinalMovedLoop {
         node: NodeId,
         field: Field,
@@ -867,6 +880,9 @@ pub struct Report {
     /// Final nodes ([`Operation::final_only`]) released and run in the
     /// final phase.
     pub final_nodes_run: u64,
+    /// Under [`CapPolicy::Finalize`], when the round cap was reached: the
+    /// loop-back fields that were still moving.
+    pub capped: Option<Vec<Field>>,
     pub resettled: u64,
 }
 
