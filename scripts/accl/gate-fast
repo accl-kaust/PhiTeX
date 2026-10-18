@@ -69,7 +69,7 @@ build_first() {
   local st b
   st=$(store "$c")
   dep=""
-  if $SSH $H "test -x $st/cli/phitex && test -x $st/tests/latex" 2>/dev/null; then
+  if $SSH $H "test -x $st/cli/phitex && test -x $st/cli/phitex-prof && test -x $st/cli/phitex-rel && test -x $st/tests/latex" 2>/dev/null; then
     echo "gate-fast: binaries of $c already built ($st)" >&2
   else
     b=$(sub "-c 16 --mem=24G -t 00:40:00 -J gf-build --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st" build)
