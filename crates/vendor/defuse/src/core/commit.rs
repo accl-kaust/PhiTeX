@@ -464,15 +464,17 @@ impl Shared {
             // A static list is a guess too: a definition outside it widens
             // it (the insertion re-validates the field's readers after the
             // node, as a new definer's does).
-            let mut widened: Vec<(Field, crate::api::Locality)> = Vec::new();
-            for d in &cx.defs {
-                self.insert_def(u, s, d.f, d.loc, d.val, &mut notes);
-                if let Some(sd) = &declared
-                    && !sd.contains(&d.f)
-                {
-                    widened.push((d.f, d.loc));
-                }
-            }
+            // The declaration is widened before the definitions go in: a
+            // reader skips a busy node's entry its declaration does not
+            // cover (`q_def`), and one that subscribed after the insertion
+            // would not be told when the cover came.
+            let widened: Vec<(Field, crate::api::Locality)> = declared.as_ref().map_or_else(Vec::new, |sd| {
+                cx.defs
+                    .iter()
+                    .filter(|d| !sd.contains(&d.f))
+                    .map(|d| (d.f, d.loc))
+                    .collect()
+            });
             if !widened.is_empty() {
                 self.c.defs_refuted.fetch_add(widened.len() as u64, Ordering::Relaxed);
                 let mut d = r.data();
@@ -483,6 +485,30 @@ impl Shared {
                 if let super::MayDefineS::Names(ns) = &mut st.may {
                     ns.extend(widened.iter().map(|w| w.0));
                 }
+            }
+            if stat_defs.is_none() {
+                // A definition outside the bound refutes it: the set is
+                // unbounded from then on.
+                let mut refuted = false;
+                for d in &cx.defs {
+                    if self.may_cover(s, d.f).is_none() {
+                        if !refuted {
+                            self.c.declarations_refuted.fetch_add(1, Ordering::Relaxed);
+                        }
+                        refuted = true;
+                        let mut t = self.tal();
+                        *t.refuted_by_field.entry(d.f).or_default() += 1;
+                        *t.refuted_nodes.entry(s).or_default() += 1;
+                    }
+                }
+                if refuted {
+                    self.unregister_named(s);
+                    r.data().stat.may = super::MayDefineS::Any;
+                    r.set(super::F_WILD);
+                }
+            }
+            for d in &cx.defs {
+                self.insert_def(u, s, d.f, d.loc, d.val, &mut notes);
             }
             let made: crate::values::FxHashSet<Field> = cx.defs.iter().map(|d| d.f).collect();
             let defined = |f: Field| made.contains(&f);
@@ -513,27 +539,6 @@ impl Shared {
             for d in &old.defs {
                 if !defined(d.f) && declared.as_ref().is_none_or(|sd| !sd.contains(&d.f)) {
                     self.remove_def(u, s, d.f, &mut notes);
-                }
-            }
-            if stat_defs.is_none() {
-                // A definition outside the bound refutes it: the set is
-                // unbounded from then on.
-                let mut refuted = false;
-                for d in &cx.defs {
-                    if self.may_cover(s, d.f).is_none() {
-                        if !refuted {
-                            self.c.declarations_refuted.fetch_add(1, Ordering::Relaxed);
-                        }
-                        refuted = true;
-                        let mut t = self.tal();
-                        *t.refuted_by_field.entry(d.f).or_default() += 1;
-                        *t.refuted_nodes.entry(s).or_default() += 1;
-                    }
-                }
-                if refuted {
-                    self.unregister_named(s);
-                    r.data().stat.may = super::MayDefineS::Any;
-                    r.set(super::F_WILD);
                 }
             }
             if stat_defs.is_none() && !cx.defs.is_empty() {
