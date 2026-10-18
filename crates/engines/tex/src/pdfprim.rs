@@ -496,18 +496,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             if let Some(o) = got {
                 o.to_string()
             } else {
-                let f = format!("pdf:pageref:{n}");
-                let obj = if let Some(x) = r.get(&f)? {
-                    int_of(v, x)
-                } else if let Some(o) = crate::pdfout::shipped_page_obj(r, n)? {
-                    // (a page shipped before: its object)
-                    o
-                } else {
-                    let o = alloc_obj(r)?;
-                    r.set(&f, v.int(o), true);
-                    o
-                };
-                obj.to_string()
+                page_obj(r, n)?.to_string()
             }
         }
         cv::LEFT_MARGIN_KERN | cv::RIGHT_MARGIN_KERN => {
@@ -780,6 +769,51 @@ fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
     let o = alloc_obj(r)?;
     r.set(&field, v.list(vec![v.int(n), v.int(o)]), true);
     Ok((n, o))
+}
+
+/// Page `n`'s object as TeX counts it (`get_obj(obj_type_page, n)`):
+/// the one a reference made, the one a page shipped before this run
+/// made, else one made now.
+fn page_obj(r: &mut Run<'_, '_>, n: i32) -> R<i64> {
+    let v = r.v;
+    let f = format!("pdf:pageref:{n}");
+    if let Some(x) = r.get(&f)? {
+        return Ok(int_of(v, x));
+    }
+    // (a page shipped before: its object)
+    if let Some(o) = crate::pdfout::shipped_page_obj(r, n)? {
+        return Ok(o);
+    }
+    let o = alloc_obj(r)?;
+    r.set(&f, v.int(o), true);
+    Ok(o)
+}
+
+/// The objects an action written at read time names (`write_action`:
+/// an outline's, pdfTeX §1560; the catalog's open action), as TeX
+/// counts them: a local `goto` gets its page's object or its
+/// destination's (`get_obj`), made where none was.
+fn action_target(r: &mut Run<'_, '_>, act: ValueId) -> R<()> {
+    let v = r.v;
+    let xs = list_of(v, act);
+    if xs.first().map(|&k| str_of(v, k)).as_deref() != Some("goto")
+        || xs.get(1).is_some_and(|&f| !str_of(v, f).is_empty())
+    {
+        return Ok(());
+    }
+    if let Some(&p) = xs.get(2)
+        && p != ValueId::UNIT
+    {
+        let n = list_of(v, p).first().map_or(0, |&n| int_of(v, n));
+        page_obj(r, i32::try_from(n).unwrap_or(0))?;
+        return Ok(());
+    }
+    if let Some(&id) = xs.get(3)
+        && !list_of(v, id).is_empty()
+    {
+        crate::pdfout::dest_first_named(r, id)?;
+    }
+    Ok(())
 }
 
 /// The objects made so far (pdfTeX's `obj_ptr`): the read-time ones and,
@@ -2098,6 +2132,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 let _ = alloc_obj(r)?;
                 let names = box_font_names(r, b)?;
                 crate::pdfout::fonts_first_used(r, &names)?;
+                // (its resources' dictionary, written into an object
+                // stream where they compress)
+                crate::pdfout::os_write(r)?;
             }
             let fx = r.cint(crate::fields::cell::PDF_XFORMCOUNT)? + 1;
             r.set_cell(crate::fields::cell::PDF_XFORMCOUNT, v.int(fx), true);
@@ -2266,13 +2303,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             if pdf_mode(r)? {
                 let _ = alloc_obj(r)?;
                 crate::pdfout::os_write(r)?;
-                let xs = list_of(v, act);
-                if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("goto")
-                    && let Some(&id) = xs.get(3)
-                    && !list_of(v, id).is_empty()
-                {
-                    crate::pdfout::dest_first_named(r, id)?;
-                }
+                action_target(r, act)?;
                 let _ = alloc_obj(r)?;
                 let _ = alloc_obj(r)?;
                 crate::pdfout::os_write(r)?;
@@ -2357,7 +2388,18 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let mut oa = ValueId::UNIT;
             if r.scan_keyword("openaction")? {
                 oa = action(r)?;
+                // (pdfTeX §1545: the first open action is written now, into
+                // an object stream where they compress, its target got;
+                // another is an error, nothing made)
+                let first = r
+                    .get_loc(crate::fields::cell::PDF_OPENACTION)?
+                    .is_none_or(|x| x == ValueId::UNIT);
                 r.set_cell(crate::fields::cell::PDF_OPENACTION, oa, true);
+                if first && pdf_mode(r)? {
+                    let _ = alloc_obj(r)?;
+                    crate::pdfout::os_write(r)?;
+                    action_target(r, oa)?;
+                }
             }
             crate::pdfout::doc_op(r, "catalog", &[t, oa])?;
         }
