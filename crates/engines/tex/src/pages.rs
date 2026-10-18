@@ -74,6 +74,14 @@ use crate::val::{
 /// back gives the same value every page).
 pub(crate) const RTN: &str = "rtn";
 
+/// What page `j`'s routine gives back, as its finisher defines it beside
+/// [`RTN`]: what page `j`'s continuation reads (a field of its own per
+/// page, so the read does not hang on the order of the finisher and the
+/// continuation placed after the same piece).
+fn rtn_field(v: &Values, j: i64) -> Field {
+    v.field(&format!("rtn:{j}"))
+}
+
 /// The pieces' main-list items, one unit per piece beside its profile:
 /// `[piece, last, items, reads, defs, locals]` (its raw node id, its
 /// last candidate when nothing came after it, its items with their
@@ -1021,6 +1029,8 @@ impl Run<'_, '_> {
         let list = c.pending.get(c.held_n..).unwrap_or_default().to_vec();
         let x = v.list(vec![v.list(raw), v.list(list)]);
         self.cx.define_with(v.field(RTN), x, Locality::Global);
+        let j = self.cx.args().first().map_or(0, |&y| int_of(v, y));
+        self.cx.define_with(rtn_field(v, j), x, Locality::Global);
         if let Some(c) = self.fin.as_mut() {
             c.rtn = Some(x);
         }
@@ -3354,6 +3364,10 @@ impl Finish {
                 last.unwrap_or_else(|| v.list(vec![v.list(Vec::new()), v.list(Vec::new())])),
             ));
         }
+        if let Some(&(_, x)) = out.iter().find(|e| e.0 == rtn) {
+            let pj = args.first().map_or(0, |&y| int_of(v, y));
+            out.push((rtn_field(v, pj), x));
+        }
         Some(out)
     }
 
@@ -3418,6 +3432,7 @@ impl Operation for Finish {
         if !names.contains(&rtn) {
             names.push(rtn);
         }
+        names.push(rtn_field(v, args.first().map_or(0, |&y| int_of(v, y))));
         ops(&self.0).fields.add_record_fields(&mut names);
         Some(names.into_iter().map(|f| (f, Locality::Global)).collect())
     }
@@ -3447,6 +3462,7 @@ impl Operation for Finish {
             for n in FIN_OWN {
                 names.push(v.field(n));
             }
+            names.push(rtn_field(v, args.first().map_or(0, |&y| int_of(v, y))));
             ops(&self.0).fields.add_record_fields(&mut names);
             return MayDefine::Names(names);
         }
@@ -3459,6 +3475,7 @@ impl Operation for Finish {
         };
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
         ps.push(RTN.to_owned());
+        ps.push("rtn:".to_owned());
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
@@ -4402,6 +4419,13 @@ impl Run<'_, '_> {
             // material whose end its scan does not know yet: nothing
             // here until it does, not a scan from the document's start)
             Some(x) if x == ValueId::UNIT => {
+                if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                    eprintln!(
+                        "scan {}: the block before ends unknown: nothing (speculative {})",
+                        self.cx.node().raw(),
+                        self.cx.is_speculative()
+                    );
+                }
                 self.cx
                     .define_with(v.field(SCAN_BLOCK), ValueId::UNIT, Locality::Global);
                 return Ok(Placed::Nothing);
@@ -4482,6 +4506,14 @@ impl Run<'_, '_> {
             mat = Some(m);
         }
         // (where this block ends, for the next block's scan)
+        if trace {
+            eprintln!(
+                "scan {}: block ends {} (speculative {})",
+                self.cx.node().raw(),
+                if known { "known" } else { "UNKNOWN" },
+                self.cx.is_speculative()
+            );
+        }
         let end = if known {
             v.list(vec![
                 src.unwrap_or(ValueId::UNIT),
@@ -4596,7 +4628,7 @@ impl Run<'_, '_> {
         let rest = if at_end { Vec::new() } else { fire.rest };
         let r = match rtn {
             Some(x) => Some(x),
-            None => self.eng_read(v.field(RTN))?,
+            None => self.eng_read(rtn_field(v, int_of(v, b[0])))?,
         };
         let rs = r.map(|x| list_of(v, x)).unwrap_or_default();
         let mut material = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
