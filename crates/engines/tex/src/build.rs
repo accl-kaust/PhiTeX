@@ -2550,16 +2550,19 @@ impl Run<'_, '_> {
                             }
                         });
                         self.chars_live = None;
-                        let n = r?;
-                        match self.cur.cmd {
-                            cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN => {
-                                got = Some(u32::try_from(self.cur.chr).unwrap_or(0));
-                            }
-                            cmd::CHAR_NUM => {
-                                got = Some(u32::try_from(n.unwrap_or(0)).unwrap_or(0));
-                            }
-                            cmd::NO_BOUNDARY => bchar = None,
-                            _ => {}
+                        // (§1038: a `\char` scanned is the character
+                        // `cur_val`, whatever token ended its number: the
+                        // scan leaves that token in `cur`, a space it took
+                        // or the one it put back)
+                        match r? {
+                            Some(n) => got = Some(u32::try_from(n).unwrap_or(0)),
+                            None => match self.cur.cmd {
+                                cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN => {
+                                    got = Some(u32::try_from(self.cur.chr).unwrap_or(0));
+                                }
+                                cmd::NO_BOUNDARY => bchar = None,
+                                _ => {}
+                            },
                         }
                     } else {
                         self.get_next_or_end()?;
