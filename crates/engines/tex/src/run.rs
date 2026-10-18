@@ -300,6 +300,16 @@ impl FileRest {
         f
     }
 
+    /// A file read inline by the run that opens it, never as paragraph
+    /// regions: a tool's output (`crate::tools`), a whole text the
+    /// reader holds.
+    pub(crate) fn inline(v: &Values, id: ValueId, name: ValueId) -> FileRest {
+        let mut f = FileRest::new(v, id, 0, name);
+        f.units = Some(std::sync::Arc::from(Vec::new()));
+        f.sliceable = false;
+        f
+    }
+
     /// Whether its text is still to be read from its units.
     pub(crate) fn lazy(&self) -> bool {
         self.units.as_ref().is_some_and(|u| !u.is_empty()) && self.str().is_empty()
@@ -1841,7 +1851,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let (marker, tagged) = if op == self.ops.finish {
             let j = i64::try_from(self.page_index()).unwrap_or(i64::MAX);
             let mut t = vec![v.int(j), e];
-            if let Some((pid, k, true)) = self.fin.as_ref().and_then(|c| c.brk) {
+            // (the piece its break is in and the candidate, whether the
+            // piece goes on after it or ends there: what the piece wrote
+            // after that candidate, an `\immediate\closeout` after the
+            // last one, comes after the page's writes)
+            if let Some((pid, k, _)) = self.fin.as_ref().and_then(|c| c.brk) {
                 t.extend([v.int(pid), v.int(k)]);
             }
             (None, v.list(t))

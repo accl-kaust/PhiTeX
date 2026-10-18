@@ -958,6 +958,10 @@ impl Run<'_, '_> {
             Some(&order) if text == phitex_defuse::ValueId::UNIT => {
                 crate::run::FileRest::written(self.v, order, xs[0])
             }
+            // (a tool's output, `crate::tools::ToolRun`: read inline)
+            Some(&m) if self.v.as_int(m).is_some() => {
+                crate::run::FileRest::inline(self.v, text, xs[0])
+            }
             _ => crate::run::FileRest::new(self.v, text, 0, xs[0]),
         };
         self.input.push_file(f);

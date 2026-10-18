@@ -499,6 +499,9 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                 let f = format!("pdf:pageref:{n}");
                 let obj = if let Some(x) = r.get(&f)? {
                     int_of(v, x)
+                } else if let Some(o) = crate::pdfout::shipped_page_obj(r, n)? {
+                    // (a page shipped before: its object)
+                    o
                 } else {
                     let o = alloc_obj(r)?;
                     r.set(&f, v.int(o), true);
@@ -777,6 +780,16 @@ fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
     let o = alloc_obj(r)?;
     r.set(&field, v.list(vec![v.int(n), v.int(o)]), true);
     Ok((n, o))
+}
+
+/// The objects made so far (pdfTeX's `obj_ptr`): the read-time ones and,
+/// in PDF mode, those of the pages shipped before this run.
+fn obj_ptr(r: &mut Run<'_, '_>) -> R<i64> {
+    let n = r.cint(crate::fields::cell::PDF_OBJNUM)?;
+    if r.param("pdfoutput")? > 0 {
+        return Ok(n + crate::pdfout::page_offset(r)?);
+    }
+    Ok(n)
 }
 
 /// The next object number (`pdf_create_obj`), as pdfTeX's counter
@@ -2030,11 +2043,33 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     }
                     n
                 }
+                // (pdfTeX §1544: `useobjnum n` takes an object made and
+                // given no body yet, else is refused with an error and
+                // `\pdfretval` -1, a new object made)
                 None => match use_n {
-                    Some(n) => n,
+                    Some(n) => {
+                        let made = obj_ptr(r)?;
+                        let used = r.get(&format!("pdf:objbody:{n}"))?.is_some();
+                        if n > 0 && n <= made && !used {
+                            n
+                        } else {
+                            r.set_cell(crate::fields::cell::PDF_RETVAL, v.int(-1), true);
+                            r.log(
+                                "error",
+                                "pdfTeX warning (ext1): invalid object number being ignored",
+                            )?;
+                            alloc_obj(r)?
+                        }
+                    }
                     None => alloc_obj(r)?,
                 },
             };
+            r.set(&format!("pdf:objbody:{n}"), v.int(1), true);
+            // (`\immediate`, not a stream: written now, into an object
+            // stream where they compress)
+            if immediate && !stream && pdf_mode(r)? {
+                crate::pdfout::os_write(r)?;
+            }
             r.set_cell(crate::fields::cell::PDF_LASTOBJ, v.int(n), true);
         }
         ex::REFOBJ => {
@@ -2057,6 +2092,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 None
             };
             let o = or_alloc(r, got)?;
+            // (`\immediate`: the form written now, pdfTeX §1357: its
+            // resources' object, then each font it uses first)
+            if immediate && pdf_mode(r)? {
+                let _ = alloc_obj(r)?;
+                let names = box_font_names(r, b)?;
+                crate::pdfout::fonts_first_used(r, &names)?;
+            }
             let fx = r.cint(crate::fields::cell::PDF_XFORMCOUNT)? + 1;
             r.set_cell(crate::fields::cell::PDF_XFORMCOUNT, v.int(fx), true);
             let bx = b.unwrap_or(ValueId::UNIT);
@@ -2217,6 +2259,23 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             })?;
             if let Some(e) = got.and_then(|g| g.err) {
                 r.log("error", &format!("pdfTeX error: {e}"))?;
+            }
+            // (pdfTeX §1560: the action's object, written now; the
+            // destination it names, made if new; the entry's; the title's,
+            // written now)
+            if pdf_mode(r)? {
+                let _ = alloc_obj(r)?;
+                crate::pdfout::os_write(r)?;
+                let xs = list_of(v, act);
+                if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("goto")
+                    && let Some(&id) = xs.get(3)
+                    && !list_of(v, id).is_empty()
+                {
+                    crate::pdfout::dest_first_named(r, id)?;
+                }
+                let _ = alloc_obj(r)?;
+                let _ = alloc_obj(r)?;
+                crate::pdfout::os_write(r)?;
             }
         }
         ex::DEST => {
@@ -2539,6 +2598,16 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
         depth = i.colordepth;
     }
     let n = or_alloc(r, got.and_then(|g| g.0))?;
+    // (pdfTeX's writepng, reading a PNG with an alpha channel for PDF 1.4
+    // and later after the image's object: the document's transparency
+    // group, made once)
+    if pdf_mode(r)? && png_alpha(&data) {
+        let (major, minor) = (r.param("pdfmajorversion")?, r.param("pdfminorversion")?);
+        if (major > 1 || minor >= 4) && r.get("pdf:pnggroup")?.is_none() {
+            let g = alloc_obj(r)?;
+            r.set("pdf:pnggroup", v.int(g), true);
+        }
+    }
     r.set(
         &format!("pdf:ximage:{n}"),
         v.list(vec![
@@ -2807,6 +2876,33 @@ fn ext_xn_over_d(x: i32, n: i32, d: i32) -> i32 {
 /// An image's size (pixels, or scaled points for a PDF page), its
 /// resolution, whether it is a PDF, its page count and colour depth.
 #[allow(clippy::type_complexity)]
+/// The names of the fonts box `b` uses (a form's, [`ex::XFORM`]).
+fn box_font_names(r: &mut Run<'_, '_>, b: Option<ValueId>) -> R<Vec<String>> {
+    let v = r.v;
+    let Some(b) = b else { return Ok(Vec::new()) };
+    let mut side = nodes::Side::default();
+    let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
+        return Ok(Vec::new());
+    };
+    let view = r.font_view(std::slice::from_ref(&Node::Box(bx)))?;
+    let mut out = Vec::new();
+    for f in view.fonts.ids() {
+        let x = r.font_get(i64::from(f), crate::fields::FontCell::Info)?;
+        if let Some(i) = crate::fonts::info(v, x)
+            && !out.contains(&i.name)
+        {
+            out.push(i.name);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `data` is a PNG image with an alpha channel (IHDR colour type
+/// 4 or 6).
+fn png_alpha(data: &[u8]) -> bool {
+    data.starts_with(b"\x89PNG") && matches!(data.get(25), Some(4 | 6))
+}
+
 fn image_info(data: &[u8], page: i32) -> (i32, i32, i32, i32, bool, i32, i32) {
     if data.starts_with(b"\x89PNG")
         && let Ok(i) = phitex_codecs::png::read_info(data)

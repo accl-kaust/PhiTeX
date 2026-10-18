@@ -472,8 +472,9 @@ fn loop_rounds_measure() {
 }
 
 /// A read-back that never settles (the written value flips what the next
-/// round reads): the build ends with the no-fixpoint error after
-/// `max_rounds`, naming the written file, instead of running on.
+/// round reads): the build stops after `max_rounds` (latexmk's
+/// `max_repeat`), keeps the last round's output and warns, naming the
+/// written file's fields still moving, instead of running on.
 #[test]
 fn oscillating_written_file() {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("oscillating-written");
@@ -494,9 +495,10 @@ fn oscillating_written_file() {
     );
     assert!(
         msgs.iter()
-            .any(|m| m.contains("no fixpoint after 8 rounds") && m.contains("main.aux")),
+            .any(|m| m.contains("still changed after 8 rounds") && m.contains("main.aux")),
         "{msgs:#?}"
     );
+    assert!(!b.output().0.is_empty(), "the last round's output is kept");
 }
 
 /// A one-letter, same-length edit inside a paragraph of para4000 whose

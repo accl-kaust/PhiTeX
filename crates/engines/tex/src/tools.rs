@@ -259,7 +259,8 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
 /// (`Ctx::apply`): `[tool, output, input, [args...]]`, its output
 /// `[path, text]` (TeX's characters), or `UNIT` where the tool makes
 /// none (its input not written, a bibliography asked for by none, a
-/// failed run).
+/// failed run). The output is `[path, text, 0]`: read inline where it is
+/// opened.
 pub(crate) struct ToolRun(pub Shared);
 
 impl Operation for ToolRun {
@@ -333,8 +334,14 @@ impl Operation for ToolRun {
                 made.as_ref().map(Vec::len)
             );
         }
+        // (`[path, text, 0]`: a whole text, read inline where it is
+        // opened, `Run::start_input`)
         Ok(made.map_or(ValueId::UNIT, |b| {
-            v.list(vec![v.str(&format!("./{output}")), v.str(&chars(&b))])
+            v.list(vec![
+                v.str(&format!("./{output}")),
+                v.str(&chars(&b)),
+                v.int(0),
+            ])
         }))
     }
 }

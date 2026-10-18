@@ -269,9 +269,6 @@ pub(crate) struct PagePiece {
     bx: Arc<BoxNode>,
     /// What the writer it is written on starts from ([`base_fold`]).
     base_in: BaseIn,
-    /// The page's `/PageAttr`-like attribute text, hashed into what it
-    /// shows.
-    attr: String,
     /// The page as its PDF side wrote it, for the link to place, and the
     /// fonts used on the state it was written on: set once, by the
     /// page's [`PdfPage`] (final, after the loop-backs settle).
@@ -1553,7 +1550,6 @@ fn ship_apart(
         whats,
         fonts,
         bx: Arc::new(bx.clone()),
-        attr: p.get(15).map(|&a| str_of(v, a)).unwrap_or_default(),
         made: OnceLock::new(),
         pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
         node: i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
@@ -1603,23 +1599,36 @@ fn ship_apart(
     let k = v.int(i64::from_ne_bytes(key.to_ne_bytes()));
     line_push(r, k);
     let op = r.ops.pdfpage;
-    r.cx.child(op, vec![k]);
+    r.kid(op, vec![k]);
     Ok(())
 }
 
-/// The field a page's PDF side defines when its record is written
-/// (`pdf:rec:<key>`, [`PdfPage`]: the hash of what the page shows): the
-/// link reads it for each page of the line, so it runs after them.
-pub(crate) fn rec_field(v: &Values, key: i64) -> phitex_defuse::Field {
-    v.field(&format!("pdf:rec:{}", key.cast_unsigned()))
+/// Page `pc`'s PDF side ([`PdfPage`]): written once, apart, on a writer
+/// of its own as the link's stands between two pages ([`base_fold`]),
+/// its record kept for the link (a page whose record is not placed as
+/// it is is shipped again by the link, whose error is the job's,
+/// [`Linked::errors`]). The record is made once, by whichever asks first.
+fn write_page(v: &Values, pc: &PagePiece) {
+    pc.made.get_or_init(|| {
+        let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
+        set_writer_params(&mut st, pc.wparams);
+        set_page_params(v, &mut st, &pc.params, pc.margins);
+        let base = st.fonts_used();
+        let (res, rec) = {
+            let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
+            st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
+        };
+        let _ = res.err();
+        (rec, base)
+    });
 }
 
 /// A page's PDF side (`[key]`, the [`PagePiece`] its finisher kept):
-/// the page written once, apart, on a writer of its own as the link's
-/// stands between two pages ([`base_fold`]), so that its content stream
-/// is compressed in parallel with the other pages' and the hash of what
-/// it shows is known ([`rec_field`]). Final (`Operation::final_only`):
-/// it runs once the loop-backs settle, and nothing it does feeds one.
+/// [`write_page`], so that the pages' content streams are compressed in
+/// parallel before the link places them (the link writes a page whose
+/// record is not made yet itself: it never waits for these). Final
+/// (`Operation::final_only`): it runs once the loop-backs settle, and
+/// nothing it does feeds one.
 pub(crate) struct PdfPage;
 
 impl phitex_defuse::Operation for PdfPage {
@@ -1628,15 +1637,10 @@ impl phitex_defuse::Operation for PdfPage {
     }
     fn defs(
         &self,
-        args: &[ValueId],
-        v: &Values,
+        _: &[ValueId],
+        _: &Values,
     ) -> Option<Vec<(phitex_defuse::Field, phitex_defuse::Locality)>> {
-        Some(
-            args.first()
-                .and_then(|&x| v.as_int(x))
-                .map(|k| vec![(rec_field(v, k), phitex_defuse::Locality::Global)])
-                .unwrap_or_default(),
-        )
+        Some(Vec::new())
     }
     /// Nothing: a range read before the loop-backs settle never waits
     /// for it.
@@ -1656,41 +1660,14 @@ impl phitex_defuse::Operation for PdfPage {
         let Some(k) = cx.args().first().and_then(|&x| v.as_int(x)) else {
             return Ok(ValueId::UNIT);
         };
-        let key = u64::from_ne_bytes(k.to_ne_bytes());
         let pc = pieces()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&key)
+            .get(&u64::from_ne_bytes(k.to_ne_bytes()))
             .cloned();
-        let Some(pc) = pc else {
-            cx.define_with(rec_field(v, k), v.int(0), phitex_defuse::Locality::Global);
-            return Ok(ValueId::UNIT);
-        };
-        let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
-        set_writer_params(&mut st, pc.wparams);
-        set_page_params(v, &mut st, &pc.params, pc.margins);
-        let base = st.fonts_used();
-        let (res, rec) = {
-            let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
-            st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
-        };
-        // (the writer's error here is this writer's, not the file's: a
-        // page whose record is not placed as it is is shipped again by
-        // the link, whose error is the job's, [`Linked::errors`])
-        let _ = res.err();
-        let (content, w, h) = st.last_page_shown();
-        let words = [
-            u64::from_ne_bytes(i64::from(w).to_ne_bytes()),
-            u64::from_ne_bytes(i64::from(h).to_ne_bytes()),
-        ];
-        let shown = phitex_defuse::hash_words(phitex_defuse::hash_bytes(0, content), &words);
-        let shown = phitex_defuse::hash_bytes(shown, pc.attr.as_bytes());
-        let _ = pc.made.set((rec, base));
-        cx.define_with(
-            rec_field(v, k),
-            v.int(i64::from_ne_bytes(shown.to_ne_bytes())),
-            phitex_defuse::Locality::Global,
-        );
+        if let Some(pc) = pc {
+            write_page(v, &pc);
+        }
         Ok(ValueId::UNIT)
     }
 }
@@ -1762,23 +1739,126 @@ pub(crate) fn page_allocs(
     } else {
         0
     };
+    // (the read-time objects made before the page: its own object's
+    // number, after its resources', counts them)
+    let read_time = r.cint(crate::fields::cell::PDF_OBJNUM)?;
+    let rt_fonts = r.get(RT_FONTS)?.unwrap_or_else(|| v.list(Vec::new()));
+    let rt_dests = r.get(RT_DESTS)?.unwrap_or_else(|| v.list(Vec::new()));
+    let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
     let e = v.list(vec![
         v.int(fixed),
         v.list(names),
         v.list(dests),
         v.list(ship_fonts),
         v.int(compressible),
+        v.int(read_time),
+        rt_fonts,
+        rt_dests,
+        rt_os,
     ]);
     r.contribute(ALLOCS, v.seq_unit(e));
     Ok(())
 }
 
+/// The fonts a read-time write uses (an `\\immediate\\pdfxform`'s):
+/// an object made for each name no page shipped before and no read-time
+/// write before used (`pdf:rtfonts`, which the pages' allocations carry,
+/// [`ALLOCS`]).
+pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
+    let v = r.v;
+    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let seen = fold_allocs(v, range).fonts;
+    let mut rt: Vec<ValueId> = r.get(RT_FONTS)?.map(|x| list_of(v, x)).unwrap_or_default();
+    for n in names {
+        let x = v.str(n);
+        if seen.contains(&x) || rt.contains(&x) {
+            continue;
+        }
+        let k = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
+        r.set_cell(crate::fields::cell::PDF_OBJNUM, v.int(k), true);
+        rt.push(x);
+    }
+    r.set(RT_FONTS, v.list(rt), true);
+    Ok(())
+}
+
+/// The fonts read-time writes used ([`fonts_first_used`]).
+const RT_FONTS: &str = "pdf:rtfonts";
+
+/// The destinations read-time commands made ([`dest_first_named`]).
+const RT_DESTS: &str = "pdf:rtdests";
+
+/// The objects read-time writes put into object streams ([`os_write`]).
+const RT_OS: &str = "pdf:rtos";
+
+/// A destination a read-time command names (an outline's `goto`):
+/// its object made where no page shipped before and no read-time command
+/// before made it (`pdf_get_obj`).
+pub(crate) fn dest_first_named(r: &mut Run<'_, '_>, id: ValueId) -> R<()> {
+    let v = r.v;
+    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let seen = fold_allocs(v, range).dests;
+    let mut rt: Vec<ValueId> = r.get(RT_DESTS)?.map(|x| list_of(v, x)).unwrap_or_default();
+    if seen.contains(&id) || rt.contains(&id) {
+        return Ok(());
+    }
+    let k = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
+    r.set_cell(crate::fields::cell::PDF_OBJNUM, v.int(k), true);
+    rt.push(id);
+    r.set(RT_DESTS, v.list(rt), true);
+    Ok(())
+}
+
+/// An object a read-time command writes now: with
+/// `\\pdfobjcompresslevel` above 0 it goes into an object stream, whose
+/// own object is made as its first object goes in (every 100: pdfTeX's
+/// `pdf_os_max_objs`), counting the pages' before it.
+pub(crate) fn os_write(r: &mut Run<'_, '_>) -> R<()> {
+    if r.param("pdfobjcompresslevel")? <= 0 {
+        return Ok(());
+    }
+    let v = r.v;
+    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let pages = fold_allocs(v, range).os_written;
+    let rt = r.get(RT_OS)?.and_then(|x| v.as_int(x)).unwrap_or(0);
+    if (pages + rt) % 100 == 0 {
+        let k = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
+        r.set_cell(crate::fields::cell::PDF_OBJNUM, v.int(k), true);
+    }
+    r.set(RT_OS, v.int(rt + 1), true);
+    Ok(())
+}
+
+/// Page `n`'s object (`\\pdfpageref n`) where that page shipped before
+/// this run and no reference made its object first: pdfTeX makes its
+/// resources' object, then the page's (pdfTeX §752).
+pub(crate) fn shipped_page_obj(r: &mut Run<'_, '_>, n: i32) -> R<Option<i64>> {
+    if r.param("pdfoutput")? <= 0 {
+        return Ok(None);
+    }
+    let v = r.v;
+    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let f = fold_allocs(v, range);
+    Ok(usize::try_from(n - 1)
+        .ok()
+        .and_then(|k| f.page_objs.get(k).copied())
+        .filter(|&o| o > 0))
+}
+
 /// The fold of the pages' allocations ([`ALLOCS`]) over a range: the
 /// objects they made and the fonts the shipouts loaded.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct AllocFold {
     objects: i64,
     ship_fonts: i64,
+    /// Each page's object (0: one a reference made before it).
+    page_objs: Arc<Vec<i64>>,
+    /// The font names the pages used.
+    fonts: Arc<BTreeSet<ValueId>>,
+    /// The destinations the pages made.
+    dests: Arc<BTreeSet<ValueId>>,
+    /// The objects the pages wrote into object streams.
+    os_written: i64,
 }
 
 type AllocMemo = Mutex<FxHashMap<(u64, u64), AllocFold>>;
@@ -1787,10 +1867,11 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     static M: OnceLock<AllocMemo> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
     let k = (v.instance(), range.raw());
-    if let Some(&x) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&k) {
-        return x;
+    if let Some(x) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&k) {
+        return x.clone();
     }
     let mut out = AllocFold::default();
+    let mut page_objs: Vec<i64> = Vec::new();
     let mut written = 0i64;
     let mut seen: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_dest: BTreeSet<ValueId> = BTreeSet::new();
@@ -1799,15 +1880,25 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         let xs = list_of(v, e);
         let i = |k: usize| xs.get(k).and_then(|&x| v.as_int(x)).unwrap_or(0);
         let l = |k: usize| xs.get(k).map(|&x| list_of(v, x)).unwrap_or_default();
+        // (the page's own object, after its resources' one)
+        page_objs.push(if i(0) >= 3 { i(5) + out.objects + 2 } else { 0 });
         out.objects += i(0);
         // (a pages-tree node every `pages_tree_kids_max` pages)
         if pages % 6 == 0 {
             out.objects += 1;
         }
+        // (the fonts read-time writes used before the page: their
+        // objects made there, counted by TeX's count)
+        for n in l(6) {
+            seen.insert(n);
+        }
         for n in l(1) {
             if seen.insert(n) {
                 out.objects += 1;
             }
+        }
+        for d in l(7) {
+            seen_dest.insert(d);
         }
         for d in l(2) {
             if seen_dest.insert(d) {
@@ -1819,18 +1910,24 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
                 out.ship_fonts += 1;
             }
         }
+        // (the read-time writes into object streams before the page
+        // count toward a stream's 100)
         for _ in 0..i(4) {
-            if written % 100 == 0 {
+            if (written + i(8)) % 100 == 0 {
                 out.objects += 1;
             }
             written += 1;
         }
     }
+    out.page_objs = Arc::new(page_objs);
+    out.fonts = Arc::new(seen);
+    out.dests = Arc::new(seen_dest);
+    out.os_written = written;
     let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
     if g.len() > 1 << 12 {
         g.clear();
     }
-    g.insert(k, out);
+    g.insert(k, out.clone());
     out
 }
 
@@ -2156,7 +2253,8 @@ pub(crate) fn finish_exact(
             set_writer_params(&mut st, pc.wparams);
             // its virtual fonts' local fonts numbered where its walk
             // reads them in, after every font loaded before it
-            // (a page whose PDF side did not run: shipped again below)
+            // (a page whose PDF side has not run yet: written here)
+            write_page(v, pc);
             let empty = phitex_pdf::PageRecord::default();
             let rec = pc.made.get().map_or(&empty, |m| &m.0);
             let fwd = nums.resolve(&pc.fonts, Some(rec.font_loads()));
