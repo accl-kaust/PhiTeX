@@ -4579,16 +4579,18 @@ impl Run<'_, '_> {
                     }
                 }
             };
-            // (the prediction goes in the continuation's arguments: its
-            // own state once it is defined, the same node from then on;
-            // but a state anchored elsewhere than the break's piece (a
-            // page firing in a continuation's material names that
-            // continuation) changes with the node, so that one is placed
-            // without a prediction, or every new node would define
-            // another state and the step place another)
-            let anchored_off =
-                defined.is_some_and(|(x, _)| ScanIn::decode(v, Some(x)).anchor != Some(at));
-            self.place_cont(Some(at), j, if anchored_off { None } else { pred }, b, None);
+            // (the prediction goes in the continuation's arguments only
+            // where its state is not defined yet: once it is, the
+            // continuation is placed without one, the same node from then
+            // on, so a step running again does not place a new one each
+            // time its guess moves)
+            self.place_cont(
+                Some(at),
+                j,
+                if defined.is_some() { None } else { pred },
+                b,
+                None,
+            );
             placed = Placed::Page;
             let Some((x, m)) = pred else {
                 known = false;
