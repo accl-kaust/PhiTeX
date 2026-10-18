@@ -2043,7 +2043,8 @@ impl Run<'_, '_> {
         let mut out: Vec<Node> = CHAR_BUF.with(std::cell::Cell::take);
         out.clear();
         // transitions and waiting spaces, each before `out[k]`
-        let mut raws: Vec<(usize, ValueId)> = Vec::new();
+        let mut raws: Vec<(usize, ValueId)> = CHAR_RAWS.with(std::cell::Cell::take);
+        raws.clear();
         let mut cancel_boundary = cancel;
         // (the space parameters, read once: no command of this loop
         // changes them)
@@ -2135,7 +2136,8 @@ impl Run<'_, '_> {
         }
         let te = crate::prof::start();
         let lid = md.lid;
-        let mut raws = raws.into_iter().peekable();
+        let mut raws_buf = raws;
+        let mut raws = raws_buf.drain(..).peekable();
         if let Some(l) = self.level_of(lid) {
             // (the run's own list: the nodes go on it native, in one go)
             l.list.reserve(out.len() + raws.len());
@@ -2161,6 +2163,7 @@ impl Run<'_, '_> {
             }
         }
         CHAR_BUF.with(|c| c.set(out));
+        CHAR_RAWS.with(|c| c.set(raws_buf));
         crate::prof::add(crate::prof::CHAR_ENC, te);
         Ok(())
     }
@@ -2864,6 +2867,8 @@ thread_local! {
     /// A character run's node buffer, kept for the worker's next run
     /// ([`Run::char_run`]).
     static CHAR_BUF: std::cell::Cell<Vec<Node>> = const { std::cell::Cell::new(Vec::new()) };
+    /// Its transitions and waiting spaces, kept the same way.
+    static CHAR_RAWS: std::cell::Cell<Vec<(usize, ValueId)>> = const { std::cell::Cell::new(Vec::new()) };
 }
 
 /// The space factor not read yet in a run of characters.
