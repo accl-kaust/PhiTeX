@@ -969,6 +969,13 @@ fn makeindex_for(cx: &mut Ctx<'_>, want: &str) -> Result<Option<String>, Stop> {
                 .filter(|n| !asked.contains(n))
                 .collect();
             if new.is_empty() {
+                if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+                    eprintln!(
+                        "makeindex for {want}: status {}, stderr {}",
+                        o.status,
+                        String::from_utf8_lossy(&o.stderr)
+                    );
+                }
                 break o.ind;
             }
             for n in new {
@@ -978,6 +985,14 @@ fn makeindex_for(cx: &mut Ctx<'_>, want: &str) -> Result<Option<String>, Stop> {
                 asked.push(n);
             }
         };
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            let read: Vec<(&str, usize)> =
+                texts.iter().map(|(n, t)| (n.as_str(), t.len())).collect();
+            eprintln!(
+                "makeindex for {want}: args {args:?}, read {read:?}, asked {asked:?}, made {:?} bytes",
+                made.as_ref().map(|f| f.contents.len())
+            );
+        }
         if let Some(f) = made {
             out = Some(f.contents.iter().map(|&b| char::from(b)).collect());
         }
