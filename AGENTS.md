@@ -66,6 +66,8 @@ crate's own docs say what it is; keep them current.
   of truth, the CLI included: the build is the document's state.
 - A cold build is an edit from nothing: there is no separate cold path.
 - Pure crates build for `wasm32-unknown-unknown` (`cargo xtask check`).
+- The engine runs as WebAssembly with threads (`phitex-wasm`,
+  `wasm32-wasip1-threads`): `scripts/wasm.sh check` keeps it byte-identical.
 - The scheduler affects speed, never results: every schedule gives
   byte-identical output.
 
