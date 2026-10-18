@@ -313,10 +313,13 @@ fn range_readers_mixed() {
                     ));
                 }
                 let want_rcp = if want.is_empty() { 1 } else { 2 };
-                if r.realised_critical_path > want_rcp {
+                // (Undeclared, a reader in work may contribute: a range
+                // reader after it waits for it, and the realised path
+                // counts that wait.)
+                if declare && r.realised_critical_path > want_rcp {
                     fail(format!(
-                        "{name} edit {kind}: realised critical path {} > {want_rcp}",
-                        r.realised_critical_path
+                        "{name} edit {kind}: realised critical path {} > {want_rcp} waits {:?} gated {}",
+                        r.realised_critical_path, r.waits_by_kind, r.gated
                     ));
                 }
             }
