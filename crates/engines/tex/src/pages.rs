@@ -2193,8 +2193,10 @@ impl Run<'_, '_> {
     /// by the piece itself it sat before the finisher: it read nothing the
     /// routine left, and its first sibling, where the rest reads on into
     /// the text, was the finisher (a top piece's run ended there: no
-    /// legal `\end`).
-    fn place_resume(&mut self, pid: i64, k: i64) -> R<()> {
+    /// legal `\end`). `after`: placed after that node's extent (the
+    /// piece's: after every page node placed there before it) instead of
+    /// right after this node.
+    fn place_resume(&mut self, pid: i64, k: i64, after: Option<phitex_defuse::NodeId>) -> R<()> {
         let v = self.v;
         let Some(x) = self.eng_read(v.field(RESUME))? else {
             return Ok(());
@@ -2209,10 +2211,15 @@ impl Run<'_, '_> {
         {
             return Ok(());
         }
-        self.cx.follow(
-            self.ops.resume,
-            vec![ValueId::UNIT, xs[2], ValueId::UNIT, xs[3]],
-        );
+        let args = vec![ValueId::UNIT, xs[2], ValueId::UNIT, xs[3]];
+        match after {
+            Some(at) => {
+                self.cx.follow_after(at, self.ops.resume, args);
+            }
+            None => {
+                self.cx.follow(self.ops.resume, args);
+            }
+        }
         Ok(())
     }
 
@@ -4308,14 +4315,20 @@ impl Run<'_, '_> {
             let mut fired = Vec::new();
             let p = self.scan_step(&mut fired)?;
             // (the step after a cut piece, `[-3, piece, candidate]`: the
-            // rest of the piece is placed here, right after it, where no
-            // page this step places fires at the cut; where one does,
-            // that page's continuation places it after the finisher,
-            // [`Run::scan_cont`])
+            // rest of the piece is placed after it where no page this
+            // step places fires at the cut (where one does, that page's
+            // continuation places it after the finisher,
+            // [`Run::scan_cont`]). Anchored at the piece, after the
+            // finishers and continuations of the pages firing at its
+            // earlier candidates, which this step placed there before it:
+            // the rest reads what their routines define and the material
+            // they leave, as it comes after those pages in the text; a
+            // plain continuation of this step would sit before them)
             if let [_, pid, k] = args[..] {
                 let (pid, k) = (int_of(v, pid), int_of(v, k));
                 if !fired.contains(&(pid, k)) {
-                    self.place_resume(pid, k)?;
+                    let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+                    self.place_resume(pid, k, Some(at))?;
                 }
             }
             p
@@ -4655,7 +4668,7 @@ impl Run<'_, '_> {
         let pid = b.get(3).map_or(-2, |&x| int_of(v, x));
         let k = b.get(4).map_or(-1, |&x| int_of(v, x));
         if pid != -2 {
-            self.place_resume(pid, k)?;
+            self.place_resume(pid, k, None)?;
         }
         Ok(placed)
     }
