@@ -900,6 +900,14 @@ impl Mk<'_> {
 /// Run `makeindex` with the command-line arguments `args` (after the
 /// program name). `version` is what the banner prints after the program
 /// name, e.g. `version 2.18 [TeX Live 2026] (kpathsea + Thai support)`.
+/// Whether a file named `name` is one makeindex takes as its input by
+/// default (its extension, 2.18's): a job writing one has it sorted
+/// between runs, as latexmk does.
+#[must_use]
+pub fn is_default_input(name: &str) -> bool {
+    name.len() > 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".idx")
+}
+
 pub fn run(args: &[Vec<u8>], version: &[u8], files: &mut dyn Files) -> Outcome {
     run_with(args, version, files, None).0
 }

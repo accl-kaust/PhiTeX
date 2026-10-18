@@ -1811,6 +1811,16 @@ impl Run<'_, '_> {
         self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
         self.set(&format!("wopen:{name}"), v.int(1), true);
         self.contribute_stream(v.list(vec![v.str(&name)]));
+        // (a file makeindex takes as its input by default is sorted
+        // between runs, as latexmk does: its output made in process from
+        // the file's stream, read back next round)
+        if phitex_makeindex::is_default_input(&name)
+            && let Some(ind) = makeindex_ind_name(std::slice::from_ref(&name))
+        {
+            self.written_decl(&ind)?;
+            let e = v.list(vec![v.str(&ind), v.list(vec![v.str(&name)])]);
+            self.contribute("tools", v.seq_unit(e));
+        }
         Ok(())
     }
 
