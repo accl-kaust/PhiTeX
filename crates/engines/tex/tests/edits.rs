@@ -513,8 +513,8 @@ fn one_word_edit_reruns_little() {
     let bench =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bench/para4000.tex");
     let src = format!("\\pdfoutput=1 {}", common::read(&bench));
-    // (paragraph 2000's first " line ": `line` to `liue`)
-    let par = src.match_indices("\n\n").nth(2000).expect("a paragraph").0;
+    // (paragraph 2003's first " line ": `line` to `liue`; no page fires in it)
+    let par = src.match_indices("\n\n").nth(2003).expect("a paragraph").0;
     let at = par + src[par..].find(" line ").expect("a word `line`") + 3;
     let text = format!("{}u{}", &src[..at], &src[at + 1..]);
     assert_eq!(&src[at - 2..at + 2], "line");
@@ -528,6 +528,7 @@ fn one_word_edit_reruns_little() {
     for t in [1, 8] {
         let mut b = common::build(opts(t), Some(&prelude), &src);
         let before = b.pages();
+        eprintln!("--- the edit at {t} threads");
         b.edit(&text);
         let st = &b.stats;
         eprintln!(
@@ -544,7 +545,14 @@ fn one_word_edit_reruns_little() {
             st.loop_rounds
         );
         for (n, op, why) in &st.reruns {
-            eprintln!("  rerun {op} {n}: {why}");
+            eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+        }
+        // (with PHITEX_RUN_LOG: every run attempt, in order)
+        for (n, op, resumed, spec, end, round) in &st.run_log {
+            eprintln!(
+                "  run {op} {n}: resumed {resumed} speculative {spec} ended {} round {round}",
+                char::from(*end)
+            );
         }
         let d = common::first_difference(&b.output().0, &cold.output().0);
         assert!(d.is_none(), "edit at {t} threads differs from cold: {d:?}");

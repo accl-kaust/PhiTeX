@@ -430,6 +430,11 @@ pub(crate) struct ScanFire {
     /// The insertion classes on the page (§1018: the boxes its fire
     /// fills).
     pub classes: Vec<u16>,
+    /// The best break's index on the page (§1014: the page's items from
+    /// it on go back to the contributions), and the insertions held
+    /// over (§1022).
+    pub best: usize,
+    pub held: usize,
 }
 
 /// The page builder's state over profiles.
@@ -639,6 +644,8 @@ impl ScanState {
                         output_penalty: f.output_penalty,
                         rest: 0,
                         classes: f.ins_records.iter().map(|r| r.n).collect(),
+                        best: f.best,
+                        held: f.held_inserts.len(),
                     });
                 }
             }

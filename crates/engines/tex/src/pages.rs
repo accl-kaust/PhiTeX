@@ -288,6 +288,10 @@ pub(crate) struct PageState {
     pub fold: FoldState,
     /// The page parameters in force (a `T_PAGE_PARAMS` marker).
     pub params: Option<ValueId>,
+    /// The page parameters in force as values, until a marker names
+    /// them (a state taken over from the scan over profiles,
+    /// [`Run::assemble_narrow`], where the marker in force is not read).
+    pub params_pre: Option<PageParams>,
     /// Contributions after the last candidate: folded items and markers,
     /// in order; the next candidate takes them first (§994).
     pub pending: Vec<ValueId>,
@@ -309,6 +313,10 @@ pub(crate) struct Fire {
     pub b255: Option<(phitex_typeset::node::BoxNode, Side)>,
     pub carried: Vec<ValueId>,
     pub rest: Vec<ValueId>,
+    /// The best break's index on the page, and the insertions held over
+    /// ([`crate::vprof::ScanFire`]'s).
+    pub best: usize,
+    pub held: usize,
 }
 
 fn some(x: ValueId) -> Option<ValueId> {
@@ -327,6 +335,7 @@ impl PageState {
                 since_bp: 0,
             },
             params: None,
+            params_pre: None,
             pending: Vec::new(),
             normal: 0,
         }
@@ -412,17 +421,20 @@ impl PageState {
         }
         if page_params.is_some() {
             self.params = page_params;
+            self.params_pre = None;
         }
-        let params = self.params.map_or(
-            PageParams {
-                vsize: 0,
-                max_depth: 0,
-                top_skip: Glue::ZERO,
-                holding_inserts: 0,
-                saving_vdiscards: false,
-            },
-            |m| params_of(v, m),
-        );
+        let params = self.params_pre.unwrap_or_else(|| {
+            self.params.map_or(
+                PageParams {
+                    vsize: 0,
+                    max_depth: 0,
+                    top_skip: Glue::ZERO,
+                    holding_inserts: 0,
+                    saving_vdiscards: false,
+                },
+                |m| params_of(v, m),
+            )
+        });
         // (the contributions as a stack, the next on top: a `Vec`)
         let mut queue: Vec<ValueId> = std::mem::take(buf);
         queue.reverse();
@@ -516,6 +528,7 @@ impl PageState {
                     if let Some(e) = end_seen {
                         carried.push(e);
                     }
+                    let (best, held) = (f.best, f.held_inserts.len());
                     let data = page_data(v, &f, &self.side);
                     let b255 = Some((f.box255.node.clone(), self.side.clone()));
                     self.pb = PageBuilder::new();
@@ -532,6 +545,8 @@ impl PageState {
                         b255,
                         carried,
                         rest: Vec::new(),
+                        best,
+                        held,
                     }));
                 }
             }
@@ -1110,10 +1125,12 @@ impl Run<'_, '_> {
     /// read where the break was found. `(state after, the fire, the piece's
     /// unit)`, the unit empty for a page firing in the material; `None`
     /// where the items fire no page at the break (a scan defect, said).
+    #[allow(clippy::too_many_lines)]
     fn assemble_page(
         &mut self,
         b: &[ValueId],
         mat: Option<ValueId>,
+        narrow: bool,
     ) -> R<Option<(PageState, Fire, Vec<ValueId>)>> {
         let v = self.v;
         let n = |i: usize| b.get(i).map_or(0, |&x| int_of(v, x));
@@ -1126,6 +1143,7 @@ impl Run<'_, '_> {
         // it is, for its continuation's prediction: a read at a node is
         // of a node before the reader)
         let here = at == self.cx.node();
+        let mut check: Option<(PageState, Fire, Vec<ValueId>)> = None;
         if pid != -2 {
             // (the material the page began with, as items, where the break
             // was found; a page firing in a continuation's material has it
@@ -1142,6 +1160,14 @@ impl Run<'_, '_> {
                     .map(|x| list_of(v, x))
                     .unwrap_or_default(),
             };
+            // (what goes on past the page from the pieces it needs only,
+            // where it can: [`Run::assemble_narrow`])
+            if narrow && let Some(r) = self.assemble_narrow(&s, pid, k, rest, here, at)? {
+                if !crate::exec::obs_flag!("PHITEX_NARROW_CHECK") {
+                    return Ok(Some(r));
+                }
+                check = Some(r);
+            }
             // (the window ends at the break's piece: neither the step
             // that found the break, nor this page's finisher, nor
             // anything after the piece is in it, so the page's nodes do
@@ -1215,6 +1241,215 @@ impl Run<'_, '_> {
                 fire.rest.len()
             ));
         }
+        // (`PHITEX_NARROW_CHECK`: the narrow assembly against this one)
+        if let Some((nps, nf, nown)) = check {
+            let diffs = [
+                ("j", nps.j != ps.j),
+                ("normal", nps.normal != ps.normal),
+                ("fold", nps.fold != ps.fold),
+                ("params", nps.params != ps.params),
+                ("carried", nf.carried != fire.carried),
+                ("rest", nf.rest != fire.rest),
+                ("k", nf.k != fire.k),
+                (
+                    "held",
+                    list_of(v, nf.data).get(3) != list_of(v, fire.data).get(3),
+                ),
+                ("own", nown != own),
+            ];
+            let bad: Vec<&str> = diffs.iter().filter(|d| d.1).map(|d| d.0).collect();
+            eprintln!(
+                "scan: narrow check at piece {}: {}",
+                n(3),
+                if bad.is_empty() {
+                    "same".to_owned()
+                } else {
+                    format!("DIFFERS in {bad:?}")
+                }
+            );
+        }
+        Ok(Some((ps, fire, own)))
+    }
+
+    /// [`Run::assemble_page`] for what goes on past the page (the state
+    /// after it, the material carried and held over, the rest of its
+    /// piece), from the items of the last pieces of its window only: the
+    /// profiles folded up to a piece (the scan's builder, the page's
+    /// items as profiles), the items from there on, where the page's
+    /// items from the best break on are all those pieces' (§1017), no
+    /// insertion is held over (§1022), and the page parameters in force
+    /// are named by a marker there or by none before. A change in a
+    /// piece before them that leaves its profile alone then runs only
+    /// the page's finisher, not what reads the material past the page.
+    /// `None`: the whole window's items are needed.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    fn assemble_narrow(
+        &mut self,
+        s: &ScanIn,
+        pid: i64,
+        k: i64,
+        rest: i64,
+        here: bool,
+        at: phitex_defuse::NodeId,
+    ) -> R<Option<(PageState, Fire, Vec<ValueId>)>> {
+        use crate::vprof::PItem;
+        let v = self.v;
+        let to = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+        let units = v.seq_to_vec(self.cx.acc_range_to(
+            v.field(crate::vprof::VPROF),
+            s.anchor,
+            Some(to),
+        )?);
+        if units.len() < 2 {
+            return Ok(narrow_miss(1, pid));
+        }
+        let parts: Vec<(i64, Vec<PItem>)> = units
+            .iter()
+            .map(|&u| {
+                let (p, ints) = crate::vprof::unit_parts(v, u);
+                (p, crate::vprof::decode(&ints))
+            })
+            .collect();
+        if parts.last().map(|x| x.0) != Some(pid) {
+            return Ok(narrow_miss(2, pid));
+        }
+        // (`\deadcycles` as the whole fold reads it)
+        let dead =
+            if !(has_end(v, &s.material) || parts.iter().any(|x| crate::vprof::has_end(&x.1))) {
+                0
+            } else if here {
+                self.cint(crate::fields::cell::DEADCYCLES)?
+            } else {
+                let f = self.loc_field(crate::fields::cell::DEADCYCLES as Loc);
+                match self.cx.use_field_at(f, Some(at))? {
+                    phitex_defuse::FieldAt::Def(x, _) => int_of(v, x),
+                    phitex_defuse::FieldAt::Unset => 0,
+                    phitex_defuse::FieldAt::Gone => self.cint(crate::fields::cell::DEADCYCLES)?,
+                }
+            };
+        // the profiles folded, the builder kept where each piece begins
+        let mut snaps: Vec<crate::vprof::ScanState> = Vec::with_capacity(parts.len());
+        let fired = {
+            let mut rd = RunReaching(
+                self,
+                s.anchor.map(|a| i64::from_ne_bytes(a.raw().to_ne_bytes())),
+            );
+            let mut st = s.state(v);
+            if st
+                .fold_items(&crate::vprof::decode(&s.prof), dead, &mut rd)
+                .is_some()
+            {
+                return Ok(narrow_miss(3, pid));
+            }
+            let mut fired = None;
+            for (i, (p, items)) in parts.iter().enumerate() {
+                let mut items = items.clone();
+                rd.0.resolve_prof_of(*p, &mut items)?;
+                rd.1 = Some(*p);
+                snaps.push(st.clone());
+                if let Some(f) = st.fold_items(&items, dead, &mut rd) {
+                    fired = Some((i, f));
+                    break;
+                }
+            }
+            fired
+        };
+        let Some((last, sf)) = fired else {
+            return Ok(narrow_miss(4, pid));
+        };
+        if last + 1 != parts.len()
+            || i64::from(sf.k) != k
+            || i64::try_from(sf.rest).ok() != Some(rest)
+            || sf.held > 0
+        {
+            return Ok(narrow_miss(5, pid));
+        }
+        // (the latest piece the items can begin at: no contribution
+        // pending from before it, the page before it ending before the
+        // best break)
+        let Some(u) = (1..=last)
+            .rev()
+            .find(|&u| snaps[u].pending.is_empty() && snaps[u].pb.page.len() <= sf.best)
+        else {
+            return Ok(narrow_miss(6, pid));
+        };
+        let marker_before = s
+            .material
+            .iter()
+            .any(|&x| nodes::tag(v, x) == nodes::T_PAGE_PARAMS)
+            || parts[..u]
+                .iter()
+                .any(|x| x.1.iter().any(|y| matches!(y, PItem::Params(_))));
+        let from =
+            phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(parts[u - 1].0.to_ne_bytes()));
+        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "scan {}: narrow assembly of the page firing in piece {pid}: items of pieces {:?}",
+                self.cx.node().raw(),
+                parts[u..].iter().map(|p| p.0).collect::<Vec<_>>()
+            );
+        }
+        let items = v.seq_to_vec(
+            self.cx
+                .acc_range_to(v.field(PITEMS), Some(from), Some(to))?,
+        );
+        let unit_pid = |x: ValueId| list_of(v, x).first().map_or(-1, |&y| int_of(v, y));
+        if items.len() != parts.len() - u
+            || items
+                .iter()
+                .zip(&parts[u..])
+                .any(|(&x, p)| unit_pid(x) != p.0)
+        {
+            return Ok(narrow_miss(7, pid));
+        }
+        let snap = &snaps[u];
+        let mut ps = PageState::fresh(snap.j);
+        ps.pb = snap.pb.clone();
+        ps.fold = snap.fold;
+        ps.normal = snap.normal;
+        ps.params = s.params;
+        if marker_before {
+            ps.params_pre = Some(snap.params.unwrap_or(PageParams {
+                vsize: 0,
+                max_depth: 0,
+                top_skip: Glue::ZERO,
+                holding_inserts: 0,
+                saving_vdiscards: false,
+            }));
+        }
+        let mut out = None;
+        for (i, &x) in items.iter().enumerate() {
+            let mut raw = unit_items(v, x);
+            self.resolve_params_of(unit_pid(x), &mut raw)?;
+            let f = {
+                let mut live = |c: u16| {
+                    if here {
+                        self.insert_class(c)
+                    } else {
+                        self.insert_class_at(c, at)
+                    }
+                };
+                ps.fold_items(v, &raw, dead, &mut live)?
+            };
+            if let Some(f) = f {
+                if i + 1 != items.len() {
+                    return Ok(narrow_miss(8, pid));
+                }
+                out = Some(f);
+            }
+        }
+        let Some(fire) = out else {
+            return Ok(narrow_miss(9, pid));
+        };
+        if i64::from(fire.k) != k
+            || i64::try_from(fire.rest.len()).ok() != Some(rest)
+            || fire.best != sf.best
+            || fire.held > 0
+            || ps.params_pre.is_some()
+        {
+            return Ok(narrow_miss(10, pid));
+        }
+        let own = items.last().map(|&x| list_of(v, x)).unwrap_or_default();
         Ok(Some((ps, fire, own)))
     }
 
@@ -1273,7 +1508,7 @@ impl Run<'_, '_> {
     /// unit. Its position where the page cannot be assembled.
     fn finisher_args(&mut self, b: &[ValueId], pos: &[ValueId]) -> R<Vec<ValueId>> {
         let v = self.v;
-        let Some((_, mut fire, own)) = self.assemble_page(b, None)? else {
+        let Some((_, mut fire, own)) = self.assemble_page(b, None, false)? else {
             return Ok(pos.to_vec());
         };
         self.fin_box = fire.b255.take();
@@ -3799,6 +4034,14 @@ impl ScanIn {
     }
 }
 
+/// [`Run::assemble_narrow`] declining (`PHITEX_SCAN_TRACE`: why).
+fn narrow_miss(why: u32, pid: i64) -> Option<(PageState, Fire, Vec<ValueId>)> {
+    if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+        eprintln!("scan: narrow assembly declined ({why}) at piece {pid}");
+    }
+    None
+}
+
 /// A [`PITEMS`] unit's items.
 fn unit_items(v: &Values, u: ValueId) -> Vec<ValueId> {
     list_of(v, u)
@@ -4255,7 +4498,7 @@ impl Run<'_, '_> {
         if rtn.is_some() && pid == -2 {
             return Ok(Cont::Nothing);
         }
-        let Some((after, fire, own)) = self.assemble_page(b, mat)? else {
+        let Some((after, fire, own)) = self.assemble_page(b, mat, true)? else {
             return Ok(Cont::Nothing);
         };
         let at_end = pid != -2
