@@ -1769,8 +1769,8 @@ pub(crate) fn page_allocs(
 /// (the state the same for all of them; a link running at that
 /// level continues in each, `append_link`: an object a piece);
 /// `[1, level, kind, id]` a link started (`do_link`; its action's
-/// target, `kind` 1 a destination, 2 a thread, 0 none, is got when
-/// each piece is written); `[2]` a link ended; `[3, on]` running links
+/// target, `kind` 2 a thread, 0 otherwise, is got when each piece is
+/// written); `[2]` a link ended; `[3, on]` running links
 /// on or off; `[4, level, n]` n vboxes entered at `level` (a thread
 /// continues in each, `append_thread`); `[5, start, level, running,
 /// id]` a thread's bead (`do_thread`: the bead and its rectangle's
@@ -1814,10 +1814,8 @@ fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>) -> 
                     let a = ys.get(6).map(|&a| list_of(v, a)).unwrap_or_default();
                     let ak = a.first().map(|&k| str_of(v, k)).unwrap_or_default();
                     let local = a.get(1).is_none_or(|&f| str_of(v, f).is_empty());
-                    let page = a.get(2).is_some_and(|&p| p != ValueId::UNIT);
                     let id = a.get(3).copied().unwrap_or(ValueId::UNIT);
                     let target = match ak.as_str() {
-                        "goto" if local && !page => 1,
                         "thread" if local => 2,
                         _ => 0,
                     };

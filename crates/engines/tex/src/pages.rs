@@ -32,15 +32,15 @@
 //!   after it, and what it gives back to the main list ([`RTN`]); the
 //!   continuation after it reads that on the finisher's prediction, so
 //!   the scan does not wait for the routine.
-//! - A piece runs through its page-builder candidates. A finisher whose
-//!   page fires inside a piece checks its routine against what the
-//!   piece read and defined after the candidate ([`Run::check_cut`]);
-//!   only where the routine changes them it splits the piece
-//!   (`split:<piece>:<k>`, [`split_field`], a loop-back): the piece's next
-//!   run ends at the candidate and its continuation
+//! - A piece ends at every page-builder candidate it can end at (none
+//!   inside a group or conditional of its own): its continuation
 //!   ([`Run::cont_encode`]) is the material of a `resume` piece
-//!   ([`Resume`], [`RESUME`]) placed after it, which reads the state
-//!   there forward and what the page's finisher leaves. The piece's PDF
+//!   ([`Resume`], [`RESUME`]) placed after it (after the finisher of a
+//!   page firing there), which reads the state there forward and what
+//!   the page's finisher leaves: a cut is a forward definition, never a
+//!   loop-back. A finisher whose page fires at a candidate inside a
+//!   piece checks its routine against what the piece read and defined
+//!   after it ([`Run::check_cut`]). The piece's PDF
 //!   records after the candidate go after the page in the line
 //!   (`crate::pdfout::order_line`).
 //! - Nothing reads the whole list, nothing is replayed: one scan state
@@ -190,18 +190,6 @@ pub(crate) fn give_no_units(r: &mut Run<'_, '_>) {
         r.muts += 1;
         r.contribs.push((f, x));
     }
-}
-
-/// Piece `pid`'s split at its candidate `k` (`split:<piece>:<k>`): the
-/// piece's run must end there (a finisher's output routine changes what
-/// the piece's commands after the candidate read), a loop-back the
-/// finisher declares and publishes ([`Run::check_cut`]); none while no
-/// finisher asked. The piece reads it at that candidate
-/// ([`Run::finish_candidate`]): a split costs a round only where the
-/// routine really changes the rest of the piece. One field a candidate:
-/// two pages that break inside the same piece each publish their own.
-pub(crate) fn split_field(v: &Values, pid: i64, k: i64) -> Field {
-    v.field(&format!("split:{}:{k}", pid.cast_unsigned()))
 }
 
 /// A location's value at a candidate in a piece's check data
@@ -728,30 +716,23 @@ impl Run<'_, '_> {
             cuttable,
         });
         self.st.mark_candidate();
-        // (a piece runs through its candidates; it ends at one only
-        // where a page's finisher found that its routine changes what
-        // the piece read after it, `split:<piece>:<k>`, [`Run::check_cut`]:
-        // the rest of its text is then a continuation placed after it,
-        // which reads the state there forward and what the routine
-        // leaves)
+        // (every candidate with text after it is a cut, as every
+        // paragraph end is: the rest of the piece is a continuation
+        // placed after it, after the finisher of a page firing there,
+        // which reads the state there forward and what a routine leaves.
+        // Nothing decides it after the piece: no page's finisher reaches
+        // back into the piece it fires in)
         // (never inside a group or a conditional of the run's own: its
         // rest, run as a resume, cannot leave them as a scope and reads
         // on into the text after it, claiming the document to the next
-        // page node; the piece runs on through the candidate instead)
-        if cuttable && self.split_at(i64::from(k))? {
+        // page node; the piece runs on through the candidate instead,
+        // and a page firing there has its finisher check the rest,
+        // [`Run::check_cut`])
+        if cuttable {
             self.cut = Some(k);
             return Err(Halt::Cut);
         }
         Ok(())
-    }
-
-    /// Whether a finisher asked this piece to end at its candidate `k`
-    /// (`split:<piece>:<k>`, a loop-back a finisher declares,
-    /// [`split_field`]).
-    fn split_at(&mut self, k: i64) -> R<bool> {
-        let v = self.v;
-        let f = split_field(v, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()), k);
-        Ok(self.cx.is_loopback(f) && self.eng_read(f)?.and_then(|x| v.as_int(x)) == Some(k))
     }
 
     /// Whether this run put an item on the main list (a node, or the
@@ -2170,9 +2151,12 @@ impl Run<'_, '_> {
         self.pin_reaching_page_params(&mut raw)?;
         let (cont, locals) = self.cont_encode()?;
         self.contribute_units(&raw, Some(k), ValueId::UNIT, ValueId::UNIT, locals, true);
-        self.cx.follow(self.ops.scan, vec![v.int(-3)]);
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+        // (the scan step after a cut knows its piece and candidate: where
+        // no page fires there, it places the resume, `Run::scan_node`)
+        self.cx
+            .follow(self.ops.scan, vec![v.int(-3), pid, v.int(i64::from(k))]);
         // (the siblings the rest of the piece will take where the piece's
         // text says so: what it takes less what it took before the cut;
         // the nodes after the resume run on that instead of waiting for
@@ -2181,10 +2165,11 @@ impl Run<'_, '_> {
         let rest = self
             .claim_guess()
             .map_or(-1, |k| i64::try_from(k.saturating_sub(n)).unwrap_or(-1));
-        // (the resume is the finisher's to place, right after itself: it
-        // reads what the routine leaves, and the text siblings the rest
-        // of the piece reads on into follow it with no page node between,
-        // [`Run::place_resume`])
+        // (the resume is the finisher's to place where a page fires at
+        // the cut, right after itself: it reads what the routine leaves,
+        // and the text siblings the rest of the piece reads on into
+        // follow it with no page node between, [`Run::place_resume`];
+        // else the scan step's after the piece)
         self.cx.define_with(
             v.field(RESUME),
             v.list(vec![
@@ -2231,26 +2216,16 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// A finisher's split of the piece its page's break is in
-    /// (`split:<piece>:<k>`, [`split_field`]): where the break is inside the
-    /// piece and the routine changes what the piece's commands after it
-    /// read ([`Run::check_cut`]), the candidate, declared a loop-back and
-    /// published; where the break is at the piece's end and the piece was
-    /// split there, the same again (the split stands while its page does).
+    /// A finisher whose page's break is inside its piece (at a
+    /// candidate the piece could not end at, a group or conditional of
+    /// its own open there): what the piece defined after the candidate
+    /// put back where the routine left it as it was ([`Run::check_cut`]).
     fn split_piece(&mut self, args: &[ValueId]) -> R<()> {
-        let v = self.v;
-        let Some((pid, k, inside)) = self.fin.as_ref().and_then(|c| c.brk) else {
+        let Some((_, _, inside)) = self.fin.as_ref().and_then(|c| c.brk) else {
             return Ok(());
         };
-        let f = split_field(v, pid, k);
-        let keep = if inside {
-            self.check_cut(args)?.is_some()
-        } else {
-            self.cx.is_loopback(f) && self.eng_read(f)?.and_then(|x| v.as_int(x)) == Some(k)
-        };
-        if keep {
-            self.cx.declare_loopback(f, ValueId::UNIT);
-            self.cx.publish(f, v.int(k));
+        if inside {
+            let _ = self.check_cut(args)?;
         }
         Ok(())
     }
@@ -2260,9 +2235,11 @@ impl Run<'_, '_> {
     /// piece's node, the candidate, what the piece read, what it defined
     /// after the candidate): whether the routine, run here instead of at
     /// the candidate, changed what the piece's commands after it saw or
-    /// saw what they defined. If so, the piece is split there
-    /// ([`Run::split_piece`]): it runs again next round ending at the
-    /// candidate, the rest of it a resume after the page.
+    /// saw what they defined: a piece ends at every candidate it can
+    /// end at ([`Run::finish_candidate`]), so this is a break where it
+    /// could not, and is said (`PHITEX_TEX_TRACE`); the piece's
+    /// definitions after the candidate the routine left as they were
+    /// there are put back for the routine's own reads.
     fn check_cut(&mut self, args: &[ValueId]) -> R<Option<(i64, i64)>> {
         let v = self.v;
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -2346,7 +2323,7 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_TEX_TRACE") || crate::exec::prof_flag!("PHITEX_TEX_TIME")
         {
             eprintln!(
-                "  split asked: piece {} at candidate {} ({why})",
+                "  routine changes a piece's rest it cannot cut: piece {} at candidate {} ({why})",
                 int_of(v, pid),
                 int_of(v, k)
             );
@@ -4328,7 +4305,20 @@ impl Run<'_, '_> {
         let placed = if args.first().is_some_and(|&x| int_of(v, x) == -2) {
             self.scan_cont()?
         } else {
-            self.scan_step()?
+            let mut fired = Vec::new();
+            let p = self.scan_step(&mut fired)?;
+            // (the step after a cut piece, `[-3, piece, candidate]`: the
+            // rest of the piece is placed here, right after it, where no
+            // page this step places fires at the cut; where one does,
+            // that page's continuation places it after the finisher,
+            // [`Run::scan_cont`])
+            if let [_, pid, k] = args[..] {
+                let (pid, k) = (int_of(v, pid), int_of(v, k));
+                if !fired.contains(&(pid, k)) {
+                    self.place_resume(pid, k)?;
+                }
+            }
+            p
         };
         // (what it defined: a reader after it no longer waits for it)
         // (a page placed: the scan state too, until it commits the
@@ -4511,7 +4501,7 @@ impl Run<'_, '_> {
     /// run of this node reads again once the continuation is there. The
     /// chain is the blocks', not the pages'.
     #[allow(clippy::too_many_lines)]
-    fn scan_step(&mut self) -> R<Placed> {
+    fn scan_step(&mut self, fired: &mut Vec<(i64, i64)>) -> R<Placed> {
         let v = self.v;
         // (where the block begins: the state the scan of the block
         // before ended its block in, [`SCAN_BLOCK`]; none before the
@@ -4561,6 +4551,7 @@ impl Run<'_, '_> {
             }
             let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
             let j = st.j - 1;
+            fired.push((pid, i64::from(sf.k)));
             let (b, pos) = self.place_break(
                 Some(at),
                 j,
