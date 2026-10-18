@@ -3432,6 +3432,11 @@ pub(crate) struct Registry {
     /// each taken by the push's one question, the rest dropped after it
     /// ([`prepared_done`]).
     prepared: Mutex<FxHashMap<u64, Prepared>>,
+    /// The hints decoded, by their string's value (the nodes of a
+    /// document share a few hint strings among thousands of slices).
+    decoded: Mutex<FxHashMap<u64, Arc<Hint>>>,
+    /// [`may_define`]'s answer by the hint string's value.
+    answers: Mutex<FxHashMap<u64, MayDefine>>,
 }
 
 /// An answer kept for its one question, or taken.
@@ -3713,7 +3718,27 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
         return h.clone();
     }
     let mut registry = false;
-    let h = Arc::new(compute_hint(reg, v, args, &mut registry));
+    let h = match hint_value(v, args) {
+        // (the hint argument's string decoded once per build)
+        Some(hv) => {
+            let known = reg
+                .decoded
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&hv.raw())
+                .cloned();
+            known.unwrap_or_else(|| {
+                let h = Arc::new(compute_hint(reg, v, args, &mut registry));
+                let mut d = reg.decoded.lock().unwrap_or_else(PoisonError::into_inner);
+                if d.len() > 1 << 16 {
+                    d.clear();
+                }
+                d.insert(hv.raw(), h.clone());
+                h
+            })
+        }
+        None => Arc::new(compute_hint(reg, v, args, &mut registry)),
+    };
     if registry {
         // (a hint read from the registered analysis of a text, which an
         // edit registers again: the arguments alone do not name it)
@@ -3725,6 +3750,14 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
     }
     c.insert(key, h.clone());
     h
+}
+
+/// The node's hint argument, the string tagged `A` or `B` (what
+/// [`compute_hint`] decodes first).
+fn hint_value(v: &Values, args: &[ValueId]) -> Option<ValueId> {
+    args.iter().skip(2).copied().find(|&h| {
+        matches!(&*v.get(h), Value::Str(t) if t.starts_with("A\x1e") || t.starts_with("B\x1e"))
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4030,6 +4063,30 @@ fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return MayDefine::Any;
     }
+    // (an answer is the hint's alone: made once per hint string)
+    let hv = hint_value(v, args).filter(|_| !crate::exec::env_flag!("PHITEX_HINTS"));
+    if let Some(hv) = hv
+        && let Some(m) = reg
+            .answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&hv.raw())
+    {
+        return m.clone();
+    }
+    let m = may_define_answer(reg, v, args);
+    if let Some(hv) = hv {
+        let mut a = reg.answers.lock().unwrap_or_else(PoisonError::into_inner);
+        if a.len() > 1 << 16 {
+            a.clear();
+        }
+        a.insert(hv.raw(), m.clone());
+    }
+    m
+}
+
+/// [`may_define_now`], made.
+fn may_define_answer(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     let h = hint_of_args(reg, v, args);
     if crate::exec::env_flag!("PHITEX_HINTS") {
         let answer = match &h.bound {

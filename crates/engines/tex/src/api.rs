@@ -2453,6 +2453,11 @@ impl Graph {
             }
             crate::timeline::lap("engine: evaluate (the runs, their commits)");
             t_mark = std::time::Instant::now();
+            if tm {
+                // (the scans a stable field's definition made through its
+                // readers, `STABLE_FIELDS`: about none, or the list is wrong)
+                eprintln!("stable fields: {} scans", r.stable_scans);
+            }
             crate::timeline::lap("engine: the evaluation's report");
             if crate::exec::env_flag!("PHITEX_CHECK_READS") {
                 // (debug: every committed node's reads checked again
@@ -2924,6 +2929,11 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
         crate::hints::unregister_text(reg, v.str(DOC_NAME));
     }
 }
+
+/// The fields the engine is told are stable (`Engine::set_stable`):
+/// read by more than half of para4000's nodes and defined only by the
+/// format or the job's environment (`PHITEX_READERS=1` counts them).
+const STABLE_FIELDS: &[&str] = &[];
 
 /// A document node's text: a slice of the document (its bytes).
 enum DocNode {
@@ -4004,6 +4014,15 @@ impl Build {
         let files = g.eng.push(unit, files_op, Vec::new());
         g.eng.add_root(files);
         crate::timeline::lap("engine: the link, end and files nodes");
+        // (the fields nearly every node reads and only the format or the
+        // job's start defines: their reads kept per unit, not filed by
+        // scope, [`STABLE_FIELDS`]; `PHITEX_NO_STABLE=1` leaves them)
+        if !crate::exec::env_flag!("PHITEX_NO_STABLE") {
+            for f in STABLE_FIELDS {
+                let f = g.eng.values().field(f);
+                g.eng.set_stable(f);
+            }
+        }
         let edits = opts.edits.clone().unwrap_or_default();
         let mut b = Build {
             g,
