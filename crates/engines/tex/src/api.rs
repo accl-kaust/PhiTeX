@@ -786,25 +786,10 @@ pub(crate) fn doc_order(v: &Values, entries: &[ValueId]) -> Vec<ValueId> {
         run.sort_by_key(|&e| page_tag(v, e).map_or(0, |t| t.0));
         es.extend(run);
     }
-    // (each page's last entry, by the piece its break is inside of; a
-    // page firing in a continuation's material, `-2`, ships while the
-    // page before it in its run does: that page's break, §1012's
-    // output routine run again at the same candidate)
+    // (each page's last entry, by the piece its break is inside of)
     let mut pages_of: FxHashMap<i64, Vec<(usize, i64)>> = FxHashMap::default();
-    let mut before: Option<(i64, i64)> = None;
     for (p, &e) in es.iter().enumerate() {
-        let tag = match page_tag(v, e) {
-            None => {
-                before = None;
-                continue;
-            }
-            Some((_, Some((-2, _)))) => before,
-            Some((_, t)) => {
-                before = t;
-                t
-            }
-        };
-        if let Some((pid, k)) = tag {
+        if let Some((_, Some((pid, k)))) = page_tag(v, e) {
             let last = es
                 .get(p + 1)
                 .and_then(|&n| page_tag(v, n))
