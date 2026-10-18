@@ -12,7 +12,7 @@ From: archlinux:base
     sed -i 's/^#\?CheckSpace/#CheckSpace/; s/^#DisableSandbox/DisableSandbox/' /etc/pacman.conf
     grep -q '^DisableSandbox' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
     pacman -Syyuu --noconfirm
-    pacman -S --noconfirm --needed base-devel git time rustup clang mold biber ghostscript valgrind qpdf \
+    pacman -S --noconfirm --needed base-devel git time nodejs rustup clang mold biber ghostscript valgrind qpdf \
         texlive-basic texlive-bibtexextra texlive-bin texlive-binextra texlive-context \
         texlive-fontsextra texlive-fontsrecommended texlive-fontutils texlive-formatsextra \
         texlive-latex texlive-latexextra texlive-latexrecommended texlive-luatex \
@@ -20,7 +20,7 @@ From: archlinux:base
         texlive-pstricks texlive-publishers texlive-xetex texlive-humanities texlive-langarabic
     export RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo
     rustup toolchain install nightly-2026-08-08 --profile minimal \
-        --component rustfmt,clippy --target wasm32-unknown-unknown
+        --component rustfmt,clippy --target wasm32-unknown-unknown,wasm32-wasip1-threads
     rustup default nightly-2026-08-08
     pacman -Scc --noconfirm
 

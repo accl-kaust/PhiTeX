@@ -1753,6 +1753,14 @@ name = "phitex-typeset"
 version = "0.0.0"
 
 [[package]]
+name = "phitex-wasm"
+version = "0.0.0"
+dependencies = [
+ "phitex-kpse",
+ "phitex-tex",
+]
+
+[[package]]
 name = "phitex-xdvipdfmx"
 version = "0.0.0"
 dependencies = [

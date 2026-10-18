@@ -13,7 +13,7 @@ usage: cargo xtask <command>
 commands:
   corpus    index test suites under upstream/ into corpus/manifest.json
   sections  tex.web coverage (sections cited as `§N` under crates/)
-  check     clippy, the wasm32 build of the pure crates, the tests";
+  check     clippy, the wasm32 builds (the pure crates; phitex-wasm with threads), the tests";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -60,9 +60,12 @@ fn check() -> Result<()> {
         }
         Ok(())
     };
+    // (the vendored engine keeps its own lints: `crates/vendor/defuse`)
     run(&[
         "clippy",
         "--workspace",
+        "--exclude",
+        "defuse",
         "--all-targets",
         "--",
         "-D",
@@ -73,5 +76,16 @@ fn check() -> Result<()> {
         wasm.extend(["-p", c]);
     }
     run(&wasm)?;
+    // (the engine as a WebAssembly program with threads, `scripts/wasm.sh`)
+    run(&[
+        "clippy",
+        "--target",
+        "wasm32-wasip1-threads",
+        "-p",
+        "phitex-wasm",
+        "--",
+        "-D",
+        "warnings",
+    ])?;
     run(&["test", "--workspace", "--release", "--quiet"])
 }
