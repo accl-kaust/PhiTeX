@@ -16,6 +16,10 @@ use crate::val::{
 };
 
 const BOX_FLAG: i64 = 0o10000000000;
+/// A read stream's state when it opened a document's file cut into
+/// units (`[LAZY_OPEN, name]`): open, its lines not read yet
+/// ([`Run::next_read_line`] reads them).
+const LAZY_OPEN: i64 = 3;
 pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 512;
 pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 
@@ -1289,6 +1293,15 @@ impl Run<'_, '_> {
             } else {
                 format!("{name}.tex")
             };
+            // (a document's file cut into units: open, its text read by
+            // the first line read from it, `Run::next_read_line`; a run
+            // that only tests the stream, `\ifeof` after it opens, reads
+            // its units' order, not its text, so an edit inside the file
+            // reaches only the runs that read its lines)
+            if self.doc && self.read_units(&key)?.is_some() {
+                self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
+                return Ok(());
+            }
             let Some(x) = self.read_file(&key)? else {
                 return Ok(());
             };
@@ -1310,8 +1323,31 @@ impl Run<'_, '_> {
     /// holds (`[state, lines, position]`): the position moves on, or at
     /// the end (`None`) the stream closes (§486). The lines are kept as
     /// they were read in; only the position changes per line.
-    pub(crate) fn next_read_line(&mut self, field: &str, st: ValueId) -> Option<String> {
+    pub(crate) fn next_read_line(&mut self, field: &str, st: ValueId) -> R<Option<String>> {
         let v = self.v;
+        // (a stream opened on a file's units: its lines read now)
+        let st = match &*v.get(st) {
+            Value::List(xs)
+                if xs
+                    .first()
+                    .is_some_and(|&c| crate::val::int_of(v, c) == LAZY_OPEN) =>
+            {
+                let key = xs.get(1).map(|&k| str_of(v, k)).unwrap_or_default();
+                let text = match self.read_file(&key)? {
+                    Some(x) => list_of(v, x)
+                        .get(1)
+                        .map(|&t| str_of(v, t))
+                        .unwrap_or_default(),
+                    None => String::new(),
+                };
+                let lines: Vec<ValueId> = crate::expand::split_lines(&text)
+                    .iter()
+                    .map(|l| v.str(l))
+                    .collect();
+                v.list(vec![v.int(1), v.list(lines)])
+            }
+            _ => st,
+        };
         let (lines, pos) = match &*v.get(st) {
             Value::List(xs) => (
                 xs.get(1).copied(),
@@ -1327,10 +1363,10 @@ impl Run<'_, '_> {
         if let (Some(l), Some(lines)) = (line, lines) {
             let next = v.list(vec![v.int(2), lines, v.int(pos + 1)]);
             self.set(field, next, true);
-            Some(str_of(v, l))
+            Ok(Some(str_of(v, l)))
         } else {
             self.set(field, ValueId::UNIT, true);
-            None
+            Ok(None)
         }
     }
 
@@ -1349,7 +1385,7 @@ impl Run<'_, '_> {
                 // modes; a build has no terminal ([`Run::fatal`])
                 return self.fatal("*** (cannot \\read from terminal in nonstop modes)");
             };
-            let line = self.next_read_line(&field, st);
+            let line = self.next_read_line(&field, st)?;
             let text = line.unwrap_or_default();
             let e = i64::from(self.ipar(Par::endlinechar)?);
             let line = crate::input::Line::of_str(&text, e, true);

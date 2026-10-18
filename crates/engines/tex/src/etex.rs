@@ -931,7 +931,7 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
     let mut body = Vec::new();
     if let Some(st) = st {
         // §486: at the file's end, an empty line, and the stream closes
-        let text = r.next_read_line(&field, st).unwrap_or_default();
+        let text = r.next_read_line(&field, st)?.unwrap_or_default();
         let e = i64::from(r.ipar(Par::endlinechar)?);
         {
             let s = crate::input::Line::of_str(&text, e, true);

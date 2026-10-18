@@ -431,6 +431,29 @@ fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
     Ok(xs.get(1).map(|&t| bytes(&str_of(r.v, t))))
 }
 
+/// A file's size in bytes, as [`file_bytes`] finds it. A document's
+/// file cut into units (`Run::read_units`): the size the environment
+/// holds beside its units' order (`fsize:<name>`, `api::file_units`),
+/// so the run reads neither its text: an edit inside the file that
+/// keeps its length reaches only the pieces of its units.
+fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    if r.doc {
+        let key = if base.contains('.') {
+            name.to_owned()
+        } else {
+            format!("{name}.tex")
+        };
+        if r.read_units(&key)?.is_some() {
+            let v = r.v;
+            if let Some(n) = r.cx.use_env(v.field(&format!("fsize:{key}")))? {
+                return Ok(Some(usize::try_from(int_of(v, n)).unwrap_or(0)));
+            }
+        }
+    }
+    Ok(file_bytes(r, name)?.map(|b| b.len()))
+}
+
 /// The conversions pdfTeX adds to `conv_toks` (pdfTeX §470 ff.).
 #[allow(clippy::too_many_lines)]
 pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
@@ -571,12 +594,12 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             // modification time; pdfTeX prints nothing for a file it
             // cannot stat
             let name = ext_string(r)?;
-            let _ = file_bytes(r, &name)?;
+            let _ = file_size(r, &name)?;
             String::new()
         }
         cv::FILE_SIZE => {
             let name = ext_string(r)?;
-            file_bytes(r, &name)?.map_or_else(String::new, |b| b.len().to_string())
+            file_size(r, &name)?.map_or_else(String::new, |n| n.to_string())
         }
         cv::MDFIVE_SUM => {
             let file = r.scan_keyword("file")?;
