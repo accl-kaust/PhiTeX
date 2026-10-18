@@ -888,7 +888,8 @@ impl Shared {
     /// The static hooks that read the text alone (no claim): what a
     /// commit can find before it takes its unit's structural lock.
     pub(crate) fn analyze_text(&self, op: OpId, args: &[ValueId]) -> Static {
-        let o = self.ops[op.0 as usize].clone();
+        // (Borrowed: a clone's count is one line every thread writes.)
+        let o = &self.ops[op.0 as usize];
         let v = &self.values;
         let defs = o.defs(args, v);
         let may = if defs.is_some() {
@@ -2365,7 +2366,7 @@ impl Shared {
             return;
         }
         let (op, args) = self.text(c);
-        let o = self.ops[op.0 as usize].clone();
+        let o = &self.ops[op.0 as usize];
         // The siblings the hook may read, gathered a few at a time: most
         // hooks look at the first few only.
         let mut cap = 16usize;

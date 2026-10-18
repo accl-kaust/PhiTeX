@@ -937,7 +937,7 @@ impl Shared {
         } else {
             r.clear(super::F_PREDRUN);
         }
-        let o = self.ops[op.0 as usize].clone();
+        let o = &self.ops[op.0 as usize];
         if token.is_none()
             && let Some(e) = r.data().x.as_mut()
         {

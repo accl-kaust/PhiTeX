@@ -889,7 +889,7 @@ impl Shared {
     pub(crate) fn q_stream(&self, at: Slot, strict: bool, me: Slot) -> Q<StreamAns> {
         self.spend();
         let (op, args) = self.text(at);
-        let o = self.ops[op.0 as usize].clone();
+        let o = &self.ops[op.0 as usize];
         let v = &self.values;
         let level = self.depth(at);
         let mut outs = Vec::new();
