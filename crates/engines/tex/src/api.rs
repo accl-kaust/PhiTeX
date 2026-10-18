@@ -2798,14 +2798,13 @@ impl Graph {
                 );
                 // (the memo's misses grouped by why, node and value ids
                 // taken out, most first, with their count by round)
-                type ByRound = std::collections::BTreeMap<u32, u64>;
-                let mut by: FxHashMap<String, (u64, ByRound)> = FxHashMap::default();
+                let mut by: FxHashMap<String, (u64, MissRounds)> = FxHashMap::default();
                 for m in &r.memo_misses {
                     let e = by.entry(miss_kind(&m.why)).or_default();
                     e.0 += 1;
                     *e.1.entry(m.round).or_default() += 1;
                 }
-                let mut by: Vec<(String, (u64, ByRound))> = by.into_iter().collect();
+                let mut by: Vec<(String, (u64, MissRounds))> = by.into_iter().collect();
                 by.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
                 for (why, (n, rounds)) in by.iter().take(40) {
                     let rs: Vec<String> = rounds
@@ -5948,6 +5947,9 @@ fn edit_distance(a: &str, b: &str) -> usize {
     }
     row[b.len()]
 }
+
+/// Memo misses by round (`acct-edit:` lines).
+type MissRounds = std::collections::BTreeMap<u32, u64>;
 
 /// A memo miss's reason without its node and value ids (digit runs),
 /// so that misses group by kind and field.
