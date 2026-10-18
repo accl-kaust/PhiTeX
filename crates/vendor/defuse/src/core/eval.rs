@@ -126,7 +126,8 @@ impl Engine {
                 && !memo.edited.load(Ordering::Acquire)
                 && self.sh.quick_holds();
             if held {
-                memo.finish_quick();
+                let sh = &self.sh;
+                memo.finish_quick(&|x| sh.rec(x).parent.load(Ordering::Acquire));
                 memo.structural.store(false, Ordering::Release);
                 let mut rep = r.expect("checked");
                 rep.rounds = memo.prev_rounds.load(Ordering::Relaxed);
@@ -390,7 +391,9 @@ impl Engine {
             return Err(self.with_report(e, rep, rounds, restarts));
         }
         if self.sh.memo.on.load(Ordering::Relaxed) && !quick {
-            self.sh.memo.finish(rounds, capped.clone());
+            let sh = &self.sh;
+            sh.memo
+                .finish(rounds, capped.clone(), &|x| sh.rec(x).parent.load(Ordering::Acquire));
             rep.memo_bytes = self.sh.memo.bytes();
         }
         let stalled = match self.classify_parked(&mut rep) {

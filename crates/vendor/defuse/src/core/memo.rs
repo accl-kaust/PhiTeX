@@ -50,9 +50,15 @@ pub(crate) struct Memo {
     pub hits: AtomicU64,
     /// Edited since the last evaluation.
     pub edited: AtomicBool,
-    /// An edit since the last evaluation was structural (an insert, a
-    /// removal, a text whose declarations changed): no quick path.
+    /// An edit since the last evaluation the quick path cannot judge (a
+    /// claimed node's text, a text whose scope effect, claim or finality
+    /// changed): the rounds run.
     pub structural: AtomicBool,
+    /// Since the last evaluation: nodes freed (id, slot, parent, and
+    /// whether its text had a scope effect or a claim), and the parents
+    /// that got a node inserted.
+    pub removed: std::sync::Mutex<Vec<(u64, Slot, Slot, bool)>>,
+    pub insert_parents: std::sync::Mutex<Vec<Slot>>,
     /// The evaluation runs the quick path (from the last fixed point; see
     /// `quick_holds`).
     pub quick: AtomicBool,
@@ -81,8 +87,11 @@ pub(crate) struct Change {
 /// added to (never pruned) by quick paths.
 #[derive(Default)]
 struct Index {
-    /// Entries (any round) reading a field.
+    /// Entries (any round) reading a field: by use (the nearest visible
+    /// definition), and otherwise (a sequence, a range, a stream).
     by_field: FxHashMap<crate::values::Field, Vec<u64>>,
+    /// (Slots: a reader's position is looked at, a freed slot skipped.)
+    by_field_use: FxHashMap<crate::values::Field, Vec<Slot>>,
     /// Entries naming a node in a read.
     by_slot: FxHashMap<Slot, Vec<u64>>,
     /// Nodes that published in some round.
@@ -96,10 +105,29 @@ struct Index {
     /// Nodes known at their last round only (a quick path ran them): not
     /// counted as a change's reader.
     uncertain: FxHashSet<u64>,
+    /// Parents of the siblings a read walked or named (a sibling, a claim,
+    /// a stream, a backward scan): an insert or removal under one of them
+    /// shifts what it saw.
+    sib_parents: FxHashSet<Slot>,
 }
 
 impl Index {
-    fn add(&mut self, id: u64, e: &Entry) {
+    fn add(&mut self, id: u64, e: &Entry, parent: &dyn Fn(Slot) -> Slot) {
+        for p in &e.ro.log {
+            let mut sib = |x: Slot| {
+                self.sib_parents.insert(parent(x));
+            };
+            match p {
+                Pred::Sib { ans: Some(a), .. } => sib(a.0),
+                Pred::PrevSib { seen, ans } => {
+                    seen.iter().for_each(|x| sib(x.0));
+                    ans.iter().for_each(|&x| sib(x));
+                }
+                Pred::Claimed { list } => list.iter().for_each(|x| sib(x.0)),
+                Pred::Stream { seen, .. } => seen.iter().for_each(|x| sib(x.0)),
+                _ => {}
+            }
+        }
         self.contribs_of
             .entry(id)
             .or_default()
@@ -112,9 +140,18 @@ impl Index {
             self.publishers.insert(id);
         }
         for p in &e.ro.log {
+            if let Pred::Def {
+                f,
+                mode: super::DMode::Use,
+                ..
+            } = p
+            {
+                self.by_field_use.entry(*f).or_default().push(e.ro.me);
+            }
             read_keys(p, &mut |k| match k {
                 Key::F(f) => self.by_field.entry(f).or_default().push(id),
                 Key::N(x) => self.by_slot.entry(x).or_default().push(id),
+                Key::F2(_) | Key::R(_) => {}
             });
             if matches!(
                 p,
@@ -150,7 +187,7 @@ impl Memo {
     }
 
     /// The evaluation ended well: its results are the next one's memo.
-    pub(crate) fn finish(&self, rounds: u64, capped: Option<Vec<crate::values::Field>>) {
+    pub(crate) fn finish(&self, rounds: u64, capped: Option<Vec<crate::values::Field>>, parent: &dyn Fn(Slot) -> Slot) {
         let cur = std::mem::take(&mut *lock(&self.cur));
         *self.prev.write().unwrap_or_else(std::sync::PoisonError::into_inner) = cur;
         self.prev_rounds.store(rounds, Ordering::Relaxed);
@@ -161,9 +198,11 @@ impl Memo {
         let mut ix = Index::default();
         for (&id, v) in prev.iter() {
             for (_, e) in v {
-                ix.add(id, e);
+                ix.add(id, e, parent);
             }
         }
+        lock(&self.removed).clear();
+        lock(&self.insert_parents).clear();
         drop(prev);
         *lock(&self.ix) = ix;
         *lock(&self.prev_changes) = changes;
@@ -185,13 +224,13 @@ impl Memo {
 
     /// The quick path held: the rounds are the last evaluation's, the nodes
     /// it committed replace their entries for the last round.
-    pub(crate) fn finish_quick(&self) {
+    pub(crate) fn finish_quick(&self, parent: &dyn Fn(Slot) -> Slot) {
         let cur = std::mem::take(&mut *lock(&self.cur));
         let mut prev = self.prev.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut ix = lock(&self.ix);
         for (id, v) in cur {
             let Some((k, e)) = v.into_iter().last() else { continue };
-            ix.add(id, &e);
+            ix.add(id, &e, parent);
             ix.uncertain.insert(id);
             let p = prev.entry(id).or_default();
             match p.last_mut() {
@@ -199,6 +238,14 @@ impl Memo {
                 _ => p.push((k, e)),
             }
         }
+        // (A node removed is no change's reader any more.)
+        for &(id, ..) in lock(&self.removed).iter() {
+            ix.uncertain.insert(id);
+        }
+        drop(ix);
+        drop(prev);
+        lock(&self.removed).clear();
+        lock(&self.insert_parents).clear();
     }
 
     /// The evaluation failed: no memo (the next one runs what it must).
@@ -212,6 +259,8 @@ impl Memo {
             .clear();
         *lock(&self.ix) = Index::default();
         self.bytes.store(0, Ordering::Relaxed);
+        lock(&self.removed).clear();
+        lock(&self.insert_parents).clear();
     }
 
     /// This evaluation's results so far.
@@ -342,12 +391,29 @@ impl Shared {
         let mut new_loop_read = false;
         for (id, v) in cur.iter() {
             let Some((_, new)) = v.last() else { continue };
-            let Some((_, last)) = prev.get(id).and_then(|o| o.last()) else {
-                return false;
-            };
             if !new.ro.pubs.is_empty() || ix.publishers.contains(id) {
                 return false;
             }
+            let Some((_, last)) = prev.get(id).and_then(|o| o.last()) else {
+                // New (inserted, or made by a run): judged when it has no
+                // scope effect, claim or unfolding of its own; its fields are
+                // walked (readers may resolve to it now).
+                let Some(x) = self.slot_of(*id) else { return false };
+                let plain = {
+                    let d = self.rec(x).data();
+                    d.stat.effect == crate::api::Effect::None && d.stat.claim == super::ClaimS::None
+                };
+                if !plain || new.ro.claim.is_some() || !new.ro.kids.is_empty() || !new.ro.conts.is_empty() {
+                    return false;
+                }
+                new_loop_read |= !new.fin && reads_loop(&new.ro.log, None);
+                work.extend(new.ro.contribs.iter().map(|c| Key::F(c.0)));
+                for d in &new.ro.defs {
+                    self.def_window(&ix, x, d.f, &mut work);
+                }
+                seen.insert(*id);
+                continue;
+            };
             if new.ro.effect != last.ro.effect
                 || new.ro.claim != last.ro.claim
                 || new.ro.kids.len() != last.ro.kids.len()
@@ -368,22 +434,80 @@ impl Shared {
                 .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let new_defs: FxHashSet<crate::values::Field> = new.ro.defs.iter().map(|d| d.f).collect();
-            work.extend(old_defs.symmetric_difference(&new_defs).map(|&f| Key::F(f)));
+            for &f in old_defs.symmetric_difference(&new_defs) {
+                if let Some(x) = self.slot_of(*id) {
+                    self.def_window(&ix, x, f, &mut work);
+                } else {
+                    work.push(Key::F(f));
+                }
+            }
             seen.insert(*id);
+        }
+        // Inserts and removals: under a parent whose children a read
+        // walked, they shift what it saw; a removed node with a scope effect
+        // or a claim, or that published, is not judged; otherwise what it
+        // defined, contributed or was named by is walked, and it is in
+        // reach (a change it read made a round count).
+        // (Removed nodes: walked here, not again by field below.)
+        let mut gone: FxHashSet<u64> = FxHashSet::default();
+        for p in lock(&self.memo.insert_parents).iter() {
+            if ix.sib_parents.contains(p) {
+                return false;
+            }
+        }
+        for &(id, x, parent, bad) in lock(&self.memo.removed).iter() {
+            if bad || ix.publishers.contains(&id) || ix.sib_parents.contains(&parent) {
+                return false;
+            }
+            // (A reader that resolved to it names it; one that went past it
+            // sees nothing new.)
+            if let Some(fs) = ix.contribs_of.get(&id) {
+                work.extend(fs.iter().map(|&f| Key::F(f)));
+            }
+            work.push(Key::N(x));
+            seen.insert(id);
+            gone.insert(id);
         }
         // Readers in any round, to a fixed point.
         for id in seen.clone() {
-            self.quick_keys(&ix, id, &mut work);
+            if !gone.contains(&id) {
+                self.quick_keys(&ix, id, &mut work);
+            }
         }
         let mut done_f: FxHashSet<crate::values::Field> = FxHashSet::default();
         let mut done_n: FxHashSet<Slot> = FxHashSet::default();
+        let mut done_f2: FxHashSet<crate::values::Field> = FxHashSet::default();
         while let Some(k) = work.pop() {
             let readers = match k {
                 Key::F(f) => {
                     if !done_f.insert(f) {
                         continue;
                     }
+                    // (By field: every reader, by use too.)
+                    if let Some(v) = ix.by_field_use.get(&f) {
+                        work.extend(
+                            v.iter()
+                                .filter(|&&w| self.rec(w).st() != super::S_FREE)
+                                .map(|&w| Key::R(self.node_id(w).0)),
+                        );
+                    }
                     ix.by_field.get(&f)
+                }
+                Key::F2(f) => {
+                    if done_f.contains(&f) || !done_f2.insert(f) {
+                        continue;
+                    }
+                    ix.by_field.get(&f)
+                }
+                Key::R(w) => {
+                    if !seen.insert(w) {
+                        continue;
+                    }
+                    if ix.publishers.contains(&w) {
+                        return false;
+                    }
+                    self.quick_keys(&ix, w, &mut work);
+                    continue;
                 }
                 Key::N(x) => {
                     if !done_n.insert(x) {
@@ -420,6 +544,40 @@ impl Shared {
             }
         }
         true
+    }
+
+    /// The readers by use of `f` a new definition of it by `x` can reach:
+    /// those after it, up to the next definition that shadows it for them
+    /// (the next in its frame, or the next global for a global one).
+    fn def_window(&self, ix: &Index, x: Slot, f: crate::values::Field, work: &mut Vec<Key>) {
+        // Readers by sequence, range or stream: all of them.
+        work.push(Key::F2(f));
+        let lo = self.rec(x).lab();
+        let u = self.unit_of(x);
+        let hi = {
+            let sh = super::rlock(self.shard(u, f));
+            sh.get(&(u, f)).and_then(|idx| {
+                let e = idx.defs.iter().find(|e| e.node == x)?;
+                let list: &[Slot] = if e.loc == crate::api::Locality::Global {
+                    &idx.globals
+                } else {
+                    idx.local.get(&e.fk).map_or(&[][..], Vec::as_slice)
+                };
+                // (By label: the first after it.)
+                let i = list.partition_point(|&y| self.rec(y).lab() <= lo);
+                list.get(i).map(|&y| self.rec(y).lab())
+            })
+        };
+        for &ws in ix.by_field_use.get(&f).into_iter().flatten() {
+            let r = self.rec(ws);
+            if r.st() == super::S_FREE {
+                continue;
+            }
+            let l = r.lab();
+            if l > lo && hi.is_none_or(|h| l < h) && self.unit_of(ws) == u {
+                work.push(Key::R(self.node_id(ws).0));
+            }
+        }
     }
 
     /// What a node in reach can change for others: its contributions (by
@@ -477,17 +635,25 @@ fn reads_loop(log: &[Pred], fields: Option<&Vec<crate::values::Field>>) -> bool 
     })
 }
 
-/// What a read depends on: a field, or a node it names.
+/// What a read depends on: a field, or a node it names; or a reader
+/// reached directly.
 enum Key {
     F(crate::values::Field),
+    /// By field, its readers by sequence, range or stream only.
+    F2(crate::values::Field),
     N(Slot),
+    R(u64),
 }
 
 /// Calls `k` with every field and node `p` names.
 fn read_keys(p: &Pred, k: &mut impl FnMut(Key)) {
     match p {
-        Pred::Def { f, ans, sites, .. } => {
-            k(Key::F(*f));
+        Pred::Def {
+            f, mode, ans, sites, ..
+        } => {
+            if *mode != super::DMode::Use {
+                k(Key::F(*f));
+            }
             if let super::DAns::Site { node, .. } = ans {
                 k(Key::N(*node));
             }

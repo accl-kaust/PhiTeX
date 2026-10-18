@@ -434,10 +434,6 @@ impl Engine {
     /// Appends a node at the end of `unit`.
     pub fn push(&mut self, unit: UnitId, op: OpId, args: Vec<ValueId>) -> NodeId {
         self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
-        self.sh
-            .memo
-            .structural
-            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&unit, &op, &args))
@@ -445,6 +441,7 @@ impl Engine {
             serde_json::Value::Null
         };
         let r = self.push_inner(unit, op, args);
+        self.note_insert(r);
         #[cfg(feature = "observe")]
         crate::record::api(&self.sh.values, "push", a, crate::record::j(&r));
         r
@@ -502,10 +499,6 @@ impl Engine {
     /// If `node` is not a live node.
     pub fn insert_after(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
-        self.sh
-            .memo
-            .structural
-            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&node, &op, &args))
@@ -513,6 +506,7 @@ impl Engine {
             serde_json::Value::Null
         };
         let r = self.insert_after_inner(node, op, args);
+        self.note_insert(r);
         #[cfg(feature = "observe")]
         crate::record::api(&self.sh.values, "insert_after", a, crate::record::j(&r));
         r
@@ -534,10 +528,6 @@ impl Engine {
     /// If `node` is not a live node.
     pub fn insert_before(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
-        self.sh
-            .memo
-            .structural
-            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&node, &op, &args))
@@ -545,6 +535,7 @@ impl Engine {
             serde_json::Value::Null
         };
         let r = self.insert_before_inner(node, op, args);
+        self.note_insert(r);
         #[cfg(feature = "observe")]
         crate::record::api(&self.sh.values, "insert_before", a, crate::record::j(&r));
         r
@@ -627,11 +618,12 @@ impl Engine {
                         }
                     }
                 }
-                // A text whose declarations differ is a structural edit
-                // for the per-round memo (`LoopStart::PerRound`).
+                // A text whose scope effect, claim or finality differ is one
+                // the per-round memo's quick path cannot judge (its
+                // definitions it can: their fields are walked).
                 let same_shape = {
                     let st = &r.data().stat;
-                    old_shape == (st.defs.clone(), st.may.clone(), st.effect, st.claim, st.fin())
+                    (old_shape.2, old_shape.3, old_shape.4) == (st.effect, st.claim, st.fin())
                 };
                 if !same_shape {
                     sh.memo.structural.store(true, Ordering::Release);
@@ -658,13 +650,17 @@ impl Engine {
         sh.enter_work_lists(s);
     }
 
+    /// Notes an inserted node's parent for the per-round memo.
+    fn note_insert(&self, n: NodeId) {
+        if let Some(s) = self.sh.live_slot(n) {
+            let p = self.sh.rec(s).parent.load(Ordering::Acquire);
+            super::lock(&self.sh.memo.insert_parents).push(p);
+        }
+    }
+
     /// Removes a node and its subtree.
     pub fn remove(&mut self, node: NodeId) {
         self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
-        self.sh
-            .memo
-            .structural
-            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&node,))
