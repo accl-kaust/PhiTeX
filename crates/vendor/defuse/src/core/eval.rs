@@ -65,7 +65,7 @@ impl Engine {
             crate::obs::span!(Evaluate);
             #[cfg(feature = "observe")]
             let _watch = super::watch::Watch::start(&self.sh);
-            self.evaluate_inner(sched, exec, src)
+            self.evaluate_per_round(sched, exec, src)
         };
         #[cfg(feature = "observe")]
         if let Err(e) = &r
@@ -103,6 +103,46 @@ impl Engine {
         r
     }
 
+    /// `evaluate_inner`, under `LoopStart::PerRound` first on the quick
+    /// path when only values were edited: from the last fixed point, kept
+    /// when no change reaches a loop-back publication in any round
+    /// (`Shared::quick_holds`: the round sequence stands, the state is the
+    /// cold one); otherwise, or when anything else happened, the rounds run
+    /// from the initial values with the memo.
+    fn evaluate_per_round(
+        &mut self,
+        sched: &mut dyn Scheduler,
+        exec: &mut dyn Executor,
+        src: &mut dyn EditSource,
+    ) -> Result<Report, EvalError> {
+        let memo = &self.sh.memo;
+        if self.loop_start == LoopStart::PerRound && memo.quick_eligible() {
+            memo.quick.store(true, Ordering::Release);
+            memo.edited.store(false, Ordering::Release);
+            let r = self.evaluate_inner(sched, exec, src);
+            let memo = &self.sh.memo;
+            memo.quick.store(false, Ordering::Release);
+            let held = matches!(&r, Ok(rep) if rep.rounds == 1)
+                && !memo.edited.load(Ordering::Acquire)
+                && self.sh.quick_holds();
+            if held {
+                memo.finish_quick();
+                memo.structural.store(false, Ordering::Release);
+                let mut rep = r.expect("checked");
+                rep.rounds = memo.prev_rounds.load(Ordering::Relaxed);
+                rep.capped = lock(&memo.prev_capped).clone();
+                rep.memo_bytes = memo.bytes();
+                return Ok(rep);
+            }
+            // The rounds from the start (as after any edit).
+            lock(memo.cur_ref()).clear();
+            memo.edited.store(true, Ordering::Release);
+        }
+        let r = self.evaluate_inner(sched, exec, src);
+        self.sh.memo.structural.store(false, Ordering::Release);
+        r
+    }
+
     fn evaluate_inner(
         &mut self,
         sched: &mut dyn Scheduler,
@@ -123,15 +163,20 @@ impl Engine {
                 sh.c.commit_ns.load(Ordering::Relaxed),
                 sh.c.check_ns.load(Ordering::Relaxed),
                 sh.c.idle_ns.load(Ordering::Relaxed),
+                sh.c.runs.load(Ordering::Relaxed),
+                sh.memo.hits.load(Ordering::Relaxed),
             )
         };
-        let close = |sh: &super::Shared, m: &(std::time::Instant, u64, u64, u64, u64)| crate::api::RoundTimes {
-            wall_ns: u64::try_from(m.0.elapsed().as_nanos()).unwrap_or(u64::MAX),
-            op_ns: sh.c.op_ns.load(Ordering::Relaxed) - m.1,
-            commit_ns: sh.c.commit_ns.load(Ordering::Relaxed) - m.2,
-            check_ns: sh.c.check_ns.load(Ordering::Relaxed) - m.3,
-            idle_ns: sh.c.idle_ns.load(Ordering::Relaxed) - m.4,
-        };
+        let close =
+            |sh: &super::Shared, m: &(std::time::Instant, u64, u64, u64, u64, u64, u64)| crate::api::RoundTimes {
+                wall_ns: u64::try_from(m.0.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                op_ns: sh.c.op_ns.load(Ordering::Relaxed) - m.1,
+                commit_ns: sh.c.commit_ns.load(Ordering::Relaxed) - m.2,
+                check_ns: sh.c.check_ns.load(Ordering::Relaxed) - m.3,
+                idle_ns: sh.c.idle_ns.load(Ordering::Relaxed) - m.4,
+                runs: sh.c.runs.load(Ordering::Relaxed) - m.5,
+                memo_hits: sh.memo.hits.load(Ordering::Relaxed) - m.6,
+            };
         let mut mark = snap(&self.sh);
         let mut idle: u64 = 0;
         // Fields still moving when the round cap stopped the rounds.
@@ -141,7 +186,14 @@ impl Engine {
             self.version = v;
             rep.edits_applied.push((v, 0));
         }
-        if self.loop_start == LoopStart::Initial && self.sh.qlen.load(Ordering::Acquire) > 0 && self.reset_loops() {
+        // PerRound: after any edit the rounds start from the initial
+        // values, as a fresh engine's do.
+        // Initial and PerRound: after any edit the rounds start from the
+        // initial values, as a fresh engine's do (the quick path aside).
+        let quick = self.sh.memo.quick.load(Ordering::Acquire);
+        let edited = !quick && self.sh.memo.edited.swap(false, Ordering::AcqRel);
+        let from_start = matches!(self.loop_start, LoopStart::Initial | LoopStart::PerRound);
+        if from_start && !quick && (edited || self.sh.qlen.load(Ordering::Acquire) > 0) && self.reset_loops() {
             restarts += 1;
         }
         // An executor that runs every job on one thread may ask for steps
@@ -253,12 +305,20 @@ impl Engine {
                         field: ch[0],
                     });
                 }
-                // (A round only when a changed value has a reader to run.)
-                Ok(ch) if !ch.is_empty() && self.sh.qlen.load(Ordering::Acquire) == 0 => continue,
+                // (A round only when a changed value has a reader to run,
+                // final nodes aside.)
+                Ok(ch) if !ch.is_empty() && !self.round_reader => {
+                    self.sh.memo.note_change(ch, false, Vec::new());
+                    continue;
+                }
                 Ok(ch) if !ch.is_empty() => {
+                    self.sh
+                        .memo
+                        .note_change(ch.clone(), true, std::mem::take(&mut self.round_readers));
                     rep.round_times.push(close(&self.sh, &mark));
                     mark = snap(&self.sh);
                     rounds += 1;
+                    self.sh.memo.next_round(u32::try_from(rounds).unwrap_or(u32::MAX - 1));
                     #[cfg(feature = "observe")]
                     tracing::debug!(target: "defuse", event = "round", round = rounds);
                     if rounds > self.max_rounds {
@@ -272,6 +332,7 @@ impl Engine {
                         // them and change nothing); the final phase next.
                         *self.sh.loop_vals.write() = vals;
                         rounds = self.max_rounds;
+                        self.sh.memo.next_round(u32::try_from(rounds).unwrap_or(u32::MAX - 1));
                         capped = Some(ch);
                     }
                     continue;
@@ -285,6 +346,7 @@ impl Engine {
                 && !lock(&self.sh.held).is_empty()
             {
                 self.sh.final_phase.store(true, Ordering::Release);
+                self.sh.memo.next_round(super::memo::FINAL);
                 self.sh.release_final();
                 continue;
             }
@@ -319,8 +381,17 @@ impl Engine {
         };
         #[cfg(feature = "profile")]
         let mut tt = tail;
+        let quick = self.sh.memo.quick.load(Ordering::Acquire);
         if let Err(e) = result {
+            // (A quick path that failed falls back to the rounds, memo kept.)
+            if !quick {
+                self.sh.memo.drop_all();
+            }
             return Err(self.with_report(e, rep, rounds, restarts));
+        }
+        if self.sh.memo.on.load(Ordering::Relaxed) && !quick {
+            self.sh.memo.finish(rounds, capped.clone());
+            rep.memo_bytes = self.sh.memo.bytes();
         }
         let stalled = match self.classify_parked(&mut rep) {
             Ok(s) => s,
@@ -524,6 +595,20 @@ impl Engine {
     fn begin(&mut self, sched: &mut dyn Scheduler) {
         let sh = &self.sh;
         sh.final_phase.store(false, Ordering::Release);
+        let per_round = self.loop_start == LoopStart::PerRound;
+        if !per_round && sh.memo.on.load(Ordering::Relaxed) {
+            sh.memo.drop_all();
+        }
+        sh.memo.on.store(per_round, Ordering::Release);
+        // (The quick path records under the last evaluation's last round.)
+        let first = if sh.memo.quick.load(Ordering::Acquire) {
+            u32::try_from(sh.memo.prev_rounds.load(Ordering::Relaxed)).unwrap_or(1)
+        } else {
+            1
+        };
+        sh.memo.next_round(first);
+        sh.memo.hits.store(0, Ordering::Relaxed);
+        sh.memo.begin();
         sh.final_released.store(0, Ordering::Relaxed);
         // 0: no speculation; 1: on nodes with a prediction; 2: on any.
         // (Free-running workers ask the policy once, with a candidate of
@@ -659,16 +744,42 @@ impl Engine {
         // The round's end looks at every field again.
         lock(&self.sh.pubs_dirty).extend(self.sh.loops.keys().copied());
         for &f in &changed {
-            self.touch_loop_readers(f);
+            let _ = self.touch_loop_readers(f);
         }
         !changed.is_empty()
     }
 
-    fn touch_loop_readers(&self, f: Field) {
+    /// Touches the readers of loop-back `f`; whether one is not a final
+    /// node (a final node's read, made in the final phase, does not make a
+    /// round: a cold build's final nodes have not run when rounds turn).
+    fn touch_loop_readers(&mut self, f: Field) -> bool {
         let readers = lock(&self.sh.loop_readers).remove(&f).unwrap_or_default();
+        let mut live = false;
+        let mut live_ids = Vec::new();
+        // A reader stays subscribed while its log is current: touched, it
+        // may be confirmed without a commit (its value came back), and a
+        // later change must reach it still.
+        let mut keep = Vec::new();
         for (n, g) in readers {
+            let r = self.sh.rec(n);
+            let current = r.st() != S_FREE && r.lgen.load(Ordering::Acquire) == g;
+            if current {
+                keep.push((n, g));
+                // (Only a clean node's read is this round's: one still in
+                // work, parked behind a held final node say, read it under
+                // an earlier text or round.)
+                if r.st() == super::S_CLEAN && !r.data().stat.fin() {
+                    live = true;
+                    live_ids.push(self.sh.node_id(n).0);
+                }
+            }
             self.sh.touch(n, g, &Cause::Loop { field: f }, false);
         }
+        if !keep.is_empty() {
+            lock(&self.sh.loop_readers).entry(f).or_default().extend(keep);
+        }
+        self.round_readers.extend(live_ids);
+        live
     }
 
     /// Advances the loop-back fields to their published values; the ones
@@ -677,9 +788,11 @@ impl Engine {
         if self.sh.loops.is_empty() {
             return Ok(Vec::new());
         }
-        // Only the fields whose publications changed since the last round
-        // can move; one nobody publishes is back at its initial value.
-        let mut fields: Vec<Field> = lock(&self.sh.pubs_dirty).drain().collect();
+        // Every loop-back field is looked at (few; a field left out of the
+        // dirty set after an error or a reset would keep a stale value):
+        // one nobody publishes is back at its initial value.
+        lock(&self.sh.pubs_dirty).clear();
+        let mut fields: Vec<Field> = self.sh.loops.keys().copied().collect();
         fields.sort_by_key(|f| f.0.raw());
         let mut next: Vec<(Field, ValueId)> = Vec::new();
         {
@@ -687,7 +800,12 @@ impl Engine {
             for f in fields {
                 let mut vals: Vec<ValueId> = pubs.get(&f).map_or_else(Vec::new, |m| {
                     m.iter()
-                        .filter(|(s, _)| self.sh.rec(**s).st() != S_FREE && self.sh.rec(**s).st() != S_INERT)
+                        // Only a node whose committed result is current: one
+                        // still in work (a final node held unrun, a reader
+                        // parked behind it, a text not yet run) published
+                        // that under an earlier text or round; its next
+                        // commit replaces it, and the next round looks again.
+                        .filter(|(s, _)| self.sh.rec(**s).st() == super::S_CLEAN)
                         .map(|(_, v)| *v)
                         .collect()
                 });
@@ -721,9 +839,12 @@ impl Engine {
                 }
             }
         }
+        let mut live = false;
+        self.round_readers.clear();
         for &f in &changed {
-            self.touch_loop_readers(f);
+            live |= self.touch_loop_readers(f);
         }
+        self.round_reader = live;
         Ok(changed)
     }
 

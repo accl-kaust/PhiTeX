@@ -62,6 +62,10 @@ pub struct Engine {
     pub(crate) loop_start: LoopStart,
     pub(crate) max_rounds: u64,
     pub(crate) cap_policy: crate::api::CapPolicy,
+    /// The last `next_round` touched a reader that is not a final node.
+    pub(crate) round_reader: bool,
+    /// Its live readers (node ids), for the per-round memo.
+    pub(crate) round_readers: Vec<u64>,
     pub(crate) version: u64,
     pub(crate) settled_out: Vec<Settled>,
     /// The version every marked node was last made a report candidate at.
@@ -150,6 +154,7 @@ impl Shared {
             final_phase: AtomicBool::new(false),
             held: Mutex::new(Vec::new()),
             final_released: AtomicU64::new(0),
+            memo: super::memo::Memo::default(),
             c: super::Counters::default(),
             t: (0..super::STRIPES).map(|_| super::TallyShard::default()).collect(),
             #[cfg(feature = "observe")]
@@ -331,6 +336,8 @@ impl Engine {
             loop_start: LoopStart::Initial,
             max_rounds: 64,
             cap_policy: crate::api::CapPolicy::Error,
+            round_reader: false,
+            round_readers: Vec::new(),
             version: 0,
             settled_out: Vec::new(),
             report_version: None,
@@ -426,6 +433,11 @@ impl Engine {
 
     /// Appends a node at the end of `unit`.
     pub fn push(&mut self, unit: UnitId, op: OpId, args: Vec<ValueId>) -> NodeId {
+        self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
+        self.sh
+            .memo
+            .structural
+            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&unit, &op, &args))
@@ -450,6 +462,11 @@ impl Engine {
     /// A batch: the texts' static facts (the operation's hooks) are taken
     /// on several threads, then the nodes are linked under one writer.
     pub fn push_many(&mut self, unit: UnitId, op: OpId, args: Vec<Vec<ValueId>>) -> Vec<NodeId> {
+        self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
+        self.sh
+            .memo
+            .structural
+            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let recording = crate::record::rec().is_some();
         #[cfg(not(feature = "observe"))]
@@ -484,6 +501,11 @@ impl Engine {
     ///
     /// If `node` is not a live node.
     pub fn insert_after(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
+        self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
+        self.sh
+            .memo
+            .structural
+            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&node, &op, &args))
@@ -511,6 +533,11 @@ impl Engine {
     ///
     /// If `node` is not a live node.
     pub fn insert_before(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
+        self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
+        self.sh
+            .memo
+            .structural
+            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&node, &op, &args))
@@ -533,6 +560,7 @@ impl Engine {
 
     /// Replaces a node's text; the node keeps its id.
     pub fn replace(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) {
+        self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&node, &op, &args))
@@ -558,6 +586,10 @@ impl Engine {
             sh.unregister_named(s);
             sh.leave_work_lists(s);
             let old_static_claim = r.data().stat.claim;
+            let old_shape = {
+                let st = &r.data().stat;
+                (st.defs.clone(), st.may.clone(), st.effect, st.claim, st.fin())
+            };
             {
                 let mut d = r.data();
                 d.op = op;
@@ -574,6 +606,7 @@ impl Engine {
             let st = r.st();
             if st == S_INERT {
                 // Claimed: only the claimer sees the new text.
+                sh.memo.structural.store(true, Ordering::Release);
                 sh.analyze_into(s);
             } else {
                 // Declared definitions the new text no longer declares.
@@ -593,6 +626,15 @@ impl Engine {
                             sh.remove_def_k(u, s, f, k, &mut notes);
                         }
                     }
+                }
+                // A text whose declarations differ is a structural edit
+                // for the per-round memo (`LoopStart::PerRound`).
+                let same_shape = {
+                    let st = &r.data().stat;
+                    old_shape == (st.defs.clone(), st.may.clone(), st.effect, st.claim, st.fin())
+                };
+                if !same_shape {
+                    sh.memo.structural.store(true, Ordering::Release);
                 }
                 r.set(F_NEEDS_RUN);
                 {
@@ -618,6 +660,11 @@ impl Engine {
 
     /// Removes a node and its subtree.
     pub fn remove(&mut self, node: NodeId) {
+        self.sh.memo.edited.store(true, std::sync::atomic::Ordering::Release);
+        self.sh
+            .memo
+            .structural
+            .store(true, std::sync::atomic::Ordering::Release);
         #[cfg(feature = "observe")]
         let a = if crate::record::rec().is_some() {
             crate::record::j(&(&node,))

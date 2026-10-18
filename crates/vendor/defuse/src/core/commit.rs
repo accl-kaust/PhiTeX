@@ -316,6 +316,9 @@ impl Shared {
         if super::ltrace::on() {
             super::ltrace::commit(self, s, &cx.log);
         }
+        if self.memo.on.load(Ordering::Relaxed) {
+            self.memo_record(s, cx, out);
+        }
         if cx.log.iter().any(|p| matches!(p, Pred::Def { proj, .. } if *proj != 0)) {
             r.set(super::F_PROJREAD);
         } else {
