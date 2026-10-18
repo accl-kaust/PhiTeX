@@ -40,6 +40,23 @@ impl Atom {
     }
 }
 
+/// The atoms of a run of characters (token `tok`, at byte `start`) when
+/// it is ASCII: a byte a character, no decoding, no `~` to look for.
+/// Whether it was.
+fn ascii_chars(out: &mut Vec<Atom>, run: &str, tok: usize, start: usize) -> bool {
+    if !run.is_ascii() {
+        return false;
+    }
+    out.extend(run.bytes().enumerate().map(|(o, c)| Atom {
+        kind: AtomKind::Char(char::from(c)),
+        tok,
+        start: start + o,
+        end: start + o + 1,
+        mate: usize::MAX,
+    }));
+    true
+}
+
 pub(crate) fn atoms(text: &str, tokens: &[Token]) -> Vec<Atom> {
     // (at most one atom a byte: never grown)
     let mut out: Vec<Atom> = Vec::with_capacity(text.len() + 1);
@@ -80,19 +97,10 @@ pub(crate) fn atoms(text: &str, tokens: &[Token]) -> Vec<Atom> {
             TokKind::Text => {
                 line_blank = false;
                 skip_space = false;
-                let run = &text[t.start..t.end];
-                if !t.expl && run.is_ascii() {
-                    // (a byte a character: no decoding, no `~` to look for)
-                    out.extend(run.bytes().enumerate().map(|(o, c)| Atom {
-                        kind: AtomKind::Char(char::from(c)),
-                        tok: k,
-                        start: t.start + o,
-                        end: t.start + o + 1,
-                        mate: usize::MAX,
-                    }));
+                if !t.expl && ascii_chars(&mut out, &text[t.start..t.end], k, t.start) {
                     continue;
                 }
-                for (o, c) in run.char_indices() {
+                for (o, c) in text[t.start..t.end].char_indices() {
                     if t.expl && c == '~' {
                         out.push(Atom {
                             start: t.start + o,

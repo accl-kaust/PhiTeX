@@ -357,7 +357,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
                 &mut b,
             )?;
             // (a head without its twenty whole lines: the whole file)
-            if b.len() as u64 == MAGIC_HEAD && b.iter().filter(|&&c| c == b'\n').count() < 20 {
+            if b.len() as u64 == MAGIC_HEAD && b.split(|&c| c == b'\n').nth(20).is_none() {
                 return std::fs::read(p);
             }
             Ok(b)
