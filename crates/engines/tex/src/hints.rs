@@ -1736,6 +1736,9 @@ struct Analysis<'t> {
     visiting: std::cell::RefCell<Vec<String>>,
     /// The format's definitions, behind the text's own.
     prelude: Defs,
+    /// The hash of each of the pass's regimes' content (a run's key
+    /// across texts, [`run_hint`]).
+    reg_hash: Vec<u64>,
 }
 
 /// Names that start a paragraph in vertical mode (§1090): the text
@@ -1911,6 +1914,15 @@ impl Analysis<'_> {
             structural.push(u(k));
         }
         let in_align = align_atoms(text, &p.atoms, &structural);
+        let reg_hash = p
+            .regimes
+            .iter()
+            .map(|r| {
+                let mut h = phitex_defuse::FxHasher::default();
+                std::hash::Hash::hash(&r.1, &mut h);
+                std::hash::Hasher::finish(&h)
+            })
+            .collect();
         Analysis {
             text,
             p,
@@ -1924,6 +1936,7 @@ impl Analysis<'_> {
             memo: std::cell::RefCell::new(FxHashMap::default()),
             visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
+            reg_hash,
         }
     }
 
@@ -2940,10 +2953,11 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
 }
 
 thread_local! {
-    /// The bounds of runs of characters by their key ([`Analysis::run_key`]
+    /// The hints of runs of characters by their key ([`Analysis::run_key`]
     /// with the regime's content for its index): a pure function of the
-    /// key, so one chunk's run serves the others.
-    static RUN_BOUNDS: std::cell::RefCell<FxHashMap<(u64, u64, u8), Bound>> =
+    /// key, so one chunk's run serves the others (without excerpts, the
+    /// traces', the hint is the same value).
+    static RUN_BOUNDS: std::cell::RefCell<FxHashMap<(u64, u64, u8), Arc<Hint>>> =
         std::cell::RefCell::default();
 }
 
@@ -2952,35 +2966,31 @@ thread_local! {
 /// its bound shared with every chunk that has the run under the same
 /// regime ([`RUN_BOUNDS`]).
 #[inline(never)]
-fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) -> Hint {
-    let reg = an.p.regimes.get(key.1).map_or(0, |r| {
-        let mut h = phitex_defuse::FxHasher::default();
-        std::hash::Hash::hash(&r.1, &mut h);
-        std::hash::Hasher::finish(&h)
-    });
+fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) -> Arc<Hint> {
+    let reg = an.reg_hash.get(key.1).copied().unwrap_or(0);
     let gkey = (key.0, reg, key.2);
     let excerpt = short(excerpt_at(an.text, start));
-    if let Some(b) = RUN_BOUNDS.with(|c| c.borrow().get(&gkey).cloned()) {
-        return Hint {
-            bound: Some(b),
-            cause: "bounded".to_owned(),
+    if let Some(h) = RUN_BOUNDS.with(|c| c.borrow().get(&gkey).cloned()) {
+        // (the cached hint, its excerpt this run's)
+        if h.excerpt == excerpt {
+            return h;
+        }
+        return Arc::new(Hint {
             excerpt,
-            guess: None,
-        };
+            ..(*h).clone()
+        });
     }
     let h = an.hint(a);
     // (kept when it has the shape the hit rebuilds: bounded, no guess)
-    if let Some(b) = &h.bound
-        && h.guess.is_none()
-        && h.cause == "bounded"
-        && h.excerpt == excerpt
-    {
+    let keep = h.bound.is_some() && h.guess.is_none() && h.cause == "bounded" && h.excerpt == excerpt;
+    let h = Arc::new(h);
+    if keep {
         RUN_BOUNDS.with(|c| {
             let mut c = c.borrow_mut();
             if c.len() >= 1 << 16 {
                 c.clear();
             }
-            c.insert(gkey, b.clone());
+            c.insert(gkey, h.clone());
         });
     }
     h
@@ -3025,7 +3035,7 @@ fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>
             );
             let h = runs
                 .entry(key)
-                .or_insert_with(|| Arc::new(run_hint(an, a, key, at.start)))
+                .or_insert_with(|| run_hint(an, a, key, at.start))
                 .clone();
             hints.push(Some(h));
             skip.push(false);
