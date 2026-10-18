@@ -82,8 +82,9 @@ fn hyphenate_all(
     lang: LangState,
     hyphenator: &mut dyn Hyphenator,
     fonts: &dyn Fonts,
+    edits: &mut Vec<(usize, usize, List)>,
 ) -> List {
-    let mut edits: Vec<(usize, usize, List)> = Vec::new();
+    edits.clear();
     let mut lang = lang;
     let mut auto_breaking = true;
     for (at, n) in list.iter().enumerate() {
@@ -109,7 +110,7 @@ fn hyphenate_all(
     }
     let extra: usize = edits.iter().map(|e| e.2.len()).sum();
     let mut out = List::with_capacity(list.len() + extra);
-    let mut edits = edits.into_iter().peekable();
+    let mut edits = edits.drain(..).peekable();
     let mut skip_to = 0;
     for (k, n) in list.into_iter().enumerate() {
         if k < skip_to {
@@ -275,6 +276,20 @@ struct Active {
     alpha: Widths,
     short: Scaled,
     glue: Scaled,
+}
+
+/// The vectors a paragraph's breaking fills, kept per thread from one
+/// paragraph to the next (cleared, not freed).
+#[derive(Default)]
+struct Pool {
+    active: Vec<Active>,
+    passive: Vec<Passive>,
+    edits: Vec<(usize, usize, List)>,
+    breaks: Vec<Option<usize>>,
+}
+
+thread_local! {
+    static POOL: std::cell::Cell<Option<Box<Pool>>> = const { std::cell::Cell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -715,13 +730,14 @@ pub fn line_break(
     let mut background = [0i64; 6];
     add_glue(&mut background, &left_skip, 1);
     add_glue(&mut background, &right_skip, 1);
+    let mut pool = POOL.take().unwrap_or_default();
     let mut b = Breaker {
         p: params,
         fonts,
         background,
         total: [0; 6],
-        active: Vec::new(),
-        passive: Vec::new(),
+        active: std::mem::take(&mut pool.active),
+        passive: std::mem::take(&mut pool.passive),
         minimal_demerits: [AWFUL_BAD; 4],
         minimum_demerits: AWFUL_BAD,
         best_place: [None; 4],
@@ -803,7 +819,7 @@ pub fn line_break(
             b.threshold = INF_BAD;
         }
         if b.second_pass && !hyphenated {
-            list = hyphenate_all(list, params.lang, hyphenator, fonts);
+            list = hyphenate_all(list, params.lang, hyphenator, fonts, &mut pool.edits);
             hyphenated = true;
         }
         // §864
@@ -959,7 +975,8 @@ pub fn line_break(
         g.spec.stretch = 0;
     }
     // §878: the breaks, first to last
-    let mut breaks = Vec::new();
+    let mut breaks = std::mem::take(&mut pool.breaks);
+    breaks.clear();
     let mut q = best.passive;
     while let Some(k) = q {
         breaks.push(b.passive[k].cur_break);
@@ -976,6 +993,12 @@ pub fn line_break(
         left_skip,
         right_skip,
     );
+    pool.breaks = breaks;
+    b.active.clear();
+    b.passive.clear();
+    pool.active = b.active;
+    pool.passive = b.passive;
+    POOL.set(Some(pool));
     Paragraph {
         lines,
         prev_graf: best.line_number - 1,

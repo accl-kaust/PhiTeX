@@ -1049,13 +1049,12 @@ impl Run<'_, '_> {
         let v = self.v;
         let t0 = crate::prof::start();
         let mut side = Side::default();
-        let list: List = items
-            .into_iter()
-            .filter_map(|x| match x {
-                crate::nest::Item::N(n) => Some(n),
-                crate::nest::Item::V(x) => nodes::decode(v, x, &mut side),
-            })
-            .collect();
+        // (room for the two nodes line breaking appends, §816)
+        let mut list: List = List::with_capacity(items.len() + 2);
+        list.extend(items.into_iter().filter_map(|x| match x {
+            crate::nest::Item::N(n) => Some(n),
+            crate::nest::Item::V(x) => nodes::decode(v, x, &mut side),
+        }));
         crate::prof::add(crate::prof::LB_DEC, t0);
         let t0 = crate::prof::start();
         let view = self.font_view(&list)?;
@@ -1123,7 +1122,7 @@ impl Run<'_, '_> {
             }
         }
         let uc_hyph = self.ipar(Par::uchyph)?;
-        let hyphen = view.hyphen.clone();
+        let hyphen = &view.hyphen;
         let lcf = |c: u16| lc.get(usize::from(c)).copied().unwrap_or(0);
         let hcf = |f: u32| hyphen.get(&f).copied().unwrap_or(-1);
         let mut hy = phitex_typeset::hyph::TexHyphenator {
@@ -1137,7 +1136,10 @@ impl Run<'_, '_> {
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
         crate::prof::add(crate::prof::LB_TS, t0);
         let t0 = crate::prof::start();
-        let just_box = para.lines.last().map(|l| l.packed.node.clone());
+        // (the last line, for a display that interrupts the paragraph:
+        // moved out once encoded)
+        let mut just_box = None;
+        let last = para.lines.len().wrapping_sub(1);
         // (the interline glue parameters in force for every line, §679:
         // nothing between the lines changes them)
         let bs = crate::val::glue_value(v, &self.gpar(Par::baselineskip)?);
@@ -1145,7 +1147,7 @@ impl Run<'_, '_> {
         let lsl = v.int(i64::from(self.ipar(Par::lineskiplimit)?));
         let tv = v.int(nodes::T_VBOX);
         let mut out = Vec::with_capacity(para.lines.len() * 2);
-        for line in para.lines {
+        for (k, line) in para.lines.into_iter().enumerate() {
             self.box_report(true, line.packed.report, true);
             let b = nodes::encode_box(v, &line.packed.node, &side);
             out.push(v.list(vec![tv, b, bs, ls, lsl]));
@@ -1154,6 +1156,9 @@ impl Run<'_, '_> {
             }
             if let Some(p) = line.penalty {
                 out.push(nodes::penalty_node(v, p));
+            }
+            if display && k == last {
+                just_box = Some(line.packed.node);
             }
         }
         // the paragraph's lines: one contribution
