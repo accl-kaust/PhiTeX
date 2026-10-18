@@ -119,8 +119,15 @@ pub(crate) const SCAN: &str = "scan:state";
 
 /// Where a block's scan ended its block ([`Run::scan_step`]): `[scan
 /// state, material]` after its last page, `()` where a continuation of it
-/// places the next page itself; read by the next block's scan.
+/// places the next page itself, `[BLOCK_AT_CONT]` where its last page's
+/// continuation sits after it (the page fired in the piece that placed
+/// the scan) and defines the state ([`SCAN`], [`SCAN_MAT`]) the next
+/// block's scan reads; read by the next block's scan.
 pub(crate) const SCAN_BLOCK: &str = "scan:block";
+
+/// [`SCAN_BLOCK`]'s mark for a block whose end is its last page's
+/// continuation's.
+const BLOCK_AT_CONT: i64 = -1;
 
 /// Where page `j`'s continuation, placed by the block's scan `placer`,
 /// leaves the scan (`scan:page:<j>:<placer>`): `[state, material,
@@ -4367,12 +4374,13 @@ impl Run<'_, '_> {
 
     /// The profiles of the window from scan state `src`'s anchor to
     /// this node folded with the page builder: the first page firing in
-    /// them, `(piece, the fire, the builder after it)`.
+    /// them, `(piece, the fire, the builder after it, whether the piece
+    /// is the window's last)`.
     #[allow(clippy::too_many_lines, clippy::type_complexity)]
     fn scan_window(
         &mut self,
         src: Option<ValueId>,
-    ) -> R<Option<(i64, crate::vprof::ScanFire, crate::vprof::ScanState)>> {
+    ) -> R<Option<(i64, crate::vprof::ScanFire, crate::vprof::ScanState, bool)>> {
         let v = self.v;
         let s = ScanIn::decode(v, src);
         let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
@@ -4493,7 +4501,7 @@ impl Run<'_, '_> {
                 let f = st.fold_items(&items, dead, &mut rd);
                 clean = clean && !needs[i] && rd.0.reach_reads == reads0;
                 if let Some(f) = f {
-                    out = Some((pid, f));
+                    out = Some((pid, f, i == last));
                     break;
                 }
                 if clean && i < last {
@@ -4508,7 +4516,7 @@ impl Run<'_, '_> {
             }
             (out, st)
         };
-        Ok(scan_fire.map(|(pid, sf)| (pid, sf, st)))
+        Ok(scan_fire.map(|(pid, sf, in_last)| (pid, sf, st, in_last)))
     }
 
     /// A block's scan (spec-final §9b): placed after the last piece of a
@@ -4546,6 +4554,13 @@ impl Run<'_, '_> {
                     .define_with(v.field(SCAN_BLOCK), ValueId::UNIT, Locality::Global);
                 return Ok(Placed::Nothing);
             }
+            // (the block before ended in a page whose continuation sits
+            // after its scan: the state that continuation defines, on its
+            // prediction until it runs)
+            Some(x) if list_of(v, x).len() == 1 => (
+                self.eng_read(v.field(SCAN))?,
+                self.eng_read(v.field(SCAN_MAT))?,
+            ),
             Some(x) => {
                 let xs = list_of(v, x);
                 (
@@ -4558,12 +4573,20 @@ impl Run<'_, '_> {
         let mut placed = Placed::Nothing;
         let trace = crate::exec::obs_flag!("PHITEX_SCAN_TRACE");
         let mut known = true;
+        let mut after_me = false;
         // (a bound on the pages one block fires: a page fires on some
         // item, and an item's page goes on in a later piece at most)
         for _ in 0..4096 {
-            let Some((pid, sf, st)) = self.scan_window(src)? else {
+            let Some((pid, sf, st, in_last)) = self.scan_window(src)? else {
                 break;
             };
+            // (a page firing in the window's last piece, the one whose
+            // run placed this step: its continuation sits after this
+            // step (in that piece's extent), where this step's reads do
+            // not reach; the next block's scan reads the scan state that
+            // continuation defines instead of this step's prediction of
+            // it, [`SCAN_BLOCK`])
+            after_me = in_last;
             if trace {
                 eprintln!(
                     "scan {}: page {} fires in piece {pid} at candidate {}",
@@ -4642,13 +4665,15 @@ impl Run<'_, '_> {
                 self.cx.is_speculative()
             );
         }
-        let end = if known {
+        let end = if !known {
+            ValueId::UNIT
+        } else if after_me {
+            v.list(vec![v.int(BLOCK_AT_CONT)])
+        } else {
             v.list(vec![
                 src.unwrap_or(ValueId::UNIT),
                 mat.unwrap_or(ValueId::UNIT),
             ])
-        } else {
-            ValueId::UNIT
         };
         self.cx
             .define_with(v.field(SCAN_BLOCK), end, Locality::Global);
