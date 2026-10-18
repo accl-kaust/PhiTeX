@@ -21,6 +21,7 @@ const CAP: u64 = 6;
 /// Memo hits and runs over the watch evaluations of a test.
 static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct Ops;
 
@@ -342,12 +343,14 @@ fn histories_mix(
             if let Ok(r) = &rep {
                 HITS.fetch_add(r.round_times.iter().map(|t| t.memo_hits).sum::<u64>(), Relaxed);
                 RUNS.fetch_add(r.runs, Relaxed);
+                HELD.fetch_add(u64::from(r.quick_held), Relaxed);
             }
             let (got, want) = (norm(seen(&eng, &ids, &rep)), norm(cold(&texts, sched + step)));
             if std::env::var_os("LOOP_TRACE").is_some() {
                 eprintln!(
-                    "step {step}: {texts:?}\n  got  {got:?}\n  want {want:?}\n  rep rounds {:?} restarts {:?}",
+                    "step {step}: {texts:?}\n  got  {got:?}\n  want {want:?}\n  rep rounds {:?} quick {:?} restarts {:?}",
                     rep.as_ref().map(|r| r.rounds),
+                    rep.as_ref().map(|r| (r.quick_held, r.quick_refused.clone())),
                     rep.as_ref().map(|r| r.restarts)
                 );
             }
@@ -406,9 +409,14 @@ fn per_round_many_histories() {
 #[test]
 fn per_round_quick_path_histories_equal_cold_builds() {
     // (Few publishers: most edits take the quick path.)
+    let before = HELD.load(Relaxed);
     if let Some(m) = histories_mix(LoopStart::PerRound, 5000..5300, true, true, true) {
         panic!("{m}");
     }
+    let held = HELD.load(Relaxed) - before;
+    eprintln!("per-round: the quick path held {held} times");
+    // (Exactness was not bought by never taking it.)
+    assert!(held > 0, "the quick path never held");
 }
 
 #[test]
@@ -420,4 +428,17 @@ fn per_round_watch_builds_equal_cold_builds_round_for_round() {
     eprintln!("per-round: {h} memo hits, {r} runs over the watch evaluations");
     // (The memo was used: exactness was not bought by running everything.)
     assert!(h > 0, "no memo hit");
+}
+
+#[test]
+fn per_round_quick_path_known_histories() {
+    // 2753: a publisher of a loop-back that moved (`keep lb 3`, one entry
+    // after a failed evaluation) re-texted to `keep lb 2`; from the last
+    // fixed point it publishes 3 again in one round, from the initial
+    // value lb settles at 2: the quick path must not hold.
+    for seed in [2753] {
+        if let Some(m) = histories(LoopStart::PerRound, seed..seed + 1, true, true) {
+            panic!("{m}");
+        }
+    }
 }
