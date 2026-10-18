@@ -1676,17 +1676,28 @@ impl phitex_defuse::Operation for PdfPage {
 /// Each shipped page's allocations as pdfTeX makes them at `\\shipout`
 /// (pdfTeX §752–§768), contributed by the page's write side (its
 /// finisher, every round) where it ships: `[fixed, [font names],
-/// [destination names], [shipout fonts], compressible]`: the objects the
-/// page always takes (its object unless a `\\pdfpageref` made it, its
-/// contents, its resources), the fonts it uses by name (an object for
-/// each name first used), the destinations it makes or links to (an
-/// object for each first named), the fonts the shipout itself loads (a
-/// virtual font's local fonts, `pdftexspace`: pdfTeX's font numbers after
-/// them), and the objects it writes into object streams (a stream's own
-/// object every 100, `\\pdfobjcompresslevel` above 0). A read-time
-/// command's object number is TeX's count of the read-time allocations
-/// before it plus the fold of this over the line before it
-/// ([`page_offset`]): an in-round value, no loop-back.
+/// [destination names], [shipout fonts], compressible, read-time count,
+/// [read-time fonts], [read-time destinations], read-time object stream
+/// writes, [mark events], node]`: the objects the page always takes (its
+/// object unless a `\\pdfpageref` made it, its contents, its resources),
+/// the fonts it uses by name (an object for each name first used), the
+/// destinations it defines (an object for each first named; each first
+/// defined written into an object stream), the fonts the shipout itself
+/// loads (a virtual font's local fonts, `pdftexspace`: pdfTeX's font
+/// numbers after them), and the objects it writes into object streams
+/// besides its destinations (its dictionary, its resources, its
+/// annotations; a stream's own object every 100, `\\pdfobjcompresslevel`
+/// above 0). A read-time command's object number is TeX's count of the
+/// read-time allocations before it plus the fold of this over the line
+/// before it ([`page_offset`]): an in-round value, no loop-back.
+///
+/// The read-time count before the page is in the entry only where the
+/// run that ships it has read it already (its own read-time commands
+/// before the `\\shipout`); otherwise it is -1, and the one reader that
+/// needs it (`\\pdfpageref` of a shipped page, [`shipped_page_obj`])
+/// reads it before the shipping node: a finisher does not read the
+/// count, so an edit that changes it does not run the finishers after
+/// it again.
 pub(crate) const ALLOCS: &str = "pdf:alloc";
 
 /// The page's allocations ([`ALLOCS`]), from the write side: its box's
@@ -1735,15 +1746,22 @@ pub(crate) fn page_allocs(
         ship_fonts.push(v.str("pdftexspace@0"));
     }
     // (the page's dictionary and resources, and each annotation it
-    // writes, go into an object stream where they compress)
+    // writes, go into an object stream where they compress; its
+    // destinations too, counted by the fold where first defined)
     let compressible = if r.param("pdfobjcompresslevel")? > 0 {
         2 + annots
     } else {
         0
     };
     // (the read-time objects made before the page: its own object's
-    // number, after its resources', counts them)
-    let read_time = r.cint(crate::fields::cell::PDF_OBJNUM)?;
+    // number, after its resources', counts them; read here only where
+    // this run read the count before the shipout, else by the reader
+    // that needs it, before this node)
+    let read_time = if r.st.is_loaded(crate::fields::cell::PDF_OBJNUM) {
+        r.cint(crate::fields::cell::PDF_OBJNUM)?
+    } else {
+        -1
+    };
     let rt_fonts = r.get(RT_FONTS)?.unwrap_or_else(|| v.list(Vec::new()));
     let rt_dests = r.get(RT_DESTS)?.unwrap_or_else(|| v.list(Vec::new()));
     let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
@@ -1758,6 +1776,7 @@ pub(crate) fn page_allocs(
         rt_dests,
         rt_os,
         marks,
+        v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())),
     ]);
     r.contribute(ALLOCS, v.seq_unit(e));
     Ok(())
@@ -1768,15 +1787,16 @@ pub(crate) fn page_allocs(
 /// `[0, level, n]` n hboxes entered at `level` since the mark before
 /// (the state the same for all of them; a link running at that
 /// level continues in each, `append_link`: an object a piece);
-/// `[1, level, kind, id]` a link started (`do_link`; its action's
-/// target, `kind` 2 a thread, 0 otherwise, is got when each piece is
-/// written); `[2]` a link ended; `[3, on]` running links
-/// on or off; `[4, level, n]` n vboxes entered at `level` (a thread
-/// continues in each, `append_thread`); `[5, start, level, running,
-/// id]` a thread's bead (`do_thread`: the bead and its rectangle's
-/// object, the thread's own where first named); `[6]` a thread ended.
-/// The state they act on (the link stack, the thread) runs on over the
-/// pages, so the fold of the line ([`fold_allocs`]) counts them.
+/// `[1, level, kind, target]` a link started (`do_link`; its action's
+/// target, got when each piece is written: `kind` 1 a destination, 2 a
+/// thread, 3 a page by number, 0 none); `[2]` a link ended; `[3, on]`
+/// running links on or off; `[4, level, n]` n vboxes entered at `level`
+/// (a thread continues in each, `append_thread`); `[5, start, level,
+/// running, id]` a thread's bead (`do_thread`: the bead and its
+/// rectangle's object, the thread's own where first named); `[6]` a
+/// thread ended. The state they act on (the link stack, the thread)
+/// runs on over the pages, so the fold of the line ([`fold_allocs`])
+/// counts them.
 fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>) -> ValueId {
     struct Walk<'a> {
         v: &'a Values,
@@ -1814,12 +1834,18 @@ fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>) -> 
                     let a = ys.get(6).map(|&a| list_of(v, a)).unwrap_or_default();
                     let ak = a.first().map(|&k| str_of(v, k)).unwrap_or_default();
                     let local = a.get(1).is_none_or(|&f| str_of(v, f).is_empty());
+                    let page = a.get(2).copied().filter(|&p| p != ValueId::UNIT);
                     let id = a.get(3).copied().unwrap_or(ValueId::UNIT);
-                    let target = match ak.as_str() {
-                        "thread" if local => 2,
-                        _ => 0,
+                    let named = !list_of(v, id).is_empty();
+                    let (target, what) = match (ak.as_str(), page) {
+                        ("goto", Some(p)) if local => {
+                            (3, v.int(list_of(v, p).first().map_or(0, |&n| int_of(v, n))))
+                        }
+                        ("goto", None) if local && named => (1, id),
+                        ("thread", _) if local && named => (2, id),
+                        _ => (0, ValueId::UNIT),
                     };
-                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), id]);
+                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), what]);
                 }
                 "pdf:endlink" if !vertical => self.push(vec![v.int(2)]),
                 "rloff" => self.push(vec![v.int(3), v.int(0)]),
@@ -1945,7 +1971,10 @@ pub(crate) fn os_write(r: &mut Run<'_, '_>) -> R<()> {
 
 /// Page `n`'s object (`\\pdfpageref n`) where that page shipped before
 /// this run and no reference made its object first: pdfTeX makes its
-/// resources' object, then the page's (pdfTeX §752).
+/// resources' object, then the page's (pdfTeX §752). The read-time
+/// objects before it are the count the shipping run had where it
+/// shipped: in the page's entry when that run read it, else the count
+/// reaching the shipping node ([`ALLOCS`]).
 pub(crate) fn shipped_page_obj(r: &mut Run<'_, '_>, n: i32) -> R<Option<i64>> {
     if r.param("pdfoutput")? <= 0 {
         return Ok(None);
@@ -1953,10 +1982,23 @@ pub(crate) fn shipped_page_obj(r: &mut Run<'_, '_>, n: i32) -> R<Option<i64>> {
     let v = r.v;
     let range = r.cx.acc_range(v.field(ALLOCS), None)?;
     let f = fold_allocs(v, range);
-    Ok(usize::try_from(n - 1)
+    let Some(&(rt, node, after)) = usize::try_from(n - 1)
         .ok()
-        .and_then(|k| f.page_objs.get(k).copied())
-        .filter(|&o| o > 0))
+        .and_then(|k| f.page_objs.get(k))
+        .filter(|o| o.2 > 0)
+    else {
+        return Ok(None);
+    };
+    if rt >= 0 {
+        return Ok(Some(rt + after));
+    }
+    let field = r.loc_field(crate::fields::cell::PDF_OBJNUM);
+    let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(node.to_ne_bytes()));
+    let rt = match r.cx.use_field_before(field, at)? {
+        phitex_defuse::FieldAt::Def(x, _) => v.as_int(x).unwrap_or(0),
+        _ => 0,
+    };
+    Ok(Some(rt + after))
 }
 
 /// The fold of the pages' allocations ([`ALLOCS`]) over a range: the
@@ -1965,8 +2007,10 @@ pub(crate) fn shipped_page_obj(r: &mut Run<'_, '_>, n: i32) -> R<Option<i64>> {
 struct AllocFold {
     objects: i64,
     ship_fonts: i64,
-    /// Each page's object (0: one a reference made before it).
-    page_objs: Arc<Vec<i64>>,
+    /// Each page's object: the read-time count where it shipped (-1:
+    /// not in the entry), its shipping node, and the page-side objects
+    /// before it plus 2 (0: an object a reference made before it).
+    page_objs: Arc<Vec<(i64, i64, i64)>>,
     /// The font names the pages used.
     fonts: Arc<BTreeSet<ValueId>>,
     /// The destinations the pages made.
@@ -1989,6 +2033,12 @@ struct MarkState {
     /// A bead on this page (`last_thread`).
     thread_last: bool,
     threads: BTreeSet<ValueId>,
+    /// The pages whose objects a link's action made before they
+    /// shipped (`get_obj(obj_type_page, n)`).
+    premade: BTreeSet<i64>,
+    /// The page being shipped (from 1): its object and those before
+    /// exist.
+    page: i64,
 }
 
 /// What a page's marks made: objects, and of them those written into an
@@ -2020,12 +2070,14 @@ impl MarkState {
                     for (kind, target) in pieces {
                         made.objects += n(2);
                         made.compressible += n(2);
-                        made.objects += self.target(kind, target, dests);
+                        if n(2) > 0 {
+                            made.objects += self.target(v, kind, target, dests);
+                        }
                     }
                 }
                 1 => {
                     self.links.push((n(1), n(2), id(3)));
-                    made.objects += self.target(n(2), id(3), dests);
+                    made.objects += self.target(v, n(2), id(3), dests);
                 }
                 2 => {
                     self.links.pop();
@@ -2059,12 +2111,17 @@ impl MarkState {
         made
     }
 
-    /// A link piece's action target got (`get_obj`): an object where it
-    /// is named first.
-    fn target(&mut self, kind: i64, id: ValueId, dests: &mut BTreeSet<ValueId>) -> i64 {
+    /// A link piece's action target got (`get_obj` as the piece is
+    /// written): an object where it is named first (a page's where it
+    /// has not shipped and nothing made it).
+    fn target(&mut self, v: &Values, kind: i64, id: ValueId, dests: &mut BTreeSet<ValueId>) -> i64 {
         let new = match kind {
             1 => dests.insert(id),
             2 => self.threads.insert(id),
+            3 => {
+                let p = v.as_int(id).unwrap_or(0);
+                p > self.page && self.premade.insert(p)
+            }
             _ => false,
         };
         i64::from(new)
@@ -2081,19 +2138,26 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         return x.clone();
     }
     let mut out = AllocFold::default();
-    let mut page_objs: Vec<i64> = Vec::new();
+    let mut page_objs: Vec<(i64, i64, i64)> = Vec::new();
     let mut written = 0i64;
     let mut seen: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_dest: BTreeSet<ValueId> = BTreeSet::new();
+    // (the destinations defined: each written once, where first defined;
+    // another definition is ignored, pdfTeX's "duplicate ignored")
+    let mut defined: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_ship: BTreeSet<ValueId> = BTreeSet::new();
     let mut ms = MarkState::default();
     for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
         let xs = list_of(v, e);
         let i = |k: usize| xs.get(k).and_then(|&x| v.as_int(x)).unwrap_or(0);
         let l = |k: usize| xs.get(k).map(|&x| list_of(v, x)).unwrap_or_default();
-        // (the page's own object, after its resources' one)
-        page_objs.push(if i(0) >= 3 { i(5) + out.objects + 2 } else { 0 });
-        out.objects += i(0);
+        let pno = i64::try_from(pages).unwrap_or(i64::MAX - 1) + 1;
+        ms.page = pno;
+        // (the page's own object, after its resources' one, unless a
+        // reference or a link's action made it before)
+        let fixed = if ms.premade.contains(&pno) { 2 } else { i(0) };
+        page_objs.push((i(5), i(10), if fixed >= 3 { out.objects + 2 } else { 0 }));
+        out.objects += fixed;
         // (a pages-tree node every `pages_tree_kids_max` pages)
         if pages % 6 == 0 {
             out.objects += 1;
@@ -2111,9 +2175,13 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         for d in l(7) {
             seen_dest.insert(d);
         }
+        let mut dests_written = 0i64;
         for d in l(2) {
             if seen_dest.insert(d) {
                 out.objects += 1;
+            }
+            if defined.insert(d) {
+                dests_written += 1;
             }
         }
         for f in l(3) {
@@ -2122,15 +2190,15 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
             }
         }
         // (the marks' objects past the fixed ones, `mark_events`: a link
-        // piece each, a bead and its rectangle each, a destination or
-        // thread a piece's action or a bead names first)
+        // piece each, a bead and its rectangle each, a destination,
+        // thread or page a piece's action or a bead names first)
         let made = ms.page(v, &l(9), &mut seen_dest);
         out.objects += made.objects;
         // (the read-time writes into object streams before the page
-        // count toward a stream's 100; a link piece's and a bead
-        // rectangle's object go into one too)
+        // count toward a stream's 100; a link piece's, a bead
+        // rectangle's and a destination's object go into one too)
         let os = if i(4) > 0 {
-            i(4) + made.compressible
+            i(4) + made.compressible + dests_written
         } else {
             0
         };
