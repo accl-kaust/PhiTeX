@@ -5728,20 +5728,54 @@ impl phitex_defuse::Monoid for LinesMonoid {
         if ys.is_empty() {
             return a;
         }
-        let mut m: std::collections::BTreeMap<String, (ValueId, i64)> =
-            std::collections::BTreeMap::new();
-        for e in xs.iter().chain(ys.iter()) {
-            let p = list_of(v, *e);
-            if let (Some(&n), Some(&k)) = (p.first(), p.get(1)) {
-                let x = m.entry(str_of(v, n)).or_insert((n, 0));
-                x.1 += int_of(v, k);
+        // (both sorted by name: merged in one walk, the names compared
+        // borrowed, no string made)
+        let pair = |e: ValueId| {
+            v.with_list(e, |p| (p.first().copied(), p.get(1).copied()))
+                .unwrap_or((None, None))
+        };
+        let cmp = |a: ValueId, b: ValueId| {
+            if a == b {
+                return std::cmp::Ordering::Equal;
+            }
+            v.with_str(a, |x| v.with_str(b, |y| x.cmp(y)))
+                .flatten()
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        let mut out: Vec<ValueId> = Vec::with_capacity(xs.len() + ys.len());
+        let mut last: Option<(ValueId, i64)> = None;
+        let (mut i, mut j) = (0, 0);
+        let mut push = |n: ValueId, k: i64, out: &mut Vec<ValueId>| match &mut last {
+            Some((m, c)) if cmp(*m, n).is_eq() => *c += k,
+            _ => {
+                if let Some((m, c)) = last.replace((n, k)) {
+                    out.push(v.list(vec![m, v.int(c)]));
+                }
+            }
+        };
+        while i < xs.len() || j < ys.len() {
+            let a = xs.get(i).map(|&e| pair(e));
+            let b = ys.get(j).map(|&e| pair(e));
+            let take_a = match (a, b) {
+                (Some((Some(na), _)), Some((Some(nb), _))) => !cmp(na, nb).is_gt(),
+                (Some(_), _) => true,
+                _ => false,
+            };
+            let (n, k) = if take_a {
+                i += 1;
+                a.unwrap_or((None, None))
+            } else {
+                j += 1;
+                b.unwrap_or((None, None))
+            };
+            if let (Some(n), Some(k)) = (n, k) {
+                push(n, int_of(v, k), &mut out);
             }
         }
-        v.list(
-            m.into_values()
-                .map(|(n, k)| v.list(vec![n, v.int(k)]))
-                .collect(),
-        )
+        if let Some((m, c)) = last {
+            out.push(v.list(vec![m, v.int(c)]));
+        }
+        v.list(out)
     }
 }
 
