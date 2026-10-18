@@ -1483,7 +1483,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let name = crate::val::field_name(self.v, f);
         // (`PHITEX_READS=<field>`: that field's reads, with the current
         // token and the token lists being read)
-        if let Ok(want) = std::env::var("PHITEX_READS")
+        if let Some(want) = crate::exec::env_str!("PHITEX_READS")
             && want == name
         {
             let v = self.v;

@@ -835,7 +835,7 @@ static STEP_LAST: std::sync::Mutex<Option<(std::time::Instant, usize)>> =
 
 impl StepTrace {
     fn enter(n: usize) -> StepTrace {
-        if std::env::var_os("PHITEX_STEP_TRACE").is_none() {
+        if !env_flag!("PHITEX_STEP_TRACE") {
             return StepTrace(None);
         }
         let now = std::time::Instant::now();

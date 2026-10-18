@@ -200,6 +200,12 @@ pub(crate) fn split_field(v: &Values, pid: i64, k: i64) -> Field {
     v.field(&format!("split:{}:{k}", pid.cast_unsigned()))
 }
 
+/// A location's value at a candidate in a piece's check data
+/// ([`Run::check_data`]) that the piece had neither read nor defined
+/// before: what reached the piece, which its page's finisher reads before
+/// it ([`phitex_defuse::Ctx::use_field_before`]).
+const BEFORE_PIECE: &str = "\u{1}before the piece";
+
 /// `max_dimen` (§421).
 pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
 
@@ -1643,11 +1649,13 @@ impl Run<'_, '_> {
                 per.push(v.list(vec![v.list(Vec::new()), v.int(0)]));
                 continue;
             }
-            let kv_of = |l: Loc| {
-                at.get(i)
-                    .and_then(|a| a.get(&l).copied())
-                    .flatten()
-                    .map_or(ValueId::UNIT, |x| v.list(x.into_iter().collect()))
+            // (`[value]` or `[]` (absent) where the run had it; one it had
+            // neither read nor defined before is what reached the piece,
+            // [`BEFORE_PIECE`], the finisher reads it there)
+            let kv_of = |l: Loc| match at.get(i).and_then(|a| a.get(&l).copied()) {
+                Some(Some(x)) => v.list(x.into_iter().collect()),
+                Some(None) => v.str(BEFORE_PIECE),
+                None => ValueId::UNIT,
             };
             let mut names: Vec<(ValueId, bool, ValueId)> = locals
                 .iter()
@@ -3243,7 +3251,7 @@ impl Operation for Finish {
                     args: args.clone(),
                     brk,
                 });
-                r.preload_candidate(&args);
+                r.preload_candidate(&args)?;
                 if let Some(names) = crate::exec::env_str!("PHITEX_FIN_SHOW") {
                     let mut shown = Vec::new();
                     for n in names.split(',') {
@@ -3303,7 +3311,7 @@ impl Run<'_, '_> {
     /// routine runs at the candidate, before those definitions. One the
     /// piece had not read stays as it reaches here; the routine reading
     /// it cuts the piece ([`Run::check_cut`]).
-    fn preload_candidate(&mut self, args: &[ValueId]) {
+    fn preload_candidate(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
         for e in list_of(v, a(3)) {
@@ -3314,17 +3322,30 @@ impl Run<'_, '_> {
             }
         }
         if args.len() < 9 || crate::exec::env_flag!("PHITEX_NO_CAND_PRELOAD") {
-            return;
+            return Ok(());
         }
+        let piece =
+            phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, a(5)).to_ne_bytes()));
+        let before = v.str(BEFORE_PIECE);
         for e in list_of(v, a(8)) {
             let ys = list_of(v, e);
-            if let [f, _, kv] = ys[..]
-                && kv != ValueId::UNIT
-            {
-                let loc = self.loc_of(Field(f));
-                self.st.preload(loc, list_of(v, kv).first().copied());
+            let [f, _, kv] = ys[..] else { continue };
+            if kv == ValueId::UNIT {
+                continue;
             }
+            let x = if kv == before {
+                match self.cx.use_field_before(Field(f), piece)? {
+                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
+                    phitex_defuse::FieldAt::Unset => None,
+                    phitex_defuse::FieldAt::Gone => continue,
+                }
+            } else {
+                list_of(v, kv).first().copied()
+            };
+            let loc = self.loc_of(Field(f));
+            self.st.preload(loc, x);
         }
+        Ok(())
     }
 
     /// The fields this finisher defined globally, for the resume after
@@ -3377,7 +3398,7 @@ impl Run<'_, '_> {
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
         // (`PHITEX_FIN_FIELD=name`: what each finisher's run left of that
         // field, for the predictions)
-        if let Ok(name) = std::env::var("PHITEX_FIN_FIELD") {
+        if let Some(name) = crate::exec::env_str!("PHITEX_FIN_FIELD") {
             let f = v.field(&name);
             eprintln!(
                 "fin-field page {j} node {}: {name} {}",
