@@ -479,16 +479,26 @@ pub(crate) fn record_of(loc: usize) -> Option<(usize, usize)> {
 
 /// The field name of cell `i` of record `b`.
 pub(crate) fn record_cell_name(b: usize, i: usize) -> String {
+    let mut s = String::new();
+    record_cell_name_into(b, i, &mut s);
+    s
+}
+
+/// [`record_cell_name`] written over `out` (no allocation once `out`
+/// holds the longest name).
+pub(crate) fn record_cell_name_into(b: usize, i: usize, out: &mut String) {
+    use std::fmt::Write as _;
+    out.clear();
     if b == B_CAT {
-        format!("cat:{i}")
+        let _ = write!(out, "cat:{i}");
     } else if let Some(&(_, _, p)) = CODE_RECORDS.iter().find(|r| r.0 == b) {
-        format!("{p}{i}")
+        let _ = write!(out, "{p}{i}");
     } else if b == B_PAGE {
-        format!("param:{}", PARAMS[PAGEPAR[i] as usize])
+        let _ = write!(out, "param:{}", PARAMS[PAGEPAR[i] as usize]);
     } else if i < PARPAR.len() {
-        format!("param:{}", PARAMS[PARPAR[i] as usize])
+        let _ = write!(out, "param:{}", PARAMS[PARPAR[i] as usize]);
     } else {
-        PARPAR_CELLS[i - PARPAR.len()].to_owned()
+        out.push_str(PARPAR_CELLS[i - PARPAR.len()]);
     }
 }
 

@@ -278,11 +278,15 @@ impl Operation for Exec {
         if !client_only(v, f) {
             return false;
         }
-        let name = crate::val::field_name(v, f);
         // (the page state a piece with items on the main list defines,
-        // and a `\shipout`'s mark: `crate::pages`)
-        crate::pages::is_page_field(&name)
-            || crate::hints::hint_of_args(reg(&self.0), v, args).may_define_field(&name)
+        // and a `\shipout`'s mark: `crate::pages`; the name borrowed,
+        // the hook asked once per definition)
+        if v.with_str(f.0, crate::pages::is_page_field) == Some(true) {
+            return true;
+        }
+        let h = crate::hints::hint_of_args(reg(&self.0), v, args);
+        v.with_str(f.0, |name| h.may_define_field(name))
+            .unwrap_or(true)
     }
     /// The meanings and catcodes the text's hint rests on
     /// ([`crate::hints::reads`]): the node waits for them instead of
@@ -650,10 +654,7 @@ impl Operation for Mark {
 /// Whether a node may define `f`: files (`file:`) come only from the
 /// client.
 pub(crate) fn client_only(v: &Values, f: Field) -> bool {
-    match &*v.get(f.0) {
-        phitex_defuse::Value::Str(s) => !s.starts_with("file:"),
-        _ => true,
-    }
+    v.with_str(f.0, |s| !s.starts_with("file:")).unwrap_or(true)
 }
 
 /// The files the job writes, read back by the next round

@@ -652,10 +652,20 @@ impl Hint {
         if false {
             return true;
         }
-        // (a record: where the node may define one of its cells)
+        // (a record: where the node may define one of its cells; the
+        // cells' names written over one buffer per thread, no string
+        // made per call)
         if let Some(b) = crate::fields::RECORDS.iter().position(|&r| r == f) {
-            return (0..crate::fields::record_len(b))
-                .any(|i| self.may_define_field(&crate::fields::record_cell_name(b, i)));
+            thread_local! {
+                static CELL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+            }
+            return CELL.with(|c| {
+                let mut c = c.borrow_mut();
+                (0..crate::fields::record_len(b)).any(|i| {
+                    crate::fields::record_cell_name_into(b, i, &mut c);
+                    self.may_define_field(&c)
+                })
+            });
         }
         let Some(b) = self.bound.as_ref().or(self.guess.as_ref()) else {
             return true;
