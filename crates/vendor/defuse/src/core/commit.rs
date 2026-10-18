@@ -288,6 +288,29 @@ impl Shared {
                 }
             }
         }
+        // A claim of nothing and an effect of none, where the text declares
+        // neither and the node holds neither, change nothing: dropped, so
+        // they take no structural writer (which every reader of the unit
+        // would retry behind).
+        {
+            let d = r.data();
+            if cx.claim == Some(0)
+                && d.stat.claim == ClaimS::None
+                && d.x
+                    .as_ref()
+                    .is_none_or(|e| e.claim_run.is_none() && e.claimed.is_empty())
+            {
+                cx.claim = None;
+            }
+            if cx.effect == Some(crate::api::Effect::None)
+                && d.stat.effect == crate::api::Effect::None
+                && d.res
+                    .as_ref()
+                    .is_none_or(|c| matches!(c.effect, None | Some(crate::api::Effect::None)))
+            {
+                cx.effect = None;
+            }
+        }
         let unfold_changed;
         let structural = {
             let d = r.data();
