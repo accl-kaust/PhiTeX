@@ -2951,6 +2951,7 @@ thread_local! {
 /// hash, its regime's index and its place's flags, [`Analysis::run_key`]),
 /// its bound shared with every chunk that has the run under the same
 /// regime ([`RUN_BOUNDS`]).
+#[inline(never)]
 fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) -> Hint {
     let reg = an.p.regimes.get(key.1).map_or(0, |r| {
         let mut h = phitex_defuse::FxHasher::default();
@@ -2989,20 +2990,13 @@ fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) ->
 // (one pass over the atoms, then one over the slices; splitting it
 // would only pass its tables around)
 #[allow(clippy::too_many_lines)]
-fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
-    let an = Analysis::with_own(text, kind, defs.clone(), own);
-    let (slices, pars) = slices_of(text, &an, kind);
+/// The hint of every atom a span or a slice reads (`an.sig`): where it
+/// starts, its hint, and whether a slice's union skips it.
+#[inline(never)]
+#[allow(clippy::type_complexity)]
+fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>>, Vec<bool>) {
     let mut starts = Vec::with_capacity(an.sig.len());
     let mut hints: Vec<Option<Arc<Hint>>> = Vec::with_capacity(an.sig.len());
-    // (one value per distinct hint, keyed by the hash of its encoding:
-    // no string keys in the pass, spec-final §5.2)
-    let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
-    let mut intern = |h: &Hint| -> Arc<str> {
-        let s = h.encode();
-        memo.entry(phitex_defuse::hash_bytes(0x6869_6e74, s.as_bytes()))
-            .or_insert_with(|| Arc::from(s))
-            .clone()
-    };
     let mut skip = Vec::with_capacity(an.sig.len());
     // (the atoms a primitive reads: never run on their own; a command
     // a macro is only guessed to read runs in the slice, so it counts)
@@ -3031,7 +3025,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             );
             let h = runs
                 .entry(key)
-                .or_insert_with(|| Arc::new(run_hint(&an, a, key, at.start)))
+                .or_insert_with(|| Arc::new(run_hint(an, a, key, at.start)))
                 .clone();
             hints.push(Some(h));
             skip.push(false);
@@ -3052,6 +3046,22 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // slice: its rows count in the union)
         skip.push(claimed && (at.kind != AtomKind::Cs || prim_op || unbounded_operand));
     }
+    (starts, hints, skip)
+}
+
+fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
+    let an = Analysis::with_own(text, kind, defs.clone(), own);
+    let (slices, pars) = slices_of(text, &an, kind);
+    // (one value per distinct hint, keyed by the hash of its encoding:
+    // no string keys in the pass, spec-final §5.2)
+    let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
+    let mut intern = |h: &Hint| -> Arc<str> {
+        let s = h.encode();
+        memo.entry(phitex_defuse::hash_bytes(0x6869_6e74, s.as_bytes()))
+            .or_insert_with(|| Arc::from(s))
+            .clone()
+    };
+    let (starts, hints, skip) = atom_hints(&an, text);
     let mut t = TextHints {
         slices,
         starts,
@@ -3065,6 +3075,9 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
     let mut pending: Vec<&'static str> = Vec::new();
+    // (which of `NORMAL_PARAGRAPH` a hint may set, by hint: the atoms of
+    // a run of characters share theirs)
+    let mut sets: FxHashMap<usize, u8> = FxHashMap::default();
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         // (whether the run reads on into the next slice: a scan for a
@@ -3198,8 +3211,15 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             let Some(ah) = t.hints[a].as_deref() else {
                 continue;
             };
-            for &n in NORMAL_PARAGRAPH {
-                if may_set(ah, n) && !out.contains(&n) {
+            let m = *sets.entry(std::ptr::from_ref(ah) as usize).or_insert_with(|| {
+                NORMAL_PARAGRAPH
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, n)| may_set(ah, n))
+                    .fold(0, |m, (k, _)| m | 1 << k)
+            });
+            for (k, &n) in NORMAL_PARAGRAPH.iter().enumerate() {
+                if m >> k & 1 == 1 && !out.contains(&n) {
                     out.push(n);
                 }
             }
