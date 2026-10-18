@@ -573,6 +573,13 @@ impl Shared {
             self.land(s, move |sh| sh.park(s, w, kept, 1));
             return;
         }
+        // What it committed in the last evaluation's same round, if its
+        // reads still hold (`LoopStart::PerRound`).
+        // (Not on the quick path: it starts from the last fixed point,
+        // where the entries are the last round's, the state it holds.)
+        if self.memo.on.load(Ordering::Relaxed) && !self.memo.quick.load(Ordering::Relaxed) && self.memo_offer(s) {
+            return;
+        }
         self.run_node(s, ver);
     }
 

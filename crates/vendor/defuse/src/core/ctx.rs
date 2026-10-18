@@ -74,6 +74,7 @@ pub struct Ctx<'a> {
 
 /// What a finished run lands for the merger: its reads and its writes,
 /// owned (the run's `Ctx` borrows the store).
+#[derive(Clone)]
 pub(crate) struct RunOut {
     pub me: Slot,
     pub unit: u32,

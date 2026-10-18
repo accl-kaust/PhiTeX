@@ -10,6 +10,7 @@ pub(crate) mod edit;
 pub(crate) mod eval;
 #[cfg(feature = "ltrace")]
 pub(crate) mod ltrace;
+pub(crate) mod memo;
 /// Without the feature: no hook (each `on()` is a constant false).
 #[cfg(not(feature = "ltrace"))]
 pub(crate) mod ltrace {
@@ -1099,6 +1100,8 @@ pub(crate) struct Shared {
     pub held: Mutex<Vec<Slot>>,
     /// Final nodes released this evaluation.
     pub final_released: AtomicU64,
+    /// The per-round memo (`LoopStart::PerRound`).
+    pub memo: memo::Memo,
     pub c: Counters,
     /// The tallies, one shard per stripe of threads (merged by `tallies`).
     pub t: Box<[TallyShard]>,

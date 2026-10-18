@@ -691,6 +691,12 @@ pub enum LoopStart {
     Initial,
     /// The last fixpoint.
     Previous,
+    /// Every evaluation after edits runs the rounds from the declared
+    /// initial values, as a fresh engine would (round for round, the cap
+    /// and the final phase included); round k reuses what each node
+    /// committed in the previous evaluation's round k whenever the reads
+    /// it made there still hold (checked as a commit checks them).
+    PerRound,
 }
 
 /// A marked node reported final at a version.
@@ -741,6 +747,11 @@ pub struct RoundTimes {
     pub check_ns: u64,
     /// Workers waiting with nothing ready.
     pub idle_ns: u64,
+    /// Runs of operations in the round.
+    pub runs: u64,
+    /// Results reused from the previous evaluation's same round
+    /// ([`LoopStart::PerRound`]).
+    pub memo_hits: u64,
 }
 
 /// What an evaluation did. The first seven counters (`nodes_run` ..
@@ -883,6 +894,9 @@ pub struct Report {
     /// Under [`CapPolicy::Finalize`], when the round cap was reached: the
     /// loop-back fields that were still moving.
     pub capped: Option<Vec<Field>>,
+    /// Bytes held by the per-round store after the evaluation
+    /// ([`LoopStart::PerRound`]; an estimate).
+    pub memo_bytes: u64,
     pub resettled: u64,
 }
 
