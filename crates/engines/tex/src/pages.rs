@@ -1137,6 +1137,7 @@ impl Run<'_, '_> {
         let (pid, k, rest) = (n(3), n(4), n(5));
         let mut s = ScanIn::decode(v, b.get(2).copied().and_then(some));
         let mut raws = Vec::new();
+        let mut raw_pids: Vec<i64> = Vec::new();
         let mut own = Vec::new();
         // (the step that found the break reads what it reads there where
         // it is, for its continuation's prediction: a read at a node is
@@ -1204,6 +1205,7 @@ impl Run<'_, '_> {
             for &u in &items {
                 let mut raw = unit_items(v, u);
                 self.resolve_params_of(unit_pid(u), &mut raw)?;
+                raw_pids.push(unit_pid(u));
                 raws.push(raw);
             }
             own = list_of(v, items[last]);
@@ -1223,22 +1225,37 @@ impl Run<'_, '_> {
             }
         };
         let mut ps = s.page_state();
+        // (an insertion class's registers read where the scan over the
+        // profiles reads them, [`RunReaching`]: the material's at the
+        // state's anchor, each piece's at that piece; read elsewhere, a
+        // finisher between them gives other registers, and the folds
+        // part)
         let fire = {
-            let mut live = |c: u16| {
-                if here {
-                    self.insert_class(c)
-                } else {
-                    self.insert_class_at(c, at)
-                }
+            let mut pos: Option<phitex_defuse::NodeId> = match s.anchor {
+                Some(a) => Some(a),
+                None if here => None,
+                None => Some(at),
             };
             let last = raws.len();
-            let mut out = ps
-                .fold_items(v, &s.material, dead, &mut live)?
-                .map(|f| (0, f));
+            let mut out = {
+                let mut live = |c: u16| match pos {
+                    Some(p) if p != self.cx.node() => self.insert_class_at(c, p),
+                    _ => self.insert_class(c),
+                };
+                ps.fold_items(v, &s.material, dead, &mut live)?
+                    .map(|f| (0, f))
+            };
             for (i, raw) in raws.iter().enumerate() {
                 if out.is_some() {
                     break;
                 }
+                pos = Some(phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(
+                    raw_pids[i].to_ne_bytes(),
+                )));
+                let mut live = |c: u16| match pos {
+                    Some(p) if p != self.cx.node() => self.insert_class_at(c, p),
+                    _ => self.insert_class(c),
+                };
                 out = ps.fold_items(v, raw, dead, &mut live)?.map(|f| (i + 1, f));
             }
             match out {
@@ -1247,6 +1264,59 @@ impl Run<'_, '_> {
             }
         };
         let Some(fire) = fire else {
+            // (what the two folds started from, to tell a state from its
+            // material: the profile of the material read against the
+            // state's own)
+            let mp = crate::vprof::encode(v, &s.material);
+            eprintln!(
+                "phitex: defect detail at node {} (op {:?}, speculative {}): page {}, state anchor {:?}, state profile {} ints, material {} items (its profile {} ints, {}), window {:?}",
+                self.cx.node().raw(),
+                self.cx.args().first().map(|&x| int_of(v, x)),
+                self.cx.is_speculative(),
+                n(0),
+                s.anchor.map(phitex_defuse::NodeId::raw),
+                s.prof.len(),
+                s.material.len(),
+                mp.len(),
+                if mp == s.prof {
+                    "the same"
+                } else {
+                    "DIFFERENT"
+                },
+                raws.iter().map(Vec::len).collect::<Vec<_>>()
+            );
+            if crate::exec::obs_flag!("PHITEX_DEFECT_DUMP") {
+                let show = |raw: &[ValueId]| -> String {
+                    raw.iter()
+                        .map(|&x| {
+                            let t = nodes::tag(v, x);
+                            if t == nodes::T_VBOX || t == nodes::T_BOX {
+                                let b = if t == nodes::T_VBOX {
+                                    list_of(v, x).get(1).copied().unwrap_or(ValueId::UNIT)
+                                } else {
+                                    x
+                                };
+                                format!(
+                                    "{t}[h{} d{}]",
+                                    nodes::box_dim(v, b, 3),
+                                    nodes::box_dim(v, b, 2)
+                                )
+                            } else {
+                                format!("{t}:{}", v.render(x).chars().take(60).collect::<String>())
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                eprintln!("defect dump material: {}", show(&s.material));
+                for (i, raw) in raws.iter().enumerate() {
+                    eprintln!("defect dump unit {i}: {}", show(raw));
+                    eprintln!(
+                        "defect dump unit {i} profile: {:?}",
+                        crate::vprof::decode(&crate::vprof::encode(v, raw))
+                    );
+                }
+            }
             self.scan_defect(&format!(
                 "page {} fires in piece {pid} at candidate {k} by the profiles, not by the items",
                 n(0) + 1
