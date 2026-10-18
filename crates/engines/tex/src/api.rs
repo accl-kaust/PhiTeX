@@ -1272,6 +1272,21 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         .map(|(k, d, n)| format!("{k} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
         .collect();
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
+    // (the time inside the engine's reads by kind, and the op bodies:
+    // the op time less it)
+    let read_total: u64 = r.read_ns.iter().map(|&(_, n)| n).sum();
+    let reads: Vec<String> = r
+        .read_ns
+        .iter()
+        .filter(|&&(_, n)| n > 0)
+        .map(|&(k, n)| format!("{k} {:.3} ms", ms(n)))
+        .collect();
+    eprintln!(
+        "acct: read_ns by kind: {}; total {:.3} ms; op bodies (op minus reads) {:.3} ms",
+        reads.join(", "),
+        ms(read_total),
+        ms(op.saturating_sub(read_total))
+    );
     // (the progress guarantee: nodes run conservatively after a refutation,
     // and the refutations by field, most first)
     let mut by_field: Vec<(String, u64)> = r

@@ -1623,12 +1623,12 @@ impl Run<'_, '_> {
                 .map(|f| v.list(vec![f.0, class])),
         );
         let gids = self.st.gid_mark();
-        let locals: Vec<Field> = self
+        let locals: Vec<(Loc, Field)> = self
             .st
             .defined_since(v, 0, gids)
             .into_iter()
             .filter(|(_, _, l)| *l == Locality::Local)
-            .map(|(l, _, _)| self.loc_field(l))
+            .map(|(l, _, _)| (l, self.loc_field(l)))
             .collect();
         let marks = self.cand_marks.clone();
         // (a location defined after a candidate with its value there,
@@ -1643,16 +1643,19 @@ impl Run<'_, '_> {
                 per.push(v.list(vec![v.list(Vec::new()), v.int(0)]));
                 continue;
             }
-            let mut names: Vec<(ValueId, bool, ValueId)> =
-                locals.iter().map(|f| (f.0, false, ValueId::UNIT)).collect();
-            for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
-                let stands = self.st.def_stands(l);
-                let kv = at
-                    .get(i)
+            let kv_of = |l: Loc| {
+                at.get(i)
                     .and_then(|a| a.get(&l).copied())
                     .flatten()
-                    .map_or(ValueId::UNIT, |x| v.list(x.into_iter().collect()));
-                names.push((self.loc_field(l).0, stands, kv));
+                    .map_or(ValueId::UNIT, |x| v.list(x.into_iter().collect()))
+            };
+            let mut names: Vec<(ValueId, bool, ValueId)> = locals
+                .iter()
+                .map(|&(l, f)| (f.0, false, kv_of(l)))
+                .collect();
+            for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
+                let stands = self.st.def_stands(l);
+                names.push((self.loc_field(l).0, stands, kv_of(l)));
             }
             names.extend(
                 self.streams_since(m.contribs)

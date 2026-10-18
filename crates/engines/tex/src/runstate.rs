@@ -1020,6 +1020,18 @@ impl State {
             if is_page_param(s.loc) {
                 self.pp_dirty = true;
             }
+            // (a restore changes the location as a definition does: its
+            // entry at the candidate before kept, [`State::at_candidates`])
+            if !self.cands.is_empty() {
+                let cur = self.slot(s.loc).e;
+                let meta = self.slot(s.loc).meta;
+                let ldef = usize::try_from(meta)
+                    .ok()
+                    .filter(|&m| m > 0)
+                    .and_then(|m| self.metas.get(m - 1))
+                    .map_or(0, |m| m.ldef_stamp);
+                self.note_cand(s.loc, ldef, cur);
+            }
             let slot = self.slot(s.loc);
             slot.e = s.prev;
             slot.save_gid = s.gid;
