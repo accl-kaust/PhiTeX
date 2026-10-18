@@ -286,6 +286,25 @@ struct Pool {
     passive: Vec<Passive>,
     edits: Vec<(usize, usize, List)>,
     breaks: Vec<Option<usize>>,
+    /// Lists of lines already read, emptied ([`recycle_line`]).
+    lines: Vec<List>,
+}
+
+/// Hands the list of a line [`line_break`] made back, once read: kept
+/// (emptied) for the lines of the thread's next paragraphs.
+pub fn recycle_line(mut list: List) {
+    list.clear();
+    if list.capacity() == 0 {
+        return;
+    }
+    POOL.with(|c| {
+        if let Some(mut p) = c.take() {
+            if p.lines.len() < 64 {
+                p.lines.push(list);
+            }
+            c.set(Some(p));
+        }
+    });
 }
 
 thread_local! {
@@ -986,6 +1005,7 @@ pub fn line_break(
     let lines = post_line_break(
         list,
         &breaks,
+        &mut pool.lines,
         best.line_number,
         display,
         params,
@@ -1013,6 +1033,7 @@ pub fn line_break(
 fn post_line_break(
     list: List,
     breaks: &[Option<usize>],
+    spare: &mut Vec<List>,
     best_line: i32,
     display: bool,
     params: &LineBreakParams,
@@ -1030,7 +1051,8 @@ fn post_line_break(
     let mut last_at = 0usize;
     for (k, &brk) in breaks.iter().enumerate() {
         // §881
-        let mut line = List::with_capacity(match brk {
+        let mut line = spare.pop().unwrap_or_default();
+        line.reserve(match brk {
             Some(at) => at.saturating_sub(last_at) + front.len() + 4,
             None => it.len() + front.len() + 2,
         });

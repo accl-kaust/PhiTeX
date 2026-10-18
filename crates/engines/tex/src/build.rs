@@ -1164,6 +1164,8 @@ impl Run<'_, '_> {
             }
             if display && k == last_k {
                 just_box = Some(line.packed.node);
+            } else {
+                phitex_typeset::linebreak::recycle_line(line.packed.node.list);
             }
         }
         // the paragraph's lines: one contribution
