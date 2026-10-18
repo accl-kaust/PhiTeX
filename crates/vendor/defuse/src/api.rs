@@ -783,6 +783,9 @@ pub struct Report {
     /// ran conservatively afterwards, on committed values only. High
     /// counts mean a hint or prediction is costing parallelism.
     pub nodes_conservative: u64,
+    /// Changes of a stable field's definition (`Engine::set_stable`) that
+    /// found readers to touch: many mean a field marked stable is not.
+    pub stable_scans: u64,
     pub env_stalled: u64,
     pub env_waits: Vec<(NodeId, Field)>,
     pub env_provided: u64,

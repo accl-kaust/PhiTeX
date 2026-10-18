@@ -626,8 +626,15 @@ pub(crate) const K_NONE: u8 = 0;
 pub(crate) const K_VALUE: u8 = 1;
 pub(crate) const K_PENDING: u8 = 2;
 
+/// One stripe of a unit's stable-field readers: (field, reader, generation).
+pub(crate) type StableReaders = Vec<(Field, Slot, u32)>;
+
 /// A unit.
 pub(crate) struct Unit {
+    /// Readers of stable fields (field, reader, its log generation), in
+    /// stripes by thread: appended without contention, scanned whole when
+    /// a definition of one of those fields changes.
+    pub stable: Box<[Mutex<StableReaders>]>,
     pub first: AtomicU32,
     pub last: AtomicU32,
     pub root_frame: u32,
@@ -889,6 +896,8 @@ pub(crate) struct Counters {
     pub predictions_refuted: Ctr,
     /// Nodes that went conservative this evaluation (`Rec::cons`).
     pub nodes_conservative: Ctr,
+    /// Changes of a stable field's definition that found readers to touch.
+    pub stable_scans: Ctr,
     pub realised: CtrMax,
     pub realised_ns: CtrMax,
     pub env_provided: Ctr,
@@ -972,6 +981,9 @@ pub(crate) struct Shared {
     pub by_id: Box<[Mutex<FxHashMap<u64, Slot>>]>,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     pub seqs: FxHashSet<Field>,
+    /// Fields marked stable (`Engine::set_stable`): read by many, defined
+    /// rarely. A read of one is filed in its unit's `stable` list only.
+    pub stable: FxHashSet<Field>,
     pub loops: FxHashMap<Field, ValueId>,
     pub loop_vals: crate::sync::BrLock<FxHashMap<Field, ValueId>>,
     pub env: crate::sync::BrLock<EnvState>,
@@ -1157,6 +1169,11 @@ pub(crate) struct Pad(pub AtomicU32);
 
 /// Stripes of a unit's committing readers.
 pub(crate) const STRIPES: usize = 32;
+
+/// This thread's stripe (for state striped by thread).
+pub(crate) fn stripe() -> usize {
+    STRIPE.with(|s| *s)
+}
 
 thread_local! {
     /// This thread's stripe of the committing-reader counters.
