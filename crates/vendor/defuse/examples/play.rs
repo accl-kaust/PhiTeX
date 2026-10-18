@@ -660,6 +660,21 @@ fn main() {
                         (op, commit, check, idle) =
                             (op + t.op_ns, commit + t.commit_ns, check + t.check_ns, idle + t.idle_ns);
                     }
+                    if rep.round_times.len() > 1 {
+                        for (k, t) in rep.round_times.iter().enumerate() {
+                            let b = t.op_ns + t.commit_ns + t.check_ns;
+                            println!(
+                                "  round {}: wall {:.1} ms; op {:.1} commit {:.1} check {:.1} idle {:.1}; busy/{threads} {:.1}",
+                                k + 1,
+                                ms(t.wall_ns),
+                                ms(t.op_ns),
+                                ms(t.commit_ns),
+                                ms(t.check_ns),
+                                ms(t.idle_ns),
+                                ms(b) / threads as f64
+                            );
+                        }
+                    }
                     let busy = op + commit + check;
                     let per_run = op as f64 / rep.nodes_run.max(1) as f64;
                     println!(
@@ -669,6 +684,17 @@ fn main() {
                         ms(check),
                         ms(idle),
                         per_run / 1e3
+                    );
+                    let rd: u64 = rep.read_ns.iter().map(|e| e.1).sum();
+                    println!(
+                        "  engine reads in runs {:.1} ms ({:.0}% of op): {}",
+                        ms(rd),
+                        100.0 * rd as f64 / op.max(1) as f64,
+                        rep.read_ns
+                            .iter()
+                            .map(|(k, n)| format!("{k} {:.1}", ms(*n)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                     println!(
                         "  bounds: busy/{threads} {:.1} ms, critical path {} runs = {:.1} ms",

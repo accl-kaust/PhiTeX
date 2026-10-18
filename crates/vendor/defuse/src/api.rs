@@ -786,6 +786,12 @@ pub struct Report {
     /// Changes of a stable field's definition (`Engine::set_stable`) that
     /// found readers to touch: many mean a field marked stable is not.
     pub stable_scans: u64,
+    /// Time the operations' runs spent inside the engine's read calls
+    /// (`use_field`, `scope_kind`, ...), by kind, in nanoseconds summed
+    /// over workers: estimated from one call in 64. Of a run's time
+    /// (`RoundTimes::op_ns`), this is the engine's share; the rest is the
+    /// operation's own code.
+    pub read_ns: Vec<(&'static str, u64)>,
     pub env_stalled: u64,
     pub env_waits: Vec<(NodeId, Field)>,
     pub env_provided: u64,
