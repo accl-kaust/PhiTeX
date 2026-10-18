@@ -689,6 +689,11 @@ fn main() {
                         ms(idle),
                         per_run / 1e3
                     );
+                    println!(
+                        "  realised critical path: {} runs, {:.1} ms",
+                        rep.realised_critical_path,
+                        rep.realised_critical_time.as_secs_f64() * 1e3
+                    );
                     let rd: u64 = rep.read_ns.iter().map(|e| e.1).sum();
                     println!(
                         "  engine reads in runs {:.1} ms ({:.0}% of op): {}",

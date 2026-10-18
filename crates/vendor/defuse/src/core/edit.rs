@@ -224,9 +224,37 @@ impl Shared {
             let _g = self.wunit(u);
             let last = self.unit(u).last.load(Ordering::Acquire);
             self.link_after(u, last, &slots);
+            let mut defs = Vec::new();
             for &s in &slots {
                 self.notify_gap(s, &mut notes);
-                self.register(s, &mut notes);
+                self.register_with(s, &mut notes, Some(&mut defs));
+            }
+            // The declared entries, a field at a time (one shard lock each),
+            // in text order within a field.
+            defs.sort_by_key(|&(f, _, s)| (f.0.raw(), self.rec(s).lab()));
+            let mut i = 0;
+            while i < defs.len() {
+                let f = defs[i].0;
+                let j = i + defs[i..].iter().take_while(|d| d.0 == f).count();
+                let fks: Vec<u32> = defs[i..j]
+                    .iter()
+                    .map(|&(_, loc, s)| {
+                        if loc.entry_key() != 0 {
+                            self.def_frame(s, loc)
+                        } else {
+                            self.frame_of(s)
+                        }
+                    })
+                    .collect();
+                let mut sh = self.wshard(u, f);
+                let idx = sh.entry((u, f)).or_default();
+                self.drain(idx);
+                for (&(_, loc, s), &fk) in defs[i..j].iter().zip(&fks) {
+                    if self.def_pos_k(idx, s, loc.entry_key()).is_none() {
+                        self.insert_def_in(idx, u, s, f, loc, fk, super::DefVal::Pending, &mut notes);
+                    }
+                }
+                i = j;
             }
             notes.frames_from.push(slots[0]);
             self.settle_structure_edit(u, &mut notes);

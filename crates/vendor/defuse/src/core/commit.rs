@@ -856,6 +856,14 @@ impl Shared {
             let old_out = r
                 .has(F_HAS_OUT)
                 .then(|| ValueId::from_raw(r.out.load(Ordering::Acquire)));
+            // Out of the in-work lists while still running: a touch that
+            // finds it clean puts it back (left after, the touch's entry
+            // would be taken out again). Not under its data lock: leaving
+            // may compact the lists, which waits for their readers, and a
+            // reader may be asking about this node.
+            if !self.stepped() {
+                self.leave_work_lists(s);
+            }
             let out_users = {
                 let mut d = r.data();
                 if old_out != Some(out) {
@@ -872,10 +880,6 @@ impl Shared {
                     r.status.store(super::S_STEP, Ordering::Release);
                     lock(&self.step_done).push(s);
                 } else {
-                    // Out of the in-work lists while still running: a touch
-                    // that finds it clean puts it back (left after, the
-                    // touch's entry would be taken out again).
-                    self.leave_work_lists(s);
                     r.status.store(S_CLEAN, Ordering::Release);
                 }
                 if old_out == Some(out) {

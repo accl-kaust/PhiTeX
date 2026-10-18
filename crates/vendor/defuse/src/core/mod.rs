@@ -670,6 +670,9 @@ pub(crate) struct Unit {
     pub pclaim_lo: std::sync::atomic::AtomicUsize,
     /// Guards the lists; holds how many entries in them have left.
     pub lists: Mutex<usize>,
+    /// Entries that left without the lock (`leave_work_lists`): folded
+    /// into `lists`' count when it is next taken for compaction.
+    pub left: std::sync::atomic::AtomicUsize,
 }
 
 /// A definition entry in a field index.
