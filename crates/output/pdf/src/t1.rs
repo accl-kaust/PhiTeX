@@ -1676,7 +1676,8 @@ fn cencrypt(plain: u8, cr: &mut u16) -> u8 {
 
 /// `copy_glyph_names`.
 fn copy_glyph_names(names: &mut GlyphNames, a: usize, b: usize) {
-    names[b] = names[a].clone();
+    let name = names[a].clone();
+    names[b] = name;
 }
 
 /// `sscanf(p, "dup dup %i %i getinterval %i exch putinterval")`.
