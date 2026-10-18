@@ -4578,7 +4578,18 @@ impl Run<'_, '_> {
                     }
                 }
             };
-            self.place_cont(Some(at), j, pred, b, None);
+            // (the prediction goes in the continuation's arguments only
+            // where its state is not defined yet: once it is, the
+            // continuation is placed without one, the same node from then
+            // on, so a step running again does not place a new one each
+            // time its guess moves)
+            self.place_cont(
+                Some(at),
+                j,
+                if defined.is_some() { None } else { pred },
+                b,
+                None,
+            );
             placed = Placed::Page;
             let Some((x, m)) = pred else {
                 known = false;
