@@ -86,9 +86,9 @@ build_first() {
   fi
   # (a build of $c already queued or running: wait on it, not a second)
   mkdir -p "$runs"
-  prev=$(awk -v c="$c" '$1 == c {id = $2} END {print id}' "$runs/gate-builds" 2>/dev/null)
+  prev=$(awk -v c="$c" '$1 == c {id = $2} END {print id}' "$runs/gate-builds" 2>/dev/null || true)
   if [ -n "$prev" ]; then
-    state=$($SSH $H "${slurm} squeue -h -j $prev -o %T" 2>/dev/null | tail -1)
+    state=$($SSH $H "${slurm} squeue -h -j $prev -o %T" 2>/dev/null | tail -1 || true)
     if [ "$state" = PENDING ] || [ "$state" = RUNNING ] || [ "$state" = CONFIGURING ]; then
       echo "gate-fast: binaries of $c being built by job $prev" >&2
       dep="--dependency=afterok:$prev --kill-on-invalid-dep=yes"
