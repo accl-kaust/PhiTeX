@@ -33,8 +33,7 @@
 //!   continuation after it reads that on the finisher's prediction, so
 //!   the scan does not wait for the routine.
 //! - A piece ends at every page-builder candidate it can end at (none
-//!   inside a list of its own; inside its groups and conditionals, which
-//!   the rest carries): its continuation
+//!   inside a group or conditional of its own): its continuation
 //!   ([`Run::cont_encode`]) is the material of a `resume` piece
 //!   ([`Resume`], [`RESUME`]) placed after it (after the finisher of a
 //!   page firing there), which reads the state there forward and what
@@ -242,8 +241,8 @@ pub(crate) struct CandMark {
     pub sig: (usize, usize, usize, u64),
     pub nest: usize,
     /// Whether the run could end at the candidate, its rest a resume
-    /// ([`Run::finish_candidate`]): no list of its own open, with input
-    /// left.
+    /// ([`Run::finish_candidate`]): not inside a group or a conditional
+    /// of its own, with input left.
     pub cuttable: bool,
 }
 
@@ -703,7 +702,7 @@ impl Run<'_, '_> {
         let cuttable = (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
             && fresh
-            && self.nest.iter().all(|l| !l.owns && l.group != 0)
+            && !self.open_span()
             && self.has_input();
         self.cand_marks.push(CandMark {
             k,
@@ -723,16 +722,12 @@ impl Run<'_, '_> {
         // which reads the state there forward and what a routine leaves.
         // Nothing decides it after the piece: no page's finisher reaches
         // back into the piece it fires in)
-        // (inside groups and conditionals of the run's own too: a page
-        // firing there has a routine whose definitions the rest reads
-        // (a routine that saves the page so far in a box the rest then
-        // measures), so the rest is a node after the routine, carrying
-        // the groups and conditionals open (`Run::cont_encode`), which it
-        // closes, leaves as scopes or reads on with as the piece would
-        // have. Never inside a list of the run's own (a paragraph, a
-        // display): that list cannot be handed over; the piece runs on
-        // through the candidate, and a page firing there has its
-        // finisher check the rest, [`Run::check_cut`])
+        // (never inside a group or a conditional of the run's own: its
+        // rest, run as a resume, cannot leave them as a scope and reads
+        // on into the text after it, claiming the document to the next
+        // page node; the piece runs on through the candidate instead,
+        // and a page firing there has its finisher check the rest,
+        // [`Run::check_cut`])
         if cuttable {
             self.cut = Some(k);
             return Err(Halt::Cut);
@@ -901,7 +896,7 @@ impl Run<'_, '_> {
     /// values, when the piece defined a page parameter itself: the
     /// marker means the values in force where the piece began, and both
     /// the run's own state at its end and the fold after it hold the
-    /// piece's later values (a piece setting `\vsize`: a first pass and a
+    /// piece's later values (multicol sets `\vsize`: a first pass and a
     /// pass stopped at the candidate resolved them differently and never
     /// agreed). A piece that leaves them alone reads nothing here.
     fn pin_reaching_page_params(&mut self, raw: &mut [ValueId]) -> R<()> {
