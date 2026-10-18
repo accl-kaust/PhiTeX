@@ -1583,13 +1583,15 @@ impl Engine {
                     let log = r.data().res.as_ref().map_or_else(Default::default, |c| c.log.clone());
                     super::query::sib_cursor_reset();
                     for p in &log {
-                        if !matches!(sh.recheck(s, p, false), Ok(Ok(()))) {
+                        let why = sh.recheck(s, p, false);
+                        if !matches!(why, Ok(Ok(()))) {
                             let (op, a) = sh.text(s);
                             let a: Vec<String> = a.iter().map(|x| sh.values.render(*x)).collect();
                             out.push(format!(
-                                "unit {u}: clean node {s} {}({}) has a broken read {p:?}",
+                                "unit {u}: clean node {s} {}({}) has a broken read {p:?}; {why:?}; {}",
                                 sh.op_name(op),
-                                a.join(", ")
+                                a.join(", "),
+                                sh.broken_read_detail(s, p)
                             ));
                             break;
                         }
@@ -1606,6 +1608,70 @@ impl Engine {
 }
 
 impl Shared {
+    /// For a broken definition read of `s`: what the read finds now, and
+    /// the state of the node it answered from and of the one it finds
+    /// (status, flags, generation, lgen, whether `s` is among the entry's
+    /// users), to tell a missed notification from a missed subscription.
+    fn broken_read_detail(&self, s: Slot, p: &super::Pred) -> String {
+        let super::Pred::Def { f, at, ans, .. } = p else {
+            return String::new();
+        };
+        let now = self.sread(self.unit_of(s), || self.q_def(*at, *f, false, s));
+        let node_of = |a: &super::DAns| match a {
+            super::DAns::Site { node, .. } => Some(*node),
+            _ => None,
+        };
+        let new = match &now {
+            super::query::Q::Ans(o) => node_of(&o.ans),
+            super::query::Q::Wait(_) => None,
+        };
+        let u = self.unit_of(s);
+        let desc = |n: Slot| {
+            let r = self.rec(n);
+            let users = super::rlock(self.shard(u, *f)).get(&(u, *f)).map(|idx| {
+                idx.defs
+                    .iter()
+                    .filter(|e| e.node == n)
+                    .map(|e| {
+                        (
+                            e.val,
+                            e.users.iter().filter(|x| x.0 == s).map(|x| x.1).collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            format!(
+                "node {n}: st {} flags {:#x} gn {} lab {} before-reader {} role {:?} owner {} entries(val, reader gens) {:?}",
+                r.st(),
+                r.flags.load(Ordering::Relaxed),
+                r.gn.load(Ordering::Relaxed),
+                r.lab(),
+                self.before(n, s),
+                r.data().role,
+                r.data().owner,
+                users
+            )
+        };
+        let mut out = format!(
+            "now {:?}; reader lgen {} flags {:#x}",
+            match &now {
+                super::query::Q::Ans(o) => format!("{:?}", o.ans),
+                super::query::Q::Wait(w) => format!("wait {w:?}"),
+            },
+            self.rec(s).lgen.load(Ordering::Relaxed),
+            self.rec(s).flags.load(Ordering::Relaxed)
+        );
+        if let Some(n) = node_of(ans) {
+            out.push_str(&format!("; was {}", desc(n)));
+        }
+        if let Some(n) = new
+            && Some(n) != node_of(ans)
+        {
+            out.push_str(&format!("; now {}", desc(n)));
+        }
+        out
+    }
+
     /// Static facts of an inert node's new text (nothing registered).
     pub(crate) fn analyze_into(&self, s: Slot) {
         let st = self.analyze(s);

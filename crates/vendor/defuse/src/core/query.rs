@@ -838,11 +838,18 @@ impl Shared {
     }
 
     /// Whether `x`'s text declares its contribution to `f` (its run need
-    /// not be waited for: the value is known). A declaration lists all of
-    /// them: a field it leaves out gets nothing (and a run that differs
-    /// is applied as a changed contribution).
-    fn contributes_statically(&self, x: Slot, _f: Field) -> bool {
-        self.rec(x).has(super::F_SCONTRIB) && self.rec(x).data().stat.contribs().is_some()
+    /// not be waited for: the value is known). Per field: a node with
+    /// static contributions to other fields only is waited for as any
+    /// other (its run may contribute here); one declaring none at all
+    /// contributes nowhere.
+    fn contributes_statically(&self, x: Slot, f: Field) -> bool {
+        self.rec(x).has(super::F_SCONTRIB)
+            && self
+                .rec(x)
+                .data()
+                .stat
+                .contribs()
+                .is_some_and(|c| c.is_empty() || c.iter().any(|e| e.0 == f))
     }
 
     /// The whole fold of `f` in unit `u`.
