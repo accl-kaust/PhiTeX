@@ -3012,10 +3012,6 @@ fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) ->
     h
 }
 
-/// [`analyse`] given the text's own definitions ([`own_definitions`]).
-// (one pass over the atoms, then one over the slices; splitting it
-// would only pass its tables around)
-#[allow(clippy::too_many_lines)]
 /// The hint of every atom a span or a slice reads (`an.sig`): where it
 /// starts, its hint, and whether a slice's union skips it.
 #[inline(never)]
@@ -3075,6 +3071,10 @@ fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>
     (starts, hints, skip)
 }
 
+/// [`analyse`] given the text's own definitions ([`own_definitions`]).
+// (one pass over the atoms, then one over the slices; splitting it
+// would only pass its tables around)
+#[allow(clippy::too_many_lines)]
 fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
     let an = Analysis::with_own(text, kind, defs.clone(), own);
     let (slices, pars) = slices_of(text, &an, kind);
@@ -3434,12 +3434,20 @@ pub(crate) struct Registry {
     prepared: Mutex<FxHashMap<u64, Prepared>>,
 }
 
+/// An answer kept for its one question, or taken.
+#[derive(Default)]
+enum Kept<T> {
+    Ready(T),
+    #[default]
+    Taken,
+}
+
 /// A node's answers made before its push ([`prepare`]), each taken by
 /// the engine's one question.
 #[derive(Default)]
 struct Prepared {
     may: Option<MayDefine>,
-    reads: Option<Option<Vec<Field>>>,
+    reads: Kept<Option<Vec<Field>>>,
     lines: Option<ValueId>,
 }
 
@@ -3655,7 +3663,7 @@ pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
     let p = Prepared {
         // (`PHITEX_HINTS` prints each answer where the engine asks)
         may: (!crate::exec::env_flag!("PHITEX_HINTS")).then(|| may_define_now(reg, v, args)),
-        reads: Some(reads_now(reg, v, args)),
+        reads: Kept::Ready(reads_now(reg, v, args)),
         lines: Some(crate::run::text_lines(v, args)),
     };
     reg.prepared
@@ -3979,7 +3987,11 @@ pub(crate) fn effect_none(reg: &Registry, v: &Values, args: &[ValueId]) -> bool 
 /// meanings of the names its text calls (`cs:name`, `act:code`) and the
 /// catcodes its bytes were read with (`cat:c`).
 pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
-    take_prepared(reg, args, |p| p.reads.take()).unwrap_or_else(|| reads_now(reg, v, args))
+    take_prepared(reg, args, |p| match std::mem::take(&mut p.reads) {
+        Kept::Ready(r) => Some(r),
+        Kept::Taken => None,
+    })
+    .unwrap_or_else(|| reads_now(reg, v, args))
 }
 
 /// [`reads`], answered now.

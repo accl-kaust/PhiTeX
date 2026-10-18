@@ -4034,6 +4034,59 @@ impl Build {
         b
     }
 
+    /// `PHITEX_READERS=1`: after a settle, the fields most nodes read,
+    /// each with its readers, the nodes in all, and where the reads found
+    /// it (the environment, or the nodes defining it): the data the
+    /// stable fields ([`STABLE_FIELDS`]) are chosen from.
+    fn dump_readers(&self) {
+        if !crate::exec::env_flag!("PHITEX_READERS") {
+            return;
+        }
+        let eng = &self.g.eng;
+        let mut todo: Vec<NodeId> = self.nodes.iter().map(|(_, n, _)| *n).collect();
+        todo.extend([self.end, self.dvi]);
+        let mut seen = phitex_defuse::FxHashSet::default();
+        // field -> (readers, reads from the environment, definers)
+        let mut by: FxHashMap<String, (usize, usize, phitex_defuse::FxHashSet<String>)> =
+            FxHashMap::default();
+        while let Some(n) = todo.pop() {
+            if !seen.insert(n.raw()) {
+                continue;
+            }
+            todo.extend(eng.children(n));
+            let mut mine = phitex_defuse::FxHashSet::default();
+            for l in eng.debug_reads(n).lines() {
+                let Some((name, rest)) = l.split_once(" (") else {
+                    continue;
+                };
+                let from = rest
+                    .split_once("): from ")
+                    .map_or("?", |(_, r)| r.split(' ').next().unwrap_or("?"));
+                let e = by.entry(name.to_owned()).or_default();
+                if mine.insert(name.to_owned()) {
+                    e.0 += 1;
+                }
+                if from == "env" {
+                    e.1 += 1;
+                } else {
+                    e.2.insert(from.to_owned());
+                }
+            }
+        }
+        let mut rows: Vec<_> = by.into_iter().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1.0));
+        for (f, (readers, env, defs)) in rows.iter().take(60) {
+            let mut d: Vec<&String> = defs.iter().collect();
+            d.sort();
+            d.truncate(4);
+            eprintln!(
+                "readers: {f} read by {readers} of {} nodes; {env} reads from the environment, {} definers {d:?}",
+                seen.len(),
+                defs.len()
+            );
+        }
+    }
+
     /// `PHITEX_CLAIMS=<text>`: the debugging dump after a settle.
     fn dump_claims(&self) {
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
@@ -4090,7 +4143,7 @@ impl Build {
         // is not made again for every edit)
         if self.g.watch.offsets.is_empty() || self.nodes.len() < 4096 {
             let mut offsets =
-                FxHashMap::with_capacity_and_hasher(self.nodes.len(), Default::default());
+                FxHashMap::with_capacity_and_hasher(self.nodes.len(), std::hash::BuildHasherDefault::default());
             for (_, n, src) in &self.nodes {
                 let Src::Doc(s, _) = *src;
                 offsets.insert(n.raw(), u64::try_from(s).unwrap_or(0));
@@ -4177,6 +4230,7 @@ impl Build {
             );
         }
         self.dump_claims();
+        self.dump_readers();
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
             for (k, &h) in pages.iter().enumerate() {
