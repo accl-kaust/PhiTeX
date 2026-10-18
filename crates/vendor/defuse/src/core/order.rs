@@ -88,6 +88,8 @@ impl Shared {
             wild: crate::sync::BrLock::new(Vec::new()),
             pfx: crate::sync::BrLock::new(crate::values::FxHashMap::default()),
             pfx_lens: crate::sync::BrLock::new(Vec::new()),
+            pfx_ver: AtomicU64::new(0),
+            pfx_of: crate::sync::BrLock::new(crate::values::FxHashMap::default()),
             peff: crate::sync::BrLock::new(Vec::new()),
             pclaim: crate::sync::BrLock::new(Vec::new()),
             pclaim_lo: std::sync::atomic::AtomicUsize::new(0),
@@ -1149,6 +1151,9 @@ impl Shared {
                         if let Err(i) = lens.binary_search(&p.len()) {
                             lens.insert(i, p.len());
                         }
+                        if !m.contains_key(&p) {
+                            u.pfx_ver.fetch_add(1, Ordering::AcqRel);
+                        }
                         let v = m.entry(p).or_default();
                         let pos = self.sorted_pos(v, s);
                         v.insert(pos, s);
@@ -1274,7 +1279,11 @@ impl Shared {
                     keep
                 });
             }
+            let before = m.len();
             m.retain(|_, v| !v.is_empty());
+            if m.len() != before {
+                u.pfx_ver.fetch_add(1, Ordering::AcqRel);
+            }
             u.pclaim_lo.store(0, Ordering::Release);
             for x in gone {
                 self.rec(x).clear(super::F_AT_PFX);

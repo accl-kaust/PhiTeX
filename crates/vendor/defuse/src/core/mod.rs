@@ -629,6 +629,9 @@ pub(crate) const K_PENDING: u8 = 2;
 /// One stripe of a unit's stable-field readers: (field, reader, generation).
 pub(crate) type StableReaders = Vec<(Field, Slot, u32)>;
 
+/// A unit's cache of the prefix lists each field's reads consult.
+pub(crate) type PfxCache = FxHashMap<Field, (u64, Arc<[String]>)>;
+
 /// A unit.
 pub(crate) struct Unit {
     /// Readers of stable fields (field, reader, its log generation), in
@@ -661,6 +664,11 @@ pub(crate) struct Unit {
     pub pfx: crate::sync::BrLock<FxHashMap<String, Vec<Slot>>>,
     /// The distinct lengths of the prefixes in `pfx`, ascending.
     pub pfx_lens: crate::sync::BrLock<Vec<usize>>,
+    /// Bumped (under `pfx`'s writer) when a prefix enters or leaves `pfx`.
+    pub pfx_ver: AtomicU64,
+    /// Per field, the prefixes in `pfx` its name starts with, as of a
+    /// `pfx_ver` (most fields match none: their reads skip the lists).
+    pub pfx_of: crate::sync::BrLock<PfxCache>,
     /// In-work nodes whose effect is pending.
     pub peff: crate::sync::BrLock<Vec<Slot>>,
     /// In-work pending claimers.
