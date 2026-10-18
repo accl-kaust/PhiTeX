@@ -92,6 +92,7 @@ impl Shared {
             pclaim: crate::sync::BrLock::new(Vec::new()),
             pclaim_lo: std::sync::atomic::AtomicUsize::new(0),
             lists: std::sync::Mutex::new(0),
+            left: std::sync::atomic::AtomicUsize::new(0),
         });
         #[allow(clippy::cast_possible_truncation)]
         let u = u as u32;
@@ -958,6 +959,17 @@ impl Shared {
     /// Puts an active node's static facts into the store: declared
     /// definitions (pending), named pending sets, the in-work lists.
     pub(crate) fn register(&self, s: Slot, notes: &mut Notes) {
+        self.register_with(s, notes, None);
+    }
+
+    /// `register`, its declared definitions' pending entries handed to
+    /// `defer` (field, locality, node) instead of filed one by one.
+    pub(crate) fn register_with(
+        &self,
+        s: Slot,
+        notes: &mut Notes,
+        mut defer: Option<&mut Vec<(Field, Locality, Slot)>>,
+    ) {
         let r = self.rec(s);
         let u = self.unit_of(s);
         if r.data().kind != Kind::Node {
@@ -1019,6 +1031,10 @@ impl Shared {
         }
         if let Some(defs) = &defs {
             for &(f, loc) in defs {
+                if let Some(v) = defer.as_deref_mut() {
+                    v.push((f, loc, s));
+                    continue;
+                }
                 let exists = super::rlock(self.shard(u, f))
                     .get(&(u, f))
                     .is_some_and(|idx| self.def_pos_k(idx, s, loc.entry_key()).is_some());
@@ -1032,9 +1048,15 @@ impl Shared {
                 let mut sh = self.wshard(u, f);
                 let idx = sh.entry((u, f)).or_default();
                 self.drain(idx);
-                self.drain(idx);
-                if !idx.named.contains(&s) {
-                    let pos = self.sorted_pos(&idx.named, s);
+                // (Sorted by label: found by search; labels may repeat, so
+                // every entry at its label is looked at.)
+                let pos = self.sorted_pos(&idx.named, s);
+                let l = self.rec(s).lab();
+                let there = idx.named[pos..]
+                    .iter()
+                    .take_while(|&&x| self.rec(x).lab() == l)
+                    .any(|&x| x == s);
+                if !there {
                     idx.named.insert(pos, s);
                 }
             }
@@ -1070,9 +1092,15 @@ impl Shared {
                 let mut sh = self.wshard(u, f);
                 let idx = sh.entry((u, f)).or_default();
                 self.drain(idx);
-                self.drain(idx);
-                if !idx.named.contains(&s) {
-                    let pos = self.sorted_pos(&idx.named, s);
+                // (Sorted by label: found by search; labels may repeat, so
+                // every entry at its label is looked at.)
+                let pos = self.sorted_pos(&idx.named, s);
+                let l = self.rec(s).lab();
+                let there = idx.named[pos..]
+                    .iter()
+                    .take_while(|&&x| self.rec(x).lab() == l)
+                    .any(|&x| x == s);
+                if !there {
                     idx.named.insert(pos, s);
                 }
             }
@@ -1187,13 +1215,29 @@ impl Shared {
             return;
         }
         let u = self.unit(self.unit_of(s));
-        let mut dead = lock(&u.lists);
+        // Its flags go without the lock: it leaves while still running, so
+        // no touch puts it back meanwhile (a touch of a running node only
+        // marks it stale).
+        let mut n = 0;
         for have in [F_IN_WILD, F_IN_PEFF, F_IN_PCLAIM] {
-            if r.fl() & have != 0 {
-                r.clear(have);
-                *dead += 1;
+            if r.flags.fetch_and(!have, Ordering::AcqRel) & have != 0 {
+                n += 1;
             }
         }
+        let left = u.left.fetch_add(n, Ordering::Relaxed) + n;
+        let total = u.wild.read().len() + u.peff.read().len() + u.pclaim.read().len();
+        let compact = left * 2 > total + 64;
+        if fl & F_IN_PCLAIM == 0 && !compact {
+            return;
+        }
+        let mut dead = if compact && fl & F_IN_PCLAIM == 0 {
+            // Whoever finds the lock free compacts; the rest go on.
+            let Ok(g) = u.lists.try_lock() else { return };
+            g
+        } else {
+            lock(&u.lists)
+        };
+        *dead += u.left.swap(0, Ordering::Relaxed);
         if fl & F_IN_PCLAIM != 0 {
             let v = u.pclaim.read();
             let mut lo = u.pclaim_lo.load(Ordering::Acquire);
@@ -1523,6 +1567,23 @@ impl Shared {
         let fk_new = fk_scope.unwrap_or_else(|| self.frame_of(s));
         let idx = sh.entry((u, f)).or_default();
         self.drain(idx);
+        self.insert_def_in(idx, u, s, f, loc, fk_new, val, notes);
+    }
+
+    /// `insert_def` with the shard held and drained (`fk_new`: the frame
+    /// the entry is filed under).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn insert_def_in(
+        &self,
+        idx: &mut super::FieldIdx,
+        u: u32,
+        s: Slot,
+        f: Field,
+        loc: Locality,
+        fk_new: u32,
+        val: DefVal,
+        notes: &mut Notes,
+    ) {
         let scope = loc.entry_key();
         if let Some(i) = self.def_pos_k(idx, s, scope) {
             let e = &mut idx.defs[i];
