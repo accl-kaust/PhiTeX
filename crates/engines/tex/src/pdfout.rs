@@ -273,7 +273,7 @@ pub(crate) struct PagePiece {
     /// fonts used on the state it was written on: set once, by the
     /// page's [`PdfPage`] (final, after the loop-backs settle).
     made: OnceLock<(phitex_pdf::PageRecord, BTreeSet<FontId>)>,
-    /// The page's index in the page chain (for traces and the key).
+    /// The page's index in the page chain (for traces).
     pj: i64,
     /// The node that shipped it, for the link's errors ([`Linked`]).
     node: i64,
@@ -1578,7 +1578,9 @@ fn ship_apart(
         maps,
         pdfmap,
         u64::from(pc.fonts.space.is_some()),
-        pc.pj.cast_unsigned(),
+        // (not the page's index in the chain: the record is placed by
+        // the link, its objects numbered there, so a page an earlier
+        // page moved is the same page and keeps its record)
         pc.brk.map_or(0, |b| b.0.cast_unsigned()),
         pc.brk.map_or(u64::MAX, |b| b.1.cast_unsigned()),
         // (the fonts as the writer gets them, the files the images ask
