@@ -187,6 +187,12 @@ pub(crate) struct Ops {
     /// finisher's declared names, and its predicted definitions where
     /// both agree (`crate::pages::Finish`).
     pub fin_defs: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, crate::pages::FinDefs>>>,
+    /// [`Ops::fin_defs`] as the evaluation began: what the guesses of
+    /// what a routine gives back and defines globally read (a guess
+    /// from what another node of the same evaluation ran would make run
+    /// counts follow the schedule, and hide that dependency from the
+    /// engine).
+    pub fin_defs_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<FinTable>>>,
     /// The class projection of meanings ([`crate::val::class_projection`],
     /// registered with the engine): a lookup that only stores its token
     /// reads the name's class, not its meaning ([`Run::class_lookup`]).
@@ -206,6 +212,9 @@ pub(crate) struct Ops {
     /// it in parallel, the engine confirms it when the real one comes).
     pub scan_guess: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<i64, (ValueId, ValueId)>>>,
 }
+
+/// The finishers' table ([`Ops::fin_defs`]).
+pub(crate) type FinTable = crate::FxHashMap<u64, crate::pages::FinDefs>;
 
 /// A package load's finished run: its node, when it began and ended,
 /// and whether it ran speculatively.

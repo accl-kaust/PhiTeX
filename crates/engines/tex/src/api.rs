@@ -1861,6 +1861,7 @@ impl Graph {
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
             scan_guess: Arc::default(),
+            fin_defs_start: Arc::default(),
             not_virtual: Arc::default(),
             pdf_cmds: Arc::default(),
             class_proj,
@@ -2442,6 +2443,19 @@ impl Graph {
                 self.push_env(env);
             }
             crate::timeline::lap("engine: the provider, the comments' environment");
+            // (the finishers' table as the evaluation begins: what the
+            // routines' guesses read, [`crate::run::Ops::fin_defs_start`])
+            {
+                let o = &self.ops;
+                let fd = o
+                    .fin_defs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                *o.fin_defs_start
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Arc::new(fd);
+            }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();

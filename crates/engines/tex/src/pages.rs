@@ -3295,7 +3295,7 @@ impl Finish {
             return ValueId::NIL;
         }
         ops(&self.0)
-            .fin_defs
+            .fin_defs_start
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
@@ -4086,7 +4086,7 @@ fn rtn_guess(o: &crate::run::Ops, v: &Values, pos: &[ValueId]) -> ValueId {
     let t = pos.get(9).copied().unwrap_or(ValueId::UNIT);
     let last = (t != ValueId::UNIT)
         .then(|| {
-            o.fin_defs
+            o.fin_defs_start
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&fin_key(v, t, pos))
