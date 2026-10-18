@@ -9,8 +9,11 @@
 #                                           # at 1 and 4 threads, the formats made in wasm
 #   scripts/sandbox scripts/wasm.sh run [phitex-wasm's arguments] FILE   # in FILE's directory
 #
-# Needs the pinned toolchain's wasm32-wasip1-threads target
-# (rust-toolchain.toml lists it), Node >= 22, and TeX Live for the
+# Needs the pinned toolchain's wasm32-wasip1-threads target (not in
+# rust-toolchain.toml, whose targets every machine installs, the accl
+# image's read-only toolchain included: `rustup target add
+# wasm32-wasip1-threads --toolchain nightly-2026-08-08` once, outside the
+# sandbox), Node >= 22, and TeX Live for the
 # formats' files and the fonts. The fastdev profile (thin LTO): a release
 # build's speed without fat LTO's link.
 set -euo pipefail

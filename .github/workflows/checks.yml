@@ -50,6 +50,7 @@ jobs:
           -p phitex-xdvipdfmx
       # (the engine as a WebAssembly program with threads, scripts/wasm.sh:
       # linted here; its documents need TeX Live: `scripts/wasm.sh check`)
+      - run: rustup target add wasm32-wasip1-threads
       - run: cargo clippy --target wasm32-wasip1-threads -p phitex-wasm -- -D warnings
       # (without TeX Live: the tests that compare with it skip themselves)
       - run: cargo test --workspace --quiet

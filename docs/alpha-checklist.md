@@ -17,6 +17,7 @@ never on the cluster):
     sb() { env PHITEX_NO_SLICE=1 CARGO_BUILD_JOBS=8 nice -n 19 ionice -c3 \
       scripts/sandbox env PATH=$T/bin:/usr/bin RUSTUP_TOOLCHAIN=$T CARGO_BUILD_JOBS=8 "$@"; }
     scripts/sandbox --net scripts/fetch-mupdf.sh      # the viewer's renderer, once (the CLI embeds it)
+    rustup target add wasm32-wasip1-threads --toolchain nightly-2026-08-08   # once, for the wasm program
 
 - [ ] `sb cargo fmt --all --check` prints nothing.
 - [ ] `sb cargo clippy --workspace --exclude defuse --all-targets -- -D warnings`
