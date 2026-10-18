@@ -2543,8 +2543,7 @@ impl Graph {
                     }
                     for (n, c) in &r.rerun_causes {
                         if let Rr::Changed { field, old, new } = *c
-                            && std::env::var("PHITEX_RERUN_DIFF")
-                                .ok()
+                            && crate::exec::env_str!("PHITEX_RERUN_DIFF")
                                 .and_then(|n| n.parse::<usize>().ok())
                                 .is_some_and(|n| shown < n)
                             && crate::val::field_name(v, field) == "ps"
@@ -4041,7 +4040,7 @@ impl Build {
         // the package loads' records (`crate::pkgrec`); a load never seen
         // runs optimistically under speculation
         let optimistic = opts.speculation != Speculation::Off
-            && std::env::var("PHITEX_PKG_OPTIMISTIC").map_or(true, |x| x != "0");
+            && crate::exec::env_str!("PHITEX_PKG_OPTIMISTIC") != Some("0");
         let predict = opts.pkg_predict || crate::exec::env_flag!("PHITEX_PKG_PREDICT");
         g.loads = Some(Arc::new(crate::pkgrec::LoadHints::new(
             crate::pkgrec::parse(&opts.pkgrec),
