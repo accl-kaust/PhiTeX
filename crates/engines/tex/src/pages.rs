@@ -3371,13 +3371,14 @@ fn fin_may_box(v: &Values, args: &[ValueId], t: ValueId, f: Field) -> bool {
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
 /// The fields every finisher defines itself, whatever its routine.
-const FIN_OWN: [&str; 6] = [
+const FIN_OWN: [&str; 7] = [
     RTN,
     "deadcycles",
     "param:outputpenalty",
     "inspen",
     "badness",
     "box:255",
+    crate::pdfout::PAGE_KEYS,
 ];
 
 const FINISHER_FIELDS: &[&str] = &[
@@ -3519,6 +3520,8 @@ impl Operation for Finish {
             names.push(rtn);
         }
         names.push(rtn_field(v, args.first().map_or(0, |&y| int_of(v, y))));
+        // (the keys of the pages it ships, its PDF sides' read)
+        names.push(v.field(crate::pdfout::PAGE_KEYS));
         ops(&self.0).fields.add_record_fields(&mut names);
         Some(names.into_iter().map(|f| (f, Locality::Global)).collect())
     }
