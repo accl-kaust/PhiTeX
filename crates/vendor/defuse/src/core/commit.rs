@@ -62,6 +62,12 @@ fn pred_value_hash(sh: &Shared, p: &Pred) -> u64 {
     }
 }
 
+/// `DEFUSE_RCHAIN` set: realised-chain links are kept.
+pub(crate) fn rchain_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DEFUSE_RCHAIN").is_some())
+}
+
 impl Shared {
     /// Its realised depth: one more than the deepest run of this
     /// evaluation it read without a guess.
@@ -100,18 +106,26 @@ impl Shared {
         };
         let mut m = 0;
         let mut tm = 0;
+        // (The deepest predecessor and why, for `DEFUSE_RCHAIN`.)
+        let mut why: (Slot, &'static str, Option<crate::values::Field>) = (super::NIL, "", None);
+        let mut take = |n: Slot, k: &'static str, f: Option<crate::values::Field>, m: &mut u64, tm: &mut u64| {
+            if dep(n) > *m || (why.0 == super::NIL && dep(n) > 0) {
+                why = (n, k, f);
+            }
+            *m = (*m).max(dep(n));
+            *tm = (*tm).max(time(n));
+        };
         // What it parked on: it could not go on before those were done.
         let parked = self.rec(s).data().x.as_mut().map(|e| std::mem::take(&mut e.parked_on));
         let now = self.epoch.load(Ordering::Relaxed);
-        for (n, e) in parked.into_iter().flatten() {
+        for (n, e, k, f) in parked.into_iter().flatten() {
             if e != now {
                 continue;
             }
-            m = m.max(dep(n));
-            tm = tm.max(time(n));
+            take(n, k, f, &mut m, &mut tm);
         }
         for p in log {
-            let n = match p {
+            let (n, k, fld) = match p {
                 // A prediction did not wait (a previous value's guess
                 // finds its definer unstamped when it read).
                 Pred::Def {
@@ -136,16 +150,19 @@ impl Shared {
                     if dep(*node) > m && self.read_as_before(s, *node, *f, *proj, *val) {
                         continue;
                     }
-                    *node
+                    (*node, "read def", Some(*f))
                 }
-                Pred::Out { node, .. } | Pred::App { node, .. } => *node,
-                Pred::Range { last, .. } if *last != super::NIL => *last,
+                Pred::Out { node, .. } => (*node, "read out", None),
+                Pred::App { node, .. } => (*node, "read app", None),
+                Pred::Range { last, f, .. } if *last != super::NIL => (*last, "read range", Some(*f)),
                 _ => continue,
             };
             if n != s {
-                m = m.max(dep(n));
-                tm = tm.max(time(n));
+                take(n, k, fld, &mut m, &mut tm);
             }
+        }
+        if rchain_on() {
+            lock(&self.rchain).insert(s, (why.0, why.1, why.2, m + 1));
         }
         let d = m + 1;
         let t = tm.saturating_add(run_ns);

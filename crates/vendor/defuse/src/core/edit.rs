@@ -90,6 +90,7 @@ impl Default for Engine {
 impl Shared {
     pub(crate) fn new() -> Shared {
         Shared {
+            rchain: std::sync::Mutex::default(),
             values: Values::new(),
             ops: Vec::new(),
             projs: Vec::new(),
