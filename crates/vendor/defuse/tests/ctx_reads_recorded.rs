@@ -6,6 +6,7 @@
 const READS: &[&str] = &[
     "use_field",
     "use_field_at",
+    "use_field_before",
     "use_field_proj",
     "use_env",
     "output_of",
