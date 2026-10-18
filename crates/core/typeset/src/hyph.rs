@@ -601,7 +601,9 @@ impl Hyphenator for TexHyphenator<'_> {
             }
         };
         // §913
-        let mut out: List = Vec::new();
+        // (room for the letters, a discretionary per possible hyphen and
+        // a few kerns: grown at most once)
+        let mut out: List = Vec::with_capacity(hn + hn / 2 + 4);
         // (a cut's translation before it is known to hold the hyphen;
         // empty at each cut)
         let mut hold: List = Vec::new();

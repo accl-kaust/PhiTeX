@@ -78,11 +78,12 @@ impl Hyphenator for NoHyphenation {
 /// language and whether breaks are automatic are followed as the pass
 /// follows them (no word holds a glue, language or math node).
 fn hyphenate_all(
-    list: List,
+    mut list: List,
     lang: LangState,
     hyphenator: &mut dyn Hyphenator,
     fonts: &dyn Fonts,
     edits: &mut Vec<(usize, usize, List)>,
+    spare: &mut List,
 ) -> List {
     edits.clear();
     let mut lang = lang;
@@ -109,10 +110,14 @@ fn hyphenate_all(
         return list;
     }
     let extra: usize = edits.iter().map(|e| e.2.len()).sum();
-    let mut out = List::with_capacity(list.len() + extra);
+    // (the hyphenated list in the buffer the last one left, which then
+    // keeps this one's)
+    let mut out = std::mem::take(spare);
+    out.clear();
+    out.reserve(list.len() + extra);
     let mut edits = edits.drain(..).peekable();
     let mut skip_to = 0;
-    for (k, n) in list.into_iter().enumerate() {
+    for (k, n) in list.drain(..).enumerate() {
         if k < skip_to {
             continue;
         }
@@ -123,6 +128,7 @@ fn hyphenate_all(
         }
         out.push(n);
     }
+    *spare = list;
     out
 }
 
@@ -288,6 +294,8 @@ struct Pool {
     breaks: Vec<Option<usize>>,
     /// Lists of lines already read, emptied ([`recycle_line`]).
     lines: Vec<List>,
+    /// A paragraph's list before hyphenation, emptied.
+    unhyphenated: List,
 }
 
 /// Hands the list of a line [`line_break`] made back, once read: kept
@@ -838,7 +846,14 @@ pub fn line_break(
             b.threshold = INF_BAD;
         }
         if b.second_pass && !hyphenated {
-            list = hyphenate_all(list, params.lang, hyphenator, fonts, &mut pool.edits);
+            list = hyphenate_all(
+                list,
+                params.lang,
+                hyphenator,
+                fonts,
+                &mut pool.edits,
+                &mut pool.unhyphenated,
+            );
             hyphenated = true;
         }
         // §864
