@@ -553,6 +553,27 @@ fn main() {
     let book = Arc::new(book);
     let units = Arc::new(Mutex::new(Vec::new()));
     let mut eng = Engine::new();
+    // `--stable N`: the N fields the recorded runs read most are marked
+    // stable (`Engine::set_stable`).
+    if let Some(n) = opt("--stable").map(|s| s.parse::<usize>().unwrap()) {
+        let mut reads: std::collections::HashMap<String, (J, u64)> = std::collections::HashMap::new();
+        for runs in book.runs.values() {
+            for (calls, _) in runs {
+                for c in calls {
+                    if c[0] == "use_field" {
+                        let f = c[1][0].clone();
+                        reads.entry(f.to_string()).or_insert((f, 0)).1 += 1;
+                    }
+                }
+            }
+        }
+        let mut top: Vec<(J, u64)> = reads.into_values().collect();
+        top.sort_by_key(|e| std::cmp::Reverse(e.1));
+        for (f, k) in top.into_iter().take(n) {
+            eprintln!("play: stable {f} ({k} recorded reads)");
+            eng.set_stable(de(&f));
+        }
+    }
     let mut evals = 0;
     let mut i = 0;
     while i < lines.len() {
