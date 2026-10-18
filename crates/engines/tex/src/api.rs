@@ -1971,15 +1971,12 @@ impl Graph {
             time,
             ..phitex_defuse::Limits::default()
         });
-        // the read-back files can have more than one fixpoint (a page
-        // number that moves a break that moves it back), so the fixpoint
-        // an edit reaches from the last values can differ from the cold
-        // build's: every evaluation's rounds start from the initial
-        // loop-back values, as a fresh engine's do, and a node is offered
-        // its result from the previous evaluation's same round, rechecked
-        // through the commit path (the memo saves work, never decides a
-        // value)
-        eng.set_loop_start(phitex_defuse::LoopStart::PerRound);
+        // an edit's rounds start from the last evaluation's loop-back
+        // values, so only what the edit reaches runs again; where the
+        // read-back files have more than one fixpoint (a page number that
+        // moves a break that moves it back), a watch build may settle on
+        // another fixpoint than the cold build's
+        eng.set_loop_start(phitex_defuse::LoopStart::Previous);
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
