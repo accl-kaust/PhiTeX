@@ -60,6 +60,7 @@ impl Engine {
             serde_json::Value::Null,
             serde_json::Value::Null,
         );
+        super::ltrace::init();
         let r = {
             crate::obs::span!(Evaluate);
             #[cfg(feature = "observe")]
@@ -88,6 +89,9 @@ impl Engine {
             crate::record::api(&self.sh.values, "evaluate_end", serde_json::Value::Null, r);
         }
         crate::obs::flush();
+        if super::ltrace::on() {
+            super::ltrace::flush();
+        }
         // The next canonical window starts now: edits from here on count
         // toward the next evaluation.
         let sh = &self.sh;
