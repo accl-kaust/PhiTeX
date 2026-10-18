@@ -304,9 +304,11 @@ impl Values {
         }
     }
 
-    /// Runs `f` on the value behind `id` (for the engine's reads: no
-    /// clone of a stored value).
-    pub(crate) fn with<R>(&self, id: ValueId, f: impl FnOnce(&Value) -> R) -> R {
+    /// Runs `f` on the value behind `id`, borrowed: no clone of a stored
+    /// value and no allocation for an inline one (unlike [`Values::get`],
+    /// which hands out an `Arc`: a shared count written per call, and a
+    /// fresh allocation for an int, bool or unit).
+    pub fn with<R>(&self, id: ValueId, f: impl FnOnce(&Value) -> R) -> R {
         match id.tag() {
             T_UNIT => f(&Value::Unit),
             T_BOOL => f(&Value::Bool(id.payload() != 0)),
@@ -369,7 +371,10 @@ impl Values {
     #[must_use]
     pub fn as_int(&self, id: ValueId) -> Option<i64> {
         match id.tag() {
-            T_INT | T_BIG => self.with(id, |v| match v {
+            // Inline: decoded from the id (sign-extending the payload).
+            #[allow(clippy::cast_possible_wrap)]
+            T_INT => Some(((id.payload() << 3) as i64) >> 3),
+            T_BIG => self.with(id, |v| match v {
                 Value::Int(i) => Some(*i),
                 _ => None,
             }),
@@ -385,6 +390,26 @@ impl Values {
         }
         self.with(id, |v| match v {
             Value::Str(s) => Some(s.to_string()),
+            _ => None,
+        })
+    }
+
+    /// Runs `f` on the string `id` holds, borrowed (`None`: not a string).
+    pub fn with_str<R>(&self, id: ValueId, f: impl FnOnce(&str) -> R) -> Option<R> {
+        if id.tag() != T_STR {
+            return None;
+        }
+        self.with(id, |v| match v {
+            Value::Str(s) => Some(f(s)),
+            _ => None,
+        })
+    }
+
+    /// Runs `f` on the elements of the list `id` holds, borrowed (`None`:
+    /// not a list).
+    pub fn with_list<R>(&self, id: ValueId, f: impl FnOnce(&[ValueId]) -> R) -> Option<R> {
+        self.with(id, |v| match v {
+            Value::List(xs) => Some(f(xs)),
             _ => None,
         })
     }
