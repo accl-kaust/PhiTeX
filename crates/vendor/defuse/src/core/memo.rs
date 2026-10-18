@@ -602,6 +602,12 @@ impl Shared {
             }
             if !new.fin {
                 let old_pubs = last.map_or(&[][..], |l| &l.ro.pubs[..]);
+                // A publisher new or re-texted: its final publication may
+                // equal the old one's while its earlier rounds' do not.
+                let same_text = last.is_some_and(|l| l.ro.op == new.ro.op && l.ro.args == new.ro.args);
+                if !same_text && (!new.ro.pubs.is_empty() || !old_pubs.is_empty() || ix.publishers.contains(id)) {
+                    return Err(format!("{} publishes a loop-back and is new or re-texted", name(*id)));
+                }
                 if new.ro.pubs != old_pubs {
                     let f = new
                         .ro
