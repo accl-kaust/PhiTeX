@@ -313,6 +313,9 @@ impl Shared {
             }
         }
         r.clear(super::F_PREDREF);
+        if super::ltrace::on() {
+            super::ltrace::commit(self, s, &cx.log);
+        }
         if cx.log.iter().any(|p| matches!(p, Pred::Def { proj, .. } if *proj != 0)) {
             r.set(super::F_PROJREAD);
         } else {

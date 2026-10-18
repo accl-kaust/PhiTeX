@@ -128,23 +128,39 @@ pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
         c.set(v.wrapping_add(1));
         v
     });
-    match sched {
-        Sched::Seq => eng.evaluate_sequential().is_ok(),
-        Sched::Par(t) => eng.evaluate(&mut Greedy::default(), &mut Threads(t)).is_ok(),
-        Sched::Spec(t) => eng
-            .evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(t))
-            .is_ok(),
-        Sched::Random(_) => eng
-            .evaluate(&mut RandomScheduler::new(m, m.is_multiple_of(2)), &mut Sequential)
-            .is_ok(),
+    let r = match sched {
+        Sched::Seq => eng.evaluate_sequential(),
+        Sched::Par(t) => eng.evaluate(&mut Greedy::default(), &mut Threads(t)),
+        Sched::Spec(t) => eng.evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(t)),
+        Sched::Random(_) => eng.evaluate(&mut RandomScheduler::new(m, m.is_multiple_of(2)), &mut Sequential),
+    };
+    if let Err(e) = &r
+        && why()
+    {
+        println!("WHY evaluate failed: {e}");
     }
+    r.is_ok()
+}
+
+/// `FUZZ_WHY` set: a failed check says which (shrinking asks many times).
+fn why() -> bool {
+    std::env::var_os("FUZZ_WHY").is_some()
 }
 
 /// Evaluates and checks the result against the interpreter and the
 /// engine's invariants.
 pub fn ok(eng: &mut Engine, p: &Program, sched: Sched) -> bool {
     evaluate(eng, sched)
-        && interpret(&p.lines).is_ok_and(|r| r == p.result(eng))
+        && {
+            let want = interpret(&p.lines);
+            let got = p.result(eng);
+            let same = want.as_ref().is_ok_and(|r| *r == got);
+            if !same && why() {
+                println!("WHY result: want {want:?}");
+                println!("WHY result: got  {got:?}");
+            }
+            same
+        }
         && eng.check_invariants().is_empty()
         && {
             // Every committed read still holds (no result rests on a stale

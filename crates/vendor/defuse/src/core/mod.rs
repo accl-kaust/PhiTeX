@@ -8,6 +8,26 @@ pub(crate) mod ctx;
 pub(crate) mod dump;
 pub(crate) mod edit;
 pub(crate) mod eval;
+#[cfg(feature = "ltrace")]
+pub(crate) mod ltrace;
+/// Without the feature: no hook (each `on()` is a constant false).
+#[cfg(not(feature = "ltrace"))]
+pub(crate) mod ltrace {
+    use super::{Pred, Shared, Slot};
+    use crate::api::Cause;
+    use crate::values::{Field, ValueId};
+
+    #[inline(always)]
+    pub(crate) fn init() {}
+    #[inline(always)]
+    pub(crate) const fn on() -> bool {
+        false
+    }
+    pub(crate) fn commit(_: &Shared, _: Slot, _: &[Pred]) {}
+    pub(crate) fn contrib(_: &Shared, _: Slot, _: Field, _: Option<ValueId>) {}
+    pub(crate) fn touch(_: &Shared, _: Slot, _: &Cause) {}
+    pub(crate) fn flush() {}
+}
 pub(crate) mod merge;
 pub(crate) mod order;
 pub(crate) mod query;
