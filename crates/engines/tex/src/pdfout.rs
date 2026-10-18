@@ -426,7 +426,7 @@ fn tails() -> &'static TailMemo {
 /// the local font `cmr10` at 10pt (none so far) and whose walk needs the
 /// space font, then `\font\x=cmr10`: pdfTeX's numbers 1, 2, 3 for the
 /// local font, 4 for the space font, and the text's `cmr10` is 3.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FontNums {
     /// The numbers given so far.
     next: FontId,
@@ -1716,13 +1716,15 @@ pub(crate) struct EndFields {
 }
 
 /// The records between two of the link's kept states ([`LinkMemo`]).
-const LINK_SNAP: usize = 16;
+const LINK_SNAP: usize = 8;
 
 /// The writer as the link left it after a record (every [`LINK_SNAP`]).
 #[derive(Clone)]
 struct LinkSnap {
     at: usize,
     st: PdfState,
+    /// The writer's digest ([`PdfState::digest`]), taken with it.
+    dg: u64,
     nums: FontNums,
     forms: Forms,
     got: usize,
@@ -1761,11 +1763,9 @@ fn same_writer(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &LinkSnap)
     if !none {
         return false;
     }
-    if format!("{nums:?}") != format!("{:?}", sn.nums) {
-        return false;
-    }
-    let mut theirs = sn.st.clone();
-    st.digest() == theirs.digest()
+    // (the snapshot's digest taken when it was kept: no copy of its
+    // writer, no formatting)
+    *nums == sn.nums && st.digest() == sn.dg
 }
 
 fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
@@ -1948,6 +1948,7 @@ pub(crate) fn finish_exact(
         if i > start && (i - start).is_multiple_of(LINK_SNAP) {
             snaps.push(LinkSnap {
                 at: i,
+                dg: st.digest(),
                 st: st.clone(),
                 nums: nums.clone(),
                 forms: forms.clone(),
@@ -2118,6 +2119,7 @@ pub(crate) fn finish_exact(
     }
     let end = LinkSnap {
         at: xpages.len(),
+        dg: 0,
         st: st.clone(),
         nums: nums.clone(),
         forms: forms.clone(),
