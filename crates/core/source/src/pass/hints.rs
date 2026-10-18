@@ -1361,32 +1361,32 @@ pub struct DefSet {
 
 impl DefSet {
     fn add(&mut self, o: &DefSet) {
-        for r in &o.relied {
-            if !self.relied.contains(r) {
-                self.relied.push(r.clone());
+        // (each list kept in its order, each entry once: a set of what
+        // it holds made once per list, not a search per entry; a set
+        // added often, a macro called many times, costs its size)
+        fn merge(to: &mut Vec<String>, from: &[String]) {
+            if from.is_empty() {
+                return;
             }
+            let new: Vec<String> = {
+                let mut seen: HashSet<&str> = to.iter().map(String::as_str).collect();
+                from.iter()
+                    .filter(|x| seen.insert(x.as_str()))
+                    .cloned()
+                    .collect()
+            };
+            to.extend(new);
         }
-        for c in &o.calls {
-            if !self.calls.contains(c) {
-                self.calls.push(c.clone());
-            }
-        }
-        for c in &o.outer_calls {
-            if !self.outer_calls.contains(c) {
-                self.outer_calls.push(c.clone());
-            }
-        }
+        merge(&mut self.relied, &o.relied);
+        merge(&mut self.calls, &o.calls);
+        merge(&mut self.outer_calls, &o.outer_calls);
         for (k, v) in &o.names {
             *self.names.entry(k.clone()).or_default() |= v;
         }
         for (k, v) in &o.prefixes {
             *self.prefixes.entry(k.clone()).or_default() |= v;
         }
-        for u in &o.unbounded {
-            if !self.unbounded.contains(u) {
-                self.unbounded.push(u.clone());
-            }
-        }
+        merge(&mut self.unbounded, &o.unbounded);
     }
 
     /// As a [`MayDefine`].
@@ -1532,6 +1532,56 @@ impl<'a> Closure<'a> {
     /// and taken from there while the document defines none of the
     /// names it looked up and none of them is being computed.
     pub(crate) fn call(&mut self, name: &str) -> DefSet {
+        // (a call at the top, no call being computed: its whole set, as
+        // a fresh closure computes it, a function of the name and the
+        // definitions alone, kept in the prelude's cache under its own
+        // key even where a recursion cut it: a text's every call of a
+        // recursive macro is then one lookup, not the walk again)
+        if self.busy.is_empty() {
+            return self.call_top(name);
+        }
+        self.call_inner(name)
+    }
+
+    /// [`Closure::call`] at the top: from the prelude's cache of whole
+    /// sets, else computed by a fresh closure (no memo of this one's
+    /// read: what a recursion cut short inside another call is not
+    /// this call's set).
+    fn call_top(&mut self, name: &str) -> DefSet {
+        let key = format!("\u{1}{name}");
+        let cached = self
+            .prelude
+            .closures
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        // (the names a top call looked up are no other call's: no frame
+        // takes them)
+        if let Some((s, names)) = cached
+            && !self.document_defines(&names)
+        {
+            return s;
+        }
+        let mut fresh = Closure::new(self.document, self.prelude);
+        let s = fresh.call_inner(name);
+        let (mut names, _) = std::mem::take(&mut fresh.frame);
+        names.sort_unstable();
+        names.dedup();
+        let names = std::sync::Arc::new(names);
+        if !self.document_defines(&names) {
+            self.prelude
+                .closures
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key, (s.clone(), names));
+        }
+        s
+    }
+
+    /// [`Closure::call`] inside another call (its memo and recursion
+    /// guard), or computing a top call afresh.
+    fn call_inner(&mut self, name: &str) -> DefSet {
         if let Some((s, names, cut)) = self.memo.get(name) {
             let s = s.clone();
             self.frame.0.extend(names.iter().cloned());

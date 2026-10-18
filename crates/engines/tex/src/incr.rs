@@ -209,7 +209,9 @@ impl Incr {
         }
         let new_len = len + c - b;
         let t = &self.text[start..start + new_len];
+        let t1 = std::time::Instant::now();
         let own = crate::hints::own_definitions(t, FileKind::Document);
+        crate::timeline::note("incr: the chunk's own definitions", t1.elapsed());
         let digest = crate::hints::defines_any(&own).then(|| own.digest());
         if digest != self.cache[k].own {
             return false;
