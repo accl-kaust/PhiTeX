@@ -898,6 +898,8 @@ pub(crate) struct Counters {
     pub nodes_conservative: Ctr,
     /// Changes of a stable field's definition that found readers to touch.
     pub stable_scans: Ctr,
+    /// Time in read calls of runs, by kind (`ctx::READ_KINDS`), sampled.
+    pub read_ns: [Ctr; 7],
     pub realised: CtrMax,
     pub realised_ns: CtrMax,
     pub env_provided: Ctr,

@@ -242,6 +242,10 @@ pub(crate) struct CandMark {
     /// advancing the clock, and the page was finished inside it.
     pub sig: (usize, usize, usize, u64),
     pub nest: usize,
+    /// Whether the run could end at the candidate, its rest a resume
+    /// ([`Run::finish_candidate`]): not inside a group or a conditional
+    /// of its own, with input left.
+    pub cuttable: bool,
 }
 
 /// A finisher's page: its index and what the routine leaves for the
@@ -681,6 +685,12 @@ impl Run<'_, '_> {
         let m = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(k))]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
         self.cand += 1;
+        let op = self.cx.op();
+        let cuttable = (op == self.ops.exec || op == self.ops.resume)
+            && (self.top || self.doc)
+            && fresh
+            && !self.open_span()
+            && self.has_input();
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -690,7 +700,9 @@ impl Run<'_, '_> {
             lines: self.lines_entered,
             sig: self.st.sig(),
             nest: self.nest.len(),
+            cuttable,
         });
+        self.st.mark_candidate();
         // (a piece runs through its candidates; it ends at one only
         // where a page's finisher found that its routine changes what
         // the piece read after it, `split:<piece>:<k>`, [`Run::check_cut`]:
@@ -701,15 +713,7 @@ impl Run<'_, '_> {
         // rest, run as a resume, cannot leave them as a scope and reads
         // on into the text after it, claiming the document to the next
         // page node; the piece runs on through the candidate instead)
-        let op = self.cx.op();
-        if (op == self.ops.exec || op == self.ops.resume)
-            && (self.top || self.doc)
-            && fresh
-            && !crate::exec::env_flag!("PHITEX_NO_CUT")
-            && self.split_at(i64::from(k))?
-            && self.has_input()
-            && !self.open_span()
-        {
+        if cuttable && !crate::exec::env_flag!("PHITEX_NO_CUT") && self.split_at(i64::from(k))? {
             self.cut = Some(k);
             return Err(Halt::Cut);
         }
@@ -1300,13 +1304,17 @@ impl Run<'_, '_> {
             v.list(Vec::new()),
             v.list(locals),
         ];
+        let mut cuttable = false;
         if at_end {
             args.extend([ValueId::UNIT; 5]);
         } else {
-            let defs_k = list_of(v, a(4))
+            // (`[names, cuttable]` at the candidate)
+            let at_k = list_of(v, a(4))
                 .get(usize::try_from(fire.k).unwrap_or(usize::MAX))
-                .copied()
-                .unwrap_or(ValueId::UNIT);
+                .map(|&x| list_of(v, x))
+                .unwrap_or_default();
+            let defs_k = at_k.first().copied().unwrap_or(ValueId::UNIT);
+            cuttable = at_k.get(1).is_some_and(|&x| int_of(v, x) != 0);
             args.extend([
                 v.list(Vec::new()),
                 v.int(pid),
@@ -1316,6 +1324,8 @@ impl Run<'_, '_> {
             ]);
         }
         args.extend(pos.get(9..12).unwrap_or_default().iter().copied());
+        args.resize(12, ValueId::UNIT);
+        args.push(v.int(i64::from(cuttable)));
         Ok(args)
     }
 
@@ -1613,40 +1623,57 @@ impl Run<'_, '_> {
                 .map(|f| v.list(vec![f.0, class])),
         );
         let gids = self.st.gid_mark();
-        let locals: Vec<Field> = self
+        let locals: Vec<(Loc, Field)> = self
             .st
             .defined_since(v, 0, gids)
             .into_iter()
             .filter(|(_, _, l)| *l == Locality::Local)
-            .map(|(l, _, _)| self.loc_field(l))
+            .map(|(l, _, _)| (l, self.loc_field(l)))
             .collect();
         let marks = self.cand_marks.clone();
+        // (a location defined after a candidate with its value there,
+        // where the run had it: the page's routine, which runs at the
+        // candidate, reads that, [`Run::finish_node`]'s preloads; no
+        // value: the routine reading it after the run cuts the piece,
+        // [`Run::check_cut`])
+        let at = self.st.at_candidates(v);
         let mut per = Vec::with_capacity(n);
-        for m in &marks {
+        for (i, m) in marks.iter().enumerate() {
             if Some(m.k) == last {
-                per.push(v.list(Vec::new()));
+                per.push(v.list(vec![v.list(Vec::new()), v.int(0)]));
                 continue;
             }
-            let mut names: Vec<(ValueId, bool)> = locals.iter().map(|f| (f.0, false)).collect();
+            let kv_of = |l: Loc| {
+                at.get(i)
+                    .and_then(|a| a.get(&l).copied())
+                    .flatten()
+                    .map_or(ValueId::UNIT, |x| v.list(x.into_iter().collect()))
+            };
+            let mut names: Vec<(ValueId, bool, ValueId)> = locals
+                .iter()
+                .map(|&(l, f)| (f.0, false, kv_of(l)))
+                .collect();
             for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
                 let stands = self.st.def_stands(l);
-                names.push((self.loc_field(l).0, stands));
+                names.push((self.loc_field(l).0, stands, kv_of(l)));
             }
             names.extend(
                 self.streams_since(m.contribs)
                     .into_iter()
-                    .map(|f| (f.0, false)),
+                    .map(|f| (f.0, false, ValueId::UNIT)),
             );
             names.sort_unstable_by_key(|x| (x.0.raw(), !x.1));
             names.dedup_by_key(|x| x.0);
-            per.push(
-                v.list(
-                    names
-                        .into_iter()
-                        .map(|(f, g)| v.list(vec![f, v.int(i64::from(g))]))
-                        .collect(),
-                ),
+            // (with whether the run could end there: a finisher of a page
+            // firing at a candidate where it could not runs its routine
+            // as if there, and the piece's definitions after it stand)
+            let names = v.list(
+                names
+                    .into_iter()
+                    .map(|(f, g, kv)| v.list(vec![f, v.int(i64::from(g)), kv]))
+                    .collect(),
             );
+            per.push(v.list(vec![names, v.int(i64::from(m.cuttable))]));
         }
         (v.list(rs), v.list(per))
     }
@@ -1849,27 +1876,46 @@ impl Run<'_, '_> {
         // its end: the piece's is the later one in tex.web, so the
         // routine's gives way to it: the value reaching here put back)
         let mut restore = Vec::new();
-        if why.is_none() {
-            for e in list_of(v, defs) {
-                let xs = list_of(v, e);
-                let Some(&f) = xs.first() else { continue };
-                let stands = xs.get(1).is_some_and(|&g| int_of(v, g) != 0);
-                if read.contains(&f) {
-                    why = Some(format!("after {}", str_of(v, f)));
-                    break;
-                }
-                if gdefs.iter().any(|(g, _)| *g == f) && stands {
+        let mut kept = Vec::new();
+        for e in list_of(v, defs) {
+            let xs = list_of(v, e);
+            let Some(&f) = xs.first() else { continue };
+            let stands = xs.get(1).is_some_and(|&g| int_of(v, g) != 0);
+            if why.is_none() && read.contains(&f) {
+                why = Some(format!("after {}", str_of(v, f)));
+            }
+            if let Some(&(_, y)) = gdefs.iter().find(|(g, _)| *g == f)
+                && stands
+            {
+                // (the routine left it as it was at the candidate: its
+                // definition changes nothing there)
+                let at_k = xs
+                    .get(2)
+                    .filter(|&&kv| kv != ValueId::UNIT)
+                    .map(|&kv| list_of(v, kv).first().copied());
+                if at_k == Some(Some(y)) {
+                    kept.push(Field(f));
+                } else {
                     restore.push(Field(f));
                 }
             }
         }
-        if why.is_none() {
-            for f in restore {
-                let x = self.eng_read(f)?;
-                let loc = self.loc_of(f);
-                self.set_loc(loc, crate::runstate::Entry::raw(x), true);
-            }
-            return Ok(None);
+        // (a piece cut at the candidate defines nothing after it: nothing
+        // to give way to, but where the routine left the location as it
+        // was there; one that cannot end there, a group or conditional
+        // of its own open, runs through and is never asked)
+        let cuttable = args.get(12).is_some_and(|&x| int_of(v, x) != 0);
+        if why.is_some() {
+            restore.clear();
+        }
+        restore.extend(kept);
+        if !cuttable {
+            why = None;
+        }
+        for f in restore {
+            let x = self.eng_read(f)?;
+            let loc = self.loc_of(f);
+            self.set_loc(loc, crate::runstate::Entry::raw(x), true);
         }
         let Some(why) = why else { return Ok(None) };
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") || crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -3197,13 +3243,7 @@ impl Operation for Finish {
                     args: args.clone(),
                     brk,
                 });
-                for e in list_of(v, a(3)) {
-                    let ys = list_of(v, e);
-                    if let [f, x] = ys[..] {
-                        let loc = r.loc_of(Field(f));
-                        r.st.preload(loc, some(x));
-                    }
-                }
+                r.preload_candidate(&args);
                 if let Some(names) = crate::exec::env_str!("PHITEX_FIN_SHOW") {
                     let mut shown = Vec::new();
                     for n in names.split(',') {
@@ -3256,6 +3296,37 @@ impl Operation for Finish {
 }
 
 impl Run<'_, '_> {
+    /// A finisher's state where its page fired, before the routine
+    /// runs: the bindings local to the groups open at the candidate
+    /// (its fourth argument), and what the piece defined after the
+    /// candidate as it was there, where the piece had it (its ninth): the
+    /// routine runs at the candidate, before those definitions. One the
+    /// piece had not read stays as it reaches here; the routine reading
+    /// it cuts the piece ([`Run::check_cut`]).
+    fn preload_candidate(&mut self, args: &[ValueId]) {
+        let v = self.v;
+        let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
+        for e in list_of(v, a(3)) {
+            let ys = list_of(v, e);
+            if let [f, x] = ys[..] {
+                let loc = self.loc_of(Field(f));
+                self.st.preload(loc, some(x));
+            }
+        }
+        if args.len() < 9 || crate::exec::env_flag!("PHITEX_NO_CAND_PRELOAD") {
+            return;
+        }
+        for e in list_of(v, a(8)) {
+            let ys = list_of(v, e);
+            if let [f, _, kv] = ys[..]
+                && kv != ValueId::UNIT
+            {
+                let loc = self.loc_of(Field(f));
+                self.st.preload(loc, list_of(v, kv).first().copied());
+            }
+        }
+    }
+
     /// The fields this finisher defined globally, for the resume after
     /// it ([`Run::cont_load`]): a group-local value the resume carries
     /// is replaced by a global definition even of an equal value.

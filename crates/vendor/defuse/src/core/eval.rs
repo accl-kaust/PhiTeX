@@ -545,6 +545,9 @@ impl Engine {
         ] {
             a.store(0, Ordering::Relaxed);
         }
+        for a in &c.read_ns {
+            a.store(0, Ordering::Relaxed);
+        }
         c.realised.store(0, Ordering::Relaxed);
         c.realised_ns.store(0, Ordering::Relaxed);
         for t in &*sh.t {

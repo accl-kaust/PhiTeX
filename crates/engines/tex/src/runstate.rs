@@ -227,6 +227,11 @@ pub(crate) struct State {
     /// the table's part of the run's mutation counter
     /// (`Run::mutations`, spec-final §2.4).
     muts: u64,
+    /// The page-builder candidates the run passed
+    /// ([`State::mark_candidate`]): each one's stamp and, for each
+    /// location defined after it and before the next one for the first
+    /// time since it, the entry the location held at the candidate.
+    cands: Vec<(u64, Vec<(Loc, Entry)>)>,
 }
 
 thread_local! {
@@ -281,6 +286,7 @@ impl Clone for State {
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
             muts: self.muts,
+            cands: self.cands.clone(),
         }
     }
 }
@@ -327,7 +333,43 @@ impl State {
             cat_gen: new_cat_gen(),
             any_gen: new_cat_gen(),
             muts: 0,
+            cands: Vec::new(),
         }
+    }
+
+    /// A page-builder candidate passed: the entries the locations
+    /// defined after it hold here are kept ([`State::at_candidate`]).
+    pub(crate) fn mark_candidate(&mut self) {
+        self.cands.push((self.stamp, Vec::new()));
+    }
+
+    /// Notes `loc`'s entry before a definition, where it is the first
+    /// since the last candidate (its latest definition `ldef` before it).
+    #[inline]
+    fn note_cand(&mut self, loc: Loc, ldef: u64, prev: Entry) {
+        if let Some((st, xs)) = self.cands.last_mut()
+            && ldef <= *st
+        {
+            xs.push((loc, prev));
+        }
+    }
+
+    /// The values at the candidates of the locations defined after them:
+    /// for each candidate passed, in order, each such location with its
+    /// engine value there (`None`: not known here, the run had neither
+    /// read nor defined it before).
+    #[allow(clippy::option_option)]
+    pub(crate) fn at_candidates(&self, v: &Values) -> Vec<FxHashMap<Loc, Option<Option<ValueId>>>> {
+        let mut out = vec![FxHashMap::default(); self.cands.len()];
+        let mut acc: FxHashMap<Loc, Option<Option<ValueId>>> = FxHashMap::default();
+        for (i, (_, xs)) in self.cands.iter().enumerate().rev() {
+            for &(l, e) in xs.iter().rev() {
+                let x = (e.flags & LOADED != 0).then(|| self.encode(&e, v));
+                acc.insert(l, x);
+            }
+            out[i].clone_from(&acc);
+        }
+        out
     }
 
     /// The catcode generation: equal while no category code below 256
@@ -854,6 +896,10 @@ impl State {
             let m = &self.metas[mi];
             (m.ldef_stamp, m.ldef_local, m.ldef_gid)
         };
+        if !self.cands.is_empty() {
+            let prev = self.slot(loc).e;
+            self.note_cand(loc, ldef.0, prev);
+        }
         let s = self.slot(loc);
         if global {
             s.ginert = st;
@@ -917,6 +963,11 @@ impl State {
         self.any_gen = new_cat_gen();
         self.muts += 1;
         let mi = self.meta(loc);
+        if !self.cands.is_empty() {
+            let prev = self.slot(loc).e;
+            let ldef = self.metas[mi].ldef_stamp;
+            self.note_cand(loc, ldef, prev);
+        }
         self.stamp += 1;
         let st = self.stamp;
         self.slot(loc).e = stored(val);
@@ -968,6 +1019,18 @@ impl State {
             }
             if is_page_param(s.loc) {
                 self.pp_dirty = true;
+            }
+            // (a restore changes the location as a definition does: its
+            // entry at the candidate before kept, [`State::at_candidates`])
+            if !self.cands.is_empty() {
+                let cur = self.slot(s.loc).e;
+                let meta = self.slot(s.loc).meta;
+                let ldef = usize::try_from(meta)
+                    .ok()
+                    .filter(|&m| m > 0)
+                    .and_then(|m| self.metas.get(m - 1))
+                    .map_or(0, |m| m.ldef_stamp);
+                self.note_cand(s.loc, ldef, cur);
             }
             let slot = self.slot(s.loc);
             slot.e = s.prev;
@@ -1428,7 +1491,18 @@ impl State {
             .as_ref()
             .map(|k| k.iter().map(|(&l, &a)| (ploc(self, l), a)).collect());
         let cont_locs = self.cont_locs.iter().map(|&l| ploc(self, l)).collect();
+        let cands = self
+            .cands
+            .iter()
+            .map(|(st, xs)| {
+                (
+                    *st,
+                    xs.iter().map(|(l, e)| (ploc(self, *l), pent(e))).collect(),
+                )
+            })
+            .collect();
         PState {
+            cands,
             cont_locs,
             slots,
             save,
@@ -1507,6 +1581,14 @@ impl State {
             }
             st.kinds = Some(m);
         }
+        for (stamp, xs) in p.cands {
+            let mut ys = Vec::with_capacity(xs.len());
+            for (l, e) in xs {
+                let l = loc(&mut st, l);
+                ys.push((l, ent(e)));
+            }
+            st.cands.push((stamp, ys));
+        }
         st.stamp = p.stamp;
         st.next_gid = p.next_gid;
         st.cat_gen = new_cat_gen();
@@ -1557,6 +1639,7 @@ struct PSaved {
 
 /// A run's table, parked ([`State::park`]).
 pub(crate) struct PState {
+    cands: Vec<(u64, Vec<(PLoc, PEntry)>)>,
     cont_locs: Vec<PLoc>,
     slots: Vec<PSlot>,
     save: Vec<PSaved>,

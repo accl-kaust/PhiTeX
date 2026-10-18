@@ -647,6 +647,10 @@ pub(crate) struct Run<'c, 'a> {
     /// main list since, a finisher's page, and the cut its fold found.
     pub cand: u32,
     pub cand_marks: Vec<crate::pages::CandMark>,
+    /// The scope kind the node runs in, once read ([`Run::scope_kind`]):
+    /// it does not change during the run.
+    #[allow(clippy::option_option)]
+    scope_kind_memo: Option<Option<ValueId>>,
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
     pub cut: Option<u32>,
@@ -774,6 +778,7 @@ impl<'c, 'a> Run<'c, 'a> {
             halt: None,
             cand: 0,
             cand_marks: Vec::new(),
+            scope_kind_memo: None,
             ins_pending: Vec::new(),
             fin: None,
             cut: None,
@@ -2927,13 +2932,19 @@ impl<'c, 'a> Run<'c, 'a> {
         out
     }
 
-    /// The scope kind the node runs in: the engine's.
+    /// The scope kind the node runs in: the engine's, read once a run
+    /// (a stop reads it again).
     pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
+        if let Some(k) = self.scope_kind_memo {
+            return Ok(k);
+        }
         let r = self.cx.scope_kind();
         if r.is_err() {
             self.trace_stop("scope kind");
         }
-        Ok(r?)
+        let k = r?;
+        self.scope_kind_memo = Some(k);
+        Ok(k)
     }
 
     /// Runs the node's input to its end (§1030's loop): every command of
