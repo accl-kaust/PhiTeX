@@ -1564,7 +1564,7 @@ fn tag_of(r: &mut Run<'_, '_>, f: i64, c: i32) -> R<i32> {
     };
     let mut view = crate::fonts::View::default();
     r.add_font(&mut view, fu)?;
-    let Some((l, _)) = view.fonts.get(&fu) else {
+    let Some((l, _)) = view.fonts.get(fu) else {
         return Ok(-1);
     };
     let Ok(cu) = u8::try_from(c) else {
@@ -2721,7 +2721,7 @@ fn xform_step(
         data.push(crate::pdfout::writer_whatsit(r, w)?);
     }
     let view = r.font_view(std::slice::from_ref(&Node::Box(bx.clone())))?;
-    let ids: Vec<u32> = view.fonts.keys().copied().collect();
+    let ids: Vec<u32> = view.fonts.ids();
     let mut all: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
     all.extend(crate::pdfout::form_fonts(r)?);
     let all: Vec<u32> = all.into_iter().collect();

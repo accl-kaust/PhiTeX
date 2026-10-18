@@ -929,7 +929,7 @@ impl Run<'_, '_> {
     /// character, the name); only math reads the parameters through
     /// the view (`Fonts::param`), and its view is made by `add_font`.
     pub(crate) fn add_font_metrics(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
-        if view.fonts.contains_key(&f) || f == 0 {
+        if view.fonts.contains_key(f) || f == 0 {
             return Ok(());
         }
         let info = self.font_get(f, crate::fields::FontCell::Info)?;
@@ -950,7 +950,7 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn add_font(&mut self, view: &mut crate::fonts::View, f: u32) -> R<()> {
-        if view.fonts.contains_key(&f) || f == 0 {
+        if view.fonts.contains_key(f) || f == 0 {
             return Ok(());
         }
         let Some(e) = self.font_entry(f)? else {
@@ -2299,7 +2299,7 @@ impl Run<'_, '_> {
             Lig,
             MoveLig,
         }
-        let Some((loaded, _)) = view.fonts.get(&f) else {
+        let Some((loaded, _)) = view.fonts.get(f) else {
             // the null font: every character is missing
             return Ok(false);
         };

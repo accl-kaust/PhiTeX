@@ -70,7 +70,7 @@ pub(crate) struct Entry {
 /// `\hyphenchar`s.
 #[derive(Default)]
 pub(crate) struct View {
-    pub fonts: FxHashMap<FontId, (Arc<Loaded>, Vec<i32>)>,
+    pub fonts: FontTable,
     pub hyphen: FxHashMap<FontId, i32>,
     pub names: FxHashMap<FontId, (String, i32)>,
 }
@@ -100,9 +100,60 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
     })
 }
 
+/// A view's fonts by id: an array indexed by the font's number (the
+/// metrics of a character a load and an index away, no hashing per
+/// character); a number past [`FontTable::DIRECT`] in a map beside it.
+#[derive(Default)]
+pub(crate) struct FontTable {
+    direct: Vec<Option<(Arc<Loaded>, Vec<i32>)>>,
+    far: FxHashMap<FontId, (Arc<Loaded>, Vec<i32>)>,
+}
+
+impl FontTable {
+    const DIRECT: usize = 1 << 16;
+
+    #[inline]
+    pub(crate) fn get(&self, f: FontId) -> Option<&(Arc<Loaded>, Vec<i32>)> {
+        let i = f as usize;
+        if i < Self::DIRECT {
+            self.direct.get(i).and_then(Option::as_ref)
+        } else {
+            self.far.get(&f)
+        }
+    }
+
+    pub(crate) fn contains_key(&self, f: FontId) -> bool {
+        self.get(f).is_some()
+    }
+
+    pub(crate) fn insert(&mut self, f: FontId, x: (Arc<Loaded>, Vec<i32>)) {
+        let i = f as usize;
+        if i < Self::DIRECT {
+            if self.direct.len() <= i {
+                self.direct.resize_with(i + 1, || None);
+            }
+            self.direct[i] = Some(x);
+        } else {
+            self.far.insert(f, x);
+        }
+    }
+
+    /// The fonts' numbers (the direct ones in order, then the others).
+    pub(crate) fn ids(&self) -> Vec<FontId> {
+        self.direct
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.is_some())
+            .filter_map(|(i, _)| FontId::try_from(i).ok())
+            .chain(self.far.keys().copied())
+            .collect()
+    }
+}
+
 impl View {
+    #[inline]
     fn get(&self, f: FontId) -> Option<&(Arc<Loaded>, Vec<i32>)> {
-        self.fonts.get(&f)
+        self.fonts.get(f)
     }
 
     pub(crate) fn char_dims(&self, f: FontId, c: u32) -> Option<phitex_tfm::CharDims> {
