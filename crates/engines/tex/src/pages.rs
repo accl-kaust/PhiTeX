@@ -3399,7 +3399,7 @@ impl Run<'_, '_> {
         // (`PHITEX_FIN_FIELD=name`: what each finisher's run left of that
         // field, for the predictions)
         if let Some(name) = crate::exec::env_str!("PHITEX_FIN_FIELD") {
-            let f = v.field(&name);
+            let f = v.field(name);
             eprintln!(
                 "fin-field page {j} node {}: {name} {}",
                 self.cx.node().raw(),
