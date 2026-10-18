@@ -1479,7 +1479,8 @@ pub(crate) fn ship(
         r.param("pdfdestmargin")?,
         r.param("pdfthreadmargin")?,
     ];
-    page_allocs(r, ids, &fonts, &side.whats)?;
+    let marks = mark_events(v, bx, &resolved);
+    page_allocs(r, ids, &fonts, &side.whats, marks)?;
     ship_apart(r, page, &p, bx, &side.whats, &resolved, fonts, margins)
 }
 
@@ -1696,6 +1697,7 @@ pub(crate) fn page_allocs(
     ids: &[u32],
     fonts: &Fonts,
     side_whats: &[ValueId],
+    marks: ValueId,
 ) -> R<()> {
     let v = r.v;
     let j = i64::try_from(r.page_index()).unwrap_or(0);
@@ -1755,9 +1757,123 @@ pub(crate) fn page_allocs(
         rt_fonts,
         rt_dests,
         rt_os,
+        marks,
     ]);
     r.contribute(ALLOCS, v.seq_unit(e));
     Ok(())
+}
+
+/// The events of a page's shipout that make objects past its fixed
+/// ones, in the order the walk meets them (pdfTeX §729, §738, §1612ff):
+/// `[0, level, n]` n hboxes entered at `level` since the mark before
+/// (the state the same for all of them; a link running at that
+/// level continues in each, `append_link`: an object a piece);
+/// `[1, level, kind, id]` a link started (`do_link`; its action's
+/// target, `kind` 1 a destination, 2 a thread, 0 none, is got when
+/// each piece is written); `[2]` a link ended; `[3, on]` running links
+/// on or off; `[4, level, n]` n vboxes entered at `level` (a thread
+/// continues in each, `append_thread`); `[5, start, level, running,
+/// id]` a thread's bead (`do_thread`: the bead and its rectangle's
+/// object, the thread's own where first named); `[6]` a thread ended.
+/// The state they act on (the link stack, the thread) runs on over the
+/// pages, so the fold of the line ([`fold_allocs`]) counts them.
+fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>) -> ValueId {
+    struct Walk<'a> {
+        v: &'a Values,
+        resolved: &'a FxHashMap<u32, ValueId>,
+        cur_s: i64,
+        seg: BTreeMap<(i64, i64), i64>,
+        ev: Vec<Vec<ValueId>>,
+    }
+    impl Walk<'_> {
+        fn count(&mut self, code: i64, level: i64) {
+            *self.seg.entry((code, level)).or_insert(0) += 1;
+        }
+        /// The boxes entered since the last mark (the state is the
+        /// same for all of them), before the next.
+        fn flush(&mut self) {
+            let v = self.v;
+            for ((code, level), n) in std::mem::take(&mut self.seg) {
+                self.ev.push(vec![v.int(code), v.int(level), v.int(n)]);
+            }
+        }
+        fn push(&mut self, e: Vec<ValueId>) {
+            self.flush();
+            self.ev.push(e);
+        }
+        fn what(&mut self, h: u32, vertical: bool) {
+            let v = self.v;
+            let Some(&d) = self.resolved.get(&h) else {
+                return;
+            };
+            let ys = list_of(v, d);
+            let kind = ys.first().map(|&k| str_of(v, k)).unwrap_or_default();
+            let int = |k: usize| ys.get(k).map_or(0, |&n| int_of(v, n));
+            match kind.as_str() {
+                "pdf:startlink" if !vertical => {
+                    let a = ys.get(6).map(|&a| list_of(v, a)).unwrap_or_default();
+                    let ak = a.first().map(|&k| str_of(v, k)).unwrap_or_default();
+                    let local = a.get(1).is_none_or(|&f| str_of(v, f).is_empty());
+                    let page = a.get(2).is_some_and(|&p| p != ValueId::UNIT);
+                    let id = a.get(3).copied().unwrap_or(ValueId::UNIT);
+                    let target = match ak.as_str() {
+                        "goto" if local && !page => 1,
+                        "thread" if local => 2,
+                        _ => 0,
+                    };
+                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), id]);
+                }
+                "pdf:endlink" if !vertical => self.push(vec![v.int(2)]),
+                "rloff" => self.push(vec![v.int(3), v.int(0)]),
+                "rlon" => self.push(vec![v.int(3), v.int(1)]),
+                "pdf:thread" | "pdf:startthread" => {
+                    let start = kind == "pdf:startthread";
+                    if start && !vertical {
+                        return;
+                    }
+                    let running = i32::try_from(int(4)).ok() == Some(phitex_typeset::node::RUNNING);
+                    self.push(vec![
+                        v.int(5),
+                        v.int(i64::from(start)),
+                        v.int(self.cur_s),
+                        v.int(i64::from(running)),
+                        ys.get(1).copied().unwrap_or(ValueId::UNIT),
+                    ]);
+                }
+                "pdf:endthread" if vertical => self.push(vec![v.int(6)]),
+                _ => {}
+            }
+        }
+        fn nodes(&mut self, list: &[phitex_typeset::node::Node], vertical: bool) {
+            use phitex_typeset::node::Node;
+            for p in list {
+                match p {
+                    Node::Box(b) => self.boxed(b),
+                    Node::Whatsit(h, _) => self.what(*h, vertical),
+                    Node::Disc(d) if !vertical => self.nodes(&d.replace, false),
+                    _ => {}
+                }
+            }
+        }
+        fn boxed(&mut self, b: &BoxNode) {
+            use phitex_typeset::node::BoxKind;
+            self.cur_s += 1;
+            let vertical = b.kind == BoxKind::V;
+            self.count(if vertical { 4 } else { 0 }, self.cur_s);
+            self.nodes(&b.list, vertical);
+            self.cur_s -= 1;
+        }
+    }
+    let mut w = Walk {
+        v,
+        resolved,
+        cur_s: -1,
+        seg: BTreeMap::new(),
+        ev: Vec::new(),
+    };
+    w.boxed(bx);
+    w.flush();
+    v.list(w.ev.into_iter().map(|e| v.list(e)).collect())
 }
 
 /// The fonts a read-time write uses (an `\\immediate\\pdfxform`'s):
@@ -1861,6 +1977,102 @@ struct AllocFold {
     os_written: i64,
 }
 
+/// The writer's link stack and thread over the pages, as the fold of
+/// their mark events ([`mark_events`]) runs them.
+#[derive(Default)]
+struct MarkState {
+    /// Each running link's level and its action's target (kind, id).
+    links: Vec<(i64, i64, ValueId)>,
+    /// Running links off (`\\pdfrunninglinkoff`).
+    off: bool,
+    thread_level: i64,
+    thread_running: bool,
+    thread_id: Option<ValueId>,
+    /// A bead on this page (`last_thread`).
+    thread_last: bool,
+    threads: BTreeSet<ValueId>,
+}
+
+/// What a page's marks made: objects, and of them those written into an
+/// object stream where they compress.
+struct MarksMade {
+    objects: i64,
+    compressible: i64,
+}
+
+impl MarkState {
+    fn page(&mut self, v: &Values, events: &[ValueId], dests: &mut BTreeSet<ValueId>) -> MarksMade {
+        let mut made = MarksMade {
+            objects: 0,
+            compressible: 0,
+        };
+        self.thread_last = false;
+        for &e in events {
+            let ys = list_of(v, e);
+            let n = |k: usize| ys.get(k).and_then(|&x| v.as_int(x)).unwrap_or(0);
+            let id = |k: usize| ys.get(k).copied().unwrap_or(ValueId::UNIT);
+            match n(0) {
+                0 if !self.off => {
+                    let pieces: Vec<(i64, ValueId)> = self
+                        .links
+                        .iter()
+                        .filter(|l| l.0 == n(1))
+                        .map(|l| (l.1, l.2))
+                        .collect();
+                    for (kind, target) in pieces {
+                        made.objects += n(2);
+                        made.compressible += n(2);
+                        made.objects += self.target(kind, target, dests);
+                    }
+                }
+                1 => {
+                    self.links.push((n(1), n(2), id(3)));
+                    made.objects += self.target(n(2), id(3), dests);
+                }
+                2 => {
+                    self.links.pop();
+                }
+                3 => self.off = n(1) == 0,
+                4 if self.thread_last && self.thread_running && self.thread_level == n(1) => {
+                    made.objects += 2 * n(2);
+                    made.compressible += n(2);
+                    let t = self.thread_id.unwrap_or(ValueId::UNIT);
+                    if self.threads.insert(t) {
+                        made.objects += 1;
+                    }
+                }
+                5 => {
+                    if n(1) != 0 {
+                        self.thread_level = n(2);
+                        self.thread_running = n(3) != 0;
+                        self.thread_id = Some(id(4));
+                    }
+                    made.objects += 2;
+                    made.compressible += 1;
+                    if self.threads.insert(id(4)) {
+                        made.objects += 1;
+                    }
+                    self.thread_last = true;
+                }
+                6 => self.thread_last = false,
+                _ => {}
+            }
+        }
+        made
+    }
+
+    /// A link piece's action target got (`get_obj`): an object where it
+    /// is named first.
+    fn target(&mut self, kind: i64, id: ValueId, dests: &mut BTreeSet<ValueId>) -> i64 {
+        let new = match kind {
+            1 => dests.insert(id),
+            2 => self.threads.insert(id),
+            _ => false,
+        };
+        i64::from(new)
+    }
+}
+
 type AllocMemo = Mutex<FxHashMap<(u64, u64), AllocFold>>;
 
 fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
@@ -1876,6 +2088,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     let mut seen: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_dest: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_ship: BTreeSet<ValueId> = BTreeSet::new();
+    let mut ms = MarkState::default();
     for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
         let xs = list_of(v, e);
         let i = |k: usize| xs.get(k).and_then(|&x| v.as_int(x)).unwrap_or(0);
@@ -1910,9 +2123,16 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
                 out.ship_fonts += 1;
             }
         }
+        // (the marks' objects past the fixed ones, `mark_events`: a link
+        // piece each, a bead and its rectangle each, a destination or
+        // thread a piece's action or a bead names first)
+        let made = ms.page(v, &l(9), &mut seen_dest);
+        out.objects += made.objects;
         // (the read-time writes into object streams before the page
-        // count toward a stream's 100)
-        for _ in 0..i(4) {
+        // count toward a stream's 100; a link piece's and a bead
+        // rectangle's object go into one too)
+        let os = if i(4) > 0 { i(4) + made.compressible } else { 0 };
+        for _ in 0..os {
             if (written + i(8)) % 100 == 0 {
                 out.objects += 1;
             }
