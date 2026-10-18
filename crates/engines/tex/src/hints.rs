@@ -3463,6 +3463,7 @@ enum Kept<T> {
 struct Prepared {
     may: Option<MayDefine>,
     reads: Kept<Option<Vec<Field>>>,
+    #[allow(dead_code, reason = "read by `prepared_lines`, unused for now")]
     lines: Option<ValueId>,
 }
 
@@ -3702,6 +3703,7 @@ fn take_prepared<T>(
 
 /// The lines a node's text begins (`crate::run::text_lines`), as
 /// prepared before its push.
+#[allow(dead_code, reason = "a node declares its lines again when a declaration can leave other fields open")]
 pub(crate) fn prepared_lines(reg: &Registry, args: &[ValueId]) -> Option<ValueId> {
     take_prepared(reg, args, |p| p.lines.take())
 }
