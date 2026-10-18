@@ -1006,8 +1006,8 @@ fn build_json_events() {
     assert!(dir.join("story.dvi").is_file());
 }
 
-/// The exit statuses: 2 for a file that is not there or an unknown
-/// command, 1 for a document with errors.
+/// The exit statuses, as pdflatex's: 1 for a file that is not there, an
+/// unknown command or a document with errors, 0 for `--help`.
 #[test]
 fn exit_statuses() {
     let _one = one();
@@ -1023,10 +1023,13 @@ fn exit_statuses() {
     };
     assert_eq!(
         status(&["build", "--engine", "tex", "nothere.tex"]),
-        Some(2)
+        Some(1)
     );
-    assert_eq!(status(&["check", "x.tex"]), Some(2));
-    assert_eq!(status(&["x.tex"]), Some(2));
+    assert_eq!(status(&["check", "x.tex"]), Some(1));
+    assert_eq!(status(&["x.tex"]), Some(1));
+    assert_eq!(status(&["--help"]), Some(0));
+    assert_eq!(status(&["--compat=pdflatex", "-help"]), Some(0));
+    assert_eq!(status(&["--compat=pdflatex", "-frob", "x.tex"]), Some(1));
     std::fs::write(dir.join("bad.tex"), "\\undefinedcs\n\\bye\n").expect("the document");
     assert_eq!(status(&["build", "--engine", "tex", "bad.tex"]), Some(1));
 }
@@ -1173,7 +1176,7 @@ fn options_in_any_position() {
 }
 
 /// An unknown option is named, with `--help` suggested, and the exit
-/// status is 2; an option before the command is never taken for TeX's
+/// status is pdflatex's 1; an option before the command is never taken for TeX's
 /// command line.
 #[test]
 fn unknown_option_is_named() {
@@ -1184,7 +1187,7 @@ fn unknown_option_is_named() {
         .output()
         .expect("phitex runs");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(err.contains("--frob"), "the option is not named:\n{err}");
     assert!(err.contains("--help"), "--help is not suggested:\n{err}");
     assert!(err.lines().count() <= 8, "more than a few lines:\n{err}");
@@ -1193,7 +1196,7 @@ fn unknown_option_is_named() {
         .output()
         .expect("phitex runs");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(err.contains("--frob") && !err.contains("compat"), "{err}");
 }
 

@@ -261,8 +261,10 @@ pub struct Report {
     /// last build's (none: cold, or the main text unchanged).
     pub edit_line: Option<usize>,
     pub runs: Vec<RunInfo>,
-    /// The written files still changing when the Build stopped.
-    pub unsettled: Vec<String>,
+    /// The engine's warnings at no place, said for a reader
+    /// ([`crate::failure::warning`]): the files read back still changing
+    /// at the round cap, latexmk's `max_repeat`.
+    pub warnings: Vec<String>,
     pub notes: Vec<String>,
     pub wall: Duration,
     /// The engine's own account of why it stopped (its state dumped: for
@@ -442,6 +444,23 @@ impl Absorb {
     }
 }
 
+/// The engine's threads: `-j N`, else `PHITEX_THREADS`, else every
+/// logical CPU this process may run on (hyperthreads included: Linux's
+/// affinity mask and cgroup quota, `available_parallelism`), as the
+/// engine itself counts them.
+pub fn threads(given: Option<usize>) -> usize {
+    given
+        .filter(|&n| n > 0)
+        .or_else(|| {
+            std::env::var("PHITEX_THREADS")
+                .ok()?
+                .parse()
+                .ok()
+                .filter(|&n| n > 0)
+        })
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+}
+
 /// The job's clock as engine `e` reads it, in seconds whose UTC fields are
 /// the job's date and time: `SOURCE_DATE_EPOCH` (TeX Live's engines but
 /// Knuth's `tex`, which ignores it), else the local time now.
@@ -563,7 +582,7 @@ impl Session {
                 ..RunInfo::default()
             }],
             edit_line: None,
-            unsettled: Vec::new(),
+            warnings: Vec::new(),
             notes: Vec::new(),
             wall: t0.elapsed(),
             internal,
@@ -632,11 +651,7 @@ impl Session {
                 } else {
                     "engine".to_owned()
                 });
-                let workers = self
-                    .job
-                    .threads
-                    .or_else(|| std::env::var("PHITEX_THREADS").ok()?.parse().ok())
-                    .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+                let workers = threads(self.job.threads);
                 let progress = Arc::new(phitex_tex::Progress::new(workers));
                 snapshots(&progress);
                 self.status.set_live(Some(live(progress.clone())));
@@ -658,6 +673,9 @@ impl Session {
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
                     threads: self.job.threads,
                     progress: Some(progress),
+                    // (pdfTeX's `\pdfshellescape`: 1 with -shell-escape,
+                    // else TeX Live's restricted default)
+                    shell_escape: if self.job.shell_escape { 1 } else { 2 },
                     speculation: match self.job.spec.as_deref() {
                         Some("off") => phitex_tex::Speculation::Off,
                         Some("all") => phitex_tex::Speculation::All,
@@ -783,15 +801,31 @@ impl Session {
         let s = &b.stats;
         let diagnostics = b.diagnostics();
         // (the engine's warnings at no place: the read-back files still
-        // changing at the round limit)
-        for d in diagnostics.iter().filter(|d| {
-            d.severity == phitex_tex::Severity::Warning && d.range == (0, 0) && d.context.is_empty()
-        }) {
-            eprintln!("warning: {}", d.message);
-        }
+        // changing at the round limit; the front ends print them)
+        let warnings: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| {
+                d.severity == phitex_tex::Severity::Warning
+                    && d.range == (0, 0)
+                    && d.context.is_empty()
+            })
+            .map(|d| crate::failure::warning(&d.message))
+            .collect();
         lap(&mut phases, "diagnostics");
         // (and the evaluation's own errors — no fixpoint, a stop — which
-        // the log does not have: errors at no place, without context)
+        // the log does not have: errors at no place, without context,
+        // each said as a sentence, `crate::failure`; their whole text is
+        // the report's `internal`, for -v)
+        let failures: Vec<&str> = diagnostics
+            .iter()
+            .filter(|d| {
+                d.severity == phitex_tex::Severity::Error
+                    && d.range == (0, 0)
+                    && d.context.is_empty()
+            })
+            .map(|d| d.message.as_str())
+            .collect();
+        let internal = (!failures.is_empty()).then(|| failures.join("\n"));
         // (the format's own errors first, with their places: a format
         // that stopped on them is not the oracle's, whatever follows)
         // (the engine's failures first — a deadline, no fixpoint, an
@@ -809,11 +843,7 @@ impl Session {
                 if phitex_tex::OBSERVE && std::env::var_os("PHITEX_EVAL_DUMP").is_some() {
                     eprintln!("eval-dump: {}", d.message);
                 }
-                let m = d.message.lines().next().unwrap_or("");
-                match m.char_indices().nth(240) {
-                    Some((k, _)) => format!("{}…", &m[..k]),
-                    None => m.to_owned(),
-                }
+                crate::failure::explain(&d.message)
             })
             .chain(
                 b.prelude_diagnostics()
@@ -904,9 +934,9 @@ impl Session {
                     s.pending_waits,
                 ],
             }],
-            internal: None,
+            internal,
             diagnostics,
-            unsettled: Vec::new(),
+            warnings,
             notes: std::iter::once(format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds, realised cp {} nodes; guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions",
                 s.nodes_run,
@@ -1329,7 +1359,11 @@ pub fn waiting_notes(job: &Job) -> Vec<String> {
         v.push("no SyncTeX yet (-synctex)".to_owned());
     }
     if job.shell_escape {
-        v.push("-shell-escape: the native engine runs no \\write18 yet".to_owned());
+        v.push(
+            "-shell-escape: \\write18 may name any command, but PhiTeX runs no external program: \
+             bibtex, biber and makeindex run in process, any other command is refused"
+                .to_owned(),
+        );
     }
     v
 }

@@ -34,6 +34,7 @@ mod compat;
 mod config;
 mod dvipdf;
 mod editor;
+mod failure;
 mod keys;
 mod modern;
 mod problems;
@@ -50,10 +51,10 @@ mod ws;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// The exit status of a usage, configuration or file error.
-pub const EXIT_USAGE: i32 = 2;
-/// The exit status of a failure inside PhiTeX (a panic caught).
-pub const EXIT_INTERNAL: i32 = 3;
+/// The exit status of any failure, as pdflatex's (web2c exits 0 or 1):
+/// TeX's errors, a usage, configuration or file error, PhiTeX's own
+/// failure. Which one it was is on standard error.
+pub const EXIT_FAILED: i32 = 1;
 
 /// When the process reached `main` (the cold build's timeline begins
 /// here, `PHITEX_TEX_TIME`).

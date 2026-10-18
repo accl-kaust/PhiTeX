@@ -428,14 +428,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let st = ui.st;
     let job = modern::job(t, o).unwrap_or_else(|e| {
         ui.error(&e);
-        std::process::exit(crate::EXIT_USAGE);
+        std::process::exit(crate::EXIT_FAILED);
     });
     // (the banner: what is built into what, by which engine)
     if !ui.quiet {
-        let threads = job
-            .threads
-            .or_else(|| std::env::var("PHITEX_THREADS").ok()?.parse().ok())
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+        let threads = session::threads(job.threads);
         ui.line(&format!(
             "{} {}  {} → {}  {}",
             st.bold("PhiTeX"),
@@ -453,7 +450,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let spin = ui.spin(what.clone(), status.clone());
     let mut s = Session::new(job, status.clone(), &mut |n: &str| ui.note(n)).unwrap_or_else(|e| {
         ui.error(&e);
-        std::process::exit(crate::EXIT_USAGE);
+        std::process::exit(crate::EXIT_FAILED);
     });
     spin.done();
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -521,7 +518,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (kept for the watch's life: dropping it stops the events)
     let _files = watcher(&root, ours.clone(), tx.clone()).unwrap_or_else(|e| {
         ui.error(&format!("can't watch {}: {e}", root.display()));
-        std::process::exit(crate::EXIT_USAGE);
+        std::process::exit(crate::EXIT_FAILED);
     });
     let raw = !ui.json && keys::raw();
     let building = Arc::new(AtomicBool::new(false));

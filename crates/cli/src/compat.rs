@@ -84,12 +84,14 @@ pub fn interaction(name: &str) -> Option<i32> {
     })
 }
 
+/// The usage line on standard error, exit status 1 (web2c's for a bad
+/// option).
 fn usage(progname: &str) -> ! {
     eprintln!(
         "usage: {progname} [-ini] [-etex] [-interaction=MODE] [-jobname=NAME] [-output-directory=DIR] \
-         [-output-format=dvi|pdf] [-fmt=NAME] [-recorder] [-synctex=N] [-threads=N] [&FORMAT] FILE"
+         [-output-format=dvi|pdf] [-fmt=NAME] [-recorder] [-synctex=N] [-threads=N] [-shell-escape] [&FORMAT] FILE"
     );
-    std::process::exit(2);
+    std::process::exit(crate::EXIT_FAILED);
 }
 
 /// Run as the engine `progname` with `args`; never returns.
@@ -132,7 +134,15 @@ pub fn main(progname: &str, args: &[String]) -> ! {
                 println!("phitex {} as {progname}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
-            "help" => usage(progname),
+            "help" => {
+                println!(
+                    "usage: {progname} [-ini] [-etex] [-interaction=MODE] [-jobname=NAME] \
+                     [-output-directory=DIR] [-output-format=dvi|pdf] [-fmt=NAME] [-recorder] \
+                     [-synctex=N] [-threads=N] [-shell-escape] [&FORMAT] FILE\n\
+                     phitex as {progname}: one run, as TeX Live's; `phitex build` runs to the fixpoint as latexmk does"
+                );
+                std::process::exit(0);
+            }
             "ini" => ini = true,
             "etex" => etex = true,
             "interaction" => {
@@ -170,7 +180,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
             "draftmode" | "mktex" | "no-mktex" | "kpathsea-debug" | "ipc" | "ipc-start" | "enc"
             | "mltex" => {
                 eprintln!("{progname}: -{name} is not supported by phitex");
-                std::process::exit(2);
+                std::process::exit(crate::EXIT_FAILED);
             }
             _ => usage(progname),
         }
@@ -182,14 +192,14 @@ pub fn main(progname: &str, args: &[String]) -> ! {
     }
     let Some(first) = rest.first().cloned() else {
         eprintln!("{progname}: phitex needs a file name on the command line (no terminal input)");
-        std::process::exit(2);
+        std::process::exit(crate::EXIT_FAILED);
     };
     if first.starts_with('\\') || rest.len() > 1 {
         eprintln!(
             "{progname}: a first line of TeX commands (`{}`) is not supported: name the main file",
             rest.join(" ")
         );
-        std::process::exit(2);
+        std::process::exit(crate::EXIT_FAILED);
     }
     // (`*name`: e-TeX's extended mode, as fmtutil gives it)
     let (file, star) = match first.strip_prefix('*') {
@@ -204,7 +214,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         })
         .unwrap_or_else(|e| {
             eprintln!("{progname}: {e}");
-            std::process::exit(2);
+            std::process::exit(crate::EXIT_FAILED);
         });
     let path = find_main(&file).unwrap_or_else(|| {
         eprintln!("! I can't find file `{file}'.");
@@ -247,9 +257,17 @@ pub fn main(progname: &str, args: &[String]) -> ! {
             "{progname}: phitex failed: {}",
             m.lines().next().unwrap_or("")
         );
-        std::process::exit(crate::EXIT_INTERNAL);
+        std::process::exit(crate::EXIT_FAILED);
     });
     print!("{}", Session::terminal(&r));
+    // (the engine's own failures and warnings, which TeX's transcript
+    // does not have: on standard error, said as sentences)
+    for e in r.out.errors.iter().filter(|e| !e.starts_with("! ")) {
+        eprintln!("{progname}: {e}");
+    }
+    for w in &r.warnings {
+        eprintln!("{progname}: warning: {w}");
+    }
     if let Err(e) = s.write(&r, true) {
         eprintln!("{progname}: {e}");
         std::process::exit(1);

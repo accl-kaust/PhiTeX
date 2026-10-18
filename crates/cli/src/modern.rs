@@ -30,12 +30,18 @@ const STYLES: Styles = Styles::styled()
 const ABOUT: &str = "\
 PhiTeX: TeX documents as graph reduction
 
-A document is built to its fixpoint (BibTeX and makeindex included) and,
-under `watch`, kept up to date as its files and the editor's buffers
-change, the pages live in the browser. It never stops for input.
+A document is built to its fixpoint as latexmk builds it with pdflatex:
+the files it writes and reads back go round until they settle (at most
+5 rounds, latexmk's limit, then the last round's output and a warning),
+BibTeX, biber and makeindex run in process when the document reads what
+they make. Under `watch` it is kept up to date as its files and the
+editor's buffers change, each build byte-identical to a cold one, the
+pages live in the browser. It never stops for input, and never runs an
+external TeX, BibTeX or \\write18 command.
 
-Exit status: 0 built (warnings allowed), 1 the document has errors,
-2 a usage, configuration or file error, 3 PhiTeX itself failed.";
+Exit status, as pdflatex's: 0 built without errors (warnings allowed),
+1 anything else (TeX's errors, a usage, configuration or file error, or
+PhiTeX itself failing; standard error says which).";
 
 /// The sections after the options (styled as clap's headers; the escapes
 /// are stripped when colour is off).
@@ -88,7 +94,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Sub {
-    /// Build the document to its fixpoint (BibTeX and makeindex included)
+    /// Build the document to its fixpoint (BibTeX, biber and makeindex in
+    /// process)
     Build {
         #[arg(value_name = "FILE")]
         file: Option<String>,
@@ -137,7 +144,8 @@ struct Opts {
     /// With --ini: e-TeX's extended mode
     #[arg(long, global = true)]
     etex: bool,
-    /// Threads (default: all cores)
+    /// The engine's threads (default: PHITEX_THREADS, else every logical
+    /// CPU, hyperthreads included); the output is the same at any count
     #[arg(
         short = 'j',
         long = "jobs",
@@ -146,9 +154,9 @@ struct Opts {
         global = true
     )]
     jobs: Option<usize>,
-    /// The PDF byte-identical to pdfTeX's, object numbers included (the
-    /// faster mode, pages written apart, may number them differently)
-    #[arg(long = "exact-pdf", global = true)]
+    /// (accepted for older scripts: the PDF is always pdfTeX's, byte for
+    /// byte)
+    #[arg(long = "exact-pdf", global = true, hide = true)]
     exact_pdf: bool,
     /// Whether the engine runs steps ahead of their inputs: on those an
     /// earlier run predicts (the default), never, or on any (not usable
@@ -166,7 +174,9 @@ struct Opts {
     /// (nothing else is printed)
     #[arg(long, global = true)]
     json: bool,
-    /// Run \write18's commands (minted, …)
+    /// \pdfshellescape 1 instead of TeX Live's restricted default; no
+    /// external program runs either way (bibtex, biber and makeindex run
+    /// in process, other commands are refused)
     #[arg(long, global = true)]
     shell_escape: bool,
     /// watch: open the viewer in the browser (or start phitex.toml's
@@ -497,7 +507,7 @@ pub fn report(
     // error — each on its own line first: the result is not the
     // document's, whatever TeX's errors and pages say)
     for f in r.out.errors.iter().filter(|e| !e.starts_with("! ")) {
-        ui.error(&format!("the engine failed: {f}"));
+        ui.error(f);
     }
     // (the engine's places when it gave them, else the transcript's)
     let placed = crate::problems::rendered(s, r, false, st.color, o.verbose > 0 || ui.verbose > 0);
@@ -520,12 +530,8 @@ pub fn report(
             log.display()
         ));
     }
-    if !r.unsettled.is_empty() {
-        ui.warning(&format!(
-            "the written files did not settle in {} runs: {} still changed (oscillating?)",
-            r.runs.len(),
-            r.unsettled.join(", ")
-        ));
+    for w in &r.warnings {
+        ui.warning(w);
     }
     let warnings: usize = crate::warnings::summarize(&text).iter().map(|g| g.1).sum();
     let run = r.runs.last().cloned().unwrap_or_default();
@@ -541,6 +547,7 @@ pub fn report(
         "errors": r.out.errors,
         "warnings": warnings,
         "diagnostics": r.engine_diagnostics(),
+        "engine_warnings": r.warnings,
         "log": log.display().to_string(),
         }));
     }
@@ -595,7 +602,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         Ok(j) => j,
         Err(e) => {
             ui.error(&e);
-            return crate::EXIT_USAGE;
+            return crate::EXIT_FAILED;
         }
     };
     for n in session::waiting_notes(&job) {
@@ -610,7 +617,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         Err(e) => {
             spin.done();
             ui.error(&e);
-            return crate::EXIT_USAGE;
+            return crate::EXIT_FAILED;
         }
     };
     let r = match crate::ui::catch(|| s.build()) {
@@ -618,7 +625,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         Err(m) => {
             spin.done();
             ui.failed("the build", &m);
-            return crate::EXIT_INTERNAL;
+            return crate::EXIT_FAILED;
         }
     };
     status.set("writing the outputs");
@@ -628,7 +635,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         Err(e) => {
             spin.done();
             ui.error(&e);
-            return crate::EXIT_USAGE;
+            return crate::EXIT_FAILED;
         }
     };
     spin.done();
@@ -734,7 +741,7 @@ fn clean(t: &Target, ui: &Ui) -> i32 {
 fn clean_all(ui: &Ui) -> ! {
     let c = crate::cache::Cache::open(None).unwrap_or_else(|e| {
         ui.error(&e);
-        std::process::exit(crate::EXIT_USAGE);
+        std::process::exit(crate::EXIT_FAILED);
     });
     let dir = crate::cache::home_relative(&c.dir);
     match c.clear_all() {
@@ -747,7 +754,7 @@ fn clean_all(ui: &Ui) -> ! {
         }
         Err(e) => {
             ui.error(&format!("{dir}: {e}"));
-            std::process::exit(crate::EXIT_USAGE);
+            std::process::exit(crate::EXIT_FAILED);
         }
     }
     std::process::exit(0);
@@ -755,9 +762,17 @@ fn clean_all(ui: &Ui) -> ! {
 
 /// Run the modern command line with `args`.
 pub fn main(args: &[String]) -> ! {
+    // (clap's own exit status for a usage error is 2: pdflatex's is 1)
     let o = match parse(args) {
         Ok(o) => o,
-        Err(e) => e.exit(),
+        Err(e) => {
+            let _ = e.print();
+            std::process::exit(if e.use_stderr() {
+                crate::EXIT_FAILED
+            } else {
+                0
+            });
+        }
     };
     let ui = Ui::new(Style::detect(), o.verbose, o.quiet, o.json);
     crate::ui::capture_panics(o.verbose > 0);
@@ -772,11 +787,11 @@ pub fn main(args: &[String]) -> ! {
     }
     let Some(command) = o.command else {
         ui.error("no command given: build, watch or clean (`phitex --help`)");
-        std::process::exit(crate::EXIT_USAGE);
+        std::process::exit(crate::EXIT_FAILED);
     };
     let t = resolve(&o).unwrap_or_else(|e| {
         ui.error(&e);
-        std::process::exit(crate::EXIT_USAGE);
+        std::process::exit(crate::EXIT_FAILED);
     });
     phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");
     match command {
