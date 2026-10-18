@@ -579,6 +579,9 @@ fn main() {
         }
     }
     let mut evals = 0;
+    // (Pushed nodes and op names, for `--edits`.)
+    let mut pushes: Vec<(J, J, J)> = Vec::new();
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut i = 0;
     while i < lines.len() {
         let l = &lines[i];
@@ -713,8 +716,60 @@ fn main() {
                     );
                 }
             }
-            "api" => apply(&mut eng, l, &book, &units),
+            "api" => {
+                if l["f"] == "push" {
+                    pushes.push((l["r"].clone(), l["a"][1].clone(), l["a"][2].clone()));
+                } else if l["f"] == "register" {
+                    names.insert(l["r"].to_string(), l["a"][0].as_str().unwrap_or("").to_string());
+                }
+                apply(&mut eng, l, &book, &units);
+            }
             _ => {}
+        }
+    }
+    // `--edits N [--edit-op NAME]`: after the replay, N edits of a node of
+    // that op (default exec) spread over the document, each its own text
+    // again (re-run on the recorded answers; an unchanged output stops the
+    // change there), timed one evaluation each.
+    if let Some(n) = opt("--edits").map(|s| s.parse::<usize>().unwrap()) {
+        let opname = opt("--edit-op").unwrap_or_else(|| "exec".to_string());
+        let of_op: Vec<&(J, J, J)> = pushes
+            .iter()
+            .filter(|p| names.get(&p.1.to_string()).is_some_and(|x| *x == opname))
+            .collect();
+        let mut times = Vec::new();
+        for i in 0..n.min(of_op.len()) {
+            let (node, op, args) = of_op[of_op.len() * (i + 1) / (n + 1)];
+            eng.replace(de(node), de(op), de(args));
+            let mut sched = Greedy::speculative(spec, budget);
+            let t0 = std::time::Instant::now();
+            let r = eng.evaluate(&mut sched, &mut Threads(threads));
+            let dt = t0.elapsed();
+            times.push(dt.as_secs_f64() * 1e3);
+            if let Ok(rep) = &r {
+                let sum = |g: fn(&defuse::RoundTimes) -> u64| rep.round_times.iter().map(g).sum::<u64>() as f64 / 1e6;
+                println!(
+                    "edit {}: {:.2} ms, runs {} stops {}; op {:.2} commit {:.2} check {:.2} ms",
+                    i + 1,
+                    dt.as_secs_f64() * 1e3,
+                    rep.nodes_run,
+                    rep.stops,
+                    sum(|t| t.op_ns),
+                    sum(|t| t.commit_ns),
+                    sum(|t| t.check_ns),
+                );
+            } else {
+                println!("edit {}: {r:?}", i + 1);
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        if !times.is_empty() {
+            println!(
+                "edits: median {:.2} ms over {} ({} {opname} nodes)",
+                times[times.len() / 2],
+                times.len(),
+                of_op.len()
+            );
         }
     }
     println!(
