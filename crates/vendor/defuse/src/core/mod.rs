@@ -706,6 +706,9 @@ pub(crate) struct Sub {
     pub at: Slot,
     /// For range readers: the anchor (`NIL`: the unit's start).
     pub from: Slot,
+    /// For range readers: the id of the window's last entry, when it ends
+    /// before `at` (0: up to `at`). An id, not a slot: a slot is reused.
+    pub to: u64,
 }
 
 /// Subscriptions by position: appended as readers commit (cheap under the

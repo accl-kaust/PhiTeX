@@ -1850,7 +1850,12 @@ impl Shared {
                 let live = r.lgen.load(Ordering::Acquire) == sub.gn && r.st() != S_FREE;
                 if live {
                     let lo = if sub.from == NIL { 0 } else { self.rec(sub.from).lab() };
-                    if lo < l {
+                    // (A window that ends before the contribution: untouched.)
+                    let past_end = sub.to != 0
+                        && self
+                            .slot_of(sub.to)
+                            .is_some_and(|t| self.rec(t).st() != S_FREE && self.rec(t).lab() < l);
+                    if lo < l && !past_end {
                         notes
                             .touch
                             .push((sub.node, sub.gn, Cause::Range { from: None, field: f }));
@@ -2141,7 +2146,7 @@ impl Shared {
         conts: &[Spec],
         anchors: &[Option<Slot>],
         notes: &mut Notes,
-    ) {
+    ) -> bool {
         let u = self.unit_of(parent);
         let (old_kids, old_conts) = {
             let d = self.rec(parent).data();
@@ -2157,8 +2162,16 @@ impl Shared {
         let kids_same = same(&old_kids, kids);
         let conts_same = same(&old_conts, conts);
         if kids_same && conts_same {
-            return;
+            return false;
         }
+        // A continuation placed before the parent (or one gone from there)
+        // changes what the parent's own reads see: its touches of the
+        // parent are dropped at dispatch, so the caller rechecks it.
+        let before_me = !conts_same
+            && (anchors.iter().any(Option::is_some)
+                || old_conts
+                    .iter()
+                    .any(|&o| self.rec(o).st() != S_FREE && self.before(o, parent)));
         let pdepth = self.depth(parent);
         let grand = self.rec(parent).parent.load(Ordering::Acquire);
         if !kids_same {
@@ -2192,6 +2205,7 @@ impl Shared {
             );
             self.rec(parent).data().conts = new;
         }
+        before_me
     }
 
     /// Replaces `old` entries by `specs` (reusing equal ids), placing new
