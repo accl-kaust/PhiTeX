@@ -1768,7 +1768,7 @@ fn file_units(
     path: &str,
     bytes: &[u8],
 ) -> Vec<(Field, ValueId)> {
-    let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+    let text = latin1(bytes);
     let pv = v.str(path);
     let order = |sliceable: bool, units: Vec<ValueId>| {
         v.list(vec![
@@ -1996,7 +1996,7 @@ impl Graph {
         self.reads
             .push((name.to_owned(), file_hash(found.as_ref())));
         if let Some((path, bytes)) = found {
-            let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+            let text = latin1(&bytes);
             let val = v.list(vec![v.str(&path), v.str(&text)]);
             self.files.push((f, val));
         } else {
@@ -2025,7 +2025,7 @@ impl Graph {
             let found = finder(todo[k].0);
             let hash = file_hash(found.as_ref());
             let val = found.map(|(path, bytes)| {
-                let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                let text = latin1(&bytes);
                 v.list(vec![v.str(&path), v.str(&text)])
             });
             (hash, val)
@@ -2106,7 +2106,7 @@ impl Graph {
                 let found = finder(name);
                 let hash = file_hash(found.as_ref());
                 let val = found.map(|(path, bytes)| {
-                    let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                    let text = latin1(&bytes);
                     v.list(vec![v.str(&path), v.str(&text)])
                 });
                 if let Ok(mut l) = log.lock() {
@@ -2904,6 +2904,17 @@ impl Graph {
     }
 }
 
+/// A file's bytes as TeX's characters, one each (Latin-1): ASCII bytes
+/// are their characters' UTF-8 already, copied at once.
+fn latin1(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes)
+        && s.is_ascii()
+    {
+        return s.to_owned();
+    }
+    bytes.iter().map(|&b| char::from(b)).collect()
+}
+
 /// The id of file `file`'s read-back definition of field `f`
 /// (`wdef:<id>`): per file, as two files that define one field (LaTeX's
 /// scratch macros, `\reserved@a`) each give their own value, the last
@@ -3462,7 +3473,7 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         let Some((_, bytes)) = finder(name) else {
             continue;
         };
-        let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+        let text = latin1(&bytes);
         let file = u32::try_from(k + 1).unwrap_or(u32::MAX);
         let kind = crate::hints::kind_of(&text, pass::FileKind::from_path(name));
         defs.harvest(&text, kind, file);
@@ -4060,8 +4071,9 @@ impl Build {
         crate::timeline::lap("engine: the link, end and files nodes");
         // (the fields nearly every node reads and only the format or the
         // job's start defines: their reads kept per unit, not filed by
-        // scope, [`STABLE_FIELDS`]; `PHITEX_NO_STABLE=1` leaves them)
-        if !crate::exec::env_flag!("PHITEX_NO_STABLE") {
+        // scope, [`STABLE_FIELDS`]; with `PHITEX_STABLE=1` only, until
+        // the engine's answer on it)
+        if crate::exec::env_flag!("PHITEX_STABLE") {
             for f in STABLE_FIELDS {
                 let f = g.eng.values().field(f);
                 g.eng.set_stable(f);
