@@ -169,6 +169,16 @@ static PARA_SPECIAL: [bool; 256] = {
     t
 };
 
+/// Whether any of the eight bytes of `w` is one [`PARA_SPECIAL`] has
+/// (`\\`, `%`, `{`, `}`, a line end): each compared at once.
+fn has_para_special(w: u64) -> bool {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let zero = |x: u64| x.wrapping_sub(LO) & !x & HI;
+    let eq = |b: u8| zero(w ^ (LO * u64::from(b)));
+    (eq(b'\\') | eq(b'%') | eq(b'{') | eq(b'}') | eq(b'\n')) != 0
+}
+
 /// Where the paragraph that begins at `start` ends: after the blank lines
 /// that follow its text at brace depth 0 (the blank lines before any text
 /// are its own). A verbatim run is skipped whole: its braces, `%` and blank
@@ -220,6 +230,13 @@ fn para_end(s: &[u8], start: usize) -> (usize, bool) {
             let ch = s[c];
             if !PARA_SPECIAL[ch as usize] {
                 c += 1;
+                // (eight bytes at a time past those the cutter does not
+                // stop at)
+                while let Some(w) = s.get(c..c + 8)
+                    && !has_para_special(u64::from_le_bytes(w.try_into().unwrap_or([0; 8])))
+                {
+                    c += 8;
+                }
                 continue;
             }
             match ch {

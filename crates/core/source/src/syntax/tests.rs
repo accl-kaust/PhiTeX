@@ -237,3 +237,19 @@ fn one_pass_cutter() {
         }
     }
 }
+
+#[test]
+fn eight_byte_skip_finds_what_the_table_does() {
+    // (every byte value in every lane, beside harmless ones)
+    for b in 0..=255u8 {
+        for lane in 0..8 {
+            let mut w = [b'a'; 8];
+            w[lane] = b;
+            assert_eq!(
+                has_para_special(u64::from_le_bytes(w)),
+                PARA_SPECIAL[b as usize],
+                "{b} at {lane}"
+            );
+        }
+    }
+}
