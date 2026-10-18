@@ -1851,11 +1851,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let (marker, tagged) = if op == self.ops.finish {
             let j = i64::try_from(self.page_index()).unwrap_or(i64::MAX);
             let mut t = vec![v.int(j), e];
-            // (the piece its break is in and the candidate, whether the
-            // piece goes on after it or ends there: what the piece wrote
-            // after that candidate, an `\immediate\closeout` after the
-            // last one, comes after the page's writes)
-            if let Some((pid, k, _)) = self.fin.as_ref().and_then(|c| c.brk) {
+            // (the piece its break is inside of and the candidate: what
+            // the piece wrote after that candidate comes after the page's
+            // writes)
+            if let Some((pid, k, true)) = self.fin.as_ref().and_then(|c| c.brk) {
                 t.extend([v.int(pid), v.int(k)]);
             }
             (None, v.list(t))

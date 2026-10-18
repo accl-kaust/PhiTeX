@@ -893,12 +893,19 @@ impl Run<'_, '_> {
 
     /// Whether a document file reached here stops the run (its lines
     /// the region children, [`Run::leftover`]): a document's run with no
-    /// level of its own open, or with groups it leaves as scopes. Open
-    /// conditionals do not keep it reading: they are all in a branch
-    /// being taken (a skipped branch is passed within one command), and
-    /// the stack goes on as a field ([`crate::run::COND_STACK`]).
+    /// level of its own open. Open conditionals do not keep it reading:
+    /// they are all in a branch being taken (a skipped branch is passed
+    /// within one command), and the stack goes on as a field
+    /// ([`crate::run::COND_STACK`]).
+    ///
+    /// A file reached inside a group of the run's own is read here, the
+    /// group's close with it (§282 by the run's own save stack). Left to
+    /// the engine as a scope around the file's pieces, a paragraph the
+    /// file leaves open made its last piece read on through the group's
+    /// close and the text after it, its view still holding the group's
+    /// local bindings: a no-op `\let` made in the group outlived it.
     pub(crate) fn stops_at_doc_file(&self) -> bool {
-        self.doc && (self.nest.is_empty() || self.can_leave_scope())
+        self.doc && self.nest.is_empty()
     }
 
     /// Whether the next input left is a document file's lines (what
