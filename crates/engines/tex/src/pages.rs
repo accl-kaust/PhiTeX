@@ -115,9 +115,10 @@ pub(crate) const SCAN: &str = "scan:state";
 pub(crate) const SCAN_BLOCK: &str = "scan:block";
 
 /// Page `j`'s continuation's scan state where it differed from what the
-/// block's scan `placer` predicted (`[state, material]`): a loop-back the
-/// continuation declares and publishes ([`Run::scan_cont`]), read by
-/// the scan the round after.
+/// block's scan `placer` predicted (`[state, material, break]`): a
+/// loop-back the continuation declares and publishes
+/// ([`Run::scan_cont`]), read by the scan the round after for that break
+/// only.
 fn scan_fix_field(v: &Values, j: i64, placer: i64) -> Field {
     v.field(&format!("scan:fix:{j}:{}", placer.cast_unsigned()))
 }
@@ -972,7 +973,7 @@ impl Run<'_, '_> {
     }
 
     /// A page found firing (spec-redesign §1): its break (`[j, read at,
-    /// src, piece, candidate, rest, origin, material]`:
+    /// src, piece, candidate, rest, origin]`:
     /// [`Run::assemble_page`]) and its
     /// finisher, placed right after the piece the page fires in (`at`,
     /// [`Ctx::follow_after`]; after this node where it fires in this
@@ -998,7 +999,6 @@ impl Run<'_, '_> {
         normal: i64,
         special: bool,
         origin: Option<ValueId>,
-        mat: Option<ValueId>,
         classes: Option<&[u16]>,
     ) -> R<(ValueId, Vec<ValueId>)> {
         let v = self.v;
@@ -1015,7 +1015,6 @@ impl Run<'_, '_> {
             v.int(i64::from(k)),
             v.int(i64::try_from(rest).unwrap_or(-1)),
             origin.unwrap_or(ValueId::UNIT),
-            mat.unwrap_or(ValueId::UNIT),
         ]);
         let mut pos = vec![v.int(j)];
         pos.extend([ValueId::UNIT; 8]);
@@ -1090,7 +1089,6 @@ impl Run<'_, '_> {
         let n = |i: usize| b.get(i).map_or(0, |&x| int_of(v, x));
         let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n(1).to_ne_bytes()));
         let (pid, k, rest) = (n(3), n(4), n(5));
-        let mat = mat.or_else(|| b.get(7).copied().filter(|&m| m != ValueId::UNIT));
         let mut s = ScanIn::decode(v, b.get(2).copied().and_then(some));
         let mut raws = Vec::new();
         let mut own = Vec::new();
@@ -1102,23 +1100,17 @@ impl Run<'_, '_> {
             // (the material the page began with, as items, where the break
             // was found; a page firing in a continuation's material has it
             // in its `src`)
-            // (as the scan that found the break had it, `mat`; else as it
-            // reaches here: a finisher and a continuation sit after the
-            // continuation of the page before, which defines it)
+            // (as the step predicting the page's continuation has it,
+            // `mat`; else as it reaches here: a finisher and a
+            // continuation sit after the continuation of the page before
+            // (and the pages firing in its material), which defines it,
+            // also where both pages break in one piece)
             s.material = match mat {
                 Some(m) => list_of(v, m),
-                None if here => self
+                None => self
                     .eng_read(v.field(SCAN_MAT))?
                     .map(|x| list_of(v, x))
                     .unwrap_or_default(),
-                None => match self.cx.use_field_at(v.field(SCAN_MAT), Some(at))? {
-                    phitex_defuse::FieldAt::Def(x, _) => list_of(v, x),
-                    phitex_defuse::FieldAt::Unset => Vec::new(),
-                    phitex_defuse::FieldAt::Gone => self
-                        .eng_read(v.field(SCAN_MAT))?
-                        .map(|x| list_of(v, x))
-                        .unwrap_or_default(),
-                },
             };
             // (the window ends at the break's piece: neither the step
             // that found the break, nor this page's finisher, nor
@@ -4015,7 +4007,6 @@ impl Run<'_, '_> {
                 st.normal,
                 sf.output_penalty <= -10001,
                 None,
-                mat,
                 Some(&sf.classes),
             )?;
             // (the continuation's scan state: as its run gave it where it
@@ -4025,9 +4016,12 @@ impl Run<'_, '_> {
             // finisher's prediction; the next page runs on it)
             let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
             let fix = scan_fix_field(v, j, me);
+            // (told for this break: a state told for another break of
+            // the page, from another state before it, is not this one's)
             let fixed = if self.cx.is_loopback(fix) {
                 self.eng_read(fix)?.and_then(|x| {
                     let xs = list_of(v, x);
+                    (xs.get(2) == Some(&b)).then_some(())?;
                     Some((*xs.first()?, *xs.get(1)?))
                 })
             } else {
@@ -4038,7 +4032,10 @@ impl Run<'_, '_> {
                 None if crate::exec::env_flag!("PHITEX_NO_CONT_PREDICT") => None,
                 None => {
                     let rtn = rtn_guess(&self.ops, v, &pos);
-                    match self.cont_state(&list_of(v, b), Some(rtn), mat)? {
+                    // (the material its page begins with as this step
+                    // has it: none before the first page)
+                    let m = mat.unwrap_or_else(|| v.list(Vec::new()));
+                    match self.cont_state(&list_of(v, b), Some(rtn), Some(m))? {
                         Cont::State(x, m) => Some((x, m)),
                         _ => None,
                     }
@@ -4114,9 +4111,8 @@ impl Run<'_, '_> {
         match self.cont_state(&b, None, None)? {
             Cont::Nothing => Ok(Placed::Nothing),
             Cont::Fire(j, src, k, rest, normal, special, origin) => {
-                let (b, _) = self.place_break(
-                    None, j, src, -2, k, rest, normal, special, origin, None, None,
-                )?;
+                let (b, _) =
+                    self.place_break(None, j, src, -2, k, rest, normal, special, origin, None)?;
                 let chain = cont_chain(v, &self.cx.args());
                 self.place_cont(None, j, None, b, chain);
                 Ok(Placed::Page)
@@ -4142,11 +4138,29 @@ impl Run<'_, '_> {
                 {
                     let j = int_of(v, j);
                     let fix = scan_fix_field(v, j, int_of(v, by));
-                    let real = v.list(vec![x, mat]);
-                    let told = self.cx.is_loopback(fix) && self.eng_read(fix)? == Some(real);
-                    if (px, args.get(3).copied().unwrap_or(ValueId::UNIT)) != (x, mat) || told {
+                    // (the state only: what the step decides from. The
+                    // material's contents (a write's text, a link's
+                    // object number) the next page's finisher and
+                    // continuation read here, where this node defines
+                    // them, not from the step: told the state it was told
+                    // already, it is told the same again, so a content
+                    // that changes with what ships before runs the readers
+                    // of the material again, not the step)
+                    let brk = args.get(4).copied().unwrap_or(ValueId::UNIT);
+                    let told = if self.cx.is_loopback(fix) {
+                        self.eng_read(fix)?.filter(|&t| {
+                            let ts = list_of(v, t);
+                            ts.first() == Some(&x) && ts.get(2) == Some(&brk)
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(t) = told {
                         self.cx.declare_loopback(fix, ValueId::UNIT);
-                        self.cx.publish(fix, real);
+                        self.cx.publish(fix, t);
+                    } else if px != x {
+                        self.cx.declare_loopback(fix, ValueId::UNIT);
+                        self.cx.publish(fix, v.list(vec![x, mat, brk]));
                     }
                 }
                 // (the guess cache: what this page's continuation defined)
@@ -4214,8 +4228,22 @@ impl Run<'_, '_> {
         material.extend(held);
         material.extend(rs.get(1).map(|&x| list_of(v, x)).unwrap_or_default());
         material.extend(carried);
+        // (a firing step's prediction reads the registers where its page
+        // fires, the piece `pid`, as its fold does: not where the step
+        // is, past the finishers and continuations it places itself,
+        // whose definitions change with what it places from those reads.
+        // The continuation reads them where it is, after the finisher,
+        // and tells the step a state that differs, `scan:fix`)
+        let at =
+            rtn.map(|_| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes())));
         for k in classes {
-            let m = self.ins_params_marker(k)?;
+            let m = match at {
+                Some(at) => {
+                    let c = self.insert_class_at(k, at)?;
+                    self.ins_marker(k, &c)
+                }
+                None => self.ins_params_marker(k)?,
+            };
             material.push(m);
         }
         material.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
@@ -4236,8 +4264,22 @@ impl Run<'_, '_> {
             ]))
         };
         material.extend(rest);
-        self.resolve_page_params(&mut material)?;
-        let dead = self.deadcycles_for(&material)?;
+        let dead = if let Some(at) = at {
+            self.resolve_params_of(pid, &mut material)?;
+            if has_end(v, &material) {
+                let f = self.loc_field(crate::fields::cell::DEADCYCLES as Loc);
+                match self.cx.use_field_at(f, Some(at))? {
+                    phitex_defuse::FieldAt::Def(x, _) => int_of(v, x),
+                    phitex_defuse::FieldAt::Unset => 0,
+                    phitex_defuse::FieldAt::Gone => self.cint(crate::fields::cell::DEADCYCLES)?,
+                }
+            } else {
+                0
+            }
+        } else {
+            self.resolve_page_params(&mut material)?;
+            self.deadcycles_for(&material)?
+        };
         let s = ScanIn {
             anchor: None,
             j: after.j,
@@ -4274,7 +4316,10 @@ impl Run<'_, '_> {
         };
         let mut ps = s.page_state();
         let fire = {
-            let mut live = |n: u16| self.insert_class(n);
+            let mut live = |n: u16| match at {
+                Some(at) => self.insert_class_at(n, at),
+                None => self.insert_class(n),
+            };
             ps.fold_items(v, &material, dead, &mut live)?
         };
         if let Some(fire) = fire {
@@ -4303,7 +4348,29 @@ impl Run<'_, '_> {
                 origin.filter(|_| in_rest),
             ));
         }
-        let prof = crate::vprof::encode(v, &material);
+        // (the state is what the page builder decides from: the markers
+        // that only order the writer's records among the pages (a write,
+        // a font loaded, a PDF write, §1370) it passes over, and page
+        // parameters set to the ones in force change nothing; the
+        // material that holds them reaches the next page's finisher by
+        // its own read, [`SCAN_MAT`]. A state holding them would differ
+        // from a prediction on every page whose routine writes another
+        // number of them or sets its parameters again)
+        let mut in_force = s.params;
+        let decides: Vec<ValueId> = material
+            .iter()
+            .copied()
+            .filter(|&x| match nodes::tag(v, x) {
+                nodes::T_WRITE_AT | nodes::T_FONT_AT | nodes::T_PDFW_AT => false,
+                nodes::T_PAGE_PARAMS if list_of(v, x).len() > 1 => {
+                    let same = in_force == Some(x);
+                    in_force = Some(x);
+                    !same
+                }
+                _ => true,
+            })
+            .collect();
+        let prof = crate::vprof::encode(v, &decides);
         let x = state(crate::vprof::value(v, &prof), Vec::new());
         Ok(Cont::State(x, v.list(material)))
     }
