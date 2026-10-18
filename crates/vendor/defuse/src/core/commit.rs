@@ -8,7 +8,7 @@ use super::ctx::Ctx;
 use super::order::Notes;
 use super::{
     ClaimS, Committed, DAns, DMode, Def, DefVal, F_APP, F_DONE, F_FWD, F_HAS_OUT, F_NEEDS_RUN, F_SENS, NIL, Pred,
-    S_CLEAN, S_FREE, S_RUN, Shared, Slot, Sub, in_work, lock, wlock,
+    S_CLEAN, S_FREE, S_RUN, Shared, Slot, Sub, in_work, lock,
 };
 use crate::api::{Cause, EvalError};
 use crate::values::{Field, ValueId, hash_words};
@@ -145,8 +145,116 @@ impl Shared {
         self.c.realised_ns.fetch_max(t, Ordering::Relaxed);
     }
 
-    /// Commits a finished run; `false`: a read broke, run again.
-    pub(crate) fn commit(&self, cx: &mut Ctx<'_>, out: ValueId) -> bool {
+    /// The worker's part of a commit: its reads checked once more (a
+    /// held read follows an equal value's new site), subscribed under a
+    /// new log generation, and the result landed for the merger.
+    pub(crate) fn land_commit(
+        &self,
+        cx: &mut Ctx<'_>,
+        out: ValueId,
+        ver: u64,
+        narrowed: Option<crate::api::MayDefine>,
+    ) {
+        let s = cx.me;
+        let u = cx.unit;
+        let r = self.rec(s);
+        let pread = Self::take_pred_read();
+        // The reads of a resumed run's earlier attempts: checked once more,
+        // following an equal value's new site (the reads this attempt made
+        // are verified at the merge).
+        let n = cx.prior.min(cx.log.len());
+        let (ok, wait) = self.recheck_chunked(s, u, &mut cx.log[..n], true);
+        if !ok {
+            // A read waits on an element in work: the run waits for it.
+            if pread && wait.is_none() {
+                self.c.predictions_refuted.fetch_add(1, Ordering::Relaxed);
+                r.set(super::F_PREDREF);
+            }
+            self.land(move |sh| sh.not_committed(s, wait));
+            return;
+        }
+        let lgen = r.lgen.load(Ordering::Acquire).wrapping_add(1) & 0x7fff_ffff;
+        r.lgen.store(lgen, Ordering::Release);
+        self.subscribe(s, u, lgen, &cx.log);
+        let keys = self.keys_of(&cx.log);
+        let mut o = cx.take_out(ver, keys, pread);
+        o.narrowed = narrowed;
+        self.land(move |sh| sh.merge_commit(o, out));
+    }
+
+    /// Asks the reads of `log` again (`refresh`: a held read follows an
+    /// equal value's new site), a chunk of reads per consistent view of
+    /// the unit (a structural write retries a chunk, not the log). Whether
+    /// they hold, and what the first that waits waits on.
+    pub(crate) fn recheck_chunked(
+        &self,
+        s: Slot,
+        u: u32,
+        log: &mut [Pred],
+        refresh: bool,
+    ) -> (bool, Option<super::query::Wait>) {
+        const CHUNK: usize = 32;
+        for part in log.chunks_mut(CHUNK) {
+            let mut wait = None;
+            let ok = self.sread(u, || {
+                super::query::sib_cursor_reset();
+                part.iter_mut().all(|p| match self.recheck(s, p, false) {
+                    Ok(Ok(())) => {
+                        if refresh {
+                            self.refresh_sites(s, p);
+                        }
+                        true
+                    }
+                    Err(w) => {
+                        wait = Some(w);
+                        false
+                    }
+                    Ok(Err(_)) => false,
+                })
+            });
+            if !ok {
+                return (false, wait);
+            }
+        }
+        (true, None)
+    }
+
+    /// A run that did not commit: it waits on what a read found in work,
+    /// or runs again.
+    pub(crate) fn not_committed(&self, s: Slot, wait: Option<super::query::Wait>) {
+        self.rec(s).data().kept = None;
+        if let Some(w) = wait {
+            self.rec(s).set(F_NEEDS_RUN);
+            self.park(s, w, None, 0);
+        } else {
+            self.run_again(s);
+        }
+    }
+
+    /// The merger's part of a commit: verified against what changed since
+    /// the run's version, then written to the store.
+    pub(crate) fn merge_commit(&self, mut o: super::ctx::RunOut, out: ValueId) {
+        let narrowed = o.narrowed.take();
+        let s = o.me;
+        let r = self.rec(s);
+        if r.st() != S_RUN || r.has(super::F_DOOM_FREE | super::F_DOOM_INERT) {
+            self.doomed(s);
+            return;
+        }
+        let late = narrowed.is_some();
+        if self.commit(&mut o, out) {
+            if late && let Some(m) = narrowed {
+                self.narrow_now(s, m);
+            }
+        } else {
+            let w = o.wait.take();
+            self.not_committed(s, w);
+        }
+    }
+
+    /// Commits a landed run; `false`: a read broke, run again (`cx.wait`:
+    /// it waits).
+    pub(crate) fn commit(&self, cx: &mut super::ctx::RunOut, out: ValueId) -> bool {
         #[cfg(feature = "observe")]
         crate::trace::node(self, cx.me, "commit", "");
         let s = cx.me;
@@ -156,49 +264,32 @@ impl Shared {
         let mut notes = Notes::default();
         let waiters;
         let mut restructured;
-        if r.st() != S_RUN || r.has(super::F_DOOM_FREE | super::F_DOOM_INERT) {
-            return self.doomed(s) || r.st() != S_RUN;
-        }
-        // Subscribe first, then validate: a write that lands after the
-        // subscription notifies this node (as stale: it validates again);
-        // one that lands before it is seen by the validation.
-        r.clear(super::F_STALE);
-        let pread = Self::take_pred_read();
-        let mut wait = None;
-        if !self.sread(u, || {
-            super::query::sib_cursor_reset();
-            cx.log.iter_mut().all(|p| match self.recheck(s, p, false) {
-                Ok(Ok(())) => {
-                    self.refresh_sites(s, p);
-                    true
+        let pread = cx.pread;
+        // Verified at the merge it lands in: only when something it read
+        // (or the structure it read through) changed since its version are
+        // its reads asked again.
+        let stale = r.flags.fetch_and(!super::F_STALE, Ordering::AcqRel) & super::F_STALE != 0;
+        if stale || self.moved_since(cx.ver, &cx.keys) {
+            let (ok, wait) = self.recheck_chunked(s, u, &mut cx.log, true);
+            if !ok {
+                if pread && wait.is_none() {
+                    self.c.predictions_refuted.fetch_add(1, Ordering::Relaxed);
+                    r.set(super::F_PREDREF);
                 }
-                Err(w) => {
-                    wait = Some(w);
-                    false
-                }
-                Ok(Err(_)) => false,
-            })
-        }) {
-            // A read waits on an element in work: the run waits for it.
-            if pread && wait.is_none() {
-                self.c.predictions_refuted.fetch_add(1, Ordering::Relaxed);
-                r.set(super::F_PREDREF);
+                cx.wait = wait;
+                return false;
             }
-            cx.wait = wait;
-            return false;
-        }
-        let lgen = r.lgen.load(Ordering::Acquire).wrapping_add(1) & 0x7fff_ffff;
-        r.lgen.store(lgen, Ordering::Release);
-        self.subscribe(s, u, lgen, &cx.log);
-        if !self.sread(u, || {
-            super::query::sib_cursor_reset();
-            cx.log.iter().all(|p| matches!(self.recheck(s, p, false), Ok(Ok(()))))
-        }) {
-            if pread {
-                self.c.predictions_refuted.fetch_add(1, Ordering::Relaxed);
-                r.set(super::F_PREDREF);
+            // The sites it consults may have moved: subscribed afresh, then
+            // checked once more (a write between the check and the new
+            // subscription notified the old one, which no longer counts).
+            let lgen = r.lgen.load(Ordering::Acquire).wrapping_add(1) & 0x7fff_ffff;
+            r.lgen.store(lgen, Ordering::Release);
+            self.subscribe(s, u, lgen, &cx.log);
+            let (ok, wait) = self.recheck_chunked(s, u, &mut cx.log, false);
+            if !ok {
+                cx.wait = wait;
+                return false;
             }
-            return false;
         }
         r.clear(super::F_PREDREF);
         if cx.log.iter().any(|p| matches!(p, Pred::Def { proj, .. } if *proj != 0)) {
@@ -404,7 +495,7 @@ impl Shared {
             let held = std::time::Instant::now();
             self.snapshot(s);
             self.c.commits.fetch_add(1, Ordering::Relaxed);
-            let limits = super::rlock(&self.limits).clone();
+            let limits = &self.limits;
             // Unfolding limits.
             let nkids = u32::try_from(cx.kids.len() + cx.conts.len()).unwrap_or(u32::MAX);
             let depth = self.depth(s);
@@ -522,12 +613,6 @@ impl Shared {
                     self.remove_def_k(u, s, d.f, sc, &mut notes);
                 }
             }
-            {
-                let mut un = lock(&self.undeclared);
-                if un.get(&s).is_some_and(|&f| !defined(f)) {
-                    un.remove(&s);
-                }
-            }
             if let Some(sd) = &stat_defs {
                 for &(f, loc) in sd {
                     let sc = loc.entry_key();
@@ -607,6 +692,7 @@ impl Shared {
                 let au = r.data().app_unit();
                 let mut e = self.unit(au).env.write();
                 for &(f, x) in &cx.env {
+                    self.note(super::merge::ke(f));
                     e.insert(f, x);
                 }
             }
@@ -761,6 +847,9 @@ impl Shared {
                 .then(|| ValueId::from_raw(r.out.load(Ordering::Acquire)));
             let out_users = {
                 let mut d = r.data();
+                if old_out != Some(out) {
+                    self.note(super::merge::kn(s));
+                }
                 r.out.store(out.raw(), Ordering::Release);
                 r.set(F_HAS_OUT | F_DONE);
                 r.clear(F_NEEDS_RUN);
@@ -768,6 +857,7 @@ impl Shared {
                     lock(&self.to_report).push(s);
                 }
                 if self.stepped() {
+                    // Seen by the next step: busy until this one ends.
                     r.status.store(super::S_STEP, Ordering::Release);
                     lock(&self.step_done).push(s);
                 } else {
@@ -989,7 +1079,7 @@ impl Shared {
                             super::query::Q::Wait(_) => Vec::new(),
                         };
                         let chain = self.scope_chain(x);
-                        let mut sh = wlock(self.shard(u, f));
+                        let mut sh = self.wshard(u, f);
                         let idx = sh.entry((u, f)).or_default();
                         self.drain(idx);
                         self.subscribe_reader(

@@ -142,7 +142,7 @@ impl Shared {
             out.push_str("queue: (locked)\n");
         }
         for m in &*self.shards {
-            if let Ok(h) = m.try_lock() {
+            if let Ok(h) = m.h.try_lock() {
                 let mut v: Vec<_> = h.iter().map(|r| r.0).collect();
                 v.sort_unstable();
                 queued.extend(v.into_iter().map(|(_, s)| s));

@@ -105,7 +105,10 @@ impl Shared {
             undeclared: Mutex::new(FxHashMap::default()),
             q: Mutex::new(super::QueueInner::default()),
             shards: (0..super::QSHARDS)
-                .map(|_| Mutex::new(std::collections::BinaryHeap::new()))
+                .map(|_| super::QShard {
+                    h: Mutex::new(std::collections::BinaryHeap::new()),
+                    top: AtomicU64::new(u64::MAX),
+                })
                 .collect(),
             next_worker: AtomicUsize::new(0),
             work: AtomicUsize::new(0),
@@ -141,10 +144,18 @@ impl Shared {
             fuel: AtomicU64::new(0),
             outstanding: std::sync::atomic::AtomicUsize::new(0),
             max_outstanding: std::sync::atomic::AtomicUsize::new(0),
-            limits: RwLock::new(Limits::default()),
-            deadline: Mutex::new(None),
+            limits: Limits::default(),
+            deadline: None,
             live: AtomicU64::new(0),
             next_top: AtomicU64::new(1),
+            ver: AtomicU64::new(1),
+            lands: (0..super::merge::LANDS)
+                .map(|_| super::merge::LandSlot::default())
+                .collect(),
+            landed: AtomicUsize::new(0),
+            land_mask: AtomicU64::new(0),
+            merging: std::sync::Mutex::new(()),
+            delta: Mutex::new(super::merge::Delta::default()),
         }
     }
 
@@ -759,7 +770,7 @@ impl Engine {
 
     #[inline]
     fn set_limits_inner(&mut self, l: Limits) {
-        *wlock(&self.sh.limits) = l.clone();
+        self.sh.limits = l.clone();
         self.limits = l;
     }
 

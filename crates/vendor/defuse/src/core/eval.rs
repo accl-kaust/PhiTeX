@@ -107,6 +107,7 @@ impl Engine {
     ) -> Result<Report, EvalError> {
         let t0 = std::time::Instant::now();
         self.sh.settle_deferred();
+        self.sh.reset_delta();
         self.begin(sched);
         let mut rep = Report::default();
         let mut rounds: u64 = 1;
@@ -141,7 +142,7 @@ impl Engine {
         // (`Executor::steps`): what a step commits is seen by the next.
         self.set_stepped(exec.parallelism() <= 1 && exec.steps());
         let limits = self.limits().clone();
-        *lock(&self.sh.deadline) = limits.time.map(|d| t0 + d);
+        self.sh.deadline = limits.time.map(|d| t0 + d);
         let result = loop {
             let before = self.sh.c.runs.load(Ordering::Relaxed) + self.sh.c.commits.load(Ordering::Relaxed);
             // Edits absorbed meanwhile: their frame walks.
@@ -304,6 +305,15 @@ impl Engine {
         self.sh.diags.reclaim();
         #[cfg(feature = "profile")]
         tick("tail_reclaim", &mut tt);
+        if std::env::var_os("DEFUSE_MERGESTAT").is_some() {
+            let c = &self.sh.c;
+            eprintln!(
+                "merges {} items {} merge {:.1} ms",
+                c.merges.load(Ordering::Relaxed),
+                c.merged.load(Ordering::Relaxed),
+                c.merge_ns.load(Ordering::Relaxed) as f64 / 1e6
+            );
+        }
         self.fill_report(&mut rep, Some(exec));
         #[cfg(feature = "profile")]
         tick("tail_report", &mut tt);
@@ -332,7 +342,9 @@ impl Engine {
             let cur: Vec<Slot> = std::mem::take(&mut q.cur).into_iter().map(|r| r.0.1).collect();
             q.next.extend(cur);
             for m in &sh.shards {
-                q.next.extend(std::mem::take(&mut *lock(m)).into_iter().map(|r| r.0.1));
+                q.next
+                    .extend(std::mem::take(&mut *lock(&m.h)).into_iter().map(|r| r.0.1));
+                m.top.store(u64::MAX, Ordering::Release);
             }
         }
         Self::start_step(sh, &mut q);
@@ -441,6 +453,7 @@ impl Engine {
     /// step's nodes become ready.
     fn end_step(&mut self) {
         let sh = &self.sh;
+        sh.merge_held();
         let done = std::mem::take(&mut *lock(&sh.step_done));
         for s in done {
             if sh
@@ -523,8 +536,6 @@ impl Engine {
             &c.static_contribs_refuted,
             &c.predictions_confirmed,
             &c.predictions_refuted,
-            &c.realised,
-            &c.realised_ns,
             &c.env_provided,
             &c.commits,
             &c.scope_region,
@@ -532,6 +543,8 @@ impl Engine {
         ] {
             a.store(0, Ordering::Relaxed);
         }
+        c.realised.store(0, Ordering::Relaxed);
+        c.realised_ns.store(0, Ordering::Relaxed);
         for t in &*sh.t {
             *lock(&t.0) = super::Tallies::default();
         }
@@ -649,7 +662,7 @@ impl Engine {
             .sh
             .shards
             .iter()
-            .flat_map(|m| lock(m).iter().map(|r| r.0.1).collect::<Vec<_>>())
+            .flat_map(|m| lock(&m.h).iter().map(|r| r.0.1).collect::<Vec<_>>())
             .collect();
         let mut out: Vec<Waiter> = q
             .cur

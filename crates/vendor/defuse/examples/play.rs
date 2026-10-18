@@ -630,6 +630,31 @@ fn main() {
                         rep.nodes_run, rep.stops, rep.rounds, rep.steps
                     );
                     println!("  restarted_by {:?} resumed {}", rep.restarted_by, rep.resumed);
+                    // Where the time went, and two bounds on the wall time:
+                    // the busy time spread over the workers, and the
+                    // critical path at the mean run's cost.
+                    let ms = |ns: u64| ns as f64 / 1e6;
+                    let (mut op, mut commit, mut check, mut idle) = (0, 0, 0, 0);
+                    for t in &rep.round_times {
+                        (op, commit, check, idle) =
+                            (op + t.op_ns, commit + t.commit_ns, check + t.check_ns, idle + t.idle_ns);
+                    }
+                    let busy = op + commit + check;
+                    let per_run = op as f64 / rep.nodes_run.max(1) as f64;
+                    println!(
+                        "  op {:.1} ms commit {:.1} check {:.1} idle {:.1}; op per run {:.1} us",
+                        ms(op),
+                        ms(commit),
+                        ms(check),
+                        ms(idle),
+                        per_run / 1e3
+                    );
+                    println!(
+                        "  bounds: busy/{threads} {:.1} ms, critical path {} runs = {:.1} ms",
+                        ms(busy) / threads as f64,
+                        rep.critical_path,
+                        f64::from(rep.critical_path) * per_run / 1e6
+                    );
                 }
             }
             "api" => apply(&mut eng, l, &book, &units),
@@ -641,6 +666,9 @@ fn main() {
         DIVERGED.load(Ordering::Relaxed),
         MISSES.load(Ordering::Relaxed)
     );
+    if defuse::obs::enabled() {
+        print!("probes:\n{}", defuse::obs::snapshot());
+    }
 }
 
 fn short(j: &J) -> String {

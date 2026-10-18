@@ -10,7 +10,7 @@ use super::{
     Br, ClaimS, Data, DefE, DefVal, F_APP, F_DONE, F_HAS_OUT, F_IN_PCLAIM, F_IN_PEFF, F_IN_WILD, F_NEEDS_RUN, F_PCLAIM,
     F_PEFF, F_PSET, F_QUEUED, F_SCLAIM, F_WILD, Frame, K_NONE, K_PENDING, K_VALUE, Kind, MayDefineS, NIL, Rec, Role,
     S_CLEAN, S_DIRTY, S_FREE, S_INERT, S_MARKER, S_NEW, S_PARK, S_RUN, S_STEP, Shared, Slot, Static, StaticRare, Unit,
-    lock, wlock,
+    lock,
 };
 use crate::api::{Cause, Effect, Locality, OpId};
 use crate::values::{Field, ValueId};
@@ -1027,7 +1027,7 @@ impl Shared {
         }
         if let Some(ns) = &names {
             for &f in ns {
-                let mut sh = wlock(self.shard(u, f));
+                let mut sh = self.wshard(u, f);
                 let idx = sh.entry((u, f)).or_default();
                 self.drain(idx);
                 self.drain(idx);
@@ -1049,7 +1049,7 @@ impl Shared {
         let may = self.rec(s).data().stat.may.clone();
         if let MayDefineS::Names(ns) = may {
             for f in ns {
-                let mut sh = wlock(self.shard(u, f));
+                let mut sh = self.wshard(u, f);
                 if let Some(idx) = sh.get_mut(&(u, f)) {
                     idx.named.retain(|&x| x != s);
                 }
@@ -1065,7 +1065,7 @@ impl Shared {
         self.unregister_named(s);
         if let MayDefineS::Names(ns) = &may {
             for &f in ns {
-                let mut sh = wlock(self.shard(u, f));
+                let mut sh = self.wshard(u, f);
                 let idx = sh.entry((u, f)).or_default();
                 self.drain(idx);
                 self.drain(idx);
@@ -1427,7 +1427,7 @@ impl Shared {
                 return;
             }
         }
-        let mut sh = wlock(self.shard(u, f));
+        let mut sh = self.wshard(u, f);
         let idx = sh.entry((u, f)).or_default();
         self.drain(idx);
         lock(&idx.inbox).extend(items);
@@ -1517,7 +1517,7 @@ impl Shared {
         // node's own frame is read under it, so a frame walk's refile,
         // which takes the lock, sees this entry or files it right.)
         let fk_scope = (loc.entry_key() != 0).then(|| self.def_frame(s, loc));
-        let mut sh = wlock(self.shard(u, f));
+        let mut sh = self.wshard(u, f);
         let fk_new = fk_scope.unwrap_or_else(|| self.frame_of(s));
         let idx = sh.entry((u, f)).or_default();
         self.drain(idx);
@@ -1662,7 +1662,7 @@ impl Shared {
         };
         let fk_node = self.frame_of(s);
         for f in fields {
-            let mut sh = wlock(self.shard(u, f));
+            let mut sh = self.wshard(u, f);
             let Some(idx) = sh.get_mut(&(u, f)) else { continue };
             self.drain(idx);
             let is: Vec<usize> = self.def_positions(idx, s).collect();
@@ -1699,7 +1699,7 @@ impl Shared {
 
     /// Removes `s`'s definition of `f` with entry key `scope`.
     pub(crate) fn remove_def_k(&self, u: u32, s: Slot, f: Field, scope: u8, notes: &mut Notes) {
-        let mut sh = wlock(self.shard(u, f));
+        let mut sh = self.wshard(u, f);
         let Some(idx) = sh.get_mut(&(u, f)) else { return };
         self.drain(idx);
         if let Some(i) = self.def_pos_k(idx, s, scope) {
@@ -1714,7 +1714,7 @@ impl Shared {
 
     /// Sets the contribution of `s` to accumulator `f`.
     pub(crate) fn set_contrib(&self, u: u32, s: Slot, f: Field, val: Option<ValueId>, notes: &mut Notes) {
-        let mut sh = wlock(self.shard(u, f));
+        let mut sh = self.wshard(u, f);
         let idx = sh.entry((u, f)).or_default();
         self.drain(idx);
         let l = self.rec(s).lab();
@@ -1889,6 +1889,7 @@ impl Shared {
     /// The order and id bookkeeping of a free (the facts go with
     /// `clear_facts`).
     fn drop_from_order(&self, s: Slot, notes: &mut Notes) {
+        self.note(super::merge::kn(s));
         let r = self.rec(s);
         if r.prev.load(Ordering::Acquire) == NIL && self.unit(self.unit_of(s)).first.load(Ordering::Acquire) != s {
             return; // already unlinked
@@ -1904,6 +1905,7 @@ impl Shared {
 
     /// Completes a free once the node is not running.
     pub(crate) fn finish_free(&self, s: Slot, notes: &mut Notes) {
+        self.note(super::merge::kn(s));
         let r = self.rec(s);
         let marker = matches!(r.data().kind, Kind::Marker { .. });
         if !marker {
@@ -1982,6 +1984,7 @@ impl Shared {
     }
 
     pub(crate) fn finish_inert(&self, s: Slot, notes: &mut Notes) {
+        self.note(super::merge::kn(s));
         self.snapshot(s);
         self.clear_facts(s, notes);
         self.rec(s).status.store(S_INERT, Ordering::Release);
@@ -2530,7 +2533,7 @@ impl Shared {
         let u = self.unit_of(s);
         let mut touch = Vec::new();
         for (f, p) in preds {
-            let mut sh = wlock(self.shard(u, f));
+            let mut sh = self.wshard(u, f);
             let Some(idx) = sh.get_mut(&(u, f)) else { continue };
             self.drain(idx);
             let Some(i) = self.def_pos(idx, s) else { continue };

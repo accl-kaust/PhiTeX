@@ -60,6 +60,8 @@ pub struct Ctx<'a> {
     pub(crate) run_ns: u64,
     pub(crate) kept: Option<Box<dyn Any + Send>>,
     pub(crate) restart: bool,
+    /// How many reads of `log` an earlier attempt made (a resumed run's).
+    pub(crate) prior: usize,
     pub(crate) dup: FxHashMap<u64, u32>,
     /// Where each field is in `defs`, once there are many.
     /// The run's definitions by field and whether scope-local.
@@ -70,7 +72,69 @@ pub struct Ctx<'a> {
     pub(crate) ask: Option<super::Ask>,
 }
 
+/// What a finished run lands for the merger: its reads and its writes,
+/// owned (the run's `Ctx` borrows the store).
+pub(crate) struct RunOut {
+    pub me: Slot,
+    pub unit: u32,
+    pub op: OpId,
+    pub args: Arc<[ValueId]>,
+    pub log: Vec<Pred>,
+    pub defs: Vec<Def>,
+    pub contribs: Vec<(Field, ValueId)>,
+    pub pubs: Vec<(Field, ValueId)>,
+    pub kids: Vec<Spec>,
+    pub conts: Vec<Spec>,
+    pub anchors: Vec<Option<Slot>>,
+    pub effect: Option<Effect>,
+    pub kind: Option<ValueId>,
+    pub kinds: Vec<ValueId>,
+    pub claim: Option<usize>,
+    pub diag: Vec<ValueId>,
+    pub env: Vec<(Field, ValueId)>,
+    pub run_ns: u64,
+    pub wait: Option<Wait>,
+    /// The store version the run read at.
+    pub ver: u64,
+    /// The keys its reads consulted (`Shared::keys_of`).
+    pub keys: Vec<u64>,
+    /// It read a predicted definition.
+    pub pread: bool,
+    /// The definition set it narrowed to, applied at its commit (a
+    /// speculative run's).
+    pub narrowed: Option<crate::api::MayDefine>,
+}
+
 impl<'a> Ctx<'a> {
+    /// The run's results, moved out for the merger.
+    pub(crate) fn take_out(&mut self, ver: u64, keys: Vec<u64>, pread: bool) -> RunOut {
+        RunOut {
+            me: self.me,
+            unit: self.unit,
+            op: self.op,
+            args: self.args.clone(),
+            log: std::mem::take(&mut self.log),
+            defs: std::mem::take(&mut self.defs),
+            contribs: std::mem::take(&mut self.contribs),
+            pubs: std::mem::take(&mut self.pubs),
+            kids: std::mem::take(&mut self.kids),
+            conts: std::mem::take(&mut self.conts),
+            anchors: std::mem::take(&mut self.anchors),
+            effect: self.effect,
+            kind: self.kind,
+            kinds: std::mem::take(&mut self.kinds),
+            claim: self.claim,
+            diag: std::mem::take(&mut self.diag),
+            env: std::mem::take(&mut self.env),
+            run_ns: self.run_ns,
+            wait: self.wait.take(),
+            ver,
+            keys,
+            pread,
+            narrowed: None,
+        }
+    }
+
     pub(crate) fn new(sh: &'a Shared, me: Slot, kept: Option<Box<dyn Any + Send>>) -> Ctx<'a> {
         let r = sh.rec(me);
         let (op, args, stat_defs, static_claimed) = {
@@ -111,6 +175,7 @@ impl<'a> Ctx<'a> {
             run_ns: 0,
             kept,
             restart: false,
+            prior: 0,
             dup: FxHashMap::default(),
             def_ix: FxHashMap::default(),
             stat_ix: FxHashMap::default(),
@@ -1187,7 +1252,7 @@ impl<'a> Ctx<'a> {
                         on: crate::api::WaitOn::Node(NodeId(self.id), None),
                     });
                 }
-                let rounds = rlock(&self.sh.limits).idle_rounds + 1;
+                let rounds = self.sh.limits.idle_rounds + 1;
                 self.sh.fail(crate::api::EvalError::NoProgress {
                     rounds,
                     waiters,
@@ -1434,6 +1499,7 @@ impl<'a> Ctx<'a> {
         self.kept = None;
         self.restart = true;
         self.log.clear();
+        self.prior = 0;
         // Starting over drops what the first pass made: its definitions,
         // children, follows and the rest are not this run's output.
         self.side.borrow_mut().clear();

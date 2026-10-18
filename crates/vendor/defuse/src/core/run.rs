@@ -10,7 +10,7 @@ use super::order::Notes;
 use super::query::{Subj, Wait};
 use super::{
     F_DOOM_FREE, F_DOOM_INERT, F_NEEDS_RUN, F_QUEUED, F_STALE, Kept, NIL, Pred, S_DIRTY, S_FREE, S_NEW, S_PARK, S_RUN,
-    Shared, Slot, WaitRec, in_work, lock, rlock,
+    Shared, Slot, WaitRec, in_work, lock,
 };
 use crate::api::{Cause, EvalError};
 
@@ -74,8 +74,20 @@ impl Shared {
     }
 
     fn push_to(&self, i: usize, s: Slot) {
-        let mut h = lock(&self.shards[i]);
-        h.push(std::cmp::Reverse((self.rec(s).lab(), s)));
+        let q = &self.shards[i];
+        let l = self.rec(s).lab();
+        let mut h = lock(&q.h);
+        h.push(std::cmp::Reverse((l, s)));
+        if l < q.top.load(Ordering::Relaxed) {
+            q.top.store(l, Ordering::Release);
+        }
+    }
+
+    /// Pops shard `q`'s first node (its lock held), keeping its top label.
+    fn pop_from(q: &super::QShard, h: &mut super::ReadyHeap) -> Option<Slot> {
+        let std::cmp::Reverse((_, s)) = h.pop()?;
+        q.top.store(h.peek().map_or(u64::MAX, |r| r.0.0), Ordering::Release);
+        Some(s)
     }
 
     #[allow(clippy::modulo_one)] // `QSHARDS` may be 1
@@ -85,20 +97,30 @@ impl Shared {
             return None;
         }
         if !self.stepped() {
-            let me = WORKER.with(std::cell::Cell::get);
-            for k in 0..super::QSHARDS {
-                let m = &self.shards[(me + k) % super::QSHARDS];
-                let mut h = if k == 0 {
-                    lock(m)
-                } else {
-                    // Others' shards: skip one being worked on.
-                    match m.try_lock() {
-                        Ok(h) => h,
-                        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-                        Err(std::sync::TryLockError::WouldBlock) => continue,
+            // The frontier: the shard whose first node comes first in the
+            // text (a busy shard is passed for the next best; the last
+            // resort waits for one).
+            let mut order: [(u64, usize); super::QSHARDS] = [(u64::MAX, 0); super::QSHARDS];
+            for (i, q) in self.shards.iter().enumerate() {
+                order[i] = (q.top.load(Ordering::Acquire), i);
+            }
+            order.sort_unstable();
+            for (k, &(top, i)) in order.iter().enumerate() {
+                if top == u64::MAX {
+                    break;
+                }
+                let q = &self.shards[i];
+                let mut h = match q.h.try_lock() {
+                    Ok(h) => h,
+                    Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        if k + 1 < order.len() && order[k + 1].0 != u64::MAX {
+                            continue;
+                        }
+                        lock(&q.h)
                     }
                 };
-                if let Some(std::cmp::Reverse((_, s))) = h.pop() {
+                if let Some(s) = Self::pop_from(q, &mut h) {
                     self.busy.fetch_add(1, Ordering::SeqCst);
                     self.qlen.fetch_sub(1, Ordering::SeqCst);
                     return Some(s);
@@ -170,6 +192,7 @@ impl Shared {
                         crate::obs::span!(RunBatch);
                         self.process(s);
                     }
+                    self.merge();
                     let (_, local, n) = NEXT.with(|c| c.replace((false, NIL, 0)));
                     match n {
                         0 => {}
@@ -200,6 +223,8 @@ impl Shared {
                 }
                 continue;
             }
+            // Landed items whose list was busy when their lander looked.
+            self.merge();
             if self.quiet() {
                 idle_add(&mut idle_since);
                 #[cfg(feature = "profile")]
@@ -379,11 +404,14 @@ impl Shared {
         let chosen = r.flags.fetch_and(!super::F_SPECJOB, Ordering::AcqRel) & super::F_SPECJOB != 0;
         let spec = chosen || mode == 2 || (mode == 1 && r.data().res.is_some());
         self.set_spec_run(spec && mode != 0);
-        self.process_job(s);
+        // The version its reads start at (a check of its kept or committed
+        // log included).
+        let ver = self.version();
+        self.process_job(s, ver);
         self.set_spec_run(false);
     }
 
-    fn process_job(&self, s: Slot) {
+    fn process_job(&self, s: Slot, ver: u64) {
         let r = self.rec(s);
         r.clear(F_QUEUED);
         let st = loop {
@@ -398,12 +426,15 @@ impl Shared {
                 break st;
             }
         };
-        if self.doomed(s) {
+        if r.has(F_DOOM_FREE | F_DOOM_INERT) {
+            self.land(move |sh| {
+                sh.doomed(s);
+            });
             return;
         }
         if let Some(c) = self.held_by(s) {
             if self.rec(c).st() == super::S_STEP {
-                self.defer_step(s, "claim");
+                self.land(move |sh| sh.defer_step(s, "claim"));
                 return;
             }
             let w = Wait {
@@ -418,7 +449,7 @@ impl Shared {
             // when woken.
             let run = r.has(F_NEEDS_RUN) || r.data().res.is_none();
             let kept = r.data().kept.take().map(|k| *k);
-            self.park_with(s, w, kept, 1, run);
+            self.land(move |sh| sh.park_with(s, w, kept, 1, run));
             return;
         }
         let has_res = r.data().res.is_some();
@@ -427,7 +458,7 @@ impl Shared {
             match self.check_log(s, &log) {
                 Check::Wait(w) => {
                     let token = r.data().kept.take().and_then(|k| k.token);
-                    self.park(s, w, Some(Kept { log, token }), 0);
+                    self.land(move |sh| sh.park(s, w, Some(Kept { log, token }), 0));
                     return;
                 }
                 Check::Broke(why) => {
@@ -440,7 +471,7 @@ impl Shared {
                     let ask = r.data().x.as_ref().and_then(|e| e.ask);
                     if let Some(w) = ask.and_then(|a| self.reask(s, a)) {
                         let kept = r.data().kept.take().map(|k| *k);
-                        self.park(s, w, kept, 1);
+                        self.land(move |sh| sh.park(s, w, kept, 1));
                         return;
                     }
                     self.c.resumed.fetch_add(1, Ordering::Relaxed);
@@ -470,7 +501,7 @@ impl Shared {
             }
             match ck {
                 Check::Holds => {
-                    let done = self.settle_clean(s);
+                    let done = self.land_clean(s, ver);
                     r.clear(super::F_CHECKING);
                     if done {
                         return;
@@ -479,7 +510,7 @@ impl Shared {
                 Check::Wait(w) => {
                     // Validation parks with nothing kept: it re-validates.
                     r.clear(super::F_CHECKING);
-                    self.park_validation(s, w);
+                    self.land(move |sh| sh.park_validation(s, w));
                     return;
                 }
                 Check::Broke(_) => {
@@ -513,14 +544,14 @@ impl Shared {
             if let Subj::Node(x) = w.on
                 && self.rec(x).st() == super::S_STEP
             {
-                self.defer_step(s, "gated");
+                self.land(move |sh| sh.defer_step(s, "gated"));
                 return;
             }
             let kept = r.data().kept.take().map(|k| *k);
-            self.park(s, w, kept, 1);
+            self.land(move |sh| sh.park(s, w, kept, 1));
             return;
         }
-        self.run_node(s);
+        self.run_node(s, ver);
     }
 
     /// The field of the first definition read in `log` that no longer
@@ -601,7 +632,15 @@ impl Shared {
 
     /// Narrows `s`'s may-define set; its waiters look again (those
     /// outside the set go on).
-    fn narrow_now(&self, s: Slot, m: crate::api::MayDefine) {
+    /// Wakes the nodes parked on `s` (they look again).
+    pub(crate) fn wake_all_waiters(&self, s: Slot) {
+        let w = std::mem::take(&mut self.rec(s).data().waiters);
+        for (n, q) in w {
+            self.wake(n, q);
+        }
+    }
+
+    pub(crate) fn narrow_now(&self, s: Slot, m: crate::api::MayDefine) {
         let r = self.rec(s);
         self.set_may(s, m.into());
         r.set(super::F_NARROWED);
@@ -638,14 +677,12 @@ impl Shared {
     /// Held by a node that committed in this step: it runs in the next
     /// step, where that commit is seen; no park and wake for it.
     fn defer_step(&self, s: Slot, kind: &'static str) {
-        let r = self.rec(s);
         if !self.leave_run(s, S_DIRTY) {
             return;
         }
         crate::obs::count!(Gated);
         self.c.gated.fetch_add(1, Ordering::Relaxed);
         *self.tal().waits_by_kind.entry(kind).or_default() += 1;
-        let _ = r;
         self.enqueue(s);
     }
 
@@ -704,55 +741,56 @@ impl Shared {
         true
     }
 
-    /// A validated node goes back to clean.
     /// A validated node goes back to clean, its reads subscribed afresh
-    /// (the answers held, but what they consulted may have moved).
-    /// `false`: a read broke meanwhile, run it.
-    fn settle_clean(&self, s: Slot) -> bool {
+    /// (the answers held, but what they consulted may have moved): the
+    /// worker's part, landed for the merger. `false`: a read broke
+    /// meanwhile, run it.
+    fn land_clean(&self, s: Slot, ver: u64) -> bool {
         let r = self.rec(s);
         let u = self.unit_of(s);
-        if r.has(F_DOOM_FREE | F_DOOM_INERT) && self.doomed(s) {
-            return true;
-        }
         r.clear(F_STALE);
-        let mut log = r
-            .data()
-            .res
-            .as_mut()
-            .map_or_else(Default::default, |c| std::mem::take(&mut c.log));
-        let restore = |log: Vec<Pred>| {
-            if let Some(c) = r.data().res.as_mut() {
-                c.log = log;
-                c.read_ix = None;
-            }
-        };
-        let ok = self.sread(u, || {
-            super::query::sib_cursor_reset();
-            log.iter_mut().all(|p| {
-                let ok = matches!(self.recheck(s, p, false), Ok(Ok(())));
-                if ok {
-                    self.refresh_sites(s, p);
-                }
-                ok
-            })
-        });
-        if !ok {
-            restore(log);
+        // (A copy: the merger may read the committed log meanwhile.)
+        let mut log = r.data().res.as_ref().map_or_else(Default::default, |c| c.log.clone());
+        if !self.recheck_chunked(s, u, &mut log, true).0 {
             return false;
         }
         let lgen = r.lgen.load(Ordering::Acquire).wrapping_add(1) & 0x7fff_ffff;
         r.lgen.store(lgen, Ordering::Release);
         self.subscribe(s, u, lgen, &log);
-        let ok = self.sread(u, || {
-            super::query::sib_cursor_reset();
-            log.iter().all(|p| matches!(self.recheck(s, p, false), Ok(Ok(()))))
-        });
-        restore(log);
-        if !ok {
-            return false;
+        let keys = self.keys_of(&log);
+        self.land(move |sh| sh.merge_clean(s, ver, keys, log));
+        true
+    }
+
+    /// The merger's part of a check that held: verified against what
+    /// changed since its version, then clean.
+    fn merge_clean(&self, s: Slot, ver: u64, keys: Vec<u64>, mut log: Vec<Pred>) {
+        let r = self.rec(s);
+        let u = self.unit_of(s);
+        if r.st() != S_RUN || r.has(F_DOOM_FREE | F_DOOM_INERT) {
+            self.doomed(s);
+            return;
+        }
+        let stale = r.flags.fetch_and(!F_STALE, Ordering::AcqRel) & F_STALE != 0;
+        if stale || self.moved_since(ver, &keys) {
+            if !self.recheck_chunked(s, u, &mut log, true).0 {
+                self.run_again(s);
+                return;
+            }
+            let lgen = r.lgen.load(Ordering::Acquire).wrapping_add(1) & 0x7fff_ffff;
+            r.lgen.store(lgen, Ordering::Release);
+            self.subscribe(s, u, lgen, &log);
+            if !self.recheck_chunked(s, u, &mut log, false).0 {
+                self.run_again(s);
+                return;
+            }
+        }
+        if let Some(c) = r.data().res.as_mut() {
+            c.log = log;
+            c.read_ix = None;
         }
         if !self.leave_run(s, super::S_CLEAN) {
-            return true;
+            return;
         }
         let waiters = {
             self.leave_work_lists(s);
@@ -766,7 +804,6 @@ impl Shared {
             r.clear(F_STALE);
             self.touch(s, u32::MAX, &crate::api::Cause::Structure, false);
         }
-        true
     }
 
     /// The definition entries a held read consults now.
@@ -800,7 +837,7 @@ impl Shared {
         }
     }
 
-    fn run_node(&self, s: Slot) {
+    fn run_node(&self, s: Slot, ver: u64) {
         let r = self.rec(s);
         let ep = self.epoch.load(Ordering::Relaxed);
         // A run this evaluation counts in its report however the node came
@@ -820,7 +857,7 @@ impl Shared {
             }
             d.runs + 1
         };
-        let limits = rlock(&self.limits).clone();
+        let limits = &self.limits;
         if runs > limits.runs_per_node {
             let causes = r.data().causes.clone();
             self.fail(EvalError::RunawayNode {
@@ -828,21 +865,22 @@ impl Shared {
                 runs,
                 causes,
             });
-            self.park(
-                s,
-                Wait {
-                    on: Subj::Child(0),
-                    field: None,
-                    prefix: None,
-                    kind: "limit",
-                    has_prev: false,
-                },
-                None,
-                0,
-            );
+            let w = Wait {
+                on: Subj::Child(0),
+                field: None,
+                prefix: None,
+                kind: "limit",
+                has_prev: false,
+            };
+            self.land(move |sh| sh.park(s, w, None, 0));
             return;
         }
-        let total = self.c.runs.fetch_add(1, Ordering::Relaxed) + 1;
+        self.c.runs.fetch_add(1, Ordering::Relaxed);
+        let total = if limits.total_runs.is_some() {
+            self.c.runs.load(Ordering::Relaxed)
+        } else {
+            0
+        };
         if limits.total_runs.is_some_and(|t| total > t) || self.past_deadline() {
             self.c.runs.fetch_sub(1, Ordering::Relaxed);
             self.abort.store(true, Ordering::Relaxed);
@@ -855,8 +893,7 @@ impl Shared {
                 });
             }
             drop(e);
-            r.status.store(S_DIRTY, Ordering::Release);
-            self.enqueue(s);
+            self.land(move |sh| sh.requeue(s, false));
             return;
         }
         let (op, kept) = {
@@ -883,7 +920,7 @@ impl Shared {
             && r.data().res.is_some()
             && (self.qlen.load(Ordering::Acquire) > 0
                 || self.busy.load(Ordering::Acquire) > 1
-                || !lock(&self.step_done).is_empty())
+                || self.landed.load(Ordering::Acquire) > 0)
         {
             r.set(super::F_PREDRUN);
         } else {
@@ -900,6 +937,7 @@ impl Shared {
         }
         let mut cx = Ctx::new(self, s, token);
         // A resumed run keeps the reads its earlier attempts made.
+        cx.prior = prior.len();
         cx.log = prior;
         // Its in-order sibling walk goes on where the earlier attempts left it.
         if let Some((i, x, gn)) = cx.log.iter().rev().find_map(|p| match p {
@@ -941,9 +979,7 @@ impl Shared {
                         message,
                     });
                     drop(cx);
-                    r.set(F_NEEDS_RUN);
-                    r.status.store(S_DIRTY, Ordering::Release);
-                    self.enqueue(s);
+                    self.land(move |sh| sh.requeue(s, true));
                     return;
                 }
             }
@@ -953,52 +989,41 @@ impl Shared {
         // from its commit (its waiters stay held until then).
         let narrowed = cx.narrowed.take();
         let late = narrowed.is_some() && Self::spec_run();
-        if let Some(m) = narrowed.clone().filter(|_| !late) {
-            self.narrow_now(s, m);
+        let mut at_commit = None;
+        if let Some(m) = narrowed {
+            if late {
+                at_commit = Some(m);
+            } else {
+                // A declaration, not a fact: narrowed at once (readers
+                // passing it are verified by its commit); its waiters are
+                // woken by the merger.
+                self.set_may(s, m.into());
+                r.set(super::F_NARROWED);
+                self.land(move |sh| sh.wake_all_waiters(s));
+            }
         }
         if let Ok(out) = res {
             let tc = std::time::Instant::now();
-            let committed = self.commit(&mut cx, out);
-            if committed
-                && late
-                && let Some(m) = narrowed
-            {
-                self.narrow_now(s, m);
-            }
+            self.land_commit(&mut cx, out, ver, at_commit);
             self.c
                 .commit_ns
                 .fetch_add(u64::try_from(tc.elapsed().as_nanos()).unwrap_or(0), Ordering::Relaxed);
-            if !committed {
-                r.data().kept = None;
-                if let Some(w) = cx.wait.take() {
-                    // A read waits on a node in work: it runs again once
-                    // that node is done.
-                    r.set(F_NEEDS_RUN);
-                    self.park(s, w, None, 0);
-                } else {
-                    // A read broke before the commit: run again.
-                    self.run_again(s);
-                }
-            }
         } else {
+            let pclaim = r.has(super::F_PCLAIM);
+            let spec = Self::spec_run();
             // A pending claimer that set its claim before it stopped:
-            // siblings past the claim go on now.
-            if let Some(n) = cx.claim
-                && !Self::spec_run()
-                && r.has(super::F_PCLAIM)
-            {
+            // siblings past the claim go on now (their view of it is a
+            // wait decision, not a fact: set at once; its waiters are
+            // woken by the merger).
+            let mut early = None;
+            if let Some(n) = cx.claim.filter(|_| !spec && pclaim) {
                 let old = r.data().ex().early_claim.replace(n);
                 if n == 0 {
                     // Claims nothing while stopped: not a claimer later
                     // nodes look past (it joins again when it runs anew).
                     self.leave_pclaim(s);
                 }
-                if old != Some(n) {
-                    let w = std::mem::take(&mut r.data().waiters);
-                    for (x, q) in w {
-                        self.wake(x, q);
-                    }
-                }
+                early = (old != Some(n)).then_some(n);
             }
             let w = cx.wait.take().unwrap_or(Wait {
                 on: Subj::Child(0),
@@ -1007,30 +1032,64 @@ impl Shared {
                 kind: "stop",
                 has_prev: false,
             });
-            if let Subj::Child(id) = w.on
-                && id != 0
-            {
-                self.commit_structure(&mut cx);
-                if let Some(c) = self.slot_of(id) {
-                    let w = Wait { on: Subj::Node(c), ..w };
-                    let kept = Kept {
-                        log: std::mem::take(&mut cx.log),
-                        token: cx.token.take(),
-                    };
-                    self.park(s, w, Some(kept), 0);
-                    return;
-                }
-            }
             let kept = Kept {
                 log: std::mem::take(&mut cx.log),
                 token: cx.token.take(),
             };
-            r.data().ex().ask = cx.ask;
-            self.park(s, w, Some(kept), 0);
+            let ask = cx.ask;
+            // The children it made before it stopped on one of them: made
+            // now, so that they can run.
+            let partial = matches!(w.on, Subj::Child(id) if id != 0).then(|| cx.take_out(ver, Vec::new(), false));
+            self.land(move |sh| sh.merge_stop(s, early, w, kept, ask, partial));
         }
     }
 
-    fn run_again(&self, s: Slot) {
+    /// The merger's part of a run that stopped.
+    fn merge_stop(
+        &self,
+        s: Slot,
+        early: Option<usize>,
+        w: Wait,
+        kept: Kept,
+        ask: Option<super::Ask>,
+        partial: Option<super::ctx::RunOut>,
+    ) {
+        let r = self.rec(s);
+        // Its claim changed: the siblings held by it look again.
+        if early.is_some() {
+            let ws = std::mem::take(&mut r.data().waiters);
+            for (x, q) in ws {
+                self.wake(x, q);
+            }
+        }
+        if let Some(mut o) = partial
+            && let Subj::Child(id) = w.on
+        {
+            self.commit_structure(&mut o);
+            if let Some(c) = self.slot_of(id) {
+                let w = Wait { on: Subj::Node(c), ..w };
+                self.park(s, w, Some(kept), 0);
+                return;
+            }
+        }
+        r.data().ex().ask = ask;
+        self.park(s, w, Some(kept), 0);
+    }
+
+    /// Back to the queue (`run`: to run, not to check).
+    pub(crate) fn requeue(&self, s: Slot, run: bool) {
+        if self.doomed(s) {
+            return;
+        }
+        let r = self.rec(s);
+        if run {
+            r.set(F_NEEDS_RUN);
+        }
+        r.status.store(S_DIRTY, Ordering::Release);
+        self.enqueue(s);
+    }
+
+    pub(crate) fn run_again(&self, s: Slot) {
         let r = self.rec(s);
         if self.doomed(s) {
             return;
@@ -1041,7 +1100,7 @@ impl Shared {
     }
 
     pub(crate) fn past_deadline(&self) -> bool {
-        lock(&self.deadline).is_some_and(|d| std::time::Instant::now() >= d)
+        self.deadline.is_some_and(|d| std::time::Instant::now() >= d)
     }
 
     pub(crate) fn fail(&self, e: EvalError) {
@@ -1139,7 +1198,9 @@ impl Shared {
             Subj::Node(x) => {
                 let xr = self.rec(x);
                 xr.data().waiters.push((s, seq));
-                if !in_work(xr.st()) || xr.st() == S_FREE {
+                // (A claim wait decided before this merge: the claimer may
+                // have let it go since.)
+                if !in_work(xr.st()) || xr.st() == S_FREE || (w.kind == "claim" && self.held_by(s) != Some(x)) {
                     self.wake(s, seq);
                 }
             }
@@ -1155,7 +1216,7 @@ impl Shared {
 
     /// The structure part of a stopped run (children it made before it
     /// stopped on one of them), so that they can run.
-    fn commit_structure(&self, cx: &mut Ctx<'_>) {
+    fn commit_structure(&self, cx: &mut super::ctx::RunOut) {
         let s = cx.me;
         let u = cx.unit;
         let mut notes = Notes::default();
@@ -1168,6 +1229,7 @@ impl Shared {
                 let au = self.rec(s).data().app_unit();
                 let mut e = self.unit(au).env.write();
                 for &(f, x) in &cx.env {
+                    self.note(super::merge::ke(f));
                     e.insert(f, x);
                 }
             }

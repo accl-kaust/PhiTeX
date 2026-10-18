@@ -8,6 +8,7 @@ pub(crate) mod ctx;
 pub(crate) mod dump;
 pub(crate) mod edit;
 pub(crate) mod eval;
+pub(crate) mod merge;
 pub(crate) mod order;
 pub(crate) mod query;
 pub(crate) mod report;
@@ -778,7 +779,15 @@ pub(crate) type ReadyHeap = std::collections::BinaryHeap<std::cmp::Reverse<(u64,
 /// cheaper, but nodes ran far out of text order, and under
 /// `Speculation::All` readers guessed past definers that had not run
 /// (loader client at 12 workers: 5.5k runs became 21k, 0.35 s 1.4 s).
-pub(crate) const QSHARDS: usize = 1;
+pub(crate) const QSHARDS: usize = 16;
+
+/// A ready-queue shard and the label of its first node (`u64::MAX`:
+/// empty), read without its lock.
+#[repr(align(64))]
+pub(crate) struct QShard {
+    pub h: Mutex<ReadyHeap>,
+    pub top: AtomicU64,
+}
 
 /// The work queue: the current step's nodes and the next step's.
 #[derive(Default)]
@@ -788,44 +797,106 @@ pub(crate) struct QueueInner {
     pub next: Vec<Slot>,
 }
 
+/// Counter shards (by thread stripe): a counter every commit adds to
+/// does not share a cache line between workers.
+pub(crate) const CSHARDS: usize = 16;
+
+#[repr(align(64))]
+#[derive(Default)]
+pub(crate) struct PadU64(AtomicU64);
+
+fn cshard() -> usize {
+    STRIPE.with(|s| *s) % CSHARDS
+}
+
+/// A sum counter, sharded by thread stripe (the API of the atomic it
+/// replaces; a read sums the shards).
+#[derive(Default)]
+pub(crate) struct Ctr([PadU64; CSHARDS]);
+
+impl Ctr {
+    /// Adds `v`; returns this shard's previous value.
+    pub(crate) fn fetch_add(&self, v: u64, o: Ordering) -> u64 {
+        self.0[cshard()].0.fetch_add(v, o)
+    }
+    pub(crate) fn fetch_sub(&self, v: u64, o: Ordering) -> u64 {
+        self.0[cshard()].0.fetch_sub(v, o)
+    }
+    pub(crate) fn load(&self, o: Ordering) -> u64 {
+        self.0.iter().fold(0u64, |a, x| a.wrapping_add(x.0.load(o)))
+    }
+    pub(crate) fn store(&self, v: u64, o: Ordering) {
+        for (i, x) in self.0.iter().enumerate() {
+            x.0.store(if i == 0 { v } else { 0 }, o);
+        }
+    }
+}
+
+/// A maximum, sharded by thread stripe.
+#[derive(Default)]
+pub(crate) struct CtrMax([PadU64; CSHARDS]);
+
+impl CtrMax {
+    pub(crate) fn fetch_max(&self, v: u64, o: Ordering) {
+        let x = &self.0[cshard()].0;
+        if x.load(Ordering::Relaxed) < v {
+            x.fetch_max(v, o);
+        }
+    }
+    pub(crate) fn load(&self, o: Ordering) -> u64 {
+        self.0.iter().map(|x| x.0.load(o)).max().unwrap_or(0)
+    }
+    pub(crate) fn store(&self, v: u64, o: Ordering) {
+        for x in &self.0 {
+            x.0.store(v, o);
+        }
+    }
+}
+
 /// Per-evaluation counters, shared by the workers.
 #[derive(Default)]
 pub(crate) struct Counters {
-    pub runs: AtomicU64,
-    pub stops: AtomicU64,
-    pub raises: AtomicU64,
-    pub pending_waits: AtomicU64,
-    pub pending_defining: AtomicU64,
-    pub speculations: AtomicU64,
-    pub confirmations: AtomicU64,
-    pub mispredictions: AtomicU64,
-    pub fuel_outs: AtomicU64,
-    pub spec_stops: AtomicU64,
-    pub op_ns: AtomicU64,
-    pub commit_ns: AtomicU64,
-    pub check_ns: AtomicU64,
-    pub idle_ns: AtomicU64,
-    pub claims_refuted: AtomicU64,
-    pub defs_refuted: AtomicU64,
-    pub effects_refuted: AtomicU64,
-    pub claim_siblings: AtomicU64,
-    pub sole_successor: AtomicU64,
-    pub many_successors: AtomicU64,
-    pub kept_successors: AtomicU64,
-    pub resumed: AtomicU64,
-    pub restarted: AtomicU64,
-    pub declarations_refuted: AtomicU64,
-    pub static_contribs_refuted: AtomicU64,
-    pub predictions_confirmed: AtomicU64,
-    pub predictions_refuted: AtomicU64,
-    pub realised: AtomicU64,
-    pub realised_ns: AtomicU64,
-    pub env_provided: AtomicU64,
-    pub commits: AtomicU64,
-    pub scope_region: AtomicU64,
-    pub created: AtomicU64,
-    pub freed: AtomicU64,
-    pub gated: AtomicU64,
+    pub runs: Ctr,
+    pub stops: Ctr,
+    pub raises: Ctr,
+    pub pending_waits: Ctr,
+    pub pending_defining: Ctr,
+    pub speculations: Ctr,
+    pub confirmations: Ctr,
+    pub mispredictions: Ctr,
+    pub fuel_outs: Ctr,
+    pub spec_stops: Ctr,
+    pub op_ns: Ctr,
+    pub commit_ns: Ctr,
+    pub check_ns: Ctr,
+    pub idle_ns: Ctr,
+    pub claims_refuted: Ctr,
+    pub defs_refuted: Ctr,
+    pub effects_refuted: Ctr,
+    pub claim_siblings: Ctr,
+    pub sole_successor: Ctr,
+    pub many_successors: Ctr,
+    pub kept_successors: Ctr,
+    pub resumed: Ctr,
+    pub restarted: Ctr,
+    pub declarations_refuted: Ctr,
+    pub static_contribs_refuted: Ctr,
+    pub predictions_confirmed: Ctr,
+    pub predictions_refuted: Ctr,
+    pub realised: CtrMax,
+    pub realised_ns: CtrMax,
+    pub env_provided: Ctr,
+    pub commits: Ctr,
+    pub scope_region: Ctr,
+    pub created: Ctr,
+    pub freed: Ctr,
+    pub gated: Ctr,
+    /// Merges (published versions).
+    pub merges: Ctr,
+    /// Items merged.
+    pub merged: Ctr,
+    /// Time in merges (ns).
+    pub merge_ns: Ctr,
 }
 
 /// A shard of the tallies on cache lines of its own.
@@ -908,7 +979,7 @@ pub(crate) struct Shared {
     pub q: Mutex<QueueInner>,
     /// Free running: the ready nodes, in `QSHARDS` heaps (a worker takes
     /// from its own first), each lowest label first.
-    pub shards: Box<[Mutex<ReadyHeap>]>,
+    pub shards: Box<[QShard]>,
     /// Workers handed shard indexes so far.
     pub next_worker: AtomicUsize,
     /// Nodes queued or being processed (zero: free running is quiet).
@@ -965,10 +1036,23 @@ pub(crate) struct Shared {
     /// Committed runs resting on guesses not yet confirmed, and the cap.
     pub outstanding: std::sync::atomic::AtomicUsize,
     pub max_outstanding: std::sync::atomic::AtomicUsize,
-    pub limits: RwLock<crate::api::Limits>,
-    pub deadline: Mutex<Option<std::time::Instant>>,
+    pub limits: crate::api::Limits,
+    pub deadline: Option<std::time::Instant>,
     pub live: AtomicU64,
     pub next_top: AtomicU64,
+    /// The store's published version (bumped by each merge).
+    pub ver: AtomicU64,
+    /// Landed items, one list per thread stripe.
+    pub lands: Box<[merge::LandSlot]>,
+    /// Items landed and not yet merged.
+    pub landed: AtomicUsize,
+    /// The landing lists that may hold items (bit per list).
+    pub land_mask: AtomicU64,
+    /// Held by whoever merges: one merge at a time (an item checks and
+    /// then writes, which a concurrent merge would interleave).
+    pub merging: std::sync::Mutex<()>,
+    /// The merges' changes by version.
+    pub delta: Mutex<merge::Delta>,
 }
 
 pub(crate) const SPEC_SEQ: u32 = u32::MAX;
@@ -984,6 +1068,13 @@ impl Shared {
 
     pub(crate) fn frame(&self, f: u32) -> &Frame {
         self.frames.get(f as usize)
+    }
+
+    /// The shard of `u`'s field `f` for writing (a merge records the change).
+    #[track_caller]
+    pub(crate) fn wshard(&self, u: u32, f: Field) -> std::sync::RwLockWriteGuard<'_, FieldMap> {
+        self.note(merge::kf(u, f));
+        wlock(self.shard(u, f))
     }
 
     pub(crate) fn shard(&self, u: u32, f: Field) -> &RwLock<FieldMap> {
@@ -1096,6 +1187,8 @@ impl Shared {
 
     pub(crate) fn wunit(&self, u: u32) -> UnitW<'_> {
         let un = self.unit(u);
+        self.note(merge::ku(u));
+        self.note(merge::kl(u));
         let g = wlock(&un.s);
         self.exclude_readers(u);
         UnitW {
@@ -1109,6 +1202,7 @@ impl Shared {
     /// adds new entries readers do not see until they are linked whole.
     pub(crate) fn wunit_light(&self, u: u32) -> UnitW<'_> {
         let un = self.unit(u);
+        self.note(merge::kl(u));
         let g = wlock(&un.s);
         LIGHT.with(|c| c.set((u, false)));
         UnitW { _g: g, un, light: true }
@@ -1119,6 +1213,7 @@ impl Shared {
     pub(crate) fn escalate(&self, u: u32) {
         let (lu, full) = LIGHT.with(std::cell::Cell::get);
         if lu == u && !full {
+            self.note(merge::ku(u));
             self.exclude_readers(u);
             LIGHT.with(|c| c.set((u, true)));
         }
