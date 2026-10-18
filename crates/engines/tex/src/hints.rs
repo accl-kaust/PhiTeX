@@ -3413,7 +3413,16 @@ pub(crate) struct Registry {
     /// nodes about to be pushed ([`prepare`]), by their arguments' key:
     /// each taken by the push's one question, the rest dropped after it
     /// ([`prepared_done`]).
-    prepared: Mutex<FxHashMap<u64, MayDefine>>,
+    prepared: Mutex<FxHashMap<u64, Prepared>>,
+}
+
+/// A node's answers made before its push ([`prepare`]), each taken by
+/// the engine's one question.
+#[derive(Default)]
+struct Prepared {
+    may: Option<MayDefine>,
+    reads: Option<Option<Vec<Field>>>,
+    lines: Option<ValueId>,
 }
 
 /// Registers a text's analysis under `name` (a string value) in the
@@ -3614,14 +3623,35 @@ fn args_key(args: &[ValueId]) -> u64 {
 /// hint decoded and cached, its [`may_define`] kept until the push asks.
 pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
     let _ = hint_of_args(reg, v, args);
-    if crate::exec::env_flag!("PHITEX_HINTS") {
-        return;
-    }
-    let m = may_define_now(reg, v, args);
+    let p = Prepared {
+        // (`PHITEX_HINTS` prints each answer where the engine asks)
+        may: (!crate::exec::env_flag!("PHITEX_HINTS")).then(|| may_define_now(reg, v, args)),
+        reads: Some(reads_now(reg, v, args)),
+        lines: Some(crate::run::text_lines(v, args)),
+    };
     reg.prepared
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .insert(args_key(args), m);
+        .insert(args_key(args), p);
+}
+
+/// The answer `f` takes from a node's prepared ones, if it was prepared.
+fn take_prepared<T>(
+    reg: &Registry,
+    args: &[ValueId],
+    f: impl FnOnce(&mut Prepared) -> Option<T>,
+) -> Option<T> {
+    let mut p = reg.prepared.lock().unwrap_or_else(PoisonError::into_inner);
+    if p.is_empty() {
+        return None;
+    }
+    p.get_mut(&args_key(args)).and_then(f)
+}
+
+/// The lines a node's text begins (`crate::run::text_lines`), as
+/// prepared before its push.
+pub(crate) fn prepared_lines(reg: &Registry, args: &[ValueId]) -> Option<ValueId> {
+    take_prepared(reg, args, |p| p.lines.take())
 }
 
 /// The push the answers were [`prepare`]d for is done: those it did not
@@ -3920,6 +3950,11 @@ pub(crate) fn effect_none(reg: &Registry, v: &Values, args: &[ValueId]) -> bool 
 /// meanings of the names its text calls (`cs:name`, `act:code`) and the
 /// catcodes its bytes were read with (`cat:c`).
 pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
+    take_prepared(reg, args, |p| p.reads.take()).unwrap_or_else(|| reads_now(reg, v, args))
+}
+
+/// [`reads`], answered now.
+fn reads_now(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return None;
     }
@@ -3946,15 +3981,7 @@ pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<
 /// The engine's question, answered from the text (made ahead when the
 /// node's push was [`prepare`]d).
 pub(crate) fn may_define(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
-    let ready = {
-        let mut p = reg.prepared.lock().unwrap_or_else(PoisonError::into_inner);
-        if p.is_empty() {
-            None
-        } else {
-            p.remove(&args_key(args))
-        }
-    };
-    ready.unwrap_or_else(|| may_define_now(reg, v, args))
+    take_prepared(reg, args, |p| p.may.take()).unwrap_or_else(|| may_define_now(reg, v, args))
 }
 
 /// [`may_define`], answered now.

@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 struct Line {
     start: Instant,
+    /// The start on the system clock, seconds since the epoch (to tell
+    /// the process's start and exit apart from its table outside it).
+    epoch: f64,
     last: Instant,
     /// (phase, time, a note within the phase after it rather than a lap)
     rows: Vec<(String, Duration, bool)>,
@@ -31,8 +34,12 @@ pub fn begin_at(t: Instant) {
     if !crate::exec::env_flag!("PHITEX_TEX_TIME") {
         return;
     }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     *LINE.lock().unwrap_or_else(PoisonError::into_inner) = Some(Line {
         start: t,
+        epoch: now.saturating_sub(t.elapsed()).as_secs_f64(),
         last: t,
         rows: Vec::new(),
     });
@@ -93,11 +100,17 @@ pub fn end(label: &str) {
         pending.clear();
     }
     out.push_str(&pending);
-    let _ = write!(
+    let _ = writeln!(
         out,
         "  {:>9.2} ms  ({} phases under 0.3 ms)",
         ms(small.0),
         small.1
+    );
+    let _ = write!(
+        out,
+        "  clock: from {:.6} to {:.6} (seconds since the epoch)",
+        l.epoch,
+        l.epoch + total.as_secs_f64()
     );
     eprintln!("{out}");
 }

@@ -297,7 +297,9 @@ impl Operation for Exec {
     /// begins the sibling's lines too: its run refutes this, and the
     /// readers after it run again.)
     fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        Some(vec![(v.field("lines"), crate::run::text_lines(v, args))])
+        let lines = crate::hints::prepared_lines(reg(&self.0), args)
+            .unwrap_or_else(|| crate::run::text_lines(v, args));
+        Some(vec![(v.field("lines"), lines)])
     }
     /// No scope effect where the text says the command opens and closes
     /// nothing ([`crate::hints`]); otherwise known when it runs (the
