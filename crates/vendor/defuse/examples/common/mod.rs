@@ -1919,6 +1919,14 @@ impl Program {
     pub fn load(lines: Vec<String>) -> (Engine, Program) {
         let mut eng = Engine::new();
         let lang = Lang::install(&mut eng);
+        if std::env::var_os("FUZZ_STABLE").is_some() {
+            // Stable is a hint: marked on fields the programs define often
+            // too, results must not change (only speed may).
+            for name in ["x", "y", "u", "w", "g", "s", "k", "z", "q", "r", "cap"] {
+                let f = eng.values().field(name);
+                eng.set_stable(f);
+            }
+        }
         let unit = eng.new_unit();
         let asts: Vec<ValueId> = lines.iter().map(|l| parse_stmt(eng.values(), l)).collect();
         let loops = Lang::declare_loops(&mut eng, &asts);

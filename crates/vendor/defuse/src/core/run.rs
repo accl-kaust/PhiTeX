@@ -454,6 +454,16 @@ impl Shared {
             return;
         }
         let has_res = r.data().res.is_some();
+        // Refuted this evaluation: a stopped run kept from before resumes
+        // on its guesses no more (it runs afresh, on committed values).
+        if self.conservative(s)
+            && r.data()
+                .kept
+                .as_ref()
+                .is_some_and(|k| k.log.iter().any(|p| matches!(p, Pred::Def { spec: Some(_), .. })))
+        {
+            r.data().kept = None;
+        }
         let kept_log = r.data().kept.as_ref().map(|k| k.log.clone());
         if let Some(log) = kept_log {
             match self.check_log(s, &log) {

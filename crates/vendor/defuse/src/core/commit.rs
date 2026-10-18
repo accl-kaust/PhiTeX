@@ -267,6 +267,14 @@ impl Shared {
         let waiters;
         let mut restructured;
         let pread = cx.pread;
+        // Refuted while this run, begun on guesses, was in flight: it does
+        // not commit them (that would be a second refutation); it runs
+        // again on committed values.
+        if self.conservative(s)
+            && (pread || r.has(super::F_PREDRUN) || cx.log.iter().any(|p| matches!(p, Pred::Def { spec: Some(_), .. })))
+        {
+            return false;
+        }
         // Verified at the merge it lands in: only when something it read
         // (or the structure it read through) changed since its version are
         // its reads asked again.
@@ -981,6 +989,12 @@ impl Shared {
                     }
                     if let DAns::Env(_) = ans {
                         lock(self.env_readers_of(*f)).entry(*f).or_default().push((s, gn));
+                    }
+                    if *mode == DMode::Use && self.stable.contains(f) {
+                        // Found by a scan when one of its definitions
+                        // changes, not by a subscription.
+                        self.stable_sub(u, *f, s, gn);
+                        continue;
                     }
                     let sub = Sub {
                         node: s,

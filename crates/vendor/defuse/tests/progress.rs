@@ -92,8 +92,9 @@ fn eval(eng: &mut Engine, i: usize) -> Report {
 
 /// Each node is refuted at most once an evaluation: it has one run on
 /// guesses at most, then runs on committed values (a rerun per change of
-/// what it read, and stops that resume), so the runs stay linear in the
-/// nodes: under 4 per node in every schedule here.
+/// what it read, stops that resume, and a run begun on guesses before it
+/// was refuted, which does not commit), so the runs stay linear in the
+/// nodes: under 5 per node in every schedule here, under load too.
 fn at_most_once(rep: &Report, what: &str) {
     assert!(rep.nodes_conservative <= N as u64, "{what}: {}", rep.nodes_conservative);
     assert!(
@@ -102,7 +103,7 @@ fn at_most_once(rep: &Report, what: &str) {
         rep.refutations_max
     );
     assert!(
-        rep.runs <= 4 * N as u64,
+        rep.runs <= 5 * N as u64,
         "{what}: {} runs for {N} nodes ({} gone conservative)",
         rep.runs,
         rep.nodes_conservative

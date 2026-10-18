@@ -71,6 +71,7 @@ impl Shared {
             kind: AtomicU64::new(0),
         });
         let u = self.units.push_with(1, |_| Unit {
+            stable: (0..16).map(|_| std::sync::Mutex::new(Vec::new())).collect(),
             first: AtomicU32::new(NIL),
             last: AtomicU32::new(NIL),
             #[allow(clippy::cast_possible_truncation)]
@@ -1526,6 +1527,9 @@ impl Shared {
         if let Some(i) = self.def_pos_k(idx, s, scope) {
             let e = &mut idx.defs[i];
             if e.val != val || e.loc != loc {
+                if self.stable.contains(&f) {
+                    self.stable_touch(u, f, s, notes);
+                }
                 let old_loc = e.loc;
                 e.val = val;
                 e.loc = loc;
@@ -1583,6 +1587,9 @@ impl Shared {
         );
         self.add_def_keys(idx, u, s, loc, fk);
         self.notify_entry(idx, s, f, loc, fk, notes);
+        if self.stable.contains(&f) {
+            self.stable_touch(u, f, s, notes);
+        }
     }
 
     /// The frame an entry of `s` with locality `loc` is filed under: its
@@ -1674,6 +1681,9 @@ impl Shared {
                     notes.touch.push((n, g, Cause::Changed { site: None, field: f }));
                 }
                 if old != fk {
+                    if self.stable.contains(&f) {
+                        self.stable_touch(u, f, s, notes);
+                    }
                     self.rm_def_keys(idx, s, loc, old, scope);
                     self.notify_entry(idx, s, f, loc, old, notes);
                     idx.defs[i].fk = fk;
@@ -1710,6 +1720,9 @@ impl Shared {
             }
             self.rm_def_keys(idx, s, e.loc, e.fk, scope);
             self.notify_entry(idx, s, f, e.loc, e.fk, notes);
+            if self.stable.contains(&f) {
+                self.stable_touch(u, f, s, notes);
+            }
         }
     }
 
@@ -2819,6 +2832,36 @@ impl Shared {
     /// A guess of `f` was refuted: past `NO_GUESS_AFTER` of them in this
     /// evaluation, reads of `f` wait for their definer instead (on a
     /// chain whose every link changes, each guess is wrong).
+    /// Files a read of stable field `f` by `s` (generation `gn`) in unit
+    /// `u` (after this, a change of `f`'s definitions finds it).
+    pub(crate) fn stable_sub(&self, u: u32, f: Field, s: Slot, gn: u32) {
+        let st = &self.unit(u).stable;
+        lock(&st[super::stripe() % st.len()]).push((f, s, gn));
+    }
+
+    /// A definition of stable field `f` by `at` changed: touches every
+    /// live reader of `f` after it in unit `u` (dropping the dead ones).
+    pub(crate) fn stable_touch(&self, u: u32, f: Field, at: Slot, notes: &mut Notes) {
+        let l = self.rec(at).lab();
+        let mut hit = false;
+        for st in &*self.unit(u).stable {
+            lock(st).retain(|&(g, n, gn)| {
+                let r = self.rec(n);
+                if r.lgen.load(Ordering::Acquire) != gn || r.st() == S_FREE {
+                    return false;
+                }
+                if g == f && r.lab() > l {
+                    notes.touch.push((n, gn, Cause::Changed { site: None, field: f }));
+                    hit = true;
+                }
+                true
+            });
+        }
+        if hit {
+            self.c.stable_scans.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// A run of `s` was refuted: it runs conservatively (no predictions,
     /// no guesses) for the rest of the evaluation, so it is refuted at
     /// most once and the evaluation cannot livelock on guesses.

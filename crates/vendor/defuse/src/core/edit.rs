@@ -92,6 +92,7 @@ impl Shared {
             by_id: (0..256).map(|_| Mutex::new(FxHashMap::default())).collect(),
             accs: FxHashMap::default(),
             seqs: FxHashSet::default(),
+            stable: FxHashSet::default(),
             loops: FxHashMap::default(),
             loop_vals: crate::sync::BrLock::new(FxHashMap::default()),
             env: crate::sync::BrLock::new(EnvState::default()),
@@ -612,6 +613,16 @@ impl Engine {
             Arc::new(crate::record::RecMonoid { inner: m, field: f })
         };
         self.sh.accs.insert(f, m);
+    }
+
+    /// Marks `f` stable: defined rarely (typically once, early) and read
+    /// by many nodes. A read of it registers only the reader in its unit,
+    /// not a subscription filed by scope; a change of one of its
+    /// definitions touches every reader after it in one scan
+    /// (`Report::stable_scans` counts the scans that found readers: many
+    /// mean the hint is wrong, which costs speed, never correctness).
+    pub fn set_stable(&mut self, f: Field) {
+        self.sh.stable.insert(f);
     }
 
     pub fn declare_sequence(&mut self, f: Field) {

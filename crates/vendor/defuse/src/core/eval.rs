@@ -537,6 +537,7 @@ impl Engine {
             &c.predictions_confirmed,
             &c.predictions_refuted,
             &c.nodes_conservative,
+            &c.stable_scans,
             &c.env_provided,
             &c.commits,
             &c.scope_region,
