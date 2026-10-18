@@ -2004,6 +2004,42 @@ impl Graph {
         }
     }
 
+    /// [`Graph::supply`] of every file of `names` in order, the files
+    /// found, read, hashed and made values on the pool (spec-final §9b:
+    /// the cold build's serial part), recorded in the same order.
+    fn supply_all(&mut self, finder: &Finder, names: &[String]) {
+        let mut seen = phitex_defuse::FxHashSet::default();
+        let todo: Vec<(&str, Field)> = names
+            .iter()
+            .filter(|n| seen.insert(n.as_str()))
+            .map(|n| (n.as_str(), self.eng.values().field(&format!("file:{n}"))))
+            .filter(|&(n, f)| {
+                !(self.files.iter().any(|(g, _)| *g == f)
+                    || self.absent.contains(&f)
+                    || self.written.iter().any(|w| w == n))
+            })
+            .collect();
+        let v = self.eng.values();
+        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(self.threads));
+        let got: Vec<(u64, Option<ValueId>)> = crate::exec::map_on(&mut ex, todo.len(), &|k| {
+            let found = finder(todo[k].0);
+            let hash = file_hash(found.as_ref());
+            let val = found.map(|(path, bytes)| {
+                let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                v.list(vec![v.str(&path), v.str(&text)])
+            });
+            (hash, val)
+        });
+        for (&(name, f), (hash, val)) in todo.iter().zip(got) {
+            self.queries.push((name.to_owned(), val.is_some()));
+            self.reads.push((name.to_owned(), hash));
+            match val {
+                Some(x) => self.files.push((f, x)),
+                None => self.absent.push(f),
+            }
+        }
+    }
+
     /// Installs the environment provider: a run reading a file the
     /// environment does not hold gets it from the finder in place, as
     /// [`Graph::supply`] would have supplied it, instead of stopping;
@@ -2445,6 +2481,12 @@ impl Graph {
             }
             crate::timeline::lap("engine: evaluate (the runs, their commits)");
             t_mark = std::time::Instant::now();
+            if tm {
+                // (the scans a stable field's definition made through its
+                // readers, `STABLE_FIELDS`: about none, or the list is wrong)
+                eprintln!("stable fields: {} scans", r.stable_scans);
+            }
+            crate::timeline::lap("engine: the evaluation's report");
             if crate::exec::env_flag!("PHITEX_CHECK_READS") {
                 // (debug: every committed node's reads checked again
                 // against the store after this evaluation; `=fail`: a
@@ -2469,6 +2511,7 @@ impl Graph {
                     "{} committed reads no longer hold",
                     lines.len()
                 );
+                crate::timeline::lap("engine: the reads checked again (PHITEX_CHECK_READS only)");
             }
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
@@ -2802,6 +2845,7 @@ impl Graph {
         if let Some(inc) = incr.as_deref_mut() {
             inc.set_text(text);
         }
+        crate::timeline::lap("hints: the units and the hint pass");
         let incr = incr.as_deref();
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
@@ -2815,17 +2859,22 @@ impl Graph {
             None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
         };
         let t1 = t0.elapsed();
+        crate::timeline::lap("push: the nodes' slices and keys");
         // (the nodes' arguments made on the pool: values are named by
         // their content, whichever worker makes them)
         let args = {
             let v = self.eng.values();
             let loads = self.loads.as_deref();
+            let reg = &*self.ops.hints;
             let mut ex = crate::exec::Threads::new(self.threads);
             crate::exec::map_on(&mut ex, nodes.len(), &|k| {
-                node_args(v, text, incr, &nodes[k].1, loads)
+                let a = node_args(v, text, incr, &nodes[k].1, loads);
+                crate::hints::prepare(reg, v, &a);
+                a
             })
         };
         let t2 = t0.elapsed();
+        crate::timeline::lap("push: the nodes' arguments (on the pool)");
         if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             for (k, _) in &nodes {
                 eprintln!("node {k:?}");
@@ -2833,6 +2882,8 @@ impl Graph {
         }
         // (one append of every node, in order)
         let ids = self.eng.push_many(unit, self.ops.exec, args);
+        crate::hints::prepared_done(&self.ops.hints);
+        crate::timeline::lap("push: the engine's push");
         let out: Vec<(u64, NodeId, Src)> = nodes
             .iter()
             .zip(ids)
@@ -2906,6 +2957,27 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
         crate::hints::unregister_text(reg, v.str(DOC_NAME));
     }
 }
+
+/// The fields the engine is told are stable (`Engine::set_stable`):
+/// read by more than half of para4000's nodes and defined only by the
+/// format or the job's environment (`PHITEX_READERS=1` counted them:
+/// 4,000 to 5,204 readers of 6,677 nodes, every read from the
+/// environment). A wrong one costs speed, never bytes.
+const STABLE_FIELDS: &[&str] = &[
+    "cattab",
+    "sftab",
+    "lctab",
+    "patterns",
+    "font",
+    "fontinfo:1",
+    "hc:1",
+    "fd:1:2",
+    "fd:1:3",
+    "fd:1:4",
+    "fd:1:7",
+    "cs:par",
+    "param:everypar",
+];
 
 /// A document node's text: a slice of the document (its bytes).
 enum DocNode {
@@ -3284,41 +3356,58 @@ fn canonical_lines_splice(
 /// [`canonical_text`]'s lines of `text`, the first numbered `first`
 /// (from 0), onto `out` and `marks`.
 fn canonical_lines(text: &str, first: usize, out: &mut String, marks: &mut Vec<(u32, String)>) {
-    for (n, line) in text.split_inclusive('\n').enumerate() {
-        let n = n + first;
-        let (body, nl) = match line.strip_suffix('\n') {
-            Some(b) => (b, "\n"),
-            None => (line, ""),
-        };
-        let b = body.as_bytes();
-        let mut i = 0;
-        let mut cut = None;
-        while i < b.len() {
-            match b[i] {
-                // (a control symbol's character, or a control word's first
-                // letter: never a comment)
-                b'\\' => i += 2,
-                b'%' => {
-                    cut = Some(i);
-                    break;
-                }
-                _ => i += 1,
-            }
+    // (only a line with a `%` can change: the lines between two such
+    // lines are copied at once, their ends counted, eight bytes at a time)
+    let b = text.as_bytes();
+    let (mut done, mut n, mut from) = (0, first, 0);
+    while let Some(p) = text[from..].find('%').map(|k| from + k) {
+        let ls = text[done..p].rfind('\n').map_or(done, |k| done + k + 1);
+        n += newlines(&b[done..ls]);
+        out.push_str(&text[done..ls]);
+        let le = text[p..].find('\n').map_or(text.len(), |k| p + k);
+        canonical_line(&text[ls..le], n, out, marks);
+        if le < text.len() {
+            out.push('\n');
+            n += 1;
+            done = le + 1;
+        } else {
+            done = le;
         }
-        match cut {
-            Some(k) if k + 1 < body.len() => {
-                out.push_str(&body[..=k]);
-                out.push('\0');
-                // (the comment as web2c's `input_line` keeps it: the
-                // line's end, then its trailing blanks removed, §31)
-                let c = body[k + 1..]
-                    .trim_end_matches(['\r', '\n'])
-                    .trim_end_matches([' ', '\t']);
-                marks.push((u32::try_from(n + 1).unwrap_or(u32::MAX), c.to_owned()));
+        from = done;
+    }
+    out.push_str(&text[done..]);
+}
+
+/// [`canonical_lines`] of one line `body` (its end not in it), line `n`
+/// (0-based) of the text.
+fn canonical_line(body: &str, n: usize, out: &mut String, marks: &mut Vec<(u32, String)>) {
+    let b = body.as_bytes();
+    let mut i = 0;
+    let mut cut = None;
+    while i < b.len() {
+        match b[i] {
+            // (a control symbol's character, or a control word's first
+            // letter: never a comment)
+            b'\\' => i += 2,
+            b'%' => {
+                cut = Some(i);
+                break;
             }
-            _ => out.push_str(body),
+            _ => i += 1,
         }
-        out.push_str(nl);
+    }
+    match cut {
+        Some(k) if k + 1 < body.len() => {
+            out.push_str(&body[..=k]);
+            out.push('\0');
+            // (the comment as web2c's `input_line` keeps it: the
+            // line's end, then its trailing blanks removed, §31)
+            let c = body[k + 1..]
+                .trim_end_matches(['\r', '\n'])
+                .trim_end_matches([' ', '\t']);
+            marks.push((u32::try_from(n + 1).unwrap_or(u32::MAX), c.to_owned()));
+        }
+        _ => out.push_str(body),
     }
 }
 
@@ -3435,10 +3524,16 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
     let mut known: Vec<String> = Vec::new();
     for c in given.into_iter().chain(candidates) {
         let t1 = std::time::Instant::now();
-        let fresh = c
-            .reads
-            .iter()
-            .all(|(n, h)| file_hash(finder(n).as_ref()) == *h);
+        // (the files found, read and hashed on the pool)
+        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(crate::exec::threads(
+            opts.threads,
+        )));
+        let fresh = crate::exec::map_on(&mut ex, c.reads.len(), &|k| {
+            let (n, h) = &c.reads[k];
+            file_hash(finder(n).as_ref()) == *h
+        })
+        .into_iter()
+        .all(|x| x);
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "format check: {} files found and hashed in {:?} ({})",
@@ -3847,9 +3942,11 @@ impl Build {
         let t0 = std::time::Instant::now();
         let cached = prelude_env(prelude, &opts);
         let t_env = t0.elapsed();
+        crate::timeline::lap("engine: the format loaded (its environment)");
         let env = cached.env.clone();
         let defs = prelude_defs(&cached, prelude, opts.prelude_finder());
         let t1 = t0.elapsed();
+        crate::timeline::lap("engine: the format's definitions");
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: prelude env (format load or build) {t_env:?}, prelude definitions {:?}",
@@ -3865,13 +3962,21 @@ impl Build {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
         }
         let unit = g.eng.new_unit();
+        crate::timeline::lap("engine: the graph made");
         // the files the format read (fonts, data) are supplied before the
         // document's first evaluation: a run reading one never stops
         let t_sup = std::time::Instant::now();
-        for (n, _) in cached.reads.clone() {
-            g.supply(&opts.finder, &n);
-        }
+        g.supply_all(
+            &opts.finder,
+            &cached
+                .reads
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>(),
+        );
+        crate::timeline::lap("engine: the format's files supplied (fonts, data)");
         g.guesses(&opts);
+        crate::timeline::lap("engine: the guesses (read-back keys)");
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: supply the format's {} files (fonts, data) {:?}",
@@ -3892,6 +3997,7 @@ impl Build {
             }
             None => document.to_owned(),
         };
+        crate::timeline::lap("engine: the canonical text");
         // (the files the job writes and reads back are loop-backs the
         // `\openout` that opens them declares, `Run::written_decl`: a read
         // before it runs again on the loop-back)
@@ -3902,6 +4008,7 @@ impl Build {
             env_trace(&g.eng, &env);
             g.push_env(env);
         }
+        crate::timeline::lap("engine: the environment pushed");
         job_env(&mut g, unit, &env, &opts);
         // §1337: `\everyjob`, before the job's first line
         let every = env
@@ -3937,6 +4044,7 @@ impl Build {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone_from(&g.loads);
+        crate::timeline::lap("engine: the job's environment, the loads' records");
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
         // (the pages: each piece places the finisher of a page that ends
         // in it, `crate::pages`; nothing of them is pushed here)
@@ -3949,6 +4057,16 @@ impl Build {
         let files_op = g.files_op;
         let files = g.eng.push(unit, files_op, Vec::new());
         g.eng.add_root(files);
+        crate::timeline::lap("engine: the link, end and files nodes");
+        // (the fields nearly every node reads and only the format or the
+        // job's start defines: their reads kept per unit, not filed by
+        // scope, [`STABLE_FIELDS`]; `PHITEX_NO_STABLE=1` leaves them)
+        if !crate::exec::env_flag!("PHITEX_NO_STABLE") {
+            for f in STABLE_FIELDS {
+                let f = g.eng.values().field(f);
+                g.eng.set_stable(f);
+            }
+        }
         let edits = opts.edits.clone().unwrap_or_default();
         let mut b = Build {
             g,
@@ -3977,6 +4095,59 @@ impl Build {
             );
         }
         b
+    }
+
+    /// `PHITEX_READERS=1`: after a settle, the fields most nodes read,
+    /// each with its readers, the nodes in all, and where the reads found
+    /// it (the environment, or the nodes defining it): the data the
+    /// stable fields ([`STABLE_FIELDS`]) are chosen from.
+    fn dump_readers(&self) {
+        if !crate::exec::env_flag!("PHITEX_READERS") {
+            return;
+        }
+        let eng = &self.g.eng;
+        let mut todo: Vec<NodeId> = self.nodes.iter().map(|(_, n, _)| *n).collect();
+        todo.extend([self.end, self.dvi]);
+        let mut seen = phitex_defuse::FxHashSet::default();
+        // field -> (readers, reads from the environment, definers)
+        let mut by: FxHashMap<String, (usize, usize, phitex_defuse::FxHashSet<String>)> =
+            FxHashMap::default();
+        while let Some(n) = todo.pop() {
+            if !seen.insert(n.raw()) {
+                continue;
+            }
+            todo.extend(eng.children(n));
+            let mut mine = phitex_defuse::FxHashSet::default();
+            for l in eng.debug_reads(n).lines() {
+                let Some((name, rest)) = l.split_once(" (") else {
+                    continue;
+                };
+                let from = rest
+                    .split_once("): from ")
+                    .map_or("?", |(_, r)| r.split(' ').next().unwrap_or("?"));
+                let e = by.entry(name.to_owned()).or_default();
+                if mine.insert(name.to_owned()) {
+                    e.0 += 1;
+                }
+                if from == "env" {
+                    e.1 += 1;
+                } else {
+                    e.2.insert(from.to_owned());
+                }
+            }
+        }
+        let mut rows: Vec<_> = by.into_iter().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1.0));
+        for (f, (readers, env, defs)) in rows.iter().take(60) {
+            let mut d: Vec<&String> = defs.iter().collect();
+            d.sort();
+            d.truncate(4);
+            eprintln!(
+                "readers: {f} read by {readers} of {} nodes; {env} reads from the environment, {} definers {d:?}",
+                seen.len(),
+                defs.len()
+            );
+        }
     }
 
     /// `PHITEX_CLAIMS=<text>`: the debugging dump after a settle.
@@ -4034,7 +4205,10 @@ impl Build {
         // while it runs is off by the edit's length at most, and the map
         // is not made again for every edit)
         if self.g.watch.offsets.is_empty() || self.nodes.len() < 4096 {
-            let mut offsets = FxHashMap::default();
+            let mut offsets = FxHashMap::with_capacity_and_hasher(
+                self.nodes.len(),
+                std::hash::BuildHasherDefault::default(),
+            );
             for (_, n, src) in &self.nodes {
                 let Src::Doc(s, _) = *src;
                 offsets.insert(n.raw(), u64::try_from(s).unwrap_or(0));
@@ -4121,6 +4295,7 @@ impl Build {
             );
         }
         self.dump_claims();
+        self.dump_readers();
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
             for (k, &h) in pages.iter().enumerate() {
@@ -5428,10 +5603,19 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
 /// PDF options and the date (§241), set on `unit` before the first line.
 fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     let v = g.eng.values();
-    let mut sets: Vec<(Field, ValueId)> = Vec::new();
-    for (k, t) in env.iter() {
-        sets.push((v.field(k), import(v, t)));
-    }
+    // (the format's bindings made values on the pool, in their order)
+    let mut ex = crate::exec::Coarse(crate::exec::Threads::new(g.threads));
+    let chunk = env.len().div_ceil(g.threads.max(1) * 4).max(1);
+    let mut sets: Vec<(Field, ValueId)> =
+        crate::exec::map_on(&mut ex, env.len().div_ceil(chunk), &|c| {
+            env[c * chunk..((c + 1) * chunk).min(env.len())]
+                .iter()
+                .map(|(k, t)| (v.field(k), import(v, t)))
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect();
     sets.push((v.field("jobname"), v.str(&opts.jobname)));
     sets.push((v.field("dvicomment"), v.str(&opts.comment)));
     sets.push((v.field("shellescape"), v.int(i64::from(opts.shell_escape))));
@@ -5699,5 +5883,49 @@ mod prelude_tests {
         assert!(deserialise(&other).is_none());
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod canonical_tests {
+    use super::*;
+
+    /// The marking line by line, as it was before the copy between
+    /// lines with comments (the invariant: the same text and marks).
+    fn by_lines(text: &str) -> (String, Vec<(u32, String)>) {
+        let (mut out, mut marks) = (String::new(), Vec::new());
+        for (n, line) in text.split_inclusive('\n').enumerate() {
+            let (body, nl) = match line.strip_suffix('\n') {
+                Some(b) => (b, "\n"),
+                None => (line, ""),
+            };
+            canonical_line(body, n, &mut out, &mut marks);
+            out.push_str(nl);
+        }
+        (out, marks)
+    }
+
+    #[test]
+    fn lines_without_comments_are_copied_as_they_are() {
+        for t in [
+            "",
+            "a\n",
+            "a",
+            "no comment\nat all\n",
+            "x % one\n\n\\% not one\n\\\\% one \t\r\nend",
+            "%\n% \n%%\n\\%%\n",
+            "a\nb\nc % c\nd\ne\\% f % g\n\n\nh\n% last",
+            "é % ü\nü\n",
+        ] {
+            assert_eq!(canonical_text(t).unwrap(), by_lines(t), "{t:?}");
+            let (mut out, mut marks) = (String::new(), Vec::new());
+            canonical_lines(t, 7, &mut out, &mut marks);
+            let (o, m) = by_lines(t);
+            assert_eq!(out, o);
+            assert_eq!(
+                marks,
+                m.into_iter().map(|(n, c)| (n + 7, c)).collect::<Vec<_>>()
+            );
+        }
     }
 }

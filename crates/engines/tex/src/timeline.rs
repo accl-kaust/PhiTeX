@@ -2,8 +2,9 @@
 //! (`PHITEX_TEX_TIME`): the watch begins it at the edit's event, each
 //! step on the way marks the end of its phase ([`lap`]), work counted
 //! inside a phase on other threads is noted beside it ([`note`]), and
-//! the watch prints it when the event goes out ([`end`]). A build no
-//! edit began (the cold one) marks nothing.
+//! the watch prints it when the event goes out ([`end`]). The cold
+//! `build` command begins one at the process's start and prints it when
+//! its files are written.
 
 use std::fmt::Write as _;
 use std::sync::{Mutex, PoisonError};
@@ -11,6 +12,9 @@ use std::time::{Duration, Instant};
 
 struct Line {
     start: Instant,
+    /// The start on the system clock, seconds since the epoch (to tell
+    /// the process's start and exit apart from its table outside it).
+    epoch: f64,
     last: Instant,
     /// (phase, time, a note within the phase after it rather than a lap)
     rows: Vec<(String, Duration, bool)>,
@@ -30,8 +34,12 @@ pub fn begin_at(t: Instant) {
     if !crate::exec::env_flag!("PHITEX_TEX_TIME") {
         return;
     }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     *LINE.lock().unwrap_or_else(PoisonError::into_inner) = Some(Line {
         start: t,
+        epoch: now.saturating_sub(t.elapsed()).as_secs_f64(),
         last: t,
         rows: Vec::new(),
     });
@@ -68,10 +76,7 @@ pub fn end(label: &str) {
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let min = Duration::from_micros(300);
     let total = l.last - l.start;
-    let mut out = format!(
-        "edit timeline ({label}): {:.2} ms from the event\n",
-        ms(total)
-    );
+    let mut out = format!("timeline ({label}): {:.2} ms from its start\n", ms(total));
     let mut small = (Duration::ZERO, 0usize);
     // (a note is shown under the phase it was made in: the next lap)
     let mut pending = String::new();
@@ -92,11 +97,17 @@ pub fn end(label: &str) {
         pending.clear();
     }
     out.push_str(&pending);
-    let _ = write!(
+    let _ = writeln!(
         out,
         "  {:>9.2} ms  ({} phases under 0.3 ms)",
         ms(small.0),
         small.1
+    );
+    let _ = write!(
+        out,
+        "  clock: from {:.6} to {:.6} (seconds since the epoch)",
+        l.epoch,
+        l.epoch + total.as_secs_f64()
     );
     eprintln!("{out}");
 }

@@ -669,7 +669,12 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             st.begin(i, "docstrip expl3 module", String::new(), Status::Predicted);
         }
         let here = st.tokens.len();
-        let (tz0, cat0, in_body0) = (st.tz, cat, body_depth > 0);
+        // (the regime the token is read under: a change point when it
+        // differs from the last one; the regime itself not copied per token)
+        if regimes.last().is_none_or(|r| r.1 != cat) {
+            regimes.push((here, cat));
+        }
+        let (tz0, expl0, in_body0) = (st.tz, cat.ignore_spaces, body_depth > 0);
         match tk {
             TokKind::Open => {
                 let r = if bodies_ahead.1 > 0 && bodies_ahead.0 == frames.len() {
@@ -832,14 +837,11 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
             _ => {}
         }
-        if regimes.last().is_none_or(|r| r.1 != cat0) {
-            regimes.push((here, cat0));
-        }
         st.tokens.push(Token {
             kind: tk,
             start: i,
             end,
-            expl: cat0.ignore_spaces,
+            expl: expl0,
             in_body: in_body0,
             tz: tz0,
         });

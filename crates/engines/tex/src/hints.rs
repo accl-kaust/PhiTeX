@@ -673,6 +673,17 @@ impl Hint {
     }
 }
 
+/// `x` in decimal, as `{x}` formats it.
+fn push_u8(o: &mut String, x: u8) {
+    if x >= 100 {
+        o.push(char::from(b'0' + x / 100));
+    }
+    if x >= 10 {
+        o.push(char::from(b'0' + x / 10 % 10));
+    }
+    o.push(char::from(b'0' + x % 10));
+}
+
 /// A bound's fields after a hint's excerpt (`\x1e` before each).
 fn encode_bound(b: &Bound, o: &mut String) {
     o.push('\x1e');
@@ -680,19 +691,23 @@ fn encode_bound(b: &Bound, o: &mut String) {
     o.push('\x1e');
     o.push_str(&b.prefixes.join("\x1f"));
     o.push('\x1e');
-    // (written in place: no string per pair)
-    for (i, (c, k)) in b.cats.iter().enumerate() {
+    // (written in place: no string per pair, no formatting)
+    for (i, &(c, k)) in b.cats.iter().enumerate() {
         if i > 0 {
             o.push('\x1f');
         }
-        let _ = write!(o, "{c}\x1d{k}");
+        push_u8(o, c);
+        o.push('\x1d');
+        push_u8(o, k);
     }
     o.push('\x1e');
     for (i, (n, k)) in b.means.iter().enumerate() {
         if i > 0 {
             o.push('\x1f');
         }
-        let _ = write!(o, "{n}\x1d{k}");
+        o.push_str(n);
+        o.push('\x1d');
+        let _ = write!(o, "{k}");
     }
     o.push('\x1e');
     match &b.state {
@@ -1736,6 +1751,9 @@ struct Analysis<'t> {
     visiting: std::cell::RefCell<Vec<String>>,
     /// The format's definitions, behind the text's own.
     prelude: Defs,
+    /// The hash of each of the pass's regimes' content (a run's key
+    /// across texts, [`run_hint`]).
+    reg_hash: Vec<u64>,
 }
 
 /// Names that start a paragraph in vertical mode (§1090): the text
@@ -1911,6 +1929,15 @@ impl Analysis<'_> {
             structural.push(u(k));
         }
         let in_align = align_atoms(text, &p.atoms, &structural);
+        let reg_hash = p
+            .regimes
+            .iter()
+            .map(|r| {
+                let mut h = phitex_defuse::FxHasher::default();
+                std::hash::Hash::hash(&r.1, &mut h);
+                std::hash::Hasher::finish(&h)
+            })
+            .collect();
         Analysis {
             text,
             p,
@@ -1924,6 +1951,7 @@ impl Analysis<'_> {
             memo: std::cell::RefCell::new(FxHashMap::default()),
             visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
+            reg_hash,
         }
     }
 
@@ -2940,10 +2968,11 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
 }
 
 thread_local! {
-    /// The bounds of runs of characters by their key ([`Analysis::run_key`]
+    /// The hints of runs of characters by their key ([`Analysis::run_key`]
     /// with the regime's content for its index): a pure function of the
-    /// key, so one chunk's run serves the others.
-    static RUN_BOUNDS: std::cell::RefCell<FxHashMap<(u64, u64, u8), Bound>> =
+    /// key, so one chunk's run serves the others (without excerpts, the
+    /// traces', the hint is the same value).
+    static RUN_BOUNDS: std::cell::RefCell<FxHashMap<(u64, u64, u8), Arc<Hint>>> =
         std::cell::RefCell::default();
 }
 
@@ -2951,58 +2980,45 @@ thread_local! {
 /// hash, its regime's index and its place's flags, [`Analysis::run_key`]),
 /// its bound shared with every chunk that has the run under the same
 /// regime ([`RUN_BOUNDS`]).
-fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) -> Hint {
-    let reg = an.p.regimes.get(key.1).map_or(0, |r| {
-        let mut h = phitex_defuse::FxHasher::default();
-        std::hash::Hash::hash(&r.1, &mut h);
-        std::hash::Hasher::finish(&h)
-    });
+#[inline(never)]
+fn run_hint(an: &Analysis<'_>, a: usize, key: (u64, usize, u8), start: usize) -> Arc<Hint> {
+    let reg = an.reg_hash.get(key.1).copied().unwrap_or(0);
     let gkey = (key.0, reg, key.2);
     let excerpt = short(excerpt_at(an.text, start));
-    if let Some(b) = RUN_BOUNDS.with(|c| c.borrow().get(&gkey).cloned()) {
-        return Hint {
-            bound: Some(b),
-            cause: "bounded".to_owned(),
+    if let Some(h) = RUN_BOUNDS.with(|c| c.borrow().get(&gkey).cloned()) {
+        // (the cached hint, its excerpt this run's)
+        if h.excerpt == excerpt {
+            return h;
+        }
+        return Arc::new(Hint {
             excerpt,
-            guess: None,
-        };
+            ..(*h).clone()
+        });
     }
     let h = an.hint(a);
     // (kept when it has the shape the hit rebuilds: bounded, no guess)
-    if let Some(b) = &h.bound
-        && h.guess.is_none()
-        && h.cause == "bounded"
-        && h.excerpt == excerpt
-    {
+    let keep =
+        h.bound.is_some() && h.guess.is_none() && h.cause == "bounded" && h.excerpt == excerpt;
+    let h = Arc::new(h);
+    if keep {
         RUN_BOUNDS.with(|c| {
             let mut c = c.borrow_mut();
             if c.len() >= 1 << 16 {
                 c.clear();
             }
-            c.insert(gkey, b.clone());
+            c.insert(gkey, h.clone());
         });
     }
     h
 }
 
-/// [`analyse`] given the text's own definitions ([`own_definitions`]).
-// (one pass over the atoms, then one over the slices; splitting it
-// would only pass its tables around)
-#[allow(clippy::too_many_lines)]
-fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
-    let an = Analysis::with_own(text, kind, defs.clone(), own);
-    let (slices, pars) = slices_of(text, &an, kind);
+/// The hint of every atom a span or a slice reads (`an.sig`): where it
+/// starts, its hint, and whether a slice's union skips it.
+#[inline(never)]
+#[allow(clippy::type_complexity)]
+fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>>, Vec<bool>) {
     let mut starts = Vec::with_capacity(an.sig.len());
     let mut hints: Vec<Option<Arc<Hint>>> = Vec::with_capacity(an.sig.len());
-    // (one value per distinct hint, keyed by the hash of its encoding:
-    // no string keys in the pass, spec-final §5.2)
-    let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
-    let mut intern = |h: &Hint| -> Arc<str> {
-        let s = h.encode();
-        memo.entry(phitex_defuse::hash_bytes(0x6869_6e74, s.as_bytes()))
-            .or_insert_with(|| Arc::from(s))
-            .clone()
-    };
     let mut skip = Vec::with_capacity(an.sig.len());
     // (the atoms a primitive reads: never run on their own; a command
     // a macro is only guessed to read runs in the slice, so it counts)
@@ -3031,7 +3047,7 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             );
             let h = runs
                 .entry(key)
-                .or_insert_with(|| Arc::new(run_hint(&an, a, key, at.start)))
+                .or_insert_with(|| run_hint(an, a, key, at.start))
                 .clone();
             hints.push(Some(h));
             skip.push(false);
@@ -3052,6 +3068,26 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
         // slice: its rows count in the union)
         skip.push(claimed && (at.kind != AtomKind::Cs || prim_op || unbounded_operand));
     }
+    (starts, hints, skip)
+}
+
+/// [`analyse`] given the text's own definitions ([`own_definitions`]).
+// (one pass over the atoms, then one over the slices; splitting it
+// would only pass its tables around)
+#[allow(clippy::too_many_lines)]
+fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
+    let an = Analysis::with_own(text, kind, defs.clone(), own);
+    let (slices, pars) = slices_of(text, &an, kind);
+    // (one value per distinct hint, keyed by the hash of its encoding:
+    // no string keys in the pass, spec-final §5.2)
+    let mut memo: FxHashMap<u64, Arc<str>> = FxHashMap::default();
+    let mut intern = |h: &Hint| -> Arc<str> {
+        let s = h.encode();
+        memo.entry(phitex_defuse::hash_bytes(0x6869_6e74, s.as_bytes()))
+            .or_insert_with(|| Arc::from(s))
+            .clone()
+    };
+    let (starts, hints, skip) = atom_hints(&an, text);
     let mut t = TextHints {
         slices,
         starts,
@@ -3065,6 +3101,9 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
     let mut pending: Vec<&'static str> = Vec::new();
+    // (which of `NORMAL_PARAGRAPH` a hint may set, by hint: the atoms of
+    // a run of characters share theirs)
+    let mut sets: FxHashMap<usize, u8> = FxHashMap::default();
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         // (whether the run reads on into the next slice: a scan for a
@@ -3198,8 +3237,17 @@ fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> Te
             let Some(ah) = t.hints[a].as_deref() else {
                 continue;
             };
-            for &n in NORMAL_PARAGRAPH {
-                if may_set(ah, n) && !out.contains(&n) {
+            let m = *sets
+                .entry(std::ptr::from_ref(ah) as usize)
+                .or_insert_with(|| {
+                    NORMAL_PARAGRAPH
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, n)| may_set(ah, n))
+                        .fold(0, |m, (k, _)| m | 1 << k)
+                });
+            for (k, &n) in NORMAL_PARAGRAPH.iter().enumerate() {
+                if m >> k & 1 == 1 && !out.contains(&n) {
                     out.push(n);
                 }
             }
@@ -3379,6 +3427,33 @@ pub(crate) struct Registry {
     /// the analysis of the whole file at the unit's slice.
     units: Mutex<FxHashMap<u64, Arc<str>>>,
     hints: Mutex<FxHashMap<u64, Arc<Hint>>>,
+    /// The engine's answers ([`may_define`]) made ahead on the pool for
+    /// nodes about to be pushed ([`prepare`]), by their arguments' key:
+    /// each taken by the push's one question, the rest dropped after it
+    /// ([`prepared_done`]).
+    prepared: Mutex<FxHashMap<u64, Prepared>>,
+    /// The hints decoded, by their string's value (the nodes of a
+    /// document share a few hint strings among thousands of slices).
+    decoded: Mutex<FxHashMap<u64, Arc<Hint>>>,
+    /// [`may_define`]'s answer by the hint string's value.
+    answers: Mutex<FxHashMap<u64, MayDefine>>,
+}
+
+/// An answer kept for its one question, or taken.
+#[derive(Default)]
+enum Kept<T> {
+    Ready(T),
+    #[default]
+    Taken,
+}
+
+/// A node's answers made before its push ([`prepare`]), each taken by
+/// the engine's one question.
+#[derive(Default)]
+struct Prepared {
+    may: Option<MayDefine>,
+    reads: Kept<Option<Vec<Field>>>,
+    lines: Option<ValueId>,
 }
 
 /// Registers a text's analysis under `name` (a string value) in the
@@ -3419,15 +3494,26 @@ pub(crate) fn unregister_text(reg: &Registry, name: ValueId) {
 /// after its own `\catcode` of `{` (plain.tex, latex.ltx, a document
 /// run without a format).
 fn looks_initex(text: &str) -> bool {
-    let brace = text.find('{');
-    let line = text
-        .find("\\catcode`\\{")
-        .or_else(|| text.find("\\catcode123"));
-    match (line, brace) {
-        (Some(l), Some(b)) => l < b,
-        (Some(_), None) => true,
-        _ => false,
+    // (the first `\catcode` of `{` written with a backquote, else the
+    // first written with its code; found in one pass over `\catcode`s)
+    let (mut quoted, mut coded) = (None, None);
+    let mut from = 0;
+    while let Some(k) = text[from..].find("\\catcode") {
+        let p = from + k;
+        let rest = &text[p + "\\catcode".len()..];
+        if rest.starts_with("`\\{") {
+            quoted = Some(p);
+            break;
+        }
+        if coded.is_none() && rest.starts_with("123") {
+            coded = Some(p);
+        }
+        from = p + 1;
     }
+    let Some(line) = quoted.or(coded) else {
+        return false;
+    };
+    text.find('{').is_none_or(|b| line < b)
 }
 
 /// The regime a text starts in: the kind its name says, unless the text
@@ -3564,16 +3650,65 @@ pub(crate) fn file_hints(reg: &Registry, v: &Values, id: ValueId, name: ValueId)
     t
 }
 
+/// The key of a node's arguments in the registry's tables.
+fn args_key(args: &[ValueId]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for a in args {
+        a.raw().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The answers the engine asks of a node at its push, made now (on the
+/// pool, for the nodes of a text before they are pushed in order: the
+/// push's serial part is then the engine's own, spec-final §9b): its
+/// hint decoded and cached, its [`may_define`] kept until the push asks.
+pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
+    let _ = hint_of_args(reg, v, args);
+    let p = Prepared {
+        // (`PHITEX_HINTS` prints each answer where the engine asks)
+        may: (!crate::exec::env_flag!("PHITEX_HINTS")).then(|| may_define_now(reg, v, args)),
+        reads: Kept::Ready(reads_now(reg, v, args)),
+        lines: Some(crate::run::text_lines(v, args)),
+    };
+    reg.prepared
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(args_key(args), p);
+}
+
+/// The answer `f` takes from a node's prepared ones, if it was prepared.
+fn take_prepared<T>(
+    reg: &Registry,
+    args: &[ValueId],
+    f: impl FnOnce(&mut Prepared) -> Option<T>,
+) -> Option<T> {
+    let mut p = reg.prepared.lock().unwrap_or_else(PoisonError::into_inner);
+    if p.is_empty() {
+        return None;
+    }
+    p.get_mut(&args_key(args)).and_then(f)
+}
+
+/// The lines a node's text begins (`crate::run::text_lines`), as
+/// prepared before its push.
+pub(crate) fn prepared_lines(reg: &Registry, args: &[ValueId]) -> Option<ValueId> {
+    take_prepared(reg, args, |p| p.lines.take())
+}
+
+/// The push the answers were [`prepare`]d for is done: those it did not
+/// take are dropped (a later node with the same arguments asks again).
+pub(crate) fn prepared_done(reg: &Registry) {
+    reg.prepared
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+}
+
 /// The hint of a node from its arguments: the extra argument when the
 /// slice carries one, else its first text frame.
 pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<Hint> {
-    let key = {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for a in args {
-            a.raw().hash(&mut h);
-        }
-        h.finish()
-    };
+    let key = args_key(args);
     if let Some(h) = reg
         .hints
         .lock()
@@ -3583,7 +3718,27 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
         return h.clone();
     }
     let mut registry = false;
-    let h = Arc::new(compute_hint(reg, v, args, &mut registry));
+    let h = match hint_value(v, args) {
+        // (the hint argument's string decoded once per build)
+        Some(hv) => {
+            let known = reg
+                .decoded
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&hv.raw())
+                .cloned();
+            known.unwrap_or_else(|| {
+                let h = Arc::new(compute_hint(reg, v, args, &mut registry));
+                let mut d = reg.decoded.lock().unwrap_or_else(PoisonError::into_inner);
+                if d.len() > 1 << 16 {
+                    d.clear();
+                }
+                d.insert(hv.raw(), h.clone());
+                h
+            })
+        }
+        None => Arc::new(compute_hint(reg, v, args, &mut registry)),
+    };
     if registry {
         // (a hint read from the registered analysis of a text, which an
         // edit registers again: the arguments alone do not name it)
@@ -3595,6 +3750,14 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
     }
     c.insert(key, h.clone());
     h
+}
+
+/// The node's hint argument, the string tagged `A` or `B` (what
+/// [`compute_hint`] decodes first).
+fn hint_value(v: &Values, args: &[ValueId]) -> Option<ValueId> {
+    args.iter().skip(2).copied().find(|&h| {
+        matches!(&*v.get(h), Value::Str(t) if t.starts_with("A\x1e") || t.starts_with("B\x1e"))
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3857,6 +4020,15 @@ pub(crate) fn effect_none(reg: &Registry, v: &Values, args: &[ValueId]) -> bool 
 /// meanings of the names its text calls (`cs:name`, `act:code`) and the
 /// catcodes its bytes were read with (`cat:c`).
 pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
+    take_prepared(reg, args, |p| match std::mem::take(&mut p.reads) {
+        Kept::Ready(r) => Some(r),
+        Kept::Taken => None,
+    })
+    .unwrap_or_else(|| reads_now(reg, v, args))
+}
+
+/// [`reads`], answered now.
+fn reads_now(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return None;
     }
@@ -3880,11 +4052,41 @@ pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<
     (!out.is_empty()).then_some(out)
 }
 
-/// The engine's question, answered from the text.
+/// The engine's question, answered from the text (made ahead when the
+/// node's push was [`prepare`]d).
 pub(crate) fn may_define(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
+    take_prepared(reg, args, |p| p.may.take()).unwrap_or_else(|| may_define_now(reg, v, args))
+}
+
+/// [`may_define`], answered now.
+fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return MayDefine::Any;
     }
+    // (an answer is the hint's alone: made once per hint string)
+    let hv = hint_value(v, args).filter(|_| !crate::exec::env_flag!("PHITEX_HINTS"));
+    if let Some(hv) = hv
+        && let Some(m) = reg
+            .answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&hv.raw())
+    {
+        return m.clone();
+    }
+    let m = may_define_answer(reg, v, args);
+    if let Some(hv) = hv {
+        let mut a = reg.answers.lock().unwrap_or_else(PoisonError::into_inner);
+        if a.len() > 1 << 16 {
+            a.clear();
+        }
+        a.insert(hv.raw(), m.clone());
+    }
+    m
+}
+
+/// [`may_define_now`], made.
+fn may_define_answer(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     let h = hint_of_args(reg, v, args);
     if crate::exec::env_flag!("PHITEX_HINTS") {
         let answer = match &h.bound {
@@ -4215,6 +4417,45 @@ mod tests {
         );
         assert!(h.may_define_field("count:0"));
         assert!(!h.may_define_field("count:24"));
+    }
+
+    #[test]
+    fn bytes_in_decimal_as_formatted() {
+        for x in 0..=255u8 {
+            let mut o = String::new();
+            push_u8(&mut o, x);
+            assert_eq!(o, x.to_string());
+        }
+    }
+
+    #[test]
+    fn initex_texts_as_before() {
+        // (the two searches it replaces)
+        fn before(text: &str) -> bool {
+            let brace = text.find('{');
+            let line = text
+                .find("\\catcode`\\{")
+                .or_else(|| text.find("\\catcode123"));
+            match (line, brace) {
+                (Some(l), Some(b)) => l < b,
+                (Some(_), None) => true,
+                _ => false,
+            }
+        }
+        for t in [
+            "",
+            "plain text",
+            "{\\catcode`\\{=1",
+            "\\catcode`\\{=1 {",
+            "\\catcode123=1 {",
+            "{ \\catcode123=1",
+            "\\catcode123=1 { \\catcode`\\{=1",
+            "\\catcode`\\}=2 \\catcode123=1",
+            "\\catcode\\catcode123 x",
+            "a \\catcode`\\{ b \\catcode123 {",
+        ] {
+            assert_eq!(looks_initex(t), before(t), "{t:?}");
+        }
     }
 
     #[test]

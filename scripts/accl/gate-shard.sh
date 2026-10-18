@@ -288,6 +288,7 @@ for l in open(sys.argv[1]):
         timeout 900 "$bin" build -j $j --output-dir=o$j --program pdftex para40000.tex > "$L" 2>&1)
       e=$?
       s1=$(date +%s.%N)
+      echo "shell: the process ran from $s0 to $s1" >> "$L"
       echo "para40000 -j $j: exit $e wall $(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}') md5 $(md5sum < "$w/big/o$j/para40000.pdf" 2>/dev/null | cut -c1-32)" >> "$r/big.txt"
       grep -E '^acct: (round|1 rounds)|^pdf exact|^link:' "$L" | sed 's/^/  /' >> "$r/big.txt"
       [ "$e" = 0 ] || red "para40000 -j $j: exit $e"
@@ -319,6 +320,7 @@ for l in open(sys.argv[1]):
           timeout 900 "$bin" build -j $j --output-dir=o$j --program pdftex para4000.tex > "$Lk" 2>&1)
         ek=$?
         s1=$(date +%s.%N)
+        echo "shell: the process ran from $s0 to $s1" >> "$Lk"
         mk=$(md5sum < "$w/par/o$j/para4000.pdf" 2>/dev/null | cut -c1-32)
         [ -n "$mk" ] || mk=none
         wk=$(awk -v a="$s0" -v b="$s1" 'BEGIN{printf "%.2f", b-a}')

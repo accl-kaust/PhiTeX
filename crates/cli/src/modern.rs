@@ -316,6 +316,10 @@ impl Target {
 /// in its directory), then the file's magic comments. Without a
 /// `phitex.toml` the build runs in the main file's directory, as latexmk
 /// -cd does.
+/// The bytes of the main file its magic comments are looked for in
+/// (their twenty lines, [`config::magic_comments`]).
+const MAGIC_HEAD: u64 = 1 << 16;
+
 pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let found = config::find(&cwd)?;
@@ -340,24 +344,41 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         o.file.clone().or_else(|| cfg.main.clone()).ok_or(
             "no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned(),
         )?;
-    let read = |f: &str| {
-        std::fs::read(f)
-            .or_else(|_| std::fs::read(format!("{f}.tex")))
+    // (the magic comments are in the first lines: the whole file is read
+    // only when no engine is named and its text decides)
+    let read = |f: &str, whole: bool| {
+        let open = |p: &str| -> std::io::Result<Vec<u8>> {
+            if whole {
+                return std::fs::read(p);
+            }
+            let mut b = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(std::fs::File::open(p)?, MAGIC_HEAD),
+                &mut b,
+            )?;
+            // (a head without its twenty whole lines: the whole file)
+            if b.len() as u64 == MAGIC_HEAD && b.split(|&c| c == b'\n').nth(20).is_none() {
+                return std::fs::read(p);
+            }
+            Ok(b)
+        };
+        open(f)
+            .or_else(|_| open(&format!("{f}.tex")))
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .map_err(|e| format!("can't read {f}: {e}"))
     };
-    let mut text = read(&file)?;
+    let mut text = read(&file, false)?;
     let (mut program, root_comment) = config::magic_comments(&text);
     if let Some(r) = root_comment {
         let dir = Path::new(&file).parent().unwrap_or(Path::new(""));
         file = dir.join(r).to_string_lossy().into_owned();
-        text = read(&file)?;
+        text = read(&file, false)?;
         program = config::magic_comments(&text).0.or(program);
     }
     let named = o.engine.clone().or(cfg.engine).or(program);
     let mut engine = match named {
         Some(e) => tex::engine(&e)?,
-        None => tex::engine(config::default_engine(&text))?,
+        None => tex::engine(config::default_engine(&read(&file, true)?))?,
     };
     if let Some(out) = o.output {
         engine = engine.with_output(out)?;
@@ -583,6 +604,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     }
     let status = Arc::new(Status::default());
     let spin = ui.spin(what(t, &job), status.clone());
+    phitex_tex::timeline::lap("cli: the job, the spinner");
     let mut s = match Session::new(job, status.clone(), &mut |n: &str| ui.note(n)) {
         Ok(s) => s,
         Err(e) => {
@@ -600,6 +622,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         }
     };
     status.set("writing the outputs");
+    phitex_tex::timeline::lap("cli: the build returned");
     let main = match s.write(&r, true) {
         Ok(w) => w.main,
         Err(e) => {
@@ -609,16 +632,20 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         }
     };
     spin.done();
+    phitex_tex::timeline::lap("cli: the spinner stopped");
     report(t, &s, &r, main.as_deref(), o, ui, true);
+    phitex_tex::timeline::lap("cli: the report");
     if let (Some(m), Some(d), true) = (&main, &t.copy_pdf, r.out.errors.is_empty()) {
         copy_pdf(m, d, ui);
     }
     cache_summary(t, ui);
+    phitex_tex::timeline::lap("cli: the cache's summary");
     let code = i32::from(!r.out.errors.is_empty());
     // (the process exits next: the session's engine and tables, hundreds
     // of megabytes, are left to it instead of freed one by one)
     std::mem::forget(s);
     std::mem::forget(r);
+    phitex_tex::timeline::end("cold build");
     code
 }
 
@@ -737,6 +764,12 @@ pub fn main(args: &[String]) -> ! {
     if o.all {
         clean_all(&ui);
     }
+    // (`PHITEX_TEX_TIME`: a cold build's phases from the process's start)
+    if matches!(o.command, Some(Command::Build))
+        && let Some(&t0) = crate::START.get()
+    {
+        phitex_tex::timeline::begin_at(t0);
+    }
     let Some(command) = o.command else {
         ui.error("no command given: build, watch or clean (`phitex --help`)");
         std::process::exit(crate::EXIT_USAGE);
@@ -745,6 +778,7 @@ pub fn main(args: &[String]) -> ! {
         ui.error(&e);
         std::process::exit(crate::EXIT_USAGE);
     });
+    phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");
     match command {
         Command::Build => std::process::exit(build(&t, &o, &ui)),
         Command::Clean => std::process::exit(clean(&t, &ui)),

@@ -436,7 +436,8 @@ fn elt_in_db(db_dir: &[u8], elt: &[u8]) -> bool {
     !db_dir.is_empty() && !elt.is_empty() && elt.starts_with(db_dir)
 }
 
-/// FNV-1a, for the `ls-R` hash table (names are short).
+/// The `ls-R` hash table's hasher: eight bytes of a name at a time
+/// (a database has hundreds of thousands of names to insert).
 #[derive(Default)]
 struct Fnv(u64);
 
@@ -445,13 +446,17 @@ impl std::hash::Hasher for Fnv {
         self.0
     }
     fn write(&mut self, bytes: &[u8]) {
-        let mut h = if self.0 == 0 {
-            0xcbf2_9ce4_8422_2325
-        } else {
-            self.0
-        };
-        for &b in bytes {
-            h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        const K: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut h = self.0;
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(*w)).wrapping_mul(K);
+        }
+        if !rest.is_empty() {
+            let mut w = [0u8; 8];
+            w[..rest.len()].copy_from_slice(rest);
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(w) ^ (rest.len() as u64) << 59)
+                .wrapping_mul(K);
         }
         self.0 = h;
     }
@@ -550,7 +555,7 @@ pub struct Kpse {
     cnf: Option<HashMap<Bytes, Bytes>>,
     doing_cnf_init: bool,
     expanding: HashMap<Bytes, bool>,
-    db: Option<Db>,
+    db: Option<std::sync::Arc<Db>>,
     /// `kpse->followup_search`: false only for the `texmf.cnf` search.
     followup_search: bool,
     paths: HashMap<Format, Bytes>,
@@ -886,10 +891,35 @@ impl Kpse {
         path
     }
 
-    /// `db.c`, `kpathsea_init_db`.
+    /// `db.c`, `kpathsea_init_db`. The databases are read once per
+    /// process while their files stay as they were (by length and time):
+    /// another instance of the same tree (a format's finder beside the
+    /// document's) shares them.
     fn init_db(&mut self) {
+        type Dbs = std::sync::Mutex<HashMap<Vec<(Bytes, u64, u128)>, std::sync::Arc<Db>>>;
+        static DBS: std::sync::OnceLock<Dbs> = std::sync::OnceLock::new();
         let db_path = self.init_format(Format::Db);
         let files = self.search_list(&db_path, &[b"ls-R".to_vec(), b"ls-r".to_vec()], true, true);
+        let key: Vec<(Bytes, u64, u128)> = files
+            .iter()
+            .map(|f| {
+                let m = std::fs::metadata(os(f)).ok();
+                let len = m.as_ref().map_or(0, std::fs::Metadata::len);
+                let at = m
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                (f.clone(), len, at)
+            })
+            .collect();
+        let dbs = DBS.get_or_init(Dbs::default);
+        let mut held = dbs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(db) = held.get(&key) {
+            self.db = Some(db.clone());
+            return;
+        }
         let mut db = Db::default();
         let mut i = 0;
         while i < files.len() {
@@ -904,6 +934,8 @@ impl Kpse {
             db.build(&files[i]);
             i += 1;
         }
+        let db = std::sync::Arc::new(db);
+        held.insert(key, db.clone());
         self.db = Some(db);
     }
 
