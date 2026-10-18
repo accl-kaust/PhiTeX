@@ -4419,7 +4419,7 @@ impl Run<'_, '_> {
             // material whose end its scan does not know yet: nothing
             // here until it does, not a scan from the document's start)
             Some(x) if x == ValueId::UNIT => {
-                if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                if crate::exec::obs_flag!("PHITEX_BLOCK_TRACE") {
                     eprintln!(
                         "scan {}: the block before ends unknown: nothing (speculative {})",
                         self.cx.node().raw(),
@@ -4506,7 +4506,7 @@ impl Run<'_, '_> {
             mat = Some(m);
         }
         // (where this block ends, for the next block's scan)
-        if trace {
+        if crate::exec::obs_flag!("PHITEX_BLOCK_TRACE") {
             eprintln!(
                 "scan {}: block ends {} (speculative {})",
                 self.cx.node().raw(),
