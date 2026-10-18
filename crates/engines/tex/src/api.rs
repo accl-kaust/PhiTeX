@@ -2932,8 +2932,24 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
 
 /// The fields the engine is told are stable (`Engine::set_stable`):
 /// read by more than half of para4000's nodes and defined only by the
-/// format or the job's environment (`PHITEX_READERS=1` counts them).
-const STABLE_FIELDS: &[&str] = &[];
+/// format or the job's environment (`PHITEX_READERS=1` counted them:
+/// 4,000 to 5,204 readers of 6,677 nodes, every read from the
+/// environment). A wrong one costs speed, never bytes.
+const STABLE_FIELDS: &[&str] = &[
+    "cattab",
+    "sftab",
+    "lctab",
+    "patterns",
+    "font",
+    "fontinfo:1",
+    "hc:1",
+    "fd:1:2",
+    "fd:1:3",
+    "fd:1:4",
+    "fd:1:7",
+    "cs:par",
+    "param:everypar",
+];
 
 /// A document node's text: a slice of the document (its bytes).
 enum DocNode {
