@@ -142,6 +142,10 @@ pub(crate) struct Rec {
     pub rtime: AtomicU64,
     pub park_seq: AtomicU32,
     pub claimed_by: AtomicU32,
+    /// The evaluation (low 32 bits of `Shared::epoch`) in which a run of
+    /// this node was refuted: for the rest of it, it reads no predictions
+    /// and takes no guesses (a node is refuted at most once a evaluation).
+    pub cons: AtomicU32,
     pub d: Mutex<Box<Data>>,
 }
 
@@ -883,6 +887,8 @@ pub(crate) struct Counters {
     pub static_contribs_refuted: Ctr,
     pub predictions_confirmed: Ctr,
     pub predictions_refuted: Ctr,
+    /// Nodes that went conservative this evaluation (`Rec::cons`).
+    pub nodes_conservative: Ctr,
     pub realised: CtrMax,
     pub realised_ns: CtrMax,
     pub env_provided: Ctr,
