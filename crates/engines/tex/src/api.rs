@@ -3470,10 +3470,16 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
     let mut known: Vec<String> = Vec::new();
     for c in given.into_iter().chain(candidates) {
         let t1 = std::time::Instant::now();
-        let fresh = c
-            .reads
-            .iter()
-            .all(|(n, h)| file_hash(finder(n).as_ref()) == *h);
+        // (the files found, read and hashed on the pool)
+        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(crate::exec::threads(
+            opts.threads,
+        )));
+        let fresh = crate::exec::map_on(&mut ex, c.reads.len(), &|k| {
+            let (n, h) = &c.reads[k];
+            file_hash(finder(n).as_ref()) == *h
+        })
+        .into_iter()
+        .all(|x| x);
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "format check: {} files found and hashed in {:?} ({})",
