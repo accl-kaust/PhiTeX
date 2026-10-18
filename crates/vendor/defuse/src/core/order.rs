@@ -480,6 +480,16 @@ impl Shared {
     }
 
     /// The frame stack after entry `e`.
+    /// Whether `e`'s frames are set for the brackets its text has now:
+    /// its scope frames allocated and its place in a frame known.
+    fn framed(&self, e: Slot) -> bool {
+        let (br, _) = self.brackets_of(e);
+        let n = u32::from(br.ob) + u32::from(br.oa);
+        let r = self.rec(e);
+        r.top_in.load(Ordering::Acquire) != NO_FRAME
+            && (n == 0 || (r.nframes.load(Ordering::Acquire) >= n && r.frames.load(Ordering::Acquire) != NO_FRAME))
+    }
+
     fn stack_after(&self, e: Slot, root: u32) -> Vec<u32> {
         let t = self.top_in(e);
         let mut stack = if t == NO_FRAME { vec![root] } else { self.chain(t) };
@@ -560,7 +570,15 @@ impl Shared {
     pub(crate) fn recompute_frames(&self, u: u32, start: Slot, moved: &mut Vec<Slot>) -> Option<Slot> {
         let un = self.unit(u);
         let root = un.root_frame;
-        let p = self.prev(start);
+        // The stack is rebuilt from the entry before: one not yet framed
+        // for its current brackets (a text edited since its frames were
+        // set, no evaluation between) is recomputed too.
+        let mut start = start;
+        let mut p = self.prev(start);
+        while p != NIL && !self.framed(p) {
+            start = p;
+            p = self.prev(start);
+        }
         let mut stack = if p == NIL {
             vec![root]
         } else {
@@ -2342,7 +2360,13 @@ impl Shared {
                     if let Some(st) = notes.pre.get(&sp.id()) {
                         self.rec(s).data().stat = st.clone();
                     }
-                    self.preset_frames(u, after, s);
+                    if self.framed(after) {
+                        self.preset_frames(u, after, s);
+                    } else {
+                        // (The entry before is not framed for its text yet:
+                        // the full writer recomputes from further back.)
+                        self.escalate(u);
+                    }
                 }
             }
             // Link now so later specs find their place.
