@@ -2216,19 +2216,16 @@ impl Run<'_, '_> {
         // (a `\write18`'s tool node the piece ended at: right before
         // the resume, `Run::tool_command`)
         let tool = xs.get(5).map(|&t| list_of(v, t));
-        match after {
-            Some(at) => {
-                if let Some(t) = tool {
-                    self.cx.follow_after(at, self.ops.toolnode, t);
-                }
-                self.cx.follow_after(at, self.ops.resume, args);
+        if let Some(at) = after {
+            if let Some(t) = tool {
+                self.cx.follow_after(at, self.ops.toolnode, t);
             }
-            None => {
-                if let Some(t) = tool {
-                    self.cx.follow(self.ops.toolnode, t);
-                }
-                self.cx.follow(self.ops.resume, args);
+            self.cx.follow_after(at, self.ops.resume, args);
+        } else {
+            if let Some(t) = tool {
+                self.cx.follow(self.ops.toolnode, t);
             }
+            self.cx.follow(self.ops.resume, args);
         }
         Ok(())
     }
