@@ -1917,6 +1917,7 @@ impl Graph {
             | E::RunawayCreation { node, .. }
             | E::UndeclaredDefinition { node, .. }
             | E::OpPanicked { node, .. } => ids.push(*node),
+            E::HookPanicked { node, .. } => ids.extend(*node),
             E::NoProgress { waiters, .. } | E::Deadline { waiters, .. } => {
                 ids.extend(waiters.iter().take(20).map(|w| w.node));
             }
@@ -1924,7 +1925,16 @@ impl Graph {
         }
         // (the field and the nodes' texts first: a harness shows the
         // head of the message; the error's full form last)
-        let mut out = format!("evaluation: {e}");
+        let mut out = match e {
+            // (a static hook of ours panicked: which hook of which
+            // operation, first, then the engine's whole message)
+            E::HookPanicked {
+                op, hook, message, ..
+            } => format!(
+                "internal error: the {hook} hook of operation {op} panicked: {message}\nevaluation: {e}"
+            ),
+            _ => format!("evaluation: {e}"),
+        };
         let v = self.eng.values();
         if let E::UndeclaredDefinition { field, .. } | E::ConflictingPublication { field } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
