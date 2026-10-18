@@ -203,15 +203,15 @@ pub fn prototype(
     for (i, w) in widths.iter().enumerate() {
         list.push(tab_glue(tabskips[i]));
         list.push(Node::Unset(if halign {
-            Unset {
+            Box::new(Unset {
                 width: *w,
                 ..Unset::default()
-            }
+            })
         } else {
-            Unset {
+            Box::new(Unset {
                 height: *w,
                 ..Unset::default()
-            }
+            })
         }));
     }
     list.push(tab_glue(tabskips[widths.len()]));
@@ -255,7 +255,7 @@ pub fn set_alignment(
     let mut out = List::with_capacity(list.len());
     for q in list {
         match q {
-            Node::Unset(row) => out.push(Node::Box(set_row(row, proto, halign, offset))),
+            Node::Unset(row) => out.push(Node::Box(Box::new(set_row(*row, proto, halign, offset)))),
             Node::Rule(mut r) => {
                 // §806
                 if r.width == RUNNING {
@@ -279,7 +279,7 @@ pub fn set_alignment(
                     )
                     .node;
                     b.shift = offset;
-                    out.push(Node::Box(b));
+                    out.push(Node::Box(Box::new(b)));
                 }
             }
             n => out.push(n),
@@ -341,16 +341,16 @@ fn set_row(row: Unset, p: &BoxNode, halign: bool, o: Scaled) -> BoxNode {
             si += 1;
             let ws = width_of(&proto[si]);
             extra.push(Node::Box(if halign {
-                BoxNode {
+                Box::new(BoxNode {
                     width: ws,
                     ..BoxNode::default()
-                }
+                })
             } else {
-                BoxNode {
+                Box::new(BoxNode {
                     kind: BoxKind::V,
                     height: ws,
                     ..BoxNode::default()
-                }
+                })
             }));
             t += ws;
         }
@@ -400,7 +400,7 @@ fn set_row(row: Unset, p: &BoxNode, halign: bool, o: Scaled) -> BoxNode {
                 list: r.list,
             }
         };
-        q.list.push(Node::Box(b));
+        q.list.push(Node::Box(Box::new(b)));
         q.list.extend(extra);
         // the tabskip glue after the entry (or spanned group)
         if let Some(g) = entries.next() {
@@ -479,7 +479,7 @@ mod tests {
         let row = |es: Vec<Unset>| {
             let mut l = vec![tab_glue(tab)];
             for e in es {
-                l.push(Node::Unset(e));
+                l.push(Node::Unset(Box::new(e)));
                 l.push(tab_glue(tab));
             }
             pack_row(l, true, &fonts, &pp)
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(proto.width, 39 * PT);
         assert!((proto.glue.ratio - 1.0).abs() < 1e-12);
         let out = set_alignment(
-            vec![Node::Unset(r1), Node::Unset(r2)],
+            vec![Node::Unset(Box::new(r1)), Node::Unset(Box::new(r2))],
             &proto,
             true,
             0,

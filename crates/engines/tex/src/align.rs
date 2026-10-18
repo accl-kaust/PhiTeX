@@ -475,7 +475,7 @@ impl Run<'_, '_> {
         let span = u16::try_from(i64::try_from(col).unwrap_or(0) - first).unwrap_or(0);
         let mut rec = AlignColumn::default();
         let (u, adj) = pack_entry(list, true, span, &mut rec, &view, &pp);
-        row.push(nodes::encode(v, &Node::Unset(u), &side));
+        row.push(nodes::encode(v, &Node::Unset(Box::new(u)), &side));
         let g = pre.cols.get(col).map_or(Glue::ZERO, |c| c.2);
         row.push(nodes::encode(v, &tab_glue(g), &side));
         for a in &adj {
@@ -491,7 +491,7 @@ impl Run<'_, '_> {
             let view = self.font_view(&rl)?;
             let r = pack_row(rl, true, &view, &pp);
             let amd = self.close_group(md)?;
-            let rv = nodes::encode(v, &Node::Unset(r), &s2);
+            let rv = nodes::encode(v, &Node::Unset(Box::new(r)), &s2);
             self.append_to_vlist(&amd, rv)?;
             for a in adjust {
                 self.append(amd.lid, a);

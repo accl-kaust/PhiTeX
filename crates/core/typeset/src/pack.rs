@@ -469,7 +469,7 @@ mod tests {
             ..BoxNode::default()
         };
         let list = vec![
-            Node::Box(inner),
+            Node::Box(Box::new(inner)),
             Node::Mark(7),
             Node::Adjust(vec![Node::Penalty(5), Node::Penalty(6)]),
             Node::Kern(UNITY, crate::node::KernKind::Explicit),
@@ -490,13 +490,13 @@ mod tests {
     fn vpack_depth_limit_and_leaders() {
         let p = PackParams::default();
         let b = |h, d, w| {
-            Node::Box(BoxNode {
+            Node::Box(Box::new(BoxNode {
                 kind: BoxKind::H,
                 width: w,
                 height: h,
                 depth: d,
                 ..BoxNode::default()
-            })
+            }))
         };
         let leader = Node::Glue(GlueNode {
             spec: Glue::new(2 * UNITY, 0, 0),

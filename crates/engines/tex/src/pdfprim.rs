@@ -2737,7 +2737,7 @@ fn xform_step(
     ]);
     let got = crate::pdfout::command_forms(r, input, &all, move |st, forms, fs| {
         let base = forms.next_handle();
-        let mut bx = bx.clone();
+        let mut bx = (*bx).clone();
         remap_whatsits(&mut bx.list, base);
         for (k, d) in data.iter().enumerate() {
             if let Some(d) = d {
@@ -2919,7 +2919,7 @@ pub(crate) struct Positions {
 /// page).
 pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
     let pdf = r.param("pdfoutput")? > 0;
-    let view = r.font_view(std::slice::from_ref(&Node::Box(b.clone())))?;
+    let view = r.font_view(std::slice::from_ref(&Node::Box(Box::new(b.clone()))))?;
     let (h0, v0) = if pdf {
         (
             r.param("pdfhorigin")? + r.param("hoffset")?,

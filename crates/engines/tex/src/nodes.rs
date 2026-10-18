@@ -476,7 +476,7 @@ pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<
         let mut b = decode_box_head(v, &xs);
         side.lazy_box.push((x, head_words(&b)));
         b.list = vec![Node::Whatsit(LAZY + k, None)];
-        return Some(Node::Box(b));
+        return Some(Node::Box(Box::new(b)));
     }
     decode(v, x, side)
 }
@@ -527,13 +527,13 @@ fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             font: u32::try_from(g(1)).unwrap_or(0),
             ch: u16::try_from(g(2)).unwrap_or(0),
         },
-        T_BOX => Node::Box(decode_box(v, xs, side)),
+        T_BOX => Node::Box(Box::new(decode_box(v, xs, side))),
         T_RULE => Node::Rule(Rule {
             width: g(1),
             height: g(2),
             depth: g(3),
         }),
-        T_INS => Node::Ins(Insert {
+        T_INS => Node::Ins(Box::new(Insert {
             number: u16::try_from(g(1)).unwrap_or(0),
             height: g(2),
             depth: g(3),
@@ -542,7 +542,7 @@ fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             list: xs
                 .get(6)
                 .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
-        }),
+        })),
         T_MARK => {
             side.marks.push(xs.get(1).copied().unwrap_or(ValueId::UNIT));
             Node::Mark(u32::try_from(side.marks.len() - 1).unwrap_or(0))
@@ -566,7 +566,7 @@ fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             left_hit: g(4) != 0,
             right_hit: g(5) != 0,
         }),
-        T_DISC => Node::Disc(Disc {
+        T_DISC => Node::Disc(Box::new(Disc {
             pre: xs
                 .get(1)
                 .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
@@ -576,7 +576,7 @@ fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             replace: xs
                 .get(3)
                 .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
-        }),
+        })),
         T_WHATSIT => {
             side.whats.push(xs.get(1).copied().unwrap_or(ValueId::UNIT));
             // a size: pdfTeX's `\pdfrefxform`, `\pdfrefximage`
@@ -611,7 +611,7 @@ fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
         }),
         T_KERN => Node::Kern(g(1), kern_kind(i64::from(g(2)))),
         T_PENALTY => Node::Penalty(g(1)),
-        T_UNSET => Node::Unset(Unset {
+        T_UNSET => Node::Unset(Box::new(Unset {
             span_count: u16::try_from(g(1)).unwrap_or(0),
             width: g(2),
             height: g(3),
@@ -623,7 +623,7 @@ fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             list: xs
                 .get(9)
                 .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
-        }),
+        })),
         _ => return None,
     })
 }
@@ -944,7 +944,7 @@ fn flat_decode(v: &Values, rd: &mut Flat<'_>, refs: &[ValueId], side: &mut Side,
                 }
                 let mut list = Vec::new();
                 flat_decode(v, rd, refs, side, &mut list);
-                Node::Box(BoxNode {
+                Node::Box(Box::new(BoxNode {
                     kind: if h[0] == 0 { BoxKind::H } else { BoxKind::V },
                     width: i32::try_from(h[1]).unwrap_or(0),
                     height: i32::try_from(h[2]).unwrap_or(0),
@@ -960,7 +960,7 @@ fn flat_decode(v: &Values, rd: &mut Flat<'_>, refs: &[ValueId], side: &mut Side,
                         ratio: f64::from_bits(u64::from_ne_bytes(h[7].to_ne_bytes())),
                     },
                     list,
-                })
+                }))
             }
             F_RULE => Node::Rule(Rule {
                 width: rd.i32(),
@@ -988,7 +988,7 @@ fn flat_decode(v: &Values, rd: &mut Flat<'_>, refs: &[ValueId], side: &mut Side,
                 flat_decode(v, rd, refs, side, &mut pre);
                 flat_decode(v, rd, refs, side, &mut post);
                 flat_decode(v, rd, refs, side, &mut replace);
-                Node::Disc(Disc { pre, post, replace })
+                Node::Disc(Box::new(Disc { pre, post, replace }))
             }
             F_MATH => {
                 let k = if rd.get() == 0 {

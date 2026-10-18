@@ -11,7 +11,7 @@
 use crate::arith::{INF_BAD, MAX_DIMEN, Scaled, badness, fract};
 use crate::fonts::Fonts;
 use crate::glue::{Glue, Order};
-use crate::node::{Disc, List, Node, param};
+use crate::node::{List, Node, param};
 use crate::pack::{PackParams, Packed, Spec, hpack};
 
 /// `inf_penalty` (§157).
@@ -1037,7 +1037,7 @@ fn post_line_break(
                         Node::Glue(_) => line.push(Node::param_glue(param::RIGHT_SKIP, right_skip)),
                         Node::Disc(d) => {
                             // §882–§885
-                            line.push(Node::Disc(Disc::default()));
+                            line.push(Node::Disc(Box::default()));
                             if !d.post.is_empty() {
                                 post_disc_break = true;
                                 front.extend(d.post.into_iter().rev());

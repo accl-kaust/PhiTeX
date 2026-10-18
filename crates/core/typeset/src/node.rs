@@ -219,12 +219,12 @@ pub enum Node {
         /// Character code.
         ch: u16,
     },
-    /// A box.
-    Box(BoxNode),
+    /// A box (boxed: a node is a word of a list, the large ones apart).
+    Box(Box<BoxNode>),
     /// A rule.
     Rule(Rule),
     /// An insertion.
-    Ins(Insert),
+    Ins(Box<Insert>),
     /// A mark: opaque, the caller's handle.
     Mark(u32),
     /// `\vadjust` material.
@@ -232,7 +232,7 @@ pub enum Node {
     /// A ligature.
     Lig(Ligature),
     /// A discretionary.
-    Disc(Disc),
+    Disc(Box<Disc>),
     /// A whatsit: opaque, the caller's handle (§1341), and its size if
     /// it has one: pdfTeX's `\pdfrefxform` and `\pdfrefximage` nodes
     /// carry the form's or image's dimensions, which packaging, line
@@ -259,8 +259,11 @@ pub enum Node {
     /// A penalty.
     Penalty(i32),
     /// An unset box.
-    Unset(Unset),
+    Unset(Box<Unset>),
 }
+
+// (a list is a run of these: the large variants apart keep it narrow)
+const _: () = assert!(std::mem::size_of::<Node>() <= 40);
 
 impl Node {
     /// A plain glue node.

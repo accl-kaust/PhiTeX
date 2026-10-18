@@ -279,12 +279,12 @@ impl Reader<'_> {
                         depth,
                     })
                 } else {
-                    Node::Box(BoxNode {
+                    Node::Box(Box::new(BoxNode {
                         kind: if k == 0 { BoxKind::H } else { BoxKind::V },
                         height,
                         depth,
                         ..BoxNode::default()
-                    })
+                    }))
                 }
             }
             P_GLUE => Node::glue(self.glue()),
@@ -318,14 +318,14 @@ impl Reader<'_> {
                         }
                     }
                 }
-                Node::Ins(Insert {
+                Node::Ins(Box::new(Insert {
                     number: u16::try_from(number).unwrap_or(0),
                     height,
                     depth,
                     split_top_skip,
                     float_cost,
                     list,
-                })
+                }))
             }
             _ => return None,
         })
@@ -341,12 +341,12 @@ impl Reader<'_> {
             P_VBOX => {
                 let (k, height, depth) = (self.next(), self.n32(), self.n32());
                 PItem::VBox {
-                    node: Node::Box(BoxNode {
+                    node: Node::Box(Box::new(BoxNode {
                         kind: if k == 0 { BoxKind::H } else { BoxKind::V },
                         height,
                         depth,
                         ..BoxNode::default()
-                    }),
+                    })),
                     bs: self.ilp.0,
                     ls: self.ilp.1,
                     lsl: self.ilp.2,
