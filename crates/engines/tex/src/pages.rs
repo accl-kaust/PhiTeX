@@ -1999,10 +1999,28 @@ impl Run<'_, '_> {
     }
 
     /// A profile's `[tag]` page parameter items, of piece `pid`, given the
-    /// parameters reaching it.
+    /// parameters reaching it, and its `[tag, n]` insertion class items
+    /// the class's registers reaching it: what [`Run::resolve_params_of`]
+    /// gives the piece's items (a marker resolved where the build reads
+    /// it would read the registers at a later piece, past a finisher
+    /// that changed them, and the scan's decision would part from the
+    /// items')
     fn resolve_prof_of(&mut self, pid: i64, items: &mut [crate::vprof::PItem]) -> R<()> {
         let mut m = None;
+        let mut classes: Vec<(u16, InsertClass)> = Vec::new();
         for x in items.iter_mut() {
+            if let crate::vprof::PItem::InsParams(n, c @ None) = x {
+                let n = *n;
+                *c = Some(if let Some(&(_, k)) = classes.iter().find(|k| k.0 == n) {
+                    k
+                } else {
+                    let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+                    let k = self.insert_class_at(n, at)?;
+                    classes.push((n, k));
+                    k
+                });
+                continue;
+            }
             if let crate::vprof::PItem::Params(p @ None) = x {
                 let pp = if let Some(pp) = m {
                     pp
@@ -4446,7 +4464,12 @@ impl Run<'_, '_> {
             let items = crate::vprof::decode(&ints);
             needs[i] = items
                 .iter()
-                .any(|x| matches!(x, crate::vprof::PItem::Params(None)) || crate::vprof::is_end(x));
+                .any(|x| {
+                    matches!(
+                        x,
+                        crate::vprof::PItem::Params(None) | crate::vprof::PItem::InsParams(_, None)
+                    ) || crate::vprof::is_end(x)
+                });
             decoded[i] = Some((pid, items));
         }
         let dead = if crate::vprof::has_end(&material)
