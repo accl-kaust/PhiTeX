@@ -105,7 +105,22 @@ fn narrow(x: i64) -> i32 {
 
 /// `pdf_print_int` (pdfTeX §686) as bytes.
 pub fn int(out: &mut Vec<u8>, n: i64) {
-    out.extend_from_slice(n.to_string().as_bytes());
+    // (the digits on the stack, last first: no string per number)
+    let mut buf = [0u8; 20];
+    let mut k = buf.len();
+    let mut m = n.unsigned_abs();
+    loop {
+        k -= 1;
+        buf[k] = b'0' + u8::try_from(m % 10).unwrap_or(0);
+        m /= 10;
+        if m == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        out.push(b'-');
+    }
+    out.extend_from_slice(&buf[k..]);
 }
 
 /// `pdf_print_real(m, d)` (pdfTeX §690): `m/10^d`, without trailing zeros.
@@ -169,6 +184,15 @@ mod tests {
         let dd = usize::try_from(dd).unwrap_or(0);
         let out = sign * (s - r / TEN_POW[dd]);
         (narrow(sign * q), narrow(out))
+    }
+
+    #[test]
+    fn int_prints_as_display() {
+        for n in [0, 7, -7, 10, -10, 65536, -1234567, i64::MAX, i64::MIN] {
+            let mut out = Vec::new();
+            int(&mut out, n);
+            assert_eq!(out, n.to_string().into_bytes());
+        }
     }
 
     #[test]

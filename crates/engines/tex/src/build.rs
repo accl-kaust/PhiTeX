@@ -58,10 +58,11 @@ impl Run<'_, '_> {
     /// The mode and current list (§211): the innermost level of the nest,
     /// or, with none open, the scope kind the node runs in.
     pub(crate) fn mode(&mut self) -> R<Mode> {
-        let base = self.base_mode()?;
         if self.nest.is_empty() {
-            return Ok(base);
+            return self.base_mode();
         }
+        // (level 0's extra fields are the top level's here: not copied)
+        let base = self.base_mode_with(false)?;
         let groups = self.local_groups();
         // the vertical list a paragraph belongs to: the level below it
         let (vlid, vm) = self
@@ -94,11 +95,26 @@ impl Run<'_, '_> {
 
     /// Level 0: the scope kind the node runs in, decoded once per value.
     pub(crate) fn base_mode(&mut self) -> R<Mode> {
+        self.base_mode_with(true)
+    }
+
+    /// [`Self::base_mode`], its extra fields left empty unless `with_extra`.
+    fn base_mode_with(&mut self, with_extra: bool) -> R<Mode> {
         let k = self.scope_kind()?;
         let v = self.v;
+        let ex = |p: &crate::run::KindFields| {
+            (
+                p.0,
+                p.1,
+                p.2,
+                p.3,
+                p.4,
+                if with_extra { p.5.clone() } else { Vec::new() },
+            )
+        };
         let (group, sid, lid, km, depth, extra) = match k {
             Some(k) => match &self.kind_memo {
-                Some((kk, p)) if *kk == k => p.clone(),
+                Some((kk, p)) if *kk == k => ex(p),
                 _ => {
                     let xs = list_of(v, k);
                     let n = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
@@ -110,8 +126,9 @@ impl Run<'_, '_> {
                         n(4),
                         xs.get(6..).map(<[ValueId]>::to_vec).unwrap_or_default(),
                     );
-                    self.kind_memo = Some((k, p.clone()));
-                    p
+                    let r = ex(&p);
+                    self.kind_memo = Some((k, p));
+                    r
                 }
             },
             None => (0, 0, 0, 1, 0, Vec::new()),
@@ -657,9 +674,14 @@ impl Run<'_, '_> {
                 continue;
             }
             for x in v.seq_to_vec(s) {
-                let xs = list_of(v, x);
-                if xs.len() == 2 && int_of(v, xs[0]) == 0 {
-                    out.push(xs[1]);
+                // (the pair borrowed: no list copied per item)
+                let pair = v
+                    .with_list(x, |xs| (xs.len() == 2).then(|| (xs[0], xs[1])))
+                    .flatten();
+                if let Some((l, y)) = pair
+                    && int_of(v, l) == 0
+                {
+                    out.push(y);
                 }
             }
         }
@@ -1049,6 +1071,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let t0 = crate::prof::start();
         let mut side = Side::default();
+        // (collected in place: the items' buffer becomes the list's)
         let list: List = items
             .into_iter()
             .filter_map(|x| match x {
@@ -1123,7 +1146,7 @@ impl Run<'_, '_> {
             }
         }
         let uc_hyph = self.ipar(Par::uchyph)?;
-        let hyphen = view.hyphen.clone();
+        let hyphen = &view.hyphen;
         let lcf = |c: u16| lc.get(usize::from(c)).copied().unwrap_or(0);
         let hcf = |f: u32| hyphen.get(&f).copied().unwrap_or(-1);
         let mut hy = phitex_typeset::hyph::TexHyphenator {
@@ -1137,7 +1160,10 @@ impl Run<'_, '_> {
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
         crate::prof::add(crate::prof::LB_TS, t0);
         let t0 = crate::prof::start();
-        let just_box = para.lines.last().map(|l| l.packed.node.clone());
+        // (the last line, for a display that interrupts the paragraph:
+        // moved out once encoded)
+        let mut just_box = None;
+        let last_k = para.lines.len().wrapping_sub(1);
         // (the interline glue parameters in force for every line, §679:
         // nothing between the lines changes them)
         let bs = crate::val::glue_value(v, &self.gpar(Par::baselineskip)?);
@@ -1145,7 +1171,7 @@ impl Run<'_, '_> {
         let lsl = v.int(i64::from(self.ipar(Par::lineskiplimit)?));
         let tv = v.int(nodes::T_VBOX);
         let mut out = Vec::with_capacity(para.lines.len() * 2);
-        for line in para.lines {
+        for (k, line) in para.lines.into_iter().enumerate() {
             self.box_report(true, line.packed.report, true);
             let b = nodes::encode_box(v, &line.packed.node, &side);
             out.push(v.list(vec![tv, b, bs, ls, lsl]));
@@ -1154,6 +1180,11 @@ impl Run<'_, '_> {
             }
             if let Some(p) = line.penalty {
                 out.push(nodes::penalty_node(v, p));
+            }
+            if display && k == last_k {
+                just_box = Some(line.packed.node);
+            } else {
+                phitex_typeset::linebreak::recycle_line(line.packed.node.list);
             }
         }
         // the paragraph's lines: one contribution
@@ -2020,7 +2051,9 @@ impl Run<'_, '_> {
     fn char_run_(&mut self, md: &Mode, cancel: bool) -> R<()> {
         let v = self.v;
         let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
-        let mut view = crate::fonts::View::default();
+        // (the view of the worker's last character run, emptied)
+        let mut view = CHAR_VIEW.with(std::cell::Cell::take).unwrap_or_default();
+        view.clear();
         self.add_font_metrics(&mut view, f)?;
         // the space factor is never read: the run's effect on it so far
         // (`sf`: SF_UNREAD none, n >= 0 set to n, -s §1034's update by s)
@@ -2149,6 +2182,7 @@ impl Run<'_, '_> {
             }
         }
         CHAR_BUF.with(|c| c.set(out));
+        CHAR_VIEW.with(|c| c.set(Some(view)));
         crate::prof::add(crate::prof::CHAR_ENC, te);
         Ok(())
     }
@@ -2852,6 +2886,8 @@ thread_local! {
     /// A character run's node buffer, kept for the worker's next run
     /// ([`Run::char_run`]).
     static CHAR_BUF: std::cell::Cell<Vec<Node>> = const { std::cell::Cell::new(Vec::new()) };
+    /// Its font view, kept the same way.
+    static CHAR_VIEW: std::cell::Cell<Option<crate::fonts::View>> = const { std::cell::Cell::new(None) };
 }
 
 /// The space factor not read yet in a run of characters.
@@ -2925,10 +2961,16 @@ pub(crate) fn fold_item(
         }
         T_PD => st.pd = i32::try_from(crate::val::int_at(v, n, 1)).unwrap_or(0),
         T_VBOX => {
-            let ys = list_of(v, n);
-            let b = ys.get(1).copied().unwrap_or(ValueId::UNIT);
-            let bs = crate::val::glue_of(v, ys.get(2).copied());
-            let ls = crate::val::glue_of(v, ys.get(3).copied());
+            // (the fields borrowed: no list copied per line)
+            let ys: [Option<ValueId>; 4] = v
+                .with_list(n, |xs| std::array::from_fn(|k| xs.get(k).copied()))
+                .unwrap_or_else(|| {
+                    let xs = list_of(v, n);
+                    std::array::from_fn(|k| xs.get(k).copied())
+                });
+            let b = ys[1].unwrap_or(ValueId::UNIT);
+            let bs = crate::val::glue_of(v, ys[2]);
+            let ls = crate::val::glue_of(v, ys[3]);
             let lsl = i32::try_from(crate::val::int_at(v, n, 4)).unwrap_or(0);
             let ht = nodes::box_dim(v, b, 3);
             if let Some(g) = phitex_typeset::linebreak::interline_glue(st.pd, ht, bs, ls, lsl) {

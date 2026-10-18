@@ -501,6 +501,9 @@ pub(crate) struct Extra {
     pub guess_pending: u32,
     /// Waits since the last commit.
     pub waited: Vec<WaitRec>,
+    /// The nodes it parked on since its last commit, with the evaluation
+    /// (epoch) it parked in: its realised depth starts after theirs.
+    pub parked_on: Vec<(Slot, u64)>,
     pub claimed: Vec<Slot>,
     /// What a static claimer consumed (window) when its claim was computed.
     pub window: Vec<Slot>,
@@ -556,6 +559,7 @@ impl Data {
             e.guessed_by.is_empty()
                 && e.guess_pending == 0
                 && e.waited.is_empty()
+                && e.parked_on.is_empty()
                 && e.claimed.is_empty()
                 && e.window.is_empty()
                 && e.reported.is_none()

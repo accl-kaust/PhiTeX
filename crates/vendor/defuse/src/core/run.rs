@@ -1167,6 +1167,14 @@ impl Shared {
             let mut d = r.data();
             d.kept = kept.map(Box::new);
             d.ex().wait_on = Some(w.clone());
+            // (A validation that waits does not hold its result back.)
+            if let Subj::Node(x) = w.on
+                && x != s
+                && needs_run
+            {
+                let ep = self.epoch.load(Ordering::Relaxed);
+                d.ex().parked_on.push((x, ep));
+            }
             // (Only the waits a committed result keeps: see `commit`.)
             if let Subj::Node(x) = w.on
                 && w.kind == "pending set"

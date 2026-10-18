@@ -100,6 +100,16 @@ impl Shared {
         };
         let mut m = 0;
         let mut tm = 0;
+        // What it parked on: it could not go on before those were done.
+        let parked = self.rec(s).data().x.as_mut().map(|e| std::mem::take(&mut e.parked_on));
+        let now = self.epoch.load(Ordering::Relaxed);
+        for (n, e) in parked.into_iter().flatten() {
+            if e != now {
+                continue;
+            }
+            m = m.max(dep(n));
+            tm = tm.max(time(n));
+        }
         for p in log {
             let n = match p {
                 // A prediction did not wait (a previous value's guess

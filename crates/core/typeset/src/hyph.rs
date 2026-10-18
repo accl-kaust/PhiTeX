@@ -310,8 +310,25 @@ impl Patterns {
         l_hyf: usize,
         r_hyf: usize,
     ) -> Option<Vec<u8>> {
+        let mut hyf = vec![0u8; word.len() + 1];
+        self.hyphenate_word_into(lang, word, l_hyf, r_hyf, &mut hyf)
+            .then_some(hyf)
+    }
+
+    /// [`Self::hyphenate_word`] into `hyf` (at least `word.len() + 1`
+    /// long; all of it is written, zero past the word): whether the
+    /// language has patterns or the word is an exception.
+    pub fn hyphenate_word_into(
+        &self,
+        lang: u16,
+        word: &[u16],
+        l_hyf: usize,
+        r_hyf: usize,
+        hyf: &mut [u8],
+    ) -> bool {
         let hn = word.len();
-        let mut hyf = vec![0u8; hn + 1];
+        hyf.fill(0);
+        let hyf = &mut hyf[..=hn];
         let f = self.flat.0.get_or_init(|| Flat::of(self));
         if let Some(pos) = f.exception(lang, word) {
             // §932
@@ -321,12 +338,22 @@ impl Patterns {
                 }
             }
         } else {
-            let root = f.roots.iter().find(|r| r.0 == lang)?.1;
-            let mut hc = Vec::with_capacity(hn + 3);
-            hc.push(0);
-            hc.extend_from_slice(word);
-            hc.push(0);
-            hc.push(NON_CHAR);
+            let Some(root) = f.roots.iter().find(|r| r.0 == lang).map(|r| r.1) else {
+                return false;
+            };
+            // (the word between its boundaries: on the stack for the
+            // words hyphenation meets, at most 63 letters)
+            let mut buf = [0u16; 72];
+            let mut heap;
+            let hc: &mut [u16] = if hn + 3 <= buf.len() {
+                &mut buf[..hn + 3]
+            } else {
+                heap = vec![0u16; hn + 3];
+                &mut heap
+            };
+            hc[1..=hn].copy_from_slice(word);
+            hc[hn + 1] = 0;
+            hc[hn + 2] = NON_CHAR;
             for j in 0..=(hn + 1).saturating_sub(r_hyf) {
                 let mut z = root;
                 let mut l = j;
@@ -351,7 +378,7 @@ impl Patterns {
         for j in 0..r_hyf.min(hn + 1) {
             hyf[hn - j] = 0;
         }
-        Some(hyf)
+        true
     }
 }
 
@@ -437,8 +464,9 @@ impl Hyphenator for TexHyphenator<'_> {
         let font_bchar = fonts.bchar(hf).unwrap_or(NON_CHAR);
         // §897
         let mut hu = [0u16; 66];
-        // (a word is at most 63 letters: one allocation, never grown)
-        let mut hc: Vec<u16> = Vec::with_capacity(64);
+        // (the word's codes, at most 63)
+        let mut hc = [0u16; 64];
+        let mut hn = 0usize;
         let mut hb = s;
         let mut hyf_bchar = NON_CHAR;
         loop {
@@ -449,12 +477,13 @@ impl Hyphenator for TexHyphenator<'_> {
                     }
                     hyf_bchar = *ch;
                     let c = code(lang.lang, *ch);
-                    if c == 0 || hc.len() == 63 {
+                    if c == 0 || hn == 63 {
                         break;
                     }
                     hb = s;
-                    hc.push(c);
-                    hu[hc.len()] = *ch;
+                    hc[hn] = c;
+                    hn += 1;
+                    hu[hn] = *ch;
                     hyf_bchar = NON_CHAR;
                 }
                 Some(Node::Lig(l)) => {
@@ -465,22 +494,25 @@ impl Hyphenator for TexHyphenator<'_> {
                     if let Some(&c) = l.original.first() {
                         hyf_bchar = c;
                     }
-                    let mut tmp = Vec::new();
+                    let mut tmp = [(0u16, 0u16); 64];
+                    let mut nt = 0usize;
                     let mut all = true;
                     for &c in &l.original {
                         let cc = code(lang.lang, c);
-                        if cc == 0 || hc.len() + tmp.len() == 63 {
+                        if cc == 0 || hn + nt == 63 {
                             all = false;
                             break;
                         }
-                        tmp.push((c, cc));
+                        tmp[nt] = (c, cc);
+                        nt += 1;
                     }
                     if !all {
                         break;
                     }
-                    for (c, cc) in tmp {
-                        hc.push(cc);
-                        hu[hc.len()] = c;
+                    for &(c, cc) in &tmp[..nt] {
+                        hc[hn] = cc;
+                        hn += 1;
+                        hu[hn] = c;
                     }
                     hb = s;
                     hyf_bchar = if l.right_hit { font_bchar } else { NON_CHAR };
@@ -494,7 +526,6 @@ impl Hyphenator for TexHyphenator<'_> {
             s += 1;
         }
         // §899
-        let hn = hc.len();
         if hn < l_hyf + r_hyf {
             return None;
         }
@@ -515,8 +546,13 @@ impl Hyphenator for TexHyphenator<'_> {
             }
         }
         // §923
-        let mut hyf = self.patterns.hyphenate_word(lang.lang, &hc, l_hyf, r_hyf)?;
-        hyf.resize(66, 0);
+        let mut hyf = [0u8; 66];
+        if !self
+            .patterns
+            .hyphenate_word_into(lang.lang, &hc[..hn], l_hyf, r_hyf, &mut hyf)
+        {
+            return None;
+        }
         // §902
         if !(l_hyf..=hn - r_hyf).any(|j| hyf[j] & 1 != 0) {
             return None;
@@ -527,7 +563,7 @@ impl Hyphenator for TexHyphenator<'_> {
             hf,
             hu,
             hyf,
-            init_list: Vec::new(),
+            init_list: &[],
             init_lig: false,
             init_lft: false,
             hyphen_passed: 0,
@@ -536,12 +572,12 @@ impl Hyphenator for TexHyphenator<'_> {
         let first_after_ha = list.get(ha + 1);
         let (keep_ha, j0) = match &list[ha] {
             Node::Char { font, ch } if *font == hf => {
-                rc.init_list = vec![*ch];
+                rc.init_list = std::slice::from_ref(ch);
                 rc.hu[0] = *ch;
                 (false, 0)
             }
             Node::Lig(l) if l.font == hf => {
-                rc.init_list.clone_from(&l.original);
+                rc.init_list = &l.original[..];
                 rc.init_lig = true;
                 rc.init_lft = l.left_hit;
                 rc.hu[0] = l.ch;
@@ -565,18 +601,24 @@ impl Hyphenator for TexHyphenator<'_> {
             }
         };
         // §913
-        let mut out: List = Vec::new();
+        // (room for the letters, a discretionary per possible hyphen and
+        // a few kerns: grown at most once)
+        let mut out: List = Vec::with_capacity(hn + hn / 2 + 4);
         let mut j = j0;
         loop {
             let mut l = j;
-            let (m, mut hold) = rc.reconstitute(j, hn, bchar, hyf_char);
-            j = m + 1;
-            if rc.hyphen_passed == 0 {
-                out.append(&mut hold);
-                if rc.hyf[j - 1] & 1 != 0 {
-                    l = j;
-                    rc.hyphen_passed = j - 1;
-                }
+            // (a cut's translation goes on the output; one that holds the
+            // hyphen comes off it again, as the replacement)
+            let mark = out.len();
+            j = rc.reconstitute(j, hn, bchar, hyf_char, &mut out) + 1;
+            let mut hold: List = if rc.hyphen_passed == 0 {
+                Vec::new()
+            } else {
+                out.split_off(mark)
+            };
+            if rc.hyphen_passed == 0 && rc.hyf[j - 1] & 1 != 0 {
+                l = j;
+                rc.hyphen_passed = j - 1;
             }
             if rc.hyphen_passed > 0 {
                 // §914
@@ -594,9 +636,7 @@ impl Hyphenator for TexHyphenator<'_> {
                         rc.hu[i] = hyf_char;
                     }
                     while l <= i {
-                        let (m, mut nodes) = rc.reconstitute(l, i, font_bchar, NON_CHAR);
-                        l = m + 1;
-                        pre.append(&mut nodes);
+                        l = rc.reconstitute(l, i, font_bchar, NON_CHAR, &mut pre) + 1;
                     }
                     if hyf_node {
                         rc.hu[i] = c;
@@ -613,22 +653,18 @@ impl Hyphenator for TexHyphenator<'_> {
                     }
                     while l < j {
                         loop {
-                            let (m, mut nodes) = rc.reconstitute(l, hn, bchar, NON_CHAR);
-                            l = m + 1;
+                            l = rc.reconstitute(l, hn, bchar, NON_CHAR, &mut post) + 1;
                             if c_loc > 0 {
                                 rc.hu[c_loc] = c;
                                 c_loc = 0;
                             }
-                            post.append(&mut nodes);
                             if l >= j {
                                 break;
                             }
                         }
                         while l > j {
                             // §917
-                            let (m, mut nodes) = rc.reconstitute(j, hn, bchar, NON_CHAR);
-                            j = m + 1;
-                            major.append(&mut nodes);
+                            j = rc.reconstitute(j, hn, bchar, NON_CHAR, &mut major) + 1;
                         }
                     }
                     // §918
@@ -661,8 +697,8 @@ struct Recon<'a> {
     fonts: &'a dyn Fonts,
     hf: FontId,
     hu: [u16; 66],
-    hyf: Vec<u8>,
-    init_list: Vec<u16>,
+    hyf: [u8; 66],
+    init_list: &'a [u16],
     init_lig: bool,
     init_lft: bool,
     hyphen_passed: usize,
@@ -670,7 +706,7 @@ struct Recon<'a> {
 
 impl Recon<'_> {
     /// `reconstitute(j, n, bchar, hchar)` (§906): the cut prefix ends at
-    /// the returned index; its translation is returned with it.
+    /// the returned index; its translation is appended to `t`.
     #[allow(clippy::too_many_lines)]
     fn reconstitute(
         &mut self,
@@ -678,15 +714,15 @@ impl Recon<'_> {
         n: usize,
         mut bchar: u16,
         mut hchar: u16,
-    ) -> (usize, List) {
+        t: &mut List,
+    ) -> usize {
         let hf = self.hf;
         let ch = |c: u16| Node::Char { font: hf, ch: c };
         self.hyphen_passed = 0;
-        let mut t: List = Vec::with_capacity(n.saturating_sub(j) + self.init_list.len() + 2);
         let mut w = 0;
         // §908
         let mut cur_l = self.hu[j];
-        let mut cur_q = 0;
+        let mut cur_q = t.len();
         let mut ligature_present = false;
         let mut lft_hit = false;
         let mut rt_hit = false;
@@ -700,7 +736,7 @@ impl Recon<'_> {
             t.push(ch(cur_l));
         }
         // the ligature stack: (character, the char node of hu[j+1])
-        let mut lig_stack: Vec<(u16, Option<u16>)> = Vec::with_capacity(4);
+        let mut lig_stack: Vec<(u16, Option<u16>)> = Vec::new();
         let set_cur_r = |j: usize, hu: &[u16; 66], hyf: &[u8], bchar: u16, hchar: u16| {
             let cur_r = if j < n { hu[j + 1] } else { bchar };
             let cur_rh = if hyf[j] & 1 != 0 { hchar } else { NON_CHAR };
@@ -777,7 +813,7 @@ impl Recon<'_> {
                     }
                     LigOp::KeepBothSkip1 | LigOp::KeepBothSkip2 => {
                         wrap_lig(
-                            &mut t,
+                            t,
                             cur_q,
                             hf,
                             cur_l,
@@ -794,7 +830,7 @@ impl Recon<'_> {
                         cur_l = rem;
                         ligature_present = true;
                         if !lig_stack.is_empty() {
-                            pop_lig_stack(&mut lig_stack, &mut t, &mut j, hf);
+                            pop_lig_stack(&mut lig_stack, t, &mut j, hf);
                             if let Some(top) = lig_stack.last() {
                                 cur_r = top.0;
                             } else {
@@ -818,7 +854,7 @@ impl Recon<'_> {
             }
             // §910
             if wrap_lig(
-                &mut t,
+                t,
                 cur_q,
                 hf,
                 cur_l,
@@ -839,14 +875,14 @@ impl Recon<'_> {
             cur_q = t.len();
             cur_l = top;
             ligature_present = true;
-            pop_lig_stack(&mut lig_stack, &mut t, &mut j, hf);
+            pop_lig_stack(&mut lig_stack, t, &mut j, hf);
             if let Some(top) = lig_stack.last() {
                 cur_r = top.0;
             } else {
                 (cur_r, cur_rh) = set_cur_r(j, &self.hu, &self.hyf, bchar, hchar);
             }
         }
-        (j, t)
+        j
     }
 }
 
