@@ -2776,6 +2776,47 @@ impl Graph {
                     r.runs,
                     r.nodes_run
                 );
+                eprintln!(
+                    "acct-edit: quick path held {}, refused by {}",
+                    r.quick_held,
+                    r.quick_refused.as_deref().unwrap_or("-")
+                );
+                // (the memo's misses grouped by why, node and value ids
+                // taken out, most first, with their count by round)
+                type ByRound = std::collections::BTreeMap<u32, u64>;
+                let mut by: FxHashMap<String, (u64, ByRound)> = FxHashMap::default();
+                for m in &r.memo_misses {
+                    let e = by.entry(miss_kind(&m.why)).or_default();
+                    e.0 += 1;
+                    *e.1.entry(m.round).or_default() += 1;
+                }
+                let mut by: Vec<(String, (u64, ByRound))> = by.into_iter().collect();
+                by.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
+                for (why, (n, rounds)) in by.iter().take(40) {
+                    let rs: Vec<String> = rounds
+                        .iter()
+                        .map(|(k, c)| {
+                            if *k == u32::MAX {
+                                format!("final:{c}")
+                            } else {
+                                format!("{k}:{c}")
+                            }
+                        })
+                        .collect();
+                    eprintln!("acct-edit: memo miss {n:6} [{}] {why}", rs.join(" "));
+                }
+                if crate::exec::prof_flag!("PHITEX_MEMO_MISSES") {
+                    // (every miss, with its node's operation and text)
+                    for m in &r.memo_misses {
+                        eprintln!(
+                            "acct-edit: miss round {} node {} [{}]: {}",
+                            m.round,
+                            m.node.raw(),
+                            describe(&self.eng, m.node),
+                            m.why
+                        );
+                    }
+                }
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
@@ -5891,6 +5932,25 @@ fn edit_distance(a: &str, b: &str) -> usize {
         }
     }
     row[b.len()]
+}
+
+/// A memo miss's reason without its node and value ids (digit runs),
+/// so that misses group by kind and field.
+fn miss_kind(why: &str) -> String {
+    let mut out = String::with_capacity(why.len());
+    let mut digits = false;
+    for c in why.chars() {
+        if c.is_ascii_digit() {
+            if !digits {
+                out.push('#');
+            }
+            digits = true;
+        } else {
+            digits = false;
+            out.push(c);
+        }
+    }
+    out.chars().take(160).collect()
 }
 
 /// A node: its operation and the start of its first argument.
