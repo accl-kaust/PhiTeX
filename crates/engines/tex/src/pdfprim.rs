@@ -786,6 +786,9 @@ fn page_obj(r: &mut Run<'_, '_>, n: i32) -> R<i64> {
     }
     let o = alloc_obj(r)?;
     r.set(&f, v.int(o), true);
+    if pdf_mode(r)? {
+        crate::pdfout::page_made_at_read_time(r, i64::from(n))?;
+    }
     Ok(o)
 }
 

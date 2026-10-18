@@ -1696,8 +1696,9 @@ impl phitex_defuse::Operation for PdfPage {
 /// finisher, every round) where it ships: `[fixed, [font names],
 /// [destination names], [shipout fonts], compressible, read-time count,
 /// [read-time fonts], [read-time destinations], read-time object stream
-/// writes, [mark events], node]`: the objects the page always takes (its
-/// object unless a `\\pdfpageref` made it, its contents, its resources),
+/// writes, [mark events], node, [read-time pages]`: the objects the page
+/// always takes (its object unless a `\\pdfpageref` or an action made it
+/// first, by its place in the line, its contents, its resources),
 /// the fonts it uses by name (an object for each name first used), the
 /// destinations it defines (an object for each first named; each first
 /// defined written into an object stream), the fonts the shipout itself
@@ -1729,9 +1730,9 @@ pub(crate) fn page_allocs(
     marks: ValueId,
 ) -> R<()> {
     let v = r.v;
-    let j = i64::try_from(r.page_index()).unwrap_or(0);
-    let pre = r.get(&format!("pdf:pageref:{}", j + 1))?.is_some();
-    let fixed = if pre { 2 } else { 3 };
+    // (its object unless a reference or a link's action made it first:
+    // the fold knows the page's number, [`RT_PAGES`])
+    let fixed = 3;
     let mut names: Vec<ValueId> = Vec::new();
     for &f in ids {
         let id = FontId::from(f);
@@ -1783,6 +1784,7 @@ pub(crate) fn page_allocs(
     let rt_fonts = r.get(RT_FONTS)?.unwrap_or_else(|| v.list(Vec::new()));
     let rt_dests = r.get(RT_DESTS)?.unwrap_or_else(|| v.list(Vec::new()));
     let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
+    let rt_pages = r.get(RT_PAGES)?.unwrap_or_else(|| v.list(Vec::new()));
     let e = v.list(vec![
         v.int(fixed),
         v.list(names),
@@ -1795,7 +1797,11 @@ pub(crate) fn page_allocs(
         rt_os,
         marks,
         v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())),
+        rt_pages,
     ]);
+    if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
+        eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
+    }
     r.contribute(ALLOCS, v.seq_unit(e));
     Ok(())
 }
@@ -1948,6 +1954,20 @@ const RT_DESTS: &str = "pdf:rtdests";
 
 /// The objects read-time writes put into object streams ([`os_write`]).
 const RT_OS: &str = "pdf:rtos";
+
+/// The pages whose objects read-time commands made before they shipped
+/// (`\\pdfpageref`, an action's `goto page`: [`page_made_at_read_time`]).
+const RT_PAGES: &str = "pdf:rtpages";
+
+/// Page `n`'s object made by a read-time command before the page
+/// shipped: the page then makes no object of its own ([`ALLOCS`]).
+pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) -> R<()> {
+    let v = r.v;
+    let mut xs: Vec<ValueId> = r.get(RT_PAGES)?.map(|x| list_of(v, x)).unwrap_or_default();
+    xs.push(v.int(n));
+    r.set(RT_PAGES, v.list(xs), true);
+    Ok(())
+}
 
 /// A destination a read-time command names (an outline's `goto`):
 /// its object made where no page shipped before and no read-time command
@@ -2171,6 +2191,9 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         let l = |k: usize| xs.get(k).map(|&x| list_of(v, x)).unwrap_or_default();
         let pno = i64::try_from(pages).unwrap_or(i64::MAX - 1) + 1;
         ms.page = pno;
+        for p in l(11) {
+            ms.premade.insert(v.as_int(p).unwrap_or(0));
+        }
         // (the page's own object, after its resources' one, unless a
         // reference or a link's action made it before)
         let fixed = if ms.premade.contains(&pno) { 2 } else { i(0) };
