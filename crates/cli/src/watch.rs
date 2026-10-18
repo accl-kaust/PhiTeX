@@ -1087,11 +1087,17 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let text = buffers.get(file).map(|b| tex_text(b));
         if file == main_rel {
             let t = text.unwrap_or_else(|| {
-                std::fs::read(&main_file)
-                    .map(tex::chars_owned)
-                    .unwrap_or_default()
+                let t0 = Instant::now();
+                let b = std::fs::read(&main_file).unwrap_or_default();
+                phitex_tex::timeline::note("watch: the main file read", t0.elapsed());
+                let t0 = Instant::now();
+                let t = tex::chars_owned(b);
+                phitex_tex::timeline::note("watch: its characters", t0.elapsed());
+                t
             });
+            let t0 = Instant::now();
             s.set_text(t);
+            phitex_tex::timeline::note("watch: the text set (shared)", t0.elapsed());
         } else {
             s.set_buffer(file, text.as_deref());
         }
@@ -1104,7 +1110,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         // one edit, timed from the last of them: the wait a writer feels)
         let mut events = vec![first];
         events.extend(held.drain(..));
-        while let Ok(e) = rx.recv_timeout(Duration::from_millis(2)) {
+        while let Ok(e) = rx.recv_timeout(Duration::from_micros(500)) {
             events.push(e);
         }
         let came = events

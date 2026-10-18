@@ -4713,22 +4713,6 @@ impl Build {
             })
     }
 
-    /// Whether the job ended on a fatal error with `\pdfoutput` positive
-    /// (pdfTeX then says no PDF file was produced, pages or none).
-    fn fatal_pdf(&self) -> bool {
-        let v = self.g.eng.values();
-        self.g
-            .eng
-            .acc_value(self.unit, v.field("log"))
-            .is_some_and(|e| {
-                let (fatal, pdf) = (v.str("fatal"), v.str("pdf"));
-                v.seq_to_vec(e).into_iter().any(|x| {
-                    let xs = list_of(v, x);
-                    xs.first() == Some(&fatal) && xs.get(1) == Some(&pdf)
-                })
-            })
-    }
-
     /// The output file (DVI or PDF) and the log.
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
@@ -4776,8 +4760,17 @@ impl Build {
         let n = self.pages().len();
         crate::timeline::note("output: the pages", t0.elapsed());
         let t0 = std::time::Instant::now();
-        let fatal = self.fatal() && (dvi.starts_with(b"%PDF") || self.fatal_pdf());
-        crate::timeline::note("output: whether the job ended fatally", t0.elapsed());
+        let mut memo = self.memo.lock().unwrap_or_else(PoisonError::into_inner);
+        let (fatal, fatal_pdf) = memo.log.update(
+            v,
+            &self.opts.name,
+            self.g.eng.acc_value(self.unit, v.field("log")),
+        );
+        let fatal = fatal && (dvi.starts_with(b"%PDF") || fatal_pdf);
+        crate::timeline::note(
+            "output: the log laid out (fatal errors found)",
+            t0.elapsed(),
+        );
         // (pdfTeX §794: after a fatal error the PDF file is removed)
         let end = if fatal {
             dvi = Arc::default();
@@ -4798,16 +4791,7 @@ impl Build {
                 dvi.len()
             )
         };
-        let log_f = v.field("log");
-        let t0 = std::time::Instant::now();
-        let log = crate::log::layout_with(
-            v,
-            &self.opts.name,
-            self.g.eng.acc_value(self.unit, log_f),
-            &end,
-            &mut self.memo.lock().unwrap_or_else(PoisonError::into_inner).log,
-        );
-        crate::timeline::note("output: the log laid out", t0.elapsed());
+        let log = memo.log.finish(&end);
         (dvi, log)
     }
 
@@ -4908,23 +4892,27 @@ impl Build {
             &made
         };
         crate::timeline::note("diagnostics: the document's line starts", t_lines.elapsed());
-        // every node under a node of the text, to that node: made only
-        // for a diagnostic placed by its node alone
+        // the node of the text a node is under, by its parents: the text's
+        // nodes by id made only for a diagnostic placed by its node alone
         let mut top_map: Option<phitex_defuse::FxHashMap<u64, usize>> = None;
         let mut top = |node: u64| -> usize {
             let m = top_map.get_or_insert_with(|| {
-                let mut top = phitex_defuse::FxHashMap::default();
-                for (i, (_, n, _)) in self.nodes.iter().enumerate() {
-                    let mut stack = vec![*n];
-                    while let Some(x) = stack.pop() {
-                        if top.insert(x.raw(), i).is_none() {
-                            stack.extend(self.g.eng.children(x));
-                        }
-                    }
-                }
-                top
+                self.nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, n, _))| (n.raw(), i))
+                    .collect()
             });
-            m.get(&node).copied().unwrap_or(0)
+            let mut n = phitex_defuse::NodeId::from_raw(node);
+            loop {
+                if let Some(&i) = m.get(&n.raw()) {
+                    return i;
+                }
+                match self.g.eng.node_info(n).and_then(|i| i.parent) {
+                    Some(p) => n = p,
+                    None => return 0,
+                }
+            }
         };
         let docname = self.opts.name.clone();
         let mut out = Vec::new();

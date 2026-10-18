@@ -1926,7 +1926,9 @@ pub(crate) fn finish_exact(
     // to its own there: the rest copied, spec-final §6.2 past the edit)
     let mut resync: Option<usize> = None;
     let mut tries = 0usize;
+    let (mut t_try, mut t_snap) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     for (i, (&x, pc)) in xpages.iter().zip(&pcs).enumerate().skip(start) {
+        let tt = std::time::Instant::now();
         if i > start
             && tries < 8
             && let Some(m) = old.as_ref()
@@ -1937,9 +1939,12 @@ pub(crate) fn finish_exact(
             tries += 1;
             if same_writer(&mut st, &nums, &forms, sn) {
                 resync = Some(i);
+                t_try += tt.elapsed();
                 break;
             }
         }
+        t_try += tt.elapsed();
+        let tt = std::time::Instant::now();
         if i > start && (i - start).is_multiple_of(LINK_SNAP) {
             snaps.push(LinkSnap {
                 at: i,
@@ -1952,6 +1957,7 @@ pub(crate) fn finish_exact(
                 shipped,
             });
         }
+        t_snap += tt.elapsed();
         let mut ps: Vec<phitex_pdf::Part> = Vec::new();
         if v.as_int(x).is_some() {
             // a page: no piece in the memo is a page written by a run
@@ -2045,6 +2051,15 @@ pub(crate) fn finish_exact(
         parts.push(ps);
     }
     let t_loop = t0.elapsed();
+    crate::timeline::note(
+        &format!(
+            "link: records {start}..{} replayed ({tries} resync tries)",
+            resync.unwrap_or(xpages.len())
+        ),
+        t_loop.saturating_sub(t_pre),
+    );
+    crate::timeline::note("link: the resync tries", t_try);
+    crate::timeline::note("link: the writer's snapshots", t_snap);
     // (spec-final §6.1: the pages' contents whose font numbers moved,
     // rewritten and compressed apart, on the executor)
     let t_parts = std::time::Instant::now();

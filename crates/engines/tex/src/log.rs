@@ -150,64 +150,84 @@ impl Log {
     }
 }
 
-/// [`layout_with`]'s log kept for the next: its events, and the log's length and
-/// column after each.
+/// A document's log kept from one build to the next ([`LayoutMemo::update`],
+/// [`LayoutMemo::finish`]): its events, the log's length and column after
+/// each, and the fatal errors among them (`(event, whether pdfTeX's)`).
 #[derive(Default)]
 pub(crate) struct LayoutMemo {
     name: String,
     events: Vec<ValueId>,
     after: Vec<(usize, usize)>,
+    fatal: Vec<(usize, bool)>,
     text: String,
+    offset: usize,
 }
 
-/// The log of a document: the file opened, the events, the end
-/// (`final_cleanup`, §1335), then `end` on a line of its own (§642).
-/// Made from the last one (`memo`) where its events begin the same: the
-/// events from the first that differs laid out again.
-pub(crate) fn layout_with(
-    v: &Values,
-    name: &str,
-    events: Option<ValueId>,
-    end: &str,
-    memo: &mut LayoutMemo,
-) -> String {
-    let evs = events.map(|e| v.seq_to_vec(e)).unwrap_or_default();
-    let same = if memo.name == name {
-        memo.events
-            .iter()
-            .zip(&evs)
-            .take_while(|(a, b)| a == b)
-            .count()
-    } else {
-        0
-    };
-    let mut log = Log::default();
-    if same == 0 {
-        log.raw('(');
-        log.print(name, -1);
-        memo.after.clear();
-    } else {
-        let (len, offset) = memo.after[same - 1];
-        memo.text.truncate(len);
-        log.text = std::mem::take(&mut memo.text);
-        log.offset = offset;
-        memo.after.truncate(same);
+impl LayoutMemo {
+    /// The log of a document: the file opened, the events (laid out
+    /// again from the first that differs from the last ones'); whether a
+    /// fatal error is among them, and whether one is pdfTeX's.
+    pub(crate) fn update(
+        &mut self,
+        v: &Values,
+        name: &str,
+        events: Option<ValueId>,
+    ) -> (bool, bool) {
+        let evs = events.map(|e| v.seq_to_vec(e)).unwrap_or_default();
+        let same = if self.name == name {
+            self.events
+                .iter()
+                .zip(&evs)
+                .take_while(|(a, b)| a == b)
+                .count()
+        } else {
+            0
+        };
+        let mut log = Log::default();
+        if same == 0 {
+            log.raw('(');
+            log.print(name, -1);
+            self.after.clear();
+        } else {
+            let (len, offset) = self.after[same - 1];
+            self.text.truncate(len);
+            log.text = std::mem::take(&mut self.text);
+            log.offset = offset;
+            self.after.truncate(same);
+        }
+        self.fatal.retain(|f| f.0 < same);
+        let (fatal, pdf) = (v.str("fatal"), v.str("pdf"));
+        for (k, &x) in evs.iter().enumerate().skip(same) {
+            let xs = list_of(v, x);
+            if xs.first() == Some(&fatal) {
+                self.fatal.push((k, xs.get(1) == Some(&pdf)));
+            }
+            let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
+            let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
+            let nl = xs.get(2).map_or(-1, |&n| int_of(v, n));
+            log.event(&kind, &text, nl);
+            self.after.push((log.text.len(), log.offset));
+        }
+        name.clone_into(&mut self.name);
+        self.events = evs;
+        self.text = log.text;
+        self.offset = log.offset;
+        (!self.fatal.is_empty(), self.fatal.iter().any(|f| f.1))
     }
-    for &x in &evs[same..] {
-        let xs = list_of(v, x);
-        let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
-        let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
-        let nl = xs.get(2).map_or(-1, |&n| int_of(v, n));
-        log.event(&kind, &text, nl);
-        memo.after.push((log.text.len(), log.offset));
+
+    /// The log [`LayoutMemo::update`] laid out, then the end
+    /// (`final_cleanup`, §1335), then `end` on a line of its own (§642).
+    pub(crate) fn finish(&mut self, end: &str) -> String {
+        let mut log = Log {
+            text: std::mem::take(&mut self.text),
+            offset: self.offset,
+        };
+        let len = log.text.len();
+        log.print(" )", -1);
+        log.print_nl(end, -1);
+        let out = log.text.clone();
+        log.text.truncate(len);
+        self.text = log.text;
+        out
     }
-    name.clone_into(&mut memo.name);
-    memo.events = evs;
-    let len = log.text.len();
-    log.print(" )", -1);
-    log.print_nl(end, -1);
-    let out = log.text.clone();
-    log.text.truncate(len);
-    memo.text = log.text;
-    out
 }
