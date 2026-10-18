@@ -168,6 +168,24 @@ fn cont_pred_key(v: &Values, args: &[ValueId]) -> Option<u64> {
 /// the items that leaves the profile alone wakes no step.
 pub(crate) const SCAN_MAT: &str = "scan:material";
 
+/// The material page `j` begins with, as the continuation of page
+/// `j - 1` defines it beside [`SCAN_MAT`]: what page `j`'s finisher and
+/// continuation read. A field of its own per page: what they read does
+/// not hang on the order of the nodes placed after the piece the page
+/// fires in (a finisher placed again after its page's continuation read
+/// that continuation's material, and lost the page's first lines).
+fn scan_mat_field(v: &Values, j: i64) -> Field {
+    v.field(&format!("scan:mat:{j}"))
+}
+
+/// A continuation's page (its argument 1).
+fn cont_page(v: &Values, args: &[ValueId]) -> Option<i64> {
+    args.first()
+        .is_some_and(|&x| int_of(v, x) == -2)
+        .then(|| args.get(1).map(|&x| int_of(v, x)))
+        .flatten()
+}
+
 /// The page nodes' declared contributions: none to the pieces' units
 /// ([`crate::vprof::VPROF`], [`PITEMS`]), so a scan step's read of a
 /// window, and its read hint's gate, do not wait for a scan step, a
@@ -1156,7 +1174,7 @@ impl Run<'_, '_> {
             s.material = match mat {
                 Some(m) => list_of(v, m),
                 None => self
-                    .eng_read(v.field(SCAN_MAT))?
+                    .eng_read(scan_mat_field(v, n(0)))?
                     .map(|x| list_of(v, x))
                     .unwrap_or_default(),
             };
@@ -1183,6 +1201,20 @@ impl Run<'_, '_> {
             let mut items =
                 v.seq_to_vec(self.cx.acc_range_to(v.field(PITEMS), s.anchor, Some(to))?);
             let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
+            if crate::exec::obs_flag!("PHITEX_ASSEMBLE_TRACE") {
+                eprintln!(
+                    "assemble {} (op {:?}): page {}, anchor {:?}, piece {pid}, candidate {k}, rest {rest}, material {} items, window {:?}",
+                    self.cx.node().raw(),
+                    self.cx.args().first().map(|&x| int_of(v, x)),
+                    n(0),
+                    s.anchor.map(phitex_defuse::NodeId::raw),
+                    s.material.len(),
+                    items
+                        .iter()
+                        .map(|&u| (unit_pid(u), unit_items(v, u).len()))
+                        .collect::<Vec<_>>()
+                );
+            }
             let Some(last) = items.iter().position(|&u| unit_pid(u) == pid) else {
                 self.scan_defect(&format!("piece {pid} is not in its range"));
                 return Ok(None);
@@ -3921,6 +3953,7 @@ impl Operation for Scan {
                 vec![
                     (v.field(SCAN), Locality::Global),
                     (v.field(SCAN_MAT), Locality::Global),
+                    (scan_mat_field(v, j + 1), Locality::Global),
                     (scan_page_field(v, j, by), Locality::Global),
                 ]
             })
@@ -3935,6 +3968,9 @@ impl Operation for Scan {
         // only)
         if args.first().is_some_and(|&x| int_of(v, x) == -2) {
             let mut names = vec![v.field(SCAN), v.field(SCAN_MAT)];
+            if let Some(j) = cont_page(v, args) {
+                names.push(scan_mat_field(v, j + 1));
+            }
             if let Some((j0, by, _)) = cont_chain(v, args) {
                 names.push(scan_page_field(v, j0, by));
             }
@@ -3984,6 +4020,7 @@ impl Operation for Scan {
             return Some(vec![
                 (v.field(SCAN), x),
                 (v.field(SCAN_MAT), mat),
+                (scan_mat_field(v, j + 1), mat),
                 (scan_page_field(v, j, by), v.list(vec![x, mat, b])),
             ]);
         }
@@ -3993,7 +4030,11 @@ impl Operation for Scan {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&j)?;
-        Some(vec![(v.field(SCAN), st), (v.field(SCAN_MAT), mat)])
+        Some(vec![
+            (v.field(SCAN), st),
+            (v.field(SCAN_MAT), mat),
+            (scan_mat_field(v, j + 1), mat),
+        ])
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
@@ -4179,6 +4220,9 @@ impl Run<'_, '_> {
             Placed::Nothing => Vec::new(),
             Placed::State | Placed::Page => vec![v.field(SCAN), v.field(SCAN_MAT)],
         };
+        if let (Placed::State, Some(j)) = (&placed, cont_page(v, args)) {
+            names.push(scan_mat_field(v, j + 1));
+        }
         if let (Placed::State, Some((j0, by, _))) = (&placed, cont_chain(v, args)) {
             names.push(scan_page_field(v, j0, by));
         }
@@ -4497,6 +4541,10 @@ impl Run<'_, '_> {
                 self.cx.define_with(v.field(SCAN), x, Locality::Global);
                 self.cx
                     .define_with(v.field(SCAN_MAT), mat, Locality::Global);
+                if let Some(j) = cont_page(v, &self.cx.args()) {
+                    self.cx
+                        .define_with(scan_mat_field(v, j + 1), mat, Locality::Global);
+                }
                 // (where the page the block's scan placed leaves the scan,
                 // for that page's break: the scan reads it and goes on
                 // from it)
