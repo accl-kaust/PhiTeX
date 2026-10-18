@@ -289,6 +289,13 @@ impl Values {
         self.put(id, || Entry::Plain(Arc::new(Value::List(xs.into_boxed_slice()))))
     }
 
+    /// A list from a borrowed slice: allocates only when the list is new
+    /// to the table (the same id as [`Values::list`]).
+    pub fn list_from(&self, xs: &[ValueId]) -> ValueId {
+        let id = hashed(T_LIST, hash_word_iter(T_LIST, xs.iter().map(|x| x.0)));
+        self.put(id, || Entry::Plain(Arc::new(Value::List(xs.into()))))
+    }
+
     /// The field named `name`.
     pub fn field(&self, name: &str) -> Field {
         Field(self.str(name))

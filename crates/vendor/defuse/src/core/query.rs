@@ -446,19 +446,40 @@ impl Shared {
         if let Some(idx) = idx {
             // The candidates: the last entry before `at` in each frame of
             // its scope chain, and the last global one; the nearest wins.
-            let mut chain: Vec<(&[Slot], usize, u32)> = Vec::new();
+            // (On the stack for a shallow chain: a read is made per run
+            // many times over.)
+            let mut buf: [(&[Slot], usize, u32); 8] = [(&[], 0, NO_FRAME); 8];
+            let mut spill: Vec<(&[Slot], usize, u32)> = Vec::new();
+            let mut n = 0;
+            macro_rules! put {
+                ($e:expr) => {{
+                    let e = $e;
+                    if n < buf.len() {
+                        buf[n] = e;
+                    } else {
+                        if spill.is_empty() {
+                            spill.extend_from_slice(&buf);
+                        }
+                        spill.push(e);
+                    }
+                    n += 1;
+                }};
+            }
             let mut g = fp;
-            while g != NO_FRAME && chain.len() < 1 << 12 {
+            let mut depth = 0;
+            while g != NO_FRAME && depth < 1 << 12 {
                 if let Some(v) = idx.local.get(&g) {
                     let i = v.partition_point(|&x| self.rec(x).lab() < pl);
-                    chain.push((v.as_slice(), i, g));
+                    put!((v.as_slice(), i, g));
+                    depth += 1;
                 }
                 g = self.frame_parent(g);
             }
             {
                 let v = idx.globals.as_slice();
-                chain.push((v, v.partition_point(|&x| self.rec(x).lab() < pl), NO_FRAME));
+                put!((v, v.partition_point(|&x| self.rec(x).lab() < pl), NO_FRAME));
             }
+            let chain: &mut [(&[Slot], usize, u32)] = if n > buf.len() { &mut spill } else { &mut buf[..n] };
             loop {
                 crate::obs::count!(WalkLevel);
                 let mut best: Option<(usize, u64)> = None;
