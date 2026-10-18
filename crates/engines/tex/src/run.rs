@@ -1884,8 +1884,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// adds to it, `[name, "", "close"]` closes it) where TeX makes it
     /// ([`crate::api::doc_order`]): from a page step, tagged with its
     /// page and, for a page whose break is inside a piece, that break
-    /// (`[j, entry]`, `[j, entry, piece, candidate]`; a page firing in a
-    /// continuation's material, `-2` for both); from a piece after
+    /// (`[j, entry]`, `[j, entry, piece, candidate]`); from a piece after
     /// one of its page-builder candidates, after a marker
     /// `["cand", piece, candidates passed]`, so that a page firing at an
     /// earlier candidate of the piece writes before it (§1370, §1374).
@@ -1902,13 +1901,8 @@ impl<'c, 'a> Run<'c, 'a> {
             // (the piece its break is inside of and the candidate: what
             // the piece wrote after that candidate comes after the page's
             // writes)
-            // (a page firing in the material a page's continuation
-            // carries, no piece's: `[j, entry, -2, -2]`, it ships while
-            // the page before it is shipped, [`crate::api::doc_order`])
-            match self.fin.as_ref().map(|c| c.brk) {
-                Some(Some((pid, k, true))) => t.extend([v.int(pid), v.int(k)]),
-                Some(None) => t.extend([v.int(-2), v.int(-2)]),
-                _ => {}
+            if let Some((pid, k, true)) = self.fin.as_ref().and_then(|c| c.brk) {
+                t.extend([v.int(pid), v.int(k)]);
             }
             (None, v.list(t))
         } else if (op == self.ops.exec || op == self.ops.resume) && self.cand > 0 {
