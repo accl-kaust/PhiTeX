@@ -436,7 +436,8 @@ fn elt_in_db(db_dir: &[u8], elt: &[u8]) -> bool {
     !db_dir.is_empty() && !elt.is_empty() && elt.starts_with(db_dir)
 }
 
-/// FNV-1a, for the `ls-R` hash table (names are short).
+/// The `ls-R` hash table's hasher: eight bytes of a name at a time
+/// (a database has hundreds of thousands of names to insert).
 #[derive(Default)]
 struct Fnv(u64);
 
@@ -445,13 +446,16 @@ impl std::hash::Hasher for Fnv {
         self.0
     }
     fn write(&mut self, bytes: &[u8]) {
-        let mut h = if self.0 == 0 {
-            0xcbf2_9ce4_8422_2325
-        } else {
-            self.0
-        };
-        for &b in bytes {
-            h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        const K: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut h = self.0;
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(*w)).wrapping_mul(K);
+        }
+        if !rest.is_empty() {
+            let mut w = [0u8; 8];
+            w[..rest.len()].copy_from_slice(rest);
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(w) ^ (rest.len() as u64) << 59).wrapping_mul(K);
         }
         self.0 = h;
     }
