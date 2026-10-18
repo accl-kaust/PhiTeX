@@ -414,9 +414,15 @@ for l in open(sys.argv[1]):
     # (PHITEX_TEX_TIME), the median edit's table quoted (the engine's
     # evaluation against the phases around it)
     rm -rf "$w/parp" "$w/parp-cold" && mkdir -p "$w/parp" && cp bench/para4000.tex "$w/parp/"
-    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_TEX_TIME=1 GATE_EDIT_STDERR="$r/edit-phases-j8.log" \
-      timeout 900 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parp" para4000.tex 8 10 7 "$r/edits-phases-j8.json" --program pdftex) > /dev/null 2>&1
-    python3 -I - "$r/edit-phases-j8.log" >> "$r/para.txt" <<'PY'
+    # (twice: the engine's heights on, as profile builds run, and off,
+    # as release builds run, PHITEX_NO_HEIGHTS)
+    for hv in on off; do
+    rm -rf "$w/parp" "$w/parp-cold" && mkdir -p "$w/parp" && cp bench/para4000.tex "$w/parp/"
+    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_TEX_TIME=1 GATE_EDIT_STDERR="$r/edit-phases-j8-$hv.log" \
+      PHITEX_NO_HEIGHTS=$([ $hv = off ] && echo 1) \
+      timeout 900 python3 -I scripts/accl/gate-edits.py "$bin" "$w/parp" para4000.tex 8 10 7 "$r/edits-phases-j8-$hv.json" --program pdftex) > /dev/null 2>&1
+    echo "(heights $hv)" >> "$r/para.txt"
+    python3 -I - "$r/edit-phases-j8-$hv.log" >> "$r/para.txt" <<'PY'
 import re, sys
 blocks, cur = [], None
 for line in open(sys.argv[1], errors="replace"):
@@ -439,6 +445,7 @@ else:
     print("para4000 edit phases -j 8 (median of %d edits; totals %s ms):" % (len(edits), " ".join("%.1f" % total(x) for x in edits)))
     print("\n".join(b[:40]))
 PY
+    done
     python3 -I scripts/accl/gate-acct.py table para "$r" > "$r/table.txt" 2>&1
     ;;
   cg)

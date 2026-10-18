@@ -1814,7 +1814,9 @@ impl Graph {
         let mut eng = Engine::new();
         // (the report's critical path and chain, a serial pass: `profile`
         // builds only)
-        eng.set_heights(cfg!(feature = "profile"));
+        // (`PHITEX_NO_HEIGHTS`: a profile build without them, as a
+        // release build runs, for its timings)
+        eng.set_heights(cfg!(feature = "profile") && !crate::exec::prof_flag!("PHITEX_NO_HEIGHTS"));
         eng.set_limits(phitex_defuse::Limits {
             // a node's children are bounded by the text it reads (one per
             // `\hyphenation` word, per character of a long run), not by a
