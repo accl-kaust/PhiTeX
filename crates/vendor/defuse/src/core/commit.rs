@@ -819,7 +819,7 @@ impl Shared {
             let anchors = std::mem::take(&mut cx.anchors);
             #[cfg(feature = "profile")]
             let su0 = std::time::Instant::now();
-            self.set_unfolding(s, &kids, &conts, &anchors, &mut notes);
+            restructured |= self.set_unfolding(s, &kids, &conts, &anchors, &mut notes);
             #[cfg(feature = "profile")]
             #[allow(clippy::cast_possible_truncation)]
             crate::obs::add_impl("commit_w_unfold", su0.elapsed().as_nanos() as u64);
@@ -1034,6 +1034,7 @@ impl Shared {
                         gn,
                         at: *at,
                         from: NIL,
+                        to: 0,
                     };
                     items.clear();
                     if *mode == DMode::Use {
@@ -1074,8 +1075,19 @@ impl Shared {
                         fwd = true;
                     }
                 }
-                Pred::Range { f, at, from, .. } => {
+                Pred::Range { f, at, from, to, .. } => {
                     let a = self.anchor(*at, *from);
+                    // The window's end when it ends before the reader (a
+                    // contribution past it changes nothing it read); its
+                    // move or removal widens the window, which touches it.
+                    let t = to
+                        .and_then(|id| self.slot_of(id))
+                        .filter(|&t| {
+                            self.unit_of(t) == self.unit_of(*at)
+                                && self.rec(t).st() != S_FREE
+                                && self.rec(t).lab() < self.rec(*at).lab()
+                        })
+                        .unwrap_or(NIL);
                     self.deliver(
                         u,
                         *f,
@@ -1084,10 +1096,18 @@ impl Shared {
                             gn,
                             at: *at,
                             from: a,
+                            to: if t == NIL {
+                                0
+                            } else {
+                                self.rec(t).id.load(Ordering::Acquire)
+                            },
                         })],
                     );
                     if a != NIL {
                         self.sib_subscribe(a, s, gn);
+                    }
+                    if t != NIL {
+                        self.sib_subscribe(t, s, gn);
                     }
                 }
                 Pred::Env { f, .. } => {
@@ -1141,6 +1161,7 @@ impl Shared {
                                 gn,
                                 at: x,
                                 from: NIL,
+                                to: 0,
                             },
                         );
                         for (q, _) in site {
