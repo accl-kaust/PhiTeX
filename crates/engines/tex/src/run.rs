@@ -433,7 +433,7 @@ pub(crate) struct Run<'c, 'a> {
     _scope: crate::val::EpochScope,
     pub cx: &'c mut Ctx<'a>,
     pub v: &'a Values,
-    pub ops: Ops,
+    pub ops: &'c Ops,
     /// The input stack ([`crate::input`]).
     pub input: crate::input::Input,
     /// Control sequence names scanned, by a hash of their characters
@@ -680,7 +680,7 @@ pub(crate) struct Run<'c, 'a> {
 
 impl<'c, 'a> Run<'c, 'a> {
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn new(cx: &'c mut Ctx<'a>, ops: Ops) -> Self {
+    pub(crate) fn new(cx: &'c mut Ctx<'a>, ops: &'c Ops) -> Self {
         let v = cx.values();
         let op = cx.op();
         if crate::exec::obs_flag!("PHITEX_LOOP_TRACE") {
@@ -3869,7 +3869,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// swept): the run then starts from the top.
     pub(crate) fn from_parked(
         cx: &'c mut Ctx<'a>,
-        ops: Ops,
+        ops: &'c Ops,
         p: Parked,
     ) -> Result<Self, &'c mut Ctx<'a>> {
         if p.epoch != cx.values_epoch() {

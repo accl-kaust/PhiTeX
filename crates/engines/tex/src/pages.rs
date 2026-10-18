@@ -4135,7 +4135,7 @@ impl Run<'_, '_> {
                 Some(p) => Some(p),
                 None if false => None,
                 None => {
-                    let rtn = rtn_guess(&self.ops, v, &pos);
+                    let rtn = rtn_guess(self.ops, v, &pos);
                     // (the material its page begins with as this step
                     // has it: none before the first page)
                     let m = mat.unwrap_or_else(|| v.list(Vec::new()));

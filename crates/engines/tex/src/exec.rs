@@ -389,6 +389,11 @@ impl Threads {
     fn job<R>(&self, f: impl FnOnce() -> R) -> R {
         let _run = widths::Run::begin();
         let prev = JOB_THREADS.with(|c| c.replace(self.n));
+        if !cfg!(feature = "profile") {
+            let r = f();
+            JOB_THREADS.with(|c| c.set(prev));
+            return r;
+        }
         let prev_ops = JOB_OPS.with(|c| c.replace(Some(self.ops.clone())));
         let r = f();
         JOB_OPS.with(|c| *c.borrow_mut() = prev_ops);
@@ -928,6 +933,14 @@ pub(crate) struct NodeTimer {
 
 impl NodeTimer {
     pub(crate) fn new(op: &'static str, node: u64) -> NodeTimer {
+        // (the busy time and the runs at once are counters: `profile`
+        // builds only, no write to the shared counters per run else)
+        if !cfg!(feature = "profile") {
+            return NodeTimer {
+                trace: None,
+                ops: None,
+            };
+        }
         let kind = KINDS.iter().position(|&k| k == op).unwrap_or(0);
         let ops = JOB_OPS.with(|c| c.borrow().clone()).map(|o| {
             let c = o.running.fetch_add(1, Ordering::Relaxed) + 1;

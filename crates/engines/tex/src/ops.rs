@@ -17,8 +17,8 @@ use crate::val::{int_of, list_of, str_of};
 /// The operations' ids, known once all are registered.
 pub(crate) type Shared = Arc<OnceLock<Ops>>;
 
-pub(crate) fn ops(s: &Shared) -> Ops {
-    s.get().expect("operations registered").clone()
+pub(crate) fn ops(s: &Shared) -> &Ops {
+    s.get().expect("operations registered")
 }
 
 /// The build's hint registry (`crate::hints::Registry`), for the
@@ -61,7 +61,7 @@ pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub(crate) fn run_node_parking(
     cx: &mut Ctx<'_>,
-    o: Ops,
+    o: &Ops,
     parks: bool,
     mut body: impl FnMut(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
@@ -85,18 +85,18 @@ pub(crate) fn run_node_parking(
     };
     let parked = if parks { cx.parked() } else { None };
     let mut r = match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
-        Some(Ok(p)) => match Run::from_parked(cx, o.clone(), *p) {
+        Some(Ok(p)) => match Run::from_parked(cx, o, *p) {
             Ok(r) => r,
             Err(cx) => {
                 cx.restart();
-                Run::new(cx, o.clone())
+                Run::new(cx, o)
             }
         },
         Some(Err(_)) => {
             cx.restart();
-            Run::new(cx, o.clone())
+            Run::new(cx, o)
         }
-        None => Run::new(cx, o.clone()),
+        None => Run::new(cx, o),
     };
     let t_body = std::time::Instant::now();
     let mut res = body(&mut r);
@@ -521,7 +521,7 @@ impl Operation for Put {
         }
         let mut fix = Vec::new();
         if !carry.is_empty() {
-            let mut r = Run::new(cx, o.clone());
+            let mut r = Run::new(cx, o);
             let res: R<Vec<ValueId>> = (|| {
                 let md = r.mode()?;
                 let mut fix = r.scope_list("lvlfix", &md)?;
@@ -600,7 +600,7 @@ impl Operation for Dvi {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
-        crate::assemble::output(cx, &o)
+        crate::assemble::output(cx, o)
     }
 }
 
@@ -628,7 +628,7 @@ impl Operation for Link {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
-        crate::assemble::link(cx, &o)
+        crate::assemble::link(cx, o)
     }
 }
 
