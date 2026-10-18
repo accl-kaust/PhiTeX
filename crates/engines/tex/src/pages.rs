@@ -1132,8 +1132,15 @@ impl Run<'_, '_> {
                     .unwrap_or_default(),
             };
             // (what goes on past the page from the pieces it needs only,
-            // where it can: [`Run::assemble_narrow`])
-            if narrow && let Some(r) = self.assemble_narrow(&s, pid, k, rest, here, at)? {
+            // [`Run::assemble_narrow`]: off but under `PHITEX_NARROW`. It
+            // takes the page's best break from the scan over profiles,
+            // which can differ from the builder's over the items, so its
+            // carried material can be short: wrong pages at 8 threads
+            // without the finishers' predictions)
+            if narrow
+                && crate::exec::obs_flag!("PHITEX_NARROW")
+                && let Some(r) = self.assemble_narrow(&s, pid, k, rest, here, at)?
+            {
                 if !crate::exec::obs_flag!("PHITEX_NARROW_CHECK") {
                     return Ok(Some(r));
                 }
@@ -1229,6 +1236,22 @@ impl Run<'_, '_> {
                 ("own", nown != own),
             ];
             let bad: Vec<&str> = diffs.iter().filter(|d| d.1).map(|d| d.0).collect();
+            if nf.carried != fire.carried {
+                eprintln!(
+                    "scan: narrow check at piece {}: carried {} {:?} against {} {:?}",
+                    n(3),
+                    nf.carried.len(),
+                    nf.carried
+                        .iter()
+                        .map(|&x| nodes::tag(v, x))
+                        .collect::<Vec<_>>(),
+                    fire.carried.len(),
+                    fire.carried
+                        .iter()
+                        .map(|&x| nodes::tag(v, x))
+                        .collect::<Vec<_>>()
+                );
+            }
             eprintln!(
                 "scan: narrow check at piece {}: {}",
                 n(3),
@@ -1421,6 +1444,20 @@ impl Run<'_, '_> {
             return Ok(narrow_miss(10, pid));
         }
         let own = items.last().map(|&x| list_of(v, x)).unwrap_or_default();
+        if crate::exec::obs_flag!("PHITEX_NARROW_CHECK") {
+            eprintln!(
+                "scan: narrow at piece {pid}: from part {u} of {}, page {} items there, best {}, carried {} ({:?}), rest {}",
+                parts.len(),
+                snaps[u].pb.page.len(),
+                sf.best,
+                fire.carried.len(),
+                fire.carried
+                    .iter()
+                    .map(|&x| nodes::tag(v, x))
+                    .collect::<Vec<_>>(),
+                fire.rest.len()
+            );
+        }
         Ok(Some((ps, fire, own)))
     }
 

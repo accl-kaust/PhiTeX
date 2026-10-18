@@ -275,6 +275,14 @@ fn para4000_bytes_without_finisher_predictions() {
     for k in 0..3 {
         let got = common::build(opts(8, false), Some(&prelude), &src);
         let d = common::first_difference(&got.output().0, &want.output().0);
+        if d.is_some()
+            && let Ok(o) = std::env::var("PHITEX_GATE_OUT")
+        {
+            let _ = std::fs::write(format!("{o}/nopred-got.pdf"), got.output().0);
+            let _ = std::fs::write(format!("{o}/nopred-want.pdf"), want.output().0);
+            let _ = std::fs::write(format!("{o}/nopred-got.log"), got.output().1);
+            let _ = std::fs::write(format!("{o}/nopred-want.log"), want.output().1);
+        }
         assert!(
             d.is_none(),
             "run {k} at 8 threads without finisher predictions differs: {d:?}"
