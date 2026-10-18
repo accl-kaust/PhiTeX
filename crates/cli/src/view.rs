@@ -23,9 +23,9 @@
 //!   double-click's or an error's place: the editor opens there), and the
 //!   editor's buffer: `set_file {file, text}` and `edit {file, start, end,
 //!   text}` (UTF-16 offsets) become the Build's new versions of the file,
-//!   built as an edit. `origins` answers a page's characters with their
-//!   source lines (the build's SyncTeX records, `synctex.rs`): what a
-//!   double-click finds and forward search highlights. The diff ops
+//!   built as an edit. `origins` would answer a page's characters with
+//!   their source lines (what a double-click finds and forward search
+//!   highlights): empty, no engine records them yet. The diff ops
 //!   (`diff_*`) say they are not there.
 
 use std::fmt::Write as _;

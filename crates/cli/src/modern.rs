@@ -174,9 +174,9 @@ struct Opts {
     /// (nothing else is printed)
     #[arg(long, global = true)]
     json: bool,
-    /// \pdfshellescape 1 instead of TeX Live's restricted default; no
-    /// external program runs either way (bibtex, biber and makeindex run
-    /// in process, other commands are refused)
+    /// \pdfshellescape 1 instead of TeX Live's restricted default (where
+    /// \write18 may name bibtex and makeindex): biber is allowed too. The
+    /// tools run in process; no other command runs either way
     #[arg(long, global = true)]
     shell_escape: bool,
     /// watch: open the viewer in the browser (or start phitex.toml's
@@ -200,7 +200,8 @@ struct Opts {
     copy_pdf: Option<String>,
     #[arg(long, global = true, hide = true)]
     no_copy_pdf: bool,
-    /// No <job>.synctex.gz (written by default)
+    /// No <job>.synctex.gz (the default until PhiTeX writes SyncTeX; a
+    /// `phitex.toml`'s `synctex = true` asks for it, with a note)
     #[arg(long, global = true)]
     no_synctex: bool,
 }
@@ -412,8 +413,9 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         engine,
         output_dir,
         copy_pdf,
-        // (on unless asked otherwise)
-        synctex: o.synctex.or(cfg.synctex).unwrap_or(true),
+        // (off unless asked for: PhiTeX writes no SyncTeX yet, and a
+        // build that asks for it says so)
+        synctex: o.synctex.or(cfg.synctex).unwrap_or(false),
         shell_escape: o.shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
