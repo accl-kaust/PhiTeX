@@ -404,7 +404,7 @@ impl Reader<'_> {
                 }
             } else if body.starts_with("\\hbox(") || body.starts_with("\\vbox(") {
                 let list = self.list(sub, &inner);
-                Node::Box(Box::new(box_header(body, list, self.fonts_ref())))
+                Node::Box(box_header(body, list, self.fonts_ref()))
             } else if let Some(rest) = body.strip_prefix("\\rule") {
                 let ([w, h, d], _) = rule_spec(rest);
                 Node::Rule(Rule {
@@ -476,11 +476,11 @@ impl Reader<'_> {
                 if let Some(n) = rest.strip_prefix(" replacing ") {
                     replace = Some((out.len(), n.parse().unwrap()));
                 }
-                out.push(Node::Disc(Box::new(Disc {
+                out.push(Node::Disc(Disc {
                     pre,
                     post,
                     replace: Vec::new(),
-                })));
+                }));
                 continue;
             } else if body.starts_with('\\') {
                 // a whatsit; a form or image carries its size
@@ -1014,8 +1014,8 @@ impl Job {
             self.ws.insert(*h, whatsit(d, &mut self.nums));
         }
         self.taken.push(k);
-        self.shown[k].boxed = Some((*b).clone());
-        *b
+        self.shown[k].boxed = Some(b.clone());
+        b
     }
 
     /// `do_vf` for the fonts of `b` not yet output, in the order they
@@ -1035,10 +1035,7 @@ impl Job {
             }
         }
         let mut fonts = Vec::new();
-        walk(
-            std::slice::from_ref(&Node::Box(Box::new(b.clone()))),
-            &mut fonts,
-        );
+        walk(std::slice::from_ref(&Node::Box(b.clone())), &mut fonts);
         for f in fonts {
             self.do_vf(f);
         }
@@ -2246,13 +2243,7 @@ fn font_alone(
         ..PackParams::default()
     };
     let b = hpack(list, Spec::Additional(0), &src, &params, false).node;
-    let page = vpackage(
-        vec![Node::Box(Box::new(b))],
-        Spec::Additional(0),
-        0,
-        &params,
-    )
-    .node;
+    let page = vpackage(vec![Node::Box(b)], Spec::Additional(0), 0, &params).node;
     w.ship_out_with(&page, &src, &mut |_, _| None).ok()?;
     let pdf: std::sync::Arc<[u8]> = w.finish().ok()?.into();
     let doc = phitex_codecs::pdfread::Doc::open(&pdf).ok()?;

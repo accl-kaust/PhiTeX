@@ -1037,7 +1037,7 @@ fn post_line_break(
                         Node::Glue(_) => line.push(Node::param_glue(param::RIGHT_SKIP, right_skip)),
                         Node::Disc(d) => {
                             // §882–§885
-                            line.push(Node::Disc(Box::default()));
+                            line.push(Node::Disc(crate::node::Disc::default()));
                             if !d.post.is_empty() {
                                 post_disc_break = true;
                                 front.extend(d.post.into_iter().rev());

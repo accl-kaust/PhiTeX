@@ -106,7 +106,7 @@ fn decode_field(v: &Values, f: ValueId, side: &mut Side) -> Field {
             ch: u16::try_from(n(2)).unwrap_or(0),
         },
         3 => match xs.get(1).and_then(|&b| nodes::decode(v, b, side)) {
-            Some(Node::Box(b)) => Field::SubBox(*b),
+            Some(Node::Box(b)) => Field::SubBox(b),
             _ => Field::Empty,
         },
         4 => Field::SubMlist(decode_mlist(
@@ -1064,15 +1064,12 @@ impl Run<'_, '_> {
         // §1204
         if e != 0 {
             let r = Node::Kern(z - w - e - d, KernKind::Normal);
-            let ab = a.take().map(|a| Node::Box(Box::new(a)));
+            let ab = a.take().map(Node::Box);
             let list: Vec<Node> = if left {
                 d = 0;
-                ab.into_iter().chain([r, Node::Box(Box::new(b))]).collect()
+                ab.into_iter().chain([r, Node::Box(b)]).collect()
             } else {
-                std::iter::once(Node::Box(Box::new(b)))
-                    .chain([r])
-                    .chain(ab)
-                    .collect()
+                std::iter::once(Node::Box(b)).chain([r]).chain(ab).collect()
             };
             let view2 = self.font_view(&list)?;
             b = phitex_typeset::pack::hpack(list, Spec::Additional(0), &view2, &pp, false).node;

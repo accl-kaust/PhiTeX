@@ -462,7 +462,7 @@ pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<
         let mut b = decode_box_head(v, &xs);
         side.lazy_box.push((x, head_words(&b)));
         b.list = vec![Node::Whatsit(LAZY + k, None)];
-        return Some(Node::Box(Box::new(b)));
+        return Some(Node::Box(b));
     }
     decode(v, x, side)
 }
@@ -514,7 +514,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
             font: u32::try_from(g(1)).unwrap_or(0),
             ch: u16::try_from(g(2)).unwrap_or(0),
         },
-        T_BOX => Node::Box(Box::new(decode_box(v, xs, side))),
+        T_BOX => Node::Box(decode_box(v, xs, side)),
         T_RULE => Node::Rule(Rule {
             width: g(1),
             height: g(2),
@@ -553,7 +553,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
             left_hit: g(4) != 0,
             right_hit: g(5) != 0,
         }),
-        T_DISC => Node::Disc(Box::new(Disc {
+        T_DISC => Node::Disc(Disc {
             pre: xs
                 .get(1)
                 .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
@@ -563,7 +563,7 @@ fn decode_items(v: &Values, xs: &[ValueId], side: &mut Side) -> Option<Node> {
             replace: xs
                 .get(3)
                 .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
-        })),
+        }),
         T_WHATSIT => {
             side.whats.push(xs.get(1).copied().unwrap_or(ValueId::UNIT));
             // a size: pdfTeX's `\pdfrefxform`, `\pdfrefximage`

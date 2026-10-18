@@ -67,7 +67,7 @@ fn parse_field(sub: &[&str], p: &str) -> Field {
                 Field::SubMlist(Vec::new())
             } else if rest.starts_with("\\hbox(") || rest.starts_with("\\vbox(") {
                 match parse_list(sub, p).pop() {
-                    Some(Node::Box(b)) => Field::SubBox(*b),
+                    Some(Node::Box(b)) => Field::SubBox(b),
                     _ => panic!("{l}"),
                 }
             } else {

@@ -198,10 +198,10 @@ fn golden_there() {
         height: hi.height + hi.depth + 3 * PT + rule.height + rule.depth + there.height,
         depth: there.depth,
         list: vec![
-            Node::Box(Box::new(hi)),
+            Node::Box(hi),
             Node::Kern(3 * PT, KernKind::Explicit),
             Node::Rule(rule),
-            Node::Box(Box::new(there)),
+            Node::Box(there),
         ],
         ..BoxNode::default()
     };
@@ -220,16 +220,16 @@ fn page_of(f: &ScaledFont, n: usize, seed: usize) -> BoxNode {
         let line = hbox(f, words[(k + seed) % 4]);
         b.height += line.height + line.depth + PT;
         b.width = b.width.max(line.width);
-        b.list.push(Node::Box(Box::new(line)));
+        b.list.push(Node::Box(line));
         b.list.push(Node::Kern(
             PT * i32::try_from((k + seed) % 3 + 1).unwrap(),
             KernKind::Explicit,
         ));
         if (k + seed).is_multiple_of(5) {
-            b.list.push(Node::Box(Box::new(BoxNode {
+            b.list.push(Node::Box(BoxNode {
                 kind: BoxKind::H,
                 ..BoxNode::default()
-            })));
+            }));
         }
     }
     b

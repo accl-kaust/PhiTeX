@@ -112,12 +112,12 @@ fn paragraphs_match_tex() {
         let v: Vec<Node> = para
             .lines
             .into_iter()
-            .map(|l| Node::Box(Box::new(l.packed.node)))
+            .map(|l| Node::Box(l.packed.node))
             .collect();
         let mut b = vpack(v, NATURAL, &PackParams::default()).node;
         b.kind = BoxKind::V;
         let mut got = String::new();
-        show_list(&[Node::Box(Box::new(b))], "", &mut got);
+        show_list(&[Node::Box(b)], "", &mut got);
         if got != want {
             failures.push(format!(
                 "case {n} ({text}):\n--- expected\n{want}--- got\n{got}"

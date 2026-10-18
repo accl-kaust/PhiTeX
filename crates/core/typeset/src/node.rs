@@ -219,8 +219,9 @@ pub enum Node {
         /// Character code.
         ch: u16,
     },
-    /// A box (boxed: a node is a word of a list, the large ones apart).
-    Box(Box<BoxNode>),
+    /// A box (inline: the most frequent node of a list after a
+    /// character, read and made per line; the rare large ones apart).
+    Box(BoxNode),
     /// A rule.
     Rule(Rule),
     /// An insertion.
@@ -232,7 +233,7 @@ pub enum Node {
     /// A ligature.
     Lig(Ligature),
     /// A discretionary.
-    Disc(Box<Disc>),
+    Disc(Disc),
     /// A whatsit: opaque, the caller's handle (§1341), and its size if
     /// it has one: pdfTeX's `\pdfrefxform` and `\pdfrefximage` nodes
     /// carry the form's or image's dimensions, which packaging, line
@@ -262,8 +263,9 @@ pub enum Node {
     Unset(Box<Unset>),
 }
 
-// (a list is a run of these: the large variants apart keep it narrow)
-const _: () = assert!(std::mem::size_of::<Node>() <= 40);
+// (a list is a run of these: the rare large variants apart keep it
+// narrow; a box and a discretionary inline, made and read per line)
+const _: () = assert!(std::mem::size_of::<Node>() <= 128);
 
 impl Node {
     /// A plain glue node.

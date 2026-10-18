@@ -634,11 +634,11 @@ impl Hyphenator for TexHyphenator<'_> {
                     if major.len() > 127 {
                         out.append(&mut major);
                     } else {
-                        out.push(Node::Disc(Box::new(Disc {
+                        out.push(Node::Disc(Disc {
                             pre,
                             post,
                             replace: major,
-                        })));
+                        }));
                     }
                     rc.hyphen_passed = j - 1;
                     if rc.hyf[j - 1] & 1 == 0 {

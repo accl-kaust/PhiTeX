@@ -899,11 +899,11 @@ mod tests {
     const PT: Scaled = 0x1_0000;
 
     fn line(h: Scaled, d: Scaled) -> Node {
-        Node::Box(Box::new(BoxNode {
+        Node::Box(BoxNode {
             height: h,
             depth: d,
             ..BoxNode::default()
-        }))
+        })
     }
 
     #[test]
