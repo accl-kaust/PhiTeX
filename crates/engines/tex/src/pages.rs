@@ -2068,6 +2068,22 @@ impl Run<'_, '_> {
                 let stands = self.st.def_stands(l);
                 names.push((self.loc_field(l).0, stands, kv_of(l)));
             }
+            // (a binding local to a group of the run open at the
+            // candidate, restored at the group's close after it: the
+            // routine runs inside that group and sees the binding, which
+            // the run's end no longer holds, §1012)
+            if let Some(a) = at.get(i) {
+                let mut restored: Vec<Loc> = a
+                    .iter()
+                    .filter_map(|(&l, &x)| x.map(|x| (l, x)))
+                    .filter(|&(l, x)| self.st.id_of(l, v) != x)
+                    .map(|(l, _)| l)
+                    .collect();
+                restored.sort_unstable();
+                for l in restored {
+                    names.push((self.loc_field(l).0, false, kv_of(l)));
+                }
+            }
             names.extend(
                 self.streams_since(m.contribs)
                     .into_iter()
