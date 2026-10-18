@@ -2068,6 +2068,11 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|f| v.list(vec![f.0, class])),
         );
+        // (by field, never by location: a location's number is the order
+        // the job's runs first met its field in, which the threads decide,
+        // so a value holding them in that order differs between two
+        // builds of one text)
+        rs.sort_by_key(|x| list_of(v, *x).first().map(|f| f.raw()));
         let gids = self.st.gid_mark();
         let locals: Vec<(Loc, Field)> = self
             .st
