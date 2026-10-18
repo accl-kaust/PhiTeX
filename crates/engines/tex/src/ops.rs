@@ -294,14 +294,17 @@ impl Operation for Exec {
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         crate::hints::reads(reg(&self.0), v, args)
     }
-    /// None: a declaration is every contribution the node makes (a
-    /// field not listed gets nothing, and range readers pass the node
-    /// while it runs), and a piece's profile and items, its page
-    /// records and its log are known only from its run. (It declared
-    /// its `lines` alone, and a page step's window of profiles passed
-    /// pieces still running.)
-    fn static_contribs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
-        None
+    /// The lines of its own text the node begins (`lines`, by file:
+    /// [`crate::run::Run::doc_lines`]): readers of `\inputlineno` fold
+    /// them without waiting for its run. A declaration names only the
+    /// fields it lists: the piece's profile and items, its page records
+    /// and its log stay unknown until it runs. (A node that claims a
+    /// sibling begins the sibling's lines too: its run refutes this, and
+    /// the readers after it run again.)
+    fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        let lines = crate::hints::prepared_lines(reg(&self.0), args)
+            .unwrap_or_else(|| crate::run::text_lines(v, args));
+        Some(vec![(v.field("lines"), lines)])
     }
     /// No scope effect where the text says the command opens and closes
     /// nothing ([`crate::hints`]); otherwise known when it runs (the
