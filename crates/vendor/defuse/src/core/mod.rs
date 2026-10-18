@@ -940,6 +940,9 @@ pub(crate) struct Tallies {
     pub refuted_nodes: FxHashMap<Slot, u32>,
 }
 
+/// One shard of the readers the environment answered: by field.
+pub(crate) type EnvReaders = FxHashMap<Field, Vec<(Slot, u32)>>;
+
 /// The store and the evaluation state every worker shares.
 pub(crate) struct Shared {
     pub values: Values,
@@ -968,7 +971,8 @@ pub(crate) struct Shared {
     pub env: crate::sync::BrLock<EnvState>,
     pub provider: Option<Provider>,
     pub apps: Mutex<FxHashMap<u64, Slot>>,
-    pub env_readers: Mutex<FxHashMap<Field, Vec<(Slot, u32)>>>,
+    /// Readers answered by the environment, sharded by field (see `env_readers_of`).
+    pub env_readers: Box<[Mutex<EnvReaders>]>,
     pub loop_readers: Mutex<FxHashMap<Field, Vec<(Slot, u32)>>>,
     pub env_waits: Mutex<FxHashMap<Field, Vec<(Slot, u32)>>>,
     pub pubs: Mutex<FxHashMap<Field, FxHashMap<Slot, ValueId>>>,
@@ -1049,7 +1053,8 @@ pub(crate) struct Shared {
     /// The landing lists that may hold items (bit per list).
     pub land_mask: AtomicU64,
     /// The merges' changes by version.
-    pub delta: Mutex<merge::Delta>,
+    /// The version delta, sharded by key.
+    pub delta: Box<[Mutex<merge::Delta>]>,
 }
 
 pub(crate) const SPEC_SEQ: u32 = u32::MAX;
@@ -1278,6 +1283,11 @@ impl Shared {
     /// Runs a read of unit `u`'s structure without blocking: again while a
     /// writer overlapped it.
     #[track_caller]
+    /// The shard of the environment's readers that holds field `f`.
+    pub(crate) fn env_readers_of(&self, f: Field) -> &Mutex<EnvReaders> {
+        &self.env_readers[(f.0.raw() >> 56) as usize % self.env_readers.len()]
+    }
+
     pub(crate) fn sread<T>(&self, u: u32, mut f: impl FnMut() -> T) -> T {
         let sv = &self.unit(u).sv;
         let mut spins = 0u32;

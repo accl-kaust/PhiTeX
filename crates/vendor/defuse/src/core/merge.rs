@@ -43,9 +43,16 @@ pub(crate) struct Delta {
     pub base: u64,
 }
 
-/// Keys kept for verification (past this the map starts over: a run older
-/// than that is verified in full).
-const DELTA_CAP: usize = 1 << 20;
+/// Keys kept for verification, per shard (past this the shard starts over:
+/// a run older than that is verified in full).
+const DELTA_CAP: usize = 1 << 16;
+
+/// Shards of the delta (by key).
+pub(crate) const DELTA_SHARDS: usize = 16;
+
+fn shard_of(k: u64) -> usize {
+    (k >> 58) as usize % DELTA_SHARDS
+}
 
 thread_local! {
     /// The keys the merge on this thread changed since its last flush
@@ -102,7 +109,7 @@ impl Shared {
             })
         });
         if fresh {
-            lock(&self.delta).last.entry(k).or_insert((0, 0)).1 += 1;
+            lock(&self.delta[shard_of(k)]).last.entry(k).or_insert((0, 0)).1 += 1;
         }
     }
 
@@ -181,17 +188,12 @@ impl Shared {
 
     /// Whether a change since version `ver` touched one of `keys`.
     pub(crate) fn moved_since(&self, ver: u64, keys: &[u64]) -> bool {
-        let d = lock(&self.delta);
-        if ver < d.base {
-            return true;
+        for k in keys {
+            let d = lock(&self.delta[shard_of(*k)]);
+            if ver < d.base || d.last.get(k).is_some_and(|&(v, w)| v > ver || w > 0) {
+                return true;
+            }
         }
-        if keys
-            .iter()
-            .any(|k| d.last.get(k).is_some_and(|&(v, w)| v > ver || w > 0))
-        {
-            return true;
-        }
-        drop(d);
         // This merge's own changes so far.
         CHANGED.with(|c| {
             c.borrow()
@@ -293,24 +295,27 @@ impl Shared {
         if ks.is_empty() {
             return;
         }
-        let mut d = lock(&self.delta);
         let ver = self.ver.fetch_add(1, Ordering::AcqRel) + 1;
         for k in ks {
+            let mut d = lock(&self.delta[shard_of(k)]);
             let e = d.last.entry(k).or_insert((0, 1));
             e.0 = ver;
             e.1 = e.1.saturating_sub(1);
-        }
-        if d.last.len() > DELTA_CAP {
-            // (Only keys nobody is writing go.)
-            d.last.retain(|_, e| e.1 > 0);
-            d.base = ver;
+            if d.last.len() > DELTA_CAP {
+                // (Only keys nobody is writing go.)
+                d.last.retain(|_, e| e.1 > 0);
+                d.base = ver;
+            }
         }
     }
 
     /// Forgets the delta (between evaluations no run is in flight).
     pub(crate) fn reset_delta(&self) {
-        let mut d = lock(&self.delta);
-        d.last.clear();
-        d.base = self.ver.load(Ordering::Acquire);
+        let base = self.ver.load(Ordering::Acquire);
+        for d in &self.delta {
+            let mut d = lock(d);
+            d.last.clear();
+            d.base = base;
+        }
     }
 }

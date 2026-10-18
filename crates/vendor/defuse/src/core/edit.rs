@@ -97,7 +97,7 @@ impl Shared {
             env: crate::sync::BrLock::new(EnvState::default()),
             provider: None,
             apps: Mutex::new(FxHashMap::default()),
-            env_readers: Mutex::new(FxHashMap::default()),
+            env_readers: (0..16).map(|_| Mutex::new(FxHashMap::default())).collect(),
             loop_readers: Mutex::new(FxHashMap::default()),
             env_waits: Mutex::new(FxHashMap::default()),
             pubs: Mutex::new(FxHashMap::default()),
@@ -154,7 +154,9 @@ impl Shared {
                 .collect(),
             landed: AtomicUsize::new(0),
             land_mask: AtomicU64::new(0),
-            delta: Mutex::new(super::merge::Delta::default()),
+            delta: (0..super::merge::DELTA_SHARDS)
+                .map(|_| Mutex::new(super::merge::Delta::default()))
+                .collect(),
         }
     }
 
@@ -680,7 +682,7 @@ impl Engine {
         for (n, g) in asked {
             self.sh.touch(n, g, &Cause::Loop { field: f }, false);
         }
-        let env = lock(&self.sh.env_readers).remove(&f).unwrap_or_default();
+        let env = lock(self.sh.env_readers_of(f)).remove(&f).unwrap_or_default();
         for (n, g) in env {
             self.sh.touch(n, g, &Cause::Loop { field: f }, false);
         }
@@ -1048,7 +1050,7 @@ impl Engine {
     fn env_changed(&mut self, fields: &[Field]) {
         let sh = &self.sh;
         for &f in fields {
-            let readers = lock(&sh.env_readers).remove(&f).unwrap_or_default();
+            let readers = lock(sh.env_readers_of(f)).remove(&f).unwrap_or_default();
             for (n, g) in readers {
                 sh.touch(n, g, &Cause::Environment { field: f }, false);
             }

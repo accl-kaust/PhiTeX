@@ -862,6 +862,10 @@ impl Shared {
                     r.status.store(super::S_STEP, Ordering::Release);
                     lock(&self.step_done).push(s);
                 } else {
+                    // Out of the in-work lists while still running: a touch
+                    // that finds it clean puts it back (left after, the
+                    // touch's entry would be taken out again).
+                    self.leave_work_lists(s);
                     r.status.store(S_CLEAN, Ordering::Release);
                 }
                 if old_out == Some(out) {
@@ -872,9 +876,6 @@ impl Shared {
             };
             for (n, g) in out_users {
                 notes.touch.push((n, g, Cause::Output { of: self.node_id(s) }));
-            }
-            if !self.stepped() {
-                self.leave_work_lists(s);
             }
             waiters = std::mem::take(&mut r.data().waiters);
             #[cfg(feature = "profile")]
@@ -977,7 +978,7 @@ impl Shared {
                         continue;
                     }
                     if let DAns::Env(_) = ans {
-                        lock(&self.env_readers).entry(*f).or_default().push((s, gn));
+                        lock(self.env_readers_of(*f)).entry(*f).or_default().push((s, gn));
                     }
                     let sub = Sub {
                         node: s,
@@ -1041,7 +1042,7 @@ impl Shared {
                     }
                 }
                 Pred::Env { f, .. } => {
-                    lock(&self.env_readers).entry(*f).or_default().push((s, gn));
+                    lock(self.env_readers_of(*f)).entry(*f).or_default().push((s, gn));
                 }
                 Pred::IsLoop { f, .. } => {
                     lock(&self.loop_readers).entry(*f).or_default().push((s, gn));
@@ -1071,7 +1072,7 @@ impl Shared {
                 Pred::Stream { seen, reads, .. } => {
                     fwd = true;
                     for &(x, f) in reads {
-                        lock(&self.env_readers).entry(f).or_default().push((s, gn));
+                        lock(self.env_readers_of(f)).entry(f).or_default().push((s, gn));
                         if self.loops.contains_key(&f) {
                             lock(&self.loop_readers).entry(f).or_default().push((s, gn));
                         }

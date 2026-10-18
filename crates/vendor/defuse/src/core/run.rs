@@ -789,13 +789,12 @@ impl Shared {
             c.log = log;
             c.read_ix = None;
         }
+        // Out of the in-work lists while still running (see `commit`).
+        self.leave_work_lists(s);
         if !self.leave_run(s, super::S_CLEAN) {
             return;
         }
-        let waiters = {
-            self.leave_work_lists(s);
-            std::mem::take(&mut r.data().waiters)
-        };
+        let waiters = std::mem::take(&mut r.data().waiters);
         for (n, q) in waiters {
             self.wake(n, q);
         }
