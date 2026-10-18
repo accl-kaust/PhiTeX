@@ -883,11 +883,20 @@ fn scan(b: &[u8], mut i: usize, limit: usize, cat: &Catcodes) -> (SyntaxKind, us
             SyntaxKind::Param
         }
         _ => {
-            while i < limit
-                && (!TEXT_END[b[i] as usize] || cat.other != 0 && cat.is_other(b[i]))
-                && !cat.is_shaping(b[i])
-            {
-                i += 1;
+            let shaping = cat.open | cat.close | cat.escape;
+            if cat.other == 0 && shaping == 0 {
+                // (no character's catcode changed from plain's: the
+                // token ends at the first byte of `TEXT_END`)
+                while i < limit && !TEXT_END[b[i] as usize] {
+                    i += 1;
+                }
+            } else {
+                while i < limit
+                    && (!TEXT_END[b[i] as usize] || cat.other != 0 && cat.is_other(b[i]))
+                    && !(b[i] < 128 && shaping >> b[i] & 1 == 1)
+                {
+                    i += 1;
+                }
             }
             SyntaxKind::Text
         }
