@@ -3254,11 +3254,10 @@ impl Finish {
         let t = args.get(9).copied().unwrap_or(ValueId::UNIT);
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
         let o = ops(&self.0);
-        let m = std::sync::Arc::clone(
-            &o.fin_defs_start
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let m = o
+            .fin_defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let d = (t != ValueId::UNIT)
             .then(|| m.get(&fin_key(v, t, args)))
             .flatten();
@@ -3296,7 +3295,7 @@ impl Finish {
             return ValueId::NIL;
         }
         ops(&self.0)
-            .fin_defs_start
+            .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
@@ -3324,7 +3323,7 @@ impl Operation for Finish {
             return None;
         }
         let mut names: Vec<Field> = ops(&self.0)
-            .fin_defs_start
+            .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
@@ -3366,7 +3365,7 @@ impl Operation for Finish {
         // outside them refutes the declaration, as any node's does, and
         // only its readers run again)
         let known = ops(&self.0)
-            .fin_defs_start
+            .fin_defs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
@@ -3950,7 +3949,7 @@ impl Operation for Scan {
         }
         let j = int_of(v, *args.get(1)?);
         let (st, mat) = *ops(&self.0)
-            .scan_guess_start
+            .scan_guess
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&j)?;
@@ -4087,7 +4086,7 @@ fn rtn_guess(o: &crate::run::Ops, v: &Values, pos: &[ValueId]) -> ValueId {
     let t = pos.get(9).copied().unwrap_or(ValueId::UNIT);
     let last = (t != ValueId::UNIT)
         .then(|| {
-            o.fin_defs_start
+            o.fin_defs
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&fin_key(v, t, pos))

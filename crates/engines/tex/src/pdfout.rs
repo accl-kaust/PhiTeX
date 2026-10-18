@@ -1024,17 +1024,29 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             known.push((f, i.name, i.size, file, i.s));
         }
     }
-    // (every step asks for its fonts' virtual files itself: an answer
-    // another step found is not a memo here, so a file appearing runs
-    // every step that asked)
+    let memo = r.ops.not_virtual.clone();
+    let not_virtual = |name: &str| {
+        memo.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned());
+    };
     let mut k = 0;
     while k < known.len() {
         let (f, name, size) = (known[k].0, known[k].1.clone(), known[k].2);
         k += 1;
+        if memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&name)
+        {
+            continue;
+        }
         let Some(b) = file_bytes(r, &format!("{name}.vf"))? else {
+            not_virtual(&name);
             continue;
         };
         let Ok(vf) = phitex_tfm::parse_vf(&b) else {
+            not_virtual(&name);
             continue;
         };
         let mut fonts = Vec::new();
