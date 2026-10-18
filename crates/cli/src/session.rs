@@ -469,8 +469,9 @@ impl Session {
         let text = Arc::from(tex::chars_owned(text));
         phitex_tex::timeline::lap("session: its characters");
         let tree = Arc::new(tex::Tree::open(&job.engine));
+        phitex_tex::timeline::lap("session: kpathsea opened (texmf.cnf, ls-R)");
         let format_tree = Arc::new(tex::Tree::open_format(&job.engine));
-        phitex_tex::timeline::lap("session: kpathsea opened (texmf.cnf)");
+        phitex_tex::timeline::lap("session: kpathsea opened for the format (texmf.cnf)");
         let cache = Cache::open(job.cache_limit).ok();
         phitex_tex::timeline::lap("session: the cache opened");
         if let Some(c) = &cache
