@@ -55,8 +55,8 @@ struct Entry {
 }
 
 /// A document chunk's regime as kept: `None` for a document's own.
-fn regime(s: pass::Start) -> Option<pass::Start> {
-    (s != pass::Start::of(FileKind::Document)).then_some(s)
+fn regime(s: &pass::Start) -> Option<pass::Start> {
+    (*s != pass::Start::of(FileKind::Document)).then_some(*s)
 }
 
 /// One chunk of the document as analysed: where it begins in the text,
@@ -229,7 +229,7 @@ impl Incr {
         let (own, end) = crate::hints::own_definitions_from(t, FileKind::Document, begins.as_ref());
         crate::timeline::note("incr: the chunk's own definitions", t1.elapsed());
         // (the regime it leaves is where the next chunk begins)
-        if regime(end) != self.cache[k].end {
+        if regime(&end) != self.cache[k].end {
             return false;
         }
         let digest = crate::hints::defines_any(&own).then(|| own.digest());
@@ -413,7 +413,7 @@ impl Incr {
                                 start.as_ref(),
                             );
                             *slot = Some(d);
-                            regime(e)
+                            regime(&e)
                         }
                     };
                     let digest = slot
@@ -480,7 +480,7 @@ impl Incr {
                     FileKind::Document,
                     None,
                 );
-                (Mutex::new(Some(d)), regime(e))
+                (Mutex::new(Some(d)), regime(&e))
             });
         let t_owns = t0.elapsed();
         let mut owns: Vec<Mutex<Option<Definitions>>> =
