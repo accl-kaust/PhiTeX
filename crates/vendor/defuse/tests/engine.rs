@@ -2903,3 +2903,74 @@ fn a_reruns_new_scope_local_ends_with_its_scope() {
         assert!(eng.check_reads().is_empty(), "threads {threads}: {:?}", eng.check_reads());
     }
 }
+
+/// A final node that declares it defines and contributes nothing, placed
+/// between an accumulator's contributor and a range reader: the reader does
+/// not wait for it (it is held until the final phase), and a final node the
+/// final phase itself places runs too.
+#[test]
+fn a_final_node_declaring_nothing_holds_no_reader() {
+    use defuse::{Field, Locality, Stop, ValueId, Values};
+    struct Op(std::sync::OnceLock<defuse::OpId>);
+    fn tag(v: &Values, a: &[ValueId]) -> String {
+        v.as_str(a[0]).unwrap_or_default()
+    }
+    impl defuse::Operation for Op {
+        fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+            Some(Vec::new())
+        }
+        fn static_contribs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+            match tag(v, a).as_str() {
+                "add" => Some(vec![(v.field("acc"), v.int(2))]),
+                _ => Some(Vec::new()),
+            }
+        }
+        fn final_only(&self, a: &[ValueId], v: &Values) -> bool {
+            matches!(tag(v, a).as_str(), "page" | "late" | "spawner")
+        }
+        fn run(&self, cx: &mut defuse::Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            let a = cx.args();
+            let acc = v.field("acc");
+            match tag(v, &a).as_str() {
+                "add" => {
+                    cx.contribute(acc, v.int(2));
+                    Ok(ValueId::UNIT)
+                }
+                "line" => {
+                    // Places a final page (held until the final phase).
+                    cx.child(*self.0.get().expect("registered"), vec![v.str("page")]);
+                    Ok(ValueId::UNIT)
+                }
+                "spawner" => {
+                    // A final node placing another final node.
+                    cx.child(*self.0.get().expect("registered"), vec![v.str("late")]);
+                    Ok(ValueId::UNIT)
+                }
+                "read" => cx.acc_range(acc, None),
+                _ => Ok(ValueId::UNIT),
+            }
+        }
+    }
+    let mut eng = Engine::new();
+    let o = std::sync::Arc::new(Op(std::sync::OnceLock::new()));
+    let op = eng.register(o.clone());
+    o.0.set(op).expect("once");
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, std::sync::Arc::new(defuse::SumMonoid));
+    let u = eng.new_unit();
+    let t = |e: &Engine, s: &str| e.values().str(s);
+    let (add, line, read, spawner) = (t(&eng, "add"), t(&eng, "line"), t(&eng, "read"), t(&eng, "spawner"));
+    eng.push(u, op, vec![add]);
+    eng.push(u, op, vec![line]);
+    let r = eng.push(u, op, vec![read]);
+    let sp = eng.push(u, op, vec![spawner]);
+    let rep = eng.evaluate_sequential().expect("no stall");
+    assert_eq!(eng.output(r).and_then(|x| eng.values().as_int(x)), Some(2));
+    // (The reader never waited on the held page.)
+    assert_eq!(rep.stops, 0, "{rep:?}");
+    // The page the final spawner placed ran.
+    let kids = eng.children(sp);
+    assert_eq!(kids.len(), 1);
+    assert!(eng.output(kids[0]).is_some(), "the late final node ran");
+}

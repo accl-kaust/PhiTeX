@@ -336,30 +336,37 @@ impl Engine {
                         self.ev_done.push((self.w.clone(), Vec::new()));
                     }
                 }
-                let held: Vec<Id> = self.w.nodes.iter().filter(|(_, n)| n.st == St::Held).map(|(&id, _)| id).collect();
-                let w = std::mem::take(&mut self.w);
-                let mut b = Builder::new(&self.core, w);
-                for &id in &held {
-                    if let Some(mut n) = b.w.node(id).cloned() {
-                        n.st = St::Dirty;
-                        b.w.put(id, n);
-                    }
-                }
-                self.w = b.finish().w;
-                for id in held {
-                    self.enqueue(&mut s, id);
-                }
+                // Held nodes run; final nodes the final phase itself places
+                // (held when made) run in turn, until none is left.
                 rep.final_nodes_run += 1;
-                let restart = self.drain(&mut s, &mut rep, &mut ran, &mut cut, deadline, &mut hs, src, per_round, rounds, sched, exec)?;
-                if restart {
-                    let cur = std::mem::take(&mut self.w);
-                    let mut all: std::collections::VecDeque<(World, Vec<Id>)> = std::mem::take(&mut self.ev_done).into();
-                    self.ev_fin = Some((cur, Vec::new()));
-                    all.extend(std::mem::take(&mut self.ev_olds));
-                    self.ev_olds = all;
-                    from_old = true;
-                    rep.restarts += 1;
-                    continue 'pass;
+                loop {
+                    let held: Vec<Id> = self.w.nodes.iter().filter(|(_, n)| n.st == St::Held).map(|(&id, _)| id).collect();
+                    if held.is_empty() {
+                        break;
+                    }
+                    let w = std::mem::take(&mut self.w);
+                    let mut b = Builder::new(&self.core, w);
+                    for &id in &held {
+                        if let Some(mut n) = b.w.node(id).cloned() {
+                            n.st = St::Dirty;
+                            b.w.put(id, n);
+                        }
+                    }
+                    self.w = b.finish().w;
+                    for id in held {
+                        self.enqueue(&mut s, id);
+                    }
+                    let restart = self.drain(&mut s, &mut rep, &mut ran, &mut cut, deadline, &mut hs, src, per_round, rounds, sched, exec)?;
+                    if restart {
+                        let cur = std::mem::take(&mut self.w);
+                        let mut all: std::collections::VecDeque<(World, Vec<Id>)> = std::mem::take(&mut self.ev_done).into();
+                        self.ev_fin = Some((cur, Vec::new()));
+                        all.extend(std::mem::take(&mut self.ev_olds));
+                        self.ev_olds = all;
+                        from_old = true;
+                        rep.restarts += 1;
+                        continue 'pass;
+                    }
                 }
                 // The final phase moved a loop-back: the final world publishes
                 // another value than the last round's world did.

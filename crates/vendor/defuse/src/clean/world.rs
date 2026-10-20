@@ -892,8 +892,9 @@ impl World {
         self.work_between(u, lo, hi).find(|&x| {
             x != me
                 && self.node(x).is_some_and(|n| {
-                    // (Declared contributions are per field.)
-                    !n.text.stat.contribs.as_ref().is_some_and(|cs| cs.iter().any(|c| c.0 == f))
+                    // (Declared contributions are per field; declaring none
+                    // at all is contributing nowhere.)
+                    !n.text.stat.contribs.as_ref().is_some_and(|cs| cs.is_empty() || cs.iter().any(|c| c.0 == f))
                         && !n.res.as_ref().is_some_and(|r| r.contribs.iter().all(|c| c.0 != f))
                 })
         })
