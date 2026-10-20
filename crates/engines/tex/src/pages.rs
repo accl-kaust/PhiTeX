@@ -3210,7 +3210,10 @@ impl Run<'_, '_> {
             v.int(i64::from(self.radix)),
             v.int(self.cur_order as i64),
             v.int(i64::try_from(self.pdf_occ).unwrap_or(0)),
-            v.int(i64::from_ne_bytes(self.muts.to_ne_bytes())),
+            // (the run's mutation count is compared only with itself
+            // within one command, `Run::rewind`: not carried, an edit
+            // before the cut would change the continuation for nothing)
+            v.int(0),
             v.int(i64::from(self.read_back_done)),
             v.int(i64::from(self.astate.is_some())),
             v.int(self.astate.unwrap_or(0)),
@@ -3230,6 +3233,18 @@ impl Run<'_, '_> {
             misc,
             v.list(overrides),
         ]);
+        if crate::exec::obs_flag!("PHITEX_CONT_PARTS") {
+            let xs = list_of(v, cont);
+            let st = list_of(v, xs[4]);
+            eprintln!(
+                "cont-parts {} k {}: {:?} state {:?} misc {:?}",
+                self.cx.node().raw(),
+                self.cand,
+                xs.iter().map(|x| x.raw() % 100_000).collect::<Vec<_>>(),
+                st.iter().map(|x| x.raw() % 100_000).collect::<Vec<_>>(),
+                list_of(v, xs[5]).iter().map(|&x| int_of(v, x)).collect::<Vec<_>>()
+            );
+        }
         Ok((cont, locals))
     }
 
@@ -3405,7 +3420,7 @@ impl Run<'_, '_> {
         self.radix = i32::try_from(n(6)).unwrap_or(0);
         self.cur_order = crate::val::order(n(7));
         self.pdf_occ = usize::try_from(n(8)).unwrap_or(0);
-        self.muts = u64::from_ne_bytes(n(9).to_ne_bytes());
+        self.muts = 0;
         self.read_back_done = n(10) != 0;
         self.astate = (n(11) != 0).then(|| n(12));
         self.aopen = n(13);

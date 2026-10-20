@@ -69,6 +69,9 @@ fn input_edit_reruns_one_region() {
     stats("edit", &b);
     eprintln!("edit: {:?}", t.elapsed());
     let run = b.stats.nodes_run;
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
     std::fs::write(dir.join("chap2.tex"), &new).unwrap();
     let cold = build(&dir);
     if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {

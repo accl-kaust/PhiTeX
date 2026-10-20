@@ -1620,8 +1620,12 @@ impl Run<'_, '_> {
                 .collect();
             line.push('\n');
             // a file whose read-back only defines: the definitions this
-            // line's read-back makes go with it (`wdef:<field>`)
-            let e = if self.keys_loopback(&name)? {
+            // line's read-back makes go with it (`wdef:<field>`); a line
+            // that does more (contributes, typesets, opens a scope) makes
+            // the file one read back as its text (`UNIT` in their place)
+            // (a line written while a line is interpreted goes nowhere:
+            // not interpreted in turn)
+            let e = if self.interp.is_none() && self.reads_back_per_field(&name) {
                 // (a text the stream's earlier lines left open goes on
                 // with this one: the file is read back whole)
                 let text = match self.take_wpending(k)? {
@@ -1638,14 +1642,20 @@ impl Run<'_, '_> {
                         r.map_or_else(|| "needs more".to_owned(), |x| crate::val::show_def(v, x))
                     );
                 }
-                if let Some(made) = r {
+                if let Some(made) = r
+                    && self.interp_plain
+                {
                     v.list(vec![v.str(&name), v.str(&line), made])
+                } else if r.is_some() {
+                    self.muts += 1;
+                    self.text_written.push(name.clone());
+                    v.list(vec![v.str(&name), v.str(&line), ValueId::UNIT])
                 } else {
                     self.set(&format!("write:pend:{k}"), v.str(&text), true);
                     v.list(vec![v.str(&name), v.str(&line)])
                 }
             } else {
-                v.list(vec![v.str(&name), v.str(&line)])
+                v.list(vec![v.str(&name), v.str(&line), ValueId::UNIT])
             };
             self.contribute_stream(e);
         } else {

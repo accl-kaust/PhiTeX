@@ -1070,3 +1070,43 @@ latexmk_tests! {
     latexmk_ams_index_j1: "amsidx", 1;
     latexmk_ams_index_j8: "amsidx", 8;
 }
+
+/// What BibTeX and makeindex say reaches the build's diagnostics as
+/// warnings, at the line that reads their output: a `\cite` key the
+/// database lacks (BibTeX's `Warning--I didn't find a database entry`)
+/// and a range closed without being opened (makeindex's `## Warning`).
+#[test]
+fn tool_warnings_are_diagnostics() {
+    let fx = common::fixtures().join("latexmk");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tool-warnings");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::copy(fx.join("bibtex/refs.bib"), dir.join("refs.bib")).expect("the database");
+    let src = "\\documentclass{article}\n\\usepackage{makeidx}\n\\makeindex\n\
+               \\begin{document}\nKnuth~\\cite{knuth84} and \\cite{nosuchkey}.\n\
+               A word\\index{word} and a range end\\index{range|)}.\n\
+               \\bibliographystyle{plain}\n\\bibliography{refs}\n\\printindex\n\\end{document}\n";
+    std::fs::write(dir.join("tw.tex"), src).expect("the document");
+    let opts = Options {
+        fixpoint: true,
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("tw", &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), src);
+    let warnings: Vec<String> = b
+        .diagnostics()
+        .into_iter()
+        .filter(|d| d.severity == phitex_tex::Severity::Warning)
+        .map(|d| d.message)
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|m| m.starts_with("bibtex warning:") && m.contains("nosuchkey")),
+        "{warnings:#?}"
+    );
+    assert!(
+        warnings.iter().any(|m| m.starts_with("makeindex warning:")),
+        "{warnings:#?}"
+    );
+}

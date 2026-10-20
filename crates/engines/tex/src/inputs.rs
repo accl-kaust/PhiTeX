@@ -17,6 +17,14 @@ use phitex_source::pass::FileKind;
 /// Whether a found file is a document's, sliceable into regions.
 pub(crate) fn document_file(path: &str, text: &str) -> bool {
     crate::hints::kind_of(text, FileKind::from_path(path)) == FileKind::Document
+        && document_text(text)
+}
+
+/// Whether a text the job wrote can be sliced into regions as a
+/// document's: its kind from its text alone, and none of the commands
+/// that depend on reading it as one file.
+pub(crate) fn document_text(text: &str) -> bool {
+    crate::hints::kind_of(text, FileKind::Document) == FileKind::Document
         && !["\\endinput", "\\inputlineno", "\\everyeof"]
             .iter()
             .any(|c| text.contains(c))
