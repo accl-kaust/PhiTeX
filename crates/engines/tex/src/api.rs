@@ -2613,8 +2613,8 @@ impl Graph {
                 });
             for (f, x) in [(wf, none), (w, guess)] {
                 decl_trace(&self.eng, f, x);
-                self.eng.declare_loopback(f, x);
             }
+            self.eng.declare_loopbacks(&[(wf, none), (w, guess)]);
             // the guessed keys' `wdef:<field>` loop-backs declared with
             // it: a read-back of a guessed key never waits for them
             let keys: Vec<String> = self
@@ -2627,18 +2627,20 @@ impl Graph {
                         .map(|k| wdef_id(name, k))
                 })
                 .collect();
+            // (declared in one pass: each declaration looks at every
+            // run's reads)
+            let mut decl = Vec::new();
             for k in keys {
                 if !self.wdefs.contains(&k) {
                     let v = self.eng.values();
                     let none = v.list(Vec::new());
                     let wd = v.field(&format!("wdef:{k}"));
-                    {
-                        decl_trace(&self.eng, wd, none);
-                        self.eng.declare_loopback(wd, none);
-                    }
+                    decl_trace(&self.eng, wd, none);
+                    decl.push((wd, none));
                     self.wdefs.push(k);
                 }
             }
+            self.eng.declare_loopbacks(&decl);
         }
         self.written.push(name.to_owned());
     }
@@ -3085,18 +3087,20 @@ impl Graph {
                         }
                     }
                 }
+                // (declared in one pass: each declaration looks at every
+                // run's reads)
+                let mut decl = Vec::with_capacity(new.len());
                 for f in new {
                     let none = self.eng.values().list(Vec::new());
                     let w = self.eng.values().field(&format!("wdef:{f}"));
-                    {
-                        decl_trace(&self.eng, w, none);
-                        self.eng.declare_loopback(w, none);
-                    }
+                    decl_trace(&self.eng, w, none);
+                    decl.push((w, none));
                     // (declared by the files node within the
                     // evaluation, its readers run again there: no
                     // evaluation more)
                     self.wdefs.push(f);
                 }
+                self.eng.declare_loopbacks(&decl);
             }
             let asked_names: Vec<String> = {
                 let v = self.eng.values();
