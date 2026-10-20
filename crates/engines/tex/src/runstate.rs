@@ -1018,6 +1018,17 @@ impl State {
     /// Closes a group whose saves and definitions began at `save_base`
     /// and `def_base`: its saves are restored (the inert ones, hidden by
     /// a global definition since, are not, §283).
+    /// The locations a close of the groups down to `save_base` restores
+    /// ([`State::close`]).
+    pub(crate) fn saved_locs(&self, save_base: usize) -> Vec<Loc> {
+        self.save
+            .get(save_base..)
+            .unwrap_or_default()
+            .iter()
+            .map(|s| s.loc)
+            .collect()
+    }
+
     pub(crate) fn close(&mut self, save_base: usize, def_base: usize) {
         self.muts += 1;
         while self.save.len() > save_base {

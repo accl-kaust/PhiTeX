@@ -2517,32 +2517,34 @@ impl Graph {
         }
         if fixpoint {
             // nothing reads the bytes on disk: a read-back that only
-            // defines (`.aux`) is its key set `wkeys:<name>` and one
+            // defines is its key set `wkeys:<name>` and one
             // `wdef:<field>` per field; another file is its text in
             // memory, `wfile:<name>`; both start empty (absent)
             let v = self.eng.values();
             let none = v.list(Vec::new());
-            let k = if defines_only(name) { "wkeys" } else { "wfile" };
-            let w = v.field(&format!("{k}:{name}"));
+            // (both: whether it is read back per field or as its text is
+            // what its lines are, which its file node finds, `crate::ops`)
+            let wf = v.field(&format!("wfile:{name}"));
+            let w = v.field(&format!("wkeys:{name}"));
             // a key set guessed (the last session's, or from the text):
             // the read-back runs once when the guess is right
             let guess = self
                 .wkeys_guess
                 .iter()
-                .find(|(n, _)| n == name && defines_only(name))
+                .find(|(n, _)| n == name)
                 .map_or(none, |(_, ks)| {
                     v.list(ks.iter().map(|k| v.str(k)).collect())
                 });
-            {
-                decl_trace(&self.eng, w, guess);
-                self.eng.declare_loopback(w, guess);
+            for (f, x) in [(wf, none), (w, guess)] {
+                decl_trace(&self.eng, f, x);
+                self.eng.declare_loopback(f, x);
             }
             // the guessed keys' `wdef:<field>` loop-backs declared with
             // it: a read-back of a guessed key never waits for them
             let keys: Vec<String> = self
                 .wkeys_guess
                 .iter()
-                .filter(|(n, _)| n == name && defines_only(name))
+                .filter(|(n, _)| n == name)
                 .flat_map(|(_, ks)| ks.iter().map(|k| wdef_id(name, k)))
                 .collect();
             for k in keys {
@@ -3243,12 +3245,33 @@ pub(crate) fn wdef_field(k: &str) -> &str {
     k.rsplit('\u{1}').next().unwrap_or(k)
 }
 
-/// Whether a job-written file's read-back only defines (its lines are
-/// read as definitions per field, never as text): `.aux`.
-pub(crate) fn defines_only(name: &str) -> bool {
-    std::path::Path::new(name)
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("aux"))
+/// The value a written file's `wkeys:<name>` takes when the file is read
+/// back as its text (`wfile:<name>`): a line written to it does more than
+/// define ([`written_as_text`]).
+pub(crate) fn text_mark(v: &Values) -> ValueId {
+    v.str("\u{1}read back as text")
+}
+
+/// The job-written files read back as their text: those a line of which
+/// did more than define as it was interpreted (`UNIT` in place of its
+/// definitions, [`crate::run::Run::interpret_line`]); every other file
+/// is read back per field.
+pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<String> {
+    let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    for &e in &streams {
+        if is_cand_marker(v, e) {
+            continue;
+        }
+        let xs = list_of(v, stream_entry(v, e));
+        if xs.get(2) == Some(&ValueId::UNIT) {
+            let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
 }
 
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.
@@ -5233,16 +5256,17 @@ impl Build {
         written_texts(v, acc("streams"))
     }
 
-    /// The key sets of the read-back files that only define (`.aux`),
+    /// The key sets of the read-back files that only define,
     /// as the last build published them: [`Options::wkeys`] for a later
     /// session of the same document.
     #[must_use]
     pub fn wkeys(&self) -> Vec<(String, Vec<String>)> {
         let v = self.g.eng.values();
         let acc = |n: &str| self.g.eng.acc_value(self.unit, v.field(n));
+        let text = written_as_text(v, acc("streams"));
         written_defs(v, acc("streams"))
             .into_iter()
-            .filter(|(n, _)| defines_only(n))
+            .filter(|(n, _)| !text.contains(n))
             .map(|(n, ds)| (n, ds.into_iter().map(|(f, _)| f).collect()))
             .collect()
     }
