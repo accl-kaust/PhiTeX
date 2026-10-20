@@ -175,7 +175,9 @@ pub(crate) fn line_show(v: &Values, x: ValueId) -> String {
     }
     let xs = list_of(v, x);
     if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("cmd") {
-        let serial = xs.get(2).map_or(0, |&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()));
+        let serial = xs
+            .get(2)
+            .map_or(0, |&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()));
         return format!("cmd serial {serial}");
     }
     v.render(x).chars().take(80).collect()

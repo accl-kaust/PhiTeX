@@ -4573,12 +4573,11 @@ impl Build {
         }
     }
 
-    fn settle(&mut self) {
-        let t_all = std::time::Instant::now();
-        // the text nodes' offsets in the document, for the progress (an
-        // edit of a long document keeps the last ones: a place shown
-        // while it runs is off by the edit's length at most, and the map
-        // is not made again for every edit)
+    /// The text nodes' offsets in the document, for the progress (an
+    /// edit of a long document keeps the last ones: a place shown while
+    /// it runs is off by the edit's length at most, and the map is not
+    /// made again for every edit).
+    fn progress_offsets(&mut self) {
         if self.g.watch.offsets.is_empty() || self.nodes.len() < 4096 {
             let mut offsets = FxHashMap::with_capacity_and_hasher(
                 self.nodes.len(),
@@ -4590,6 +4589,74 @@ impl Build {
             }
             self.g.watch.offsets = Arc::new(offsets);
         }
+    }
+
+    /// The loads' records as the evaluation left them: a load inserted
+    /// by a later edit uses them. A record is what a load's run left
+    /// (`crate::pkgrec::entry`), so an evaluation in which no load ran
+    /// leaves the merged records as they were.
+    fn merge_load_records(&mut self) {
+        self.loads_ran = !self
+            .g
+            .ops
+            .pkg_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty();
+        if self.loads_ran
+            && let Some(l) = &self.g.loads
+        {
+            l.merge(self.fresh_records());
+        }
+    }
+
+    /// `PHITEX_TEX_TIME`: the evaluation's phases (ends `t_before`,
+    /// `t_apply`, `t_settle` from its start `t_all`) and the sizes.
+    fn note_edit_phases(
+        &self,
+        t_all: std::time::Instant,
+        t_before: std::time::Duration,
+        t_apply: std::time::Duration,
+        t_settle: std::time::Duration,
+    ) {
+        eprintln!(
+            "edit phases: before the apply (offsets, inputs) {t_before:?}, apply (intake, hint pass, slice-key diff, engine replace/insert/remove: `edit apply`) {:?}, settle (`settle phases`) {:?}, after (stats, guesses kept) {:?}",
+            t_apply.saturating_sub(t_before),
+            t_settle.saturating_sub(t_apply),
+            t_all.elapsed().saturating_sub(t_settle)
+        );
+        let (nodes, units, values) = self.sizes();
+        let (node, use_) = Engine::record_sizes();
+        let rss = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|t| {
+                t.lines()
+                    .find_map(|l| l.strip_prefix("VmRSS:"))
+                    .map(|v| v.trim().to_owned())
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
+        );
+    }
+
+    /// The pages whose hash changed since last told, to the
+    /// `on_page_settled` callback.
+    fn tell_settled_pages(&mut self) {
+        if let Some(cb) = self.opts.on_page_settled.clone() {
+            let pages = self.pages();
+            for (k, &h) in pages.iter().enumerate() {
+                if self.settled.get(k) != Some(&h) {
+                    cb(k, h, self.stats.version);
+                }
+            }
+            self.settled = pages;
+        }
+    }
+
+    fn settle(&mut self) {
+        let t_all = std::time::Instant::now();
+        self.progress_offsets();
         crate::timeline::lap("engine: the nodes' offsets (progress)");
         let mut stats = Stats::default();
         self.g.queries.clear();
@@ -4641,56 +4708,15 @@ impl Build {
         }
         self.pkg_stats(&mut stats);
         crate::timeline::lap("engine: package load stats");
-        // the loads' records as this evaluation left them: a load
-        // inserted by a later edit uses them. A record is what a load's
-        // run left (`crate::pkgrec::entry`), so an evaluation in which no
-        // load ran leaves the merged records as they were.
-        self.loads_ran = !self
-            .g
-            .ops
-            .pkg_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_empty();
-        if self.loads_ran
-            && let Some(l) = &self.g.loads
-        {
-            l.merge(self.fresh_records());
-        }
+        self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-            eprintln!(
-                "edit phases: before the apply (offsets, inputs) {t_before:?}, apply (intake, hint pass, slice-key diff, engine replace/insert/remove: `edit apply`) {:?}, settle (`settle phases`) {:?}, after (stats, guesses kept) {:?}",
-                t_apply.saturating_sub(t_before),
-                t_settle.saturating_sub(t_apply),
-                t_all.elapsed().saturating_sub(t_settle)
-            );
-            let (nodes, units, values) = self.sizes();
-            let (node, use_) = Engine::record_sizes();
-            let rss = std::fs::read_to_string("/proc/self/status")
-                .ok()
-                .and_then(|t| {
-                    t.lines()
-                        .find_map(|l| l.strip_prefix("VmRSS:"))
-                        .map(|v| v.trim().to_owned())
-                })
-                .unwrap_or_default();
-            eprintln!(
-                "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
-            );
+            self.note_edit_phases(t_all, t_before, t_apply, t_settle);
         }
         self.dump_claims();
         self.dump_readers();
-        if let Some(cb) = self.opts.on_page_settled.clone() {
-            let pages = self.pages();
-            for (k, &h) in pages.iter().enumerate() {
-                if self.settled.get(k) != Some(&h) {
-                    cb(k, h, self.stats.version);
-                }
-            }
-            self.settled = pages;
-        }
+        self.tell_settled_pages();
     }
 
     /// A handle to send this build new texts from another thread

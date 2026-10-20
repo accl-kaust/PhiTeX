@@ -767,14 +767,26 @@ impl Run<'_, '_> {
             eprintln!(
                 "cand: node {} op {} k {k} newgraf {newgraf} fresh {fresh} input {} nest {:?} conds {} forced {} cuttable {cuttable}",
                 self.cx.node().raw(),
-                if op == self.ops.exec { "exec" } else if op == self.ops.resume { "resume" } else { "other" },
+                if op == self.ops.exec {
+                    "exec"
+                } else if op == self.ops.resume {
+                    "resume"
+                } else {
+                    "other"
+                },
                 self.has_input(),
                 self.nest
                     .iter()
                     .map(|l| (l.mode, l.group, l.owns))
                     .collect::<Vec<_>>(),
                 self.conds.len(),
-                self.forced_since(self.cand_marks.len().checked_sub(2).and_then(|i| self.cand_marks.get(i)).map_or(0, |m| m.contribs)),
+                self.forced_since(
+                    self.cand_marks
+                        .len()
+                        .checked_sub(2)
+                        .and_then(|i| self.cand_marks.get(i))
+                        .map_or(0, |m| m.contribs)
+                ),
             );
         }
         // (every candidate with text after it is a cut, as every
@@ -1244,15 +1256,10 @@ impl Run<'_, '_> {
                     .unwrap_or_default(),
             };
             // (what goes on past the page from the pieces it needs only,
-            // [`Run::assemble_narrow`]: off but under `PHITEX_NARROW`. It
-            // takes the page's best break from the scan over profiles,
-            // which can differ from the builder's over the items, so its
-            // carried material can be short: wrong pages at 8 threads
-            // without the finishers' predictions)
-            if narrow
-                && crate::exec::obs_flag!("PHITEX_NARROW")
-                && let Some(r) = self.assemble_narrow(&s, pid, k, rest, here, at)?
-            {
+            // [`Run::assemble_narrow`]: an edit in a piece before them that
+            // leaves its profile alone runs the page's finisher, not its
+            // continuation)
+            if narrow && let Some(r) = self.assemble_narrow(&s, pid, k, rest, here, at)? {
                 if !crate::exec::obs_flag!("PHITEX_NARROW_CHECK") {
                     return Ok(Some(r));
                 }
@@ -2432,7 +2439,13 @@ impl Run<'_, '_> {
             .map_or(-1, |k| i64::try_from(k.saturating_sub(n)).unwrap_or(-1));
         self.cx.define_with(
             v.field(RESUME),
-            v.list(vec![cont, pid, v.int(flags), v.int(rest), v.int(i64::from(k))]),
+            v.list(vec![
+                cont,
+                pid,
+                v.int(flags),
+                v.int(rest),
+                v.int(i64::from(k)),
+            ]),
             Locality::Global,
         );
         // (the rest of the piece after its scan step: the finisher and
@@ -3242,7 +3255,10 @@ impl Run<'_, '_> {
                 self.cand,
                 xs.iter().map(|x| x.raw() % 100_000).collect::<Vec<_>>(),
                 st.iter().map(|x| x.raw() % 100_000).collect::<Vec<_>>(),
-                list_of(v, xs[5]).iter().map(|&x| int_of(v, x)).collect::<Vec<_>>()
+                list_of(v, xs[5])
+                    .iter()
+                    .map(|&x| int_of(v, x))
+                    .collect::<Vec<_>>()
             );
         }
         Ok((cont, locals))
@@ -4891,8 +4907,15 @@ impl Run<'_, '_> {
                     eprintln!(
                         "scan {}: the block before ends at a continuation {:?}: {} (speculative {})",
                         self.cx.node().raw(),
-                        xs.iter().skip(1).map(|&y| int_of(v, y).cast_unsigned()).collect::<Vec<_>>(),
-                        if p.is_some() { "defined" } else { "not defined: nothing" },
+                        xs.iter()
+                            .skip(1)
+                            .map(|&y| int_of(v, y).cast_unsigned())
+                            .collect::<Vec<_>>(),
+                        if p.is_some() {
+                            "defined"
+                        } else {
+                            "not defined: nothing"
+                        },
                         self.cx.is_speculative()
                     );
                 }
@@ -4980,8 +5003,17 @@ impl Run<'_, '_> {
                 None => {
                     let rtn = rtn_guess(self.ops, v, &pos);
                     // (the material its page begins with as this step
-                    // has it: none before the first page)
-                    let m = mat.unwrap_or_else(|| v.list(Vec::new()));
+                    // has it, or its page's field where the step began
+                    // from a block before: none before the first page)
+                    let m = match (mat, src) {
+                        (Some(m), _) => m,
+                        (None, Some(x)) => {
+                            let j0 = ScanIn::decode(v, Some(x)).j;
+                            self.eng_read(scan_mat_field(v, j0))?
+                                .unwrap_or_else(|| v.list(Vec::new()))
+                        }
+                        (None, None) => v.list(Vec::new()),
+                    };
                     match self.cont_state(&list_of(v, b), Some(rtn), Some(m))? {
                         Cont::State(x, m) => Some((x, m)),
                         _ => None,
@@ -5030,10 +5062,11 @@ impl Run<'_, '_> {
         } else if !known {
             ValueId::UNIT
         } else {
-            v.list(vec![
-                src.unwrap_or(ValueId::UNIT),
-                mat.unwrap_or(ValueId::UNIT),
-            ])
+            // (the state only: the material the next page begins with is
+            // its page's field, [`scan_mat_field`], read by the block that
+            // fires that page; carried here, an edit in it would run
+            // every block's scan to the next page again)
+            v.list(vec![src.unwrap_or(ValueId::UNIT), ValueId::UNIT])
         };
         self.cx
             .define_with(v.field(SCAN_BLOCK), end, Locality::Global);
@@ -5066,8 +5099,9 @@ impl Run<'_, '_> {
         match self.cont_state(&b, None, None)? {
             Cont::Nothing => Ok(Placed::Nothing),
             Cont::Fire(j, src, k, rest, normal, special, origin) => {
-                let (b, _) =
-                    self.place_break(None, false, j, src, -2, k, rest, normal, special, origin, None)?;
+                let (b, _) = self.place_break(
+                    None, false, j, src, -2, k, rest, normal, special, origin, None,
+                )?;
                 let chain = cont_chain(v, &self.cx.args());
                 self.place_cont(None, false, j, None, b, chain);
                 Ok(Placed::Page)

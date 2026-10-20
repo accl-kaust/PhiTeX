@@ -70,6 +70,32 @@ pub(crate) struct Lexed {
     /// The regime each token was read under, as change points: from
     /// token index `i` on (the first entry is the file's own regime).
     pub regimes: Vec<(usize, Catcodes)>,
+    /// The regime in force at the text's end: where the text that
+    /// follows it begins.
+    pub end: Start,
+}
+
+/// The regime a text's reading is in at a point: its catcodes, the ones
+/// expl3's syntax put aside, and the characters whose catcode was
+/// changed to one that does not shape tokens. A text read on from
+/// another's end begins in that one's ([`Lexed::end`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Start {
+    cat: Catcodes,
+    pre_expl: Option<Catcodes>,
+    special: u128,
+}
+
+impl Start {
+    /// The regime a text of `kind` begins in on its own.
+    #[must_use]
+    pub fn of(kind: FileKind) -> Start {
+        Start {
+            cat: kind.catcodes(),
+            pre_expl: None,
+            special: 0,
+        }
+    }
 }
 
 /// What an open brace group is to the regime.
@@ -560,16 +586,29 @@ fn char_constant_at(st: &State<'_>, i: usize) -> bool {
 /// Reads `text` under `kind`'s regime and the changes visible in it.
 /// `scope` gives the macros and environments known to change catcodes
 /// (none when harvesting definitions).
-#[allow(clippy::too_many_lines)]
 pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed {
+    lex_from(text, kind, scope, None)
+}
+
+/// [`lex`] beginning in the regime `start` (`None`: `kind`'s own), the
+/// one the text before it ended in: a regime other than `kind`'s is a
+/// prediction (the runs verify each character's catcode they assume).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn lex_from(
+    text: &str,
+    kind: FileKind,
+    scope: Option<Scope<'_>>,
+    start: Option<&Start>,
+) -> Lexed {
     let b = text.as_bytes();
+    let start = start.copied().unwrap_or_else(|| Start::of(kind));
     let mut st = State {
         text,
         tokens: Vec::with_capacity(b.len() / 3 + 4),
         hazards: Vec::new(),
         open: Vec::new(),
         tz: Status::Known,
-        special: 0,
+        special: start.special,
         maybe_active: scope.map_or(0, |s| s.document.maybe_active()),
         timed: Vec::new(),
     };
@@ -577,11 +616,21 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
     let mut unmatched_closes = Vec::new();
     let mut frames: Vec<Frame> = Vec::new();
     let mut soft: Vec<Soft> = Vec::new();
-    let mut cat = kind.catcodes();
+    let mut cat = start.cat;
     let mut regimes: Vec<(usize, Catcodes)> = vec![(0, cat)];
     let mut role = Role::Simple;
     let mut body_depth = 0usize;
-    let mut pre_expl: Option<Catcodes> = None;
+    let mut pre_expl: Option<Catcodes> = start.pre_expl;
+    if start != Start::of(kind) {
+        // (the regime the text before left: predicted, as a change read
+        // in the text is)
+        st.begin(
+            0,
+            "regime of the text before",
+            String::new(),
+            Status::Predicted,
+        );
+    }
     // (brace groups ahead that are bodies, at the depth where they come)
     let mut bodies_ahead: (usize, u8) = (0, 0);
     let mut verb: Option<std::ops::Range<usize>> = None;
@@ -854,6 +903,11 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
         braces,
         unmatched_closes,
         regimes,
+        end: Start {
+            cat,
+            pre_expl,
+            special: st.special,
+        },
     }
 }
 

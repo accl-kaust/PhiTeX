@@ -1359,6 +1359,97 @@ pub struct DefSet {
     pub outer_calls: Vec<String>,
 }
 
+/// The hasher of [`Acc`]'s sets: a multiply-rotate over the bytes, eight
+/// at a time (names, no adversary).
+#[derive(Default, Clone, Copy)]
+struct Fx(u64);
+
+impl Fx {
+    fn mix(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.mix(u64::from_le_bytes(*w));
+        }
+        for &b in rest {
+            self.mix(u64::from(b));
+        }
+    }
+}
+
+/// A set of names hashed with [`Fx`].
+type NameSet = HashSet<String, std::hash::BuildHasherDefault<Fx>>;
+
+/// [`DefSet::add`] of many sets in turn into one: each list's entries
+/// kept in a set as they come, made once, not once per set added (a
+/// closure adding the sets of many calls costs their sizes, not their
+/// sizes times its own).
+struct Acc {
+    s: DefSet,
+    /// The entries of `relied`, `calls`, `outer_calls`, `unbounded`.
+    seen: [NameSet; 4],
+}
+
+impl Acc {
+    fn new(s: DefSet) -> Acc {
+        let set = |l: &[String]| l.iter().cloned().collect::<NameSet>();
+        let seen = [
+            set(&s.relied),
+            set(&s.calls),
+            set(&s.outer_calls),
+            set(&s.unbounded),
+        ];
+        Acc { s, seen }
+    }
+
+    /// `x` added to `to` unless there already.
+    fn push(to: &mut Vec<String>, seen: &mut NameSet, x: &str) {
+        if !seen.contains(x) {
+            seen.insert(x.to_owned());
+            to.push(x.to_owned());
+        }
+    }
+
+    /// [`DefSet::add`] of `o`; `outer: false`: of `o` run inside a group
+    /// (no outer calls, its global definitions alone).
+    fn add(&mut self, o: &DefSet, outer: bool) {
+        let [relied, calls, outer_calls, unbounded] = &mut self.seen;
+        for x in &o.relied {
+            Acc::push(&mut self.s.relied, relied, x);
+        }
+        for x in &o.calls {
+            Acc::push(&mut self.s.calls, calls, x);
+        }
+        if outer {
+            for x in &o.outer_calls {
+                Acc::push(&mut self.s.outer_calls, outer_calls, x);
+            }
+        }
+        for (k, v) in &o.names {
+            if outer || *v {
+                *self.s.names.entry(k.clone()).or_default() |= v;
+            }
+        }
+        for (k, v) in &o.prefixes {
+            if outer || *v {
+                *self.s.prefixes.entry(k.clone()).or_default() |= v;
+            }
+        }
+        for x in &o.unbounded {
+            Acc::push(&mut self.s.unbounded, unbounded, x);
+        }
+    }
+}
+
 impl DefSet {
     fn add(&mut self, o: &DefSet) {
         // (each list kept in its order, each entry once: a set of what
@@ -1425,6 +1516,10 @@ pub(crate) struct Closure<'a> {
     /// By name: the set, the names looked up for it, and whether a
     /// recursion cut it short (then it depends on the order of calls).
     memo: HashMap<String, (DefSet, std::sync::Arc<Vec<String>>, bool)>,
+    /// By name, a call's whole set at the top ([`Closure::call_top`]):
+    /// the same for every call of the name in this closure's life (its
+    /// definitions do not change).
+    tops: HashMap<String, std::sync::Arc<DefSet>>,
     busy: HashSet<String>,
     /// The call being computed: the names looked up so far, whether a
     /// recursion cut it short.
@@ -1437,6 +1532,7 @@ impl<'a> Closure<'a> {
             document,
             prelude,
             memo: HashMap::new(),
+            tops: HashMap::new(),
             busy: HashSet::new(),
             frame: (Vec::new(), false),
         }
@@ -1460,31 +1556,24 @@ impl<'a> Closure<'a> {
             *s.prefixes.entry(d.field.clone()).or_default() |= d.global;
         }
         s.unbounded.extend(e.unbounded.iter().cloned());
+        let mut acc = Acc::new(s);
         for a in &e.assigned {
             let x = self.assigned(a);
-            s.add(&x);
+            acc.add(&x, true);
         }
         for c in &e.calls {
-            if !s.calls.contains(c) {
-                s.calls.push(c.clone());
-            }
+            Acc::push(&mut acc.s.calls, &mut acc.seen[1], c);
             let x = self.call(c);
             if e.outer_calls.contains(c) {
-                if !s.outer_calls.contains(c) {
-                    s.outer_calls.push(c.clone());
-                }
-                s.add(&x);
+                Acc::push(&mut acc.s.outer_calls, &mut acc.seen[2], c);
+                acc.add(&x, true);
             } else {
                 // (inside a group: what it calls runs there too, and its
                 // local definitions are undone at the group's end)
-                let mut inner = x.clone();
-                inner.outer_calls.clear();
-                inner.names.retain(|_, g| *g);
-                inner.prefixes.retain(|_, g| *g);
-                s.add(&inner);
+                acc.add(&x, false);
             }
         }
-        s
+        acc.s
     }
 
     /// What assigning the quantity `name` defines.
@@ -1531,31 +1620,31 @@ impl<'a> Closure<'a> {
     /// cache ([`Definitions::closures`]) for every text analysed with it,
     /// and taken from there while the document defines none of the
     /// names it looked up and none of them is being computed.
-    pub(crate) fn call(&mut self, name: &str) -> DefSet {
+    pub(crate) fn call(&mut self, name: &str) -> std::sync::Arc<DefSet> {
         // (a call at the top, no call being computed: its whole set, as
         // a fresh closure computes it, a function of the name and the
         // definitions alone, kept in the prelude's cache under its own
         // key even where a recursion cut it: a text's every call of a
-        // recursive macro is then one lookup, not the walk again)
+        // recursive macro is then one lookup, not the walk again; and
+        // kept for this closure's life, [`Closure::tops`])
         if self.busy.is_empty() {
-            return self.call_top(name);
+            if let Some(s) = self.tops.get(name) {
+                return s.clone();
+            }
+            let s = self.call_top(name);
+            self.tops.insert(name.to_owned(), s.clone());
+            return s;
         }
-        self.call_inner(name)
+        std::sync::Arc::new(self.call_inner(name))
     }
 
     /// [`Closure::call`] at the top: from the prelude's cache of whole
     /// sets, else computed by a fresh closure (no memo of this one's
     /// read: what a recursion cut short inside another call is not
     /// this call's set).
-    fn call_top(&mut self, name: &str) -> DefSet {
+    fn call_top(&mut self, name: &str) -> std::sync::Arc<DefSet> {
         let key = format!("\u{1}{name}");
-        let cached = self
-            .prelude
-            .closures
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&key)
-            .cloned();
+        let cached = self.prelude.closure(&key);
         // (the names a top call looked up are no other call's: no frame
         // takes them)
         if let Some((s, names)) = cached
@@ -1564,17 +1653,13 @@ impl<'a> Closure<'a> {
             return s;
         }
         let mut fresh = Closure::new(self.document, self.prelude);
-        let s = fresh.call_inner(name);
+        let s = std::sync::Arc::new(fresh.call_inner(name));
         let (mut names, _) = std::mem::take(&mut fresh.frame);
         names.sort_unstable();
         names.dedup();
         let names = std::sync::Arc::new(names);
         if !self.document_defines(&names) {
-            self.prelude
-                .closures
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key, (s.clone(), names));
+            self.prelude.keep_closure(key, s.clone(), names);
         }
         s
     }
@@ -1593,17 +1678,12 @@ impl<'a> Closure<'a> {
             self.frame.1 = true;
             return DefSet::default();
         }
-        let cached = self
-            .prelude
-            .closures
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(name)
-            .cloned();
+        let cached = self.prelude.closure(name);
         if let Some((s, names)) = cached
             && !names.iter().any(|n| self.busy.contains(n))
             && !self.document_defines(&names)
         {
+            let s = (*s).clone();
             self.frame.0.extend(names.iter().cloned());
             self.memo.insert(name.to_owned(), (s.clone(), names, false));
             return s;
@@ -1617,11 +1697,11 @@ impl<'a> Closure<'a> {
         names.dedup();
         let names = std::sync::Arc::new(names);
         if !cut && !self.document_defines(&names) {
-            self.prelude
-                .closures
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(name.to_owned(), (s.clone(), names.clone()));
+            self.prelude.keep_closure(
+                name.to_owned(),
+                std::sync::Arc::new(s.clone()),
+                names.clone(),
+            );
         }
         self.frame.0.extend(names.iter().cloned());
         self.frame.1 |= cut;
