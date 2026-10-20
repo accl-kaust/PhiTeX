@@ -1073,6 +1073,9 @@ latexmk_tests! {
     // register it allocates unless defined there, declared after it)
     latexmk_total_counter_j1: "total-counter", 1;
     latexmk_total_counter_j8: "total-counter", 8;
+    // (the first object, an open action, fixes the PDF version there)
+    latexmk_catalog_openaction_j1: "catalog-openaction", 1;
+    latexmk_catalog_openaction_j8: "catalog-openaction", 8;
 }
 
 /// What BibTeX and makeindex say reaches the build's diagnostics as
