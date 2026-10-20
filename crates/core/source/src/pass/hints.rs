@@ -1376,13 +1376,11 @@ impl std::hash::Hasher for Fx {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        let mut words = bytes.chunks_exact(8);
-        for w in &mut words {
-            let mut b = [0u8; 8];
-            b.copy_from_slice(w);
-            self.mix(u64::from_le_bytes(b));
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.mix(u64::from_le_bytes(*w));
         }
-        for &b in words.remainder() {
+        for &b in rest {
             self.mix(u64::from(b));
         }
     }

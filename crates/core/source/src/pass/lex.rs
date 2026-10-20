@@ -598,10 +598,10 @@ pub(crate) fn lex_from(
     text: &str,
     kind: FileKind,
     scope: Option<Scope<'_>>,
-    start: Option<Start>,
+    start: Option<&Start>,
 ) -> Lexed {
     let b = text.as_bytes();
-    let start = start.unwrap_or_else(|| Start::of(kind));
+    let start = start.copied().unwrap_or_else(|| Start::of(kind));
     let mut st = State {
         text,
         tokens: Vec::with_capacity(b.len() / 3 + 4),

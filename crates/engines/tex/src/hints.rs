@@ -1911,7 +1911,7 @@ impl Analysis<'_> {
         kind: FileKind,
         prelude: Defs,
         defs: Definitions,
-        start: Option<pass::Start>,
+        start: Option<&pass::Start>,
     ) -> Analysis<'_> {
         let scope = Scope {
             document: &defs,
@@ -3122,7 +3122,7 @@ fn analyse_with(
     kind: FileKind,
     defs: &Defs,
     own: Definitions,
-    start: Option<pass::Start>,
+    start: Option<&pass::Start>,
 ) -> TextHints {
     // (`PHITEX_TEX_TIME`: the analysis's phases, on the timeline)
     let tm = crate::exec::prof_flag!("PHITEX_TEX_TIME");
@@ -3627,7 +3627,7 @@ pub(crate) fn own_definitions(text: &str, kind: FileKind) -> Definitions {
 pub(crate) fn own_definitions_from(
     text: &str,
     kind: FileKind,
-    start: Option<pass::Start>,
+    start: Option<&pass::Start>,
 ) -> (Definitions, pass::Start) {
     let mut d = Definitions::new();
     let end = d.harvest_from(text, kind_of(text, kind), 0, start);
@@ -3647,7 +3647,7 @@ pub(crate) fn text_hints_with(
     kind: FileKind,
     defs: &Defs,
     own: Option<Definitions>,
-    start: Option<pass::Start>,
+    start: Option<&pass::Start>,
 ) -> Arc<TextHints> {
     let named = kind;
     let kind = kind_of(text, kind);

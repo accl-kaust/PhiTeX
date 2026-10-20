@@ -638,7 +638,7 @@ impl Definitions {
         text: &str,
         kind: FileKind,
         file: u32,
-        start: Option<lex::Start>,
+        start: Option<&lex::Start>,
     ) -> lex::Start {
         // (read under the initial catcodes, a text without a backslash
         // (nor a `^^` that could make one, §355) has no control

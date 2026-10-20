@@ -347,7 +347,7 @@ pub fn analyze_from(
     kind: FileKind,
     scope: Scope<'_>,
     features: Features,
-    start: Option<Start>,
+    start: Option<&Start>,
 ) -> Pass {
     let lexed = lex::lex_from(text, kind, Some(scope), start);
     let atoms = atoms::atoms(text, &lexed.tokens);

@@ -226,7 +226,7 @@ impl Incr {
         let t = &self.text[start..start + new_len];
         let t1 = std::time::Instant::now();
         let begins = self.cache[k].start;
-        let (own, end) = crate::hints::own_definitions_from(t, FileKind::Document, begins);
+        let (own, end) = crate::hints::own_definitions_from(t, FileKind::Document, begins.as_ref());
         crate::timeline::note("incr: the chunk's own definitions", t1.elapsed());
         // (the regime it leaves is where the next chunk begins)
         if regime(end) != self.cache[k].end {
@@ -241,7 +241,7 @@ impl Incr {
         } else {
             self.cache[k - 1].out.1.clone()
         };
-        let (th, keys) = analyse(t, &defs, Some(own), begins);
+        let (th, keys) = analyse(t, &defs, Some(own), begins.as_ref());
         let e = &mut self.cache[k];
         e.units = new_units;
         e.len = new_len;
@@ -407,8 +407,11 @@ impl Incr {
                     let end = match &*slot {
                         Some(_) if start.is_none() => ends[k],
                         _ => {
-                            let (d, e) =
-                                crate::hints::own_definitions_from(t, FileKind::Document, start);
+                            let (d, e) = crate::hints::own_definitions_from(
+                                t,
+                                FileKind::Document,
+                                start.as_ref(),
+                            );
                             *slot = Some(d);
                             regime(e)
                         }
@@ -426,7 +429,7 @@ impl Incr {
                         "incr: the definitions before a chunk copied",
                         t1.elapsed(),
                     );
-                    d.harvest_from(t, FileKind::Document, *next_file, start);
+                    d.harvest_from(t, FileKind::Document, *next_file, start.as_ref());
                     *next_file = next_file.wrapping_add(1);
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     key.hash(&mut h);
@@ -503,7 +506,7 @@ impl Incr {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .take();
-            analyse(chunk_text(&parts[k]), &c.ins[k].1, own, c.starts[k])
+            analyse(chunk_text(&parts[k]), &c.ins[k].1, own, c.starts[k].as_ref())
         };
         // (the analyses' summed time, for `PHITEX_TEX_TIME`)
         let busy = std::sync::atomic::AtomicU64::new(0);
@@ -608,7 +611,7 @@ fn analyse(
     t: &str,
     defs: &Defs,
     own: Option<Definitions>,
-    start: Option<pass::Start>,
+    start: Option<&pass::Start>,
 ) -> (Arc<TextHints>, Arc<[u64]>) {
     let th = crate::hints::text_hints_with(t, FileKind::Document, defs, own, start);
     let keys = th
