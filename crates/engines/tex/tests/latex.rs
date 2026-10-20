@@ -1079,6 +1079,10 @@ latexmk_tests! {
     // (the first object, an open action, fixes the PDF version there)
     latexmk_catalog_openaction_j1: "catalog-openaction", 1;
     latexmk_catalog_openaction_j8: "catalog-openaction", 8;
+    // (job-written files read line by line, and a tool's output named as
+    // a file the job also writes)
+    latexmk_topic_units_j1: "topic-units", 1;
+    latexmk_topic_units_j8: "topic-units", 8;
 }
 
 /// What BibTeX and makeindex say reaches the build's diagnostics as

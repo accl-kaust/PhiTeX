@@ -817,7 +817,8 @@ fn file_node(
     }
     if per_field {
         let ds = ds.as_deref().unwrap_or_default();
-        let mut keys = Vec::new();
+        // (the file exists, whatever its lines define)
+        let mut keys = vec![v.str(crate::api::WRITTEN_KEY)];
         let trace = crate::exec::obs_flag!("PHITEX_AUX_TRACE");
         for (f, val) in ds {
             let id = crate::api::wdef_id(name, f);

@@ -1,0 +1,45 @@
+% Bibliography units: each unit's file the job writes is copied line by
+% line (\openin, \read) and compared with its copy, a file of the same
+% name as a tool's output is written by the job and then made by the tool.
+%%
+%% This is file `sample.tex',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% bibtopic.dtx  (with options: `sample.tex')
+%% ----------------------------------------
+%% Example TeX file for the documentation
+%% of the bibtopic package
+%% Copyright (C) 1998-2000 P. Basso, S. Ulrich
+%%               2001-2004 S. Ulrich
+%% 
+%% Please send bug reports to: <stefanulrich@users.sourceforge.net>
+%% 
+%% See bibtopic.ins  for the copyright details.
+%% 
+\documentclass[10pt]{article}
+\usepackage{bibtopic}
+\begin{document}
+\bibliographystyle{alpha}
+
+\section{Testing}
+Let's cite all the books: \cite{ColBenh:93} and
+\cite{Munt:93}; and an article: \cite{RouxSmart:95}.
+
+\begin{btSect}{books}
+\section{References from books}
+\btPrintCited
+\end{btSect}
+
+\begin{btSect}[plain]{articles}
+\section{References from articles}
+\btPrintCited
+
+\section{Articles not cited}
+\btPrintNotCited
+\end{btSect}
+\end{document}
+\endinput
+%%
+%% End of file `sample.tex'.

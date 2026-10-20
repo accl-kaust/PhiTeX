@@ -2545,7 +2545,11 @@ impl Graph {
                 .wkeys_guess
                 .iter()
                 .filter(|(n, _)| n == name)
-                .flat_map(|(_, ks)| ks.iter().map(|k| wdef_id(name, k)))
+                .flat_map(|(_, ks)| {
+                    ks.iter()
+                        .filter(|k| *k != WRITTEN_KEY)
+                        .map(|k| wdef_id(name, k))
+                })
                 .collect();
             for k in keys {
                 if !self.wdefs.contains(&k) {
@@ -3244,6 +3248,12 @@ pub(crate) fn wdef_id(file: &str, f: &str) -> String {
 pub(crate) fn wdef_field(k: &str) -> &str {
     k.rsplit('\u{1}').next().unwrap_or(k)
 }
+
+/// The first key of a written file's key set (`wkeys:<name>`) when the
+/// job wrote the file, whatever its lines define: the file exists (TeX
+/// finds a file the job wrote though no line of it defines anything);
+/// no field's.
+pub(crate) const WRITTEN_KEY: &str = "\u{2}written";
 
 /// The value a written file's `wkeys:<name>` takes when the file is read
 /// back as its text (`wfile:<name>`): a line written to it does more than
@@ -5300,7 +5310,11 @@ impl Build {
         written_defs(v, acc("streams"))
             .into_iter()
             .filter(|(n, _)| !text.contains(n))
-            .map(|(n, ds)| (n, ds.into_iter().map(|(f, _)| f).collect()))
+            .map(|(n, ds)| {
+                let mut ks = vec![WRITTEN_KEY.to_owned()];
+                ks.extend(ds.into_iter().map(|(f, _)| f));
+                (n, ks)
+            })
             .collect()
     }
 

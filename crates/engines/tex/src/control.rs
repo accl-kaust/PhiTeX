@@ -1302,6 +1302,15 @@ impl Run<'_, '_> {
                 self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
                 return Ok(());
             }
+            // (so too a file the job wrote a round before and reads back
+            // per field: a test of the stream reads whether it exists,
+            // not its text)
+            if self.get(&format!("wopen:{key}"))?.is_none() && self.written_per_field(&key)? {
+                if self.file_lazy(&key)?.is_some() {
+                    self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
+                }
+                return Ok(());
+            }
             let Some(x) = self.read_file(&key)? else {
                 return Ok(());
             };
