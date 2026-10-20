@@ -1,0 +1,11 @@
+% A counter's total read back from the file the job writes by a line that allocates the
+% counter where it is read (the read-back point) unless it is defined
+% there, then sets it: the line is read under the state at that point, in
+% which the counter is not defined yet (it is declared after it).
+\documentclass{article}
+\usepackage{totcount}
+\begin{document}
+\newtotcounter{yourcount}
+Total: \total{yourcount}.
+\addtocounter{yourcount}{5}
+\end{document}

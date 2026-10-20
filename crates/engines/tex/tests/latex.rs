@@ -1069,6 +1069,10 @@ latexmk_tests! {
     // the routine reads the column height and page state it leaves)
     latexmk_ams_index_j1: "amsidx", 1;
     latexmk_ams_index_j8: "amsidx", 8;
+    // (a line read back under the state at its read-back point: a
+    // register it allocates unless defined there, declared after it)
+    latexmk_total_counter_j1: "total-counter", 1;
+    latexmk_total_counter_j8: "total-counter", 8;
 }
 
 /// What BibTeX and makeindex say reaches the build's diagnostics as

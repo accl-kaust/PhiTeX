@@ -685,7 +685,19 @@ pub(crate) struct Run<'c, 'a> {
     /// level): what the run defines while it is still on the input
     /// stack keeps its value at the read-back ([`Run::note_pre`]).
     pub read_back_at: Option<crate::input::Level>,
+    /// This run is the read-back point of a job-written file
+    /// ([`Run::mark_read_point`]): what it defines from there to its end
+    /// keeps its value there (`wpre:<field>`, [`Run::note_pre`]), not only
+    /// while the macro that read the file runs.
+    pub read_point_here: bool,
+    /// While a line is interpreted ([`Run::interpret_line`]): the node
+    /// where its file is read back (`wpoint:<file>`), whose state the
+    /// line's reads see.
+    pub interp_point: Option<phitex_defuse::NodeId>,
+    /// [`Run::revert_read_back`]'s values by location, for reads at
+    /// [`Run::interp_point`] (`pre_memo_at`).
     pub pre_memo: phitex_defuse::FxHashMap<Loc, Option<ValueId>>,
+    pub pre_memo_at: Option<phitex_defuse::NodeId>,
     /// Errors since the last paragraph ended (§76 `error_count`, reset by
     /// `end_graf`, §1096): at 100 the job stops (§82).
     pub error_count: u32,
@@ -846,7 +858,10 @@ impl<'c, 'a> Run<'c, 'a> {
             closed: Vec::new(),
             read_back_done: false,
             read_back_at: None,
+            read_point_here: false,
+            interp_point: None,
             pre_memo: phitex_defuse::FxHashMap::default(),
+            pre_memo_at: None,
             error_count: 0,
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
@@ -914,15 +929,18 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// A job-written line is read as the next round's read-back reads
-    /// it: in the state before this round's read-back took effect. The
-    /// first read of a read-back field in the line gets the value the
-    /// read-back replaced (`wpre:<field>`, left by [`Run::read_back`]),
-    /// and of a field the reading run defined after it, its value there
-    /// ([`Run::note_pre`]),
-    /// so a line whose effect depends on the field (biblatex's
-    /// `\xifinlist`-guarded `\listxadd`, `\ifcsundef`-guarded
-    /// `\csgdef`) defines it as the reading run will, not as this run,
-    /// which already holds the previous round's value, would.
+    /// it: in the state at its read-back point, before this round's
+    /// read-back took effect. The first read of a field in the line gets
+    /// the value the read-back replaced (`wpre:<field>`, left by
+    /// [`Run::read_back`]), or of a field the reading run defined after
+    /// the point, its value there ([`Run::note_pre`]); of any other
+    /// field, its value at the node that reads the file back
+    /// ([`Run::interp_point`], an engine read at that position), so a
+    /// line whose effect depends on a field defines it as the reading run
+    /// will, not as this run, which holds the previous round's read-back
+    /// (a list appended to unless it holds the item) or what the text
+    /// defined since the point (a register allocated after it, a command
+    /// a conditional in the line tests), would.
     #[inline(never)]
     fn revert_read_back(&mut self, loc: Loc) -> R<()> {
         let Some(done) = &mut self.interp else {
@@ -934,17 +952,22 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.st.defined_after(loc, self.interp_base) {
             return Ok(());
         }
+        if self.pre_memo_at != self.interp_point {
+            self.pre_memo.clear();
+            self.pre_memo_at = self.interp_point;
+        }
         let pre = if let Some(&p) = self.pre_memo.get(&loc) {
             p
         } else {
-            let f = self.loc_field(loc);
-            let name = crate::val::field_name(self.v, f);
-            // (a read-back field, or one the reading run defined after
-            // the read-back: [`Run::note_pre`])
-            let p = if name.starts_with("wpre:") {
-                None
-            } else {
-                self.get(&format!("wpre:{name}"))?
+            let p = match self.pre_value(loc) {
+                Ok(p) => p,
+                Err(h) => {
+                    // (read again once what it waits on is there)
+                    if let Some(d) = &mut self.interp {
+                        d.remove(&loc);
+                    }
+                    return Err(h);
+                }
             };
             self.pre_memo.insert(loc, p);
             p
@@ -952,7 +975,14 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(p) = pre {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 let name = crate::val::field_name(self.v, self.loc_field(loc));
-                eprintln!("aux-trace: revert {name} for the line's read");
+                eprintln!(
+                    "aux-trace: revert {name} for the line's read: {}",
+                    if p == ValueId::UNIT {
+                        "absent".to_owned()
+                    } else {
+                        crate::val::show_def(self.v, p)
+                    }
+                );
             }
             // (read in place of the value, not a definition of the line:
             // only what the line defines on it is published)
@@ -960,6 +990,49 @@ impl<'c, 'a> Run<'c, 'a> {
                 .preload(loc, if p == ValueId::UNIT { None } else { Some(p) });
         }
         Ok(())
+    }
+
+    /// The value location `loc` has at the read-back point of the line
+    /// being interpreted ([`Run::revert_read_back`]): `UNIT` for absent,
+    /// `None` where the line reads it as this run holds it (no read-back
+    /// point known, the point this run itself, a record's cell, the
+    /// run's own bookkeeping).
+    fn pre_value(&mut self, loc: Loc) -> R<Option<ValueId>> {
+        let f = self.loc_field(loc);
+        let name = crate::val::field_name(self.v, f);
+        if name.starts_with("wpre:") {
+            return Ok(None);
+        }
+        // (a read-back field, or one the reading run defined after the
+        // read-back, [`Run::note_pre`]: as this run holds it, the line
+        // written in the reading run itself, or no point known)
+        let Some(at) = self.interp_point.filter(|&n| n != self.cx.node()) else {
+            return self.get(&format!("wpre:{name}"));
+        };
+        if crate::fields::record_of(loc as usize).is_some() || !is_read_back_definition(&name) {
+            return Ok(None);
+        }
+        // (at the point: the reading run's own `wpre:`, else the field as
+        // that node leaves it)
+        let pf = self
+            .ops
+            .fields
+            .get_at(self.v, self.cx.values_epoch(), &format!("wpre:{name}"));
+        for g in [pf, f] {
+            let r = self.cx.use_field_at(g, Some(at));
+            if r.is_err() {
+                note_stop(self.op_name(), g);
+            }
+            match r? {
+                phitex_defuse::FieldAt::Def(x, by) if g == f || by == Some(at) => {
+                    return Ok(Some(x));
+                }
+                phitex_defuse::FieldAt::Unset if g == f => return Ok(Some(ValueId::UNIT)),
+                phitex_defuse::FieldAt::Gone => return Ok(None),
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     /// An engine read of field `f` outside the state table (by name): a
@@ -1387,13 +1460,16 @@ impl<'c, 'a> Run<'c, 'a> {
                 .iter()
                 .any(|l| l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b)
         });
-        if !still {
+        // (the run that is a file's read-back point: to its end, as the
+        // lines read the rest of the state at the end of its node,
+        // [`Run::pre_value`])
+        if !still && !self.read_point_here {
             self.read_back_done = false;
             return;
         }
         let f = self.loc_field(loc);
         let name = crate::val::field_name(v, f);
-        if name.starts_with("wpre:") || name.starts_with("cat:") {
+        if name.starts_with("wpre:") || name.starts_with("wpoint:") || name.starts_with("cat:") {
             return;
         }
         let pre = v.field(&format!("wpre:{name}"));
@@ -1872,6 +1948,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if x.is_none() && self.interp.is_none() {
             if per_field.is_some() {
                 self.note_read_point();
+                self.mark_read_point(key)?;
             } else if !self.read_back_done || self.read_point_pending.is_some() {
                 self.note_read_point();
                 if self.read_back_done {
@@ -2135,14 +2212,48 @@ impl<'c, 'a> Run<'c, 'a> {
     /// from a macro still running: that lookup was its read-back point
     /// (a macro that looks for the file it then writes: the first round's
     /// lines are read back at that point next round).
-    fn note_absent_read_point(&mut self, name: &str) {
+    fn note_absent_read_point(&mut self, name: &str) -> R<()> {
         if self.read_point_pending.as_deref() != Some(name) {
-            return;
+            return Ok(());
         }
         self.read_point_pending = None;
         for (loc, old) in std::mem::take(&mut self.pending_pre) {
             self.set_pre(loc, old);
         }
+        self.mark_read_point(name)
+    }
+
+    /// This run's node is where file `key` is read back (or looked for
+    /// in vain, the file written later): `wpoint:<key>`, its node, which
+    /// the lines written to the file read the state at
+    /// ([`Run::pre_value`]). The first such point reaching here stands
+    /// (a file read back again later, to compare, is no new point).
+    pub(crate) fn mark_read_point(&mut self, key: &str) -> R<()> {
+        if self.interp.is_some() {
+            return Ok(());
+        }
+        let f = format!("wpoint:{key}");
+        if self.get(&f)?.is_some() {
+            return Ok(());
+        }
+        let n = self.cx.node().raw();
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            eprintln!("aux-trace: read-back point of {key}: node {n}");
+        }
+        self.set(&f, self.v.int(i64::from_ne_bytes(n.to_ne_bytes())), true);
+        self.read_point_here = true;
+        self.read_back_done = true;
+        Ok(())
+    }
+
+    /// The read-back point of file `name` reaching here
+    /// ([`Run::mark_read_point`]).
+    pub(crate) fn read_point_of(&mut self, name: &str) -> R<Option<phitex_defuse::NodeId>> {
+        let v = self.v;
+        Ok(self
+            .get(&format!("wpoint:{name}"))?
+            .and_then(|x| v.as_int(x))
+            .map(|n| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes()))))
     }
 
     /// `\input` of a file whose read-back only defines: the
@@ -2219,6 +2330,7 @@ impl<'c, 'a> Run<'c, 'a> {
             }
         }
         self.note_read_point();
+        self.mark_read_point(key)?;
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: read back {key} in node {} ({:?}): levels {:?}",
@@ -2374,6 +2486,9 @@ impl<'c, 'a> Run<'c, 'a> {
             && self.nest.len() == nest_len + 1
             && self.nest.last().is_some_and(|l| l.list.is_empty())
             && self.conds == conds;
+        if !self.interp_plain && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            self.trace_more_than_define(res.is_ok(), (nc, nk, nest_len), &conds);
+        }
         self.interp = None;
         self.input = input;
         self.st = st;
@@ -2394,6 +2509,37 @@ impl<'c, 'a> Run<'c, 'a> {
         self.kind_memo = None;
         res?;
         Ok((!short).then(|| v.list(made)))
+    }
+
+    /// (observe) `PHITEX_AUX_TRACE`: what made the line just interpreted
+    /// more than definitions ([`Run::interpret_line`]), against the
+    /// contributions, kids and levels it began with (`at`) and the
+    /// conditionals open then.
+    fn trace_more_than_define(&self, ok: bool, at: (usize, usize, usize), conds: &[u8]) {
+        let (nc, nk, nest_len) = at;
+        let v = self.v;
+        let log = v.field("log");
+        let what: Vec<String> = self
+            .contribs
+            .get(nc..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|&&(f, _)| f != log)
+            .map(|&(f, x)| {
+                format!(
+                    "{} {}",
+                    crate::val::field_name(v, f),
+                    v.render(x).chars().take(80).collect::<String>()
+                )
+            })
+            .collect();
+        eprintln!(
+            "aux-trace: the line does more than define: ran to its end {ok}, contributed {what:?}, kids {}, levels {:?} (list {}), conditionals {:?} (were {conds:?})",
+            self.kids.len().saturating_sub(nk),
+            self.nest.len().checked_sub(nest_len + 1),
+            self.nest.last().map_or(0, |l| l.list.len()),
+            self.conds,
+        );
     }
 
     /// Whether the run contributed since its `n`th contribution anything
@@ -2419,7 +2565,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// evaluation waits on the client for it.
     pub(crate) fn written_decl(&mut self, name: &str) -> R<()> {
         if self.interp.is_none() {
-            self.note_absent_read_point(name);
+            self.note_absent_read_point(name)?;
         }
         if self.written_known(name) {
             return Ok(());
@@ -4039,6 +4185,7 @@ pub(crate) struct Parked {
     muts: u64,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
+    read_point_here: bool,
     text_written: Vec<String>,
     read_point_pending: Option<String>,
     pending_pre: Vec<(Field, ValueId)>,
@@ -4178,6 +4325,7 @@ impl Run<'_, '_> {
             muts: self.muts,
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
+            read_point_here: self.read_point_here,
             text_written: std::mem::take(&mut self.text_written),
             read_point_pending: self.read_point_pending.take(),
             pending_pre: std::mem::take(&mut self.pending_pre)
@@ -4275,6 +4423,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.muts = p.muts;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
+        r.read_point_here = p.read_point_here;
         r.text_written = p.text_written;
         r.read_point_pending = p.read_point_pending;
         r.pending_pre = p
@@ -4414,7 +4563,7 @@ impl Run<'_, '_> {
 /// ...) is never a read-back definition, nor are category codes (the
 /// read-back reads under `\makeatletter`).
 fn is_read_back_definition(name: &str) -> bool {
-    const NOT: [&str; 15] = [
+    const NOT: [&str; 16] = [
         "cat:",
         "pdf:",
         "pg:",
@@ -4422,6 +4571,7 @@ fn is_read_back_definition(name: &str) -> bool {
         "write:",
         "wopen:",
         "wpre:",
+        "wpoint:",
         "read:",
         "aftertoken",
         "deadcycles",
