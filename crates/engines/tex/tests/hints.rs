@@ -269,3 +269,20 @@ fn a_control_symbol_assumes_no_letter() {
         "the run did not check that `@` is no letter"
     );
 }
+
+/// `\expandafter` steps over its first token reading of its meaning only
+/// whether it is `\outer` (§336, §368): an outer one is still forbidden
+/// where a definition is being scanned.
+#[test]
+fn a_stepped_over_outer_macro_is_still_forbidden() {
+    let _g = lock();
+    let b = build(
+        "\\outer\\def\\o{}\n\\edef\\y{\\expandafter\\o\\relax}\n\\bye\n",
+        false,
+    );
+    let errors: Vec<String> = b.diagnostics().iter().map(|d| d.message.clone()).collect();
+    assert!(
+        errors.iter().any(|m| m.contains("Forbidden control sequence")),
+        "no outer error: {errors:?}"
+    );
+}

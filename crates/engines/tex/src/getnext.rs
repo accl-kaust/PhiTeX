@@ -59,6 +59,15 @@ impl Run<'_, '_> {
         // internal marker, and no alignment entry to watch for)
         if let Some(tok) = self.input.next_plain_of_top() {
             self.set_cur_flag(tok);
+            if self.cur.cmd >= cmd::OUTER_CALL
+                && self.cur.cmd <= cmd::LONG_OUTER_CALL
+                && (self.scanner.is_some() || self.in_skip)
+            {
+                if let Err(h) = self.outer_validity() {
+                    self.raise(h);
+                }
+                return true;
+            }
             if self.aopen != 0
                 && ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0
             {
@@ -192,6 +201,13 @@ impl Run<'_, '_> {
                 return Ok(true);
             }
             self.set_cur(t)?;
+            if self.cur.cmd >= cmd::OUTER_CALL
+                && self.cur.cmd <= cmd::LONG_OUTER_CALL
+                && (self.scanner.is_some() || self.in_skip)
+            {
+                self.outer_validity()?;
+                return Ok(true);
+            }
             if self.aopen != 0
                 && matches!(
                     self.cur.cmd,
@@ -244,6 +260,91 @@ impl Run<'_, '_> {
     pub(crate) fn get_next_or_end(&mut self) -> R<()> {
         self.next_or_end();
         self.ck()
+    }
+
+    /// Where a line is now, for a message that names it later: the
+    /// line's own number where it has one, else this run's lines begun
+    /// so far ([`Run::input_line_no`] reads the rest when needed).
+    pub(crate) fn line_mark(&self) -> (Option<i64>, i64) {
+        match self.file_line_here() {
+            Some(crate::run::FileLine::Known(n)) => (Some(n), 0),
+            Some(crate::run::FileLine::Piece(name)) => (
+                None,
+                self.doc_lines
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(0, |&(_, k)| k),
+            ),
+            None => (Some(0), 0),
+        }
+    }
+
+    /// §336 `check_outer_validity`: an `\outer` macro (`cur`) met while
+    /// a token list is being scanned or conditional text skipped. It is
+    /// backed up to be read again and a space read in its place; a list
+    /// being scanned is a runaway, "Forbidden control sequence found
+    /// while scanning ... of \x", ended by what §339 inserts (`}` for a
+    /// definition or a text, `\par` for an argument, which then ends
+    /// without "Paragraph ended"); a skip is "Incomplete \if...; all
+    /// text was ignored after line n", ended by an inserted `\fi`.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn outer_validity(&mut self) -> R<()> {
+        let t = self.cur.tok;
+        self.back_input(t);
+        self.cur = Cur {
+            tok: Tok::ch(10, u32::from(b' ')),
+            cmd: cmd::SPACER,
+            chr: i32::from(b' '),
+        };
+        if !self.in_skip
+            && let Some((status, w)) = self.scanner
+        {
+            // §338-§339
+            let (what, ins) = match status {
+                crate::run::SCAN_DEFINING => ("definition", Tok::ch(2, u32::from(b'}'))),
+                crate::run::SCAN_MATCHING => {
+                    self.outer_call = true;
+                    ("use", crate::expand::par_tok())
+                }
+                _ => ("text", Tok::ch(2, u32::from(b'}'))),
+            };
+            let mut cs = String::new();
+            self.show_toks_into(&mut cs, std::slice::from_ref(&w))?;
+            let msg = format!(
+                "Forbidden control sequence found while scanning {what} of {}",
+                cs.trim_end()
+            );
+            self.outer_error(msg)?;
+            self.push_toks([ins]);
+            return Ok(());
+        }
+        // §336's skipping case
+        let code = self.if_codes.last().copied().unwrap_or(0);
+        let name = crate::prims::PRIMS
+            .iter()
+            .find(|&&(_, c, h)| c == cmd::IF_TEST && h == code)
+            .map_or("if", |&(n, _, _)| n);
+        let line = match self.skip_from {
+            (Some(n), _) => n,
+            (None, mine) => {
+                let now = self.line_mark().1;
+                i64::from(self.input_line_no()?) - (now - mine)
+            }
+        };
+        let msg = format!("Incomplete \\{name}; all text was ignored after line {line}");
+        self.outer_error(msg)?;
+        self.push_toks([crate::expand::frozen_fi_tok()]);
+        Ok(())
+    }
+
+    fn outer_error(&mut self, msg: String) -> R<()> {
+        if self.interp.is_some() {
+            self.interp_errs.push(msg);
+            Ok(())
+        } else {
+            self.log("error", &msg)
+        }
     }
 
     /// §336–§339 at the end of a file (§362), or of an interpreted one: a token list being

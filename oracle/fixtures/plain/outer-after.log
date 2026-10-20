@@ -1,0 +1,25 @@
+This is TeX, Version 3.141592653 (TeX Live 2026/Arch Linux) (preloaded format=tex 2026.10.13)  20 OCT 2026 18:43
+**outer-after.tex
+(./outer-after.tex
+Runaway definition?
+->
+! Forbidden control sequence found while scanning definition of \y.
+<inserted text> 
+                }
+<to be read again> 
+                   \o 
+l.2 \edef\y{\expandafter\o
+                          \relax}
+I suspect you have forgotten a `}', causing me
+to read past where you wanted me to stop.
+I'll try to recover; but if the error is serious,
+you'd better type `E' or `X' now and fix your file.
+
+! Too many }'s.
+l.2 \edef\y{\expandafter\o\relax}
+                                 
+You've closed more groups than you opened.
+Such booboos are generally harmless, so keep going.
+
+[1] )
+Output written on outer-after.dvi (1 page, 216 bytes).

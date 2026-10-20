@@ -1992,6 +1992,7 @@ impl Graph {
         let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
+        let outer_proj = eng.register_projection(Arc::new(crate::val::outer_projection));
         // (handles held outside the graph: pinned, or a value sweep
         // frees them while a run still defines through them)
         for f in fields.handles() {
@@ -2020,6 +2021,7 @@ impl Graph {
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
             class_proj,
+            outer_proj,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);

@@ -924,6 +924,16 @@ pub(crate) fn class_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(c)
 }
 
+/// Whether a meaning is an `\outer` macro (§336), as a lookup that only
+/// steps over its token needs it (`\expandafter`'s first, §368): get_next
+/// checks an outer one's validity, nothing else of it is used. A pure
+/// projection for the engine: a redefinition that keeps a name outer, or
+/// not, leaves such a reader standing.
+pub(crate) fn outer_projection(x: ValueId, v: &Values) -> ValueId {
+    let outer = matches!(Mean::decode(v, Some(x)), Mean::Macro(m) if m.flags & 2 != 0);
+    v.int(i64::from(outer))
+}
+
 /// A meaning (§222): what a control sequence or active character is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Mean {
@@ -1412,6 +1422,10 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
     }
     let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(v);
     out.push(("cs:\u{10FFFE}relax".to_owned(), relax));
+    // (`frozen_fi`, §222: what §336 inserts to end a conditional skipped
+    // into an outer macro)
+    let fi = Mean::Prim("fi", cmd::FI_OR_ELSE, crate::expand::FI_CODE).encode(v);
+    out.push(("cs:\u{10FFFE}fi".to_owned(), fi));
     out.push((
         "cs:\u{10FFFE}endgraf".to_owned(),
         v.list(vec![v.str("prim"), v.str("\u{10FFFE}endgraf")]),
