@@ -2832,15 +2832,20 @@ impl Run<'_, '_> {
 
     /// `\vsplit` (§977): the box split off register `n` at height `h`.
     fn vsplit(&mut self, n: i32, h: i32) -> R<Option<ValueId>> {
+        // (§977, e-TeX's `vsplit_init`: the split marks are cleared first,
+        // whatever the box holds, a void box's split leaving none)
         let Some(b) = self.box_reg(n)? else {
+            crate::etex::split_marks(self, &[], &Side::default())?;
             return Ok(None);
         };
         let v = self.v;
         let mut side = Side::default();
         let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
+            crate::etex::split_marks(self, &[], &Side::default())?;
             return Ok(None);
         };
         if bx.kind != BoxKind::V {
+            crate::etex::split_marks(self, &[], &Side::default())?;
             return Ok(None);
         }
         let stk = self.gpar(Par::splittopskip)?;

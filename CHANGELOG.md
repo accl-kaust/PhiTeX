@@ -87,6 +87,15 @@ lists what has to be green before it reaches `main`.
   and `-mltex` are refused.
 - **The `.log`:** not byte-identical to pdfTeX's. Errors, warnings and
   pages are reported, but the transcript's details differ.
+- **A page that fires inside a group or a display of the text around
+  it:** the page is shipped after the rest of that text has run, so the
+  rest reads the state from before the output routine. The log's page
+  numbers there (a warning's "on page N") can be one too low, and so
+  can `\thepage` read in such a spot (repro:
+  `bench/r4/docs/page-align.tex`). No PDF of the test documents
+  changes. The finisher's check of such a page also misses reads a
+  resumed piece took from its continuation (they are preloaded, so
+  `read_values` skips them).
 - **Speed:** the alpha's bar is exactness. A cold build of a large
   document is not yet faster than pdflatex, and an edit of one does not
   yet take milliseconds. The release gate's numbers are recorded in
