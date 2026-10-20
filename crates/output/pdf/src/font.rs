@@ -311,14 +311,16 @@ impl PdfState {
         file: &std::sync::Arc<[u8]>,
         fd: &mut Fd,
     ) -> Result<t1::Embedded, PdfError> {
-        type Made = (t1::Embedded, t1::FontDesc, BTreeSet<[u8; 6]>, i32);
+        type Made = (t1::Embedded, t1::FontDesc, i32);
         static MEMO: std::sync::Mutex<Vec<(u64, std::sync::Arc<Made>)>> =
             std::sync::Mutex::new(Vec::new());
+        // (the subset tags taken before are not in the key: the program
+        // depends on them only through the tag chosen, chosen again here
+        // from what chose it, as `make_subset_tag` would)
         let key = crate::digest::debug_hash(&(
             crate::digest::Blob(file),
             &fd.fm,
             &fd.desc,
-            &self.subset_tags,
             self.last_arg_other_subr3,
         ));
         let hit = MEMO
@@ -328,10 +330,15 @@ impl PdfState {
             .find(|e| e.0 == key)
             .map(|e| e.1.clone());
         if let Some(m) = hit {
+            let mut e = m.0.clone();
             fd.desc = m.1.clone();
-            self.subset_tags.clone_from(&m.2);
-            self.last_arg_other_subr3 = m.3;
-            return Ok(m.0.clone());
+            if let Some((at, glyphs, name)) = &e.tag_at {
+                let tag = t1::make_subset_tag(glyphs, name, &mut self.subset_tags);
+                e.bytes[*at..*at + 6].copy_from_slice(&tag);
+                fd.desc.subset_tag = Some(tag);
+            }
+            self.last_arg_other_subr3 = m.2;
+            return Ok(e);
         }
         let e = t1::write_t1(
             file,
@@ -340,12 +347,7 @@ impl PdfState {
             &mut self.subset_tags,
             &mut self.last_arg_other_subr3,
         )?;
-        let made = std::sync::Arc::new((
-            e.clone(),
-            fd.desc.clone(),
-            self.subset_tags.clone(),
-            self.last_arg_other_subr3,
-        ));
+        let made = std::sync::Arc::new((e.clone(), fd.desc.clone(), self.last_arg_other_subr3));
         let mut m = MEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if m.len() >= 256 {
             m.remove(0);

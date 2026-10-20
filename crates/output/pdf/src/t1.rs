@@ -190,6 +190,10 @@ pub struct FontDesc {
 /// What `writet1` leaves in `fb` and the lengths.
 #[derive(Clone)]
 pub struct Embedded {
+    /// Where the subset tag is in `bytes` and what chose it (the glyphs
+    /// and the font name given to [`make_subset_tag`]): the program is
+    /// the same for any tag but those six bytes.
+    pub tag_at: Option<(usize, BTreeSet<Vec<u8>>, Vec<u8>)>,
     /// The font program.
     pub bytes: Vec<u8>,
     /// `t1_length1`.
@@ -230,6 +234,9 @@ struct T1<'a> {
     length1: usize,
     length2: usize,
     fontname_offset: usize,
+    /// Where the subset tag went and what chose it (`fontname_offset`,
+    /// the glyphs and the font name `make_subset_tag` was given).
+    tag_at: Option<(usize, BTreeSet<Vec<u8>>, Vec<u8>)>,
     encoding: Encoding,
     fm: &'a MapEntry,
     fd: &'a mut FontDesc,
@@ -415,6 +422,7 @@ impl<'a> T1<'a> {
             length1: 0,
             length2: 0,
             fontname_offset: 0,
+            tag_at: None,
             encoding: Encoding::Builtin,
             fm,
             fd,
@@ -1051,6 +1059,11 @@ impl<'a> T1<'a> {
             let tag = make_subset_tag(&self.fd.gl_tree, &self.fd.fontname, tags);
             self.fd.subset_tag = Some(tag);
             self.fb[self.fontname_offset..self.fontname_offset + 6].copy_from_slice(&tag);
+            self.tag_at = Some((
+                self.fontname_offset,
+                self.fd.gl_tree.clone(),
+                self.fd.fontname.clone(),
+            ));
         }
         if self.encoding == Encoding::Standard {
             self.puts(b"/Encoding StandardEncoding def\n");
@@ -1748,6 +1761,7 @@ pub fn write_t1(
         t.include()?;
     }
     Ok(Embedded {
+        tag_at: t.tag_at.take(),
         length1: t.length1,
         length2: t.length2,
         length3: 0,
