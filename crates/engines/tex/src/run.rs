@@ -3926,6 +3926,9 @@ impl Run<'_, '_> {
         if !self.rewind() {
             return None;
         }
+        if crate::exec::obs_flag!("PHITEX_PARK_TRACE") {
+            eprintln!("park-trace: park {}: {}", self.cx.node().raw(), self.input_where());
+        }
         let mut segs = Vec::new();
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         for l in input.levels.iter().rev() {
@@ -4065,6 +4068,9 @@ impl<'c, 'a> Run<'c, 'a> {
         r.input.text = p.segs;
         r.input.text_at = 0;
         r.parked_levels = p.nlev;
+        if crate::exec::obs_flag!("PHITEX_PARK_TRACE") {
+            eprintln!("park-trace: resume {}: {}", r.cx.node().raw(), r.input_where());
+        }
         r.nest = p
             .nest
             .into_iter()
@@ -4142,6 +4148,45 @@ impl Run<'_, '_> {
     /// The innermost file being read (§304): the top file level of the
     /// input stack (a line of it, or the rest of a file read here), else
     /// the file the node's token levels were left in (its `t` frame).
+    /// Debug (`PHITEX_PARK_TRACE`): the input levels top first (a line's
+    /// position, state, end character and the text around its position)
+    /// and the segments of the text not reached.
+    pub(crate) fn input_where(&self) -> String {
+        let line = |s: &crate::input::Line| {
+            let a = s.loc.saturating_sub(24);
+            let b = (s.loc + 24).min(s.buf.len());
+            let t: String = s.buf[a.min(b)..b]
+                .iter()
+                .map(|&c| char::from_u32(c).unwrap_or('?'))
+                .collect();
+            format!(
+                "line loc {} len {} state {} endch {} starts {} ends {} [{t:?}]",
+                s.loc,
+                s.buf.len(),
+                s.state,
+                s.endch,
+                s.starts,
+                s.ends
+            )
+        };
+        let mut out = Vec::new();
+        for l in self.input.levels.iter().rev() {
+            out.push(match l.kind {
+                crate::input::kind::TOKS => format!("toks {}", l.b.saturating_sub(l.a)),
+                crate::input::kind::LINE => line(self.input.line(*l)),
+                _ => "file".to_owned(),
+            });
+        }
+        for s in self.input.text_rest() {
+            out.push(match s {
+                Seg::Toks(t) => format!("text toks {}", t.len()),
+                Seg::Line(l) => format!("text {}", line(l)),
+                Seg::File(_) => "text file".to_owned(),
+            });
+        }
+        format!("{} | cur {:?} | text_at {} parked_levels {}", out.join(" / "), self.cur.tok, self.input.text_at, self.parked_levels)
+    }
+
     pub(crate) fn file_line_here(&self) -> Option<FileLine> {
         let line = |s: &crate::input::Line| {
             if s.lineno > 0 {
