@@ -168,3 +168,11 @@ fn outer_validity() {
         ("plain", "outer-after", false, true),
     ]);
 }
+
+/// A slice whose hint claims the blank line after it (its paragraph to
+/// end there) but whose run takes nothing: the blank line is still read,
+/// as its own node, and the lines after it numbered as TeX numbers them.
+#[test]
+fn line_claims() {
+    run(&[("plain", "lineclaim", false, true)]);
+}

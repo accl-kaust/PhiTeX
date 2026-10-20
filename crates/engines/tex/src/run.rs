@@ -3848,10 +3848,12 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cut
             );
         }
-        // (nothing to claim, no effect: no call, the engine's default)
-        if n != 0 {
-            self.cx.claim(n);
-        }
+        // (what the run took, none included: a declared claim is a
+        // guess, and a run that makes no claim is held to it, so the
+        // siblings it declared it would take and did not read stayed
+        // taken, unread; the engine drops a claim of none where none
+        // was declared or held)
+        self.cx.claim(n);
         if crate::exec::obs_flag!("PHITEX_TEX_TRACE")
             && self.effect != Effect::None
             && crate::hints::effect_none(&self.ops.hints, self.v, &self.cx.args())
