@@ -2254,7 +2254,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let mut made: Vec<ValueId> = self
             .st
-            .defined_since(v, base, gids)
+            .defined_since_in_order(v, base, gids)
             .into_iter()
             .filter_map(|(loc, x, l)| Some((self.loc_field(loc), x?, l)))
             .filter(|d| is_read_back_definition(&str_of(v, d.0.0)))
