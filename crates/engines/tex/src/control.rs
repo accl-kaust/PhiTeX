@@ -1559,7 +1559,14 @@ impl Run<'_, '_> {
     /// `write_out` (§1370–§1371): the tokens expanded, to the log.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn write_out(&mut self, k: i32, body: &[Tok]) -> R<()> {
-        let s = self.expand_late(body)?;
+        let s = self.expand_late(body);
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.is_err() {
+            eprintln!(
+                "aux-trace: write_out stream {k} node {} halted expanding its text",
+                self.cx.node().raw()
+            );
+        }
+        let s = s?;
         // (web2c's §1370 change: stream 18 is a shell command)
         if k == 18 && self.int32("shellescape")? != 0 {
             return self.shell_command(&s);
