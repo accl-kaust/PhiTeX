@@ -622,12 +622,14 @@ impl Input {
                 kind::LINE => {
                     let x = &self.lines[l.a as usize];
                     into.lines.push((x.loc, x.state, x.endch, x.buf.len()));
-                    into.pushes.push(self.line_push.get(l.a as usize).copied().unwrap_or(0));
+                    into.pushes
+                        .push(self.line_push.get(l.a as usize).copied().unwrap_or(0));
                 }
                 kind::FILE => {
                     let f = &self.files[l.a as usize];
                     into.lines.push((f.off, 0, 0, f.pos_chars()));
-                    into.pushes.push(self.file_push.get(l.a as usize).copied().unwrap_or(0));
+                    into.pushes
+                        .push(self.file_push.get(l.a as usize).copied().unwrap_or(0));
                 }
                 _ => {}
             }
