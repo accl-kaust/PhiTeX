@@ -49,6 +49,24 @@ impl fmt::Debug for Blob<'_> {
     }
 }
 
+/// Bytes as the digest sees them: their length and content hash.
+pub(crate) struct Bytes<'a>(pub &'a [u8]);
+
+impl fmt::Debug for Bytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = DefaultHasher::new();
+        s.write(self.0);
+        write!(f, "bytes({},{:x})", self.0.len(), s.finish())
+    }
+}
+
+/// The hash of `x`'s `Debug` form.
+pub(crate) fn debug_hash(x: &dyn fmt::Debug) -> u64 {
+    let mut w = Writer(DefaultHasher::new());
+    let _ = fmt::write(&mut w, format_args!("{x:?}"));
+    w.0.finish()
+}
+
 /// An optional blob.
 pub(crate) fn opt(b: Option<&Arc<[u8]>>) -> Option<Blob<'_>> {
     b.map(Blob)
@@ -337,6 +355,7 @@ mod tests {
                 kerns: Vec::new(),
                 params: Vec::new(),
             },
+            metrics_hash: 0,
             map: None,
             file: Some(Arc::from(name.repeat(1000))),
             enc: None,
