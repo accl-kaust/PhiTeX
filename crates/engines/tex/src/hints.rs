@@ -4580,15 +4580,19 @@ mod tests {
     fn reset_pending_across_slices() {
         // (`\\parshape` set in one slice, the paragraph ended in the
         // next: that one's `normal_paragraph` resets it, §1070; the one
-        // after finds it reset already)
-        let t = "\\parshape 1 0pt 100pt text\n\\input x\nmore text\\par\nthird\\par\n";
+        // after finds it reset already; the paragraph's first character
+        // begins a slice of its own, a paragraph start being a cut)
+        let t = "\\parshape 1 0pt 100pt text\nmore text\\par\nthird\\par\n";
         let text = analyse(t, FileKind::Document, no_defs());
-        let state = |needle: &str| -> Vec<&'static str> {
-            let k = text
-                .slices
+        let slice = |needle: &str| -> usize {
+            text.slices
                 .iter()
                 .position(|&(s, e)| t[s..e].contains(needle))
-                .expect("a slice");
+                .expect("a slice")
+        };
+        assert_ne!(slice("parshape"), slice("more"), "set in one slice, ended in the next");
+        let state = |needle: &str| -> Vec<&'static str> {
+            let k = slice(needle);
             eprintln!("{needle}: {:?}", &t[text.slices[k].0..text.slices[k].1]);
             Hint::decode(&text.slice_hints[k])
                 .bound

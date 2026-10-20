@@ -9,8 +9,8 @@
 //! file its run read, each with the hash of its text (or absent). A key
 //! that no longer matches (a file changed, appeared or went) leaves the
 //! load unbounded and the next run records it anew. A record is a hint:
-//! a run that defines outside it is the engine's undeclared-definition
-//! refutation (the node then may define anything, its readers re-run)
+//! a run that defines outside it refutes it (a guess the engine widens:
+//! the node then may define anything, its readers re-run)
 //! and the run's own sets replace the record. A load never seen gets
 //! [`crate::hints::optimistic_hint`] under speculation.
 
