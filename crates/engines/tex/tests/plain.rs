@@ -154,3 +154,17 @@ fn table() {
         ("plain", "table", true, true),
     ]);
 }
+
+/// §336-§339: an `\outer` macro met while a definition, an argument or a
+/// text is scanned, or while conditional text is skipped (and stepped
+/// over by `\expandafter` there): TeX's errors and recoveries.
+#[test]
+fn outer_validity() {
+    run(&[
+        ("plain", "outer-def", false, true),
+        ("plain", "outer-use", false, true),
+        ("plain", "outer-text", false, true),
+        ("plain", "outer-skip", false, true),
+        ("plain", "outer-after", false, true),
+    ]);
+}

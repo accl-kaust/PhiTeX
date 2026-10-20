@@ -208,6 +208,10 @@ pub(crate) struct Ops {
     /// registered with the engine): a lookup that only stores its token
     /// reads the name's class, not its meaning ([`Run::class_lookup`]).
     pub class_proj: phitex_defuse::ProjId,
+    /// The outer projection of meanings ([`crate::val::outer_projection`]):
+    /// a token only stepped over reads whether its meaning is `\outer`
+    /// ([`Run::outer_lookup`]).
+    pub outer_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -537,6 +541,9 @@ pub(crate) struct Run<'c, 'a> {
     /// Inside `pass_text` (§494): a skipped text's tokens are read only
     /// to classify them (conditional, `\fi`/`\else`, or neither).
     pub in_skip: bool,
+    /// Where the conditional text being skipped began (§494's
+    /// `skip_line`, [`Run::line_mark`]).
+    pub skip_from: (Option<i64>, i64),
     /// The locations a load's run first read from the engine while
     /// skipping (`PHITEX_PKG_TRACE`: which chaining reads are skips).
     pub skip_first: Vec<Loc>,
@@ -571,6 +578,13 @@ pub(crate) struct Run<'c, 'a> {
     /// codes (the engine holds the projected reads; this run's own
     /// lookups and the cut checks need them).
     pub class_memo: phitex_defuse::FxHashMap<Loc, u8>,
+    /// Set while a token is fetched only to be stepped over
+    /// (`\expandafter`'s first, §368): a meaning not this run's own is
+    /// read only as whether it is `\outer` ([`Run::outer_lookup`]).
+    pub outer_reads: bool,
+    /// The meanings this run read as outer or not only (kept over a park
+    /// like [`Run::class_memo`]).
+    pub outer_memo: phitex_defuse::FxHashMap<Loc, bool>,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -805,6 +819,7 @@ impl<'c, 'a> Run<'c, 'a> {
             fread: Vec::new(),
             fmiss: Vec::new(),
             in_skip: false,
+            skip_from: (None, 0),
             skip_first: Vec::new(),
             rec_load: false,
             no_pull: false,
@@ -816,6 +831,8 @@ impl<'c, 'a> Run<'c, 'a> {
             font_memo: phitex_defuse::FxHashMap::default(),
             class_reads: false,
             class_memo: phitex_defuse::FxHashMap::default(),
+            outer_reads: false,
+            outer_memo: phitex_defuse::FxHashMap::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -3074,6 +3091,21 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        // (a marker of the input's own, a file's end, is never stepped
+        // over by its meaning's class: read in full)
+        if self.outer_reads
+            && !tok.as_cs().is_some_and(|n| n.starts_with('\u{10FFFE}'))
+            && self.outer_lookup(tok)? == Some(false)
+        {
+            // (not outer: get_next checks nothing of it, §336, and the
+            // caller keeps its token only)
+            self.cur = Cur {
+                tok,
+                cmd: cmd::RELAX,
+                chr: 256,
+            };
+            return Ok(());
+        }
         if self.class_reads
             && let Some(c) = self.class_lookup(tok)?
         {
@@ -3115,6 +3147,31 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         self.class_memo.insert(l, c);
         Ok(Some(c))
+    }
+
+    /// Whether `tok`'s meaning is an `\outer` macro, read through the
+    /// engine's outer projection ([`crate::val::outer_projection`]) where
+    /// the run has not bound it itself: a redefinition that keeps it
+    /// outer, or not, leaves this run standing. `None` where it is this
+    /// run's own (read in full).
+    #[inline(never)]
+    fn outer_lookup(&mut self, tok: Tok) -> R<Option<bool>> {
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(None);
+        };
+        if self.st.is_loaded(l) {
+            return Ok(None);
+        }
+        if let Some(&o) = self.outer_memo.get(&l) {
+            return Ok(Some(o));
+        }
+        let f = self.loc_field(l);
+        let Some(x) = self.cx.use_field_proj(f, self.ops.outer_proj)? else {
+            return Ok(None);
+        };
+        let o = int_of(self.v, x) != 0;
+        self.outer_memo.insert(l, o);
+        Ok(Some(o))
     }
 
     /// A NUL read from a document line: the mark of a comment of the
@@ -3162,7 +3219,12 @@ impl<'c, 'a> Run<'c, 'a> {
         // name's number in the process's interner, which the threads'
         // schedule orders; every one, whether or not the table still
         // holds its field, as after a park)
-        let ls: Vec<Loc> = self.class_memo.keys().copied().collect();
+        let ls: Vec<Loc> = self
+            .class_memo
+            .keys()
+            .chain(self.outer_memo.keys())
+            .copied()
+            .collect();
         let mut fs: Vec<Field> = ls.into_iter().map(|l| self.loc_field(l)).collect();
         fs.sort_unstable_by_key(|f| f.0.raw());
         fs
@@ -4163,6 +4225,7 @@ pub(crate) struct Parked {
     /// The meanings read by class only ([`Run::class_memo`]): reads of
     /// the run like its table's, kept over the park.
     class_memo: Vec<(Field, u8)>,
+    outer_memo: Vec<(Field, bool)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -4303,6 +4366,10 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|(l, c)| (self.loc_field(l), c))
                 .collect(),
+            outer_memo: std::mem::take(&mut self.outer_memo)
+                .into_iter()
+                .map(|(l, o)| (self.loc_field(l), o))
+                .collect(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -4400,6 +4467,11 @@ impl<'c, 'a> Run<'c, 'a> {
             .class_memo
             .into_iter()
             .map(|(f, c)| (r.loc_of(f), c))
+            .collect();
+        r.outer_memo = p
+            .outer_memo
+            .into_iter()
+            .map(|(f, o)| (r.loc_of(f), o))
             .collect();
         r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;

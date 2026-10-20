@@ -34,6 +34,7 @@ macro_rules! cs_once {
 }
 cs_once!(par_tok, "par");
 cs_once!(relax_tok, "\u{10FFFE}relax");
+cs_once!(frozen_fi_tok, "\u{10FFFE}fi");
 cs_once!(notexpanded_tok, "\u{10FFFE}notexpanded");
 cs_once!(halt_tok, "\u{10FFFE}halt");
 
@@ -73,8 +74,11 @@ impl Run<'_, '_> {
                     self.push_toks(toks);
                 }
                 cmd::EXPAND_AFTER => {
-                    // §368
+                    // §368 (the first token is stepped over: of its
+                    // meaning only whether it is outer is read, §336)
+                    self.outer_reads = true;
                     self.get_token();
+                    self.outer_reads = false;
                     self.ck()?;
                     let t = self.cur.tok;
                     self.get_token();
@@ -431,6 +435,8 @@ impl Run<'_, '_> {
     /// A halt is raised, never returned.
     pub(crate) fn pass_text(&mut self) {
         self.in_skip = true;
+        // (§494: `skip_line:=line`, for §336's message)
+        self.skip_from = self.line_mark();
         let mut l = 0;
         loop {
             if !self.get_next() || self.halt.is_some() {
