@@ -476,6 +476,10 @@ enum FontType {
 struct FontState {
     name: Vec<u8>,
     metrics: ScaledFont,
+    /// The hash of `metrics` (fixed once loaded), what the digest reads
+    /// of them: a font changed by a step (a character marked) is hashed
+    /// again without formatting its metrics.
+    metrics_hash: u64,
     map: Option<MapEntry>,
     file: Option<Arc<[u8]>>,
     enc: Option<Arc<[u8]>>,
@@ -504,7 +508,7 @@ impl std::fmt::Debug for FontState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FontState")
             .field("name", &self.name)
-            .field("metrics", &self.metrics)
+            .field("metrics", &self.metrics_hash)
             .field("map", &self.map)
             .field("file", &digest::opt(self.file.as_ref()))
             .field("enc", &digest::opt(self.enc.as_ref()))
@@ -518,7 +522,7 @@ impl std::fmt::Debug for FontState {
             .field("kind", &self.kind)
             .field("vf", &self.vf)
             .field("expand", &self.expand)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -559,7 +563,7 @@ fn int(n: usize) -> i64 {
 }
 
 /// The object stream being filled (pdfTeX §680's `pdf_os_*`).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 struct ObjStm {
     /// `pdf_os_enable`.
     enable: bool,
@@ -571,6 +575,20 @@ struct ObjStm {
     cur: usize,
     /// `pdf_os_objnum` and `pdf_os_objoff` up to `pdf_os_objidx`.
     list: Vec<(usize, usize)>,
+}
+
+impl std::fmt::Debug for ObjStm {
+    // (the buffer by its length and content hash: formatting each byte
+    // as a number cost the state's digest more than the rest of it)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObjStm")
+            .field("enable", &self.enable)
+            .field("mode", &self.mode)
+            .field("buf", &digest::Bytes(&self.buf))
+            .field("cur", &self.cur)
+            .field("list", &self.list)
+            .finish()
+    }
 }
 
 /// The data of raw objects, forms, images and marks (`obj_aux` and the

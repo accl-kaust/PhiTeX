@@ -387,13 +387,7 @@ impl PageState {
     /// The page fired at candidate `k` (§1017: what the page could not
     /// take goes first in what is carried, then `more`), the builder
     /// set for the next page.
-    fn fired(
-        &mut self,
-        v: &Values,
-        f: &Fired,
-        k: u32,
-        more: Vec<ValueId>,
-    ) -> Fire {
+    fn fired(&mut self, v: &Values, f: &Fired, k: u32, more: Vec<ValueId>) -> Fire {
         let mut carried: Vec<ValueId> = f
             .contributions
             .iter()
@@ -1338,15 +1332,19 @@ impl Run<'_, '_> {
         if let Some(sf) = &upto
             && let Some((bp, prev)) = sf.upto
         {
-            let node = |x: i64| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(x.to_ne_bytes()));
+            let node =
+                |x: i64| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(x.to_ne_bytes()));
             let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
             s.material = match self.eng_read(scan_mat_field(v, n(0)))? {
                 Some(m) => list_of(v, m),
                 None => Vec::new(),
             };
             if bp != crate::vprof::MATERIAL {
-                let mut items =
-                    v.seq_to_vec(self.cx.acc_range_to(v.field(PITEMS), s.anchor, Some(node(bp)))?);
+                let mut items = v.seq_to_vec(self.cx.acc_range_to(
+                    v.field(PITEMS),
+                    s.anchor,
+                    Some(node(bp)),
+                )?);
                 let Some(last) = items.iter().position(|&x| unit_pid(x) == bp) else {
                     self.scan_defect(&format!("piece {bp} is not in its range"));
                     return Ok(None);
@@ -1495,9 +1493,7 @@ impl Run<'_, '_> {
             match (out, &upto) {
                 // (the page built as far as its known break, which a later
                 // piece's candidate fired)
-                (None, Some(sf)) => {
-                    ps.fire_known(v, sf.best, sf.output_penalty, sf.holding, sf.k)
-                }
+                (None, Some(sf)) => ps.fire_known(v, sf.best, sf.output_penalty, sf.holding, sf.k),
                 (Some((i, f)), None) if i == last => Some(f),
                 _ => None,
             }
@@ -3295,7 +3291,11 @@ impl Run<'_, '_> {
                         cur = Some(c);
                     }
                 }
-                _ => cur = Some(crate::run::FileLine::Known(i64::from(self.input.file(*l).line))),
+                _ => {
+                    cur = Some(crate::run::FileLine::Known(i64::from(
+                        self.input.file(*l).line,
+                    )))
+                }
             }
             level_here.push(here_of(cur));
         }

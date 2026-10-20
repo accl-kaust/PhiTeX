@@ -19,28 +19,31 @@ a job writes and reads back are a loop-back reduced to a fixpoint. A
 cold build is an edit from nothing; an edit reduces again only what its
 change reaches, and its output is the cold build's, byte for byte.
 
-## Status: alpha
+## Alpha status
 
-The first alpha runs plain TeX and LaTeX documents with pdfTeX's
-semantics. See [`CHANGELOG.md`](CHANGELOG.md) for what it covers and what
-it does not yet do.
+The alpha runs plain TeX and LaTeX documents with pdfTeX's semantics.
 
-- **Output:** the PDF is byte-identical to pdfTeX 1.40.29's (TeX Live
-  2026), object numbers included, at every thread count. So are the
-  files the job reads back. The `.log` is not compared.
-- **Builds like latexmk:** `phitex build` runs the document to its
-  fixpoint, re-reading the files it writes until they settle. It takes no
-  more rounds than latexmk takes pdflatex runs, and stops after 5 with a
-  warning. BibTeX, biber and makeindex run in process.
-- **Edits:** `phitex watch` rebuilds on every change. Each rebuild's
-  output is byte-identical to a cold build of the same text.
-- **Parallel:** the engine schedules its steps on every logical CPU
-  (`-j N` to change that). The output does not depend on the thread
-  count.
-- **WebAssembly:** the same engine, with threads, builds for
-  `wasm32-wasip1-threads` and runs in Node (`scripts/wasm.sh`).
-- **Not yet:** XeLaTeX, LuaLaTeX, SyncTeX, and any `\write18` command
-  other than BibTeX, biber and makeindex.
+- **What works:** plain TeX and LaTeX (`pdftex`, `pdflatex`, and `tex`,
+  `etex`, `latex` for DVI), with pdfTeX 1.40.29's semantics. The PDF is
+  byte-identical to pdfTeX's (TeX Live 2026), object numbers included,
+  at every thread count, and so are the files the job reads back; the
+  `.log` is not compared. `phitex build` does latexmk's rounds in one
+  build, in no more rounds than latexmk's pdflatex runs, with BibTeX,
+  biber and makeindex in process. `phitex watch` rebuilds on every
+  change with the pages live in the browser. The same engine builds for
+  WebAssembly with threads (`scripts/wasm.sh`).
+- **How to run it:** build the binary as in [Building](#building), then
+
+      phitex build paper.tex          # to the fixpoint, like latexmk -pdf
+      phitex watch paper.tex          # rebuild on change, pages in the browser
+      phitex --compat=pdflatex paper.tex   # one run, as pdflatex
+
+- **What is checked, and what is not met yet:** the release bars and
+  their measured values are in
+  [`docs/alpha-checklist.md`](docs/alpha-checklist.md). What does not
+  work yet (XeLaTeX, LuaLaTeX, SyncTeX, font expansion, Type 3 fonts,
+  speed, and more) is listed with its cause under "Known not to work" in
+  [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Layout
 
