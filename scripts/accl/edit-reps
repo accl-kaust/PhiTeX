@@ -1,0 +1,33 @@
+#!/bin/bash
+# The hard-bar edit times of commits, side by side (on accl, in a job):
+#
+#   scripts/accl/accl submit cmd bash scripts/accl/edit-reps N NAME:REV...
+#   (ACCL_OPTS="-w acclnode01" picks the node: record it with the numbers)
+#
+# Each REV's release CLI built; amsldoc's watch --exact-pdf -j 8 per REV,
+# all pinned to the same 8 CPUs; the one-letter and line re-break edits,
+# each saved and reverted N times (N >= 16 for a number to report), the
+# REVs interleaved so a drift of the node hits them alike; the median,
+# min and max wall (save to build event). Then amsldoc -j 1 and 4x -j 8
+# md5 and qpdf of the last REV. Writes $r/summary.txt with the node.
+set -u
+cd "$(dirname "$0")/../.."
+export CARGO_BUILD_JOBS=16
+n=$1; shift
+root=$PWD
+for nr in "$@"; do
+  nm=${nr%%:*} rev=${nr#*:}
+  s=$w/src-$nm; rm -rf "$s"; mkdir -p "$s"; git archive "$rev" | tar -x -C "$s"; ln -s "$root/upstream" "$s/upstream"
+  (cd "$s" && CARGO_TARGET_DIR=$w/t-$nm cargo build -q --release -p phitex-cli > "$r/build-$nm.txt" 2>&1) || echo "$nm build FAILED" | tee -a "$r/summary.txt"
+done
+args=()
+for nr in "$@"; do nm=${nr%%:*}; args+=("$nm=$w/t-$nm/release/phitex"); done
+pin=$(python3 -c "import os;print(','.join(map(str,sorted(os.sched_getaffinity(0))[:8])))")
+echo "node $(hostname), $(nproc) CPUs allowed, $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2), watch pinned to CPUs $pin (taskset), -j 8" | tee -a "$r/summary.txt"
+taskset -c "$pin" python3 -I scripts/accl/edit-reps.py "$n" "$w/reps" "$r" "${args[@]}" | tee -a "$r/summary.txt"
+last=${args[-1]#*=}
+for j in 1 8 8 8 8; do
+  rm -rf $w/a && cp -a bench/amsldoc $w/a
+  (cd $w/a && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/reps/cache timeout 900 $last build amsldoc.tex --exact-pdf -j $j > /dev/null 2>&1)
+  echo "last amsldoc -j $j: md5 $(md5sum < $w/a/amsldoc.pdf | cut -c1-32) $(qpdf --check $w/a/amsldoc.pdf > /dev/null 2>&1 && echo qpdf-ok || echo QPDF-FAIL)" | tee -a "$r/summary.txt"
+done
