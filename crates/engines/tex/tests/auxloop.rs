@@ -339,3 +339,48 @@ Entries.
             .collect::<String>()
     );
 }
+
+/// A lookup of a name a tool makes from a file the job writes (here the
+/// bibliography from the `.aux`, which asks for no data, so the tool
+/// makes nothing): the reader depends on what the tool makes, not on the
+/// whole text of its input. A line written to the input changed runs
+/// the tool's memoised run again, not the node that looked the name up.
+#[test]
+fn a_tool_output_lookup_does_not_read_the_tool_input() {
+    let doc = |word: &str| {
+        format!(
+            r"\openin15=\jobname.bbl \ifeof15 \gdef\st{{none}}\else\closein15 \gdef\st{{some}}\fi
+
+\immediate\openout1=\jobname.aux
+
+
+\immediate\write1{{\relax {word}}}
+Status \st.
+\bye
+"
+        )
+    };
+    let dir = common::fixtures().join("plain");
+    let opts = || Options {
+        fixpoint: true,
+        ..common::options("./b.tex", "b", "", &dir)
+    };
+    let mut b = common::build(opts(), Some(&common::plain()), &doc("one"));
+    b.edit(&doc("two"));
+    let reran: Vec<String> = b
+        .stats
+        .reruns
+        .iter()
+        .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+        .collect();
+    for r in &reran {
+        eprintln!("  rerun {r}");
+    }
+    let cold = common::build(opts(), Some(&common::plain()), &doc("two"));
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert!(
+        !reran.iter().any(|r| r.contains("openin")),
+        "the node that looked the tool's output up ran again: {reran:?}"
+    );
+}
