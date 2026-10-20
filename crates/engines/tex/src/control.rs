@@ -2034,6 +2034,38 @@ impl Run<'_, '_> {
             }
             None => 0,
         };
+        if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
+            let levels: Vec<String> = self
+                .input
+                .levels
+                .iter()
+                .map(|l| match l.kind {
+                    crate::input::kind::TOKS => format!("T{}", l.ty),
+                    crate::input::kind::LINE => {
+                        let ln = self.input.line(*l);
+                        format!(
+                            "L(no {} origin {} rescanned {})",
+                            ln.lineno,
+                            ln.origin.is_some(),
+                            ln.rescanned
+                        )
+                    }
+                    _ => format!("F{}", self.input.file(*l).line),
+                })
+                .collect();
+            let frames = self
+                .cx
+                .args()
+                .first()
+                .map(|&f| self.v.render(f).chars().take(200).collect::<String>());
+            eprintln!(
+                "line-trace: inputlineno {n} node {} op {:?} levels {levels:?} parked {} text_at {} frames {frames:?}",
+                self.cx.node().raw(),
+                self.cx.op(),
+                self.parked_levels,
+                self.input.text_at
+            );
+        }
         Ok(i32::try_from(n).unwrap_or(0))
     }
 }

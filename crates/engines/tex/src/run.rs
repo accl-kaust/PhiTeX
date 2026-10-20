@@ -395,6 +395,7 @@ impl FileRest {
 }
 
 /// Where `\inputlineno` reads (`line`, §304: the innermost file's).
+#[derive(Clone, Copy)]
 pub(crate) enum FileLine {
     /// The line's number is known here.
     Known(i64),
@@ -666,6 +667,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The files the job writes whose round-one read-back this run made
     /// from the text the client gave for them ([`Run::seed_written`]).
     pub seeded: Vec<Seeded>,
+    /// Where each segment of a resumed piece's text was read
+    /// ([`Run::cont_load`], by its index in the text): a token level's
+    /// file line, for `\inputlineno` ([`Run::file_line_here`]).
+    pub cont_lines: Vec<Option<FileLine>>,
     /// A read-back point not known to be one yet: the file this run
     /// looked for in vain from the macro running ([`Run::read_back_at`]).
     /// When the run opens that file for writing, the point was its
@@ -871,6 +876,7 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_plain: false,
             text_written: Vec::new(),
             seeded: Vec::new(),
+            cont_lines: Vec::new(),
             read_point_pending: None,
             pending_pre: Vec::new(),
             scanner: None,
@@ -4608,6 +4614,7 @@ pub(crate) struct Parked {
     read_point_here: bool,
     text_written: Vec<String>,
     seeded: Vec<Seeded>,
+    cont_lines: Vec<Option<FileLine>>,
     read_point_pending: Option<String>,
     pending_pre: Vec<(Field, ValueId)>,
     cand: u32,
@@ -4753,6 +4760,7 @@ impl Run<'_, '_> {
             read_point_here: self.read_point_here,
             text_written: std::mem::take(&mut self.text_written),
             seeded: std::mem::take(&mut self.seeded),
+            cont_lines: std::mem::take(&mut self.cont_lines),
             read_point_pending: self.read_point_pending.take(),
             pending_pre: std::mem::take(&mut self.pending_pre)
                 .into_iter()
@@ -4857,6 +4865,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.read_point_here = p.read_point_here;
         r.text_written = p.text_written;
         r.seeded = p.seeded;
+        r.cont_lines = p.cont_lines;
         r.read_point_pending = p.read_point_pending;
         r.pending_pre = p
             .pending_pre
@@ -4926,19 +4935,11 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn file_line_here(&self) -> Option<FileLine> {
-        let line = |s: &crate::input::Line| {
-            if s.lineno > 0 {
-                return Some(FileLine::Known(i64::from(s.lineno)));
-            }
-            // (a `\read` line is no file's, §483; a text without an
-            // origin, a format's or INITEX's, is one file, UNIT)
-            (!s.rescanned).then(|| FileLine::Piece(s.origin.map_or(ValueId::UNIT, |o| o.0)))
-        };
         for l in self.input.levels.iter().rev() {
             match l.kind {
                 crate::input::kind::TOKS => {}
                 crate::input::kind::LINE => {
-                    if let Some(x) = line(self.input.line(*l)) {
+                    if let Some(x) = line_of(self.input.line(*l)) {
                         return Some(x);
                     }
                 }
@@ -4947,6 +4948,11 @@ impl Run<'_, '_> {
                 }
             }
         }
+        self.text_line()
+    }
+
+    /// [`Run::file_line_here`] below the levels the run holds.
+    pub(crate) fn text_line(&self) -> Option<FileLine> {
         // (a run resumed from a park: the levels it had when it parked and
         // has not reached again are below the ones it holds, in order, as
         // in a run that never parked)
@@ -4955,27 +4961,26 @@ impl Run<'_, '_> {
             match s {
                 Seg::Toks(_) => {}
                 Seg::Line(l) => {
-                    if let Some(x) = line(l) {
+                    if let Some(x) = line_of(l) {
                         return Some(x);
                     }
                 }
                 Seg::File(f) => return Some(FileLine::Known(i64::from(f.line))),
             }
         }
+        // (a resumed piece's: where the segment it reads now, the last it
+        // took up, was read, [`Run::cont_load`])
+        if let Some(&Some(c)) = self
+            .input
+            .text_at
+            .checked_sub(1)
+            .and_then(|i| self.cont_lines.get(i))
+        {
+            return Some(c);
+        }
         let v = self.v;
         let frames = self.cx.args().first().map(|&f| list_of(v, f))?;
-        frames.iter().find_map(|&f| {
-            let xs = list_of(v, f);
-            if xs.len() < 4 || xs.first().map(|&t| str_of(v, t)).as_deref() != Some("t") {
-                return None;
-            }
-            let n = int_of(v, xs[3]);
-            Some(if n >= 0 {
-                FileLine::Known(n)
-            } else {
-                FileLine::Piece(xs[2])
-            })
-        })
+        frames.iter().find_map(|&f| frame_line(v, f))
     }
 
     /// A line of a document's piece in file `name` begun (§362).
@@ -4985,6 +4990,31 @@ impl Run<'_, '_> {
             None => self.doc_lines.push((name, 1)),
         }
     }
+}
+
+/// Where a line was read ([`Run::file_line_here`]): its file's line,
+/// or a document piece's file; a `\read` line is no file's (§483), a text
+/// without an origin, a format's or INITEX's, one file (`UNIT`).
+pub(crate) fn line_of(s: &Line) -> Option<FileLine> {
+    if s.lineno > 0 {
+        return Some(FileLine::Known(i64::from(s.lineno)));
+    }
+    (!s.rescanned).then(|| FileLine::Piece(s.origin.map_or(ValueId::UNIT, |o| o.0)))
+}
+
+/// Where the tokens of a token frame (`["t", toks, file, line]`,
+/// [`Run::leftover`]) were read, if it says.
+pub(crate) fn frame_line(v: &Values, f: ValueId) -> Option<FileLine> {
+    let xs = list_of(v, f);
+    if xs.len() < 4 || xs.first().map(|&t| str_of(v, t)).as_deref() != Some("t") {
+        return None;
+    }
+    let n = int_of(v, xs[3]);
+    Some(if n >= 0 {
+        FileLine::Known(n)
+    } else {
+        FileLine::Piece(xs[2])
+    })
 }
 
 /// Whether a field the interpretation of a written line set is one of

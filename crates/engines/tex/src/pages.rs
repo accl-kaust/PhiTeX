@@ -3101,23 +3101,44 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn cont_encode(&mut self) -> R<(ValueId, Vec<ValueId>)> {
         let v = self.v;
-        let here: Vec<ValueId> = match self.file_line_here() {
-            Some(crate::run::FileLine::Known(n)) => vec![ValueId::UNIT, v.int(n)],
-            Some(crate::run::FileLine::Piece(name)) => vec![name, v.int(-1)],
-            None => Vec::new(),
+        // (each token level's file line: of the innermost file read
+        // below it, §304, a file it is inside staying open until the
+        // level is read to its end; below them all, the text's)
+        let here_of = |c: Option<crate::run::FileLine>| -> Vec<ValueId> {
+            match c {
+                Some(crate::run::FileLine::Known(n)) => vec![ValueId::UNIT, v.int(n)],
+                Some(crate::run::FileLine::Piece(name)) => vec![name, v.int(-1)],
+                None => Vec::new(),
+            }
         };
-        let toks_frame = |toks: &[crate::val::Tok]| {
+        let base = self.text_line();
+        let mut cur = base;
+        let mut level_here = Vec::with_capacity(self.input.levels.len());
+        for l in &self.input.levels {
+            match l.kind {
+                crate::input::kind::TOKS => {}
+                crate::input::kind::LINE => {
+                    if let Some(c) = crate::run::line_of(self.input.line(*l)) {
+                        cur = Some(c);
+                    }
+                }
+                _ => cur = Some(crate::run::FileLine::Known(i64::from(self.input.file(*l).line))),
+            }
+            level_here.push(here_of(cur));
+        }
+        let toks_frame = |toks: &[crate::val::Tok], here: &[ValueId]| {
             let mut t = vec![v.str("t"), toks_value(v, toks)];
             t.extend(here.iter().copied());
             v.list(t)
         };
+        let base_here = here_of(base);
         let mut frames = Vec::new();
-        for l in self.input.levels.iter().rev() {
+        for (i, l) in self.input.levels.iter().enumerate().rev() {
             match l.kind {
                 crate::input::kind::TOKS => {
                     let r = self.input.arena.get(l.rest());
                     if !r.is_empty() {
-                        frames.push(toks_frame(r));
+                        frames.push(toks_frame(r, &level_here[i]));
                     }
                 }
                 crate::input::kind::LINE => {
@@ -3137,7 +3158,7 @@ impl Run<'_, '_> {
                 }
                 Seg::Toks(t) => {
                     if !t.is_empty() {
-                        frames.push(toks_frame(t));
+                        frames.push(toks_frame(t, &base_here));
                     }
                 }
                 Seg::File(f) => frames.extend(file_frames(v, f)),
@@ -3322,6 +3343,15 @@ impl Run<'_, '_> {
         let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
         let frames = self.resolve_units(&[a(0)])?;
         self.input.text = crate::run::decode_segs(v, &frames);
+        // (where each segment was read: a token frame's file line)
+        self.cont_lines = frames
+            .first()
+            .map(|&l| list_of(v, l))
+            .unwrap_or_default()
+            .iter()
+            .filter(|&&f| crate::run::first_seg(v, &[v.list(vec![f])]).is_some())
+            .map(|&f| crate::run::frame_line(v, f))
+            .collect();
         self.input.text_at = 0;
         // the state table first: the levels index its saves
         let st = list_of(v, a(4));
