@@ -1906,13 +1906,13 @@ impl Analysis<'_> {
 
     /// [`Analysis::with_own`] beginning in the regime `start` (`None`:
     /// `kind`'s own; [`pass::Start`]).
-    fn with_own_from(
-        text: &str,
+    fn with_own_from<'a>(
+        text: &'a str,
         kind: FileKind,
         prelude: Defs,
         defs: Definitions,
         start: Option<&pass::Start>,
-    ) -> Analysis<'_> {
+    ) -> Analysis<'a> {
         let scope = Scope {
             document: &defs,
             file: 0,
