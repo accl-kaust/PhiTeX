@@ -1,0 +1,7 @@
+\pdfcompresslevel=0 \pdfobjcompresslevel=0
+\vsize=100pt \parskip=0pt \baselineskip=12pt
+\def\l#1{\leavevmode\pdfstartlink attr{/Border[0 0 1]} user{/S/URI/URI(#1)}Line #1\pdfendlink
+  \ifodd\pdflastlink\ odd\else\ even\fi\par}
+\count1=1
+\loop \l{\the\count1}\advance\count1 by 1 \ifnum\count1<25 \repeat
+\bye

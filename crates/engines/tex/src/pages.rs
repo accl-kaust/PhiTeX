@@ -734,6 +734,31 @@ impl Run<'_, '_> {
             cuttable,
         });
         self.st.mark_candidate();
+        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") && self.cand_marks.len() == 1 {
+            let args = self.cx.args();
+            let first = args
+                .first()
+                .map(|&x| v.render(x))
+                .unwrap_or_default()
+                .chars()
+                .take(160)
+                .collect::<String>();
+            eprintln!("cand-text: node {} {first}", self.cx.node().raw());
+        }
+        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
+            eprintln!(
+                "cand: node {} op {} k {k} fresh {fresh} input {} nest {:?} conds {} forced {} cuttable {cuttable}",
+                self.cx.node().raw(),
+                if op == self.ops.exec { "exec" } else if op == self.ops.resume { "resume" } else { "other" },
+                self.has_input(),
+                self.nest
+                    .iter()
+                    .map(|l| (l.mode, l.group, l.owns))
+                    .collect::<Vec<_>>(),
+                self.conds.len(),
+                self.forced_since(self.cand_marks.len().checked_sub(2).and_then(|i| self.cand_marks.get(i)).map_or(0, |m| m.contribs)),
+            );
+        }
         // (every candidate with text after it is a cut, as every
         // paragraph end is: the rest of the piece is a continuation
         // placed after it, after the finisher of a page firing there,
@@ -1096,6 +1121,14 @@ impl Run<'_, '_> {
         // the boxes of the others its fire leaves alone, [`fin_classes`])
         if let Some(cs) = classes {
             pos.push(v.list(cs.iter().map(|&n| v.int(i64::from(n))).collect()));
+        }
+        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "place finisher of page {j} (piece {} candidate {k}) by {} after {:?}",
+                pid.cast_unsigned(),
+                self.cx.node().raw(),
+                at.map(phitex_defuse::NodeId::raw)
+            );
         }
         match at {
             Some(at) => {
@@ -1874,6 +1907,16 @@ impl Run<'_, '_> {
             v.list(locals),
         ];
         let mut cuttable = false;
+        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
+            eprintln!(
+                "fin-place: page {} piece {} candidate {} last {} inside {}",
+                pos.first().map_or(-1, |&x| int_of(v, x)),
+                pid.cast_unsigned(),
+                fire.k,
+                int_of(v, a(1)),
+                !at_end
+            );
+        }
         if at_end {
             args.extend([ValueId::UNIT; 5]);
         } else {
@@ -2417,6 +2460,14 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let args = vec![ValueId::UNIT, xs[2], ValueId::UNIT, xs[3]];
+        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "place resume of piece {} candidate {k} by {} after {:?}",
+                pid.cast_unsigned(),
+                self.cx.node().raw(),
+                after.map(phitex_defuse::NodeId::raw)
+            );
+        }
         // (a `\write18`'s tool node the piece ended at: right before
         // the resume, `Run::tool_command`)
         let tool = xs.get(5).map(|&t| list_of(v, t));
@@ -2529,6 +2580,15 @@ impl Run<'_, '_> {
             restore.clear();
         }
         restore.extend(kept);
+        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
+            eprintln!(
+                "cut-check: finisher {} piece {} candidate {} cuttable {cuttable} why {:?}",
+                self.cx.node().raw(),
+                int_of(v, pid).cast_unsigned(),
+                int_of(v, k),
+                why
+            );
+        }
         if !cuttable {
             why = None;
         }
@@ -3129,8 +3189,9 @@ impl Run<'_, '_> {
                     Some(x) => x,
                     None => self.eng_read(f)?,
                 };
-                overrides.push(v.list(vec![f.0, opt_val(base)]));
-                locals.push(v.list(vec![f.0, opt_val(s.cur)]));
+                let after = v.int(self.made_after(s.ldef.map(|d| d.0)));
+                overrides.push(v.list(vec![f.0, opt_val(base), after]));
+                locals.push(v.list(vec![f.0, opt_val(s.cur), after]));
             }
             let (stamp, local, gid) = s.ldef.map_or((-1, 0, None), |(st, l, g)| {
                 (i64::from_ne_bytes(st.to_ne_bytes()), i64::from(l), g)
@@ -3295,18 +3356,11 @@ impl Run<'_, '_> {
         }
         // the fields the finishers between the cut and this resume
         // defined globally (`gdefs`, the window after the cutting node)
-        let gdefs: Vec<ValueId> = match Some(pid).filter(|&p| p != ValueId::UNIT) {
-            Some(p) if self.cx.op() == self.ops.resume => {
-                let pid =
-                    phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, p).to_ne_bytes()));
-                let acc = self.cx.acc_range(v.field(GDEFS), Some(pid))?;
-                v.seq_to_vec(acc)
-                    .into_iter()
-                    .flat_map(|e| list_of(v, e))
-                    .collect()
-            }
+        let gdefs: Vec<GDef> = match Some(pid).filter(|&p| p != ValueId::UNIT) {
+            Some(p) if self.cx.op() == self.ops.resume => self.gdefs_after(int_of(v, p))?,
             _ => Vec::new(),
         };
+        let piece = int_of(v, pid);
         for e in list_of(v, a(6)) {
             let ys = list_of(v, e);
             if ys.len() < 2 {
@@ -3315,10 +3369,12 @@ impl Run<'_, '_> {
             let f = Field(ys[0]);
             let x0 = some(ys[1]);
             let x1 = self.eng_read(f)?;
+            let after = ys.get(2).map_or(-1, |&c| int_of(v, c));
             // (§279: a global definition replaces the group's local value
             // whatever it defines, the value outside the group too: by
-            // the definition, not the value)
-            if gdefs.contains(&f.0) {
+            // the definition, not the value; a routine's at a candidate
+            // the binding was made after left it standing)
+            if replaced(&gdefs, f, piece, after) {
                 let loc = self.loc_of(f);
                 self.st.override_global(loc, x1);
                 continue;
@@ -3393,6 +3449,81 @@ impl Run<'_, '_> {
         self.rec_load = n(17) != 0;
         self.cond_loaded = n(18) != 0;
         Ok(())
+    }
+}
+
+/// A finisher's unit of [`GDEFS`]: the fields its routine defined
+/// globally, and where its page fired, the piece and the candidate
+/// ([`fin_at`]).
+pub(crate) struct GDef {
+    names: Vec<ValueId>,
+    pid: i64,
+    k: i64,
+}
+
+/// Where a finisher's page fired, from its position's break (argument
+/// 12, [`Run::place_break`]): the piece and its candidate; a page firing
+/// in a continuation's material, the piece that material came from and
+/// a candidate after all of its own (`i64::MAX`).
+fn fin_at(v: &Values, pos: &[ValueId]) -> (i64, i64) {
+    let b = pos.get(12).map(|&x| list_of(v, x)).unwrap_or_default();
+    let pid = b.get(3).map_or(-2, |&x| int_of(v, x));
+    if pid != -2 {
+        return (pid, b.get(4).map_or(i64::MAX, |&x| int_of(v, x)));
+    }
+    let origin = b
+        .get(6)
+        .filter(|&&o| o != ValueId::UNIT)
+        .and_then(|&o| list_of(v, o).first().map(|&p| int_of(v, p)));
+    (origin.unwrap_or(-2), i64::MAX)
+}
+
+/// A finisher's [`GDEFS`] unit: `[names, piece, candidate]`, nothing
+/// where it defined nothing globally.
+fn gdefs_unit(v: &Values, names: ValueId, (pid, k): (i64, i64)) -> ValueId {
+    if names == ValueId::NIL {
+        return ValueId::NIL;
+    }
+    v.seq_unit(v.list(vec![names, v.int(pid), v.int(k)]))
+}
+
+/// Whether a group-local binding of `f` the run of `piece` made after
+/// its candidate `after` (-1: before its first, or before the run) is
+/// replaced by a global definition of one of the routines `gdefs` (§279:
+/// at every level): one of a page firing in another piece's text, or in
+/// this piece's at a candidate the binding was made before.
+fn replaced(gdefs: &[GDef], f: Field, piece: i64, after: i64) -> bool {
+    gdefs
+        .iter()
+        .any(|g| g.names.contains(&f.0) && (g.pid != piece || after < g.k))
+}
+
+impl Run<'_, '_> {
+    /// The [`GDEFS`] units of the finishers between node `pid` and this
+    /// one.
+    fn gdefs_after(&mut self, pid: i64) -> R<Vec<GDef>> {
+        let v = self.v;
+        let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+        let acc = self.cx.acc_range(v.field(GDEFS), Some(at))?;
+        Ok(v.seq_to_vec(acc)
+            .into_iter()
+            .filter_map(|e| match list_of(v, e)[..] {
+                [n, p, k] => Some(GDef {
+                    names: list_of(v, n),
+                    pid: int_of(v, p),
+                    k: int_of(v, k),
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// The last of the run's candidates passed before the definition
+    /// with stamp `st` (-1: before the first, or none).
+    fn made_after(&self, st: Option<u64>) -> i64 {
+        let Some(st) = st else { return -1 };
+        let n = self.cand_marks.iter().filter(|m| m.stamp < st).count();
+        i64::try_from(n).unwrap_or(0) - 1
     }
 }
 
@@ -3691,7 +3822,7 @@ impl Finish {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&fin_key(v, t, args))
             .and_then(|d| d.gdefs)
-            .unwrap_or(ValueId::NIL)
+            .map_or(ValueId::NIL, |x| gdefs_unit(v, x, fin_at(v, args)))
     }
 }
 
@@ -3929,9 +4060,23 @@ impl Run<'_, '_> {
     fn preload_candidate(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
-        for e in list_of(v, a(3)) {
+        let locals = list_of(v, a(3));
+        // (the routines of the pages firing in the piece before this one,
+        // placed after it before this finisher: a binding they defined
+        // globally is gone at every level where it was made before
+        // their candidate, §279)
+        let piece = self.fin.as_ref().and_then(|c| c.brk).map(|b| b.0);
+        let gdefs = match piece {
+            Some(p) if !locals.is_empty() => self.gdefs_after(p)?,
+            _ => Vec::new(),
+        };
+        for e in locals {
             let ys = list_of(v, e);
-            if let [f, x] = ys[..] {
+            if let [f, x, ..] = ys[..] {
+                let after = ys.get(2).map_or(-1, |&c| int_of(v, c));
+                if replaced(&gdefs, Field(f), piece.unwrap_or(-2), after) {
+                    continue;
+                }
                 let loc = self.loc_of(Field(f));
                 self.st.preload(loc, some(x));
             }
@@ -3980,9 +4125,10 @@ impl Run<'_, '_> {
         let x = if names.is_empty() {
             ValueId::NIL
         } else {
-            v.seq_unit(v.list(names))
+            v.list(names)
         };
-        self.contribute(GDEFS, x);
+        let at = fin_at(v, &self.cx.args());
+        self.contribute(GDEFS, gdefs_unit(v, x, at));
         x
     }
 
@@ -4582,6 +4728,14 @@ impl Run<'_, '_> {
         let s = ScanIn::decode(v, src);
         let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
         let trace = crate::exec::obs_flag!("PHITEX_SCAN_TRACE");
+        if trace && units.is_empty() {
+            eprintln!(
+                "scan {}: from page {} (anchor {:?}), no units",
+                self.cx.node().raw(),
+                s.j,
+                s.anchor.map(phitex_defuse::NodeId::raw)
+            );
+        }
         if units.is_empty() {
             return Ok(None);
         }
@@ -4888,11 +5042,17 @@ impl Run<'_, '_> {
                 self.cx.is_speculative()
             );
         }
-        let end = if !known {
-            ValueId::UNIT
-        } else if after_me {
+        // (a page firing in the window's last piece: its continuation,
+        // or the last of the chain its material fires, sits after this
+        // step and defines the state the block ends in, whether or not
+        // this step could predict it: the next block reads that. Unknown
+        // where the continuation sits before this step: this step reads
+        // its state once it is defined, and runs again)
+        let end = if after_me {
             let me = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
             v.list(vec![v.int(BLOCK_AT_CONT), v.int(last_page), v.int(me)])
+        } else if !known {
+            ValueId::UNIT
         } else {
             v.list(vec![
                 src.unwrap_or(ValueId::UNIT),
@@ -5065,6 +5225,19 @@ impl Run<'_, '_> {
             ]))
         };
         material.extend(rest);
+        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "cont {}: after page {} piece {} candidate {} at_end {at_end} rtn read {} routine's {} held+carried {} rest {}",
+                self.cx.node().raw(),
+                int_of(v, b[0]),
+                pid.cast_unsigned(),
+                fire.k,
+                r.is_some(),
+                rs.get(1).map_or(0, |&x| list_of(v, x).len()),
+                rest_at.saturating_sub(1),
+                material.len() - rest_at
+            );
+        }
         let dead = if let Some(at) = at {
             self.resolve_params_of(pid, &mut material)?;
             if has_end(v, &material) {

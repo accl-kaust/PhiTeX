@@ -357,6 +357,13 @@ pub(crate) struct Input {
     /// The file rests of [`kind::FILE`] levels.
     pub files: Vec<crate::run::FileRest>,
     free_files: Vec<u32>,
+    /// Per line and file slot, the push that filled it last (a slot is
+    /// reused once its level pops): a snapshot names its slots with
+    /// these, so a restore after the slot took another line refuses
+    /// instead of putting the old line's position on the new line.
+    line_push: Vec<u64>,
+    file_push: Vec<u64>,
+    pushes: u64,
     /// The node's text below the levels: segments in order, `text_at`
     /// the next to reach.
     pub text: Vec<Seg>,
@@ -379,6 +386,9 @@ impl Input {
             free_lines: Vec::new(),
             files: Vec::new(),
             free_files: Vec::new(),
+            line_push: Vec::new(),
+            file_push: Vec::new(),
+            pushes: 0,
             text: Vec::new(),
             text_at: 0,
             compact_at: ARENA_COMPACT,
@@ -427,6 +437,9 @@ impl Input {
             self.lines.push(line);
             self.lines.len() - 1
         };
+        self.pushes += 1;
+        self.line_push.resize(self.lines.len(), 0);
+        self.line_push[i] = self.pushes;
         self.levels.push(Level::line(i));
         i
     }
@@ -440,6 +453,9 @@ impl Input {
             self.files.push(f);
             self.files.len() - 1
         };
+        self.pushes += 1;
+        self.file_push.resize(self.files.len(), 0);
+        self.file_push[i] = self.pushes;
         self.levels.push(Level::file(i));
         i
     }
@@ -580,10 +596,14 @@ impl Input {
         for s in segs {
             // (a reached segment stays in the text as a copy; a
             // continuation of the line on top joins that line instead,
-            // `Run::join_continuation`)
+            // `Run::join_continuation`; so does one of a line reached
+            // already that waits in the text as a level a parked run
+            // had, its `\endlinechar` not applied as it did not end: a
+            // segment of its own after it, as after the line on top)
             if self.text.len() > self.text_at
                 && let (Some(Seg::Line(last)), Seg::Line(next)) = (self.text.last_mut(), &s)
                 && !last.ends
+                && last.endch == -2
                 && !next.starts
             {
                 last.buf.extend_from_slice(&next.buf);
@@ -600,15 +620,20 @@ impl Input {
         into.levels.clear();
         into.levels.extend_from_slice(&self.levels);
         into.lines.clear();
+        into.pushes.clear();
         for l in &self.levels {
             match l.kind {
                 kind::LINE => {
                     let x = &self.lines[l.a as usize];
                     into.lines.push((x.loc, x.state, x.endch, x.buf.len()));
+                    into.pushes
+                        .push(self.line_push.get(l.a as usize).copied().unwrap_or(0));
                 }
                 kind::FILE => {
                     let f = &self.files[l.a as usize];
                     into.lines.push((f.off, 0, 0, f.pos_chars()));
+                    into.pushes
+                        .push(self.file_push.get(l.a as usize).copied().unwrap_or(0));
                 }
                 _ => {}
             }
@@ -657,6 +682,20 @@ impl Input {
         while self.levels.len() > s.levels.len() {
             self.pop();
         }
+        // (each line or file slot must still hold the line or file it
+        // held then: one spent since and refilled holds another)
+        let mut k = 0;
+        for l in &s.levels {
+            let now = match l.kind {
+                kind::LINE => self.line_push.get(l.a as usize),
+                kind::FILE => self.file_push.get(l.a as usize),
+                _ => continue,
+            };
+            if now.copied() != s.pushes.get(k).copied() {
+                return false;
+            }
+            k += 1;
+        }
         self.levels.clear();
         self.levels.extend_from_slice(&s.levels);
         let mut k = 0;
@@ -702,6 +741,8 @@ pub(crate) struct Snapshot {
     /// `(loc, state, endch, len)` per line level, `(off, _, _, pos)` per
     /// file level, in level order.
     pub lines: Vec<(usize, u8, i64, usize)>,
+    /// The push that filled each of those slots ([`Input::push_line`]).
+    pub pushes: Vec<u64>,
     pub text_at: usize,
     pub arena: u32,
 }
@@ -746,5 +787,68 @@ mod tests {
         assert!(inp.restore(&s));
         assert_eq!(inp.depth(), 1);
         assert_eq!(inp.next_of_top(), Some(Tok::c(1)));
+    }
+
+    /// A snapshot taken on a line that is then spent, its slot refilled
+    /// by the next line, must not restore: the slot index no longer names
+    /// the line it was taken on (the old line's position and state would
+    /// land on the new line's text).
+    #[test]
+    fn snapshot_refuses_a_refilled_line_slot() {
+        let mut inp = Input::new();
+        let a = inp.push_line(Line::of_str("ab", 13, false));
+        let top = *inp.top().unwrap();
+        inp.line_mut(top).loc = 1;
+        let mut s = Snapshot::default();
+        inp.snapshot(&mut s);
+        // the line read to its end and popped; the next line takes its slot
+        inp.pop();
+        let b = inp.push_line(Line::of_str("wxyz", 13, false));
+        assert_eq!(a, b, "the spent line's slot is reused");
+        assert!(!inp.restore(&s), "a refilled slot holds another line");
+
+        // the slot still holding its line restores
+        let mut inp = Input::new();
+        inp.push_line(Line::of_str("ab", 13, false));
+        inp.snapshot(&mut s);
+        let top = *inp.top().unwrap();
+        inp.line_mut(top).loc = 2;
+        assert!(inp.restore(&s));
+        assert_eq!(inp.top_line().map(|l| l.loc), Some(0));
+    }
+
+    /// A line's continuation (a sibling's first segment, cut mid-line)
+    /// joins the last text segment only while that segment has not been
+    /// reached: a line reached already, as not ending (no
+    /// `\endlinechar` after it), and waiting in the text as a level a
+    /// parked run had, gets its continuation as a segment of its own,
+    /// which takes the `\endlinechar` when it is reached, as after the
+    /// line on top. (Joined, the line's end took none: a resumed run lost
+    /// the space at the end of a line its node boundary cut.)
+    #[test]
+    fn a_continuation_does_not_join_a_reached_line() {
+        let cut = |text: &str, starts: bool, ends: bool, endch: i64| {
+            let mut l = Line::of_str(text, -1, false);
+            l.starts = starts;
+            l.ends = ends;
+            l.endch = endch;
+            l
+        };
+        // (reached: the parked run's line level, read to its cut)
+        let mut inp = Input::new();
+        let mut reached = cut("\\cn{iint}", true, false, -1);
+        reached.loc = reached.buf.len();
+        inp.text.push(Seg::Line(reached));
+        inp.append_text(vec![Seg::Line(cut(", and integral", false, true, -2))]);
+        assert_eq!(inp.text.len(), 2, "a segment of its own");
+        // (not reached: one line, its end still to come)
+        let mut inp = Input::new();
+        inp.text.push(Seg::Line(cut("\\cn{iint}", true, false, -2)));
+        inp.append_text(vec![Seg::Line(cut(", and integral", false, true, -2))]);
+        assert_eq!(inp.text.len(), 1, "joined");
+        let Some(Seg::Line(l)) = inp.text.first() else {
+            panic!("a line")
+        };
+        assert!(l.ends);
     }
 }

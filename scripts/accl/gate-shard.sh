@@ -153,10 +153,12 @@ case $shard in
   lint)
     # (no fmt: the image's rustfmt is another version than the pinned
     # nightly's and reflows what the local one keeps, as job.sbatch's
-    # gate since b2fbf61a; clippy skips the vendored engine)
+    # gate since b2fbf61a; clippy skips the vendored engine: `--exclude`
+    # drops it from the members linted, `--no-deps` from the path
+    # dependencies cargo would lint with them)
     built
     cache_on
-    if ! cargo clippy --workspace --exclude defuse --all-targets --keep-going -q --message-format short -- -D warnings > "$r/clippy.txt" 2>&1; then
+    if ! cargo clippy --workspace --exclude defuse --no-deps --all-targets --keep-going -q --message-format short -- -D warnings > "$r/clippy.txt" 2>&1; then
       grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|warning)' "$r/clippy.txt" | sort -u | head -60 | while IFS= read -r l; do echo "clippy: $l"; done >> "$r/red.txt"
       grep -q . "$r/red.txt" || echo "clippy: $(grep -m1 '^error' "$r/clippy.txt")" >> "$r/red.txt"
       status=red

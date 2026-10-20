@@ -861,7 +861,9 @@ fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
     let x = r.v.int(n);
     r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
     if r.param("pdfoutput")? > 0 {
-        return Ok(n + crate::pdfout::page_offset(r)?);
+        let n = n + crate::pdfout::page_offset(r)?;
+        crate::pdfout::note_read_time(r, n);
+        return Ok(n);
     }
     Ok(n)
 }
@@ -2274,6 +2276,14 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 })?;
                 or_alloc(r, num_of(got))?
             };
+            if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
+                let off = crate::pdfout::page_offset(r)?;
+                eprintln!(
+                    "startlink: node {} cand {} number {n} (page offset {off})",
+                    r.cx.node().raw(),
+                    r.cand,
+                );
+            }
             whatsit(
                 r,
                 md,

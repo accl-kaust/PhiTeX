@@ -471,7 +471,7 @@ impl Run<'_, '_> {
                 let joins = self.input.text.len() > self.input.text_at
                     && matches!(
                         (self.input.text.last(), segs.first()),
-                        (Some(Seg::Line(last)), Some(Seg::Line(next))) if !last.ends && !next.starts
+                        (Some(Seg::Line(last)), Some(Seg::Line(next))) if !last.ends && last.endch == -2 && !next.starts
                     );
                 if self.pull_at.len() == self.pulled {
                     self.pull_at.push((!joins).then_some(self.input.text.len()));
@@ -1460,6 +1460,7 @@ impl Run<'_, '_> {
     /// A command begins: marks the input and the state it starts from.
     #[inline]
     pub(crate) fn begin_command(&mut self) {
+        self.pdf_cmd = 0;
         let sig = self.mutations();
         let mut m = std::mem::take(&mut self.mark);
         self.input.snapshot(&mut m.snap);

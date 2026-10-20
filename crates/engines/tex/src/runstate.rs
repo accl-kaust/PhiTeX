@@ -1121,7 +1121,13 @@ impl State {
 
     /// The locations whose value the run read from the engine: read
     /// before the run defined them, or never defined (a value preloaded
-    /// in place of the engine's is not one).
+    /// in place of the engine's is not one). In the run's own order (its
+    /// definitions' bookkeeping first, then the rest as first touched),
+    /// never by location: a meaning's location is its name's number in
+    /// the process's interner, which numbers names in the order the
+    /// threads first meet them, so a list in location order differs
+    /// between two builds of one text (each location appears once: one
+    /// meta a location, one place in the touched list).
     pub(crate) fn read_locs(&self) -> Vec<Loc> {
         let mut out: Vec<Loc> = self
             .metas
@@ -1141,13 +1147,11 @@ impl State {
                 out.push(l);
             }
         }
-        out.sort_unstable();
-        out.dedup();
         out
     }
 
     /// [`State::read_locs`] with the values read (`None`: undefined in
-    /// the engine).
+    /// the engine), in the same order.
     pub(crate) fn read_values(&self) -> Vec<(Loc, Option<ValueId>)> {
         let mut out: Vec<(Loc, Option<ValueId>)> = self
             .metas
@@ -1166,8 +1170,6 @@ impl State {
                 out.push((l, s.e.id));
             }
         }
-        out.sort_unstable_by_key(|e| e.0);
-        out.dedup_by_key(|e| e.0);
         out
     }
 
@@ -1439,8 +1441,12 @@ impl State {
         }
     }
 
-    /// The table without `Rc`, for a parked run ([`PState`]): the slots
-    /// that hold more than an engine read.
+    /// The table without `Rc`, for a parked run ([`PState`]): the table
+    /// the run had, so the run resumed from it holds what a run that never
+    /// parked would (whether a run parks is the schedule's choice): every
+    /// location it touched in its order, its engine reads with their
+    /// values (they still hold when the engine gives the park back), its
+    /// definitions' bookkeeping in its order.
     pub(crate) fn park(&mut self, v: &Values) -> PState {
         let ploc = |s: &State, l: Loc| -> PLoc {
             if l & SPILL == 0 {
@@ -1463,7 +1469,7 @@ impl State {
         let mut slots = Vec::new();
         for &l in &self.touched {
             let Some(s) = self.slot_ref(l) else { continue };
-            if s.meta == 0 && s.save_gid == 0 && s.ginert == 0 && s.e.flags & PRELOADED == 0 {
+            if s.meta == 0 && s.save_gid == 0 && s.ginert == 0 && s.e.flags & LOADED == 0 {
                 continue;
             }
             let meta = (s.meta != 0).then(|| {
@@ -1514,9 +1520,13 @@ impl State {
                 )
             })
             .collect();
+        let touched = self.touched.iter().map(|&l| ploc(self, l)).collect();
+        let meta_order = self.metas.iter().map(|m| ploc(self, m.loc)).collect();
         PState {
             cands,
             cont_locs,
+            touched,
+            meta_order,
             slots,
             save,
             defined,
@@ -1542,10 +1552,23 @@ impl State {
             x.flags = e.flags;
             x
         };
+        // (the touched list in the run's order first: the reads it
+        // reports follow it, [`State::read_locs`])
+        for l in p.touched {
+            let l = loc(&mut st, l);
+            st.slot(l);
+        }
+        // (the metas in the run's order: its definitions' bookkeeping
+        // comes first in the reads it reports)
+        let order: Vec<Loc> = p.meta_order.into_iter().map(|l| loc(&mut st, l)).collect();
+        let at: FxHashMap<Loc, usize> = order.iter().enumerate().map(|(i, &l)| (l, i)).collect();
+        let mut metas: Vec<Option<Meta>> = (0..order.len()).map(|_| None).collect();
         for s in p.slots {
             let l = loc(&mut st, s.loc);
-            let meta = s.meta.map(|m| {
-                st.metas.push(Meta {
+            if let Some(m) = s.meta
+                && let Some(&i) = at.get(&l)
+            {
+                metas[i] = Some(Meta {
                     loc: l,
                     eng: m.eng,
                     publ: m.publ.map(|(x, lc)| (Entry::raw(x), lc)),
@@ -1553,14 +1576,18 @@ impl State {
                     ldef_local: m.ldef_local,
                     ldef_gid: m.ldef_gid,
                 });
-                u32::try_from(st.metas.len()).unwrap_or(0)
-            });
+            }
             let slot = st.slot(l);
             slot.e = ent(s.e);
             slot.save_gid = s.save_gid;
             slot.save_stamp = s.save_stamp;
             slot.ginert = s.ginert;
-            slot.meta = meta.unwrap_or(0);
+        }
+        for m in metas.into_iter().flatten() {
+            st.metas.push(m);
+            let i = u32::try_from(st.metas.len()).unwrap_or(0);
+            let l = st.metas[st.metas.len() - 1].loc;
+            st.slot(l).meta = i;
         }
         for s in p.save {
             let l = loc(&mut st, s.loc);
@@ -1654,6 +1681,10 @@ struct PSaved {
 pub(crate) struct PState {
     cands: Vec<(u64, Vec<(PLoc, PEntry)>)>,
     cont_locs: Vec<PLoc>,
+    /// Every location the run touched, in its order.
+    touched: Vec<PLoc>,
+    /// The locations of the run's metas, in its order.
+    meta_order: Vec<PLoc>,
     slots: Vec<PSlot>,
     save: Vec<PSaved>,
     defined: Vec<PLoc>,
@@ -1872,5 +1903,55 @@ impl State {
         m.ldef_stamp = st;
         m.ldef_local = false;
         m.ldef_gid = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reads a run reports come in the run's own order, whatever the
+    /// locations' numbers: a meaning's number is its name's place in the
+    /// process's interner, which the threads' schedule decides.
+    #[test]
+    fn reads_in_the_runs_order_not_by_location() {
+        let mut st = State::new();
+        st.fill(900, None);
+        st.fill(7, None);
+        st.fill(300, None);
+        // (a location read, then defined: still a read, through its meta)
+        st.set(300, Entry::raw(None), false, None);
+        st.fill(40, None);
+        assert_eq!(st.read_locs(), vec![300, 900, 7, 40]);
+        let order: Vec<Loc> = st.read_values().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(order, st.read_locs());
+    }
+
+    /// A run resumed from a park reports the reads a run that never
+    /// parked would, in the same order, and a location it read before
+    /// the park and defines after it is still a read: whether a run
+    /// parks is the schedule's choice. (The park dropped the slots that
+    /// held only an engine read, so the reads before it went missing
+    /// from the reads a piece contributes for a finisher's check.)
+    #[test]
+    fn a_parked_runs_reads_are_a_straight_runs() {
+        let v = Values::new();
+        let mut st = State::new();
+        st.fill(900, Some(v.int(1)));
+        st.fill(7, None);
+        st.fill(300, Some(v.int(3)));
+        st.set(300, Entry::raw(Some(v.int(4))), false, None);
+        st.fill(40, Some(v.int(5)));
+        st.set(41, Entry::raw(Some(v.int(6))), false, None);
+        let want = st.read_values();
+        let mut back = State::unpark(st.park(&v));
+        assert_eq!(back.read_values(), want);
+        // (defined after the resume: read before it, so still a read)
+        st.set(900, Entry::raw(Some(v.int(7))), false, None);
+        back.set(900, Entry::raw(Some(v.int(7))), false, None);
+        st.fill(8, None);
+        back.fill(8, None);
+        assert_eq!(back.read_values(), st.read_values());
+        assert!(back.read_locs().contains(&900));
     }
 }

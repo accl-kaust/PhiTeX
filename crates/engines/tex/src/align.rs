@@ -192,6 +192,7 @@ impl Run<'_, '_> {
                 if let Some(l) = self.level_of(md.lid) {
                     l.list.clear();
                 }
+                self.muts += 1;
                 self.incs.retain(|(l, _)| *l != md.lid);
             }
         }

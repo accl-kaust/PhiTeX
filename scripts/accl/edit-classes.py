@@ -11,7 +11,8 @@ the edit's timeline split into analysis (the phases before the
 evaluation), engine (the evaluation's wall), op bodies (the runs' time
 summed over threads), the PDF link (the link op's runs) and the rest,
 and the runs by op. Then para4000's one-word edit, amsldoc's -j 1 md5,
-pages and node count, and four -j 8 md5s: all printed as one table.
+pages and node count, and four -j 8 md5s: all printed as one table, with
+`qpdf --check` of the -j 1 PDF and of each edit's PDF under it.
 """
 import hashlib
 import json
@@ -41,6 +42,22 @@ def md5(p):
         return hashlib.md5(open(p, "rb").read()).hexdigest()
     except OSError:
         return "none"
+
+
+def qcheck(pdf):
+    """`qpdf --check` of a PDF: "pass", or "FAIL" and its first warning or
+    error line (qpdf repairs a broken xref with warnings only, exit 3)."""
+    if not os.path.exists(pdf):
+        return "FAIL: no PDF"
+    try:
+        p = subprocess.run(["qpdf", "--check", pdf], capture_output=True, text=True, errors="replace", timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"unchecked: {e}"[:160]
+    if p.returncode == 0:
+        return "pass"
+    lines = (p.stdout + p.stderr).splitlines()
+    first = next((l for l in lines if re.search(r"WARNING|ERROR|error|warning", l)), lines[-1] if lines else "")
+    return f"FAIL (exit {p.returncode}): {first}"[:200]
 
 
 def fresh(src_dir, d, cache):
@@ -122,7 +139,7 @@ def classes(binary, d, j, env, errf, timed):
         wall = time.monotonic() - t
         if timed:
             w.wait_timeline(c + 1)
-        return wall, ev
+        return wall, ev, None if timed else qcheck(w.path[:-4] + ".pdf")
 
     for name, a, b in CLASSES:
         assert orig.count(a) == 1, name
@@ -187,7 +204,8 @@ def cold(binary, src, d, cache, j, log):
     errs = re.findall(r"^error: (.*)", text, re.M)
     if j == 1 and os.path.exists(pdf):
         shutil.copy(pdf, log[:-4] + ".pdf")
-    return rc, md5(pdf), pg[-1] if pg else "?", wall, (nodes[-1][1] if nodes else "?"), "; ".join(errs)[:120]
+    return (rc, md5(pdf), pg[-1] if pg else "?", wall, (nodes[-1][1] if nodes else "?"), "; ".join(errs)[:120],
+            qcheck(pdf) if j == 1 else None)
 
 
 def para_edit(binary, src, d, cache, errf):
@@ -243,7 +261,7 @@ def main():
           f", node {os.uname().nodename}, -j 8 watch --json --exact-pdf")
     print("| class | wall ms | engine ms (event) | ok | pages | prof: total | analysis | engine | op bodies (sum) | link | rest | runs by op |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|")
-    for (name, _, _), (wall, ev) in zip(CLASSES, walls):
+    for (name, _, _), (wall, ev, _) in zip(CLASSES, walls):
         s = sp.get(name, {})
         eng = ev and (ev.get("parallel") or {}).get("engine_ms")
         tot, an, en = s.get("total"), s.get("analysis"), s.get("engine")
@@ -257,10 +275,12 @@ def main():
         return "; ".join(str(e.get("message", e) if isinstance(e, dict) else e) for e in (ev or {}).get("diagnostics") or [] if "rror" in str(e))[:160]
     print(f"watch cold (rel) {cold_rel:.1f} s ok {ev_cold and ev_cold.get('ok')} pages {ev_cold and ev_cold.get('pages')} {errs(ev_cold)}; "
           f"prof cold ok {pev_cold and pev_cold.get('ok')} pages {pev_cold and pev_cold.get('pages')}; history after the reverts md5 {hist_rel}")
-    for (name, _, _), (wall, ev) in zip(CLASSES, walls):
+    for (name, _, _), (wall, ev, q) in zip(CLASSES, walls):
         if ev and not ev.get("ok"):
             print(f"  {name}: not ok: {errs(ev) or str(ev.get('errors'))[:160]}")
+        print(f"  {name}: qpdf --check {q}")
     print(f"amsldoc -j 1: exit {j1[0]} md5 {j1[1]} pages {j1[2]} wall {j1[3]:.1f} s nodes {j1[4]} {j1[5]}")
+    print(f"amsldoc -j 1: qpdf --check {j1[6]}")
     for k, x in enumerate(j8):
         print(f"amsldoc -j 8 #{k + 1}: exit {x[0]} md5 {x[1]} pages {x[2]} wall {x[3]:.1f} s {x[5]}")
 
