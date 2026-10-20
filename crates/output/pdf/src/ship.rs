@@ -245,6 +245,7 @@ impl PdfState {
             std::sync::Arc::new(FontState {
                 name,
                 metrics: src.metrics(f).clone(),
+                metrics_hash: crate::digest::debug_hash(src.metrics(f)),
                 map,
                 file,
                 enc,
