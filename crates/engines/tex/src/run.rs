@@ -2873,10 +2873,15 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The fields this run read by class only ([`Run::class_lookup`]):
     /// for the cut checks, which take them as read (a routine's global
     /// definition of one is taken to change what the run saw).
-    pub(crate) fn class_read_fields(&self) -> Vec<Field> {
-        let mut ls: Vec<Loc> = self.class_memo.keys().copied().collect();
-        ls.sort_unstable();
-        ls.into_iter().filter_map(|l| self.st.field(l)).collect()
+    pub(crate) fn class_read_fields(&mut self) -> Vec<Field> {
+        // (by field, never by location: a meaning's location is its
+        // name's number in the process's interner, which the threads'
+        // schedule orders; every one, whether or not the table still
+        // holds its field, as after a park)
+        let ls: Vec<Loc> = self.class_memo.keys().copied().collect();
+        let mut fs: Vec<Field> = ls.into_iter().map(|l| self.loc_field(l)).collect();
+        fs.sort_unstable_by_key(|f| f.0.raw());
+        fs
     }
 
     #[inline(never)]
@@ -3863,6 +3868,9 @@ pub(crate) struct Parked {
     fread: Vec<(String, u64)>,
     fmiss: Vec<String>,
     skip_first: Vec<Field>,
+    /// The meanings read by class only ([`Run::class_memo`]): reads of
+    /// the run like its table's, kept over the park.
+    class_memo: Vec<(Field, u8)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -3981,6 +3989,10 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|l| self.loc_field(l))
                 .collect(),
+            class_memo: std::mem::take(&mut self.class_memo)
+                .into_iter()
+                .map(|(l, c)| (self.loc_field(l), c))
+                .collect(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -4056,6 +4068,11 @@ impl<'c, 'a> Run<'c, 'a> {
         r.fread = p.fread;
         r.fmiss = p.fmiss;
         r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
+        r.class_memo = p
+            .class_memo
+            .into_iter()
+            .map(|(f, c)| (r.loc_of(f), c))
+            .collect();
         r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
         r.st = crate::runstate::State::unpark(p.st);
