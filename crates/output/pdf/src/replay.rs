@@ -642,7 +642,7 @@ impl PdfState {
             self.aux.marks.insert(at(*k), m.clone());
         }
         for (k, d) in &rec.dest_data {
-            self.aux.dests.insert(at(*k), d.clone());
+            self.aux.dests.insert(at(*k), Some(d.clone()));
         }
         for (f, cs) in &rec.chars {
             let f = fmap(*f);

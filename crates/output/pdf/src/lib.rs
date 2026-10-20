@@ -585,8 +585,12 @@ struct Aux {
     ximages: digest::TMap<usize, image::XImage>,
     /// `obj_annot_ptr`: annotations' and links' rectangles and data.
     marks: digest::TMap<usize, marks::Mark>,
-    /// `obj_dest_ptr`: destinations met.
-    dests: digest::TMap<usize, marks::Dest>,
+    /// `obj_dest_ptr`: destinations met; once its page wrote it, a
+    /// destination's data is gone (`None`): only that it was met is read
+    /// after its page (a duplicate is ignored, §1580; one never met is
+    /// fixed at the end, §796), so a destination moved on one page
+    /// leaves the state after that page as it was.
+    dests: digest::TMap<usize, Option<marks::Dest>>,
     /// Outline entries.
     outlines: digest::TMap<usize, marks::Outline>,
     /// `obj_thread_first`.

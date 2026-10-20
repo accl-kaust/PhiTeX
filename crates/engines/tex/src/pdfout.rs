@@ -1231,19 +1231,48 @@ fn fresh(v: &Values, date: String, jobname: &str, g2u: Option<ValueId>) -> PdfSt
         output_file_name: format!("{jobname}.pdf"),
         ..PdfParams::default()
     };
-    let mut st = PdfState::new(p);
     // the `\pdfglyphtounicode` table a format carries (`dumptounicode`,
     // pdfTeX §1502; `undumptounicode`, §1503): a fresh writer state, a
-    // format loaded, starts from it
-    if let Some(t) = g2u {
-        for e in list_of(v, t) {
-            let ab = list_of(v, e);
-            if let [a, b] = ab[..] {
-                st.glyph_to_unicode(&bytes_of(&str_of(v, a)), &bytes_of(&str_of(v, b)));
+    // format loaded, starts from it. Made once per table (its value in
+    // its values table) and shared by every writer started from it: the
+    // writer's tables are shared until changed, so a page written apart
+    // or a link starts from it without copying or hashing it again.
+    let mut st = match g2u {
+        None => PdfState::new(PdfParams::default()),
+        Some(t) => {
+            let key = (v.instance(), t.raw());
+            let mut m = g2u_states()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(k) = m.iter().position(|e| e.0 == key) {
+                m[k].1.clone()
+            } else {
+                let mut st = PdfState::new(PdfParams::default());
+                for e in list_of(v, t) {
+                    let ab = list_of(v, e);
+                    if let [a, b] = ab[..] {
+                        st.glyph_to_unicode(&bytes_of(&str_of(v, a)), &bytes_of(&str_of(v, b)));
+                    }
+                }
+                // (its sums taken here, once: a clone's are up to date)
+                let _ = st.digest();
+                if m.len() >= 4 {
+                    m.remove(0);
+                }
+                m.push((key, st.clone()));
+                st
             }
         }
-    }
+    };
+    *st.params_mut() = p;
     st
+}
+
+/// The fresh writers of [`fresh`] by their glyph table (values instance,
+/// value), the latest few.
+fn g2u_states() -> &'static Mutex<Vec<((u64, u64), PdfState)>> {
+    static M: OnceLock<Mutex<Vec<((u64, u64), PdfState)>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// A read-time command on the writer in PDF mode, with the fonts it

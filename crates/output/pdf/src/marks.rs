@@ -423,12 +423,12 @@ impl PdfState {
         }
         self.aux.dests.insert(
             k,
-            Dest {
+            Some(Dest {
                 rect,
                 kind,
                 struct_num,
                 named: matches!(id, Ident::Name(_)),
-            },
+            }),
         );
         self.dest_list.push(k);
     }
@@ -591,7 +591,8 @@ impl PdfState {
                 ));
                 continue;
             }
-            let Some(d) = self.aux.dests.get(&k).cloned() else {
+            // (written: only that it was met stays)
+            let Some(Some(d)) = self.aux.dests.insert(k, None) else {
                 continue;
             };
             let dict = d.named && d.struct_num.is_none();

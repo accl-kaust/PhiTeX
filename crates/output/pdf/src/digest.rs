@@ -199,55 +199,67 @@ impl<T: fmt::Debug> fmt::Debug for TVec<T> {
 }
 
 /// A map whose digest is kept up to date by the entries changed: the
-/// sum of the hashes of (key, value).
+/// sum of the hashes of (key, value). The entries and their hashes are
+/// shared between clones until one of them changes (a writer kept at a
+/// record and the writer going on share a table neither changed: the
+/// glyph names' Unicode table a format loads, thousands of entries, is
+/// copied by no clone).
 #[derive(Clone)]
 pub(crate) struct TMap<K, V> {
     name: &'static str,
-    map: std::collections::BTreeMap<K, V>,
-    hashes: std::collections::BTreeMap<K, u64>,
+    map: Arc<std::collections::BTreeMap<K, V>>,
+    hashes: Arc<std::collections::BTreeMap<K, u64>>,
     dirty: std::collections::BTreeSet<K>,
     sum: u64,
 }
 
-impl<K: Ord + Clone + fmt::Debug, V: fmt::Debug> TMap<K, V> {
+impl<K: Ord + Clone + fmt::Debug, V: Clone + fmt::Debug> TMap<K, V> {
     pub(crate) fn new(name: &'static str) -> Self {
         TMap {
             name,
-            map: std::collections::BTreeMap::new(),
-            hashes: std::collections::BTreeMap::new(),
+            map: Arc::new(std::collections::BTreeMap::new()),
+            hashes: Arc::new(std::collections::BTreeMap::new()),
             dirty: std::collections::BTreeSet::new(),
             sum: 0,
         }
     }
     pub(crate) fn insert(&mut self, k: K, v: V) -> Option<V> {
         self.dirty.insert(k.clone());
-        self.map.insert(k, v)
+        Arc::make_mut(&mut self.map).insert(k, v)
     }
     pub(crate) fn remove(&mut self, k: &K) -> Option<V> {
+        if !self.map.contains_key(k) {
+            return None;
+        }
         self.dirty.insert(k.clone());
-        self.map.remove(k)
+        Arc::make_mut(&mut self.map).remove(k)
     }
     pub(crate) fn get_mut(&mut self, k: &K) -> Option<&mut V> {
-        if self.map.contains_key(k) {
-            self.dirty.insert(k.clone());
+        if !self.map.contains_key(k) {
+            return None;
         }
-        self.map.get_mut(k)
+        self.dirty.insert(k.clone());
+        Arc::make_mut(&mut self.map).get_mut(k)
     }
     /// `entry(k).or_insert_with(f)`.
     pub(crate) fn get_or_insert_with(&mut self, k: K, f: impl FnOnce() -> V) -> &mut V {
         self.dirty.insert(k.clone());
-        self.map.entry(k).or_insert_with(f)
+        Arc::make_mut(&mut self.map).entry(k).or_insert_with(f)
     }
     /// Brings the sum up to date.
     pub(crate) fn refresh(&mut self) {
+        if self.dirty.is_empty() {
+            return;
+        }
+        let hashes = Arc::make_mut(&mut self.hashes);
         for k in std::mem::take(&mut self.dirty) {
-            if let Some(old) = self.hashes.remove(&k) {
+            if let Some(old) = hashes.remove(&k) {
                 self.sum = self.sum.wrapping_sub(old);
             }
             if let Some(v) = self.map.get(&k) {
                 let h = element_hash(self.name, &(&k, v));
                 self.sum = self.sum.wrapping_add(h);
-                self.hashes.insert(k, h);
+                hashes.insert(k, h);
             }
         }
     }

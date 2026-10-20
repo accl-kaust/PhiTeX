@@ -1476,7 +1476,7 @@ impl PdfState {
             r.dest_data = self
                 .dest_list
                 .iter()
-                .filter_map(|k| Some((*k, self.aux.dests.get(k)?.clone())))
+                .filter_map(|k| Some((*k, self.aux.dests.get(k)?.clone()?)))
                 .collect();
         }
         if shipping_page {
