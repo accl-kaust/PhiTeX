@@ -215,3 +215,57 @@ fn handles_survive_evaluations() {
         assert_eq!(a.stats.undeclared_definitions, 0);
     }
 }
+
+/// A file read by `\input` where its reader made `@` a letter: the
+/// pass reads the file in a document's regime (`@` no letter), as it
+/// cannot know its reader's, so `\@x` is to it `\@` (a macro of one
+/// argument) and `x`. The same text read inline, where the pass sees the
+/// change, is the reference.
+const PART: &str = "\\def\\@#1{A}\\def\\@x{B}\n\\@x\n";
+
+fn read_as_file(file: bool) -> Build {
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hints-regime");
+    let _ = std::fs::create_dir_all(&d);
+    std::fs::write(d.join("part.tex"), PART).unwrap();
+    let doc = if file {
+        "\\catcode`\\@=11 \n\\input part\n\\catcode`\\@=12 \n\\bye\n".to_owned()
+    } else {
+        format!("\\catcode`\\@=11 \n{PART}\\catcode`\\@=12 \n\\bye\n")
+    };
+    let opts = Options {
+        time_limit: None,
+        ..common::options("./main.tex", "main", "", &d)
+    };
+    common::build(opts, Some(&common::plain()), &doc)
+}
+
+/// Where a control sequence's name ends is the pass's reading under the
+/// regime it predicts: a cut between `\@` and `x` would split the
+/// control word `\@x` in two, which no run joins again. No slice begins
+/// right after a name: the file typesets as the inline text does.
+#[test]
+fn a_mispredicted_regime_cuts_no_token() {
+    let _g = lock();
+    let file = read_as_file(true);
+    let inline = read_as_file(false);
+    hint_diags(&file);
+    assert_eq!(
+        file.output().0,
+        inline.output().0,
+        "the file typeset otherwise"
+    );
+}
+
+/// A control symbol's character is read as no letter (or the name would
+/// go on, §356): the hint says so, and the run checks it. `\@` read as a
+/// control symbol where `@` is a letter is a violation.
+#[test]
+fn a_control_symbol_assumes_no_letter() {
+    let _g = lock();
+    let b = read_as_file(true);
+    hint_diags(&b);
+    assert!(
+        b.stats.regime_violations > 0,
+        "the run did not check that `@` is no letter"
+    );
+}

@@ -5820,11 +5820,9 @@ impl Build {
                 let md = match crate::hints::may_define(&self.g.ops.hints, v, &i.args) {
                     phitex_defuse::MayDefine::Any => None,
                     phitex_defuse::MayDefine::Nothing => Some(Vec::new()),
-                    phitex_defuse::MayDefine::Names(fs) => Some(
-                        fs.iter()
-                            .map(|&f| crate::val::field_name(v, f))
-                            .collect(),
-                    ),
+                    phitex_defuse::MayDefine::Names(fs) => {
+                        Some(fs.iter().map(|&f| crate::val::field_name(v, f)).collect())
+                    }
                     phitex_defuse::MayDefine::Prefixes(ps) => {
                         Some(ps.iter().map(|p| format!("{p}*")).collect())
                     }
