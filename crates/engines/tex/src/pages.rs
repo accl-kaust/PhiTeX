@@ -1144,6 +1144,15 @@ impl Run<'_, '_> {
     /// candidate, its locals at its last]`): the page's finisher checks
     /// the piece there as for a page firing in its own items
     /// ([`Run::check_cut`]).
+    ///
+    /// (Why the page's index `j` and its ordinary pages stay in the
+    /// arguments, so that a page added before re-places the finishers and
+    /// continuations after it: the finisher's predicted definitions,
+    /// [`FinDefs::predict`], step page counters by the ordinary pages
+    /// between, from its arguments alone; without them a cold build's
+    /// finishers wait on one another's counters. Those finishers run
+    /// again anyway where a page is added: their pages' numbers differ.
+    /// The scan state leaves them out, [`SCAN_AT`].)
     #[allow(clippy::too_many_arguments)]
     fn place_break(
         &mut self,
