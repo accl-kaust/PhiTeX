@@ -502,10 +502,7 @@ impl Incr {
         // the analyses of the chunks not kept
         let analyse_todo = |x: usize| {
             let k = c.todo[x];
-            let own = owns[k]
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take();
+            let own = owns[k].lock().unwrap_or_else(PoisonError::into_inner).take();
             analyse(chunk_text(&parts[k]), &c.ins[k].1, own, c.starts[k].as_ref())
         };
         // (the analyses' summed time, for `PHITEX_TEX_TIME`)
