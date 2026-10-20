@@ -265,9 +265,20 @@ thread_local! {
 
 impl Clone for State {
     fn clone(&self) -> State {
+        // (a pooled table is all default slots, and a slot of this one
+        // that is not is in its touched list, [`State::slot`]: those
+        // copied, not the whole table, which spans every control
+        // sequence the thread's runs have seen)
         let mut eq = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
-        eq.clear();
-        eq.extend(self.eq.iter().cloned());
+        eq.truncate(self.eq.len());
+        eq.resize_with(self.eq.len(), Slot::default);
+        for &l in &self.touched {
+            if l < SPILL
+                && let Some(s) = self.eq.get(l as usize)
+            {
+                eq[l as usize] = s.clone();
+            }
+        }
         State {
             eq,
             spill: self.spill.clone(),
