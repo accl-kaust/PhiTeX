@@ -702,6 +702,10 @@ impl<T> std::ops::DerefMut for Memo<T> {
     }
 }
 
+/// `divide_scaled(w, size, 4)` of characters' widths: `(w, size, q, r)`
+/// by a hash of width and size ([`PdfState`]'s `adv_memo`).
+type AdvMemo = [(Scaled, Scaled, i32, Scaled); 64];
+
 /// The writer before the split: the state and its bytes in one.
 pub type PdfWriter = PdfState;
 
@@ -815,7 +819,7 @@ pub struct PdfState {
     last_loaded: Memo<Option<FontId>>,
     /// `divide_scaled(w, size, 4)` of characters' widths, direct-mapped
     /// by width and size (a pure function: a line repeats its letters).
-    adv_memo: Memo<Box<[(Scaled, Scaled, i32, Scaled); 64]>>,
+    adv_memo: Memo<Box<AdvMemo>>,
     /// `fd_tree`'s descriptors of included PDF files' fonts.
     epdf_fds: digest::TMap<epdffont::FdKey, epdffont::EpdfFd>,
     /// `\pdfmapline` and `\pdfmapfile` entries: replacing (`=`) or
