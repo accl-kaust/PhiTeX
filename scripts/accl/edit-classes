@@ -1,0 +1,24 @@
+#!/bin/bash
+# The edit-time table of a commit (on accl, in a job):
+#
+#   ACCL_COMMIT=<rev> scripts/accl/accl submit cmd bash scripts/accl/edit-classes
+#
+# Builds the release CLI twice (the users' build, and the same with the
+# `profile` feature for the timelines), then in one table: amsldoc's six
+# edit classes at -j 8 through `watch --json --exact-pdf` (the wall from
+# the users' build; runs by op and the time split from the profile
+# build's timeline), para4000's one-word edit, amsldoc's -j 1 md5, pages
+# and node count, and four -j 8 md5s. Writes $r/summary.txt (the table)
+# and the logs beside it.
+set -u
+cd "$(dirname "$0")/../.."
+export CARGO_BUILD_JOBS=8
+t0=$(date +%s)
+( CARGO_TARGET_DIR=$w/t-rel cargo build -q --release -p phitex-cli > "$r/build-rel.txt" 2>&1; echo "EXIT $?" >> "$r/build-rel.txt" ) &
+( CARGO_TARGET_DIR=$w/t-prof cargo build -q --release -p phitex-cli --features phitex-tex/profile > "$r/build-prof.txt" 2>&1; echo "EXIT $?" >> "$r/build-prof.txt" ) &
+wait
+for b in rel prof; do
+  grep -q '^EXIT 0$' "$r/build-$b.txt" || { echo "build $b FAILED: $(grep -m1 '^error' "$r/build-$b.txt")" | tee "$r/summary.txt"; exit 1; }
+done
+echo "built in $(( $(date +%s) - t0 )) s" > "$r/build-time.txt"
+python3 -I scripts/accl/edit-classes.py "$w/t-rel/release/phitex" "$w/t-prof/release/phitex" "$w/ec" "$r" | tee "$r/summary.txt"
