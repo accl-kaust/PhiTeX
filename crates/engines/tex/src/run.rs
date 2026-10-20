@@ -2344,7 +2344,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // (a line that does more than define is read back as text:
             // its interpretation stops at the first command that does,
             // its definitions not wanted)
-            if self.contribs.len() != nc
+            if self.contributed_since(nc)
                 || self.kids.len() != nk
                 || self.nest.len() != nest_len + 1
                 || self.nest.last().is_some_and(|l| !l.list.is_empty())
@@ -2365,7 +2365,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (only definitions: nothing contributed, typeset or called, the
         // line's own list empty and closed, no conditional left open)
         self.interp_plain = res.is_ok()
-            && self.contribs.len() == nc
+            && !self.contributed_since(nc)
             && self.kids.len() == nk
             && self.nest.len() == nest_len + 1
             && self.nest.last().is_some_and(|l| l.list.is_empty())
@@ -2390,6 +2390,18 @@ impl<'c, 'a> Run<'c, 'a> {
         self.kind_memo = None;
         res?;
         Ok((!short).then(|| v.list(made)))
+    }
+
+    /// Whether the run contributed since its `n`th contribution anything
+    /// but lines of the log: what a written line writes to the log as it
+    /// is read back is no output of the job's the line's definitions
+    /// stand for (the log need not match), so such a line still only
+    /// defines ([`Run::interpret_line`]).
+    fn contributed_since(&self, n: usize) -> bool {
+        let log = self.v.field("log");
+        self.contribs
+            .get(n..)
+            .is_some_and(|c| c.iter().any(|&(f, _)| f != log))
     }
 
     /// File `name` is opened for writing: where the build keeps the
