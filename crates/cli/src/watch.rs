@@ -104,6 +104,13 @@ fn watcher(
     Ok(w)
 }
 
+/// The next event, the receiver borrowed uniquely: a closure that calls
+/// this holds `&mut Receiver` (which may cross to another thread), where
+/// one calling `rx.recv()` holds `&Receiver` (which may not).
+fn recv_unique<T>(rx: &mut mpsc::Receiver<T>) -> Result<T, mpsc::RecvError> {
+    rx.recv()
+}
+
 /// `s` with UTF-16 code units `start..end` replaced by `text` (the
 /// viewer's offsets).
 fn splice_utf16(s: &str, start: usize, end: usize, text: &str) -> String {
@@ -1089,7 +1096,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // to it, everything held for after it)
     let cold_absorb = s.absorb();
     let mut cold_meanwhile = || {
-        let Ok((at, e)) = (&mut rx).recv() else {
+        let Ok((at, e)) = recv_unique(&mut rx) else {
             return true;
         };
         if let Event::Built = e {
@@ -1380,7 +1387,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             // (while the build runs: the main file's edits sent to it, the
             // rest held for after it)
             let mut meanwhile = || {
-                let Ok((at, e)) = (&mut rx).recv() else {
+                let Ok((at, e)) = recv_unique(&mut rx) else {
                     return true;
                 };
                 let send_main = |buffers: &HashMap<String, String>, file: &str| -> bool {

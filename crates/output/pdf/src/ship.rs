@@ -200,11 +200,11 @@ impl PdfState {
 
     /// The font's state, from the caller's data the first time.
     pub(crate) fn load_font(&mut self, f: FontId, src: &dyn FontSource) {
-        if self.last_loaded == Some(f) {
+        if *self.last_loaded == Some(f) {
             return;
         }
         if self.fonts.contains_key(&f) {
-            self.last_loaded = Some(f);
+            *self.last_loaded = Some(f);
             return;
         }
         let name = src.name(f).to_vec();
@@ -409,7 +409,7 @@ impl PdfState {
             // pdfmaplinesp
             self.map_line(b"=pdftexspace PdfTeX-Space <pdftexspace.pfb");
             self.fonts.remove(&f);
-            self.last_loaded = None;
+            *self.last_loaded = None;
             self.load_font(f, src);
             self.font_mut(f).chars[32] = true;
         }
