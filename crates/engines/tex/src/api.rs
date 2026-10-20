@@ -130,6 +130,14 @@ pub struct Options {
     /// no guess. A right guess saves the loop-back's second round; a
     /// wrong one costs nothing more than no guess.
     pub wkeys: Vec<(String, Vec<String>)>,
+    /// The files the job writes as they are when the build begins (name,
+    /// text), as an earlier run left them on disk (`fixpoint` only): the
+    /// first round reads each back from this text where the job reads it
+    /// (`crate::run::Run::seed_written`), as TeX's next run reads the file
+    /// the last one wrote, so a round that writes the files as it read
+    /// them is the last. A file not listed starts absent. The engine
+    /// reads no file of its own.
+    pub written_init: Vec<(String, String)>,
     /// The package loads' records ([`Build::export_pkgrec`]): kept
     /// machine-wide beside the format, keyed by the load and the files
     /// it read, never by the document, so a new document's first build
@@ -574,6 +582,7 @@ impl Default for Options {
             epoch: None,
             fixpoint: false,
             wkeys: Vec::new(),
+            written_init: Vec::new(),
             pkgrec: Vec::new(),
             pkg_predict: false,
             finisher_predictions: true,
@@ -873,24 +882,46 @@ pub(crate) fn written_defs(
             out.push((name, Vec::new()));
             out.len() - 1
         };
-        for d in list_of(v, made) {
-            let ds = list_of(v, d);
-            // (`[field]`: a definition a read-back nested in the line
-            // made, the other file's: a key of this file whose value that
-            // file publishes, `UNIT` here)
-            let (f, val) = match ds.as_slice() {
-                [f, x, g] => (str_of(v, *f), v.list(vec![*x, *g])),
-                [f] => (str_of(v, *f), ValueId::UNIT),
-                _ => continue,
-            };
-            match out[k].1.iter_mut().find(|(n, _)| *n == f) {
-                Some(slot) if val != ValueId::UNIT => slot.1 = val,
-                Some(_) => {}
-                None => out[k].1.push((f, val)),
-            }
-        }
+        merge_defs(v, &mut out[k].1, made);
     }
     out
+}
+
+/// One line's definitions (`made`, [`Run::interpret_line`]) added to a
+/// file's read-back definitions `ds` ([`written_defs`]): each field
+/// once, where it was first defined, with its last value.
+pub(crate) fn merge_defs(v: &Values, ds: &mut Vec<(String, ValueId)>, made: ValueId) {
+    for d in list_of(v, made) {
+        let xs = list_of(v, d);
+        // (`[field]`: a definition a read-back nested in the line
+        // made, the other file's: a key of this file whose value that
+        // file publishes, `UNIT` here)
+        let (f, val) = match xs.as_slice() {
+            [f, x, g] => (str_of(v, *f), v.list(vec![*x, *g])),
+            [f] => (str_of(v, *f), ValueId::UNIT),
+            _ => continue,
+        };
+        match ds.iter_mut().find(|(n, _)| *n == f) {
+            Some(slot) if val != ValueId::UNIT => slot.1 = val,
+            Some(_) => {}
+            None => ds.push((f, val)),
+        }
+    }
+}
+
+/// The key set of file `name` read back per field (`wkeys:<name>`) from
+/// its definitions `ds` ([`written_defs`]): [`WRITTEN_KEY`], then each
+/// field, a key a nested read-back's file publishes by its id.
+pub(crate) fn key_set(v: &Values, name: &str, ds: &[(String, ValueId)]) -> ValueId {
+    let mut keys = vec![v.str(WRITTEN_KEY)];
+    for (f, val) in ds {
+        keys.push(if *val == ValueId::UNIT {
+            v.str(&wdef_id(name, f))
+        } else {
+            v.str(f)
+        });
+    }
+    v.list(keys)
 }
 
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
@@ -1836,6 +1867,10 @@ struct Graph {
     /// The files the job writes and reads back: loop-back fields
     /// (`fixpoint`), or absent before the job writes them.
     written: Vec<String>,
+    /// The files the job writes whose text the client gave as the build
+    /// began ([`Options::written_init`]): their loop-backs are declared by
+    /// the run that reads them back first (`crate::run::Run::seed_written`).
+    seeds: Vec<(String, String)>,
     /// The files the last evaluation's runs opened for writing: their
     /// nodes are placed from the streams (`ops::Files`), so `loopfiles`
     /// lists only the files written before and not opened now.
@@ -2042,6 +2077,7 @@ impl Graph {
             queries: Vec::new(),
             absent: Vec::new(),
             written: Vec::new(),
+            seeds: Vec::new(),
             threads: crate::exec::threads(threads),
             marks: Marks::default(),
             wdefs: Vec::new(),
@@ -2481,7 +2517,25 @@ impl Graph {
     /// Round one's guesses for the loop-backs: the last build's values
     /// (`opts`); none without one.
     fn guesses(&mut self, opts: &Options) {
-        self.wkeys_guess.clone_from(&opts.wkeys);
+        if opts.fixpoint {
+            self.seeds.clone_from(&opts.written_init);
+        }
+        // (the files the job wrote in an earlier round: those, as the
+        // files node lists them once it ran a round, `crate::ops::WSEEN`)
+        if !self.seeds.is_empty() {
+            let v = self.eng.values();
+            let names = v.list(self.seeds.iter().map(|(n, _)| v.str(n)).collect());
+            let f = v.field(crate::ops::WSEEN);
+            decl_trace(&self.eng, f, names);
+            self.eng.declare_loopback(f, names);
+        }
+        // (a file read back from its text needs no guess of its keys)
+        self.wkeys_guess = opts
+            .wkeys
+            .iter()
+            .filter(|(n, _)| !self.seeds.iter().any(|(m, _)| m == n))
+            .cloned()
+            .collect();
     }
 
     /// A file the job writes is read back: from the previous round
@@ -2517,8 +2571,12 @@ impl Graph {
         } else {
             self.absent.push(f);
         }
-        if fixpoint {
-            // nothing reads the bytes on disk: a read-back that only
+        // (a file whose text the client gave: its loop-backs are the
+        // reading run's, declared with what it read back from that text,
+        // [`Options::written_init`]; declared again here, their round-one
+        // values would be lost)
+        if fixpoint && !self.seeds.iter().any(|(n, _)| n == name) {
+            // nothing else reads the bytes on disk: a read-back that only
             // defines is its key set `wkeys:<name>` and one
             // `wdef:<field>` per field; another file is its text in
             // memory, `wfile:<name>`; both start empty (absent)
@@ -2613,8 +2671,18 @@ impl Graph {
                 .map(|n| v.str(n))
                 .collect();
             env.push((v.field("loopfiles"), v.list(names)));
+            // (the texts the client gave for the files the job writes,
+            // read back in round one where the job first reads each)
+            env.push((
+                v.field(crate::run::SEEDS),
+                v.list(self.seeds.iter().map(|(n, _)| v.str(n)).collect()),
+            ));
+            for (n, t) in &self.seeds {
+                env.push((v.field(&format!("{}:{n}", crate::run::SEEDS)), v.str(t)));
+            }
         } else {
             env.push((v.field("loopfiles"), ValueId::UNIT));
+            env.push((v.field(crate::run::SEEDS), v.list(Vec::new())));
         }
         env
     }
@@ -2988,6 +3056,11 @@ impl Graph {
                 let defs = written_defs(v, acc("streams"));
                 let mut new = Vec::new();
                 for (name, ds) in defs {
+                    // (a file read back from the client's text: the
+                    // reading run declared its keys, `written_file`)
+                    if self.seeds.iter().any(|(n, _)| *n == name) {
+                        continue;
+                    }
                     for (f, _) in ds {
                         let f = wdef_id(&name, &f);
                         if !self.wdefs.contains(&f) && !new.contains(&f) {
@@ -6195,6 +6268,7 @@ fn declare_fields(eng: &mut Engine) {
         crate::pdfout::XPAGES,
         crate::vprof::VPROF,
         crate::pages::PITEMS,
+        crate::run::SEEDED,
     ] {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));

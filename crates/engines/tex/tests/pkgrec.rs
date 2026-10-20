@@ -267,10 +267,14 @@ fn defining_outside_the_record_is_refuted() {
         let second = build(&d, &doc(1), spec, recs.clone());
         note("behaviour changed", &second);
         assert_eq!(second.stats.pkg_recorded, 2);
+        // (a definition outside a declared set widens it, a refuted
+        // guess: no undeclared-definition error since the engine's
+        // static definition lists became guesses, 5f6f4f1)
         assert!(
-            second.stats.declarations_refuted >= 1 && second.stats.undeclared_definitions >= 1,
+            second.stats.declarations_refuted >= 1,
             "the record is refuted"
         );
+        assert_eq!(second.stats.undeclared_definitions, 0);
         same(
             "behaviour changed",
             &second.output().0,
