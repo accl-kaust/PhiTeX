@@ -6290,6 +6290,8 @@ fn declare_fields(eng: &mut Engine) {
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
+    let rels = eng.values().field(crate::pdfprim::RT_RELS);
+    eng.declare_accumulator(rels, Arc::new(SeqMonoid));
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));
