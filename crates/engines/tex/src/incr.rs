@@ -21,13 +21,6 @@
 //! texts); a chunk whose first unit kept its identity, whose units are
 //! the same and whose key is the same keeps its analysis, the others are
 //! analysed again.
-//!
-//! A chunk with package loads in it defines, besides its own text's
-//! definitions, those of the files the loads read when they last ran
-//! (their records, `crate::pkgrec`, matched by the files' text hashes
-//! now): the chunks after it are analysed under them, as under the
-//! format's. Those are a guess like any hint's: a run that defines or
-//! takes outside what its hint says refutes it.
 
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -51,9 +44,8 @@ struct Entry {
     out: (u64, Defs),
     /// Whether nothing stays open at its end ([`Open::closed`]).
     closed: bool,
-    /// The digest of its own definitions ([`Definitions::digest`]) and
-    /// of the files its loads read ([`own_key`]), or `None` when it
-    /// defines nothing and has no load: the key of the definitions after
+    /// The digest of its own definitions ([`Definitions::digest`]), or
+    /// `None` when it defines nothing: the key of the definitions after
     /// it chains this, not its text.
     own: Option<u64>,
     /// The regime it was read beginning in, and the one it ends in
@@ -93,27 +85,6 @@ pub(crate) struct Incr {
     next_file: u32,
     /// The workers its chunks are analysed on (`crate::exec::Coarse`).
     pub threads: usize,
-    /// The package loads' records: the files a chunk's loads read
-    /// ([`crate::pkgrec::LoadHints::files_read`]).
-    pub loads: Option<Arc<crate::pkgrec::LoadHints>>,
-}
-
-/// The key of what a chunk adds to the definitions in force: its own
-/// definitions' digest (`None`: it defines nothing) with the files its
-/// loads read (name and text hash, in order); `None` when neither.
-fn own_key(own: Option<u64>, files: &[(String, u64)]) -> Option<u64> {
-    if files.is_empty() {
-        return own;
-    }
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    own.hash(&mut h);
-    files.hash(&mut h);
-    Some(h.finish())
-}
-
-/// The files a chunk's loads read, by `loads`' records (none without).
-fn files_read(loads: Option<&crate::pkgrec::LoadHints>, t: &str) -> Vec<(String, u64)> {
-    loads.map_or_else(Vec::new, |l| l.files_read(t))
 }
 
 impl Incr {
@@ -127,7 +98,6 @@ impl Incr {
             analysed: 0,
             next_file: 2_000_000_000,
             threads: 1,
-            loads: None,
         }
     }
 
@@ -262,10 +232,7 @@ impl Incr {
         if regime(end) != self.cache[k].end {
             return false;
         }
-        let digest = own_key(
-            crate::hints::defines_any(&own).then(|| own.digest()),
-            &files_read(self.loads.as_deref(), t),
-        );
+        let digest = crate::hints::defines_any(&own).then(|| own.digest());
         if digest != self.cache[k].own {
             return false;
         }
@@ -397,7 +364,6 @@ impl Incr {
     fn chain(
         text: &str,
         base: &Defs,
-        loads: Option<&crate::pkgrec::LoadHints>,
         next_file: &mut u32,
         parts: &mut [Part],
         owns: &[Mutex<Option<Definitions>>],
@@ -436,9 +402,6 @@ impl Incr {
             } else {
                 c.todo.push(k);
                 let t = &text[p.start..p.start + p.len];
-                // (the files its loads read: their definitions before its
-                // own text's, as the loads run before what follows them)
-                let files = files_read(loads, t);
                 let (own, end) = cached_own.unwrap_or_else(|| {
                     let mut slot = owns[k].lock().unwrap_or_else(PoisonError::into_inner);
                     let end = match &*slot {
@@ -454,7 +417,7 @@ impl Incr {
                         .as_ref()
                         .filter(|d| crate::hints::defines_any(d))
                         .map(Definitions::digest);
-                    (own_key(digest, &files), end)
+                    (digest, end)
                 });
                 if let Some(d_own) = own {
                     let t1 = std::time::Instant::now();
@@ -463,21 +426,6 @@ impl Incr {
                         "incr: the definitions before a chunk copied",
                         t1.elapsed(),
                     );
-                    let t1 = std::time::Instant::now();
-                    for (name, _) in &files {
-                        if !crate::api::is_tex_text(name) {
-                            continue;
-                        }
-                        let Some(ft) = loads.and_then(|l| l.file_text(name)) else {
-                            continue;
-                        };
-                        let kind = crate::hints::kind_of(&ft, FileKind::from_path(name));
-                        d.harvest(&ft, kind, *next_file);
-                        *next_file = next_file.wrapping_add(1);
-                    }
-                    if !files.is_empty() {
-                        crate::timeline::note("incr: the loads' files harvested", t1.elapsed());
-                    }
                     d.harvest_from(t, FileKind::Document, *next_file, start);
                     *next_file = next_file.wrapping_add(1);
                     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -542,7 +490,6 @@ impl Incr {
         let mut c = Self::chain(
             text,
             &self.defs,
-            self.loads.as_deref(),
             &mut self.next_file,
             &mut parts,
             &owns,
@@ -611,7 +558,7 @@ impl Incr {
 }
 
 /// What [`Incr::chain`] gives, by chunk: the definitions before it (key
-/// and set) and after it, its own key ([`own_key`]), the regimes it
+/// and set) and after it, its own key (its own definitions' digest), the regimes it
 /// begins and ends in; and the chunks to analyse again.
 struct Chained {
     ins: Vec<(u64, Defs)>,

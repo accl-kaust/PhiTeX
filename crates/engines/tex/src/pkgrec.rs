@@ -386,58 +386,6 @@ impl LoadHints {
         None
     }
 
-    /// The files the package loads in the document text `text` read when
-    /// they last ran, by their records: each load whose command begins a
-    /// line of `text`, whose key the text from there begins with (the
-    /// longest such key) and whose files are as recorded now; each
-    /// file's name and text hash, in the order the loads read them, a
-    /// file absent or listed already left out. A file a record lists
-    /// that is no longer there, or reads otherwise now: none of that
-    /// load's (its record no longer matches).
-    pub(crate) fn files_read(&self, text: &str) -> Vec<(String, u64)> {
-        let mut out: Vec<(String, u64)> = Vec::new();
-        // (a text's id is its content's hash, the same in any table: the
-        // hashes are made here without the build's values)
-        let mut scratch: Option<Values> = None;
-        for (i, _) in text.match_indices('\\') {
-            let line = text[..i].rfind('\n').map_or(0, |k| k + 1);
-            if !text[line..i].bytes().all(|c| c == b' ' || c == b'\t') {
-                continue;
-            }
-            let rest = &text[i + 1..];
-            let n = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
-            if !LOADERS.contains(&&rest[..n]) {
-                continue;
-            }
-            let rec = {
-                let recs = self.recs.lock().unwrap_or_else(PoisonError::into_inner);
-                let longest = recs.keys().map(String::len).max().unwrap_or(0);
-                let body = load_body(&text[i..], longest);
-                recs.iter()
-                    .filter(|(k, _)| body.starts_with(k.as_str()))
-                    .max_by_key(|(k, _)| k.len())
-                    .map(|(_, r)| r.files.clone())
-            };
-            let Some(files) = rec else { continue };
-            let v = scratch.get_or_insert_with(Values::new);
-            if !files.iter().all(|(n, h)| self.hash_now(v, n) == *h) {
-                continue;
-            }
-            for (n, h) in files {
-                if h != 0 && !out.iter().any(|(m, _)| *m == n) {
-                    out.push((n, h));
-                }
-            }
-        }
-        out
-    }
-
-    /// File `name`'s text as the build's finder gives it now, its bytes
-    /// as characters (as [`Self::hash_now`] reads it).
-    pub(crate) fn file_text(&self, name: &str) -> Option<String> {
-        (self.finder)(name).map(|(_, bytes)| bytes.iter().map(|&b| char::from(b)).collect())
-    }
-
     /// The records with `fresh` (load key, record) replacing theirs.
     pub(crate) fn merge(&self, fresh: Vec<(String, Rec)>) {
         let mut r = self.recs.lock().unwrap_or_else(PoisonError::into_inner);
