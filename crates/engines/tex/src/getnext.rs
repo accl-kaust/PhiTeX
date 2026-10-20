@@ -471,7 +471,7 @@ impl Run<'_, '_> {
                 let joins = self.input.text.len() > self.input.text_at
                     && matches!(
                         (self.input.text.last(), segs.first()),
-                        (Some(Seg::Line(last)), Some(Seg::Line(next))) if !last.ends && !next.starts
+                        (Some(Seg::Line(last)), Some(Seg::Line(next))) if !last.ends && last.endch == -2 && !next.starts
                     );
                 if self.pull_at.len() == self.pulled {
                     self.pull_at.push((!joins).then_some(self.input.text.len()));

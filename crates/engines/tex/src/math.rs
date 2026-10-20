@@ -732,6 +732,9 @@ impl Run<'_, '_> {
         let (items, _) = self.list_items(md.lid)?;
         let n = i64::try_from(items.len()).unwrap_or(0);
         let inc = v.list(vec![v.int(thick), v.int(l), v.int(r), v.int(n)]);
+        // (a change a rewind of the input does not undo, as any of the
+        // run's own state, [`Run::mutations`])
+        self.muts += 1;
         self.incs.push((md.lid, inc));
         Ok(())
     }
@@ -747,6 +750,9 @@ impl Run<'_, '_> {
             .iter()
             .position(|x| x.0 == lid)
             .map(|i| self.incs.swap_remove(i).1);
+        if inc.is_some() {
+            self.muts += 1;
+        }
         let Some(inc) = inc else {
             let mut out = items;
             out.extend(p);

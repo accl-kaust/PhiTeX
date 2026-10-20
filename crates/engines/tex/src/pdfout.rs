@@ -270,6 +270,9 @@ pub(crate) struct Cmd {
     wparams: WParams,
     /// The node that ran it (for the link's trace).
     node: u64,
+    /// When it was made ([`CMD_BORN`]): the link drops only the
+    /// commands made before it looked.
+    born: u64,
     /// The object number TeX gave the object the command makes, at read
     /// time ([`note_read_time`]; 0: none): the link maps it to the
     /// number its writer gives where it stands in the line.
@@ -322,7 +325,7 @@ pub(crate) struct PagePiece {
     /// fonts used on the state it was written on: set once, by the
     /// page's [`PdfPage`] (final, after the loop-backs settle).
     made: OnceLock<(phitex_pdf::PageRecord, BTreeSet<FontId>)>,
-    /// The page's index in the page chain (for traces and the key).
+    /// The page's index in the page chain (for traces).
     pj: i64,
     /// The node that shipped it, for the link's errors ([`Linked`]).
     node: i64,
@@ -1247,7 +1250,6 @@ pub(crate) fn command_forms(
     let wparams = writer_params(r)?;
     // (the command's key: its node and its place among the node's
     // commands, the same in every round the node runs as this run)
-    let _ = input;
     r.muts += 1;
     r.pdf_occ += 1;
     let key = phitex_defuse::hash_words(
@@ -1255,7 +1257,14 @@ pub(crate) fn command_forms(
         &[r.cx.node().raw(), r.pdf_occ as u64],
     )
     .max(1);
-    let serial = CMD_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    // (the record's handle on the command: what the command is (its key,
+    // its input, the fonts and parameters it runs with), never a count
+    // of the commands made so far, which the threads' schedule orders;
+    // two runs that make the same handle made the same command)
+    let mut words = vec![key, input.raw(), fs.digest()];
+    words.extend(wparams.iter().map(|&p| u64::from(p.cast_unsigned())));
+    let serial = phitex_defuse::hash_words(0x6364_6d73_6572_0001, &words);
+    let born = CMD_BORN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     r.ops
         .pdf_cmds
         .lock()
@@ -1267,6 +1276,7 @@ pub(crate) fn command_forms(
                 fonts: fs,
                 wparams,
                 node: r.cx.node().raw(),
+                born,
                 rt: std::sync::atomic::AtomicU64::new(0),
             }),
         );
@@ -1280,8 +1290,9 @@ pub(crate) fn command_forms(
     Ok(None)
 }
 
-/// The commands' serials ([`command`]): one per run of a command.
-static CMD_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The commands made so far ([`command`]), for [`Cmd::born`] only: a
+/// count the schedule orders, never put in a value.
+static CMD_BORN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn param(v: &Values, xs: &[ValueId], k: usize) -> i32 {
     xs.get(k)
@@ -1629,7 +1640,9 @@ fn ship_apart(
         maps,
         pdfmap,
         u64::from(pc.fonts.space.is_some()),
-        pc.pj.cast_unsigned(),
+        // (not the page's index in the chain: the record is placed by
+        // the link, its objects numbered there, so a page an earlier
+        // page moved is the same page and keeps its record)
         pc.brk.map_or(0, |b| b.0.cast_unsigned()),
         pc.brk.map_or(u64::MAX, |b| b.1.cast_unsigned()),
         // (the fonts as the writer gets them, the files the images ask
@@ -2568,9 +2581,9 @@ pub(crate) fn finish_exact(
             })
             .collect()
     };
-    // (the serials given out so far: a command run after this point is
-    // not one this link can have dropped)
-    let hi = CMD_SERIAL.load(std::sync::atomic::Ordering::Relaxed);
+    // (the commands made so far: one made after this point is not one
+    // this link can have dropped)
+    let hi = CMD_BORN.load(std::sync::atomic::Ordering::Relaxed);
     let serials: FxHashMap<u64, Arc<Cmd>> = {
         let mut m = cmds.lock().unwrap_or_else(PoisonError::into_inner);
         let serials: FxHashMap<u64, Arc<Cmd>> = xpages
@@ -2590,7 +2603,7 @@ pub(crate) fn finish_exact(
         // old one, a discarded speculation's: the link waits for every
         // contributor, so none of them is still to come)
         if m.len() > 2 * serials.len() + 64 {
-            m.retain(|s, _| *s > hi || serials.contains_key(s));
+            m.retain(|s, c| c.born > hi || serials.contains_key(s));
         }
         serials
     };

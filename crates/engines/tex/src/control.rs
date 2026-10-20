@@ -1778,6 +1778,7 @@ impl Run<'_, '_> {
             .get(&format!("write:{n}"))?
             .and_then(|x| list_of(v, x).first().map(|&m| str_of(v, m)));
         if !self.closed.contains(&n) {
+            self.muts += 1;
             self.closed.push(n);
         }
         if let Some(name) = name {
