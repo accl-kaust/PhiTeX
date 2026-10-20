@@ -155,6 +155,32 @@ pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
     line
 }
 
+/// A line record for a trace: a page's number, the node that shipped
+/// it and its break; a command's node; a marker; another record as it is.
+pub(crate) fn line_show(v: &Values, x: ValueId) -> String {
+    if let Some(k) = v.as_int(x) {
+        let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
+        return match m.get(&u64::from_ne_bytes(k.to_ne_bytes())) {
+            Some(pc) => format!(
+                "page {} node {} brk {:?}",
+                pc.pj,
+                pc.node.cast_unsigned(),
+                pc.brk.map(|(p, c)| (p.cast_unsigned(), c))
+            ),
+            None => "page ?".to_owned(),
+        };
+    }
+    if let Some((p, c)) = line_marker(v, x) {
+        return format!("marker piece {} cand {c}", p.cast_unsigned());
+    }
+    let xs = list_of(v, x);
+    if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("cmd") {
+        let serial = xs.get(2).map_or(0, |&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()));
+        return format!("cmd serial {serial}");
+    }
+    v.render(x).chars().take(80).collect()
+}
+
 /// A line marker's piece and candidates passed ([`line_push`]).
 fn line_marker(v: &Values, x: ValueId) -> Option<(i64, i64)> {
     if v.as_int(x).is_some() {
@@ -247,6 +273,29 @@ pub(crate) struct Cmd {
     /// When it was made ([`CMD_BORN`]): the link drops only the
     /// commands made before it looked.
     born: u64,
+    /// The object number TeX gave the object the command makes, at read
+    /// time ([`note_read_time`]; 0: none): the link maps it to the
+    /// number its writer gives where it stands in the line.
+    rt: std::sync::atomic::AtomicU64,
+}
+
+/// A read-time allocation `n` of the command in progress: the number
+/// TeX read back for the object its writer command makes (the first
+/// allocation after the command was recorded, [`Run::pdf_cmd`]).
+pub(crate) fn note_read_time(r: &mut Run<'_, '_>, n: i64) {
+    let serial = std::mem::take(&mut r.pdf_cmd);
+    if serial == 0 {
+        return;
+    }
+    if let Some(c) = r
+        .ops
+        .pdf_cmds
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&serial)
+    {
+        c.rt.store(n.cast_unsigned(), std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The build's read-time commands by serial ([`crate::run::Ops::pdf_cmds`]).
@@ -1228,8 +1277,10 @@ pub(crate) fn command_forms(
                 wparams,
                 node: r.cx.node().raw(),
                 born,
+                rt: std::sync::atomic::AtomicU64::new(0),
             }),
         );
+    r.pdf_cmd = serial;
     let e = v.list(vec![
         v.str("cmd"),
         v.int(i64::from_ne_bytes(key.to_ne_bytes())),
@@ -1628,6 +1679,16 @@ fn write_page(v: &Values, pc: &PagePiece) {
         set_writer_params(&mut st, pc.wparams);
         set_page_params(v, &mut st, &pc.params, pc.margins);
         let base = st.fonts_used();
+        // (the objects TeX numbered before the page that its whatsits
+        // name, a link's, an annotation's: numbered here first, so that
+        // the page's own objects come after them and the record keeps
+        // their numbers as names, mapping only its own; on a writer that
+        // starts from fewer objects a link's number was taken for one of
+        // the page's own, and the replay renumbered the link)
+        let named = pc.whats.values().filter_map(what_objnum).max().unwrap_or(0);
+        while st.objects_numbered() < named.min(1 << 24) {
+            st.new_objnum();
+        }
         let (res, rec) = {
             let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
             st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
@@ -2325,10 +2386,71 @@ struct LinkSnap {
     dg: u64,
     nums: FontNums,
     forms: Forms,
+    /// The read-time object numbers the link numbered otherwise
+    /// ([`Reloc`]).
+    reloc: Reloc,
     got: usize,
     errors: usize,
     placed: usize,
     shipped: usize,
+}
+
+/// Read-time object numbers whose objects the link's writer numbered
+/// otherwise, by the number TeX read back: a command after a candidate
+/// of its piece where a page fired, whose finisher sits after the piece
+/// (the read-time number leaves that page's objects out; the writer,
+/// placing the command after the page as pdfTeX ships it, counts them,
+/// [`order_line`]). A page's whatsits naming one are shipped with the
+/// writer's number.
+type Reloc = std::collections::BTreeMap<usize, usize>;
+
+/// Whatsit `w` with its object numbers as the link numbered them.
+fn relocated(w: Whatsit, reloc: &Reloc) -> Whatsit {
+    let at = |n: usize| reloc.get(&n).copied().unwrap_or(n);
+    match w {
+        Whatsit::StartLink {
+            objnum,
+            width,
+            height,
+            depth,
+            attr,
+            action,
+        } => Whatsit::StartLink {
+            objnum: at(objnum),
+            width,
+            height,
+            depth,
+            attr,
+            action,
+        },
+        Whatsit::Annot {
+            objnum,
+            width,
+            height,
+            depth,
+            data,
+        } => Whatsit::Annot {
+            objnum: at(objnum),
+            width,
+            height,
+            depth,
+            data,
+        },
+        Whatsit::RefObj(n) => Whatsit::RefObj(at(n)),
+        Whatsit::RefXForm(n) => Whatsit::RefXForm(at(n)),
+        Whatsit::RefXImage(n) => Whatsit::RefXImage(at(n)),
+        w => w,
+    }
+}
+
+/// The object numbers whatsit `w` names (a link's, an annotation's, a
+/// reference's).
+fn what_objnum(w: &Whatsit) -> Option<usize> {
+    match w {
+        Whatsit::StartLink { objnum, .. } | Whatsit::Annot { objnum, .. } => Some(*objnum),
+        Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => Some(*n),
+        _ => None,
+    }
 }
 
 /// The last link of the process: its records (by value), each record's
@@ -2442,6 +2564,7 @@ pub(crate) fn finish_exact(
     let t0 = std::time::Instant::now();
     let mut st = fresh(v, f.date.clone(), &f.jobname, f.g2u);
     let mut forms = Forms::default();
+    let mut reloc = Reloc::new();
     let mut nums = FontNums::default();
     nums.seed(&f.seed);
     let mut bytes = PdfBytes::new();
@@ -2522,6 +2645,7 @@ pub(crate) fn finish_exact(
             st = sn.st.clone();
             nums = sn.nums.clone();
             forms = sn.forms.clone();
+            reloc = sn.reloc.clone();
             got = m.got[..sn.got].to_vec();
             errors = m.errors[..sn.errors].to_vec();
             (placed, shipped) = (sn.placed, sn.shipped);
@@ -2559,12 +2683,12 @@ pub(crate) fn finish_exact(
             && m.ids[i..] == ids[i..]
         {
             tries += 1;
-            if same_writer(&mut st, &nums, &forms, sn) {
+            if reloc == sn.reloc && same_writer(&mut st, &nums, &forms, sn) {
                 resync = Some(i);
                 t_try += tt.elapsed();
                 break;
             }
-            if same_writer_but_chars(&mut st, &nums, &forms, sn) {
+            if reloc == sn.reloc && same_writer_but_chars(&mut st, &nums, &forms, sn) {
                 resync = Some(i);
                 chars_added = Some(st.used_chars());
                 t_try += tt.elapsed();
@@ -2580,6 +2704,7 @@ pub(crate) fn finish_exact(
                 st: st.clone(),
                 nums: nums.clone(),
                 forms: forms.clone(),
+                reloc: reloc.clone(),
                 got: got.len(),
                 errors: errors.len(),
                 placed,
@@ -2606,11 +2731,24 @@ pub(crate) fn finish_exact(
             let fmap = |g: FontId| fwd.get(&g).copied().unwrap_or(g);
             set_page_params(v, &mut st, &pc.params, pc.margins);
             let n0 = st.objects_numbered();
-            let res = st.replay_page(rec, &src, &fmap, None, &mut ps);
+            // (a page naming an object the link numbered otherwise than
+            // TeX read it is shipped with the link's number)
+            let moved = pc
+                .whats
+                .values()
+                .filter_map(what_objnum)
+                .any(|n| reloc.contains_key(&n));
+            let res = if moved {
+                Err("an object numbered otherwise at read time".to_owned())
+            } else {
+                st.replay_page(rec, &src, &fmap, None, &mut ps)
+            };
             if res.is_err() {
                 // (the node that wrote the page logged the writer's
                 // error when it wrote it)
-                let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
+                let mut wh = |h: u32, _leaders: bool| {
+                    page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &reloc))
+                };
                 let mut side = crate::nodes::Side::default();
                 if let Some(phitex_typeset::node::Node::Box(bx)) =
                     crate::nodes::decode(v, pc.boxv, &mut side)
@@ -2655,9 +2793,16 @@ pub(crate) fn finish_exact(
                         let mut g = c.f.lock().unwrap_or_else(PoisonError::into_inner);
                         (*g)(&mut st, &mut forms, &src)
                     };
+                    let rt = c.rt.load(std::sync::atomic::Ordering::Relaxed);
+                    if let (Ok(rt @ 1..), Some(&m)) = (usize::try_from(rt), out.nums.first())
+                        && let Ok(m) = usize::try_from(m)
+                        && m != rt
+                    {
+                        reloc.insert(rt, m);
+                    }
                     if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
                         eprintln!(
-                            "  link command of node {}: {:?} (objects {})",
+                            "  link command {serial} of node {}: {:?} (objects {})",
                             c.node,
                             out,
                             st.objects_numbered()
@@ -2745,6 +2890,7 @@ pub(crate) fn finish_exact(
         st = m.end.st;
         nums = m.end.nums;
         forms = m.end.forms;
+        reloc = m.end.reloc;
         if let Some(c) = &chars_added {
             st.add_used_chars(c);
         }
@@ -2758,6 +2904,7 @@ pub(crate) fn finish_exact(
         st: st.clone(),
         nums: nums.clone(),
         forms: forms.clone(),
+        reloc: reloc.clone(),
         got: got.len(),
         errors: errors.len(),
         placed,

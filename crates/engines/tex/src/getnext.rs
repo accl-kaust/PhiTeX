@@ -1460,6 +1460,7 @@ impl Run<'_, '_> {
     /// A command begins: marks the input and the state it starts from.
     #[inline]
     pub(crate) fn begin_command(&mut self) {
+        self.pdf_cmd = 0;
         let sig = self.mutations();
         let mut m = std::mem::take(&mut self.mark);
         self.input.snapshot(&mut m.snap);

@@ -426,6 +426,13 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
 
     let t_acc = t0.elapsed();
     let xpages = crate::pdfout::order_line(v, &line);
+    if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
+        for (tag, l) in [("in", &line), ("out", &xpages)] {
+            for &x in l {
+                eprintln!("line {tag}: {}", crate::pdfout::line_show(v, x));
+            }
+        }
+    }
     let t_order = t0.elapsed();
     let date = field(cx, "pdfdate")?.map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
     let jobname = field(cx, "jobname")?
