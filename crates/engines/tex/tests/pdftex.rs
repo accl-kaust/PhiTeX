@@ -288,13 +288,16 @@ fn parallel_counters() {
             );
             (s, b.output().0)
         };
+        // (the runs at once and the busy time are counted in `profile`
+        // builds only: no write to shared counters per run else)
+        let counted = cfg!(feature = "profile");
         let (four, out4) = run(4);
         assert_eq!(four.threads, 4);
-        assert!(four.peak_running <= 4 && four.peak_running >= 1);
+        assert!(four.peak_running <= 4 && (four.peak_running >= 1 || !counted));
         assert!(four.critical_path.is_some());
         let (one, out1) = run(1);
         assert_eq!(one.threads, 1);
-        assert_eq!(one.peak_running, 1);
+        assert_eq!(one.peak_running, usize::from(counted));
         assert_eq!(one.batches, one.batches_inline);
         assert!(one.busy <= one.wall);
         let (_, out16) = run(16);

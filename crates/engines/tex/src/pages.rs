@@ -673,7 +673,6 @@ impl Run<'_, '_> {
         if !self.at_outer()? {
             return Ok(());
         }
-        let v = self.v;
         let k = self.cand;
         // (§994: `build_page` with nothing contributed does nothing, so a
         // page fires only at a candidate with items contributed since the
@@ -685,6 +684,57 @@ impl Run<'_, '_> {
             Some(m) => self.main_items_since(m.contribs),
             None => self.cx.op() != self.ops.resume || self.main_items_since(0),
         };
+        self.note_candidate(k)?;
+        self.cand += 1;
+        let cuttable = fresh && self.cuttable_here(newgraf);
+        self.cand_marks.push(CandMark {
+            k,
+            stamp: self.st.stamp(),
+            gids: self.st.gid_mark(),
+            contribs: self.contribs.len(),
+            kids: self.kids.len(),
+            lines: self.lines_entered,
+            sig: self.st.sig(),
+            nest: self.nest.len(),
+            cuttable,
+        });
+        self.st.mark_candidate();
+        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
+            self.trace_candidate(k, newgraf, fresh, cuttable);
+        }
+        // (every candidate with text after it is a cut, as every
+        // paragraph end is: the rest of the piece is a continuation
+        // placed after it, after the finisher of a page firing there,
+        // which reads the state there forward and what a routine leaves.
+        // Nothing decides it after the piece: no page's finisher reaches
+        // back into the piece it fires in)
+        // (inside a group or a conditional of the run's own, only where
+        // the page is made to fire, above: elsewhere the piece runs on
+        // through the candidate, and a page firing there has its
+        // finisher check the rest, [`Run::check_cut`])
+        if cuttable {
+            if self.open_span() && crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+                eprintln!(
+                    "page-trace: node {} cut inside its own span at candidate {k}: nest {:?} conds {}",
+                    self.cx.node().raw(),
+                    self.nest
+                        .iter()
+                        .map(|l| (l.group, l.owns))
+                        .collect::<Vec<_>>(),
+                    self.conds.len()
+                );
+            }
+            self.cut = Some(k);
+            return Err(Halt::Cut);
+        }
+        Ok(())
+    }
+
+    /// What the builder reads of eqtb at candidate `k` noted on the main
+    /// list (§987's page parameters, §1008's registers of the insertion
+    /// classes put on it since the last candidate), then its marker.
+    fn note_candidate(&mut self, k: u32) -> R<()> {
+        let v = self.v;
         if self.st.take_page_params() {
             if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
                 eprintln!(
@@ -714,7 +764,12 @@ impl Run<'_, '_> {
         }
         let m = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(k))]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
-        self.cand += 1;
+        Ok(())
+    }
+
+    /// Whether the run can end at the candidate it is at, its rest a
+    /// resume (items contributed since the one before aside).
+    fn cuttable_here(&mut self, newgraf: bool) -> bool {
         let op = self.cx.op();
         // (inside a group or a conditional of the run's own only where
         // the builder is made to fire: a penalty of `eject_penalty` or
@@ -735,24 +790,17 @@ impl Run<'_, '_> {
             || par_start
             || (self.nest.iter().all(|l| !l.owns && l.group != 0)
                 && self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs)));
-        let cuttable = (op == self.ops.exec || op == self.ops.resume)
+        (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
-            && fresh
             && open_ok
-            && self.has_input();
-        self.cand_marks.push(CandMark {
-            k,
-            stamp: self.st.stamp(),
-            gids: self.st.gid_mark(),
-            contribs: self.contribs.len(),
-            kids: self.kids.len(),
-            lines: self.lines_entered,
-            sig: self.st.sig(),
-            nest: self.nest.len(),
-            cuttable,
-        });
-        self.st.mark_candidate();
-        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") && self.cand_marks.len() == 1 {
+            && self.has_input()
+    }
+
+    /// `PHITEX_CAND_TRACE`: the candidate `k` and what decided its cut.
+    fn trace_candidate(&mut self, k: u32, newgraf: bool, fresh: bool, cuttable: bool) {
+        let v = self.v;
+        let op = self.cx.op();
+        if self.cand_marks.len() == 1 {
             let args = self.cx.args();
             let first = args
                 .first()
@@ -763,46 +811,30 @@ impl Run<'_, '_> {
                 .collect::<String>();
             eprintln!("cand-text: node {} {first}", self.cx.node().raw());
         }
-        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
-            eprintln!(
-                "cand: node {} op {} k {k} newgraf {newgraf} fresh {fresh} input {} nest {:?} conds {} forced {} cuttable {cuttable}",
-                self.cx.node().raw(),
-                if op == self.ops.exec { "exec" } else if op == self.ops.resume { "resume" } else { "other" },
-                self.has_input(),
-                self.nest
-                    .iter()
-                    .map(|l| (l.mode, l.group, l.owns))
-                    .collect::<Vec<_>>(),
-                self.conds.len(),
-                self.forced_since(self.cand_marks.len().checked_sub(2).and_then(|i| self.cand_marks.get(i)).map_or(0, |m| m.contribs)),
-            );
-        }
-        // (every candidate with text after it is a cut, as every
-        // paragraph end is: the rest of the piece is a continuation
-        // placed after it, after the finisher of a page firing there,
-        // which reads the state there forward and what a routine leaves.
-        // Nothing decides it after the piece: no page's finisher reaches
-        // back into the piece it fires in)
-        // (inside a group or a conditional of the run's own, only where
-        // the page is made to fire, above: elsewhere the piece runs on
-        // through the candidate, and a page firing there has its
-        // finisher check the rest, [`Run::check_cut`])
-        if cuttable {
-            if self.open_span() && crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
-                eprintln!(
-                    "page-trace: node {} cut inside its own span at candidate {k}: nest {:?} conds {}",
-                    self.cx.node().raw(),
-                    self.nest
-                        .iter()
-                        .map(|l| (l.group, l.owns))
-                        .collect::<Vec<_>>(),
-                    self.conds.len()
-                );
-            }
-            self.cut = Some(k);
-            return Err(Halt::Cut);
-        }
-        Ok(())
+        eprintln!(
+            "cand: node {} op {} k {k} newgraf {newgraf} fresh {fresh} input {} nest {:?} conds {} forced {} cuttable {cuttable}",
+            self.cx.node().raw(),
+            if op == self.ops.exec {
+                "exec"
+            } else if op == self.ops.resume {
+                "resume"
+            } else {
+                "other"
+            },
+            self.has_input(),
+            self.nest
+                .iter()
+                .map(|l| (l.mode, l.group, l.owns))
+                .collect::<Vec<_>>(),
+            self.conds.len(),
+            self.forced_since(
+                self.cand_marks
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|i| self.cand_marks.get(i))
+                    .map_or(0, |m| m.contribs)
+            ),
+        );
     }
 
     /// Whether this run put an item on the main list (a node, or the
@@ -1244,15 +1276,10 @@ impl Run<'_, '_> {
                     .unwrap_or_default(),
             };
             // (what goes on past the page from the pieces it needs only,
-            // [`Run::assemble_narrow`]: off but under `PHITEX_NARROW`. It
-            // takes the page's best break from the scan over profiles,
-            // which can differ from the builder's over the items, so its
-            // carried material can be short: wrong pages at 8 threads
-            // without the finishers' predictions)
-            if narrow
-                && crate::exec::obs_flag!("PHITEX_NARROW")
-                && let Some(r) = self.assemble_narrow(&s, pid, k, rest, here, at)?
-            {
+            // [`Run::assemble_narrow`]: an edit in a piece before them that
+            // leaves its profile alone runs the page's finisher, not its
+            // continuation)
+            if narrow && let Some(r) = self.assemble_narrow(&s, pid, k, rest, here, at)? {
                 if !crate::exec::obs_flag!("PHITEX_NARROW_CHECK") {
                     return Ok(Some(r));
                 }
@@ -2432,7 +2459,13 @@ impl Run<'_, '_> {
             .map_or(-1, |k| i64::try_from(k.saturating_sub(n)).unwrap_or(-1));
         self.cx.define_with(
             v.field(RESUME),
-            v.list(vec![cont, pid, v.int(flags), v.int(rest), v.int(i64::from(k))]),
+            v.list(vec![
+                cont,
+                pid,
+                v.int(flags),
+                v.int(rest),
+                v.int(i64::from(k)),
+            ]),
             Locality::Global,
         );
         // (the rest of the piece after its scan step: the finisher and
@@ -3242,7 +3275,10 @@ impl Run<'_, '_> {
                 self.cand,
                 xs.iter().map(|x| x.raw() % 100_000).collect::<Vec<_>>(),
                 st.iter().map(|x| x.raw() % 100_000).collect::<Vec<_>>(),
-                list_of(v, xs[5]).iter().map(|&x| int_of(v, x)).collect::<Vec<_>>()
+                list_of(v, xs[5])
+                    .iter()
+                    .map(|&x| int_of(v, x))
+                    .collect::<Vec<_>>()
             );
         }
         Ok((cont, locals))
@@ -4891,8 +4927,15 @@ impl Run<'_, '_> {
                     eprintln!(
                         "scan {}: the block before ends at a continuation {:?}: {} (speculative {})",
                         self.cx.node().raw(),
-                        xs.iter().skip(1).map(|&y| int_of(v, y).cast_unsigned()).collect::<Vec<_>>(),
-                        if p.is_some() { "defined" } else { "not defined: nothing" },
+                        xs.iter()
+                            .skip(1)
+                            .map(|&y| int_of(v, y).cast_unsigned())
+                            .collect::<Vec<_>>(),
+                        if p.is_some() {
+                            "defined"
+                        } else {
+                            "not defined: nothing"
+                        },
                         self.cx.is_speculative()
                     );
                 }
@@ -4980,8 +5023,17 @@ impl Run<'_, '_> {
                 None => {
                     let rtn = rtn_guess(self.ops, v, &pos);
                     // (the material its page begins with as this step
-                    // has it: none before the first page)
-                    let m = mat.unwrap_or_else(|| v.list(Vec::new()));
+                    // has it, or its page's field where the step began
+                    // from a block before: none before the first page)
+                    let m = match (mat, src) {
+                        (Some(m), _) => m,
+                        (None, Some(x)) => {
+                            let j0 = ScanIn::decode(v, Some(x)).j;
+                            self.eng_read(scan_mat_field(v, j0))?
+                                .unwrap_or_else(|| v.list(Vec::new()))
+                        }
+                        (None, None) => v.list(Vec::new()),
+                    };
                     match self.cont_state(&list_of(v, b), Some(rtn), Some(m))? {
                         Cont::State(x, m) => Some((x, m)),
                         _ => None,
@@ -5030,10 +5082,11 @@ impl Run<'_, '_> {
         } else if !known {
             ValueId::UNIT
         } else {
-            v.list(vec![
-                src.unwrap_or(ValueId::UNIT),
-                mat.unwrap_or(ValueId::UNIT),
-            ])
+            // (the state only: the material the next page begins with is
+            // its page's field, [`scan_mat_field`], read by the block that
+            // fires that page; carried here, an edit in it would run
+            // every block's scan to the next page again)
+            v.list(vec![src.unwrap_or(ValueId::UNIT), ValueId::UNIT])
         };
         self.cx
             .define_with(v.field(SCAN_BLOCK), end, Locality::Global);
@@ -5066,8 +5119,9 @@ impl Run<'_, '_> {
         match self.cont_state(&b, None, None)? {
             Cont::Nothing => Ok(Placed::Nothing),
             Cont::Fire(j, src, k, rest, normal, special, origin) => {
-                let (b, _) =
-                    self.place_break(None, false, j, src, -2, k, rest, normal, special, origin, None)?;
+                let (b, _) = self.place_break(
+                    None, false, j, src, -2, k, rest, normal, special, origin, None,
+                )?;
                 let chain = cont_chain(v, &self.cx.args());
                 self.place_cont(None, false, j, None, b, chain);
                 Ok(Placed::Page)

@@ -175,7 +175,9 @@ pub(crate) fn line_show(v: &Values, x: ValueId) -> String {
     }
     let xs = list_of(v, x);
     if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("cmd") {
-        let serial = xs.get(2).map_or(0, |&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()));
+        let serial = xs
+            .get(2)
+            .map_or(0, |&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()));
         return format!("cmd serial {serial}");
     }
     v.render(x).chars().take(80).collect()
@@ -2004,7 +2006,7 @@ fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>) -> 
 /// [`ALLOCS`]).
 pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
     let v = r.v;
-    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let range = allocs_range(r)?;
     let seen = fold_allocs(v, range).fonts;
     let mut rt: Vec<ValueId> = r.get(RT_FONTS)?.map(|x| list_of(v, x)).unwrap_or_default();
     for n in names {
@@ -2018,6 +2020,16 @@ pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
     }
     r.set(RT_FONTS, v.list(rt), true);
     Ok(())
+}
+
+/// The allocations before this node ([`ALLOCS`]); `PHITEX_ALLOCS_TRACE`
+/// (observe): which node read them.
+fn allocs_range(r: &mut Run<'_, '_>) -> R<ValueId> {
+    if crate::exec::obs_flag!("PHITEX_ALLOCS_TRACE") {
+        eprintln!("allocs-read: node {}", r.cx.node().raw());
+    }
+    let v = r.v;
+    Ok(r.cx.acc_range(v.field(ALLOCS), None)?)
 }
 
 /// The fonts read-time writes used ([`fonts_first_used`]).
@@ -2048,7 +2060,7 @@ pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) -> R<()> {
 /// before made it (`pdf_get_obj`).
 pub(crate) fn dest_first_named(r: &mut Run<'_, '_>, id: ValueId) -> R<()> {
     let v = r.v;
-    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let range = allocs_range(r)?;
     let seen = fold_allocs(v, range).dests;
     let mut rt: Vec<ValueId> = r.get(RT_DESTS)?.map(|x| list_of(v, x)).unwrap_or_default();
     if seen.contains(&id) || rt.contains(&id) {
@@ -2070,7 +2082,7 @@ pub(crate) fn os_write(r: &mut Run<'_, '_>) -> R<()> {
         return Ok(());
     }
     let v = r.v;
-    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let range = allocs_range(r)?;
     let pages = fold_allocs(v, range).os_written;
     let rt = r.get(RT_OS)?.and_then(|x| v.as_int(x)).unwrap_or(0);
     if (pages + rt) % 100 == 0 {
@@ -2092,7 +2104,7 @@ pub(crate) fn shipped_page_obj(r: &mut Run<'_, '_>, n: i32) -> R<Option<i64>> {
         return Ok(None);
     }
     let v = r.v;
-    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let range = allocs_range(r)?;
     let f = fold_allocs(v, range);
     let Some(&(rt, node, after)) = usize::try_from(n - 1)
         .ok()
@@ -2342,7 +2354,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
 /// node: no round, no loop-back.
 pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
     let v = r.v;
-    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let range = allocs_range(r)?;
     Ok(fold_allocs(v, range).objects)
 }
 
@@ -2351,7 +2363,7 @@ pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
 /// ([`ALLOCS`]), which pdfTeX numbers as it loads them.
 pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
     let v = r.v;
-    let range = r.cx.acc_range(v.field(ALLOCS), None)?;
+    let range = allocs_range(r)?;
     Ok(n + fold_allocs(v, range).ship_fonts)
 }
 

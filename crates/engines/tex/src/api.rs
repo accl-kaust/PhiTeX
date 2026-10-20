@@ -4275,6 +4275,13 @@ pub struct Build {
     loads_ran: bool,
 }
 
+impl Drop for Build {
+    /// The files its link made go with it ([`crate::assemble::forget_linked`]).
+    fn drop(&mut self) {
+        crate::assemble::forget_linked(self.g.eng.values().instance());
+    }
+}
+
 impl Build {
     /// A cold build of `document` after `prelude` (`None`: INITEX).
     #[must_use]

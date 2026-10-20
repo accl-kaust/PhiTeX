@@ -667,6 +667,9 @@ fn exact_pdf_edit_on_page_k_reruns_its_piece_finisher_place_and_the_link_only() 
         "page k edit: runs by op {:?}, pages touched {touched:?} of {n}",
         b.stats.runs_by_op
     );
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
     let cold = common::build(opts(), Some(&prelude), &text);
     let d = common::first_difference(&b.output().0, &cold.output().0);
     assert!(d.is_none(), "edit differs from cold: {d:?}");

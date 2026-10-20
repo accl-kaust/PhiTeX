@@ -1,0 +1,13 @@
+% Now (dev 36fc97dc, 2026-10-20): the text and objects equal pdfLaTeX's after qpdf --qdf; the files differ in
+% their objects' numbers and order.
+% An image included on two pages (an external image object, \pdfximage, referred to from two pages):
+% pdfLaTeX writes it once and refers to it from both; the sweep's PhiTeX stopped with
+% "cannot find referenced object (on a page the output places)".
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\begin{document}
+\includegraphics[width=3cm]{example-image-a}
+\newpage
+\includegraphics[width=3cm]{example-image-a}
+\end{document}
