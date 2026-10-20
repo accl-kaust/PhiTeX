@@ -12,6 +12,6 @@ for d in $DOCS; do
   cp $O/$d.pdf $r/$d-oracle.pdf 2>/dev/null; cp $O/$d.log $r/$d-oracle.log 2>/dev/null
   P=$w/phi-$d; rm -rf $P; mkdir -p $P; cp ${SRC:-bench/corpus-repro}/$d.tex $P/
   ( cd $P && env SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/cache ${TRACE:-} timeout 600 $BIN build $d.tex --exact-pdf -j ${J:-1} > $r/$d.err 2>&1; echo "exit $?" >> $r/$d.err )
-  cp $P/$d.pdf $r/$d.pdf 2>/dev/null
+  cp $P/$d.pdf $r/$d.pdf 2>/dev/null; cp $P/$d.log $r/$d.log 2>/dev/null
   echo "$d: $(tail -1 $r/$d.err) ours $(md5sum < $P/$d.pdf | cut -c1-8) oracle $(md5sum < $O/$d.pdf | cut -c1-8)" | tee -a $r/summary.txt
 done
