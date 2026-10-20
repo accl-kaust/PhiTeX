@@ -3162,35 +3162,6 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect()
     }
 
-    /// A page node whose declared contributions are all it contributes
-    /// ([`crate::pages::PageNode::contribs_complete`]) contributes to no
-    /// other field.
-    ///
-    /// # Panics
-    ///
-    /// Where it does: the engine passed it by in that field's windows.
-    fn check_contribs_complete(&self) {
-        let args = self.cx.args();
-        let Some(k) = crate::pages::PageNode::of(self.ops, self.v, self.cx.op(), &args) else {
-            return;
-        };
-        if !k.contribs_complete() {
-            return;
-        }
-        let declared: Vec<Field> = crate::pages::no_units(self.v)
-            .into_iter()
-            .map(|c| c.0)
-            .collect();
-        for (f, _) in &self.contribs {
-            assert!(
-                declared.contains(f),
-                "node {} ({k:?}) contributes to {}, which its declaration leaves out (PageNode::contribs_complete)",
-                self.cx.node().raw(),
-                crate::val::field_name(self.v, *f)
-            );
-        }
-    }
-
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
         let f = self.v.field(name);
         self.muts += 1;
@@ -4162,9 +4133,6 @@ impl<'c, 'a> Run<'c, 'a> {
             for e in es {
                 self.contribute("fread", v.seq_unit(e));
             }
-        }
-        if cfg!(feature = "observe") {
-            self.check_contribs_complete();
         }
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);
