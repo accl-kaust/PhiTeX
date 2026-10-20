@@ -313,6 +313,14 @@ pub(crate) struct Threads {
     batches: AtomicU64,
     batches_inline: AtomicU64,
     jobs_max_batch: AtomicUsize,
+    /// (`profile`) the batches handed to the pool: their jobs, the
+    /// nanoseconds from the hand-over to the last result, and the
+    /// longest job's of each: the difference is the dispatch's (the
+    /// workers' wake, the caller's wait for the last of them)
+    pooled: AtomicU64,
+    pooled_jobs: AtomicU64,
+    pooled_ns: AtomicU64,
+    pooled_longest_ns: AtomicU64,
 }
 
 impl Threads {
@@ -324,6 +332,10 @@ impl Threads {
             batches: AtomicU64::new(0),
             batches_inline: AtomicU64::new(0),
             jobs_max_batch: AtomicUsize::new(0),
+            pooled: AtomicU64::new(0),
+            pooled_jobs: AtomicU64::new(0),
+            pooled_ns: AtomicU64::new(0),
+            pooled_longest_ns: AtomicU64::new(0),
         }
     }
 
@@ -368,6 +380,17 @@ impl Threads {
     /// The operations' summed run time (zero without a clock).
     pub(crate) fn busy(&self) -> std::time::Duration {
         std::time::Duration::from_nanos(self.ops.busy.load(Ordering::Relaxed))
+    }
+
+    /// (`profile`) The batches handed to the pool: `(batches, jobs, from
+    /// hand-over to last result, the longest jobs' sum)`.
+    pub(crate) fn pooled(&self) -> (u64, u64, std::time::Duration, std::time::Duration) {
+        (
+            self.pooled.load(Ordering::Relaxed),
+            self.pooled_jobs.load(Ordering::Relaxed),
+            std::time::Duration::from_nanos(self.pooled_ns.load(Ordering::Relaxed)),
+            std::time::Duration::from_nanos(self.pooled_longest_ns.load(Ordering::Relaxed)),
+        )
     }
 
     /// The batches of runs, those run inline, and the largest batch.
@@ -475,10 +498,29 @@ impl Executor for Threads {
         }
         let slots: Vec<OnceLock<RunResult>> = (0..n).map(|_| OnceLock::new()).collect();
         trace(n, self.n);
+        let prof = cfg!(feature = "profile");
+        let now = || if prof { clock().now() } else { None };
+        let longest = AtomicU64::new(0);
         // one job a task: each costs a run
-        parallel(self.n, n, 1, &|i| {
+        let t0 = now();
+        on_pool(self.n, n, 1, &|i| {
+            let t = now();
             let _ = slots[i].set(self.node_job(|| run(i)));
+            if let (Some(a), Some(b)) = (t, now()) {
+                longest.fetch_max(b.saturating_sub(a), Ordering::Relaxed);
+            }
         });
+        let t1 = now();
+        flush_workers(self.n);
+        if let (Some(a), Some(b)) = (t0, t1) {
+            self.pooled.fetch_add(1, Ordering::Relaxed);
+            self.pooled_jobs
+                .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
+            self.pooled_ns
+                .fetch_add(b.saturating_sub(a), Ordering::Relaxed);
+            self.pooled_longest_ns
+                .fetch_add(longest.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
         out.extend(
             slots
                 .into_iter()
@@ -599,17 +641,27 @@ fn trace(n: usize, threads: usize) {
     }
 }
 
-#[cfg(feature = "rayon")]
 fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
+    on_pool(threads, n, grain, f);
+    flush_workers(threads);
+}
+
+/// `f(i)` for every `i < n` on the pool of `threads` workers.
+#[cfg(feature = "rayon")]
+fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
     use rayon::prelude::*;
-    let pool = pool(threads);
-    pool.install(|| {
+    pool(threads).install(|| {
         (0..n).into_par_iter().with_min_len(grain).for_each(f);
     });
-    // every worker adds its probe counts and spans to the totals (a
-    // no-op without the `profile` feature, so the broadcast is skipped)
+}
+
+/// Every worker of the pool of `threads` adds its probe counts and spans
+/// to the totals (a no-op without the `profile` feature, so the broadcast
+/// is skipped).
+#[cfg(feature = "rayon")]
+fn flush_workers(threads: usize) {
     if cfg!(feature = "profile") {
-        pool.broadcast(|_| phitex_defuse::obs::flush());
+        pool(threads).broadcast(|_| phitex_defuse::obs::flush());
         phitex_defuse::obs::flush();
     }
 }
@@ -645,9 +697,13 @@ fn pool(threads: usize) -> std::sync::Arc<rayon::ThreadPool> {
 }
 
 #[cfg(not(feature = "rayon"))]
-fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
+fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
     scoped(threads, n, grain, f);
 }
+
+/// (The scoped threads flush their counts as they end.)
+#[cfg(not(feature = "rayon"))]
+fn flush_workers(_: usize) {}
 
 /// `f(i)` for every `i < n` on `threads` threads of its own, made for
 /// the call and joined at its end.

@@ -1498,6 +1498,23 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         r.realised_critical_path,
         r.realised_critical_time.as_secs_f64() * 1e3
     );
+    {
+        // (the executor's dispatch: a step's batch handed to the pool
+        // waits for its longest job, and for the hand-over and the wake
+        // of the workers and of the caller around it)
+        let (b, bi, m) = ex.batches();
+        let (pb, pj, pt, pl) = ex.pooled();
+        let d = pt.saturating_sub(pl);
+        #[allow(clippy::cast_precision_loss)]
+        let per = d.as_secs_f64() * 1e6 / pb.max(1) as f64;
+        eprintln!(
+            "acct: executor: {} engine steps, {b} batches ({bi} inline, largest {m}), {pb} pooled with {pj} jobs: {:.3} ms from hand-over to last result, longest jobs {:.3} ms, dispatch {:.3} ms ({per:.1} us a pooled batch)",
+            r.steps,
+            pt.as_secs_f64() * 1e3,
+            pl.as_secs_f64() * 1e3,
+            d.as_secs_f64() * 1e3,
+        );
+    }
     let ld = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
         "acct: commands {}; exec claims declared: none {}, a count {}, pending {}",
