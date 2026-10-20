@@ -1884,6 +1884,12 @@ struct Graph {
     /// The `wdef:<field>` loop-backs declared: the fields the read-back
     /// of a job-written file defines.
     wdefs: Vec<String>,
+    /// The written files' accumulator (`streams`) `wdefs` were last
+    /// declared from: the same value, the same fields, none new.
+    wdefs_from: Option<ValueId>,
+    /// The names of the files opened for writing ([`Graph::opened`]), by
+    /// the `streams` value they were read from.
+    opened_memo: std::sync::Mutex<Option<(Option<ValueId>, Vec<String>)>>,
     /// The round-one guesses of the `wkeys:<name>` loop-backs.
     wkeys_guess: Vec<(String, Vec<String>)>,
     /// What the executor runs now, for readers on other threads.
@@ -2081,6 +2087,8 @@ impl Graph {
             threads: crate::exec::threads(threads),
             marks: Marks::default(),
             wdefs: Vec::new(),
+            wdefs_from: None,
+            opened_memo: std::sync::Mutex::new(None),
             wkeys_guess: Vec::new(),
             opened_last: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
@@ -2503,15 +2511,23 @@ impl Graph {
     fn opened(&self, unit: UnitId) -> Vec<String> {
         let v = self.eng.values();
         let f = v.field("streams");
-        let entries = self
-            .eng
-            .acc_value(unit, f)
-            .map(|s| v.seq_to_vec(s))
-            .unwrap_or_default();
-        stream_texts(v, &entries)
+        let streams = self.eng.acc_value(unit, f);
+        let mut m = self
+            .opened_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((from, names)) = &*m
+            && *from == streams
+        {
+            return names.clone();
+        }
+        let entries = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
+        let names: Vec<String> = stream_texts(v, &entries)
             .into_iter()
             .map(|(n, _)| n)
-            .collect()
+            .collect();
+        *m = Some((streams, names.clone()));
+        names
     }
 
     /// Round one's guesses for the loop-backs: the last build's values
@@ -3050,10 +3066,11 @@ impl Graph {
             }
             // the fields a job-written file's read-back defines: their
             // `wdef:<field>` loop-backs declared
-            if fixpoint {
+            let streams = self.eng.acc_value(unit, self.eng.values().field("streams"));
+            if fixpoint && (streams.is_none() || streams != self.wdefs_from) {
+                self.wdefs_from = streams;
                 let v = self.eng.values();
-                let acc = |n: &str| self.eng.acc_value(unit, v.field(n));
-                let defs = written_defs(v, acc("streams"));
+                let defs = written_defs(v, streams);
                 let mut new = Vec::new();
                 for (name, ds) in defs {
                     // (a file read back from the client's text: the
@@ -3520,6 +3537,9 @@ struct OutMemo {
     )>,
     pages: Option<(Option<ValueId>, Vec<u64>)>,
     log: crate::log::LayoutMemo,
+    /// The files' texts ([`Build::files`]) by the `streams` value.
+    #[allow(clippy::type_complexity)]
+    files: Option<(Option<ValueId>, Arc<Vec<(String, String)>>)>,
 }
 
 /// The comments by line, and whether the environment lacks them.
@@ -5376,8 +5396,16 @@ impl Build {
     #[must_use]
     pub fn files(&self) -> Vec<(String, String)> {
         let v = self.g.eng.values();
-        let acc = |n: &str| self.g.eng.acc_value(self.unit, v.field(n));
-        written_texts(v, acc("streams"))
+        let streams = self.g.eng.acc_value(self.unit, v.field("streams"));
+        let mut m = self.memo.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((from, fs)) = &m.files
+            && *from == streams
+        {
+            return fs.to_vec();
+        }
+        let fs = Arc::new(written_texts(v, streams));
+        m.files = Some((streams, fs.clone()));
+        fs.to_vec()
     }
 
     /// What [`Build::wkeys`] is made from (the written files'
