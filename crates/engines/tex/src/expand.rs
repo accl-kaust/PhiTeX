@@ -1016,6 +1016,15 @@ impl Run<'_, '_> {
             self.get_x_token();
             self.ck()?;
         }
+        if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
+            eprintln!(
+                "cmd-trace {} file name {name:?} ended by {:?} cmd {} chr {}",
+                self.cx.node().raw(),
+                self.cur.tok,
+                self.cur.cmd,
+                self.cur.chr
+            );
+        }
         Ok(name)
     }
 }
