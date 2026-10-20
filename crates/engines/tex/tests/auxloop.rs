@@ -262,3 +262,39 @@ fn a_line_that_typesets_reads_the_file_back_as_text() {
         b.wkeys()
     );
 }
+
+/// A file the job writes only where it is missing, then reads (a package
+/// a document carries in its own text): TeX's next run finds the file the
+/// run before wrote, so it does not write it again and reads it; the
+/// file stays as that run left it, and the rounds settle on the second
+/// (the next round's file is not absent for want of a write, which would
+/// write it again in the third, and so on to the cap).
+const KEPT_DOC: &str = r"\openin15=kept.tex
+\ifeof15 \immediate\openout2=kept.tex
+\immediate\write2{\noexpand\def\noexpand\word{12345}}
+\immediate\closeout2 \else\closein15 \fi
+\input kept.tex
+Word: \word.
+\bye
+";
+
+#[test]
+fn a_file_written_where_missing_stays_for_the_next_round() {
+    let dir = common::fixtures().join("plain");
+    let opts = Options {
+        fixpoint: true,
+        ..common::options("./k.tex", "k", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), KEPT_DOC);
+    eprintln!("kept: {} loop rounds", b.stats.loop_rounds);
+    let (dvi, _) = b.output();
+    assert!(
+        dvi.windows(5).any(|w| w == b"12345"),
+        "the page does not show the file's definition"
+    );
+    assert!(
+        b.stats.loop_rounds <= 2,
+        "{} loop rounds (the file written in round one, found in round two)",
+        b.stats.loop_rounds
+    );
+}

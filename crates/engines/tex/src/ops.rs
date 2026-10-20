@@ -729,24 +729,45 @@ impl Operation for Files {
             Some(&n) => {
                 let name = str_of(v, n);
                 let shared = ops(&self.0);
-                file_node(cx, &name, listed.contains(&name), &shared.defs)
+                file_node(cx, &name, &shared.defs)
             }
         }
     }
 }
 
+/// The files the job wrote in an earlier round of the build (a
+/// loop-back the files' root publishes): each keeps its node, and what
+/// it holds, in a round that does not write it ([`file_node`]).
+const WSEEN: &str = "wseen";
+
 /// The root of the files' nodes: one child per file the job writes
-/// (the client's `loopfiles`, the streams opened this round), in that
-/// order.
+/// (the client's `loopfiles`, the files written in an earlier round,
+/// `wseen`, the streams opened this round), in that order.
 fn files_root(cx: &mut Ctx<'_>, listed: Vec<String>) -> Result<ValueId, Stop> {
     let v = cx.values();
     let mut names = listed;
+    let seen = v.field(WSEEN);
+    if !cx.is_loopback(seen) {
+        cx.declare_loopback(seen, v.list(Vec::new()));
+    }
+    let mut written: Vec<String> = cx
+        .use_field(seen)?
+        .map(|x| list_of(v, x).iter().map(|&n| str_of(v, n)).collect())
+        .unwrap_or_default();
     let opened = cx.acc_range(v.field(crate::run::WNAMES), None)?;
     for n in v.seq_to_vec(opened).into_iter().map(|n| str_of(v, n)) {
-        if !names.contains(&n) {
-            names.push(n);
+        if !written.contains(&n) {
+            written.push(n);
         }
     }
+    for n in &written {
+        if !names.contains(n) {
+            names.push(n.clone());
+        }
+    }
+    // (every round: a loop-back no run publishes is its initial value
+    // next round)
+    publish_traced(cx, seen, v.list(written.iter().map(|n| v.str(n)).collect()));
     let op = cx.op();
     for n in names {
         cx.child(op, vec![v.str(&n)]);
@@ -789,13 +810,16 @@ type WrittenDefs = Vec<(String, ValueId)>;
 fn file_node(
     cx: &mut Ctx<'_>,
     name: &str,
-    listed: bool,
     defs_lock: &std::sync::Mutex<crate::hints::Defs>,
 ) -> Result<ValueId, Stop> {
     let v = cx.values();
     let (text, ds, as_text) = stream_of(cx, name)?;
-    if !listed && text.is_none() && ds.is_none() {
-        return Ok(ValueId::UNIT);
+    // (a file not opened for writing this round stays as the round
+    // before left it: TeX's next run finds the file an earlier run
+    // wrote, which a job that writes a file only where it is missing
+    // reads instead of writing it again)
+    if text.is_none() && ds.is_none() {
+        return keep_file(cx, name);
     }
     // (the whole text, for the tools that read the file next round,
     // `crate::tools`: a loop-back nobody reads costs no round)
@@ -812,7 +836,12 @@ fn file_node(
         // (opened this round: declared here too, the opening run's
         // declaration being in effect only once the evaluation is quiet)
         cx.declare_loopback(k, v.list(Vec::new()));
-    } else if !per_field && cx.is_loopback(k) {
+    } else if !per_field {
+        // (as text: so marked from the round that opened it, its
+        // readers bound to the mark from then on)
+        if !cx.is_loopback(k) {
+            cx.declare_loopback(k, v.list(Vec::new()));
+        }
         publish_traced(cx, k, crate::api::text_mark(v));
     }
     if per_field {
@@ -882,6 +911,52 @@ fn file_node(
     Ok(ValueId::UNIT)
 }
 
+/// A written file not opened this round ([`file_node`]): its loop-backs
+/// published again with the values this round read, its text, its key
+/// set and each key's definitions.
+fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
+    let v = cx.values();
+    let k = v.field(&format!("wkeys:{name}"));
+    let mut fields = vec![
+        crate::tools::text_field(v, name),
+        k,
+        v.field(&format!("wfile:{name}")),
+    ];
+    if cx.is_loopback(k)
+        && let Some(keys) = cx.use_field(k)?
+        && keys != crate::api::text_mark(v)
+    {
+        for key in list_of(v, keys) {
+            let key = str_of(v, key);
+            if key == crate::api::WRITTEN_KEY {
+                continue;
+            }
+            let id = crate::api::wdef_id(name, &key);
+            fields.push(v.field(&format!("wdef:{id}")));
+        }
+    }
+    // (and its units', `wunit:`, as its order names them)
+    let wf = fields[2];
+    if cx.is_loopback(wf)
+        && let Some(order) = cx.use_field(wf)?
+        && let Some(&es) = list_of(v, order).get(1)
+    {
+        for e in list_of(v, es) {
+            if let Some(&u) = list_of(v, e).first() {
+                fields.push(v.field(&str_of(v, u)));
+            }
+        }
+    }
+    for f in fields {
+        if cx.is_loopback(f)
+            && let Some(x) = cx.use_field(f)?
+        {
+            publish_traced(cx, f, x);
+        }
+    }
+    Ok(ValueId::UNIT)
+}
+
 /// A written file's text as units ([`Files`]): each unit published as
 /// its loop-back (declared from here, the first round that has it), and
 /// the order value.
@@ -925,16 +1000,18 @@ fn written_units(cx: &mut Ctx<'_>, name: &str, text: &str, defs: &crate::hints::
 
 /// Publishes a loop-back's next round value; under `observe` with
 /// `PHITEX_ROUND_TRACE`, each publication is printed with its value's
-/// hash and the node (`round-trace: <field> <hash> node <n>`): the fields
-/// that changed between rounds are those printed with a new hash.
+/// hash and the node (`round-trace: <field> <hash> node <n> (field id
+/// <id>)`): the fields that changed between rounds are those printed with
+/// a new hash; the id is the one the engine's rerun causes name.
 fn publish_traced(cx: &mut Ctx<'_>, f: Field, x: ValueId) {
     if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
         let v = cx.values();
         eprintln!(
-            "round-trace: {} {:016x} node {}",
+            "round-trace: {} {:016x} node {} (field id {})",
             crate::val::field_name(v, f),
             x.raw(),
-            cx.node().raw()
+            cx.node().raw(),
+            f.0.raw()
         );
     }
     cx.publish(f, x);
