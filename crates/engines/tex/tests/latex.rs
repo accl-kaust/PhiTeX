@@ -1091,6 +1091,13 @@ latexmk_tests! {
     latexmk_corpus_char_string_j8: "corpus-char-string", 8;
     latexmk_corpus_version_class_j1: "corpus-version-class", 1;
     latexmk_corpus_version_class_j8: "corpus-version-class", 8;
+    // (a stream closed and opened again on another file in one run)
+    latexmk_reopen_stream_j1: "reopen-stream", 1;
+    latexmk_reopen_stream_j8: "reopen-stream", 8;
+    // (job-written files read line by line, and a tool's output named as
+    // a file the job also writes)
+    latexmk_topic_units_j1: "topic-units", 1;
+    latexmk_topic_units_j8: "topic-units", 8;
 }
 
 /// What BibTeX and makeindex say reaches the build's diagnostics as

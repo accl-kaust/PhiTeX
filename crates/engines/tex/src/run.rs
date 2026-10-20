@@ -1717,12 +1717,24 @@ impl<'c, 'a> Run<'c, 'a> {
     /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
     /// writes and reads back is a loop-back field: the previous round's.
     pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
+        // (a file the job writes and reads back per field: its read-back
+        // reads no text, but a read of its bytes, `\\openin`'s lines, a
+        // size, reads them all, `wtext:`)
+        let whole = self.written_per_field(key)?;
         let Some(x) = self.file_lazy(key)? else {
             return Ok(None);
         };
-        // (a file the job writes: its text read from its units here)
         let v = self.v;
         let xs = list_of(v, x);
+        if whole && let [path, _] = xs[..] {
+            let t = self
+                .cx
+                .use_field(crate::tools::text_field(v, key))?
+                .filter(|&t| t != ValueId::UNIT)
+                .unwrap_or_else(|| v.str(""));
+            return Ok(Some(v.list(vec![path, t])));
+        }
+        // (a file the job writes: its text read from its units here)
         if let [path, t, order] = xs[..]
             && t == ValueId::UNIT
         {
@@ -1730,6 +1742,13 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(v.list(vec![path, text])));
         }
         Ok(Some(x))
+    }
+
+    /// Whether `key` is a file the job writes that is read back per
+    /// field (its text not read by the read-back) and no tool makes.
+    pub(crate) fn written_per_field(&mut self, key: &str) -> R<bool> {
+        let k = self.keyed(crate::fields::Fam::Wkeys, key);
+        Ok(self.cx.is_loopback(k) && self.per_field(k)?.is_some() && !self.tool_makes(key)?)
     }
 
     /// [`Run::file`], a file the job writes as `[path, UNIT, order]`
@@ -1804,13 +1823,15 @@ impl<'c, 'a> Run<'c, 'a> {
                 .map_or(0, |&o| usize::try_from(int_of(v, o)).unwrap_or(0));
             return Ok((text, at));
         }
-        Ok((
-            self.cx
-                .use_field(f)?
-                .map(|x| str_of(v, x))
-                .unwrap_or_default(),
-            0,
-        ))
+        let x = self.cx.use_field(f)?;
+        if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
+            eprintln!(
+                "round-read: {name} {:016x} node {}",
+                x.map_or(0, ValueId::raw),
+                self.cx.node().raw()
+            );
+        }
+        Ok((x.map(|x| str_of(v, x)).unwrap_or_default(), 0))
     }
 
     /// A written file's text from its order (`ops::Files`): its units
@@ -1903,10 +1924,34 @@ impl<'c, 'a> Run<'c, 'a> {
             let _ = self.cx.use_field(k)?;
             let _ = self.cx.use_field(w)?;
         }
-        let per_field = self.per_field(k)?;
-        let x = if let Some(keys) = per_field {
+        // (a name the job writes that a tool also makes from a file the
+        // job writes: the tool's output, as latexmk's tool run after the
+        // TeX run that wrote both replaces what the job wrote there)
+        let made = if self.cx.is_loopback(k) || self.cx.is_loopback(w) {
+            self.tool_output(key)?
+        } else {
+            None
+        };
+        let per_field = if made.is_some() {
+            None
+        } else {
+            self.per_field(k)?
+        };
+        if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") && self.cx.is_loopback(k) {
+            let (kx, wx) = (self.cx.use_field(k)?, self.cx.use_field(w)?);
+            eprintln!(
+                "round-read: wkeys:{key} {:016x} wfile:{key} {:016x} tool {} node {}",
+                kx.map_or(0, ValueId::raw),
+                wx.map_or(0, ValueId::raw),
+                made.is_some(),
+                self.cx.node().raw()
+            );
+        }
+        let x = if made.is_some() {
+            made
+        } else if let Some(keys) = per_field {
             // a file whose read-back only defines: it exists (empty) once
-            // a line of it defines something ([`Run::read_back`])
+            // the job wrote it ([`Run::read_back`])
             if keys.is_some_and(|x| !list_of(v, x).is_empty()) {
                 Some(v.list(vec![v.str(&format!("./{key}")), v.str("")]))
             } else {
@@ -2269,7 +2314,11 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let keys = keys.map(|x| list_of(v, x)).unwrap_or_default();
         for k in keys {
-            let id = crate::api::wdef_id(key, &str_of(v, k));
+            let k = str_of(v, k);
+            if k == crate::api::WRITTEN_KEY {
+                continue;
+            }
+            let id = crate::api::wdef_id(key, &k);
             let name = crate::api::wdef_field(&id).to_owned();
             let wd = self.keyed(crate::fields::Fam::Wdef, &id);
             // (a key whose loop-back the files node has not declared

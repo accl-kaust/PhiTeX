@@ -1302,6 +1302,15 @@ impl Run<'_, '_> {
                 self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
                 return Ok(());
             }
+            // (so too a file the job wrote a round before and reads back
+            // per field: a test of the stream reads whether it exists,
+            // not its text)
+            if self.get(&format!("wopen:{key}"))?.is_none() && self.written_per_field(&key)? {
+                if self.file_lazy(&key)?.is_some() {
+                    self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
+                }
+                return Ok(());
+            }
             let Some(x) = self.read_file(&key)? else {
                 return Ok(());
             };
@@ -1840,6 +1849,14 @@ impl Run<'_, '_> {
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         }
         self.written_decl(&name)?;
+        // (§1374: the stream is open from here, whatever this run closed
+        // of it before)
+        if let Ok(k) = i32::try_from(n)
+            && self.closed.contains(&k)
+        {
+            self.muts += 1;
+            self.closed.retain(|&c| c != k);
+        }
         self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
         self.set(&format!("wopen:{name}"), v.int(1), true);
         self.contribute_stream(v.list(vec![v.str(&name)]));
