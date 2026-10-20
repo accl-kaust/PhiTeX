@@ -1,7 +1,8 @@
 // Run phitex-wasm (crates/wasm, built for wasm32-wasip1-threads by
 // scripts/wasm.sh) in Node: WASI preview 1 for files, the environment and
-// the clock (node:wasi, the whole file system as the program sees it:
-// run it through scripts/sandbox), and wasi-threads' `thread-spawn`
+// the clock (node:wasi: the directory it runs in and the system's TeX
+// directories, `preopens` below; run it through scripts/sandbox), and
+// wasi-threads' `thread-spawn`
 // answered with a Node worker per thread, each instantiating the same
 // module on the same shared memory and entering `wasi_thread_start`.
 // No wasm-bindgen and no `unsafe` in the program: std's threads are
@@ -13,7 +14,7 @@
 // target aborts) ends the whole process (SIGTERM), since the main thread,
 // blocked on the engine's locks, cannot hear of it.
 
-import { readdirSync, readFileSync, writeSync } from "node:fs";
+import { accessSync, constants, readFileSync, writeSync } from "node:fs";
 import { WASI } from "node:wasi";
 import { Worker, isMainThread, workerData } from "node:worker_threads";
 
@@ -21,14 +22,26 @@ import { Worker, isMainThread, workerData } from "node:worker_threads";
 const PAGES_INITIAL = 1024;
 const PAGES_MAX = 65536;
 
-// The file system as the program sees it: every directory at the root
-// under its own path, and the directory Node runs in as the root itself,
-// so that a relative path (WASI's are taken from "/", it has no current
-// directory) is one from here. The longest matching preopen wins.
+// The file system as the program sees it: the directory Node runs in as
+// the root itself, so that a relative path (WASI's are taken from "/", it
+// has no current directory) is one from here; and under their own paths
+// only the directories it reads TeX's files from, PHITEX_WASM_DIRS
+// (colon-separated; by default the system's: /usr, /etc, /var, /opt,
+// where a TeX installation, its texmf.cnf and its generated files are),
+// each one it can open. Every directory at the root was preopened before:
+// under a sandbox one it cannot open (/root, a mount it may not read) ends
+// the WASI start with UVWASI_EACCES. The longest matching preopen wins.
 function preopens() {
   const p = { "/": process.cwd() };
-  for (const d of readdirSync("/", { withFileTypes: true })) {
-    if (d.isDirectory() || d.isSymbolicLink()) p[`/${d.name}`] = `/${d.name}`;
+  const dirs = (process.env.PHITEX_WASM_DIRS ?? "/usr:/etc:/var:/opt").split(":");
+  for (const d of dirs) {
+    if (!d.startsWith("/") || d === "/") continue;
+    try {
+      accessSync(d, constants.R_OK | constants.X_OK);
+      p[d] = d;
+    } catch {
+      // (absent or unreadable: not the program's)
+    }
   }
   return p;
 }
