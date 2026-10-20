@@ -288,10 +288,16 @@ pub fn find_main(name: &str) -> Option<PathBuf> {
     tries.into_iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
-/// The job's name: the file's without its directory and `.tex`.
+/// The job's name: the main file's, as found ([`find_main`]: `a.b`
+/// is `a.b.tex` when that exists), without its directory and extension.
 pub fn job_of(file: &str) -> String {
-    let base = file.rsplit('/').next().unwrap_or(file);
-    base.strip_suffix(".tex").unwrap_or(base).to_owned()
+    let found = find_main(file).map(|p| p.to_string_lossy().into_owned());
+    let name = found.as_deref().unwrap_or(file);
+    // (as TeX scans a file name, §516-§517 with web2c's change: the area
+    // ends at the last `/`, the extension starts at the last `.` after
+    // it, whatever follows; §537: the job is the name without either)
+    let base = name.rsplit('/').next().unwrap_or(name);
+    base.rfind('.').map_or(base, |k| &base[..k]).to_owned()
 }
 
 #[cfg(test)]
@@ -300,6 +306,23 @@ mod tests {
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|&s| s.to_owned()).collect()
+    }
+
+    #[test]
+    fn job_names_drop_any_extension() {
+        assert_eq!(job_of("a.tex"), "a");
+        assert_eq!(job_of("dir/x.ltx"), "x");
+        assert_eq!(job_of("d.v/a.b.dtx"), "a.b");
+        assert_eq!(job_of("plain"), "plain");
+        assert_eq!(job_of("d.v/plain"), "plain");
+        // (a name found with `.tex` appended keeps its own dots)
+        let dir = std::env::temp_dir().join(format!("phitex-job-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.b.tex");
+        std::fs::write(&f, "").unwrap();
+        let given = dir.join("a.b").to_string_lossy().into_owned();
+        assert_eq!(job_of(&given), "a.b");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
