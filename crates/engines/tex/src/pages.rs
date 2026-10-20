@@ -264,14 +264,12 @@ impl PageNode {
 
     /// The read hint: the fields `gate` the node cannot run without, and
     /// [`PageNode::folds`].
-    fn reads(self, v: &Values, gate: &[&str]) -> Option<Vec<Field>> {
-        Some(
-            gate.iter()
-                .copied()
-                .chain(self.folds().iter().copied())
-                .map(|f| v.field(f))
-                .collect(),
-        )
+    fn reads(self, v: &Values, gate: &[&str]) -> Vec<Field> {
+        gate.iter()
+            .copied()
+            .chain(self.folds().iter().copied())
+            .map(|f| v.field(f))
+            .collect()
     }
 }
 
@@ -2855,7 +2853,8 @@ impl Run<'_, '_> {
         if !cuttable {
             // (observe/profile: a page firing where the piece could not
             // end, and what the routine changed that the rest read)
-            if crate::exec::obs_flag!("PHITEX_TEX_TRACE") || crate::exec::prof_flag!("PHITEX_TEX_TIME")
+            if crate::exec::obs_flag!("PHITEX_TEX_TRACE")
+                || crate::exec::prof_flag!("PHITEX_TEX_TIME")
             {
                 eprintln!(
                     "  page fires at a candidate a piece runs through: piece {} at candidate {} ({})",
@@ -4272,7 +4271,7 @@ impl Operation for Finish {
     /// reads in its run, where the continuation before it is predicted
     /// ([`Scan::predicted_defs`]): the engine's gate takes no prediction.
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        PageNode::Finish.reads(v, &[])
+        Some(PageNode::Finish.reads(v, &[]))
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
@@ -4598,7 +4597,7 @@ impl Operation for Resume {
     /// instead of a run parking on it. And what it folds
     /// ([`PageNode::folds`]).
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        PageNode::Resume.reads(v, &[RESUME])
+        Some(PageNode::Resume.reads(v, &[RESUME]))
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
@@ -4784,14 +4783,14 @@ impl Operation for Scan {
             // (it assembles its page as the finisher does, reading the
             // material the page began with in its run, on the prediction
             // of the continuation before it; the break is its argument)
-            return PageNode::Cont.reads(v, &[]);
+            return Some(PageNode::Cont.reads(v, &[]));
         }
         // (not the scan state: the engine's gate does not take a
         // definer's prediction, a run's read does, and the continuation
         // before it is predicted, [`Run::place_cont`]; the state where
         // its block begins, which the block's scan before defines and
         // nothing predicts: waited for at the gate, not parked on)
-        PageNode::Step.reads(v, &[crate::build::MAIN_LAST, SCAN_BLOCK])
+        Some(PageNode::Step.reads(v, &[crate::build::MAIN_LAST, SCAN_BLOCK]))
     }
     /// No pieces' units: a window holding a step does not wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
