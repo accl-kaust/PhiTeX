@@ -67,6 +67,8 @@ pub(crate) struct Builder<'a> {
     /// (`None`), or only those of the fields whose definitions or
     /// contributions changed.
     recheck: FxHashMap<Id, Option<Vec<Field>>>,
+    /// Readers past a shadow bound, asked under CLEAN_SCOPED_CHECK only.
+    beyond: Vec<(Id, Field)>,
     /// Readers made dirty because a use now reaches another site.
     pub rebinds: u64,
     /// Claims wait for the evaluation (a client's edits).
@@ -93,6 +95,7 @@ impl<'a> Builder<'a> {
             freed: Vec::new(),
             woken: Vec::new(),
             recheck: FxHashMap::default(),
+            beyond: Vec::new(),
             rebinds: 0,
             defer_claims: false,
             defer: None,
@@ -102,9 +105,13 @@ impl<'a> Builder<'a> {
     }
 
     /// Readers to re-ask (a flush's), each on a field.
-    pub(crate) fn recheck_all(&mut self, ids: impl IntoIterator<Item = (Id, Field)>) {
-        for (r, f) in ids {
-            self.recheck_on(r, f);
+    pub(crate) fn recheck_all(&mut self, ids: impl IntoIterator<Item = (Id, Field, bool)>) {
+        for (r, f, beyond) in ids {
+            if beyond {
+                self.beyond.push((r, f));
+            } else {
+                self.recheck_on(r, f);
+            }
         }
     }
 
@@ -164,6 +171,21 @@ impl<'a> Builder<'a> {
     /// Re-asks the reads of the readers queued for it; a broken one makes
     /// its reader dirty.
     fn settle(&mut self) {
+        for (id, f) in std::mem::take(&mut self.beyond) {
+            // (Re-asked on `f` anyway, by another change: not a miss.)
+            if self.recheck.get(&id).is_some_and(|on| on.as_ref().is_none_or(|fs| fs.contains(&f))) {
+                continue;
+            }
+            let Some(n) = self.w.node(id) else { continue };
+            if n.st != St::Done {
+                continue;
+            }
+            let Some(res) = n.res.clone() else { continue };
+            if let Some(r) = res.reads.iter().find(|r| read_on(r, &[f]) && !holds(self.core, &self.w, id, r)) {
+                eprintln!("shadow check: {id} past the bound on {f:?}, broken {r:?}");
+                self.recheck_on(id, f);
+            }
+        }
         let ids: Vec<(Id, Option<Vec<Field>>)> = std::mem::take(&mut self.recheck).into_iter().collect();
         for (id, on) in ids {
             let Some(n) = self.w.node(id) else { continue };
@@ -504,7 +526,7 @@ impl<'a> Builder<'a> {
             return;
         }
         self.w.file_def(n.unit, f, pos, fr, e);
-        self.def_changed(n.unit, f, n.pos);
+        self.def_changed_in(n.unit, f, n.pos, Some(fr), loc == Locality::Global);
     }
 
     /// The value and locality of node `n`'s filed entry of `f` (`None`:
@@ -530,7 +552,7 @@ impl<'a> Builder<'a> {
             return;
         }
         self.w.unfile_def(n.unit, f, pos, fr, loc == Locality::Global);
-        self.def_changed(n.unit, f, n.pos);
+        self.def_changed_in(n.unit, f, n.pos, Some(fr), loc == Locality::Global);
     }
 
     /// The frame a definition of locality `loc` by node `n` is filed in.
@@ -557,11 +579,27 @@ impl<'a> Builder<'a> {
     }
 
     /// The definitions of `f` in unit `u` changed at position `at`: its
-    /// readers after it are re-asked.
+    /// readers after it are re-asked, up to the next entry that shadows
+    /// the change (`fr`: the frame of a local entry; `None` unbounded).
     fn def_changed(&mut self, u: u32, f: Field, at: Pos) {
+        self.def_changed_in(u, f, at, None, false);
+    }
+
+    fn def_changed_in(&mut self, u: u32, f: Field, at: Pos, fr: Option<FrameId>, global: bool) {
         self.w.touch_key(Key::Defs(u, f));
-        for r in self.w.readers_between(u, f, at.saturating_sub(1), Pos::MAX) {
+        let hi = match fr {
+            Some(fr) => shadow_end(self.core, self.w.defs.get(&(u, f)), f, at, fr, global),
+            None => Pos::MAX,
+        };
+        for r in self.w.readers_between(u, f, at.saturating_sub(1), hi) {
             self.recheck_on(r, f);
+        }
+        // (CLEAN_SCOPED_CHECK: the readers past the bound are asked too,
+        // a broken one named.)
+        if hi != Pos::MAX && scoped_check() {
+            for r in self.w.readers_between(u, f, hi - 1, Pos::MAX) {
+                self.beyond.push((r, f));
+            }
         }
     }
 
@@ -1698,7 +1736,7 @@ fn read_on(r: &Read, fs: &[Field]) -> bool {
 
 /// Whether `CLEAN_SCOPED_CHECK` asks settle to check every read of a
 /// reader re-asked on a field (read once).
-fn scoped_check() -> bool {
+pub(crate) fn scoped_check() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("CLEAN_SCOPED_CHECK").is_some())
 }
@@ -1720,4 +1758,22 @@ struct ReadAgg {
     kind: bool,
     fwd: Option<Pos>,
     back: Option<Pos>,
+}
+
+/// The end (exclusive) of the readers a change to `f`'s entry at `at`
+/// can reach: a read takes the nearest earlier entry of its frame chain
+/// or the globals, so past the next global (and, for a local entry, the
+/// next one in its frame) none sees it; that entry's own node still may
+/// (a node passes its own entries). A sequence's readers fold every
+/// entry: unbounded.
+pub(crate) fn shadow_end(core: &Core, fd: Option<&super::world::FieldDefs>, f: Field, at: Pos, fr: FrameId, global: bool) -> Pos {
+    let Some(fd) = fd else { return Pos::MAX };
+    if core.seqs.contains(&f) {
+        return Pos::MAX;
+    }
+    let mut end = fd.globals.above(&at).map_or(Pos::MAX, |(&p, _)| p);
+    if !global && let Some(m) = fd.local.get(&fr) {
+        end = end.min(m.above(&at).map_or(Pos::MAX, |(&p, _)| p));
+    }
+    end.saturating_add(1)
 }

@@ -969,6 +969,10 @@ impl Engine {
                     && x != k.2
                     && self.w.node(x).is_some_and(|n| n.st == St::Dirty)
                 {
+                    if super::core::debug() {
+                        let op = |y: Id| self.w.node(y).map(|n| self.core.op_name(n.text.op));
+                        eprintln!("held {} ({:?}) on {x} ({:?})", k.2, op(k.2), op(x));
+                    }
                     s.queue.remove(&k);
                     s.queued.remove(&k.2);
                     s.parked.insert(k.2, Wait::Node(x, None));
