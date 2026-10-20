@@ -4246,6 +4246,10 @@ pub struct Build {
     lines: Mutex<Option<Vec<usize>>>,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
+    /// Whether a package load ran in the last evaluation: only then do
+    /// the loads' records change (`crate::pkgrec`; a record is only a
+    /// load's run's), so only then are they merged and stored.
+    loads_ran: bool,
 }
 
 impl Build {
@@ -4426,6 +4430,7 @@ impl Build {
             raw: g_canon.then(|| Arc::from(document)),
             memo: Mutex::default(),
             lines: Mutex::default(),
+            loads_ran: false,
         };
         b.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -4607,8 +4612,19 @@ impl Build {
         self.pkg_stats(&mut stats);
         crate::timeline::lap("engine: package load stats");
         // the loads' records as this evaluation left them: a load
-        // inserted by a later edit uses them
-        if let Some(l) = &self.g.loads {
+        // inserted by a later edit uses them. A record is what a load's
+        // run left (`crate::pkgrec::entry`), so an evaluation in which no
+        // load ran leaves the merged records as they were.
+        self.loads_ran = !self
+            .g
+            .ops
+            .pkg_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty();
+        if self.loads_ran
+            && let Some(l) = &self.g.loads
+        {
             l.merge(self.fresh_records());
         }
         crate::timeline::lap("engine: package load records merged");
@@ -4947,16 +4963,22 @@ impl Build {
 
     /// The package loads' records ([`Options::pkgrec`]): those the build
     /// was given, each load this build ran replacing its own
-    /// (`crate::pkgrec`). Kept machine-wide, beside the format.
+    /// (`crate::pkgrec`; merged at the end of each evaluation in which a
+    /// load ran). Kept machine-wide, beside the format.
     #[must_use]
     pub fn export_pkgrec(&self) -> Vec<u8> {
         match &self.g.loads {
-            Some(l) => {
-                l.merge(self.fresh_records());
-                l.bytes()
-            }
+            Some(l) => l.bytes(),
             None => self.opts.pkgrec.clone(),
         }
+    }
+
+    /// Whether a package load ran in the last evaluation, so that the
+    /// records [`Self::export_pkgrec`] gives may differ from those it
+    /// gave before; `false`: they are the same.
+    #[must_use]
+    pub fn pkgrec_changed(&self) -> bool {
+        self.loads_ran
     }
 
     /// The predicted publications of the package load `text` (what the
