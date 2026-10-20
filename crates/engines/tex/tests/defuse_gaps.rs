@@ -1318,7 +1318,7 @@ impl Operation for ToyCut {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
         let a = cx.args();
-        let ss = |cx: &Ctx<'_>| {
+        let ss = |cx: &mut Ctx<'_>| {
             let mut n = 0;
             while cx.following(n).is_some_and(|(_, xs)| tag(v, &xs) == "s") {
                 n += 1;
