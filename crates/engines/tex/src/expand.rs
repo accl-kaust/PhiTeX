@@ -956,6 +956,9 @@ impl Run<'_, '_> {
         // lines, a piece each where it slices, `Run::doc_file_regions`)
         let f = match xs.get(2) {
             Some(&order) if text == phitex_defuse::ValueId::UNIT => {
+                // (a file the job writes read back as its text: its lines
+                // are read under the state here too, [`Run::pre_value`])
+                self.mark_read_point(&key)?;
                 crate::run::FileRest::written(self.v, order, xs[0])
             }
             // (a tool's output, `crate::tools::ToolRun`: read inline, what
