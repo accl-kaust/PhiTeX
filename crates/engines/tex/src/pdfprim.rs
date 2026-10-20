@@ -414,15 +414,18 @@ fn hex_upper(b: &[u8]) -> String {
 /// A file's bytes, or the need for it.
 /// pdfTeX's `kpse_find_tex` (pdfTeX §1752 `\\pdffilesize` and the
 /// other file conversions): a name without a suffix is looked up with
-/// `.tex` first, then as given (kpathsea's `tex` format).
+/// `.tex` first, then as given (kpathsea's `tex` format). A file the job
+/// wrote before here is what it wrote ([`Run::read_file`]), as `\\input`
+/// and `\\openin` find it: TeX looks the name up in the file system the
+/// job's own writes changed.
 fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
     let base = name.rsplit('/').next().unwrap_or(name);
     let mut found = None;
     if !base.contains('.') {
-        found = r.file(&format!("{name}.tex"))?;
+        found = r.read_file(&format!("{name}.tex"))?;
     }
     if found.is_none() {
-        found = r.file(name)?;
+        found = r.read_file(name)?;
     }
     let Some(x) = found else {
         return Ok(None);
