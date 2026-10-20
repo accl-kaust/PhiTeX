@@ -1210,15 +1210,41 @@ impl State {
         since: u64,
         gids: u32,
     ) -> Vec<(Loc, Option<ValueId>, Locality)> {
-        let hits: Vec<(Loc, bool)> = self
+        self.defined_since_by(v, since, gids, false)
+    }
+
+    /// [`State::defined_since`] in the order of the latest definitions
+    /// (their stamps), not of the locations' first definitions in the
+    /// run: what a stretch of the run defined, listed as that stretch
+    /// alone decides, whatever the run touched before it.
+    pub(crate) fn defined_since_in_order(
+        &mut self,
+        v: &Values,
+        since: u64,
+        gids: u32,
+    ) -> Vec<(Loc, Option<ValueId>, Locality)> {
+        self.defined_since_by(v, since, gids, true)
+    }
+
+    fn defined_since_by(
+        &mut self,
+        v: &Values,
+        since: u64,
+        gids: u32,
+        by_stamp: bool,
+    ) -> Vec<(Loc, Option<ValueId>, Locality)> {
+        let mut hits: Vec<(Loc, bool, u64)> = self
             .metas
             .iter()
             .filter(|m| m.ldef_stamp > since)
             .filter(|m| !(m.ldef_local && m.ldef_gid.is_some_and(|g| g > gids)))
-            .map(|m| (m.loc, m.ldef_local))
+            .map(|m| (m.loc, m.ldef_local, m.ldef_stamp))
             .collect();
+        if by_stamp {
+            hits.sort_by_key(|h| h.2);
+        }
         hits.into_iter()
-            .map(|(loc, local)| {
+            .map(|(loc, local, _)| {
                 let x = self.id_of(loc, v);
                 let l = if local {
                     Locality::Local

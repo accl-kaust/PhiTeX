@@ -1635,10 +1635,16 @@ impl Run<'_, '_> {
                     }
                     None => line.clone(),
                 };
-                let r = self.interpret_line(&text)?;
+                self.interp_point = self.read_point_of(&name)?;
+                let r = self.interpret_line(&text);
+                self.interp_point = None;
+                let r = r?;
                 if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                     eprintln!(
-                        "aux-trace: interpreted {name} {text:?}: {}",
+                        "aux-trace: interpreted {name} {text:?} in node {} (read-back point {:?}, only defines {}): {}",
+                        self.cx.node().raw(),
+                        self.read_point_of(&name)?.map(phitex_defuse::NodeId::raw),
+                        self.interp_plain,
                         r.map_or_else(|| "needs more".to_owned(), |x| crate::val::show_def(v, x))
                     );
                 }
@@ -1655,6 +1661,12 @@ impl Run<'_, '_> {
                     v.list(vec![v.str(&name), v.str(&line)])
                 }
             } else {
+                if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && self.interp.is_none() {
+                    eprintln!(
+                        "aux-trace: {name} line {line:?} not interpreted in node {}: an earlier line of this run did more than define",
+                        self.cx.node().raw()
+                    );
+                }
                 v.list(vec![v.str(&name), v.str(&line), ValueId::UNIT])
             };
             self.contribute_stream(e);
@@ -1739,7 +1751,9 @@ impl Run<'_, '_> {
             .unwrap_or_default();
         self.interp_eof = true;
         self.interp_errs.clear();
+        self.interp_point = self.read_point_of(&name)?;
         let r = self.interpret_line(text);
+        self.interp_point = None;
         self.interp_eof = false;
         let errs = std::mem::take(&mut self.interp_errs);
         let made = r?;

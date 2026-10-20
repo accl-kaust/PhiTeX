@@ -868,6 +868,60 @@ fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
     Ok(n)
 }
 
+/// The mark of a read-time object number that only PDF bytes name (a
+/// link's, an annotation's): the read-time count with this bit, no page's
+/// objects folded in. The page writer and the link give it the number
+/// in the line (`pdfout::finish_exact`); a read that spends it into
+/// tokens or a conditional (`\pdflastlink`, `\pdflastannot`) folds the
+/// pages' allocations where it was made ([`resolved_num`]).
+pub(crate) const REL: i64 = 1 << 40;
+
+/// [`alloc_obj`] for an object only PDF bytes name ([`REL`]): the
+/// read-time count, no fold of the pages' allocations.
+fn alloc_rel(r: &mut Run<'_, '_>) -> R<i64> {
+    let n = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
+    let x = r.v.int(n);
+    r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
+    if r.param("pdfoutput")? <= 0 {
+        return Ok(n);
+    }
+    let t = n | REL;
+    crate::pdfout::note_read_time(r, t);
+    Ok(t)
+}
+
+/// The node this run is, as an integer in a whatsit's data: where a
+/// [`REL`] number it names was made.
+fn node_int(r: &Run<'_, '_>) -> ValueId {
+    r.v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()))
+}
+
+/// A last-object cell's value for number `n` this run made: a
+/// [`REL`] number with the node that made it, `[n, node]`.
+fn last_num(r: &Run<'_, '_>, n: i64) -> ValueId {
+    let v = r.v;
+    if n & REL == 0 {
+        return v.int(n);
+    }
+    v.list(vec![
+        v.int(n),
+        v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())),
+    ])
+}
+
+/// A last-object cell's number as TeX reads it: a [`REL`] number with
+/// the objects of the pages shipped before the node that made it.
+fn resolved_num(r: &mut Run<'_, '_>, x: ValueId) -> R<i64> {
+    let v = r.v;
+    let xs = list_of(v, x);
+    let (Some(&n), Some(&at)) = (xs.first(), xs.get(1)) else {
+        return Ok(v.as_int(x).unwrap_or(0));
+    };
+    let n = int_of(v, n) & !REL;
+    let at = u64::from_ne_bytes(int_of(v, at).to_ne_bytes());
+    Ok(n + crate::pdfout::page_offset_at(r, at)?)
+}
+
 // ------------------------------------------------------------ `\pdfmatch`
 
 /// `\pdfmatch` (utils.c `matchstrings`): POSIX extended expressions.
@@ -1602,8 +1656,19 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
         li::LAST_XIMAGE => "pdf:lastximage",
         li::LAST_XIMAGE_PAGES => "pdf:lastximagepages",
         li::LAST_XIMAGE_COLORDEPTH => "pdf:lastximagecolordepth",
-        li::LAST_ANNOT => "pdf:lastannot",
-        li::LAST_LINK => "pdf:lastlink",
+        li::LAST_ANNOT | li::LAST_LINK => {
+            let c = if m == li::LAST_LINK {
+                crate::fields::cell::PDF_LASTLINK
+            } else {
+                crate::fields::cell::PDF_LASTANNOT
+            };
+            let x = r.get_loc(c)?;
+            let n = match x {
+                Some(x) => resolved_num(r, x)?,
+                None => 0,
+            };
+            return Ok(IVal::Int(i32::try_from(n).unwrap_or(0)));
+        }
         li::LAST_X_POS => "pdf:lastxpos",
         li::LAST_Y_POS => "pdf:lastypos",
         li::RETVAL => "pdf:retval",
@@ -2235,10 +2300,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             } else {
                 {
                     let input = v.list(vec![s("newobjnum"), s("annot")]);
-                    let got = crate::pdfout::command(r, input, &[], |st, _| {
+                    crate::pdfout::command(r, input, &[], |st, _| {
                         crate::pdfout::CmdOut::num(st.new_objnum())
                     })?;
-                    or_alloc(r, num_of(got))?
+                    alloc_rel(r)?
                 }
             };
             if !reserved {
@@ -2254,10 +2319,12 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                         v.int(i64::from(h)),
                         v.int(i64::from(d)),
                         data,
+                        node_int(r),
                     ],
                 );
             }
-            r.set_cell(crate::fields::cell::PDF_LASTANNOT, v.int(n), true);
+            let x = last_num(r, n);
+            r.set_cell(crate::fields::cell::PDF_LASTANNOT, x, true);
         }
         ex::START_LINK => {
             if md.m.abs() == 1 {
@@ -2271,10 +2338,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let act = action(r)?;
             let n = {
                 let input = v.list(vec![s("newobjnum"), s("link")]);
-                let got = crate::pdfout::command(r, input, &[], |st, _| {
+                crate::pdfout::command(r, input, &[], |st, _| {
                     crate::pdfout::CmdOut::num(st.new_objnum())
                 })?;
-                or_alloc(r, num_of(got))?
+                alloc_rel(r)?
             };
             if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
                 let off = crate::pdfout::page_offset(r)?;
@@ -2295,9 +2362,11 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     v.int(i64::from(d)),
                     at,
                     act,
+                    node_int(r),
                 ],
             );
-            r.set_cell(crate::fields::cell::PDF_LASTLINK, v.int(n), true);
+            let x = last_num(r, n);
+            r.set_cell(crate::fields::cell::PDF_LASTLINK, x, true);
         }
         ex::END_LINK => {
             if md.m.abs() == 1 {
@@ -2875,6 +2944,7 @@ fn xform_step(
     for w in side.whats.clone() {
         data.push(crate::pdfout::writer_whatsit(r, w)?);
     }
+    crate::pdfout::form_whatsit_nums(r, &side.whats, &mut data)?;
     let view = r.font_view(std::slice::from_ref(&Node::Box(bx.clone())))?;
     let ids: Vec<u32> = view.fonts.ids();
     let mut all: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
