@@ -1,0 +1,9 @@
+% A total counter declared after \begin{document} and shown before its last change: pdfLaTeX
+% prints 5 after its passes; PhiTeX prints ??.
+\documentclass{article}
+\usepackage{totcount}
+\begin{document}
+\newtotcounter{yourcount}
+\total{yourcount}
+\addtocounter{yourcount}{5}
+\end{document}

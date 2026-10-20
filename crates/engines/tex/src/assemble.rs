@@ -60,25 +60,47 @@ pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, 
 /// The exact PDF file the link made (`pdf:file`), read by the end node.
 pub(crate) const LINKED: &str = "pdf:file";
 
-/// The bytes of the files the link made, by their hash: the file's value
-/// is `["bytes", hash, length]`, not the file as a string (copied,
-/// interned and hashed as characters, then copied back to bytes: O(file)
-/// three times an edit). The latest few kept.
+/// The bytes of the files the link made, by their values table and hash:
+/// the file's value is `["bytes", hash, length]`, not the file as a string
+/// (copied, interned and hashed as characters, then copied back to bytes:
+/// O(file) three times an edit). The latest few kept per table, until
+/// the build that owns the table goes ([`forget_linked`]): what one build
+/// links never evicts another's file (with a few kept for all builds, the
+/// builds of one process running at once lost their files: an empty
+/// output).
 fn linked_files() -> &'static LinkedFiles {
     static M: std::sync::OnceLock<LinkedFiles> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
 }
 
-/// [`linked_files`]: (hash, bytes), the latest last.
-type LinkedFiles = std::sync::Mutex<std::collections::VecDeque<(u64, std::sync::Arc<Vec<u8>>)>>;
+/// [`linked_files`]: per values table (its instance), its files.
+type LinkedFiles = std::sync::Mutex<Vec<(u64, Linked)>>;
+
+/// A table's linked files: (hash, bytes), the latest last.
+type Linked = std::collections::VecDeque<(u64, std::sync::Arc<Vec<u8>>)>;
+
+/// The files linked in values table `instance` dropped: its build goes.
+pub(crate) fn forget_linked(instance: u64) {
+    linked_files()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|(i, _)| *i != instance);
+}
 
 /// The value standing for file bytes `b` ([`linked_files`]).
 fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>, hash: Option<u64>) -> ValueId {
     let h = hash.unwrap_or_else(|| phitex_defuse::hash_bytes(0x6c69_6e6b_6564, &b));
     let n = b.len();
-    let mut m = linked_files()
+    let mut all = linked_files()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let k = if let Some(k) = all.iter().position(|(i, _)| *i == v.instance()) {
+        k
+    } else {
+        all.push((v.instance(), std::collections::VecDeque::new()));
+        all.len() - 1
+    };
+    let m = &mut all[k].1;
     if !m.iter().any(|e| e.0 == h) {
         m.push_back((h, std::sync::Arc::new(b)));
         while m.len() > 4 {
@@ -104,8 +126,8 @@ pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::s
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .find(|e| e.0 == h)
-            .map(|e| e.1.clone())
+            .find(|(i, _)| *i == v.instance())
+            .and_then(|(_, m)| m.iter().find(|e| e.0 == h).map(|e| e.1.clone()))
             .unwrap_or_default();
     }
     std::sync::Arc::new(
@@ -509,4 +531,33 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         );
     }
     Ok(x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A build's linked file stays readable however many files other
+    /// builds of the process link meanwhile, and goes with its build.
+    /// (Kept a few for all builds at once, the latest one of a build was
+    /// evicted by the others' when several ran in one process: the build
+    /// read an empty output.)
+    #[test]
+    fn a_linked_file_is_its_builds_whatever_others_link() {
+        let mine = phitex_defuse::Values::new();
+        let x = bytes_value(&mine, b"%PDF mine".to_vec(), None);
+        let others: Vec<phitex_defuse::Values> =
+            (0..8).map(|_| phitex_defuse::Values::new()).collect();
+        for (k, o) in others.iter().enumerate() {
+            for n in 0..6 {
+                let _ = bytes_value(o, format!("%PDF {k} {n}").into_bytes(), None);
+            }
+        }
+        assert_eq!(file_bytes_shared(&mine, x).as_slice(), b"%PDF mine");
+        forget_linked(mine.instance());
+        assert!(file_bytes_shared(&mine, x).is_empty());
+        for o in &others {
+            forget_linked(o.instance());
+        }
+    }
 }

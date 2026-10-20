@@ -60,12 +60,15 @@ fn check() -> Result<()> {
         }
         Ok(())
     };
-    // (the vendored engine keeps its own lints: `crates/vendor/defuse`)
+    // (the vendored engine keeps its own lints: `crates/vendor/defuse`;
+    // `--exclude` drops it from the members linted, `--no-deps` from the
+    // path dependencies cargo would lint with them)
     run(&[
         "clippy",
         "--workspace",
         "--exclude",
         "defuse",
+        "--no-deps",
         "--all-targets",
         "--",
         "-D",
@@ -76,16 +79,21 @@ fn check() -> Result<()> {
         wasm.extend(["-p", c]);
     }
     run(&wasm)?;
-    // (the engine as a WebAssembly program with threads, `scripts/wasm.sh`)
-    run(&[
+    // (the engine as a WebAssembly program with threads, `scripts/wasm.sh`:
+    // the program and the pure crates linted for it, the vendored engine
+    // not, `--no-deps`)
+    let mut wasm_lint = vec![
         "clippy",
         "--target",
         "wasm32-wasip1-threads",
+        "--no-deps",
         "-p",
         "phitex-wasm",
-        "--",
-        "-D",
-        "warnings",
-    ])?;
+    ];
+    for c in WASM_CRATES {
+        wasm_lint.extend(["-p", c]);
+    }
+    wasm_lint.extend(["--", "-D", "warnings"]);
+    run(&wasm_lint)?;
     run(&["test", "--workspace", "--release", "--quiet"])
 }
