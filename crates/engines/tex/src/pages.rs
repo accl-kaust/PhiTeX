@@ -3294,7 +3294,7 @@ impl Run<'_, '_> {
                 _ => {
                     cur = Some(crate::run::FileLine::Known(i64::from(
                         self.input.file(*l).line,
-                    )))
+                    )));
                 }
             }
             level_here.push(here_of(cur));

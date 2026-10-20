@@ -632,6 +632,15 @@ pub(crate) struct Run<'c, 'a> {
     /// The objects this run made at read time in relaxed PDF mode (their
     /// owner keys: the node and the occurrence).
     pub pdf_occ: usize,
+    /// The objects this run made at read time in PDF mode, all, those
+    /// counted in the `pdf:objnum` cell, and those only PDF bytes name
+    /// (`crate::pdfprim::REL`, counted in no cell): what a number spent
+    /// in this run adds to the count before it
+    /// (`crate::pdfprim::rt_before`). Not carried by a continuation (its
+    /// node counts from its own start).
+    pub rt_made: i64,
+    pub rt_cells: i64,
+    pub rt_rels: i64,
     /// Whether this run continues a parked attempt ([`Run::from_parked`]).
     pub resumed: bool,
     /// Changes to the run's state a stopped command cannot undo (own
@@ -866,6 +875,9 @@ impl<'c, 'a> Run<'c, 'a> {
             radix: 0,
             cur_order: phitex_typeset::glue::Order::Normal,
             pdf_occ: 0,
+            rt_made: 0,
+            rt_cells: 0,
+            rt_rels: 0,
             resumed: false,
             muts: 0,
             interp: None,
@@ -4608,6 +4620,9 @@ pub(crate) struct Parked {
     radix: i32,
     cur_order: phitex_typeset::glue::Order,
     pdf_occ: usize,
+    rt_made: i64,
+    rt_cells: i64,
+    rt_rels: i64,
     muts: u64,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
@@ -4754,6 +4769,9 @@ impl Run<'_, '_> {
             radix: self.radix,
             cur_order: self.cur_order,
             pdf_occ: self.pdf_occ,
+            rt_made: self.rt_made,
+            rt_cells: self.rt_cells,
+            rt_rels: self.rt_rels,
             muts: self.muts,
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
@@ -4859,6 +4877,9 @@ impl<'c, 'a> Run<'c, 'a> {
         r.radix = p.radix;
         r.cur_order = p.cur_order;
         r.pdf_occ = p.pdf_occ;
+        r.rt_made = p.rt_made;
+        r.rt_cells = p.rt_cells;
+        r.rt_rels = p.rt_rels;
         r.muts = p.muts;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;

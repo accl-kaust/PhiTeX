@@ -2859,13 +2859,16 @@ impl Graph {
                 let rounds: Vec<String> = r
                     .round_times
                     .iter()
-                    .map(|t| format!("{}/{}", t.runs, t.memo_hits))
+                    .map(|t| {
+                        let ms = std::time::Duration::from_nanos(t.wall_ns).as_secs_f64() * 1e3;
+                        format!("{}/{}/{ms:.1}ms", t.runs, t.memo_hits)
+                    })
                     .collect();
                 let mut ops: Vec<(&str, u64)> =
                     r.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
                 ops.sort_unstable();
                 eprintln!(
-                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits by round [{}], memo {} bytes, {} runs, {} nodes run, runs by op {ops:?}",
+                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits/wall by round [{}], memo {} bytes, {} runs, {} nodes run, runs by op {ops:?}",
                     t0.elapsed().as_secs_f64() * 1e3,
                     r.rounds,
                     rounds.join(" "),
@@ -6318,6 +6321,8 @@ fn declare_fields(eng: &mut Engine) {
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
+    let rels = eng.values().field(crate::pdfprim::RT_RELS);
+    eng.declare_accumulator(rels, Arc::new(SeqMonoid));
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));

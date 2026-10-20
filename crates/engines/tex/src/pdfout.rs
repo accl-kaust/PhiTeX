@@ -1909,11 +1909,12 @@ pub(crate) fn page_allocs(
         0
     };
     // (the read-time objects made before the page: its own object's
-    // number, after its resources', counts them; read here only where
-    // this run read the count before the shipout, else by the reader
-    // that needs it, before this node)
-    let read_time = if r.st.is_loaded(crate::fields::cell::PDF_OBJNUM) {
-        r.cint(crate::fields::cell::PDF_OBJNUM)?
+    // number, after its resources', counts them; counted here only
+    // where this run made or read one before the shipout, else by the
+    // reader that needs it, before this node)
+    let read_time = if r.rt_made > 0 || r.st.is_loaded(crate::fields::cell::PDF_OBJNUM) {
+        let me = r.cx.node().raw();
+        crate::pdfprim::rt_before(r, me)? + r.rt_made
     } else {
         -1
     };
@@ -2144,10 +2145,20 @@ pub(crate) fn os_write(r: &mut Run<'_, '_>) -> R<()> {
     let pages = fold_allocs(v, range).os_written;
     let rt = r.get(RT_OS)?.and_then(|x| v.as_int(x)).unwrap_or(0);
     if (pages + rt) % 100 == 0 {
-        let k = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
-        r.set_cell(crate::fields::cell::PDF_OBJNUM, v.int(k), true);
+        bump_cell(r)?;
     }
     r.set(RT_OS, v.int(rt + 1), true);
+    Ok(())
+}
+
+/// A read-time object counted in the `pdf:objnum` cell, made by this
+/// run ([`crate::pdfprim::rt_before`]).
+pub(crate) fn bump_cell(r: &mut Run<'_, '_>) -> R<()> {
+    let k = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
+    let x = r.v.int(k);
+    r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
+    r.rt_cells += 1;
+    r.rt_made += 1;
     Ok(())
 }
 
@@ -2174,12 +2185,7 @@ pub(crate) fn shipped_page_obj(r: &mut Run<'_, '_>, n: i32) -> R<Option<i64>> {
     if rt >= 0 {
         return Ok(Some(rt + after));
     }
-    let field = r.loc_field(crate::fields::cell::PDF_OBJNUM);
-    let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(node.to_ne_bytes()));
-    let rt = match r.cx.use_field_before(field, at)? {
-        phitex_defuse::FieldAt::Def(x, _) => v.as_int(x).unwrap_or(0),
-        _ => 0,
-    };
+    let rt = crate::pdfprim::rt_before(r, u64::from_ne_bytes(node.to_ne_bytes()))?;
     Ok(Some(rt + after))
 }
 
@@ -2541,6 +2547,8 @@ pub(crate) fn form_whatsit_nums(
             Some("pdf:annot") => 6,
             _ => continue,
         };
+        // (its count in its node follows the node)
+        let k = xs.get(at + 1).map_or(0, |&x| int_of(v, x));
         let t = xs.get(1).map_or(0, |&x| int_of(v, x));
         if t & crate::pdfprim::REL == 0 {
             continue;
@@ -2548,7 +2556,7 @@ pub(crate) fn form_whatsit_nums(
         let node = xs
             .get(at)
             .map_or(0, |&x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()));
-        let n = (t & !crate::pdfprim::REL) + page_offset_at(r, node)?;
+        let n = crate::pdfprim::rel_number(r, node, k)?;
         if let (Ok(t), Ok(n)) = (usize::try_from(t), usize::try_from(n)) {
             map.insert(t, n);
         }
