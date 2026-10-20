@@ -65,6 +65,42 @@ fn check(name: &str) {
     }
 }
 
+/// `NAME.tex` built: its `.aux` equals pdflatex's (`NAME.aux`, to its
+/// fixpoint) and the build gives no error.
+fn check_aux(name: &str) {
+    let (_, term) = build(name);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("corpus-repros")
+        .join(name);
+    let got = std::fs::read(dir.join(format!("{name}.aux"))).unwrap_or_default();
+    let want = std::fs::read(fixtures().join(format!("{name}.aux"))).expect("the oracle");
+    let errors: Vec<&str> = term
+        .lines()
+        .filter(|l| l.starts_with("error"))
+        .take(5)
+        .collect();
+    assert_eq!(
+        String::from_utf8_lossy(&got),
+        String::from_utf8_lossy(&want),
+        "{name}: the .aux differs from pdflatex's; errors: {errors:?}"
+    );
+    assert!(errors.is_empty(), "{name}: {errors:?}");
+}
+
+/// A package the document writes where it is missing (LaTeX's
+/// file-writing environment) and then loads: from the second round the
+/// file exists, the environment lets `\write` gobble its arguments in
+/// its group, and the `\immediate\write` of `\relax` that
+/// `\begin{document}` makes after opening the `.aux` must still reach
+/// it. (The round core filed the environment's local definition, new in
+/// the second round in a node whose scope was the same, at the node's
+/// own level: every `\write` after the environment was gobbled, and the
+/// `.aux` lost its `\relax`.)
+#[test]
+fn written_text_lost_write() {
+    check_aux("written_text_lost_write");
+}
+
 macro_rules! repro {
     ($name:ident, $why:literal) => {
         #[doc = $why]
