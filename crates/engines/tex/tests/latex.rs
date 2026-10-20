@@ -1073,6 +1073,9 @@ latexmk_tests! {
     // register it allocates unless defined there, declared after it)
     latexmk_total_counter_j1: "total-counter", 1;
     latexmk_total_counter_j8: "total-counter", 8;
+    // (a stream closed and opened again on another file in one run)
+    latexmk_reopen_stream_j1: "reopen-stream", 1;
+    latexmk_reopen_stream_j8: "reopen-stream", 8;
     // (the first object, an open action, fixes the PDF version there)
     latexmk_catalog_openaction_j1: "catalog-openaction", 1;
     latexmk_catalog_openaction_j8: "catalog-openaction", 8;
