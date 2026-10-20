@@ -4402,7 +4402,12 @@ impl Build {
             opts.finisher_predictions,
             std::sync::atomic::Ordering::Relaxed,
         );
-        g.eng.set_max_rounds(opts.max_rounds);
+        // (observe: `PHITEX_MAX_ROUNDS`, a lower cap, so the warning names
+        // the fields still moving after that round)
+        let cap = crate::exec::obs_str!("PHITEX_MAX_ROUNDS")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(opts.max_rounds);
+        g.eng.set_max_rounds(cap);
         // (latexmk's `max_repeat`: the document finished on its last
         // round's values, the fields still moving a warning)
         g.eng

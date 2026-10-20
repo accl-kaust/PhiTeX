@@ -15,7 +15,7 @@ for t in ${DOCS:-bench/r4/docs/*.tex}; do
   for side in tl ph; do
     D=$w/c/$d-$side; rm -rf $D; mkdir -p $D; cp $t $D/
     if [ $side = tl ]; then (cd $D && timeout 600 pdflatex -interaction=batchmode $d.tex > term.txt 2>&1)
-    else (cd $D && PHITEX_CACHE_DIR=$w/ccache NO_COLOR=1 ${PHITEX_ENV:-} timeout 600 $P --compat=pdflatex -interaction=batchmode $d.tex > term.txt 2>&1); fi
+    else (cd $D && PHITEX_CACHE_DIR=$w/ccache NO_COLOR=1 env ${PHITEX_ENV:-} timeout 600 $P --compat=pdflatex -interaction=batchmode $d.tex > term.txt 2>&1); fi
     mkdir -p $r/$d; cp $D/$d.log $r/$d/$side.log; cp $D/term.txt $r/$d/$side-term.txt; norm $D/$d.log > $r/$d/$side.norm
   done
   diff $r/$d/tl.norm $r/$d/ph.norm > $r/$d/diff.txt
