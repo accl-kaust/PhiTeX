@@ -1167,10 +1167,53 @@ impl<'a> Builder<'a> {
 
     /// Files (`on`) or unfiles node `id`'s reads in the reader indexes.
     fn index_reads(&mut self, id: Id, n: &Node, reads: &[Read], on: bool) {
+        let (keys, agg) = self.read_keys(id, n, reads);
+        for k in keys {
+            self.index_key(id, k, on);
+        }
+        self.index_agg(id, n, agg, on);
+    }
+
+    /// Moves node `id`'s reader entries from read log `old` to `new`:
+    /// only the entries that differ are unfiled and filed (a run that
+    /// reads what it read before touches no index).
+    fn reindex_reads(&mut self, id: Id, n: &Node, old: &[Read], new: &[Read]) {
+        let (ko, ao) = self.read_keys(id, n, old);
+        let (kn, an) = self.read_keys(id, n, new);
+        let ko: FxHashSet<ReadKey> = ko.into_iter().collect();
+        let kn: FxHashSet<ReadKey> = kn.into_iter().collect();
+        for &k in ko.difference(&kn) {
+            self.index_key(id, k, false);
+        }
+        // (An entry in both is filed if it is not there: one filed at a
+        // position that moved since, as dropping and filing it again
+        // would.)
+        for &k in &kn {
+            if !ko.contains(&k) || !self.has_key(id, k) {
+                self.index_key(id, k, true);
+            }
+        }
+        // (Windows hang on subtree extents that move: filed again.)
+        self.index_agg(id, n, ao, false);
+        self.index_agg(id, n, an, true);
+    }
+
+    /// Whether node `id`'s reader entry `k` is filed (deferred writes
+    /// aside: a node's own are its commit's).
+    fn has_key(&self, id: Id, k: ReadKey) -> bool {
+        match k {
+            ReadKey::Field(u, f, pos) => self.w.readers.get(&(u, f)).is_some_and(|m| m.contains_key(&(pos, id))),
+            ReadKey::Out(x) => self.w.out_readers.get(&x).is_some_and(|m| m.contains_key(&id)),
+            ReadKey::Range(ru, f, lo, hi) => self.w.range_readers.get(&(ru, f)).and_then(|m| m.get(&(hi, id))) == Some(&lo),
+        }
+    }
+
+    /// The index entries of read log `reads` of node `id`, and its scope
+    /// and sibling windows.
+    fn read_keys(&self, id: Id, n: &Node, reads: &[Read]) -> (Vec<ReadKey>, ReadAgg) {
         let u = n.unit;
-        let mut fwd: Option<Pos> = None;
-        let mut back: Option<Pos> = None;
-        let mut kind = false;
+        let mut keys = Vec::with_capacity(reads.len());
+        let mut agg = ReadAgg::default();
         // Just past node `x`'s subtree (a change there is in the window).
         let past = |w: &World, x: Id| -> Pos {
             let e = w.subtree_end(x);
@@ -1179,87 +1222,93 @@ impl<'a> Builder<'a> {
         for r in reads {
             match r {
                 Read::Use { f, at, after, .. } => {
-                    let pos = self.read_pos(*at, *after, n);
-                    self.reader(u, *f, pos, id, on);
+                    keys.push(ReadKey::Field(u, *f, self.read_pos(*at, *after, n)));
                     // (Its answer follows the frame chain it reads through.)
-                    kind = true;
+                    agg.kind = true;
                 }
-                Read::Out { node, .. } | Read::At { node, .. } => {
-                    if on {
-                        self.w.add_out_reader(*node, id);
-                    } else {
-                        self.w.drop_out_reader(*node, id);
-                    }
-                }
-                Read::Kind { .. } => kind = true,
+                Read::Out { node, .. } | Read::At { node, .. } => keys.push(ReadKey::Out(*node)),
+                Read::Kind { .. } => agg.kind = true,
                 Read::Range { f, from, to, .. } => {
                     if let Some((ru, lo, hi)) = self.w.window(id, *from, *to) {
-                        if let Some(d) = &mut self.defer {
-                            d.push(ru, *f, super::batch::FieldOp::RangeReader { lo, hi, id, on });
-                        } else if on {
-                            self.w.add_range_reader(ru, *f, lo, hi, id);
-                        } else {
-                            self.w.drop_range_reader(ru, *f, hi, id);
-                        }
+                        keys.push(ReadKey::Range(ru, *f, lo, hi));
                     }
                     // (Its anchors going moves its window.)
                     for x in [*from, *to] {
                         if x != NONE {
-                            if on {
-                                self.w.add_out_reader(x, id);
-                            } else {
-                                self.w.drop_out_reader(x, id);
-                            }
+                            keys.push(ReadKey::Out(x));
                         }
                     }
                 }
                 Read::Seq { f, .. } => {
-                    self.reader(u, *f, n.pos, id, on);
-                    kind = true;
+                    keys.push(ReadKey::Field(u, *f, n.pos));
+                    agg.kind = true;
                 }
                 Read::Sib { ans, .. } => {
                     let r = ans.map_or(Pos::MAX, |(x, _)| past(&self.w, x));
-                    fwd = Some(fwd.map_or(r, |f| f.max(r)));
+                    agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
                 }
                 Read::Claimed { list } => {
                     let r = list.last().map_or(Pos::MAX, |&(x, _)| past(&self.w, x));
-                    fwd = Some(fwd.map_or(r, |f| f.max(r)));
+                    agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
                 }
                 Read::Prev { ans, .. } => {
                     let l = ans.and_then(|x| self.w.node(x)).map_or(0, |x| x.pos);
-                    back = Some(back.map_or(l, |b| b.min(l)));
+                    agg.back = Some(agg.back.map_or(l, |b| b.min(l)));
                 }
                 Read::Stream { outs, end, fields } => {
                     let r = end.map_or(Pos::MAX, |e| past(&self.w, e));
-                    fwd = Some(fwd.map_or(r, |f| f.max(r)));
-                    for &(x, _) in outs {
-                        if on {
-                            self.w.add_out_reader(x, id);
-                        } else {
-                            self.w.drop_out_reader(x, id);
-                        }
-                    }
+                    agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
+                    keys.extend(outs.iter().map(|&(x, _)| ReadKey::Out(x)));
                     for &(f, x) in fields {
                         if let Some(xn) = self.w.node(x) {
-                            let (xu, p) = (xn.unit, xn.pos);
-                            self.reader(xu, f, p, id, on);
+                            keys.push(ReadKey::Field(xn.unit, f, xn.pos));
                         }
                     }
                 }
                 Read::Loop { .. } | Read::Env { .. } | Read::IsLoop { .. } => {}
             }
         }
-        if kind {
+        (keys, agg)
+    }
+
+    /// Files (`on`) or unfiles one reader entry of node `id`.
+    fn index_key(&mut self, id: Id, k: ReadKey, on: bool) {
+        match k {
+            ReadKey::Field(u, f, pos) => self.reader(u, f, pos, id, on),
+            ReadKey::Out(x) => {
+                if on {
+                    self.w.add_out_reader(x, id);
+                } else {
+                    self.w.drop_out_reader(x, id);
+                }
+            }
+            ReadKey::Range(ru, f, lo, hi) => {
+                if let Some(d) = &mut self.defer {
+                    d.push(ru, f, super::batch::FieldOp::RangeReader { lo, hi, id, on });
+                } else if on {
+                    self.w.add_range_reader(ru, f, lo, hi, id);
+                } else {
+                    self.w.drop_range_reader(ru, f, hi, id);
+                }
+            }
+        }
+    }
+
+    /// Files (`on`) or unfiles node `id`'s scope reader entry and sibling
+    /// windows.
+    fn index_agg(&mut self, id: Id, n: &Node, agg: ReadAgg, on: bool) {
+        let u = n.unit;
+        if agg.kind {
             if on {
                 self.w.add_kind_reader(u, n.pos, id);
             } else {
                 self.w.drop_kind_reader(u, n.pos, id);
             }
         }
-        if let Some(r) = fwd {
+        if let Some(r) = agg.fwd {
             self.w.set_window(false, u, n.pos, id, on.then_some(r));
         }
-        if let Some(l) = back {
+        if let Some(l) = agg.back {
             self.w.set_window(true, u, n.pos, id, on.then_some(l));
         }
     }
@@ -1284,11 +1333,9 @@ impl<'a> Builder<'a> {
         res.conts = c;
         let n = self.w.node(id).cloned().expect("live");
         // Reads: the index follows the new log.
-        super::core::prof::time(11, || {
-            if let Some(o) = &old {
-                self.drop_reads(id, &n, &o.reads);
-            }
-            self.add_reads(id, &n, &res.reads);
+        super::core::prof::time(11, || match &old {
+            Some(o) => self.reindex_reads(id, &n, &o.reads, &res.reads),
+            None => self.add_reads(id, &n, &res.reads),
         });
         let t_defs = super::core::prof::start();
         // Definitions: removed, added, changed.
@@ -1646,4 +1693,23 @@ fn read_on(r: &Read, fs: &[Field]) -> bool {
 fn scoped_check() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("CLEAN_SCOPED_CHECK").is_some())
+}
+
+/// One reader index entry a read files.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum ReadKey {
+    /// A reader of field `f` of a unit at a position.
+    Field(u32, Field, Pos),
+    /// A reader of a node's output (or of its being there).
+    Out(Id),
+    /// A range reader of an accumulator over a window.
+    Range(u32, Field, Pos, Pos),
+}
+
+/// A read log's scope reader entry and sibling windows.
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
+struct ReadAgg {
+    kind: bool,
+    fwd: Option<Pos>,
+    back: Option<Pos>,
 }

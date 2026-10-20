@@ -280,9 +280,8 @@ impl Engine {
                 // Loop-backs runs declared: taken in now, their readers run.
                 let later = std::mem::take(&mut *super::core::lock(&self.core.loops_later));
                 if !later.is_empty() {
-                    for (f, init) in later {
-                        self.declare_loopback(f, init);
-                    }
+                    // (All at once: one pass over the runs' reads.)
+                    self.declare_loopbacks(&later);
                     for id in std::mem::take(&mut self.pending) {
                         self.enqueue(&mut s, id);
                     }

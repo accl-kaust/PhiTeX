@@ -47,6 +47,9 @@ pub(crate) struct Core {
     pub loops_later: Mutex<Vec<(Field, ValueId)>>,
     pub env: RwLock<Env>,
     pub provider: Option<Box<crate::api::EnvProvider>>,
+    /// Held while the provider is asked (runs asking for the same field at
+    /// once ask it once).
+    pub asking: Mutex<()>,
     /// Texts analysed, by `(op, args)` hash.
     pub texts: Mutex<FxHashMap<u64, Vec<Arc<Text>>>>,
     /// Texts cached, and how many there were after the last pruning.
@@ -91,6 +94,7 @@ impl Core {
             app_units: Mutex::new(FxHashMap::default()),
             causes: Mutex::new(FxHashMap::default()),
             env_provided: std::sync::atomic::AtomicU64::new(0),
+            asking: Mutex::new(()),
         }
     }
 
@@ -275,6 +279,17 @@ impl Core {
             }
         }
         let p = self.provider.as_ref()?;
+        let _asking = lock(&self.asking);
+        {
+            // (Answered while waiting for the turn.)
+            let e = self.env.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(a) = e.get(f) {
+                return Some(a);
+            }
+            if e.unknown.contains(&f) {
+                return None;
+            }
+        }
         let Some(got) = p(&self.values, f) else {
             self.env
                 .write()
