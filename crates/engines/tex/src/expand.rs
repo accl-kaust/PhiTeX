@@ -916,6 +916,10 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
+        // (a file the job writes whose text the client gave, not read
+        // back yet: read back from that text here, its read-back point,
+        // `Run::seed_written`)
+        self.seed_written(&key)?;
         // (a document's `\input`: the file as units when it is cut,
         // `Run::read_units`; else its text)
         let x = if self.doc {

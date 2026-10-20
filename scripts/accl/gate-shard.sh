@@ -268,6 +268,12 @@ for l in open(sys.argv[1]):
     printf '%s\n' "$GATE_TIME_PY" > "$w/gate-time.py"
     fetched
     bin=$w/bin/cli/phitex
+    # (the format built into the cache first, by a one-line document: each
+    # -j build then counts only its document's rounds, not the format's
+    # evaluation as well)
+    mkdir -p "$w/warm" && printf '%s\n' '\documentclass{article}' '\begin{document}' 'x' '\end{document}' > "$w/warm/warm.tex"
+    (cd "$w/warm" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/acache \
+      timeout 900 "$bin" build warm.tex > "$r/ams-warm.log" 2>&1) || red "amsldoc: the format build (warm.tex) failed: $(tail -3 "$r/ams-warm.log" | tr '\n' ' ' | cut -c1-200)"
     for j in 1 8 16; do
       rm -rf "$w/ams" && cp -a bench/amsldoc "$w/ams"
       s0=$(date +%s.%N)

@@ -165,6 +165,8 @@ pub struct RunInfo {
     pub why: String,
     /// Nodes reduced (not kept from the last build).
     pub commands_run: u64,
+    /// The loop-back rounds (latexmk's runs of LaTeX).
+    pub rounds: u64,
     /// Nodes the build has after it (those not run were kept).
     pub live: usize,
     /// The engine's threads, and its work summed over them (none: no
@@ -385,9 +387,13 @@ pub struct Session {
     /// The hashes of the files the last write wrote (an unchanged file is
     /// not written again).
     written: Mutex<BTreeMap<PathBuf, u64>>,
-    /// The written keys and the package records last stored in the
-    /// cache ([`Session::store_wkeys`], [`Session::store_pkgrec`]).
-    stored: Mutex<(Option<Vec<u8>>, Option<Vec<u8>>)>,
+    /// The written keys, the package records and the written files'
+    /// names last stored in the cache ([`Session::store_wkeys`],
+    /// [`Session::store_pkgrec`], [`Session::store_wnames`]).
+    stored: Mutex<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)>,
+    /// What the written keys and names last stored were made from
+    /// ([`Build::wkeys_source`]): the same, nothing to make or store.
+    wkeys_from: Mutex<Option<u64>>,
     /// The main output last written, and where ([`Session::write_main`]).
     last_main: Mutex<Option<(PathBuf, Arc<Vec<u8>>)>>,
     /// What the session does now, for a spinner.
@@ -509,7 +515,8 @@ impl Session {
             builds: 0,
             written: Mutex::new(BTreeMap::new()),
             last_main: Mutex::new(None),
-            stored: Mutex::new((None, None)),
+            stored: Mutex::new((None, None, None)),
+            wkeys_from: Mutex::new(None),
             status,
             buffers: Arc::default(),
             changed: Vec::new(),
@@ -683,6 +690,7 @@ impl Session {
                         _ => Options::default().speculation,
                     },
                     wkeys: self.load_wkeys(),
+                    written_init: self.written_init(),
                     // (the package loads' records: machine-wide, beside the
                     // format, from every document built with it)
                     pkgrec: self
@@ -742,7 +750,22 @@ impl Session {
             tp = Instant::now();
         };
         if let Some(b) = &self.build {
-            self.store_wkeys(b);
+            // (both made from the written files' accumulator: the same
+            // as last stored, nothing to make or store)
+            let from = b.wkeys_source();
+            let same = {
+                let mut last = self
+                    .wkeys_from
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let same = from.is_some() && *last == from;
+                *last = from;
+                same
+            };
+            if !same {
+                self.store_wkeys(b);
+                self.store_wnames(b);
+            }
             lap(&mut phases, "written keys");
             // (no load ran: its records are as last stored)
             if b.pkgrec_changed() {
@@ -910,6 +933,7 @@ impl Session {
                     .max(usize::from(self.absorbed_at.is_some())),
                 why: why.to_owned(),
                 commands_run: s.nodes_run,
+                rounds: s.loop_rounds,
                 live: s.live,
                 threads: s.threads,
                 busy: s.busy,
@@ -1081,6 +1105,87 @@ impl Session {
             let _ = c.put(&p, out.as_bytes(), &[]);
         }
         last.0 = Some(out.into_bytes());
+    }
+
+    /// The cache's file of the names of the files the document's job
+    /// wrote in the last session ([`Build::files`]).
+    fn wnames_path(&self) -> Option<PathBuf> {
+        Some(self.cache.as_ref()?.doc_dir(&self.job.path).join("wnames"))
+    }
+
+    /// The files the job writes as an earlier run left them in the
+    /// output directory ([`Options::written_init`], a fixpoint's): those
+    /// the last session's job wrote, or the last run's log names, that
+    /// are there. Their bytes as TeX
+    /// reads them, one character each, as [`Session::write`] wrote them.
+    ///
+    /// latexmk's first run: the job's `.aux` file, written as latexmk
+    /// writes it where there is none ([`LATEXMK_AUX`]), else as it is.
+    fn written_init(&self) -> Vec<(String, String)> {
+        if !self.job.fixpoint {
+            return Vec::new();
+        }
+        let read = |n: &str| -> Option<String> {
+            let bytes = std::fs::read(self.job.out_dir.join(n)).ok()?;
+            Some(bytes.iter().map(|&c| char::from(c)).collect())
+        };
+        let mut out: Vec<(String, String)> = match (&self.cache, self.wnames_path()) {
+            (Some(c), Some(p)) => c
+                .get(&p)
+                .map(|b| {
+                    String::from_utf8_lossy(&b)
+                        .lines()
+                        .filter(|n| out_name_ok(n))
+                        .filter_map(|n| Some((n.to_owned(), read(n)?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        // (and those the last run's log says it opened for writing, §1374's
+        // `\openoutN = `name'.`: a run by another TeX, or by a session
+        // whose cache is gone)
+        let log = read(&format!("{}.log", self.job.jobname)).unwrap_or_default();
+        for l in log.lines() {
+            let Some(n) = l
+                .strip_prefix("\\openout")
+                .and_then(|r| r.split_once(" = `"))
+                .and_then(|(_, r)| r.strip_suffix("'."))
+            else {
+                continue;
+            };
+            if out_name_ok(n)
+                && !out.iter().any(|(m, _)| m == n)
+                && let Some(t) = read(n)
+            {
+                out.push((n.to_owned(), t));
+            }
+        }
+        let aux = format!("{}.aux", self.job.jobname);
+        if !out.iter().any(|(n, _)| *n == aux) {
+            let text = read(&aux).unwrap_or_else(|| LATEXMK_AUX.to_owned());
+            out.push((aux, text));
+        }
+        out
+    }
+
+    fn store_wnames(&self, b: &Build) {
+        let (Some(c), Some(p)) = (&self.cache, self.wnames_path()) else {
+            return;
+        };
+        let mut out = String::new();
+        for (n, _) in b.files() {
+            out.push_str(&n);
+            out.push('\n');
+        }
+        let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.2.as_deref() == Some(out.as_bytes()) {
+            return;
+        }
+        if c.get(&p).as_deref() != Some(out.as_bytes()) {
+            let _ = c.put(&p, out.as_bytes(), &[]);
+        }
+        last.2 = Some(out.into_bytes());
     }
 
     /// The cache's file of the package loads' records
@@ -1373,6 +1478,12 @@ pub fn waiting_notes(job: &Job) -> Vec<String> {
     }
     v
 }
+
+/// The `.aux` file latexmk writes before its first run where the job has
+/// none (latexmk.pl, `set_trivial_aux_fdb`): what LaTeX writes for a
+/// one-page document without cross-references, so that such a document
+/// needs one run, not two.
+const LATEXMK_AUX: &str = "\\relax \n\\gdef \\@abspage@last{1}\n";
 
 /// Whether a file the document writes may be written under `name`
 /// (kpathsea's `kpse_out_name_ok` in its paranoid mode, TeX Live's

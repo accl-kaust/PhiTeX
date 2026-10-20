@@ -663,6 +663,9 @@ pub(crate) struct Run<'c, 'a> {
     /// The files this run wrote a line of that does more than define:
     /// read back as text, their next lines not interpreted.
     pub text_written: Vec<String>,
+    /// The files the job writes whose round-one read-back this run made
+    /// from the text the client gave for them ([`Run::seed_written`]).
+    pub seeded: Vec<Seeded>,
     /// A read-back point not known to be one yet: the file this run
     /// looked for in vain from the macro running ([`Run::read_back_at`]).
     /// When the run opens that file for writing, the point was its
@@ -867,6 +870,7 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_errs: Vec::new(),
             interp_plain: false,
             text_written: Vec::new(),
+            seeded: Vec::new(),
             read_point_pending: None,
             pending_pre: Vec::new(),
             scanner: None,
@@ -1782,19 +1786,37 @@ impl<'c, 'a> Run<'c, 'a> {
     /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
     /// writes and reads back is a loop-back field: the previous round's.
     pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
+        // (a file the job writes, read whole, `\\openin`'s lines, a size:
+        // its text, `wtext:`, whatever its read-back is, per field or as
+        // its text, which only a read-back reads; absent, as a lookup in
+        // vain reads it, below)
+        let v = self.v;
+        let wt = crate::tools::text_field(v, key);
+        if self.cx.is_loopback(wt) {
+            let k = self.keyed(crate::fields::Fam::Wkeys, key);
+            let w = self.keyed(crate::fields::Fam::Wfile, key);
+            if (self.cx.is_loopback(k) || self.cx.is_loopback(w))
+                && !self.tool_makes(key)?
+                && let Some(t) = self.cx.use_field(wt)?.filter(|&t| t != ValueId::UNIT)
+            {
+                return Ok(Some(v.list(vec![v.str(&format!("./{key}")), t])));
+            }
+        }
         // (a file the job writes and reads back per field: its read-back
-        // reads no text, but a read of its bytes, `\\openin`'s lines, a
-        // size, reads them all, `wtext:`)
+        // reads no text, but a read of its bytes reads them all, `wtext:`)
+        let x = self.file_lazy(key)?;
         let whole = self.written_per_field(key)?;
-        let Some(x) = self.file_lazy(key)? else {
+        let Some(x) = x else {
             return Ok(None);
         };
-        let v = self.v;
         let xs = list_of(v, x);
         if whole && let [path, _] = xs[..] {
-            let t = self
-                .cx
-                .use_field(crate::tools::text_field(v, key))?
+            let seed = self.seeded(key).map(|sd| sd.text);
+            let t = match seed {
+                Some(t) if !self.cx.is_loopback(wt) => Some(t),
+                _ => self.cx.use_field(wt)?,
+            };
+            let t = t
                 .filter(|&t| t != ValueId::UNIT)
                 .unwrap_or_else(|| v.str(""));
             return Ok(Some(v.list(vec![path, t])));
@@ -1813,7 +1835,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// field (its text not read by the read-back) and no tool makes.
     pub(crate) fn written_per_field(&mut self, key: &str) -> R<bool> {
         let k = self.keyed(crate::fields::Fam::Wkeys, key);
-        Ok(self.cx.is_loopback(k) && self.per_field(k)?.is_some() && !self.tool_makes(key)?)
+        if !self.cx.is_loopback(k) {
+            let mark = crate::api::text_mark(self.v);
+            return Ok(self.seeded(key).is_some_and(|s| s.keys != mark) && !self.tool_makes(key)?);
+        }
+        Ok(self.per_field(k)?.is_some() && !self.tool_makes(key)?)
     }
 
     /// [`Run::file`], a file the job writes as `[path, UNIT, order]`
@@ -1845,6 +1871,11 @@ impl<'c, 'a> Run<'c, 'a> {
         // later declares its loop-back and this runs again)
         let _ = self.cx.use_field(k)?;
         let _ = self.cx.use_field(w)?;
+        // (a file the job writes whose text the client gave: read back,
+        // or read whole, not as a document's units, [`Run::seed_written`])
+        if self.seeded(key).is_some() || self.seed_text(key)?.is_some() {
+            return Ok(None);
+        }
         // (a tool's output is read whole, [`Run::file`])
         if self.tool_makes(key)? {
             return Ok(None);
@@ -1975,6 +2006,39 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// File `key`, one the job writes whose text the client gave, looked
+    /// up while its loop-backs are not declared ([`Run::file_inner`]):
+    /// `None` for another file.
+    #[allow(clippy::option_option)]
+    fn seeded_lookup(&mut self, key: &str) -> R<Option<Option<ValueId>>> {
+        let v = self.v;
+        if let Some(sd) = self.seeded(key) {
+            let path = v.str(&format!("./{key}"));
+            return Ok(Some(Some(if sd.keys == crate::api::text_mark(v) {
+                v.list(vec![path, sd.text])
+            } else {
+                v.list(vec![path, v.str("")])
+            })));
+        }
+        // (looked up where it is not read back, an `\\openin` say: its
+        // text, the client's, the round's whole text of the file,
+        // `wtext:`, once its file's node declares that)
+        let Some(t) = self.seed_text(key)? else {
+            return Ok(None);
+        };
+        let wt = crate::tools::text_field(v, key);
+        let loopback = self.cx.is_loopback(wt);
+        let x = self.cx.use_field(wt)?;
+        let t = if loopback {
+            x.unwrap_or(ValueId::UNIT)
+        } else {
+            t
+        };
+        Ok(Some(
+            (t != ValueId::UNIT).then(|| v.list(vec![v.str(&format!("./{key}")), t])),
+        ))
+    }
+
     fn file_inner(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
         // a file the job writes: its in-memory value (`wfile:<key>`, a
@@ -1988,6 +2052,12 @@ impl<'c, 'a> Run<'c, 'a> {
         if !self.cx.is_loopback(k) && !self.cx.is_loopback(w) {
             let _ = self.cx.use_field(k)?;
             let _ = self.cx.use_field(w)?;
+            // (a file the job writes whose text the client gave: read
+            // back from it here, as from its loop-backs once they are in
+            // effect, [`Run::seed_written`])
+            if let Some(x) = self.seeded_lookup(key)? {
+                return Ok(x);
+            }
         }
         // (a name the job writes that a tool also makes from a file the
         // job writes: the tool's output, as latexmk's tool run after the
@@ -2273,7 +2343,7 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn written_known(&mut self, name: &str) -> bool {
         let w = self.keyed(crate::fields::Fam::Wfile, name);
         let k = self.keyed(crate::fields::Fam::Wkeys, name);
-        self.cx.is_loopback(w) || self.cx.is_loopback(k)
+        self.cx.is_loopback(w) || self.cx.is_loopback(k) || self.seeded(name).is_some()
     }
 
     /// Whether the lines this run writes to `name` are interpreted as
@@ -2371,13 +2441,27 @@ impl<'c, 'a> Run<'c, 'a> {
     /// `wdef:<field>` the writer publishes for the fields listed in
     /// `wkeys:<key>`; nothing of the file's text is read. Whether `key`
     /// is such a file.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn read_back(&mut self, key: &str) -> R<bool> {
         let v = self.v;
         let wk = self.keyed(crate::fields::Fam::Wkeys, key);
-        let Some(keys) = self.per_field(wk)? else {
-            return Ok(false);
+        // (read back from the client's text in this run, its loop-backs
+        // not in effect yet: the values they are declared with)
+        let seed = if self.cx.is_loopback(wk) {
+            None
+        } else {
+            self.seeded(key).cloned()
         };
-        let keys = keys.map(|x| list_of(v, x)).unwrap_or_default();
+        let keys = match &seed {
+            Some(sd) if sd.keys == crate::api::text_mark(v) => return Ok(false),
+            Some(sd) => list_of(v, sd.keys),
+            None => {
+                let Some(keys) = self.per_field(wk)? else {
+                    return Ok(false);
+                };
+                keys.map(|x| list_of(v, x)).unwrap_or_default()
+            }
+        };
         for k in keys {
             let k = str_of(v, k);
             if k == crate::api::WRITTEN_KEY {
@@ -2385,15 +2469,23 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             let id = crate::api::wdef_id(key, &k);
             let name = crate::api::wdef_field(&id).to_owned();
-            let wd = self.keyed(crate::fields::Fam::Wdef, &id);
-            // (a key whose loop-back the files node has not declared
-            // yet: the field bound, so this runs again when it does)
-            if !self.cx.is_loopback(wd) {
-                let _ = self.cx.use_field(wd)?;
-                continue;
-            }
-            let Some(x) = self.cx.use_field(wd)? else {
-                continue;
+            let x = if let Some(sd) = &seed {
+                match sd.defs.iter().find(|(i, _)| *i == id) {
+                    Some(&(_, x)) if x != ValueId::UNIT => x,
+                    _ => continue,
+                }
+            } else {
+                let wd = self.keyed(crate::fields::Fam::Wdef, &id);
+                // (a key whose loop-back the files node has not declared
+                // yet: the field bound, so this runs again when it does)
+                if !self.cx.is_loopback(wd) {
+                    let _ = self.cx.use_field(wd)?;
+                    continue;
+                }
+                let Some(x) = self.cx.use_field(wd)? else {
+                    continue;
+                };
+                x
             };
             let xs = list_of(v, x);
             // (the errors the file's text gives as it ends inside a
@@ -2466,6 +2558,149 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         Ok(true)
+    }
+
+    /// File `key`, one the job writes and has not declared yet (round
+    /// one), read back from the text the client gave for it as the build
+    /// began (`wseeds`, [`crate::Options::written_init`]: the file an
+    /// earlier run left), as TeX's next run reads the file the run before
+    /// left: here, where it is read back, under the state here, its lines
+    /// interpreted as the lines the job writes are ([`Run::interpret_line`]):
+    /// per field while every line only defines, else as its text. Its
+    /// loop-backs are declared with those values as their round-one values
+    /// (in effect once the evaluation is quiet: this run, bound to them,
+    /// runs again on them and reads them back as it reads them here), so a
+    /// round that writes the file as it was read is the last. Whether
+    /// `key` is so read back in this run ([`Run::seeded`]).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn seed_written(&mut self, key: &str) -> R<bool> {
+        if self.seeded.iter().any(|s| s.name == key) {
+            return Ok(true);
+        }
+        let v = self.v;
+        let k = self.keyed(crate::fields::Fam::Wkeys, key);
+        let w = self.keyed(crate::fields::Fam::Wfile, key);
+        if self.cx.is_loopback(k) || self.cx.is_loopback(w) {
+            return Ok(false);
+        }
+        let Some(t) = self.seed_text(key)? else {
+            return Ok(false);
+        };
+        // (bound: this runs again once they are in effect)
+        let _ = self.cx.use_field(k)?;
+        let _ = self.cx.use_field(w)?;
+        let text = str_of(v, t);
+        // (each line as the stream's: a text an earlier line left open
+        // goes on with the next; the first line that does more than
+        // define makes the file one read back as its text)
+        let mut ds: Vec<(String, ValueId)> = Vec::new();
+        let mut as_text = false;
+        let mut open = String::new();
+        for line in text.split_inclusive('\n') {
+            open.push_str(line);
+            let made = self.interpret_line(&open)?;
+            match made {
+                None => {}
+                Some(m) if self.interp_plain => {
+                    crate::api::merge_defs(v, &mut ds, m);
+                    open.clear();
+                }
+                Some(_) => {
+                    as_text = true;
+                    break;
+                }
+            }
+        }
+        // (a text left open at the file's end: read to its end as the
+        // stream's close reads it, its errors given at each read-back)
+        if !as_text && !open.is_empty() {
+            self.interp_eof = true;
+            self.interp_errs.clear();
+            let made = self.interpret_line(&open);
+            self.interp_eof = false;
+            let errs = std::mem::take(&mut self.interp_errs);
+            match made? {
+                Some(m) => crate::api::merge_defs(v, &mut ds, m),
+                None => as_text = true,
+            }
+            if !errs.is_empty() {
+                let e = v.list(vec![
+                    v.str(&format!("rberr:{key}")),
+                    v.list(errs.iter().map(|e| v.str(e)).collect()),
+                    v.int(1),
+                ]);
+                crate::api::merge_defs(v, &mut ds, v.list(vec![e]));
+            }
+        }
+        // (what this read back: its file's node declares its loop-backs
+        // with it, `crate::ops::file_node`, from the runs that hold, a
+        // run refuted or run again leaving nothing of it)
+        let keys = if as_text {
+            ds.clear();
+            crate::api::text_mark(v)
+        } else {
+            crate::api::key_set(v, key, &ds)
+        };
+        let defs: Vec<ValueId> = ds
+            .iter()
+            .filter(|(_, x)| *x != ValueId::UNIT)
+            .map(|(f, x)| v.list(vec![v.str(&crate::api::wdef_id(key, f)), *x]))
+            .collect();
+        let e = v.list(vec![v.str(key), keys, v.list(defs)]);
+        self.contribute(SEEDED, v.seq_unit(e));
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: {key} read back from the client's text in node {}: {} bytes, {}",
+                self.cx.node().raw(),
+                text.len(),
+                if as_text {
+                    "as its text".to_owned()
+                } else {
+                    format!("{} definitions", ds.len())
+                }
+            );
+        }
+        self.muts += 1;
+        self.seeded.push(Seeded {
+            name: key.to_owned(),
+            keys,
+            defs: ds
+                .into_iter()
+                .map(|(f, x)| (crate::api::wdef_id(key, &f), x))
+                .collect(),
+            text: t,
+        });
+        Ok(true)
+    }
+
+    /// The read-back this run made of file `key` from the client's text
+    /// ([`Run::seed_written`]), while its loop-backs are not in effect.
+    fn seeded(&self, key: &str) -> Option<&Seeded> {
+        self.seeded.iter().find(|s| s.name == key)
+    }
+
+    /// The text the client gave for file `key`, one the job writes, as
+    /// the build began (`wseeds`): `None` for another file, or outside a
+    /// fixpoint, or while a written line is interpreted.
+    pub(crate) fn seed_text(&mut self, key: &str) -> R<Option<ValueId>> {
+        if self.interp.is_some() {
+            return Ok(None);
+        }
+        let v = self.v;
+        let Some(names) = self.cx.use_field(v.field(SEEDS))? else {
+            return Ok(None);
+        };
+        if !list_of(v, names).iter().any(|&n| str_of(v, n) == key) {
+            return Ok(None);
+        }
+        if self
+            .cx
+            .use_field(v.field("loopfiles"))?
+            .is_none_or(|x| x == ValueId::UNIT)
+        {
+            return Ok(None);
+        }
+        Ok(self.cx.use_field(v.field(&format!("{SEEDS}:{key}")))?)
     }
 
     /// The definitions an interpreted text made since stamp `base`,
@@ -4287,6 +4522,29 @@ struct PLevel {
     ag: Vec<Tok>,
 }
 
+/// The env field listing the files the job writes whose text the
+/// client gave as the build began ([`crate::Options::written_init`]);
+/// `wseeds:<name>` is each one's text.
+pub(crate) const SEEDS: &str = "wseeds";
+
+/// The accumulator of the read-backs runs made of those files
+/// ([`Run::seed_written`]): `[name, keys, [[wdef id, value], ...]]` each.
+pub(crate) const SEEDED: &str = "wseeded";
+
+/// A round-one read-back of a file the job writes, from the client's
+/// text ([`Run::seed_written`]).
+#[derive(Clone)]
+pub(crate) struct Seeded {
+    pub name: String,
+    /// Its `wkeys:` value: the key set, or the text mark.
+    pub keys: ValueId,
+    /// Its definitions by `wdef:` id (`[value, global]` each; `UNIT`
+    /// for a key another file publishes).
+    pub defs: Vec<(String, ValueId)>,
+    /// Its text.
+    pub text: ValueId,
+}
+
 /// A run stopped at a read, at the start of the command the read
 /// abandoned ([`Run::rewind`]): every owned field of [`Run`] but the
 /// caches, which the resumed run rebuilds ([`phitex_defuse::Ctx::park`]).
@@ -4349,6 +4607,7 @@ pub(crate) struct Parked {
     read_back_at: Option<crate::input::Level>,
     read_point_here: bool,
     text_written: Vec<String>,
+    seeded: Vec<Seeded>,
     read_point_pending: Option<String>,
     pending_pre: Vec<(Field, ValueId)>,
     cand: u32,
@@ -4493,6 +4752,7 @@ impl Run<'_, '_> {
             read_back_at: self.read_back_at,
             read_point_here: self.read_point_here,
             text_written: std::mem::take(&mut self.text_written),
+            seeded: std::mem::take(&mut self.seeded),
             read_point_pending: self.read_point_pending.take(),
             pending_pre: std::mem::take(&mut self.pending_pre)
                 .into_iter()
@@ -4596,6 +4856,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.read_back_at = p.read_back_at;
         r.read_point_here = p.read_point_here;
         r.text_written = p.text_written;
+        r.seeded = p.seeded;
         r.read_point_pending = p.read_point_pending;
         r.pending_pre = p
             .pending_pre

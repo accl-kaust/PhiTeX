@@ -41,6 +41,9 @@ enum Event {
     Clients(usize),
     /// File `0`'s buffer changed (applied already, while a build ran).
     Edited(String),
+    /// The build running on its own thread ended: the watch joins it at
+    /// once (no poll).
+    Built,
 }
 
 /// The extensions of the files a change of rebuilds.
@@ -552,6 +555,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             .spawn(move || read_keys(&tx, raw, &here))
             .expect("a thread");
     }
+    // (the build's thread's end, sent to the loop that waits on it)
+    let built = Mutex::new(tx.clone());
     drop(tx);
     if raw {
         ui.keys(keys::BAR);
@@ -596,11 +601,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let mut started = false;
     // (`since`: when the change came; none for the cold build)
     // (`meanwhile`: called again and again while the build runs, on this
-    // thread: the build runs on one of its own)
+    // thread: the build runs on one of its own and sends `Event::Built`
+    // as it ends, which `meanwhile` answers with true)
     let mut rebuild = |s: &mut Session,
                        why: &str,
                        since: Option<Instant>,
-                       meanwhile: &mut dyn FnMut()| {
+                       meanwhile: &mut dyn FnMut() -> bool| {
         builds += 1;
         if let Some(t) = since
             && !phitex_tex::timeline::active()
@@ -625,10 +631,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         // (a build that fails inside the engine — a panic: the pieces did
         // not settle — is reported, and the watch goes on waiting)
         let ran = std::thread::scope(|sc| {
-            let h = sc.spawn(|| crate::ui::catch(|| s.build()));
-            while !h.is_finished() {
-                meanwhile();
-            }
+            let h = sc.spawn(|| {
+                let r = crate::ui::catch(|| s.build());
+                let _ = built
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .send((Instant::now(), Event::Built));
+                r
+            });
+            while !meanwhile() {}
             h.join()
                 .unwrap_or_else(|_| Err("the build's thread panicked".to_owned()))
         });
@@ -1078,9 +1089,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // to it, everything held for after it)
     let cold_absorb = s.absorb();
     let mut cold_meanwhile = || {
-        let Ok((at, e)) = rx.recv_timeout(Duration::from_millis(5)) else {
-            return;
+        let Ok((at, e)) = rx.recv() else {
+            return true;
         };
+        if let Event::Built = e {
+            return true;
+        }
         if let Event::Files(ps) = &e
             && ps
                 .iter()
@@ -1090,6 +1104,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             cold_absorb.send(&tex::chars(&b), at);
         }
         held.push_back((at, e));
+        false
     };
     rebuild(&mut s, "cold", None, &mut cold_meanwhile);
     let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {
@@ -1277,6 +1292,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         again = true;
                     }
                 }
+                // (a build's end is taken by the loop that waits on it)
+                Event::Built => {}
                 Event::Edited(file) => {
                     set(&mut s, &buffers, &file);
                     why.push(format!("{file} (editor)"));
@@ -1360,8 +1377,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             // (while the build runs: the main file's edits sent to it, the
             // rest held for after it)
             let mut meanwhile = || {
-                let Ok((at, e)) = rx.recv_timeout(Duration::from_millis(1)) else {
-                    return;
+                let Ok((at, e)) = rx.recv() else {
+                    return true;
                 };
                 let send_main = |buffers: &HashMap<String, String>, file: &str| -> bool {
                     if file != main_rel {
@@ -1379,6 +1396,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     true
                 };
                 match e {
+                    Event::Built => return true,
                     Event::Asked => {
                         for a in view.as_ref().map(View::take_asks).unwrap_or_default() {
                             match a {
@@ -1422,6 +1440,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     }
                     e => held.push_back((at, e)),
                 }
+                false
             };
             rebuild(&mut s, &why.join(", "), Some(came), &mut meanwhile);
         }
