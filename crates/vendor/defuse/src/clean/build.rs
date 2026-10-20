@@ -63,8 +63,10 @@ pub(crate) struct Builder<'a> {
     pub freed: Vec<Id>,
     /// Nodes whose runs it should wake (their subject committed or went).
     pub woken: Vec<Id>,
-    /// Readers to re-ask once the change is complete.
-    recheck: FxHashSet<Id>,
+    /// Readers to re-ask once the change is complete: all their reads
+    /// (`None`), or only those of the fields whose definitions or
+    /// contributions changed.
+    recheck: FxHashMap<Id, Option<Vec<Field>>>,
     /// Readers made dirty because a use now reaches another site.
     pub rebinds: u64,
     /// Claims wait for the evaluation (a client's edits).
@@ -90,7 +92,7 @@ impl<'a> Builder<'a> {
             created: 0,
             freed: Vec::new(),
             woken: Vec::new(),
-            recheck: FxHashSet::default(),
+            recheck: FxHashMap::default(),
             rebinds: 0,
             defer_claims: false,
             defer: None,
@@ -99,9 +101,33 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Readers to re-ask (a flush's).
-    pub(crate) fn recheck_all(&mut self, ids: impl IntoIterator<Item = Id>) {
-        self.recheck.extend(ids);
+    /// Readers to re-ask (a flush's), each on a field.
+    pub(crate) fn recheck_all(&mut self, ids: impl IntoIterator<Item = (Id, Field)>) {
+        for (r, f) in ids {
+            self.recheck_on(r, f);
+        }
+    }
+
+    /// Reader `r` re-asked on all its reads.
+    fn recheck(&mut self, r: Id) {
+        self.recheck.insert(r, None);
+    }
+
+    /// Reader `r` re-asked on its reads of `f` (a definition or a
+    /// contribution of `f` changed: no other read can break).
+    fn recheck_on(&mut self, r: Id, f: Field) {
+        match self.recheck.entry(r) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                if let Some(fs) = e.get_mut()
+                    && !fs.contains(&f)
+                {
+                    fs.push(f);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(Some(vec![f]));
+            }
+        }
     }
 
     /// A field reader filed (`on`) or not.
@@ -136,14 +162,15 @@ impl<'a> Builder<'a> {
     /// Re-asks the reads of the readers queued for it; a broken one makes
     /// its reader dirty.
     fn settle(&mut self) {
-        let ids: Vec<Id> = std::mem::take(&mut self.recheck).into_iter().collect();
-        for id in ids {
+        let ids: Vec<(Id, Option<Vec<Field>>)> = std::mem::take(&mut self.recheck).into_iter().collect();
+        for (id, on) in ids {
             let Some(n) = self.w.node(id) else { continue };
             if n.st != St::Done {
                 continue;
             }
             let Some(res) = n.res.clone() else { continue };
-            if let Some(r) = res.reads.iter().find(|r| !holds(self.core, &self.w, id, r)) {
+            let asked = |r: &Read| on.as_ref().is_none_or(|fs| read_on(r, fs));
+            if let Some(r) = res.reads.iter().find(|r| asked(r) && !holds(self.core, &self.w, id, r)) {
                 let why = if rebound(self.core, &self.w, r) {
                     self.rebinds += 1;
                     match r {
@@ -517,7 +544,7 @@ impl<'a> Builder<'a> {
     fn def_changed(&mut self, u: u32, f: Field, at: Pos) {
         self.w.touch_key(Key::Defs(u, f));
         for r in self.w.readers_between(u, f, at.saturating_sub(1), Pos::MAX) {
-            self.recheck.insert(r);
+            self.recheck_on(r, f);
         }
     }
 
@@ -539,7 +566,7 @@ impl<'a> Builder<'a> {
         // Its readers and those of its position.
         if let Some(m) = self.w.out_readers.get(&id).cloned() {
             for (&r, ()) in m.iter() {
-                self.recheck.insert(r);
+                self.recheck(r);
             }
         }
         self.w.out_readers.remove(&id, &NoMeasure);
@@ -570,7 +597,7 @@ impl<'a> Builder<'a> {
         super::core::prof::time(16, || self.w.set_contrib(&m, u, f, pos, x));
         self.w.touch_key(Key::Acc(u, f));
         for r in super::core::prof::time(17, || self.w.range_readers_over(u, f, pos)) {
-            self.recheck.insert(r);
+            self.recheck_on(r, f);
         }
     }
 
@@ -592,7 +619,7 @@ impl<'a> Builder<'a> {
             hit.extend(super::claims::stab_backward(m, p).into_iter().map(|e| e.1));
         }
         for r in hit {
-            self.recheck.insert(r);
+            self.recheck(r);
         }
         self.claim_point(u, p);
     }
@@ -699,7 +726,7 @@ impl<'a> Builder<'a> {
         self.w.touch_key(Key::Out(x));
         if let Some(m) = self.w.out_readers.get(&x).cloned() {
             for (&r, ()) in m.iter() {
-                self.recheck.insert(r);
+                self.recheck(r);
             }
         }
     }
@@ -894,7 +921,7 @@ impl<'a> Builder<'a> {
                 .map(|(&(_, r), ())| r)
                 .collect();
             for r in hit {
-                self.recheck.insert(r);
+                self.recheck(r);
             }
         }
         for (id, old, fr) in moved {
@@ -911,7 +938,7 @@ impl<'a> Builder<'a> {
                 self.file(id, &n, f, loc, val);
             }
             // Its own reads ask from another frame now.
-            self.recheck.insert(id);
+            self.recheck(id);
         }
     }
 
@@ -1369,7 +1396,7 @@ impl<'a> Builder<'a> {
                 self.w.touch_key(Key::Out(id));
                 if let Some(m) = self.w.out_readers.get(&id).cloned() {
                     for (&r, ()) in m.iter() {
-                        self.recheck.insert(r);
+                        self.recheck(r);
                     }
                 }
             }
@@ -1588,4 +1615,19 @@ pub(crate) fn new_unit(w: &mut World, u: u32, app: Id) {
         &NoMeasure,
     );
     w.units.insert(u, un, &NoMeasure);
+}
+
+/// Whether read `r` is one of fields `fs` (a change to their definitions
+/// or contributions can break no other read).
+fn read_on(r: &Read, fs: &[Field]) -> bool {
+    match r {
+        Read::Use { f, .. }
+        | Read::Loop { f, .. }
+        | Read::Env { f, .. }
+        | Read::IsLoop { f, .. }
+        | Read::Range { f, .. }
+        | Read::Seq { f, .. } => fs.contains(f),
+        Read::Stream { fields, .. } => fields.iter().any(|(f, _)| fs.contains(f)),
+        _ => false,
+    }
 }

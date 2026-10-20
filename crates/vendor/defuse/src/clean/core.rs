@@ -354,12 +354,14 @@ pub(crate) fn debug() -> bool {
 /// Phase timers (`CLEAN_PROF`): nanoseconds per phase, summed.
 pub(crate) mod prof {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    pub(crate) const NAMES: [&str; 22] = [
+    pub(crate) const NAMES: [&str; 25] = [
         "op", "apply", "settle_claims", "settle", "frames", "held_by", "prepare", "unguess", "absorb", "commit", "place", "reads", "defs", "contribs", "claimed", "outs",
         "set_contrib", "range_readers",
         "read_at", "pset_between", "flush", "reaching",
+        // (Steps: choosing batches, the executor's calls, all of it.)
+        "select", "execute", "steps",
     ];
-    pub(crate) static NS: [AtomicU64; 22] = [const { AtomicU64::new(0) }; 22];
+    pub(crate) static NS: [AtomicU64; 25] = [const { AtomicU64::new(0) }; 25];
     pub(crate) fn on() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *ON.get_or_init(|| std::env::var_os("CLEAN_PROF").is_some())
