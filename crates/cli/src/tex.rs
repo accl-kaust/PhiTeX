@@ -188,13 +188,26 @@ fn samples(len: usize) -> Vec<(usize, usize)> {
 /// that neither the write nor the check reads a large output whole.
 pub fn fingerprint(b: &[u8]) -> u64 {
     if b.len() <= 1 << 20 {
-        return Fnv::new().add(b).0;
+        return words_hash(b);
     }
     let mut h = Fnv::new().add(&(b.len() as u64).to_le_bytes());
     for (at, n) in samples(b.len()) {
         h = h.add(&b[at..at + n]);
     }
     h.0
+}
+
+/// A hash of `b` eight bytes a step (FNV's byte steps took a
+/// millisecond on an output of half a megabyte, every build): each word
+/// mixed in by a multiply and a rotate, the length and the tail last.
+fn words_hash(b: &[u8]) -> u64 {
+    const K: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut h = Fnv::new().0 ^ (b.len() as u64).wrapping_mul(K);
+    let (words, tail) = b.as_chunks::<8>();
+    for w in words {
+        h = (h ^ u64::from_le_bytes(*w)).wrapping_mul(K).rotate_left(29);
+    }
+    Fnv(h).add(tail).0
 }
 
 /// [`fingerprint`] of the file at `p`, reading only what it needs.

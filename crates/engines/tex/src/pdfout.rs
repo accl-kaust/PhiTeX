@@ -2804,11 +2804,13 @@ pub(crate) fn finish_exact(
     let hi = CMD_BORN.load(std::sync::atomic::Ordering::Relaxed);
     let serials: FxHashMap<u64, Arc<Cmd>> = {
         let mut m = cmds.lock().unwrap_or_else(PoisonError::into_inner);
+        // (the tag compared as a value: no string made per record)
+        let cmd_tag = v.str("cmd");
         let serials: FxHashMap<u64, Arc<Cmd>> = xpages
             .iter()
             .filter_map(|&x| {
                 let xs = list_of(v, x);
-                (xs.first().map(|&k| str_of(v, k)).as_deref() == Some("cmd"))
+                (xs.first() == Some(&cmd_tag))
                     .then(|| {
                         xs.get(2)
                             .map(|&s| u64::from_ne_bytes(int_of(v, s).to_ne_bytes()))
