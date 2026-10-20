@@ -227,6 +227,9 @@ impl Run<'_, '_> {
     #[inline]
     pub(crate) fn next_or_end(&mut self) {
         if self.get_next() || self.halt.is_some() {
+            if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
+                self.tok_trace("next");
+            }
             return;
         }
         self.at_end_of_input();
@@ -436,6 +439,40 @@ impl Run<'_, '_> {
                 return;
             }
         }
+    }
+
+    /// (observe) `PHITEX_TOK_TRACE=<a>[-<b>]`: in the node
+    /// `PHITEX_CMD_TRACE` names, each token its commands `a` to `b` get, with its meaning's
+    /// `cmd`/`chr` and the input levels.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn tok_trace(&self, at: &str) {
+        let Some((a, b)) = crate::exec::env_str!("PHITEX_TOK_TRACE").and_then(|x| {
+            let (a, b) = x.split_once('-').unwrap_or((x, x));
+            Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?))
+        }) else {
+            return;
+        };
+        if !(a..=b).contains(&self.cmds) || !self.cmd_traced() {
+            return;
+        }
+        let levels: Vec<(u8, u8, u32, u32)> = self
+            .input
+            .levels
+            .iter()
+            .map(|l| (l.kind, l.ty, l.c, l.b))
+            .collect();
+        let slot = crate::fields::mean_loc(self.cur.tok)
+            .and_then(|l| crate::runstate::Loc::try_from(l).ok())
+            .map(|l| format!("{} {}", self.st.debug_slot(l), self.st.debug_marks(l)))
+            .unwrap_or_default();
+        eprintln!(
+            "tok-trace {at}: {:?} cmd {} chr {} halt {} levels {levels:?} slot {slot}",
+            self.cur.tok,
+            self.cur.cmd,
+            self.cur.chr,
+            self.halt.is_some()
+        );
     }
 
     /// `x_token` (§381): a halt is raised, never returned.

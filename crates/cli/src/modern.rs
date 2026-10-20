@@ -546,6 +546,7 @@ pub fn report(
         "pages": r.pages(),
         "wall_ms": r.wall.as_secs_f64() * 1e3,
         "nodes_run": run.commands_run,
+        "rounds": run.rounds,
         "errors": r.out.errors,
         "warnings": warnings,
         "diagnostics": r.engine_diagnostics(),

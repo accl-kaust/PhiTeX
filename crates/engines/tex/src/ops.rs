@@ -710,7 +710,10 @@ impl Operation for Files {
         let mut out = vec![v.field("loopfiles")];
         match args.first() {
             None => out.push(v.field(crate::run::WNAMES)),
-            Some(&n) => out.push(crate::run::stream_bucket(v, &str_of(v, n))),
+            Some(&n) => {
+                out.push(crate::run::stream_bucket(v, &str_of(v, n)));
+                out.push(v.field(crate::run::SEEDED));
+            }
         }
         Some(out)
     }
@@ -738,7 +741,7 @@ impl Operation for Files {
 /// The files the job wrote in an earlier round of the build (a
 /// loop-back the files' root publishes): each keeps its node, and what
 /// it holds, in a round that does not write it ([`file_node`]).
-const WSEEN: &str = "wseen";
+pub(crate) const WSEEN: &str = "wseen";
 
 /// The root of the files' nodes: one child per file the job writes
 /// (the client's `loopfiles`, the files written in an earlier round,
@@ -822,6 +825,22 @@ fn file_node(
     defs_lock: &std::sync::Mutex<crate::hints::Defs>,
 ) -> Result<ValueId, Stop> {
     let v = cx.values();
+    // (a file whose text the client gave, its loop-backs not declared
+    // yet: declared here with what this round read of that text, the
+    // read-back the first run that read it back made of it,
+    // `Run::seed_written`, else the text alone; once they are in effect
+    // this runs again, bound to them, and publishes)
+    let k = v.field(&format!("wkeys:{name}"));
+    let wt = crate::tools::text_field(v, name);
+    if !cx.is_loopback(k)
+        && !cx.is_loopback(wt)
+        && let Some(seed) = seed_text(cx, name)?
+    {
+        seed_decls(cx, name, seed, defs_lock)?;
+        let _ = cx.use_field(k)?;
+        let _ = cx.use_field(wt)?;
+        return Ok(ValueId::UNIT);
+    }
     let (text, ds, as_text) = stream_of(cx, name)?;
     // (a file not opened for writing this round stays as the round
     // before left it: TeX's next run finds the file an earlier run
@@ -832,12 +851,10 @@ fn file_node(
     }
     // (the whole text, for the tools that read the file next round,
     // `crate::tools`: a loop-back nobody reads costs no round)
-    let wt = crate::tools::text_field(v, name);
     if !cx.is_loopback(wt) {
         cx.declare_loopback(wt, ValueId::UNIT);
     }
     publish_traced(cx, wt, text.as_deref().map_or(ValueId::UNIT, |t| v.str(t)));
-    let k = v.field(&format!("wkeys:{name}"));
     // (read back per field while every line written to it only defines;
     // as its text once one does more, `wkeys:` then marked so)
     let per_field = !as_text;
@@ -855,8 +872,9 @@ fn file_node(
     }
     if per_field {
         let ds = ds.as_deref().unwrap_or_default();
-        // (the file exists, whatever its lines define)
-        let mut keys = vec![v.str(crate::api::WRITTEN_KEY)];
+        // (the file exists, whatever its lines define; a nested file's
+        // key names that file)
+        let keys = crate::api::key_set(v, name, ds);
         let trace = crate::exec::obs_flag!("PHITEX_AUX_TRACE");
         for (f, val) in ds {
             let id = crate::api::wdef_id(name, f);
@@ -867,8 +885,6 @@ fn file_node(
             if !cx.is_loopback(w) {
                 cx.declare_loopback(w, v.list(Vec::new()));
             }
-            // (a nested file's key names that file)
-            keys.push(v.str(if *val == ValueId::UNIT { &id } else { f }));
             // (a key whose value another file's lines publish)
             if *val == ValueId::UNIT {
                 continue;
@@ -889,12 +905,12 @@ fn file_node(
         if trace {
             eprintln!(
                 "aux-trace: publish {name}: {} keys, text {} bytes:\n{}",
-                keys.len(),
+                list_of(v, keys).len(),
                 text.as_deref().map_or(0, str::len),
                 text.as_deref().unwrap_or("")
             );
         }
-        publish_traced(cx, k, v.list(keys));
+        publish_traced(cx, k, keys);
     }
     let f = v.field(&format!("wfile:{name}"));
     if per_field {
@@ -918,6 +934,78 @@ fn file_node(
     let order = written_units(cx, name, &t, &defs);
     publish_traced(cx, f, order);
     Ok(ValueId::UNIT)
+}
+
+/// The text the client gave for file `name`, one the job writes, as the
+/// build began (`crate::run::SEEDS`).
+fn seed_text(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
+    let v = cx.values();
+    let listed = cx
+        .use_field(v.field(crate::run::SEEDS))?
+        .is_some_and(|ns| list_of(v, ns).iter().any(|&n| str_of(v, n) == name));
+    if !listed {
+        return Ok(None);
+    }
+    cx.use_field(v.field(&format!("{}:{name}", crate::run::SEEDS)))
+}
+
+/// The round-one values of file `name`'s loop-backs from the client's
+/// text `seed` ([`file_node`]): its whole text; and where a run read it
+/// back (`crate::run::SEEDED`, the first such), its key set and its
+/// definitions, or as its text, its units and their order, as this node
+/// publishes them from what the job writes.
+fn seed_decls(
+    cx: &mut Ctx<'_>,
+    name: &str,
+    seed: ValueId,
+    defs_lock: &std::sync::Mutex<crate::hints::Defs>,
+) -> Result<(), Stop> {
+    let v = cx.values();
+    let reads = cx.acc_range(v.field(crate::run::SEEDED), None)?;
+    let read = v
+        .seq_to_vec(reads)
+        .into_iter()
+        .map(|e| list_of(v, e))
+        .find(|xs| xs.first().is_some_and(|&n| str_of(v, n) == name));
+    let mut decl = vec![(crate::tools::text_field(v, name), seed)];
+    if let Some(xs) = read
+        && let [_, keys, defs] = xs[..]
+    {
+        let wf = v.field(&format!("wfile:{name}"));
+        if keys == crate::api::text_mark(v) {
+            let hints = defs_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let text = str_of(v, seed);
+            let (order, units) = units_of(v, name, &text, &hints);
+            for (key, u) in units {
+                decl.push((v.field(&key), v.str(u)));
+            }
+            decl.push((wf, order));
+        } else {
+            decl.push((wf, v.list(Vec::new())));
+            for d in list_of(v, defs) {
+                if let [id, x] = list_of(v, d)[..] {
+                    decl.push((v.field(&format!("wdef:{}", str_of(v, id))), x));
+                }
+            }
+        }
+        decl.push((v.field(&format!("wkeys:{name}")), keys));
+    }
+    for (f, x) in decl {
+        if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
+            eprintln!(
+                "round-seed: {} {:016x} node {} (field id {})",
+                crate::val::field_name(v, f),
+                x.raw(),
+                cx.node().raw(),
+                f.0.raw()
+            );
+        }
+        cx.declare_loopback(f, x);
+    }
+    Ok(())
 }
 
 /// A written file not opened this round ([`file_node`]): its loop-backs
@@ -971,6 +1059,25 @@ fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
 /// the order value.
 fn written_units(cx: &mut Ctx<'_>, name: &str, text: &str, defs: &crate::hints::Defs) -> ValueId {
     let v = cx.values();
+    let (order, units) = units_of(v, name, text, defs);
+    for (key, u) in units {
+        let f = v.field(&key);
+        if !cx.is_loopback(f) {
+            cx.declare_loopback(f, v.str(""));
+        }
+        publish_traced(cx, f, v.str(u));
+    }
+    order
+}
+
+/// A written file's text as units: the order value (`wfile:<name>`) and
+/// each unit's field (`wunit:<name>:<hash>:<n>`) with its text.
+pub(crate) fn units_of<'t>(
+    v: &Values,
+    name: &str,
+    text: &'t str,
+    defs: &crate::hints::Defs,
+) -> (ValueId, Vec<(String, &'t str)>) {
     let t = crate::hints::text_hints(text, phitex_source::pass::FileKind::Document, defs);
     // (the units cover the text: each from the end of the one before to
     // its slice's end, the last to the text's end)
@@ -983,6 +1090,7 @@ fn written_units(cx: &mut Ctx<'_>, name: &str, text: &str, defs: &crate::hints::
     }
     let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
     let mut entries = Vec::with_capacity(ends.len());
+    let mut units = Vec::with_capacity(ends.len());
     let mut at = 0;
     for e in ends {
         let Some(u) = text.get(at..e) else { continue };
@@ -995,16 +1103,15 @@ fn written_units(cx: &mut Ctx<'_>, name: &str, text: &str, defs: &crate::hints::
         let n = seen.entry(h).or_insert(0);
         let key = format!("wunit:{name}:{h:016x}:{n}");
         *n += 1;
-        let f = v.field(&key);
-        if !cx.is_loopback(f) {
-            cx.declare_loopback(f, v.str(""));
-        }
-        publish_traced(cx, f, v.str(u));
         entries.push(v.list(vec![v.str(&key), v.int(i64::from(starts))]));
+        units.push((key, u));
     }
     // (the job's own text: what kind of file it is comes from its text)
     let sliceable = crate::inputs::document_text(text);
-    v.list(vec![v.int(i64::from(sliceable)), v.list(entries)])
+    (
+        v.list(vec![v.int(i64::from(sliceable)), v.list(entries)]),
+        units,
+    )
 }
 
 /// Publishes a loop-back's next round value; under `observe` with

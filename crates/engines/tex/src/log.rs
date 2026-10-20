@@ -143,6 +143,13 @@ impl Log {
                 self.print_plain(text);
             }
             "shipend" => self.raw(']'),
+            "openout" => {
+                // web2c's §1374: `print_nl`, the name, `print_nl("")`,
+                // `print_ln`
+                self.print_nl(text, nl);
+                self.print_nl("", nl);
+                self.print_ln();
+            }
             "println" => self.print_ln(),
             "fatal" => {}
             _ => self.print(text, nl),

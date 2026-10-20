@@ -1006,6 +1006,55 @@ fn build_json_events() {
     assert!(dir.join("story.dvi").is_file());
 }
 
+/// `phitex build` runs LaTeX as latexmk runs pdflatex: from nothing, a
+/// one-page document without cross-references in one round (the `.aux`
+/// latexmk writes before its first run, `set_trivial_aux_fdb`), one with
+/// a reference in two, as latexmk; rebuilt with the files the build left
+/// on disk, each in one round, as latexmk, with the same PDF.
+#[test]
+fn build_rounds_are_latexmks_runs() {
+    let _one = one();
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    for (name, src, cold_rounds) in [
+        (
+            "hello",
+            "\\documentclass{article}\n\\begin{document}\nHello, world.\n\\end{document}\n",
+            1,
+        ),
+        (
+            "label",
+            "\\documentclass{article}\n\\begin{document}\n\\section{One}\\label{one}See section~\\ref{one} on page~\\pageref{one}.\n\\end{document}\n",
+            2,
+        ),
+    ] {
+        let dir = scratch(&format!("latexmk-rounds-{name}"));
+        std::fs::write(dir.join(format!("{name}.tex")), src).expect("the document");
+        let build = || {
+            let out = command(bin, &dir)
+                .args(["build", "--json", &format!("{name}.tex")])
+                .output()
+                .expect("phitex runs");
+            assert!(
+                out.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let ev = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .find(|e| e["event"] == "build")
+                .expect("a build event");
+            let pdf = std::fs::read(dir.join(format!("{name}.pdf"))).expect("the PDF");
+            (ev["rounds"].as_u64().expect("its rounds"), pdf)
+        };
+        let (cold, pdf) = build();
+        assert_eq!(cold, cold_rounds, "{name}: the rounds from nothing");
+        let (again, pdf2) = build();
+        assert_eq!(again, 1, "{name}: the rounds rebuilt with its files");
+        assert!(pdf == pdf2, "{name}: the rebuild's PDF is not the first build's");
+    }
+}
+
 /// The exit statuses, as pdflatex's: 1 for a file that is not there, an
 /// unknown command or a document with errors, 0 for `--help`.
 #[test]

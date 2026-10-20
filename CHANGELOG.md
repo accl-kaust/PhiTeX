@@ -91,6 +91,11 @@ lists what has to be green before it reaches `main`.
   document is not yet faster than pdflatex, and an edit of one does not
   yet take milliseconds. The release gate's numbers are recorded in
   `docs/alpha-checklist.md`.
+- **Scaling:** a LaTeX document's nodes still form long chains. The
+  census bar (a cold critical path of at most 6 nodes) is not met: the
+  path is 83 nodes on a 30-paragraph article and 138 on the
+  environments article, the same on every run (a scaling fact, not a
+  schedule's), so the census tests are ignored until it is.
 
 ### How to run it
 

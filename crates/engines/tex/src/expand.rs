@@ -916,6 +916,10 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
+        // (a file the job writes whose text the client gave, not read
+        // back yet: read back from that text here, its read-back point,
+        // `Run::seed_written`)
+        self.seed_written(&key)?;
         // (a document's `\input`: the file as units when it is cut,
         // `Run::read_units`; else its text)
         let x = if self.doc {
@@ -1015,6 +1019,15 @@ impl Run<'_, '_> {
             }
             self.get_x_token();
             self.ck()?;
+        }
+        if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
+            eprintln!(
+                "cmd-trace {} file name {name:?} ended by {:?} cmd {} chr {}",
+                self.cx.node().raw(),
+                self.cur.tok,
+                self.cur.cmd,
+                self.cur.chr
+            );
         }
         Ok(name)
     }

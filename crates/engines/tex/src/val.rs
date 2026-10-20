@@ -925,7 +925,7 @@ pub(crate) fn class_projection(x: ValueId, v: &Values) -> ValueId {
 }
 
 /// Whether a meaning is an `\outer` macro (§336), as a lookup that only
-/// steps over its token needs it (`\expandafter`'s first, §368): get_next
+/// steps over its token needs it (`\expandafter`'s first, §368): `get_next`
 /// checks an outer one's validity, nothing else of it is used. A pure
 /// projection for the engine: a redefinition that keeps a name outer, or
 /// not, leaves such a reader standing.
