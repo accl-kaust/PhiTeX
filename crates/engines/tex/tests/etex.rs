@@ -111,3 +111,17 @@ fn catcode_restore() {
 fn expandafter_conditionals() {
     run(&["xcondx"]);
 }
+
+/// `\vsplit` clears the split marks first (§977, e-TeX's `vsplit_init`),
+/// whatever the box holds: a split of the void box left by the one before
+/// leaves none, as pdfTeX's log of `io.tex` has it.
+#[test]
+fn vsplit_of_a_void_box_clears_the_split_marks() {
+    let dir = common::fixtures().join("etex");
+    let src = "\\setbox1\\vbox{\\hrule height 5pt\\marks3{three-a}\\mark{zero}\\hrule height 5pt\\marks3{three-b}%\n\\penalty-10000 \\hrule height 5pt \\marks3{three-c}}\n\\setbox2\\vsplit1 to 10pt\n\\setbox2\\vsplit1 to 10pt\n\\message{[\\splitfirstmarks3][\\splitbotmarks3][\\splitfirstmark]}\n\\setbox2\\vsplit1 to 10pt\n\\message{[\\splitfirstmarks3]}\n";
+    let doc = format!("{PRELUDE}{src}\\end\n");
+    let opts = common::options("./core.tex", "texput", "", &dir);
+    let b = common::build(opts, None, &doc);
+    let log = b.output().1.replace('\n', "");
+    assert!(log.contains("[three-c][three-c][] []"), "{log}");
+}

@@ -2773,6 +2773,17 @@ impl Run<'_, '_> {
             );
         }
         if !cuttable {
+            // (observe/profile: a page firing where the piece could not
+            // end, and what the routine changed that the rest read)
+            if crate::exec::obs_flag!("PHITEX_TEX_TRACE") || crate::exec::prof_flag!("PHITEX_TEX_TIME")
+            {
+                eprintln!(
+                    "  page fires at a candidate a piece runs through: piece {} at candidate {} ({})",
+                    int_of(v, pid).cast_unsigned(),
+                    int_of(v, k),
+                    why.as_deref().unwrap_or("no read seen")
+                );
+            }
             why = None;
         }
         for f in restore {
