@@ -2344,10 +2344,14 @@ impl<'c, 'a> Run<'c, 'a> {
             // (a line that does more than define is read back as text:
             // its interpretation stops at the first command that does,
             // its definitions not wanted)
+            // (a group opened in the line shares its list: only a level
+            // with a list of its own, or an item on any, is more; a group
+            // still open at the line's end is, below)
             if self.contributed_since(nc)
                 || self.kids.len() != nk
-                || self.nest.len() != nest_len + 1
-                || self.nest.last().is_some_and(|l| !l.list.is_empty())
+                || self.nest.len() <= nest_len
+                || self.nest[nest_len + 1..].iter().any(|l| l.owns)
+                || self.nest[nest_len..].iter().any(|l| !l.list.is_empty())
             {
                 break;
             }
