@@ -203,12 +203,11 @@ pub fn fingerprint(b: &[u8]) -> u64 {
 fn words_hash(b: &[u8]) -> u64 {
     const K: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut h = Fnv::new().0 ^ (b.len() as u64).wrapping_mul(K);
-    let mut words = b.chunks_exact(8);
-    for w in &mut words {
-        let x = u64::from_le_bytes(w.try_into().unwrap_or([0; 8]));
-        h = (h ^ x).wrapping_mul(K).rotate_left(29);
+    let (words, tail) = b.as_chunks::<8>();
+    for w in words {
+        h = (h ^ u64::from_le_bytes(*w)).wrapping_mul(K).rotate_left(29);
     }
-    Fnv(h).add(words.remainder()).0
+    Fnv(h).add(tail).0
 }
 
 /// [`fingerprint`] of the file at `p`, reading only what it needs.
