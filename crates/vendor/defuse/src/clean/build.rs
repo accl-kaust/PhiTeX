@@ -170,7 +170,16 @@ impl<'a> Builder<'a> {
             }
             let Some(res) = n.res.clone() else { continue };
             let asked = |r: &Read| on.as_ref().is_none_or(|fs| read_on(r, fs));
-            if let Some(r) = res.reads.iter().find(|r| asked(r) && !holds(self.core, &self.w, id, r)) {
+            let mut broken = res.reads.iter().find(|r| asked(r) && !holds(self.core, &self.w, id, r));
+            // (CLEAN_SCOPED_CHECK: a read of another field broken too is
+            // an invalidation missed elsewhere; named, and taken.)
+            if broken.is_none() && on.is_some() && scoped_check() {
+                broken = res.reads.iter().find(|r| !holds(self.core, &self.w, id, r));
+                if let Some(r) = broken {
+                    eprintln!("scoped check: {id} asked on {on:?}, broken {r:?}");
+                }
+            }
+            if let Some(r) = broken {
                 let why = if rebound(self.core, &self.w, r) {
                     self.rebinds += 1;
                     match r {
@@ -1630,4 +1639,11 @@ fn read_on(r: &Read, fs: &[Field]) -> bool {
         Read::Stream { fields, .. } => fields.iter().any(|(f, _)| fs.contains(f)),
         _ => false,
     }
+}
+
+/// Whether `CLEAN_SCOPED_CHECK` asks settle to check every read of a
+/// reader re-asked on a field (read once).
+fn scoped_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CLEAN_SCOPED_CHECK").is_some())
 }

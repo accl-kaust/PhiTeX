@@ -283,6 +283,15 @@ impl Fast {
         })
     }
 
+    /// The tables as [`Fast::new`] makes them, in this allocation.
+    fn zero(&mut self) {
+        for v in self.head.iter_mut().chain(self.prev.iter_mut()) {
+            v.fill(0);
+        }
+        self.seq.fill(0);
+        self.count.fill(0);
+    }
+
     /// The first `k` bytes at `p` of `w`, as a number.
     fn key(w: &[u8], p: usize, k: usize) -> u64 {
         let x = u64::from_le_bytes(w[p..p + 8].try_into().unwrap_or([0; 8]));
@@ -1474,6 +1483,10 @@ pub struct Scratch {
     snap_step: usize,
     snaps: Vec<(usize, State<'static>)>,
     fast: bool,
+    /// The longer chains' tables of the last compression, zeroed again
+    /// for the next (a megabyte: allocated each time, its pages were
+    /// faulted in again for every stream).
+    fast_tables: Option<Box<Fast>>,
 }
 
 /// Every [`Fast`] match checked against zlib's walk (a test's switch;
@@ -1505,6 +1518,8 @@ pub struct Resumable {
     input: Vec<u8>,
     out: Vec<u8>,
     snaps: Vec<(usize, State<'static>)>,
+    /// The buffers of a compression from the start, kept for the next.
+    scratch: Scratch,
 }
 
 impl Resumable {
@@ -1544,13 +1559,12 @@ impl Resumable {
             self.snaps = s.snaps;
             (s.out, from)
         } else {
-            let mut sc = Scratch {
-                snap_step: Self::STEP,
-                fast: true,
-                ..Scratch::default()
-            };
-            let out = compress_with(&mut sc, data, level);
-            self.snaps = sc.snaps;
+            let sc = &mut self.scratch;
+            sc.snap_step = Self::STEP;
+            sc.fast = true;
+            sc.snaps.clear();
+            let out = compress_with(sc, data, level);
+            self.snaps = core::mem::take(&mut sc.snaps);
             (out, 0)
         };
         self.level = level;
@@ -1645,7 +1659,13 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
         bi_valid: 0,
         snap_step: 0,
         snaps: Vec::new(),
-        fast: sc.fast.then(Fast::new),
+        fast: sc.fast.then(|| match sc.fast_tables.take() {
+            Some(mut f) => {
+                f.zero();
+                f
+            }
+            None => Fast::new(),
+        }),
     };
     s.init_block();
     // (the zlib header: deflate, a 32K window, the level's flags)
@@ -1670,6 +1690,7 @@ pub fn compress_with(sc: &mut Scratch, data: &[u8], level: i32) -> Vec<u8> {
     sc.prev = s.prev;
     sc.head = s.head;
     sc.sym_buf = s.sym_buf;
+    sc.fast_tables = s.fast.take();
     s.out
 }
 

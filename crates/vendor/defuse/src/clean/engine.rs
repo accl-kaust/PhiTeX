@@ -266,8 +266,10 @@ impl Engine {
         self.edit(|b| {
             let after = match at {
                 Anchor::End => b.w.unit(u).order.last().map_or(0, |(&p, _)| p),
+                // (After its extent: its subtree and the continuations it
+                // placed, where a cold build puts the next node.)
                 Anchor::After(x) => {
-                    let end = b.w.subtree_end(x);
+                    let end = b.extent_end(x);
                     b.w.node(end).or_else(|| b.w.node(x)).map_or(0, |e| e.pos)
                 }
                 Anchor::Before(x) => {

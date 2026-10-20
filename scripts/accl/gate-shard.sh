@@ -54,7 +54,7 @@ red() { echo "$1" >> "$r/red.txt"; status=red; }
 built() { echo "build_s $(( $(date +%s) - t0 ))" >> "$r/times.txt"; }
 T="cargo test --profile fastdev -p phitex-tex --features profile,observe"
 # the test targets the shards run (the build shard builds them)
-SUITES="pdftex edits pages plain etex hints inputs defuse_gaps"
+SUITES="pdftex edits pages page_steps plain etex hints inputs defuse_gaps"
 # The compiler cache (job.sbatch's PHITEX_SCCACHE, on the shared home):
 # the compiler's wrapper once its server starts, else none (the build as
 # before). Incremental builds are not cacheable, and a fresh target
