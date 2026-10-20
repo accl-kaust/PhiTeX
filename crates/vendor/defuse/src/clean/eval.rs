@@ -520,7 +520,10 @@ impl Engine {
         sched: &mut dyn Scheduler,
         exec: &mut dyn Executor,
     ) -> Result<bool, EvalError> {
-        if exec.parallelism() > 1 && std::env::var_os("CLEAN_STEPS").is_none() {
+        // (The flow is opt-in: merging in the workers under one lock cost
+        // more than it saved, 2026-10-20: para4000 j2-j48 ~700 ms against
+        // steps ~350-430 ms.)
+        if exec.parallelism() > 1 && std::env::var_os("CLEAN_FLOW").is_some() {
             return self.drain_flow(s, rep, ran, cut, deadline, hs, src, per_round, rounds, sched, exec);
         }
         if exec.parallelism() > 1 || exec.steps() {
