@@ -403,12 +403,12 @@ pub(crate) mod prof {
         }
     }
     /// Event counters (shown with the timers).
-    pub(crate) const COUNTS: [&str; 21] = [
+    pub(crate) const COUNTS: [&str; 22] = [
         "results", "clean", "data_conflict", "shape_conflict", "placing", "effect_change", "deferred", "st_kids", "st_effect", "st_claim", "st_env", "st_stop", "flushes",
         // (Rechecks queued, by source; reads settle asked.)
-        "rk_freed", "rk_shape", "rk_out", "rk_kind", "rk_moved", "rk_outchg", "rk_field", "rk_reads",
+        "rk_freed", "rk_shape", "rk_out", "rk_kind", "rk_moved", "rk_outchg", "rk_field", "rk_reads", "rk_acc",
     ];
-    pub(crate) static CN: [AtomicU64; 21] = [const { AtomicU64::new(0) }; 21];
+    pub(crate) static CN: [AtomicU64; 22] = [const { AtomicU64::new(0) }; 22];
     pub(crate) fn count(i: usize) {
         if on() {
             CN[i].fetch_add(1, Relaxed);

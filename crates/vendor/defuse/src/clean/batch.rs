@@ -121,7 +121,10 @@ impl Group {
                         self.range_readers
                             .range(std::ops::Bound::Excluded(&(pos, Id::MAX)), std::ops::Bound::Unbounded)
                             .filter(|(_, lo)| **lo < pos)
-                            .map(|(k, _)| (k.1, f, false)),
+                            .map(|(k, _)| {
+                                super::core::prof::count(21);
+                                (k.1, f, false)
+                            }),
                     );
                 }
             }

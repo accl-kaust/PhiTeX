@@ -652,6 +652,7 @@ impl<'a> Builder<'a> {
         super::core::prof::time(16, || self.w.set_contrib(&m, u, f, pos, x));
         self.w.touch_key(Key::Acc(u, f));
         for r in super::core::prof::time(17, || self.w.range_readers_over(u, f, pos)) {
+            super::core::prof::count(21);
             self.recheck_on(r, f);
         }
     }
@@ -1127,18 +1128,41 @@ impl<'a> Builder<'a> {
                 Place::After(a) => (a, self.w.node(a).map_or(n.depth, |x| x.depth)),
                 _ => (id, n.depth),
             };
-            let base = last_cont.get(&anchor).copied().unwrap_or_else(|| self.w.subtree_end(anchor));
-            // (After the continuations already placed there.)
-            let base = self.after_conts(anchor, base);
+            let base = match last_cont.get(&anchor) {
+                Some(&b) => b,
+                // (After the follow nodes other placers keep there.)
+                None => self.after_conts(anchor, self.w.subtree_end(anchor), id, spec.place),
+            };
             let end = self.put_placed(id, &n, c, spec, depth, base);
             last_cont.insert(anchor, end);
         }
         (kid_ids, cont_ids)
     }
 
-    /// The last node of the continuations placed after `anchor` before
-    /// position `base` ends, so a new one goes after them.
-    fn after_conts(&self, _anchor: Id, base: Id) -> Id {
+    /// Where placer `placer`'s first continuation after `anchor` goes: past
+    /// `base` (the anchor's subtree end), the follow nodes other placers
+    /// keep after the anchor come first, an earlier placer's before a
+    /// later one's, then the anchor's own continuations (as a cold build
+    /// places them: a page fired at a cut before the text resumes). Two
+    /// placers wanting the same slot otherwise move each other's nodes on
+    /// every rerun.
+    fn after_conts(&self, anchor: Id, base: Id, placer: Id, place: Place) -> Id {
+        let ppos = self.w.node(placer).map_or(0, |p| p.pos);
+        let mut base = base;
+        while let Some(y) = self.w.next(base) {
+            let Some(yn) = self.w.node(y) else { break };
+            let skip = yn.place == Place::After(anchor)
+                && yn.parent != placer
+                && match place {
+                    // (The anchor's own: after every follow node there.)
+                    Place::Cont => true,
+                    _ => self.w.node(yn.parent).is_some_and(|q| q.pos < ppos),
+                };
+            if !skip {
+                break;
+            }
+            base = self.extent_end(y);
+        }
         base
     }
 
@@ -1173,6 +1197,9 @@ impl<'a> Builder<'a> {
                 // Kept: in place when still right after `after`.
                 let right = self.w.next(after) == Some(x);
                 if !right {
+                    if super::core::debug() {
+                        eprintln!("moved {x}: placed by {parent} after {after}, whose next is {:?}", self.w.next(after));
+                    }
                     // Moved: made again at its new place.
                     self.free(x);
                     return self.make_placed(parent, pn, x, text, spec.place, depth, after);
