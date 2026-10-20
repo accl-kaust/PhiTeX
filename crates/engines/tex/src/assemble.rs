@@ -94,12 +94,11 @@ fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>, hash: Option<u64>) -> Valu
     let mut all = linked_files()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let k = match all.iter().position(|(i, _)| *i == v.instance()) {
-        Some(k) => k,
-        None => {
-            all.push((v.instance(), std::collections::VecDeque::new()));
-            all.len() - 1
-        }
+    let k = if let Some(k) = all.iter().position(|(i, _)| *i == v.instance()) {
+        k
+    } else {
+        all.push((v.instance(), std::collections::VecDeque::new()));
+        all.len() - 1
     };
     let m = &mut all[k].1;
     if !m.iter().any(|e| e.0 == h) {
