@@ -79,7 +79,6 @@ const CHAPTER: &str = "Chapter text. Some words in a paragraph here.\n\nA second
 /// (job aborted, no legal \end found)." (the `TikZ` manual: after
 /// `pgfmanual-en-introduction`).
 #[test]
-#[ignore = "\\include ends the job: the main file's text after the first \\include is never read (no legal \\end found)"]
 fn include_reads_on() {
     let (code, log) = build_latex(
         "tikzman-include",
@@ -96,7 +95,6 @@ fn include_reads_on() {
 /// `\include` with hyperref and a table of contents: also an evaluation
 /// error, "conflicting publications for Field(..)" (`ConflictingPublication`).
 #[test]
-#[ignore = "\\include with hyperref and \\tableofcontents: evaluation error ConflictingPublication"]
 fn include_with_hyperref_toc() {
     let (code, log) = build_latex(
         "tikzman-include-hyperref",
@@ -115,7 +113,6 @@ fn include_with_hyperref_toc() {
 /// writes it), read back through the main `.aux`. Read a line at a time,
 /// the first line runs out of input and the job aborts.
 #[test]
-#[ignore = "each written .aux line is interpreted alone: a group opened on one line and closed on the next aborts the job"]
 fn aux_group_across_lines() {
     let (code, log) = build_latex(
         "tikzman-ckpt",
