@@ -1788,6 +1788,64 @@ fn supplying_the_providers_answer_reruns_no_reader() {
     }
 }
 
+/// `["a", k]` defines `g` to `k` and places a continuation `["f"]` that
+/// reads `g`; `["b"]` reads `g`. Each run's tag and answer is recorded.
+struct FollowToy {
+    seen: std::sync::Mutex<Vec<(String, Option<i64>)>>,
+}
+
+impl defuse::Operation for FollowToy {
+    fn defs(&self, _: &[ValueId], _: &defuse::Values) -> Option<Vec<(Field, defuse::Locality)>> {
+        None
+    }
+    fn run(&self, cx: &mut defuse::Ctx<'_>) -> Result<ValueId, defuse::Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let tag = v.as_str(a[0]).unwrap_or_default();
+        let g = v.field("g");
+        if tag == "a" {
+            cx.define(g, a[1]);
+            let f = v.str("f");
+            cx.follow(cx.op(), vec![f]);
+            return Ok(ValueId::UNIT);
+        }
+        let x = cx.use_field(g)?;
+        self.seen.lock().unwrap().push((tag, x.and_then(|x| v.as_int(x))));
+        Ok(x.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// A node inserted after one that placed continuations goes after them,
+/// as a cold build places it: the continuations read the definitions
+/// before them, not the new node's (PhiTeX's page_steps, a paragraph
+/// inserted after one that placed follow nodes).
+#[test]
+fn a_node_inserted_after_a_follower_goes_after_its_continuations() {
+    use std::sync::Arc;
+    let toy = Arc::new(FollowToy {
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut eng = Engine::new();
+    let op = eng.register(toy.clone());
+    let u = eng.new_unit();
+    let a = vec![eng.values().str("a"), eng.values().int(1)];
+    let a = eng.push(u, op, a);
+    let b = vec![eng.values().str("b")];
+    let b = eng.push(u, op, b);
+    eng.add_root(b);
+    eng.evaluate_sequential().expect("cold");
+    assert_eq!(*toy.seen.lock().unwrap(), [("f".to_owned(), Some(1)), ("b".to_owned(), Some(1))]);
+    toy.seen.lock().unwrap().clear();
+    let n = vec![eng.values().str("a"), eng.values().int(2)];
+    eng.insert_after(a, op, n);
+    eng.evaluate_sequential().expect("edit");
+    // `a`'s continuation keeps reading 1; the new node's reads 2, `b` 2.
+    let mut seen = toy.seen.lock().unwrap().clone();
+    seen.sort();
+    assert_eq!(seen, [("b".to_owned(), Some(2)), ("f".to_owned(), Some(2))], "{seen:?}");
+    assert_eq!(eng.output(b).and_then(|x| eng.values().as_int(x)), Some(2));
+}
+
 /// `["link", k]` has a pending definition set: it reads `f(k-1)` (`k` 0:
 /// the environment's `file`) and defines `f(k)` to it.
 struct Link;
