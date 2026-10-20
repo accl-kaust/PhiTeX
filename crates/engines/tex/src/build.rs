@@ -792,7 +792,7 @@ impl Run<'_, '_> {
         let ep = self.par(Par::everypar)?;
         let toks = crate::val::toks_of(v, ep);
         self.push_toks(toks);
-        self.finish_candidate()
+        self.finish_candidate_at(true)
     }
 
     /// `\prevgraf` of the vertical list `md.vlid` (§1091, §1096): the

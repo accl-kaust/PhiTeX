@@ -37,6 +37,30 @@ fn random() {
     log_gate("pdfrandom").unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// The numbers `\pdflastlink` gives after a page fired at a paragraph's
+/// start, as the log shows them (`[L<k>=<n>]` of `pdf/linkloop`): the
+/// page's objects come before them, as pdfTeX numbers them.
+#[test]
+fn read_time_numbers_in_the_log() {
+    let dir = common::fixtures().join("pdf");
+    let marks = |log: &str| -> Vec<String> {
+        let flat = log.replace('\n', "");
+        flat.split("[L")
+            .skip(1)
+            .filter_map(|x| x.split_once(']').map(|(m, _)| m.to_owned()))
+            .collect()
+    };
+    let src = common::read(&dir.join("linkloop.tex"));
+    let want = marks(&common::read(&dir.join("linkloop.log")));
+    let opts = phitex_tex::Options {
+        epoch: Some(0),
+        ..common::options("./linkloop.tex", "linkloop", "", &dir)
+    };
+    let b = common::build(opts, None, &src);
+    let (_, log) = b.output();
+    assert_eq!(marks(&log), want, "pdf/linkloop: the numbers in the log");
+}
+
 #[test]
 fn savepos() {
     let dir = common::fixtures().join("pdf");

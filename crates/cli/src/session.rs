@@ -942,7 +942,7 @@ impl Session {
             diagnostics,
             warnings,
             notes: std::iter::once(format!(
-                "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds, realised cp {} nodes; guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions",
+                "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds, realised cp {} nodes; guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions; {} nodes placed, {} freed",
                 s.nodes_run,
                 s.live,
                 s.runs,
@@ -952,7 +952,9 @@ impl Session {
                 s.claims_refuted,
                 s.effects_refuted,
                 s.claim_siblings,
-                s.defs_refuted
+                s.defs_refuted,
+                s.created,
+                s.freed
             ))
             .chain(std::iter::once({
                 let (nodes, units, values) = b.sizes();
