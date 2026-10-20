@@ -419,12 +419,15 @@ fn makeindex_said(ilg: &[u8]) -> Vec<(bool, String)> {
 }
 
 /// The arguments of the tool run that makes `output` by default, if one
-/// does: the first tool claiming it by name whose input the job writes,
-/// with the input's text as the round before wrote it (its loop-back,
-/// read here, by the reader: a later publication runs the reader again,
-/// and the run is memoised on the text). `None`: no tool makes it, or
-/// the job wrote none of its input the round before (the name is read
-/// from the file system).
+/// does: the first tool claiming it by name whose input the job writes
+/// (its loop-back declared). The run reads the input's text as the round
+/// before wrote it itself ([`ToolRun`], `look_up`), not the reader: a
+/// reader of the output depends on what the run makes, not on its input
+/// (a lookup of an output name read the whole input, and every line the
+/// job wrote to it ran the reader again, the output the same or none).
+/// The run makes nothing where the job wrote none of the input the round
+/// before, and the name is then read from the file system. `None`: no
+/// tool makes it.
 pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<ValueId>>, Stop> {
     let v = cx.values();
     for (t, input) in claims(output) {
@@ -435,12 +438,7 @@ pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<Valu
             let _ = cx.use_field(w)?;
             continue;
         }
-        let Some(text) = cx.use_field(w)?.filter(|&x| x != ValueId::UNIT) else {
-            return Ok(None);
-        };
-        let mut a = command_args(v, t, output, &input, std::slice::from_ref(&input));
-        a.push(text);
-        return Ok(Some(a));
+        return Ok(Some(command_args(v, t, output, &input, std::slice::from_ref(&input))));
     }
     Ok(None)
 }

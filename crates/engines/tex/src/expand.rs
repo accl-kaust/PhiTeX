@@ -969,6 +969,7 @@ impl Run<'_, '_> {
                 // (a file the job writes read back as its text: its lines
                 // are read under the state here too, [`Run::pre_value`])
                 self.mark_read_point(&key)?;
+                self.note_read_back(&key)?;
                 crate::run::FileRest::written(self.v, order, xs[0])
             }
             // (a tool's output, `crate::tools::ToolRun`: read inline, what

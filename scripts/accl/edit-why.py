@@ -25,7 +25,7 @@ ec = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ec)
 
 
-CAUSES = ["Text", "Changed", "Rebind", "Refuted", "Woken", "Loop", "Environment", "Output", "Claim", "SiblingScan",
+CAUSES = ["Text", "Anchor", "Changed", "Rebind", "Refuted", "Woken", "Loop", "Environment", "Output", "Claim", "SiblingScan",
           "Range", "Scope", "Other"]
 
 
