@@ -11,7 +11,7 @@ use super::hints::{Closure, DefSet, Effects, effects};
 use super::lex::{self, changes_catcodes};
 
 /// One argument a command reads (see the table module's spec letters).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Arg {
     Star,
     /// An optional character (xparse's `t`).
@@ -63,14 +63,14 @@ pub enum Arg {
 }
 
 /// A token of parameter text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Lit {
     Cs(String),
     Char(char),
 }
 
 /// What a defined name is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Shape {
     Macro(Vec<Arg>),
     /// `\let` to another command.
@@ -147,7 +147,7 @@ pub(crate) struct Kept {
 static STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// What a definition's body does to catcodes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Catcoder {
     /// The kind and characters ([`Definitions::changes_catcodes`]).
     pub kind: (u8, u128),
@@ -215,6 +215,52 @@ fn find<'v, T: PartialEq>(
     }
 }
 
+
+std::thread_local! {
+    /// The names looked up on this thread while [`with_reads`] runs.
+    static READS: std::cell::RefCell<Option<HashSet<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A lookup of `name` in any definitions, noted while [`with_reads`]
+/// runs on this thread.
+fn read(name: &str) {
+    READS.with(|r| {
+        if let Some(set) = r.borrow_mut().as_mut()
+            && !set.contains(name)
+        {
+            set.insert(name.to_owned());
+        }
+    });
+}
+
+/// The first file id of a document's own chunks (`phitex-tex`'s
+/// per-chunk harvests): a lookup never names one of these.
+pub const DOC_FILES: u32 = 2_000_000_000;
+
+/// The pseudo-name a lookup of the active characters notes ([`with_reads`]).
+pub const READ_ACTIVE: &str = "\u{1}active";
+/// The pseudo-name a lookup of the load order notes ([`with_reads`]).
+pub const READ_ORDER: &str = "\u{1}order";
+/// The pseudo-name a question about every name notes ([`with_reads`]).
+pub const READ_ALL: &str = "\u{1}all";
+
+/// `f`, and every name it looked up in any definitions on this thread
+/// (an analysis's read set: a text analysed under definitions that give
+/// each of these names what they gave, [`Definitions::name_digest`],
+/// is analysed the same).
+pub fn with_reads<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let outer = READS.with(|r| r.borrow_mut().replace(HashSet::new()));
+    let x = f();
+    let set = READS.with(|r| std::mem::replace(&mut *r.borrow_mut(), outer));
+    let mut names: Vec<String> = set.unwrap_or_default().into_iter().collect();
+    names.sort_unstable();
+    // (a read set inside another: the outer one read these too)
+    for n in &names {
+        read(n);
+    }
+    (x, names)
+}
+
 impl Definitions {
     #[must_use]
     pub fn new() -> Definitions {
@@ -224,11 +270,13 @@ impl Definitions {
     /// How many names are defined.
     #[must_use]
     pub fn len(&self) -> usize {
+        read(READ_ALL);
         self.macros.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
+        read(READ_ALL);
         self.macros.is_empty()
     }
 
@@ -269,15 +317,65 @@ impl Definitions {
         h.finish()
     }
 
+    /// What these definitions give name `name` (a [`with_reads`] name),
+    /// as a digest: its definitions, bodies, catcode effects, register
+    /// and font mark, each where it stands in its file (the ids of the
+    /// document's own files, [`DOC_FILES`] and up, left out: a lookup
+    /// never names one, it only tells them from the format's); the
+    /// pseudo-names' the active characters, the load order, every name.
+    #[must_use]
+    pub fn name_digest(&self, name: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        fn at<T, H: Hasher>(h: &mut H, v: Option<&Vec<At<T>>>, what: impl Fn(&T, &mut H)) {
+            for d in v.into_iter().flatten() {
+                (d.file < DOC_FILES).then_some(d.file).hash(h);
+                d.pos.hash(h);
+                what(&d.what, h);
+            }
+            0xffu8.hash(h);
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match name {
+            READ_ACTIVE => self.active.hash(&mut h),
+            READ_ORDER => {
+                let mut o: Vec<(u32, u32)> = self.order.iter().flatten().map(|(&a, &b)| (a, b)).collect();
+                o.sort_unstable();
+                (self.order.is_some(), o).hash(&mut h);
+            }
+            READ_ALL => return self.digest(),
+            _ => {
+                name.hash(&mut h);
+                at(&mut h, self.macros.get(name), Hash::hash);
+                at(&mut h, self.envs.get(name), Hash::hash);
+                at(&mut h, self.catcoders.get(name), Hash::hash);
+                at(&mut h, self.bodies.get(name), |b, h| b.text.hash(h));
+                self.env_catcoders.contains(name).hash(&mut h);
+                self.fonts.contains(name).hash(&mut h);
+                self.registers.get(name).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    /// The mark of the last change to `name`'s definitions (unique in
+    /// the process; 0: none): definitions with a name's same mark give
+    /// it the same ([`Definitions::name_digest`]).
+    #[must_use]
+    pub fn name_stamp(&self, name: &str) -> u64 {
+        self.stamp(name)
+    }
+
     /// What `name` is at `at` (file, byte) or, without a place, by its
     /// last definition (a format's).
     pub(crate) fn find(&self, name: &str, at: Option<(u32, usize)>) -> Found<'_, Shape> {
+        read(name);
         find(self.macros.get(name), at, self.order.as_ref())
     }
 
     /// Where the definition of `name` bound at `at` stands, when one in
     /// its file (or, by load order, before it) binds.
     pub(crate) fn bound_at(&self, name: &str, at: (u32, usize)) -> Option<(u32, usize)> {
+        read(name);
         let v = self.macros.get(name)?;
         let (file, pos) = at;
         if let Some(d) = v
@@ -301,6 +399,7 @@ impl Definitions {
         name: &str,
         at: Option<(u32, usize)>,
     ) -> Found<'_, std::sync::Arc<Body>> {
+        read(name);
         find(self.bodies.get(name), at, self.order.as_ref())
     }
 
@@ -332,10 +431,12 @@ impl Definitions {
     /// The register number a `\\countdef` (or kin) gave `name` as digits.
     #[must_use]
     pub fn register(&self, name: &str) -> Option<u32> {
+        read(name);
         self.registers.get(name).copied()
     }
 
     pub(crate) fn shapes(&self, name: &str) -> Option<Vec<&Shape>> {
+        read(name);
         self.macros
             .get(name)
             .map(|v| v.iter().map(|d| &d.what).collect())
@@ -343,6 +444,7 @@ impl Definitions {
 
     /// What each visible body of `name` defines directly.
     pub(crate) fn effects(&self, name: &str) -> Option<Vec<&Effects>> {
+        read(name);
         self.bodies
             .get(name)
             .map(|v| v.iter().map(|d| &d.what.effects).collect())
@@ -377,7 +479,12 @@ impl Definitions {
                     .zip(&k.stamps)
                     .all(|(n, &s)| self.stamp(n) == s)
             })
-            .map(|k| (k.set.clone(), k.names.clone()))
+            .map(|k| {
+                for n in k.names.iter() {
+                    read(n);
+                }
+                (k.set.clone(), k.names.clone())
+            })
     }
 
     /// Keeps the closure `set` under `key`, computed under these
@@ -406,6 +513,7 @@ impl Definitions {
     /// binds to the last definition loaded before it, in any file.
     pub fn set_load_order(&mut self, files: &[u32]) {
         self.closures = ClosureCache::default();
+        self.touch(READ_ORDER);
         self.order = Some(
             files
                 .iter()
@@ -418,12 +526,15 @@ impl Definitions {
     /// Whether a load order is declared.
     #[must_use]
     pub fn ordered(&self) -> bool {
+        read(READ_ORDER);
         self.order.is_some()
     }
 
     /// The file of the definition of `name` bound at `at`, if it binds
     /// to one in another file by load order.
     pub(crate) fn bound_across_files(&self, name: &str, file: u32, pos: usize) -> bool {
+        read(name);
+        read(READ_ORDER);
         let Some(o) = &self.order else { return false };
         let Some(v) = self.macros.get(name) else {
             return false;
@@ -441,6 +552,7 @@ impl Definitions {
     /// definitions of `self`, then `prelude`).
     #[must_use]
     pub fn output_defines(&self, prelude: &Definitions) -> Option<DefSet> {
+        read(OUTPUT);
         let mut c = Closure::new(self, prelude);
         self.bodies
             .contains_key(OUTPUT)
@@ -455,11 +567,14 @@ impl Definitions {
 
     /// Whether the document defines `name` anywhere.
     pub(crate) fn defines(&self, name: &str) -> bool {
+        read(name);
         self.macros.contains_key(name)
     }
 
     /// Whether `name` is defined in `file` before `pos`.
     pub(crate) fn defined_before(&self, name: &str, file: u32, pos: usize) -> bool {
+        read(name);
+        read(READ_ORDER);
         self.macros.get(name).is_some_and(|v| {
             v.iter().any(|d| d.file == file && d.pos < pos)
                 || self.order.as_ref().is_some_and(|o| {
@@ -471,11 +586,14 @@ impl Definitions {
     }
 
     pub(crate) fn find_env(&self, name: &str, at: Option<(u32, usize)>) -> Found<'_, Vec<Arg>> {
+        read(name);
+        read(READ_ORDER);
         find(self.envs.get(name), at, self.order.as_ref())
     }
 
     /// The characters the document makes active somewhere.
     pub(crate) fn maybe_active(&self) -> u128 {
+        read(READ_ACTIVE);
         self.active
     }
 
@@ -483,6 +601,7 @@ impl Definitions {
     /// active (bit `c` set), besides `~`.
     #[must_use]
     pub fn active_chars(&self) -> u128 {
+        read(READ_ACTIVE);
         self.active
     }
 
@@ -490,6 +609,7 @@ impl Definitions {
     /// with `'f'` for a quantity some `\\font` makes.
     #[must_use]
     pub fn shape(&self, name: &str) -> Option<Shape> {
+        read(name);
         let v = self.macros.get(name)?;
         let first = &v.first()?.what;
         if v.iter().any(|d| d.what != *first) {
@@ -510,6 +630,8 @@ impl Definitions {
     /// Whether the definition of `name` bound at `at` changes catcodes
     /// (0 no, 1 for the arguments it reads, 2 for good).
     pub(crate) fn changes_catcodes(&self, name: &str, at: Option<(u32, usize)>) -> (u8, u128) {
+        read(name);
+        read(READ_ORDER);
         match find(self.catcoders.get(name), at, self.order.as_ref()) {
             Found::One(k) => k.kind,
             Found::None => (0, 0),
@@ -540,6 +662,8 @@ impl Definitions {
     /// The catcodes the definition of `name` bound at `at` sets of the
     /// characters its arguments name: (parameter, catcode).
     pub(crate) fn arg_catcodes(&self, name: &str, at: Option<(u32, usize)>) -> &[(u8, u32)] {
+        read(name);
+        read(READ_ORDER);
         match find(self.catcoders.get(name), at, self.order.as_ref()) {
             Found::One(k) => &k.of_args,
             _ => &[],
@@ -549,6 +673,8 @@ impl Definitions {
     /// The literal catcodes the definition of `name` bound at `at` sets:
     /// (character, catcode), in order.
     pub(crate) fn set_catcodes(&self, name: &str, at: Option<(u32, usize)>) -> &[(u8, u32)] {
+        read(name);
+        read(READ_ORDER);
         match find(self.catcoders.get(name), at, self.order.as_ref()) {
             Found::One(k) => &k.set,
             _ => &[],
@@ -558,6 +684,8 @@ impl Definitions {
     /// Whether the definition of `name` bound at `at` ends a group its
     /// caller began.
     pub(crate) fn ends_group(&self, name: &str, at: Option<(u32, usize)>) -> bool {
+        read(name);
+        read(READ_ORDER);
         matches!(
             find(self.catcoders.get(name), at, self.order.as_ref()),
             Found::One(k) if k.ends_group
@@ -565,6 +693,7 @@ impl Definitions {
     }
 
     pub(crate) fn env_changes_catcodes(&self, name: &str) -> bool {
+        read(name);
         self.env_catcoders.contains(name)
     }
 
@@ -623,6 +752,7 @@ impl Definitions {
                 .entry(name.to_owned())
                 .or_default()
                 .push(At { file, pos, what: k });
+            self.touch(name);
         }
     }
 
@@ -658,6 +788,7 @@ impl Definitions {
                 && !lex::structural(c)
             {
                 self.active |= 1 << c;
+                self.touch(READ_ACTIVE);
             }
         }
         let mut a = 0;
@@ -776,6 +907,7 @@ impl Definitions {
                 if matches!(body_catcodes(text, atoms, open, false).kind.0, 1 | 2) {
                     self.env_catcoders.insert(env.clone());
                 }
+                self.touch(&env);
                 self.envs.entry(env).or_default().push(At {
                     file,
                     pos,
@@ -811,6 +943,7 @@ impl Definitions {
                     return;
                 };
                 let args = xparse(&spec).unwrap_or_else(|e| vec![Arg::Pending(e.to_owned())]);
+                self.touch(&env);
                 self.envs.entry(env).or_default().push(At {
                     file,
                     pos,
@@ -822,6 +955,7 @@ impl Definitions {
                 let Some(env) = group_text(atoms, j) else {
                     return;
                 };
+                self.touch(&env);
                 self.envs.entry(env).or_default().push(At {
                     file,
                     pos,

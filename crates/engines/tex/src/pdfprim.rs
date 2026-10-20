@@ -848,49 +848,128 @@ fn action_target(r: &mut Run<'_, '_>, act: ValueId) -> R<()> {
 /// The objects made so far (pdfTeX's `obj_ptr`): the read-time ones and,
 /// in PDF mode, those of the pages shipped before this run.
 fn obj_ptr(r: &mut Run<'_, '_>) -> R<i64> {
-    let n = r.cint(crate::fields::cell::PDF_OBJNUM)?;
     if r.param("pdfoutput")? > 0 {
-        return Ok(n + crate::pdfout::page_offset(r)?);
+        let me = r.cx.node().raw();
+        return Ok(rt_before(r, me)? + r.rt_made + crate::pdfout::page_offset(r)?);
     }
-    Ok(n)
+    r.cint(crate::fields::cell::PDF_OBJNUM)
+}
+
+/// The read-time objects only PDF bytes name ([`REL`]): one unit each,
+/// the node that made it and the candidates it had passed there,
+/// `[node, candidate]`. No cell counts them: a link made or gone moves
+/// no later node's state; a number spent counts them here
+/// ([`rels_before`]).
+pub(crate) const RT_RELS: &str = "pdf:rtrels";
+
+/// The [`RT_RELS`] objects the nodes before node `at` made: for this
+/// run's own node, a finisher whose page fires inside a piece at its
+/// candidate `k`, not those the piece made after `k` (pdfTeX ships the
+/// page there first, as `crate::api::doc_order` places its writes).
+fn rels_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
+    let v = r.v;
+    let f = v.field(RT_RELS);
+    let own = at == r.cx.node().raw();
+    let range = if own {
+        r.cx.acc_range(f, None)?
+    } else {
+        r.cx
+            .acc_range_to(f, None, Some(phitex_defuse::NodeId::from_raw(at)))?
+    };
+    let me = i64::from_ne_bytes(at.to_ne_bytes());
+    let brk = if own {
+        r.fin.as_ref().and_then(|c| c.brk).filter(|b| b.2)
+    } else {
+        None
+    };
+    let n = v
+        .seq_to_vec(range)
+        .into_iter()
+        .filter(|&u| {
+            let xs = list_of(v, u);
+            let (node, c) = (
+                xs.first().map_or(0, |&x| int_of(v, x)),
+                xs.get(1).map_or(0, |&x| int_of(v, x)),
+            );
+            node != me && brk.is_none_or(|(pid, k, _)| node != pid || c <= k)
+        })
+        .count();
+    Ok(i64::try_from(n).unwrap_or(0))
+}
+
+/// The objects made at read time before node `at` began (this run's
+/// node, or one before it): the cell's count where it began (the
+/// objects a number is read back for, `pdf:objnum`) and the [`RT_RELS`]
+/// ones before it. A number made in that node is this plus the node's
+/// own count up to it (`Run::rt_made`).
+pub(crate) fn rt_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
+    let v = r.v;
+    let cell = if at == r.cx.node().raw() {
+        r.cint(crate::fields::cell::PDF_OBJNUM)? - r.rt_cells
+    } else {
+        let field = r.loc_field(crate::fields::cell::PDF_OBJNUM);
+        match r
+            .cx
+            .use_field_before(field, phitex_defuse::NodeId::from_raw(at))?
+        {
+            phitex_defuse::FieldAt::Def(x, _) => v.as_int(x).unwrap_or(0),
+            _ => 0,
+        }
+    };
+    Ok(cell + rels_before(r, at)?)
 }
 
 /// The next object number (`pdf_create_obj`), as pdfTeX's counter
-/// gives it: the read-time allocations so far (TeX's count, a cell),
-/// and in PDF mode the objects the pages shipped before this run made
+/// gives it: in PDF mode the read-time allocations before this node
+/// ([`rt_before`]: the cell's, those only PDF bytes name) and this
+/// run's, and the objects the pages shipped before this run made
 /// (`pdfout::page_offset`, a fold of their write sides' allocations).
 fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
-    let n = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
-    let x = r.v.int(n);
-    r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
     if r.param("pdfoutput")? > 0 {
-        let n = n + crate::pdfout::page_offset(r)?;
+        let me = r.cx.node().raw();
+        let before = rt_before(r, me)?;
+        let off = crate::pdfout::page_offset(r)?;
+        crate::pdfout::bump_cell(r)?;
+        let n = before + r.rt_made + off;
         crate::pdfout::note_read_time(r, n);
         return Ok(n);
     }
+    let n = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
+    let x = r.v.int(n);
+    r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
     Ok(n)
 }
 
 /// The mark of a read-time object number that only PDF bytes name (a
-/// link's, an annotation's): the read-time count with this bit, no page's
-/// objects folded in. The page writer and the link give it the number
-/// in the line (`pdfout::finish_exact`); a read that spends it into
-/// tokens or a conditional (`\pdflastlink`, `\pdflastannot`) folds the
-/// pages' allocations where it was made ([`resolved_num`]).
+/// link's, an annotation's): no count, an identity, the command's key
+/// (its node and its place among the node's commands,
+/// `pdfout::command`) with this bit. The page writer and the link give
+/// it the number in the line (`pdfout::finish_exact`); a read that
+/// spends it into tokens or a conditional (`\pdflastlink`,
+/// `\pdflastannot`) counts the objects made before it where it was
+/// made ([`resolved_num`]).
 pub(crate) const REL: i64 = 1 << 40;
 
-/// [`alloc_obj`] for an object only PDF bytes name ([`REL`]): the
-/// read-time count, no fold of the pages' allocations.
-fn alloc_rel(r: &mut Run<'_, '_>) -> R<i64> {
-    let n = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
-    let x = r.v.int(n);
-    r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
+/// [`alloc_obj`] for an object only PDF bytes name ([`REL`]): in PDF
+/// mode its identity, `(identity, the node's count up to it)`; it reads
+/// no count, and counts itself in [`RT_RELS`].
+fn alloc_rel(r: &mut Run<'_, '_>) -> R<(i64, i64)> {
     if r.param("pdfoutput")? <= 0 {
-        return Ok(n);
+        let n = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
+        let x = r.v.int(n);
+        r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
+        return Ok((n, 0));
     }
-    let t = n | REL;
+    let v = r.v;
+    let me = r.cx.node().raw();
+    let key = phitex_defuse::hash_words(0x7265_6c6f_626a_0001, &[me, r.pdf_occ as u64]);
+    let t = i64::from_ne_bytes((key & (u64::MAX >> 1) & !(REL.cast_unsigned())).to_ne_bytes()) | REL;
+    r.rt_made += 1;
+    r.rt_rels += 1;
+    let u = v.seq_unit(v.list(vec![node_int(r), v.int(i64::from(r.cand))]));
+    r.contribute(RT_RELS, u);
     crate::pdfout::note_read_time(r, t);
-    Ok(t)
+    Ok((t, r.rt_made))
 }
 
 /// The node this run is, as an integer in a whatsit's data: where a
@@ -899,9 +978,10 @@ fn node_int(r: &Run<'_, '_>) -> ValueId {
     r.v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()))
 }
 
-/// A last-object cell's value for number `n` this run made: a
-/// [`REL`] number with the node that made it, `[n, node]`.
-fn last_num(r: &Run<'_, '_>, n: i64) -> ValueId {
+/// A last-object cell's value for number `(n, k)` this run made
+/// ([`alloc_rel`]): a [`REL`] number with the node that made it and
+/// the node's count up to it, `[n, node, k]`.
+fn last_num(r: &Run<'_, '_>, (n, k): (i64, i64)) -> ValueId {
     let v = r.v;
     if n & REL == 0 {
         return v.int(n);
@@ -909,20 +989,27 @@ fn last_num(r: &Run<'_, '_>, n: i64) -> ValueId {
     v.list(vec![
         v.int(n),
         v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())),
+        v.int(k),
     ])
 }
 
-/// A last-object cell's number as TeX reads it: a [`REL`] number with
-/// the objects of the pages shipped before the node that made it.
+/// A last-object cell's number as TeX reads it ([`last_num`]): a [`REL`]
+/// object's count where it was made ([`rel_number`]).
 fn resolved_num(r: &mut Run<'_, '_>, x: ValueId) -> R<i64> {
     let v = r.v;
     let xs = list_of(v, x);
-    let (Some(&n), Some(&at)) = (xs.first(), xs.get(1)) else {
+    let (Some(&at), Some(&k)) = (xs.get(1), xs.get(2)) else {
         return Ok(v.as_int(x).unwrap_or(0));
     };
-    let n = int_of(v, n) & !REL;
     let at = u64::from_ne_bytes(int_of(v, at).to_ne_bytes());
-    Ok(n + crate::pdfout::page_offset_at(r, at)?)
+    rel_number(r, at, int_of(v, k))
+}
+
+/// The number TeX reads back for the [`REL`] object node `at` made as
+/// its `k`-th read-time object: the read-time objects before the node
+/// ([`rt_before`]), `k`, and the objects of the pages shipped before it.
+pub(crate) fn rel_number(r: &mut Run<'_, '_>, at: u64, k: i64) -> R<i64> {
+    Ok(rt_before(r, at)? + k + crate::pdfout::page_offset_at(r, at)?)
 }
 
 // ------------------------------------------------------------ `\pdfmatch`
@@ -2298,8 +2385,8 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         ex::ANNOT => {
             let (use_n, reserved) = obj_num_option(r)?;
             // `pdf_new_objnum` unless `useobjnum` gave it
-            let n = if let Some(n) = use_n {
-                n
+            let (n, k) = if let Some(n) = use_n {
+                (n, 0)
             } else {
                 {
                     let input = v.list(vec![s("newobjnum"), s("annot")]);
@@ -2323,10 +2410,11 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                         v.int(i64::from(d)),
                         data,
                         node_int(r),
+                        v.int(k),
                     ],
                 );
             }
-            let x = last_num(r, n);
+            let x = last_num(r, (n, k));
             r.set_cell(crate::fields::cell::PDF_LASTANNOT, x, true);
         }
         ex::START_LINK => {
@@ -2339,7 +2427,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let (w, h, d) = alt_rule(r)?;
             let at = attr(r)?;
             let act = action(r)?;
-            let n = {
+            let (n, k) = {
                 let input = v.list(vec![s("newobjnum"), s("link")]);
                 crate::pdfout::command(r, input, &[], |st, _| {
                     crate::pdfout::CmdOut::num(st.new_objnum())
@@ -2347,9 +2435,8 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 alloc_rel(r)?
             };
             if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
-                let off = crate::pdfout::page_offset(r)?;
                 eprintln!(
-                    "startlink: node {} cand {} number {n} (page offset {off})",
+                    "startlink: node {} cand {} number {n} (the node's {k}th read-time object)",
                     r.cx.node().raw(),
                     r.cand,
                 );
@@ -2366,9 +2453,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     at,
                     act,
                     node_int(r),
+                    v.int(k),
                 ],
             );
-            let x = last_num(r, n);
+            let x = last_num(r, (n, k));
             r.set_cell(crate::fields::cell::PDF_LASTLINK, x, true);
         }
         ex::END_LINK => {

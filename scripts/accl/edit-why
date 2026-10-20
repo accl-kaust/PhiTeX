@@ -1,0 +1,18 @@
+#!/bin/bash
+# Why an edit class costs what it does (on accl, in a job):
+#
+#   ACCL_COMMIT=<rev> scripts/accl/accl submit cmd bash scripts/accl/edit-why [class...]
+#
+# Builds the release CLI with `profile` and `observe`, then runs
+# amsldoc's edit classes (default: label, heading, preamble def) at -j 8
+# through `watch --json --exact-pdf` with the round accounting, every
+# rerun by node and field and every loop-back publication
+# (PHITEX_ROUND_ACCT, PHITEX_TEX_TIME, PHITEX_RERUN_OPS,
+# PHITEX_ROUND_TRACE). Writes $r/why.err (the stderr, one `=== CLASS`
+# marker per class) and $r/summary.txt (edit-why.py's digest of it).
+set -u
+cd "$(dirname "$0")/../.."
+export CARGO_BUILD_JOBS=16
+CARGO_TARGET_DIR=$w/t-obs cargo build -q --release -p phitex-cli --features phitex-tex/profile,phitex-tex/observe > "$r/build.txt" 2>&1 \
+  || { echo "build FAILED: $(grep -m1 '^error' "$r/build.txt")" | tee "$r/summary.txt"; exit 1; }
+python3 -I scripts/accl/edit-why.py "$w/t-obs/release/phitex" "$w/why" "$r" "$@" | tee "$r/summary.txt"
