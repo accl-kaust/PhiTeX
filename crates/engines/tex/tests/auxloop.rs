@@ -1,4 +1,4 @@
-//! The `.aux` loop-back: a file the job writes and reads back is a set
+//! The read-back loop: a file the job writes and reads back is a set
 //! of per-field definitions, each round's read-back the previous
 //! round's publication, settled when a round publishes what the one
 //! before did.
@@ -200,4 +200,65 @@ fn bop_counts(dvi: &[u8]) -> Vec<i32> {
     }
     cs.reverse();
     cs
+}
+
+/// A job-written file is read back per field because every line written
+/// to it only defines, not because of its name: [`DOC`] writing to a
+/// file of another name reads the same values back, and the file is one
+/// of the per-field read-backs the build exports.
+#[test]
+fn a_file_of_definitions_is_read_back_per_field_whatever_its_name() {
+    let dir = common::fixtures().join("plain");
+    let opts = Options {
+        fixpoint: true,
+        ..common::options("./t.tex", "t", "", &dir)
+    };
+    let doc = DOC.replace("\\jobname.aux", "\\jobname.dat");
+    let b = common::build(opts, Some(&common::plain()), &doc);
+    let (dvi, _) = b.output();
+    for word in [&b"ab"[..], b"c/xyz"] {
+        assert!(
+            dvi.windows(word.len()).any(|w| w == word),
+            "the page does not show the read-back value {}",
+            String::from_utf8_lossy(word)
+        );
+    }
+    assert!(
+        b.wkeys().iter().any(|(n, _)| n == "t.dat"),
+        "read back per field: {:?}",
+        b.wkeys()
+    );
+}
+
+/// A line that typesets makes its file one read back as its text: the
+/// read-back typesets the line and defines what the other lines define.
+const TEXT_DOC: &str = r"\def\bar{}
+\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi
+\immediate\openout1=\jobname.aux
+\immediate\write1{\noexpand\gdef\noexpand\bar{xyz}}
+\immediate\write1{qqq}
+Value: \bar.
+\bye
+";
+
+#[test]
+fn a_line_that_typesets_reads_the_file_back_as_text() {
+    let dir = common::fixtures().join("plain");
+    let opts = Options {
+        fixpoint: true,
+        ..common::options("./u.tex", "u", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), TEXT_DOC);
+    let (dvi, _) = b.output();
+    let has = |w: &[u8]| dvi.windows(w.len()).any(|x| x == w);
+    assert!(
+        has(b"qqq") && has(b"xyz"),
+        "{}",
+        String::from_utf8_lossy(&dvi)
+    );
+    assert!(
+        !b.wkeys().iter().any(|(n, _)| n == "u.aux"),
+        "read back as text: {:?}",
+        b.wkeys()
+    );
 }

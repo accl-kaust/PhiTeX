@@ -757,7 +757,13 @@ fn files_root(cx: &mut Ctx<'_>, listed: Vec<String>) -> Result<ValueId, Stop> {
 /// The text the job wrote to file `name` this round, from its stream's
 /// accumulator alone ([`crate::run::stream_bucket`]), and the
 /// definitions its read-back makes.
-fn stream_of(cx: &mut Ctx<'_>, name: &str) -> Result<(Option<String>, Option<WrittenDefs>), Stop> {
+/// A written file's text, its read-back's definitions and whether it is
+/// read back as its text (a line of it did more than define,
+/// [`crate::api::written_as_text`]).
+fn stream_of(
+    cx: &mut Ctx<'_>,
+    name: &str,
+) -> Result<(Option<String>, Option<WrittenDefs>, bool), Stop> {
     let v = cx.values();
     let acc = cx.acc_range(crate::run::stream_bucket(v, name), None)?;
     let text = crate::api::written_texts(v, Some(acc))
@@ -768,7 +774,10 @@ fn stream_of(cx: &mut Ctx<'_>, name: &str) -> Result<(Option<String>, Option<Wri
         .into_iter()
         .find(|(n, _)| n == name)
         .map(|(_, d)| d);
-    Ok((text, defs))
+    let as_text = crate::api::written_as_text(v, Some(acc))
+        .iter()
+        .any(|n| n == name);
+    Ok((text, defs, as_text))
 }
 
 /// A written file's read-back definitions: `(field, value)` each.
@@ -784,7 +793,7 @@ fn file_node(
     defs_lock: &std::sync::Mutex<crate::hints::Defs>,
 ) -> Result<ValueId, Stop> {
     let v = cx.values();
-    let (text, ds) = stream_of(cx, name)?;
+    let (text, ds, as_text) = stream_of(cx, name)?;
     if !listed && text.is_none() && ds.is_none() {
         return Ok(ValueId::UNIT);
     }
@@ -796,18 +805,17 @@ fn file_node(
     }
     publish_traced(cx, wt, text.as_deref().map_or(ValueId::UNIT, |t| v.str(t)));
     let k = v.field(&format!("wkeys:{name}"));
-    let keys_on = if cx.is_loopback(k) {
-        true
-    } else if crate::api::defines_only(name) {
-        // (a file whose read-back only defines, opened this round:
-        // declared here too, the opening run's declaration being in
-        // effect only once the evaluation is quiet)
+    // (read back per field while every line written to it only defines;
+    // as its text once one does more, `wkeys:` then marked so)
+    let per_field = !as_text;
+    if per_field && !cx.is_loopback(k) {
+        // (opened this round: declared here too, the opening run's
+        // declaration being in effect only once the evaluation is quiet)
         cx.declare_loopback(k, v.list(Vec::new()));
-        true
-    } else {
-        false
-    };
-    if keys_on {
+    } else if !per_field && cx.is_loopback(k) {
+        publish_traced(cx, k, crate::api::text_mark(v));
+    }
+    if per_field {
         let ds = ds.as_deref().unwrap_or_default();
         let mut keys = Vec::new();
         let trace = crate::exec::obs_flag!("PHITEX_AUX_TRACE");
@@ -850,10 +858,10 @@ fn file_node(
         publish_traced(cx, k, v.list(keys));
     }
     let f = v.field(&format!("wfile:{name}"));
+    if per_field {
+        return Ok(ValueId::UNIT);
+    }
     if !cx.is_loopback(f) {
-        if crate::api::defines_only(name) {
-            return Ok(ValueId::UNIT);
-        }
         cx.declare_loopback(f, v.list(Vec::new()));
     }
     // a file the job did not write this round is absent next round
@@ -909,7 +917,8 @@ fn written_units(cx: &mut Ctx<'_>, name: &str, text: &str, defs: &crate::hints::
         publish_traced(cx, f, v.str(u));
         entries.push(v.list(vec![v.str(&key), v.int(i64::from(starts))]));
     }
-    let sliceable = crate::inputs::document_file(name, text);
+    // (the job's own text: what kind of file it is comes from its text)
+    let sliceable = crate::inputs::document_text(text);
     v.list(vec![v.int(i64::from(sliceable)), v.list(entries)])
 }
 

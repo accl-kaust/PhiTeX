@@ -836,14 +836,14 @@ mod tests {
         };
         // (reached: the parked run's line level, read to its cut)
         let mut inp = Input::new();
-        let mut reached = cut("\\cn{iint}", true, false, -1);
+        let mut reached = cut("\\x{ab}", true, false, -1);
         reached.loc = reached.buf.len();
         inp.text.push(Seg::Line(reached));
         inp.append_text(vec![Seg::Line(cut(", and integral", false, true, -2))]);
         assert_eq!(inp.text.len(), 2, "a segment of its own");
         // (not reached: one line, its end still to come)
         let mut inp = Input::new();
-        inp.text.push(Seg::Line(cut("\\cn{iint}", true, false, -2)));
+        inp.text.push(Seg::Line(cut("\\x{ab}", true, false, -2)));
         inp.append_text(vec![Seg::Line(cut(", and integral", false, true, -2))]);
         assert_eq!(inp.text.len(), 1, "joined");
         let Some(Seg::Line(l)) = inp.text.first() else {

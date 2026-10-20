@@ -641,6 +641,24 @@ pub(crate) struct Run<'c, 'a> {
     pub interp_eof: bool,
     /// The errors §338 gave as the interpreted file ended.
     pub interp_errs: Vec<String>,
+    /// Whether the last line interpreted ([`Run::interpret_line`]) only
+    /// defined: it contributed nothing, typeset nothing, called no
+    /// node, left no group or conditional open. A file every line of
+    /// which only defines is read back per field ([`Run::read_back`]).
+    pub interp_plain: bool,
+    /// The files this run wrote a line of that does more than define:
+    /// read back as text, their next lines not interpreted.
+    pub text_written: Vec<String>,
+    /// A read-back point not known to be one yet: the file this run
+    /// looked for in vain from the macro running ([`Run::read_back_at`]).
+    /// When the run opens that file for writing, the point was its
+    /// read-back point ([`Run::written_decl`]): the values kept meanwhile
+    /// ([`Run::pending_pre`]) become the read-back values. Else nothing
+    /// of it is published.
+    pub read_point_pending: Option<String>,
+    /// The values at a pending read-back point of the locations defined
+    /// or restored after it ([`Run::note_pre`]).
+    pub pending_pre: Vec<(Loc, ValueId)>,
     /// `scanner_status` and `warning_index` (§305): what a token list
     /// being scanned is (`SCAN_DEFINING`, `SCAN_MATCHING`,
     /// `SCAN_ABSORBING`) and whose; `None` is `normal`. Kept only for
@@ -818,6 +836,10 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_nested: phitex_defuse::FxHashMap::default(),
             interp_eof: false,
             interp_errs: Vec::new(),
+            interp_plain: false,
+            text_written: Vec::new(),
+            read_point_pending: None,
+            pending_pre: Vec::new(),
             scanner: None,
             outer_call: false,
             interp_base: 0,
@@ -1349,10 +1371,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// A field this run defines after reading a job-written file back:
     /// its value at the read-back point (`wpre:<field>`, once), which a
     /// line written later reads as the read-back does
-    /// ([`Run::revert_read_back`]). LaTeX's `\document` disables the
-    /// preamble commands (`\@newl@bel` among them) right after it reads
-    /// the `.aux`; a `\newlabel` line is read before that.
-    fn note_pre(&mut self, loc: Loc) {
+    /// ([`Run::revert_read_back`]): a macro that reads a file back and
+    /// then redefines what the file's lines use (makes a command an
+    /// error from then on) leaves the lines read under the meanings at
+    /// the read-back point.
+    pub(crate) fn note_pre(&mut self, loc: Loc) {
         let v = self.v;
         // (only while the macro that read the file back runs:
         // `\document`'s rest, not the text after it)
@@ -1383,6 +1406,26 @@ impl<'c, 'a> Run<'c, 'a> {
             return;
         }
         let old = self.st.id_of(loc, v).unwrap_or(ValueId::UNIT);
+        if self.read_point_pending.is_some() {
+            if !self.pending_pre.iter().any(|&(l, _)| l == loc) {
+                self.muts += 1;
+                self.pending_pre.push((loc, old));
+            }
+            return;
+        }
+        self.set_pre(loc, old);
+    }
+
+    /// `wpre:<field>` of location `loc`: its value at the read-back
+    /// point, `old` ([`Run::note_pre`]), once.
+    fn set_pre(&mut self, loc: Loc, old: ValueId) {
+        let v = self.v;
+        let f = self.loc_field(loc);
+        let name = crate::val::field_name(v, f);
+        let pl = self.loc_of(v.field(&format!("wpre:{name}")));
+        if self.st.defined_after(pl, 0) {
+            return;
+        }
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: wpre {name} = {} (node {})",
@@ -1784,10 +1827,10 @@ impl<'c, 'a> Run<'c, 'a> {
             let _ = self.cx.use_field(k)?;
             let _ = self.cx.use_field(w)?;
         }
-        let x = if self.cx.is_loopback(k) {
+        let per_field = self.per_field(k)?;
+        let x = if let Some(keys) = per_field {
             // a file whose read-back only defines: it exists (empty) once
             // a line of it defines something ([`Run::read_back`])
-            let keys = self.cx.use_field(k)?;
             if keys.is_some_and(|x| !list_of(v, x).is_empty()) {
                 Some(v.list(vec![v.str(&format!("./{key}")), v.str("")]))
             } else {
@@ -1822,6 +1865,21 @@ impl<'c, 'a> Run<'c, 'a> {
             }
         };
         let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
+        // (a file looked for in vain: where it would be read back, its
+        // next round's lines are read, [`Run::note_read_point`]; one this
+        // job writes and reads back per field is known here, another may
+        // be opened for writing by this run later, [`Run::written_decl`])
+        if x.is_none() && self.interp.is_none() {
+            if per_field.is_some() {
+                self.note_read_point();
+            } else if !self.read_back_done || self.read_point_pending.is_some() {
+                self.note_read_point();
+                if self.read_back_done {
+                    self.muts += 1;
+                    self.read_point_pending = Some(key.to_owned());
+                }
+            }
+        }
         // (the text's hash: its value's id, a content hash, so a font's
         // or map's bytes are not copied and hashed again at every read;
         // a written file's, its units' order's)
@@ -2031,22 +2089,63 @@ impl<'c, 'a> Run<'c, 'a> {
         self.cx.is_loopback(w) || self.cx.is_loopback(k)
     }
 
-    /// Whether `name`'s `wkeys:` loop-back is declared (a file whose
-    /// read-back only defines, [`Run::read_back`]). Not yet: for such a
-    /// file the field is bound, so this run goes again once the opening
-    /// run's declaration ([`Run::written_decl`]) is in effect.
-    pub(crate) fn keys_loopback(&mut self, name: &str) -> R<bool> {
-        let k = self.keyed(crate::fields::Fam::Wkeys, name);
-        if self.cx.is_loopback(k) {
-            return Ok(true);
-        }
-        if crate::api::defines_only(name) {
-            let _ = self.cx.use_field(k)?;
-        }
-        Ok(false)
+    /// Whether the lines this run writes to `name` are interpreted as
+    /// they are written ([`Run::interpret_line`]): a file is read back per
+    /// field while every line written to it only defines, which a line is
+    /// guessed to do until this run wrote one that does more. The guess
+    /// is the first round's too, before any file node declared the file's
+    /// loop-backs: the definitions go with the lines, the file node
+    /// publishes them, and the next round reads them, as TeX's next run
+    /// reads the file this one wrote.
+    pub(crate) fn reads_back_per_field(&self, name: &str) -> bool {
+        !self.text_written.iter().any(|n| n == name)
     }
 
-    /// `\input` of a file whose read-back only defines (`.aux`): the
+    /// Whether `name`'s read-back is per field this round: its `wkeys:`
+    /// loop-back declared and not marked as read back as text
+    /// ([`crate::api::text_mark`]). The key set read, its value bound.
+    #[allow(clippy::option_option)]
+    fn per_field(&mut self, k: Field) -> R<Option<Option<ValueId>>> {
+        if !self.cx.is_loopback(k) {
+            return Ok(None);
+        }
+        let x = self.cx.use_field(k)?;
+        Ok((x != Some(crate::api::text_mark(self.v))).then_some(x))
+    }
+
+    /// The read-back point of a file whose read-back only defines (where
+    /// the macro on top reads it back, or looks for it in vain): the
+    /// fields this macro defines after it keep their value here for the
+    /// lines written later ([`Run::note_pre`]). A file looked for in vain
+    /// marks it too: the lines this run writes are read back next round
+    /// at this point, under the meanings in force here.
+    fn note_read_point(&mut self) {
+        self.read_point_pending = None;
+        self.pending_pre.clear();
+        self.read_back_at = self
+            .input
+            .levels
+            .iter()
+            .find(|l| l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO)
+            .copied();
+        self.read_back_done = self.read_back_at.is_some();
+    }
+
+    /// File `name` opened for writing by a run that looked for it in vain
+    /// from a macro still running: that lookup was its read-back point
+    /// (a macro that looks for the file it then writes: the first round's
+    /// lines are read back at that point next round).
+    fn note_absent_read_point(&mut self, name: &str) {
+        if self.read_point_pending.as_deref() != Some(name) {
+            return;
+        }
+        self.read_point_pending = None;
+        for (loc, old) in std::mem::take(&mut self.pending_pre) {
+            self.set_pre(loc, old);
+        }
+    }
+
+    /// `\input` of a file whose read-back only defines: the
     /// definitions its lines make, from the per-field loop-backs
     /// `wdef:<field>` the writer publishes for the fields listed in
     /// `wkeys:<key>`; nothing of the file's text is read. Whether `key`
@@ -2054,14 +2153,10 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn read_back(&mut self, key: &str) -> R<bool> {
         let v = self.v;
         let wk = self.keyed(crate::fields::Fam::Wkeys, key);
-        if !self.cx.is_loopback(wk) {
+        let Some(keys) = self.per_field(wk)? else {
             return Ok(false);
-        }
-        let keys = self
-            .cx
-            .use_field(wk)?
-            .map(|x| list_of(v, x))
-            .unwrap_or_default();
+        };
+        let keys = keys.map(|x| list_of(v, x)).unwrap_or_default();
         for k in keys {
             let id = crate::api::wdef_id(key, &str_of(v, k));
             let name = crate::api::wdef_field(&id).to_owned();
@@ -2103,7 +2198,8 @@ impl<'c, 'a> Run<'c, 'a> {
                 let global = int_of(v, *g) != 0;
                 // the value the read-back replaces, for the lines
                 // written this round ([`Run::revert_read_back`]): once
-                // per run (LaTeX reads the `.aux` again at `\enddocument`)
+                // per run (a file read back again later in the run keeps
+                // the first read-back point's)
                 let pre = format!("wpre:{name}");
                 if self.get(&pre)?.is_none() {
                     let was = self.get(&name)?;
@@ -2122,13 +2218,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
         }
-        self.read_back_at = self
-            .input
-            .levels
-            .iter()
-            .find(|l| l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO)
-            .copied();
-        self.read_back_done = self.read_back_at.is_some();
+        self.note_read_point();
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: read back {key} in node {} ({:?}): levels {:?}",
@@ -2251,6 +2341,16 @@ impl<'c, 'a> Run<'c, 'a> {
                 res = Err(h);
                 break;
             }
+            // (a line that does more than define is read back as text:
+            // its interpretation stops at the first command that does,
+            // its definitions not wanted)
+            if self.contribs.len() != nc
+                || self.kids.len() != nk
+                || self.nest.len() != nest_len + 1
+                || self.nest.last().is_some_and(|l| !l.list.is_empty())
+            {
+                break;
+            }
         }
         // (the text ended inside a command: as `\input` of the file
         // would, the next line written goes on with it)
@@ -2262,6 +2362,14 @@ impl<'c, 'a> Run<'c, 'a> {
         self.outer_call = false;
         let nested = std::mem::take(&mut self.interp_nested);
         let made = self.made_since(base, &nested, gids);
+        // (only definitions: nothing contributed, typeset or called, the
+        // line's own list empty and closed, no conditional left open)
+        self.interp_plain = res.is_ok()
+            && self.contribs.len() == nc
+            && self.kids.len() == nk
+            && self.nest.len() == nest_len + 1
+            && self.nest.last().is_some_and(|l| l.list.is_empty())
+            && self.conds == conds;
         self.interp = None;
         self.input = input;
         self.st = st;
@@ -2286,13 +2394,17 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// File `name` is opened for writing: where the build keeps the
     /// files the job writes in memory (`loopfiles`, a watch's fixpoint),
-    /// its loop-back is declared here, from the run (spec-redesign §1
-    /// `files(round)`): `wkeys:<name>` for a read-back that only defines,
-    /// else `wfile:<name>`, none until the files node publishes one. A
+    /// its loop-backs are declared here, from the run (spec-redesign §1
+    /// `files(round)`): `wkeys:<name>` for a read-back that only defines
+    /// and `wfile:<name>` for its text, which of the two its file node
+    /// finds from its lines, none until it publishes one. A
     /// reader that read the file before binds the field
     /// ([`Run::file`]) and runs again within the evaluation; no
     /// evaluation waits on the client for it.
     pub(crate) fn written_decl(&mut self, name: &str) -> R<()> {
+        if self.interp.is_none() {
+            self.note_absent_read_point(name);
+        }
         if self.written_known(name) {
             return Ok(());
         }
@@ -2306,13 +2418,12 @@ impl<'c, 'a> Run<'c, 'a> {
         {
             return Ok(());
         }
-        let fam = if crate::api::defines_only(name) {
-            crate::fields::Fam::Wkeys
-        } else {
-            crate::fields::Fam::Wfile
-        };
-        let f = self.keyed(fam, name);
-        self.cx.declare_loopback(f, v.list(Vec::new()));
+        // (both: whether its read-back is per field or its text is what
+        // its lines are, which its file node finds, `crate::ops`)
+        for fam in [crate::fields::Fam::Wkeys, crate::fields::Fam::Wfile] {
+            let f = self.keyed(fam, name);
+            self.cx.declare_loopback(f, v.list(Vec::new()));
+        }
         Ok(())
     }
 
@@ -3912,6 +4023,9 @@ pub(crate) struct Parked {
     muts: u64,
     read_back_done: bool,
     read_back_at: Option<crate::input::Level>,
+    text_written: Vec<String>,
+    read_point_pending: Option<String>,
+    pending_pre: Vec<(Field, ValueId)>,
     cand: u32,
     cand_marks: Vec<crate::pages::CandMark>,
     ins_pending: Vec<u16>,
@@ -3927,7 +4041,11 @@ impl Run<'_, '_> {
             return None;
         }
         if crate::exec::obs_flag!("PHITEX_PARK_TRACE") {
-            eprintln!("park-trace: park {}: {}", self.cx.node().raw(), self.input_where());
+            eprintln!(
+                "park-trace: park {}: {}",
+                self.cx.node().raw(),
+                self.input_where()
+            );
         }
         let mut segs = Vec::new();
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
@@ -4044,6 +4162,12 @@ impl Run<'_, '_> {
             muts: self.muts,
             read_back_done: self.read_back_done,
             read_back_at: self.read_back_at,
+            text_written: std::mem::take(&mut self.text_written),
+            read_point_pending: self.read_point_pending.take(),
+            pending_pre: std::mem::take(&mut self.pending_pre)
+                .into_iter()
+                .map(|(l, x)| (self.loc_field(l), x))
+                .collect(),
             cand: self.cand,
             cand_marks: std::mem::take(&mut self.cand_marks),
             ins_pending: std::mem::take(&mut self.ins_pending),
@@ -4069,7 +4193,11 @@ impl<'c, 'a> Run<'c, 'a> {
         r.input.text_at = 0;
         r.parked_levels = p.nlev;
         if crate::exec::obs_flag!("PHITEX_PARK_TRACE") {
-            eprintln!("park-trace: resume {}: {}", r.cx.node().raw(), r.input_where());
+            eprintln!(
+                "park-trace: resume {}: {}",
+                r.cx.node().raw(),
+                r.input_where()
+            );
         }
         r.nest = p
             .nest
@@ -4131,6 +4259,13 @@ impl<'c, 'a> Run<'c, 'a> {
         r.muts = p.muts;
         r.read_back_done = p.read_back_done;
         r.read_back_at = p.read_back_at;
+        r.text_written = p.text_written;
+        r.read_point_pending = p.read_point_pending;
+        r.pending_pre = p
+            .pending_pre
+            .into_iter()
+            .map(|(f, x)| (r.loc_of(f), x))
+            .collect();
         r.cand = p.cand;
         r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;
@@ -4184,7 +4319,13 @@ impl Run<'_, '_> {
                 Seg::File(_) => "text file".to_owned(),
             });
         }
-        format!("{} | cur {:?} | text_at {} parked_levels {}", out.join(" / "), self.cur.tok, self.input.text_at, self.parked_levels)
+        format!(
+            "{} | cur {:?} | text_at {} parked_levels {}",
+            out.join(" / "),
+            self.cur.tok,
+            self.input.text_at,
+            self.parked_levels
+        )
     }
 
     pub(crate) fn file_line_here(&self) -> Option<FileLine> {

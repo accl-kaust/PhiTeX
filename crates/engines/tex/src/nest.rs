@@ -218,6 +218,14 @@ impl Run<'_, '_> {
         let l = self.nest.pop()?;
         // (a paragraph is no group: its definitions are the level's below)
         if l.group != 0 {
+            // (a restore after a read-back point changes what the point
+            // had, as a definition does: kept for the lines written
+            // later, [`Run::note_pre`])
+            if self.read_back_done && self.interp.is_none() {
+                for loc in self.st.saved_locs(l.save_base) {
+                    self.note_pre(loc);
+                }
+            }
             self.st.close(l.save_base, l.def_base);
         }
         let toks: Vec<Tok> = l.ag.clone();
