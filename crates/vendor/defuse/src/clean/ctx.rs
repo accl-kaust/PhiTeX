@@ -139,7 +139,23 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    #[track_caller]
     fn stop(&mut self, w: Wait) -> Stop {
+        if super::core::debug() {
+            // (Where it stopped, and the subject as this run's world has it.)
+            let x = match w {
+                Wait::Node(x, _) => Some(x),
+                _ => None,
+            };
+            eprintln!(
+                "stopped {} at ctx.rs:{} on {w:?}: {:?} (op {:?}, reads hinted {:?})",
+                self.me,
+                std::panic::Location::caller().line(),
+                x.and_then(|x| self.w.node(x)).map(|n| (n.st, n.pos)),
+                self.w.node(self.me).map(|n| self.core.op_name(n.text.op)),
+                self.w.node(self.me).map(|n| n.text.stat.reads.is_some()),
+            );
+        }
         self.wait = Some(w);
         Stop { _private: () }
     }

@@ -61,6 +61,9 @@ struct Sched {
     guessed: FxHashSet<Id>,
     /// Nodes whose run stopped on an accumulator range, with the range.
     range_wait: FxHashMap<Id, (Field, Id, Id)>,
+    /// Nodes a batch left out by their read hints, parked on the node in
+    /// work they wait on (not scanned again until it is done).
+    hint_parked: FxHashMap<Id, Id>,
 }
 
 impl Sched {
@@ -652,7 +655,24 @@ impl Engine {
             .unwrap_or_else(|| (exec.parallelism().max(1) * 8).max(64));
         let mut idle: u32 = 0;
         let predict = sched.speculation_budget() > 0;
-        while !s.queue.is_empty() {
+        loop {
+            if s.queue.is_empty() {
+                // (Nodes parked by their hints whose blocker left work
+                // without waking them: queued again.)
+                let back: Vec<Id> = std::mem::take(&mut s.hint_parked)
+                    .into_iter()
+                    .filter(|(id, x)| s.parked.get(id) == Some(&Wait::Node(*x, None)))
+                    .map(|(id, _)| id)
+                    .collect();
+                if back.is_empty() {
+                    break;
+                }
+                for id in back {
+                    s.parked.remove(&id);
+                    self.enqueue(s, id);
+                }
+                continue;
+            }
             rep.max_ready = rep.max_ready.max(s.queue.len());
             self.check_deadline(s, rep, deadline)?;
             let Some((mut chosen, mut resumes, fueled)) = self.select_batch(s, rep, ran, cut, hs, window, predict, sched, &FxHashSet::default())? else { continue };
@@ -941,7 +961,21 @@ impl Engine {
             // (The first always goes, unless nodes are running: they
             // finish and let it go.)
             let first = ready.is_empty() && skip.is_empty();
-            if !first && !self.w.ready_by_hints(&self.core, k.2, predict) {
+            if !first && let Err(x) = self.w.hint_blocker(&self.core, k.2, predict) {
+                // (Parked on a dirty blocker, steps only: its commit
+                // queues it again; a scan per step for each cost a
+                // window's worth of checks, growing with the threads.)
+                if skip.is_empty()
+                    && let Some(x) = x
+                    && x != k.2
+                    && self.w.node(x).is_some_and(|n| n.st == St::Dirty)
+                {
+                    s.queue.remove(&k);
+                    s.queued.remove(&k.2);
+                    s.parked.insert(k.2, Wait::Node(x, None));
+                    s.waiters.entry(x).or_default().push(k.2);
+                    s.hint_parked.insert(k.2, x);
+                }
                 continue;
             }
             // A node refuted this evaluation runs in text order: when
@@ -1254,6 +1288,8 @@ impl Engine {
                         self.kept.remove(x);
                         s.parked.remove(x);
                         s.env.remove(x);
+                        // (Its waiters: their subject is gone.)
+                        self.wake(s, *x);
                     }
                     for x in dirty {
                         self.enqueue(s, x);

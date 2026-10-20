@@ -996,18 +996,23 @@ impl World {
 
     /// Whether node `id` is ready by its read hints: no hinted field is
     /// defined before it by a node still in work, nor past a pending set.
-    pub(crate) fn ready_by_hints(&self, core: &super::core::Core, id: Id, predict: bool) -> bool {
-        let Some(n) = self.node(id) else { return true };
-        let Some(fs) = n.text.stat.reads.as_ref() else { return true };
-        let Some((u, pos, fr)) = self.frame_at(id, false) else { return true };
-        fs.iter().all(|&f| {
+    /// Not ready: the node it waits on, when one in work is known.
+    pub(crate) fn hint_blocker(&self, core: &super::core::Core, id: Id, predict: bool) -> Result<(), Option<Id>> {
+        let Some(n) = self.node(id) else { return Ok(()) };
+        let Some(fs) = n.text.stat.reads.as_ref() else { return Ok(()) };
+        let Some((u, pos, fr)) = self.frame_at(id, false) else { return Ok(()) };
+        let working = |x: Id| self.node(x).is_some_and(|d| in_work(d.st)).then_some(x);
+        for &f in fs.iter() {
             if self.loops.get(&f).is_some() {
-                return true;
+                continue;
             }
             // An accumulator: held while a node before it in work may
             // still contribute (it would stop on the fold otherwise).
             if core.accs.contains_key(&f) {
-                return self.range_blocker(id, f, u, 0, pos).is_none();
+                if let Some(x) = self.range_blocker(id, f, u, 0, pos) {
+                    return Err(Some(x));
+                }
+                continue;
             }
             let reach = self.reaching(u, f, pos, fr, id);
             if let Some((_, e)) = reach {
@@ -1020,11 +1025,14 @@ impl World {
                         .and_then(|d| d.text.stat.preds.as_ref())
                         .is_some_and(|ps| ps.iter().any(|p| p.0 == f));
                 if busy && !predicted {
-                    return false;
+                    return Err(working(e.node));
                 }
             }
-            predict || self.pending_set_between(core, u, f, reach.map_or(0, |r| r.0), pos, id).is_none()
-        })
+            if !predict && let Some(x) = self.pending_set_between(core, u, f, reach.map_or(0, |r| r.0), pos, id) {
+                return Err(working(x));
+            }
+        }
+        Ok(())
     }
 
     /// The first node in work strictly between `lo` and `hi` in unit `u`
