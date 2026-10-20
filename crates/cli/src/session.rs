@@ -388,6 +388,9 @@ pub struct Session {
     /// The written keys and the package records last stored in the
     /// cache ([`Session::store_wkeys`], [`Session::store_pkgrec`]).
     stored: Mutex<(Option<Vec<u8>>, Option<Vec<u8>>)>,
+    /// What the written keys last stored were made from
+    /// ([`Build::wkeys_source`]): the same, nothing to make or store.
+    wkeys_from: Mutex<Option<u64>>,
     /// The main output last written, and where ([`Session::write_main`]).
     last_main: Mutex<Option<(PathBuf, Arc<Vec<u8>>)>>,
     /// What the session does now, for a spinner.
@@ -510,6 +513,7 @@ impl Session {
             written: Mutex::new(BTreeMap::new()),
             last_main: Mutex::new(None),
             stored: Mutex::new((None, None)),
+            wkeys_from: Mutex::new(None),
             status,
             buffers: Arc::default(),
             changed: Vec::new(),
@@ -1062,6 +1066,17 @@ impl Session {
         let (Some(c), Some(p)) = (&self.cache, self.wkeys_path()) else {
             return;
         };
+        let from = b.wkeys_source();
+        {
+            let mut last = self
+                .wkeys_from
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if from.is_some() && *last == from {
+                return;
+            }
+            *last = from;
+        }
         let mut out = String::new();
         for (n, ks) in b.wkeys() {
             out.push_str(&n);
