@@ -43,13 +43,6 @@ def md5(p):
         return "none"
 
 
-def pages(p):
-    try:
-        return len(re.findall(rb"/Type\s*/Page\b", open(p, "rb").read()))
-    except OSError:
-        return 0
-
-
 def fresh(src_dir, d, cache):
     shutil.rmtree(d, ignore_errors=True)
     shutil.copytree(src_dir, d)
@@ -60,6 +53,7 @@ def fresh(src_dir, d, cache):
 class Watch:
     def __init__(self, binary, d, main_, j, env, errf, flags):
         self.err = open(errf, "a")
+        self.events = open(errf + ".events.jsonl", "w")
         self.errf = errf
         self.p = subprocess.Popen([binary, "watch", "--no-view", "--json", *flags, "-j", str(j), main_], cwd=d,
                                   env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err)
@@ -73,6 +67,8 @@ class Watch:
             except ValueError:
                 continue
             if x.get("event") in ("build", "failed"):
+                self.events.write(line.decode("utf-8", "replace"))
+                self.events.flush()
                 return x, time.monotonic() - t
             if time.monotonic() - t > timeout:
                 break
@@ -113,7 +109,7 @@ def classes(binary, d, j, env, errf, timed):
     between them)."""
     open(errf, "w").close()
     w = Watch(binary, d, "amsldoc.tex", j, env, errf, ["--exact-pdf"])
-    ev, cold = w.build()
+    ev0, cold = w.build()
     if timed:
         w.wait_timeline(1)
     orig = open(w.path, encoding="latin-1").read()
@@ -135,7 +131,7 @@ def classes(binary, d, j, env, errf, timed):
         w.mark(f"REVERT {name}")
         step(orig)
     w.quit()
-    return cold, out
+    return (cold, ev0), out
 
 
 def split(errf):
@@ -185,8 +181,13 @@ def cold(binary, src, d, cache, j, log):
                             stdout=f, stderr=subprocess.STDOUT, timeout=1800).returncode
     wall = time.monotonic() - t
     pdf = os.path.join(d, "amsldoc.pdf")
-    nodes = re.findall(r"(\d+) nodes run of (\d+) live", open(log, errors="replace").read())
-    return rc, md5(pdf), pages(pdf), wall, (nodes[-1][1] if nodes else "?")
+    text = open(log, errors="replace").read()
+    nodes = re.findall(r"(\d+) nodes run of (\d+) live", text)
+    pg = re.findall(r"^(?:finished|failed): .*?(\d+) pages", text, re.M)
+    errs = re.findall(r"^error: (.*)", text, re.M)
+    if j == 1 and os.path.exists(pdf):
+        shutil.copy(pdf, log[:-4] + ".pdf")
+    return rc, md5(pdf), pg[-1] if pg else "?", wall, (nodes[-1][1] if nodes else "?"), "; ".join(errs)[:120]
 
 
 def para_edit(binary, src, d, cache, errf):
@@ -222,11 +223,11 @@ def main():
           for k in range(4)]
     d = os.path.join(work, "cls")
     env = fresh(ams, d, cache)
-    cold_rel, walls = classes(rel, d, 8, env, os.path.join(res, "classes-rel.err"), False)
+    (cold_rel, ev_cold), walls = classes(rel, d, 8, env, os.path.join(res, "classes-rel.err"), False)
     hist_rel = md5(os.path.join(d, "amsldoc.pdf"))
     d = os.path.join(work, "clsp")
     env = dict(fresh(ams, d, cache), PHITEX_TEX_TIME="1", PHITEX_ROUND_ACCT="1")
-    pcold, pwalls = classes(prof, d, 8, env, os.path.join(res, "classes-prof.err"), True)
+    (pcold, pev_cold), pwalls = classes(prof, d, 8, env, os.path.join(res, "classes-prof.err"), True)
     sp = split(os.path.join(res, "classes-prof.err"))
     pd = os.path.join(work, "para")
     shutil.rmtree(pd, ignore_errors=True)
@@ -252,10 +253,16 @@ def main():
               f"{f(s.get('bodies'))} | {f(s.get('link'))} | {f(rest)} | {runs} |")
     print(f"| para4000 one word (3 edits) | {' / '.join(f'{x * 1e3:.0f}' for x in pw)} | | | | | | | | | | |")
     print()
-    print(f"watch cold (rel) {cold_rel:.1f} s; history after the reverts md5 {hist_rel}")
-    print(f"amsldoc -j 1: exit {j1[0]} md5 {j1[1]} pages {j1[2]} wall {j1[3]:.1f} s nodes {j1[4]}")
+    def errs(ev):
+        return "; ".join(str(e.get("message", e) if isinstance(e, dict) else e) for e in (ev or {}).get("diagnostics") or [] if "rror" in str(e))[:160]
+    print(f"watch cold (rel) {cold_rel:.1f} s ok {ev_cold and ev_cold.get('ok')} pages {ev_cold and ev_cold.get('pages')} {errs(ev_cold)}; "
+          f"prof cold ok {pev_cold and pev_cold.get('ok')} pages {pev_cold and pev_cold.get('pages')}; history after the reverts md5 {hist_rel}")
+    for (name, _, _), (wall, ev) in zip(CLASSES, walls):
+        if ev and not ev.get("ok"):
+            print(f"  {name}: not ok: {errs(ev) or str(ev.get('errors'))[:160]}")
+    print(f"amsldoc -j 1: exit {j1[0]} md5 {j1[1]} pages {j1[2]} wall {j1[3]:.1f} s nodes {j1[4]} {j1[5]}")
     for k, x in enumerate(j8):
-        print(f"amsldoc -j 8 #{k + 1}: exit {x[0]} md5 {x[1]} pages {x[2]} wall {x[3]:.1f} s")
+        print(f"amsldoc -j 8 #{k + 1}: exit {x[0]} md5 {x[1]} pages {x[2]} wall {x[3]:.1f} s {x[5]}")
 
 
 if __name__ == "__main__":
