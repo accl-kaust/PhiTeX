@@ -150,6 +150,8 @@ impl Engine {
     ) -> Result<Report, EvalError> {
         let t0 = std::time::Instant::now();
         let mut rep = Report::default();
+        (self.t_op, self.t_commit, self.t_idle) = (0, 0, 0);
+        self.t_seen = (0, 0, 0);
         if let Some(v) = src.absorb(self) {
             self.version = v;
             rep.edits_applied.push((v, 0));
@@ -476,6 +478,11 @@ impl Engine {
         rep.version = self.version;
         if let Some(t) = rep.round_times.last_mut() {
             t.wall_ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            // (The final phase's time goes with the last round.)
+            let (o, c, i) = self.t_seen;
+            t.op_ns += self.t_op - o;
+            t.commit_ns += self.t_commit - c;
+            t.idle_ns += self.t_idle - i;
         }
         rep.quick_held = had_old && !moved_vs_old && rounds == old_rounds;
         // (Every per-round evaluation after the first runs the rounds again
@@ -596,8 +603,11 @@ impl Engine {
             };
             idle = 0;
             *s.time.entry(id).or_default() += d;
+            self.t_op += u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
             let applied = matches!(outcome, Outcome::Done(_));
+            let tc = std::time::Instant::now();
             super::core::prof::time(1, || self.apply(s, rep, ran, cut, hs, id, outcome, true))?;
+            self.t_commit += u64::try_from(tc.elapsed().as_nanos()).unwrap_or(u64::MAX);
             rep.steps += 1;
             if applied {
                 width(rep, 1);
@@ -628,7 +638,11 @@ impl Engine {
         sched: &mut dyn Scheduler,
         exec: &mut dyn Executor,
     ) -> Result<bool, EvalError> {
-        let window = (exec.parallelism().max(1) * 8).max(64);
+        // (CLEAN_WINDOW: the ready window's size, to study.)
+        let window = std::env::var("CLEAN_WINDOW")
+            .ok()
+            .and_then(|w| w.parse().ok())
+            .unwrap_or_else(|| (exec.parallelism().max(1) * 8).max(64));
         let mut idle: u32 = 0;
         let predict = sched.speculation_budget() > 0;
         while !s.queue.is_empty() {
@@ -665,7 +679,13 @@ impl Engine {
                     crate::api::RunResult(())
                 };
                 let mut out = Vec::with_capacity(jobs.len());
+                let ts = std::time::Instant::now();
                 exec.execute(jobs.len(), &run, &mut out);
+                // (Idle: the workers' time in the step not spent in runs.)
+                let busy: u64 = slots.iter().filter_map(|x| super::core::lock(x).as_ref().map(|(_, d)| u64::try_from(d.as_nanos()).unwrap_or(0))).sum();
+                let span = u64::try_from(ts.elapsed().as_nanos()).unwrap_or(u64::MAX).saturating_mul(exec.parallelism().max(1) as u64);
+                self.t_op += busy;
+                self.t_idle += span.saturating_sub(busy);
             }
             // The field writes of the commits that change no structure are
             // recorded and made together, in parallel ([`super::batch`]).
@@ -682,9 +702,11 @@ impl Engine {
                 parked: 0,
                 err: None,
             };
+            let tc = std::time::Instant::now();
             m.drain(&snap, &jobs, &slots, exec);
             m.flush(exec);
             m.eng.defer = None;
+            m.eng.t_commit += u64::try_from(tc.elapsed().as_nanos()).unwrap_or(u64::MAX);
             let (applied, parked, err) = (m.applied, m.parked, m.err.take());
             drop(m);
             if let Some(e) = err {
@@ -1636,15 +1658,20 @@ impl Engine {
 
     /// A round ended: its runs, and (from its old world) the results it
     /// reused.
-    fn round_done(&self, rep: &mut Report, round_runs: &mut u64, from_old: bool) {
+    fn round_done(&mut self, rep: &mut Report, round_runs: &mut u64, from_old: bool) {
         let runs = rep.runs - *round_runs;
         *round_runs = rep.runs;
         let memo_hits = if from_old { (self.w.nodes.len() as u64).saturating_sub(runs) } else { 0 };
+        let (o, c, i) = self.t_seen;
         rep.round_times.push(crate::api::RoundTimes {
             runs,
             memo_hits,
+            op_ns: self.t_op - o,
+            commit_ns: self.t_commit - c,
+            idle_ns: self.t_idle - i,
             ..Default::default()
         });
+        self.t_seen = (self.t_op, self.t_commit, self.t_idle);
     }
 
     fn publications(&self) -> Result<Vec<(Field, ValueId)>, EvalError> {

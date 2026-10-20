@@ -103,6 +103,12 @@ pub struct Engine {
     pub(crate) heights: bool,
     /// While a step merges: the field writes recorded ([`super::batch`]).
     pub(crate) defer: Option<super::batch::Pending>,
+    /// Time in runs, in commits and workers idle this evaluation (ns), and
+    /// how much of it the rounds before took.
+    pub(crate) t_op: u64,
+    pub(crate) t_commit: u64,
+    pub(crate) t_idle: u64,
+    pub(crate) t_seen: (u64, u64, u64),
     /// The last evaluation's critical chain, highest first.
     pub(crate) chain: Vec<(NodeId, u32, crate::api::Cause)>,
 }
@@ -146,6 +152,10 @@ impl Engine {
             rerun_text: Vec::new(),
             heights: true,
             defer: None,
+            t_op: 0,
+            t_commit: 0,
+            t_idle: 0,
+            t_seen: (0, 0, 0),
             chain: Vec::new(),
         };
         eng.register(Arc::new(OpenOp));
