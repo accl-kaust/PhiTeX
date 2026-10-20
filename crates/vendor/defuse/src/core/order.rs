@@ -1610,40 +1610,6 @@ impl Shared {
         }
     }
 
-    /// `s`, out of work, touches each reader that passed its entry for a
-    /// field while it was in work (`Shared::passes`) when it still has an
-    /// entry for that field: an entry its last run made again unchanged
-    /// notifies nobody by itself, and those readers hold the older
-    /// definition it shadows. (Only those readers: a reader that found
-    /// the entry is right. An entry changed or removed notified already.)
-    pub(crate) fn passed_entries(&self, s: Slot, notes: &mut Notes) {
-        let mut passed = {
-            let mut d = self.rec(s).data();
-            let Some(e) = d.x.as_mut() else { return };
-            if e.passed.is_empty() {
-                return;
-            }
-            std::mem::take(&mut e.passed)
-        };
-        passed.sort_unstable();
-        passed.dedup();
-        let u = self.unit_of(s);
-        let mut i = 0;
-        while i < passed.len() {
-            let f = passed[i].0;
-            let j = i + passed[i..].partition_point(|p| p.0 == f);
-            let kept = super::rlock(self.shard(u, f))
-                .get(&(u, f))
-                .is_some_and(|idx| self.def_positions(idx, s).next().is_some());
-            if kept {
-                for &(_, n) in &passed[i..j] {
-                    notes.touch.push((n, u32::MAX, Cause::Changed { site: None, field: f }));
-                }
-            }
-            i = j;
-        }
-    }
-
     /// Inserts a definition entry for `s`, notifying readers after it.
     pub(crate) fn insert_def(&self, u: u32, s: Slot, f: Field, loc: Locality, val: DefVal, notes: &mut Notes) {
         // (A scope frame reads the node's data: before the shard lock. A

@@ -2791,3 +2791,35 @@ fn rerun_causes_name_the_text_and_the_changed_value() {
         r.rerun_causes
     );
 }
+
+/// `mark_op` marks the nodes its operation creates from then on, unfolded
+/// children too: each is reported settled once final.
+#[test]
+fn mark_op_reports_the_nodes_it_creates() {
+    struct Op(std::sync::OnceLock<defuse::OpId>);
+    impl defuse::Operation for Op {
+        fn defs(&self, _: &[defuse::ValueId], _: &defuse::Values) -> Option<Vec<(defuse::Field, defuse::Locality)>> {
+            Some(Vec::new())
+        }
+        fn run(&self, cx: &mut defuse::Ctx<'_>) -> Result<defuse::ValueId, defuse::Stop> {
+            let a = cx.args();
+            if cx.values().as_int(a[0]) == Some(0) {
+                for k in 1..4 {
+                    let x = cx.values().int(k);
+                    cx.child(*self.0.get().expect("registered"), vec![x]);
+                }
+            }
+            Ok(a[0])
+        }
+    }
+    let mut eng = Engine::new();
+    let o = std::sync::Arc::new(Op(std::sync::OnceLock::new()));
+    let op = eng.register(o.clone());
+    o.0.set(op).expect("once");
+    eng.mark_op(op);
+    let u = eng.new_unit();
+    let z = eng.values().int(0);
+    eng.push(u, op, vec![z]);
+    eng.evaluate_sequential().unwrap();
+    assert_eq!(eng.take_settled().len(), 4);
+}

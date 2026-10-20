@@ -118,9 +118,7 @@ impl Engine {
         let memo = &self.sh.memo;
         let mut refused: Option<String> = None;
         if self.loop_start == LoopStart::PerRound && memo.edited.load(Ordering::Acquire) && !memo.quick_eligible() {
-            refused = Some(if memo.no_quick() {
-                "the last evaluation failed (its rounds' entries are offered; the quick path waits for a good one)"
-            } else if memo.structural.load(Ordering::Acquire) {
+            refused = Some(if memo.structural.load(Ordering::Acquire) {
                 "an edit the quick path cannot judge (a claimed text, a changed scope effect, claim or finality, push_many)"
             } else {
                 "no per-round memo yet"
@@ -404,11 +402,9 @@ impl Engine {
         let mut tt = tail;
         let quick = self.sh.memo.quick.load(Ordering::Acquire);
         if let Err(e) = result {
-            // (A quick path that failed falls back to the rounds, memo kept.
-            // Rounds that failed keep the last good evaluation's entries for
-            // the next one to offer; the quick path waits for a good one.)
+            // (A quick path that failed falls back to the rounds, memo kept.)
             if !quick {
-                self.sh.memo.failed();
+                self.sh.memo.drop_all();
             }
             return Err(self.with_report(e, rep, rounds, restarts));
         }
@@ -617,9 +613,6 @@ impl Engine {
                 .is_ok()
             {
                 sh.leave_work_lists(s);
-                let mut notes = super::order::Notes::default();
-                sh.passed_entries(s, &mut notes);
-                sh.dispatch(&mut notes, s);
             }
             let w = std::mem::take(&mut sh.rec(s).data().waiters);
             for (n, q) in w {
@@ -722,7 +715,6 @@ impl Engine {
             a.store(0, Ordering::Relaxed);
         }
         c.realised.store(0, Ordering::Relaxed);
-        lock(&sh.rchain).clear();
         c.realised_ns.store(0, Ordering::Relaxed);
         for t in &*sh.t {
             *lock(&t.0) = super::Tallies::default();

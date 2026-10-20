@@ -24,6 +24,8 @@ observe = ["dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber
 # The light trace (`DEFUSE_LTRACE`, see `core::ltrace`): off by default,
 # when release builds carry no hook and read no environment.
 ltrace = []
+# The clean core (`docs/clean-core.md`), built beside the round core.
+clean = []
 
 [profile.release]
 debug = 1

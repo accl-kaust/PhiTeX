@@ -75,7 +75,7 @@ impl Recorder {
             m.insert("e".into(), json!(vals.instance()));
         }
         let text = line.to_string();
-        let mut g = crate::core::lock(&self.out);
+        let mut g = self.out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (w, seen, lines) = &mut *g;
         if once && !lines.insert(hash_of(&text)) {
             // Skipped: the values named so far that are not written yet

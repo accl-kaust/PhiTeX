@@ -236,10 +236,8 @@ impl Shared {
     /// candidates in the reader's span (a definition set narrow enough to
     /// name the field, or a prefix few nodes declare) is likely to
     /// define the field: the read waits for it rather than guess past it.
-    /// Otherwise, under any speculation, it guesses past it (a definition
-    /// it makes after all refutes the read when the reader lands).
     fn optimistic_pset(&self, cands: usize) -> bool {
-        if self.spec.load(Ordering::Relaxed) >= 1 && cands > PSET_FEW {
+        if self.spec.load(Ordering::Relaxed) == 2 && cands > PSET_FEW {
             self.c.speculations.fetch_add(1, Ordering::Relaxed);
             true
         } else {
@@ -511,7 +509,7 @@ impl Shared {
                 if q == at {
                     continue;
                 }
-                if self.passes(q, f, me) {
+                if (q == me || self.busy(q, me)) && !self.may_define_now(q, f) {
                     // A definition its old text made: gone once it commits.
                     continue;
                 }
@@ -679,7 +677,7 @@ impl Shared {
                 if q == at {
                     continue;
                 }
-                if self.passes(q, f, me) {
+                if (q == me || self.busy(q, me)) && !self.may_define_now(q, f) {
                     // A definition its old text made: gone once it commits.
                     continue;
                 }
@@ -1084,33 +1082,6 @@ impl Shared {
             return false;
         }
         fields.iter().any(|&f| self.may_define_now(c, f))
-    }
-
-    /// Whether a read by `me` passes `q`'s entry for `f`: `q` is the
-    /// reader, or in work with a declaration that no longer covers `f` (a
-    /// definition its old text made: gone once it commits). A pass by
-    /// another reader is recorded on `q`, under its data lock with `q`
-    /// still in work: should `q` leave work with the entry still there,
-    /// it touches this reader (`passed_entries`), so the older definition
-    /// this read found instead never stands.
-    fn passes(&self, q: Slot, f: Field, me: Slot) -> bool {
-        if q == me {
-            return !self.may_define_now(q, f);
-        }
-        if !self.busy(q, me) || self.may_define_now(q, f) {
-            return false;
-        }
-        let mut d = self.rec(q).data();
-        // (Left work since: its entry stands, read it.)
-        if !self.busy(q, me) {
-            return false;
-        }
-        let e = d.ex();
-        // (Repeats are dropped when `q` leaves work.)
-        if me != NIL && e.passed.last() != Some(&(f, me)) {
-            e.passed.push((f, me));
-        }
-        true
     }
 
     /// Whether `c`'s current text may define `f` (a definition entry it

@@ -529,7 +529,7 @@ pub(crate) struct Extra {
     pub waited: Vec<WaitRec>,
     /// The nodes it parked on since its last commit, with the evaluation
     /// (epoch) it parked in: its realised depth starts after theirs.
-    pub parked_on: Vec<(Slot, u64, &'static str, Option<Field>)>,
+    pub parked_on: Vec<(Slot, u64)>,
     pub claimed: Vec<Slot>,
     /// What a static claimer consumed (window) when its claim was computed.
     pub window: Vec<Slot>,
@@ -553,11 +553,6 @@ pub(crate) struct Extra {
     pub check_from: u32,
     /// That check waited where the one before it started.
     pub check_stuck: bool,
-    /// (field, reader): reads that passed this node's entry for the field
-    /// while it was in work, its declaration not covering the field; when
-    /// it leaves work with the entry kept, those readers are touched
-    /// (`Shared::passed_entries`).
-    pub passed: Vec<(Field, Slot)>,
 }
 
 impl Data {
@@ -597,7 +592,6 @@ impl Data {
                 && e.app_unit == u32::MAX
                 && e.wait_on.is_none()
                 && e.ask.is_none()
-                && e.passed.is_empty()
         }) {
             self.x = None;
         }
@@ -1012,9 +1006,6 @@ pub(crate) type EnvReaders = FxHashMap<Field, Vec<(Slot, u32)>>;
 
 /// The store and the evaluation state every worker shares.
 pub(crate) struct Shared {
-    /// With `DEFUSE_RCHAIN` set: per node run this evaluation, the run
-    /// its realised depth followed and why (`Engine::realised_chain`).
-    pub rchain: std::sync::Mutex<FxHashMap<Slot, (Slot, &'static str, Option<Field>, u64)>>,
     pub values: Values,
     pub ops: Vec<Arc<dyn Operation>>,
     /// Client projections (`ProjId` 2 on).
@@ -1378,16 +1369,9 @@ impl Shared {
         &self.env_readers[(f.0.raw() >> 56) as usize % self.env_readers.len()]
     }
 
-    /// Runs `f` on a consistent view of unit `u`'s structure: optimistic
-    /// (retried when a structural write overlapped it); after two
-    /// overlapped attempts, or a writer in for long, as a committing reader
-    /// (`runit`: writers wait for it), so a long read is not retried
-    /// without end while writes keep landing.
-    #[track_caller]
     pub(crate) fn sread<T>(&self, u: u32, mut f: impl FnMut() -> T) -> T {
         let sv = &self.unit(u).sv;
         let mut spins = 0u32;
-        let mut overlapped = 0u32;
         #[cfg(feature = "profile")]
         let t0 = std::time::Instant::now();
         loop {
@@ -1403,22 +1387,13 @@ impl Shared {
                     }
                     return r;
                 }
-                overlapped += 1;
             }
             spins += 1;
-            if overlapped >= 2 || spins >= 64 {
-                // (No structural write lands while it is held; this thread
-                // holds no full writer of `u`: its own would keep `sv` odd.)
-                let _r = self.runit(u);
-                let r = f();
-                #[cfg(feature = "profile")]
-                {
-                    #[allow(clippy::cast_possible_truncation)]
-                    crate::obs::lock_wait(std::panic::Location::caller(), t0.elapsed().as_nanos() as u64);
-                }
-                return r;
+            if spins < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
             }
-            std::hint::spin_loop();
         }
     }
 }

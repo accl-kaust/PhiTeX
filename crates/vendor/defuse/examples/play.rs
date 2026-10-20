@@ -198,18 +198,8 @@ impl Operation for PlayOp {
     fn may_define_field(&self, args: &[ValueId], _: &Values, f: Field) -> bool {
         self.st("may_define_field", args, json!(f), true)
     }
-    fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        // `PLAY_DROP_READS=a,b`: those fields left out of the recorded
-        // hints (a client that no longer declares them).
-        let r: Option<Vec<Field>> = self.st("reads", args, J::Null, None);
-        match std::env::var("PLAY_DROP_READS") {
-            Ok(drop) => r.map(|fs| {
-                fs.into_iter()
-                    .filter(|f| v.as_str(f.0).is_none_or(|n| !drop.split(',').any(|d| d == n)))
-                    .collect()
-            }),
-            Err(_) => r,
-        }
+    fn reads(&self, args: &[ValueId], _: &Values) -> Option<Vec<Field>> {
+        self.st("reads", args, J::Null, None)
     }
     fn static_contribs(&self, args: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
         self.st("static_contribs", args, J::Null, None)
@@ -678,6 +668,12 @@ fn main() {
                 for l in stale.iter().take(10) {
                     println!("    {l}");
                 }
+                #[cfg(feature = "clean")]
+                if let Ok(rep) = &r
+                    && std::env::var_os("PLAY_DAG").is_some()
+                {
+                    sched_study(&eng, rep);
+                }
                 if let Ok(rep) = &r {
                     println!(
                         "  runs {} stops {} rounds {} steps {}",
@@ -734,17 +730,6 @@ fn main() {
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
-                    if std::env::var_os("DEFUSE_RCHAIN").is_some() {
-                        // The realised chain, deepest first: why each run
-                        // came after the next.
-                        for (n, d, k) in eng.realised_chain() {
-                            let what = eng.node_info(n).map_or(String::new(), |i| {
-                                let a: Vec<String> = i.args.iter().take(3).map(|&v| eng.values().render(v)).collect();
-                                format!("{} {}", i.op, a.join(" ")).chars().take(90).collect()
-                            });
-                            println!("    chain {d:>4} {k:<24} {what}");
-                        }
-                    }
                     println!(
                         "  bounds: busy/{threads} {:.1} ms, critical path {} runs = {:.1} ms",
                         ms(busy) / threads as f64,
@@ -822,4 +807,144 @@ fn main() {
 fn short(j: &J) -> String {
     let s = j.to_string();
     if s.len() > 300 { format!("{}…", &s[..300]) } else { s }
+}
+
+/// The best any scheduler could do on this evaluation's dependency graph
+/// with these run times: the critical path, and a list schedule (longest
+/// path to the end first) on P workers, with commits free or each taking
+/// PLAY_COMMIT_US on one committer.
+#[cfg(feature = "clean")]
+fn sched_study(eng: &defuse::Engine, rep: &defuse::Report) {
+    use std::collections::{BinaryHeap, HashMap, VecDeque};
+    let g = eng.dependency_graph();
+    let idx: HashMap<defuse::NodeId, usize> = g.iter().enumerate().map(|(i, (n, _))| (*n, i)).collect();
+    let times: HashMap<defuse::NodeId, f64> = rep.run_times.iter().map(|(n, d)| (*n, d.as_secs_f64() * 1e3)).collect();
+    let n = g.len();
+    let t: Vec<f64> = g.iter().map(|(x, _)| times.get(x).copied().unwrap_or(0.0)).collect();
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut indeg = vec![0usize; n];
+    let mut edges = 0;
+    for (i, (_, ds)) in g.iter().enumerate() {
+        for d in ds {
+            if let Some(&j) = idx.get(d) {
+                succ[j].push(i);
+                indeg[i] += 1;
+                edges += 1;
+            }
+        }
+    }
+    // A topological order; nodes left in cycles lose their remaining
+    // in-edges (counted).
+    let mut deg = indeg.clone();
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut q: VecDeque<usize> = (0..n).filter(|&i| deg[i] == 0).collect();
+    let mut broken = 0;
+    let mut seen = vec![false; n];
+    loop {
+        while let Some(i) = q.pop_front() {
+            if seen[i] {
+                continue;
+            }
+            seen[i] = true;
+            order.push(i);
+            for &s in &succ[i] {
+                deg[s] = deg[s].saturating_sub(1);
+                if deg[s] == 0 {
+                    q.push_back(s);
+                }
+            }
+        }
+        match (0..n).find(|&i| !seen[i]) {
+            Some(i) => {
+                broken += 1;
+                deg[i] = 0;
+                q.push_back(i);
+            }
+            None => break,
+        }
+    }
+    let mut pos = vec![0usize; n];
+    for (k, &i) in order.iter().enumerate() {
+        pos[i] = k;
+    }
+    // Longest path from each node to the end (its own time included),
+    // along edges that go forward in the order.
+    let mut bl = vec![0.0f64; n];
+    for &i in order.iter().rev() {
+        let m = succ[i].iter().filter(|&&s| pos[s] > pos[i]).map(|&s| bl[s]).fold(0.0, f64::max);
+        bl[i] = t[i] + m;
+    }
+    let crit = bl.iter().copied().fold(0.0, f64::max);
+    let total: f64 = t.iter().sum();
+    // The critical chain's length in runs.
+    let mut len = 0;
+    let mut cur = (0..n).max_by(|&a, &b| bl[a].total_cmp(&bl[b]));
+    while let Some(i) = cur {
+        len += 1;
+        cur = succ[i].iter().copied().filter(|&s| pos[s] > pos[i]).max_by(|&a, &b| bl[a].total_cmp(&bl[b]));
+    }
+    println!("  dag: nodes {n} edges {edges} cycles broken {broken}; run time {total:.1} ms; critical path {crit:.1} ms over {len} runs");
+    let commit_us: f64 = std::env::var("PLAY_COMMIT_US").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0);
+    let sim = |p: usize, c: f64| -> f64 {
+        // Ready by priority (longest path to the end first).
+        #[derive(PartialEq)]
+        struct R(f64, usize);
+        impl Eq for R {}
+        impl PartialOrd for R {
+            fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(o))
+            }
+        }
+        impl Ord for R {
+            fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+                self.0.total_cmp(&o.0).then(o.1.cmp(&self.1))
+            }
+        }
+        let ns = |x: f64| (x * 1e6) as u64;
+        let mut deg: Vec<usize> = (0..n).map(|i| g[i].1.iter().filter(|d| idx.get(d).is_some_and(|&j| pos[j] < pos[i])).count()).collect();
+        let mut ready: BinaryHeap<R> = BinaryHeap::new();
+        // Events (time, kind, node): kind 0 a node becomes ready, 1 a run
+        // ends.
+        let mut ev: BinaryHeap<std::cmp::Reverse<(u64, u8, usize)>> = (0..n).filter(|&i| deg[i] == 0).map(|i| std::cmp::Reverse((0, 0, i))).collect();
+        let (mut now, mut free, mut committer, mut done) = (0u64, p, 0u64, 0usize);
+        while done < n {
+            let Some(std::cmp::Reverse((tm, kind, i))) = ev.pop() else { break };
+            now = tm;
+            if kind == 0 {
+                ready.push(R(bl[i], i));
+            } else {
+                free += 1;
+                done += 1;
+                let end = if c > 0.0 {
+                    committer = committer.max(now) + ns(c);
+                    committer
+                } else {
+                    now
+                };
+                for &s in &succ[i] {
+                    if pos[s] > pos[i] {
+                        deg[s] -= 1;
+                        if deg[s] == 0 {
+                            ev.push(std::cmp::Reverse((end, 0, s)));
+                        }
+                    }
+                }
+            }
+            // Start what can start now (after every event of this time).
+            if ev.peek().is_some_and(|e| e.0.0 == now) {
+                continue;
+            }
+            while free > 0 {
+                let Some(R(_, x)) = ready.pop() else { break };
+                free -= 1;
+                ev.push(std::cmp::Reverse((now + ns(t[x]), 1, x)));
+            }
+        }
+        now.max(committer) as f64 / 1e6
+    };
+    let mut line = String::from("  ideal:");
+    for p in [1usize, 2, 4, 8, 16, 32, 48] {
+        line += &format!(" j{p} {:.1}/{:.1}", sim(p, 0.0), sim(p, commit_us / 1e3));
+    }
+    println!("{line}  (ms; free commits / one committer at {commit_us} us each)");
 }

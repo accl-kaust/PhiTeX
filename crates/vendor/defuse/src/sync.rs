@@ -8,6 +8,9 @@
 //!
 //! Both never move or free a record before the container is dropped, which
 //! is what makes handing out `&T` from a shared reference sound.
+//!
+//! - [`SendMut`]: a borrowed `&mut T` carried into a mutex the workers
+//!   share (the clean core's scheduler in its flow).
 
 use std::ptr;
 use std::sync::Mutex;
@@ -507,6 +510,37 @@ impl<T> BrLock<T> {
             _g: g,
             data: unsafe { &mut *self.data.get() },
         }
+    }
+}
+
+/// A `&mut T` that may cross to another thread inside a mutex: the
+/// clean core's flow keeps its scheduler (a `dyn Scheduler`, not `Send`)
+/// in the mutex its workers share and calls it only while holding it.
+#[allow(dead_code)]
+pub(crate) struct SendMut<'a, T: ?Sized> {
+    p: *mut T,
+    _b: std::marker::PhantomData<&'a mut T>,
+}
+
+// SAFETY: a `SendMut` is reached only through `&mut self` (so by one thread
+// at a time, the one holding the mutex it lives in), it borrows its `T` for
+// its whole life, and the `T`s it carries (schedulers) keep no state tied to
+// a thread.
+unsafe impl<T: ?Sized> Send for SendMut<'_, T> {}
+
+#[allow(dead_code)]
+impl<'a, T: ?Sized> SendMut<'a, T> {
+    pub(crate) fn new(r: &'a mut T) -> Self {
+        SendMut {
+            p: std::ptr::from_mut(r),
+            _b: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn with<R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
+        // SAFETY: borrowed for 'a and reached only by the holder of
+        // `&mut self` (see the `Send` impl).
+        f(unsafe { &mut *self.p })
     }
 }
 

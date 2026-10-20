@@ -7,7 +7,7 @@ publish = false
 description = "PhiTeX's side of the engine: re-exports defuse (the TeX-free def-use graph evaluator, vendored under crates/vendor/defuse and never edited here) and holds what PhiTeX adds around it without knowing TeX"
 
 [dependencies]
-defuse = { path = "../../vendor/defuse" }
+defuse = { path = "../../vendor/defuse", features = ["clean"] }
 
 [features]
 # the engine's probes (defuse::obs): spans and counters, profiling only

@@ -823,11 +823,6 @@ impl Shared {
         if !self.leave_run(s, super::S_CLEAN) {
             return;
         }
-        {
-            let mut notes = Notes::default();
-            self.passed_entries(s, &mut notes);
-            self.dispatch(&mut notes, s);
-        }
         let waiters = std::mem::take(&mut r.data().waiters);
         for (n, q) in waiters {
             self.wake(n, q);
@@ -1271,7 +1266,7 @@ impl Shared {
                 && needs_run
             {
                 let ep = self.epoch.load(Ordering::Relaxed);
-                d.ex().parked_on.push((x, ep, w.kind, w.field));
+                d.ex().parked_on.push((x, ep));
             }
             // (Only the waits a committed result keeps: see `commit`.)
             if let Subj::Node(x) = w.on

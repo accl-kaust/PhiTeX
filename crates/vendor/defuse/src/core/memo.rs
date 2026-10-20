@@ -145,9 +145,6 @@ pub(crate) struct Memo {
     ix: std::sync::Mutex<Index>,
     /// The bytes held (computed when the memo is replaced).
     bytes: AtomicU64,
-    /// The last evaluation failed: the state is not the kept memo's fixed
-    /// point (no quick path until a good evaluation).
-    no_quick: AtomicBool,
 }
 
 /// A loop-back change at the end of a round: the fields, whether a round
@@ -287,12 +284,6 @@ impl Memo {
         *lock(&self.ix) = ix;
         *lock(&self.prev_changes) = changes;
         self.bytes.store(self.measure(), Ordering::Relaxed);
-        self.no_quick.store(false, Ordering::Release);
-    }
-
-    /// The last evaluation failed (see `failed`).
-    pub(crate) fn no_quick(&self) -> bool {
-        self.no_quick.load(Ordering::Acquire)
     }
 
     /// Whether the quick path may be tried: only value edits (same
@@ -300,7 +291,6 @@ impl Memo {
     pub(crate) fn quick_eligible(&self) -> bool {
         self.edited.load(Ordering::Acquire)
             && !self.structural.load(Ordering::Acquire)
-            && !self.no_quick.load(Ordering::Acquire)
             && self.prev_rounds.load(Ordering::Relaxed) > 0
             && !self
                 .prev
@@ -335,17 +325,7 @@ impl Memo {
         lock(&self.insert_parents).clear();
     }
 
-    /// The rounds failed: this evaluation's results are dropped, the last
-    /// good one's kept to be offered (every offer is checked); the quick
-    /// path, which starts from that evaluation's fixed point, waits for
-    /// the next good evaluation.
-    pub(crate) fn failed(&self) {
-        lock(&self.cur).clear();
-        lock(&self.changes).clear();
-        self.no_quick.store(true, Ordering::Release);
-    }
-
-    /// No memo (the next evaluation runs what it must).
+    /// The evaluation failed: no memo (the next one runs what it must).
     pub(crate) fn drop_all(&self) {
         lock(&self.cur).clear();
         lock(&self.changes).clear();

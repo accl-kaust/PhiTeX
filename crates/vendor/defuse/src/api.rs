@@ -416,6 +416,9 @@ pub enum Rerun {
     /// Its claim (or a claim stream's following siblings) changed: a
     /// sibling came, went, changed or was claimed by another.
     Claim,
+    /// The anchor `of` it placed after (`follow_after`) or read at
+    /// (`use_field_at`) came or went.
+    Anchor { of: NodeId },
     /// A sibling its `prev_sibling_where` scan passed over changed.
     SiblingScan,
     /// An accumulator range it reads changed (a contribution or the

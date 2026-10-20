@@ -539,28 +539,6 @@ impl Engine {
             .collect()
     }
 
-    /// With `DEFUSE_RCHAIN` set: the last evaluation's realised critical
-    /// chain, deepest run first: each node, its realised depth, and why it
-    /// came after the next (a wait's kind, or the read that followed it).
-    #[must_use]
-    pub fn realised_chain(&self) -> Vec<(NodeId, u64, String)> {
-        let m = lock(&self.sh.rchain);
-        let Some((&s0, _)) = m.iter().max_by_key(|(_, v)| v.3) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        let mut s = s0;
-        while let Some(&(p, k, f, d)) = m.get(&s) {
-            let f = f.map_or(String::new(), |f| self.sh.values.render(f.0));
-            out.push((self.sh.node_id(s), d, format!("{k} {f}")));
-            if p == super::NIL || out.len() > 100_000 {
-                break;
-            }
-            s = p;
-        }
-        out
-    }
-
     /// The critical chain with each node's height.
     #[must_use]
     pub fn critical_chain_heights(&self) -> Vec<(NodeId, u32, Cause)> {
