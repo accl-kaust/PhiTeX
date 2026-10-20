@@ -553,6 +553,11 @@ pub(crate) struct Extra {
     pub check_from: u32,
     /// That check waited where the one before it started.
     pub check_stuck: bool,
+    /// (field, reader): reads that passed this node's entry for the field
+    /// while it was in work, its declaration not covering the field; when
+    /// it leaves work with the entry kept, those readers are touched
+    /// (`Shared::passed_entries`).
+    pub passed: Vec<(Field, Slot)>,
 }
 
 impl Data {
@@ -592,6 +597,7 @@ impl Data {
                 && e.app_unit == u32::MAX
                 && e.wait_on.is_none()
                 && e.ask.is_none()
+                && e.passed.is_empty()
         }) {
             self.x = None;
         }
