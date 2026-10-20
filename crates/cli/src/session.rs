@@ -743,7 +743,11 @@ impl Session {
         };
         if let Some(b) = &self.build {
             self.store_wkeys(b);
-            self.store_pkgrec(b);
+            lap(&mut phases, "written keys");
+            // (no load ran: its records are as last stored)
+            if b.pkgrec_changed() {
+                self.store_pkgrec(b);
+            }
             // (`PHITEX_CHAIN_DUMP=1`: the critical chain in full, and its
             // waits, for measurements)
             if phitex_tex::OBSERVE && std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {

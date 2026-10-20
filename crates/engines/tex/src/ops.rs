@@ -343,12 +343,20 @@ impl Operation for Exec {
         };
         // (`PHITEX_CLAIM_TRACE`: a pending claim's text and its next
         // sibling's, as the args render)
+        // (with why: no bound (the hint's cause), a scope its run may
+        // open or close, or an item reaching past it)
         if k == 2 && crate::exec::obs_flag!("PHITEX_CLAIM_TRACE") {
+            let h = crate::hints::hint_of_args(reg(&self.0), v, args);
+            let why = match &h.bound {
+                None => format!("unbounded\t{}", h.cause),
+                Some(b) if !b.no_scope => "scope\t".to_owned(),
+                Some(_) => "reaches past\t".to_owned(),
+            };
             let next = following
                 .next()
                 .map(|(_, a)| a.first().map(|&x| v.render(x)).unwrap_or_default());
             eprintln!(
-                "claim-trace: pending {:?} next {:?}",
+                "claim-trace: pending\t{why}\t{:?} next {:?}",
                 args.first()
                     .map(|&x| v.render(x))
                     .unwrap_or_default()
