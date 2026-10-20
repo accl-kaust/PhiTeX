@@ -1132,9 +1132,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     while let Some(first) = held.pop_front().or_else(|| rx.recv().ok()) {
         // (what came meanwhile, a build's time of keystrokes among it, is
         // one edit, timed from the last of them: the wait a writer feels)
+        // (the events of one save come together, from one read of the
+        // system's queue: 100 µs gathers them; a later edit is taken by
+        // the build while it runs, `absorb`, or builds again after it)
         let mut events = vec![first];
         events.extend(held.drain(..));
-        while let Ok(e) = rx.recv_timeout(Duration::from_micros(500)) {
+        while let Ok(e) = rx.recv_timeout(Duration::from_micros(100)) {
             events.push(e);
         }
         let came = events
