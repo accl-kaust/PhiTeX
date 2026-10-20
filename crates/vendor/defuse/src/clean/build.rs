@@ -109,13 +109,15 @@ impl<'a> Builder<'a> {
     }
 
     /// Reader `r` re-asked on all its reads.
-    fn recheck(&mut self, r: Id) {
+    fn recheck(&mut self, r: Id, src: usize) {
+        super::core::prof::count(src);
         self.recheck.insert(r, None);
     }
 
     /// Reader `r` re-asked on its reads of `f` (a definition or a
     /// contribution of `f` changed: no other read can break).
     fn recheck_on(&mut self, r: Id, f: Field) {
+        super::core::prof::count(19);
         match self.recheck.entry(r) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 if let Some(fs) = e.get_mut()
@@ -169,7 +171,13 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let Some(res) = n.res.clone() else { continue };
-            let asked = |r: &Read| on.as_ref().is_none_or(|fs| read_on(r, fs));
+            let asked = |r: &Read| {
+                let a = on.as_ref().is_none_or(|fs| read_on(r, fs));
+                if a {
+                    super::core::prof::count(20);
+                }
+                a
+            };
             let mut broken = res.reads.iter().find(|r| asked(r) && !holds(self.core, &self.w, id, r));
             // (CLEAN_SCOPED_CHECK: a read of another field broken too is
             // an invalidation missed elsewhere; named, and taken.)
@@ -575,7 +583,7 @@ impl<'a> Builder<'a> {
         // Its readers and those of its position.
         if let Some(m) = self.w.out_readers.get(&id).cloned() {
             for (&r, ()) in m.iter() {
-                self.recheck(r);
+                self.recheck(r, 13);
             }
         }
         self.w.out_readers.remove(&id, &NoMeasure);
@@ -628,7 +636,7 @@ impl<'a> Builder<'a> {
             hit.extend(super::claims::stab_backward(m, p).into_iter().map(|e| e.1));
         }
         for r in hit {
-            self.recheck(r);
+            self.recheck(r, 14);
         }
         self.claim_point(u, p);
     }
@@ -735,7 +743,7 @@ impl<'a> Builder<'a> {
         self.w.touch_key(Key::Out(x));
         if let Some(m) = self.w.out_readers.get(&x).cloned() {
             for (&r, ()) in m.iter() {
-                self.recheck(r);
+                self.recheck(r, 15);
             }
         }
     }
@@ -930,7 +938,7 @@ impl<'a> Builder<'a> {
                 .map(|(&(_, r), ())| r)
                 .collect();
             for r in hit {
-                self.recheck(r);
+                self.recheck(r, 16);
             }
         }
         for (id, old, fr) in moved {
@@ -947,7 +955,7 @@ impl<'a> Builder<'a> {
                 self.file(id, &n, f, loc, val);
             }
             // Its own reads ask from another frame now.
-            self.recheck(id);
+            self.recheck(id, 17);
         }
     }
 
@@ -1452,7 +1460,7 @@ impl<'a> Builder<'a> {
                 self.w.touch_key(Key::Out(id));
                 if let Some(m) = self.w.out_readers.get(&id).cloned() {
                     for (&r, ()) in m.iter() {
-                        self.recheck(r);
+                        self.recheck(r, 18);
                     }
                 }
             }
