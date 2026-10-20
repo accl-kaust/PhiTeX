@@ -52,7 +52,29 @@ struct Entry {
     /// ([`regime`]).
     start: Option<pass::Start>,
     end: Option<pass::Start>,
+    /// The names its analysis looked up in the definitions before it,
+    /// with what those gave each ([`pass::Definitions::name_digest`]):
+    /// under other definitions that give each the same, the analysis
+    /// is the same ([`reads_hold`]).
+    reads: Reads,
 }
+
+/// An analysis's read set: each name it looked up, its mark and its
+/// digest ([`pass::Definitions::name_stamp`], `name_digest`).
+type Reads = Arc<[(String, u64, u64)]>;
+
+/// Whether every name of `reads` is what it was under `defs`: an
+/// analysis made under other definitions holds under these. A name
+/// whose mark is the same is (no change since); else its digest says.
+fn reads_hold(reads: &[(String, u64, u64)], defs: &Defs) -> bool {
+    reads
+        .iter()
+        .all(|(n, s, d)| defs.name_stamp(n) == *s || defs.name_digest(n) == *d)
+}
+
+/// A chunk's analysis made afresh or kept ([`Incr::walk`]): its hints,
+/// its slices' keys, its read set, whether it was made afresh.
+type Made = (Arc<TextHints>, Arc<[u64]>, Reads, bool);
 
 /// A document chunk's regime as kept: `None` for a document's own.
 fn regime(s: &pass::Start) -> Option<pass::Start> {
@@ -241,12 +263,13 @@ impl Incr {
         } else {
             self.cache[k - 1].out.1.clone()
         };
-        let (th, keys) = analyse(t, &defs, Some(own), begins.as_ref());
+        let (th, keys, reads) = analyse(t, &defs, Some(own), begins.as_ref());
         let e = &mut self.cache[k];
         e.units = new_units;
         e.len = new_len;
         e.th = th.clone();
         e.keys = keys.clone();
+        e.reads = reads;
         e.closed = closed;
         self.chunks[k] = Chunk { start, th, keys };
         if c != b {
@@ -344,6 +367,7 @@ impl Incr {
                 len,
                 closed,
                 cached,
+                stale: None,
             });
             off += len;
             i = j;
@@ -391,11 +415,13 @@ impl Incr {
                 .as_ref()
                 .filter(|e| e.start == start)
                 .map(|e| (e.own, e.end));
-            if p.cached
-                .as_ref()
-                .is_some_and(|e| e.key != key || e.start != start)
-            {
+            // (under other definitions before it: its definitions after
+            // it made again, its analysis kept where what it looked up
+            // is the same, [`reads_hold`])
+            if p.cached.as_ref().is_some_and(|e| e.start != start) {
                 p.cached = None;
+            } else if p.cached.as_ref().is_some_and(|e| e.key != key) {
+                p.stale = p.cached.take();
             }
             let (out, own, end) = if let Some(e) = &p.cached {
                 (e.out.clone(), e.own, e.end)
@@ -456,6 +482,7 @@ impl Incr {
     /// chunks that define anything (in order: each adds to the earlier
     /// ones'), with the regime each begins in; the chunks' analyses
     /// under them, on the pool.
+    #[allow(clippy::too_many_lines)]
     fn walk(&mut self) {
         let t0 = std::time::Instant::now();
         let ids: Vec<UnitId> = self.src.units().collect();
@@ -502,20 +529,26 @@ impl Incr {
         // the analyses of the chunks not kept
         let analyse_todo = |x: usize| {
             let k = c.todo[x];
+            if let Some(e) = &parts[k].stale
+                && reads_hold(&e.reads, &c.ins[k].1)
+            {
+                return (e.th.clone(), e.keys.clone(), e.reads.clone(), false);
+            }
             let own = owns[k]
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .take();
-            analyse(
+            let (th, keys, reads) = analyse(
                 chunk_text(&parts[k]),
                 &c.ins[k].1,
                 own,
                 c.starts[k].as_ref(),
-            )
+            );
+            (th, keys, reads, true)
         };
         // (the analyses' summed time, for `PHITEX_TEX_TIME`)
         let busy = std::sync::atomic::AtomicU64::new(0);
-        let made: Vec<(Arc<TextHints>, Arc<[u64]>)> =
+        let made: Vec<Made> =
             crate::exec::map_on(&mut ex, c.todo.len(), &|x| {
                 let t = std::time::Instant::now();
                 let r = analyse_todo(x);
@@ -526,14 +559,14 @@ impl Incr {
                 r
             });
         let t_made = t0.elapsed();
-        let analysed = c.todo.len();
+        let analysed = made.iter().filter(|m| m.3).count();
         let mut made = made.into_iter();
         let mut chunks = Vec::with_capacity(parts.len());
         for (k, p) in parts.into_iter().enumerate() {
             let e = if let Some(e) = p.cached {
                 e
             } else {
-                let (th, keys) = made.next().expect("every chunk analysed");
+                let (th, keys, reads, _) = made.next().expect("every chunk analysed");
                 Entry {
                     units: ids[p.units.clone()].to_vec(),
                     len: p.len,
@@ -545,6 +578,7 @@ impl Incr {
                     own: c.owns[k],
                     start: c.starts[k],
                     end: c.ends[k],
+                    reads,
                 }
             };
             chunks.push(Chunk {
@@ -617,8 +651,15 @@ fn analyse(
     defs: &Defs,
     own: Option<Definitions>,
     start: Option<&pass::Start>,
-) -> (Arc<TextHints>, Arc<[u64]>) {
-    let th = crate::hints::text_hints_with(t, FileKind::Document, defs, own, start);
+) -> (Arc<TextHints>, Arc<[u64]>, Reads) {
+    let (th, names) = crate::hints::text_hints_reads(t, FileKind::Document, defs, own, start);
+    let reads: Reads = names
+        .into_iter()
+        .map(|n| {
+            let (s, d) = (defs.name_stamp(&n), defs.name_digest(&n));
+            (n, s, d)
+        })
+        .collect();
     let keys = th
         .slices
         .iter()
@@ -627,7 +668,7 @@ fn analyse(
             crate::api::key(&t[s..e], starts)
         })
         .collect();
-    (th, keys)
+    (th, keys, reads)
 }
 
 /// A chunk of the units being walked: its units, where it begins and its
@@ -639,6 +680,10 @@ struct Part {
     len: usize,
     closed: bool,
     cached: Option<Entry>,
+    /// Its cached analysis made under other definitions before it
+    /// (the same text and regime): kept where its reads hold
+    /// ([`reads_hold`]).
+    stale: Option<Entry>,
 }
 
 /// The length of the prefix `a` and `b` share: block by block (a
@@ -887,6 +932,37 @@ mod tests {
         let mut inc = Incr::new(crate::hints::no_defs().clone());
         inc.set_text(&text);
         eprintln!("incr: cold, {} chunks", inc.chunks.len());
+    }
+
+    /// A chunk's analysis is keyed on what it looked up, not on every
+    /// definition before it: an edit of a definition analyses again the
+    /// defining chunk and the chunks that look its name up, and keeps
+    /// the others (their hints the same as a cold walk's).
+    #[test]
+    fn a_definition_edit_analyses_its_readers_only() {
+        let doc = |body: &str| {
+            format!(
+                "\\def\\a{{{body}}}\n\n\\def\\b{{y}}\n\n\\a\n\none two\n\nthree\n\n\\b four\n\nfive \\a\n\nsix\n"
+            )
+        };
+        let mut inc = Incr::new(crate::hints::no_defs().clone());
+        inc.set_text(&doc("x"));
+        let n = inc.chunks.len();
+        assert_eq!(n, 8);
+        inc.set_text(&doc("\\vskip 1pt"));
+        // (the defining chunk and the two that call `\a`)
+        assert_eq!(inc.analysed, 3, "of {n} chunks");
+        let mut fresh = Incr::new(crate::hints::no_defs().clone());
+        fresh.set_text(&doc("\\vskip 1pt"));
+        assert_eq!(fresh.slices(), inc.slices());
+        for (a, b) in fresh.chunks.iter().zip(&inc.chunks) {
+            for &(s, _) in &a.th.slices {
+                assert_eq!(
+                    crate::hints::slice_hint_of(&a.th, s),
+                    crate::hints::slice_hint_of(&b.th, s)
+                );
+            }
+        }
     }
 
     #[test]

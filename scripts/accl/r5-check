@@ -1,0 +1,19 @@
+#!/bin/bash
+# r5-edits' check of a commit (on accl, in a job): clippy on the crates
+# touched, the named unit tests, then the edit-time table
+# (scripts/accl/edit-classes, amsldoc -j 1 md5 in it).
+#   scripts/accl/accl submit cmd bash scripts/accl/r5-check '<test filter>' [<test filter>...]
+set -u
+cd "$(dirname "$0")/../.."
+export CARGO_BUILD_JOBS=16
+{
+  cargo clippy -q -p phitex-source -p phitex-tex --no-deps --all-targets -- -D warnings 2>&1 | tail -40
+  echo "clippy exit ${PIPESTATUS[0]}"
+  for f in "$@"; do
+    CARGO_TARGET_DIR=$w/t-test cargo test -q -p phitex-tex -p phitex-source --lib -- "$f" 2>&1 | tail -30
+    echo "test $f exit ${PIPESTATUS[0]}"
+  done
+} > "$r/checks.txt" 2>&1
+bash scripts/accl/edit-classes
+cat "$r/checks.txt" >> "$r/summary.txt"
+grep -E "exit|panicked|error" "$r/checks.txt"

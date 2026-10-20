@@ -3706,6 +3706,23 @@ pub(crate) fn text_hints_with(
     t
 }
 
+/// [`text_hints_with`] made afresh (no cache), with the names the
+/// analysis looked up in the definitions ([`pass::with_reads`]): a
+/// document chunk's analysis and its read set (`crate::incr`).
+pub(crate) fn text_hints_reads(
+    text: &str,
+    kind: FileKind,
+    defs: &Defs,
+    own: Option<Definitions>,
+    start: Option<&pass::Start>,
+) -> (Arc<TextHints>, Vec<String>) {
+    let named = kind;
+    let kind = kind_of(text, kind);
+    let own = own.unwrap_or_else(|| own_definitions_from(text, named, start).0);
+    let (t, names) = pass::with_reads(|| analyse_with(text, kind, defs, own, start));
+    (Arc::new(t), names)
+}
+
 /// The hint of the document slice beginning at byte `s` of the text `t`
 /// analyses (looked up once per text by the caller), encoded.
 pub(crate) fn slice_hint_of(t: &TextHints, s: usize) -> Arc<str> {

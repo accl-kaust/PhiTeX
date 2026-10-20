@@ -2843,13 +2843,13 @@ impl Graph {
                 let rounds: Vec<String> = r
                     .round_times
                     .iter()
-                    .map(|t| format!("{}/{}", t.runs, t.memo_hits))
+                    .map(|t| format!("{}/{}/{:.1}ms", t.runs, t.memo_hits, t.wall_ns as f64 / 1e6))
                     .collect();
                 let mut ops: Vec<(&str, u64)> =
                     r.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
                 ops.sort_unstable();
                 eprintln!(
-                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits by round [{}], memo {} bytes, {} runs, {} nodes run, runs by op {ops:?}",
+                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits/wall by round [{}], memo {} bytes, {} runs, {} nodes run, runs by op {ops:?}",
                     t0.elapsed().as_secs_f64() * 1e3,
                     r.rounds,
                     rounds.join(" "),
