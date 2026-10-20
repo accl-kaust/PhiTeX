@@ -662,6 +662,13 @@ impl Run<'_, '_> {
     /// At the candidate it is to stop at (its second pass after a cut),
     /// the run ends.
     pub(crate) fn finish_candidate(&mut self) -> R<()> {
+        self.finish_candidate_at(false)
+    }
+
+    /// [`Run::finish_candidate`]; `newgraf`: the candidate of a
+    /// paragraph's start (§1091), after its level is pushed, its indent
+    /// box appended and `\everypar` put on the input.
+    pub(crate) fn finish_candidate_at(&mut self, newgraf: bool) -> R<()> {
         if !self.at_outer()? {
             return Ok(());
         }
@@ -714,7 +721,17 @@ impl Run<'_, '_> {
         // routine runs there, and the rest reads what it defines (a page
         // so far saved in a box, a column height), so the rest is a
         // node after the routine. Never inside a list of the run's own)
+        // (a paragraph's start is a cut too, its level just pushed and
+        // carried by the continuation with its list and the input
+        // `\everypar` left (§1091): the page firing there has its
+        // finisher before the paragraph's commands, which read what the
+        // routine leaves, as they come after it in tex.web)
+        let par_start = newgraf
+            && self.conds.is_empty()
+            && self.nest.last().is_some_and(|l| l.owns && l.group == 0)
+            && self.nest.len() == 1;
         let open_ok = !self.open_span()
+            || par_start
             || (self.nest.iter().all(|l| !l.owns && l.group != 0)
                 && self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs)));
         let cuttable = (op == self.ops.exec || op == self.ops.resume)
@@ -747,7 +764,7 @@ impl Run<'_, '_> {
         }
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
             eprintln!(
-                "cand: node {} op {} k {k} fresh {fresh} input {} nest {:?} conds {} forced {} cuttable {cuttable}",
+                "cand: node {} op {} k {k} newgraf {newgraf} fresh {fresh} input {} nest {:?} conds {} forced {} cuttable {cuttable}",
                 self.cx.node().raw(),
                 if op == self.ops.exec { "exec" } else if op == self.ops.resume { "resume" } else { "other" },
                 self.has_input(),
@@ -2444,7 +2461,12 @@ impl Run<'_, '_> {
     /// legal `\end`). `after`: placed after that node's extent (the
     /// piece's: after every page node placed there before it) instead of
     /// right after this node.
-    fn place_resume(&mut self, pid: i64, k: i64, after: Option<phitex_defuse::NodeId>) -> R<()> {
+    fn place_resume(
+        &mut self,
+        pid: i64,
+        k: i64,
+        after: Option<(phitex_defuse::NodeId, ValueId)>,
+    ) -> R<()> {
         let v = self.v;
         let Some(x) = self.eng_read(v.field(RESUME))? else {
             return Ok(());
@@ -2459,7 +2481,13 @@ impl Run<'_, '_> {
         {
             return Ok(());
         }
-        let args = vec![ValueId::UNIT, xs[2], ValueId::UNIT, xs[3]];
+        let mut args = vec![ValueId::UNIT, xs[2], ValueId::UNIT, xs[3]];
+        if let Some((_, b)) = after
+            && b != ValueId::UNIT
+        {
+            args.push(b);
+        }
+        let after = after.map(|(at, _)| at);
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
                 "place resume of piece {} candidate {k} by {} after {:?}",
@@ -4672,7 +4700,7 @@ impl Run<'_, '_> {
         let placed = if args.first().is_some_and(|&x| int_of(v, x) == -2) {
             self.scan_cont()?
         } else {
-            let mut fired = Vec::new();
+            let mut fired: Vec<(i64, i64, ValueId)> = Vec::new();
             let p = self.scan_step(&mut fired)?;
             // (the step after a cut piece, `[-3, piece, candidate]`: the
             // rest of the piece is placed after it where no page this
@@ -4686,9 +4714,19 @@ impl Run<'_, '_> {
             // plain continuation of this step would sit before them)
             if let [_, pid, k] = args[..] {
                 let (pid, k) = (int_of(v, pid), int_of(v, k));
-                if !fired.contains(&(pid, k)) {
+                if !fired.iter().any(|&(p, c, _)| (p, c) == (pid, k)) {
                     let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
-                    self.place_resume(pid, k, Some(at))?;
+                    // (with the break of the last page this step placed in
+                    // the piece: placed anew with that page's finisher and
+                    // continuation, after them; a resume kept from an
+                    // earlier run while they are placed anew would sit
+                    // before them)
+                    let last = fired
+                        .iter()
+                        .rev()
+                        .find(|f| f.0 == pid)
+                        .map_or(ValueId::UNIT, |f| f.2);
+                    self.place_resume(pid, k, Some((at, last)))?;
                 }
             }
             p
@@ -4886,7 +4924,7 @@ impl Run<'_, '_> {
     /// run of this node reads again once the continuation is there. The
     /// chain is the blocks', not the pages'.
     #[allow(clippy::too_many_lines)]
-    fn scan_step(&mut self, fired: &mut Vec<(i64, i64)>) -> R<Placed> {
+    fn scan_step(&mut self, fired: &mut Vec<(i64, i64, ValueId)>) -> R<Placed> {
         let v = self.v;
         // (where the block begins: the state the scan of the block
         // before ended its block in, [`SCAN_BLOCK`]; none before the
@@ -4925,6 +4963,15 @@ impl Run<'_, '_> {
                     [_, j, by] => self.eng_read(scan_page_field(v, int_of(v, j), int_of(v, by)))?,
                     _ => None,
                 };
+                if crate::exec::obs_flag!("PHITEX_BLOCK_TRACE") {
+                    eprintln!(
+                        "scan {}: the block before ends at a continuation {:?}: {} (speculative {})",
+                        self.cx.node().raw(),
+                        xs.iter().skip(1).map(|&y| int_of(v, y).cast_unsigned()).collect::<Vec<_>>(),
+                        if p.is_some() { "defined" } else { "not defined: nothing" },
+                        self.cx.is_speculative()
+                    );
+                }
                 let Some(p) = p else {
                     self.cx
                         .define_with(v.field(SCAN_BLOCK), ValueId::UNIT, Locality::Global);
@@ -4974,7 +5021,6 @@ impl Run<'_, '_> {
             }
             let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
             let j = st.j - 1;
-            fired.push((pid, i64::from(sf.k)));
             let (b, pos) = self.place_break(
                 Some(at),
                 j,
@@ -4987,6 +5033,7 @@ impl Run<'_, '_> {
                 None,
                 Some(&sf.classes),
             )?;
+            fired.push((pid, i64::from(sf.k), b));
             // (the continuation's scan state: as it defines it for this
             // break, an ordinary read of a node this scan placed, which
             // runs this scan again where it differs; else as the scan
@@ -5118,6 +5165,13 @@ impl Run<'_, '_> {
                 // for that page's break: the scan reads it and goes on
                 // from it)
                 if let Some((j0, by, b0)) = cont_chain(v, &self.cx.args()) {
+                    if crate::exec::obs_flag!("PHITEX_BLOCK_TRACE") {
+                        eprintln!(
+                            "cont {}: defines the state of page {j0} placed by {}",
+                            self.cx.node().raw(),
+                            by.cast_unsigned()
+                        );
+                    }
                     self.cx.define_with(
                         scan_page_field(v, j0, by),
                         v.list(vec![x, mat, b0]),
