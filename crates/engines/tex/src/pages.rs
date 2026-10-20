@@ -384,6 +384,73 @@ impl PageState {
         Ok(None)
     }
 
+    /// The page fired at candidate `k` (§1017: what the page could not
+    /// take goes first in what is carried, then `more`), the builder
+    /// set for the next page.
+    fn fired(
+        &mut self,
+        v: &Values,
+        f: &Fired,
+        k: u32,
+        more: Vec<ValueId>,
+    ) -> Fire {
+        let mut carried: Vec<ValueId> = f
+            .contributions
+            .iter()
+            .map(|n| nodes::encode(v, n, &self.side))
+            .collect();
+        carried.extend(more);
+        let (best, held) = (f.best, f.held_inserts.len());
+        let data = page_data(v, f, &self.side);
+        let b255 = Some((f.box255.node.clone(), self.side.clone()));
+        self.pb = PageBuilder::new();
+        self.side = Side::default();
+        self.j += 1;
+        if f.output_penalty > -10001 {
+            self.normal += 1;
+        }
+        self.fold.since_bp = 0;
+        Fire {
+            k,
+            data,
+            b255,
+            carried,
+            rest: Vec::new(),
+            best,
+            held,
+        }
+    }
+
+    /// The page fired at candidate `k` of a later piece at its known best
+    /// break (`best`, `\outputpenalty` there, `\holdinginserts` positive
+    /// where it fired), the page built as far as the break
+    /// ([`PageBuilder::fire_known`]): its finisher's page from the items
+    /// before the break alone. `None` where the page is not built to it.
+    pub(crate) fn fire_known(
+        &mut self,
+        v: &Values,
+        best: usize,
+        output_penalty: i32,
+        holding: bool,
+        k: u32,
+    ) -> Option<Fire> {
+        let mut params = self.params_pre.unwrap_or_else(|| {
+            self.params.map_or(
+                PageParams {
+                    vsize: 0,
+                    max_depth: 0,
+                    top_skip: Glue::ZERO,
+                    holding_inserts: 0,
+                    saving_vdiscards: false,
+                },
+                |m| params_of(v, m),
+            )
+        });
+        params.holding_inserts = i32::from(holding);
+        let f = self.pb.fire_known(best, output_penalty, &params)?;
+        Some(self.fired(v, &f, k, Vec::new()))
+    }
+
     /// One `build_page` call (§994) over the contributions `buf` at
     /// candidate `k`: what the page cannot take stays in `buf`.
     #[allow(clippy::too_many_lines)]
@@ -529,36 +596,10 @@ impl PageState {
                                 .map_or_else(|| "none".to_owned(), |m| v.render(m))
                         );
                     }
-                    // §1017: what the page could not take goes first
-                    let mut carried: Vec<ValueId> = f
-                        .contributions
-                        .iter()
-                        .map(|n| nodes::encode(v, n, &self.side))
-                        .collect();
-                    carried.extend(queue.drain(..).rev());
-                    if let Some(e) = end_seen {
-                        carried.push(e);
-                    }
-                    let (best, held) = (f.best, f.held_inserts.len());
-                    let data = page_data(v, &f, &self.side);
-                    let b255 = Some((f.box255.node.clone(), self.side.clone()));
-                    self.pb = PageBuilder::new();
-                    self.side = Side::default();
-                    self.j += 1;
-                    if f.output_penalty > -10001 {
-                        self.normal += 1;
-                    }
-                    self.fold.since_bp = 0;
+                    let mut more: Vec<ValueId> = queue.drain(..).rev().collect();
+                    more.extend(end_seen);
                     buf.clear();
-                    return Ok(Some(Fire {
-                        k,
-                        data,
-                        b255,
-                        carried,
-                        rest: Vec::new(),
-                        best,
-                        held,
-                    }));
+                    return Ok(Some(self.fired(v, &f, k, more)));
                 }
             }
         }
@@ -1285,7 +1326,50 @@ impl Run<'_, '_> {
         // of a node before the reader)
         let here = at == self.cx.node();
         let mut check: Option<(PageState, Fire, Vec<ValueId>)> = None;
-        if pid != -2 {
+        // (a finisher's page whose items before the best break end before
+        // the piece it fires in, [`Run::best_window`]: those items alone,
+        // and the firing piece's unit for its check; what lies between
+        // the break and the fire is the next page's, §1017)
+        let upto = if !narrow && mat.is_none() && pid != -2 {
+            self.best_window(&s, pid, k, here, at)?
+        } else {
+            None
+        };
+        if let Some(sf) = &upto
+            && let Some((bp, prev)) = sf.upto
+        {
+            let node = |x: i64| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(x.to_ne_bytes()));
+            let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
+            s.material = match self.eng_read(scan_mat_field(v, n(0)))? {
+                Some(m) => list_of(v, m),
+                None => Vec::new(),
+            };
+            if bp != crate::vprof::MATERIAL {
+                let mut items =
+                    v.seq_to_vec(self.cx.acc_range_to(v.field(PITEMS), s.anchor, Some(node(bp)))?);
+                let Some(last) = items.iter().position(|&x| unit_pid(x) == bp) else {
+                    self.scan_defect(&format!("piece {bp} is not in its range"));
+                    return Ok(None);
+                };
+                items.truncate(last + 1);
+                for &x in &items {
+                    let mut raw = unit_items(v, x);
+                    self.resolve_params_of(unit_pid(x), &mut raw)?;
+                    raw_pids.push(unit_pid(x));
+                    raws.push(raw);
+                }
+            }
+            let tail = v.seq_to_vec(self.cx.acc_range_to(
+                v.field(PITEMS),
+                prev.map(node).or(s.anchor),
+                Some(node(pid)),
+            )?);
+            let Some(&mine) = tail.iter().find(|&&x| unit_pid(x) == pid) else {
+                self.scan_defect(&format!("piece {pid} is not in its range"));
+                return Ok(None);
+            };
+            own = list_of(v, mine);
+        } else if pid != -2 {
             // (the material the page began with, as items, where the break
             // was found; a page firing in a continuation's material has it
             // in its `src`)
@@ -1408,8 +1492,13 @@ impl Run<'_, '_> {
                     );
                 }
             }
-            match out {
-                Some((i, f)) if i == last => Some(f),
+            match (out, &upto) {
+                // (the page built as far as its known break, which a later
+                // piece's candidate fired)
+                (None, Some(sf)) => {
+                    ps.fire_known(v, sf.best, sf.output_penalty, sf.holding, sf.k)
+                }
+                (Some((i, f)), None) if i == last => Some(f),
                 _ => None,
             }
         };
@@ -1510,7 +1599,9 @@ impl Run<'_, '_> {
             ));
             return Ok(None);
         };
-        if i64::from(fire.k) != k || i64::try_from(fire.rest.len()).ok() != Some(rest) {
+        if upto.is_none()
+            && (i64::from(fire.k) != k || i64::try_from(fire.rest.len()).ok() != Some(rest))
+        {
             self.scan_defect(&format!(
                 "page {} fires in piece {pid} at candidate {k} ({rest} items after) by the profiles, at candidate {} ({} after) by the items",
                 n(0) + 1,
@@ -1562,6 +1653,77 @@ impl Run<'_, '_> {
             );
         }
         Ok(Some((ps, fire, own)))
+    }
+
+    /// Where a page's items before its best break end, when that is
+    /// before the piece `pid` it fires in at candidate `k`: the window's
+    /// profiles folded as the scan folds them ([`Run::scan_window`]),
+    /// its fire with [`crate::vprof::ScanFire::upto`] set; `None` where
+    /// the break is in the firing piece (the whole window's items are
+    /// the page's). The profiles are what the break rests on: a change
+    /// in them runs the finisher again; a change in the items between
+    /// the break and the fire, the next page's, does not.
+    fn best_window(
+        &mut self,
+        s: &ScanIn,
+        pid: i64,
+        k: i64,
+        here: bool,
+        at: phitex_defuse::NodeId,
+    ) -> R<Option<crate::vprof::ScanFire>> {
+        let v = self.v;
+        let to = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
+        let units = v.seq_to_vec(self.cx.acc_range_to(
+            v.field(crate::vprof::VPROF),
+            s.anchor,
+            Some(to),
+        )?);
+        let parts: Vec<(i64, Vec<crate::vprof::PItem>)> = units
+            .iter()
+            .map(|&u| {
+                let (p, ints) = crate::vprof::unit_parts(v, u);
+                (p, crate::vprof::decode(&ints))
+            })
+            .collect();
+        if parts.len() < 2 || parts.last().map(|x| x.0) != Some(pid) {
+            return Ok(None);
+        }
+        let material = crate::vprof::decode(&s.prof);
+        // (`\deadcycles` as the scan's fold reads it)
+        let dead = if !(crate::vprof::has_end(&material)
+            || parts.iter().any(|x| crate::vprof::has_end(&x.1)))
+        {
+            0
+        } else if here {
+            self.cint(crate::fields::cell::DEADCYCLES)?
+        } else {
+            let f = self.loc_field(crate::fields::cell::DEADCYCLES as Loc);
+            match self.cx.use_field_at(f, Some(at))? {
+                phitex_defuse::FieldAt::Def(x, _) => int_of(v, x),
+                phitex_defuse::FieldAt::Unset => 0,
+                phitex_defuse::FieldAt::Gone => self.cint(crate::fields::cell::DEADCYCLES)?,
+            }
+        };
+        let mut rd = RunReaching(
+            self,
+            s.anchor.map(|a| i64::from_ne_bytes(a.raw().to_ne_bytes())),
+        );
+        let mut st = s.state(v);
+        if st.fold_items(&material, dead, &mut rd).is_some() {
+            return Ok(None);
+        }
+        st.note_piece(crate::vprof::MATERIAL);
+        let last = parts.len() - 1;
+        for (i, (p, items)) in parts.into_iter().enumerate() {
+            let mut items = items;
+            rd.0.resolve_prof_of(p, &mut items)?;
+            rd.1 = Some(p);
+            if let Some(f) = st.fold_items(&items, dead, &mut rd) {
+                return Ok((i == last && i64::from(f.k) == k && f.upto.is_some()).then_some(f));
+            }
+            st.note_piece(p);
+        }
+        Ok(None)
     }
 
     /// [`Run::assemble_page`] for what goes on past the page (the state

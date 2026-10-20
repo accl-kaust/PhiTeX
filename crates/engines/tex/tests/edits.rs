@@ -505,10 +505,14 @@ fn oscillating_written_file() {
 /// lines come out the same size (`n` to `u` in a four-letter word: the
 /// same width, height and depth, no kern or ligature, too short to
 /// hyphenate), so the paragraph's vertical profile is unchanged: the edit
-/// runs exactly that paragraph's exec, its page's finisher, the link and
-/// the end node, once each, at 1 and at 8 threads. No block scan, no node
-/// run twice, no speculative run dropped; the PDF equals a cold build of
-/// the edited text. Every rerun's cause is printed.
+/// runs exactly that paragraph's exec and the resume piece after it, its
+/// page's finisher, the link and the end node, once each, at 1 and at 8
+/// threads. (A paragraph that begins a text unit is a cut at its start,
+/// a page-builder candidate: its exec runs to it and the resume placed
+/// after it reads the rest of the paragraph, so both read the edited
+/// text.) No block scan, no node run twice, no speculative run dropped;
+/// the PDF equals a cold build of the edited text. Every rerun's cause
+/// is printed.
 #[test]
 fn one_word_edit_reruns_little() {
     let fx = common::fixtures().join("dvi");
@@ -567,7 +571,9 @@ fn one_word_edit_reruns_little() {
                 ("exec", 1),
                 ("finish", 1),
                 ("link", 1),
-                ("pdfpage", 1)
+                ("pdfpage", 1),
+                // (the paragraph's rest after the cut at its start)
+                ("resume", 1)
             ],
             "runs by op at {t} threads"
         );
