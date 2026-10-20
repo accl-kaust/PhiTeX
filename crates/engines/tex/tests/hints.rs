@@ -89,20 +89,34 @@ fn far_definition_is_bounded() {
     assert_eq!(a.stats.regime_violations, 0);
     assert_eq!(a.stats.undeclared_definitions, 0);
     assert_eq!(a.pages().len(), 1);
+    // (the readers of `\hello` bind to its definition and wait on no
+    // node between: each node of the filler lines declares what it may
+    // define, `\hello` not among it, and that it takes no sibling)
+    let bounds = a.node_bounds();
+    for (t, md, claim) in &bounds {
+        eprintln!("bound {t:?}: {md:?}, claim {claim:?}");
+    }
+    let fillers: Vec<_> = bounds.iter().filter(|(t, _, _)| t.contains("filler")).collect();
+    assert!(!fillers.is_empty(), "no node of the filler lines");
+    for (t, md, claim) in fillers {
+        let md = md
+            .as_ref()
+            .unwrap_or_else(|| panic!("{t:?} may define anything"));
+        assert!(
+            !md.iter()
+                .any(|f| "cs:hello".starts_with(f.strip_suffix('*').unwrap_or(f))),
+            "{t:?} may define \\hello: {md:?}"
+        );
+        assert_eq!(*claim, Some(0), "{t:?} may take the siblings after it");
+    }
     let b = build(&doc, true);
     eprintln!(
         "any: {} bounded, {} any, stops {}, pending {}",
         b.stats.nodes_bounded, b.stats.nodes_any, b.stats.stops, b.stats.pending_waits
     );
     assert_eq!(a.output().0, b.output().0, "the hints changed the output");
-    // (the readers of `\hello` bind to its definition and wait on no
-    // node between; the paragraph's own state still runs in order)
-    assert!(
-        a.stats.pending_waits <= b.stats.pending_waits,
-        "pending waits with hints {} > without {}",
-        a.stats.pending_waits,
-        b.stats.pending_waits
-    );
+    // (the hints off: no node bounded)
+    assert_eq!(b.stats.nodes_bounded, 0, "a node bounded with the hints off");
 }
 
 #[test]

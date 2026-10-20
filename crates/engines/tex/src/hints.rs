@@ -3791,6 +3791,14 @@ pub(crate) fn prepared_done(reg: &Registry) {
 /// The hint of a node from its arguments: the extra argument when the
 /// slice carries one, else its first text frame.
 pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<Hint> {
+    // (the hints off: every node's answers `Any`, its claim, effect and
+    // reads unknown, [`set_hints_enabled`])
+    if OFF.load(Ordering::Relaxed) {
+        static ANY: OnceLock<Arc<Hint>> = OnceLock::new();
+        return ANY
+            .get_or_init(|| Arc::new(Hint::any("hints off", "")))
+            .clone();
+    }
     let key = args_key(args);
     if let Some(h) = reg
         .hints

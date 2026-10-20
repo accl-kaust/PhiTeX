@@ -5794,6 +5794,48 @@ impl Build {
             .collect()
     }
 
+    /// Every document node's bound (a measure): its text's start, the
+    /// fields it may define (`None`: anything; a prefix ends in `*`),
+    /// and the siblings it declares it takes (`None`: only its run
+    /// knows).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn node_bounds(&self) -> Vec<(String, Option<Vec<String>>, Option<usize>)> {
+        let v = self.g.eng.values();
+        self.nodes
+            .iter()
+            .filter_map(|(_, n, _)| {
+                let i = self.g.eng.node_info(*n)?;
+                if i.op != "exec" {
+                    return None;
+                }
+                let text: String = i
+                    .args
+                    .first()
+                    .map(|&x| v.render(x))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(60)
+                    .collect();
+                let md = match crate::hints::may_define(&self.g.ops.hints, v, &i.args) {
+                    phitex_defuse::MayDefine::Any => None,
+                    phitex_defuse::MayDefine::Nothing => Some(Vec::new()),
+                    phitex_defuse::MayDefine::Names(fs) => Some(
+                        fs.iter()
+                            .map(|&f| crate::val::field_name(v, f))
+                            .collect(),
+                    ),
+                    phitex_defuse::MayDefine::Prefixes(ps) => {
+                        Some(ps.iter().map(|p| format!("{p}*")).collect())
+                    }
+                };
+                let h = crate::hints::hint_of_args(&self.g.ops.hints, v, &i.args);
+                let claim = h.bound.as_ref().and_then(|b| b.claim);
+                Some((text, md, claim))
+            })
+            .collect()
+    }
+
     /// The critical chain's waits in detail (a measure): for each
     /// `Woken` link, the waiter and the node it waited on (text, the
     /// hint's class and cause, `may_define`, effect, the hinted reads);
