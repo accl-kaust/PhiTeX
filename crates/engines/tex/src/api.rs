@@ -3137,6 +3137,7 @@ impl Graph {
     ) -> (Vec<(u64, NodeId, Src)>, Incr) {
         let mut incr = Incr::new(defs);
         incr.threads = self.threads;
+        incr.loads.clone_from(&self.loads);
         let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr));
         (nodes, incr)
     }
@@ -3742,7 +3743,7 @@ fn as_file(text: &str) -> std::borrow::Cow<'_, str> {
 
 /// Whether a file the prelude read is TeX text worth harvesting (fonts,
 /// encodings and maps are not).
-fn is_tex_text(name: &str) -> bool {
+pub(crate) fn is_tex_text(name: &str) -> bool {
     let base = name.rsplit('/').next().unwrap_or(name);
     match base.rsplit_once('.') {
         None => true,
