@@ -703,8 +703,10 @@ impl Engine {
                 self.t_idle += span.saturating_sub(busy);
             }
             // The field writes of the commits that change no structure are
-            // recorded and made together, in parallel ([`super::batch`]).
-            self.defer = Some(super::batch::Pending::default());
+            // recorded and made together, in parallel ([`super::batch`]);
+            // a step of a few results commits directly (recording and a
+            // flush cost more than they save there).
+            self.defer = (jobs.len() >= 4).then(super::batch::Pending::default);
             let mut m = Merge {
                 eng: &mut *self,
                 s: &mut *s,

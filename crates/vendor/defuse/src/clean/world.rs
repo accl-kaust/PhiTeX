@@ -534,25 +534,38 @@ impl World {
     pub(crate) fn reaching(&self, u: u32, f: Field, pos: Pos, fr: FrameId, skip: Id) -> Option<(Pos, Entry)> {
         let fd = self.defs.get(&(u, f))?;
         let mut best: Option<(Pos, Entry)> = None;
-        let mut take = |m: &PMap<Pos, Entry>| {
+        let take = |best: &mut Option<(Pos, Entry)>, m: &PMap<Pos, Entry>| {
             let mut k = pos;
             while let Some((&p, e)) = m.below(&k) {
                 if best.is_some_and(|b| b.0 >= p) {
                     return;
                 }
                 if e.node != skip {
-                    best = Some((p, *e));
+                    *best = Some((p, *e));
                     return;
                 }
                 k = p;
             }
         };
-        for g in self.chain(u, fr) {
+        // The chain, innermost first, walked in place: an enclosing frame's
+        // entries before the read lie at or before the inner frame's
+        // opener, so past an entry after it the walk stops.
+        let un = self.unit(u);
+        let mut g = fr;
+        for _ in 0..=1 << 16 {
             if let Some(m) = fd.local.get(&g) {
-                take(m);
+                take(&mut best, m);
             }
+            if g.is_root() {
+                break;
+            }
+            let Some(frm) = un.frames.get(&g) else { break };
+            if best.is_some_and(|b| b.0 > frm.start) {
+                break;
+            }
+            g = frm.parent;
         }
-        take(&fd.globals);
+        take(&mut best, &fd.globals);
         best
     }
 
@@ -1099,14 +1112,14 @@ impl World {
     /// past it waits: its answer is not known yet).
     /// Sets (`on`) or clears node `id`'s pending-set entry under key `k`.
     fn pset_set(&mut self, u: u32, k: u64, p: Pos, id: Id, on: bool) {
-        let had = self.psets.get(&(u, k)).and_then(|m| m.get(&p)) == Some(&id);
-        index_set(&mut self.psets, (u, k), p, id, on);
-        let has = self.psets.get(&(u, k)).and_then(|m| m.get(&p)) == Some(&id);
-        if had != has {
+        // (An entry filed over another node's at `p` takes its place: the
+        // count stays.)
+        let other = on && self.psets.get(&(u, k)).and_then(|m| m.get(&p)).is_some_and(|&x| x != id);
+        if index_set(&mut self.psets, (u, k), p, id, on) && !other {
             self.pset_buckets.upsert(u, &NoMeasure, |b| {
                 let b = Arc::make_mut(&mut b.0);
                 let i = (k % 64) as usize;
-                b[i] = if has { b[i] + 1 } else { b[i] - 1 };
+                b[i] = if on { b[i] + 1 } else { b[i] - 1 };
             });
         }
     }
@@ -1219,13 +1232,15 @@ impl World {
 
 /// Sets (`on`) or clears node `id` at position `p` of unit `u` in a
 /// per-unit position index (clearing only its own entry).
-fn index_set<U: Ord + Clone>(map: &mut PMap<U, PMap<Pos, Id>>, u: U, p: Pos, id: Id, on: bool) {
+/// Files (`on`) or takes out `id` at `p` under `u`; whether `id` was
+/// added there or removed from there.
+fn index_set<U: Ord + Clone>(map: &mut PMap<U, PMap<Pos, Id>>, u: U, p: Pos, id: Id, on: bool) -> bool {
     let has = map.get(&u).and_then(|m| m.get(&p)).copied();
     if on == (has == Some(id)) {
-        return;
+        return false;
     }
     if !on && has != Some(id) {
-        return;
+        return false;
     }
     map.upsert(u, &NoMeasure, |m| {
         if on {
@@ -1234,6 +1249,7 @@ fn index_set<U: Ord + Clone>(map: &mut PMap<U, PMap<Pos, Id>>, u: U, p: Pos, id:
             m.remove(&p, &NoMeasure);
         }
     });
+    true
 }
 
 /// The pending-set index keys of node `n`: none unless it is in work with
