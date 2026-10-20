@@ -1556,7 +1556,10 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let f = self.loc_field(loc);
         let name = crate::val::field_name(v, f);
-        if name.starts_with("wpre:") || name.starts_with("wpoint:") || name.starts_with("cat:") {
+        if ["wpre:", "wpoint:", "cat:", "wread:", REREAD]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
             return;
         }
         let pre = v.field(&format!("wpre:{name}"));
@@ -2444,6 +2447,27 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(())
     }
 
+    /// File `key`'s lines read back by this run (per field or as its
+    /// text, not a lookup): a second such read by the same run, before it
+    /// opens the file for writing, reads the round before's lines again,
+    /// under the meanings there ([`REREAD`]).
+    pub(crate) fn note_read_back(&mut self, key: &str) -> R<()> {
+        if self.interp.is_some() {
+            return Ok(());
+        }
+        let me = self.v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+        let f = format!("wread:{key}");
+        if self.get(&f)? == Some(me)
+            && self.get(&format!("wopen:{key}"))?.is_none()
+            && self.get(&format!("{REREAD}{key}"))?.is_none()
+        {
+            self.set(&format!("{REREAD}{key}"), self.v.int(1), true);
+        } else if self.get(&f)? != Some(me) {
+            self.set(&f, me, true);
+        }
+        Ok(())
+    }
+
     /// The read-back point of file `name` reaching here
     /// ([`Run::mark_read_point`]).
     pub(crate) fn read_point_of(&mut self, name: &str) -> R<Option<phitex_defuse::NodeId>> {
@@ -2555,6 +2579,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.note_read_point();
         self.mark_read_point(key)?;
+        self.note_read_back(key)?;
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: read back {key} in node {} ({:?}): levels {:?}",
@@ -4325,6 +4350,19 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 }
 
+/// A file the job writes read back twice by the run at its read-back
+/// point (`wreread:<file>`, [`Run::mark_read_point`]): its lines are
+/// written as its text, never interpreted per field. A read back per
+/// field stands for the lines by the definitions they make under the
+/// meanings at one point; that is the file only where every read gives
+/// its lines those meanings. A run that reads the file again after
+/// redefining what the lines call (a macro that reads a list once to
+/// count its entries and again to act on them) reads them under other
+/// meanings there, which the definitions made at the first read do not
+/// say: the second read would find the first's definitions in place of
+/// the lines it acts on.
+pub(crate) const REREAD: &str = "wreread:";
+
 /// Spent token lists by length, for the next macro body of that length
 /// The segments of an `Exec` node's arguments.
 /// A file read as units whose text is not read yet (`f.lazy()`), as one
@@ -5046,8 +5084,10 @@ pub(crate) fn frame_line(v: &Values, f: ValueId) -> Option<FileLine> {
 /// ...) is never a read-back definition, nor are category codes (the
 /// read-back reads under `\makeatletter`).
 fn is_read_back_definition(name: &str) -> bool {
-    const NOT: [&str; 16] = [
+    const NOT: [&str; 18] = [
         "cat:",
+        "wread:",
+        REREAD,
         "pdf:",
         "pg:",
         "pp:",

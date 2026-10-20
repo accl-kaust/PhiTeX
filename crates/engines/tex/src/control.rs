@@ -1689,7 +1689,12 @@ impl Run<'_, '_> {
             // the file one read back as its text (`UNIT` in their place)
             // (a line written while a line is interpreted goes nowhere:
             // not interpreted in turn)
-            let e = if self.interp.is_none() && self.reads_back_per_field(&name) {
+            let per_field = self.interp.is_none()
+                && self.reads_back_per_field(&name)
+                && self
+                    .get(&format!("{}{name}", crate::run::REREAD))?
+                    .is_none();
+            let e = if per_field {
                 // (a text the stream's earlier lines left open goes on
                 // with this one: the file is read back whole)
                 let text = match self.take_wpending(k)? {

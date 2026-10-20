@@ -298,3 +298,44 @@ fn a_file_written_where_missing_stays_for_the_next_round() {
         b.stats.loop_rounds
     );
 }
+
+/// A written file read back twice by one macro, its lines meaning a
+/// definition the first time and text the second (a list read once to
+/// note its entries, then to set them): read back as its text, both
+/// reads see its lines, and the page shows the entries (`mmm`, `nnn`)
+/// after a build that read the file back. Read back per field, by the
+/// definitions the lines make at the first read, the second read would
+/// find those definitions instead of the lines and set nothing.
+#[test]
+fn a_file_read_back_twice_by_one_run_is_read_as_text() {
+    let doc = r"\def\LST#1{\ENTRY{#1}}
+\def\readtwice{%
+  \gdef\ENTRY##1{\expandafter\gdef\csname seen##1\endcsname{}}%
+  \openin15=\jobname.lst \ifeof15 \let\next\relax\else\closein15 \def\next{\input\jobname.lst }\fi\next
+  \gdef\ENTRY##1{##1 }%
+  \openin15=\jobname.lst \ifeof15 \let\next\relax\else\closein15 \def\next{\input\jobname.lst }\fi\next
+  }
+\readtwice\par
+\immediate\openout2=\jobname.lst
+\immediate\write2{\string\LST{mmm}}
+\immediate\write2{\string\LST{nnn}}
+Entries.
+\bye
+";
+    let dir = common::fixtures().join("plain");
+    let opts = Options {
+        fixpoint: true,
+        ..common::options("./r.tex", "r", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), doc);
+    let (dvi, _) = b.output();
+    let has = |w: &[u8]| dvi.windows(w.len()).any(|x| x == w);
+    assert!(
+        has(b"mmm") && has(b"nnn"),
+        "the second read's text: {}",
+        String::from_utf8_lossy(&dvi)
+            .chars()
+            .filter(char::is_ascii_lowercase)
+            .collect::<String>()
+    );
+}
