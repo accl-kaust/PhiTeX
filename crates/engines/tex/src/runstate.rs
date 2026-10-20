@@ -1121,7 +1121,13 @@ impl State {
 
     /// The locations whose value the run read from the engine: read
     /// before the run defined them, or never defined (a value preloaded
-    /// in place of the engine's is not one).
+    /// in place of the engine's is not one). In the run's own order (its
+    /// definitions' bookkeeping first, then the rest as first touched),
+    /// never by location: a meaning's location is its name's number in
+    /// the process's interner, which numbers names in the order the
+    /// threads first meet them, so a list in location order differs
+    /// between two builds of one text (each location appears once: one
+    /// meta a location, one place in the touched list).
     pub(crate) fn read_locs(&self) -> Vec<Loc> {
         let mut out: Vec<Loc> = self
             .metas
@@ -1141,13 +1147,11 @@ impl State {
                 out.push(l);
             }
         }
-        out.sort_unstable();
-        out.dedup();
         out
     }
 
     /// [`State::read_locs`] with the values read (`None`: undefined in
-    /// the engine).
+    /// the engine), in the same order.
     pub(crate) fn read_values(&self) -> Vec<(Loc, Option<ValueId>)> {
         let mut out: Vec<(Loc, Option<ValueId>)> = self
             .metas
@@ -1166,8 +1170,6 @@ impl State {
                 out.push((l, s.e.id));
             }
         }
-        out.sort_unstable_by_key(|e| e.0);
-        out.dedup_by_key(|e| e.0);
         out
     }
 
@@ -1872,5 +1874,27 @@ impl State {
         m.ldef_stamp = st;
         m.ldef_local = false;
         m.ldef_gid = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reads a run reports come in the run's own order, whatever the
+    /// locations' numbers: a meaning's number is its name's place in the
+    /// process's interner, which the threads' schedule decides.
+    #[test]
+    fn reads_in_the_runs_order_not_by_location() {
+        let mut st = State::new();
+        st.fill(900, None);
+        st.fill(7, None);
+        st.fill(300, None);
+        // (a location read, then defined: still a read, through its meta)
+        st.set(300, Entry::raw(None), false, None);
+        st.fill(40, None);
+        assert_eq!(st.read_locs(), vec![300, 900, 7, 40]);
+        let order: Vec<Loc> = st.read_values().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(order, st.read_locs());
     }
 }
