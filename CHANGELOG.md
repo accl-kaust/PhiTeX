@@ -31,10 +31,11 @@ lists what has to be green before it reaches `main`.
   document reads the file it makes, on what the job wrote, and again
   only when that input changes. It runs as a memoised step of the build,
   not between runs. Its support files are found through kpathsea.
-- **Watch equals cold.** `phitex watch` rebuilds on each change of the
+- **Watch mode.** `phitex watch` rebuilds on each change of the
   document's files or the editor's buffers, with the pages live in the
-  browser. Each rebuild's output is byte-identical to a cold build of
-  the same text, including every round.
+  browser. On the gate's edit histories each rebuild equals a cold build
+  of the same text; since the engine starts each round from the
+  previous build's (2026-10-18), that is checked, not promised.
 - **Parallel.** The engine's steps run on every logical CPU by default
   (hyperthreads included; `-j N` or `PHITEX_THREADS` to change that).
   The output is the same at any thread count, and so is the number of
@@ -87,15 +88,46 @@ lists what has to be green before it reaches `main`.
   and `-mltex` are refused.
 - **The `.log`:** not byte-identical to pdfTeX's. Errors, warnings and
   pages are reported, but the transcript's details differ.
-- **Speed:** the alpha's bar is exactness. A cold build of a large
-  document is not yet faster than pdflatex, and an edit of one does not
-  yet take milliseconds. The release gate's numbers are recorded in
-  `docs/alpha-checklist.md`.
+- **Speed:** the alpha's bar is exactness. A cold build is not yet
+  faster than pdflatex (amsldoc: 5.4 s at 8 threads against pdfTeX's
+  3.0 s a run; para4000: 2.3 s against 0.73 s), and the edit bar is not
+  met (amsldoc at 8 threads: one letter 22 ms and a line re-break 27 ms
+  against 16 ms; a heading 127 ms, a label 574 ms and a preamble
+  definition 82 ms against 50 ms). The numbers, their jobs and commits
+  are in `docs/alpha-checklist.md`.
 - **Scaling:** a LaTeX document's nodes still form long chains. The
   census bar (a cold critical path of at most 6 nodes) is not met: the
   path is 83 nodes on a 30-paragraph article and 138 on the
   environments article, the same on every run (a scaling fact, not a
   schedule's), so the census tests are ignored until it is.
+- **Font expansion:** micro-typography's `\pdfadjustspacing` and
+  `\pdffontexpand` are stored but not applied: pdfLaTeX breaks the
+  paragraph with expanded fonts (and writes the scale), PhiTeX with the
+  fonts as they are, so the lines differ. The largest cause of
+  difference in the corpus sweep (about 120 documents; sweep job 14495,
+  dev e74c84e3, 2026-10-20).
+  Repro: `bench/corpus-repro/microtype-expansion.tex`.
+- **Type 3 (bitmap, PK) fonts in PDF:** pdfTeX embeds them; PhiTeX
+  writes a DVI file instead of the PDF.
+  Repro: `bench/corpus-repro/type3-font.tex`.
+- **pgf/TikZ-heavy documents:** some time out (32 documents in the
+  corpus sweep). The cause is not found yet, and there is no minimal
+  repro yet.
+- **Documents set only in `multicols`:** some ship no page ("No pages
+  of output") where pdfLaTeX ships them. No minimal repro yet.
+- **A local definition new in a later round:** where a region that
+  opens a group runs again in a later round and now defines something
+  locally (LaTeX's file-writing environment once its file exists lets
+  `\write` gobble its arguments), the definition outlives the group, and
+  the `.aux` loses `\begin{document}`'s `\relax`. An engine bug of the
+  round core, fixed in the clean core (`docs/alpha-checklist.md`).
+  Repro: `bench/corpus-repro/written-text-lost-write.tex`; test
+  `corpus_repros::written_text_lost_write` (with the clean core).
+- **`\inputlineno` across files:** it counts the lines of every file
+  together, not each file's own. Test `etex::io` (ignored).
+- **Alignments:** 57 documents in the corpus sweep stop with an
+  alignment error (a misplaced `&` or `\cr`) that pdfLaTeX does not
+  give. No minimal repro yet.
 
 ### How to run it
 
