@@ -679,6 +679,10 @@ pub(crate) struct Run<'c, 'a> {
     /// main list since, a finisher's page, and the cut its fold found.
     pub cand: u32,
     pub cand_marks: Vec<crate::pages::CandMark>,
+    /// The serial of the writer command the command in progress recorded
+    /// ([`crate::pdfout::command`]), until a read-time allocation takes
+    /// it as its own ([`crate::pdfout::note_read_time`]); 0: none.
+    pub pdf_cmd: u64,
     /// The scope kind the node runs in, once read ([`Run::scope_kind`]):
     /// it does not change during the run.
     #[allow(clippy::option_option)]
@@ -821,6 +825,7 @@ impl<'c, 'a> Run<'c, 'a> {
             halt: None,
             cand: 0,
             cand_marks: Vec::new(),
+            pdf_cmd: 0,
             scope_kind_memo: None,
             ins_pending: Vec::new(),
             fin: None,
