@@ -476,7 +476,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         .to_string_lossy()
         .trim_start_matches("./")
         .to_owned();
-    let (tx, rx) = mpsc::channel::<(Instant, Event)>();
+    let (tx, mut rx) = mpsc::channel::<(Instant, Event)>();
     // (a terminal editor, or an unknown one: the viewer shows the place
     // instead of opening it)
     let editor = crate::editor::Editor::configured(t.editor.as_deref()).unwrap_or_else(|e| {
@@ -606,7 +606,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let mut rebuild = |s: &mut Session,
                        why: &str,
                        since: Option<Instant>,
-                       meanwhile: &mut dyn FnMut() -> bool| {
+                       meanwhile: &mut (dyn FnMut() -> bool + Send)| {
         builds += 1;
         if let Some(t) = since
             && !phitex_tex::timeline::active()
@@ -630,18 +630,18 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let spin = ui.spin(format!("{what}: build {builds} ({why})"), status.clone());
         // (a build that fails inside the engine — a panic: the pieces did
         // not settle — is reported, and the watch goes on waiting)
+        // (the build on this thread, the same one every build: what the
+        // engine keeps per thread, its tables and caches, stays warm from
+        // one build to the next; the events taken meanwhile on a helper)
         let ran = std::thread::scope(|sc| {
-            let h = sc.spawn(|| {
-                let r = crate::ui::catch(|| s.build());
-                let _ = built
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .send((Instant::now(), Event::Built));
-                r
-            });
-            while !meanwhile() {}
-            h.join()
-                .unwrap_or_else(|_| Err("the build's thread panicked".to_owned()))
+            let pump = sc.spawn(|| while !meanwhile() {});
+            let r = crate::ui::catch(|| s.build());
+            let _ = built
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send((Instant::now(), Event::Built));
+            let _ = pump.join();
+            r
         });
         // (an edit the build took while it ran: timed from it)
         let since = match (since, s.absorbed_at()) {
@@ -1089,7 +1089,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // to it, everything held for after it)
     let cold_absorb = s.absorb();
     let mut cold_meanwhile = || {
-        let Ok((at, e)) = rx.recv() else {
+        let Ok((at, e)) = (&mut rx).recv() else {
             return true;
         };
         if let Event::Built = e {
@@ -1377,7 +1377,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             // (while the build runs: the main file's edits sent to it, the
             // rest held for after it)
             let mut meanwhile = || {
-                let Ok((at, e)) = rx.recv() else {
+                let Ok((at, e)) = (&mut rx).recv() else {
                     return true;
                 };
                 let send_main = |buffers: &HashMap<String, String>, file: &str| -> bool {
