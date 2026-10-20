@@ -656,21 +656,10 @@ impl Engine {
         let predict = sched.speculation_budget() > 0;
         loop {
             if s.queue.is_empty() {
-                // (Nodes parked by their hints whose blocker left work
-                // without waking them: queued again.)
-                let back: Vec<Id> = std::mem::take(&mut s.hint_parked)
-                    .into_iter()
-                    .filter(|(id, x)| s.parked.get(id) == Some(&Wait::Node(*x, None)))
-                    .map(|(id, _)| id)
-                    .collect();
-                if back.is_empty() {
-                    break;
+                if self.requeue_hint_parked(s) {
+                    continue;
                 }
-                for id in back {
-                    s.parked.remove(&id);
-                    self.enqueue(s, id);
-                }
-                continue;
+                break;
             }
             rep.max_ready = rep.max_ready.max(s.queue.len());
             self.check_deadline(s, rep, deadline)?;
@@ -770,6 +759,21 @@ impl Engine {
     /// it is), takes the next ready node and runs it on the world then; edits
     /// are taken in between epochs of a few hundred merges.
     #[allow(clippy::too_many_arguments)]
+    /// Nodes parked by their hints whose blocker left work without waking
+    /// them, queued again (when the queue ran dry); whether there were any.
+    fn requeue_hint_parked(&self, s: &mut Sched) -> bool {
+        let back: Vec<Id> = std::mem::take(&mut s.hint_parked)
+            .into_iter()
+            .filter(|(id, x)| s.parked.get(id) == Some(&Wait::Node(*x, None)))
+            .map(|(id, _)| id)
+            .collect();
+        for &id in &back {
+            s.parked.remove(&id);
+            self.enqueue(s, id);
+        }
+        !back.is_empty()
+    }
+
     fn drain_flow(
         &mut self,
         s: &mut Sched,
@@ -789,7 +793,10 @@ impl Engine {
         let predict = sched.speculation_budget() > 0;
         let fuel = sched.fuel();
         let mut idle: u32 = 0;
-        while !s.queue.is_empty() {
+        loop {
+            if s.queue.is_empty() && !self.requeue_hint_parked(s) {
+                break;
+            }
             rep.max_ready = rep.max_ready.max(s.queue.len());
             self.check_deadline(s, rep, deadline)?;
             let flow = std::sync::Mutex::new(Flow {
@@ -961,14 +968,17 @@ impl Engine {
             // finish and let it go.)
             let first = ready.is_empty() && skip.is_empty();
             if !first && let Err(x) = self.w.hint_blocker(&self.core, k.2, predict) {
-                // (Parked on a dirty blocker, steps only: its commit
-                // queues it again; a scan per step for each cost a
-                // window's worth of checks, growing with the threads.)
-                if skip.is_empty()
-                    && let Some(x) = x
+                // (Parked on a dirty blocker: its commit queues it again;
+                // a scan per step (or pick) for each cost a window's worth
+                // of checks, growing with the threads.)
+                if let Some(x) = x
                     && x != k.2
                     && self.w.node(x).is_some_and(|n| n.st == St::Dirty)
                 {
+                    if super::core::debug() {
+                        let op = |y: Id| self.w.node(y).map(|n| self.core.op_name(n.text.op));
+                        eprintln!("held {} ({:?}) on {x} ({:?})", k.2, op(k.2), op(x));
+                    }
                     s.queue.remove(&k);
                     s.queued.remove(&k.2);
                     s.parked.insert(k.2, Wait::Node(x, None));

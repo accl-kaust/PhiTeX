@@ -867,7 +867,9 @@ pub(crate) fn add_form_fonts(r: &mut Run<'_, '_>, ids: &[u32]) -> R<()> {
 /// One font as the writer asks for it.
 struct Font {
     name: Vec<u8>,
-    metrics: ScaledFont,
+    /// The font as loaded ([`crate::fonts::load`], shared: its metrics
+    /// not copied for every page that uses the font).
+    loaded: Arc<crate::fonts::Loaded>,
     entry: Option<MapEntry>,
     ff: Option<Arc<[u8]>>,
     enc: Option<Arc<[u8]>>,
@@ -916,7 +918,7 @@ impl Fonts {
             let x = &self.by_id[f];
             let words = [
                 u64::from(*f),
-                u64::from_ne_bytes(i64::from(x.metrics.size).to_ne_bytes()),
+                u64::from_ne_bytes(i64::from(x.loaded.at.size).to_ne_bytes()),
             ];
             h = phitex_defuse::hash_words(h, &words);
             h = phitex_defuse::hash_bytes(h, &x.name);
@@ -997,7 +999,7 @@ impl FontSource for Fonts {
                     params: Vec::new(),
                 })
             },
-            |x| &x.metrics,
+            |x| &x.loaded.at,
         )
     }
     fn name(&self, f: FontId) -> &[u8] {
@@ -1183,7 +1185,7 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
             id,
             Font {
                 name: name.into_bytes(),
-                metrics: l.at.clone(),
+                loaded: l.clone(),
                 entry,
                 ff,
                 enc,

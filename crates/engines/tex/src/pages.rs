@@ -262,6 +262,21 @@ impl PageNode {
         }
     }
 
+    /// Whether the node's run runs a text (a routine's, the rest of a cut
+    /// piece's), whose commands contribute as a text's do.
+    pub(crate) const fn runs_text(self) -> bool {
+        matches!(self, PageNode::Finish | PageNode::Resume)
+    }
+
+    /// Whether the node's declared contributions ([`Operation::
+    /// static_contribs`]: its own code's, [`no_units`]) are all it
+    /// contributes: so where it runs no text. Then the engine passes it
+    /// by in a window of any other accumulator while it is in work.
+    /// [`Run::finish`] checks a run against it (under `observe`).
+    pub(crate) const fn contribs_complete(self) -> bool {
+        !self.runs_text()
+    }
+
     /// The read hint: the fields `gate` the node cannot run without, and
     /// [`PageNode::folds`].
     fn reads(self, v: &Values, gate: &[&str]) -> Vec<Field> {
@@ -4795,6 +4810,13 @@ impl Operation for Scan {
     /// No pieces' units: a window holding a step does not wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         Some(no_units(v))
+    }
+    /// All it contributes where it runs no text ([`PageNode::
+    /// contribs_complete`]): a window of another accumulator does not
+    /// wait for it either.
+    fn contribs_complete(&self, args: &[ValueId], v: &Values) -> bool {
+        let o = ops(&self.0);
+        PageNode::of(o, v, o.scan, args).is_some_and(PageNode::contribs_complete)
     }
     /// A continuation's scan state as the block's scan that placed it
     /// predicted it (its arguments 2 and 3), with its page's field; else as the

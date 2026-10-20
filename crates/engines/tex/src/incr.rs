@@ -642,6 +642,33 @@ fn walk_note(
     }
 }
 
+/// [`pass::Definitions::name_digest`] of `n` whose mark is `stamp`: the
+/// mark is unique in the process and definitions with the same mark give
+/// the name the same digest, so it is hashed once per mark, not again
+/// for every chunk analysed (a chunk re-analysed reads a hundred names).
+fn name_digest(defs: &Defs, n: &str, stamp: u64) -> u64 {
+    thread_local! {
+        static MEMO: std::cell::RefCell<phitex_defuse::FxHashMap<(String, u64), u64>> =
+            std::cell::RefCell::new(phitex_defuse::FxHashMap::default());
+    }
+    if stamp == 0 {
+        return defs.name_digest(n);
+    }
+    let key = (n.to_owned(), stamp);
+    if let Some(d) = MEMO.with(|m| m.borrow().get(&key).copied()) {
+        return d;
+    }
+    let d = defs.name_digest(n);
+    MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= 1 << 16 {
+            m.clear();
+        }
+        m.insert(key, d);
+    });
+    d
+}
+
 /// A chunk's analysis under the definitions `defs` before it (given its
 /// own, [`crate::hints::own_definitions`], when harvested already): its
 /// hints, its slices' keys (a slice at its start taken as beginning a
@@ -656,7 +683,8 @@ fn analyse(
     let reads: Reads = names
         .into_iter()
         .map(|n| {
-            let (s, d) = (defs.name_stamp(&n), defs.name_digest(&n));
+            let s = defs.name_stamp(&n);
+            let d = name_digest(defs, &n, s);
             (n, s, d)
         })
         .collect();

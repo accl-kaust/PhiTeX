@@ -1392,15 +1392,9 @@ impl Run<'_, '_> {
                     if ok {
                         let m = nodes::marker(v, T_DELETE);
                         self.append(md.lid, m);
-                        last.map(|x| {
-                            let mut side = Side::default();
-                            let mut bx = match nodes::decode(v, x, &mut side) {
-                                Some(Node::Box(b)) => b,
-                                _ => BoxNode::default(),
-                            };
-                            bx.shift = 0;
-                            nodes::encode_box(v, &bx, &side)
-                        })
+                        // (its shift set to 0 in the value itself: the box
+                        // is not decoded and encoded again whole)
+                        last.map(|x| with_shift(v, x, 0))
                     } else {
                         None
                     }

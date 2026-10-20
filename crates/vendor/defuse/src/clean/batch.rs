@@ -41,7 +41,9 @@ struct Group {
     range_readers: PMap<(Pos, Id), Pos>,
     defs_touched: bool,
     acc_touched: bool,
-    recheck: Vec<(Id, Field)>,
+    /// Readers to re-ask on the field (`true`: past the shadow bound,
+    /// under CLEAN_SCOPED_CHECK only).
+    recheck: Vec<(Id, Field, bool)>,
     done: bool,
 }
 
@@ -83,7 +85,7 @@ impl Group {
                             m.insert(pos, e, &NoMeasure);
                         });
                     }
-                    self.def_changed(at);
+                    self.def_changed(core, at, fr, e.loc == Locality::Global);
                 }
                 FieldOp::Unfile { pos, fr, global, at } => {
                     if global {
@@ -98,7 +100,7 @@ impl Group {
                             self.defs.local.remove(&fr, &NoMeasure);
                         }
                     }
-                    self.def_changed(at);
+                    self.def_changed(core, at, fr, global);
                 }
                 FieldOp::Contrib { pos, x } => {
                     let Some(mo) = core.accs.get(&f) else { continue };
@@ -119,7 +121,7 @@ impl Group {
                         self.range_readers
                             .range(std::ops::Bound::Excluded(&(pos, Id::MAX)), std::ops::Bound::Unbounded)
                             .filter(|(_, lo)| **lo < pos)
-                            .map(|(k, _)| (k.1, f)),
+                            .map(|(k, _)| (k.1, f, false)),
                     );
                 }
             }
@@ -127,16 +129,24 @@ impl Group {
     }
 
     /// The field's definitions changed at `at`: its readers after it are
-    /// re-asked.
-    fn def_changed(&mut self, at: Pos) {
+    /// re-asked, up to the next entry that shadows the change.
+    fn def_changed(&mut self, core: &Core, at: Pos, fr: FrameId, global: bool) {
         self.defs_touched = true;
         let lo = at.saturating_sub(1);
         let f = self.key.1;
+        let hi = super::build::shadow_end(core, Some(&self.defs), f, at, fr, global);
         self.recheck.extend(
             self.readers
-                .range(std::ops::Bound::Excluded(&(lo, Id::MAX)), std::ops::Bound::Excluded(&(Pos::MAX, 0)))
-                .map(|(k, ())| (k.1, f)),
+                .range(std::ops::Bound::Excluded(&(lo, Id::MAX)), std::ops::Bound::Excluded(&(hi, 0)))
+                .map(|(k, ())| (k.1, f, false)),
         );
+        if hi != Pos::MAX && super::build::scoped_check() {
+            self.recheck.extend(
+                self.readers
+                    .range(std::ops::Bound::Excluded(&(hi - 1, Id::MAX)), std::ops::Bound::Unbounded)
+                    .map(|(k, ())| (k.1, f, true)),
+            );
+        }
     }
 }
 
@@ -164,7 +174,7 @@ impl Pending {
 
     /// Applies the writes to `w` (in parallel on `exec` when there are
     /// many); the readers to ask again, each on its field.
-    pub(crate) fn flush(&mut self, core: &Core, w: &mut World, exec: &mut dyn crate::api::Executor) -> Vec<(Id, Field)> {
+    pub(crate) fn flush(&mut self, core: &Core, w: &mut World, exec: &mut dyn crate::api::Executor) -> Vec<(Id, Field, bool)> {
         self.fields.clear();
         if self.ops.is_empty() {
             return Vec::new();
