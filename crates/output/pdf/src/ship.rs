@@ -1433,7 +1433,11 @@ impl PdfState {
                 Some(z) => z.clone(),
                 None => self.out[self.save_offset - self.base..].to_vec(),
             };
-            self.page_shown = (crate::Shown(data), self.cur_page_width, self.cur_page_height);
+            self.page_shown = (
+                crate::Shown(data),
+                self.cur_page_width,
+                self.cur_page_height,
+            );
         }
         self.end_stream();
         if shipping_page && let Some(r) = &mut self.rec {

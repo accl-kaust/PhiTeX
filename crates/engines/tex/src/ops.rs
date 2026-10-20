@@ -832,16 +832,15 @@ fn file_node(
     // this runs again, bound to them, and publishes)
     let k = v.field(&format!("wkeys:{name}"));
     let wt = crate::tools::text_field(v, name);
-    if !cx.is_loopback(k)
-        && !cx.is_loopback(wt)
+    let (text, ds, as_text) = stream_of(cx, name)?;
+    if !cx.is_loopback(wt)
         && let Some(seed) = seed_text(cx, name)?
     {
-        seed_decls(cx, name, seed, defs_lock)?;
+        seed_decls(cx, name, seed, text.is_some() && as_text, defs_lock)?;
         let _ = cx.use_field(k)?;
         let _ = cx.use_field(wt)?;
         return Ok(ValueId::UNIT);
     }
-    let (text, ds, as_text) = stream_of(cx, name)?;
     // (a file not opened for writing this round stays as the round
     // before left it: TeX's next run finds the file an earlier run
     // wrote, which a job that writes a file only where it is missing
@@ -953,11 +952,17 @@ fn seed_text(cx: &mut Ctx<'_>, name: &str) -> Result<Option<ValueId>, Stop> {
 /// text `seed` ([`file_node`]): its whole text; and where a run read it
 /// back (`crate::run::SEEDED`, the first such), its key set and its
 /// definitions, or as its text, its units and their order, as this node
-/// publishes them from what the job writes.
+/// publishes them from what the job writes. A file the job writes this
+/// round read back as its text (`written_as_text`: a line of it did more
+/// than define as it was written) is so declared whatever the read-back
+/// made of the client's text: read as its text where it is read back,
+/// the text's lines make what the read-back's definitions make, and the
+/// round's values are as this node publishes them.
 fn seed_decls(
     cx: &mut Ctx<'_>,
     name: &str,
     seed: ValueId,
+    written_as_text: bool,
     defs_lock: &std::sync::Mutex<crate::hints::Defs>,
 ) -> Result<(), Stop> {
     let v = cx.values();
@@ -968,31 +973,49 @@ fn seed_decls(
         .map(|e| list_of(v, e))
         .find(|xs| xs.first().is_some_and(|&n| str_of(v, n) == name));
     let mut decl = vec![(crate::tools::text_field(v, name), seed)];
-    if let Some(xs) = read
-        && let [_, keys, defs] = xs[..]
-    {
-        let wf = v.field(&format!("wfile:{name}"));
-        if keys == crate::api::text_mark(v) {
-            let hints = defs_lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let text = str_of(v, seed);
-            let (order, units) = units_of(v, name, &text, &hints);
-            for (key, u) in units {
-                decl.push((v.field(&key), v.str(u)));
-            }
-            decl.push((wf, order));
-        } else {
-            decl.push((wf, v.list(Vec::new())));
-            for d in list_of(v, defs) {
-                if let [id, x] = list_of(v, d)[..] {
-                    decl.push((v.field(&format!("wdef:{}", str_of(v, id))), x));
-                }
+    // (the key set and definitions a run read back, or the text mark of
+    // a file read back as its text, or written so; none: the text alone)
+    let mark = crate::api::text_mark(v);
+    let read = read.and_then(|xs| match xs[..] {
+        [_, keys, defs] => Some((keys, defs)),
+        _ => None,
+    });
+    let (keys, defs) = match read {
+        _ if written_as_text => (mark, ValueId::UNIT),
+        Some(kd) => kd,
+        None => {
+            declare_seeds(cx, decl);
+            return Ok(());
+        }
+    };
+    let wf = v.field(&format!("wfile:{name}"));
+    if keys == mark {
+        let hints = defs_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let text = str_of(v, seed);
+        let (order, units) = units_of(v, name, &text, &hints);
+        for (key, u) in units {
+            decl.push((v.field(&key), v.str(u)));
+        }
+        decl.push((wf, order));
+    } else {
+        decl.push((wf, v.list(Vec::new())));
+        for d in list_of(v, defs) {
+            if let [id, x] = list_of(v, d)[..] {
+                decl.push((v.field(&format!("wdef:{}", str_of(v, id))), x));
             }
         }
-        decl.push((v.field(&format!("wkeys:{name}")), keys));
     }
+    decl.push((v.field(&format!("wkeys:{name}")), keys));
+    declare_seeds(cx, decl);
+    Ok(())
+}
+
+/// [`seed_decls`]: the loop-backs declared with their round-one values.
+fn declare_seeds(cx: &mut Ctx<'_>, decl: Vec<(Field, ValueId)>) {
+    let v = cx.values();
     for (f, x) in decl {
         if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") {
             eprintln!(
@@ -1005,7 +1028,6 @@ fn seed_decls(
         }
         cx.declare_loopback(f, x);
     }
-    Ok(())
 }
 
 /// A written file not opened this round ([`file_node`]): its loop-backs

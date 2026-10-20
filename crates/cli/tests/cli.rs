@@ -1051,7 +1051,10 @@ fn build_rounds_are_latexmks_runs() {
         assert_eq!(cold, cold_rounds, "{name}: the rounds from nothing");
         let (again, pdf2) = build();
         assert_eq!(again, 1, "{name}: the rounds rebuilt with its files");
-        assert!(pdf == pdf2, "{name}: the rebuild's PDF is not the first build's");
+        assert!(
+            pdf == pdf2,
+            "{name}: the rebuild's PDF is not the first build's"
+        );
     }
 }
 

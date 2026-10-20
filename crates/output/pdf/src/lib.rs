@@ -518,7 +518,7 @@ impl std::fmt::Debug for FontState {
             .field("kind", &self.kind)
             .field("vf", &self.vf)
             .field("expand", &self.expand)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

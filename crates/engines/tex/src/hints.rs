@@ -4590,7 +4590,11 @@ mod tests {
                 .position(|&(s, e)| t[s..e].contains(needle))
                 .expect("a slice")
         };
-        assert_ne!(slice("parshape"), slice("more"), "set in one slice, ended in the next");
+        assert_ne!(
+            slice("parshape"),
+            slice("more"),
+            "set in one slice, ended in the next"
+        );
         let state = |needle: &str| -> Vec<&'static str> {
             let k = slice(needle);
             eprintln!("{needle}: {:?}", &t[text.slices[k].0..text.slices[k].1]);

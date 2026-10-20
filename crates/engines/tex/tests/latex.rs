@@ -1232,3 +1232,27 @@ fn amsldoc_rebreak_reruns() {
         eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
     }
 }
+
+/// `\inputlineno` in token lists a resumed piece reads (a page candidate
+/// cut the piece, its continuation the hooks `\begin{document}` runs) is
+/// the line of the file below them, as pdflatex's log has it: P=3, H=5
+/// (the hook, at `\begin{document}`'s line), D=6.
+#[test]
+fn inputlineno_in_a_resumed_piece_is_the_file_line_below_it() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("inputlineno");
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let src = "\\documentclass{article}\n\\usepackage{graphicx}\n\\typeout{P=\\the\\inputlineno}\n\\AtBeginDocument{\\typeout{H=\\the\\inputlineno}}\n\\begin{document}\n\\typeout{D=\\the\\inputlineno}\nx\n\\end{document}\n";
+    for threads in [1, 8] {
+        let opts = Options {
+            threads: Some(threads),
+            ..pdf_opts("line", &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), src);
+        let (_, log) = b.output();
+        let got: Vec<&str> = log
+            .lines()
+            .filter(|l| l.len() > 2 && l.as_bytes()[1] == b'=' && "PHD".contains(&l[..1]))
+            .collect();
+        assert_eq!(got, ["P=3", "H=5", "D=6"], "-j {threads}");
+    }
+}
