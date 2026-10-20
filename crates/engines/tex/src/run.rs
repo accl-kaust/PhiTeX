@@ -488,6 +488,11 @@ pub(crate) struct Run<'c, 'a> {
     pub hb_at: u64,
     pub hb_done: u64,
     pub pulled: usize,
+    /// In a run resumed from a park, how many segments at the head of the
+    /// input's text were levels of the input when it parked (top first,
+    /// [`Run::park`]): the levels it had, not text it had yet to reach
+    /// ([`Run::file_line_here`] looks through them as through levels).
+    pub parked_levels: usize,
     /// Where each pulled sibling's text begins in the input's text (its
     /// first segment's index), or `None` when it joined the line before
     /// it: [`Run::give_back_peeked`].
@@ -755,6 +760,7 @@ impl<'c, 'a> Run<'c, 'a> {
             hb_at: Run::heartbeat_start(),
             hb_done: 0,
             pulled: 0,
+            parked_levels: 0,
             pull_at: Vec::new(),
             pull_lev: None,
             pull_orig: Vec::new(),
@@ -3856,6 +3862,8 @@ pub(crate) struct Parked {
     epoch: u64,
     /// The input left, top first: the levels' rests, then the text.
     segs: Vec<Seg>,
+    /// How many of `segs` were levels ([`Run::parked_levels`]).
+    nlev: usize,
     pulled: usize,
     /// Where each pulled sibling's text begins, as an index into `segs`'
     /// text part: [`Run::pull_at`], kept so a resumed run can still give a
@@ -3873,6 +3881,12 @@ pub(crate) struct Parked {
     fread: Vec<(String, u64)>,
     fmiss: Vec<String>,
     skip_first: Vec<Field>,
+    /// The incompleat noads ([`Run::incs`]), the streams closed
+    /// ([`Run::closed`]) and the errors counted ([`Run::error_count`]):
+    /// the run's state like the rest, kept over the park.
+    incs: Vec<(i64, ValueId)>,
+    closed: Vec<i32>,
+    error_count: u32,
     /// The meanings read by class only ([`Run::class_memo`]): reads of
     /// the run like its table's, kept over the park.
     class_memo: Vec<(Field, u8)>,
@@ -3954,6 +3968,9 @@ impl Run<'_, '_> {
             pull_at.push(at);
             pull_orig.push(orig);
         }
+        // (the levels a run resumed before had yet to reach are levels
+        // still: they come first in the text)
+        let nlev_all = nlev + self.parked_levels.saturating_sub(input.text_at);
         segs.extend(input.text_rest().iter().cloned());
         let nest = std::mem::take(&mut self.nest)
             .into_iter()
@@ -3977,6 +3994,7 @@ impl Run<'_, '_> {
         Some(Parked {
             epoch: self.cx.values_epoch(),
             segs,
+            nlev: nlev_all,
             pulled: self.pulled,
             pull_at,
             pull_orig,
@@ -3994,6 +4012,9 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|l| self.loc_field(l))
                 .collect(),
+            incs: std::mem::take(&mut self.incs),
+            closed: std::mem::take(&mut self.closed),
+            error_count: self.error_count,
             class_memo: std::mem::take(&mut self.class_memo)
                 .into_iter()
                 .map(|(l, c)| (self.loc_field(l), c))
@@ -4043,6 +4064,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let mut r = Run::new(cx, ops);
         r.input.text = p.segs;
         r.input.text_at = 0;
+        r.parked_levels = p.nlev;
         r.nest = p
             .nest
             .into_iter()
@@ -4073,6 +4095,9 @@ impl<'c, 'a> Run<'c, 'a> {
         r.fread = p.fread;
         r.fmiss = p.fmiss;
         r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
+        r.incs = p.incs;
+        r.closed = p.closed;
+        r.error_count = p.error_count;
         r.class_memo = p
             .class_memo
             .into_iter()
@@ -4118,24 +4143,40 @@ impl Run<'_, '_> {
     /// input stack (a line of it, or the rest of a file read here), else
     /// the file the node's token levels were left in (its `t` frame).
     pub(crate) fn file_line_here(&self) -> Option<FileLine> {
+        let line = |s: &crate::input::Line| {
+            if s.lineno > 0 {
+                return Some(FileLine::Known(i64::from(s.lineno)));
+            }
+            // (a `\read` line is no file's, §483; a text without an
+            // origin, a format's or INITEX's, is one file, UNIT)
+            (!s.rescanned).then(|| FileLine::Piece(s.origin.map_or(ValueId::UNIT, |o| o.0)))
+        };
         for l in self.input.levels.iter().rev() {
             match l.kind {
                 crate::input::kind::TOKS => {}
                 crate::input::kind::LINE => {
-                    let s = self.input.line(*l);
-                    if s.lineno > 0 {
-                        return Some(FileLine::Known(i64::from(s.lineno)));
-                    }
-                    // (a `\read` line is no file's, §483; a text
-                    // without an origin, a format's or INITEX's, is one
-                    // file, UNIT)
-                    if !s.rescanned {
-                        return Some(FileLine::Piece(s.origin.map_or(ValueId::UNIT, |o| o.0)));
+                    if let Some(x) = line(self.input.line(*l)) {
+                        return Some(x);
                     }
                 }
                 _ => {
                     return Some(FileLine::Known(i64::from(self.input.file(*l).line)));
                 }
+            }
+        }
+        // (a run resumed from a park: the levels it had when it parked and
+        // has not reached again are below the ones it holds, in order, as
+        // in a run that never parked)
+        let parked = self.input.text_at..self.parked_levels.min(self.input.text.len());
+        for s in self.input.text.get(parked).unwrap_or_default() {
+            match s {
+                Seg::Toks(_) => {}
+                Seg::Line(l) => {
+                    if let Some(x) = line(l) {
+                        return Some(x);
+                    }
+                }
+                Seg::File(f) => return Some(FileLine::Known(i64::from(f.line))),
             }
         }
         let v = self.v;
