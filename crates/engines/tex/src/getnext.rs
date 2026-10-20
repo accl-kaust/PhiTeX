@@ -766,7 +766,7 @@ impl Run<'_, '_> {
     /// (debug, `PHITEX_GIVEBACK_ONLY=k`: only the k-th distinct sibling
     /// text met by a give-back, in the order first met, may be given
     /// back; the others are refused)
-    fn giveback_only_allows(&self) -> bool {
+    fn giveback_only_allows(&mut self) -> bool {
         static K: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
         static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
         let Some(k) = *K.get_or_init(|| {
@@ -931,7 +931,7 @@ impl Run<'_, '_> {
 
     /// Whether the next sibling's text continues this line (the line on
     /// top is the last segment of the text, not ended).
-    fn next_is_continuation(&self) -> bool {
+    fn next_is_continuation(&mut self) -> bool {
         if !self.top_line_is_cut() {
             return false;
         }

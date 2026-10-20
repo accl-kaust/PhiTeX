@@ -3752,11 +3752,11 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a load whose run went on into its siblings is not one load:
         // no record of it)
         if self.rec_load && crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
+            let blanks = self.pulled_only_blanks();
             eprintln!(
-                "pkgrec: load run {} finishes: pulled {} (blanks only {}), rest claimed {}, effect {:?}, {} definitions",
+                "pkgrec: load run {} finishes: pulled {} (blanks only {blanks}), rest claimed {}, effect {:?}, {} definitions",
                 self.cx.node().raw(),
                 self.pulled,
-                self.pulled_only_blanks(),
                 self.claim_rest,
                 self.effect,
                 published.len()
@@ -3924,7 +3924,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// after them. Declared at the commit, and before the page fold's
     /// read of the page state (`crate::pages`), so that a run parked
     /// there holds no sibling it does not take.
-    pub(crate) fn claim_count(&self) -> usize {
+    pub(crate) fn claim_count(&mut self) -> usize {
         let mut n = self.pulled;
         if self.claim_rest {
             while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec) {
@@ -3936,7 +3936,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether every sibling the run took is blank text (a line's end
     /// left as a node of its own): the run is still its load's alone.
-    fn pulled_only_blanks(&self) -> bool {
+    fn pulled_only_blanks(&mut self) -> bool {
         (0..self.pulled).all(|i| match self.cx.following(i) {
             Some((op, args)) if op == self.ops.exec => args.first().is_some_and(|&fr| {
                 list_of(self.v, fr).into_iter().all(|f| {
