@@ -551,7 +551,7 @@ impl Engine {
             return self.drain_flow(s, rep, ran, cut, deadline, hs, src, per_round, rounds, sched, exec);
         }
         if exec.parallelism() > 1 || exec.steps() {
-            return self.drain_steps(s, rep, ran, cut, deadline, hs, src, per_round, rounds, sched, exec);
+            return super::core::prof::time(24, || self.drain_steps(s, rep, ran, cut, deadline, hs, src, per_round, rounds, sched, exec));
         }
         let mut idle: u32 = 0;
         while let Some(k) = s.queue.first().copied() {
@@ -675,7 +675,7 @@ impl Engine {
             }
             rep.max_ready = rep.max_ready.max(s.queue.len());
             self.check_deadline(s, rep, deadline)?;
-            let Some((mut chosen, mut resumes, fueled)) = self.select_batch(s, rep, ran, cut, hs, window, predict, sched, &FxHashSet::default())? else { continue };
+            let Some((mut chosen, mut resumes, fueled)) = super::core::prof::time(22, || self.select_batch(s, rep, ran, cut, hs, window, predict, sched, &FxHashSet::default()))? else { continue };
             // Run against the snapshot; the results merge in text order
             // after the batch (merging in the workers as results came only
             // added contention: 2026-10-20, para4000 j8 341 -> 430 ms).
@@ -707,7 +707,7 @@ impl Engine {
                 };
                 let mut out = Vec::with_capacity(jobs.len());
                 let ts = std::time::Instant::now();
-                exec.execute(jobs.len(), &run, &mut out);
+                super::core::prof::time(23, || exec.execute(jobs.len(), &run, &mut out));
                 // (Idle: the workers' time in the step not spent in runs.)
                 let busy: u64 = slots.iter().filter_map(|x| super::core::lock(x).as_ref().map(|(_, d)| u64::try_from(d.as_nanos()).unwrap_or(0))).sum();
                 let span = u64::try_from(ts.elapsed().as_nanos()).unwrap_or(u64::MAX).saturating_mul(exec.parallelism().max(1) as u64);

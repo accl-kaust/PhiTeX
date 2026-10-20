@@ -41,7 +41,7 @@ struct Group {
     range_readers: PMap<(Pos, Id), Pos>,
     defs_touched: bool,
     acc_touched: bool,
-    recheck: Vec<Id>,
+    recheck: Vec<(Id, Field)>,
     done: bool,
 }
 
@@ -119,7 +119,7 @@ impl Group {
                         self.range_readers
                             .range(std::ops::Bound::Excluded(&(pos, Id::MAX)), std::ops::Bound::Unbounded)
                             .filter(|(_, lo)| **lo < pos)
-                            .map(|(k, _)| k.1),
+                            .map(|(k, _)| (k.1, f)),
                     );
                 }
             }
@@ -131,10 +131,11 @@ impl Group {
     fn def_changed(&mut self, at: Pos) {
         self.defs_touched = true;
         let lo = at.saturating_sub(1);
+        let f = self.key.1;
         self.recheck.extend(
             self.readers
                 .range(std::ops::Bound::Excluded(&(lo, Id::MAX)), std::ops::Bound::Excluded(&(Pos::MAX, 0)))
-                .map(|(k, ())| k.1),
+                .map(|(k, ())| (k.1, f)),
         );
     }
 }
@@ -162,8 +163,8 @@ impl Pending {
     }
 
     /// Applies the writes to `w` (in parallel on `exec` when there are
-    /// many); the readers to ask again.
-    pub(crate) fn flush(&mut self, core: &Core, w: &mut World, exec: &mut dyn crate::api::Executor) -> Vec<Id> {
+    /// many); the readers to ask again, each on its field.
+    pub(crate) fn flush(&mut self, core: &Core, w: &mut World, exec: &mut dyn crate::api::Executor) -> Vec<(Id, Field)> {
         self.fields.clear();
         if self.ops.is_empty() {
             return Vec::new();
