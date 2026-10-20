@@ -152,6 +152,7 @@ impl Engine {
         let mut rep = Report::default();
         (self.t_op, self.t_commit, self.t_idle) = (0, 0, 0);
         self.t_seen = (0, 0, 0);
+        self.stopped = 0;
         if let Some(v) = src.absorb(self) {
             self.version = v;
             rep.edits_applied.push((v, 0));
@@ -341,11 +342,14 @@ impl Engine {
                 // Held nodes run; final nodes the final phase itself places
                 // (held when made) run in turn, until none is left.
                 rep.final_nodes_run += 1;
+                let mut once = false;
                 loop {
                     let held: Vec<Id> = self.w.nodes.iter().filter(|(_, n)| n.st == St::Held).map(|(&id, _)| id).collect();
-                    if held.is_empty() {
+                    // (Drained once at least: the final world's queued work.)
+                    if held.is_empty() && once {
                         break;
                     }
+                    once = true;
                     let w = std::mem::take(&mut self.w);
                     let mut b = Builder::new(&self.core, w);
                     for &id in &held {
@@ -505,6 +509,9 @@ impl Engine {
             .collect();
         causes.sort_by_key(|c| c.0);
         rep.rerun_causes = causes;
+        // (Complete runs, as the round core counts them: a stopped attempt
+        // is not one; the limits count attempts.)
+        rep.runs -= self.stopped;
         super::core::prof::dump();
         Ok(rep)
     }
@@ -1260,6 +1267,7 @@ impl Engine {
                 }
                 Outcome::Stopped(r, wait) => {
                     rep.stops += 1;
+                    self.stopped += 1;
                     if let Some(rw) = r.range_wait {
                         s.range_wait.insert(id, rw);
                     }

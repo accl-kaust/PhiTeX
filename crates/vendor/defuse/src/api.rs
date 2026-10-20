@@ -796,7 +796,8 @@ pub struct Report {
     pub freed: u64,
     pub rounds: u64,
     pub restarts: u64,
-    /// Runs of operations (every attempt).
+    /// Complete runs of operations (a stopped attempt is not one: see
+    /// `stops`; `runs_by_op` counts every attempt).
     pub runs: u64,
     pub runs_by_op: Vec<(&'static str, u64)>,
     /// Waits (a run or a validation parked on a subject in work).

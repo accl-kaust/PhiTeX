@@ -1748,6 +1748,46 @@ fn an_environment_read_waits_until_the_field_is_supplied_or_declared_absent() {
     assert_eq!(out(&eng).as_deref(), Some("6"));
 }
 
+/// The client supplies what the provider answered (PhiTeX moves the
+/// provider's files into its environment): the answers are the same, no
+/// reader runs again.
+#[test]
+fn supplying_the_providers_answer_reruns_no_reader() {
+    use std::sync::Arc;
+    for absent in [true, false] {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(EnvToy));
+        let five = eng.values().int(5);
+        eng.set_env_provider(Box::new(move |v: &defuse::Values, f: Field| {
+            (v.as_str(f.0).as_deref() == Some("file")).then_some((!absent).then_some(five))
+        }));
+        let u = eng.new_unit();
+        let i = eng.values().str("i");
+        eng.push(u, op, vec![i]);
+        let rr = eng.values().str("r");
+        let r = eng.push(u, op, vec![rr]);
+        eng.add_root(r);
+        let rep = eng.evaluate_sequential().expect("evaluate");
+        assert_eq!(rep.nodes_run, 2);
+        let f = eng.values().field("file");
+        if absent {
+            eng.set_environment_absent([f]);
+        } else {
+            eng.set_environment([(f, five)]);
+        }
+        let rep = eng.evaluate_sequential().expect("evaluate");
+        assert_eq!(rep.nodes_run, 0, "absent {absent}");
+        // Then withdrawn: the provider's answer is underneath, the same.
+        if absent {
+            eng.set_environment_absent([]);
+        } else {
+            eng.set_environment([]);
+        }
+        let rep = eng.evaluate_sequential().expect("evaluate");
+        assert_eq!(rep.nodes_run, 0, "absent {absent}, withdrawn");
+    }
+}
+
 /// `["link", k]` has a pending definition set: it reads `f(k-1)` (`k` 0:
 /// the environment's `file`) and defines `f(k)` to it.
 struct Link;

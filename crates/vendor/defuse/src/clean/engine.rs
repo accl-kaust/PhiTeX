@@ -109,6 +109,9 @@ pub struct Engine {
     pub(crate) t_commit: u64,
     pub(crate) t_idle: u64,
     pub(crate) t_seen: (u64, u64, u64),
+    /// Runs this evaluation that stopped (attempts, not runs, in the
+    /// report).
+    pub(crate) stopped: u64,
     /// The last evaluation's critical chain, highest first.
     pub(crate) chain: Vec<(NodeId, u32, crate::api::Cause)>,
 }
@@ -156,6 +159,7 @@ impl Engine {
             t_commit: 0,
             t_idle: 0,
             t_seen: (0, 0, 0),
+            stopped: 0,
             chain: Vec::new(),
         };
         eng.register(Arc::new(OpenOp));
@@ -411,32 +415,43 @@ impl Engine {
     }
 
     pub fn declare_loopback(&mut self, f: Field, init: ValueId) {
-        if self.core.loops.contains_key(&f) {
+        self.declare_loopbacks(&[(f, init)]);
+    }
+
+    /// Declares several loop-back fields at once: one pass over the runs
+    /// (a field declared already is left as it is).
+    pub fn declare_loopbacks(&mut self, fields: &[(Field, ValueId)]) {
+        let mut new: FxHashMap<Field, ValueId> = FxHashMap::default();
+        for &(f, init) in fields {
+            if !self.core.loops.contains_key(&f) {
+                new.entry(f).or_insert(init);
+            }
+        }
+        if new.is_empty() {
             return;
         }
-        self.core_mut().loops.insert(f, init);
+        self.core_mut().loops.extend(new.iter().map(|(&f, &x)| (f, x)));
         self.each_world(|w| {
-            if w.loops.get(&f).is_none() {
-                w.loops.insert(f, init, &super::ptree::NoMeasure);
+            for (&f, &init) in &new {
+                if w.loops.get(&f).is_none() {
+                    w.loops.insert(f, init, &super::ptree::NoMeasure);
+                }
             }
         });
-        // Runs that read `f`, or asked whether it is a loop-back, run again.
+        // Runs that read one, or asked whether it is a loop-back, run again.
         self.edit(|b| {
-            let hit: Vec<Id> = b
+            let hit: Vec<(Id, Field)> = b
                 .w
                 .nodes
                 .iter()
-                .filter(|(_, n)| {
-                    n.res.as_ref().is_some_and(|r| {
-                        r.reads.iter().any(|rd| match rd {
-                            super::world::Read::Use { f: g, .. } | super::world::Read::IsLoop { f: g, .. } => *g == f,
-                            _ => false,
-                        })
+                .filter_map(|(&id, n)| {
+                    n.res.as_ref()?.reads.iter().find_map(|rd| match rd {
+                        super::world::Read::Use { f, .. } | super::world::Read::IsLoop { f, .. } if new.contains_key(f) => Some((id, *f)),
+                        _ => None,
                     })
                 })
-                .map(|(&id, _)| id)
                 .collect();
-            for id in hit {
+            for (id, f) in hit {
                 b.make_dirty_for(id, crate::api::Rerun::Loop { field: f });
             }
         });
@@ -472,14 +487,15 @@ impl Engine {
     /// Supplies environment fields (replacing the previous ones).
     pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
         let new: FxHashMap<Field, ValueId> = env.into_iter().collect();
-        let changed: Vec<Field> = {
-            let e = self.core.env.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            // (Against what reads saw: supplied, or the provider's answer.)
-            let mut c: Vec<Field> = new.iter().filter(|(f, v)| e.get(**f) != Some(Some(**v))).map(|(f, _)| *f).collect();
-            c.extend(e.known.keys().filter(|f| !new.contains_key(f)).copied());
-            c
+        // By answer: a field whose answer stays (the provider's underneath
+        // one no longer supplied, say) wakes no reader.
+        let changed = {
+            let mut e = self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let fs: FxHashSet<Field> = e.known.keys().chain(new.keys()).copied().collect();
+            let before: Vec<(Field, Option<Option<ValueId>>)> = fs.into_iter().map(|f| (f, e.get(f))).collect();
+            e.known = new;
+            before.into_iter().filter(|(f, b)| e.get(*f) != *b).map(|(f, _)| f).collect::<Vec<_>>()
         };
-        self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner).known = new;
         self.env_changed(&changed);
     }
 
@@ -487,11 +503,13 @@ impl Engine {
     /// waiting).
     pub fn set_environment_absent(&mut self, absent: impl IntoIterator<Item = Field>) {
         let new: FxHashSet<Field> = absent.into_iter().collect();
-        let changed: Vec<Field> = {
-            let e = self.core.env.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            new.symmetric_difference(&e.absent).copied().collect()
+        let changed = {
+            let mut e = self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let fs: Vec<Field> = new.symmetric_difference(&e.absent).copied().collect();
+            let before: Vec<(Field, Option<Option<ValueId>>)> = fs.into_iter().map(|f| (f, e.get(f))).collect();
+            e.absent = new;
+            before.into_iter().filter(|(f, b)| e.get(*f) != *b).map(|(f, _)| f).collect::<Vec<_>>()
         };
-        self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner).absent = new;
         self.env_changed(&changed);
     }
 
@@ -840,6 +858,26 @@ impl Engine {
                     open(&mut stack, u32::from(b.opens));
                 }
             }
+        }
+        // The accumulator indexes: as the nodes in work file them.
+        let mut want = super::world::World::default();
+        for (&id, n) in self.w.nodes.iter() {
+            want.put(id, n.clone());
+        }
+        let list_u = |m: &super::ptree::PMap<u32, super::ptree::PMap<Pos, Id>>| -> Vec<(u32, Pos, Id)> {
+            m.iter().flat_map(|(&u, s)| s.iter().map(move |(&p, &x)| (u, p, x))).collect()
+        };
+        let list_f = |m: &super::ptree::PMap<(u32, crate::values::Field), super::ptree::PMap<Pos, Id>>| -> Vec<(u32, u64, Pos, Id)> {
+            m.iter().flat_map(|(&(u, f), s)| s.iter().map(move |(&p, &x)| (u, f.0.raw(), p, x))).collect()
+        };
+        if list_u(&self.w.acc_open) != list_u(&want.acc_open) {
+            out.push(format!("acc_open {:?}, the nodes file {:?}", list_u(&self.w.acc_open), list_u(&want.acc_open)));
+        }
+        if list_f(&self.w.acc_static) != list_f(&want.acc_static) {
+            out.push(format!("acc_static {:?}, the nodes file {:?}", list_f(&self.w.acc_static), list_f(&want.acc_static)));
+        }
+        if list_f(&self.w.acc_res) != list_f(&want.acc_res) {
+            out.push(format!("acc_res {:?}, the nodes file {:?}", list_f(&self.w.acc_res), list_f(&want.acc_res)));
         }
         out
     }

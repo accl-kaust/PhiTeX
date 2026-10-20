@@ -379,6 +379,14 @@ pub(crate) struct World {
     pub range_readers: PMap<(u32, Field), PMap<(Pos, Id), Pos>>,
     /// Nodes in work (dirty or held), by unit and position.
     pub work: PMap<u32, PMap<Pos, Id, usize>>,
+    /// The nodes in work that may contribute to an accumulator (see
+    /// [`World::range_blocker`]), by unit and position: without a result
+    /// (`acc_open`; those declaring their contributions to a field also in
+    /// `acc_static` under it), and with one, under each field it
+    /// contributed to (`acc_res`).
+    pub acc_open: PMap<u32, PMap<Pos, Id>>,
+    pub acc_static: PMap<(u32, Field), PMap<Pos, Id>>,
+    pub acc_res: PMap<(u32, Field), PMap<Pos, Id>>,
     /// Loop-back fields' values for this round.
     pub loops: PMap<Field, ValueId>,
     /// The version each key last changed at.
@@ -840,6 +848,24 @@ impl World {
                 self.set_work(now.0, now.1, Some(id));
             }
         }
+        let old = self.nodes.get(&id).filter(|o| in_work(o.st)).cloned();
+        if (old.is_some() || in_work(n.st))
+            && !old.as_ref().is_some_and(|o| {
+                in_work(n.st)
+                    && (o.unit, o.pos) == (n.unit, n.pos)
+                    && Arc::ptr_eq(&o.text, &n.text)
+                    && match (&o.res, &n.res) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a.contribs.iter().map(|c| c.0).eq(b.contribs.iter().map(|c| c.0)),
+                        _ => false,
+                    }
+            })
+        {
+            if let Some(o) = &old {
+                self.acc_index(id, o, false);
+            }
+            self.acc_index(id, &n, true);
+        }
         self.nodes.insert(id, n, &NoMeasure);
     }
 
@@ -847,8 +873,10 @@ impl World {
     pub(crate) fn drop_node(&mut self, id: Id) {
         if let Some(o) = self.nodes.get(&id) {
             let (u, p, w, ks) = (o.unit, o.pos, in_work(o.st), pset_keys(o));
-            if w {
+            let o = w.then(|| o.clone());
+            if let Some(o) = o {
                 self.set_work(u, p, None);
+                self.acc_index(id, &o, false);
             }
             self.unhold(u, p, id);
             self.unclaim_at(u, p, id);
@@ -884,20 +912,86 @@ impl World {
             .map(|(_, &x)| x)
     }
 
+    /// Files node `n` (`on`) in the accumulator indexes, or takes it out.
+    fn acc_index(&mut self, id: Id, n: &Node, on: bool) {
+        // (Declaring no contributions at all is contributing nowhere.)
+        let stat = n.text.stat.contribs.as_deref();
+        if !in_work(n.st) || stat.is_some_and(<[_]>::is_empty) {
+            return;
+        }
+        let (u, p) = (n.unit, n.pos);
+        match &n.res {
+            None => {
+                index_set(&mut self.acc_open, u, p, id, on);
+                for &(f, _) in stat.unwrap_or_default() {
+                    index_set(&mut self.acc_static, (u, f), p, id, on);
+                }
+            }
+            Some(r) => {
+                for &(f, _) in &r.contribs {
+                    if !stat.is_some_and(|cs| cs.iter().any(|c| c.0 == f)) {
+                        index_set(&mut self.acc_res, (u, f), p, id, on);
+                    }
+                }
+            }
+        }
+    }
+
     /// A node in the window `(lo, hi)` of unit `u` still in work that may
-    /// contribute to `f` (one that declares its contributions, or whose
-    /// last run made none to `f`, is folded as it stands; its change
-    /// re-asks the reader).
+    /// contribute to `f`: the first, other than `me`. One that declares
+    /// its contributions to `f` (or none at all), or whose last run made
+    /// none to `f`, is folded as it stands; its change re-asks the reader.
     pub(crate) fn range_blocker(&self, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
-        self.work_between(u, lo, hi).find(|&x| {
-            x != me
-                && self.node(x).is_some_and(|n| {
-                    // (Declared contributions are per field; declaring none
-                    // at all is contributing nowhere.)
-                    !n.text.stat.contribs.as_ref().is_some_and(|cs| cs.is_empty() || cs.iter().any(|c| c.0 == f))
-                        && !n.res.as_ref().is_some_and(|r| r.contribs.iter().all(|c| c.0 != f))
-                })
-        })
+        let mut lo = lo;
+        loop {
+            let open = self.first_open(f, u, lo, hi);
+            let res = self
+                .acc_res
+                .get(&(u, f))
+                .and_then(|m| m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)).next())
+                .map(|(&p, &x)| (p, x));
+            let x = match (open, res) {
+                (Some(a), Some(b)) => a.min(b),
+                (a, b) => a.or(b)?,
+            };
+            if x.1 != me {
+                return Some(x.1);
+            }
+            lo = x.0;
+        }
+    }
+
+    /// The first node without a result in work in `(lo, hi)` of unit `u`
+    /// that does not declare its contribution to `f`: those that do are a
+    /// prefix-closed subset, so the first not among them is found by
+    /// bisection on counts (O(log² n)).
+    fn first_open(&self, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<(Pos, Id)> {
+        let open = self.acc_open.get(&u)?;
+        let a = open.rank(&lo) + usize::from(open.contains_key(&lo));
+        let b = open.rank(&hi);
+        if a >= b {
+            return None;
+        }
+        let Some(st) = self.acc_static.get(&(u, f)).filter(|m| !m.is_empty()) else {
+            return open.nth(a).map(|(&p, &x)| (p, x));
+        };
+        let s0 = st.rank(&lo) + usize::from(st.contains_key(&lo));
+        // (The first k+1 open nodes all declare: as many declaring ones up
+        // to the k-th.)
+        let all_declare = |k: usize| -> bool {
+            let (&p, _) = open.nth(a + k).expect("in range");
+            st.rank(&p) + usize::from(st.contains_key(&p)) - s0 == k + 1
+        };
+        let (mut l, mut r) = (0, b - a);
+        while l < r {
+            let mid = l + (r - l) / 2;
+            if all_declare(mid) {
+                l = mid + 1;
+            } else {
+                r = mid;
+            }
+        }
+        (l < b - a).then(|| open.nth(a + l).map(|(&p, &x)| (p, x))).flatten()
     }
 
     /// Whether node `id` is ready by its read hints: no hinted field is
