@@ -96,7 +96,10 @@ fn far_definition_is_bounded() {
     for (t, md, claim) in &bounds {
         eprintln!("bound {t:?}: {md:?}, claim {claim:?}");
     }
-    let fillers: Vec<_> = bounds.iter().filter(|(t, _, _)| t.contains("filler")).collect();
+    let fillers: Vec<_> = bounds
+        .iter()
+        .filter(|(t, _, _)| t.contains("filler"))
+        .collect();
     assert!(!fillers.is_empty(), "no node of the filler lines");
     for (t, md, claim) in fillers {
         let md = md
@@ -116,7 +119,10 @@ fn far_definition_is_bounded() {
     );
     assert_eq!(a.output().0, b.output().0, "the hints changed the output");
     // (the hints off: no node bounded)
-    assert_eq!(b.stats.nodes_bounded, 0, "a node bounded with the hints off");
+    assert_eq!(
+        b.stats.nodes_bounded, 0,
+        "a node bounded with the hints off"
+    );
 }
 
 #[test]
@@ -282,7 +288,9 @@ fn a_stepped_over_outer_macro_is_still_forbidden() {
     );
     let errors: Vec<String> = b.diagnostics().iter().map(|d| d.message.clone()).collect();
     assert!(
-        errors.iter().any(|m| m.contains("Forbidden control sequence")),
+        errors
+            .iter()
+            .any(|m| m.contains("Forbidden control sequence")),
         "no outer error: {errors:?}"
     );
 }

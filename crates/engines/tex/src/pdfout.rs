@@ -1241,9 +1241,7 @@ fn fresh(v: &Values, date: String, jobname: &str, g2u: Option<ValueId>) -> PdfSt
         None => PdfState::new(PdfParams::default()),
         Some(t) => {
             let key = (v.instance(), t.raw());
-            let mut m = g2u_states()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut m = g2u_states().lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(k) = m.iter().position(|e| e.0 == key) {
                 m[k].1.clone()
             } else {

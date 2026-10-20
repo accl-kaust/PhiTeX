@@ -68,12 +68,7 @@ impl Run<'_, '_> {
             return;
         }
         let node = self.cx.node().raw();
-        let levels: Vec<(u8, u8)> = self
-            .input
-            .levels
-            .iter()
-            .map(|l| (l.kind, l.ty))
-            .collect();
+        let levels: Vec<(u8, u8)> = self.input.levels.iter().map(|l| (l.kind, l.ty)).collect();
         eprintln!(
             "cmd-trace {node} #{} {:?} cmd {} chr {} levels {levels:?}",
             self.cmds, self.cur.tok, self.cur.cmd, self.cur.chr
