@@ -1166,12 +1166,16 @@ impl<'a> Builder<'a> {
         base
     }
 
-    /// The last node of `x`'s extent: its subtree, then its continuations'
-    /// extents (they follow it at its level).
+    /// The last node of `x`'s extent: its subtree, the follow nodes other
+    /// placers keep after it, then its continuations' extents (they follow
+    /// it at its level).
     pub(crate) fn extent_end(&self, x: Id) -> Id {
         let mut x = x;
         loop {
-            let e = self.w.subtree_end(x);
+            let mut e = self.w.subtree_end(x);
+            while let Some(y) = self.w.next(e).filter(|&y| self.w.node(y).is_some_and(|yn| yn.place == Place::After(x))) {
+                e = self.extent_end(y);
+            }
             let Some(ep) = self.w.node(e).map(|n| n.pos) else { return e };
             let last = self.w.node(x).and_then(|n| n.res.as_ref()).and_then(|r| {
                 r.conts
@@ -1251,6 +1255,19 @@ impl<'a> Builder<'a> {
     /// only the entries that differ are unfiled and filed (a run that
     /// reads what it read before touches no index).
     fn reindex_reads(&mut self, id: Id, n: &Node, old: &[Read], new: &[Read]) {
+        if old == new {
+            // (The same log: the same entries; each filed again only when it
+            // is not there.)
+            let (kn, an) = self.read_keys(id, n, new);
+            for k in kn {
+                if !self.has_key(id, k) {
+                    self.index_key(id, k, true);
+                }
+            }
+            self.index_agg(id, n, an, false);
+            self.index_agg(id, n, an, true);
+            return;
+        }
         let (ko, ao) = self.read_keys(id, n, old);
         let (kn, an) = self.read_keys(id, n, new);
         let ko: FxHashSet<ReadKey> = ko.into_iter().collect();

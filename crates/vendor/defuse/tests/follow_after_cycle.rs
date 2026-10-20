@@ -178,3 +178,72 @@ impl defuse::Executor for Threads {
         out.extend(slots.into_iter().map(|s| s.into_inner().expect("every job ran")));
     }
 }
+
+/// `["p", v]` places children `a` and `b`; `["s"]` places a follow node
+/// after `a` (between `a` and `b`, the anchor its first argument once it
+/// is known). Each run's tag is recorded.
+struct Kids {
+    a: Mutex<Option<NodeId>>,
+    runs: Mutex<Vec<String>>,
+}
+
+impl Operation for Kids {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let t = tag(v, &a);
+        match t.as_str() {
+            "p" => {
+                for k in ["a", "b"] {
+                    let x = vec![v.str(k)];
+                    cx.child(cx.op(), x);
+                }
+            }
+            "s" => {
+                if let Some(at) = *self.a.lock().unwrap() {
+                    let f = vec![v.str("f")];
+                    cx.follow_after(at, cx.op(), f);
+                }
+            }
+            _ => {}
+        }
+        self.runs.lock().unwrap().push(t);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A parent run again with the same children keeps them, though another
+/// placer's follow node sits between two of them (PhiTeX: a toc's pieces
+/// made again, one after another, on a heading edit).
+#[test]
+fn children_around_another_placers_follow_node_are_kept() {
+    let mut eng = Engine::new();
+    let ops = Arc::new(Kids {
+        a: Mutex::new(None),
+        runs: Mutex::new(Vec::new()),
+    });
+    let op = eng.register(ops.clone());
+    let u = eng.new_unit();
+    let pa = vec![eng.values().str("p"), eng.values().int(0)];
+    let p = eng.push(u, op, pa);
+    let sa = vec![eng.values().str("s")];
+    let s = eng.push(u, op, sa.clone());
+    eng.add_root(p);
+    eng.add_root(s);
+    eng.evaluate_sequential().expect("cold");
+    let a = eng.children(p)[0];
+    *ops.a.lock().unwrap() = Some(a);
+    // (`s` runs again, now placing its follow node after `a`.)
+    let sa2 = vec![eng.values().str("s"), eng.values().int(1)];
+    eng.replace(s, op, sa2);
+    eng.evaluate_sequential().expect("s places");
+    ops.runs.lock().unwrap().clear();
+    let pa2 = vec![eng.values().str("p"), eng.values().int(1)];
+    eng.replace(p, op, pa2);
+    eng.evaluate_sequential().expect("p again");
+    let runs = ops.runs.lock().unwrap().clone();
+    assert_eq!(runs, ["p"], "only p runs again");
+}
