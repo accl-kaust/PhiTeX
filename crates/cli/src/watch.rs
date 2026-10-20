@@ -357,6 +357,9 @@ struct Last {
     cold: Option<Duration>,
     /// The last change's time from its save to the viewer's screen.
     screen: Option<Duration>,
+    /// Every change's time from its save to the screen, for the quit
+    /// line.
+    screens: Vec<Duration>,
     /// The builds, and the edits' times (those that changed something).
     builds: usize,
     edits: Vec<Duration>,
@@ -384,6 +387,15 @@ fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
     }
     if let Some(c) = l.cold {
         parts.push(format!("cold {}", ms(c)));
+    }
+    let mut sc = l.screens.clone();
+    sc.sort();
+    if let Some(f) = sc.first() {
+        parts.push(format!(
+            "to the screen {} (median {})",
+            st.bold(&ms(*f)),
+            ms(sc[sc.len() / 2])
+        ));
     }
     Some(format!(
         "{} {}",
@@ -1277,7 +1289,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         let file = match a {
                             Ask::Painted(us) => {
                                 let mut l = last.borrow_mut();
-                                l.screen = Some(Duration::from_micros(us));
+                                let d = Duration::from_micros(us);
+                                l.screen = Some(d);
+                                l.screens.push(d);
+                                ui.event(&json!({
+                                    "event": "screen",
+                                    "build": l.builds,
+                                    "ms": d.as_secs_f64() * 1e3,
+                                }));
                                 show(ui, &l);
                                 continue;
                             }
@@ -1495,6 +1514,24 @@ mod tests {
         assert_eq!(line_key(" q "), Key::Quit);
         assert_eq!(line_key("quit"), Key::Quit);
         assert_eq!(line_key("xyz"), Key::Other('x'));
+    }
+
+    #[test]
+    fn quit_line_has_the_screen_times() {
+        let st = crate::ui::Style {
+            color: false,
+            tty: false,
+        };
+        let mut l = Last {
+            builds: 3,
+            cold: Some(Duration::from_secs(2)),
+            ..Last::default()
+        };
+        assert!(!farewell(st, &l).unwrap().contains("screen"));
+        l.screens = [40, 12, 25].map(Duration::from_millis).to_vec();
+        let q = farewell(st, &l).unwrap();
+        assert!(q.contains("to the screen 12"), "{q}");
+        assert!(q.contains("(median 25"), "{q}");
     }
 
     #[test]

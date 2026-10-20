@@ -5365,8 +5365,10 @@ impl Build {
     }
 
     /// Up to three defined control sequences within two edits of `name`,
-    /// nearest first, for an undefined one's help.
-    fn near_names(&self, name: &str, known: &mut Option<Vec<String>>) -> Vec<String> {
+    /// for an undefined one's help: those the document's text `doc` has
+    /// first, then nearest first; a name with a character not a letter
+    /// only when `name` has it too (a format's internal names left out).
+    fn near_names(&self, name: &str, doc: &str, known: &mut Option<Vec<String>>) -> Vec<String> {
         if name.is_empty() {
             return Vec::new();
         }
@@ -5395,16 +5397,20 @@ impl Build {
             names.dedup();
             names
         });
-        let mut near: Vec<(usize, &String)> = known
+        let mut near: Vec<(bool, usize, &String)> = known
             .iter()
             .filter(|k| k.as_str() != name)
+            .filter(|k| k.chars().all(|c| c.is_alphabetic() || name.contains(c)))
             .filter_map(|k| {
                 let d = edit_distance(name, k);
-                (d <= 2).then_some((d, k))
+                (d <= 2).then(|| (!uses_name(doc, k), d, k))
             })
             .collect();
         near.sort();
-        near.into_iter().take(3).map(|(_, k)| k.clone()).collect()
+        near.into_iter()
+            .take(3)
+            .map(|(_, _, k)| k.clone())
+            .collect()
     }
 
     #[allow(clippy::too_many_lines)]
@@ -5584,7 +5590,7 @@ impl Build {
                  and I'll forget about whatever was undefined."
                     .to_owned();
                 let name = before.rfind('\\').map_or("", |k| &before[k + 1..]);
-                let near = self.near_names(name, &mut known);
+                let near = self.near_names(name, doc, &mut known);
                 if !near.is_empty() {
                     let l: Vec<String> = near.iter().map(|n| format!("\\{n}")).collect();
                     let _ = std::fmt::Write::write_fmt(
@@ -5942,6 +5948,17 @@ impl Build {
     pub fn live_nodes(&self) -> usize {
         self.g.eng.live_nodes()
     }
+}
+
+/// Whether `text` has the control sequence `\name`: the name after a
+/// backslash, and no letter after a name that ends in one.
+fn uses_name(text: &str, name: &str) -> bool {
+    let ends_in_letter = name.chars().last().is_some_and(char::is_alphabetic);
+    text.match_indices('\\').any(|(k, _)| {
+        text[k + 1..].strip_prefix(name).is_some_and(|rest| {
+            !ends_in_letter || !rest.chars().next().is_some_and(char::is_alphabetic)
+        })
+    })
 }
 
 /// The Levenshtein distance between `a` and `b`, by characters.

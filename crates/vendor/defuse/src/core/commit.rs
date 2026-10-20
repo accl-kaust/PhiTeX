@@ -945,6 +945,10 @@ impl Shared {
                 notes.touch.push((n, g, Cause::Output { of: self.node_id(s) }));
             }
             waiters = std::mem::take(&mut r.data().waiters);
+            // Out of work now (a step's commit: at the step's end).
+            if !self.stepped() {
+                self.passed_entries(s, &mut notes);
+            }
             #[cfg(feature = "profile")]
             let st1 = std::time::Instant::now();
             self.settle_structure(u, &mut notes);

@@ -958,8 +958,20 @@ impl Run<'_, '_> {
             Some(&order) if text == phitex_defuse::ValueId::UNIT => {
                 crate::run::FileRest::written(self.v, order, xs[0])
             }
-            // (a tool's output, `crate::tools::ToolRun`: read inline)
+            // (a tool's output, `crate::tools::ToolRun`: read inline, what
+            // the tool said reported here, where its output is read)
             Some(&m) if self.v.as_int(m).is_some() => {
+                if let Some(&said) = xs.get(3) {
+                    for s in crate::val::list_of(self.v, said) {
+                        let e = crate::val::list_of(self.v, s);
+                        // (a warning either way: the tool's errors are
+                        // not TeX's, and pdflatex's run does not fail on
+                        // them)
+                        if let [_, msg] = e[..] {
+                            self.diag(false, &str_of(self.v, msg));
+                        }
+                    }
+                }
                 crate::run::FileRest::inline(self.v, text, xs[0])
             }
             _ => crate::run::FileRest::new(self.v, text, 0, xs[0]),

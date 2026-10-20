@@ -617,6 +617,9 @@ impl Engine {
                 .is_ok()
             {
                 sh.leave_work_lists(s);
+                let mut notes = super::order::Notes::default();
+                sh.passed_entries(s, &mut notes);
+                sh.dispatch(&mut notes, s);
             }
             let w = std::mem::take(&mut sh.rec(s).data().waiters);
             for (n, q) in w {

@@ -317,24 +317,30 @@ impl Operation for ToolRun {
         );
         // (run, then the files it asked for and had not looked up, and
         // again until it asks for none new)
-        let made = loop {
-            let made = match tool {
+        let (made, said) = loop {
+            let (made, said) = match tool {
                 Tool::Makeindex => {
                     let a: Vec<Vec<u8>> = targs.iter().map(|a| bytes(a)).collect();
-                    phitex_makeindex::run(&a, MAKEINDEX_VERSION, &mut served)
-                        .ind
-                        .map(|f| f.contents)
+                    let o = phitex_makeindex::run(&a, MAKEINDEX_VERSION, &mut served);
+                    let said = makeindex_said(o.ilg.as_ref().map_or(&[][..], |f| &f.contents));
+                    (o.ind.map(|f| f.contents), said)
                 }
-                Tool::Bibtex => phitex_bibtex::run(input.as_bytes(), &opts.bibtex, &mut served)
-                    .bbl
-                    .map(|f| f.contents),
-                Tool::Biber => phitex_biber::run(&text, &mut served)
-                    .bbl
-                    .map(String::into_bytes),
+                Tool::Bibtex => {
+                    let o = phitex_bibtex::run(input.as_bytes(), &opts.bibtex, &mut served);
+                    let said = bibtex_said(o.blg.as_ref().map_or(&[][..], |f| &f.contents));
+                    (o.bbl.map(|f| f.contents), said)
+                }
+                Tool::Biber => {
+                    let o = phitex_biber::run(&text, &mut served);
+                    let said = (o.errors.iter().map(|e| (true, e.clone())))
+                        .chain(o.warnings.iter().map(|w| (false, w.clone())))
+                        .collect();
+                    (o.bbl.map(String::into_bytes), said)
+                }
             };
             let missing = std::mem::take(&mut served.missing);
             if missing.is_empty() {
-                break made;
+                break (made, said);
             }
             for n in missing {
                 let x = look_up(cx, &n)?;
@@ -349,16 +355,67 @@ impl Operation for ToolRun {
                 made.as_ref().map(Vec::len)
             );
         }
-        // (`[path, text, 0]`: a whole text, read inline where it is
-        // opened, `Run::start_input`)
+        // (`[path, text, 0, said]`: a whole text, read inline where it is
+        // opened, `Run::start_input`, which reports what the tool said
+        // there: `[error, message]` each, in the tool's order)
         Ok(made.map_or(ValueId::UNIT, |b| {
+            let said = said
+                .into_iter()
+                .map(|(e, m)| {
+                    let what = if e { "error" } else { "warning" };
+                    v.list(vec![
+                        v.int(i64::from(e)),
+                        v.str(&format!("{} {what}: {m}", tool.name())),
+                    ])
+                })
+                .collect();
             v.list(vec![
                 v.str(&format!("./{output}")),
                 v.str(&chars(&b)),
                 v.int(0),
+                v.list(said),
             ])
         }))
     }
+}
+
+/// What BibTeX's `.blg` says a user should see: its warnings
+/// (`Warning--…`) and its errors (a message followed by its place,
+/// `---line N of file F`, joined into one), each `(error, message)`.
+fn bibtex_said(blg: &[u8]) -> Vec<(bool, String)> {
+    let t = chars(blg);
+    let lines: Vec<&str> = t.lines().collect();
+    let mut out = Vec::new();
+    for (k, l) in lines.iter().enumerate() {
+        if let Some(w) = l.strip_prefix("Warning--") {
+            out.push((false, w.trim().to_owned()));
+        } else if l.starts_with("---") && k > 0 {
+            out.push((true, format!("{}{l}", lines[k - 1].trim_end())));
+        }
+    }
+    out
+}
+
+/// What makeindex's `.ilg` says a user should see: each `## Warning`
+/// and `!! Input index error` with the line after it (its reason), as
+/// `(error, message)`.
+fn makeindex_said(ilg: &[u8]) -> Vec<(bool, String)> {
+    let t = chars(ilg);
+    let lines: Vec<&str> = t.lines().collect();
+    let mut out = Vec::new();
+    for (k, l) in lines.iter().enumerate() {
+        let error = l.starts_with("!!");
+        if error || l.starts_with("##") {
+            let why = lines
+                .get(k + 1)
+                .map_or("", |n| n.trim().trim_start_matches("-- "));
+            out.push((
+                error,
+                format!("{} {why}", l.trim_start_matches(['#', '!', ' ']).trim_end()),
+            ));
+        }
+    }
+    out
 }
 
 /// The arguments of the tool run that makes `output` by default, if one

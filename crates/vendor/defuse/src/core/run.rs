@@ -823,6 +823,11 @@ impl Shared {
         if !self.leave_run(s, super::S_CLEAN) {
             return;
         }
+        {
+            let mut notes = Notes::default();
+            self.passed_entries(s, &mut notes);
+            self.dispatch(&mut notes, s);
+        }
         let waiters = std::mem::take(&mut r.data().waiters);
         for (n, q) in waiters {
             self.wake(n, q);

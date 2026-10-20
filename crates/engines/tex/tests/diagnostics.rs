@@ -134,3 +134,52 @@ fn did_you_mean() {
     let h = ds[0].help.as_deref().unwrap_or("");
     assert!(h.contains("Did you mean \\hbox"), "{h}");
 }
+
+/// The names an undefined control sequence's help suggests, in order.
+fn suggestions(doc: &str) -> Vec<String> {
+    let b = build(doc, |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let d = ds
+        .iter()
+        .find(|d| d.message == "Undefined control sequence")
+        .expect("an undefined control sequence");
+    let h = d.help.as_deref().unwrap_or("");
+    h.lines()
+        .find_map(|l| l.strip_prefix("Did you mean "))
+        .map(|l| {
+            l.trim_end_matches('?')
+                .split(", ")
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn did_you_mean_the_nearest_primitive_first() {
+    let s = suggestions("\\hboxx{}\n\\bye\n");
+    assert_eq!(s.first().map(String::as_str), Some("\\hbox"), "{s:?}");
+}
+
+#[test]
+fn did_you_mean_a_name_the_document_uses_first() {
+    let s = suggestions("\\def\\mymacro{x}\\mymacro\n\\mymacr\n\\bye\n");
+    assert_eq!(s.first().map(String::as_str), Some("\\mymacro"), "{s:?}");
+    // (before a nearer name the document does not have: \hbox is one
+    // edit from \hbax, the document's \hbaxyz two)
+    let s = suggestions("\\def\\hbaxyz{x}\\hbaxyz\n\\hbax\n\\bye\n");
+    assert_eq!(s.first().map(String::as_str), Some("\\hbaxyz"), "{s:?}");
+    assert!(s.iter().any(|n| n == "\\hbox"), "{s:?}");
+}
+
+#[test]
+fn did_you_mean_no_names_with_characters_the_typo_lacks() {
+    for typo in ["pp", "zz", "mne", "hbx", "foo"] {
+        let s = suggestions(&format!("\\{typo}{{}}\n\\bye\n"));
+        assert!(
+            s.iter().all(|n| !n[1..].contains(['@', ':', '_'])),
+            "\\{typo}: {s:?}"
+        );
+    }
+}
