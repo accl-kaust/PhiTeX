@@ -128,6 +128,15 @@ pub(crate) const SCAN: &str = "scan:state";
 /// block's scan.
 pub(crate) const SCAN_BLOCK: &str = "scan:block";
 
+/// Where the scan state reaching a block's scan stands among the pages
+/// (`scan:at`): `[j, normal]`, the next page's index and the ordinary
+/// pages fired before it. Not in the scan state ([`SCAN`],
+/// [`SCAN_BLOCK`]): a page added before them changes these and nothing
+/// a block's scan decides from, and a scan that fires no page reads
+/// none; defined by a block's scan that fired pages (after its last),
+/// or that began at a continuation's state ([`BLOCK_AT_CONT`]).
+const SCAN_AT: &str = "scan:at";
+
 /// [`SCAN_BLOCK`]'s mark for a block whose end is its last page's
 /// continuation's.
 const BLOCK_AT_CONT: i64 = -1;
@@ -1156,6 +1165,9 @@ impl Run<'_, '_> {
         // piece it fires in, before its finisher; this node for a page
         // firing in this node's own material)
         let read_at = at.unwrap_or_else(|| self.cx.node());
+        // (where the page stands among the pages, which its state `src`
+        // leaves out, [`SCAN_AT`]: the ordinary pages before it and
+        // after it, `normal` counting it where it is one)
         let b = v.list(vec![
             v.int(j),
             v.int(i64::from_ne_bytes(read_at.raw().to_ne_bytes())),
@@ -1164,6 +1176,8 @@ impl Run<'_, '_> {
             v.int(i64::from(k)),
             v.int(i64::try_from(rest).unwrap_or(-1)),
             origin.unwrap_or(ValueId::UNIT),
+            v.int(normal - i64::from(!special)),
+            v.int(normal),
         ]);
         let mut pos = vec![v.int(j)];
         pos.extend([ValueId::UNIT; 8]);
@@ -1251,6 +1265,9 @@ impl Run<'_, '_> {
         let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(n(1).to_ne_bytes()));
         let (pid, k, rest) = (n(3), n(4), n(5));
         let mut s = ScanIn::decode(v, b.get(2).copied().and_then(some));
+        // (where the page stands, which its state leaves out: the break's)
+        s.j = n(0);
+        s.normal = n(7);
         let mut raws = Vec::new();
         let mut raw_pids: Vec<i64> = Vec::new();
         let mut own = Vec::new();
@@ -4458,7 +4475,12 @@ impl Operation for Scan {
             }
             return MayDefine::Names(names);
         }
-        MayDefine::Names(vec![v.field(SCAN), v.field(SCAN_MAT), v.field(SCAN_BLOCK)])
+        MayDefine::Names(vec![
+            v.field(SCAN),
+            v.field(SCAN_MAT),
+            v.field(SCAN_BLOCK),
+            v.field(SCAN_AT),
+        ])
     }
     /// A step is held until the scan state is there and its piece has
     /// run (what the piece leaves the main list, which it defines at its
@@ -4497,11 +4519,18 @@ impl Operation for Scan {
             (cont_chain(v, args), args.get(2), args.get(3))
             && x != ValueId::UNIT
         {
+            // (where the state after the page stands: the next page, the
+            // ordinary pages up to this one, its break's)
+            let bs = list_of(v, b);
+            let at = v.list(vec![
+                v.int(j + 1),
+                bs.get(8).copied().unwrap_or_else(|| v.int(0)),
+            ]);
             return Some(vec![
                 (v.field(SCAN), x),
                 (v.field(SCAN_MAT), mat),
                 (scan_mat_field(v, j + 1), mat),
-                (scan_page_field(v, j, by), v.list(vec![x, mat, b])),
+                (scan_page_field(v, j, by), v.list(vec![x, mat, b, at])),
             ]);
         }
         let j = int_of(v, *args.get(1)?);
@@ -4637,8 +4666,9 @@ enum Cont {
     /// The next page's break in its material: `[j, src, k, rest,
     /// normal, special, origin]` as [`Run::place_break`] takes them.
     Fire(i64, ValueId, u32, usize, i64, bool, Option<ValueId>),
-    /// The scan state and the material it defines.
-    State(ValueId, ValueId),
+    /// The scan state and the material it defines, and where it stands
+    /// among the pages (`[j, normal]`, [`SCAN_AT`]).
+    State(ValueId, ValueId, ValueId),
 }
 
 /// What a finisher placed at `pos` is predicted to give back to the
@@ -4708,6 +4738,7 @@ impl Run<'_, '_> {
         }
         if block {
             names.push(v.field(SCAN_BLOCK));
+            names.push(v.field(SCAN_AT));
         }
         self.cx.narrow(MayDefine::Names(names));
         Ok(())
@@ -4890,6 +4921,11 @@ impl Run<'_, '_> {
         // before ended its block in, [`SCAN_BLOCK`]; none before the
         // first block. Nothing its own continuations define is read: they
         // sit before it)
+        // (where the block begins among the pages, [`SCAN_AT`]: read where
+        // a page fires in it, from the continuation's field where the
+        // block begins at one)
+        let mut base: Option<(i64, i64)> = None;
+        let mut define_at = false;
         let (mut src, mut mat) = match self.eng_read(v.field(SCAN_BLOCK))? {
             // (the block before ended in pages firing in continuations'
             // material whose end its scan does not know yet: nothing
@@ -4945,6 +4981,12 @@ impl Run<'_, '_> {
                     return Ok(Placed::Nothing);
                 };
                 let ps = list_of(v, p);
+                let at = ps.get(3).map(|&a| list_of(v, a)).unwrap_or_default();
+                base = Some((
+                    at.first().map_or(0, |&x| int_of(v, x)),
+                    at.get(1).map_or(0, |&x| int_of(v, x)),
+                ));
+                define_at = true;
                 (
                     ps.first().copied().filter(|&y| y != ValueId::UNIT),
                     ps.get(1).copied().filter(|&y| y != ValueId::UNIT),
@@ -4977,17 +5019,33 @@ impl Run<'_, '_> {
             // continuation defines instead of this step's prediction of
             // it, [`SCAN_BLOCK`])
             after_me = in_last;
-            last_page = st.j - 1;
+            // (the window's state leaves out where it stands: the
+            // page's index and the ordinary pages from where the block
+            // began, or the page before in it)
+            let (j0, n0) = if let Some(b) = base {
+                b
+            } else {
+                let at = self.eng_read(v.field(SCAN_AT))?.map(|x| list_of(v, x));
+                let at = at.unwrap_or_default();
+                (
+                    at.first().map_or(0, |&x| int_of(v, x)),
+                    at.get(1).map_or(0, |&x| int_of(v, x)),
+                )
+            };
+            let j = j0 + st.j - 1;
+            let normal = n0 + st.normal;
+            base = Some((j + 1, normal));
+            define_at = true;
+            last_page = j;
             if trace {
                 eprintln!(
                     "scan {}: page {} fires in piece {pid} at candidate {}",
                     self.cx.node().raw(),
-                    st.j,
+                    j + 1,
                     sf.k
                 );
             }
             let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
-            let j = st.j - 1;
             // (a page firing in the window's last piece, the one that
             // placed this step right after itself: its finisher and
             // continuation right after this step, before the rest of the
@@ -5000,7 +5058,7 @@ impl Run<'_, '_> {
                 pid,
                 sf.k,
                 sf.rest,
-                st.normal,
+                normal,
                 sf.output_penalty <= -10001,
                 None,
                 Some(&sf.classes),
@@ -5027,15 +5085,13 @@ impl Run<'_, '_> {
                     // from a block before: none before the first page)
                     let m = match (mat, src) {
                         (Some(m), _) => m,
-                        (None, Some(x)) => {
-                            let j0 = ScanIn::decode(v, Some(x)).j;
-                            self.eng_read(scan_mat_field(v, j0))?
-                                .unwrap_or_else(|| v.list(Vec::new()))
-                        }
+                        (None, Some(_)) => self
+                            .eng_read(scan_mat_field(v, j))?
+                            .unwrap_or_else(|| v.list(Vec::new())),
                         (None, None) => v.list(Vec::new()),
                     };
                     match self.cont_state(&list_of(v, b), Some(rtn), Some(m))? {
-                        Cont::State(x, m) => Some((x, m)),
+                        Cont::State(x, m, _) => Some((x, m)),
                         _ => None,
                     }
                 }
@@ -5090,6 +5146,20 @@ impl Run<'_, '_> {
         };
         self.cx
             .define_with(v.field(SCAN_BLOCK), end, Locality::Global);
+        // (where the next block begins among the pages: where this one
+        // fired pages, or began at a continuation's state; else as it
+        // reached this one)
+        if define_at
+            && known
+            && !after_me
+            && let Some((j, n)) = base
+        {
+            self.cx.define_with(
+                v.field(SCAN_AT),
+                v.list(vec![v.int(j), v.int(n)]),
+                Locality::Global,
+            );
+        }
         Ok(placed)
     }
 
@@ -5126,7 +5196,7 @@ impl Run<'_, '_> {
                 self.place_cont(None, false, j, None, b, chain);
                 Ok(Placed::Page)
             }
-            Cont::State(x, mat) => {
+            Cont::State(x, mat, at) => {
                 self.cx.define_with(v.field(SCAN), x, Locality::Global);
                 self.cx
                     .define_with(v.field(SCAN_MAT), mat, Locality::Global);
@@ -5147,7 +5217,7 @@ impl Run<'_, '_> {
                     }
                     self.cx.define_with(
                         scan_page_field(v, j0, by),
-                        v.list(vec![x, mat, b0]),
+                        v.list(vec![x, mat, b0, at]),
                         Locality::Global,
                     );
                 }
@@ -5302,11 +5372,13 @@ impl Run<'_, '_> {
         } else {
             pid
         };
+        // (the state without where it stands among the pages, `j` and
+        // the ordinary pages before: [`SCAN_AT`])
         let state = |prof: ValueId, material: Vec<ValueId>| {
             v.list(vec![
                 v.int(me),
-                v.int(s.j),
-                v.int(s.normal),
+                v.int(0),
+                v.int(0),
                 v.int(i64::from(s.fold.sf)),
                 v.int(i64::from(s.fold.pd)),
                 v.int(i64::try_from(s.fold.since_bp).unwrap_or(0)),
@@ -5373,6 +5445,10 @@ impl Run<'_, '_> {
             .collect();
         let prof = crate::vprof::encode(v, &decides);
         let x = state(crate::vprof::value(v, &prof), Vec::new());
-        Ok(Cont::State(x, v.list(material)))
+        Ok(Cont::State(
+            x,
+            v.list(material),
+            v.list(vec![v.int(s.j), v.int(s.normal)]),
+        ))
     }
 }
