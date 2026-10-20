@@ -512,6 +512,13 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         ]);
         cx.contribute(v.field("diags"), v.seq_unit(d));
     }
+    cx.contribute(
+        v.field(crate::pdfout::LINKED),
+        v.seq_unit(v.list(vec![
+            v.int(i64::try_from(l.placed).unwrap_or(0)),
+            v.int(i64::try_from(l.shipped).unwrap_or(0)),
+        ])),
+    );
     let x = bytes_value(v, l.file, l.hash);
     {
         use crate::timeline::note;

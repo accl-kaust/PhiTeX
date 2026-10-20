@@ -5415,6 +5415,22 @@ impl Build {
             .collect()
     }
 
+    /// What the last evaluation's link did with the exact PDF's pages:
+    /// `(placed, shipped again)`, the pages placed as their own steps
+    /// wrote them and those it wrote again itself (none linked: zeros).
+    #[must_use]
+    pub fn link_pages(&self) -> (u64, u64) {
+        let v = self.g.eng.values();
+        let acc = self.g.eng.acc_value(self.unit, v.field(crate::pdfout::LINKED));
+        acc.map(|a| v.seq_to_vec(a))
+            .and_then(|es| es.last().copied())
+            .map_or((0, 0), |e| {
+                let xs = list_of(v, e);
+                let n = |k: usize| xs.get(k).map_or(0, |&x| u64::try_from(int_of(v, x)).unwrap_or(0));
+                (n(0), n(1))
+            })
+    }
+
     /// The files the job wrote (`\openout`, `\write`), with their text,
     /// in the order first opened: what TeX leaves in them.
     #[must_use]
@@ -6344,6 +6360,8 @@ fn declare_fields(eng: &mut Engine) {
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
     let rels = eng.values().field(crate::pdfprim::RT_RELS);
     eng.declare_accumulator(rels, Arc::new(SeqMonoid));
+    let linked = eng.values().field(crate::pdfout::LINKED);
+    eng.declare_accumulator(linked, Arc::new(SeqMonoid));
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));

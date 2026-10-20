@@ -742,6 +742,13 @@ fn a_link_removed_reruns_its_piece_and_page_only() {
     // (the edited piece's own continuation, where a page fires inside
     // it, and no other)
     assert!(common::runs_of(&b, "resume") <= 1, "no later continuation");
+    // (every page placed as its own step wrote it: a page's link objects
+    // are named past the objects of the writer it is written on, so none
+    // is found scheduled there where the line's is not)
+    for (what, x) in [("edit", &b), ("cold", &cold)] {
+        let (placed, shipped) = x.link_pages();
+        assert_eq!(shipped, 0, "{what}: pages shipped again by the link ({placed} placed)");
+    }
 }
 
 /// A measure: 400 and 4000 plain paragraphs with `\pdfoutput=1`, cold

@@ -326,7 +326,7 @@ pub(crate) struct PagePiece {
     /// The page as its PDF side wrote it, for the link to place, and the
     /// fonts used on the state it was written on: set once, by the
     /// page's [`PdfPage`] (final, after the loop-backs settle).
-    made: OnceLock<(phitex_pdf::PageRecord, BTreeSet<FontId>)>,
+    made: OnceLock<(phitex_pdf::PageRecord, BTreeSet<FontId>, usize)>,
     /// The page's index in the page chain (for traces).
     pj: i64,
     /// The node that shipped it, for the link's errors ([`Linked`]).
@@ -1744,8 +1744,12 @@ fn write_page(v: &Values, pc: &PagePiece) {
         // the page's own, and the replay renumbered the link)
         // (the read-time numbers only its bytes name: named after
         // those, [`apart_names`])
-        let (named, aliases) = apart_names(&pc.whats);
-        while st.objects_numbered() < (named + aliases.len()).min(1 << 24) {
+        // (named past the objects the writer it starts from made too,
+        // [`base_fold`]: a name one of those has is scheduled there, and
+        // the line's number of the same object is not)
+        let floor = st.objects_numbered();
+        let (named, aliases) = apart_names(&pc.whats, floor);
+        while st.objects_numbered() < (named.max(floor) + aliases.len()).min(1 << 24) {
             st.new_objnum();
         }
         let local: Reloc = aliases.iter().map(|&(p, t)| (t, p)).collect();
@@ -1756,7 +1760,7 @@ fn write_page(v: &Values, pc: &PagePiece) {
             st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
         };
         let _ = res.err();
-        (rec, base)
+        (rec, base, floor)
     });
 }
 
@@ -2638,17 +2642,22 @@ fn rel_objnum(w: &Whatsit) -> Option<usize> {
 
 /// The names a page written apart gives the [`crate::pdfprim::REL`]
 /// numbers its whatsits name, `(name, number)`: in order, after every
-/// number TeX numbered that it names (the largest of those, first); the
-/// link gives each name the number the line gives its object.
-fn apart_names(whats: &BTreeMap<u32, Whatsit>) -> (usize, Vec<(usize, usize)>) {
+/// number TeX numbered that it names (the largest of those, first) and
+/// every object of the writer it is written on (`floor`, [`base_fold`]:
+/// a name one of those had is scheduled there, so the record's link was
+/// found scheduled where the line's is not, and the link shipped the
+/// page again); the link gives each name the number the line gives its
+/// object.
+fn apart_names(whats: &BTreeMap<u32, Whatsit>, floor: usize) -> (usize, Vec<(usize, usize)>) {
     let named = whats.values().filter_map(what_objnum).max().unwrap_or(0);
+    let from = named.max(floor);
     let mut rel: Vec<usize> = whats.values().filter_map(rel_objnum).collect();
     rel.sort_unstable();
     rel.dedup();
     let aliases = rel
         .into_iter()
         .enumerate()
-        .map(|(i, t)| (named + 1 + i, t))
+        .map(|(i, t)| (from + 1 + i, t))
         .collect();
     (named, aliases)
 }
@@ -2728,7 +2737,16 @@ pub(crate) struct Linked {
     /// `PDF-BACKEND-GAP`: a fatal error there, here logged, the job going
     /// on), with the node that shipped the page.
     pub errors: Vec<(String, i64)>,
+    /// The pages the link placed as their own steps wrote them, and those
+    /// it shipped again ([`PdfState::replay_page`]'s refusals).
+    pub placed: u64,
+    pub shipped: u64,
 }
+
+/// What a link did with the pages ([`Linked::placed`], `shipped`):
+/// `[placed, shipped]`, the end node's contribution
+/// (`crate::Build::link_pages`).
+pub(crate) const LINKED: &str = "pdf:linked";
 
 /// The exact PDF file, linked (spec-redesign §1 `link`): one writer
 /// state from the start, the line's records put on it in order
@@ -2755,6 +2773,8 @@ pub(crate) fn finish_exact(
         file: Vec::new(),
         hash: None,
         errors: Vec::new(),
+        placed: 0,
+        shipped: 0,
     };
     if xpages.is_empty() {
         return none;
@@ -2943,7 +2963,8 @@ pub(crate) fn finish_exact(
             // (the names the page was written apart with for the
             // read-time numbers only its bytes name: the line's numbers
             // of their objects)
-            let (_, aliases) = apart_names(&pc.whats);
+            let floor = pc.made.get().map_or(0, |m| m.2);
+            let (_, aliases) = apart_names(&pc.whats, floor);
             let tex: FxHashMap<usize, usize> = aliases
                 .iter()
                 .filter_map(|&(p, t)| reloc.get(&t).map(|&m| (p, m)))
@@ -3219,5 +3240,7 @@ pub(crate) fn finish_exact(
         file: out,
         hash,
         errors,
+        placed: u64::try_from(placed).unwrap_or(0),
+        shipped: u64::try_from(shipped).unwrap_or(0),
     }
 }
