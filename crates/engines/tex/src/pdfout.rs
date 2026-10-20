@@ -355,8 +355,33 @@ pub(crate) fn doc_op(r: &mut Run<'_, '_>, kind: &str, args: &[ValueId]) -> R<boo
     let v = r.v;
     let mut xs = vec![v.str(kind)];
     xs.extend_from_slice(args);
+    // (the writer's parameters where it runs: one that writes now, an
+    // open action's object, fixes the file's version and compression
+    // with them, §792, as a command's step does)
+    let wp = writer_params(r)?;
+    let mut w = vec![v.str(DOC_WP)];
+    w.extend(wp.iter().map(|&p| v.int(i64::from(p))));
+    xs.push(v.list(w));
     line_push(r, v.list(xs));
     Ok(true)
+}
+
+/// The tag of a document-level command's writer parameters, its record's
+/// last element ([`doc_op`]).
+const DOC_WP: &str = "wp";
+
+/// The writer's parameters a document-level command's record carries
+/// ([`doc_op`]).
+fn doc_op_params(v: &Values, e: ValueId) -> Option<WParams> {
+    let xs = list_of(v, *list_of(v, e).last()?);
+    if xs.first().map(|&k| str_of(v, k)).as_deref() != Some(DOC_WP) {
+        return None;
+    }
+    let mut ps = [0; 5];
+    for (p, &x) in ps.iter_mut().zip(xs.get(1..)?) {
+        *p = i32::try_from(int_of(v, x)).unwrap_or(0);
+    }
+    Some(ps)
 }
 
 /// A document-level command kept by [`doc_op`], applied to `st`.
@@ -2964,7 +2989,12 @@ pub(crate) fn finish_exact(
                         i32::try_from(size).unwrap_or(0),
                     );
                 }
-                _ => apply_doc_op(v, &mut st, x),
+                _ => {
+                    if let Some(wp) = doc_op_params(v, x) {
+                        set_writer_params(&mut st, wp);
+                    }
+                    apply_doc_op(v, &mut st, x);
+                }
             }
         }
         if let Some(c) = st.flush_chunk() {

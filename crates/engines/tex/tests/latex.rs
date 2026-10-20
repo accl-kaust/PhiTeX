@@ -1073,6 +1073,24 @@ latexmk_tests! {
     // register it allocates unless defined there, declared after it)
     latexmk_total_counter_j1: "total-counter", 1;
     latexmk_total_counter_j8: "total-counter", 8;
+    // (corpus documents whose objects equal pdfLaTeX's but whose file
+    // differed: a document-level command that writes where it runs, an
+    // open action's object, does so with the writer's parameters there,
+    // the format's version and object streams, §792)
+    latexmk_corpus_links_text_j1: "corpus-links-text", 1;
+    latexmk_corpus_links_text_j8: "corpus-links-text", 8;
+    latexmk_corpus_links_url_j1: "corpus-links-url", 1;
+    latexmk_corpus_links_url_j8: "corpus-links-url", 8;
+    latexmk_corpus_links_table_j1: "corpus-links-table", 1;
+    latexmk_corpus_links_table_j8: "corpus-links-table", 8;
+    latexmk_corpus_title_links_j1: "corpus-title-links", 1;
+    latexmk_corpus_title_links_j8: "corpus-title-links", 8;
+    latexmk_corpus_image_twice_j1: "corpus-image-twice", 1;
+    latexmk_corpus_image_twice_j8: "corpus-image-twice", 8;
+    latexmk_corpus_char_string_j1: "corpus-char-string", 1;
+    latexmk_corpus_char_string_j8: "corpus-char-string", 8;
+    latexmk_corpus_version_class_j1: "corpus-version-class", 1;
+    latexmk_corpus_version_class_j8: "corpus-version-class", 8;
 }
 
 /// What BibTeX and makeindex say reaches the build's diagnostics as
