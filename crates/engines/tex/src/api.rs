@@ -2862,7 +2862,8 @@ impl Graph {
                             && crate::exec::obs_str!("PHITEX_RERUN_DIFF")
                                 .and_then(|n| n.parse::<usize>().ok())
                                 .is_some_and(|n| shown < n)
-                            && crate::val::field_name(v, field) == "ps"
+                            && crate::val::field_name(v, field)
+                                == crate::exec::obs_str!("PHITEX_RERUN_DIFF_FIELD").unwrap_or("ps")
                         {
                             shown += 1;
                             let (o, w) = (v.render(old), v.render(new));
@@ -5834,11 +5835,9 @@ impl Build {
                 let md = match crate::hints::may_define(&self.g.ops.hints, v, &i.args) {
                     phitex_defuse::MayDefine::Any => None,
                     phitex_defuse::MayDefine::Nothing => Some(Vec::new()),
-                    phitex_defuse::MayDefine::Names(fs) => Some(
-                        fs.iter()
-                            .map(|&f| crate::val::field_name(v, f))
-                            .collect(),
-                    ),
+                    phitex_defuse::MayDefine::Names(fs) => {
+                        Some(fs.iter().map(|&f| crate::val::field_name(v, f)).collect())
+                    }
                     phitex_defuse::MayDefine::Prefixes(ps) => {
                         Some(ps.iter().map(|p| format!("{p}*")).collect())
                     }

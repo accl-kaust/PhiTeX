@@ -115,6 +115,10 @@ pub(crate) struct Bound {
     pub reads: Vec<String>,
 }
 
+/// The catcode a [`Cats`] pair gives a byte read as no letter (a
+/// control word's end, a control symbol's character): any but 11.
+pub(crate) const NOT_LETTER: u8 = 16;
+
 /// Bytes and the catcode each was read with, in the order first met,
 /// each pair once: the list, and by byte the catcode it came with
 /// first, so adding is mostly a compare, not a search.
@@ -1396,9 +1400,17 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
             .tokens
             .get(a.tok)
             .is_some_and(|t| t.tz == pass::Status::Pending);
+        // (no slice begins right after a control sequence's name: where
+        // a name ends is the pass's reading under the regime it predicts,
+        // and a regime it got wrong, a letter read as another character,
+        // would cut the name in two, which no run joins again, §356)
+        let after_name = k > 0 && {
+            let b = &p.atoms[k - 1];
+            b.kind == AtomKind::Cs && b.end == a.start
+        };
         // (an operand a primitive reads never starts a slice; a macro's
         // operand range is the pass's guess and does not cut)
-        if !(inside_if || operand.has(k) || pending || (ch && prev_char)) {
+        if !(inside_if || operand.has(k) || pending || (ch && prev_char) || after_name) {
             starts.push(a.start);
         }
         prev_char = ch;
@@ -2094,6 +2106,21 @@ impl Analysis<'_> {
         let bytes: &[u8] = match at.kind {
             AtomKind::Cs => {
                 let name = at.name(self.text);
+                // (where the name ends is read too: the character after a
+                // control word, or a control symbol's own, is no letter,
+                // or the name would go on, §356)
+                let next = if name.bytes().all(|b| r.catcode(b) == Some(11)) {
+                    t.get(at.end).copied()
+                } else {
+                    t.get(at.start + 1).copied()
+                };
+                if let Some(b) = next
+                    && b < 128
+                    && (b == 9 || (32..127).contains(&b))
+                    && r.catcode(b).is_some_and(|c| c != 11)
+                {
+                    out.add((b, NOT_LETTER));
+                }
                 if name.bytes().all(|b| r.catcode(b) == Some(11)) {
                     &t[at.start..at.end]
                 } else {
@@ -4309,7 +4336,7 @@ pub(crate) fn verify(r: &mut Run<'_, '_>, h: &Hint) -> R<Option<String>> {
     };
     for &(byte, cat_code) in b.cats.iter() {
         let got = r.cat(u32::from(byte))?;
-        if got != cat_code {
+        if got != cat_code && (cat_code != NOT_LETTER || got == 11) {
             return Ok(Some(cat(&[
                 "catcode of '",
                 char::from(byte).encode_utf8(&mut [0; 4]),
