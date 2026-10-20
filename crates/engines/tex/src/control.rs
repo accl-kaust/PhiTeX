@@ -44,6 +44,9 @@ impl Run<'_, '_> {
         if !got {
             return Ok(());
         }
+        if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
+            self.cmd_trace();
+        }
         if self.cur.cmd > cmd::MAX_COMMAND {
             if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
                 return Ok(());
@@ -53,6 +56,36 @@ impl Run<'_, '_> {
         }
         self.dispatch()?;
         self.ck()
+    }
+
+    /// (observe) `PHITEX_CMD_TRACE=<node>` (`all`: every node): each
+    /// command the node's run does, its token, `cmd`/`chr` and the input
+    /// levels (kind, type) it is read from, innermost last.
+    #[cold]
+    #[inline(never)]
+    fn cmd_trace(&self) {
+        if !self.cmd_traced() {
+            return;
+        }
+        let node = self.cx.node().raw();
+        let levels: Vec<(u8, u8)> = self
+            .input
+            .levels
+            .iter()
+            .map(|l| (l.kind, l.ty))
+            .collect();
+        eprintln!(
+            "cmd-trace {node} #{} {:?} cmd {} chr {} levels {levels:?}",
+            self.cmds, self.cur.tok, self.cur.cmd, self.cur.chr
+        );
+    }
+
+    /// (observe) Whether `PHITEX_CMD_TRACE` names this run's node.
+    pub(crate) fn cmd_traced(&self) -> bool {
+        let Some(want) = crate::exec::env_str!("PHITEX_CMD_TRACE") else {
+            return false;
+        };
+        want == "all" || want.parse::<u64>().ok() == Some(self.cx.node().raw())
     }
 
     /// The commands between two heartbeat ticks ([`Run::heartbeat_tick`]).
@@ -1521,11 +1554,28 @@ impl Run<'_, '_> {
                 // \immediate (§1375)
                 self.get_x_token();
                 self.ck()?;
+                if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
+                    eprintln!(
+                        "cmd-trace {} immediate: {:?} cmd {} chr {}",
+                        self.cx.node().raw(),
+                        self.cur.tok,
+                        self.cur.cmd,
+                        self.cur.chr
+                    );
+                }
                 if self.cur.cmd == cmd::EXTENSION && self.cur.chr <= 2 {
                     match self.cur.chr {
                         1 => {
                             let k = self.scan_int()?;
                             let (_, body) = self.scan_toks(false, false);
+                            if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
+                                eprintln!(
+                                    "cmd-trace {} immediate write {k}: {} tokens, halt {}",
+                                    self.cx.node().raw(),
+                                    body.len(),
+                                    self.halt.is_some()
+                                );
+                            }
                             self.ck()?;
                             self.write_out(k, &body)?;
                         }
@@ -1559,6 +1609,9 @@ impl Run<'_, '_> {
     /// `write_out` (§1370–§1371): the tokens expanded, to the log.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn write_out(&mut self, k: i32, body: &[Tok]) -> R<()> {
+        if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
+            eprintln!("cmd-trace {} write_out {k}", self.cx.node().raw());
+        }
         let s = self.expand_late(body);
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.is_err() {
             eprintln!(

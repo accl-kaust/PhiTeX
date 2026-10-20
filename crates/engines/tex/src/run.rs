@@ -1387,6 +1387,24 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
+        if crate::exec::obs_flag!("PHITEX_DEF_TRACE")
+            && crate::exec::env_str!("PHITEX_DEF_TRACE")
+                .is_some_and(|w| w == crate::val::field_name(self.v, f))
+        {
+            eprintln!(
+                "def-trace read {} = {} by node {} op {:?} at {:?} (cmd #{})",
+                crate::val::field_name(self.v, f),
+                match &r {
+                    Ok(Some(x)) => format!("{x:?} {}", crate::val::show_def(self.v, *x)),
+                    Ok(None) => "none".to_owned(),
+                    Err(_) => "stop".to_owned(),
+                },
+                self.cx.node().raw(),
+                self.cx.op(),
+                self.cur.tok,
+                self.cmds
+            );
+        }
         self.st.fill(loc, r?);
         Ok(())
     }
@@ -1445,6 +1463,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cx.op()
             );
         }
+        if crate::exec::obs_flag!("PHITEX_DEF_TRACE") {
+            self.def_trace(loc, &val, global);
+        }
         if self.read_back_done && self.interp.is_none() {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 let f = self.loc_field(loc);
@@ -1460,6 +1481,33 @@ impl<'c, 'a> Run<'c, 'a> {
         self.st.note_kind(loc, self.in_advance);
         self.st.set(loc, val, global, grp);
         self.muts += 1;
+    }
+
+    /// (observe) `PHITEX_DEF_TRACE=<field>`: each definition of the
+    /// field, by which node and command, local or global, in which
+    /// group, while a line is interpreted or not.
+    #[cold]
+    #[inline(never)]
+    fn def_trace(&mut self, loc: Loc, val: &Entry, global: bool) {
+        let Some(want) = crate::exec::env_str!("PHITEX_DEF_TRACE") else {
+            return;
+        };
+        let f = self.loc_field(loc);
+        let name = crate::val::field_name(self.v, f);
+        if name != want {
+            return;
+        }
+        eprintln!(
+            "def-trace {name} := {} global={global} group {:?} nest {} interp {} by node {} op {:?} at {:?} (cmd #{})",
+            self.st.debug_entry(val, self.v),
+            self.innermost_group(),
+            self.nest.len(),
+            self.interp.is_some(),
+            self.cx.node().raw(),
+            self.cx.op(),
+            self.cur.tok,
+            self.cmds
+        );
     }
 
     /// A field this run defines after reading a job-written file back:
