@@ -676,6 +676,32 @@ impl std::fmt::Debug for Shown {
     }
 }
 
+/// A memo of the writer's (a pure function's answers, a lookup's last
+/// hit): what it holds depends on the steps taken, not on the state, so
+/// the state's digest leaves it out (two equal states reached by other
+/// steps keep equal digests).
+#[derive(Clone, Default)]
+struct Memo<T>(T);
+
+impl<T> std::fmt::Debug for Memo<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("memo")
+    }
+}
+
+impl<T> std::ops::Deref for Memo<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Memo<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
 /// The writer before the split: the state and its bytes in one.
 pub type PdfWriter = PdfState;
 
@@ -786,10 +812,10 @@ pub struct PdfState {
     fonts: digest::TMap<FontId, Arc<FontState>>,
     /// A font known to be in `fonts` (the last one `load_font` saw):
     /// the per-character check is a compare.
-    last_loaded: Option<FontId>,
+    last_loaded: Memo<Option<FontId>>,
     /// `divide_scaled(w, size, 4)` of characters' widths, direct-mapped
     /// by width and size (a pure function: a line repeats its letters).
-    adv_memo: Box<[(Scaled, Scaled, i32, Scaled); 64]>,
+    adv_memo: Memo<Box<[(Scaled, Scaled, i32, Scaled); 64]>>,
     /// `fd_tree`'s descriptors of included PDF files' fonts.
     epdf_fds: digest::TMap<epdffont::FdKey, epdffont::EpdfFd>,
     /// `\pdfmapline` and `\pdfmapfile` entries: replacing (`=`) or
@@ -920,8 +946,8 @@ impl PdfState {
             stacks: color::Stacks::default(),
             epdf_fds: digest::TMap::new("epdf_fds"),
             fonts: digest::TMap::new("fonts"),
-            last_loaded: None,
-            adv_memo: Box::new([(0, 0, 0, 0); 64]),
+            last_loaded: Memo(None),
+            adv_memo: Memo(Box::new([(0, 0, 0, 0); 64])),
             map_over: digest::TMap::new("map_over"),
             map_add: digest::TMap::new("map_add"),
             glyph_unicode: digest::TMap::new("glyph_unicode"),
