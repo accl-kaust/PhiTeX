@@ -1112,21 +1112,12 @@ pub(crate) fn units_of<'t>(
     text: &'t str,
     defs: &crate::hints::Defs,
 ) -> (ValueId, Vec<(String, &'t str)>) {
-    let t = crate::hints::text_hints(text, phitex_source::pass::FileKind::Document, defs);
-    // (the units cover the text: each from the end of the one before to
-    // its slice's end, the last to the text's end)
-    let mut ends: Vec<usize> = t.slices.iter().map(|&(_, e)| e).collect();
-    ends.retain(|&e| e > 0 && e <= text.len());
-    ends.sort_unstable();
-    ends.dedup();
-    if ends.last() != Some(&text.len()) {
-        ends.push(text.len());
-    }
+    let (ends, sliceable) = unit_ends(text, defs);
     let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
     let mut entries = Vec::with_capacity(ends.len());
     let mut units = Vec::with_capacity(ends.len());
     let mut at = 0;
-    for e in ends {
+    for &e in ends.iter() {
         let Some(u) = text.get(at..e) else { continue };
         let starts = at == 0 || text.as_bytes()[at - 1] == b'\n';
         at = e;
@@ -1140,12 +1131,54 @@ pub(crate) fn units_of<'t>(
         entries.push(v.list(vec![v.str(&key), v.int(i64::from(starts))]));
         units.push((key, u));
     }
-    // (the job's own text: what kind of file it is comes from its text)
-    let sliceable = crate::inputs::document_text(text);
     (
         v.list(vec![v.int(i64::from(sliceable)), v.list(entries)]),
         units,
     )
+}
+
+/// Where a written file's units end ([`units_of`]: its slices' ends as
+/// the document's slicer cuts it, under the format's definitions
+/// `defs`) and whether it slices as a document's text: a function of
+/// the text and the definitions, kept by both (a file a round writes
+/// as the round before wrote it is not analysed again: amsldoc's index
+/// file, 40 kB, 125 ms).
+fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
+    type Kept = (std::sync::Weak<phitex_source::pass::Definitions>, Arc<[usize]>, bool);
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<FxHashMap<(u64, usize), Kept>>> =
+        std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
+    let key = (
+        phitex_defuse::hash_bytes(0x756e_6974_656e_6473, text.as_bytes()),
+        Arc::as_ptr(defs) as usize,
+    );
+    if let Some((d, ends, sl)) = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        && d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
+    {
+        return (ends.clone(), *sl);
+    }
+    let t = crate::hints::text_hints(text, phitex_source::pass::FileKind::Document, defs);
+    // (the units cover the text: each from the end of the one before to
+    // its slice's end, the last to the text's end)
+    let mut ends: Vec<usize> = t.slices.iter().map(|&(_, e)| e).collect();
+    ends.retain(|&e| e > 0 && e <= text.len());
+    ends.sort_unstable();
+    ends.dedup();
+    if ends.last() != Some(&text.len()) {
+        ends.push(text.len());
+    }
+    // (the job's own text: what kind of file it is comes from its text)
+    let sliceable = crate::inputs::document_text(text);
+    let ends: Arc<[usize]> = ends.into();
+    let mut m = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if m.len() > 64 {
+        m.clear();
+    }
+    m.insert(key, (Arc::downgrade(defs), ends.clone(), sliceable));
+    (ends, sliceable)
 }
 
 /// Publishes a loop-back's next round value; under `observe` with
