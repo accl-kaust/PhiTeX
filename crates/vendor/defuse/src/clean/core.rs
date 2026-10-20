@@ -211,11 +211,13 @@ impl Core {
             .hook(who, op, "predicted_defs", || None, || o.predicted_defs(args, v))
             .map(Arc::from);
         let fin = self.hook(who, op, "final_only", || false, || o.final_only(args, v));
+        let contribs_complete = contribs.is_some() && self.hook(who, op, "contribs_complete", || false, || o.contribs_complete(args, v));
         Static {
             defs: defs.map(Arc::from),
             may,
             effect,
             contribs,
+            contribs_complete,
             preds,
             fin,
             reads: self.hook(who, op, "reads", || None, || o.reads(args, v)).map(Arc::from),

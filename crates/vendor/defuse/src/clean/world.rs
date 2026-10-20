@@ -63,6 +63,8 @@ pub(crate) struct Static {
     pub may: May,
     pub effect: Option<Effect>,
     pub contribs: Option<Arc<[(Field, ValueId)]>>,
+    /// The listed contributions are all of them (none to other fields).
+    pub contribs_complete: bool,
     pub preds: Option<Arc<[(Field, ValueId)]>>,
     pub fin: bool,
     /// The fields the run is declared to read (`reads`, a hint).
@@ -914,9 +916,10 @@ impl World {
 
     /// Files node `n` (`on`) in the accumulator indexes, or takes it out.
     fn acc_index(&mut self, id: Id, n: &Node, on: bool) {
-        // (Declaring no contributions at all is contributing nowhere.)
+        // (Declaring no contributions at all, or all of them, is
+        // contributing nowhere else.)
         let stat = n.text.stat.contribs.as_deref();
-        if !in_work(n.st) || stat.is_some_and(<[_]>::is_empty) {
+        if !in_work(n.st) || stat.is_some_and(|cs| cs.is_empty() || n.text.stat.contribs_complete) {
             return;
         }
         let (u, p) = (n.unit, n.pos);
@@ -959,6 +962,62 @@ impl World {
             }
             lo = x.0;
         }
+    }
+
+    /// The last such blocker in `(lo, hi)` before `hi` (other than `me`):
+    /// the one a reader parked on is woken by last, when commits come in
+    /// text order.
+    pub(crate) fn range_blocker_last(&self, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let mut hi = hi;
+        loop {
+            let open = self.last_open(f, u, lo, hi);
+            let res = self
+                .acc_res
+                .get(&(u, f))
+                .and_then(|m| m.below(&hi))
+                .filter(|(p, _)| **p > lo)
+                .map(|(&p, &x)| (p, x));
+            let x = match (open, res) {
+                (Some(a), Some(b)) => a.max(b),
+                (a, b) => a.or(b)?,
+            };
+            if x.1 != me {
+                return Some(x.1);
+            }
+            hi = x.0;
+        }
+    }
+
+    /// The last node without a result in work in `(lo, hi)` of unit `u`
+    /// that does not declare its contribution to `f` (as [`Self::first_open`],
+    /// from the end).
+    fn last_open(&self, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<(Pos, Id)> {
+        let open = self.acc_open.get(&u)?;
+        let a = open.rank(&lo) + usize::from(open.contains_key(&lo));
+        let b = open.rank(&hi);
+        if a >= b {
+            return None;
+        }
+        let Some(st) = self.acc_static.get(&(u, f)).filter(|m| !m.is_empty()) else {
+            return open.nth(b - 1).map(|(&p, &x)| (p, x));
+        };
+        let s1 = st.rank(&hi);
+        // (The last k+1 open nodes all declare: as many declaring ones
+        // from the k-th last on.)
+        let all_declare = |k: usize| -> bool {
+            let (&p, _) = open.nth(b - 1 - k).expect("in range");
+            s1 - st.rank(&p) == k + 1
+        };
+        let (mut l, mut r) = (0, b - a);
+        while l < r {
+            let mid = l + (r - l) / 2;
+            if all_declare(mid) {
+                l = mid + 1;
+            } else {
+                r = mid;
+            }
+        }
+        (l < b - a).then(|| open.nth(b - 1 - l).map(|(&p, &x)| (p, x))).flatten()
     }
 
     /// The first node without a result in work in `(lo, hi)` of unit `u`
@@ -1009,7 +1068,7 @@ impl World {
             // An accumulator: held while a node before it in work may
             // still contribute (it would stop on the fold otherwise).
             if core.accs.contains_key(&f) {
-                if let Some(x) = self.range_blocker(id, f, u, 0, pos) {
+                if let Some(x) = self.range_blocker_last(id, f, u, 0, pos) {
                     return Err(Some(x));
                 }
                 continue;
