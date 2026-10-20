@@ -596,10 +596,14 @@ impl Input {
         for s in segs {
             // (a reached segment stays in the text as a copy; a
             // continuation of the line on top joins that line instead,
-            // `Run::join_continuation`)
+            // `Run::join_continuation`; so does one of a line reached
+            // already that waits in the text as a level a parked run
+            // had, its `\endlinechar` not applied as it did not end: a
+            // segment of its own after it, as after the line on top)
             if self.text.len() > self.text_at
                 && let (Some(Seg::Line(last)), Seg::Line(next)) = (self.text.last_mut(), &s)
                 && !last.ends
+                && last.endch == -2
                 && !next.starts
             {
                 last.buf.extend_from_slice(&next.buf);
@@ -811,5 +815,40 @@ mod tests {
         inp.line_mut(top).loc = 2;
         assert!(inp.restore(&s));
         assert_eq!(inp.top_line().map(|l| l.loc), Some(0));
+    }
+
+    /// A line's continuation (a sibling's first segment, cut mid-line)
+    /// joins the last text segment only while that segment has not been
+    /// reached: a line reached already, as not ending (no
+    /// `\endlinechar` after it), and waiting in the text as a level a
+    /// parked run had, gets its continuation as a segment of its own,
+    /// which takes the `\endlinechar` when it is reached, as after the
+    /// line on top. (Joined, the line's end took none: a resumed run lost
+    /// the space at the end of a line its node boundary cut.)
+    #[test]
+    fn a_continuation_does_not_join_a_reached_line() {
+        let cut = |text: &str, starts: bool, ends: bool, endch: i64| {
+            let mut l = Line::of_str(text, -1, false);
+            l.starts = starts;
+            l.ends = ends;
+            l.endch = endch;
+            l
+        };
+        // (reached: the parked run's line level, read to its cut)
+        let mut inp = Input::new();
+        let mut reached = cut("\\cn{iint}", true, false, -1);
+        reached.loc = reached.buf.len();
+        inp.text.push(Seg::Line(reached));
+        inp.append_text(vec![Seg::Line(cut(", and integral", false, true, -2))]);
+        assert_eq!(inp.text.len(), 2, "a segment of its own");
+        // (not reached: one line, its end still to come)
+        let mut inp = Input::new();
+        inp.text.push(Seg::Line(cut("\\cn{iint}", true, false, -2)));
+        inp.append_text(vec![Seg::Line(cut(", and integral", false, true, -2))]);
+        assert_eq!(inp.text.len(), 1, "joined");
+        let Some(Seg::Line(l)) = inp.text.first() else {
+            panic!("a line")
+        };
+        assert!(l.ends);
     }
 }
