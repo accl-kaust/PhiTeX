@@ -2858,7 +2858,8 @@ impl Graph {
                             && crate::exec::obs_str!("PHITEX_RERUN_DIFF")
                                 .and_then(|n| n.parse::<usize>().ok())
                                 .is_some_and(|n| shown < n)
-                            && crate::val::field_name(v, field) == "ps"
+                            && crate::val::field_name(v, field)
+                                == crate::exec::obs_str!("PHITEX_RERUN_DIFF_FIELD").unwrap_or("ps")
                         {
                             shown += 1;
                             let (o, w) = (v.render(old), v.render(new));
