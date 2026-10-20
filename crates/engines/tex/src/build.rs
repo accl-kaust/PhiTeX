@@ -2834,7 +2834,9 @@ impl Run<'_, '_> {
         };
         let v = self.v;
         let mut side = Side::default();
-        let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
+        // (the box's top list only: the break measures its boxes and
+        // never looks into them, §970-§977; they are put back encoded)
+        let Some(bx) = nodes::decode_box_top(v, b, &mut side) else {
             crate::etex::split_marks(self, &[], &Side::default())?;
             return Ok(None);
         };

@@ -467,6 +467,26 @@ pub(crate) fn decode_shallow(v: &Values, x: ValueId, side: &mut Side) -> Option<
     decode(v, x, side)
 }
 
+/// A box's value decoded one level deep: its head, and its list's items
+/// as [`decode_shallow`] gives them (a box among them left encoded, put
+/// back as it was by [`encode`] with the same `side`). For a reader of
+/// the top list only (`\vsplit`'s break, §970: it measures the boxes,
+/// never looks into them). `None` if `x` is not a box.
+pub(crate) fn decode_box_top(v: &Values, x: ValueId, side: &mut Side) -> Option<BoxNode> {
+    let xs = v
+        .with_list(x, |xs| <[ValueId; 10]>::try_from(xs).ok())
+        .flatten()?;
+    if int_of(v, xs[0]) != T_BOX {
+        return None;
+    }
+    let mut b = decode_box_head(v, &xs);
+    b.list = list_of(v, xs[9])
+        .into_iter()
+        .filter_map(|n| decode_shallow(v, n, side))
+        .collect();
+    Some(b)
+}
+
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     // (a character, most of a list: its own direct-mapped cache)
     if let Some((font, ch)) = crate::val::char_node_of(v, x) {
