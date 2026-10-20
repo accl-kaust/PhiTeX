@@ -443,6 +443,7 @@ impl Engine {
                     }
                 }
             }
+            rep.stuck_subjects = self.stuck_subjects(&s, &stuck);
             return Err(EvalError::NoProgress {
                 rounds: self.limits.idle_rounds.saturating_add(1),
                 waiters: stuck,
@@ -1477,6 +1478,40 @@ impl Engine {
     /// The parked nodes whose wait ends, through the nodes they wait on,
     /// at an environment wait (a stall the client resolves, not a lack of
     /// progress).
+    /// The nodes the waiters wait on that are not waiting themselves, each
+    /// with its state.
+    fn stuck_subjects(&self, s: &Sched, stuck: &[crate::api::Waiter]) -> Vec<String> {
+        let waiting: FxHashSet<NodeId> = stuck.iter().map(|w| w.node).collect();
+        let mut subjects: Vec<NodeId> = stuck
+            .iter()
+            .filter_map(|w| match w.on {
+                crate::api::WaitOn::Node(x, _) if !waiting.contains(&x) => Some(x),
+                _ => None,
+            })
+            .collect();
+        subjects.sort_unstable();
+        subjects.dedup();
+        subjects
+            .into_iter()
+            .map(|x| match self.w.node(x.0) {
+                None => format!("{}: gone", x.0),
+                Some(n) => format!(
+                    "{}: {:?}, result {}, op {} {}, {:?} by {}, parked {:?}, queued {}, waiters {}",
+                    x.0,
+                    n.st,
+                    n.res.is_some(),
+                    self.core.op_name(n.text.op),
+                    n.text.args.iter().take(2).map(|&a| self.core.values.render(a)).collect::<Vec<_>>().join(" ").chars().take(60).collect::<String>(),
+                    n.place,
+                    n.parent,
+                    s.parked.get(&x.0),
+                    s.queued.contains(&x.0),
+                    s.waiters.get(&x.0).map_or(0, Vec::len),
+                ),
+            })
+            .collect()
+    }
+
     fn env_blocked(&self, s: &Sched) -> FxHashSet<Id> {
         let mut out: FxHashSet<Id> = s.env.keys().copied().collect();
         out.extend(s.parked.iter().filter(|(_, w)| matches!(w, Wait::Env(_))).map(|(&id, _)| id));

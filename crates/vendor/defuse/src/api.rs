@@ -617,10 +617,11 @@ impl std::fmt::Display for EvalError {
                 f,
                 "node {node:?} created {created} children at depth {depth}; last: {last:?}"
             ),
-            EvalError::NoProgress { rounds, waiters, .. } => write!(
+            EvalError::NoProgress { rounds, waiters, report } => write!(
                 f,
-                "{rounds} rounds without progress; {} nodes waiting: {waiters:?}",
-                waiters.len()
+                "{rounds} rounds without progress; {} nodes waiting: {waiters:?}; waited on: {:?}",
+                waiters.len(),
+                report.stuck_subjects
             ),
             EvalError::BadPosition { node, at } => {
                 write!(
@@ -930,6 +931,9 @@ pub struct Report {
     /// entry not reused, and why (a node offered no entry included).
     pub memo_misses: Vec<MemoMiss>,
     pub resettled: u64,
+    /// At a `NoProgress` stop: each node waited on that is not itself
+    /// waiting, and its state (why nothing wakes the waiters).
+    pub stuck_subjects: Vec<String>,
 }
 
 impl Report {

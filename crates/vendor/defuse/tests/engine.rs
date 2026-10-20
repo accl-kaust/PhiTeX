@@ -2823,3 +2823,83 @@ fn mark_op_reports_the_nodes_it_creates() {
     eng.evaluate_sequential().unwrap();
     assert_eq!(eng.take_settled().len(), 4);
 }
+
+/// A rerun that newly defines a scope-local, its scope effect the same as
+/// before: the local ends with the scope. S opens a scope (decided when it
+/// runs) and defines `x` in it only when `c` is 1; a reader after the
+/// scope's close sees the outer `x`, before and after `c` changes.
+#[test]
+fn a_reruns_new_scope_local_ends_with_its_scope() {
+    use defuse::{Effect, Field, Locality, Stop, ValueId, Values};
+    struct Op;
+    fn tag(v: &Values, a: &[ValueId]) -> String {
+        v.as_str(a[0]).unwrap_or_default()
+    }
+    impl defuse::Operation for Op {
+        fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+            match tag(v, a).as_str() {
+                "c" => Some(vec![(v.field("c"), Locality::Local)]),
+                "x" => Some(vec![(v.field("x"), Locality::Local)]),
+                "s" => Some(vec![(v.field("x"), Locality::Scope)]),
+                _ => Some(Vec::new()),
+            }
+        }
+        fn effect(&self, a: &[ValueId], v: &Values) -> Effect {
+            match tag(v, a).as_str() {
+                "s" => Effect::Pending,
+                "close" => Effect::Close,
+                _ => Effect::None,
+            }
+        }
+        fn run(&self, cx: &mut defuse::Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            let a = cx.args();
+            match tag(v, &a).as_str() {
+                "c" | "x" => {
+                    let f = v.field(&tag(v, &a));
+                    cx.define(f, a[1]);
+                    Ok(a[1])
+                }
+                "s" => {
+                    cx.set_effect(Effect::Open);
+                    let c = cx.use_field(v.field("c"))?.and_then(|x| v.as_int(x));
+                    if c == Some(1) {
+                        cx.define_in_scope(v.field("x"), v.int(99));
+                    }
+                    Ok(ValueId::UNIT)
+                }
+                "read" => Ok(cx.use_field(v.field("x"))?.unwrap_or(ValueId::UNIT)),
+                _ => Ok(ValueId::UNIT),
+            }
+        }
+    }
+    for threads in [0usize, 4] {
+        let mut eng = Engine::new();
+        let op = eng.register(std::sync::Arc::new(Op));
+        let u = eng.new_unit();
+        let s = |e: &Engine, t: &str| e.values().str(t);
+        let (cs, xs) = (s(&eng, "c"), s(&eng, "x"));
+        let (zero, one) = (eng.values().int(0), eng.values().int(1));
+        let c = eng.push(u, op, vec![cs, zero]);
+        eng.push(u, op, vec![xs, one]);
+        let sn = s(&eng, "s");
+        eng.push(u, op, vec![sn]);
+        let close = s(&eng, "close");
+        eng.push(u, op, vec![close]);
+        let rd = s(&eng, "read");
+        let r = eng.push(u, op, vec![rd]);
+        let eval = |e: &mut Engine| {
+            if threads == 0 {
+                e.evaluate_sequential()
+            } else {
+                e.evaluate(&mut Greedy::default(), &mut Threads(threads))
+            }
+        };
+        eval(&mut eng).unwrap();
+        assert_eq!(eng.output(r).and_then(|x| eng.values().as_int(x)), Some(1), "threads {threads}: cold");
+        eng.replace(c, op, vec![cs, one]);
+        eval(&mut eng).unwrap();
+        assert_eq!(eng.output(r).and_then(|x| eng.values().as_int(x)), Some(1), "threads {threads}: after the rerun");
+        assert!(eng.check_reads().is_empty(), "threads {threads}: {:?}", eng.check_reads());
+    }
+}
