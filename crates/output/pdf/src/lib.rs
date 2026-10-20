@@ -511,7 +511,7 @@ impl std::fmt::Debug for FontState {
             .field("used", &self.used)
             .field("size", &self.size)
             .field("num", &self.num)
-            .field("chars", &self.chars)
+            // (the characters used: apart, [`PdfState::digest`])
             .field("attr", &self.attr)
             .field("nobuiltin_tounicode", &self.nobuiltin_tounicode)
             .field("has_space", &self.has_space)
@@ -645,6 +645,19 @@ impl PdfState {
     }
 }
 
+/// The last page's content stream ([`PdfState::last_page_shown`]):
+/// nothing written later depends on it, so the state's digest leaves it
+/// out (a page shipped again and the same page placed from its record
+/// leave equal states).
+#[derive(Clone, Default)]
+struct Shown(Vec<u8>);
+
+impl std::fmt::Debug for Shown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("shown")
+    }
+}
+
 /// The writer before the split: the state and its bytes in one.
 pub type PdfWriter = PdfState;
 
@@ -672,8 +685,10 @@ pub struct PdfState {
     zip: Option<Vec<u8>>,
     stream_length_offset: usize,
     save_offset: usize,
-    /// The last page's content stream, uncompressed, and its size.
-    page_shown: (Vec<u8>, Scaled, Scaled),
+    /// The last page's content stream, uncompressed, and its size: what
+    /// a caller is shown, never read by a later step, so not in the
+    /// digest ([`Shown`]).
+    page_shown: (Shown, Scaled, Scaled),
     objs: digest::TVec<Obj>,
     /// `obj_ptr`: the objects counted for the user (object streams are
     /// not).
@@ -821,7 +836,7 @@ impl PdfState {
             zip: None,
             stream_length_offset: 0,
             save_offset: 0,
-            page_shown: (Vec::new(), 0, 0),
+            page_shown: (Shown::default(), 0, 0),
             objs: {
                 let mut o = digest::TVec::new("objs");
                 o.push(Obj::default());
@@ -928,7 +943,7 @@ impl PdfState {
     /// (uncompressed), width and height; no object numbers.
     #[must_use]
     pub fn last_page_shown(&self) -> (&[u8], Scaled, Scaled) {
-        (&self.page_shown.0, self.page_shown.1, self.page_shown.2)
+        (&self.page_shown.0.0, self.page_shown.1, self.page_shown.2)
     }
 
     /// The number of pages shipped.

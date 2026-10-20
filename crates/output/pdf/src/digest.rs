@@ -72,6 +72,17 @@ impl PdfState {
     /// of what it changed.
     #[must_use]
     pub fn digest(&mut self) -> u64 {
+        let d = self.digest_sans_chars();
+        with_chars(d, self)
+    }
+
+    /// [`PdfState::digest`] but for the characters the fonts used: two
+    /// states that differ only in the characters their pages used (what
+    /// only the end of the file, the fonts' subsets, reads) have equal
+    /// ones. The characters are kept out of the fonts' element hashes,
+    /// so this formats nothing more than the digest does.
+    #[must_use]
+    pub fn digest_sans_chars(&mut self) -> u64 {
         self.refresh_digests();
         fast_hash(self)
     }
@@ -83,8 +94,24 @@ impl PdfState {
     pub fn digest_full(&self) -> u64 {
         let mut w = Writer(DefaultHasher::new());
         let _ = fmt::write(&mut w, format_args!("{self:?}"));
-        w.0.finish()
+        with_chars(w.0.finish(), self)
     }
+}
+
+/// `d` with the characters each font used hashed in (the fonts' own
+/// formatting leaves them out).
+fn with_chars(d: u64, st: &PdfState) -> u64 {
+    let mut s = DefaultHasher::new();
+    s.write_u64(d);
+    for (f, fs) in st.fonts.iter() {
+        if fs.chars.iter().any(|&c| c) {
+            s.write_u64(u64::from(*f));
+            for c in fs.chars.chunks(64) {
+                s.write_u64(c.iter().fold(0u64, |a, &b| (a << 1) | u64::from(b)));
+            }
+        }
+    }
+    s.finish()
 }
 
 // ---- incremental digests of the large collections ----

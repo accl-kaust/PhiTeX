@@ -1270,8 +1270,11 @@ fn fresh(v: &Values, date: String, jobname: &str, g2u: Option<ValueId>) -> PdfSt
 
 /// The fresh writers of [`fresh`] by their glyph table (values instance,
 /// value), the latest few.
-fn g2u_states() -> &'static Mutex<Vec<((u64, u64), PdfState)>> {
-    static M: OnceLock<Mutex<Vec<((u64, u64), PdfState)>>> = OnceLock::new();
+type G2uStates = Mutex<Vec<((u64, u64), PdfState)>>;
+
+/// [`G2uStates`], the process's.
+fn g2u_states() -> &'static G2uStates {
+    static M: OnceLock<G2uStates> = OnceLock::new();
     M.get_or_init(|| Mutex::new(Vec::new()))
 }
 
@@ -2496,6 +2499,10 @@ struct LinkSnap {
     st: PdfState,
     /// The writer's digest ([`PdfState::digest`]), taken with it.
     dg: u64,
+    /// Its digest but for the characters used and those characters
+    /// ([`PdfState::digest_sans_chars`], [`PdfState::used_chars`]).
+    dg_sans: u64,
+    chars: Vec<(FontId, [bool; 256])>,
     nums: FontNums,
     forms: Forms,
     /// The read-time object numbers the link numbered otherwise
@@ -2689,17 +2696,15 @@ fn same_writer_but_chars(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: 
     if !none || *nums != sn.nums {
         return false;
     }
+    // (the snapshot's digest and characters taken when it was kept: no
+    // copy of its writer)
     let mine = st.used_chars();
-    let covers = sn.st.used_chars().iter().all(|(f, c)| {
+    let covers = sn.chars.iter().all(|(f, c)| {
         mine.iter()
             .find(|m| m.0 == *f)
             .is_some_and(|m| c.iter().zip(&m.1).all(|(&a, &b)| !a || b))
     });
-    if !covers {
-        return false;
-    }
-    let mut theirs = sn.st.clone();
-    st.digest_sans_chars() == theirs.digest_sans_chars()
+    covers && st.digest_sans_chars() == sn.dg_sans
 }
 
 fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
@@ -2888,6 +2893,8 @@ pub(crate) fn finish_exact(
             snaps.push(LinkSnap {
                 at: i,
                 dg: st.digest(),
+                dg_sans: st.digest_sans_chars(),
+                chars: st.used_chars(),
                 st: st.clone(),
                 nums: nums.clone(),
                 forms: forms.clone(),
@@ -3104,6 +3111,8 @@ pub(crate) fn finish_exact(
     let end = LinkSnap {
         at: xpages.len(),
         dg: 0,
+        dg_sans: 0,
+        chars: Vec::new(),
         st: st.clone(),
         nums: nums.clone(),
         forms: forms.clone(),
