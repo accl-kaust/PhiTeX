@@ -1687,12 +1687,17 @@ fn write_page(v: &Values, pc: &PagePiece) {
         // their numbers as names, mapping only its own; on a writer that
         // starts from fewer objects a link's number was taken for one of
         // the page's own, and the replay renumbered the link)
-        let named = pc.whats.values().filter_map(what_objnum).max().unwrap_or(0);
-        while st.objects_numbered() < named.min(1 << 24) {
+        // (the read-time numbers only its bytes name: named after
+        // those, [`apart_names`])
+        let (named, aliases) = apart_names(&pc.whats);
+        while st.objects_numbered() < (named + aliases.len()).min(1 << 24) {
             st.new_objnum();
         }
+        let local: Reloc = aliases.iter().map(|&(p, t)| (t, p)).collect();
         let (res, rec) = {
-            let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
+            let mut wh = |h: u32, _leaders: bool| {
+                page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &local))
+            };
             st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
         };
         let _ = res.err();
@@ -2006,27 +2011,28 @@ fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>) -> 
 /// [`ALLOCS`]).
 pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
     let v = r.v;
-    let range = allocs_range(r)?;
-    let seen = fold_allocs(v, range).fonts;
+    // (named, not counted: whether a page made the font's object first
+    // is the pages' fold's to say, where a read needs the count,
+    // [`page_offset`]; the write itself only reaches PDF bytes)
     let mut rt: Vec<ValueId> = r.get(RT_FONTS)?.map(|x| list_of(v, x)).unwrap_or_default();
+    let n0 = rt.len();
     for n in names {
         let x = v.str(n);
-        if seen.contains(&x) || rt.contains(&x) {
-            continue;
+        if !rt.contains(&x) {
+            rt.push(x);
         }
-        let k = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
-        r.set_cell(crate::fields::cell::PDF_OBJNUM, v.int(k), true);
-        rt.push(x);
     }
-    r.set(RT_FONTS, v.list(rt), true);
+    if rt.len() != n0 {
+        r.set(RT_FONTS, v.list(rt), true);
+    }
     Ok(())
 }
 
 /// The allocations before this node ([`ALLOCS`]); `PHITEX_ALLOCS_TRACE`
 /// (observe): which node read them.
-fn allocs_range(r: &mut Run<'_, '_>) -> R<ValueId> {
+fn allocs_range(r: &mut Run<'_, '_>, why: &str) -> R<ValueId> {
     if crate::exec::obs_flag!("PHITEX_ALLOCS_TRACE") {
-        eprintln!("allocs-read: node {}", r.cx.node().raw());
+        eprintln!("allocs-read: node {} {why}", r.cx.node().raw());
     }
     let v = r.v;
     Ok(r.cx.acc_range(v.field(ALLOCS), None)?)
@@ -2060,14 +2066,11 @@ pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) -> R<()> {
 /// before made it (`pdf_get_obj`).
 pub(crate) fn dest_first_named(r: &mut Run<'_, '_>, id: ValueId) -> R<()> {
     let v = r.v;
-    let range = allocs_range(r)?;
-    let seen = fold_allocs(v, range).dests;
+    // (named, not counted, as [`fonts_first_used`])
     let mut rt: Vec<ValueId> = r.get(RT_DESTS)?.map(|x| list_of(v, x)).unwrap_or_default();
-    if seen.contains(&id) || rt.contains(&id) {
+    if rt.contains(&id) {
         return Ok(());
     }
-    let k = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
-    r.set_cell(crate::fields::cell::PDF_OBJNUM, v.int(k), true);
     rt.push(id);
     r.set(RT_DESTS, v.list(rt), true);
     Ok(())
@@ -2082,7 +2085,7 @@ pub(crate) fn os_write(r: &mut Run<'_, '_>) -> R<()> {
         return Ok(());
     }
     let v = r.v;
-    let range = allocs_range(r)?;
+    let range = allocs_range(r, "os_write")?;
     let pages = fold_allocs(v, range).os_written;
     let rt = r.get(RT_OS)?.and_then(|x| v.as_int(x)).unwrap_or(0);
     if (pages + rt) % 100 == 0 {
@@ -2104,7 +2107,7 @@ pub(crate) fn shipped_page_obj(r: &mut Run<'_, '_>, n: i32) -> R<Option<i64>> {
         return Ok(None);
     }
     let v = r.v;
-    let range = allocs_range(r)?;
+    let range = allocs_range(r, "shipped_page_obj")?;
     let f = fold_allocs(v, range);
     let Some(&(rt, node, after)) = usize::try_from(n - 1)
         .ok()
@@ -2280,6 +2283,19 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         for p in l(11) {
             ms.premade.insert(v.as_int(p).unwrap_or(0));
         }
+        // (the fonts and destinations read-time writes named before the
+        // page: an object each where none was made before, before the
+        // page's own)
+        for n in l(6) {
+            if seen.insert(n) {
+                out.objects += 1;
+            }
+        }
+        for d in l(7) {
+            if seen_dest.insert(d) {
+                out.objects += 1;
+            }
+        }
         // (the page's own object, after its resources' one, unless a
         // reference or a link's action made it before)
         let fixed = if ms.premade.contains(&pno) { 2 } else { i(0) };
@@ -2289,18 +2305,10 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         if pages % 6 == 0 {
             out.objects += 1;
         }
-        // (the fonts read-time writes used before the page: their
-        // objects made there, counted by TeX's count)
-        for n in l(6) {
-            seen.insert(n);
-        }
         for n in l(1) {
             if seen.insert(n) {
                 out.objects += 1;
             }
-        }
-        for d in l(7) {
-            seen_dest.insert(d);
         }
         let mut dests_written = 0i64;
         for d in l(2) {
@@ -2354,8 +2362,46 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
 /// node: no round, no loop-back.
 pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
     let v = r.v;
-    let range = allocs_range(r)?;
-    Ok(fold_allocs(v, range).objects)
+    let range = allocs_range(r, "page_offset")?;
+    let f = fold_allocs(v, range);
+    let (fonts, dests) = (r.get(RT_FONTS)?, r.get(RT_DESTS)?);
+    Ok(f.objects + rt_new(v, &f, fonts, dests))
+}
+
+/// The objects read-time writes made for fonts and destinations they
+/// named (`fonts`, `dests`: [`RT_FONTS`], [`RT_DESTS`] where the read
+/// is) after the pages of fold `f`: those no page and no read-time
+/// write before made.
+fn rt_new(v: &Values, f: &AllocFold, fonts: Option<ValueId>, dests: Option<ValueId>) -> i64 {
+    let new = |x: Option<ValueId>, seen: &BTreeSet<ValueId>| {
+        x.map(|x| list_of(v, x))
+            .unwrap_or_default()
+            .iter()
+            .filter(|n| !seen.contains(n))
+            .count()
+    };
+    i64::try_from(new(fonts, &f.fonts) + new(dests, &f.dests)).unwrap_or(0)
+}
+
+/// [`page_offset`] where node `at` is (a [`crate::pdfprim::REL`]
+/// number it made, read in another node): the pages' allocations up to
+/// and including it.
+pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
+    if at == r.cx.node().raw() {
+        return page_offset(r);
+    }
+    let v = r.v;
+    let to = phitex_defuse::NodeId::from_raw(at);
+    let range = r.cx.acc_range_to(v.field(ALLOCS), None, Some(to))?;
+    let f = fold_allocs(v, range);
+    let mut there = |name: &str| -> R<Option<ValueId>> {
+        Ok(match r.cx.use_field_at(v.field(name), Some(to))? {
+            phitex_defuse::FieldAt::Def(x, _) => Some(x),
+            _ => None,
+        })
+    };
+    let (fonts, dests) = (there(RT_FONTS)?, there(RT_DESTS)?);
+    Ok(f.objects + rt_new(v, &f, fonts, dests))
 }
 
 /// Font `n`'s name number as pdfTeX gives it (`\\pdffontname`): the
@@ -2363,7 +2409,7 @@ pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
 /// ([`ALLOCS`]), which pdfTeX numbers as it loads them.
 pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
     let v = r.v;
-    let range = allocs_range(r)?;
+    let range = allocs_range(r, "font_tag_read")?;
     Ok(n + fold_allocs(v, range).ship_fonts)
 }
 
@@ -2414,7 +2460,49 @@ struct LinkSnap {
 /// placing the command after the page as pdfTeX ships it, counts them,
 /// [`order_line`]). A page's whatsits naming one are shipped with the
 /// writer's number.
+/// A link's or an annotation's number only PDF bytes name
+/// ([`crate::pdfprim::REL`]) is always mapped: the link numbers its object.
 type Reloc = std::collections::BTreeMap<usize, usize>;
+
+/// A form's whatsits (`data`, from the read-time ones `raw`) with the
+/// [`crate::pdfprim::REL`] numbers they name as TeX reads them: a form is
+/// written by the link's step for its command, which takes its whatsits
+/// as they are, not by a page written apart.
+pub(crate) fn form_whatsit_nums(
+    r: &mut Run<'_, '_>,
+    raw: &[ValueId],
+    data: &mut [Option<Whatsit>],
+) -> R<()> {
+    let v = r.v;
+    let mut map = Reloc::new();
+    for &w in raw {
+        let xs = list_of(v, w);
+        let at = match xs.first().map(|&k| str_of(v, k)).as_deref() {
+            Some("pdf:startlink") => 7,
+            Some("pdf:annot") => 6,
+            _ => continue,
+        };
+        let t = xs.get(1).map_or(0, |&x| int_of(v, x));
+        if t & crate::pdfprim::REL == 0 {
+            continue;
+        }
+        let node = xs
+            .get(at)
+            .map_or(0, |&x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()));
+        let n = (t & !crate::pdfprim::REL) + page_offset_at(r, node)?;
+        if let (Ok(t), Ok(n)) = (usize::try_from(t), usize::try_from(n)) {
+            map.insert(t, n);
+        }
+    }
+    if !map.is_empty() {
+        for d in data.iter_mut() {
+            if let Some(w) = d.take() {
+                *d = Some(relocated(w, &map));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Whatsit `w` with its object numbers as the link numbered them.
 fn relocated(w: Whatsit, reloc: &Reloc) -> Whatsit {
@@ -2463,6 +2551,39 @@ fn what_objnum(w: &Whatsit) -> Option<usize> {
         Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => Some(*n),
         _ => None,
     }
+    .filter(|&n| !is_rel(n))
+}
+
+/// Whether object number `n` is a read-time one only PDF bytes name
+/// ([`crate::pdfprim::REL`]).
+fn is_rel(n: usize) -> bool {
+    i64::try_from(n).is_ok_and(|n| n & crate::pdfprim::REL != 0)
+}
+
+/// The [`crate::pdfprim::REL`] numbers whatsit `w` names.
+fn rel_objnum(w: &Whatsit) -> Option<usize> {
+    match w {
+        Whatsit::StartLink { objnum, .. } | Whatsit::Annot { objnum, .. } => Some(*objnum),
+        _ => None,
+    }
+    .filter(|&n| is_rel(n))
+}
+
+/// The names a page written apart gives the [`crate::pdfprim::REL`]
+/// numbers its whatsits name, `(name, number)`: in order, after every
+/// number TeX numbered that it names (the largest of those, first); the
+/// link gives each name the number the line gives its object.
+fn apart_names(whats: &BTreeMap<u32, Whatsit>) -> (usize, Vec<(usize, usize)>) {
+    let named = whats.values().filter_map(what_objnum).max().unwrap_or(0);
+    let mut rel: Vec<usize> = whats.values().filter_map(rel_objnum).collect();
+    rel.sort_unstable();
+    rel.dedup();
+    let aliases = rel
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| (named + 1 + i, t))
+        .collect();
+    (named, aliases)
 }
 
 /// The last link of the process: its records (by value), each record's
@@ -2750,10 +2871,21 @@ pub(crate) fn finish_exact(
                 .values()
                 .filter_map(what_objnum)
                 .any(|n| reloc.contains_key(&n));
+            // (the names the page was written apart with for the
+            // read-time numbers only its bytes name: the line's numbers
+            // of their objects)
+            let (_, aliases) = apart_names(&pc.whats);
+            let tex: FxHashMap<usize, usize> = aliases
+                .iter()
+                .filter_map(|&(p, t)| reloc.get(&t).map(|&m| (p, m)))
+                .collect();
             let res = if moved {
                 Err("an object numbered otherwise at read time".to_owned())
+            } else if tex.len() != aliases.len() {
+                Err("an object the line does not number".to_owned())
             } else {
-                st.replay_page(rec, &src, &fmap, None, &mut ps)
+                let at = |n: usize| tex.get(&n).copied().unwrap_or(n);
+                st.replay_page(rec, &src, &fmap, &at, None, &mut ps)
             };
             if res.is_err() {
                 // (the node that wrote the page logged the writer's

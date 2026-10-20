@@ -494,6 +494,8 @@ impl PdfState {
     /// content are rewritten as here, and where any differs the content
     /// goes to `parts` as a [`Part::Content`] after the bytes before it,
     /// for the caller to compress (in parallel with the other pages').
+    /// `tex` gives a number the record shares with the state it was
+    /// recorded on (one TeX numbered before the page) the number here.
     ///
     /// # Errors
     /// Why the page cannot be placed (the caller ships it).
@@ -503,6 +505,7 @@ impl PdfState {
         rec: &PageRecord,
         fonts: &dyn FontSource,
         fmap: &dyn Fn(FontId) -> FontId,
+        tex: &dyn Fn(usize) -> usize,
         known: Option<&str>,
         parts: &mut Vec<Part>,
     ) -> Result<Option<String>, String> {
@@ -554,7 +557,8 @@ impl PdfState {
         for e in &rec.events {
             match e {
                 FontEv::Sched(n, was) if *n <= rec.shared => {
-                    if *n > self.sys_obj_ptr() || self.is_scheduled(*n) != *was {
+                    let n = tex(*n);
+                    if n > self.sys_obj_ptr() || self.is_scheduled(n) != *was {
                         return Err(format!("object {n} scheduled differently here"));
                     }
                 }
@@ -626,12 +630,14 @@ impl PdfState {
                 }
                 FontEv::Sched(..) => {}
                 FontEv::Scheduled(n) => {
-                    let k = map.get(&n).copied().unwrap_or(n);
+                    let k = map.get(&n).copied().unwrap_or_else(|| tex(n));
                     self.set_scheduled(k);
                 }
             }
         }
-        let at = |n: usize| map.get(&n).copied().unwrap_or(n);
+        // (a number shared with the state recorded on: TeX's, as the
+        // caller numbers it, `tex`)
+        let at = |n: usize| map.get(&n).copied().unwrap_or_else(|| tex(n));
         for (k, m) in &rec.marks {
             self.aux.marks.insert(at(*k), m.clone());
         }
