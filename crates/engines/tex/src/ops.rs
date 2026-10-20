@@ -787,6 +787,15 @@ fn stream_of(
 ) -> Result<(Option<String>, Option<WrittenDefs>, bool), Stop> {
     let v = cx.values();
     let acc = cx.acc_range(crate::run::stream_bucket(v, name), None)?;
+    if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+        for e in v.seq_to_vec(acc) {
+            eprintln!(
+                "aux-trace: stream entry for {name} at node {}: {}",
+                cx.node().raw(),
+                v.render(e).chars().take(120).collect::<String>()
+            );
+        }
+    }
     let text = crate::api::written_texts(v, Some(acc))
         .into_iter()
         .find(|(n, _)| n == name)
