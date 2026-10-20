@@ -1486,9 +1486,9 @@ fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
                                 );
                             }
                         }
-                        for c in an.defset(n).calls {
-                            if !calls.contains(&c) {
-                                calls.push(c);
+                        for c in &an.defset(n).calls {
+                            if !calls.contains(c) {
+                                calls.push(c.clone());
                             }
                         }
                     }
@@ -1776,7 +1776,7 @@ struct Analysis<'t> {
     sig: Vec<u32>,
     /// The control sequences' and braces' atoms, in order.
     structural: Vec<u32>,
-    memo: std::cell::RefCell<FxHashMap<String, DefSet>>,
+    memo: std::cell::RefCell<FxHashMap<String, Arc<DefSet>>>,
     /// The names whose state [`Analysis::defined_state`] is reading.
     visiting: std::cell::RefCell<Vec<String>>,
     /// The format's definitions, behind the text's own.
@@ -1901,12 +1901,24 @@ impl Analysis<'_> {
     /// [`Analysis::new`] given the text's own definitions
     /// ([`own_definitions`]).
     fn with_own(text: &str, kind: FileKind, prelude: Defs, defs: Definitions) -> Analysis<'_> {
+        Analysis::with_own_from(text, kind, prelude, defs, None)
+    }
+
+    /// [`Analysis::with_own`] beginning in the regime `start` (`None`:
+    /// `kind`'s own; [`pass::Start`]).
+    fn with_own_from(
+        text: &str,
+        kind: FileKind,
+        prelude: Defs,
+        defs: Definitions,
+        start: Option<pass::Start>,
+    ) -> Analysis<'_> {
         let scope = Scope {
             document: &defs,
             file: 0,
             prelude: &prelude,
         };
-        let p = pass::analyze(text, kind, scope);
+        let p = pass::analyze_from(text, kind, scope, pass::Features::default(), start);
         let item_of = p
             .items
             .iter()
@@ -2054,7 +2066,7 @@ impl Analysis<'_> {
 
     /// What calling `name` (as the text, then the format, defines it)
     /// may define.
-    fn defset(&self, name: &str) -> DefSet {
+    fn defset(&self, name: &str) -> Arc<DefSet> {
         if let Some(d) = self.memo.borrow().get(name) {
             return d.clone();
         }
@@ -2994,7 +3006,7 @@ fn add_defs_with(an: &Analysis<'_>, ds: &[Def], prefixes: bool, b: &mut Bound) {
 
 #[cfg(test)]
 fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
-    analyse_with(text, kind, defs, own_definitions(text, kind))
+    analyse_with(text, kind, defs, own_definitions(text, kind), None)
 }
 
 thread_local! {
@@ -3105,11 +3117,17 @@ fn atom_hints(an: &Analysis<'_>, text: &str) -> (Vec<u32>, Vec<Option<Arc<Hint>>
 // (one pass over the atoms, then one over the slices; splitting it
 // would only pass its tables around)
 #[allow(clippy::too_many_lines)]
-fn analyse_with(text: &str, kind: FileKind, defs: &Defs, own: Definitions) -> TextHints {
+fn analyse_with(
+    text: &str,
+    kind: FileKind,
+    defs: &Defs,
+    own: Definitions,
+    start: Option<pass::Start>,
+) -> TextHints {
     // (`PHITEX_TEX_TIME`: the analysis's phases, on the timeline)
     let tm = crate::exec::prof_flag!("PHITEX_TEX_TIME");
     let t0 = std::time::Instant::now();
-    let an = Analysis::with_own(text, kind, defs.clone(), own);
+    let an = Analysis::with_own_from(text, kind, defs.clone(), own, start);
     if tm {
         crate::timeline::note("hints: the pass (lex, atoms, classify)", t0.elapsed());
     }
@@ -3449,8 +3467,9 @@ type Cache<K> = Mutex<FxHashMap<K, Arc<TextHints>>>;
 /// with it) could be followed by another set at the same address, which
 /// would get the analysis made under the first.
 /// (`phitex_pdf::digest::blob_hash` memoizes the same way.)
-type TextsCache =
-    Mutex<FxHashMap<(u64, u8, usize), (std::sync::Weak<pass::Definitions>, Arc<TextHints>)>>;
+type TextsCache = Mutex<
+    FxHashMap<(u64, u8, usize, Option<u64>), (std::sync::Weak<pass::Definitions>, Arc<TextHints>)>,
+>;
 
 fn texts() -> &'static TextsCache {
     static C: OnceLock<TextsCache> = OnceLock::new();
@@ -3591,7 +3610,7 @@ pub(crate) fn routine_hint(text: &str, defs: &Defs) -> Hint {
 /// The analysis of a document's or prelude's text under the format's
 /// definitions `defs` (cached by the text and the definitions).
 pub(crate) fn text_hints(text: &str, kind: FileKind, defs: &Defs) -> Arc<TextHints> {
-    text_hints_with(text, kind, defs, None)
+    text_hints_with(text, kind, defs, None, None)
 }
 
 /// The definitions a text makes on its own (harvested from it alone,
@@ -3600,9 +3619,19 @@ pub(crate) fn text_hints(text: &str, kind: FileKind, defs: &Defs) -> Arc<TextHin
 /// ([`TextHints::defines`], [`defines_any`]), without the definitions
 /// in force before it.
 pub(crate) fn own_definitions(text: &str, kind: FileKind) -> Definitions {
+    own_definitions_from(text, kind, None).0
+}
+
+/// [`own_definitions`] of a text beginning in the regime `start`
+/// (`None`: its kind's own; [`pass::Start`]), with the regime it ends in.
+pub(crate) fn own_definitions_from(
+    text: &str,
+    kind: FileKind,
+    start: Option<pass::Start>,
+) -> (Definitions, pass::Start) {
     let mut d = Definitions::new();
-    d.harvest(text, kind_of(text, kind), 0);
-    d
+    let end = d.harvest_from(text, kind_of(text, kind), 0, start);
+    (d, end)
 }
 
 /// Whether a text's own definitions ([`own_definitions`]) define
@@ -3618,10 +3647,20 @@ pub(crate) fn text_hints_with(
     kind: FileKind,
     defs: &Defs,
     own: Option<Definitions>,
+    start: Option<pass::Start>,
 ) -> Arc<TextHints> {
     let named = kind;
     let kind = kind_of(text, kind);
-    let key = (hash_str(text), kind as u8, Arc::as_ptr(defs) as usize);
+    let key = (
+        hash_str(text),
+        kind as u8,
+        Arc::as_ptr(defs) as usize,
+        start.map(|s| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish()
+        }),
+    );
     if let Some((d, t)) = texts()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -3630,8 +3669,8 @@ pub(crate) fn text_hints_with(
     {
         return t.clone();
     }
-    let own = own.unwrap_or_else(|| own_definitions(text, named));
-    let t = Arc::new(analyse_with(text, kind, defs, own));
+    let own = own.unwrap_or_else(|| own_definitions_from(text, named, start).0);
+    let t = Arc::new(analyse_with(text, kind, defs, own, start));
     let mut c = texts().lock().unwrap_or_else(PoisonError::into_inner);
     if c.len() > 256 {
         c.clear();

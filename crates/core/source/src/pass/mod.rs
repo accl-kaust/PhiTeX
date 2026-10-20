@@ -51,7 +51,7 @@ pub use hints::{
     Assumption, Claim, Def, DefSet, Effect, Hints, Implicit, Mark, MayDefine, MeaningShape,
     ScopeHint, ScopeKind,
 };
-pub use lex::{Hazard, TokKind, Token};
+pub use lex::{Hazard, Start, TokKind, Token};
 pub use report::Stats;
 
 /// How far a piece of structure is known from the text.
@@ -336,7 +336,20 @@ pub fn analyze(text: &str, kind: FileKind, scope: Scope<'_>) -> Pass {
 /// [`analyze`] with only `features`.
 #[must_use]
 pub fn analyze_with(text: &str, kind: FileKind, scope: Scope<'_>, features: Features) -> Pass {
-    let lexed = lex::lex(text, kind, Some(scope));
+    analyze_from(text, kind, scope, features, None)
+}
+
+/// [`analyze_with`] beginning in the regime `start` (`None`: `kind`'s
+/// own; [`Start`]).
+#[must_use]
+pub fn analyze_from(
+    text: &str,
+    kind: FileKind,
+    scope: Scope<'_>,
+    features: Features,
+    start: Option<Start>,
+) -> Pass {
+    let lexed = lex::lex_from(text, kind, Some(scope), start);
     let atoms = atoms::atoms(text, &lexed.tokens);
     let braces = lexed
         .braces

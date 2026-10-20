@@ -107,7 +107,9 @@ pub struct Definitions {
     /// Per definition with a visible body, its text and what running it
     /// defines directly. The output routine set by `\output{…}` is kept
     /// under [`OUTPUT`].
-    bodies: HashMap<String, Vec<At<Body>>>,
+    /// (shared, not copied, by a copy of the definitions: a chain of
+    /// them copies each set before adding to it)
+    bodies: HashMap<String, Vec<At<std::sync::Arc<Body>>>>,
     /// The order the files load in (file → rank), when known: a later
     /// definition in another file then wins after it (load order).
     order: Option<HashMap<u32, u32>>,
@@ -118,15 +120,31 @@ pub struct Definitions {
     /// assignment defines that register alone. A later definition of
     /// the name without one drops it.
     registers: HashMap<String, u32>,
-    /// Closures computed with these as the prelude ([`Closure`]): by
-    /// name, the set and every name looked up for it. Shared by clones;
-    /// dropped (a fresh table) by any change.
+    /// Closures computed with these as the prelude ([`Closure`]), or
+    /// with definitions they were cloned from or to: by name, each set
+    /// with every name looked up for it and those names' stamps then
+    /// ([`Definitions::closure`]). Shared by clones.
     pub(crate) closures: ClosureCache,
+    /// By name, the mark of the last change to its definitions, bodies
+    /// or register (unique in the process; none: 0): two sets of
+    /// definitions with a name's same stamp give it the same.
+    stamps: HashMap<String, u64>,
 }
 
 /// [`Definitions::closures`].
-pub(crate) type ClosureCache =
-    std::sync::Arc<std::sync::RwLock<HashMap<String, (DefSet, std::sync::Arc<Vec<String>>)>>>;
+pub(crate) type ClosureCache = std::sync::Arc<std::sync::RwLock<HashMap<String, Vec<Kept>>>>;
+
+/// A closure kept ([`Definitions::closures`]): the set, the names looked
+/// up for it, and their stamps when it was computed.
+#[derive(Clone, Debug)]
+pub(crate) struct Kept {
+    set: std::sync::Arc<DefSet>,
+    names: std::sync::Arc<Vec<String>>,
+    stamps: Vec<u64>,
+}
+
+/// The source of [`Definitions::stamps`].
+static STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// What a definition's body does to catcodes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -278,7 +296,11 @@ impl Definitions {
     }
 
     /// The body bound at `at` (as [`Definitions::find`] binds).
-    pub(crate) fn find_body(&self, name: &str, at: Option<(u32, usize)>) -> Found<'_, Body> {
+    pub(crate) fn find_body(
+        &self,
+        name: &str,
+        at: Option<(u32, usize)>,
+    ) -> Found<'_, std::sync::Arc<Body>> {
         find(self.bodies.get(name), at, self.order.as_ref())
     }
 
@@ -326,6 +348,60 @@ impl Definitions {
             .map(|v| v.iter().map(|d| &d.what.effects).collect())
     }
 
+    /// A change to `name`'s definitions, bodies or register.
+    fn touch(&mut self, name: &str) {
+        let s = STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.stamps.insert(name.to_owned(), s);
+    }
+
+    fn stamp(&self, name: &str) -> u64 {
+        self.stamps.get(name).copied().unwrap_or(0)
+    }
+
+    /// The closure kept under `key` that these definitions give: one
+    /// whose every name looked up has the stamp it had then (its
+    /// definitions are the same here), with those names.
+    pub(crate) fn closure(
+        &self,
+        key: &str,
+    ) -> Option<(std::sync::Arc<DefSet>, std::sync::Arc<Vec<String>>)> {
+        let c = self
+            .closures
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        c.get(key)?
+            .iter()
+            .find(|k| {
+                k.names
+                    .iter()
+                    .zip(&k.stamps)
+                    .all(|(n, &s)| self.stamp(n) == s)
+            })
+            .map(|k| (k.set.clone(), k.names.clone()))
+    }
+
+    /// Keeps the closure `set` under `key`, computed under these
+    /// definitions, having looked up `names`.
+    pub(crate) fn keep_closure(
+        &self,
+        key: String,
+        set: std::sync::Arc<DefSet>,
+        names: std::sync::Arc<Vec<String>>,
+    ) {
+        let stamps: Vec<u64> = names.iter().map(|n| self.stamp(n)).collect();
+        let mut c = self
+            .closures
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let v = c.entry(key).or_default();
+        v.retain(|k| k.names != names || k.stamps != stamps);
+        // (a few variants by key: the sets of a chain's layers)
+        if v.len() >= 8 {
+            v.remove(0);
+        }
+        v.push(Kept { set, names, stamps });
+    }
+
     /// Declares the order the files load in: `files[0]` first. A use then
     /// binds to the last definition loaded before it, in any file.
     pub fn set_load_order(&mut self, files: &[u32]) {
@@ -366,12 +442,14 @@ impl Definitions {
     #[must_use]
     pub fn output_defines(&self, prelude: &Definitions) -> Option<DefSet> {
         let mut c = Closure::new(self, prelude);
-        self.bodies.contains_key(OUTPUT).then(|| c.call(OUTPUT))
+        self.bodies
+            .contains_key(OUTPUT)
+            .then(|| (*c.call(OUTPUT)).clone())
     }
 
     /// What calling `name` may define (through `self`, then `prelude`).
     #[must_use]
-    pub fn call_defines(&self, prelude: &Definitions, name: &str) -> DefSet {
+    pub fn call_defines(&self, prelude: &Definitions, name: &str) -> std::sync::Arc<DefSet> {
         Closure::new(self, prelude).call(name)
     }
 
@@ -515,6 +593,7 @@ impl Definitions {
         let v = self.macros.entry(name.to_owned()).or_default();
         if !v.iter().any(|d| d.file == file && d.what == what) || v.iter().all(|d| d.file != file) {
             v.push(At { file, pos, what });
+            self.touch(name);
         }
     }
 
@@ -524,13 +603,14 @@ impl Definitions {
         if close == usize::MAX {
             return;
         }
-        let what = Body {
+        let what = std::sync::Arc::new(Body {
             text: text[atoms[open].end..atoms[close].start].to_owned(),
             effects: effects(text, atoms, open + 1, close, false),
-        };
+        });
         let v = self.bodies.entry(name.to_owned()).or_default();
         if !v.iter().any(|d| d.file == file && d.what == what) || v.iter().all(|d| d.file != file) {
             v.push(At { file, pos, what });
+            self.touch(name);
         }
     }
 
@@ -548,14 +628,26 @@ impl Definitions {
 
     /// Reads the definitions in `text`, file `file` of the document.
     pub fn harvest(&mut self, text: &str, kind: FileKind, file: u32) {
-        self.closures = ClosureCache::default();
+        self.harvest_from(text, kind, file, None);
+    }
+
+    /// [`Definitions::harvest`] beginning in the regime `start` (`None`:
+    /// `kind`'s own); the regime the text ends in.
+    pub fn harvest_from(
+        &mut self,
+        text: &str,
+        kind: FileKind,
+        file: u32,
+        start: Option<lex::Start>,
+    ) -> lex::Start {
         // (read under the initial catcodes, a text without a backslash
         // (nor a `^^` that could make one, §355) has no control
-        // sequence: nothing defined, nothing made active)
-        if !text.contains('\\') && !text.contains("^^") {
-            return;
+        // sequence: nothing defined, nothing made active; it ends in the
+        // regime it began in)
+        if start.is_none() && !text.contains('\\') && !text.contains("^^") {
+            return lex::Start::of(kind);
         }
-        let lexed = lex::lex(text, kind, None);
+        let lexed = lex::lex_from(text, kind, None, start);
         let atoms = atoms::atoms(text, &lexed.tokens);
         for t in &lexed.tokens {
             if t.kind == lex::TokKind::Cs
@@ -575,6 +667,7 @@ impl Definitions {
             }
             a += 1;
         }
+        lexed.end
     }
 
     #[allow(clippy::too_many_lines)]
@@ -776,6 +869,7 @@ impl Definitions {
                         self.registers.remove(&target);
                     }
                 }
+                self.touch(&target);
                 self.add(&target, file, pos, Shape::Quantity(ty));
             }
             "newcounter" => {
