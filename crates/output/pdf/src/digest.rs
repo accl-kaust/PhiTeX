@@ -62,9 +62,9 @@ impl fmt::Debug for Bytes<'_> {
 
 /// The hash of `x`'s `Debug` form.
 pub(crate) fn debug_hash(x: &dyn fmt::Debug) -> u64 {
-    let mut w = Writer(DefaultHasher::new());
+    let mut w = Writer::default();
     let _ = fmt::write(&mut w, format_args!("{x:?}"));
-    w.0.finish()
+    w.finish()
 }
 
 /// An optional blob.
@@ -72,11 +72,23 @@ pub(crate) fn opt(b: Option<&Arc<[u8]>>) -> Option<Blob<'_>> {
     b.map(Blob)
 }
 
-struct Writer(DefaultHasher);
+/// The formatted text, hashed whole at the end (one hash write, not
+/// one for every piece the formatter writes: tens of thousands a
+/// digest of the state).
+#[derive(Default)]
+struct Writer(String);
+
+impl Writer {
+    fn finish(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        h.write(self.0.as_bytes());
+        h.finish()
+    }
+}
 
 impl fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0.write(s.as_bytes());
+        self.0.push_str(s);
         Ok(())
     }
 }
@@ -110,9 +122,9 @@ impl PdfState {
     #[doc(hidden)]
     #[must_use]
     pub fn digest_full(&self) -> u64 {
-        let mut w = Writer(DefaultHasher::new());
+        let mut w = Writer::default();
         let _ = fmt::write(&mut w, format_args!("{self:?}"));
-        with_chars(w.0.finish(), self)
+        with_chars(w.finish(), self)
     }
 }
 
@@ -152,9 +164,9 @@ pub(crate) fn element_hashes(name: &str) -> u64 {
 
 fn element_hash(name: &'static str, x: &dyn fmt::Debug) -> u64 {
     HASHED.with(|h| *h.borrow_mut().entry(name).or_default() += 1);
-    let mut w = Writer(DefaultHasher::new());
+    let mut w = Writer::default();
     let _ = fmt::write(&mut w, format_args!("{x:?}"));
-    w.0.finish()
+    w.finish()
 }
 
 /// A vector whose digest is kept up to date by the elements changed:
@@ -330,10 +342,10 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for TMap<K, V> {
 /// Formats `x` with the tracked collections as their sums.
 pub(crate) fn fast_hash(x: &dyn fmt::Debug) -> u64 {
     FAST.with(|c| c.set(true));
-    let mut w = Writer(DefaultHasher::new());
+    let mut w = Writer::default();
     let _ = fmt::write(&mut w, format_args!("{x:?}"));
     FAST.with(|c| c.set(false));
-    w.0.finish()
+    w.finish()
 }
 
 #[cfg(test)]
