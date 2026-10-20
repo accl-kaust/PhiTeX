@@ -989,6 +989,19 @@ impl Run<'_, '_> {
             }
             _ => crate::run::FileRest::new(self.v, text, 0, xs[0]),
         };
+        if crate::exec::obs_flag!("PHITEX_WFILE_TRACE") && f.units.is_some() {
+            // (whether the run stops at the file, its units the region
+            // children, `Run::has_input`, or reads it inline: and why)
+            eprintln!(
+                "wfile: {key} opened in node {}: units {}, sliceable {}, document run {}, own groups open {}, levels {:?}",
+                self.cx.node().raw(),
+                f.units.as_ref().map_or(0, |u| u.len()),
+                f.sliceable,
+                self.doc,
+                self.nest.len(),
+                self.input.levels.iter().map(|l| l.kind).collect::<Vec<_>>()
+            );
+        }
         self.input.push_file(f);
         Ok(())
     }

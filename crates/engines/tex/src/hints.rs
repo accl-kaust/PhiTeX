@@ -3719,8 +3719,8 @@ pub(crate) fn text_hints_reads(
     let named = kind;
     let kind = kind_of(text, kind);
     let own = own.unwrap_or_else(|| own_definitions_from(text, named, start).0);
-    let (t, names) = pass::with_reads(|| analyse_with(text, kind, defs, own, start));
-    (Arc::new(t), names)
+    let (t, looked) = pass::with_reads(|| analyse_with(text, kind, defs, own, start));
+    (Arc::new(t), looked)
 }
 
 /// The hint of the document slice beginning at byte `s` of the text `t`

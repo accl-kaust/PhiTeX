@@ -832,7 +832,15 @@ fn file_node(
     // this runs again, bound to them, and publishes)
     let k = v.field(&format!("wkeys:{name}"));
     let wt = crate::tools::text_field(v, name);
+    let t0 = std::time::Instant::now();
     let (text, ds, as_text) = stream_of(cx, name)?;
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "files-node: {name}: the stream read in {:?}, {} bytes, as text {as_text}",
+            t0.elapsed(),
+            text.as_ref().map_or(0, String::len)
+        );
+    }
     if !cx.is_loopback(wt)
         && let Some(seed) = seed_text(cx, name)?
     {
@@ -930,7 +938,11 @@ fn file_node(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    let t0 = std::time::Instant::now();
     let order = written_units(cx, name, &t, &defs);
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        eprintln!("files-node: {name}: its units in {:?}", t0.elapsed());
+    }
     publish_traced(cx, f, order);
     Ok(ValueId::UNIT)
 }

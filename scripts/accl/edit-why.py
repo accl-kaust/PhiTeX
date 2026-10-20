@@ -54,6 +54,9 @@ def main():
     ec.Watch.put = keep
     (cold, ev0), out = ec.classes(binary, d, 8, env, errf, True)
     ec.Watch.put = put
+    for ext in ("aux", "out", "toc", "idx", "ind", "log"):
+        if os.path.exists(os.path.join(d, "amsldoc." + ext)):
+            shutil.copy(os.path.join(d, "amsldoc." + ext), res)
     print(f"cold {cold:.1f} s ok {ev0 and ev0.get('ok')}")
     # (the edits are pdfs[0], [2], ...: each against a cold -j 8 build of
     # its text, the bytes and the text pdftotext gives)
