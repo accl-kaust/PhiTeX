@@ -5380,6 +5380,17 @@ impl Build {
         written_texts(v, acc("streams"))
     }
 
+    /// What [`Build::wkeys`] is made from (the written files'
+    /// accumulator, as a value): equal, the same key sets.
+    #[must_use]
+    pub fn wkeys_source(&self) -> Option<u64> {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("streams"))
+            .map(ValueId::raw)
+    }
+
     /// The key sets of the read-back files that only define,
     /// as the last build published them: [`Options::wkeys`] for a later
     /// session of the same document.

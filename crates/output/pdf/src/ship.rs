@@ -96,26 +96,6 @@ impl PdfState {
         self.fonts.iter().map(|(&k, s)| (k, s.chars)).collect()
     }
 
-    /// [`PdfState::digest`] of the state with no character marked used
-    /// in any font: two states that differ only in the characters their
-    /// pages used (what only the end of the file, the fonts' subsets,
-    /// reads) have equal ones.
-    pub fn digest_sans_chars(&mut self) -> u64 {
-        let saved = self.used_chars();
-        for &(f, c) in &saved {
-            if c.iter().any(|&x| x) {
-                self.font_mut(f).chars = [false; 256];
-            }
-        }
-        let d = self.digest();
-        for (f, c) in saved {
-            if c.iter().any(|&x| x) {
-                self.font_mut(f).chars = c;
-            }
-        }
-        d
-    }
-
     /// The characters `chars` (by font, [`PdfState::used_chars`]) marked
     /// used too.
     pub fn add_used_chars(&mut self, chars: &[(FontId, [bool; 256])]) {
@@ -1453,7 +1433,7 @@ impl PdfState {
                 Some(z) => z.clone(),
                 None => self.out[self.save_offset - self.base..].to_vec(),
             };
-            self.page_shown = (data, self.cur_page_width, self.cur_page_height);
+            self.page_shown = (crate::Shown(data), self.cur_page_width, self.cur_page_height);
         }
         self.end_stream();
         if shipping_page && let Some(r) = &mut self.rec {
@@ -1476,7 +1456,7 @@ impl PdfState {
             r.dest_data = self
                 .dest_list
                 .iter()
-                .filter_map(|k| Some((*k, self.aux.dests.get(k)?.clone())))
+                .filter_map(|k| Some((*k, self.aux.dests.get(k)?.clone()?)))
                 .collect();
         }
         if shipping_page {

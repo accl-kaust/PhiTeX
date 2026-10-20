@@ -435,6 +435,15 @@ pub(crate) struct ScanFire {
     /// over (§1022).
     pub best: usize,
     pub held: usize,
+    /// `\holdinginserts` positive where the page fired (§1018).
+    pub holding: bool,
+    /// Where the page's items before its best break end, when that is
+    /// before the piece it fires in: `(piece, the piece before the one
+    /// it fires in)`, [`MATERIAL`] for the material, `None` for the
+    /// piece the page began after. A finisher assembles its page from
+    /// those items, not from what follows the break (§1017: the rest
+    /// goes back to the contributions).
+    pub upto: Option<(i64, Option<i64>)>,
 }
 
 /// The page builder's state over profiles.
@@ -448,7 +457,16 @@ pub(crate) struct ScanState {
     pub fold: FoldState,
     pub params: Option<PageParams>,
     pub pending: Vec<PItem>,
+    /// The page's length after the material it began with
+    /// ([`MATERIAL`]) and after each piece folded since (its id), where
+    /// a fold notes them ([`ScanState::note_piece`], a finisher's): where
+    /// a page fires, the piece its best break's page ends in
+    /// ([`ScanFire::upto`]).
+    pub page_lens: Vec<(i64, usize)>,
 }
+
+/// [`ScanState::page_lens`]' entry for the material a page began with.
+pub(crate) const MATERIAL: i64 = i64::MIN;
 
 /// What the scan reads where it runs: the page parameters and an
 /// insertion class's registers in force.
@@ -475,7 +493,13 @@ impl ScanState {
             fold,
             params,
             pending: Vec::new(),
+            page_lens: Vec::new(),
         }
+    }
+
+    /// Notes the page's length after `piece` (or [`MATERIAL`]) folded.
+    pub(crate) fn note_piece(&mut self, piece: i64) {
+        self.page_lens.push((piece, self.pb.page.len()));
     }
 
     /// [`crate::pages::PageState::fold_items`] over profile items.
@@ -548,6 +572,7 @@ impl ScanState {
     }
 
     /// [`crate::pages::PageState`]'s `build` over profile items.
+    #[allow(clippy::too_many_lines)]
     fn build(
         &mut self,
         buf: &mut Vec<PItem>,
@@ -631,6 +656,20 @@ impl ScanState {
                     break;
                 }
                 Outcome::Fire(f) => {
+                    // (the piece the page's items before the break end
+                    // in: the first whose fold left the page that long;
+                    // none, the piece firing it)
+                    let prev = self
+                        .page_lens
+                        .last()
+                        .map(|e| e.0)
+                        .filter(|&p| p != MATERIAL);
+                    let upto = self
+                        .page_lens
+                        .iter()
+                        .find(|e| e.1 >= f.best)
+                        .map(|e| (e.0, prev));
+                    self.page_lens.clear();
                     self.pb = PageBuilder::new();
                     self.pb.measure_only = true;
                     self.j += 1;
@@ -646,6 +685,8 @@ impl ScanState {
                         classes: f.ins_records.iter().map(|r| r.n).collect(),
                         best: f.best,
                         held: f.held_inserts.len(),
+                        holding: params.holding_inserts > 0,
+                        upto,
                     });
                 }
             }

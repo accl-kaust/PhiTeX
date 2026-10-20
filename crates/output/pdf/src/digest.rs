@@ -72,6 +72,17 @@ impl PdfState {
     /// of what it changed.
     #[must_use]
     pub fn digest(&mut self) -> u64 {
+        let d = self.digest_sans_chars();
+        with_chars(d, self)
+    }
+
+    /// [`PdfState::digest`] but for the characters the fonts used: two
+    /// states that differ only in the characters their pages used (what
+    /// only the end of the file, the fonts' subsets, reads) have equal
+    /// ones. The characters are kept out of the fonts' element hashes,
+    /// so this formats nothing more than the digest does.
+    #[must_use]
+    pub fn digest_sans_chars(&mut self) -> u64 {
         self.refresh_digests();
         fast_hash(self)
     }
@@ -83,8 +94,24 @@ impl PdfState {
     pub fn digest_full(&self) -> u64 {
         let mut w = Writer(DefaultHasher::new());
         let _ = fmt::write(&mut w, format_args!("{self:?}"));
-        w.0.finish()
+        with_chars(w.0.finish(), self)
     }
+}
+
+/// `d` with the characters each font used hashed in (the fonts' own
+/// formatting leaves them out).
+fn with_chars(d: u64, st: &PdfState) -> u64 {
+    let mut s = DefaultHasher::new();
+    s.write_u64(d);
+    for (f, fs) in st.fonts.iter() {
+        if fs.chars.iter().any(|&c| c) {
+            s.write_u64(u64::from(*f));
+            for c in fs.chars.chunks(64) {
+                s.write_u64(c.iter().fold(0u64, |a, &b| (a << 1) | u64::from(b)));
+            }
+        }
+    }
+    s.finish()
 }
 
 // ---- incremental digests of the large collections ----
@@ -199,55 +226,67 @@ impl<T: fmt::Debug> fmt::Debug for TVec<T> {
 }
 
 /// A map whose digest is kept up to date by the entries changed: the
-/// sum of the hashes of (key, value).
+/// sum of the hashes of (key, value). The entries and their hashes are
+/// shared between clones until one of them changes (a writer kept at a
+/// record and the writer going on share a table neither changed: the
+/// glyph names' Unicode table a format loads, thousands of entries, is
+/// copied by no clone).
 #[derive(Clone)]
 pub(crate) struct TMap<K, V> {
     name: &'static str,
-    map: std::collections::BTreeMap<K, V>,
-    hashes: std::collections::BTreeMap<K, u64>,
+    map: Arc<std::collections::BTreeMap<K, V>>,
+    hashes: Arc<std::collections::BTreeMap<K, u64>>,
     dirty: std::collections::BTreeSet<K>,
     sum: u64,
 }
 
-impl<K: Ord + Clone + fmt::Debug, V: fmt::Debug> TMap<K, V> {
+impl<K: Ord + Clone + fmt::Debug, V: Clone + fmt::Debug> TMap<K, V> {
     pub(crate) fn new(name: &'static str) -> Self {
         TMap {
             name,
-            map: std::collections::BTreeMap::new(),
-            hashes: std::collections::BTreeMap::new(),
+            map: Arc::new(std::collections::BTreeMap::new()),
+            hashes: Arc::new(std::collections::BTreeMap::new()),
             dirty: std::collections::BTreeSet::new(),
             sum: 0,
         }
     }
     pub(crate) fn insert(&mut self, k: K, v: V) -> Option<V> {
         self.dirty.insert(k.clone());
-        self.map.insert(k, v)
+        Arc::make_mut(&mut self.map).insert(k, v)
     }
     pub(crate) fn remove(&mut self, k: &K) -> Option<V> {
+        if !self.map.contains_key(k) {
+            return None;
+        }
         self.dirty.insert(k.clone());
-        self.map.remove(k)
+        Arc::make_mut(&mut self.map).remove(k)
     }
     pub(crate) fn get_mut(&mut self, k: &K) -> Option<&mut V> {
-        if self.map.contains_key(k) {
-            self.dirty.insert(k.clone());
+        if !self.map.contains_key(k) {
+            return None;
         }
-        self.map.get_mut(k)
+        self.dirty.insert(k.clone());
+        Arc::make_mut(&mut self.map).get_mut(k)
     }
     /// `entry(k).or_insert_with(f)`.
     pub(crate) fn get_or_insert_with(&mut self, k: K, f: impl FnOnce() -> V) -> &mut V {
         self.dirty.insert(k.clone());
-        self.map.entry(k).or_insert_with(f)
+        Arc::make_mut(&mut self.map).entry(k).or_insert_with(f)
     }
     /// Brings the sum up to date.
     pub(crate) fn refresh(&mut self) {
+        if self.dirty.is_empty() {
+            return;
+        }
+        let hashes = Arc::make_mut(&mut self.hashes);
         for k in std::mem::take(&mut self.dirty) {
-            if let Some(old) = self.hashes.remove(&k) {
+            if let Some(old) = hashes.remove(&k) {
                 self.sum = self.sum.wrapping_sub(old);
             }
             if let Some(v) = self.map.get(&k) {
                 let h = element_hash(self.name, &(&k, v));
                 self.sum = self.sum.wrapping_add(h);
-                self.hashes.insert(k, h);
+                hashes.insert(k, h);
             }
         }
     }

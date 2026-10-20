@@ -756,6 +756,37 @@ impl PageBuilder {
         };
     }
 
+    /// `fire_up` (§1012–§1023) where a later node fired the page and
+    /// its best break is known: `best`, the break's index on the page,
+    /// and `output_penalty`, the penalty there (`INF_PENALTY` for any
+    /// other break), with the page built as far as the break. A break
+    /// still to come (the page ends at it) is recorded as §1005 records
+    /// it when it is the next node. `None` where the page is not built
+    /// to the break.
+    pub fn fire_known(
+        &mut self,
+        best: usize,
+        output_penalty: i32,
+        params: &PageParams,
+    ) -> Option<Fired> {
+        if self.best_break != Some(best) {
+            if self.page.len() != best {
+                return None;
+            }
+            self.best_break = Some(best);
+            self.best_size = self.so_far[0];
+            for r in &mut self.ins {
+                r.best_ins = r.last_ins;
+            }
+        }
+        let c = if output_penalty < INF_PENALTY {
+            Node::Penalty(output_penalty)
+        } else {
+            Node::Kern(0, crate::node::KernKind::Normal)
+        };
+        Some(self.fire_up(c, params))
+    }
+
     /// `fire_up(c)` (§1012–§1023): `c` is the node being contributed.
     #[allow(clippy::too_many_lines)]
     fn fire_up(&mut self, mut c: Node, params: &PageParams) -> Fired {

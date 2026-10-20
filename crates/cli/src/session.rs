@@ -391,6 +391,9 @@ pub struct Session {
     /// names last stored in the cache ([`Session::store_wkeys`],
     /// [`Session::store_pkgrec`], [`Session::store_wnames`]).
     stored: Mutex<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)>,
+    /// What the written keys and names last stored were made from
+    /// ([`Build::wkeys_source`]): the same, nothing to make or store.
+    wkeys_from: Mutex<Option<u64>>,
     /// The main output last written, and where ([`Session::write_main`]).
     last_main: Mutex<Option<(PathBuf, Arc<Vec<u8>>)>>,
     /// What the session does now, for a spinner.
@@ -513,6 +516,7 @@ impl Session {
             written: Mutex::new(BTreeMap::new()),
             last_main: Mutex::new(None),
             stored: Mutex::new((None, None, None)),
+            wkeys_from: Mutex::new(None),
             status,
             buffers: Arc::default(),
             changed: Vec::new(),
@@ -746,8 +750,22 @@ impl Session {
             tp = Instant::now();
         };
         if let Some(b) = &self.build {
-            self.store_wkeys(b);
-            self.store_wnames(b);
+            // (both made from the written files' accumulator: the same
+            // as last stored, nothing to make or store)
+            let from = b.wkeys_source();
+            let same = {
+                let mut last = self
+                    .wkeys_from
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let same = from.is_some() && *last == from;
+                *last = from;
+                same
+            };
+            if !same {
+                self.store_wkeys(b);
+                self.store_wnames(b);
+            }
             lap(&mut phases, "written keys");
             // (no load ran: its records are as last stored)
             if b.pkgrec_changed() {

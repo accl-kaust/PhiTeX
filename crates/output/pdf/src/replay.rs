@@ -424,7 +424,7 @@ impl PdfState {
             pr.chars = page_chars;
             pr.holes = rec.holes;
             pr.shown = (
-                std::sync::Arc::from(self.page_shown.0.as_slice()),
+                std::sync::Arc::from(self.page_shown.0.0.as_slice()),
                 self.page_shown.1,
                 self.page_shown.2,
             );
@@ -642,7 +642,7 @@ impl PdfState {
             self.aux.marks.insert(at(*k), m.clone());
         }
         for (k, d) in &rec.dest_data {
-            self.aux.dests.insert(at(*k), d.clone());
+            self.aux.dests.insert(at(*k), Some(d.clone()));
         }
         for (f, cs) in &rec.chars {
             let f = fmap(*f);
@@ -696,7 +696,7 @@ impl PdfState {
         self.annot_list = rec.annots.iter().map(|&k| at(k)).collect();
         self.link_list = rec.links.iter().map(|&k| at(k)).collect();
         self.dest_list = rec.dests.iter().map(|&k| at(k)).collect();
-        self.page_shown = (Vec::new(), rec.shown.1, rec.shown.2);
+        self.page_shown = (crate::Shown::default(), rec.shown.1, rec.shown.2);
         self.write_page_object(last_stream, last_resources);
         // "Write out resource lists": what no page before wrote
         self.obj_list = rec.obj_list.iter().map(|&k| at(k)).collect();

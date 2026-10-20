@@ -268,7 +268,7 @@ impl PdfState {
         // page it showed, are the step's: not the state after it)
         self.stream_length_offset = 0;
         self.save_offset = 0;
-        self.page_shown = (Vec::new(), 0, 0);
+        self.page_shown = (crate::Shown::default(), 0, 0);
         if self.out.is_empty() {
             return None;
         }
