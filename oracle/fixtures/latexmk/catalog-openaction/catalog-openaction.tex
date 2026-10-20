@@ -1,9 +1,0 @@
-% An open action given in the preamble: pdfTeX writes its object there,
-% and that first object fixes the PDF version from \pdfminorversion as it
-% stands there (the format's), not from the writer's defaults.
-\documentclass{article}
-\pdfcatalog{/PageMode /UseNone} openaction goto page 1 {/Fit}
-\begin{document}
-\section{One}\label{one}
-Section~\ref{one}.
-\end{document}

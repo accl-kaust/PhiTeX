@@ -347,19 +347,14 @@ fn pieces() -> &'static PieceMemo {
 /// A document-level command (`\pdfinfo`, `\pdfcatalog`, `\pdfnames`,
 /// `\pdftrailer`, `\pdftrailerid`): kept in the line's accumulator
 /// ([`XPAGES`]) where it ran, and applied by the link there. True when
-/// it was kept (the caller does nothing more). The writer's parameters
-/// where it ran go with it (last): one that writes an object there (an
-/// open action) writes it under them, and the first object written
-/// fixes the PDF version (§683).
+/// it was kept (the caller does nothing more).
 pub(crate) fn doc_op(r: &mut Run<'_, '_>, kind: &str, args: &[ValueId]) -> R<bool> {
     if r.param("pdfoutput")? <= 0 {
         return Ok(false);
     }
     let v = r.v;
-    let ps = writer_params(r)?;
     let mut xs = vec![v.str(kind)];
     xs.extend_from_slice(args);
-    xs.push(v.list(ps.iter().map(|&p| v.int(i64::from(p))).collect()));
     line_push(r, v.list(xs));
     Ok(true)
 }
@@ -383,15 +378,6 @@ fn apply_doc_op(v: &Values, st: &mut PdfState, e: ValueId) {
                 .copied()
                 .filter(|&x| x != ValueId::UNIT)
                 .and_then(|x| action(v, x));
-            if a.is_some()
-                && let Some(&ps) = xs.last()
-            {
-                let mut w: WParams = [0; 5];
-                for (p, &x) in w.iter_mut().zip(list_of(v, ps).iter()) {
-                    *p = i32::try_from(int_of(v, x)).unwrap_or(0);
-                }
-                set_writer_params(st, w);
-            }
             // (the step's run logged nothing: the error is the fold's)
             let _ = st.catalog(&text(1), a.as_ref());
         }
@@ -2920,10 +2906,9 @@ pub(crate) fn finish_exact(
             }
             if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
                 eprintln!(
-                    "  link page {} (shipped by node {}, writer params {:?}): objects {n0} -> {} ({})",
+                    "  link page {} (shipped by node {}): objects {n0} -> {} ({})",
                     pc.pj,
                     u64::from_ne_bytes(pc.node.to_ne_bytes()),
-                    pc.wparams,
                     st.objects_numbered(),
                     match &res {
                         Ok(r) => format!(
@@ -2961,9 +2946,8 @@ pub(crate) fn finish_exact(
                     }
                     if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
                         eprintln!(
-                            "  link command {serial} of node {} (writer params {:?}): {:?} (objects {})",
+                            "  link command {serial} of node {}: {:?} (objects {})",
                             c.node,
-                            c.wparams,
                             out,
                             st.objects_numbered()
                         );
