@@ -552,15 +552,25 @@ impl PdfState {
                 }
             }
         }
-        // the objects TeX numbered are as they were where recorded, and
+        // the objects TeX numbered are as they were where recorded (an
+        // object the page itself scheduled earlier, a link broken across
+        // lines, found scheduled by its next piece, there and here), and
         // no destination the page defines was defined by a page before
+        let mut own: BTreeSet<usize> = BTreeSet::new();
         for e in &rec.events {
             match e {
-                FontEv::Sched(n, was) if *n <= rec.shared => {
-                    let n = tex(*n);
-                    if n > self.sys_obj_ptr() || self.is_scheduled(n) != *was {
-                        return Err(format!("object {n} scheduled differently here"));
+                FontEv::Sched(r, was) if *r <= rec.shared => {
+                    let n = tex(*r);
+                    let here = self.is_scheduled(n) || own.contains(r);
+                    if n > self.sys_obj_ptr() || here != *was {
+                        return Err(format!(
+                            "object {n} scheduled differently here (the record's {r}: scheduled {was} there, {here} here; objects made here {})",
+                            self.sys_obj_ptr()
+                        ));
                     }
+                }
+                FontEv::Scheduled(r) => {
+                    own.insert(*r);
                 }
                 FontEv::Get(t, id, n) if rec.dests.contains(n) => {
                     if let Some(k) = self.index.get(&(*t, id.clone()))
