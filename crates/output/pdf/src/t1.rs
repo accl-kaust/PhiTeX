@@ -188,6 +188,7 @@ pub struct FontDesc {
 }
 
 /// What `writet1` leaves in `fb` and the lengths.
+#[derive(Clone)]
 pub struct Embedded {
     /// The font program.
     pub bytes: Vec<u8>,

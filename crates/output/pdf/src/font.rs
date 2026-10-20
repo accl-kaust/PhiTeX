@@ -300,6 +300,60 @@ impl PdfState {
         self.pdf_out(b'\n');
     }
 
+    /// [`t1::write_t1`] of `file` for `fd`, by a memo of the process: the
+    /// font program is a function of the file, the map entry, the
+    /// descriptor as it comes in, the subset tags taken before and
+    /// `last_arg_other_subr3`; it gives the program, the descriptor as it
+    /// goes out and those two after (a link writes the same fonts again
+    /// for every edit, subsetting each).
+    fn write_t1_memo(
+        &mut self,
+        file: &std::sync::Arc<[u8]>,
+        fd: &mut Fd,
+    ) -> Result<t1::Embedded, PdfError> {
+        type Made = (t1::Embedded, t1::FontDesc, BTreeSet<[u8; 6]>, i32);
+        static MEMO: std::sync::Mutex<Vec<(u64, std::sync::Arc<Made>)>> =
+            std::sync::Mutex::new(Vec::new());
+        let key = crate::digest::debug_hash(&(
+            crate::digest::Blob(file),
+            &fd.fm,
+            &fd.desc,
+            &self.subset_tags,
+            self.last_arg_other_subr3,
+        ));
+        let hit = MEMO
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|e| e.0 == key)
+            .map(|e| e.1.clone());
+        if let Some(m) = hit {
+            fd.desc = m.1.clone();
+            self.subset_tags.clone_from(&m.2);
+            self.last_arg_other_subr3 = m.3;
+            return Ok(m.0.clone());
+        }
+        let e = t1::write_t1(
+            file,
+            &fd.fm,
+            &mut fd.desc,
+            &mut self.subset_tags,
+            &mut self.last_arg_other_subr3,
+        )?;
+        let made = std::sync::Arc::new((
+            e.clone(),
+            fd.desc.clone(),
+            self.subset_tags.clone(),
+            self.last_arg_other_subr3,
+        ));
+        let mut m = MEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if m.len() >= 256 {
+            m.remove(0);
+        }
+        m.push((key, made));
+        Ok(e)
+    }
+
     /// `write_fontfile`.
     fn write_fontfile(&mut self, fd: &mut Fd) -> Result<(), PdfError> {
         let name =
@@ -316,13 +370,7 @@ impl PdfState {
             )));
         };
         if fd.fm.is_type1() {
-            let e = t1::write_t1(
-                &file,
-                &fd.fm,
-                &mut fd.desc,
-                &mut self.subset_tags,
-                &mut self.last_arg_other_subr3,
-            )?;
+            let e = self.write_t1_memo(&file, fd)?;
             fd.ff_found = true;
             fd.ff_objnum = self.new_objnum_();
             self.begin_dict(fd.ff_objnum, 0);
