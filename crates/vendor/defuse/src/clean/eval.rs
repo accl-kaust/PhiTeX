@@ -1137,7 +1137,7 @@ impl Engine {
         // still has a node in work.
         if let Some((f, from, to)) = s.range_wait.remove(&id)
             && let Some((u, lo, hi)) = self.w.window(id, from, to)
-            && let Some(x) = self.w.range_blocker(id, f, u, lo, hi)
+            && let Some(x) = self.w.range_blocker_last(id, f, u, lo, hi)
         {
             s.range_wait.insert(id, (f, from, to));
             s.parked.insert(id, Wait::Node(x, Some(f)));

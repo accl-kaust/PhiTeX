@@ -696,6 +696,54 @@ fn exact_pdf_edit_on_page_k_reruns_its_piece_finisher_place_and_the_link_only() 
     assert_eq!(common::runs_of(&b, "dvi"), 1, "one link");
 }
 
+/// Exact PDF, a link removed on page k of n where every paragraph
+/// makes a link (`\pdfstartlink`): a link's object number is named only
+/// by PDF bytes, so no later piece reads a count its loss moves; the
+/// edited piece and its page's finisher run, no later piece, finisher or
+/// continuation runs again, and the PDF equals a cold build's (the link
+/// numbers the objects as pdfTeX does).
+#[test]
+fn a_link_removed_reruns_its_piece_and_page_only() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\pdfoutput=1 \\pdfcompresslevel=0 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n",
+    );
+    for k in 0..300 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has \\pdfstartlink user{{/S/URI/URI(u{k})}}a link\\pdfendlink{{}} in it, \
+             and enough words to fill a few lines of text set with plain's macros, so \
+             that the pages fill up one after another.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./pl.tex", "pl", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    assert!(b.is_pdf());
+    let n = b.pages().len();
+    let text = src.replacen(
+        "Paragraph 150 has \\pdfstartlink user{/S/URI/URI(u150)}a link\\pdfendlink{}",
+        "Paragraph 150 has a link",
+        1,
+    );
+    assert_ne!(text, src);
+    b.edit(&text);
+    eprintln!("link removed: runs by op {:?} ({n} pages)", b.stats.runs_by_op);
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert_eq!(common::runs_of(&b, "exec"), 1, "only the edited piece");
+    assert!(common::runs_of(&b, "finish") <= 1, "only its page's finisher");
+    // (the edited piece's own continuation, where a page fires inside
+    // it, and no other)
+    assert!(common::runs_of(&b, "resume") <= 1, "no later continuation");
+}
+
 /// A measure: 400 and 4000 plain paragraphs with `\pdfoutput=1`, cold
 /// and after a one-word edit on page 1 (page steps re-run, wall).
 #[test]

@@ -174,15 +174,25 @@ pub trait Operation: Send + Sync {
         None
     }
 
-    /// The node's contributions to accumulators, if known from its text:
-    /// all of them (a field not listed gets nothing). Range readers fold
-    /// them without waiting for the node's run, which must contribute
-    /// exactly the same: a run that differs is applied like any change
-    /// to a contribution (the readers whose range holds it run again). A
-    /// node claimed by another contributes nothing (its claimer does, in
-    /// its place); a new text asks again.
+    /// The node's contributions to accumulators, if known from its text,
+    /// per field: range readers of a listed field fold the listed value
+    /// without waiting for the node's run, which must contribute exactly
+    /// that: a run that differs is applied like any change to a
+    /// contribution (the readers whose range holds it run again). A field
+    /// not listed is not known: its range readers wait for the run, unless
+    /// [`Operation::contribs_complete`] says the list is all of them (an
+    /// empty list always is). A node claimed by another contributes
+    /// nothing (its claimer does, in its place); a new text asks again.
     fn static_contribs(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<(Field, ValueId)>> {
         None
+    }
+
+    /// Whether [`Operation::static_contribs`] lists all the node's
+    /// contributions: a field not listed gets nothing from its run, so
+    /// its range readers pass the node while it is in work (a run that
+    /// contributes to one anyway is applied like any change).
+    fn contribs_complete(&self, _args: &[ValueId], _values: &Values) -> bool {
+        false
     }
 
     /// Whether the node runs only in the evaluation's final phase: held,
