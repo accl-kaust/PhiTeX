@@ -1100,6 +1100,61 @@ latexmk_tests! {
     latexmk_topic_units_j8: "topic-units", 8;
 }
 
+/// A rebuild given the files the job wrote as an earlier build left them
+/// (`Options::written_init`, what the CLI reads from disk) reads them
+/// back in round one where the job reads them, as TeX's next run reads
+/// the files the last one wrote: a document whose files come out as they
+/// were read takes one round, as latexmk runs pdflatex once on it, and
+/// the output is the cold build's. A file read back per field (the
+/// `.aux`) and one read back as its text (the `.toc`), at 1 and 8
+/// threads.
+#[test]
+fn rebuild_reads_the_written_files_back_in_round_one() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("rebuild-seeded");
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let docs = [
+        (
+            "hello",
+            "\\documentclass{article}\n\\begin{document}\nHello, world.\n\\end{document}\n",
+        ),
+        (
+            "label",
+            "\\documentclass{article}\n\\begin{document}\n\\section{One}\\label{one}See section~\\ref{one} on page~\\pageref{one}.\n\\end{document}\n",
+        ),
+        (
+            "toc",
+            "\\documentclass{article}\n\\begin{document}\n\\tableofcontents\n\\section{One}\\label{one}See~\\ref{one}.\n\\section{Two}Text.\n\\end{document}\n",
+        ),
+    ];
+    for (name, src) in docs {
+        for threads in [1, 8] {
+            let opts = |init: Vec<(String, String)>| Options {
+                fixpoint: true,
+                threads: Some(threads),
+                written_init: init,
+                ..pdf_opts(name, &dir)
+            };
+            let cold = common::build(opts(Vec::new()), Some(&prelude(true)), src);
+            let files = cold.files();
+            let b = common::build(opts(files.clone()), Some(&prelude(true)), src);
+            eprintln!(
+                "{name} -j {threads}: cold {} rounds, rebuilt {} rounds; files {:?}",
+                cold.stats.loop_rounds,
+                b.stats.loop_rounds,
+                files.iter().map(|f| &f.0).collect::<Vec<_>>()
+            );
+            if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+                panic!("{name} -j {threads}: the rebuild's output is not the cold build's: {d}");
+            }
+            assert_eq!(b.files(), files, "{name} -j {threads}: the files written");
+            assert_eq!(
+                b.stats.loop_rounds, 1,
+                "{name} -j {threads}: the rebuild's rounds"
+            );
+        }
+    }
+}
+
 /// What BibTeX and makeindex say reaches the build's diagnostics as
 /// warnings, at the line that reads their output: a `\cite` key the
 /// database lacks (BibTeX's `Warning--I didn't find a database entry`)

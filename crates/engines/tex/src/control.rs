@@ -1867,6 +1867,8 @@ impl Run<'_, '_> {
         self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
         self.set(&format!("wopen:{name}"), v.int(1), true);
         self.contribute_stream(v.list(vec![v.str(&name)]));
+        // (web2c's §1374, `log_openout`: the file opened, in the log)
+        self.log("openout", &format!("\\openout{n} = `{name}'."))?;
         Ok(())
     }
 
