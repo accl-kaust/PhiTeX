@@ -848,6 +848,13 @@ impl Engine {
         self.chain.iter().map(|c| (c.0, c.2.clone())).collect()
     }
 
+    /// The realised chain, deepest first: each run, its height, and why it
+    /// came after the next (as the round core's `DEFUSE_RCHAIN` prints it).
+    #[must_use]
+    pub fn realised_chain(&self) -> Vec<(NodeId, u64, String)> {
+        self.chain.iter().map(|c| (c.0, u64::from(c.1), format!("{:?}", c.2))).collect()
+    }
+
     /// The critical chain with each run's height.
     #[must_use]
     pub fn critical_chain_heights(&self) -> Vec<(NodeId, u32, crate::api::Cause)> {
