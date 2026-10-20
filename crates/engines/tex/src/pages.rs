@@ -211,6 +211,102 @@ pub(crate) fn give_no_units(r: &mut Run<'_, '_>) {
     }
 }
 
+/// The page nodes, by what their own code folds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageNode {
+    /// A scan step after a piece ([`Run::scan_window`], and the page
+    /// whose continuation it predicts, [`Run::cont_state`]).
+    Step,
+    /// A scan's continuation after a finisher ([`Run::cont_state`]).
+    Cont,
+    /// A finisher ([`Run::finisher_args`], [`Run::preload_candidate`]).
+    Finish,
+    /// The rest of a cut piece ([`Run::gdefs_after`], where it loads its
+    /// continuation).
+    Resume,
+}
+
+impl PageNode {
+    /// The page node of op `op` with arguments `args`, if one.
+    pub(crate) fn of(
+        o: &crate::run::Ops,
+        v: &Values,
+        op: OpId,
+        args: &[ValueId],
+    ) -> Option<PageNode> {
+        if op == o.scan {
+            let cont = args.first().is_some_and(|&x| int_of(v, x) == -2);
+            Some(if cont { PageNode::Cont } else { PageNode::Step })
+        } else if op == o.finish {
+            Some(PageNode::Finish)
+        } else if op == o.resume {
+            Some(PageNode::Resume)
+        } else {
+            None
+        }
+    }
+
+    /// The accumulators the node's own code folds (reads by range): the
+    /// pieces' profiles and items where it builds or assembles a page,
+    /// the finishers' global definitions after a cut. Its read hint names
+    /// each of them: the engine's gate holds the node while a contributor
+    /// before it is in work, where its run would start, stop on the fold
+    /// and run again. [`Run::fold_own`] folds only these (checked under
+    /// `observe`). (What the commands of a text fold is the text's: its
+    /// hint's, [`crate::hints::reads`].)
+    pub(crate) const fn folds(self) -> &'static [&'static str] {
+        match self {
+            PageNode::Step | PageNode::Cont => &[crate::vprof::VPROF, PITEMS],
+            PageNode::Finish => &[crate::vprof::VPROF, PITEMS, GDEFS],
+            PageNode::Resume => &[GDEFS],
+        }
+    }
+
+    /// The read hint: the fields `gate` the node cannot run without, and
+    /// [`PageNode::folds`].
+    fn reads(self, v: &Values, gate: &[&str]) -> Option<Vec<Field>> {
+        Some(
+            gate.iter()
+                .copied()
+                .chain(self.folds().iter().copied())
+                .map(|f| v.field(f))
+                .collect(),
+        )
+    }
+}
+
+impl Run<'_, '_> {
+    /// The fold of accumulator `name` over the window `(from, to]` (up
+    /// to this node where `to` is none), read by a page node's own code:
+    /// one of the node's [`PageNode::folds`], which its read hint names.
+    ///
+    /// # Panics
+    ///
+    /// Under `observe`, where the field is not among them: the hint would
+    /// leave the fold out, and the node start while a contributor before
+    /// it is in work.
+    fn fold_own(
+        &mut self,
+        name: &'static str,
+        from: Option<phitex_defuse::NodeId>,
+        to: Option<phitex_defuse::NodeId>,
+    ) -> R<ValueId> {
+        if cfg!(feature = "observe") {
+            let k = PageNode::of(self.ops, self.v, self.cx.op(), &self.cx.args());
+            assert!(
+                k.is_some_and(|k| k.folds().contains(&name)),
+                "node {} ({k:?}) folds {name}, which its read hint leaves out (PageNode::folds)",
+                self.cx.node().raw()
+            );
+        }
+        let f = self.v.field(name);
+        Ok(match to {
+            None => self.cx.acc_range(f, from)?,
+            Some(_) => self.cx.acc_range_to(f, from, to)?,
+        })
+    }
+}
+
 /// A location's value at a candidate in a piece's check data
 /// ([`Run::check_data`]) that the piece had neither read nor defined
 /// before: what reached the piece, which its page's finisher reads before
@@ -1340,11 +1436,7 @@ impl Run<'_, '_> {
                 None => Vec::new(),
             };
             if bp != crate::vprof::MATERIAL {
-                let mut items = v.seq_to_vec(self.cx.acc_range_to(
-                    v.field(PITEMS),
-                    s.anchor,
-                    Some(node(bp)),
-                )?);
+                let mut items = v.seq_to_vec(self.fold_own(PITEMS, s.anchor, Some(node(bp)))?);
                 let Some(last) = items.iter().position(|&x| unit_pid(x) == bp) else {
                     self.scan_defect(&format!("piece {bp} is not in its range"));
                     return Ok(None);
@@ -1357,8 +1449,8 @@ impl Run<'_, '_> {
                     raws.push(raw);
                 }
             }
-            let tail = v.seq_to_vec(self.cx.acc_range_to(
-                v.field(PITEMS),
+            let tail = v.seq_to_vec(self.fold_own(
+                PITEMS,
                 prev.map(node).or(s.anchor),
                 Some(node(pid)),
             )?);
@@ -1398,8 +1490,7 @@ impl Run<'_, '_> {
             // anything after the piece is in it, so the page's nodes do
             // not wait on one another)
             let to = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
-            let mut items =
-                v.seq_to_vec(self.cx.acc_range_to(v.field(PITEMS), s.anchor, Some(to))?);
+            let mut items = v.seq_to_vec(self.fold_own(PITEMS, s.anchor, Some(to))?);
             let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
             if crate::exec::obs_flag!("PHITEX_ASSEMBLE_TRACE") {
                 eprintln!(
@@ -1669,11 +1760,7 @@ impl Run<'_, '_> {
     ) -> R<Option<crate::vprof::ScanFire>> {
         let v = self.v;
         let to = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
-        let units = v.seq_to_vec(self.cx.acc_range_to(
-            v.field(crate::vprof::VPROF),
-            s.anchor,
-            Some(to),
-        )?);
+        let units = v.seq_to_vec(self.fold_own(crate::vprof::VPROF, s.anchor, Some(to))?);
         let parts: Vec<(i64, Vec<crate::vprof::PItem>)> = units
             .iter()
             .map(|&u| {
@@ -1746,11 +1833,7 @@ impl Run<'_, '_> {
         use crate::vprof::PItem;
         let v = self.v;
         let to = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
-        let units = v.seq_to_vec(self.cx.acc_range_to(
-            v.field(crate::vprof::VPROF),
-            s.anchor,
-            Some(to),
-        )?);
+        let units = v.seq_to_vec(self.fold_own(crate::vprof::VPROF, s.anchor, Some(to))?);
         if units.len() < 2 {
             return Ok(narrow_miss(1, pid));
         }
@@ -1840,10 +1923,7 @@ impl Run<'_, '_> {
                 parts[u..].iter().map(|p| p.0).collect::<Vec<_>>()
             );
         }
-        let items = v.seq_to_vec(
-            self.cx
-                .acc_range_to(v.field(PITEMS), Some(from), Some(to))?,
-        );
+        let items = v.seq_to_vec(self.fold_own(PITEMS, Some(from), Some(to))?);
         let unit_pid = |x: ValueId| list_of(v, x).first().map_or(-1, |&y| int_of(v, y));
         if items.len() != parts.len() - u
             || items
@@ -3739,7 +3819,7 @@ impl Run<'_, '_> {
     fn gdefs_after(&mut self, pid: i64) -> R<Vec<GDef>> {
         let v = self.v;
         let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
-        let acc = self.cx.acc_range(v.field(GDEFS), Some(at))?;
+        let acc = self.fold_own(GDEFS, Some(at), None)?;
         Ok(v.seq_to_vec(acc)
             .into_iter()
             .filter_map(|e| match list_of(v, e)[..] {
@@ -4176,12 +4256,12 @@ impl Operation for Finish {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
-    /// Nothing held: its break is its argument, and the material its
-    /// page begins with ([`SCAN_MAT`]) it reads in its run, where the
-    /// continuation before it is predicted ([`Scan::predicted_defs`]):
-    /// the engine's gate takes no prediction.
-    fn reads(&self, _: &[ValueId], _: &Values) -> Option<Vec<Field>> {
-        None
+    /// What it folds ([`PageNode::folds`]) only: its break is its
+    /// argument, and the material its page begins with ([`SCAN_MAT`]) it
+    /// reads in its run, where the continuation before it is predicted
+    /// ([`Scan::predicted_defs`]): the engine's gate takes no prediction.
+    fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        PageNode::Finish.reads(v, &[])
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
@@ -4504,9 +4584,10 @@ impl Operation for Resume {
     }
     /// What it cannot run without (spec-final §9b): the continuation the
     /// cut piece defined; the engine's gate holds it until that is there
-    /// instead of a run parking on it.
+    /// instead of a run parking on it. And what it folds
+    /// ([`PageNode::folds`]).
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        Some(vec![v.field(RESUME)])
+        PageNode::Resume.reads(v, &[RESUME])
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
@@ -4685,23 +4766,21 @@ impl Operation for Scan {
     }
     /// A step is held until the scan state is there and its piece has
     /// run (what the piece leaves the main list, which it defines at its
-    /// end). Not the profiles: the engine's gate answers an accumulator
-    /// by combining it from the unit's start at every check, quadratic
-    /// over a cold build; the step's range read stops on a piece of its
-    /// window still in work.
+    /// end), and both kinds while a contributor to what they fold
+    /// ([`PageNode::folds`]) before them is in work.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         if args.first().is_some_and(|&x| int_of(v, x) == -2) {
             // (it assembles its page as the finisher does, reading the
             // material the page began with in its run, on the prediction
             // of the continuation before it; the break is its argument)
-            return None;
+            return PageNode::Cont.reads(v, &[]);
         }
         // (not the scan state: the engine's gate does not take a
         // definer's prediction, a run's read does, and the continuation
         // before it is predicted, [`Run::place_cont`]; the state where
         // its block begins, which the block's scan before defines and
         // nothing predicts: waited for at the gate, not parked on)
-        Some(vec![v.field(crate::build::MAIN_LAST), v.field(SCAN_BLOCK)])
+        PageNode::Step.reads(v, &[crate::build::MAIN_LAST, SCAN_BLOCK])
     }
     /// No pieces' units: a window holding a step does not wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
@@ -4956,7 +5035,7 @@ impl Run<'_, '_> {
     ) -> R<Option<(i64, crate::vprof::ScanFire, crate::vprof::ScanState, bool)>> {
         let v = self.v;
         let s = ScanIn::decode(v, src);
-        let units = v.seq_to_vec(self.cx.acc_range(v.field(crate::vprof::VPROF), s.anchor)?);
+        let units = v.seq_to_vec(self.fold_own(crate::vprof::VPROF, s.anchor, None)?);
         let trace = crate::exec::obs_flag!("PHITEX_SCAN_TRACE");
         if trace && units.is_empty() {
             eprintln!(
