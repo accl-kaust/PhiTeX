@@ -1270,8 +1270,11 @@ fn fresh(v: &Values, date: String, jobname: &str, g2u: Option<ValueId>) -> PdfSt
 
 /// The fresh writers of [`fresh`] by their glyph table (values instance,
 /// value), the latest few.
-fn g2u_states() -> &'static Mutex<Vec<((u64, u64), PdfState)>> {
-    static M: OnceLock<Mutex<Vec<((u64, u64), PdfState)>>> = OnceLock::new();
+type G2uStates = Mutex<Vec<((u64, u64), PdfState)>>;
+
+/// [`G2uStates`], the process's.
+fn g2u_states() -> &'static G2uStates {
+    static M: OnceLock<G2uStates> = OnceLock::new();
     M.get_or_init(|| Mutex::new(Vec::new()))
 }
 
