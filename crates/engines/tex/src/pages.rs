@@ -673,7 +673,6 @@ impl Run<'_, '_> {
         if !self.at_outer()? {
             return Ok(());
         }
-        let v = self.v;
         let k = self.cand;
         // (§994: `build_page` with nothing contributed does nothing, so a
         // page fires only at a candidate with items contributed since the
@@ -685,6 +684,57 @@ impl Run<'_, '_> {
             Some(m) => self.main_items_since(m.contribs),
             None => self.cx.op() != self.ops.resume || self.main_items_since(0),
         };
+        self.note_candidate(k)?;
+        self.cand += 1;
+        let cuttable = fresh && self.cuttable_here(newgraf);
+        self.cand_marks.push(CandMark {
+            k,
+            stamp: self.st.stamp(),
+            gids: self.st.gid_mark(),
+            contribs: self.contribs.len(),
+            kids: self.kids.len(),
+            lines: self.lines_entered,
+            sig: self.st.sig(),
+            nest: self.nest.len(),
+            cuttable,
+        });
+        self.st.mark_candidate();
+        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
+            self.trace_candidate(k, newgraf, fresh, cuttable);
+        }
+        // (every candidate with text after it is a cut, as every
+        // paragraph end is: the rest of the piece is a continuation
+        // placed after it, after the finisher of a page firing there,
+        // which reads the state there forward and what a routine leaves.
+        // Nothing decides it after the piece: no page's finisher reaches
+        // back into the piece it fires in)
+        // (inside a group or a conditional of the run's own, only where
+        // the page is made to fire, above: elsewhere the piece runs on
+        // through the candidate, and a page firing there has its
+        // finisher check the rest, [`Run::check_cut`])
+        if cuttable {
+            if self.open_span() && crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+                eprintln!(
+                    "page-trace: node {} cut inside its own span at candidate {k}: nest {:?} conds {}",
+                    self.cx.node().raw(),
+                    self.nest
+                        .iter()
+                        .map(|l| (l.group, l.owns))
+                        .collect::<Vec<_>>(),
+                    self.conds.len()
+                );
+            }
+            self.cut = Some(k);
+            return Err(Halt::Cut);
+        }
+        Ok(())
+    }
+
+    /// What the builder reads of eqtb at candidate `k` noted on the main
+    /// list (§987's page parameters, §1008's registers of the insertion
+    /// classes put on it since the last candidate), then its marker.
+    fn note_candidate(&mut self, k: u32) -> R<()> {
+        let v = self.v;
         if self.st.take_page_params() {
             if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
                 eprintln!(
@@ -714,7 +764,12 @@ impl Run<'_, '_> {
         }
         let m = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(k))]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), m])));
-        self.cand += 1;
+        Ok(())
+    }
+
+    /// Whether the run can end at the candidate it is at, its rest a
+    /// resume (items contributed since the one before aside).
+    fn cuttable_here(&mut self, newgraf: bool) -> bool {
         let op = self.cx.op();
         // (inside a group or a conditional of the run's own only where
         // the builder is made to fire: a penalty of `eject_penalty` or
@@ -735,24 +790,17 @@ impl Run<'_, '_> {
             || par_start
             || (self.nest.iter().all(|l| !l.owns && l.group != 0)
                 && self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs)));
-        let cuttable = (op == self.ops.exec || op == self.ops.resume)
+        (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
-            && fresh
             && open_ok
-            && self.has_input();
-        self.cand_marks.push(CandMark {
-            k,
-            stamp: self.st.stamp(),
-            gids: self.st.gid_mark(),
-            contribs: self.contribs.len(),
-            kids: self.kids.len(),
-            lines: self.lines_entered,
-            sig: self.st.sig(),
-            nest: self.nest.len(),
-            cuttable,
-        });
-        self.st.mark_candidate();
-        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") && self.cand_marks.len() == 1 {
+            && self.has_input()
+    }
+
+    /// `PHITEX_CAND_TRACE`: the candidate `k` and what decided its cut.
+    fn trace_candidate(&mut self, k: u32, newgraf: bool, fresh: bool, cuttable: bool) {
+        let v = self.v;
+        let op = self.cx.op();
+        if self.cand_marks.len() == 1 {
             let args = self.cx.args();
             let first = args
                 .first()
@@ -763,58 +811,30 @@ impl Run<'_, '_> {
                 .collect::<String>();
             eprintln!("cand-text: node {} {first}", self.cx.node().raw());
         }
-        if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
-            eprintln!(
-                "cand: node {} op {} k {k} newgraf {newgraf} fresh {fresh} input {} nest {:?} conds {} forced {} cuttable {cuttable}",
-                self.cx.node().raw(),
-                if op == self.ops.exec {
-                    "exec"
-                } else if op == self.ops.resume {
-                    "resume"
-                } else {
-                    "other"
-                },
-                self.has_input(),
-                self.nest
-                    .iter()
-                    .map(|l| (l.mode, l.group, l.owns))
-                    .collect::<Vec<_>>(),
-                self.conds.len(),
-                self.forced_since(
-                    self.cand_marks
-                        .len()
-                        .checked_sub(2)
-                        .and_then(|i| self.cand_marks.get(i))
-                        .map_or(0, |m| m.contribs)
-                ),
-            );
-        }
-        // (every candidate with text after it is a cut, as every
-        // paragraph end is: the rest of the piece is a continuation
-        // placed after it, after the finisher of a page firing there,
-        // which reads the state there forward and what a routine leaves.
-        // Nothing decides it after the piece: no page's finisher reaches
-        // back into the piece it fires in)
-        // (inside a group or a conditional of the run's own, only where
-        // the page is made to fire, above: elsewhere the piece runs on
-        // through the candidate, and a page firing there has its
-        // finisher check the rest, [`Run::check_cut`])
-        if cuttable {
-            if self.open_span() && crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
-                eprintln!(
-                    "page-trace: node {} cut inside its own span at candidate {k}: nest {:?} conds {}",
-                    self.cx.node().raw(),
-                    self.nest
-                        .iter()
-                        .map(|l| (l.group, l.owns))
-                        .collect::<Vec<_>>(),
-                    self.conds.len()
-                );
-            }
-            self.cut = Some(k);
-            return Err(Halt::Cut);
-        }
-        Ok(())
+        eprintln!(
+            "cand: node {} op {} k {k} newgraf {newgraf} fresh {fresh} input {} nest {:?} conds {} forced {} cuttable {cuttable}",
+            self.cx.node().raw(),
+            if op == self.ops.exec {
+                "exec"
+            } else if op == self.ops.resume {
+                "resume"
+            } else {
+                "other"
+            },
+            self.has_input(),
+            self.nest
+                .iter()
+                .map(|l| (l.mode, l.group, l.owns))
+                .collect::<Vec<_>>(),
+            self.conds.len(),
+            self.forced_since(
+                self.cand_marks
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|i| self.cand_marks.get(i))
+                    .map_or(0, |m| m.contribs)
+            ),
+        );
     }
 
     /// Whether this run put an item on the main list (a node, or the

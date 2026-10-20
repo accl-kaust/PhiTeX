@@ -1114,3 +1114,39 @@ fn tool_warnings_are_diagnostics() {
         "{warnings:#?}"
     );
 }
+
+/// A measure: amsldoc (`bench/amsldoc`) built as latexmk would, then
+/// one sentence added to a paragraph (its lines re-broken): the nodes
+/// that ran again and why (`PHITEX_EDIT_TEXT`: `OLD=>NEW` instead).
+#[test]
+#[ignore = "a measure: amsldoc's re-break edit, the reruns by node"]
+fn amsldoc_rebreak_reruns() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../bench/amsldoc");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("amsldoc-rebreak");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::copy(src_dir.join("amsldoc.tex"), dir.join("amsldoc.tex")).expect("the source");
+    let src = common::read(&dir.join("amsldoc.tex"));
+    let opts = Options {
+        fixpoint: true,
+        threads: Some(1),
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("amsldoc", &dir)
+    };
+    let mut b = common::build(opts, Some(&prelude(true)), &src);
+    let (old, new) = std::env::var("PHITEX_EDIT_TEXT")
+        .ok()
+        .and_then(|s| s.split_once("=>").map(|(a, b)| (a.to_owned(), b.to_owned())))
+        .unwrap_or_else(|| {
+            (
+                "pagebreak after a given line, as usual.".to_owned(),
+                "pagebreak after a given line, as usual. This added sentence makes the paragraph one line longer than it was before, so the breaks after it move.".to_owned(),
+            )
+        });
+    assert_eq!(src.matches(&old).count(), 1);
+    b.edit(&src.replacen(&old, &new, 1));
+    eprintln!("runs by op {:?}", b.stats.runs_by_op);
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
+}
