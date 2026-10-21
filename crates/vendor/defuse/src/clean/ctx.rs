@@ -11,6 +11,10 @@ use crate::values::FxHashMap;
 use crate::values::{Field, ValueId, Values};
 
 /// A placement a run made, before the merge gives it an id.
+/// The placements a run's earlier attempts made: children, continuations,
+/// the children that are not scope markers.
+pub(crate) type Base = (usize, usize, usize);
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Spec {
     pub op: OpId,
@@ -51,6 +55,11 @@ pub struct Ctx<'a> {
     pub(crate) kept: Option<Box<dyn Any + Send>>,
     /// Resumed from a kept state.
     pub(crate) resumed: bool,
+    /// A resumed run continues: the placements its earlier attempts made
+    /// stand (the first of its committed ones), and it places after them
+    /// (their counts: children, continuations, the children that are not
+    /// scope markers).
+    pub(crate) base: Option<Base>,
     /// A resumed run named a node that is gone (its kept state is of a
     /// world before): it runs again from the start.
     pub(crate) named_gone: bool,
@@ -69,7 +78,7 @@ pub struct Ctx<'a> {
     /// entry in `reads`. The world a run sees does not change, so the same
     /// question asked again has the same answer and is not logged again.
     read_ix: FxHashMap<(Field, Id, bool, u16), usize>,
-    nkids: usize,
+    pub(crate) nkids: usize,
     /// The run stopped on a pending definition set.
     pub(crate) pset_wait: bool,
     /// Reads of a definer still to run may take its predicted value.
@@ -113,6 +122,7 @@ impl<'a> Ctx<'a> {
             diag: Vec::new(),
             wait: None,
             resumed: kept.is_some(),
+            base: None,
             named_gone: false,
             kept,
             restart: false,
@@ -575,7 +585,7 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn follow_inner(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
-        let i = self.conts.len();
+        let i = self.base.map_or(0, |b| b.1) + self.conts.len();
         self.conts.push(Spec {
             op,
             args: Arc::from(args),
@@ -622,7 +632,7 @@ impl<'a> Ctx<'a> {
             node: at.0,
             there: self.w.node(at.0).is_some(),
         });
-        let i = self.conts.len();
+        let i = self.base.map_or(0, |b| b.1) + self.conts.len();
         self.conts.push(Spec {
             op,
             args: Arc::from(args),
@@ -682,6 +692,16 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn output_of_inner(&mut self, i: usize) -> Result<ValueId, Stop> {
+        let res = self.w.node(self.me).and_then(|n| n.res.as_ref());
+        // (Continuing: one of the earlier attempts' children, as committed.)
+        let (bk, _, bn) = self.base.unwrap_or((0, 0, 0));
+        if i < bn {
+            let c = res.and_then(|r| r.kids.iter().copied().filter(|&k| self.w.node(k).is_none_or(|c| !matches!(c.place, Place::Marker(_)))).nth(i));
+            return match c {
+                Some(c) => self.read_out(c),
+                None => Ok(ValueId::UNIT),
+            };
+        }
         // The child this run placed `i`-th, if the committed unfolding has
         // it (the same placement order: the same node).
         let Some(k) = self
@@ -689,19 +709,16 @@ impl<'a> Ctx<'a> {
             .iter()
             .enumerate()
             .filter(|(_, s)| !matches!(s.place, Place::Marker(_)))
-            .nth(i)
+            .nth(i - bn)
             .map(|(k, _)| k)
         else {
             return Ok(ValueId::UNIT);
         };
-        let committed = self
-            .w
-            .node(self.me)
-            .and_then(|n| n.res.as_ref())
-            .and_then(|r| r.kids.get(k).copied())
+        let committed = res
+            .and_then(|r| r.kids.get(bk + k).copied())
             .filter(|&c| self.w.node(c).is_some_and(|n| n.text.op == self.kids[k].op && n.text.args == self.kids[k].args));
         let Some(c) = committed else {
-            return Err(self.stop(Wait::Child(k)));
+            return Err(self.stop(Wait::Child(bk + k)));
         };
         self.read_out(c)
     }
@@ -1372,6 +1389,7 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn restart_inner(&mut self) {
         self.kept = None;
+        self.base = None;
         self.restart = true;
         self.reads.clear();
         self.read_ix.clear();

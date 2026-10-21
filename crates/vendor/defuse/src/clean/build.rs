@@ -84,6 +84,11 @@ pub(crate) struct Builder<'a> {
     /// definitions are to be filed once they are.
     hold: Option<(u32, Pos, Vec<Id>)>,
     pub counts: Counts,
+    /// The run committed continued from its kept state (`Ctx::base`): its
+    /// placements go after the children and continuations its earlier
+    /// attempts made (the first this many of those committed), which
+    /// stand.
+    pub cont: Option<(usize, usize)>,
 }
 
 impl<'a> Builder<'a> {
@@ -105,6 +110,7 @@ impl<'a> Builder<'a> {
             defer: None,
             hold: None,
             counts: Counts::default(),
+            cont: None,
         }
     }
 
@@ -332,6 +338,14 @@ impl<'a> Builder<'a> {
         }
         let new_keep = if keep == 0 { 0 } else { map.get(&keep).copied().unwrap_or(keep) };
         let remap = |p: Pos| -> Pos { map.get(&p).copied().unwrap_or(p) };
+        // (Frames held back to walk from a position: that position moves
+        // too; one that names no node walks the whole unit.)
+        if let Some((hu, hp, _)) = &mut self.hold
+            && *hu == u
+            && *hp != Pos::MAX
+        {
+            *hp = map.get(hp).copied().unwrap_or(0);
+        }
         // Nodes.
         for &(q, id) in &order {
             if let Some(mut nd) = self.w.node(id).cloned() {
@@ -1096,28 +1110,44 @@ impl<'a> Builder<'a> {
     fn place_held(&mut self, id: Id, kids: &[Spec], conts: &[Spec], prefix: bool) -> (Vec<Id>, Vec<Id>) {
         let n = self.w.node(id).cloned().expect("live");
         let old: (Vec<Id>, Vec<Id>) = n.res.as_ref().map_or((Vec::new(), Vec::new()), |r| (r.kids.clone(), r.conts.clone()));
-        let assign = |specs: &[Spec]| -> Vec<Id> {
-            let mut ord: FxHashMap<(u64, crate::api::OpId, u64), u32> = FxHashMap::default();
+        let cont = self.cont.is_some();
+        let (bk, bc) = self.cont.unwrap_or((0, 0));
+        let (bk, bc) = (bk.min(old.0.len()), bc.min(old.1.len()));
+        let key = |place: Place, op: crate::api::OpId| match place {
+            Place::Child => (1, op, 0),
+            Place::Cont => (2, op, 0),
+            Place::After(a) => (3, op, a),
+            Place::Marker(o) => (4 + u64::from(o), op, 0),
+            Place::Top => (6, op, 0),
+        };
+        // (Continuing: the ordinals go on from the placements committed.)
+        let seed = |ids: &[Id]| -> FxHashMap<(u64, crate::api::OpId, u64), u32> {
+            let mut ord = FxHashMap::default();
+            if cont {
+                for x in ids {
+                    if let Some(xn) = self.w.node(*x) {
+                        *ord.entry(key(xn.place, xn.text.op)).or_insert(0) += 1;
+                    }
+                }
+            }
+            ord
+        };
+        let assign = |specs: &[Spec], mut ord: FxHashMap<(u64, crate::api::OpId, u64), u32>| -> Vec<Id> {
             specs
                 .iter()
                 .map(|s| {
-                    let key = match s.place {
-                        Place::Child => (1, s.op, 0),
-                        Place::Cont => (2, s.op, 0),
-                        Place::After(a) => (3, s.op, a),
-                        Place::Marker(o) => (4 + u64::from(o), s.op, 0),
-                        Place::Top => (6, s.op, 0),
-                    };
-                    let k = ord.entry(key).or_insert(0);
+                    let k = ord.entry(key(s.place, s.op)).or_insert(0);
                     *k += 1;
                     Self::placed_id(id, s.place, s.op, *k)
                 })
                 .collect()
         };
-        let kid_ids = assign(kids);
-        let cont_ids = assign(conts);
-        // Gone: freed (a stopped run's: not yet made, kept).
-        let keep: FxHashSet<Id> = kid_ids.iter().chain(&cont_ids).copied().collect();
+        let kid_ids = assign(kids, seed(&old.0[..bk]));
+        let cont_ids = assign(conts, seed(&old.1[..bc]));
+        // Gone: freed (a stopped run's: not yet made, kept; a continued
+        // run's earlier attempts' stand).
+        let mut keep: FxHashSet<Id> = kid_ids.iter().chain(&cont_ids).copied().collect();
+        keep.extend(old.0[..bk].iter().chain(&old.1[..bc]).copied());
         if !prefix {
             for &x in old.0.iter().chain(&old.1) {
                 if !keep.contains(&x) {
@@ -1129,8 +1159,12 @@ impl<'a> Builder<'a> {
         for x in &keep {
             self.w.awaiting.remove(x, &NoMeasure);
         }
-        // Kids: in order after `id` (each after the previous one's subtree).
+        // Kids: in order after `id` (each after the previous one's subtree;
+        // continuing, after those committed).
         let mut after = id;
+        if let Some(&k) = old.0[..bk].iter().rev().find(|&&k| self.w.node(k).is_some()) {
+            after = self.extent_end(k);
+        }
         for (spec, &kid) in kids.iter().zip(&kid_ids) {
             after = self.put_placed(id, &n, kid, spec, n.depth + 1, after);
         }
@@ -1143,11 +1177,32 @@ impl<'a> Builder<'a> {
             };
             let base = match last_cont.get(&anchor) {
                 Some(&b) => b,
-                // (After the follow nodes other placers keep there.)
-                None => self.after_conts(anchor, self.w.subtree_end(anchor), id, spec.place),
+                // (After the follow nodes other placers keep there;
+                // continuing, after its own committed there too.)
+                None => {
+                    let mut b = self.after_conts(anchor, self.w.subtree_end(anchor), id, spec.place);
+                    while cont && let Some(y) = self.w.next(b).filter(|&y| self.w.node(y).is_some_and(|yn| yn.parent == id && yn.place == spec.place)) {
+                        b = self.extent_end(y);
+                    }
+                    b
+                }
             };
             let end = self.put_placed(id, &n, c, spec, depth, base);
             last_cont.insert(anchor, end);
+        }
+        if cont {
+            // Its earlier attempts', its own, then (stopped) the earlier
+            // result's it has not made again.
+            let made: FxHashSet<Id> = kid_ids.iter().chain(&cont_ids).copied().collect();
+            let join = |own: &[Id], new: Vec<Id>, rest: &[Id]| -> Vec<Id> {
+                let mut v: Vec<Id> = own.iter().copied().filter(|&x| self.w.node(x).is_some()).collect();
+                v.extend(new);
+                if prefix {
+                    v.extend(rest.iter().copied().filter(|x| !made.contains(x) && self.w.node(*x).is_some()));
+                }
+                v
+            };
+            return (join(&old.0[..bk], kid_ids, &old.0[bk..]), join(&old.1[..bc], cont_ids, &old.1[bc..]));
         }
         if prefix {
             let mut kid_ids = kid_ids;
