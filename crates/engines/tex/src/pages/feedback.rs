@@ -32,10 +32,12 @@ pub(crate) enum Feedback {
     /// changes it.)
     OutputState,
     /// What the routine gives back to the main list (§1026: its list, the
-    /// page parameters it set): the page builder folds the next page on
-    /// a guess ([`FinishIn::rtn_guess`]); a finisher whose routine gave
-    /// otherwise contributes the real one to [`PAGE_MISS`], and the page
-    /// builder's node runs again on it.
+    /// page parameters it set) and `\deadcycles` as it leaves it where not
+    /// 0 (a page not shipped, which §1054's `\end` after it reads): the
+    /// page builder folds the next page on a guess
+    /// ([`FinishIn::rtn_guess`], `\deadcycles` always guessed 0); a
+    /// finisher whose routine gave otherwise contributes the real one to
+    /// [`PAGE_MISS`], and the page builder's node runs again on it.
     RoutineGivesBack,
     /// The page parameters and an insertion class's registers (§980,
     /// §1008), set by text or by a routine: read by the page builder

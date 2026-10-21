@@ -688,6 +688,17 @@ impl Run<'_, '_> {
             .locked()
             .get(&fin_key(v, hint, &[]))
             .and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1))
+            // (`\deadcycles` guessed 0, a page shipped: a dead cycle
+            // guessed from the last run would grow a chain of pages on
+            // guesses)
+            .map(|x| {
+                let xs = list_of(v, x);
+                if xs.len() > 2 {
+                    v.list(xs[..2].to_vec())
+                } else {
+                    x
+                }
+            })
             .unwrap_or_else(empty)
     }
 }
@@ -872,10 +883,11 @@ impl Run<'_, '_> {
         // the same nodes; a page not placed again is freed)
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
-                "pages {}: attempt, {} pages placed again, from {:?}",
+                "pages {}: attempt, {} pages placed again, from {:?}, misses {:?}",
                 self.cx.node().raw(),
                 lp.pages.len(),
-                lp.cur.map(phitex_defuse::NodeId::raw)
+                lp.cur.map(phitex_defuse::NodeId::raw),
+                lp.misses.iter().map(|m| m.0).collect::<Vec<_>>()
             );
         }
         for (at, fin) in &lp.pages {
