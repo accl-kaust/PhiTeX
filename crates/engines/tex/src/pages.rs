@@ -2148,7 +2148,7 @@ impl Run<'_, '_> {
             fields.push(self.loc_field(l));
         }
         for f in fields {
-            match self.cx.use_field_at(f, Some(at))? {
+            match self.field_at(f, at, false)? {
                 phitex_defuse::FieldAt::Def(x, _) => xs.push(Some(x)),
                 phitex_defuse::FieldAt::Unset => xs.push(None),
                 phitex_defuse::FieldAt::Gone => return self.insert_class(n),
@@ -4406,7 +4406,7 @@ impl Run<'_, '_> {
                 continue;
             }
             let x = if kv == before {
-                match self.cx.use_field_before(Field(f), piece)? {
+                match self.field_at(Field(f), piece, true)? {
                     phitex_defuse::FieldAt::Def(x, _) => Some(x),
                     phitex_defuse::FieldAt::Unset => None,
                     phitex_defuse::FieldAt::Gone => continue,
