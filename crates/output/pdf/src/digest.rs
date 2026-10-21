@@ -113,8 +113,28 @@ impl PdfState {
     /// so this formats nothing more than the digest does.
     #[must_use]
     pub fn digest_sans_chars(&mut self) -> u64 {
+        let (core, os) = self.digest_parts();
+        let mut s = DefaultHasher::new();
+        s.write_u64(core);
+        s.write_u64(os);
+        s.finish()
+    }
+
+    /// [`PdfState::digest_sans_chars`] in two parts: the digest of the
+    /// state but for the bytes of the objects in the object stream being
+    /// filled (their count and length in, their content out), and the
+    /// hash of those bytes. They are read only where the stream is
+    /// written: two states equal in the first part are equal in all once
+    /// the same steps have written that stream ([`PdfState::os_stream`]).
+    #[must_use]
+    pub fn digest_parts(&mut self) -> (u64, u64) {
         self.refresh_digests();
-        fast_hash(self)
+        SANS_OS.with(|c| c.set(true));
+        let core = fast_hash(self);
+        SANS_OS.with(|c| c.set(false));
+        let mut s = DefaultHasher::new();
+        s.write(self.os_bytes());
+        (core, s.finish())
     }
 
     /// The digest of the whole state formatted in full: the oracle of
@@ -150,6 +170,9 @@ thread_local! {
     /// Set while [`PdfState::digest`] formats the state: a tracked
     /// collection then prints its running sum instead of its content.
     static FAST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while [`PdfState::digest_parts`] formats the state: the object
+    /// stream's bytes are then left out (their length kept).
+    static SANS_OS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Element hashes computed, by collection (for tests).
     static HASHED: std::cell::RefCell<std::collections::BTreeMap<&'static str, u64>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
@@ -337,6 +360,12 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for TMap<K, V> {
             self.map.fmt(f)
         }
     }
+}
+
+/// Whether the object stream's bytes are left out of the formatting
+/// ([`PdfState::digest_parts`]).
+pub(crate) fn sans_os() -> bool {
+    SANS_OS.with(std::cell::Cell::get)
 }
 
 /// Formats `x` with the tracked collections as their sums.

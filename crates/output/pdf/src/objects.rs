@@ -150,6 +150,20 @@ impl PdfState {
         k
     }
 
+    /// The object stream being filled: its number (0: none), which a
+    /// state gets anew once it has written the stream (to tell when two
+    /// states equal but for its bytes, [`PdfState::digest_parts`], are
+    /// equal again).
+    #[must_use]
+    pub fn os_stream(&self) -> usize {
+        self.os.cur
+    }
+
+    /// The bytes of the objects in the object stream being filled.
+    pub(crate) fn os_bytes(&self) -> &[u8] {
+        &self.os.buf
+    }
+
     /// `pdf_os_switch`.
     fn os_switch(&mut self, on: bool) {
         self.os.mode = on && self.os.enable;
