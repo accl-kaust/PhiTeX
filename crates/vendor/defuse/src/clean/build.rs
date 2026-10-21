@@ -231,7 +231,15 @@ impl<'a> Builder<'a> {
                 }
                 a
             };
-            let mut broken = res.reads.iter().find(|r| asked(r) && !holds(self.core, &self.w, id, r));
+            let mut a = Asker::default();
+            let check = memo_check();
+            let mut broken = res.reads.iter().find(|r| {
+                asked(r) && {
+                    let ok = holds_asked(self.core, &self.w, id, r, &mut a);
+                    assert!(!check || ok == holds(self.core, &self.w, id, r), "reader {id}: its read {r:?} asked with memo: {ok}");
+                    !ok
+                }
+            });
             // (CLEAN_SCOPED_CHECK: a read of another field broken too is
             // an invalidation missed elsewhere; named, and taken.)
             if broken.is_none() && on.is_some() && scoped_check() {
@@ -1771,6 +1779,59 @@ fn frame_kind(n: &Node, k: u8) -> Option<ValueId> {
 /// Whether read `r` of node `me` still gets the answer it got.
 pub(crate) fn holds(core: &Core, w: &World, me: Id, r: &Read) -> bool {
     holds_with(core, w, me, r, false)
+}
+
+/// What asking one reader's reads of one world looks up again and again
+/// (as a run's `Ctx` keeps it): the last read point, the last frame chain,
+/// the field cells.
+#[derive(Default)]
+pub(crate) struct Asker<'w> {
+    point: Option<((Id, bool, bool), Option<(u32, Pos, FrameId, Id)>)>,
+    chain: Option<((u32, FrameId), Vec<(FrameId, Pos)>)>,
+    cells: FxHashMap<(u32, Field), Option<&'w super::world::FieldCell>>,
+}
+
+/// As [`holds`], with `a`'s lookups (of `w`, unchanged since).
+pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &mut Asker<'w>) -> bool {
+    let Read::Use { f, at, after, own, val, proj, .. } = r else {
+        return holds_with(core, w, me, r, false);
+    };
+    if w.loops.get(f).is_some() {
+        return false;
+    }
+    let key = (*at, *after, *own);
+    let point = match &a.point {
+        Some((k, p)) if *k == key => *p,
+        _ => {
+            let p = w.read_point(*at, *after, *own);
+            a.point = Some((key, p));
+            p
+        }
+    };
+    let Some((u, pos, fr, skip)) = point else {
+        return false;
+    };
+    let reach = match *a.cells.entry((u, *f)).or_insert_with(|| w.field(u, *f)) {
+        None => None,
+        Some(cell) => {
+            if a.chain.as_ref().is_none_or(|c| c.0 != (u, fr)) {
+                a.chain = Some(((u, fr), w.chain_starts(u, fr)));
+            }
+            World::reaching_in(&cell.defs, &a.chain.as_ref().expect("set").1, pos, skip)
+        }
+    };
+    let v2 = match reach {
+        Some((_, e)) => match e.val {
+            Some(v) => Some(v),
+            // (A definer in work: the answer stands as a guess.)
+            None => return true,
+        },
+        None => w.env_of(core, u, *f),
+    };
+    if *proj != 0 {
+        return v2.map(|x| core.project(*proj, x)) == val.map(|x| core.project(*proj, x));
+    }
+    v2 == *val
 }
 
 /// Whether read `r` of node `me` still holds; `strict`: a definition still

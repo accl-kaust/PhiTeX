@@ -48,6 +48,8 @@ struct Run {
     /// It resumed a kept state; the log length of the world it ran on.
     resumed: bool,
     log_at: u64,
+    /// The text the run ran under (a token it parked is of that text).
+    text: Option<std::sync::Arc<super::world::Text>>,
 }
 
 /// The evaluation's scheduling state.
@@ -617,6 +619,7 @@ impl Engine {
         let kept = &self.kept;
         self.kept_ix.retain(|id, _| kept.contains_key(id));
         self.cont_memo.retain(|id, _| kept.contains_key(id));
+        self.kept_text.retain(|id, _| kept.contains_key(id));
         let low = self.kept_ix.values().filter(|ix| ix.log.same(&self.w.log)).map(|ix| ix.from).min();
         self.w.log.forget(low.unwrap_or(self.w.log_len));
         rep.kept_asked = std::mem::take(&mut self.kept_asked);
@@ -1464,6 +1467,7 @@ impl Engine {
             park_cont: false,
             resumed: false,
             log_at: 0,
+            text: None,
         })
     }
 
@@ -1530,10 +1534,10 @@ impl Engine {
 
     /// Where placer `p`'s broken read `r` starts to differ: a range read's
     /// window start (what it read before it stands), else anywhere.
-    fn broken_from(&self, p: Id, r: &Read) -> Pos {
+    fn broken_from(&self, p: Id, b: &Broken) -> Pos {
         let pu = self.w.node(p).map(|n| n.unit);
-        match r {
-            Read::Range { from, .. } => self.w.node(*from).filter(|n| Some(n.unit) == pu).map_or(0, |n| n.pos),
+        match b {
+            Broken::Read(Read::Range { from, .. }) => self.w.node(*from).filter(|n| Some(n.unit) == pu).map_or(0, |n| n.pos),
             _ => 0,
         }
     }
@@ -1546,7 +1550,7 @@ impl Engine {
             return None;
         }
         match self.kept_first_broken(p) {
-            Some(r) => Some(self.broken_from(p, &r)),
+            Some(b) => Some(self.broken_from(p, &b)),
             None => {
                 s.kept_ok.insert(p, self.w.ver);
                 None
@@ -1557,8 +1561,16 @@ impl Engine {
     /// The first of node `id`'s kept reads that no longer holds: asked of
     /// those its index names (a change since its last check reaches
     /// them), or all; none broken, the index is brought up to now.
-    fn kept_first_broken(&mut self, id: Id) -> Option<Read> {
+    fn kept_first_broken(&mut self, id: Id) -> Option<Broken> {
         let _t = super::core::prof::Span::new(46);
+        // (A token is of the text it was parked under: the node given
+        // another since, by its placer or an edit, starts over.)
+        if let Some(t) = self.kept_text.get(&id)
+            && self.w.node(id).is_some_and(|n| !std::sync::Arc::ptr_eq(&n.text, t))
+        {
+            self.kept_ix.remove(&id);
+            return Some(Broken::Text);
+        }
         let reads = &self.kept.get(&id)?.1;
         let n = reads.len();
         let ask = self.kept_ix.get(&id).and_then(|ix| ix.suspects(&self.w, n));
@@ -1592,7 +1604,7 @@ impl Engine {
             ix.from = self.w.log_len;
             super::core::prof::time(45, || ix.add(&self.w, id, reads));
         }
-        broken
+        broken.map(Broken::Read)
     }
 
     fn prepare(&mut self, s: &mut Sched, rep: &mut Report, k: (u32, Pos, Id)) -> Option<Kept> {
@@ -1668,7 +1680,10 @@ impl Engine {
                 }
                 Some(r) => {
                     rep.restarted += 1;
-                    bump(&mut rep.restarted_by, read_kind(r));
+                    bump(&mut rep.restarted_by, match r {
+                        Broken::Read(rd) => read_kind(rd),
+                        Broken::Text => "text: changed",
+                    });
                     if super::core::debug() {
                         eprintln!("restart {id}: kept read broken {r:?}");
                     }
@@ -1929,6 +1944,9 @@ impl Engine {
                         super::core::prof::time(45, || ix.add(&self.w, id, &reads));
                         self.kept_ix.insert(id, ix);
                         self.kept.insert(id, (k, reads, base));
+                        if let Some(t) = r.text.clone() {
+                            self.kept_text.insert(id, t);
+                        }
                     }
                     // Applications asked for: made now; an application's
                     // environment set before its body runs.
@@ -2623,6 +2641,14 @@ fn chain_by_time(hs: &Heights) -> Vec<(NodeId, crate::api::Cause, [u64; 4])> {
     out
 }
 
+/// Why a kept state no longer stands: a read of it broke, or the node's
+/// text is not the one its token was parked under.
+#[derive(Debug)]
+enum Broken {
+    Read(Read),
+    Text,
+}
+
 /// A read's kind, as `Report::restarted_by` names why a kept state went.
 fn read_kind(r: &Read) -> &'static str {
     match r {
@@ -2940,6 +2966,9 @@ impl Merge<'_> {
                     {
                         eng.kept_ix.remove(&id);
                         eng.kept.insert(id, (k, r.res.reads.clone(), r.park_cont.then(|| r.base.unwrap_or_default())));
+                        if let Some(t) = r.text.clone() {
+                            eng.kept_text.insert(id, t);
+                        }
                     }
                     eng.enqueue(s, id);
                     None
@@ -3211,6 +3240,9 @@ impl Merge<'_> {
                 {
                     eng.kept_ix.remove(&id);
                     eng.kept.insert(id, (k, r.res.reads.clone(), r.park_cont.then(|| r.base.unwrap_or_default())));
+                    if let Some(t) = r.text.clone() {
+                        eng.kept_text.insert(id, t);
+                    }
                 }
                 eng.enqueue(s, id);
                 return Ok(());
@@ -3338,6 +3370,7 @@ fn run_job(
     fuel: Option<u64>,
 ) -> Outcome {
     let (resumed, log_at) = (resume.is_some(), w.log_len);
+    let text = w.node(id).map(|n| n.text.clone());
     let (kept, reads, base) = match resume {
         Some((t, r, b)) => (Some(t), r, Some(b)),
         None => (None, Vec::new(), None),
@@ -3398,6 +3431,7 @@ fn run_job(
         base: cx.base,
         park_cont: cx.park_cont,
         resumed,
+        text: text.clone(),
         log_at,
     };
     match r {

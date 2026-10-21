@@ -95,6 +95,8 @@ pub struct Engine {
     pub(crate) kept_ix: FxHashMap<Id, super::eval::KeptIx>,
     /// Continuing placers' placements as their last stop left them.
     pub(crate) cont_memo: FxHashMap<Id, super::build::ContMemo>,
+    /// The text each kept state's token was parked under.
+    pub(crate) kept_text: FxHashMap<Id, std::sync::Arc<super::world::Text>>,
     pub(crate) marked: FxHashSet<Id>,
     pub(crate) settled_out: Vec<Settled>,
     pub(crate) edits: u64,
@@ -159,6 +161,7 @@ impl Engine {
             kept: FxHashMap::default(),
             kept_ix: FxHashMap::default(),
             cont_memo: FxHashMap::default(),
+            kept_text: FxHashMap::default(),
             marked: FxHashSet::default(),
             settled_out: Vec::new(),
             edits: 0,
@@ -1071,7 +1074,7 @@ impl Engine {
         let list_f = |w: &World, res: bool| -> Vec<(u32, u64, Pos, Id)> {
             w.fields
                 .iter()
-                .flat_map(|(&(u, f), c)| if res { &c.acc_res } else { &c.acc_static }.iter().map(move |(&p, &x)| (u, f.0.raw(), p, x)))
+                .flat_map(|(&k, c)| if res { &c.acc_res } else { &c.acc_static }.iter().map(move |(&p, &x)| (k.unit(), k.field().0.raw(), p, x)))
                 .collect()
         };
         if list_u(&self.w) != list_u(&want) {

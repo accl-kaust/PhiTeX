@@ -124,7 +124,8 @@ impl<'a> Ctx<'a> {
             unit: n.unit,
             op: n.text.op,
             args: n.text.args.clone(),
-            reads: Vec::new(),
+            // (About as many as its last run read.)
+            reads: Vec::with_capacity(n.res.as_ref().map_or(0, |r| r.reads.len())),
             defs: Vec::new(),
             contribs: Vec::new(),
             pubs: Vec::new(),

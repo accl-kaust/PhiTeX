@@ -496,7 +496,7 @@ pub(crate) struct World {
     pub units: PMap<u32, Arc<Unit>>,
     /// Each field of each unit: its definitions, readers, contributions
     /// and contributors in work (a cell, written as a whole).
-    pub fields: PMap<(u32, Field), Arc<FieldCell>>,
+    pub fields: PMap<FKey, Arc<FieldCell>>,
     /// The reader indexes (of fields, ranges, outputs, structure), live:
     /// shared by this world's copies (see `live`; a kept world takes a
     /// [`World::snapshot`]).
@@ -532,6 +532,25 @@ pub(crate) struct World {
     /// Changes go unnoted (a renumbering's moves: its change of all
     /// covers them).
     pub quiet: bool,
+}
+
+/// A field cell's key: its unit, then its field, as one number (ordered
+/// as the pair; one comparison where a node of the field map is searched).
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct FKey(u128);
+
+impl FKey {
+    pub(crate) fn new(u: u32, f: Field) -> FKey {
+        FKey((u128::from(u) << 64) | u128::from(f.0.raw()))
+    }
+
+    pub(crate) fn unit(self) -> u32 {
+        (self.0 >> 64) as u32
+    }
+
+    pub(crate) fn field(self) -> Field {
+        Field(ValueId::from_raw(self.0 as u64))
+    }
 }
 
 /// A change to a world, as a kept state's reads see it (which of them it
@@ -610,7 +629,7 @@ impl World {
     /// Field `f` of unit `u`, if anything is filed under it.
     #[inline]
     pub(crate) fn field(&self, u: u32, f: Field) -> Option<&FieldCell> {
-        self.fields.get(&(u, f)).map(|c| &**c)
+        self.fields.get(&FKey::new(u, f)).map(|c| &**c)
     }
 
     /// Changes field `f` of unit `u` (made if new).
@@ -618,16 +637,16 @@ impl World {
     pub(crate) fn with_field<R>(&mut self, u: u32, f: Field, g: impl FnOnce(&mut FieldCell) -> R) -> R {
         let mut g = Some(g);
         let mut r = None;
-        self.fields.upsert((u, f), &NoMeasure, |c| r = Some((g.take().expect("once"))(Arc::make_mut(c))));
+        self.fields.upsert(FKey::new(u, f), &NoMeasure, |c| r = Some((g.take().expect("once"))(Arc::make_mut(c))));
         r.expect("ran")
     }
 
     /// The fields of unit `u` with a cell.
     pub(crate) fn fields_of(&self, u: u32) -> Vec<Field> {
         self.fields
-            .range(std::ops::Bound::Included(&(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
-            .take_while(|(k, _)| k.0 == u)
-            .map(|(k, _)| k.1)
+            .range(std::ops::Bound::Included(&FKey::new(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
+            .take_while(|(k, _)| k.unit() == u)
+            .map(|(k, _)| k.field())
             .collect()
     }
 
@@ -1490,6 +1509,8 @@ impl World {
         let Some(fs) = n.text.stat.reads.as_ref() else { return Ok(()) };
         let Some((u, pos, fr)) = self.frame_at(id, false) else { return Ok(()) };
         let working = |x: Id| self.node(x).is_some_and(|d| in_work(d.st)).then_some(x);
+        // (The frame chain walked once, for every hinted field.)
+        let mut chain: Option<Vec<(FrameId, Pos)>> = None;
         for &f in fs.iter() {
             if self.loops.get(&f).is_some() {
                 continue;
@@ -1505,7 +1526,7 @@ impl World {
                 }
                 continue;
             }
-            let reach = self.reaching(u, f, pos, fr, id);
+            let reach = self.field(u, f).and_then(|c| Self::reaching_in(&c.defs, chain.get_or_insert_with(|| self.chain_starts(u, fr)), pos, id));
             if let Some((_, e)) = reach {
                 let busy = e.val.is_none() || self.node(e.node).is_some_and(|d| in_work(d.st));
                 // (A definer in work that predicts the field: its
