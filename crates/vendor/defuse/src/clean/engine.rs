@@ -528,6 +528,18 @@ impl Engine {
         self.rec_call("set_heights", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
     }
 
+    /// Opts field `f` in to guessing from the last evaluation: a reader
+    /// that would wait on a definer declared, not yet made, of `f` takes
+    /// the value its result from a previous evaluation read at the same
+    /// point, as a guess the merge validates (the definer's commit re-asks
+    /// it). When predicting only; a result of the evaluation running is
+    /// never guessed from, so a cold build is as without it.
+    pub fn guess_from_last(&mut self, f: Field) {
+        self.core_mut().guess_last.insert(f);
+        #[cfg(feature = "observe")]
+        self.rec_call("guess_from_last", crate::record::rec().map(|_| crate::record::j(&(&f,))), &());
+    }
+
     pub fn declare_sequence(&mut self, f: Field) {
         self.core_mut().seqs.insert(f);
         #[cfg(feature = "observe")]

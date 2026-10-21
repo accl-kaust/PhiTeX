@@ -1952,6 +1952,13 @@ impl Program {
                 eng.set_stable(f);
             }
         }
+        if std::env::var_os("FUZZ_GUESS_LAST").is_some() {
+            // Guessed from the last evaluation: results must not change.
+            for name in ["x", "y", "u", "w", "g", "s", "k", "z", "q", "r", "cap"] {
+                let f = eng.values().field(name);
+                eng.guess_from_last(f);
+            }
+        }
         let unit = eng.new_unit();
         let asts: Vec<ValueId> = lines.iter().map(|l| parse_stmt(eng.values(), l)).collect();
         let loops = Lang::declare_loops(&mut eng, &asts);

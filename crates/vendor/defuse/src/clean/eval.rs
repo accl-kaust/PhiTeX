@@ -249,6 +249,7 @@ impl Engine {
         let src: &mut dyn EditSource = &mut rsrc;
         #[cfg(feature = "observe")]
         crate::record::api(&self.core.values, "evaluate_begin", serde_json::Value::Null, serde_json::Value::Null);
+        self.core.eval_no.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let r = self.evaluate_inner(sched, exec, src);
         #[cfg(feature = "observe")]
         {
@@ -3423,6 +3424,7 @@ fn run_job(
             filed: None,
             def_ix: std::sync::OnceLock::new(),
             text: 0,
+            eval: core.eval_no.load(std::sync::atomic::Ordering::Relaxed),
         },
         kids: cx.kids,
         conts: cx.conts,

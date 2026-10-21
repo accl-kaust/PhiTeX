@@ -215,6 +215,8 @@ pub(crate) struct Res {
     pub def_ix: std::sync::OnceLock<Arc<FxHashMap<Field, ValueId>>>,
     /// The text it was committed under ([`text_key`]; 0: not yet).
     pub text: usize,
+    /// The evaluation its run ran in (`Core::eval_no`; 0: none).
+    pub eval: u64,
 }
 
 impl Res {
@@ -252,6 +254,7 @@ impl Default for Res {
             filed: None,
             def_ix: std::sync::OnceLock::new(),
             text: 0,
+            eval: 0,
         }
     }
 }
@@ -1564,10 +1567,11 @@ impl World {
                 // (A definer in work that predicts the field: its
                 // prediction stands in, when predictions are used.)
                 let predicted = predict
-                    && self
+                    && (self
                         .node(e.node)
                         .and_then(|d| d.text.stat.preds.as_ref())
-                        .is_some_and(|ps| ps.iter().any(|p| p.0 == f));
+                        .is_some_and(|ps| ps.iter().any(|p| p.0 == f))
+                        || (e.val.is_none() && self.read_last(core, id, f)));
                 if busy && !predicted {
                     return Err(working(e.node));
                 }
@@ -1577,6 +1581,17 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    /// Whether node `id`'s result from a previous evaluation read `f`, a
+    /// field guessed from the last (`Engine::guess_from_last`): its read
+    /// guesses that, and need not wait.
+    fn read_last(&self, core: &super::core::Core, id: Id, f: Field) -> bool {
+        core.guess_last.contains(&f)
+            && self
+                .node(id)
+                .and_then(|n| n.res.as_ref())
+                .is_some_and(|r| r.eval < core.eval_no.load(std::sync::atomic::Ordering::Relaxed) && r.reads.iter().any(|rd| matches!(rd, Read::Use { f: g, val: Some(_), .. } if *g == f)))
     }
 
     /// The first node in work strictly between `lo` and `hi` in unit `u`

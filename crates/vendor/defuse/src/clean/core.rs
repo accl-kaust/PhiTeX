@@ -45,6 +45,11 @@ pub(crate) struct Core {
     pub acc_memo: crate::sync::Table<Option<Arc<dyn Monoid>>>,
     pub seqs: FxHashSet<Field>,
     pub stable: FxHashSet<Field>,
+    /// Fields a reader guesses from its last evaluation's read of them
+    /// while their definer is declared, not made (`Engine::guess_from_last`).
+    pub guess_last: FxHashSet<Field>,
+    /// The evaluation running (or last run): counted from 1 at each start.
+    pub eval_no: std::sync::atomic::AtomicU64,
 
     /// Declared loop-back fields and their initial values.
     pub loops: FxHashMap<Field, ValueId>,
@@ -114,6 +119,8 @@ impl Core {
             acc_memo: crate::sync::Table::new(),
             seqs: FxHashSet::default(),
             stable: FxHashSet::default(),
+            guess_last: FxHashSet::default(),
+            eval_no: std::sync::atomic::AtomicU64::new(0),
 
             loops: FxHashMap::default(),
             loops_later: Mutex::new(Vec::new()),

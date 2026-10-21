@@ -778,6 +778,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "unmark" => eng.unmark(de(&g(0))),
         "set_version" => eng.set_version(de(&g(0))),
         "set_stable" => eng.set_stable(de(&g(0))),
+        "guess_from_last" => eng.guess_from_last(de(&g(0))),
         "set_heights" => eng.set_heights(de(&g(0))),
         "set_round_cap_policy" => eng.set_round_cap_policy(de::<CapPolicy>(&g(0))),
         "refresh_where" => {
