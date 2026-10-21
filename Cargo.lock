@@ -1659,6 +1659,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-graphite"
+version = "0.0.0"
+
+[[package]]
 name = "phitex-kpse"
 version = "0.0.0"
 
@@ -1688,6 +1692,7 @@ dependencies = [
  "brotli-decompressor",
  "harfrust",
  "libm",
+ "phitex-graphite",
  "phitex-kpse",
  "read-fonts",
  "skrifa",

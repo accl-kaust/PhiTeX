@@ -119,10 +119,12 @@ fn xdv_words(d: &[u8]) -> (BTreeMap<u32, Def>, Vec<Word>) {
     let mut words = Vec::new();
     let (mut font, mut page) = (0u32, 0usize);
     let mut p = 0usize;
+    // (a read past the end, in an XDV XeTeX did not finish, reads 0;
+    // the loop stops there)
     let u = |p: usize, n: usize| -> i64 {
         let mut v: i64 = 0;
         for i in 0..n {
-            v = (v << 8) | i64::from(d[p + i]);
+            v = (v << 8) | i64::from(d.get(p + i).copied().unwrap_or(0));
         }
         v
     };
@@ -162,24 +164,25 @@ fn xdv_words(d: &[u8]) -> (BTreeMap<u32, Def>, Vec<Word>) {
             243..=246 => {
                 let n = (op - 242) as usize;
                 p += n + 12;
-                let a = d[p] as usize;
-                let l = d[p + 1] as usize;
+                let a = u(p, 1) as usize;
+                let l = u(p + 1, 1) as usize;
                 p += 2 + a + l;
             }
             247 => {
                 p += 14;
-                let k = d[p - 1] as usize;
+                let k = u(p - 1, 1) as usize;
                 p += k;
             }
-            248 => break,
+            // (248, the postamble, ends the pages like any op unknown here)
             252 => {
                 let k = u(p, 4) as u32;
                 let size = s(p + 4, 4) as i32;
                 p += 8;
                 let flags = u(p, 2) as u16;
                 p += 2;
-                let l = d[p] as usize;
-                let path = String::from_utf8_lossy(&d[p + 1..p + 1 + l]).into_owned();
+                let l = u(p, 1) as usize;
+                let Some(path) = d.get(p + 1..p + 1 + l) else { break };
+                let path = String::from_utf8_lossy(path).into_owned();
                 let index = u(p + 1 + l, 4) as u32;
                 p += 1 + l + 4;
                 let mut def = Def { size, path, index, ..Def::default() };
@@ -219,9 +222,13 @@ fn xdv_words(d: &[u8]) -> (BTreeMap<u32, Def>, Vec<Word>) {
                     g.2 = u(p + 2 * i, 2) as u16;
                 }
                 p += 2 * n;
+                if p > d.len() {
+                    break;
+                }
                 words.push(Word { page, font, text, width, glyphs });
             }
-            _ => panic!("XDV op {op} at {}", p - 1),
+            // (an unknown op: an XDV cut short; what was read is kept)
+            _ => break,
         }
     }
     (defs, words)
