@@ -6493,6 +6493,24 @@ fn structural_diff(
 /// those nodes (`debug_node`: label, state, flags; the parent) at the
 /// evaluation's start and end.
 fn debug_nodes(eng: &Engine, when: &str) {
+    // (`PHITEX_ORDER_AROUND=a,b`: the unit's nodes in text order from
+    // node `a` to node `b`, each as the engine has it)
+    if let Some(ab) = crate::exec::obs_str!("PHITEX_ORDER_AROUND") {
+        let ids: Vec<u64> = ab.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if let [a, b] = ids[..]
+            && let Some(i) = eng.node_info(phitex_defuse::NodeId::from_raw(a))
+        {
+            let order = eng.order(i.unit);
+            let at = |x: u64| order.iter().position(|n| n.raw() == x);
+            if let (Some(p), Some(q)) = (at(a), at(b)) {
+                eprintln!("order {when} from {a} to {b}:");
+                for n in &order[p.min(q)..=p.max(q)] {
+                    let d = eng.debug_node(*n);
+                    eprintln!("  {} {}", n.raw(), d.chars().take(400).collect::<String>());
+                }
+            }
+        }
+    }
     let Some(list) = crate::exec::obs_str!("PHITEX_DEBUG_NODES") else {
         return;
     };
