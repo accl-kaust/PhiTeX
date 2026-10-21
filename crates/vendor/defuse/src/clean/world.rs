@@ -466,7 +466,9 @@ pub(crate) struct World {
     /// The last renumbering's epoch (`live::fresh_epoch`; 0: none yet):
     /// positions taken at another may have moved since.
     pub relabels: u64,
-    pub nodes: PMap<Id, Node>,
+    /// (Each node behind its own `Arc`: a write copies a path of pointers,
+    /// not of nodes.)
+    pub nodes: PMap<Id, Arc<Node>>,
     pub units: PMap<u32, Arc<Unit>>,
     /// Each field of each unit: its definitions, readers, contributions
     /// and contributors in work (a cell, written as a whole).
@@ -541,7 +543,7 @@ impl World {
     }
 
     pub(crate) fn node(&self, id: Id) -> Option<&Node> {
-        self.nodes.get(&id)
+        self.nodes.get(&id).map(|n| &**n)
     }
 
     pub(crate) fn unit(&self, u: u32) -> &Unit {
@@ -1085,7 +1087,7 @@ impl World {
             }
             self.acc_index(id, &n, true);
         }
-        self.nodes.insert(id, n, &NoMeasure);
+        self.nodes.insert(id, Arc::new(n), &NoMeasure);
     }
 
     /// Removes a node's record.

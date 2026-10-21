@@ -91,7 +91,7 @@ pub struct Engine {
     pub(crate) pending: Vec<Id>,
     /// Kept tokens of stopped runs (`Ctx::park`).
     /// with the reads the stopped run made (it resumes while they hold).
-    pub(crate) kept: FxHashMap<Id, (Box<dyn Any + Send>, Vec<super::world::Read>)>,
+    pub(crate) kept: FxHashMap<Id, (Box<dyn Any + Send>, Vec<super::world::Read>, super::ctx::Base)>,
     pub(crate) marked: FxHashSet<Id>,
     pub(crate) settled_out: Vec<Settled>,
     pub(crate) edits: u64,
@@ -496,6 +496,18 @@ impl Engine {
         self.core_mut().stable.insert(f);
         #[cfg(feature = "observe")]
         self.rec_call("set_stable", crate::record::rec().map(|_| crate::record::j(&(&f,))), &());
+    }
+
+    /// Whether a run resumed from its kept token (`Ctx::parked` gave it
+    /// back, its reads holding) continues its placements: those its earlier
+    /// attempts committed stand, and it makes only the ones it has not
+    /// (child and continuation indices go on from theirs). Off (the
+    /// default), every attempt makes all its placements again. A run that
+    /// starts over makes all of them either way.
+    pub fn set_continue_placements(&mut self, on: bool) {
+        self.core_mut().cont_placements = on;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_continue_placements", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
     }
 
     /// Whether evaluations compute heights and the critical chain.
@@ -1037,7 +1049,7 @@ impl Engine {
         // The accumulator indexes: as the nodes in work file them.
         let mut want = super::world::World::default();
         for (&id, n) in self.w.nodes.iter() {
-            want.put(id, n.clone());
+            want.put(id, super::world::Node::clone(n));
         }
         let list_u = |w: &World| -> Vec<(u32, Pos, Id)> { w.units.iter().flat_map(|(&u, un)| un.acc_open.iter().map(move |(&p, &x)| (u, p, x))).collect() };
         let list_f = |w: &World, res: bool| -> Vec<(u32, u64, Pos, Id)> {

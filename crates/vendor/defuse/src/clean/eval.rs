@@ -40,6 +40,9 @@ struct Run {
     fold_redo: bool,
     /// When it started and ended (the critical chain's link times).
     span: Option<(std::time::Instant, std::time::Instant)>,
+    /// It continued from its kept state (`Ctx::base`): its placements are
+    /// its new ones, after those its earlier attempts made.
+    base: Option<super::ctx::Base>,
 }
 
 /// The evaluation's scheduling state.
@@ -1396,6 +1399,7 @@ impl Engine {
             narrowed: None,
             fold_redo: false,
             span: None,
+            base: None,
         })
     }
 
@@ -1471,7 +1475,7 @@ impl Engine {
     /// (the first one's start, see [`Self::broken_from`]); asked once per
     /// world version while they hold.
     fn kept_broken(&self, s: &mut Sched, p: Id) -> Option<Pos> {
-        let (_, reads) = self.kept.get(&p)?;
+        let (_, reads, _) = self.kept.get(&p)?;
         if s.kept_ok.get(&p) == Some(&self.w.ver) {
             return None;
         }
@@ -1546,10 +1550,10 @@ impl Engine {
         }
         // A stopped run's kept state: resumed while its reads hold.
         Some(match self.kept.remove(&id) {
-            Some((tok, reads)) => match reads.iter().find(|r| !super::build::holds(&self.core, &self.w, id, r)) {
+            Some((tok, reads, base)) => match reads.iter().find(|r| !super::build::holds(&self.core, &self.w, id, r)) {
                 None => {
                     rep.resumed += 1;
-                    Some((tok, reads))
+                    Some((tok, reads, base))
                 }
                 Some(r) => {
                     rep.restarted += 1;
@@ -1687,6 +1691,7 @@ impl Engine {
                     let mut b = Builder::new(&self.core, w);
                     b.app_env(id, &r.env);
                     b.defer = self.defer.take();
+                    b.cont = r.base.map(|x| (x.0, x.1));
                     let changed = super::core::prof::time(9, || b.commit(id, r.res, &r.kids, &r.conts));
                     let mut m = b.finish();
                     self.defer = m.defer.take();
@@ -1767,7 +1772,11 @@ impl Engine {
                         eprintln!("stop {id} on {wait:?} reads {:?} node {:?}", r.res.reads, self.w.node(match wait { Wait::Node(x, _) => x, _ => id }));
                     }
                     if let Some(k) = r.kept {
-                        self.kept.insert(id, (k, r.res.reads.clone()));
+                        // (The placements made so far, this attempt's
+                        // committed below.)
+                        let nk = r.kids.iter().filter(|x| !matches!(x.place, super::world::Place::Marker(_))).count();
+                        let b = r.base.unwrap_or_default();
+                        self.kept.insert(id, (k, r.res.reads.clone(), (b.0 + r.kids.len(), b.1 + r.conts.len(), b.2 + nk)));
                     }
                     // Applications asked for: made now; an application's
                     // environment set before its body runs.
@@ -1809,7 +1818,9 @@ impl Engine {
                         let w = std::mem::take(&mut self.w);
                         let mut b = Builder::new(&self.core, w);
                         if unfold {
+                            b.cont = r.base.map(|x| (x.0, x.1));
                             b.commit_unfolding(id, &r.kids, &r.conts);
+                            b.cont = None;
                         }
                         let gone = past(&b.w);
                         if !gone.is_empty() {
@@ -2574,7 +2585,7 @@ struct Merge<'a> {
 }
 
 /// A stopped run's kept state, and the reads it made before stopping.
-type Kept = Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>;
+type Kept = Option<(Box<dyn std::any::Any + Send>, Vec<Read>, super::ctx::Base)>;
 
 type Resume = std::sync::Mutex<Kept>;
 
@@ -2657,8 +2668,12 @@ impl Merge<'_> {
                 Outcome::Stopped(r, _) if r.fuel_out => {
                     rep.fuel_outs += 1;
                     s.no_fuel.insert(id);
-                    if let Some(k) = r.kept {
-                        eng.kept.insert(id, (k, r.res.reads.clone()));
+                    // (Its placements are not made: a continuing token would
+                    // stand on them, and goes.)
+                    if let Some(k) = r.kept
+                        && (!eng.core.cont_placements || (r.kids.is_empty() && r.conts.is_empty()))
+                    {
+                        eng.kept.insert(id, (k, r.res.reads.clone(), r.base.unwrap_or_default()));
                     }
                     eng.enqueue(s, id);
                     None
@@ -2923,8 +2938,12 @@ impl Merge<'_> {
                 rep.merged += 1;
                 rep.fuel_outs += 1;
                 s.no_fuel.insert(id);
-                if let Some(k) = r.kept {
-                    eng.kept.insert(id, (k, r.res.reads.clone()));
+                // (Its placements are not made: a continuing token would
+                // stand on them, and goes.)
+                if let Some(k) = r.kept
+                    && (!eng.core.cont_placements || (r.kids.is_empty() && r.conts.is_empty()))
+                {
+                    eng.kept.insert(id, (k, r.res.reads.clone(), r.base.unwrap_or_default()));
                 }
                 eng.enqueue(s, id);
                 return Ok(());
@@ -3050,9 +3069,9 @@ fn run_job(
     careful: bool,
     fuel: Option<u64>,
 ) -> Outcome {
-    let (kept, reads) = match resume {
-        Some((t, r)) => (Some(t), r),
-        None => (None, Vec::new()),
+    let (kept, reads, base) = match resume {
+        Some((t, r, b)) => (Some(t), r, Some(b)),
+        None => (None, Vec::new(), None),
     };
     // Run ahead of a node before it still in work: what it reads may
     // change yet (a guess).
@@ -3060,6 +3079,13 @@ fn run_job(
     let t_start = super::core::now();
     let mut cx = Ctx::new(core, w, id, kept);
     cx.reads = reads;
+    // (Continuing: the placements its earlier attempts made stand.)
+    if core.cont_placements
+        && let Some(b) = base
+    {
+        cx.base = Some(b);
+        cx.nkids = b.2;
+    }
     cx.predict = predict;
     cx.careful = careful;
     cx.fuel = fuel;
@@ -3101,6 +3127,7 @@ fn run_job(
         narrowed: cx.narrowed,
         fold_redo: false,
         span: t_start.zip(super::core::now()),
+        base: cx.base,
     };
     match r {
         Ok(Ok(out)) => {
