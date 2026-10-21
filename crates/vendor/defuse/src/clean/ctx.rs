@@ -5,7 +5,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::core::Core;
-use super::world::{Def, Id, NONE, Place, Read, St, World};
+use super::world::{Def, Id, NONE, Place, Pos, Read, St, World};
 use crate::api::{Effect, FieldAt, Locality, NodeId, OpId, Stop};
 use crate::values::FxHashMap;
 use crate::values::{Field, ValueId, Values};
@@ -75,11 +75,10 @@ pub struct Ctx<'a> {
     pub(crate) fuel: Option<u64>,
     pub(crate) fuel_out: bool,
     /// The range a stopped run waits on (field, from, to).
-    pub(crate) range_wait: Option<(Field, Id, Id)>,
+    pub(crate) range_wait: Option<(Field, Id, Id, bool)>,
     /// The bound the run narrowed its pending set to.
     pub(crate) narrowed: Option<super::world::May>,
-    /// The calls of a recorded run (`observe`; the clean core records the
-    /// run, not yet its calls).
+    /// The calls of a recorded run (`observe`; `RecOp::run` collects them).
     #[cfg(feature = "observe")]
     pub(crate) calls: std::cell::RefCell<Option<crate::record::Calls>>,
 }
@@ -556,16 +555,31 @@ impl<'a> Ctx<'a> {
     pub fn follow_after(&mut self, at: NodeId, op: OpId, args: Vec<ValueId>) -> usize {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&at, &op, &args, )) } else { serde_json::Value::Null };
-        let r = self.follow_after_inner(at, op, args);
+        let r = self.follow_after_inner(at, op, args, false);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "follow_after", a, crate::record::j(&r));
         r
     }
 
+    /// As [`Ctx::follow_after`], with `at` before or past this node: a
+    /// continuation placed right after a later node of this unit (as a
+    /// page builder places a page's finisher after the piece it broke
+    /// at). Readers after `at` are re-asked as for any node coming in. An
+    /// `at` that is gone, in another unit or this node places it after
+    /// this one (as `follow`).
+    pub fn follow_after_any(&mut self, at: NodeId, op: OpId, args: Vec<ValueId>) -> usize {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&at, &op, &args, )) } else { serde_json::Value::Null };
+        let r = self.follow_after_inner(at, op, args, true);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "follow_after_any", a, crate::record::j(&r));
+        r
+    }
+
     #[inline]
-    fn follow_after_inner(&mut self, at: NodeId, op: OpId, args: Vec<ValueId>) -> usize {
+    fn follow_after_inner(&mut self, at: NodeId, op: OpId, args: Vec<ValueId>, any: bool) -> usize {
         let ok = self.w.node(at.0).is_some_and(|n| n.unit == self.unit && !matches!(n.place, Place::Marker(_)))
-            && self.w.before(at.0, self.me);
+            && if any { at.0 != self.me } else { self.w.before(at.0, self.me) };
         if !ok {
             return self.follow(op, args);
         }
@@ -761,21 +775,64 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn acc_range_to_inner(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
-        let from = from.map_or(NONE, |n| n.0);
-        let to = to.map_or(NONE, |n| n.0);
-        let Some((u, lo, hi)) = self.w.window(self.me, from, to) else {
-            return Ok(ValueId::UNIT);
+        self.acc_window(f, from, to, false)
+    }
+
+    /// The fold of accumulator `f` over the window `(from, to]`, which may
+    /// lie past this node (`to` after it): a reader of the nodes after it,
+    /// as a page builder reads the pieces it breaks. This node's own
+    /// contribution to `f`, if any, is folded as it last committed.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] until every node in the window has finished.
+    pub fn acc_fold(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<ValueId, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &from, &to, )) } else { serde_json::Value::Null };
+        let r = self.acc_window(f, from, to, true);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "acc_fold", a, crate::record::stop_or(&r));
+        r
+    }
+
+    /// The first node after `after` (`None`: the unit's start), before or
+    /// past this one, that contributes to accumulator `f`, with its
+    /// contribution; `None` when none is left in the unit. A reader that
+    /// folds forward a node at a time, as a page builder takes the pieces
+    /// after it until it decides, calls it again from the node it got.
+    /// What it read is the window up to that node: a contributor that
+    /// comes in between, or a change of the node's contribution, re-asks.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] while a node in the window, up to the next contributor,
+    /// is in work and may contribute.
+    pub fn acc_next(&mut self, f: Field, after: Option<NodeId>) -> Result<Option<(NodeId, ValueId)>, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &after, )) } else { serde_json::Value::Null };
+        let r = self.acc_next_inner(f, after);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "acc_next", a, crate::record::stop_or(&r));
+        r
+    }
+
+    fn acc_next_inner(&mut self, f: Field, after: Option<NodeId>) -> Result<Option<(NodeId, ValueId)>, Stop> {
+        let from = after.map_or(NONE, |n| n.0);
+        let Some((u, lo, _)) = self.w.window(self.me, from, NONE, true) else {
+            return Ok(None);
         };
-        // A node in the window still in work that may contribute: waited
-        // for (one that declares its contributions, or whose last run made
-        // none to `f`, is folded as it stands; its change re-asks).
+        // The next committed (or listed) contribution, not this node's.
+        let order = &self.w.unit(u).order;
+        let next = self.w.contribs.get(&(u, f)).and_then(|m| {
+            m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Unbounded)
+                .filter_map(|(p, _)| order.get(p).map(|&x| (*p, x)))
+                .find(|&(_, x)| x != self.me)
+        });
+        let hi = next.map_or(Pos::MAX, |(p, _)| p + 1);
+        // (A node before it in work that may contribute comes first.)
         if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
-            if super::core::debug() && self.w.node(x).is_some_and(|n| !matches!(n.st, St::Dirty | St::Held)) {
-                eprintln!("range {} of {f:?}: blocker {x} in state {:?}", self.me, self.w.node(x).map(|n| n.st));
-            }
-            // (It waits for the whole range: re-parked on the next blocker
-            // without running while one is left.)
-            self.range_wait = Some((f, from, to));
+            let to = next.map_or(NONE, |(_, x)| x);
+            self.range_wait = Some((f, from, to, true));
             return Err(self.stop(Wait::Node(x, Some(f))));
         }
         let val = match self.core.accs.get(&f) {
@@ -788,7 +845,40 @@ impl<'a> Ctx<'a> {
             }
             None => ValueId::UNIT,
         };
-        self.reads.push(Read::Range { f, from, to, val });
+        let to = next.map_or(NONE, |(_, x)| x);
+        self.reads.push(Read::Range { f, from, to, val, past: true });
+        Ok(next.map(|(_, x)| (NodeId(x), val)))
+    }
+
+    fn acc_window(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, past: bool) -> Result<ValueId, Stop> {
+        let from = from.map_or(NONE, |n| n.0);
+        let to = to.map_or(NONE, |n| n.0);
+        let Some((u, lo, hi)) = self.w.window(self.me, from, to, past) else {
+            return Ok(ValueId::UNIT);
+        };
+        // A node in the window still in work that may contribute: waited
+        // for (one that declares its contributions, or whose last run made
+        // none to `f`, is folded as it stands; its change re-asks).
+        if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
+            if super::core::debug() && self.w.node(x).is_some_and(|n| !matches!(n.st, St::Dirty | St::Held)) {
+                eprintln!("range {} of {f:?}: blocker {x} in state {:?}", self.me, self.w.node(x).map(|n| n.st));
+            }
+            // (It waits for the whole range: re-parked on the next blocker
+            // without running while one is left.)
+            self.range_wait = Some((f, from, to, past));
+            return Err(self.stop(Wait::Node(x, Some(f))));
+        }
+        let val = match self.core.accs.get(&f) {
+            Some(mo) => {
+                let m = super::world::AccMeasure {
+                    m: &**mo,
+                    v: &self.core.values,
+                };
+                self.w.fold(&m, u, f, lo, hi)
+            }
+            None => ValueId::UNIT,
+        };
+        self.reads.push(Read::Range { f, from, to, val, past });
         Ok(val)
     }
 

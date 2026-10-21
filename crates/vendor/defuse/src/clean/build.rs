@@ -726,13 +726,9 @@ impl<'a> Builder<'a> {
     /// Holds every final node that ran: its facts go (its readers wait for
     /// the final phase).
     pub(crate) fn hold_finals(&mut self) {
-        let fins: Vec<Id> = self
-            .w
-            .nodes
-            .iter()
-            .filter(|(_, n)| n.text.stat.fin && matches!(n.st, St::Done | St::Dirty))
-            .map(|(&id, _)| id)
-            .collect();
+        let mut fins = self.w.fins_in(St::Done);
+        fins.extend(self.w.fins_in(St::Dirty));
+        fins.sort_unstable();
         for id in fins {
             let Some(n) = self.w.node(id).cloned() else { continue };
             if let Some(res) = n.res.clone() {
@@ -1324,8 +1320,8 @@ impl<'a> Builder<'a> {
                 }
                 Read::Out { node, .. } | Read::At { node, .. } => keys.push(ReadKey::Out(*node)),
                 Read::Kind { .. } => agg.kind = true,
-                Read::Range { f, from, to, .. } => {
-                    if let Some((ru, lo, hi)) = self.w.window(id, *from, *to) {
+                Read::Range { f, from, to, past, .. } => {
+                    if let Some((ru, lo, hi)) = self.w.window(id, *from, *to, *past) {
                         keys.push(ReadKey::Range(ru, *f, lo, hi));
                     }
                     // (Its anchors going moves its window.)
@@ -1679,7 +1675,7 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
             Ok((o, e, _)) => o == *outs && e == *end,
             Err(_) => false,
         },
-        Read::Range { f, from, to, val } => {
+        Read::Range { f, from, to, val, past } => {
             let Some(mo) = core.accs.get(f) else {
                 return *val == ValueId::UNIT;
             };
@@ -1687,7 +1683,7 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
                 m: &**mo,
                 v: &core.values,
             };
-            let Some((u, lo, hi)) = w.window(me, *from, *to) else {
+            let Some((u, lo, hi)) = w.window(me, *from, *to, *past) else {
                 return false;
             };
             w.fold(&m, u, *f, lo, hi) == *val
@@ -1785,10 +1781,16 @@ fn read_on(r: &Read, fs: &[Field]) -> bool {
 }
 
 /// Whether `CLEAN_SCOPED_CHECK` asks settle to check every read of a
-/// reader re-asked on a field (read once).
+/// reader re-asked on a field (read once; `profile` builds only).
+#[inline]
 pub(crate) fn scoped_check() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CLEAN_SCOPED_CHECK").is_some())
+    #[cfg(feature = "profile")]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("CLEAN_SCOPED_CHECK").is_some())
+    }
+    #[cfg(not(feature = "profile"))]
+    false
 }
 
 /// One reader index entry a read files.
