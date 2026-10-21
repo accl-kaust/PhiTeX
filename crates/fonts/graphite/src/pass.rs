@@ -243,6 +243,7 @@ impl Pass {
                 rc_end = rc_begin;
             }
             pass.rules = rules.into_iter().map(|r| r.expect("rule")).collect();
+            pass.rule_map.reserve(num_entries);
             for k in 0..num_entries {
                 let rn = u16_at(d, rule_map_at + 2 * k);
                 if rn >= num_rules {
@@ -259,6 +260,7 @@ impl Pass {
                 }
                 pass.start_states.push(s);
             }
+            pass.transitions.reserve(tsize);
             for k in 0..tsize {
                 let t = u16_at(d, states_at + 2 * k);
                 if t >= num_states {

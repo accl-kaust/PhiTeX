@@ -752,6 +752,10 @@ impl Code {
             return code;
         }
         code.present = true;
+        // (an instruction or a datum a byte at most, but for the analysis's
+        // copies)
+        code.instrs.reserve(bytecode.len());
+        code.data.reserve(bytecode.len());
         let (slotref, max_ref, ok) = {
             let mut dec = Decoder {
                 code: &mut code,

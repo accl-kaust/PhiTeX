@@ -17,6 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::face::{Face, FaceKey, content_hash};
 use crate::index::{FaceEntry, FontIndex, LOADABLE, SFNT};
 use crate::names::{self, NameRecord};
 use crate::xetex::Diagnostic;
@@ -65,23 +66,14 @@ struct NameCollection {
     ps_name: String,
 }
 
-/// fontconfig's family, style and full names of a face.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FcNames {
-    pub family: Vec<String>,
-    pub style: Vec<String>,
-    pub fullname: Vec<String>,
-}
+pub use crate::index::FcNames;
 
 /// fontconfig's `FcStrCmpIgnoreBlanksAndCase(a, b) == 0`.
 fn fc_same(a: &str, b: &str) -> bool {
-    let fold = |s: &str| -> Vec<char> {
-        s.chars()
-            .filter(|&c| c != ' ')
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
-    fold(a) == fold(b)
+    a.chars()
+        .filter(|&c| c != ' ')
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().filter(|&c| c != ' ').flat_map(char::to_lowercase))
 }
 
 /// `FcSfntNameTranscode` (without iconv: UTF-16, Mac Roman, ASCII and
@@ -226,6 +218,10 @@ pub struct FontManager {
     ps_name_to_font: BTreeMap<String, usize>,
     cached_all: bool,
     req_engine: u8,
+    /// The faces loaded, by content: a file loaded again (at another size,
+    /// with other features) shares the face, its tables and its shaping
+    /// caches.
+    faces: BTreeMap<FaceKey, Arc<Face>>,
     /// `\tracingfonts` (for the `-> path` line).
     pub tracing_fonts: i32,
 }
@@ -251,8 +247,25 @@ impl FontManager {
             ps_name_to_font: BTreeMap::new(),
             cached_all: false,
             req_engine: 0,
+            faces: BTreeMap::new(),
             tracing_fonts: 0,
         }
+    }
+
+    /// Face `index` of the file `data` ([`Face::new`]), the face an
+    /// earlier load of the same bytes made if there was one.
+    pub fn face(&mut self, data: Arc<[u8]>, index: u32) -> Option<Arc<Face>> {
+        let key = FaceKey {
+            hash: content_hash(&data),
+            len: data.len() as u64,
+            index,
+        };
+        if let Some(f) = self.faces.get(&key) {
+            return Some(f.clone());
+        }
+        let f = Face::with_key(data, index, key)?;
+        self.faces.insert(key, f.clone());
+        Some(f)
     }
 
     /// The index entry of a font [`FontManager::find_font`] returned.
@@ -275,11 +288,15 @@ impl FontManager {
         f.full_name.clone().unwrap_or_else(|| f.ps_name.clone())
     }
 
+    /// Face `e`'s fontconfig names: the index's, else derived once.
     fn fc_names(&mut self, e: usize) -> &FcNames {
-        if self.fc[e].is_none() {
+        if self.index.entries[e].fc_names.is_none() && self.fc[e].is_none() {
             self.fc[e] = Some(fc_names(&self.index.entries[e]));
         }
-        self.fc[e].as_ref().expect("set above")
+        match &self.index.entries[e].fc_names {
+            Some(fc) => fc,
+            None => self.fc[e].as_ref().expect("set above"),
+        }
     }
 
     /// `readNames`.
@@ -487,7 +504,7 @@ impl FontManager {
                     self.cache(e);
                     continue;
                 }
-                let fc = self.fc_names(e).clone();
+                let fc = self.fc_names(e);
                 let mut hit = fc.fullname.iter().any(|s| s == name);
                 if !hit {
                     'fam: for s in &fc.family {
@@ -495,11 +512,13 @@ impl FontManager {
                             hit = true;
                             break;
                         }
+                        // ("family style" == name)
                         for t in &fc.style {
-                            let mut full = s.clone();
-                            full.push(' ');
-                            full.push_str(t);
-                            if full == name {
+                            if name.len() == s.len() + 1 + t.len()
+                                && name.starts_with(s.as_str())
+                                && name.as_bytes()[s.len()] == b' '
+                                && name.ends_with(t.as_str())
+                            {
                                 hit = true;
                                 break 'fam;
                             }

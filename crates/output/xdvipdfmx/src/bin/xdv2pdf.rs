@@ -6,18 +6,23 @@
 //! xdvipdfmx a DVI name, as when it reads a file and not a pipe. Files are
 //! found by kpathsea in process (`phitex-kpse`, as the CLI's viewer finds
 //! them); streams are compressed with the system zlib's `compress2`, as
-//! xdvipdfmx compresses them.
+//! xdvipdfmx compresses them, the end's (the fonts') on `--threads N`
+//! threads (`PHITEX_THREADS`, else every CPU) with the same bytes.
 #![expect(unsafe_code, reason = "FFI to the system zlib")]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{OsStr, c_int, c_ulong};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use phitex_kpse::{Format as KpseFormat, Kpse};
-use phitex_xdvipdfmx::api::{Options, Session, split_xdv};
+use phitex_xdvipdfmx::api::{BatchDeflate, Options, Session, Starts, split_xdv};
 use phitex_xdvipdfmx::io::{Files, Format};
 
 #[link(name = "z")]
@@ -100,6 +105,28 @@ impl Default for Kpsewhich {
     }
 }
 
+/// The files of a process: one [`Kpsewhich`], its lookups and the files
+/// read kept for every conversion the process makes.
+#[derive(Clone, Default)]
+struct Shared(Rc<RefCell<Kpsewhich>>, Rc<RefCell<Contents>>);
+
+/// The files read, by path.
+type Contents = HashMap<Vec<u8>, Option<Arc<[u8]>>>;
+
+impl Files for Shared {
+    fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
+        self.0.borrow_mut().find(name, format, progname)
+    }
+
+    fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+        self.1
+            .borrow_mut()
+            .entry(path.to_vec())
+            .or_insert_with(|| std::fs::read(OsStr::from_bytes(path)).ok().map(Arc::from))
+            .clone()
+    }
+}
+
 impl Files for Kpsewhich {
     fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
         let key = (name.to_vec(), format, progname.to_vec());
@@ -119,18 +146,24 @@ impl Files for Kpsewhich {
 }
 
 fn main() {
+    let t0 = Instant::now();
     let mut args = std::env::args().skip(1);
-    let (mut pdf, mut dvi, mut input, mut resume) = (None, None, None, false);
+    let (mut pdf, mut dvi, mut input, mut resume, mut repeat) = (None, None, None, false, 1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => pdf = args.next(),
             "--dvi" => dvi = args.next(),
             "--check-resume" => resume = true,
+            "--repeat" => repeat = args.next().and_then(|n| n.parse().ok()).unwrap_or(1),
+            "--threads" => {
+                let n = args.next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                THREADS.set(n).expect("threads set once");
+            }
             _ => input = Some(a),
         }
     }
     let Some(input) = input else {
-        eprintln!("usage: xdv2pdf [-o NAME.pdf] [--dvi NAME.xdv] FILE.xdv > OUT.pdf");
+        eprintln!("usage: xdv2pdf [-o NAME.pdf] [--dvi NAME.xdv] [--repeat N] [--threads N] FILE.xdv > OUT.pdf");
         std::process::exit(2);
     };
     let pdf =
@@ -151,6 +184,33 @@ fn main() {
         check_resume(options, &xdv);
         return;
     }
+    let files = Shared::default();
+    if repeat > 1 {
+        // `--repeat N`: the same XDV converted N times in this process,
+        // as a watch converts each build: the first conversion cold, the
+        // others warm (the host's files and lookups kept, and the
+        // session's start: `Starts`). Each one's time to stderr; all must
+        // give the same bytes, the first to stdout.
+        let mut starts = Starts::default();
+        let first = cold_run(&mut starts, &options, &files, &xdv);
+        eprintln!("xdv2pdf: conversion 1: {:.3} ms", ms(t0));
+        for k in 2..=repeat {
+            let t = Instant::now();
+            let again = warm_run(&mut starts, &options, &files, &xdv);
+            eprintln!("xdv2pdf: conversion {k}: {:.3} ms", ms(t));
+            if again != first {
+                eprintln!("xdv2pdf: conversion {k} differs from the first");
+                std::process::exit(1);
+            }
+        }
+        let (bytes, err) = first;
+        std::io::stdout().write_all(&bytes).expect("stdout");
+        if let Some(e) = err {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // Page by page, as xdvipdfmx writes: when it stops on an error
     // (`ERROR` prints its message and exits), its output file keeps what
     // was written until then, and so does stdout here.
@@ -158,7 +218,7 @@ fn main() {
     let (pre, pages) = split_xdv(&xdv);
     let mut session = match Session::new(
         options,
-        Box::new(Kpsewhich::default()),
+        Box::new(files),
         Box::new(deflate),
         &xdv[..pre],
     ) {
@@ -168,6 +228,9 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(b) = batch() {
+        session.set_batch_deflate(b);
+    }
     let result = (|| {
         for &(a, b) in &pages {
             let out = session.page(&xdv[a..b])?;
@@ -181,6 +244,112 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(1);
     }
+}
+
+/// `--threads N`, else `PHITEX_THREADS`, else every CPU: the threads
+/// that compress the end's streams (1: each as it is written).
+static THREADS: OnceLock<usize> = OnceLock::new();
+
+fn threads() -> usize {
+    *THREADS.get_or_init(|| {
+        std::env::var("PHITEX_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+            .max(1)
+    })
+}
+
+/// The batch deflater on [`threads`] threads, the largest streams first
+/// (none for one thread).
+fn batch() -> Option<BatchDeflate> {
+    let n = threads();
+    (n > 1).then(|| {
+        Box::new(move |jobs: &[(i32, &[u8])]| {
+            let mut order: Vec<usize> = (0..jobs.len()).collect();
+            order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].1.len()));
+            let next = AtomicUsize::new(0);
+            let done: Mutex<Vec<Vec<u8>>> = Mutex::new(vec![Vec::new(); jobs.len()]);
+            std::thread::scope(|s| {
+                for _ in 0..n.min(jobs.len()) {
+                    s.spawn(|| {
+                        loop {
+                            let k = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(&i) = order.get(k) else { break };
+                            let z = deflate(jobs[i].0, jobs[i].1);
+                            done.lock().expect("deflate results")[i] = z;
+                        }
+                    });
+                }
+            });
+            done.into_inner().expect("deflate results")
+        }) as BatchDeflate
+    })
+}
+
+fn ms(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+/// One whole conversion: the bytes written and the fatal error that
+/// stopped it, if one did.
+fn convert(
+    starts: &mut Starts,
+    options: &Options,
+    files: &Shared,
+    xdv: &[u8],
+) -> (Vec<u8>, Option<String>) {
+    let (pre, pages) = split_xdv(xdv);
+    let mut session = match starts.session(
+        options.clone(),
+        Box::new(files.clone()),
+        Box::new(deflate),
+        &xdv[..pre],
+    ) {
+        Ok(s) => s,
+        Err(e) => return (Vec::new(), Some(e.to_string())),
+    };
+    if let Some(b) = batch() {
+        session.set_batch_deflate(b);
+    }
+    let mut out = Vec::new();
+    let result = (|| {
+        for &(a, b) in &pages {
+            out.extend(session.page(&xdv[a..b])?.pdf);
+        }
+        out.extend(session.finish()?);
+        Ok::<(), phitex_xdvipdfmx::ctx::Fatal>(())
+    })();
+    match result {
+        Ok(()) => (out, None),
+        Err(e) => {
+            out.extend(session.written());
+            (out, Some(e.to_string()))
+        }
+    }
+}
+
+/// The first conversion (a function of its own: profiles tell it apart).
+#[inline(never)]
+fn cold_run(
+    starts: &mut Starts,
+    options: &Options,
+    files: &Shared,
+    xdv: &[u8],
+) -> (Vec<u8>, Option<String>) {
+    convert(starts, options, files, std::hint::black_box(xdv))
+}
+
+/// A later conversion in the same process (`callgrind
+/// --toggle-collect='*warm_run*'` counts these alone).
+#[inline(never)]
+fn warm_run(
+    starts: &mut Starts,
+    options: &Options,
+    files: &Shared,
+    xdv: &[u8],
+) -> (Vec<u8>, Option<String>) {
+    convert(starts, options, files, xdv)
 }
 
 /// `--check-resume`: the incremental link's test. A cold run keeps a

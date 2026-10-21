@@ -499,7 +499,7 @@ pub fn parse_c_string(s: &[u8], pp: &mut usize) -> Option<Vec<u8>> {
     let mut q = None;
     let l = read_c_litstrc(s, &mut p, None);
     if l >= 0 {
-        let mut v = Vec::new();
+        let mut v = Vec::with_capacity(l as usize);
         p = *pp + 1;
         read_c_litstrc(s, &mut p, Some(&mut v));
         q = Some(v);

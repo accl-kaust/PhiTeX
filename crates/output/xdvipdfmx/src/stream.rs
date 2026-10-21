@@ -180,6 +180,41 @@ impl MemFile {
         Some(line)
     }
 
+    /// [`MemFile::mfgets`] into `buf` (C's buffer, at most `buf.len() -
+    /// 1` bytes): the line's length, or none at the end of the file.
+    pub fn mfgets_into(&mut self, buf: &mut [u8]) -> Option<usize> {
+        let data = &self.data[..];
+        let mut p = self.pos.min(data.len());
+        let max = buf.len().saturating_sub(1);
+        let rest = &data[p..];
+        let lim = max.min(rest.len());
+        // (as `getc` a byte at a time: the line's end read, or the limit,
+        // or the end of the file)
+        let (n, ch) = match rest[..lim].iter().position(|&c| c == b'\n' || c == b'\r') {
+            Some(k) => {
+                p += k + 1;
+                (k, i32::from(rest[k]))
+            }
+            None if lim < max => {
+                p += lim;
+                (lim, -1)
+            }
+            None => {
+                p += lim;
+                (lim, if lim == 0 { 0 } else { i32::from(rest[lim - 1]) })
+            }
+        };
+        buf[..n].copy_from_slice(&rest[..n]);
+        if ch < 0 && n == 0 {
+            return None;
+        }
+        if ch == i32::from(b'\r') && data.get(p) == Some(&b'\n') {
+            p += 1;
+        }
+        self.pos = p;
+        Some(n)
+    }
+
     /// `mfreadln`: a line without its end; `None` at the end of the file
     /// (C's -1), `Some(Err(()))` for a line longer than `size` (C's -2).
     pub fn mfreadln(&mut self, size: usize) -> Option<Result<Vec<u8>, ()>> {
@@ -250,5 +285,39 @@ pub fn sqxfw(sq: i32, fw: i32) -> i32 {
         result
     } else {
         result.wrapping_neg()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    /// `mfgets_into` reads the lines `mfgets` reads, to the byte.
+    #[test]
+    fn mfgets_into_is_mfgets() {
+        let texts: [&[u8]; 8] = [
+            b"",
+            b"a",
+            b"ab\ncd",
+            b"ab\r\ncd\r",
+            b"\r\r\n\n",
+            b"abcdefgh\nij",
+            b"abc\rdef\n\rg",
+            b"abcd\nefgh\r\n",
+        ];
+        for t in texts {
+            for size in 0..7 {
+                let mut a = MemFile::new(Arc::from(t), b"t");
+                let mut b = MemFile::new(Arc::from(t), b"t");
+                let mut buf = vec![0u8; size];
+                for _ in 0..12 {
+                    let x = a.mfgets(size);
+                    let y = b.mfgets_into(&mut buf).map(|n| buf[..n].to_vec());
+                    assert_eq!(x, y, "{t:?} size {size}");
+                    assert_eq!(a.pos, b.pos, "{t:?} size {size}");
+                }
+            }
+        }
     }
 }

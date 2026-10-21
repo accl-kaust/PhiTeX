@@ -248,6 +248,9 @@ struct Span {
 /// The glyph runs' state.
 #[derive(Clone, Debug, Default)]
 pub struct State {
+    /// Whether runs are recorded at all ([`crate::api::Options::glyph_runs`]):
+    /// a viewer needs them, a conversion for the PDF alone does not.
+    pub on: bool,
     /// The page's runs so far.
     pub runs: Vec<GlyphRun>,
     /// The page's next cluster.
@@ -272,6 +275,9 @@ impl Dpx {
     /// `set_text_and_glyphs`' glyphs begin: one cluster, text `unicodes`
     /// (UTF-16).
     pub(crate) fn glyph_runs_span(&mut self, unicodes: &[u16]) {
+        if !self.runs.on {
+            return;
+        }
         let r = &mut self.runs;
         r.span = Some(Span {
             cluster: r.next_cluster,
@@ -290,6 +296,9 @@ impl Dpx {
     /// (`x`, `y`), y up (the compensation not taken off yet); `alpha` the
     /// native font's.
     pub(crate) fn record_glyph_run(&mut self, lf: usize, code: u32, x: Spt, y: Spt, alpha: u8) {
+        if !self.runs.on {
+            return;
+        }
         let (ftype, dev_id) = {
             let f = &self.dvi.loaded_fonts[lf];
             (f.type_, f.font_id)
