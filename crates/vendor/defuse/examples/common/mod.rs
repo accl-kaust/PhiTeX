@@ -2254,6 +2254,28 @@ impl Pool {
     }
 }
 
+/// An executor that runs each job on a thread of its own, at once: the
+/// workers of a stepless drain (`execute(n, worker)`) all run together.
+pub struct Workers(pub usize);
+
+impl Executor for Workers {
+    fn parallelism(&self) -> usize {
+        self.0.max(1)
+    }
+
+    fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> RunResult + Sync), out: &mut Vec<RunResult>) {
+        let got: Vec<RunResult> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..n).map(|i| sc.spawn(move || run(i))).collect();
+            hs.into_iter().map(|h| h.join().expect("a worker panicked")).collect()
+        });
+        out.extend(got);
+    }
+
+    fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        (0..n).for_each(f);
+    }
+}
+
 impl Executor for Threads {
     fn parallelism(&self) -> usize {
         self.0.max(1)

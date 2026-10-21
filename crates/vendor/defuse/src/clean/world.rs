@@ -866,6 +866,60 @@ impl World {
         best
     }
 
+    /// Frame `fr`'s chain in unit `u`, innermost first, each frame with its
+    /// start (the root last; a frame the unit no longer has ends it).
+    pub(crate) fn chain_starts(&self, u: u32, fr: FrameId) -> Vec<(FrameId, Pos)> {
+        let un = self.unit(u);
+        let mut out = Vec::new();
+        let mut g = fr;
+        for _ in 0..=1 << 16 {
+            if g.is_root() {
+                out.push((g, 0));
+                break;
+            }
+            let Some(frm) = un.frames.get(&g) else {
+                out.push((g, Pos::MAX));
+                break;
+            };
+            out.push((g, frm.start));
+            g = frm.parent;
+        }
+        out
+    }
+
+    /// As [`Self::reaching`], in definitions `fd`, along the chain
+    /// [`Self::chain_starts`] gives.
+    pub(crate) fn reaching_in(fd: &FieldDefs, chain: &[(FrameId, Pos)], pos: Pos, skip: Id) -> Option<(Pos, Entry)> {
+        let mut best: Option<(Pos, Entry)> = None;
+        let take = |best: &mut Option<(Pos, Entry)>, m: &PMap<Pos, Entry>| {
+            let mut k = pos;
+            while let Some((&p, e)) = m.below(&k) {
+                if best.is_some_and(|b| b.0 >= p) {
+                    return;
+                }
+                if e.node != skip {
+                    *best = Some((p, *e));
+                    return;
+                }
+                k = p;
+            }
+        };
+        for &(g, start) in chain {
+            if let Some(m) = fd.local.get(&g) {
+                take(&mut best, m);
+            }
+            // (The root, or a frame gone: the chain ends.)
+            if g.is_root() || start == Pos::MAX {
+                break;
+            }
+            if best.is_some_and(|b| b.0 > start) {
+                break;
+            }
+        }
+        take(&mut best, &fd.globals);
+        best
+    }
+
     /// The window of a range read by `me` from `from` up to `to`: the
     /// positions strictly between which contributions fold.
     pub(crate) fn window(&self, me: Id, from: Id, to: Id, past: bool) -> Option<(u32, Pos, Pos)> {
@@ -1510,7 +1564,10 @@ impl World {
         let m = &un.pset_nodes;
         let mut few: [Id; 8] = [NONE; 8];
         let mut k = 0;
-        for (_, &x) in m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)) {
+        // (Stepped entry by entry: the window is usually empty, one descent.)
+        let mut at = lo;
+        while let Some((&p, &x)) = m.above(&at).filter(|e| *e.0 < hi) {
+            at = p;
             if x == me {
                 continue;
             }
@@ -1537,14 +1594,17 @@ impl World {
             }
             let Some(m) = un.psets.get(&k) else { return };
             let upto = best.map_or(hi, |b| b.0);
-            let hit = m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&upto)).find(|&(_, &x)| {
-                x != me
+            let mut at = lo;
+            while let Some((&p, &x)) = m.above(&at).filter(|e| *e.0 < upto) {
+                at = p;
+                if x != me
                     && self.node(x).is_some_and(|n| {
                         n.text.stat.defs.is_none() && (n.wide || core.may_cover(n.may(), n.text.op, &n.text.args, f))
                     })
-            });
-            if let Some((&p, &x)) = hit {
-                best = Some((p, x));
+                {
+                    best = Some((p, x));
+                    break;
+                }
             }
         };
         look(0);

@@ -5,7 +5,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::core::Core;
-use super::world::{Def, Id, NONE, Place, Pos, Read, St, World};
+use super::world::{Def, FieldCell, FrameId, Id, NONE, Place, Pos, Read, St, World};
 use crate::api::{Effect, FieldAt, Locality, NodeId, OpId, Stop};
 use crate::values::FxHashMap;
 use crate::values::{Field, ValueId, Values};
@@ -106,6 +106,12 @@ pub struct Ctx<'a> {
     /// The calls of a recorded run (`observe`; `RecOp::run` collects them).
     #[cfg(feature = "observe")]
     pub(crate) calls: std::cell::RefCell<Option<crate::record::Calls>>,
+    /// What the run's reads look up again and again in its one world: the
+    /// last read point asked (with the fuel a read there spends), the
+    /// frame chain of the last frame read in, and field cells.
+    point: Option<((Id, bool, bool), Option<(u32, Pos, FrameId, Id)>, u64)>,
+    chain: Option<((u32, FrameId), Vec<(FrameId, Pos)>)>,
+    cells: FxHashMap<(u32, Field), Option<&'a FieldCell>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -152,6 +158,9 @@ impl<'a> Ctx<'a> {
             narrowed: None,
             #[cfg(feature = "observe")]
             calls: std::cell::RefCell::new(None),
+            point: None,
+            chain: None,
+            cells: FxHashMap::default(),
         }
     }
 
@@ -253,16 +262,33 @@ impl<'a> Ctx<'a> {
 
     fn read_at_inner(&mut self, f: Field, at: Id, after: bool, own: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
         // (Fuel: one, and one per frame the read walks.)
-        let depth = self.w.node(at).map_or(1, |n| self.w.unit(n.unit).frames.get(&n.frame).map_or(1, |fr| u64::from(fr.depth) + 1));
+        let w = self.w;
+        let key = (at, after, own);
+        let (point, depth) = match &self.point {
+            Some((k, p, d)) if *k == key => (*p, *d),
+            _ => {
+                let d = w.node(at).map_or(1, |n| w.unit(n.unit).frames.get(&n.frame).map_or(1, |fr| u64::from(fr.depth) + 1));
+                let p = w.read_point(at, after, own);
+                self.point = Some((key, p, d));
+                (p, d)
+            }
+        };
         self.spend(depth)?;
-        if let Some(&lv) = self.w.loops.get(&f) {
+        if let Some(&lv) = w.loops.get(&f) {
             self.reads.push(Read::Loop { f, val: lv });
             return Ok(Some((lv, NONE)));
         }
-        let Some((u, pos, fr, skip)) = self.w.read_point(at, after, own) else {
+        let Some((u, pos, fr, skip)) = point else {
             return Ok(None);
         };
-        let reach = super::core::prof::time(21, || self.w.reaching(u, f, pos, fr, skip));
+        let reach = super::core::prof::time(21, || {
+            let cell = *self.cells.entry((u, f)).or_insert_with(|| w.field(u, f));
+            let cell = cell?;
+            if self.chain.as_ref().is_none_or(|c| c.0 != (u, fr)) {
+                self.chain = Some(((u, fr), w.chain_starts(u, fr)));
+            }
+            World::reaching_in(&cell.defs, &self.chain.as_ref().expect("set").1, pos, skip)
+        });
         // A pending definition set between the site and the reader: wait
         // (speculating, the read guesses past it; a definition it makes
         // re-asks the reader).

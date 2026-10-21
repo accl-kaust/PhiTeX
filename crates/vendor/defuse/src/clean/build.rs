@@ -81,10 +81,11 @@ pub(crate) struct Builder<'a> {
     /// A step's merge: the field writes recorded, not made
     /// ([`super::batch`]).
     pub defer: Option<super::batch::Pending>,
-    /// While a run's placements are made: the unit, the lowest position
-    /// whose frames are to be walked again, and the nodes whose declared
-    /// definitions are to be filed once they are.
-    hold: Option<(u32, Pos, Vec<Id>)>,
+    /// While a run's placements are made: the unit, the positions whose
+    /// frames are to be walked again (each: a walk stops where the frames
+    /// agree again, short of a placement further on), and the nodes whose
+    /// declared definitions are to be filed once they are.
+    hold: Option<(u32, Vec<Pos>, Vec<Id>)>,
     pub counts: Counts,
     /// The run committed continued from its kept state (`Ctx::base`): its
     /// placements go after the children and continuations its earlier
@@ -394,11 +395,12 @@ impl<'a> Builder<'a> {
         };
         // (Frames held back to walk from a position: that position moves
         // too; one that names no node walks the whole unit.)
-        if let Some((hu, hp, _)) = &mut self.hold
+        if let Some((hu, hps, _)) = &mut self.hold
             && *hu == u
-            && *hp != Pos::MAX
         {
-            *hp = map.get(hp).copied().unwrap_or(0);
+            for hp in hps.iter_mut() {
+                *hp = map.get(hp).copied().unwrap_or(0);
+            }
         }
         // Nodes.
         self.w.quiet = true;
@@ -966,10 +968,10 @@ impl<'a> Builder<'a> {
     /// frame stack agrees with what it was; nodes whose frame changed have
     /// their definitions filed again and their readers re-asked.
     pub(crate) fn frames_from(&mut self, u: u32, from: Pos) {
-        if let Some((hu, hp, _)) = &mut self.hold
+        if let Some((hu, hps, _)) = &mut self.hold
             && *hu == u
         {
-            *hp = (*hp).min(from);
+            hps.push(from);
             return;
         }
         self.frames_now(u, from);
@@ -1191,12 +1193,14 @@ impl<'a> Builder<'a> {
     /// so far: the earlier ones it did not make (yet) stay, after them.
     fn place_some(&mut self, id: Id, kids: &[Spec], conts: &[Spec], prefix: bool) -> (Vec<Id>, Vec<Id>) {
         let u = self.w.node(id).map(|n| n.unit).expect("live");
-        self.hold = Some((u, Pos::MAX, Vec::new()));
+        self.hold = Some((u, Vec::new(), Vec::new()));
         let r = self.place_held(id, kids, conts, prefix);
-        // The frames walked once, from the lowest placement; then the new
+        // The frames walked from each placement, in order; then the new
         // nodes' declared definitions filed in them.
-        if let Some((u, p, ids)) = self.hold.take() {
-            if p != Pos::MAX {
+        if let Some((u, mut ps, ids)) = self.hold.take() {
+            ps.sort_unstable();
+            ps.dedup();
+            for p in ps {
                 self.frames_now(u, p);
             }
             for x in ids {
