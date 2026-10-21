@@ -422,32 +422,6 @@ fn is_marker(x: &PItem) -> bool {
 
 // --------------------------------------------------------------- scan
 
-/// A page fired by the scan: at candidate `k`, its `\outputpenalty`,
-/// the profile items after the candidate.
-#[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
-pub(crate) struct ScanFire {
-    pub k: u32,
-    pub output_penalty: i32,
-    pub rest: usize,
-    /// The insertion classes on the page (§1018: the boxes its fire
-    /// fills).
-    pub classes: Vec<u16>,
-    /// The best break's index on the page (§1014: the page's items from
-    /// it on go back to the contributions), and the insertions held
-    /// over (§1022).
-    pub best: usize,
-    pub held: usize,
-    /// `\holdinginserts` positive where the page fired (§1018).
-    pub holding: bool,
-    /// Where the page's items before its best break end, when that is
-    /// before the piece it fires in: `(piece, the piece before the one
-    /// it fires in)`, [`MATERIAL`] for the material, `None` for the
-    /// piece the page began after. A finisher assembles its page from
-    /// those items, not from what follows the break (§1017: the rest
-    /// goes back to the contributions).
-    pub upto: Option<(i64, Option<i64>)>,
-}
-
 /// The page builder's state over profiles.
 #[derive(Clone)]
 pub(crate) struct ScanState {
@@ -459,16 +433,7 @@ pub(crate) struct ScanState {
     pub fold: FoldState,
     pub params: Option<PageParams>,
     pub pending: Vec<PItem>,
-    /// The page's length after the material it began with
-    /// ([`MATERIAL`]) and after each piece folded since (its id), where
-    /// a fold notes them ([`ScanState::note_piece`], a finisher's): where
-    /// a page fires, the piece its best break's page ends in
-    /// ([`ScanFire::upto`]).
-    pub page_lens: Vec<(i64, usize)>,
 }
-
-/// [`ScanState::page_lens`]' entry for the material a page began with.
-pub(crate) const MATERIAL: i64 = i64::MIN;
 
 /// What the scan reads where it runs: the page parameters and an
 /// insertion class's registers in force.
@@ -495,31 +460,19 @@ impl ScanState {
             fold,
             params,
             pending: Vec::new(),
-            page_lens: Vec::new(),
         }
     }
 
-    /// Notes the page's length after `piece` (or [`MATERIAL`]) folded.
-    #[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
-    pub(crate) fn note_piece(&mut self, piece: i64) {
-        self.page_lens.push((piece, self.pb.page.len()));
-    }
-
-    /// [`crate::pages::PageState::fold_items`] over profile items.
-    pub(crate) fn fold_items(
-        &mut self,
-        items: &[PItem],
-        dead: i64,
-        rd: &mut dyn Reaching,
-    ) -> Option<ScanFire> {
+    /// [`crate::pages::PageState::fold_items`] over profile items: whether
+    /// a page fired (the fold stops there).
+    pub(crate) fn fold_items(&mut self, items: &[PItem], dead: i64, rd: &mut dyn Reaching) -> bool {
         let mut buf = std::mem::take(&mut self.pending);
-        for (i, x) in items.iter().enumerate() {
+        for x in items {
             match x {
-                PItem::Build(k) => {
+                PItem::Build(_) => {
                     self.fold.since_bp = 0;
-                    if let Some(mut f) = self.build(&mut buf, *k, dead, rd) {
-                        f.rest = items.len() - i - 1;
-                        return Some(f);
+                    if self.build(&mut buf, dead, rd) {
+                        return true;
                     }
                 }
                 PItem::SetPage(..) | PItem::InsParams(..) | PItem::End(_) | PItem::Abort => {
@@ -529,7 +482,7 @@ impl ScanState {
             }
         }
         self.pending = buf;
-        None
+        false
     }
 
     /// [`crate::build::fold_item`] on the main list.
@@ -574,15 +527,9 @@ impl ScanState {
         }
     }
 
-    /// [`crate::pages::PageState`]'s `build` over profile items.
-    #[allow(clippy::too_many_lines)]
-    fn build(
-        &mut self,
-        buf: &mut Vec<PItem>,
-        k: u32,
-        dead: i64,
-        rd: &mut dyn Reaching,
-    ) -> Option<ScanFire> {
+    /// [`crate::pages::PageState`]'s `build` over profile items: whether
+    /// a page fired.
+    fn build(&mut self, buf: &mut Vec<PItem>, dead: i64, rd: &mut dyn Reaching) -> bool {
         let mut classes: Vec<(u16, InsertClass)> = Vec::new();
         let mut page_params = None;
         let so_far = &mut self.pb.so_far;
@@ -630,7 +577,7 @@ impl ScanState {
                 }
                 PItem::Abort => {
                     buf.clear();
-                    return None;
+                    return false;
                 }
                 PItem::Node(ref n) => n.clone(),
                 _ => continue,
@@ -659,20 +606,6 @@ impl ScanState {
                     break;
                 }
                 Outcome::Fire(f) => {
-                    // (the piece the page's items before the break end
-                    // in: the first whose fold left the page that long;
-                    // none, the piece firing it)
-                    let prev = self
-                        .page_lens
-                        .last()
-                        .map(|e| e.0)
-                        .filter(|&p| p != MATERIAL);
-                    let upto = self
-                        .page_lens
-                        .iter()
-                        .find(|e| e.1 >= f.best)
-                        .map(|e| (e.0, prev));
-                    self.page_lens.clear();
                     self.pb = PageBuilder::new();
                     self.pb.measure_only = true;
                     self.j += 1;
@@ -681,22 +614,13 @@ impl ScanState {
                     }
                     self.fold.since_bp = 0;
                     buf.clear();
-                    return Some(ScanFire {
-                        k,
-                        output_penalty: f.output_penalty,
-                        rest: 0,
-                        classes: f.ins_records.iter().map(|r| r.n).collect(),
-                        best: f.best,
-                        held: f.held_inserts.len(),
-                        holding: params.holding_inserts > 0,
-                        upto,
-                    });
+                    return true;
                 }
             }
         }
         queue.reverse();
         *buf = queue;
-        None
+        false
     }
 }
 
@@ -735,7 +659,6 @@ fn size_report() -> String {
 
 /// Whether profile items hold an `\end` marker (the scan then reads
 /// `\deadcycles`, §1054).
-#[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
 pub(crate) fn has_end(items: &[PItem]) -> bool {
     items.iter().any(|x| matches!(x, PItem::End(_)))
 }

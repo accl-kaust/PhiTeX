@@ -1659,7 +1659,6 @@ impl Operation for Resume {
 }
 
 /// A [`PITEMS`] unit's items.
-#[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
 pub(crate) fn unit_items(v: &Values, u: ValueId) -> Vec<ValueId> {
     list_of(v, u)
         .get(2)
@@ -1669,7 +1668,6 @@ pub(crate) fn unit_items(v: &Values, u: ValueId) -> Vec<ValueId> {
 
 /// Whether items hold an `\end` marker (the builder then reads
 /// `\deadcycles`, §1054).
-#[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
 pub(crate) fn has_end(v: &Values, raw: &[ValueId]) -> bool {
     raw.iter().any(|&x| nodes::tag(v, x) == nodes::T_END)
 }

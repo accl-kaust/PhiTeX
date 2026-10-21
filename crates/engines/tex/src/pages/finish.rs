@@ -106,6 +106,15 @@ pub(crate) struct FinishIn {
     /// guess, never the real value read back, so a miss does not change
     /// this node.
     pub rtn_guess: ValueId,
+    /// How many of the spans the post-output build of the page before
+    /// takes (§1026: the routine's material and the held-over insertions
+    /// as they are, a piece's items carried folded again with their
+    /// builds and markers spent), and what that build reads besides: the
+    /// insertion classes' registers on its material (`T_INS_PARAMS`
+    /// markers) and its candidate. None for the first page.
+    pub post: u32,
+    pub post_markers: Vec<ValueId>,
+    pub post_k: u32,
 }
 
 impl FinishIn {
@@ -134,6 +143,9 @@ impl FinishIn {
             v.int(i64::from(self.held)),
             self.top_marks,
             self.rtn_guess,
+            v.int(i64::from(self.post)),
+            v.list(self.post_markers.clone()),
+            v.int(i64::from(self.post_k)),
         ]);
         let mut out = vec![v.int(self.j)];
         out.extend([ValueId::UNIT; 8]);
@@ -198,6 +210,9 @@ impl FinishIn {
             held: u32::try_from(n(13)).unwrap_or(0),
             top_marks: p[14],
             rtn_guess: p[15],
+            post: p.get(16).map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
+            post_markers: p.get(17).map(|&x| list_of(v, x)).unwrap_or_default(),
+            post_k: p.get(18).map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
         })
     }
 }
@@ -213,11 +228,12 @@ impl Run<'_, '_> {
     ///    routine's material from `fin.rtns`, a held-over insertion's
     ///    list from its split (§1021);
     /// 2. folded with the builder on real nodes from `fin.fold` and
-    ///    `fin.params` ([`PageState::fold_items`]), each insertion class's
-    ///    registers read where its piece is ([`Run::insert_class_at`]), to
-    ///    the fire at the builder's decisions ([`PageState::fire_known`]):
-    ///    the page's data, `\box255` native ([`Run::fin_box`]), the
-    ///    material carried; the marks from `fin.top_marks` on;
+    ///    `fin.params` ([`PageState::fold_items`]): the post-output build
+    ///    first (`fin.post` spans: the material as it is, a piece's items
+    ///    carried folded again with their builds and markers spent, then
+    ///    `fin.post_markers` and the build at `fin.post_k`), then the
+    ///    pieces' items to the fire: the page's data, `\box255` native
+    ///    ([`Run::fin_box`]), the material carried;
     /// 3. where the candidate is inside the piece with commands after it
     ///    (not its last, [`PITEMS`]' `last`), the piece's check data at
     ///    that candidate ([`Run::check_cut`]) and its locals.
@@ -225,14 +241,237 @@ impl Run<'_, '_> {
     /// A fire the real nodes do not make where the profiles made it is a
     /// defect: a panic in debug and observe builds, an engine diagnostic
     /// otherwise.
-    #[allow(clippy::type_complexity)]
+    #[allow(
+        clippy::type_complexity,
+        clippy::too_many_lines,
+        clippy::assertions_on_constants,
+        reason = "a long assembly; a debug or observe build stops on the defect"
+    )]
     pub(crate) fn finisher_args(
         &mut self,
         fin: &FinishIn,
         pos: &[ValueId],
     ) -> R<(Vec<ValueId>, Option<(i64, i64, bool)>)> {
-        let _ = (fin, pos);
-        todo!("layer 5: a finisher's page assembled from its input (docs/spec-layers.md §7 step 1)")
+        let v = self.v;
+        let me = |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
+        let pid = me(fin.piece);
+        // (the window's units, by piece: their items with the markers
+        // resolved where each piece is)
+        let window = v.seq_to_vec(self.fold_own(PITEMS, fin.after, Some(fin.piece))?);
+        let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
+        let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
+        let mut want: Vec<i64> = vec![pid];
+        for s in &fin.spans {
+            if let Src::Piece { piece, .. } | Src::Held { piece, .. } = s.src
+                && !want.contains(&piece)
+            {
+                want.push(piece);
+            }
+        }
+        for &u in &window {
+            let p = unit_pid(u);
+            if want.contains(&p) && !units.iter().any(|x| x.0 == p) {
+                let mut raw = unit_items(v, u);
+                self.resolve_params_of(p, &mut raw)?;
+                units.push((p, u, raw));
+            }
+        }
+        let defect = |r: &mut Self, what: String| {
+            let msg = format!(
+                "page {} (finisher {}): {what}: the page builder over the profiles and the finisher's page part",
+                fin.j,
+                r.cx.node().raw()
+            );
+            assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
+            r.engine_diag(&msg);
+        };
+        let rtn_items = |page: i64| -> Vec<ValueId> {
+            fin.rtns
+                .iter()
+                .find(|r| r.0 == page)
+                .map(|r| {
+                    let rs = list_of(v, r.1);
+                    let mut out = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
+                    out.extend(rs.get(1).map(|&x| list_of(v, x)).unwrap_or_default());
+                    out
+                })
+                .unwrap_or_default()
+        };
+        // (an item a source names, real)
+        let item = |src: Src| -> Option<ValueId> {
+            match src {
+                Src::Piece { piece, item } => {
+                    let raw = &units.iter().find(|u| u.0 == piece)?.2;
+                    match crate::pages::end_sub_of(item) {
+                        None => raw.get(item as usize).copied(),
+                        Some((e, s)) => list_of(v, *raw.get(e as usize)?).get(1 + s as usize).copied(),
+                    }
+                }
+                Src::Rtn { page, item } => rtn_items(page).get(item as usize).copied(),
+                Src::Held { piece, item, from } => {
+                    let raw = &units.iter().find(|u| u.0 == piece)?.2;
+                    let x = *raw.get(item as usize)?;
+                    if from == 0 {
+                        return Some(x);
+                    }
+                    let mut side = Side::default();
+                    let Some(Node::Ins(mut ins)) = nodes::decode(v, x, &mut side) else {
+                        return None;
+                    };
+                    // (§1021: the rest of a split, its top pruned)
+                    let tail = ins.list.split_off((from as usize).min(ins.list.len()));
+                    let (rem, _) = phitex_typeset::page::prune_page_top(tail, ins.split_top_skip, false);
+                    let b = phitex_typeset::pack::vpack(
+                        rem.clone(),
+                        Spec::Additional(0),
+                        &PackParams::default(),
+                    )
+                    .node;
+                    ins.height = b.height + b.depth;
+                    ins.list = rem;
+                    Some(nodes::encode(v, &Node::Ins(ins), &side))
+                }
+            }
+        };
+        let mut ps = PageState::fresh(fin.j);
+        ps.normal = fin.normal - i64::from(!fin.special);
+        ps.fold = fin.fold;
+        ps.params = fin.params;
+        let at = fin.piece;
+        let mut fire: Option<Fire> = None;
+        let mut fired_at_end = false;
+        // 1. the post-output build
+        let post = (fin.post as usize).min(fin.spans.len());
+        if post > 0 {
+            for s in &fin.spans[..post] {
+                for src in crate::pages::span_srcs(s) {
+                    let Some(x) = item(src) else {
+                        defect(self, format!("no item for {src:?}"));
+                        continue;
+                    };
+                    let carried_raw = matches!(src, Src::Piece { item, .. } if crate::pages::end_sub_of(item).is_none())
+                        && nodes::tag(v, x) != nodes::T_END;
+                    if carried_raw {
+                        match nodes::tag(v, x) {
+                            nodes::T_BUILD_PAGE => ps.fold.since_bp = 0,
+                            nodes::T_PAGE_PARAMS | nodes::T_SET_PAGE | nodes::T_INS_PARAMS => {}
+                            nodes::T_ABORT => ps.pending.push(x),
+                            _ => fold_item(v, 0, x, &mut ps.fold, &mut ps.pending),
+                        }
+                    } else {
+                        ps.pending.push(x);
+                    }
+                }
+            }
+            ps.pending.extend(fin.post_markers.iter().copied());
+            let dead = if crate::pages::has_end(v, &ps.pending) {
+                self.dead_at(at)?
+            } else {
+                0
+            };
+            let bp = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(fin.post_k))]);
+            let mut live = |c: u16| self.insert_class_at(c, at);
+            fire = ps.fold_items(v, &[bp], dead, &mut live)?;
+            fired_at_end = post == fin.spans.len();
+        }
+        // 2. the pieces' items, piece by piece
+        let mut i = post;
+        while fire.is_none() && i < fin.spans.len() {
+            let s = fin.spans[i];
+            i += 1;
+            let mut raw: Vec<ValueId> = Vec::new();
+            for src in crate::pages::span_srcs(&s) {
+                match item(src) {
+                    Some(x) => raw.push(x),
+                    None => defect(self, format!("no item for {src:?}")),
+                }
+            }
+            let p_at = match s.src {
+                Src::Piece { piece, .. } => crate::pages::node_of(piece),
+                _ => at,
+            };
+            let dead = if crate::pages::has_end(v, &raw) || crate::pages::has_end(v, &ps.pending) {
+                self.dead_at(p_at)?
+            } else {
+                0
+            };
+            let mut live = |c: u16| self.insert_class_at(c, p_at);
+            fire = ps.fold_items(v, &raw, dead, &mut live)?;
+            fired_at_end = i == fin.spans.len() && fire.as_ref().is_some_and(|f| f.rest.is_empty());
+        }
+        let Some(mut fire) = fire else {
+            defect(self, "no page fires on the real nodes".to_owned());
+            return Ok((pos.to_vec(), None));
+        };
+        if !fired_at_end || fire.k != fin.k || fire.best != fin.best as usize {
+            defect(
+                self,
+                format!(
+                    "the real nodes fire at candidate {} best {} (at the input's end {fired_at_end}), the profiles at {} best {}",
+                    fire.k, fire.best, fin.k, fin.best
+                ),
+            );
+        }
+        self.fin_box = fire.b255.take();
+        // (the piece the page fired in: its check where the candidate is
+        // inside it, the rest of its items after the candidate)
+        let own = units
+            .iter()
+            .find(|u| u.0 == pid)
+            .map(|u| list_of(v, u.1))
+            .unwrap_or_default();
+        let a = |i: usize| own.get(i).copied().unwrap_or(ValueId::UNIT);
+        let last = if own.is_empty() { -1 } else { int_of(v, a(1)) };
+        let at_end = i64::from(fire.k) == last;
+        let rest: Vec<ValueId> = if fin.in_material {
+            // (the piece's items after its candidate, all to come)
+            units
+                .iter()
+                .find(|u| u.0 == pid)
+                .map(|u| {
+                    let k = i64::from(fin.k);
+                    u.2.iter()
+                        .position(|&x| nodes::tag(v, x) == nodes::T_BUILD_PAGE && int_at(v, x, 1) == k)
+                        .map_or_else(Vec::new, |p| u.2[p + 1..].to_vec())
+                })
+                .unwrap_or_default()
+        } else {
+            std::mem::take(&mut fire.rest)
+        };
+        let locals = list_of(v, a(5));
+        let mut args = vec![
+            pos.first().copied().unwrap_or(ValueId::UNIT),
+            fire.data,
+            v.list(fire.carried.clone()),
+            v.list(locals),
+        ];
+        let mut cuttable = false;
+        if at_end || own.is_empty() {
+            args.extend([ValueId::UNIT; 5]);
+        } else {
+            // (`[names, cuttable]` at the candidate)
+            let at_k = list_of(v, a(4))
+                .get(usize::try_from(fire.k).unwrap_or(usize::MAX))
+                .map(|&x| list_of(v, x))
+                .unwrap_or_default();
+            let defs_k = at_k.first().copied().unwrap_or(ValueId::UNIT);
+            cuttable = at_k.get(1).is_some_and(|&x| int_of(v, x) != 0);
+            args.extend([v.list(rest.clone()), v.int(pid), v.int(i64::from(fire.k)), a(3), defs_k]);
+        }
+        args.extend(pos.get(arg::HINT..arg::PAGE).unwrap_or_default().iter().copied());
+        args.resize(12, ValueId::UNIT);
+        args.push(v.int(i64::from(cuttable)));
+        // (where the next page begins, for [`Run::define_page_start`]:
+        // the fold after the fire, the parameters in force, the rest)
+        args.push(v.list(vec![
+            v.int(i64::from(ps.fold.sf)),
+            v.int(i64::from(ps.fold.pd)),
+            v.int(i64::try_from(ps.fold.since_bp).unwrap_or(0)),
+            ps.params.unwrap_or(ValueId::UNIT),
+            v.list(rest),
+        ]));
+        let brk = Some((pid, i64::from(fire.k), !at_end && !own.is_empty()));
+        Ok((args, brk))
     }
 
     /// Where the next page begins, for the text after this finisher
@@ -243,7 +482,39 @@ impl Run<'_, '_> {
     /// list ([`FinCtx::pending`]), the material carried and the rest of
     /// the piece after the candidate.
     pub(crate) fn define_page_start(&mut self) -> R<()> {
-        todo!("layer 5: where the next page begins, for the text's \\pagetotal (docs/spec-layers.md §3)")
+        let v = self.v;
+        let Some(c) = self.fin.clone() else {
+            return Ok(());
+        };
+        let Some(&st) = c.args.get(13) else {
+            return Ok(());
+        };
+        let xs = list_of(v, st);
+        let n = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
+        let fold = FoldState {
+            sf: i32::try_from(n(0)).unwrap_or(1000),
+            pd: i32::try_from(n(1)).unwrap_or(IGNORE_DEPTH),
+            since_bp: usize::try_from(n(2)).unwrap_or(0),
+        };
+        let params = xs.get(3).copied().and_then(some);
+        let mut mat: Vec<ValueId> = c.pending.clone();
+        mat.extend(c.args.get(2).map(|&x| list_of(v, x)).unwrap_or_default());
+        mat.push(v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(0)]));
+        mat.extend(xs.get(4).map(|&x| list_of(v, x)).unwrap_or_default());
+        self.resolve_page_params(&mut mat)?;
+        let anchor = c.brk.map(|b| crate::pages::node_of(b.0));
+        let normal = c.args.get(arg::NORMAL).map_or(0, |&x| int_of(v, x));
+        let s = PageStart {
+            anchor,
+            j: c.j + 1,
+            normal,
+            fold,
+            params,
+            prof: crate::vprof::encode(v, &mat),
+        };
+        self.cx
+            .define_with(v.field(PAGE_START), s.encode(v), Locality::Global);
+        Ok(())
     }
 }
 
@@ -911,8 +1182,9 @@ pub(crate) fn fin_may_box(v: &Values, args: &[ValueId], t: ValueId, f: Field) ->
 /// What a finisher defines besides its routine's definitions
 /// (`fire_page`, `output_end`, `ship_out`): field prefixes.
 /// The fields every finisher defines itself, whatever its routine.
-pub(crate) const FIN_OWN: [&str; 7] = [
+pub(crate) const FIN_OWN: [&str; 8] = [
     RTN,
+    PAGE_START,
     "deadcycles",
     "param:outputpenalty",
     "inspen",
@@ -923,6 +1195,7 @@ pub(crate) const FIN_OWN: [&str; 7] = [
 
 pub(crate) const FINISHER_FIELDS: &[&str] = &[
     "deadcycles",
+    PAGE_START,
     "mark:",
     "param:outputpenalty",
     "inspen",
@@ -1374,38 +1647,5 @@ impl Run<'_, '_> {
             e.prev = out;
             e.prev_j = j;
         }
-    }
-
-    /// `\deadcycles` where the fold is, when the fold needs it: only
-    /// `\end` reads it (§1054); any other fold reads nothing a finisher
-    /// defines, so a finisher placed anew does not run the folds after
-    /// it again.
-    #[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
-    pub(crate) fn deadcycles_for(&mut self, raw: &[ValueId]) -> R<i64> {
-        let v = self.v;
-        if raw.iter().any(|&x| nodes::tag(v, x) == nodes::T_END) {
-            return self.cint(crate::fields::cell::DEADCYCLES);
-        }
-        Ok(0)
-    }
-
-    /// The hint of the output routine in force (its tokens shown as
-    /// source, read under the format's definitions), encoded: the
-    /// finisher's bound ([`Finish`]). Unit for the default routine.
-    #[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
-    pub(crate) fn output_hint(&mut self) -> R<ValueId> {
-        let v = self.v;
-        let out = self.par(Par::output)?;
-        let toks = toks_of(v, out);
-        if toks.is_empty() {
-            return Ok(ValueId::UNIT);
-        }
-        let mut text = String::new();
-        self.show_toks_into(&mut text, &toks)?;
-        let h = {
-            let defs = self.ops.defs.locked();
-            crate::hints::routine_hint(&text, &defs)
-        };
-        Ok(v.str(&h.encode()))
     }
 }

@@ -150,7 +150,6 @@ impl PageStart {
     }
 
     /// The value of [`PAGE_START`].
-    #[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
         let anchor = self
             .anchor
@@ -206,7 +205,7 @@ impl Run<'_, '_> {
         items.push(crate::vprof::decode(&crate::vprof::encode(v, &head)));
         let mut rd = RunReaching(self, None);
         for x in &items {
-            if st.fold_items(x, dead, &mut rd).is_some() {
+            if st.fold_items(x, dead, &mut rd) {
                 break;
             }
         }
