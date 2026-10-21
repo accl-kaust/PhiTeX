@@ -1,11 +1,13 @@
 //! A run resumed from its kept token continues its placements
-//! (`Engine::set_continue_placements`): `Pages` folds the pieces with
+//! (`Ctx::park_continuing`): `Pages` folds the pieces with
 //! `Ctx::acc_next` and places a finisher after each, keeping its cursor
 //! and count in its token; resumed, it places only the finishers after
 //! pieces it had not reached. A parent places a child per attempt and
 //! sums all its children's outputs (`Ctx::output_of`, the indices going
-//! on from the earlier attempts'). Both match the contract where every
-//! attempt places everything again, cold and after edits.
+//! on from the earlier attempts'). A finisher places a child and waits for
+//! it with `Ctx::park`, making it again each attempt, as before. All match
+//! the contract where every attempt places everything again, cold and
+//! after edits.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, OnceLock};
@@ -38,7 +40,7 @@ impl Operation for Ops {
         Some(Vec::new())
     }
     fn static_contribs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        matches!(tag(v, a).as_str(), "pages" | "fin" | "parent" | "kid").then(Vec::new)
+        matches!(tag(v, a).as_str(), "pages" | "fin" | "parent" | "kid" | "leaf").then(Vec::new)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -67,7 +69,11 @@ impl Operation for Ops {
                         }
                         Ok(None) => break,
                         Err(s) => {
-                            cx.park(Box::new(Tok(after, passed)));
+                            if cont {
+                                cx.park_continuing(Box::new(Tok(after, passed)));
+                            } else {
+                                cx.park(Box::new(Tok(after, passed)));
+                            }
                             return Err(s);
                         }
                     }
@@ -76,8 +82,18 @@ impl Operation for Ops {
             }
             "fin" => {
                 let prev = cx.prev_sibling_where(&|_, args| v.as_str(args[0]).as_deref() == Some("fin"));
-                Ok(cx.acc_range(f, prev)?)
+                let h = cx.acc_range(f, prev)?;
+                // (Made again each attempt: a plain park.)
+                cx.child(op, vec![v.str("leaf"), h]);
+                match cx.output_of(0) {
+                    Ok(x) => Ok(v.int(v.as_int(h).unwrap_or(0) * 100 + v.as_int(x).unwrap_or(0))),
+                    Err(s) => {
+                        cx.park(Box::new(()));
+                        Err(s)
+                    }
+                }
             }
+            "leaf" => Ok(v.int(v.as_int(a[1]).unwrap_or(0) % 7)),
             "parent" => {
                 // Children 0..n, each waited for (`k`: those placed so far).
                 let k = cx.parked().and_then(|t| t.downcast::<usize>().ok()).map(|b| *b);
@@ -93,7 +109,11 @@ impl Operation for Ops {
                     match cx.output_of(i) {
                         Ok(x) => sum += v.as_int(x).unwrap_or(0),
                         Err(s) => {
-                            cx.park(Box::new(i + 1));
+                            if cont {
+                                cx.park_continuing(Box::new(i + 1));
+                            } else {
+                                cx.park(Box::new(i + 1));
+                            }
                             return Err(s);
                         }
                     }
@@ -148,7 +168,6 @@ fn trace(cont: bool, sp: defuse::Speculation, threads: usize) -> Vec<Vec<Option<
         continued: AtomicU64::new(0),
     });
     let mut eng = Engine::new();
-    eng.set_continue_placements(cont);
     let acc = vprof(eng.values());
     eng.declare_accumulator(acc, Arc::new(defuse::SumMonoid));
     let op = eng.register(ops.clone());
