@@ -881,13 +881,13 @@ impl<'a> Ctx<'a> {
         });
         let hi = next.map_or(Pos::MAX, |(p, _)| p + 1);
         // (A node before it in work that may contribute comes first;
-        // guessing, it is passed as it last contributed.)
+        // guessing, it is passed as it last contributed. Waited for alone,
+        // not with the rest of the window: it may be the next contributor,
+        // and a page builder folds piece by piece as they finish.)
         if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
             if self.guess_fold(f) {
                 self.guessed = true;
             } else {
-                let to = next.map_or(NONE, |(_, x)| x);
-                self.range_wait = Some((f, from, to, true));
                 return Err(self.stop(Wait::Node(x, Some(f))));
             }
         }
@@ -1304,7 +1304,11 @@ impl<'a> Ctx<'a> {
     }
 
     /// Keeps `token` if this run stops: the next run gets it from
-    /// `parked` when its reads so far still hold.
+    /// `parked` when its reads so far still hold. The token saves work, not
+    /// output: the next run makes its whole result again, its definitions,
+    /// contributions and placements (the placements a stopped run made are
+    /// made at its stop, and the next run placing them again in the same
+    /// order names the same nodes; one it no longer places goes).
     pub fn park(&mut self, token: Box<dyn Any + Send>) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
