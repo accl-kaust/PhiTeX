@@ -557,7 +557,8 @@ impl State {
     }
 
     /// Notes slot `loc` before a change, while a checkpoint stands.
-    #[inline]
+    #[cold]
+    #[inline(never)]
     fn log_slot(&mut self, loc: Loc) {
         let Some(u) = self.undo.as_mut() else { return };
         if !u.logged.insert(loc) {
@@ -575,13 +576,22 @@ impl State {
     /// stands.
     #[inline]
     fn meta_mut(&mut self, mi: usize) -> &mut Meta {
+        if self.undo.is_some() {
+            self.log_meta(mi);
+        }
+        &mut self.metas[mi]
+    }
+
+    /// Notes metas entry `mi` before a change, while a checkpoint stands.
+    #[cold]
+    #[inline(never)]
+    fn log_meta(&mut self, mi: usize) {
         if let Some(u) = self.undo.as_mut()
             && mi < u.lens[0]
             && u.metas_logged.insert(mi)
         {
             u.metas.push((mi, self.metas[mi].clone()));
         }
-        &mut self.metas[mi]
     }
 
     /// A page-builder candidate passed: the entries the locations
@@ -651,6 +661,7 @@ impl State {
         }
     }
 
+    #[inline]
     fn slot(&mut self, loc: Loc) -> &mut Slot {
         if self.undo.is_some() {
             self.log_slot(loc);
