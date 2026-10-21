@@ -1192,6 +1192,12 @@ impl Run<'_, '_> {
             assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
             self.engine_diag(&msg);
         }
+        let inf: Vec<Src> = lp
+            .inf
+            .iter()
+            .copied()
+            .filter(|&b| spans.iter().any(|sp| span_srcs(sp).any(|x| x == b)))
+            .collect();
         let fin = FinishIn {
             j,
             normal: lp.st.normal,
@@ -1216,12 +1222,7 @@ impl Run<'_, '_> {
             post_markers: lp.post_markers.clone(),
             post_k: lp.post_k,
             prev_fire: lp.prev_fire,
-            inf: lp
-                .inf
-                .iter()
-                .copied()
-                .filter(|&b| spans.iter().any(|sp| span_srcs(sp).any(|x| x == b)))
-                .collect(),
+            inf,
         };
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
