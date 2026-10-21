@@ -65,7 +65,13 @@ All of these must hold in the table:
 
 Threads must pay off. Measure on `$D` with release builds, **on one quiet
 accl node** (the whole node, `-c 32`), cold, 3 interleaved repetitions
-each, the median counting, the engine's lane as `$D` ships it:
+each, the median counting, the engine's lane as `$D` ships it, under the
+node's own CPU frequency governor (`ondemand` on harrier and acclnode01: what
+a user's machine does; no `--cpu-freq`, no spinners; the user's decision of
+2026-10-21). Record the node and its governor beside every number. The `-j 1`
+baseline runs one core at full boost (3.1-3.5 GHz on harrier against
+2.2-2.5 GHz for workers left idle between jobs, docs/note-cold-scaling.md), so
+the ratio to `-j 1` also counts idle time the governor turns into lower clocks:
 
 - [ ] **para4000:** `-j 8` wall ≤ 1.0 s; `-j 16` and `-j 32` no slower than
       `-j 8`; `-j 8` at least 3× faster than `-j 1`.
