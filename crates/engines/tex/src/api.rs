@@ -6552,6 +6552,7 @@ fn debug_nodes(eng: &Engine, when: &str) {
         && let Some(path) = crate::exec::obs_str!("PHITEX_NODE_DUMP")
         && let Some(root) = eng.node_info(phitex_defuse::NodeId::from_raw(1))
     {
+        use std::fmt::Write as _;
         use std::hash::{Hash as _, Hasher as _};
         let v = eng.values();
         let dig = |x: ValueId| {
@@ -6568,27 +6569,28 @@ fn debug_nodes(eng: &Engine, when: &str) {
             }
             let o = eng.output(n).map_or(0, dig);
             let head: String = i.args.first().map(|&a| v.render(a)).unwrap_or_default().chars().take(60).collect();
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "{} {} {:?} parent {:?} args {:016x} out {o:016x} {head}",
                 n.raw(),
                 i.op,
                 i.state,
                 i.parent.map(phitex_defuse::NodeId::raw),
                 h.finish()
-            ));
+            );
             // (a page's finisher: what it gave back; `PHITEX_NODE_DUMP_READS`
             // names nodes whose reads follow)
             if i.op == "finish" {
                 let r: String = eng.output(n).map(|x| v.render(x)).unwrap_or_default().chars().take(300).collect();
-                out.push_str(&format!(" | {r}"));
+                let _ = write!(out, " | {r}");
             }
             out.push('\n');
             if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS")
                 .is_some_and(|l| l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw())))
             {
-                out.push_str(&format!("    node {}\n", eng.debug_node(n)));
+                let _ = writeln!(out, "    node {}", eng.debug_node(n));
                 for l in eng.debug_reads(n).lines() {
-                    out.push_str(&format!("    read {}\n", l.replace("}, ", "},\n    read ")));
+                    let _ = writeln!(out, "    read {}", l.replace("}, ", "},\n    read "));
                 }
             }
         }
