@@ -278,6 +278,10 @@ thread_local! {
     /// The touched lists of finished runs, emptied (a run touches a few
     /// hundred locations: the list is not grown again run after run).
     static TOUCHED_POOL: std::cell::RefCell<Vec<Vec<Loc>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The metas' vectors of the thread's tables dropped, emptied: a
+    /// run's table grows its metas to what the runs before it had
+    /// without reallocating on the way ([`State::new`]).
+    static METAS_POOL: std::cell::RefCell<Vec<Vec<Meta>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl Clone for State {
@@ -301,7 +305,11 @@ impl Clone for State {
             spill: self.spill.clone(),
             spill_ix: self.spill_ix.clone(),
             touched: self.touched.clone(),
-            metas: self.metas.clone(),
+            metas: {
+                let mut m = METAS_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+                m.extend_from_slice(&self.metas);
+                m
+            },
             scope_extra: self.scope_extra.clone(),
             save: self.save.clone(),
             defined: self.defined.clone(),
@@ -331,6 +339,16 @@ impl Drop for State {
             {
                 *s = Slot::default();
             }
+        }
+        let mut metas = std::mem::take(&mut self.metas);
+        metas.clear();
+        if metas.capacity() > 0 {
+            METAS_POOL.with(|p| {
+                let mut p = p.borrow_mut();
+                if p.len() < 4 {
+                    p.push(metas);
+                }
+            });
         }
         let mut touched = std::mem::take(&mut self.touched);
         touched.clear();
@@ -390,7 +408,7 @@ impl State {
             touched: TOUCHED_POOL
                 .with(|p| p.borrow_mut().pop())
                 .unwrap_or_else(|| Vec::with_capacity(256)),
-            metas: Vec::new(),
+            metas: METAS_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default(),
             scope_extra: Vec::new(),
             save: Vec::new(),
             defined: Vec::new(),
