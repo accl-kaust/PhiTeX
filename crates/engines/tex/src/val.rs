@@ -932,6 +932,35 @@ pub(crate) fn outer_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(i64::from(outer))
 }
 
+/// What a skipped conditional branch reads of a meaning (§494, §336):
+/// `pass_text` counts the conditionals the skipped text opens and closes
+/// and stops at an `\else`, `\or` or `\fi` of its own level (whose code
+/// its caller reads), and `get_next` checks an `\outer` macro's validity;
+/// nothing else of the meaning is used. [`SKIP_IF`], [`SKIP_OUTER`],
+/// [`SKIP_FI`] plus the `\fi`/`\else`/`\or` code, or 0. A pure
+/// projection for the engine: a redefinition that keeps the name in its
+/// class leaves the skipping run standing.
+pub(crate) fn skip_projection(x: ValueId, v: &Values) -> ValueId {
+    let m = Mean::decode(v, Some(x));
+    let c = if let Mean::Macro(mm) = &m {
+        if mm.flags & 2 != 0 { SKIP_OUTER } else { 0 }
+    } else {
+        match m.cmd_chr() {
+            (cmd::IF_TEST, _) => SKIP_IF,
+            (cmd::FI_OR_ELSE, h) => SKIP_FI + i64::from(h),
+            _ => 0,
+        }
+    };
+    v.int(c)
+}
+
+/// [`skip_projection`]'s class of a meaning that opens a conditional.
+pub(crate) const SKIP_IF: i64 = 1;
+/// [`skip_projection`]'s class of an `\outer` macro.
+pub(crate) const SKIP_OUTER: i64 = 2;
+/// [`skip_projection`]'s class of `\fi`, `\else` and `\or`, plus the code.
+pub(crate) const SKIP_FI: i64 = 16;
+
 /// A meaning (§222): what a control sequence or active character is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Mean {
