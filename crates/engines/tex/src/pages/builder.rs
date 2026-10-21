@@ -732,7 +732,11 @@ impl Operation for Pages {
         let resumed = parked.is_some();
         let mut lp = parked.unwrap_or_else(PageLoop::new);
         lp.resumed = resumed && CONTINUES;
-        match r.page_loop(&mut lp) {
+        crate::prof::pages::attempt();
+        let t = crate::prof::pages::start();
+        let res = r.page_loop(&mut lp);
+        crate::prof::pages::add(crate::prof::pages::ATTEMPT, t);
+        match res {
             Ok(()) => {}
             Err(Halt::Stop(s)) => {
                 // (a run that continues: resumed, its placements stand)
@@ -752,7 +756,8 @@ impl Operation for Pages {
 
 impl Run<'_, '_> {
     /// A routine's give-back as the evaluation began (§1026): its last
-    /// value on another page (`crate::run::Ops::fin_defs` then, so every
+    /// value on another page of the class `pen`
+    /// ([`crate::pages::finish::pen_class`]; `crate::run::Ops::fin_defs` then, so every
     /// attempt of the loop guesses the same), `\deadcycles` left out,
     /// else nothing given back. The guess of page `j`
     /// ([`FinishIn::rtn_guess`], made in [`Run::page_loop`]) is what the
@@ -764,7 +769,7 @@ impl Run<'_, '_> {
     /// nothing for a page fired in a routine's material (no chain of
     /// pages grows on guesses). It depends on the pages before `j` alone:
     /// a page's own output never changes it.
-    pub(crate) fn rtn_guess(&self, hint: ValueId) -> ValueId {
+    pub(crate) fn rtn_guess(&self, hint: ValueId, pen: i32) -> ValueId {
         let v = self.v;
         let empty = || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]);
         if hint == ValueId::UNIT {
@@ -774,7 +779,7 @@ impl Run<'_, '_> {
         self.ops
             .fin_defs_start
             .locked()
-            .get(&fin_key(v, hint, &[]))
+            .get(&crate::pages::finish::fin_key_class(hint, pen))
             .and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1))
             // (`\deadcycles` guessed 0, its register maps kept)
             .map_or_else(empty, |x| crate::pages::finish::rtn_as_guess(v, x))
@@ -995,6 +1000,7 @@ impl Run<'_, '_> {
     /// A read of a piece still in work stops ([`Halt::Stop`]): the node
     /// parks `lp` and goes on from it.
     pub(crate) fn page_loop(&mut self, lp: &mut PageLoop) -> R<()> {
+        use crate::prof::pages as pp;
         let v = self.v;
         // (the pages an attempt before fired: placed again, in page order,
         // where the attempt starts over, the same calls giving the same
@@ -1015,8 +1021,14 @@ impl Run<'_, '_> {
             }
         }
         let vprof = v.field(crate::vprof::VPROF);
-        while let Some((node, u)) = self.cx.acc_next(vprof, lp.cur)? {
+        loop {
+            let t = pp::start();
+            let next = self.cx.acc_next(vprof, lp.cur);
+            pp::add(pp::NEXT, t);
+            let Some((node, u)) = next? else { break };
             for x in v.seq_to_vec(u) {
+                pp::unit();
+                let t = pp::start();
                 let (pid, ints) = crate::vprof::unit_parts(v, x);
                 if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
                     eprintln!(
@@ -1029,7 +1041,12 @@ impl Run<'_, '_> {
                 }
                 let mut items = crate::vprof::decode(&ints);
                 remap_marks(&mut items, &crate::vprof::unit_marks(v, x), &mut lp.marks);
-                self.resolve_prof_of(pid, &mut items)?;
+                pp::add(pp::DECODE, t);
+                let t = pp::start();
+                let r = self.resolve_prof_of(pid, &mut items);
+                pp::add(pp::RESOLVE, t);
+                r?;
+                let t = pp::start();
                 let at = node_of(pid);
                 // (the registers of the insertion classes this unit and
                 // the contributions pending put on the page, as they
@@ -1045,14 +1062,28 @@ impl Run<'_, '_> {
                 }
                 let mut classes = Vec::with_capacity(ns.len());
                 for n in ns {
-                    classes.push((n, self.insert_class_at(n, at)?));
+                    let c = self.insert_class_at(n, at);
+                    if c.is_err() {
+                        pp::add(pp::CLASSES, t);
+                    }
+                    classes.push((n, c?));
                 }
+                pp::add(pp::CLASSES, t);
                 // (units no page needs any more dropped, before the
                 // snapshot a stop puts back)
+                let t = pp::start();
                 Self::drop_units(lp);
+                pp::add(pp::DROP, t);
+                let t = pp::start();
                 let snap = lp.snap();
-                if let Err(h) = self.fold_unit(lp, node, pid, items, &classes) {
+                pp::add(pp::SNAP, t);
+                let t = pp::start();
+                let r = self.fold_unit(lp, node, pid, items, &classes);
+                pp::add(pp::FOLD, t);
+                if let Err(h) = r {
+                    let t = pp::start();
                     lp.restore(snap);
+                    pp::add(pp::RESTORE, t);
                     return Err(h);
                 }
             }
@@ -1120,7 +1151,10 @@ impl Run<'_, '_> {
                     let mut fire = build_t(lp, *k, &mut live);
                     let mut in_material = false;
                     while let Some(f) = fire {
-                        fire = self.on_fire(lp, node, pid, &f, in_material, classes)?;
+                        let t = crate::prof::pages::start();
+                        let r = self.on_fire(lp, node, pid, &f, in_material, classes);
+                        crate::prof::pages::add(crate::prof::pages::FIRE, t);
+                        fire = r?;
                         in_material = true;
                     }
                 }
@@ -1197,7 +1231,7 @@ impl Run<'_, '_> {
                     .iter()
                     .find(|e| e.0 == hint)
                     .map_or_else(empty, |e| v.list(vec![e.1, v.list(Vec::new())])),
-                None => self.rtn_guess(hint),
+                None => self.rtn_guess(hint, key.1),
             }
         };
         if cfg!(feature = "observe") {
@@ -1206,7 +1240,7 @@ impl Run<'_, '_> {
             let eval = (
                 std::ptr::from_ref(v) as usize,
                 self.cx.values_epoch(),
-                self.rtn_guess(hint),
+                self.rtn_guess(hint, key.1),
             );
             guess_check(self.cx.node().raw(), j, (eval, key, in_material, &lp.last_rtn, &lp.last_markers), rtn_guess);
         }

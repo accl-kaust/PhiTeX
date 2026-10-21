@@ -1184,9 +1184,47 @@ pub(crate) struct FinDefs {
     /// globally, [`Run::contribute_global_defs`]): the next finisher's
     /// declared contribution, a guess ([`Finish::static_contribs`]).
     pub gdefs: Option<ValueId>,
+    /// Each page's last run (by the page's index, the finisher's first
+    /// argument): its ordinary pages fired and its definitions
+    /// ([`FinDefs::at`]).
+    pub pages: std::collections::BTreeMap<i64, (i64, Vec<(Field, ValueId)>)>,
 }
 
 impl FinDefs {
+    /// The history a finisher of page `idx` predicts from: the page's
+    /// own last run where it ran before (a finisher placed again with
+    /// other arguments, a round after the first), both runs that one;
+    /// else the last two pages before it; else the last two runs. Never
+    /// pages after it: what a routine leaves on a later page (a column
+    /// kept, a float pending, a page counter) is not what it leaves on
+    /// this one.
+    pub(crate) fn at(&self, idx: i64) -> FinDefs {
+        let mut d = FinDefs {
+            recent: self.recent.clone(),
+            ..FinDefs::default()
+        };
+        if let Some((j, defs)) = self.pages.get(&idx) {
+            d.last.clone_from(defs);
+            d.prev.clone_from(defs);
+            (d.last_j, d.prev_j) = (*j, *j);
+            return d;
+        }
+        let mut before = self.pages.range(..idx).rev();
+        if let Some((_, (lj, l))) = before.next() {
+            d.last.clone_from(l);
+            d.last_j = *lj;
+            if let Some((_, (pj, pd))) = before.next() {
+                d.prev.clone_from(pd);
+                d.prev_j = *pj;
+            }
+        } else {
+            d.last.clone_from(&self.last);
+            d.prev.clone_from(&self.prev);
+            (d.last_j, d.prev_j) = (self.last_j, self.prev_j);
+        }
+        d
+    }
+
     /// The fields any run of the routine defined.
     pub(crate) fn names(&self) -> Vec<Field> {
         self.seen.clone()
@@ -1364,9 +1402,26 @@ pub(crate) const FINISHER_FIELDS: &[&str] = &[
     "pdf:",
 ];
 
-/// A finisher's entry in `Ops::fin_defs`: its routine (the hint `t`).
-pub(crate) fn fin_key(_: &Values, t: ValueId, _: &[ValueId]) -> u64 {
-    t.raw()
+/// A finisher's entry in `Ops::fin_defs`: its routine (the hint `t`)
+/// and its page's class ([`pen_class`]), from its arguments `args` (an
+/// ordinary page where they hold none).
+pub(crate) fn fin_key(v: &Values, t: ValueId, args: &[ValueId]) -> u64 {
+    let pen = FinishIn::of(v, args).map_or(i32::MAX, |f| pen_class(f.output_penalty));
+    fin_key_class(t, pen)
+}
+
+/// The class of a page fired at `\outputpenalty` `p`: every ordinary
+/// one (above -10001, §1013) alike, `i32::MAX`; a special one its own,
+/// which its routine branches on (a float page, a cleared page): the
+/// routine defines and gives back otherwise in each class, so each has
+/// its own history ([`FinDefs`]).
+pub(crate) fn pen_class(p: i32) -> i32 {
+    if p > -10001 { i32::MAX } else { p }
+}
+
+/// [`fin_key`] of routine `t` on a page of class `pen`.
+pub(crate) fn fin_key_class(t: ValueId, pen: i32) -> u64 {
+    t.raw() ^ u64::from(pen.cast_unsigned()).rotate_left(32).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 /// Finishers created with a prediction of their definitions, and
@@ -1394,9 +1449,12 @@ impl Finish {
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
         let o = ops(&self.0);
         let m = o.fin_defs.locked();
+        let idx = args.first().map_or(0, |&x| int_of(v, x));
         let d = (t != ValueId::UNIT)
             .then(|| m.get(&fin_key(v, t, args)))
-            .flatten();
+            .flatten()
+            .map(|d| d.at(idx));
+        let d = d.as_ref();
         let mut out = d
             .map(|d| if false { d.stable(v) } else { d.predict(v, j) })
             .unwrap_or_default();
@@ -1462,6 +1520,8 @@ impl Operation for Finish {
             .locked()
             .get(&fin_key(v, t, args))
             .map(|d| {
+                // (the history this finisher predicts from, [`FinDefs::at`])
+                let d = d.at(args.first().map_or(0, |&x| int_of(v, x)));
                 let mut ns: Vec<Field> = d
                     .last
                     .iter()
@@ -1774,7 +1834,9 @@ impl Run<'_, '_> {
             );
         }
         let mut m = self.ops.fin_defs.locked();
-        let e = m.entry(fin_key(v, t, args)).or_default();
+        let pos = self.cx.args();
+        let idx = pos.first().map_or(0, |&x| int_of(v, x));
+        let e = m.entry(fin_key(v, t, &pos)).or_default();
         e.gdefs = Some(gdefs);
         for &(f, x) in &out {
             if !e.seen.contains(&f) {
@@ -1787,18 +1849,31 @@ impl Run<'_, '_> {
             }
         }
         if crate::exec::obs_flag!("PHITEX_PRED_SHOW") {
+            // (the page's class: the penalty it fired at, whether in a
+            // routine's material, the dead cycles before it)
+            let fin = FinishIn::of(v, &self.cx.args());
+            let class = fin.as_ref().map_or_else(String::new, |f| {
+                format!("pen {} mat {} prev_dead {} classes {:?} j {}", f.output_penalty, f.in_material, f.prev_fire.1, f.classes, f.j)
+            });
+            let r = |x: ValueId| v.render(x).chars().take(120).collect::<String>();
+            let e = e.at(idx);
             for (f, x) in e.predict(v, j) {
                 let got = out.iter().find(|d| d.0 == f).map(|d| d.1);
                 if got != Some(x) {
+                    let name = crate::val::field_name(v, f);
+                    let prev = e.prev.iter().find(|d| d.0 == f).map(|d| d.1);
                     eprintln!(
-                        "pred page {j}: {} predicted {} got {}",
-                        crate::val::field_name(v, f),
-                        v.render(x),
-                        got.map_or_else(|| "nothing".to_owned(), |g| v.render(g))
+                        "pred page {j} ({class}; last {} prev {}): {name} predicted {} got {} (last two {})",
+                        e.last_j,
+                        e.prev_j,
+                        r(x),
+                        got.map_or_else(|| "nothing".to_owned(), r),
+                        if prev == e.last.iter().find(|d| d.0 == f).map(|d| d.1) { "equal" } else { "differ" }
                     );
                 }
             }
         }
+        e.pages.insert(idx, (j, out.clone()));
         // (the two latest pages: finishers commit in any order; a page's
         // run again replaces its own entry, never makes the other: two
         // runs of one page agree on what changes from page to page, a
