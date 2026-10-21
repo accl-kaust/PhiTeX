@@ -2526,7 +2526,7 @@ pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
 pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
     let v = r.v;
     let mut out: FxHashMap<i64, i64> = FxHashMap::default();
-    let mut put = |k: i64, out: &mut FxHashMap<i64, i64>| {
+    let put = |k: i64, out: &mut FxHashMap<i64, i64>| {
         let n = i64::try_from(out.len()).unwrap_or(0) + 1;
         out.entry(k).or_insert(n);
     };
