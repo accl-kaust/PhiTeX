@@ -1808,7 +1808,7 @@ impl Run<'_, '_> {
             // routine's material, the dead cycles before it)
             let fin = FinishIn::of(v, &self.cx.args());
             let class = fin.as_ref().map_or_else(String::new, |f| {
-                format!("pen {} mat {} prev_dead {}", f.output_penalty, f.in_material, f.prev_fire.1)
+                format!("pen {} mat {} prev_dead {} classes {:?} j {}", f.output_penalty, f.in_material, f.prev_fire.1, f.classes, f.j)
             });
             let r = |x: ValueId| v.render(x).chars().take(120).collect::<String>();
             for (f, x) in e.predict(v, j) {
