@@ -1019,7 +1019,13 @@ impl Run<'_, '_> {
         } else {
             let _ = self.scan_keyword("by")?;
         }
-        let old = self.read_f(field)?;
+        // (§1238: the old value is read for `\advance`, `\multiply` and
+        // `\divide` only; an assignment replaces it unseen)
+        let old = if q == cmd::REGISTER {
+            None
+        } else {
+            self.read_f(field)?
+        };
         if p < 2 {
             let cur = i64::from(crate::val::i32_of(v, old));
             let r: Option<i32> = if q < cmd::MULTIPLY {
