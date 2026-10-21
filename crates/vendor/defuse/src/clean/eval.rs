@@ -1980,7 +1980,7 @@ impl Engine {
                         site: Some(NodeId(*site)),
                     });
                 }
-                Read::Out { node, .. } => offer(hs, *node, Cause::Output { of: NodeId(*node) }),
+                Read::Out { node, .. } | Read::Placed { node, .. } => offer(hs, *node, Cause::Output { of: NodeId(*node) }),
                 // (A range's last contributor: a chain through an
                 // accumulator falls by one through each.)
                 Read::Range { f, from, to, past, .. } => {
@@ -2432,6 +2432,7 @@ fn read_kind(r: &Read) -> &'static str {
         Read::Loop { .. } => "loop: changed",
         Read::Env { .. } => "env: changed",
         Read::Out { .. } => "output: changed",
+        Read::Placed { .. } => "placed output: changed",
         Read::Kind { .. } => "kind: changed",
         Read::IsLoop { .. } => "is_loopback: changed",
         Read::At { .. } => "position: gone",
@@ -2925,7 +2926,7 @@ impl Merge<'_> {
         reads.iter().any(|rd| match rd {
             Read::Use { f, .. } | Read::Range { f, .. } | Read::Seq { f, .. } => p.fields.contains(f),
             Read::Stream { fields, .. } => fields.iter().any(|(f, _)| p.fields.contains(f)),
-            Read::Out { .. } | Read::At { .. } | Read::Kind { .. } | Read::Loop { .. } | Read::Env { .. } | Read::IsLoop { .. } => false,
+            Read::Out { .. } | Read::Placed { .. } | Read::At { .. } | Read::Kind { .. } | Read::Loop { .. } | Read::Env { .. } | Read::IsLoop { .. } => false,
             _ => true,
         })
     }
@@ -3093,7 +3094,7 @@ fn conflict_counts(snap: &World, w: &World, id: Id, o: &Outcome) {
                 data |= moved(Key::Defs(unit_of(*at), *f));
                 shape |= moved(Key::Shape(unit_of(*at)));
             }
-            Read::Out { node, .. } => data |= moved(Key::Out(*node)),
+            Read::Out { node, .. } | Read::Placed { node, .. } => data |= moved(Key::Out(*node)),
             Read::Range { f, .. } | Read::Seq { f, .. } => {
                 data |= moved(Key::Acc(u, *f)) || moved(Key::Defs(u, *f));
                 shape |= moved(Key::Shape(u));
@@ -3177,6 +3178,7 @@ fn run_job(
             claim: cx.claim,
             filed: None,
             def_ix: std::sync::OnceLock::new(),
+            text: 0,
         },
         kids: cx.kids,
         conts: cx.conts,

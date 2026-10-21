@@ -755,7 +755,7 @@ impl Engine {
             for rd in &r.reads {
                 match rd {
                     Read::Use { site, .. } => d.push(*site),
-                    Read::Out { node, .. } | Read::At { node, .. } => d.push(*node),
+                    Read::Out { node, .. } | Read::Placed { node, .. } | Read::At { node, .. } => d.push(*node),
                     Read::Kind { at, .. } => d.extend(w.node(*at).and_then(|x| opener(x.frame))),
                     Read::Range { f, from, to, past, .. } => {
                         if let Some((ru, lo, hi)) = w.window(id, *from, *to, *past)

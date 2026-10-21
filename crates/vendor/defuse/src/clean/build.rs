@@ -1112,7 +1112,7 @@ impl<'a> Builder<'a> {
     /// The id of a placed node: its placer, the kind of placement, the
     /// operation, and its ordinal among the placer's placements of that
     /// kind and operation (and anchor).
-    fn placed_id(parent: Id, place: Place, op: crate::api::OpId, ord: u32) -> Id {
+    pub(crate) fn placed_id(parent: Id, place: Place, op: crate::api::OpId, ord: u32) -> Id {
         let (tag, anchor) = match place {
             Place::Child => (1, 0),
             Place::Cont => (2, 0),
@@ -1528,7 +1528,10 @@ impl<'a> Builder<'a> {
         }
         let effect_changed = old.as_ref().and_then(|o| o.effect) != res.effect
             || old.as_ref().map_or(&[][..], |o| &o.kinds[..]) != &res.kinds[..];
-        let out_changed = old.as_ref().is_none_or(|o| o.out != res.out);
+        // (A result of another text than the last is a new output to a
+        // reader of its placed output.)
+        res.text = super::world::text_key(&n.text);
+        let out_changed = old.as_ref().is_none_or(|o| o.out != res.out || o.text != res.text);
         let mut n2 = n.clone();
         n2.wide |= widen;
         n2.narrowed = None;
@@ -1704,6 +1707,7 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
         Read::Loop { f, val } => w.loops.get(f) == Some(val),
         Read::Env { f, val } => core.env_get(w, *f).flatten() == *val,
         Read::Out { node, val } => w.node(*node).and_then(Node::out) == *val,
+        Read::Placed { node, op, args, val } => w.node(*node).and_then(|n| n.placed_out(*op, args)) == *val,
         Read::Kind { at, val } => w.kind_at(*at) == *val,
         Read::IsLoop { f, val } => core.is_loop(*f) == *val,
         Read::At { node, there } => w.node(*node).is_some() == *there,
@@ -1791,7 +1795,7 @@ pub(crate) fn why_broken(core: &Core, w: &World, me: Id, r: &Read) -> crate::api
         }
         Read::Loop { f, .. } => Rerun::Loop { field: *f },
         Read::Env { f, .. } => Rerun::Environment { field: *f },
-        Read::Out { node, .. } => Rerun::Output {
+        Read::Out { node, .. } | Read::Placed { node, .. } => Rerun::Output {
             of: crate::api::NodeId(*node),
         },
         Read::Kind { .. } => Rerun::Scope,
@@ -1895,7 +1899,7 @@ fn read_keys(w: &World, id: Id, n: &Node, reads: &[Read], which: Which) -> (Vec<
                 // (Its answer follows the frame chain it reads through.)
                 agg.kind |= moving;
             }
-            Read::Out { node, .. } | Read::At { node, .. } => {
+            Read::Out { node, .. } | Read::Placed { node, .. } | Read::At { node, .. } => {
                 if fixed {
                     keys.push(ReadKey::Out(*node));
                 }

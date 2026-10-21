@@ -138,6 +138,15 @@ pub(crate) enum Read {
     Env { f: Field, val: Option<ValueId> },
     /// The output of a node.
     Out { node: Id, val: Option<ValueId> },
+    /// The output of a node the reader placed (`Ctx::placed_output`), as
+    /// it last committed under the text it was placed with (`op`,
+    /// `args`): `None` while it has no result of that text.
+    Placed {
+        node: Id,
+        op: crate::api::OpId,
+        args: Arc<[ValueId]>,
+        val: Option<ValueId>,
+    },
     /// The kind of the scope a node is in.
     Kind { at: Id, val: Option<ValueId> },
     /// Whether a field is a loop-back field.
@@ -202,6 +211,8 @@ pub(crate) struct Res {
     /// Its definitions by field (the first of each), made when first
     /// asked of a result with many (`Engine::def_value`).
     pub def_ix: std::sync::OnceLock<Arc<FxHashMap<Field, ValueId>>>,
+    /// The text it was committed under ([`text_key`]; 0: not yet).
+    pub text: usize,
 }
 
 impl Res {
@@ -238,6 +249,7 @@ impl Default for Res {
             claim: None,
             filed: None,
             def_ix: std::sync::OnceLock::new(),
+            text: 0,
         }
     }
 }
@@ -296,6 +308,15 @@ impl Node {
             (Some(e), _) | (None, Some(e)) => e.brackets(),
             (None, None) => Brackets::default(),
         }
+    }
+
+    /// Its output as committed under the text `op`, `args` (see
+    /// [`Read::Placed`]).
+    pub(crate) fn placed_out(&self, op: crate::api::OpId, args: &[ValueId]) -> Option<ValueId> {
+        if matches!(self.st, St::Inert(_)) || self.text.op != op || *self.text.args != *args {
+            return None;
+        }
+        self.res.as_ref().filter(|r| r.text == text_key(&self.text)).map(|r| r.out)
     }
 
     pub(crate) fn out(&self) -> Option<ValueId> {

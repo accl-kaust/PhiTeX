@@ -753,6 +753,52 @@ impl<'a> Ctx<'a> {
         self.read_out(c)
     }
 
+    /// The output of continuation `i` of this run (the index `follow`,
+    /// `follow_after` or `follow_after_any` gave), as it last committed
+    /// under the text this run placed it with: `None` while it has no
+    /// result of that text (not made yet, not run, or given new arguments
+    /// and not run since). Never a stop: the read is recorded, and the
+    /// continuation's commit re-asks this run.
+    pub fn placed_output(&mut self, i: usize) -> Option<ValueId> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&i, )) } else { serde_json::Value::Null };
+        let r = self.placed_output_inner(i);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "placed_output", a, crate::record::j(&r));
+        r
+    }
+
+    fn placed_output_inner(&mut self, i: usize) -> Option<ValueId> {
+        let bc = self.base.map_or(0, |b| b.1);
+        let committed: &[Id] = self.w.node(self.me).and_then(|n| n.res.as_ref()).map_or(&[], |r| &r.conts[..]);
+        let (node, op, args) = if i < bc {
+            // (An earlier attempt's, as it stands.)
+            let c = *committed.get(i)?;
+            let n = self.w.node(c)?;
+            (c, n.text.op, n.text.args.clone())
+        } else {
+            // This attempt's: the node its commit makes or keeps (the
+            // ordinals go on from the earlier attempts' placements).
+            let k = i - bc;
+            let s = self.conts.get(k)?;
+            let key = |place: Place, op: OpId| match place {
+                Place::After(a) => (3, op, a),
+                p => (u64::from(!matches!(p, Place::Cont)), op, 0),
+            };
+            let want = key(s.place, s.op);
+            let earlier = committed[..bc.min(committed.len())]
+                .iter()
+                .filter(|&&x| self.w.node(x).is_some_and(|n| key(n.place, n.text.op) == want))
+                .count();
+            let mine = self.conts[..k].iter().filter(|c| key(c.place, c.op) == want).count();
+            let ord = u32::try_from(earlier + mine + 1).unwrap_or(u32::MAX);
+            (super::build::Builder::placed_id(self.me, s.place, s.op, ord), s.op, s.args.clone())
+        };
+        let val = self.w.node(node).and_then(|n| n.placed_out(op, &args));
+        self.reads.push(Read::Placed { node, op, args, val });
+        val
+    }
+
     fn read_out(&mut self, c: Id) -> Result<ValueId, Stop> {
         let Some(n) = self.w.node(c) else {
             return Ok(ValueId::UNIT);

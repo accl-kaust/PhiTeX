@@ -11,6 +11,7 @@ const READS: &[&str] = &[
     "use_field_proj",
     "use_env",
     "output_of",
+    "placed_output",
     "apply",
     "acc_range",
     "acc_range_to",
