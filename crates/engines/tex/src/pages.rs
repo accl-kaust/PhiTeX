@@ -3667,13 +3667,19 @@ impl Run<'_, '_> {
             );
         }
         // the fields the finishers between the cut and this resume
-        // defined globally (`gdefs`, the window after the cutting node)
+        // defined globally (`gdefs`, the window after the cutting node),
+        // read only where a group's binding is open at the cut: they
+        // decide nothing else here, and a finisher placed between would
+        // run this resume again for nothing
+        let hidden = list_of(v, a(6));
         let gdefs: Vec<GDef> = match Some(pid).filter(|&p| p != ValueId::UNIT) {
-            Some(p) if self.cx.op() == self.ops.resume => self.gdefs_after(int_of(v, p))?,
+            Some(p) if self.cx.op() == self.ops.resume && !hidden.is_empty() => {
+                self.gdefs_after(int_of(v, p))?
+            }
             _ => Vec::new(),
         };
         let piece = int_of(v, pid);
-        for e in list_of(v, a(6)) {
+        for e in hidden {
             let ys = list_of(v, e);
             if ys.len() < 2 {
                 continue;
