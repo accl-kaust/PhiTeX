@@ -12,7 +12,8 @@ defuse = { path = "../../vendor/defuse" }
 [features]
 # the engine's probes (defuse::obs): spans and counters, profiling only
 profile = ["defuse/profile"]
-# the engine's recording for replay (DEFUSE_RECORD); release builds carry none
+# the engine's scheduler dumps (DEFUSE_DUMP, DEFUSE_DUMP_EVERY, on SIGTERM and on NoProgress);
+# release builds carry none
 observe = ["defuse/observe"]
 
 [lints]

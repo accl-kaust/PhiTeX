@@ -1024,6 +1024,7 @@ fn engine_identity() -> u64 {
             include_bytes!("../../../vendor/defuse/src/sync.rs"),
             include_bytes!("../../../vendor/defuse/src/obs.rs"),
             include_bytes!("../../../vendor/defuse/src/record.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/mod.rs"),
             include_bytes!("../../../vendor/defuse/src/clean/batch.rs"),
             include_bytes!("../../../vendor/defuse/src/clean/build.rs"),
             include_bytes!("../../../vendor/defuse/src/clean/claims.rs"),
@@ -1031,7 +1032,6 @@ fn engine_identity() -> u64 {
             include_bytes!("../../../vendor/defuse/src/clean/ctx.rs"),
             include_bytes!("../../../vendor/defuse/src/clean/engine.rs"),
             include_bytes!("../../../vendor/defuse/src/clean/eval.rs"),
-            include_bytes!("../../../vendor/defuse/src/clean/mod.rs"),
             include_bytes!("../../../vendor/defuse/src/clean/ptree.rs"),
             include_bytes!("../../../vendor/defuse/src/clean/seq.rs"),
             include_bytes!("../../../vendor/defuse/src/clean/world.rs"),
@@ -1177,10 +1177,8 @@ pub struct Stats {
     pub loop_rounds: u64,
     /// Nodes that waited on a value not known yet, and stops.
     pub pending_waits: u64,
-    /// Waits on a node whose declared set was pending, and how many of
-    /// those sets then defined the field (the necessary ones).
+    /// Waits on a node whose declared set was pending.
     pub pending_sets: u64,
-    pub pending_sets_defining: u64,
     pub stops: u64,
     /// Attempts that resumed a stopped run at its blocked read, and that
     /// started over though one was kept (a read changed).
@@ -1240,21 +1238,13 @@ pub struct Stats {
     /// ended (`o` finished, `s` stopped, `x` other), and the evaluation's
     /// index in the build or edit (its round).
     pub run_log: Vec<(u64, &'static str, bool, bool, u8, u64)>,
-    /// The engine's pending waits by kind, summed over the evaluations.
-    pub waits_by_kind: Vec<(&'static str, u64)>,
-    /// The nodes most waited on in the last evaluation (raw ids, waits).
-    pub top_waited: Vec<(u64, u64)>,
-    /// Starts the engine held back until a node's inputs were known.
-    pub gated: u64,
     /// The version of the text the result is for ([`Build::version`]).
     pub version: u64,
     /// The texts taken while the engine evaluated (the engine's
     /// `edits_applied`): each one's version and the step it came before.
     pub absorbed: Vec<(u64, u64)>,
-    /// Scheduler steps, and the nodes run in them summed: `ready_mean`
-    /// is the mean batch.
+    /// Scheduler steps.
     pub steps: u64,
-    pub ready_total: u64,
     /// Nodes whose text bounded what they may define ([`crate::hints`]),
     /// and those that may define anything, among the live nodes that
     /// ran.
@@ -1296,8 +1286,7 @@ pub struct Stats {
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
     /// The engine's speculative runs: kept with outstanding
-    /// assumptions, confirmed, and whose assumptions failed; and nodes
-    /// re-done higher after running below a finished input (raises).
+    /// assumptions, confirmed, and whose assumptions failed.
     pub speculations: u64,
     pub confirmations: u64,
     pub mispredictions: u64,
@@ -1305,12 +1294,6 @@ pub struct Stats {
     /// confirmed, and refuted (their readers re-ran).
     pub predictions_confirmed: u64,
     pub predictions_refuted: u64,
-    /// Speculative runs dropped at a stop (their guess is then blocked
-    /// until its node leaves work).
-    pub spec_stops: u64,
-    /// Speculative runs dropped at apply because they changed the
-    /// node's shape (`Report::spec_shape_changes`).
-    pub spec_shape_changes: u64,
     /// Results dropped at apply because the node went away or was
     /// re-bound (`dead_result`), or no longer takes a result
     /// (`state_result`): the engine's probe counters, totals since their
@@ -1323,7 +1306,6 @@ pub struct Stats {
     pub tail: u64,
     pub use_record: u64,
     pub slice_abort: u64,
-    pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
     pub max_ready: usize,
@@ -1365,8 +1347,8 @@ pub struct Stats {
 
 /// The cold accounting of an evaluation (spec-final §1), with
 /// `PHITEX_TEX_TIME`: per round the engine's split of its time, the
-/// runs per node, the parallel shape (§9b: raises, pending waits, the
-/// finishers waited on), the op time by node kind, the realised
+/// runs per node, the parallel shape (§9b: pending waits), the op time
+/// by node kind, the realised
 /// critical path in nodes and time and the kinds on the engine's
 /// critical chain, and the environment pushes.
 #[allow(clippy::too_many_lines)]
@@ -1400,12 +1382,10 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
     #[allow(clippy::cast_precision_loss)]
     let rpn = r.runs as f64 / live as f64;
     eprintln!(
-        "acct: {} rounds, {} runs, {} live nodes, {rpn:.2} runs/node, raises {} ({:.2}% of runs), pending waits {} ({:.2}% of runs), round wall minus op {per_run_us:.1} us/run at {} threads",
+        "acct: {} rounds, {} runs, {} live nodes, {rpn:.2} runs/node, pending waits {} ({:.2}% of runs), round wall minus op {per_run_us:.1} us/run at {} threads",
         r.round_times.len(),
         r.runs,
         live,
-        r.raises,
-        pct(r.raises),
         r.pending_waits,
         pct(r.pending_waits),
         ex.n
@@ -1473,13 +1453,8 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         chain.len(),
         first.join(" ")
     );
-    let waited_fin = r
-        .top_waited
-        .iter()
-        .filter(|(n, _)| eng.node_info(*n).is_some_and(|i| i.op == "finish"))
-        .count();
     eprintln!(
-        "acct: critical path {} nodes, {:.3} ms; chain kinds {on_chain:?}; finishers waited on {waited_fin}; env calls {env_calls}",
+        "acct: critical path {} nodes, {:.3} ms; chain kinds {on_chain:?}; env calls {env_calls}",
         r.realised_critical_path,
         r.realised_critical_time.as_secs_f64() * 1e3
     );
@@ -1524,24 +1499,6 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         ld(&crate::ops::EXEC_CLAIMS[1]),
         ld(&crate::ops::EXEC_CLAIMS[2])
     );
-    // (the nodes waited on most: the definers the waits are on, by
-    // operation, with the start of the text or arguments)
-    let waited: Vec<String> = r
-        .top_waited
-        .iter()
-        .map(|&(n, w)| {
-            let info = eng.node_info(n);
-            let op = info.as_ref().map_or("gone", |i| i.op);
-            let a = info
-                .and_then(|i| i.args.first().map(|&x| eng.values().render(x)))
-                .unwrap_or_default()
-                .chars()
-                .take(48)
-                .collect::<String>();
-            format!("{w}x {op} {a}")
-        })
-        .collect();
-    eprintln!("acct: waited on (top {}): {waited:?}", waited.len());
     let longest: Vec<String> = r
         .run_times
         .iter()
@@ -1567,9 +1524,8 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         .collect();
     eprintln!("acct: predictions refuted by field (top 12): {refuted:?}");
     eprintln!(
-        "acct: stops by reader and field (top 15): {:?}; waits by kind {:?}; by reader {:?}",
+        "acct: stops by reader and field (top 15): {:?}; waits by reader {:?}",
         crate::run::take_stops(eng.values(), 15),
-        r.waits_by_kind,
         r.waits_by_op
     );
 }
@@ -1618,20 +1574,17 @@ fn print_round(t: std::time::Duration, r: &Report) {
             .collect::<Vec<_>>()
     );
     eprintln!(
-        "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} env_provided, {} raises, {} pending, {} pending sets ({} defining), {} created, {} freed, spec {}/{}/{}, by op {:?}",
+        "round: {t:?}, {} nodes run, {} runs, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} env_provided, {} pending, {} pending sets, {} created, {} freed, spec {}/{}/{}, by op {:?}",
         r.nodes_run,
         r.runs,
-        r.gated,
         r.cutoffs,
         r.rebinds,
         r.restarts,
         r.rounds,
         r.stops,
         r.env_provided,
-        r.raises,
         r.pending_waits,
         r.pending_sets,
-        r.pending_sets_defining,
         r.created,
         r.freed,
         r.speculations,
@@ -1642,14 +1595,6 @@ fn print_round(t: std::time::Duration, r: &Report) {
 }
 
 impl Stats {
-    /// The mean number of nodes run per scheduler step.
-    #[must_use]
-    pub fn ready_mean(&self) -> f64 {
-        #[allow(clippy::cast_precision_loss)]
-        let m = self.ready_total as f64 / self.steps.max(1) as f64;
-        m
-    }
-
     /// The executor's counters of one evaluation begun at `c0`.
     fn add_exec(&mut self, ex: &crate::exec::Threads, c0: Option<u64>, eng: &Engine) {
         if let (Some(a), Some(b)) = (c0, crate::exec::clock().now()) {
@@ -1783,7 +1728,6 @@ impl Stats {
         self.loop_rounds += r.rounds;
         self.pending_waits += r.pending_waits;
         self.pending_sets += r.pending_sets;
-        self.pending_sets_defining += r.pending_sets_defining;
         self.stops += r.stops;
         self.resumed += r.resumed;
         self.restarted += r.restarted;
@@ -1801,7 +1745,6 @@ impl Stats {
         self.version = r.version;
         self.absorbed.extend_from_slice(&r.edits_applied);
         self.steps += r.steps;
-        self.ready_total += r.ready_total;
         self.speculations += r.speculations;
         self.confirmations += r.confirmations;
         self.mispredictions += r.mispredictions;
@@ -1818,21 +1761,10 @@ impl Stats {
                 .map(|&(n, t)| (n.raw(), t))
                 .collect();
         }
-        self.spec_stops += r.spec_stops;
-        self.spec_shape_changes += r.spec_shape_changes;
-        self.raises += r.raises;
         self.max_ready = self.max_ready.max(r.max_ready);
         self.fuel_outs += r.fuel_outs;
         self.declarations_refuted += r.declarations_refuted;
         self.page_steps += Report::by_op(&r.runs_by_op, "finish");
-        self.gated += r.gated;
-        self.top_waited = r.top_waited.iter().map(|&(n, w)| (n.raw(), w)).collect();
-        for &(k, n) in &r.waits_by_kind {
-            match self.waits_by_kind.iter_mut().find(|x| x.0 == k) {
-                Some(x) => x.1 += n,
-                None => self.waits_by_kind.push((k, n)),
-            }
-        }
         for &(k, n) in &r.runs_by_op {
             match self.runs_by_op.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,
@@ -2869,6 +2801,7 @@ impl Graph {
                     r.runs,
                     r.nodes_run
                 );
+                eprintln!("acct-edit: quick path held {}", r.quick_held);
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
@@ -2961,10 +2894,6 @@ impl Graph {
                     by.sort_by_key(|a| std::cmp::Reverse(a.1));
                     by.truncate(12);
                     eprintln!("  reruns by field {by:?}");
-                }
-                eprintln!("  waits by kind {:?}", r.waits_by_kind);
-                for &(n, w) in &r.top_waited {
-                    eprintln!("  waited on {w}x: {}", describe(&self.eng, n));
                 }
             }
             crate::timeline::lap("engine: the accounting printed (PHITEX_TEX_TIME only)");
@@ -5461,7 +5390,7 @@ impl Build {
         (dvi, log)
     }
 
-    /// A node by its raw id ([`Stats::top_waited`]): its operation and
+    /// A node by its raw id ([`Stats::reruns`]): its operation and
     /// the start of its first argument.
     #[must_use]
     pub fn describe_node(&self, raw: u64) -> String {

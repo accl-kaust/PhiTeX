@@ -28,34 +28,30 @@ def num(s):
 
 def acct(text):
     """The accounting lines of a log, summed over its evaluations."""
-    r = {"rounds": [], "runs": 0, "live": 0, "raises": 0, "pending": 0,
-         "kinds": {}, "cp_nodes": 0, "cp_ms": 0.0, "chain": "", "fin_waited": 0,
-         "env_calls": 0, "overhead_us": None, "threads": None, "hint_ms": 0.0, "bodies_ms": 0.0}
+    r = {"rounds": [], "runs": 0, "live": 0, "pending": 0,
+         "kinds": {}, "cp_nodes": 0, "cp_ms": 0.0, "chain": "",
+         "env_calls": 0, "overhead_us": None, "threads": None, "hint_ms": 0.0}
     for m in re.finditer(r"^acct: round (\d+): wall ([0-9.]+) ms, op ([0-9.]+) ms, commit ([0-9.]+) ms, "
                          r"check ([0-9.]+) ms, idle ([0-9.]+) ms", text, re.M):
         r["rounds"].append(tuple(float(m.group(i)) for i in range(2, 7)))
-    for m in re.finditer(r"^acct: (\d+) rounds, (\d+) runs, (\d+) live nodes, [0-9.]+ runs/node, raises (\d+) "
-                         r"\([0-9.]+% of runs\), pending waits (\d+) \([0-9.]+% of runs\), round wall minus op "
+    for m in re.finditer(r"^acct: (\d+) rounds, (\d+) runs, (\d+) live nodes, [0-9.]+ runs/node, "
+                         r"pending waits (\d+) \([0-9.]+% of runs\), round wall minus op "
                          r"([0-9.]+) us/run at (\d+) threads", text, re.M):
         r["runs"] += int(m.group(2))
         r["live"] = int(m.group(3))
-        r["raises"] += int(m.group(4))
-        r["pending"] += int(m.group(5))
-        r["overhead_us"] = float(m.group(6))
-        r["threads"] = int(m.group(7))
+        r["pending"] += int(m.group(4))
+        r["overhead_us"] = float(m.group(5))
+        r["threads"] = int(m.group(6))
     for m in re.finditer(r"^acct: op time by kind: (.*)$", text, re.M):
         for k, ms, n in re.findall(r"(\w+) ([0-9.]+) ms/(\d+)", m.group(1)):
             a = r["kinds"].setdefault(k, [0.0, 0])
             a[0] += float(ms)
             a[1] += int(n)
     for m in re.finditer(r"^acct: critical path (\d+) nodes, ([0-9.]+) ms; chain kinds (\{[^}]*\}); "
-                         r"finishers waited on (\d+); env calls (\d+)", text, re.M):
+                         r"env calls (\d+)", text, re.M):
         if float(m.group(2)) >= r["cp_ms"]:
             r["cp_nodes"], r["cp_ms"], r["chain"] = int(m.group(1)), float(m.group(2)), m.group(3)
-        r["fin_waited"] = max(r["fin_waited"], int(m.group(4)))
-        r["env_calls"] = int(m.group(5))
-    for m in re.finditer(r"^acct: read_ns by kind: .*; op bodies \(op minus reads\) ([0-9.]+) ms", text, re.M):
-        r["bodies_ms"] += float(m.group(1))
+        r["env_calls"] = int(m.group(4))
     for m in re.finditer(r"^incr walk: .*?, analyses ([0-9.]+)(ms|µs|us|s|ns)", text, re.M):
         u = {"s": 1e3, "ms": 1.0, "µs": 1e-3, "us": 1e-3, "ns": 1e-6}[m.group(2)]
         r["hint_ms"] += float(m.group(1)) * u
@@ -71,12 +67,11 @@ def show_acct(log, label):
     kinds = ", ".join(f"{k} {v[0]:.1f} ms/{v[1]}" for k, v in sorted(a["kinds"].items()))
     out.append(f"  op time by kind: {kinds}")
     rpn = a["runs"] / a["live"] if a["live"] else 0
-    rr = 100 * a["raises"] / a["runs"] if a["runs"] else 0
     pr = 100 * a["pending"] / a["runs"] if a["runs"] else 0
-    out.append(f"  runs {a['runs']}, live {a['live']}, runs/node {rpn:.2f}; raises {rr:.2f}% pending {pr:.2f}% "
+    out.append(f"  runs {a['runs']}, live {a['live']}, runs/node {rpn:.2f}; pending {pr:.2f}% "
                f"of runs (bar <= 1%); round wall minus op {a['overhead_us']} us/run (bar <= 10 at j1)")
     out.append(f"  critical path {a['cp_nodes']} nodes, {a['cp_ms']:.1f} ms, chain kinds {a['chain']}; "
-               f"finishers waited on {a['fin_waited']} (bar 0 but link and cut resumes); env calls {a['env_calls']}")
+               f"env calls {a['env_calls']}")
     print("\n".join(out))
 
 
