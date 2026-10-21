@@ -1144,7 +1144,10 @@ impl<'a> Builder<'a> {
             let base = match last_cont.get(&anchor) {
                 Some(&b) => b,
                 // (After the follow nodes other placers keep there.)
-                None => self.after_conts(anchor, self.w.subtree_end(anchor), id, spec.place),
+                None => match spec.place {
+                    Place::After(_) => self.after_conts(anchor, self.claim_end(anchor), id, spec.place),
+                    _ => self.after_conts(anchor, self.w.subtree_end(anchor), id, spec.place),
+                },
             };
             let end = self.put_placed(id, &n, c, spec, depth, base);
             last_cont.insert(anchor, end);
@@ -1184,6 +1187,28 @@ impl<'a> Builder<'a> {
             base = self.extent_end(y);
         }
         base
+    }
+
+    /// The last node of `x`'s subtree and of the siblings it claims (its
+    /// run took their text: what is placed after `x` goes after them, a
+    /// claim is never split). Its own continuations right after it are
+    /// crossed to reach them.
+    fn claim_end(&self, x: Id) -> Id {
+        let mut e = self.w.subtree_end(x);
+        let Some(d) = self.w.node(x).map(|n| n.depth) else { return e };
+        let mut at = e;
+        while let Some(y) = self.w.next(at) {
+            let Some(yn) = self.w.node(y) else { break };
+            if yn.st == St::Inert(x) && yn.depth == d {
+                at = self.w.subtree_end(y);
+                e = at;
+            } else if yn.parent == x && yn.place == Place::Cont {
+                at = self.extent_end(y);
+            } else {
+                break;
+            }
+        }
+        e
     }
 
     /// The last node of `x`'s extent: its subtree, the follow nodes other
