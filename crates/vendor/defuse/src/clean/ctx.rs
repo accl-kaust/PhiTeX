@@ -308,7 +308,11 @@ impl<'a> Ctx<'a> {
 
     /// The definition of `f` reaching the position just after node `at`
     /// (what it unfolded or claims included): the value and its defining
-    /// node (`None`: the unit's start value).
+    /// node (`None`: the unit's start value). `at` is any other node of
+    /// this unit, before or past this one (a page builder reading the
+    /// state at the pieces after it): a definition coming in or changing
+    /// up to `at` re-asks, as for any read. One past this node may reach
+    /// this node's own definition, read as it last committed.
     ///
     /// # Errors
     ///
@@ -327,7 +331,8 @@ impl<'a> Ctx<'a> {
         self.use_field_pos(f, at, true)
     }
 
-    /// The definition of `f` reaching the position just before node `at`.
+    /// The definition of `f` reaching the position just before node `at`
+    /// (before or past this one, as [`Ctx::use_field_at`]).
     ///
     /// # Errors
     ///
@@ -358,7 +363,8 @@ impl<'a> Ctx<'a> {
             self.reads.push(Read::At { node: a, there: false });
             return Ok(FieldAt::Gone);
         }
-        if !self.w.before(a, self.me) {
+        // (Before or past the reader in its unit, not the reader itself.)
+        if a == self.me || self.w.node(a).is_none_or(|n| n.unit != self.unit) {
             self.error = Some(crate::api::EvalError::BadPosition {
                 node: self.node(),
                 at,

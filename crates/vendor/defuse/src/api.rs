@@ -561,8 +561,9 @@ pub enum EvalError {
         /// The evaluation's counters up to here.
         report: Box<Report>,
     },
-    /// [`crate::Ctx::use_field_at`] named a node that is not earlier in the
-    /// reader's unit.
+    /// [`crate::Ctx::use_field_at`] named the reader itself or a node of
+    /// another unit (the clean core; the round core: a node that is not
+    /// earlier in the reader's unit).
     BadPosition {
         node: NodeId,
         at: NodeId,
@@ -636,7 +637,7 @@ impl std::fmt::Display for EvalError {
             EvalError::BadPosition { node, at } => {
                 write!(
                     f,
-                    "node {node:?} read a field at {at:?}, which is not earlier in its unit"
+                    "node {node:?} read a field at {at:?}, a position it may not read at"
                 )
             }
             EvalError::OpPanicked { node, op, message } => {
