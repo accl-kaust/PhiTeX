@@ -1442,28 +1442,46 @@ impl Engine {
     /// Whether queued node `k` is to run now (and with what kept state): it
     /// is dirty where it was queued, and no pending claim holds it back.
     #[allow(clippy::type_complexity)]
-    /// Placer `p` starts over, its kept state broken: what it placed waits
-    /// for it, as for a placer a change dirtied.
-    fn stale_placer(&mut self, p: Id) {
+    /// Placer `p` starts over, its kept state broken from position `from`
+    /// on: what it placed past there waits for it, as for a placer a change
+    /// dirtied. (Up to there its next attempt reads what this one read and
+    /// places the same: those go on, or a page builder restarted by a
+    /// change past its finishers would take them away and back.)
+    fn stale_placer(&mut self, p: Id, from: Pos) {
         if let Some(r) = self.w.node(p).and_then(|n| n.res.clone()) {
             for &x in r.kids.iter().chain(&r.conts) {
-                self.w.awaiting.insert(x, (), &NoMeasure);
+                if self.w.node(x).is_none_or(|xn| xn.pos > from) {
+                    self.w.awaiting.insert(x, (), &NoMeasure);
+                }
             }
         }
     }
 
-    /// Whether placer `p`'s kept state stands on reads that no longer hold
-    /// (asked once per world version while they hold).
-    fn kept_broken(&self, s: &mut Sched, p: Id) -> bool {
-        let Some((_, reads)) = self.kept.get(&p) else { return false };
+    /// Where placer `p`'s broken read `r` starts to differ: a range read's
+    /// window start (what it read before it stands), else anywhere.
+    fn broken_from(&self, p: Id, r: &Read) -> Pos {
+        let pu = self.w.node(p).map(|n| n.unit);
+        match r {
+            Read::Range { from, .. } => self.w.node(*from).filter(|n| Some(n.unit) == pu).map_or(0, |n| n.pos),
+            _ => 0,
+        }
+    }
+
+    /// Where placer `p`'s kept state stands on a read that no longer holds
+    /// (the first one's start, see [`Self::broken_from`]); asked once per
+    /// world version while they hold.
+    fn kept_broken(&self, s: &mut Sched, p: Id) -> Option<Pos> {
+        let (_, reads) = self.kept.get(&p)?;
         if s.kept_ok.get(&p) == Some(&self.w.ver) {
-            return false;
+            return None;
         }
-        let broken = reads.iter().any(|r| !super::build::holds(&self.core, &self.w, p, r));
-        if !broken {
-            s.kept_ok.insert(p, self.w.ver);
+        match reads.iter().find(|r| !super::build::holds(&self.core, &self.w, p, r)) {
+            Some(r) => Some(self.broken_from(p, r)),
+            None => {
+                s.kept_ok.insert(p, self.w.ver);
+                None
+            }
         }
-        broken
     }
 
     fn prepare(&mut self, s: &mut Sched, rep: &mut Report, k: (u32, Pos, Id)) -> Option<Kept> {
@@ -1499,13 +1517,15 @@ impl Engine {
         // A placer stopped on a kept state whose reads broke (a node it
         // read went) is such a placer too: it starts over now (its kept
         // state is of a world before), and what it placed waits for it.
-        if self.kept.contains_key(&placer) && self.kept_broken(s, placer) {
+        if self.kept.contains_key(&placer)
+            && let Some(from) = self.kept_broken(s, placer)
+        {
             self.kept.remove(&placer);
             s.kept_ok.remove(&placer);
             s.parked.remove(&placer);
             s.range_wait.remove(&placer);
             self.enqueue(s, placer);
-            self.stale_placer(placer);
+            self.stale_placer(placer, from);
         }
         if self.w.awaiting.contains_key(&id) && self.w.node(placer).is_some_and(|p| super::world::in_work(p.st)) {
             s.parked.insert(id, Wait::Node(placer, None));
@@ -1535,7 +1555,8 @@ impl Engine {
                     rep.restarted += 1;
                     bump(&mut rep.restarted_by, read_kind(r));
                     // (Starting over, it is a stale placer.)
-                    self.stale_placer(id);
+                    let from = self.broken_from(id, r);
+                    self.stale_placer(id, from);
                     None
                 }
             },

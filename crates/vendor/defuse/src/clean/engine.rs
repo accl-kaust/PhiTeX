@@ -808,6 +808,12 @@ impl Engine {
         self.w.nodes.iter().filter(|(_, n)| !matches!(n.place, Place::Marker(_))).count()
     }
 
+    /// Unit `u`'s nodes in text order (for checks and traces).
+    #[must_use]
+    pub fn order(&self, u: UnitId) -> Vec<NodeId> {
+        self.w.units.get(&u.0).map_or_else(Vec::new, |un| un.order.iter().map(|(_, &x)| NodeId(x)).collect())
+    }
+
     #[must_use]
     pub fn live_units(&self) -> usize {
         self.units as usize

@@ -425,7 +425,7 @@ pub(crate) fn ns_since(t: Option<std::time::Instant>) -> u64 {
 /// Phase timers (`CLEAN_PROF`): nanoseconds per phase, summed.
 pub(crate) mod prof {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    pub(crate) const NAMES: [&str; 31] = [
+    pub(crate) const NAMES: [&str; 37] = [
         "op", "apply", "settle_claims", "settle", "frames", "held_by", "prepare", "unguess", "absorb", "commit", "place", "reads", "defs", "contribs", "claimed", "outs",
         "set_contrib", "range_readers",
         "read_at", "pset_between", "flush", "reaching",
@@ -434,8 +434,12 @@ pub(crate) mod prof {
         // (Filing reads, `reads` split: the keys made, entries looked up,
         // filed or unfiled by kind, scope and sibling windows.)
         "rd_keys", "rd_has", "rd_field", "rd_out", "rd_range", "rd_agg",
+        // (A commit's node work: nodes made, their declared entries filed,
+        // structure readers re-asked; entries filed and the readers they
+        // re-ask; the committed node stored.)
+        "create", "file_decl", "shape_at", "file_if", "def_readers", "put_node",
     ];
-    pub(crate) static NS: [AtomicU64; 31] = [const { AtomicU64::new(0) }; 31];
+    pub(crate) static NS: [AtomicU64; 37] = [const { AtomicU64::new(0) }; 37];
     /// Whether `CLEAN_PROF` asks for them (`profile` builds only: without
     /// the feature every probe compiles away).
     #[inline]
