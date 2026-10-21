@@ -166,6 +166,9 @@ pub(crate) struct PageLoop {
     /// `\deadcycles` as the routine of the page fired last left it
     /// ([`RTN`]'s third element; 0 where it has none).
     pub rtn_dead: i64,
+    /// The best breaks of the pages fired, penalties: 10000 from their
+    /// fire on (§1013), wherever they are folded again.
+    pub inf: Vec<Src>,
     /// What each routine (by its hint) gave back on the last page fired
     /// on the text, `\deadcycles` left out: the next page's guess
     /// ([`FinishIn::rtn_guess`]).
@@ -226,6 +229,7 @@ impl PageLoop {
             began: (crate::build::IGNORE_DEPTH_STATE, None),
             top_marks: ValueId::UNIT,
             rtn_dead: 0,
+            inf: Vec::new(),
             last_rtn: Vec::new(),
             prev_fire: (-1, 0),
             marks: Vec::new(),
@@ -268,6 +272,22 @@ pub(crate) struct LoopFire {
 
 /// The profile item a source names, as the loop has it.
 fn loop_item(lp: &PageLoop, src: Src) -> Option<crate::vprof::PItem> {
+    use crate::vprof::PItem;
+    // (§1013: a page's best break, a penalty, set to 10000 where the page
+    // fired: it goes back to the contributions so)
+    if lp.inf.contains(&src) {
+        return match loop_item_raw(lp, src)? {
+            PItem::Node(Node::Penalty(_)) => {
+                Some(PItem::Node(Node::Penalty(phitex_typeset::linebreak::INF_PENALTY)))
+            }
+            x => Some(x),
+        };
+    }
+    loop_item_raw(lp, src)
+}
+
+/// [`loop_item`] as the source holds it.
+fn loop_item_raw(lp: &PageLoop, src: Src) -> Option<crate::vprof::PItem> {
     use crate::vprof::PItem;
     match src {
         Src::Piece { piece, item } => {
@@ -466,6 +486,15 @@ fn build_t(
                 let holding = params.holding_inserts > 0;
                 let held = held_srcs(&f, &srcs, &ins, holding);
                 let held_named = held.is_some();
+                // (§1013: the best break, a penalty, is 10000 from here on)
+                if f.output_penalty < phitex_typeset::linebreak::INF_PENALTY {
+                    let brk = srcs.get(f.best).map_or(s.src, |b| b.src);
+                    if let Some(b) = brk
+                        && !lp.inf.contains(&b)
+                    {
+                        lp.inf.push(b);
+                    }
+                }
                 let mut carried: Vec<SrcRef> = srcs.get(f.best..).unwrap_or_default().to_vec();
                 if topskip {
                     carried.push(SrcRef { src: None, fold: s.fold });
@@ -802,6 +831,7 @@ struct LoopSnap {
     began: (FoldState, Option<ValueId>),
     top_marks: ValueId,
     rtn_dead: i64,
+    inf: Vec<Src>,
     prev_fire: (i64, i64),
     last_rtn: Vec<(ValueId, ValueId)>,
     pend: Vec<(crate::vprof::PItem, SrcRef)>,
@@ -826,6 +856,7 @@ impl PageLoop {
             began: self.began,
             top_marks: self.top_marks,
             rtn_dead: self.rtn_dead,
+            inf: self.inf.clone(),
             prev_fire: self.prev_fire,
             last_rtn: self.last_rtn.clone(),
             pend: self.pend.clone(),
@@ -849,6 +880,7 @@ impl PageLoop {
         self.began = s.began;
         self.top_marks = s.top_marks;
         self.rtn_dead = s.rtn_dead;
+        self.inf = s.inf;
         self.prev_fire = s.prev_fire;
         self.last_rtn = s.last_rtn;
         self.pend = s.pend;
@@ -1184,6 +1216,12 @@ impl Run<'_, '_> {
             post_markers: lp.post_markers.clone(),
             post_k: lp.post_k,
             prev_fire: lp.prev_fire,
+            inf: lp
+                .inf
+                .iter()
+                .copied()
+                .filter(|&b| spans.iter().any(|sp| span_srcs(sp).any(|x| x == b)))
+                .collect(),
         };
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(

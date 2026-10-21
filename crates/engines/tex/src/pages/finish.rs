@@ -123,6 +123,9 @@ pub(crate) struct FinishIn {
     /// what §1054's `\end` reads in the post-output build and in the
     /// rest of that piece.
     pub prev_fire: (i64, i64),
+    /// The items of its spans that are the best break of a page before,
+    /// a penalty: 10000 since that page fired (§1013).
+    pub inf: Vec<Src>,
 }
 
 impl FinishIn {
@@ -156,6 +159,12 @@ impl FinishIn {
             v.int(i64::from(self.post_k)),
             v.int(self.prev_fire.0),
             v.int(self.prev_fire.1),
+            v.list(
+                self.inf
+                    .iter()
+                    .map(|&src| Span { src, len: 1 }.encode(v))
+                    .collect(),
+            ),
         ]);
         let mut out = vec![v.int(self.j)];
         out.extend([ValueId::UNIT; 8]);
@@ -227,6 +236,13 @@ impl FinishIn {
                 p.get(19).map_or(-1, |&x| int_of(v, x)),
                 p.get(20).map_or(0, |&x| int_of(v, x)),
             ),
+            inf: p
+                .get(21)
+                .map(|&x| list_of(v, x))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|x| Span::decode(v, x).map(|s| s.src))
+                .collect(),
         })
     }
 }
@@ -330,7 +346,7 @@ impl Run<'_, '_> {
                 .unwrap_or_default()
         };
         // (an item a source names, real)
-        let item = |src: Src| -> Option<ValueId> {
+        let item_raw = |src: Src| -> Option<ValueId> {
             match src {
                 Src::Piece { piece, item } => {
                     let raw = &units.iter().find(|u| u.0 == piece)?.2;
@@ -364,6 +380,18 @@ impl Run<'_, '_> {
                     Some(nodes::encode(v, &Node::Ins(ins), &side))
                 }
             }
+        };
+        // (§1013: a page before's best break, a penalty, is 10000 since)
+        let item = |src: Src| -> Option<ValueId> {
+            let x = item_raw(src)?;
+            if fin.inf.contains(&src) && nodes::tag(v, x) == nodes::T_PENALTY {
+                return Some(nodes::encode(
+                    v,
+                    &Node::Penalty(phitex_typeset::linebreak::INF_PENALTY),
+                    &Side::default(),
+                ));
+            }
+            Some(x)
         };
         let mut ps = PageState::fresh(fin.j);
         ps.normal = fin.normal - i64::from(!fin.special);
