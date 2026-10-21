@@ -170,9 +170,9 @@ pub(crate) struct PageLoop {
     /// fire on (§1013), wherever they are folded again.
     pub inf: Vec<Src>,
     /// What each routine (by its hint) gave back on the last page fired
-    /// on the text, `\deadcycles` left out: the next page's guess
-    /// ([`FinishIn::rtn_guess`]).
-    pub last_rtn: Vec<(ValueId, ValueId)>,
+    /// on the text at each `\outputpenalty`, `\deadcycles` left out: the
+    /// guess of a later page fired there ([`FinishIn::rtn_guess`]).
+    pub last_rtn: Vec<((ValueId, i32), ValueId)>,
     /// The piece the page fired last fired in and `rtn_dead`
     /// ([`FinishIn::prev_fire`]).
     pub prev_fire: (i64, i64),
@@ -717,10 +717,12 @@ impl Run<'_, '_> {
     /// else nothing given back. The guess of page `j`
     /// ([`FinishIn::rtn_guess`], made in [`Run::page_loop`]) is what the
     /// same routine gave back on the last page the loop fired on the text
-    /// before `j` (the miss it read, or that page's own guess where it
-    /// read none), else this; nothing for a page fired in a routine's
-    /// material (no chain of pages grows on guesses). It depends on the
-    /// pages before `j` alone: a page's own miss never changes it.
+    /// before `j` at the same `\outputpenalty` (the miss it read, or that
+    /// page's own guess where it read none); else nothing for a penalty
+    /// above -10001 (an ordinary page ships), this for a special one;
+    /// nothing for a page fired in a routine's material (no chain of
+    /// pages grows on guesses). It depends on the pages before `j` alone:
+    /// a page's own miss never changes it.
     pub(crate) fn rtn_guess(&self, hint: ValueId) -> ValueId {
         let v = self.v;
         let empty = || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]);
@@ -838,7 +840,7 @@ struct LoopSnap {
     rtn_dead: i64,
     inf: Vec<Src>,
     prev_fire: (i64, i64),
-    last_rtn: Vec<(ValueId, ValueId)>,
+    last_rtn: Vec<((ValueId, i32), ValueId)>,
     pend: Vec<(crate::vprof::PItem, SrcRef)>,
     page_src: Vec<SrcRef>,
     page_ins: Vec<Option<u16>>,
@@ -1161,17 +1163,22 @@ impl Run<'_, '_> {
         }
         let after = first.and_then(|(_, p)| lp.prev.get(&p).copied().flatten());
         let hint = self.output_hint_at(node)?;
-        // (the guess: what the routine gave back on the page before that
-        // fired on the text, where one did in this loop, else its last
-        // value as the evaluation began; nothing for a page fired in a
-        // routine's material, so no chain of pages grows on guesses)
+        // (the guess: what the routine gave back on the last page before
+        // fired on the text at the same `\outputpenalty`, which the
+        // routine branches on; else nothing for an ordinary page, which
+        // ships, and the routine's last value as the evaluation began for
+        // a special one; nothing for a page fired in a routine's
+        // material, so no chain of pages grows on guesses)
+        let key = (hint, f.output_penalty);
+        let empty = || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]);
         let rtn_guess = if in_material {
-            v.list(vec![v.list(Vec::new()), v.list(Vec::new())])
+            empty()
         } else {
-            lp.last_rtn
-                .iter()
-                .find(|e| e.0 == hint)
-                .map_or_else(|| self.rtn_guess(hint), |e| e.1)
+            match lp.last_rtn.iter().find(|e| e.0 == key) {
+                Some(e) => e.1,
+                None if f.output_penalty > -10001 => empty(),
+                None => self.rtn_guess(hint),
+            }
         };
         if cfg!(feature = "observe") {
             // (the evaluation: its values and their epoch, the guesses
@@ -1181,7 +1188,7 @@ impl Run<'_, '_> {
                 self.cx.values_epoch(),
                 self.rtn_guess(hint),
             );
-            guess_check(self.cx.node().raw(), j, &lp.misses, (eval, hint, in_material), rtn_guess);
+            guess_check(self.cx.node().raw(), j, &lp.misses, (eval, key, in_material), rtn_guess);
         }
         let rtns: Vec<(i64, ValueId)> = {
             let mut pages: Vec<i64> = spans
@@ -1271,9 +1278,9 @@ impl Run<'_, '_> {
             } else {
                 rtn
             };
-            match lp.last_rtn.iter_mut().find(|e| e.0 == hint) {
+            match lp.last_rtn.iter_mut().find(|e| e.0 == key) {
                 Some(e) => e.1 = given,
-                None => lp.last_rtn.push((hint, given)),
+                None => lp.last_rtn.push((key, given)),
             }
         }
         let mut markers = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
