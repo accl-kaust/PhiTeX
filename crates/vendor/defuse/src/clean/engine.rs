@@ -488,7 +488,7 @@ impl Engine {
     pub fn declare_accumulator(&mut self, f: Field, m: Arc<dyn Monoid>) {
         #[cfg(feature = "observe")]
         let m: Arc<dyn Monoid> = {
-            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), serde_json::json!(m.speculate()));
+            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), crate::record::monoid_mode(&*m));
             Arc::new(crate::record::RecMonoid { inner: m, field: f })
         };
         self.core_mut().accs.insert(f, m);
@@ -504,7 +504,7 @@ impl Engine {
     /// prefix that matches wins.
     pub fn declare_accumulator_prefix(&mut self, prefix: &str, m: Arc<dyn Monoid>) {
         #[cfg(feature = "observe")]
-        crate::record::api(&self.core.values, "declare_accumulator_prefix", crate::record::j(&(prefix,)), serde_json::json!(m.speculate()));
+        crate::record::api(&self.core.values, "declare_accumulator_prefix", crate::record::j(&(prefix,)), crate::record::monoid_mode(&*m));
         let core = self.core_mut();
         core.acc_prefixes.push((prefix.to_string(), m));
         // (Fields resolved before see the new prefix.)

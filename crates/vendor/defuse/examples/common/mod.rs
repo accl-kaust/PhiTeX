@@ -1057,8 +1057,9 @@ fn unfold_output(cx: &mut Ctx<'_>, ops: Ops, src: ValueId, st: ValueId, h: Value
     cx.close_scope();
 }
 
-/// `SeqMonoid`, its folds guessed when predicting (`SPEC_FOLD`).
-struct GuessSeq;
+/// `SeqMonoid`, its folds guessed when predicting (`SPEC_FOLD`; with
+/// `SPEC_FOLD=ran`, past contributors that ran only: `Monoid::guess_ran`).
+struct GuessSeq(bool);
 
 impl defuse::Monoid for GuessSeq {
     fn empty(&self, v: &Values) -> ValueId {
@@ -1068,7 +1069,10 @@ impl defuse::Monoid for GuessSeq {
         SeqMonoid.combine(v, a, b)
     }
     fn speculate(&self) -> bool {
-        true
+        !self.0
+    }
+    fn guess_ran(&self) -> bool {
+        self.0
     }
 }
 
@@ -1876,7 +1880,7 @@ impl Lang {
         // SPEC_FOLD=1: `out`'s readers guess past contributors in work
         // (`Monoid::speculate`).
         if std::env::var_os("SPEC_FOLD").is_some() {
-            eng.declare_accumulator(out, Arc::new(GuessSeq));
+            eng.declare_accumulator(out, Arc::new(GuessSeq(std::env::var("SPEC_FOLD").is_ok_and(|v| v == "ran"))));
         } else {
             eng.declare_accumulator(out, Arc::new(SeqMonoid));
         }

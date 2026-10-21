@@ -373,6 +373,26 @@ impl<'a> Ctx<'a> {
         self.predict && !self.careful && self.core.acc(f).is_some_and(|m| m.speculate())
     }
 
+    /// The node in work a range read of accumulator `f` over `(lo, hi)`
+    /// waits for: the first that may contribute; none when the fold is
+    /// guessed; guessing those that ran (`Monoid::guess_ran`), the first
+    /// without a result. (`guessed` set when it folds one in work.)
+    fn fold_blocker(&mut self, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let x = self.w.range_blocker(self.me, f, u, lo, hi)?;
+        if self.guess_fold(f) {
+            self.guessed = true;
+            return None;
+        }
+        if self.predict && !self.careful && self.core.acc(f).is_some_and(|m| m.guess_ran()) {
+            let open = self.w.range_blocker_open(self.me, f, u, lo, hi);
+            if open.is_none() {
+                self.guessed = true;
+            }
+            return open;
+        }
+        Some(x)
+    }
+
     /// Whether node `id` is in work in this world.
     fn in_work(&self, id: Id) -> bool {
         self.w.node(id).is_some_and(|n| matches!(n.st, St::Dirty | St::Held))
@@ -1039,12 +1059,8 @@ impl<'a> Ctx<'a> {
         // guessing, it is passed as it last contributed. Waited for alone,
         // not with the rest of the window: it may be the next contributor,
         // and a page builder folds piece by piece as they finish.)
-        if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
-            if self.guess_fold(f) {
-                self.guessed = true;
-            } else {
-                return Err(self.stop(Wait::Node(x, Some(f))));
-            }
+        if let Some(x) = self.fold_blocker(f, u, lo, hi) {
+            return Err(self.stop(Wait::Node(x, Some(f))));
         }
         let val = match self.core.acc(f) {
             Some(mo) => {
@@ -1071,10 +1087,8 @@ impl<'a> Ctx<'a> {
         // for (one that declares its contributions, or whose last run made
         // none to `f`, is folded as it stands; its change re-asks), unless
         // the fold is guessed (`Monoid::speculate`).
-        if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
-            if self.guess_fold(f) {
-                self.guessed = true;
-            } else {
+        if let Some(x) = self.fold_blocker(f, u, lo, hi) {
+            {
                 if super::core::debug() && self.w.node(x).is_some_and(|n| !matches!(n.st, St::Dirty | St::Held)) {
                     eprintln!("range {} of {f:?}: blocker {x} in state {:?}", self.me, self.w.node(x).map(|n| n.st));
                 }

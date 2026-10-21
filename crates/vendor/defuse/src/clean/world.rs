@@ -1412,6 +1412,32 @@ impl World {
         }
     }
 
+    /// The first node in `(lo, hi)` (other than `me`) in work without a
+    /// result that may contribute to `f` (a range read waits for these
+    /// when it guesses those that ran: `Monoid::guess_ran`).
+    pub(crate) fn range_blocker_open(&self, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let mut lo = lo;
+        loop {
+            let (p, x) = self.first_open(f, u, lo, hi)?;
+            if x != me {
+                return Some(x);
+            }
+            lo = p;
+        }
+    }
+
+    /// The last such node before `hi` (other than `me`).
+    pub(crate) fn range_blocker_open_last(&self, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let mut hi = hi;
+        loop {
+            let (p, x) = self.last_open(f, u, lo, hi)?;
+            if x != me {
+                return Some(x);
+            }
+            hi = p;
+        }
+    }
+
     /// The last such blocker in `(lo, hi)` before `hi` (other than `me`):
     /// the one a reader parked on is woken by last, when commits come in
     /// text order.
@@ -1518,10 +1544,16 @@ impl World {
             // An accumulator: held while a node before it in work may
             // still contribute (it would stop on the fold otherwise).
             if let Some(m) = core.acc(f) {
-                // (A guessed fold does not wait: `Monoid::speculate`.)
-                if !(predict && m.speculate())
-                    && let Some(x) = self.range_blocker_last(id, f, u, 0, pos)
-                {
+                // (A guessed fold does not wait: `Monoid::speculate`; one
+                // that guesses those that ran waits for those that did not.)
+                let x = if predict && m.speculate() {
+                    None
+                } else if predict && m.guess_ran() {
+                    self.range_blocker_open_last(id, f, u, 0, pos)
+                } else {
+                    self.range_blocker_last(id, f, u, 0, pos)
+                };
+                if let Some(x) = x {
                     return Err(Some(x));
                 }
                 continue;

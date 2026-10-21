@@ -492,8 +492,10 @@ struct PlayMonoid {
     book: Arc<Book>,
     field: J,
     exact: bool,
-    /// The client monoid's `speculate` (its declaration's answer).
+    /// The client monoid's `speculate` and `guess_ran` (its declaration's
+    /// answer).
     speculate: bool,
+    guess_ran: bool,
     /// The recorded empty value.
     zero: Option<ValueId>,
 }
@@ -540,6 +542,9 @@ impl PlayMonoid {
 impl Monoid for PlayMonoid {
     fn speculate(&self) -> bool {
         self.speculate
+    }
+    fn guess_ran(&self) -> bool {
+        self.guess_ran
     }
     fn empty(&self, _: &Values) -> ValueId {
         self.zero().unwrap_or_else(|| {
@@ -701,6 +706,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
                     field: a.clone(),
                     exact: book.exact.contains(&a.to_string()),
                     speculate: want.as_bool().unwrap_or(false),
+                    guess_ran: want.as_str() == Some("ran"),
                     zero: book.monoid.get(&key(&[a, &json!("empty"), &J::Null])).map(de),
                 }),
             );
@@ -719,6 +725,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
                         field: fj.clone(),
                         exact: book.exact.contains(&fj.to_string()),
                         speculate: want.as_bool().unwrap_or(false),
+                        guess_ran: want.as_str() == Some("ran"),
                         zero: book.monoid.get(&key(&[&fj, &json!("empty"), &J::Null])).map(de),
                     }),
                 );

@@ -78,6 +78,8 @@ struct Sched {
     careful: FxHashSet<Id>,
     /// Nodes whose committed result rests on a guess.
     guessed: FxHashSet<Id>,
+    /// Whether the scheduler predicts (runs guess).
+    predict: bool,
     /// Nodes whose run stopped on an accumulator range, with the range.
     range_wait: FxHashMap<Id, (Field, Id, Id, bool)>,
     /// Nodes a batch left out by their read hints, parked on the node in
@@ -819,6 +821,7 @@ impl Engine {
             .unwrap_or_else(|| (exec.parallelism().max(1) * 8).max(64));
         let mut idle: u32 = 0;
         let predict = sched.speculation_budget() > 0;
+        s.predict = predict;
         loop {
             if s.queue.is_empty() {
                 if self.requeue_hint_parked(s) {
@@ -1000,6 +1003,7 @@ impl Engine {
         let par = exec.parallelism().max(1);
         let window = (par * 8).max(64);
         let predict = sched.speculation_budget() > 0;
+        s.predict = predict;
         let fuel = sched.fuel();
         let mut idle: u32 = 0;
         loop {
@@ -1170,6 +1174,7 @@ impl Engine {
         let par = exec.parallelism().max(1);
         let window = (par * 8).max(64);
         let predict = sched.speculation_budget() > 0;
+        s.predict = predict;
         let fuel = sched.fuel();
         let mut idle: u32 = 0;
         loop {
@@ -1624,9 +1629,13 @@ impl Engine {
         }
         // Stopped on a range: parked again, without a run, while the range
         // still has a node in work.
+        // (Guessing those that ran, `Monoid::guess_ran`: while one that
+        // never ran is.)
+        let guessing = s.predict && !s.careful(id);
+        let ran = |f: Field| guessing && self.core.acc(f).is_some_and(|m| m.guess_ran());
         if let Some((f, from, to, past)) = s.range_wait.remove(&id)
             && let Some((u, lo, hi)) = self.w.window(id, from, to, past)
-            && let Some(x) = self.w.range_blocker_last(id, f, u, lo, hi)
+            && let Some(x) = if ran(f) { self.w.range_blocker_open_last(id, f, u, lo, hi) } else { self.w.range_blocker_last(id, f, u, lo, hi) }
         {
             s.range_wait.insert(id, (f, from, to, past));
             s.parked.insert(id, Wait::Node(x, Some(f)));
@@ -2151,7 +2160,7 @@ impl Engine {
         let cause = super::core::lock(&self.core.causes).get(&id).copied();
         let old = self.w.node(id).and_then(|n| n.res.clone());
         let moved = |f: Field, from: Id, to: Id, val: ValueId| {
-            !self.core.acc(f).is_some_and(|m| m.speculate())
+            !self.core.acc(f).is_some_and(|m| m.speculate() || m.guess_ran())
                 || matches!(cause, Some(crate::api::Rerun::Range { field: Some(g) }) if g == f)
                 || old.as_ref().is_some_and(|o| {
                     o.reads.iter().any(|r| matches!(r, Read::Range { f: g, from: a, to: b, val: v, .. } if *g == f && *a == from && *b == to && *v != val))
@@ -3209,7 +3218,7 @@ impl Merge<'_> {
         let asked = |rd: &Read| !same || matches!(rd, Read::Env { .. });
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
-                let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate()));
+                let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate() || m.guess_ran()));
                 let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd));
                 match broken.next() {
                     Some(rd) if speculated(rd) && broken.all(speculated) => {
@@ -3461,7 +3470,7 @@ fn run_job(
 /// guessing, not carefully, its contributors now as they last contributed.
 /// `count`: this refutation is counted (else only asked).
 fn fold_guess(core: &super::core::Core, s: &mut Sched, id: Id, f: Field, count: bool) -> bool {
-    if !core.acc(f).is_some_and(|m| m.speculate()) {
+    if !core.acc(f).is_some_and(|m| m.speculate() || m.guess_ran()) {
         return false;
     }
     let c = s.fold_refutes.entry(id).or_default();
