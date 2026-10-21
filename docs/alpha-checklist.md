@@ -76,36 +76,42 @@ The edit bar is not in `gate-fast`. Measure it on `$D` with
 amsedit shards still compare each edit history with its cold build, and
 a difference there is still a red.)
 
-Record the gate:
+Record the gate (dev 9afea351, the clean core, gate jobs 15413–15421,
+15424, 15425 on acclnode01, 2026-10-21; the gate builds with profile and
+observe):
 
 | bar | value | job | commit | met |
 |---|---|---|---|---|
-| every shard green | all green but lint: clippy `missing_fields_in_debug` at `crates/output/pdf/src/lib.rs:503`, fixed after it in f8c4f328 (workspace clippy clean locally there) | 15050–15062 (lint 15051) | 1c8ca62a | **no** (fixed after) |
-| amsldoc md5 at -j 1 / 8 / 16 = `98c96e00…` | 98c96e00 / 98c96e00 / 98c96e00, 44 pages | 15056 | 1c8ca62a | yes |
-| amsldoc cold rounds ≤ 3 (latexmk) | 3 | 15056 | 1c8ca62a | yes |
-| amsedit histories equal cold (8, 16 threads) | same, same | 15058, 15059 | 1c8ca62a | yes |
-| para4000 md5 at -j 1 / 8 / 16 = `41467932…` | same at all three | 15061 | 1c8ca62a | yes |
-| the clean core | the round core (the clean core is on `try-clean6`, not on dev) | | 1c8ca62a | **no** |
-| one letter ≤ 16 ms (-j 8) | 22 ms | 15043 | 00765988 | **no** |
-| line re-break ≤ 16 ms (-j 8) | 27 ms | 15043 | 00765988 | **no** |
-| heading ≤ 50 ms | 127 ms | 15043 | 00765988 | **no** |
-| label ≤ 50 ms | 574 ms | 15043 | 00765988 | **no** |
-| preamble definition ≤ 50 ms | 82 ms | 15043 | 00765988 | **no** |
-| page added (recorded, not gated) | 1702 ms | 15043 | 00765988 | – |
-| realised critical path ≤ 6 (amsldoc, -j 8) | 1222 nodes, 3.49 s | 15056 | 1c8ca62a | **no** |
-| runs per node ≤ 1.1 (amsldoc, -j 8) | 1.44 | 15056 | 1c8ca62a | **no** |
+| every shard green | all green: build, lint, suites, latex 0–2, ams, amsedit 8, amsedit 16, para, cg | 15413–15421, 15424, 15425 | 9afea351 | yes |
+| amsldoc md5 at -j 1 / 8 / 16 = `98c96e00…` | 98c96e00 / 98c96e00 / 98c96e00, 44 pages, 0 stale reads | 15419 | 9afea351 | yes |
+| amsldoc cold rounds ≤ 3 (latexmk) | 3 | 15419 | 9afea351 | yes |
+| amsedit histories equal cold (8, 16 threads) | same, same (10 edits each) | 15420, 15421 | 9afea351 | yes |
+| para4000 md5 at -j 1 / 8 / 16 = `41467932…` | same at all three, and at -j 32; edit histories (50 edits) same at -j 8 and 16 | 15424 | 9afea351 | yes |
+| the clean core | `crates/vendor/defuse` built with `clean` (dev since bf7644bf) | | 9afea351 | yes |
+| one letter ≤ 16 ms (-j 8) | ~17 ms (edit-reps, pinned, node01, r4-speed's latest) | | | **no** |
+| line re-break ≤ 16 ms (-j 8) | ~19–22 ms (edit-reps, pinned, node01, r4-speed's latest) | | | **no** |
+| heading ≤ 50 ms | 136 ms (r5-edits' last check) | | | **no** |
+| label ≤ 50 ms | 226 ms (r5-edits' last check); amsldoc's label sits in a table float, whose floor is ~57 ms: the user's decision on how to measure it is pending | | | **no** |
+| preamble definition ≤ 50 ms | 43 ms (r5-edits' last check) | | | yes |
+| realised critical path ≤ 6 (amsldoc, -j 8) | 698 nodes | 15419 | 9afea351 | **no** |
+| runs per node ≤ 1.1 (amsldoc, -j 8) | 1.37 | 15419 | 9afea351 | **no** |
 
 Recorded beside the bars, not gated:
 
 | | value | job | commit |
 |---|---|---|---|
-| amsldoc cold wall at -j 1 / 8 / 16 (pdfTeX: 3.0 s a run) | 5.17 / 8.69 / 9.20 s (profile and observe build, shared node) | 15056 | 1c8ca62a |
-| amsldoc cold watch build at -j 8, release | 5.4 s | 15043 | 00765988 |
-| amsldoc one-word edit at -j 8 / 16 (amsedit, 10 edits) | median 34 / 31 ms, max 52 / 44 ms | 15058, 15059 | 1c8ca62a |
-| para4000 wall at -j 1 / 8 / 16 (profile build) | 2.92 / 2.77 / 3.13 s | 15061 | 1c8ca62a |
-| para4000 wall at -j 1 / 8, release | 2.43 / 2.34 s (pdfTeX: 0.734 s) | 15061 | 1c8ca62a |
-| para4000 one-word edit at -j 8 / 16 | median 18 / 20 ms, max 24 / 24 ms | 15061 | 1c8ca62a |
-| para4000 realised critical path, runs per node (-j 8) | 6865 nodes, 1.09 | 15061 | 1c8ca62a |
+| amsldoc cold wall at -j 1 / 8 / 16 (pdfTeX: 3.0 s a run) | 4.35 / 6.20 / 6.42 s (profile and observe build) | 15419 | 9afea351 |
+| amsldoc cold wall at -j 1 / 8 / 16, release build, one node | 2.78 / 3.34–3.57 / 3.47 s | 15404 | 6003aab8 |
+| amsldoc cold at -j 8: idle, commit, op bodies | 27.7 s summed, 1.50 s, 4.98 s | 15419 | 9afea351 |
+| amsldoc one-word edit at -j 8 / 16 (amsedit, 10 edits) | median 24 / 24 ms, max 34 / 34 ms | 15419 | 9afea351 |
+| para4000 wall at -j 1 / 8 / 16 / 32 (profile build) | 3.09 / 3.22 / 3.28 / 3.53 s | 15424 | 9afea351 |
+| para4000 wall at -j 1 / 8, release | 2.93 / 2.76 s (pdfTeX: 0.734 s) | 15424 | 9afea351 |
+| para4000 realised critical path (-j 1 / 8) | 6093 / 4321 nodes | 15424 | 9afea351 |
+| para4000 -j 1 under callgrind | 20.3 G Ir; node bodies 156 k Ir a command (pdfTeX ~2.9 k) | 15425 | 9afea351 |
+
+Why cold amsldoc does not scale with threads, and what was ruled out:
+[note-cold-scaling.md](note-cold-scaling.md); the scan's chain and the
+parked block variant: [note-scan-blocks.md](note-scan-blocks.md).
 
 The tree's local checks (section 1), 2026-10-20, through bubblewrap
 with the pinned toolchain:
