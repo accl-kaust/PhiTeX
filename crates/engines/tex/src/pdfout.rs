@@ -1058,7 +1058,11 @@ impl FontSource for Fonts {
     fn metrics_hash(&self, f: FontId) -> u64 {
         self.by_id.get(&f).map_or_else(
             || phitex_pdf::metrics_hash(self.metrics(f)),
-            |x| *x.loaded.at_hash.get_or_init(|| phitex_pdf::metrics_hash(&x.loaded.at)),
+            |x| {
+                *x.loaded
+                    .at_hash
+                    .get_or_init(|| phitex_pdf::metrics_hash(&x.loaded.at))
+            },
         )
     }
     fn map_by_ps_name(&self, ps_name: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
