@@ -688,6 +688,21 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A node's contributions at `pos` of unit `u` made `after` where they
+    /// were `before`.
+    fn swap_contribs(&mut self, u: u32, pos: Pos, before: &[(Field, ValueId)], after: &[(Field, ValueId)]) {
+        for &(f, _) in before {
+            if !after.iter().any(|c| c.0 == f) {
+                self.contrib(u, f, pos, None);
+            }
+        }
+        for &(f, x) in after {
+            if !before.contains(&(f, x)) {
+                self.contrib(u, f, pos, Some(x));
+            }
+        }
+    }
+
     /// Sets a contribution to accumulator `f` at `pos` (a field declared
     /// no accumulator keeps none).
     pub(crate) fn contrib(&mut self, u: u32, f: Field, pos: Pos, x: Option<ValueId>) {
@@ -843,6 +858,12 @@ impl<'a> Builder<'a> {
         m.text = text;
         m.wide = false;
         m.narrowed = None;
+        // (Without a result, or claimed, it contributes what its text
+        // declares: the new text's now.)
+        let (before, after) = (contribs_of(&n), contribs_of(&m));
+        if before != after {
+            self.swap_contribs(n.unit, n.pos, &before, &after);
+        }
         if matches!(m.st, St::Inert(_)) {
             // A claimed node's new text is analysed only; it does not run.
             self.w.put(id, m);
@@ -1495,19 +1516,7 @@ impl<'a> Builder<'a> {
         self.counts.merge.defs += super::core::ns_since(t);
         // Contributions: the run's replace the old (or the declared ones).
         let t = super::core::now();
-        super::core::prof::time(13, || {
-            let before: Vec<(Field, ValueId)> = contribs_of(&n);
-            for &(f, _) in &before {
-                if !res.contribs.iter().any(|c| c.0 == f) {
-                    self.contrib(n.unit, f, n.pos, None);
-                }
-            }
-            for &(f, x) in &res.contribs {
-                if !before.contains(&(f, x)) {
-                    self.contrib(n.unit, f, n.pos, Some(x));
-                }
-            }
-        });
+        super::core::prof::time(13, || self.swap_contribs(n.unit, n.pos, &contribs_of(&n), &res.contribs));
         self.counts.merge.contribs += super::core::ns_since(t);
         let t_defs = super::core::prof::start();
         let t = super::core::now();
@@ -1619,7 +1628,9 @@ pub(crate) fn passed(w: &World, id: Id, x: Id) -> Vec<Id> {
 /// A node's contributions as filed: its run's, else its text's declared.
 fn contribs_of(n: &Node) -> Vec<(Field, ValueId)> {
     match (&n.res, &n.text.stat.contribs) {
-        (Some(r), _) if !matches!(n.st, St::Inert(_)) => r.contribs.clone(),
+        // (Claimed: its facts went; released, it files its text's.)
+        _ if matches!(n.st, St::Inert(_)) => Vec::new(),
+        (Some(r), _) => r.contribs.clone(),
         (_, Some(c)) => c.to_vec(),
         _ => Vec::new(),
     }
