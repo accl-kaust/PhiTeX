@@ -732,7 +732,7 @@ impl Operation for Pages {
         // committed at the stop stay and it places only new pages)
         let resumed = parked.is_some();
         let mut lp = parked.unwrap_or_else(PageLoop::new);
-        lp.resumed = resumed;
+        lp.resumed = resumed && crate::pages::CONTINUE_PLACEMENTS;
         match r.page_loop(&mut lp) {
             Ok(()) => {}
             Err(Halt::Stop(s)) => {

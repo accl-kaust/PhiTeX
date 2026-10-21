@@ -6356,10 +6356,12 @@ fn declare_fields(eng: &mut Engine) {
     // text in work: `crate::pages::MissMonoid`)
     let miss = eng.values().field(crate::pages::PAGE_MISS);
     eng.declare_accumulator(miss, Arc::new(crate::pages::MissMonoid));
-    // (a run resumed from its kept token continues its placements: the
-    // page builder places only the pages new since its stop,
-    // `crate::pages::PageLoop::resumed`)
-    eng.set_continue_placements(true);
+    // (a run resumed from its kept token continuing its placements: the
+    // page builder placing only the pages new since its stop,
+    // `crate::pages::PageLoop::resumed`; off while the engine's switch is
+    // for every operation, as the pieces and finishers make their whole
+    // result at every attempt)
+    eng.set_continue_placements(crate::pages::CONTINUE_PLACEMENTS);
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
     let rels = eng.values().field(crate::pdfprim::RT_RELS);
