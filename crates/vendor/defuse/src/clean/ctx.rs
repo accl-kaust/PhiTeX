@@ -84,7 +84,7 @@ pub struct Ctx<'a> {
     /// Each definition read made (field, at, after, projection): its
     /// entry in `reads`. The world a run sees does not change, so the same
     /// question asked again has the same answer and is not logged again.
-    read_ix: FxHashMap<(Field, Id, bool, u16), usize>,
+    read_ix: FxHashMap<(Field, Id, bool, bool, u16), usize>,
     pub(crate) nkids: usize,
     /// The run stopped on a pending definition set.
     pub(crate) pset_wait: bool,
@@ -227,13 +227,13 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn use_field_inner(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
-        Ok(self.read_at(f, self.me, false, 0)?.map(|x| x.0))
+        Ok(self.read_at(f, self.me, false, false, 0)?.map(|x| x.0))
     }
 
     /// Reads `f` at node `at` (before it, or after its subtree when
     /// `after`): the value and the site.
-    fn read_at(&mut self, f: Field, at: Id, after: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
-        let key = (f, at, after, proj);
+    fn read_at(&mut self, f: Field, at: Id, after: bool, own: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
+        let key = (f, at, after, own, proj);
         if let Some(&i) = self.read_ix.get(&key) {
             match self.reads[i] {
                 Read::Use { site, val, .. } => return Ok(val.map(|v| (v, site))),
@@ -243,7 +243,7 @@ impl<'a> Ctx<'a> {
         }
         let t = super::core::prof::start();
         let before = self.reads.len();
-        let r = self.read_at_inner(f, at, after, proj);
+        let r = self.read_at_inner(f, at, after, own, proj);
         if r.is_ok() && self.reads.len() == before + 1 {
             self.read_ix.insert(key, before);
         }
@@ -251,7 +251,7 @@ impl<'a> Ctx<'a> {
         r
     }
 
-    fn read_at_inner(&mut self, f: Field, at: Id, after: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
+    fn read_at_inner(&mut self, f: Field, at: Id, after: bool, own: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
         // (Fuel: one, and one per frame the read walks.)
         let depth = self.w.node(at).map_or(1, |n| self.w.unit(n.unit).frames.get(&n.frame).map_or(1, |fr| u64::from(fr.depth) + 1));
         self.spend(depth)?;
@@ -259,10 +259,10 @@ impl<'a> Ctx<'a> {
             self.reads.push(Read::Loop { f, val: lv });
             return Ok(Some((lv, NONE)));
         }
-        let Some((u, pos, fr)) = self.w.frame_at(at, after) else {
+        let Some((u, pos, fr, skip)) = self.w.read_point(at, after, own) else {
             return Ok(None);
         };
-        let reach = super::core::prof::time(21, || self.w.reaching(u, f, pos, fr, if after { NONE } else { at }));
+        let reach = super::core::prof::time(21, || self.w.reaching(u, f, pos, fr, skip));
         // A pending definition set between the site and the reader: wait
         // (speculating, the read guesses past it; a definition it makes
         // re-asks the reader).
@@ -316,6 +316,7 @@ impl<'a> Ctx<'a> {
                     f,
                     at,
                     after,
+                    own,
                     site,
                     val,
                     proj,
@@ -328,6 +329,7 @@ impl<'a> Ctx<'a> {
                     f,
                     at,
                     after,
+                    own,
                     site: NONE,
                     val,
                     proj,
@@ -378,7 +380,7 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn use_field_at_inner(&mut self, f: Field, at: Option<NodeId>) -> Result<FieldAt, Stop> {
-        self.use_field_pos(f, at, true)
+        self.use_field_pos(f, at, true, false)
     }
 
     /// The definition of `f` reaching the position just before node `at`
@@ -398,10 +400,30 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn use_field_before_inner(&mut self, f: Field, at: NodeId) -> Result<FieldAt, Stop> {
-        self.use_field_pos(f, Some(at), false)
+        self.use_field_pos(f, Some(at), false, false)
     }
 
-    fn use_field_pos(&mut self, f: Field, at: Option<NodeId>, after: bool) -> Result<FieldAt, Stop> {
+    /// The definition of `f` reaching the position right after node `at`'s
+    /// own definitions (what its run made, the text it claims included):
+    /// not after what it unfolded, nor after nodes placed after it or
+    /// after its children (a page's finisher placed in its extent reads
+    /// the state the piece's own run left, not one that includes itself).
+    /// `at` is any other node of this unit, before or past this one, as
+    /// for [`Ctx::use_field_at`].
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] while that definition (or structure before it) is in work.
+    pub fn use_field_after_own(&mut self, f: Field, at: NodeId) -> Result<FieldAt, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &at, )) } else { serde_json::Value::Null };
+        let r = self.use_field_pos(f, Some(at), false, true);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "use_field_after_own", a, crate::record::stop_or(&r));
+        r
+    }
+
+    fn use_field_pos(&mut self, f: Field, at: Option<NodeId>, after: bool, own: bool) -> Result<FieldAt, Stop> {
         let Some(at) = at else {
             // The unit's start: its start value.
             let v = self.env_value(f)?;
@@ -423,7 +445,7 @@ impl<'a> Ctx<'a> {
             return Ok(FieldAt::Unset);
         }
         self.reads.push(Read::At { node: a, there: true });
-        let r = self.read_at(f, a, after, 0)?;
+        let r = self.read_at(f, a, after, own, 0)?;
         Ok(match r {
             None => FieldAt::Unset,
             Some((v, site)) => FieldAt::Def(v, (site != NONE).then_some(NodeId(site))),
@@ -447,7 +469,7 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn use_field_proj_inner(&mut self, f: Field, p: crate::api::ProjId) -> Result<Option<ValueId>, Stop> {
-        let r = self.read_at(f, self.me, false, p.0)?;
+        let r = self.read_at(f, self.me, false, false, p.0)?;
         Ok(r.map(|(x, _)| self.core.project(p.0, x)))
     }
 
@@ -837,7 +859,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn acc_range_after_def_inner(&mut self, acc: Field, f: Field) -> Result<(Option<ValueId>, ValueId), Stop> {
-        let def = self.read_at(f, self.me, false, 0)?;
+        let def = self.read_at(f, self.me, false, false, 0)?;
         let from = def.map(|d| d.1).filter(|&s| s != NONE).map(NodeId);
         let fold = self.acc_range_to_inner(acc, from, None)?;
         Ok((def.map(|d| d.0), fold))

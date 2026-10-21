@@ -119,14 +119,15 @@ pub(crate) struct Def {
 /// One read a run made: the question and the answer it got.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Read {
-    /// The definition of `f` reaching position `at` (a node: before it, or
-    /// after its subtree when `after`), answered by `site` (`NONE`: the
-    /// environment or the unit's start) with `val`, through projection
-    /// `proj` (0: in full).
+    /// The definition of `f` reaching position `at` (a node: before it,
+    /// after its subtree when `after`, or right after its own definitions
+    /// when `own`), answered by `site` (`NONE`: the environment or the
+    /// unit's start) with `val`, through projection `proj` (0: in full).
     Use {
         f: Field,
         at: Id,
         after: bool,
+        own: bool,
         site: Id,
         val: Option<ValueId>,
         proj: u16,
@@ -674,6 +675,20 @@ impl World {
                 Some((e.unit, e.pos + 1, self.frame_after(end)))
             }
         }
+    }
+
+    /// Where a use read at node `at` reads (see [`Read::Use`]): its unit,
+    /// the position its answer is the nearest definition before, the frame
+    /// it reads in, and the node whose own entries it passes over.
+    pub(crate) fn read_point(&self, at: Id, after: bool, own: bool) -> Option<(u32, Pos, FrameId, Id)> {
+        if own {
+            // (Its own entries, at its position, in the frame its brackets
+            // leave open; nothing it unfolded or had placed after it.)
+            let n = self.node(at)?;
+            return Some((n.unit, n.pos + 1, self.frame_after(at), NONE));
+        }
+        let (u, pos, fr) = self.frame_at(at, after)?;
+        Some((u, pos, fr, if after { NONE } else { at }))
     }
 
     /// The innermost frame open after node `id` (its brackets after it

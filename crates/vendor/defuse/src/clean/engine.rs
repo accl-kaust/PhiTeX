@@ -475,6 +475,10 @@ impl Engine {
             Arc::new(crate::record::RecMonoid { inner: m, field: f })
         };
         self.core_mut().accs.insert(f, m);
+        // (What nodes made contribute to it before goes in now.)
+        if !self.w.nodes.is_empty() {
+            self.edit(|b| b.refile_contribs());
+        }
     }
 
     /// Declares every field whose name starts with `prefix` (and has no
@@ -488,6 +492,9 @@ impl Engine {
         core.acc_prefixes.push((prefix.to_string(), m));
         // (Fields resolved before see the new prefix.)
         core.acc_memo = crate::sync::Table::new();
+        if !self.w.nodes.is_empty() {
+            self.edit(|b| b.refile_contribs());
+        }
     }
 
     /// Marks `f` stable (a hint; the clean core needs none).

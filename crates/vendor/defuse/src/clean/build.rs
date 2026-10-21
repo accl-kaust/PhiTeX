@@ -671,6 +671,23 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Files the contributions of every node to fields declared
+    /// accumulators since they were made (a contribution to a field no
+    /// accumulator was not kept).
+    pub(crate) fn refile_contribs(&mut self) {
+        let mut todo: Vec<(u32, Field, Pos, ValueId)> = Vec::new();
+        for (_, n) in self.w.nodes.iter() {
+            for (f, x) in contribs_of(n) {
+                if self.core.acc(f).is_some() && self.w.field(n.unit, f).and_then(|c| c.contribs.get(&n.pos)) != Some(&x) {
+                    todo.push((n.unit, f, n.pos, x));
+                }
+            }
+        }
+        for (u, f, pos, x) in todo {
+            self.contrib(u, f, pos, Some(x));
+        }
+    }
+
     /// Sets a contribution to accumulator `f` at `pos` (a field declared
     /// no accumulator keeps none).
     pub(crate) fn contrib(&mut self, u: u32, f: Field, pos: Pos, x: Option<ValueId>) {
@@ -1560,7 +1577,8 @@ impl<'a> Builder<'a> {
 
     /// Commits a stopped run's unfolding only (its children made, so the
     /// run can wait for them).
-    /// Frees the placements `gone` of placer `id` (see [`passed`]).
+    /// Frees the placements `gone` of placer `id` (see [`passed`]; or a
+    /// cycle through them broken).
     pub(crate) fn free_placed(&mut self, id: Id, gone: &[Id]) {
         for &k in gone {
             self.free(k);
@@ -1640,6 +1658,7 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
             f,
             at,
             after,
+            own,
             site,
             val,
             proj,
@@ -1648,10 +1667,10 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
                 let _ = lv;
                 return false;
             }
-            let Some((u, pos, fr)) = w.frame_at(*at, *after) else {
+            let Some((u, pos, fr, skip)) = w.read_point(*at, *after, *own) else {
                 return false;
             };
-            let reach = w.reaching(u, *f, pos, fr, if *after { NONE } else { *at });
+            let reach = w.reaching(u, *f, pos, fr, skip);
             if strict && w.pending_set_between(core, u, *f, reach.map_or(0, |r| r.0), pos, me).is_some() {
                 return false;
             }
@@ -1728,16 +1747,16 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
 /// Whether use read `r` now reaches another site.
 pub(crate) fn rebound(core: &Core, w: &World, r: &Read) -> bool {
     let _ = core;
-    let Read::Use { f, at, after, site, .. } = r else {
+    let Read::Use { f, at, after, own, site, .. } = r else {
         return false;
     };
     if w.loops.get(f).is_some() {
         return false;
     }
-    let Some((u, pos, fr)) = w.frame_at(*at, *after) else {
+    let Some((u, pos, fr, skip)) = w.read_point(*at, *after, *own) else {
         return true;
     };
-    let now = w.reaching(u, *f, pos, fr, if *after { NONE } else { *at }).map_or(NONE, |(_, e)| e.node);
+    let now = w.reaching(u, *f, pos, fr, skip).map_or(NONE, |(_, e)| e.node);
     now != *site
 }
 
@@ -1745,10 +1764,10 @@ pub(crate) fn rebound(core: &Core, w: &World, r: &Read) -> bool {
 pub(crate) fn why_broken(core: &Core, w: &World, me: Id, r: &Read) -> crate::api::Rerun {
     use crate::api::Rerun;
     match r {
-        Read::Use { f, at, after, val, .. } => {
+        Read::Use { f, at, after, own, val, .. } => {
             let new = w
-                .frame_at(*at, *after)
-                .and_then(|(u, pos, fr)| match w.reaching(u, *f, pos, fr, if *after { NONE } else { *at }) {
+                .read_point(*at, *after, *own)
+                .and_then(|(u, pos, fr, skip)| match w.reaching(u, *f, pos, fr, skip) {
                     Some((_, e)) => e.val,
                     None => w.env_of(core, u, *f),
                 })

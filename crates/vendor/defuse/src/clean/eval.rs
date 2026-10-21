@@ -351,8 +351,12 @@ impl Engine {
                 if super::core::prof::time(7, || self.unguess(&mut s)) {
                     continue;
                 }
-                // Quiet: a cycle through outputs is an error.
+                // Quiet: a cycle through outputs is an error, but for one
+                // through a node waiting for its placer to place it again.
                 if let Some(c) = self.cycle(&s) {
+                    if self.break_hold_cycle(&mut s, &c) {
+                        continue;
+                    }
                     return Err(EvalError::Cycle(c.into_iter().map(NodeId).collect()));
                 }
                 // Loop-backs runs declared: taken in now, their readers run.
@@ -2196,6 +2200,52 @@ impl Engine {
         }
     }
 
+
+    /// Breaks cycle `c` among parked nodes where it runs through a node
+    /// waiting for its placer (in the cycle too) to place it again (one a
+    /// stop did not free: see the stop's passed placements): the placer's
+    /// attempt waits on what waits on that node, so it is past it; the
+    /// node goes. Whether one went.
+    fn break_hold_cycle(&mut self, s: &mut Sched, c: &[Id]) -> bool {
+        let on: FxHashSet<Id> = c.iter().copied().collect();
+        let mut gone: Vec<(Id, Id)> = Vec::new();
+        for &y in c {
+            let Some(p) = self.w.node(y).map(|n| n.parent) else { continue };
+            if on.contains(&p) && self.w.awaiting.contains_key(&y) && matches!(s.parked.get(&y), Some(Wait::Node(q, None)) if *q == p) {
+                gone.push((p, y));
+            }
+        }
+        if gone.is_empty() {
+            return false;
+        }
+        if super::core::debug() {
+            eprintln!("hold cycle {c:?}: frees {gone:?}");
+        }
+        let w = std::mem::take(&mut self.w);
+        let mut b = Builder::new(&self.core, w);
+        for &(p, y) in &gone {
+            b.free_placed(p, &[y]);
+        }
+        let m = b.finish();
+        let (dirty, created, freed, woken) = (m.dirty, m.created, m.freed, m.woken);
+        self.rebinds += m.rebinds;
+        self.w = m.w;
+        self.created += created;
+        self.freed += freed.len() as u64;
+        for x in &freed {
+            self.kept.remove(x);
+            s.parked.remove(x);
+            s.env.remove(x);
+            self.wake(s, *x);
+        }
+        for x in dirty {
+            self.enqueue(s, x);
+        }
+        for x in woken {
+            self.wake(s, x);
+        }
+        true
+    }
 
     /// A cycle among parked nodes through outputs, if any.
     fn cycle(&self, s: &Sched) -> Option<Vec<Id>> {
