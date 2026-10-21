@@ -2707,6 +2707,7 @@ impl Graph {
             {
                 Ok(r) => r,
                 Err(e) => {
+                    debug_nodes(&self.eng, "at the evaluation's error");
                     // the build ends here; the error is a diagnostic
                     let m = self.diagnose(&e, unit);
                     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -6506,7 +6507,7 @@ fn debug_nodes(eng: &Engine, when: &str) {
                 eprintln!("order {when} from {a} to {b}:");
                 for n in &order[p.min(q)..=p.max(q)] {
                     let d = eng.debug_node(*n);
-                    eprintln!("  {} {}", n.raw(), d.chars().take(400).collect::<String>());
+                    eprintln!("  {} {}", n.raw(), d.chars().take(4000).collect::<String>());
                 }
             }
         }
