@@ -807,6 +807,15 @@ impl Run<'_, '_> {
         // value: the routine reading it after the run cuts the piece,
         // [`Run::check_cut`])
         let at = self.st.at_candidates(v);
+        // (each location some candidate holds, by field (then location),
+        // with its value where the run ends: a candidate's restored
+        // bindings are these filtered, in order)
+        let mut held: Vec<(Field, Loc, Option<ValueId>)> = Vec::new();
+        for l in at.locs() {
+            let f = self.loc_field(l);
+            held.push((f, l, self.st.id_of(l, v)));
+        }
+        held.sort_unstable_by_key(|x| (x.0.0.raw(), x.1));
         let mut per = Vec::with_capacity(n);
         for (i, m) in marks.iter().enumerate() {
             if Some(m.k) == last {
@@ -816,37 +825,30 @@ impl Run<'_, '_> {
             // (`[value]` or `[]` (absent) where the run had it; one it had
             // neither read nor defined before is what reached the piece,
             // [`BEFORE_PIECE`], the finisher reads it there)
-            let kv_of = |l: Loc| match at.get(i).and_then(|a| a.get(&l).copied()) {
+            let kv_of = |l: Loc| match at.get(i, l) {
                 Some(Some(x)) => v.list(x.into_iter().collect()),
                 Some(None) => v.str(BEFORE_PIECE),
                 None => ValueId::UNIT,
             };
-            let mut names: Vec<(ValueId, bool, ValueId)> = Vec::new();
             // (a binding local to a group of the run open at the
             // candidate, restored at the group's close after it: the
             // routine runs inside that group and sees the binding, which
             // the run's end no longer holds, §1012)
-            if let Some(a) = at.get(i) {
-                let mut restored: Vec<Loc> = a
-                    .iter()
-                    .filter_map(|(&l, &x)| x.map(|x| (l, x)))
-                    .filter(|&(l, x)| self.st.id_of(l, v) != x)
-                    .map(|(l, _)| l)
-                    .collect();
-                restored.sort_unstable();
-                for l in restored {
-                    names.push((self.loc_field(l).0, false, kv_of(l)));
-                }
-            }
-            names.extend(
-                self.streams_since(m.contribs)
-                    .into_iter()
-                    .map(|f| (f.0, false, ValueId::UNIT)),
-            );
+            let restored = held.iter().filter_map(|&(f, l, end)| match at.get(i, l) {
+                Some(Some(x)) if x != end => Some((f.0, false, v.list(x.into_iter().collect()))),
+                _ => None,
+            });
+            let mut streams: Vec<(ValueId, bool, ValueId)> = self
+                .streams_since(m.contribs)
+                .into_iter()
+                .map(|f| (f.0, false, ValueId::UNIT))
+                .collect();
+            streams.sort_by_key(|x| x.0.raw());
             // (by field, a standing definition first; at a tie the
-            // locals, then the definitions after the candidate, then
-            // these: one stable sort of all of them in that order)
-            names.sort_by_key(|x| (x.0.raw(), !x.1));
+            // locals, then the definitions after the candidate, then the
+            // restored ones, then the streams: one stable sort of all of
+            // them in that order)
+            let names = merge_stable(restored, streams);
             let after = defs
                 .iter()
                 .filter(|d| d.3 > m.stamp && !(d.4 && d.5.is_some_and(|g| g > m.gids)))
