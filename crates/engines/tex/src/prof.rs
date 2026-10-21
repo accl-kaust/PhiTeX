@@ -216,10 +216,8 @@ pub(crate) mod pages {
     pub(crate) const RESOLVE: usize = 2;
     pub(crate) const CLASSES: usize = 3;
     pub(crate) const DROP: usize = 4;
-    pub(crate) const SNAP: usize = 5;
     pub(crate) const FOLD: usize = 6;
     pub(crate) const FIRE: usize = 7;
-    pub(crate) const RESTORE: usize = 8;
     pub(crate) const ATTEMPT: usize = 9;
     const N: usize = 10;
     const NAMES: [&str; N] = [
@@ -228,15 +226,16 @@ pub(crate) mod pages {
         "resolve_prof_of",
         "insertion classes",
         "drop_units",
-        "snap",
+        "(unused)",
         "fold_unit (fires included)",
         "  of which on_fire",
-        "restore (a stop)",
+        "(unused)",
         "attempt (all of it)",
     ];
     static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
     static UNITS: AtomicU64 = AtomicU64::new(0);
     static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static TORNS: AtomicU64 = AtomicU64::new(0);
 
     #[inline]
     pub(crate) fn on() -> bool {
@@ -265,6 +264,14 @@ pub(crate) mod pages {
         }
     }
 
+    /// A fold torn mid-unit (`crate::pages::PageLoop::torn`).
+    #[inline]
+    pub(crate) fn torn() {
+        if on() {
+            TORNS.fetch_add(1, Relaxed);
+        }
+    }
+
     /// One attempt of the loop.
     #[inline]
     pub(crate) fn attempt() {
@@ -283,7 +290,8 @@ pub(crate) mod pages {
         if attempts == 0 {
             return;
         }
-        eprintln!("pagesprof: {attempts} attempts, {units} units; ms total, µs per unit:");
+        let torn = TORNS.swap(0, Relaxed);
+        eprintln!("pagesprof: {attempts} attempts, {units} units, {torn} torn; ms total, µs per unit:");
         for (k, name) in NAMES.iter().enumerate() {
             let ns = NS[k].swap(0, Relaxed);
             #[allow(clippy::cast_precision_loss)]

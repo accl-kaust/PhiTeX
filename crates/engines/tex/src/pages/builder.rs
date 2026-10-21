@@ -208,8 +208,6 @@ pub(crate) struct PageLoop {
     pub resumed: bool,
     /// The finishers this run placed, page by page: their arguments and
     /// the placement's index ([`phitex_defuse::Ctx::placed_output`]).
-    /// Kept where a stop rolls a unit back: a page fired again is not
-    /// placed twice.
     pub placed: Vec<(Vec<ValueId>, usize)>,
     /// The contributions not yet looked at, with their sources.
     pub pend: Vec<(crate::vprof::PItem, SrcRef)>,
@@ -240,8 +238,15 @@ pub(crate) struct PageLoop {
     pub order: phitex_defuse::FxHashMap<i64, u64>,
     /// What the loop read where the owner of the units it folds last is
     /// ([`OwnerReads`]): a piece's unit and its paragraphs' lines' units
-    /// share it. Kept where a stop rolls a unit back (its reads stand).
+    /// share it.
     pub own: OwnerReads,
+    /// Whether a read stopped the fold inside a unit (in a page's fire,
+    /// [`Run::on_fire`]: the routine, its give-back's markers and
+    /// insertion classes where the piece is): the loop is left as it was
+    /// there, so the node keeps no token and its next run starts over.
+    /// Rare (a node before the piece still in work, defining what is
+    /// read there), so no unit's fold saves the loop before it.
+    pub torn: bool,
 }
 
 /// The reads at one owner piece ([`crate::vprof::unit_owner`]): its page
@@ -289,6 +294,7 @@ impl PageLoop {
             held_nodes: Vec::new(),
             order: phitex_defuse::FxHashMap::default(),
             own: OwnerReads::default(),
+            torn: false,
         }
     }
 }
@@ -761,6 +767,10 @@ impl Operation for Pages {
         match res {
             Ok(()) => {}
             Err(Halt::Stop(s)) => {
+                // (torn mid-unit: no token, the next run starts over)
+                if lp.torn {
+                    return Err(s);
+                }
                 // (a run that continues: resumed, its placements stand)
                 if CONTINUES {
                     r.cx.park_continuing(Box::new(lp));
@@ -936,94 +946,6 @@ pub(crate) fn step_rtn(v: &Values, x: ValueId) -> Option<ValueId> {
 /// pages new since its stop.
 const CONTINUES: bool = true;
 
-/// What the loop saves before folding a unit, put back where the fold
-/// stops on a read ([`Halt::Stop`]): the unit is folded again whole.
-struct LoopSnap {
-    st: crate::vprof::ScanState,
-    srcs: Vec<Src>,
-    post: usize,
-    post_markers: Vec<ValueId>,
-    post_k: u32,
-    began: (FoldState, Option<ValueId>),
-    top_marks: ValueId,
-    rtn_dead: i64,
-    dead: i64,
-    inf: Vec<Src>,
-    prev_fire: (i64, i64),
-    last_rtn: Vec<(RtnKey, ValueId)>,
-    prev_rtn: Option<(RtnKey, ValueId)>,
-    last_markers: Vec<(ValueId, ValueId)>,
-    pend: Vec<(crate::vprof::PItem, SrcRef)>,
-    page_src: Vec<SrcRef>,
-    page_ins: Vec<Option<u16>>,
-    held_nodes: Vec<(Src, Node)>,
-    units: usize,
-    pages: usize,
-    rtns: usize,
-    frontier: (usize, u32),
-    last_fire: Option<(phitex_defuse::NodeId, i64, u32)>,
-}
-
-impl PageLoop {
-    fn snap(&self) -> LoopSnap {
-        LoopSnap {
-            st: self.st.clone(),
-            srcs: self.srcs.clone(),
-            post: self.post,
-            post_markers: self.post_markers.clone(),
-            post_k: self.post_k,
-            began: self.began,
-            top_marks: self.top_marks,
-            rtn_dead: self.rtn_dead,
-            dead: self.dead,
-            inf: self.inf.clone(),
-            prev_fire: self.prev_fire,
-            last_rtn: self.last_rtn.clone(),
-            prev_rtn: self.prev_rtn,
-            last_markers: self.last_markers.clone(),
-            pend: self.pend.clone(),
-            page_src: self.page_src.clone(),
-            page_ins: self.page_ins.clone(),
-            held_nodes: self.held_nodes.clone(),
-            units: self.units.len(),
-            pages: self.pages.len(),
-            rtns: self.rtns.len(),
-            frontier: self.frontier,
-            last_fire: self.last_fire,
-        }
-    }
-
-    fn restore(&mut self, s: LoopSnap) {
-        self.st = s.st;
-        self.srcs = s.srcs;
-        self.post = s.post;
-        self.post_markers = s.post_markers;
-        self.post_k = s.post_k;
-        self.began = s.began;
-        self.top_marks = s.top_marks;
-        self.rtn_dead = s.rtn_dead;
-        self.dead = s.dead;
-        self.inf = s.inf;
-        self.prev_fire = s.prev_fire;
-        self.last_rtn = s.last_rtn;
-        self.prev_rtn = s.prev_rtn;
-        self.last_markers = s.last_markers;
-        self.pend = s.pend;
-        self.page_src = s.page_src;
-        self.page_ins = s.page_ins;
-        self.held_nodes = s.held_nodes;
-        // (a unit folded before the stop and dropped since is not
-        // brought back: the stop comes before any page fired in it
-        // is noted, or the pages are truncated with it)
-        self.units.truncate(s.units);
-        self.pages.truncate(s.pages);
-        self.page_args.truncate(s.pages);
-        self.rtns.truncate(s.rtns);
-        self.frontier = s.frontier;
-        self.last_fire = s.last_fire;
-    }
-}
-
 impl Run<'_, '_> {
     /// The page builder's loop over the profiles (the module's doc), from
     /// where `lp` stands to the unit's end:
@@ -1045,8 +967,8 @@ impl Run<'_, '_> {
     ///    `lp.pages` with the piece it fired in and its finisher placed
     ///    as it fires ([`Run::place_finisher`]: the engine publishes a
     ///    run's placements at every stop, so the finishers run while the
-    ///    loop still folds; a page fired again after a stop rolled its
-    ///    unit back is placed already, `lp.placed`); `lp.srcs` keeps what goes
+    ///    loop still folds; a read stopping the fold inside a unit
+    ///    tears the loop, [`PageLoop::torn`]); `lp.srcs` keeps what goes
     ///    back to the contributions (the page's items from the best break
     ///    on, §1017), after the held-over insertions ([`Src::Held`]) and
     ///    the routine's material ([`Src::Rtn`]: the finisher's output
@@ -1139,27 +1061,19 @@ impl Run<'_, '_> {
                     classes.push(c);
                 }
                 pp::add(pp::CLASSES, t);
-                // (units no page needs any more dropped, before the
-                // snapshot a stop puts back)
+                // (units no page needs any more dropped)
                 let t = pp::start();
                 Self::drop_units(lp);
                 pp::add(pp::DROP, t);
-                // (a unit with no build in it fires no page, and its fold
-                // reads nothing: no stop to roll back)
-                let t = pp::start();
-                let fires = items.iter().any(|x| matches!(x, crate::vprof::PItem::Build(_)));
-                let snap = fires.then(|| lp.snap());
-                pp::add(pp::SNAP, t);
                 let t = pp::start();
                 let r = self.fold_unit(lp, node, pid, items, &classes);
                 pp::add(pp::FOLD, t);
+                // (a read of a page that fired in it stopped (where the
+                // page's piece is, a node before it still in work): the
+                // loop is torn mid-unit, and starts over, [`PageLoop::torn`])
                 if let Err(h) = r {
-                    let t = pp::start();
-                    assert!(snap.is_some(), "a unit with no build stopped in its fold");
-                    if let Some(snap) = snap {
-                        lp.restore(snap);
-                    }
-                    pp::add(pp::RESTORE, t);
+                    pp::torn();
+                    lp.torn = true;
                     return Err(h);
                 }
             }
@@ -1410,9 +1324,9 @@ impl Run<'_, '_> {
                 f.output_penalty
             );
         }
-        // (placed as it fires, its output read below; a page fired again
-        // after a stop rolled its unit back is placed already, with the
-        // same arguments)
+        // (placed as it fires, its output read below; one placed by an
+        // attempt before, which this one continues, is placed already,
+        // with the same arguments)
         let args = fin.args(v);
         let idx = lp.pages.len();
         let at = if let Some(p) = lp.placed.get(idx) {
