@@ -539,8 +539,8 @@ impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
         self.root.as_ref().map_or_else(|| m.zero(), |c| c.sum(m).clone())
     }
 
-    /// Whether two maps share the same root (O(1); for "unchanged" checks).
-    #[cfg(test)]
+    /// Whether two maps share the same root (O(1); for "unchanged" checks:
+    /// while one is kept, a change to the other copies its root).
     pub fn ptr_eq(&self, other: &Self) -> bool {
         match (&self.root, &other.root) {
             (None, None) => true,

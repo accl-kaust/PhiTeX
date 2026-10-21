@@ -1624,6 +1624,10 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
             Err(_) => false,
         },
         Read::Range { f, from, to, val, past } => {
+            // (An end gone: the window it named is not there.)
+            if [*from, *to].iter().any(|&x| x != NONE && w.node(x).is_none()) {
+                return false;
+            }
             let Some(mo) = core.acc(*f) else {
                 return *val == ValueId::UNIT;
             };

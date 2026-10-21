@@ -501,6 +501,20 @@ pub(crate) struct World {
 }
 
 impl World {
+    /// Whether `other` is this world unchanged, as a read sees it (every
+    /// map a read's answer stands on shares its root): a run on one
+    /// reads the same in the other. While `other` is kept, any change
+    /// to this one copies the changed map's root.
+    pub(crate) fn same_as(&self, other: &World) -> bool {
+        self.nodes.ptr_eq(&other.nodes)
+            && self.units.ptr_eq(&other.units)
+            && self.fields.ptr_eq(&other.fields)
+            && self.loops.ptr_eq(&other.loops)
+            && self.claims.ptr_eq(&other.claims)
+            && self.fins.ptr_eq(&other.fins)
+            && self.publishers.ptr_eq(&other.publishers)
+    }
+
     /// Field `f` of unit `u`, if anything is filed under it.
     #[inline]
     pub(crate) fn field(&self, u: u32, f: Field) -> Option<&FieldCell> {
