@@ -87,6 +87,8 @@ struct Book {
 }
 
 static DIVERGED: AtomicU64 = AtomicU64::new(0);
+static T_OP: AtomicU64 = AtomicU64::new(0);
+static T_CTX: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// Where the replay is in the recording: the line of the engine call being
@@ -171,6 +173,12 @@ impl PlayOp {
 /// `Err` with the run's stop when the call stopped it.
 #[allow(clippy::too_many_lines)]
 fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
+    let t = std::time::Instant::now();
+    let r = call0(cx, m, a);
+    T_CTX.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    r
+}
+fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
     fn res<T: serde::Serialize>(r: Result<T, Stop>) -> Result<J, Stop> {
         r.map(|x| json!({"ok": x}))
     }
@@ -315,7 +323,10 @@ impl Operation for PlayOp {
         self.take("until_predict", args, it, None)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        self.run_inner(cx)
+        let t = std::time::Instant::now();
+        let r = self.run_inner(cx);
+        T_OP.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        r
     }
 }
 impl PlayOp {
@@ -1199,7 +1210,7 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                         "  runs {} stops {} rounds {} steps {}",
                         rep.nodes_run, rep.stops, rep.rounds, rep.steps
                     );
-                    println!("  restarted_by {:?} resumed {} kept reads asked {} of {}", rep.restarted_by, rep.resumed, rep.kept_asked, rep.kept_held);
+                    println!("  restarted_by {:?} resumed {} play op {} ms ctx {} ms, kept reads asked {} of {}", rep.restarted_by, rep.resumed, T_OP.load(Ordering::Relaxed) / 1_000_000, T_CTX.load(Ordering::Relaxed) / 1_000_000, rep.kept_asked, rep.kept_held);
                     // Where the time went, and two bounds on the wall time:
                     // the busy time spread over the workers, and the
                     // critical path at the mean run's cost.
