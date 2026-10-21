@@ -42,6 +42,21 @@ def raw(x):
     return x
 
 
+def link_kind(n, op, hidden):
+    """A piece -> piece link by what the read is."""
+    if hidden:
+        return "resume start: a hidden binding's base value"
+    if n == "pages:resume":
+        return "the cut's own continuation"
+    if n.startswith(("count:", "dimen:", "skip:")) or n in ("fontcount",):
+        return "register (affine writes)"
+    if n.startswith(("vlist:", "main:", "pg:")) or n in ("aftertoken", "parpar"):
+        return "list tail / paragraph state"
+    if n.startswith("cs:"):
+        return "macro read"
+    return "other: " + n.split(":")[0]
+
+
 def as_int(ints, e, x):
     """An integer value: inline (tag 2, a sign-extended 61-bit payload) or a big one."""
     if isinstance(x, int) and x >> 61 == 2:
@@ -73,12 +88,23 @@ def main(path):
                 if op not in PIECES and op != "finish":
                     continue
                 reads, writes, seen = [], [], {}
+                # (a resume's reads right after its read of the finishers'
+                # global definitions: the base values its continuation's
+                # group bindings hide, checked at its start)
+                pre = False
                 for m, a, r in ln["calls"]:
+                    if m in ("acc_range", "acc_range_to"):
+                        pre = strs.get((e, raw(a[0]))) == "gdefs"
+                        continue
                     if m in READS and r != "stop":
                         f, x = raw(a[0]), raw(r)
-                        reads.append((f, x))
+                        reads.append((f, x, pre and m == "use_field"))
                         seen.setdefault(f, x)
-                    elif m in DEFS:
+                        if m != "use_field":
+                            pre = False
+                        continue
+                    pre = False
+                    if m in DEFS:
                         f = raw(a[0])
                         writes.append((f, raw(a[1]), f in seen, seen.get(f)))
                 last[(e, json.dumps(ln["node"]))] = (op, reads, writes)
@@ -106,12 +132,13 @@ def main(path):
     # 2. piece -> piece
     pp = collections.defaultdict(lambda: [0, 0, 0])  # field -> [writers, linked readers, ambiguous]
     edges = collections.defaultdict(list)  # (e, reader) -> [(writer, field name)]
+    kind_of = {}  # (reader, field name) -> link kind
     for key, (op, reads, writes) in last.items():
         if op not in PIECES:
             continue
         e = key[0]
         done = set()
-        for f, x in reads:
+        for f, x, hid in reads:
             if f in done:
                 continue
             done.add(f)
@@ -126,6 +153,7 @@ def main(path):
             if len(pws) == 1 and len(ws) == 1:
                 pp[n][1] += 1
                 edges[key].append((next(iter(pws)), n))
+                kind_of[(key, n)] = link_kind(n, op, hid)
             elif pws:
                 pp[n][2] += 1
     for key, (op, _, writes) in last.items():
@@ -139,6 +167,8 @@ def main(path):
 
     # longest chains (with the fields along the longest one)
     sys.setrecursionlimit(1000000)
+
+    kinds_along = collections.Counter()
 
     def longest(keep):
         sub = {k: [(w, n) for w, n in es if keep(n)] for k, es in edges.items()}
@@ -164,6 +194,7 @@ def main(path):
         fields = collections.Counter()
         if top is None:
             return 0, fields
+        kinds_along.clear()
         k, walked = top, set()
         while k not in walked:
             walked.add(k)
@@ -171,6 +202,7 @@ def main(path):
             if not step:
                 break
             fields[step[1]] += 1
+            kinds_along[kind_of.get((k, step[1]), "?")] += 1
             k = step[0]
         return depth(top)[0], fields
 
@@ -190,8 +222,20 @@ def main(path):
         print(f"   {a:7d} {b:7d} {c:7d} {chain[n]:6d}  {n}")
     d, fs = longest(lambda m: True)
     print(f"   longest chain through all fields: {d}; its links by field: {dict(fs.most_common(15))}")
+    print(f"   its links by kind: {dict(kinds_along)}")
+    print(f"   all linked reads by kind: {dict(collections.Counter(kind_of.values()))}")
     d, fs = longest(lambda m: m not in ("pages:resume",))
     print(f"   without the cut's own field (pages:resume): {d}; its links by field: {dict(fs.most_common(15))}")
+    print(f"   its links by kind: {dict(kinds_along)}")
+    for label, drop in (("without cut + hidden-binding reads", {"the cut's own continuation", "resume start: a hidden binding's base value"}),
+                        ("and without registers", {"the cut's own continuation", "resume start: a hidden binding's base value", "register (affine writes)"}),
+                        ("and without the list tail", {"the cut's own continuation", "resume start: a hidden binding's base value", "register (affine writes)", "list tail / paragraph state"})):
+        saved = dict(edges)
+        for k2 in list(edges):
+            edges[k2] = [(w, n) for w, n in edges[k2] if kind_of.get((k2, n)) not in drop]
+        d, fs = longest(lambda m: True)
+        print(f"   {label}: {d}; by field {dict(fs.most_common(8))}")
+        edges.clear(); edges.update(saved)
     # 3. writes by kind
     kinds = collections.defaultdict(lambda: [0, 0, collections.Counter()])  # field -> [rmw, set, deltas]
     for key, (op, _, writes) in last.items():
@@ -268,7 +312,7 @@ def tail(path, names, strs, ints, lists, last, extra):
             continue
         e = key[0]
         seen = set()
-        for f, _ in reads:
+        for f, *_ in reads:
             n = fname(e, f)
             if n.split(":")[0] in ("scan", "main", "vlist", "page", "pages") or n in ("deadcycles", "outputpenalty", "insertpenalties"):
                 seen.add(n)
