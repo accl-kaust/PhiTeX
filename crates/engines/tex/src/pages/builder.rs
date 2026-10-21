@@ -732,12 +732,16 @@ impl Operation for Pages {
         // committed at the stop stay and it places only new pages)
         let resumed = parked.is_some();
         let mut lp = parked.unwrap_or_else(PageLoop::new);
-        lp.resumed = resumed;
+        lp.resumed = resumed && CONTINUES;
         match r.page_loop(&mut lp) {
             Ok(()) => {}
             Err(Halt::Stop(s)) => {
                 // (a run that continues: resumed, its placements stand)
-                r.cx.park_continuing(Box::new(lp));
+                if CONTINUES {
+                    r.cx.park_continuing(Box::new(lp));
+                } else {
+                    r.cx.park(Box::new(lp));
+                }
                 return Err(s);
             }
             Err(_) => unreachable!("the page builder's loop runs no command"),
@@ -878,6 +882,11 @@ fn node_short(n: &Node) -> String {
         _ => "other".to_owned(),
     }
 }
+
+/// Whether the page builder parks continuing
+/// ([`phitex_defuse::Ctx::park_continuing`]): off until a placement made
+/// by a continued attempt reads its window as one made afresh does.
+const CONTINUES: bool = false;
 
 /// What the loop saves before folding a unit, put back where the fold
 /// stops on a read ([`Halt::Stop`]): the unit is folded again whole.
