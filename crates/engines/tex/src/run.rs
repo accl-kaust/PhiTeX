@@ -1559,9 +1559,13 @@ impl<'c, 'a> Run<'c, 'a> {
         self.muts += 1;
     }
 
-    /// Field `f` as it reaches node `at` (after it, or before it with
-    /// `before`), as [`phitex_defuse::Ctx::use_field_at`] and
-    /// [`phitex_defuse::Ctx::use_field_before`] give it; an integer
+    /// Field `f` as it reaches node `at` (right after its own run, or
+    /// before it with `before`), as
+    /// [`phitex_defuse::Ctx::use_field_after_own`] and
+    /// [`phitex_defuse::Ctx::use_field_before`] give it: after a piece's
+    /// own definitions, its claimed text included, never what it unfolded
+    /// or what was placed in its extent (its paragraphs' lines, the
+    /// finishers of pages firing in it, which come after it in TeX); an integer
     /// register with the maps contributed after its definition up to `at`
     /// applied, `at`'s own included (they precede its first candidate,
     /// [`crate::regfold`]).
@@ -1574,7 +1578,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let r = if before {
             self.cx.use_field_before(f, at)?
         } else {
-            self.cx.use_field_at(f, Some(at))?
+            self.cx.use_field_after_own(f, at)?
         };
         let Some(n) = crate::val::field_name(self.v, f)
             .strip_prefix("count:")

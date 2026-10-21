@@ -2000,7 +2000,7 @@ impl Run<'_, '_> {
         let b = crate::fields::B_PAGE;
         let rf = self.ops.fields.slot_field(crate::fields::record_loc(b));
         let n = crate::fields::record_len(b);
-        let cells = match self.cx.use_field_at(rf, Some(at))? {
+        let cells = match self.cx.use_field_after_own(rf, at)? {
             phitex_defuse::FieldAt::Def(x, _) => Some(list_of(v, x)).filter(|xs| xs.len() == n),
             phitex_defuse::FieldAt::Gone => return self.page_params_marker(),
             phitex_defuse::FieldAt::Unset => None,
@@ -2014,7 +2014,7 @@ impl Run<'_, '_> {
                 let loc =
                     crate::runstate::Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
                 let f = self.loc_field(loc);
-                match self.cx.use_field_at(f, Some(at))? {
+                match self.cx.use_field_after_own(f, at)? {
                     phitex_defuse::FieldAt::Def(x, _) => Some(x),
                     _ => None,
                 }
