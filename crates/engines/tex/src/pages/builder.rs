@@ -27,10 +27,10 @@
 //!
 //! The next page begins with what the routine gives back (§1026): the
 //! finisher's output ([`RTN`], [`phitex_defuse::Ctx::placed_output`]),
-//! read where the loop placed it, and while the finisher has none, a
-//! guess ([`FinishIn::rtn_guess`], [`Feedback::RoutineGivesBack`]): the
+//! read where the loop placed it ([`phitex_defuse::Ctx::placed_output_or`]),
+//! and while the finisher has none, a guess ([`FinishIn::rtn_guess`], [`Feedback::RoutineGivesBack`]): the
 //! routine's last value on another page, or nothing. A finisher's
-//! output coming in otherwise runs the node again, which folds that
+//! output coming in other than the guess runs the node again, which folds that
 //! page's next page on it. The guess in a finisher's arguments stays the
 //! guess, never the real value, so the output read back does not change
 //! the finisher it came from.
@@ -1301,9 +1301,10 @@ impl Run<'_, '_> {
         lp.top_marks = bot_marks_after(v, lp.top_marks, &f.marks, &lp.marks);
         lp.last_fire = Some((node, pid, f.k));
         // (the routine's material, §1026: the finisher's output, the
-        // guess while it has none; its page parameter markers resolved
-        // where the page fired)
-        let rtn = self.cx.placed_output(at).unwrap_or(rtn_guess);
+        // guess while it has none, the read holding while it gives the
+        // guess; its page parameter markers resolved where the page
+        // fired)
+        let rtn = self.cx.placed_output_or(at, rtn_guess);
         let rs = list_of(v, rtn);
         if !in_material {
             let given = crate::pages::finish::rtn_as_guess(v, rtn);
