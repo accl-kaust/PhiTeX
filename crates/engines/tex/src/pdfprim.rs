@@ -3055,7 +3055,7 @@ fn xform_step(
         data.push(crate::pdfout::writer_whatsit(r, w)?);
     }
     crate::pdfout::form_whatsit_nums(r, &side.whats, &mut data)?;
-    let view = r.font_view(std::slice::from_ref(&Node::Box(bx.clone())))?;
+    let view = r.font_view(&bx.list)?;
     let ids: Vec<u32> = view.fonts.ids();
     let mut all: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
     all.extend(crate::pdfout::form_fonts(r)?);
@@ -3281,7 +3281,8 @@ pub(crate) struct Positions {
 /// page).
 pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
     let pdf = r.param("pdfoutput")? > 0;
-    let view = r.font_view(std::slice::from_ref(&Node::Box(b.clone())))?;
+    // (the box's fonts are its list's: no copy of the page to wrap it)
+    let view = r.font_view(&b.list)?;
     let (h0, v0) = if pdf {
         (
             r.param("pdfhorigin")? + r.param("hoffset")?,

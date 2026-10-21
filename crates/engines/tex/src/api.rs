@@ -3257,13 +3257,24 @@ impl Graph {
 
 /// A file's bytes as TeX's characters, one each (Latin-1): ASCII bytes
 /// are their characters' UTF-8 already, copied at once.
-fn latin1(bytes: &[u8]) -> String {
+pub(crate) fn latin1(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes)
         && s.is_ascii()
     {
         return s.to_owned();
     }
-    bytes.iter().map(|&b| char::from(b)).collect()
+    // (each byte its character's UTF-8 written at once: one or two
+    // bytes, no character pushed one by one)
+    let wide = bytes.iter().filter(|&&b| b >= 0x80).count();
+    let mut out = Vec::with_capacity(bytes.len() + wide);
+    for &b in bytes {
+        if b < 0x80 {
+            out.push(b);
+        } else {
+            out.extend_from_slice(&[0xC0 | (b >> 6), 0x80 | (b & 0x3F)]);
+        }
+    }
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// The id of file `file`'s read-back definition of field `f`
