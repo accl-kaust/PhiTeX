@@ -1160,7 +1160,7 @@ impl World {
         let pending = |x: Id| {
             self.node(x).is_some_and(|n| n.text.stat.defs.is_none() && (n.wide || core.may_cover(n.may(), n.text.op, &n.text.args, f)))
         };
-        let Some(m) = self.pset_nodes.get(&u) else { return None };
+        let m = self.pset_nodes.get(&u)?;
         let mut few: [Id; 8] = [NONE; 8];
         let mut k = 0;
         for (_, &x) in m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)) {

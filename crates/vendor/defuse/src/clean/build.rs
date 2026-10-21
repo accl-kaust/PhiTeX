@@ -566,11 +566,7 @@ impl<'a> Builder<'a> {
                     Locality::ScopeAt(k) => k.min(opens - 1),
                     _ => 0,
                 };
-                if b.before {
-                    FrameId::opened(id, k)
-                } else {
-                    FrameId::opened(id, k)
-                }
+                FrameId::opened(id, k)
             }
         }
     }

@@ -39,10 +39,12 @@ pub(crate) fn named(raw: u64) {
     NAMED.with(|n| n.borrow_mut().push(raw));
 }
 
+/// The file, the values written, and for `once` lines the last line
+/// written of each (line without its answer, by hash).
+type Out = (BufWriter<File>, FxHashSet<u64>, FxHashMap<u64, u64>);
+
 pub(crate) struct Recorder {
-    /// The file, the values written, and for `once` lines the last line
-    /// written of each (line without its answer, by hash).
-    out: Mutex<(BufWriter<File>, FxHashSet<u64>, FxHashMap<u64, u64>)>,
+    out: Mutex<Out>,
 }
 
 static REC: OnceLock<Option<Recorder>> = OnceLock::new();

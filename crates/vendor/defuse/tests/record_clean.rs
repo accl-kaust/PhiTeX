@@ -73,7 +73,10 @@ impl Operation for Toy {
 /// contributes 1 to `pos`; `["rd"]` folds `pos` before it, parking at the
 /// stop; `["fa"]` places a continuation after itself through
 /// `follow_after`; `["sc"]` contributes 1 to `pos` (5 when `big`) and says
-/// so statically; `["env"]` reads environment field `eb`.
+/// so statically; `["env"]` reads environment field `eb`; `["mx", k]`
+/// contributes `k` to `top`, whose fold is the greatest, and `["top"]`
+/// folds it; `["nd", ""]` defines `who` as its node's id, `["who", k]`
+/// reads it.
 struct Pg {
     big: Arc<AtomicBool>,
 }
@@ -88,8 +91,8 @@ impl Operation for Pg {
     fn name(&self) -> &'static str {
         "pg"
     }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(Vec::new())
+    fn defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if text(v, args.first()) == "nd" { vec![(v.field("who"), Locality::Local)] } else { Vec::new() })
     }
     fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         (text(v, args.first()) == "sc").then(|| vec![(v.field("pos"), self.amount(v))])
@@ -124,6 +127,18 @@ impl Operation for Pg {
                 let _ = cx.parked();
                 cx.acc_range(pos, None).inspect_err(|_| cx.park(Box::new(())))
             }
+            "mx" => {
+                cx.contribute(v.field("top"), a[1]);
+                Ok(ValueId::UNIT)
+            }
+            "top" => cx.acc_range(v.field("top"), None),
+            #[allow(clippy::cast_possible_wrap)]
+            "nd" => {
+                let who = v.int(cx.node().raw() as i64);
+                cx.define(v.field("who"), who);
+                Ok(ValueId::UNIT)
+            }
+            "who" => Ok(cx.use_field(v.field("who"))?.unwrap_or(ValueId::UNIT)),
             "fa" => {
                 let me_node = cx.node();
                 Ok(v.int(cx.follow_after(me_node, me, leaf(v.int(9))) as i64))
@@ -134,6 +149,18 @@ impl Operation for Pg {
             }
             _ => Ok(cx.use_env(v.field("eb"))?.unwrap_or(ValueId::NIL)),
         }
+    }
+}
+
+/// The greatest of the integers.
+struct MaxMonoid;
+
+impl defuse::Monoid for MaxMonoid {
+    fn empty(&self, v: &Values) -> ValueId {
+        v.int(i64::MIN / 2)
+    }
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        v.int(v.as_int(a).unwrap_or(0).max(v.as_int(b).unwrap_or(0)))
     }
 }
 
@@ -264,11 +291,26 @@ fn a_clean_recording_holds_what_play_replays() {
         eng2.push(u2, pg, s(&eng2, &["rd"])),
         eng2.push(u2, pg, s(&eng2, &["env"])),
     ];
+    // (Its own monoid: a fold the replay groups otherwise than the
+    // recording is no recorded combine.)
+    // (In a unit of their own: the environment read above waits.)
+    eng2.declare_accumulator(field(&eng2, "top"), Arc::new(MaxMonoid));
+    let u2b = eng2.new_unit();
+    for k in [3, 9, 4] {
+        eng2.push(u2b, pg, vec![eng2.values().str("mx"), int(&eng2, k)]);
+    }
+    let top = eng2.push(u2b, pg, s(&eng2, &["top"]));
+    // Two nodes of one text whose runs differ by the node alone.
+    let nd = [&["nd", ""], &["who", "1"], &["nd", ""], &["who", "2"]].map(|t| eng2.push(u2b, pg, s(&eng2, t)));
     let r = eng2.evaluate_sequential().expect("the second engine");
     assert!(r.resumed >= 3, "the chain resumes twice, the range read once: {r:?}");
     assert_eq!(eng2.output(n2[0]), Some(int(&eng2, 2)));
     assert_eq!(eng2.output(n2[1]), Some(int(&eng2, 1)));
     assert_eq!(eng2.output(n2[4]), Some(int(&eng2, 2)));
+    assert_eq!(eng2.output(top), Some(int(&eng2, 9)));
+    #[allow(clippy::cast_possible_wrap)]
+    let id = |n: NodeId| Some(int(&eng2, n.raw() as i64));
+    assert_eq!((eng2.output(nd[1]), eng2.output(nd[3])), (id(nd[0]), id(nd[2])));
     // The client's context changes: the provider knows `eb` now, and the
     // `sc` texts' hooks answer again.
     known.store(true, Ordering::Relaxed);

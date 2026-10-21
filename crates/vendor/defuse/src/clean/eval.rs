@@ -701,7 +701,7 @@ impl Engine {
             // added contention: 2026-10-20, para4000 j8 341 -> 430 ms).
             chosen.sort_by_key(|&id| self.w.node(id).map(|n| (n.unit, n.pos)));
             let snap = self.w.clone();
-            let jobs: Vec<(Id, std::sync::Mutex<Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>>)> = chosen
+            let jobs: Vec<(Id, std::sync::Mutex<Kept>)> = chosen
                 .iter()
                 .map(|&id| (id, std::sync::Mutex::new(resumes.remove(&id).flatten())))
                 .collect();
@@ -739,7 +739,7 @@ impl Engine {
                     if lane_on && i == 0 {
                         lane_ran.store(true, std::sync::atomic::Ordering::Relaxed);
                         let mut g = super::core::lock(&lane_m);
-                        let d = g.lane(&core, &jobs[0], &careful, &fueled, fuel, predict, &busy_ids, &left, par, deadline);
+                        let d = g.lane(&core, &snap, &jobs, &slots, &careful, &fueled, fuel, predict, &busy_ids, &left, par, deadline);
                         lane_busy.fetch_add(d, std::sync::atomic::Ordering::Relaxed);
                         return crate::api::RunResult(());
                     }
@@ -817,11 +817,6 @@ impl Engine {
         Ok(false)
     }
 
-    /// Runs dirty nodes on the executor's workers without steps: a worker
-    /// that finishes merges what finished (validated against the world as
-    /// it is), takes the next ready node and runs it on the world then; edits
-    /// are taken in between epochs of a few hundred merges.
-    #[allow(clippy::too_many_arguments)]
     /// The final nodes waiting to run in the round: held for the final
     /// phase instead.
     fn hold_dirty_finals(&mut self) {
@@ -849,6 +844,11 @@ impl Engine {
         !back.is_empty()
     }
 
+    /// Runs dirty nodes on the executor's workers without steps: a worker
+    /// that finishes merges what finished (validated against the world as
+    /// it is), takes the next ready node and runs it on the world then; edits
+    /// are taken in between epochs of a few hundred merges.
+    #[allow(clippy::too_many_arguments)]
     fn drain_flow(
         &mut self,
         s: &mut Sched,
@@ -1025,12 +1025,12 @@ impl Engine {
         predict: bool,
         sched: &mut dyn Scheduler,
         skip: &FxHashSet<Id>,
-    ) -> Result<Option<(Vec<Id>, FxHashMap<Id, Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>>, FxHashSet<Id>)>, EvalError> {
+    ) -> Result<Option<(Vec<Id>, FxHashMap<Id, Kept>, FxHashSet<Id>)>, EvalError> {
         // The ready nodes: the first of the queue in text order whose
         // read hints do not wait on a node in work (learned waits); at
         // least the first.
         let mut ready: Vec<(u32, Pos, Id)> = Vec::new();
-        let mut resumes: FxHashMap<Id, Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>> = FxHashMap::default();
+        let mut resumes: FxHashMap<Id, Kept> = FxHashMap::default();
         let scan: Vec<(u32, Pos, Id)> = s.queue.iter().take(window * 4).copied().collect();
         for k in scan {
             if ready.len() >= window {
@@ -1205,7 +1205,7 @@ impl Engine {
     /// Whether queued node `k` is to run now (and with what kept state): it
     /// is dirty where it was queued, and no pending claim holds it back.
     #[allow(clippy::type_complexity)]
-    fn prepare(&mut self, s: &mut Sched, rep: &mut Report, k: (u32, Pos, Id)) -> Option<Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>> {
+    fn prepare(&mut self, s: &mut Sched, rep: &mut Report, k: (u32, Pos, Id)) -> Option<Kept> {
         let id = k.2;
         s.queued.remove(&id);
         let n = self.w.node(id)?;
@@ -1954,7 +1954,7 @@ struct Flow<'a> {
     m: Merge<'a>,
     sched: crate::sync::SendMut<'a, dyn Scheduler + 'a>,
     /// Chosen, not yet running: each with its kept state.
-    buf: std::collections::VecDeque<(Id, Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>)>,
+    buf: std::collections::VecDeque<(Id, Kept)>,
     fueled: FxHashSet<Id>,
     inflight: FxHashSet<Id>,
     /// Finished runs: the world each ran on, and what it gave.
@@ -1965,7 +1965,7 @@ struct Flow<'a> {
 
 impl Flow<'_> {
     /// The next node to run: from the batch chosen last, else a new one.
-    fn pick(&mut self, window: usize, predict: bool) -> Option<(Id, Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>)> {
+    fn pick(&mut self, window: usize, predict: bool) -> Option<(Id, Kept)> {
         // (A chosen node a merge freed, finished or queued again since is
         // dropped: queued, it is chosen again in its turn.)
         while let Some((id, r)) = self.buf.pop_front() {
@@ -2018,7 +2018,10 @@ struct Merge<'a> {
     err: Option<EvalError>,
 }
 
-type Resume = std::sync::Mutex<Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>>;
+/// A stopped run's kept state, and the reads it made before stopping.
+type Kept = Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>;
+
+type Resume = std::sync::Mutex<Kept>;
 
 impl Merge<'_> {
     /// Merges the results ready in order; `all`: the batch is over (a job
@@ -2050,13 +2053,17 @@ impl Merge<'_> {
     /// its commits queued fewer than `par` nodes off the chain, the
     /// chain on from it: the first ready node its commits queued that runs
     /// the first node's operation (a scan's next scan, not the pieces it
-    /// unfolded), or the node the last run stopped on;
+    /// unfolded), or the node the last run stopped on; once the other jobs
+    /// are done, their results merge first (`snap`, `jobs`, `slots`: the
+    /// step's);
     /// the time it ran ops (ns).
     #[allow(clippy::too_many_arguments)]
     fn lane(
         &mut self,
         core: &super::core::Core,
-        first: &(Id, Resume),
+        snap: &World,
+        jobs: &[(Id, Resume)],
+        slots: &[std::sync::Mutex<Option<(Outcome, std::time::Duration)>>],
         careful: &FxHashSet<Id>,
         fueled: &FxHashSet<Id>,
         fuel: u64,
@@ -2068,6 +2075,7 @@ impl Merge<'_> {
     ) -> u64 {
         use super::core::prof::count;
         let mut t_ops = 0u64;
+        let first = &jobs[0];
         let mut job = Some((first.0, super::core::lock(&first.1).take(), careful.contains(&first.0), fueled.contains(&first.0)));
         self.s.lane_new = Some(Vec::new());
         // (The chain's operation: its first node's. `others`: the nodes its
@@ -2117,9 +2125,20 @@ impl Merge<'_> {
             // (The step's other jobs done and enough queued to feed the
             // workers: the step ends; while too little is, the chain
             // goes on here rather than a step per link.)
-            if left.load(std::sync::atomic::Ordering::Acquire) == 0 && others.len() >= par {
-                count(24);
-                break;
+            if left.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                // (The step's other results merge now, before the chain
+                // goes on: waiting for the step's end, they were checked
+                // against a world the lane had moved on and refuted.)
+                if self.next < jobs.len() {
+                    self.drain(snap, jobs, slots, &mut Sequential);
+                    if self.err.is_some() {
+                        break;
+                    }
+                }
+                if others.len() >= par {
+                    count(24);
+                    break;
+                }
             }
             if let Err(e) = self.eng.check_deadline(self.s, self.rep, deadline) {
                 self.err = Some(e);
@@ -2152,7 +2171,7 @@ impl Merge<'_> {
         op: Option<crate::api::OpId>,
         want: Option<Id>,
         others: &mut FxHashSet<Id>,
-    ) -> Result<Option<(Id, Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>)>, EvalError> {
+    ) -> Result<Option<(Id, Kept)>, EvalError> {
         use super::core::prof::count;
         let (eng, s, rep) = (&mut *self.eng, &mut *self.s, &mut *self.rep);
         if let Some(x) = want
@@ -2402,7 +2421,7 @@ fn run_job(
     core: &super::core::Core,
     w: &World,
     id: Id,
-    resume: Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>,
+    resume: Kept,
     predict: bool,
     careful: bool,
     fuel: Option<u64>,

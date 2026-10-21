@@ -147,12 +147,13 @@ impl<'a> Ctx<'a> {
                 _ => None,
             };
             eprintln!(
-                "stopped {} at ctx.rs:{} on {w:?}: {:?} (op {:?}, reads hinted {:?})",
+                "stopped {} at ctx.rs:{} on {w:?}: {:?} (op {:?}, reads hinted {:?}, subject result {:?})",
                 self.me,
                 std::panic::Location::caller().line(),
                 x.and_then(|x| self.w.node(x)).map(|n| (n.st, n.pos)),
                 self.w.node(self.me).map(|n| self.core.op_name(n.text.op)),
                 self.w.node(self.me).map(|n| n.text.stat.reads.is_some()),
+                x.and_then(|x| self.w.node(x)).map(|n| n.res.is_some()),
             );
         }
         self.wait = Some(w);
@@ -429,10 +430,9 @@ impl<'a> Ctx<'a> {
     pub fn define(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x, )) } else { serde_json::Value::Null };
-        let r = self.define_inner(f, x);
+        self.define_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "define", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -448,10 +448,9 @@ impl<'a> Ctx<'a> {
     pub fn define_with(&mut self, f: Field, x: ValueId, loc: Locality) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x, &loc, )) } else { serde_json::Value::Null };
-        let r = self.define_with_inner(f, x, loc);
+        self.define_with_inner(f, x, loc);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "define_with", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -481,10 +480,9 @@ impl<'a> Ctx<'a> {
     pub fn declare_loopback(&mut self, f: Field, init: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &init, )) } else { serde_json::Value::Null };
-        let r = self.declare_loopback_inner(f, init);
+        self.declare_loopback_inner(f, init);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "declare_loopback", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -496,10 +494,9 @@ impl<'a> Ctx<'a> {
     pub fn publish(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x, )) } else { serde_json::Value::Null };
-        let r = self.publish_inner(f, x);
+        self.publish_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "publish", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -606,10 +603,9 @@ impl<'a> Ctx<'a> {
     pub fn open_scope(&mut self) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
-        let r = self.open_scope_inner();
+        self.open_scope_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "open_scope", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -624,10 +620,9 @@ impl<'a> Ctx<'a> {
     pub fn close_scope(&mut self) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
-        let r = self.close_scope_inner();
+        self.close_scope_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "close_scope", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -726,10 +721,9 @@ impl<'a> Ctx<'a> {
     pub fn contribute(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x, )) } else { serde_json::Value::Null };
-        let r = self.contribute_inner(f, x);
+        self.contribute_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "contribute", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -913,10 +907,9 @@ impl<'a> Ctx<'a> {
     pub fn set_kind(&mut self, k: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&k, )) } else { serde_json::Value::Null };
-        let r = self.set_kind_inner(k);
+        self.set_kind_inner(k);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "set_kind", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -928,10 +921,9 @@ impl<'a> Ctx<'a> {
     pub fn set_kinds(&mut self, ks: &[ValueId]) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&ks, )) } else { serde_json::Value::Null };
-        let r = self.set_kinds_inner(ks);
+        self.set_kinds_inner(ks);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "set_kinds", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -943,10 +935,9 @@ impl<'a> Ctx<'a> {
     pub fn set_effect(&mut self, e: Effect) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&e, )) } else { serde_json::Value::Null };
-        let r = self.set_effect_inner(e);
+        self.set_effect_inner(e);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "set_effect", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -985,10 +976,9 @@ impl<'a> Ctx<'a> {
     pub fn claim(&mut self, n: usize) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&n, )) } else { serde_json::Value::Null };
-        let r = self.claim_inner(n);
+        self.claim_inner(n);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "claim", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -1143,10 +1133,9 @@ impl<'a> Ctx<'a> {
     pub fn push_contribution(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x, )) } else { serde_json::Value::Null };
-        let r = self.push_contribution_inner(f, x);
+        self.push_contribution_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "push_contribution", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -1238,10 +1227,9 @@ impl<'a> Ctx<'a> {
     pub fn set_env(&mut self, f: Field, x: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &x, )) } else { serde_json::Value::Null };
-        let r = self.set_env_inner(f, x);
+        self.set_env_inner(f, x);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "set_env", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -1259,10 +1247,9 @@ impl<'a> Ctx<'a> {
     pub fn park(&mut self, token: Box<dyn Any + Send>) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
-        let r = self.park_inner(token);
+        self.park_inner(token);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "park", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -1290,10 +1277,9 @@ impl<'a> Ctx<'a> {
     pub fn restart(&mut self) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
-        let r = self.restart_inner();
+        self.restart_inner();
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "restart", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]
@@ -1318,10 +1304,9 @@ impl<'a> Ctx<'a> {
     pub fn diagnostic(&mut self, msg: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&msg, )) } else { serde_json::Value::Null };
-        let r = self.diagnostic_inner(msg);
+        self.diagnostic_inner(msg);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "diagnostic", a, serde_json::Value::Null);
-        r
     }
 
     #[inline]

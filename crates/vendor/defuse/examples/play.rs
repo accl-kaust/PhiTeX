@@ -7,12 +7,17 @@
 //! A playback run makes the recorded run's `Ctx` calls in order and checks
 //! each answer against the recording; when an answer differs from every
 //! recorded run of that node's text, the run is a divergence (counted and
-//! printed, the run returns its best recorded result). A run the engine
-//! stops makes the calls the recorded run made after its stop (a `park`)
-//! and ends as it ended.
+//! printed, the run goes on as the recorded run it followed). Of a text's
+//! recorded runs, the node's own and the latest recorded are followed
+//! first. A run the engine stops makes the calls the recorded run made
+//! after its stop (a `park`) and ends as it ended.
 //!
 //! A hook or the provider answers as it last answered at that point of the
 //! recording (a client's answers may change between evaluations).
+//!
+//! An accumulator's folds the engine groups otherwise than the recording
+//! did are formal where the monoid is the client's own (see
+//! [`PlayMonoid`]).
 //!
 //! A process may record several engines (a format built in an engine of
 //! its own before the document's): each is replayed in turn, in a fresh
@@ -67,6 +72,12 @@ struct Book {
     runs: HashMap<String, Vec<Run>>,
     /// (field, method, args) -> answer.
     monoid: HashMap<String, J>,
+    /// The accumulators (fields) whose recorded combines are all a sum, a
+    /// list or a sequence concatenation: an unrecorded combine is that.
+    exact: std::collections::HashSet<String>,
+    /// The formal folds made (see [`PlayMonoid`]), and what each is when
+    /// known.
+    formal: Mutex<HashMap<u64, Option<u64>>>,
     /// (projection, value) -> answer.
     proj: HashMap<String, J>,
     /// field -> the provider's answers (their lines).
@@ -306,12 +317,17 @@ impl PlayOp {
         // whose answer picks none of them (a definition, say) is made as
         // the client last made it.
         let at = AT.load(Ordering::Relaxed);
+        // Those of this node first: its runs may differ from another
+        // node's of the same text where no answer tells them apart (a
+        // value made of the node's id, say).
+        let me = json!(cx.node());
         let mut live: Vec<usize> = (0..runs.len()).collect();
         live.sort_by_key(|&c| {
             let o = &runs[c].origins;
+            let mine = usize::from(!runs[c].nodes.contains(&me));
             match o.partition_point(|&x| x <= at) {
-                0 => (1, o[0]),
-                k => (0, usize::MAX - o[k - 1]),
+                0 => (mine, 1, o[0]),
+                k => (mine, 0, usize::MAX - o[k - 1]),
             }
         });
         let mut i = 0;
@@ -328,7 +344,8 @@ impl PlayOp {
                     }
                 };
             }
-            let c0 = &runs[live[0]].calls[i];
+            let followed = live[0];
+            let c0 = &runs[followed].calls[i];
             let (m, a) = (c0[0].as_str().unwrap_or(""), c0[1].clone());
             let got = match m {
                 // The token parked names the recorded runs that parked it:
@@ -354,10 +371,14 @@ impl PlayOp {
                 Ok(j) => j.clone(),
                 Err(_) => json!("stop"),
             };
+            let vals = cx.values();
             live.retain(|&c| {
                 let r = &runs[c].calls;
-                r.len() > i && r[i][0] == c0[0] && (r[i][2] == ans || r[i][2] == "*")
+                r.len() > i && r[i][0] == c0[0] && (r[i][2] == "*" || self.book.same(vals, &ans, &r[i][2]))
             });
+            if let Some(&c) = live.first() {
+                self.book.learn(vals, &ans, &runs[c].calls[i][2]);
+            }
             if let Err(stop) = got {
                 // The calls the client made after the stop (it parks its
                 // state, say), and its result, as a run that stopped here
@@ -385,7 +406,16 @@ impl PlayOp {
                     cx.args(),
                     want.join(" | ")
                 );
-                return Ok(ValueId::UNIT);
+                // The run goes on as the recorded run it followed (its
+                // children and definitions made: what comes after does not
+                // diverge for want of them).
+                for j in i + 1..runs[followed].calls.len() {
+                    runs[followed].call(cx, j)?;
+                }
+                return Ok(match &runs[followed].r {
+                    J::Object(o) => de(&o["ok"]),
+                    _ => ValueId::UNIT,
+                });
             }
             i += 1;
         }
@@ -402,6 +432,8 @@ struct Run {
     /// resumed.
     origins: Vec<usize>,
     resumes: Vec<usize>,
+    /// The nodes that ran it.
+    nodes: Vec<J>,
 }
 
 impl Run {
@@ -418,22 +450,82 @@ impl Run {
     }
 }
 
+/// An accumulator in playback. The engine folds a range in whatever
+/// association its tree has then, which need not be the recording's: a
+/// combine the recording never made is asked for. Where the recorded
+/// combines are all a sum, a list or a sequence concatenation, that is
+/// what an unrecorded one is. Otherwise (a client's own monoid) a fold is
+/// formal: the sequence of the contributions folded, each `[MARK, field,
+/// x]` (one contribution is itself, none the empty value). Sequence ids
+/// are associative, so equal folds have equal ids whatever the grouping;
+/// an op handed one is answered with the value the recorded run got (or
+/// the fold of the recorded combines, when they make it).
 struct PlayMonoid {
     book: Arc<Book>,
     field: J,
+    exact: bool,
+    /// The recorded empty value.
+    zero: Option<ValueId>,
+}
+
+/// The first element of a formal fold's contributions.
+const MARK: &str = "\u{1}play:fold";
+
+/// The contributions of formal fold `v` (`None`: not one).
+fn formal_leaves(v: &Values, x: ValueId) -> Option<(J, Vec<ValueId>)> {
+    let Value::Seq(n) = &*v.get(x) else { return None };
+    let Value::List(e) = &*v.get(n.elem) else { return None };
+    if e.len() != 3 || v.as_str(e[0]).is_none_or(|m| m != MARK) {
+        return None;
+    }
+    let field = json!(e[1]);
+    let leaves = v
+        .seq_to_vec(x)
+        .into_iter()
+        .filter_map(|w| match &*v.get(w) {
+            Value::List(e) if e.len() == 3 => Some(e[2]),
+            _ => None,
+        })
+        .collect();
+    Some((field, leaves))
+}
+
+impl PlayMonoid {
+    fn zero(&self) -> Option<ValueId> {
+        self.zero
+    }
+    /// `x` as a sequence of marked contributions.
+    fn marked(&self, v: &Values, x: ValueId) -> ValueId {
+        if Some(x) == self.zero() || x == ValueId::NIL && self.zero().is_none() {
+            return ValueId::NIL;
+        }
+        if self.book.formal.lock().unwrap().contains_key(&x.raw()) {
+            return x;
+        }
+        let f: ValueId = de(&self.field);
+        v.seq_unit(v.list(vec![v.str(MARK), f, x]))
+    }
 }
 
 impl Monoid for PlayMonoid {
     fn empty(&self, _: &Values) -> ValueId {
-        match self.book.monoid.get(&key(&[&self.field, &json!("empty"), &J::Null])) {
-            Some(r) => de(r),
-            None => {
-                miss(format_args!("empty of accumulator {}", self.field));
-                ValueId::NIL
-            }
-        }
+        self.zero().unwrap_or_else(|| {
+            miss(format_args!("empty of accumulator {}", self.field));
+            ValueId::NIL
+        })
     }
     fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        if !self.exact {
+            let s = v.seq_concat(self.marked(v, a), self.marked(v, b));
+            return match v.seq_len(s) {
+                0 => self.zero().unwrap_or(ValueId::NIL),
+                1 => formal_leaves(v, s).map_or(s, |(_, l)| l[0]),
+                _ => {
+                    self.book.formal.lock().unwrap().entry(s.raw()).or_insert(None);
+                    s
+                }
+            };
+        }
         if let Some(r) = self
             .book
             .monoid
@@ -441,14 +533,72 @@ impl Monoid for PlayMonoid {
         {
             return de(r);
         }
-        // Not recorded (the engine grouped the fold another way): a guess
-        // that holds for sequences, sums and list concatenations (not for
-        // a client's own monoid: counted).
-        miss(format_args!("combine of accumulator {} {a:?} {b:?}", self.field));
         match (&*v.get(a), &*v.get(b)) {
             (Value::Int(x), Value::Int(y)) => v.int(x + y),
             (Value::List(x), Value::List(y)) => v.list(x.iter().chain(y.iter()).copied().collect()),
             _ => v.seq_concat(a, b),
+        }
+    }
+}
+
+impl Book {
+    /// Whether answer `got` (formal folds in it) is recorded answer `rec`:
+    /// a formal fold is the value it was matched with before, else the
+    /// fold of its contributions by the recorded combines, else anything.
+    fn same(&self, v: &Values, got: &J, rec: &J) -> bool {
+        if got == rec {
+            return true;
+        }
+        match (got, rec) {
+            (J::Number(g), J::Number(r)) => {
+                let Some(g) = g.as_u64() else { return false };
+                match self.formal_value(v, g) {
+                    Some(Some(x)) => r.as_u64() == Some(x),
+                    Some(None) => true,
+                    None => false,
+                }
+            }
+            (J::Array(g), J::Array(r)) => g.len() == r.len() && g.iter().zip(r).all(|(g, r)| self.same(v, g, r)),
+            (J::Object(g), J::Object(r)) => {
+                g.len() == r.len() && g.iter().all(|(k, g)| r.get(k).is_some_and(|r| self.same(v, g, r)))
+            }
+            _ => false,
+        }
+    }
+    /// For formal fold `g`: what it is, if known (`None`: not formal).
+    fn formal_value(&self, v: &Values, g: u64) -> Option<Option<u64>> {
+        if let Some(x) = *self.formal.lock().unwrap().get(&g)? {
+            return Some(Some(x));
+        }
+        let (field, leaves) = formal_leaves(v, de(&json!(g)))?;
+        let mut acc = *leaves.first()?;
+        for &x in &leaves[1..] {
+            match self.monoid.get(&key(&[&field, &json!("combine"), &json!([acc, x])])) {
+                Some(r) => acc = de(r),
+                None => return Some(None),
+            }
+        }
+        self.formal.lock().unwrap().insert(g, Some(acc.raw()));
+        Some(Some(acc.raw()))
+    }
+    /// Notes what the formal folds in `got` are, as `rec` has them.
+    fn learn(&self, v: &Values, got: &J, rec: &J) {
+        match (got, rec) {
+            (J::Number(g), J::Number(r)) => {
+                if let (Some(g), Some(r)) = (g.as_u64(), r.as_u64())
+                    && g != r
+                    && self.formal_value(v, g) == Some(None)
+                {
+                    self.formal.lock().unwrap().insert(g, Some(r));
+                }
+            }
+            (J::Array(g), J::Array(r)) => g.iter().zip(r).for_each(|(g, r)| self.learn(v, g, r)),
+            (J::Object(g), J::Object(r)) => g.iter().for_each(|(k, g)| {
+                if let Some(r) = r.get(k) {
+                    self.learn(v, g, r);
+                }
+            }),
+            _ => {}
         }
     }
 }
@@ -516,6 +666,8 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
                 Arc::new(PlayMonoid {
                     book: book.clone(),
                     field: a.clone(),
+                    exact: book.exact.contains(&a.to_string()),
+                    zero: book.monoid.get(&key(&[a, &json!("empty"), &J::Null])).map(de),
                 }),
             );
         }
@@ -575,6 +727,47 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "pin" | "unpin" | "evaluate_begin" | "evaluate_end" => {}
         other => eprintln!("play: skipped engine call {other}"),
     }
+}
+
+/// The accumulators whose recorded combines are all sums, list or
+/// sequence concatenations (judged from the recorded values).
+fn exact_fields(lines: &[J], combines: &[&J]) -> std::collections::HashSet<String> {
+    let vals: HashMap<u64, &J> = lines
+        .iter()
+        .filter(|l| l["k"] == "val")
+        .filter_map(|l| Some((l["id"].as_u64()?, l)))
+        .collect();
+    // A value's elements, if it is a sequence (`nil`: none).
+    let elems = |x: &J| -> Option<Vec<J>> {
+        let l = vals.get(&x.as_u64()?)?;
+        match l["t"].as_str()? {
+            "nil" => Some(Vec::new()),
+            "seq" => l["x"].as_array().cloned(),
+            _ => None,
+        }
+    };
+    let is = |a: &J, b: &J, r: &J| -> Option<bool> {
+        let (va, vb, vr) = (vals.get(&a.as_u64()?)?, vals.get(&b.as_u64()?)?, vals.get(&r.as_u64()?)?);
+        Some(match (va["t"].as_str()?, vb["t"].as_str()?) {
+            ("int", "int") => vr["t"] == "int" && vr["x"].as_i64() == Some(va["x"].as_i64()? + vb["x"].as_i64()?),
+            ("list", "list") => {
+                let mut x = va["x"].as_array()?.clone();
+                x.extend(vb["x"].as_array()?.iter().cloned());
+                vr["t"] == "list" && vr["x"].as_array() == Some(&x)
+            }
+            _ => {
+                let mut x = elems(a)?;
+                x.extend(elems(b)?);
+                elems(r)? == x
+            }
+        })
+    };
+    let mut ok: HashMap<String, bool> = HashMap::new();
+    for l in combines {
+        let yes = is(&l["a"][0], &l["a"][1], &l["r"]).unwrap_or(false);
+        *ok.entry(l["f"].to_string()).or_insert(true) &= yes;
+    }
+    ok.into_iter().filter(|e| e.1).map(|e| e.0).collect()
 }
 
 /// A run's calls without the calls a public `Ctx` call made inside and a
@@ -758,7 +951,7 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
     let mut stopped: HashMap<String, (Option<Vec<J>>, usize)> = HashMap::new();
     // Identical runs of a text are one candidate: (text, run) -> its index.
     let mut merged: HashMap<String, usize> = HashMap::new();
-    let mut add = |book: &mut Book, text: &String, calls: Vec<J>, r: &J, origin: usize, resumes: Option<usize>| {
+    let mut add = |book: &mut Book, text: &String, calls: Vec<J>, r: &J, node: &J, origin: usize, resumes: Option<usize>| {
         let runs = book.runs.entry(text.clone()).or_default();
         let k = *merged
             .entry(format!("{text}|{}", json!([calls, r])))
@@ -772,7 +965,11 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
             });
         runs[k].origins.push(origin);
         runs[k].resumes.extend(resumes);
+        if !runs[k].nodes.contains(node) {
+            runs[k].nodes.push(node.clone());
+        }
     };
+    let mut combines: Vec<&J> = Vec::new();
     for (at, l) in lines.iter().enumerate() {
         match l["k"].as_str().unwrap_or("") {
             "st" => {
@@ -816,17 +1013,22 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                     }),
                 };
                 if let (true, Some(c)) = (resumed, &from_start) {
-                    add(&mut book, &text, c.clone(), r, at, None);
+                    add(&mut book, &text, c.clone(), r, &l["node"], at, None);
                 }
                 if *r == json!("stop") {
                     stopped.insert(node, (from_start, at));
                 } else {
                     stopped.remove(&node);
                 }
-                add(&mut book, &text, calls, r, at, prev.map(|p| p.1));
+                add(&mut book, &text, calls, r, &l["node"], at, prev.map(|p| p.1));
             }
             "mono" => {
-                let a = if l["m"] == "empty" { J::Null } else { l["a"].clone() };
+                let a = if l["m"] == "empty" {
+                    J::Null
+                } else {
+                    combines.push(l);
+                    l["a"].clone()
+                };
                 book.monoid.insert(key(&[&l["f"], &l["m"], &a]), l["r"].clone());
             }
             "proj" => {
@@ -838,6 +1040,7 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
             _ => {}
         }
     }
+    book.exact = exact_fields(&lines, &combines);
     let book = Arc::new(book);
     let units = Arc::new(Mutex::new(Vec::new()));
     let mut eng = Engine::new();

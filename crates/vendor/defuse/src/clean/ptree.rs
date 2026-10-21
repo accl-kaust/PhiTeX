@@ -357,7 +357,7 @@ impl<K: Ord + Clone, V: Clone, S: Clone> Child<K, V, S> {
     }
 
     /// Applies `f` to the value of `k`, which is in the subtree.
-    fn update<M: Measure<K, V, S = S>>(&mut self, k: &K, m: &M, f: impl FnOnce(&mut V)) {
+    fn update(&mut self, k: &K, f: impl FnOnce(&mut V)) {
         let node = Arc::make_mut(&mut self.node);
         match node {
             Node::Leaf(es) => {
@@ -366,7 +366,7 @@ impl<K: Ord + Clone, V: Clone, S: Clone> Child<K, V, S> {
             }
             Node::Inner { keys, kids } => {
                 let i = prefix(keys, |s| s <= k);
-                kids[i].update(k, m, f);
+                kids[i].update(k, f);
             }
         }
         self.sum = std::sync::OnceLock::new();
@@ -609,13 +609,14 @@ impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
         Some(old)
     }
 
-    /// Applies `f` to the value of `k` and recomputes the summaries on its
-    /// path; false (and nothing copied) when `k` is missing.
-    pub fn update<M: Measure<K, V, S = S>>(&mut self, k: &K, m: &M, f: impl FnOnce(&mut V)) -> bool {
+    /// Applies `f` to the value of `k`; the summaries on its path are made
+    /// again when next asked (`_m`: their measure). False (and nothing
+    /// copied) when `k` is missing.
+    pub fn update<M: Measure<K, V, S = S>>(&mut self, k: &K, _m: &M, f: impl FnOnce(&mut V)) -> bool {
         if self.get(k).is_none() {
             return false;
         }
-        self.root.as_mut().expect("present key").update(k, m, f);
+        self.root.as_mut().expect("present key").update(k, f);
         true
     }
 

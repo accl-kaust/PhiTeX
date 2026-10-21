@@ -226,7 +226,7 @@ impl<T> Table<T> {
         // SAFETY: as above.
         let cap = unsafe { (*t).mask } + 1;
         let step = (cap / (STRIPES * 16)).max(1);
-        if c % step == 0 && self.len() * 4 > cap * 3 {
+        if c.is_multiple_of(step) && self.len() * 4 > cap * 3 {
             self.grow_from(t);
         }
         // SAFETY: values are freed only in `drop`.
