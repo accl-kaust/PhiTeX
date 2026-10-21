@@ -590,6 +590,12 @@ impl Operation for Dvi {
     fn name(&self) -> &'static str {
         "dvi"
     }
+    /// No page profiles or items (the pieces' units, `crate::pages`):
+    /// the last page's scan, which reads them to the unit's end, does not
+    /// wait for it.
+    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(crate::pages::no_units(v))
+    }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
     }
@@ -624,6 +630,12 @@ pub(crate) struct Link(pub Shared);
 impl Operation for Link {
     fn name(&self) -> &'static str {
         "link"
+    }
+    /// No page profiles or items (the pieces' units, `crate::pages`):
+    /// the last page's scan, which reads them to the unit's end, does not
+    /// wait for it.
+    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(crate::pages::no_units(v))
     }
     fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(vec![(v.field(crate::assemble::LINKED), Locality::Global)])
@@ -693,6 +705,12 @@ impl Operation for Files {
     fn name(&self) -> &'static str {
         "files"
     }
+    /// No page profiles or items (the pieces' units, `crate::pages`):
+    /// the last page's scan, which reads them to the unit's end, does not
+    /// wait for it.
+    fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(crate::pages::no_units(v))
+    }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
     }
@@ -701,8 +719,10 @@ impl Operation for Files {
     /// Held until every contributor before it is done, instead of
     /// starting and parking at the range again for each one still in
     /// work (the root parked 349 times on para4000).
+    /// And the page chain's end ([`crate::pages::CHAIN_END`]): every
+    /// page's finisher, which writes and opens streams, is in the range.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        let mut out = vec![v.field("loopfiles")];
+        let mut out = vec![v.field("loopfiles"), v.field(crate::pages::CHAIN_END)];
         match args.first() {
             None => out.push(v.field(crate::run::WNAMES)),
             Some(&n) => {
@@ -722,6 +742,9 @@ impl Operation for Files {
             return Ok(ValueId::UNIT);
         };
         let listed: Vec<String> = list_of(v, listed).iter().map(|&n| str_of(v, n)).collect();
+        // (the written text is complete once every page's finisher is
+        // placed: the chain's end, defined by its last scan)
+        cx.use_field(v.field(crate::pages::CHAIN_END))?;
         match cx.args().first() {
             None => files_root(cx, listed),
             Some(&n) => {
