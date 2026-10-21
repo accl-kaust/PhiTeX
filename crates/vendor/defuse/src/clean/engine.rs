@@ -1,7 +1,6 @@
 //! The public engine: registration, edits, settings and queries over the
 //! current world.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use super::build::{Builder, new_unit};
@@ -91,7 +90,7 @@ pub struct Engine {
     pub(crate) pending: Vec<Id>,
     /// Kept tokens of stopped runs (`Ctx::park`).
     /// with the reads the stopped run made (it resumes while they hold).
-    pub(crate) kept: FxHashMap<Id, (Box<dyn Any + Send>, Vec<super::world::Read>, super::ctx::Base)>,
+    pub(crate) kept: FxHashMap<Id, super::ctx::KeptState>,
     pub(crate) marked: FxHashSet<Id>,
     pub(crate) settled_out: Vec<Settled>,
     pub(crate) edits: u64,

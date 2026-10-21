@@ -429,7 +429,7 @@ pub(crate) fn ns_since(t: Option<std::time::Instant>) -> u64 {
 /// Phase timers (`CLEAN_PROF`): nanoseconds per phase, summed.
 pub(crate) mod prof {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    pub(crate) const NAMES: [&str; 37] = [
+    pub(crate) const NAMES: [&str; 42] = [
         "op", "apply", "settle_claims", "settle", "frames", "held_by", "prepare", "unguess", "absorb", "commit", "place", "reads", "defs", "contribs", "claimed", "outs",
         "set_contrib", "range_readers",
         "read_at", "pset_between", "flush", "reaching",
@@ -442,8 +442,26 @@ pub(crate) mod prof {
         // structure readers re-asked; entries filed and the readers they
         // re-ask; the committed node stored.)
         "create", "file_decl", "shape_at", "file_if", "def_readers", "put_node",
+        // (A node stored, `World::put`: its pending-set entries, its holder
+        // and claim entries, the in-work index, the contributors' index,
+        // the node map.)
+        "put_pset", "put_claims", "put_work", "put_acc", "put_map",
     ];
-    pub(crate) static NS: [AtomicU64; 37] = [const { AtomicU64::new(0) }; 37];
+    pub(crate) static NS: [AtomicU64; 42] = [const { AtomicU64::new(0) }; 42];
+    /// Whether `CLEAN_CONFLICTS` asks for the conflict counts (what keys
+    /// a step's commits changed under its later results; `profile` builds
+    /// only): every change is logged by key for them.
+    #[inline]
+    pub(crate) fn conflicts() -> bool {
+        #[cfg(feature = "profile")]
+        {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ON.get_or_init(|| std::env::var_os("CLEAN_CONFLICTS").is_some())
+        }
+        #[cfg(not(feature = "profile"))]
+        false
+    }
+
     /// Whether `CLEAN_PROF` asks for them (`profile` builds only: without
     /// the feature every probe compiles away).
     #[inline]

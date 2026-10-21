@@ -2585,7 +2585,7 @@ struct Merge<'a> {
 }
 
 /// A stopped run's kept state, and the reads it made before stopping.
-type Kept = Option<(Box<dyn std::any::Any + Send>, Vec<Read>, super::ctx::Base)>;
+type Kept = Option<super::ctx::KeptState>;
 
 type Resume = std::sync::Mutex<Kept>;
 
@@ -2894,7 +2894,7 @@ impl Merge<'_> {
             eng.enqueue(s, id);
             return Ok(());
         }
-        if super::core::prof::on() {
+        if super::core::prof::conflicts() {
             conflict_counts(snap, &eng.w, id, &o);
         }
         // (Behind an earlier job of its step: it ran on a snapshot that

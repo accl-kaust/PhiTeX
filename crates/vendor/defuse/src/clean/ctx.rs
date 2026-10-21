@@ -15,6 +15,10 @@ use crate::values::{Field, ValueId, Values};
 /// the children that are not scope markers.
 pub(crate) type Base = (usize, usize, usize);
 
+/// A stopped run's kept state: its token (`Ctx::park`), the reads its
+/// attempts made (it resumes while they hold), its placements so far.
+pub(crate) type KeptState = (Box<dyn Any + Send>, Vec<Read>, Base);
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Spec {
     pub op: OpId,

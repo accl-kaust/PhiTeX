@@ -789,8 +789,12 @@ impl World {
         un.frames.get(&g)?.kind
     }
 
-    /// Marks `k` changed at this world's version.
+    /// Marks `k` changed at this world's version (kept for the conflict
+    /// counts only, `CLEAN_CONFLICTS`: a write per change otherwise).
     pub(crate) fn touch_key(&mut self, k: Key) {
+        if !super::core::prof::conflicts() {
+            return;
+        }
         let v = self.ver;
         self.changed.insert(k, v, &NoMeasure);
     }
@@ -963,12 +967,23 @@ impl World {
 
     /// Replaces a node's record (the in-work index follows its state).
     pub(crate) fn put(&mut self, id: Id, n: Node) {
+        let t = super::core::prof::start();
         let old = self.nodes.get(&id).map(|o| (o.unit, o.pos));
         let moved = old != Some((n.unit, n.pos));
-        let was = self.nodes.get(&id).map(|o| (o.unit, o.pos, pset_keys(o)));
-        let now = (n.unit, n.pos, pset_keys(&n));
+        // (Its pending-set entries stand on these: the same, they stand.)
+        let sig = |o: &Node| (o.unit, o.pos, in_work(o.st), Arc::as_ptr(&o.text), o.wide, o.narrowed.as_ref().map(Arc::as_ptr));
+        let same = self.nodes.get(&id).is_some_and(|o| sig(o) == sig(&n));
+        let (was, now) = if same {
+            (None, None)
+        } else {
+            (self.nodes.get(&id).map(|o| (o.unit, o.pos, pset_keys(o))), Some((n.unit, n.pos, pset_keys(&n))))
+        };
+        super::core::prof::stop(37, t);
         self.put_node(id, n);
-        if was.as_ref() != Some(&now) {
+        let t = super::core::prof::start();
+        if let Some(now) = now
+            && was.as_ref() != Some(&now)
+        {
             if let Some((u, p, ks)) = was {
                 if !ks.is_empty() {
                     self.unit_set(u, PosIx::PsetNodes, p, id, false);
@@ -984,6 +999,8 @@ impl World {
                 self.pset_set(now.0, k, now.1, id, true);
             }
         }
+        super::core::prof::stop(37, t);
+        let t = super::core::prof::start();
         if let Some((u, p)) = old {
             self.unhold(u, p, id);
             if moved {
@@ -994,6 +1011,7 @@ impl World {
         if moved {
             self.refresh_claim_at(id);
         }
+        super::core::prof::stop(38, t);
     }
 
     fn unclaim_at(&mut self, u: u32, p: Pos, id: Id) {
@@ -1044,6 +1062,7 @@ impl World {
     }
 
     fn put_node(&mut self, id: Id, n: Node) {
+        let t = super::core::prof::start();
         let (fin, publ) = (n.text.stat.fin, publishes(&n));
         if self.nodes.get(&id).is_none_or(|o| o.text.stat.fin != fin) {
             if fin {
@@ -1069,6 +1088,8 @@ impl World {
                 self.set_work(now.0, now.1, Some(id));
             }
         }
+        super::core::prof::stop(39, t);
+        let t = super::core::prof::start();
         let old = self.nodes.get(&id).filter(|o| in_work(o.st)).cloned();
         if (old.is_some() || in_work(n.st))
             && !old.as_ref().is_some_and(|o| {
@@ -1087,7 +1108,8 @@ impl World {
             }
             self.acc_index(id, &n, true);
         }
-        self.nodes.insert(id, Arc::new(n), &NoMeasure);
+        super::core::prof::stop(40, t);
+        super::core::prof::time(41, || self.nodes.insert(id, Arc::new(n), &NoMeasure));
     }
 
     /// Removes a node's record.
