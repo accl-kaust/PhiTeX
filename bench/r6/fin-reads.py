@@ -79,7 +79,8 @@ def main(path):
                         f = raw(a[0])
                         writes.append((f, raw(a[1]), f in seen, seen.get(f)))
                 last[(e, json.dumps(ln["node"]))] = (op, reads, writes)
-    fname = lambda e, f: strs.get((e, f), f"#{f}")
+    anystr = {i: x for (_, i), x in strs.items()}
+    fname = lambda e, f: strs.get((e, f)) or anystr.get(f, f"#{f}")
     # who wrote (field, value)
     writers = collections.defaultdict(set)
     for key, (op, _, writes) in last.items():
@@ -126,32 +127,60 @@ def main(path):
     for n, (a, b) in sorted(fp.items(), key=lambda kv: (-kv[1][1], -kv[1][0]))[:40]:
         print(f"   {a:7d} {b:7d}  {n}")
 
-    # longest chains
-    def longest(filter_field):
+    # longest chains (with the fields along the longest one)
+    sys.setrecursionlimit(1000000)
+
+    def longest(keep):
+        sub = {k: [(w, n) for w, n in es if keep(n)] for k, es in edges.items()}
+        sub = {k: es for k, es in sub.items() if es}
         memo, onstack = {}, set()
 
         def depth(k):
             if k in memo:
                 return memo[k]
-            if k in onstack:
-                return 0
+            if k in onstack or k not in sub:
+                return (0, None)
             onstack.add(k)
-            best = 0
-            for w, n in edges.get(k, ()):
-                if filter_field is None or n == filter_field:
-                    best = max(best, 1 + depth(w))
+            best = (0, None)
+            for w, n in sub[k]:
+                d = depth(w)[0] + 1
+                if d > best[0]:
+                    best = (d, (w, n))
             onstack.discard(k)
             memo[k] = best
             return best
 
-        sys.setrecursionlimit(1000000)
-        return max((depth(k) for k in edges), default=0)
+        top = max(sub, key=lambda k: depth(k)[0], default=None)
+        fields = collections.Counter()
+        if top is None:
+            return 0, fields
+        k = top
+        while True:
+            d, step = depth(k)
+            if not step:
+                break
+            fields[step[1]] += 1
+            k = step[0]
+        return depth(top)[0], fields
 
     print("\n2. piece -> piece (writers | readers linked to one writer | readers of a value several wrote | longest chain through the field alone)")
-    rows = sorted(pp.items(), key=lambda kv: -kv[1][1])
+    by_field = collections.defaultdict(dict)
+    for k, es in edges.items():
+        for w, n in es:
+            by_field[n].setdefault(k, []).append((w, n))
+    chain = {}
+    for n in pp:
+        saved, edges_n = edges, by_field.get(n, {})
+        edges = edges_n
+        chain[n] = longest(lambda m: True)[0] if edges_n else 0
+        edges = saved
+    rows = sorted(pp.items(), key=lambda kv: (-chain[kv[0]], -kv[1][1]))
     for n, (a, b, c) in rows[:45]:
-        print(f"   {a:7d} {b:7d} {c:7d} {longest(n) if b else 0:6d}  {n}")
-    print(f"   longest chain through all fields: {longest(None)}")
+        print(f"   {a:7d} {b:7d} {c:7d} {chain[n]:6d}  {n}")
+    d, fs = longest(lambda m: True)
+    print(f"   longest chain through all fields: {d}; its links by field: {dict(fs.most_common(15))}")
+    d, fs = longest(lambda m: m not in ("pages:resume",))
+    print(f"   without the cut's own field (pages:resume): {d}; its links by field: {dict(fs.most_common(15))}")
     # 3. writes by kind
     kinds = collections.defaultdict(lambda: [0, 0, collections.Counter()])  # field -> [rmw, set, deltas]
     for key, (op, _, writes) in last.items():
