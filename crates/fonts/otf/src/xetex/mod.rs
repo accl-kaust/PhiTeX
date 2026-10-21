@@ -572,6 +572,65 @@ pub fn find_native_font(
     (result, ld.diags)
 }
 
+/// `readFeatureNumber(s, e)`: an `id=setting` option in decimal.
+fn read_feature_number(o: &[u8]) -> Option<(Tag, i32)> {
+    let at = |i: usize| o.get(i).copied().unwrap_or(0);
+    let mut i = 0;
+    if !at(0).is_ascii_digit() {
+        return None;
+    }
+    let mut f: u32 = 0;
+    while at(i).is_ascii_digit() {
+        f = f.wrapping_mul(10).wrapping_add(u32::from(at(i) - b'0'));
+        i += 1;
+    }
+    while matches!(at(i), b' ' | b'\t') {
+        i += 1;
+    }
+    if at(i) != b'=' {
+        return None;
+    }
+    i += 1;
+    if !at(i).is_ascii_digit() {
+        return None;
+    }
+    let mut v: i32 = 0;
+    while at(i).is_ascii_digit() {
+        v = v.wrapping_mul(10).wrapping_add(i32::from(at(i) - b'0'));
+        i += 1;
+    }
+    while matches!(at(i), b' ' | b'\t') {
+        i += 1;
+    }
+    (i == o.len()).then_some((f, v))
+}
+
+/// `findGraphiteFeature(engine, s, e)`: a `Feature Name=Setting Name`
+/// option (`s[b..e]`), by the face's English labels (each a prefix
+/// match). Without `=`, the setting's name runs past the option to the
+/// end of the string, as the C reads it.
+fn find_graphite_feature(gr: &phitex_graphite::Face, s: &[u8], b: usize, e: usize) -> Option<(Tag, i32)> {
+    let mut b = b;
+    while matches!(s.get(b), Some(b' ' | b'\t')) {
+        b += 1;
+    }
+    let mut cp = b;
+    while cp < e && s[cp] != b'=' {
+        cp += 1;
+    }
+    let f = crate::graphite::feature_named(gr, &s[b..cp])?;
+    cp += 1;
+    while cp < e && matches!(s[cp], b' ' | b'\t') {
+        cp += 1;
+    }
+    if cp == e {
+        return None;
+    }
+    let name = if cp < e { &s[cp..e] } else { s.get(cp..).unwrap_or(&[]) };
+    let v = crate::graphite::setting_named(gr, f, name)?;
+    Some((f, v))
+}
+
 /// `loadOTfont`: the feature string read, the engine made.
 #[allow(clippy::too_many_arguments)]
 fn load_ot_font(
@@ -673,6 +732,14 @@ fn load_ot_font(
                     });
                 }
             }
+            if ok.is_none()
+                && req_engine == b'G'
+                && let Some((t, v)) = read_feature_number(&s[cp1..cp2])
+                    .or_else(|| face.graphite().and_then(|gr| find_graphite_feature(gr, s, cp1, cp2)))
+            {
+                features.push(Feature { tag: t, value: v as u32, start: 0, end: u32::MAX });
+                ok = Some(true);
+            }
             if ok.is_none() {
                 if at(cp1) == b'+' {
                     let (t, mut param) = read_tag_with_param(&s[cp1 + 1..]);
@@ -729,7 +796,14 @@ fn load_ot_font(
     if ld.flags & FONT_FLAGS_COLORED == 0 {
         rgb = 0x0000_00FF;
     }
+    // (a Graphite request's language is a BCP 47 tag; an OpenType one's
+    // an OpenType language tag)
     let lang_tag = tag_from_str(language.as_deref().unwrap_or(b""));
+    let language = if req_engine == b'G' {
+        language.as_deref().and_then(crate::graphite::language_from_string)
+    } else {
+        ot_tag_to_language(lang_tag)
+    };
     XeTeXFont {
         face,
         path,
@@ -737,7 +811,7 @@ fn load_ot_font(
         point_size: fix2d(scaled_size) as f32,
         scaled_size,
         script,
-        language: ot_tag_to_language(lang_tag),
+        language,
         features,
         req_engine,
         rgba: rgb,
@@ -771,6 +845,9 @@ pub mod what {
     pub const OT_SCRIPT_CODE: i32 = 19;
     pub const OT_LANGUAGE_CODE: i32 = 20;
     pub const OT_FEATURE_CODE: i32 = 21;
+    /// `grprintfontname`'s codes.
+    pub const FEATURE_NAME: i32 = 8;
+    pub const SELECTOR_NAME: i32 = 9;
 }
 
 /// `sup_cmd` / `sub_cmd` of `get_ot_math_kern`.
@@ -1071,12 +1148,32 @@ impl XeTeXFont {
             language: self.language.clone(),
             features: self.features.clone(),
         };
-        let glyphs = shaper.shape(&self.face, &req);
         // The buffer's script after `hb_buffer_guess_segment_properties`.
         let script = req
             .script
             .filter(|&s| harfrust::Script::from_iso15924_tag(harfrust::Tag::from_u32(s)).is_some());
         let script = script.or_else(|| guess_script(&text[start..start + len]));
+        // `/GR` on a face graphite2 loads: the `graphite2` shaper. (Where
+        // it fails XeTeX stops, "all shapers failed"; this shapes as
+        // OpenType instead.)
+        if self.req_engine == b'G'
+            && let Some(gr) = self.face.graphite()
+            && let Some(g) = crate::graphite::shape(
+                &self.face,
+                gr,
+                text,
+                start,
+                len,
+                rtl,
+                self.flags & FONT_FLAGS_VERTICAL != 0,
+                script,
+                self.language.as_deref(),
+                &self.features,
+            )
+        {
+            return (Arc::from(g), script);
+        }
+        let glyphs = shaper.shape(&self.face, &req);
         (glyphs, script)
     }
 
@@ -1534,6 +1631,18 @@ impl XeTeXFont {
                 list.get(param as u32 as usize).map_or(0, |&t| t as i32)
             }
             what::IS_EXCLUSIVE_FEATURE => 1,
+            // (Graphite: `getGraphiteFeatureCode`,
+            // `countGraphiteFeatureSettings`)
+            what::FEATURE_CODE => self
+                .face
+                .graphite()
+                .and_then(|gr| gr.fref(param as u16))
+                .map_or(0, |f| f.fref_id() as i32),
+            what::COUNT_SELECTORS => self
+                .face
+                .graphite()
+                .and_then(|gr| gr.find_fref(param as u32))
+                .map_or(0, |f| i32::from(f.n_values())),
             _ => 0,
         }
     }
@@ -1568,7 +1677,21 @@ impl XeTeXFont {
                 }
                 n as i32
             }
-            what::IS_DEFAULT_SELECTOR => i32::from(p2 == 0),
+            what::SELECTOR_CODE => self
+                .face
+                .graphite()
+                .and_then(|gr| gr.find_fref(p1 as u32))
+                .map_or(0, |f| i32::from(f.setting_value(p2 as u16))),
+            // `getGraphiteFeatureDefaultSetting(p1) == p2`: the setting for
+            // the font's language
+            what::IS_DEFAULT_SELECTOR => {
+                let def = self.face.graphite().map_or(0, |gr| {
+                    let lang = self.language.as_deref().map_or(0, |l| tag_from_str(l.as_bytes()));
+                    let feats = gr.featureval_for_lang(lang);
+                    gr.find_fref(p1 as u32).map_or(0, |f| u32::from(f.feature_value(&feats)))
+                });
+                i32::from(def == p2 as u32)
+            }
             _ => 0,
         }
     }
@@ -1589,6 +1712,49 @@ impl XeTeXFont {
             }
         }
         0
+    }
+
+    /// `grprintfontname(what, p1, p2)`: the English label of Graphite
+    /// feature `p1` ([`what::FEATURE_NAME`]) or of its setting `p2`
+    /// ([`what::SELECTOR_NAME`]).
+    #[must_use]
+    pub fn gr_font_name(&self, what: i32, p1: i32, p2: i32) -> Option<String> {
+        let gr = self.face.graphite()?;
+        let f = gr.find_fref(p1 as u32)?;
+        match what {
+            what::FEATURE_NAME => gr.fref_label(f, 0x409).map(|l| l.0),
+            what::SELECTOR_NAME => (0..f.n_values())
+                .find(|&i| i32::from(f.setting_value(i)) == p2)
+                .and_then(|i| gr.fref_value_label(f, i, 0x409))
+                .map(|l| l.0),
+            _ => None,
+        }
+    }
+
+    /// `grfontgetnamed(what)`: the Graphite feature named `name` (-1 for
+    /// none).
+    #[must_use]
+    pub fn gr_font_get_named(&self, what: i32, name: &[u8]) -> i32 {
+        if what != what::FIND_FEATURE_BY_NAME {
+            return -1;
+        }
+        self.face
+            .graphite()
+            .and_then(|gr| crate::graphite::feature_named(gr, name))
+            .map_or(-1, |id| id as i32)
+    }
+
+    /// `grfontgetnamed1(what, param)`: the setting of feature `param`
+    /// named `name` (-1 for none).
+    #[must_use]
+    pub fn gr_font_get_named1(&self, what: i32, param: i32, name: &[u8]) -> i32 {
+        if what != what::FIND_SELECTOR_BY_NAME {
+            return -1;
+        }
+        self.face
+            .graphite()
+            .and_then(|gr| crate::graphite::setting_named(gr, param as u32, name))
+            .unwrap_or(-1)
     }
 
     /// The features `countFeatures`/`getIndFeature` read from one table.

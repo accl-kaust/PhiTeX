@@ -13,7 +13,9 @@
 //!   ascender/descender, the character map FreeType picks, glyph names),
 //!   [`shape`] (HarfRust with font functions that answer as XeTeX's
 //!   FreeType callbacks do; glyph ids, clusters, advances and offsets in
-//!   font units), [`math`] (the MATH table as HarfBuzz reads it),
+//!   font units), [`graphite`] (HarfBuzz's `graphite2` shaper over
+//!   phitex-graphite, for `/GR` requests), [`math`] (the MATH table as
+//!   HarfBuzz reads it),
 //!   [`layout`] (OpenType script, language and feature lists, the `size`
 //!   feature), [`bidi`] (directional runs), [`teckit`] (TECkit's
 //!   runtime), [`names`] and [`index`] (the raw name records of every
@@ -48,6 +50,7 @@ extern crate alloc;
 
 pub mod bidi;
 pub mod face;
+pub mod graphite;
 pub mod index;
 mod inflate;
 pub mod layout;
