@@ -118,6 +118,10 @@ pub(crate) const PAGE_START: &str = "pages:start";
 /// ([`Feedback::RoutineGivesBack`]).
 pub(crate) const PAGE_MISS: &str = "pages:miss";
 
+/// A `T_SET_PAGE` marker's slot for `\deadcycles` set by the text
+/// (§1246): after the eight of `\pagegoal` and its kin (§1245).
+pub(crate) const DEAD_SLOT: i64 = 8;
+
 /// [`PAGE_MISS`]'s fold: a sequence, read past its contributors still in
 /// work as they last contributed (nothing, for a node that never did,
 /// [`phitex_defuse::Monoid::speculate`]). Only finishers contribute to

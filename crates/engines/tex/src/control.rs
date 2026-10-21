@@ -901,6 +901,18 @@ impl Run<'_, '_> {
                     v.int(i64::from(n)),
                     true,
                 );
+                // (the text's `\deadcycles` on the main list too, where
+                // the page builder and the finishers read it in order with
+                // the pages' fires, §1054, §1012; a routine's is its own,
+                // given back with its material)
+                if c == 0 && self.cx.op() != self.ops.finish {
+                    let m = v.list(vec![
+                        v.int(crate::nodes::T_SET_PAGE),
+                        v.int(crate::pages::DEAD_SLOT),
+                        v.int(i64::from(n)),
+                    ]);
+                    self.append(0, m);
+                }
             }
             cmd::SET_BOX_DIMEN => {
                 // §1247

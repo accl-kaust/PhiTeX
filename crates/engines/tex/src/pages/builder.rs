@@ -36,9 +36,12 @@
 //! [`PAGES_END`].
 //!
 //! What the loop reads where a piece is (the page parameters, an
-//! insertion class's registers, `\deadcycles` at `\end`) it reads at that
-//! piece, a read past its own node ([`Run::page_params_at`],
-//! [`Run::insert_class_at`], [`Feedback::BuilderRegisters`]).
+//! insertion class's registers) it reads at that piece, a read past its
+//! own node ([`Run::page_params_at`], [`Run::insert_class_at`],
+//! [`Feedback::BuilderRegisters`]). `\deadcycles` (§1054's `\end`, §1012)
+//! it has as the routine before left it ([`RTN`]) and as the text set it
+//! after, a marker on the main list in order with the pieces' items
+//! ([`crate::pages::DEAD_SLOT`]).
 //!
 //! The finisher's own fold of its page's items is the same builder on
 //! real nodes ([`PageState`]), at the decisions the loop made.
@@ -166,6 +169,10 @@ pub(crate) struct PageLoop {
     /// `\deadcycles` as the routine of the page fired last left it
     /// ([`RTN`]'s third element; 0 where it has none).
     pub rtn_dead: i64,
+    /// `\deadcycles` where the loop is (§1054's `\end` reads it): as the
+    /// routine of the page fired last left it, else as the text set it
+    /// after ([`crate::pages::DEAD_SLOT`] markers).
+    pub dead: i64,
     /// The best breaks of the pages fired, penalties: 10000 from their
     /// fire on (§1013), wherever they are folded again.
     pub inf: Vec<Src>,
@@ -236,6 +243,7 @@ impl PageLoop {
             began: (crate::build::IGNORE_DEPTH_STATE, None),
             top_marks: ValueId::UNIT,
             rtn_dead: 0,
+            dead: 0,
             inf: Vec::new(),
             last_rtn: Vec::new(),
             last_markers: Vec::new(),
@@ -380,13 +388,13 @@ fn is_marker_p(x: &crate::vprof::PItem) -> bool {
 fn build_t(
     lp: &mut PageLoop,
     k: u32,
-    dead: i64,
     class_of_live: &mut dyn FnMut(u16) -> InsertClass,
 ) -> Option<LoopFire> {
     use crate::vprof::PItem;
     let mut classes: Vec<(u16, InsertClass)> = Vec::new();
     let mut page_params = None;
     let mut buf = std::mem::take(&mut lp.pend);
+    let mut dead_set = None;
     {
         let so_far = &mut lp.st.pb.so_far;
         buf.retain(|(x, _)| match x {
@@ -401,8 +409,11 @@ fn build_t(
                 false
             }
             PItem::SetPage(i, x) => {
-                let i = usize::try_from(*i).unwrap_or(8);
-                if i < 8 {
+                if *i == crate::pages::DEAD_SLOT {
+                    dead_set = Some(i64::from(*x));
+                } else if let Ok(i) = usize::try_from(*i)
+                    && i < 8
+                {
                     so_far[i] = *x;
                 }
                 false
@@ -414,6 +425,10 @@ fn build_t(
             _ => true,
         });
     }
+    if let Some(d) = dead_set {
+        lp.dead = d;
+    }
+    let dead = lp.dead;
     if page_params.is_some() {
         lp.st.params = page_params;
     }
@@ -865,6 +880,7 @@ struct LoopSnap {
     began: (FoldState, Option<ValueId>),
     top_marks: ValueId,
     rtn_dead: i64,
+    dead: i64,
     inf: Vec<Src>,
     prev_fire: (i64, i64),
     last_rtn: Vec<((ValueId, i32), ValueId)>,
@@ -891,6 +907,7 @@ impl PageLoop {
             began: self.began,
             top_marks: self.top_marks,
             rtn_dead: self.rtn_dead,
+            dead: self.dead,
             inf: self.inf.clone(),
             prev_fire: self.prev_fire,
             last_rtn: self.last_rtn.clone(),
@@ -916,6 +933,7 @@ impl PageLoop {
         self.began = s.began;
         self.top_marks = s.top_marks;
         self.rtn_dead = s.rtn_dead;
+        self.dead = s.dead;
         self.inf = s.inf;
         self.prev_fire = s.prev_fire;
         self.last_rtn = s.last_rtn;
@@ -949,8 +967,8 @@ impl Run<'_, '_> {
     /// 2. each contributor after `lp.cur` ([`phitex_defuse::Ctx::acc_next`]
     ///    on [`crate::vprof::VPROF`]): its units decoded, their markers
     ///    resolved where the piece is ([`Run::resolve_prof_of`]),
-    ///    `\deadcycles` read at the piece where it holds `\end` (§1054),
-    ///    each item folded with `lp.st` and its source pushed on
+    ///    `\deadcycles` as the routine before left it and the text set it
+    ///    after (§1054, [`crate::pages::DEAD_SLOT`]), each item folded with `lp.st` and its source pushed on
     ///    `lp.srcs` as the builder takes it (§994–§1008: what the page
     ///    takes, what waits, what is discarded at the page's top);
     /// 3. where a page fires (§1005, §1014–§1017): its [`FinishIn`] from
@@ -1017,11 +1035,6 @@ impl Run<'_, '_> {
                 remap_marks(&mut items, &crate::vprof::unit_marks(v, x), &mut lp.marks);
                 self.resolve_prof_of(pid, &mut items)?;
                 let at = node_of(pid);
-                let dead = if crate::vprof::has_end(&items) {
-                    self.dead_at(at)?
-                } else {
-                    0
-                };
                 // (the registers of the insertion classes this unit and
                 // the contributions pending put on the page, as they
                 // reach it, where no marker names them: §1008 reads them
@@ -1043,7 +1056,7 @@ impl Run<'_, '_> {
                 Self::drop_units(lp);
                 let snap = lp.snap();
                 let placed = lp.pages.len();
-                if let Err(h) = self.fold_unit(lp, node, pid, items, dead, &classes) {
+                if let Err(h) = self.fold_unit(lp, node, pid, items, &classes) {
                     lp.restore(snap);
                     return Err(h);
                 }
@@ -1061,20 +1074,6 @@ impl Run<'_, '_> {
             lp.cur = Some(node);
         }
         Ok(())
-    }
-
-    /// `\deadcycles` where piece `at` ends (§1054's read at `\end`).
-    pub(crate) fn dead_at(&mut self, at: phitex_defuse::NodeId) -> R<i64> {
-        if at == self.cx.node() {
-            return self.cint(crate::fields::cell::DEADCYCLES);
-        }
-        let v = self.v;
-        let f = self.loc_field(crate::fields::cell::DEADCYCLES as Loc);
-        Ok(match self.field_at(f, at, false)? {
-            phitex_defuse::FieldAt::Def(x, _) => int_of(v, x),
-            phitex_defuse::FieldAt::Unset => 0,
-            phitex_defuse::FieldAt::Gone => self.cint(crate::fields::cell::DEADCYCLES)?,
-        })
     }
 
     /// The output routine's hint (as [`Run::output_hint`]) where piece
@@ -1108,7 +1107,6 @@ impl Run<'_, '_> {
         node: phitex_defuse::NodeId,
         pid: i64,
         items: Vec<crate::vprof::PItem>,
-        mut dead: i64,
         classes: &[(u16, InsertClass)],
     ) -> R<()> {
         use crate::vprof::PItem;
@@ -1134,13 +1132,10 @@ impl Run<'_, '_> {
                 PItem::Build(k) => {
                     lp.st.fold.since_bp = 0;
                     let mut live = |n: u16| class_in(classes, n);
-                    let mut fire = build_t(lp, *k, dead, &mut live);
+                    let mut fire = build_t(lp, *k, &mut live);
                     let mut in_material = false;
                     while let Some(f) = fire {
                         fire = self.on_fire(lp, node, pid, &f, in_material, classes)?;
-                        // (§1054 after a page fired: `\deadcycles` as its
-                        // routine left it, given back with its material)
-                        dead = lp.rtn_dead;
                         in_material = true;
                     }
                 }
@@ -1333,6 +1328,9 @@ impl Run<'_, '_> {
         // (`\deadcycles` as the routine left it, where not 0: what an
         // `\end` in the material after it reads, §1054)
         lp.rtn_dead = rs.get(2).map_or(0, |&x| int_of(v, x));
+        // (§1054, §1012 after the page: `\deadcycles` as its routine left
+        // it, given back with its material)
+        lp.dead = lp.rtn_dead;
         lp.prev_fire = (pid, lp.rtn_dead);
         self.resolve_params_of(pid, &mut markers)?;
         let m_len = markers.len();
@@ -1491,8 +1489,7 @@ impl Run<'_, '_> {
         }
         lp.st.fold.since_bp = 0;
         let mut live = |n: u16| class_in(classes, n);
-        let dead = lp.rtn_dead;
-        Ok(build_t(lp, f.k, dead, &mut live))
+        Ok(build_t(lp, f.k, &mut live))
     }
 
     /// A held-over insertion as the loop measured it (the source names it).
@@ -1595,6 +1592,10 @@ pub(crate) struct PageState {
     /// (the ordinary ones: the finishers' predictions step page
     /// counters by these, [`FinDefs::predict`]).
     pub normal: i64,
+    /// `\deadcycles` where the state is (§1054's `\end` reads it, §1012's
+    /// fire counts from it): as the routine before left it, else as the
+    /// text set it after ([`crate::pages::DEAD_SLOT`] markers).
+    pub dead: i64,
 }
 
 /// A page finishing: at candidate `k`, the finisher's page data, the
@@ -1632,18 +1633,17 @@ impl PageState {
             params_pre: None,
             pending: Vec::new(),
             normal: 0,
+            dead: 0,
         }
     }
 
     /// The items of a run folded in: candidate by candidate
-    /// ([`PageState::build`]), the rest left pending. `dead` is
-    /// `\deadcycles` where the run is; `live` answers for an insertion
-    /// class no marker of the run gives.
+    /// ([`PageState::build`]), the rest left pending. `live` answers for
+    /// an insertion class no marker of the run gives.
     pub(crate) fn fold_items(
         &mut self,
         v: &Values,
         raw: &[ValueId],
-        dead: i64,
         live: &mut dyn FnMut(u16) -> R<InsertClass>,
     ) -> R<Option<Fire>> {
         let mut buf = std::mem::take(&mut self.pending);
@@ -1652,7 +1652,7 @@ impl PageState {
                 nodes::T_BUILD_PAGE => {
                     let k = u32::try_from(int_at(v, x, 1)).unwrap_or(0);
                     self.fold.since_bp = 0;
-                    if let Some(mut f) = self.build(v, &mut buf, k, dead, live)? {
+                    if let Some(mut f) = self.build(v, &mut buf, k, live)? {
                         f.rest = raw[i + 1..].to_vec();
                         return Ok(Some(f));
                     }
@@ -1705,7 +1705,6 @@ impl PageState {
         v: &Values,
         buf: &mut Vec<ValueId>,
         k: u32,
-        dead: i64,
         live: &mut dyn FnMut(u16) -> R<InsertClass>,
     ) -> R<Option<Fire>> {
         // §1245: `\pagegoal=` and its kin set the page so far at once;
@@ -1717,14 +1716,18 @@ impl PageState {
         let mut unresolved: Vec<u16> = Vec::new();
         let mut page_params = None;
         let so_far = &mut self.pb.so_far;
+        let mut dead_set = None;
         buf.retain(|&x| match nodes::tag(v, x) {
             nodes::T_PAGE_PARAMS => {
                 page_params = Some(x);
                 false
             }
             nodes::T_SET_PAGE => {
-                let i = usize::try_from(int_at(v, x, 1)).unwrap_or(8);
-                if i < 8 {
+                if int_at(v, x, 1) == crate::pages::DEAD_SLOT {
+                    dead_set = Some(int_at(v, x, 2));
+                } else if let Ok(i) = usize::try_from(int_at(v, x, 1))
+                    && i < 8
+                {
                     so_far[i] = i32::try_from(int_at(v, x, 2)).unwrap_or(0);
                 }
                 false
@@ -1739,6 +1742,9 @@ impl PageState {
             }
             _ => true,
         });
+        if let Some(d) = dead_set {
+            self.dead = d;
+        }
         // (a marker no step resolved: the registers as the fold has them)
         for n in unresolved {
             classes.push((n, live(n)?));
@@ -1771,7 +1777,7 @@ impl PageState {
                 // marker carried past the finisher)
                 nodes::T_END => {
                     end_seen = Some(x);
-                    if self.pb.page.is_empty() && queue.is_empty() && dead == 0 {
+                    if self.pb.page.is_empty() && queue.is_empty() && self.dead == 0 {
                         continue;
                     }
                     let xs = list_of(v, x);

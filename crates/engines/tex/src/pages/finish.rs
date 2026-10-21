@@ -397,6 +397,10 @@ impl Run<'_, '_> {
         ps.normal = fin.normal - i64::from(!fin.special);
         ps.fold = fin.fold;
         ps.params = fin.params;
+        // (`\deadcycles` as the routine before left it, §1012: the page
+        // builder's, never the finisher before's; the text's settings
+        // after it come in order with the items, `DEAD_SLOT` markers)
+        ps.dead = fin.prev_fire.1;
         let at = fin.piece;
         let mut fire: Option<Fire> = None;
         let mut fired_at_end = false;
@@ -424,10 +428,9 @@ impl Run<'_, '_> {
                 }
             }
             ps.pending.extend(fin.post_markers.iter().copied());
-            let dead = fin.prev_fire.1;
             let bp = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(fin.post_k))]);
             let mut live = |c: u16| self.insert_class_at(c, at);
-            fire = ps.fold_items(v, &[bp], dead, &mut live)?;
+            fire = ps.fold_items(v, &[bp], &mut live)?;
             fired_at_end = post == fin.spans.len();
         }
         // 2. the pieces' items, piece by piece
@@ -446,17 +449,8 @@ impl Run<'_, '_> {
                 Src::Piece { piece, .. } => crate::pages::node_of(piece),
                 _ => at,
             };
-            // (as the loop: the rest of the piece the page before fired
-            // in reads `\deadcycles` as that routine left it)
-            let dead = if !(crate::pages::has_end(v, &raw) || crate::pages::has_end(v, &ps.pending)) {
-                0
-            } else if matches!(s.src, Src::Piece { piece, .. } if piece == fin.prev_fire.0) {
-                fin.prev_fire.1
-            } else {
-                self.dead_at(p_at)?
-            };
             let mut live = |c: u16| self.insert_class_at(c, p_at);
-            fire = ps.fold_items(v, &raw, dead, &mut live)?;
+            fire = ps.fold_items(v, &raw, &mut live)?;
             fired_at_end = i == fin.spans.len() && fire.as_ref().is_some_and(|f| f.rest.is_empty());
         }
         let Some(mut fire) = fire else {
@@ -529,6 +523,8 @@ impl Run<'_, '_> {
             v.int(i64::try_from(ps.fold.since_bp).unwrap_or(0)),
             ps.params.unwrap_or(ValueId::UNIT),
             v.list(rest),
+            // (`\deadcycles` where the page fires, §1012)
+            v.int(ps.dead),
         ]));
         let brk = Some((pid, i64::from(fire.k), !at_end && !own.is_empty()));
         Ok((args, brk))
@@ -784,7 +780,18 @@ impl Run<'_, '_> {
         self.set("param:outputpenalty", v.int(output_penalty), true);
         let output = self.par(Par::output)?;
         let mut toks = toks_of(v, output);
-        let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        // (`\deadcycles` where the page fired, as the page builder had it:
+        // its arguments' ([`Run::finisher_args`]), not the finisher
+        // before's definition)
+        let dead = match self
+            .fin
+            .as_ref()
+            .and_then(|c| c.args.get(13))
+            .and_then(|&x| list_of(v, x).get(5).copied())
+        {
+            Some(x) => int_of(v, x),
+            None => self.cint(crate::fields::cell::DEADCYCLES)?,
+        };
         let max_dead = i64::from(self.param("maxdeadcycles")?);
         if !toks.is_empty() && dead >= max_dead {
             // §1024
