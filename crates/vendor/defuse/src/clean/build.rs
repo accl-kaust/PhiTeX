@@ -232,13 +232,7 @@ impl<'a> Builder<'a> {
     /// position `from`: one that stood on a definition still to be made
     /// runs again (and waits for it).
     pub(crate) fn recheck_strict(&mut self, u: u32, from: Pos) {
-        let keys: Vec<(u32, Field)> = self
-            .w
-            .readers
-            .range(std::ops::Bound::Included(&(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
-            .take_while(|(k, _)| k.0 == u)
-            .map(|(k, _)| *k)
-            .collect();
+        let keys: Vec<(u32, Field)> = self.w.fields_of(u).into_iter().map(|f| (u, f)).collect();
         let mut seen: FxHashSet<Id> = FxHashSet::default();
         for k in keys {
             for r in self.w.readers_between(u, k.1, from, Pos::MAX) {
@@ -271,8 +265,17 @@ impl<'a> Builder<'a> {
         n.st = if hold { St::Held } else { St::Dirty };
         // (Running again: its text's bound until it narrows again.)
         n.narrowed = None;
+        self.stale_placer(id, &n);
         self.w.put(id, n);
         self.dirty.push(id);
+    }
+
+    /// Node `id` (`n`) runs again for a change: what it placed waits for
+    /// its placements to be made again.
+    fn stale_placer(&mut self, id: Id, n: &Node) {
+        if n.res.as_ref().is_some_and(|r| !r.kids.is_empty() || !r.conts.is_empty()) {
+            self.w.stale.insert(id, (), &NoMeasure);
+        }
     }
 
     // ------------------------------------------------------------ positions
@@ -323,7 +326,7 @@ impl<'a> Builder<'a> {
         self.w.claims_dirty.insert(u, (), &NoMeasure);
         self.w.claim_points = Default::default();
         let un = self.w.unit(u).clone();
-        let old_work = self.w.work.get(&u).cloned();
+        let old_work = un.work.clone();
         let n = un.order.len() as u64;
         let gap = (Pos::MAX / 2 / (n + 2)).min(PUSH_GAP);
         let mut map: FxHashMap<Pos, Pos> = FxHashMap::default();
@@ -342,26 +345,22 @@ impl<'a> Builder<'a> {
                 self.w.put(id, nd);
             }
         }
-        let mut un2 = un.clone();
-        un2.order = PMap::from_sorted(order, &Count);
         let mut frames = PMap::new();
         for (&f, fr) in un.frames.iter() {
             let mut fr = *fr;
             fr.start = remap(fr.start);
             frames.insert(f, fr, &NoMeasure);
         }
-        un2.frames = frames;
-        self.w.units.insert(u, un2, &NoMeasure);
-        // Definition indexes of the unit.
-        let keys: Vec<(u32, Field)> = self
-            .w
-            .defs
-            .range(std::ops::Bound::Included(&(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
-            .take_while(|(k, _)| k.0 == u)
-            .map(|(k, _)| *k)
-            .collect();
-        for k in keys {
-            let fd = self.w.defs.get(&k).cloned().expect("listed");
+        // (Only what is renumbered here: the nodes' indexes moved with
+        // their nodes above.)
+        self.w.with_unit(u, |c| {
+            c.order = PMap::from_sorted(order, &Count);
+            c.frames = frames;
+        });
+        // The unit's field cells: definitions, readers, contributions and
+        // range readers. (Contributors in work moved with their nodes.)
+        for f in self.w.fields_of(u) {
+            let c = self.w.field(u, f).cloned().expect("listed");
             let re = |m: &PMap<Pos, Entry>| -> PMap<Pos, Entry> {
                 let mut v: Vec<(Pos, Entry)> = m.iter().map(|(&p, e)| (remap(p), *e)).collect();
                 v.sort_by_key(|x| x.0);
@@ -369,83 +368,53 @@ impl<'a> Builder<'a> {
             };
             let mut nf = super::world::FieldDefs {
                 local: PMap::new(),
-                globals: re(&fd.globals),
+                globals: re(&c.defs.globals),
             };
-            for (fr, m) in fd.local.iter() {
+            for (fr, m) in c.defs.local.iter() {
                 nf.local.insert(*fr, re(m), &NoMeasure);
             }
-            self.w.defs.insert(k, nf, &NoMeasure);
-        }
-        // Readers of the unit.
-        let keys: Vec<(u32, Field)> = self
-            .w
-            .readers
-            .range(std::ops::Bound::Included(&(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
-            .take_while(|(k, _)| k.0 == u)
-            .map(|(k, _)| *k)
-            .collect();
-        for k in keys {
-            let m = self.w.readers.get(&k).cloned().expect("listed");
-            let mut v: Vec<((Pos, Id), ())> = m.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
-            v.sort_by_key(|x| x.0);
-            v.dedup_by_key(|x| x.0);
-            self.w.readers.insert(k, PMap::from_sorted(v, &NoMeasure), &NoMeasure);
-        }
-        // Contributions, range readers and work of the unit.
-        let keys: Vec<(u32, Field)> = self
-            .w
-            .contribs
-            .range(std::ops::Bound::Included(&(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
-            .take_while(|(k, _)| k.0 == u)
-            .map(|(k, _)| *k)
-            .collect();
-        for k in keys {
-            let Some(mo) = self.core.acc(k.1) else { continue };
-            let m = AccMeasure {
-                m: &**mo,
-                v: &self.core.values,
+            let mut readers: Vec<((Pos, Id), ())> = c.readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
+            readers.sort_by_key(|x| x.0);
+            readers.dedup_by_key(|x| x.0);
+            let contribs = match self.core.acc(f) {
+                Some(mo) if !c.contribs.is_empty() => {
+                    let m = AccMeasure {
+                        m: &**mo,
+                        v: &self.core.values,
+                    };
+                    let mut v: Vec<(Pos, ValueId)> = c.contribs.iter().map(|(&p, &x)| (remap(p), x)).collect();
+                    v.sort_by_key(|x| x.0);
+                    PMap::from_sorted(v, &m)
+                }
+                _ => c.contribs.clone(),
             };
-            let t = self.w.contribs.get(&k).cloned().expect("listed");
-            let mut v: Vec<(Pos, ValueId)> = t.iter().map(|(&p, &x)| (remap(p), x)).collect();
-            v.sort_by_key(|x| x.0);
-            self.w.contribs.insert(k, PMap::from_sorted(v, &m), &NoMeasure);
+            let mut ranges: Vec<((Pos, Id), Pos)> = c.range_readers.iter().map(|(&(p, id), &lo)| ((remap(p), id), remap(lo))).collect();
+            ranges.sort_by_key(|x| x.0);
+            ranges.dedup_by_key(|x| x.0);
+            self.w.with_field(u, f, |c| {
+                c.defs = nf;
+                c.readers = PMap::from_sorted(readers, &NoMeasure);
+                c.contribs = contribs;
+                c.range_readers = PMap::from_sorted(ranges, &NoMeasure);
+            });
         }
-        let keys: Vec<(u32, Field)> = self
-            .w
-            .range_readers
-            .range(std::ops::Bound::Included(&(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
-            .take_while(|(k, _)| k.0 == u)
-            .map(|(k, _)| *k)
-            .collect();
-        for k in keys {
-            let m = self.w.range_readers.get(&k).cloned().expect("listed");
-            let mut v: Vec<((Pos, Id), Pos)> = m.iter().map(|(&(p, id), &lo)| ((remap(p), id), remap(lo))).collect();
-            v.sort_by_key(|x| x.0);
-            v.dedup_by_key(|x| x.0);
-            self.w.range_readers.insert(k, PMap::from_sorted(v, &NoMeasure), &NoMeasure);
-        }
-        // Scope and sibling readers of the unit: keys and reaches.
-        if let Some(m) = self.w.kind_readers.get(&u).cloned() {
-            let mut v: Vec<((Pos, Id), ())> = m.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
-            v.sort_by_key(|x| x.0);
-            self.w.kind_readers.insert(u, PMap::from_sorted(v, &NoMeasure), &NoMeasure);
-        }
+        // Scope and sibling readers and the work of the unit: keys and
+        // reaches.
         let re = |p: Pos| if p == Pos::MAX || p == 0 { p } else { remap(p) };
-        if let Some(m) = self.w.fwd_readers.get(&u).cloned() {
-            let mut v: Vec<(Pos, (Id, Pos))> = m.iter().map(|(&p, &(id, r))| (remap(p), (id, re(r)))).collect();
+        self.w.with_unit(u, |c| {
+            let mut v: Vec<((Pos, Id), ())> = c.kind_readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
             v.sort_by_key(|x| x.0);
-            self.w.fwd_readers.insert(u, PMap::from_sorted(v, &super::claims::MaxReach), &NoMeasure);
-        }
-        if let Some(m) = self.w.back_readers.get(&u).cloned() {
-            let mut v: Vec<(Pos, (Id, Pos))> = m.iter().map(|(&p, &(id, r))| (remap(p), (id, re(r)))).collect();
+            c.kind_readers = PMap::from_sorted(v, &NoMeasure);
+            let mut v: Vec<(Pos, (Id, Pos))> = c.fwd_readers.iter().map(|(&p, &(id, r))| (remap(p), (id, re(r)))).collect();
             v.sort_by_key(|x| x.0);
-            self.w.back_readers.insert(u, PMap::from_sorted(v, &super::claims::MinLow), &NoMeasure);
-        }
-        if let Some(m) = old_work {
-            let mut v: Vec<(Pos, Id)> = m.iter().map(|(&p, &x)| (remap(p), x)).collect();
+            c.fwd_readers = PMap::from_sorted(v, &super::claims::MaxReach);
+            let mut v: Vec<(Pos, (Id, Pos))> = c.back_readers.iter().map(|(&p, &(id, r))| (remap(p), (id, re(r)))).collect();
             v.sort_by_key(|x| x.0);
-            self.w.work.insert(u, PMap::from_sorted(v, &Count), &NoMeasure);
-        }
+            c.back_readers = PMap::from_sorted(v, &super::claims::MinLow);
+            let mut v: Vec<(Pos, Id)> = old_work.iter().map(|(&p, &x)| (remap(p), x)).collect();
+            v.sort_by_key(|x| x.0);
+            c.work = PMap::from_sorted(v, &Count);
+        });
         self.w.touch_key(Key::Shape(u));
         new_keep
     }
@@ -534,7 +503,7 @@ impl<'a> Builder<'a> {
     /// The value and locality of node `n`'s filed entry of `f` (`None`:
     /// none filed, or filed pending).
     fn filed(&self, id: Id, n: &Node, f: Field, loc: Locality) -> Option<(ValueId, Locality)> {
-        let fd = self.w.defs.get(&(n.unit, f))?;
+        let fd = &self.w.field(n.unit, f)?.defs;
         let pos = def_pos(n, loc);
         let e = if loc == Locality::Global {
             fd.globals.get(&pos)
@@ -586,7 +555,7 @@ impl<'a> Builder<'a> {
     fn def_changed_in(&mut self, u: u32, f: Field, at: Pos, fr: Option<FrameId>, global: bool) {
         self.w.touch_key(Key::Defs(u, f));
         let hi = match fr {
-            Some(fr) => shadow_end(self.core, self.w.defs.get(&(u, f)), f, at, fr, global),
+            Some(fr) => shadow_end(self.core, self.w.field(u, f).map(|c| &c.defs), f, at, fr, global),
             None => Pos::MAX,
         };
         for r in self.w.readers_between(u, f, at.saturating_sub(1), hi) {
@@ -604,6 +573,7 @@ impl<'a> Builder<'a> {
     /// Frees node `id` and everything it unfolded.
     pub(crate) fn free(&mut self, id: Id) {
         let Some(n) = self.w.node(id).cloned() else { return };
+        self.w.stale.remove(&id, &NoMeasure);
         if let Some(res) = n.res.clone() {
             for &k in res.kids.iter().chain(&res.conts) {
                 if self.w.node(k).is_some_and(|c| c.parent == id) {
@@ -666,11 +636,9 @@ impl<'a> Builder<'a> {
     pub(crate) fn shape_at(&mut self, u: u32, p: Pos) {
         self.shape_changed(u);
         let mut hit: Vec<Id> = Vec::new();
-        if let Some(m) = self.w.fwd_readers.get(&u) {
-            hit.extend(super::claims::stab_forward(m, p).into_iter().map(|e| e.1));
-        }
-        if let Some(m) = self.w.back_readers.get(&u) {
-            hit.extend(super::claims::stab_backward(m, p).into_iter().map(|e| e.1));
+        if let Some(un) = self.w.unit_opt(u) {
+            hit.extend(super::claims::stab_forward(&un.fwd_readers, p).into_iter().map(|e| e.1));
+            hit.extend(super::claims::stab_backward(&un.back_readers, p).into_iter().map(|e| e.1));
         }
         for r in hit {
             self.recheck(r, 14);
@@ -709,12 +677,13 @@ impl<'a> Builder<'a> {
 
     /// Sets field `f` of unit `u`'s environment: its readers are re-asked.
     pub(crate) fn set_unit_env(&mut self, u: u32, f: Field, x: ValueId) {
-        let Some(mut un) = self.w.units.get(&u).cloned() else { return };
+        let Some(un) = self.w.unit_opt(u) else { return };
         if un.env.get(&f) == Some(&x) {
             return;
         }
-        un.env.insert(f, x, &NoMeasure);
-        self.w.units.insert(u, un, &NoMeasure);
+        self.w.with_unit(u, |un| {
+            un.env.insert(f, x, &NoMeasure);
+        });
         self.def_changed(u, f, 0);
     }
 
@@ -808,6 +777,7 @@ impl<'a> Builder<'a> {
         // round.)
         let hold = m.text.stat.fin && self.core.hold_fin.load(std::sync::atomic::Ordering::Relaxed);
         m.st = if hold { St::Held } else { St::Dirty };
+        self.stale_placer(id, &m);
         // Scope entries filed in the frames the old text opened move to the
         // ones the new text opens (or to its own frame); they keep their
         // values until the run.
@@ -960,15 +930,13 @@ impl<'a> Builder<'a> {
                 stack.push(f);
             }
         }
-        let mut un2 = self.w.unit(u).clone();
-        un2.frames = frames;
-        self.w.units.insert(u, un2, &NoMeasure);
+        self.w.with_unit(u, |c| c.frames = frames);
         if !changed_frames.is_empty() || !moved.is_empty() {
             self.shape_changed(u);
         }
         // The scope readers in the walked stretch are re-asked (also when
         // nothing moved: a frame that is gone leaves no trace in the walk).
-        if let Some(m) = self.w.kind_readers.get(&u) {
+        if let Some(m) = self.w.unit_opt(u).map(|un| &un.kind_readers) {
             let hit: Vec<Id> = m
                 .range(std::ops::Bound::Included(&(from, 0)), std::ops::Bound::Included(&(walked, Id::MAX)))
                 .map(|(&(_, r), ())| r)
@@ -1012,7 +980,7 @@ impl<'a> Builder<'a> {
         }
         keys.into_iter()
             .filter_map(|(f, loc)| {
-                let fd = self.w.defs.get(&(n.unit, f))?;
+                let fd = &self.w.field(n.unit, f)?.defs;
                 let pos = def_pos(n, loc);
                 let e = if loc == Locality::Global {
                     fd.globals.get(&pos)
@@ -1338,9 +1306,9 @@ impl<'a> Builder<'a> {
     fn has_key(&self, id: Id, k: ReadKey) -> bool {
         let _t = super::core::prof::Span::new(26);
         match k {
-            ReadKey::Field(u, f, pos) => self.w.readers.get(&(u, f)).is_some_and(|m| m.contains_key(&(pos, id))),
+            ReadKey::Field(u, f, pos) => self.w.field(u, f).is_some_and(|c| c.readers.contains_key(&(pos, id))),
             ReadKey::Out(x) => self.w.out_readers.get(&x).is_some_and(|m| m.contains_key(&id)),
-            ReadKey::Range(ru, f, lo, hi) => self.w.range_readers.get(&(ru, f)).and_then(|m| m.get(&(hi, id))) == Some(&lo),
+            ReadKey::Range(ru, f, lo, hi) => self.w.field(ru, f).and_then(|c| c.range_readers.get(&(hi, id))) == Some(&lo),
         }
     }
 
@@ -1625,6 +1593,7 @@ impl<'a> Builder<'a> {
         });
         super::core::prof::time(14, || self.run_claimed(id, claim));
         self.counts.merge.outs += super::core::ns_since(t);
+        self.w.stale.remove(&id, &NoMeasure);
         self.woken.push(id);
         out_changed
     }
@@ -1640,6 +1609,7 @@ impl<'a> Builder<'a> {
         res.conts = c;
         n2.res = Some(Arc::new(res));
         self.w.put(id, n2);
+        self.w.stale.remove(&id, &NoMeasure);
     }
 }
 
@@ -1837,7 +1807,7 @@ pub(crate) fn new_unit(w: &mut World, u: u32, app: Id) {
         },
         &NoMeasure,
     );
-    w.units.insert(u, un, &NoMeasure);
+    w.units.insert(u, Arc::new(un), &NoMeasure);
 }
 
 /// Whether read `r` is one of fields `fs` (a change to their definitions

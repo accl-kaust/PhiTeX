@@ -2818,6 +2818,9 @@ impl Graph {
                 print_round(t0.elapsed(), &r);
                 crate::exec::flush_later();
                 print_accounting(&self.eng, &r, &ex, self.env_calls);
+                if let Some(path) = crate::exec::obs_str!("PHITEX_CHAIN_TSV") {
+                    dump_chain(&self.eng, &r, path);
+                }
                 {
                     // (the reruns by cause and field, most first)
                     use phitex_defuse::Rerun as Rr;
@@ -6050,6 +6053,159 @@ fn edit_distance(a: &str, b: &str) -> usize {
         }
     }
     row[b.len()]
+}
+
+/// (`observe`, `PHITEX_CHAIN_TSV=<file>`, with `PHITEX_TEX_TIME` in a
+/// `profile` build) The evaluation's realised critical chain appended to
+/// `path`, one tab-separated line per link, highest run first: index,
+/// height, node, operation, the cause's kind, its field, the prefix or
+/// hinted field, the run's queued/start/end/commit (ns since the
+/// evaluation began), its run time over all attempts (ns), its unit and
+/// parent; for a definition read, the definers before the writer that
+/// defined the same value (relays), the first of them, the definer
+/// before that, and the value; and its arguments as text (tabs and
+/// newlines escaped). The
+/// next line is the node it waited on. An evaluation starts with a line
+/// `# eval <links> <realised path> <realised ns>`.
+#[allow(clippy::too_many_lines)]
+fn dump_chain(eng: &Engine, r: &Report, path: &str) {
+    use phitex_defuse::Cause;
+    use std::io::Write as _;
+    let v = eng.values();
+    let times: FxHashMap<u64, u128> = r
+        .run_times
+        .iter()
+        .map(|(n, d)| (n.raw(), d.as_nanos()))
+        .collect();
+    // (the same order as the heights: index by index)
+    let at: Vec<[u64; 4]> = eng
+        .critical_chain_times()
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect();
+    let chain = eng.critical_chain_heights();
+    let mut s = format!(
+        "# eval {} {} {}\n",
+        chain.len(),
+        r.realised_critical_path,
+        r.realised_critical_time.as_nanos()
+    );
+    let fname = |f: Field| field_name(v, f);
+    for (i, (n, h, c)) in chain.iter().enumerate() {
+        let (kind, field, extra) = match c {
+            Cause::Rebind { field, .. } => ("Rebind", fname(*field), String::new()),
+            Cause::Changed { field, site } => (
+                if site.is_some() {
+                    "Changed"
+                } else {
+                    "ChangedStart"
+                },
+                fname(*field),
+                String::new(),
+            ),
+            Cause::Output { .. } => ("Output", String::new(), String::new()),
+            Cause::Woken { field, prefix, .. } => (
+                "Woken",
+                field.map(fname).unwrap_or_default(),
+                prefix.clone().unwrap_or_default(),
+            ),
+            Cause::Loop { field } => ("Loop", fname(*field), String::new()),
+            Cause::Environment { field } => ("Environment", fname(*field), String::new()),
+            Cause::Structure => ("Structure", String::new(), String::new()),
+            Cause::Range { field, .. } => ("Range", fname(*field), String::new()),
+            Cause::Created { from_hint, .. } => (
+                if from_hint.is_some() {
+                    "CreatedHint"
+                } else {
+                    "Created"
+                },
+                String::new(),
+                from_hint.map(|(f, _)| fname(f)).unwrap_or_default(),
+            ),
+            Cause::Raised { to, how, .. } => ("Raised", format!("{how:?}"), to.to_string()),
+        };
+        let info = eng.node_info(*n);
+        let op = info.as_ref().map_or("?", |i| i.op);
+        let (unit, parent) = info.as_ref().map_or((String::new(), 0), |i| {
+            (
+                format!("{:?}", i.unit),
+                i.parent.map_or(0, phitex_defuse::NodeId::raw),
+            )
+        });
+        let text: String = info
+            .as_ref()
+            .map(|i| {
+                i.args
+                    .iter()
+                    .take(3)
+                    .map(|&x| v.render(x))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .unwrap_or_default()
+            .chars()
+            .take(400)
+            .collect::<String>()
+            .replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n");
+        let t = at.get(i).copied().unwrap_or_default();
+        // (a definition read: the value the writer defined, and how many
+        // definers before it defined that same value (relays: the value
+        // came from further up), with the first of them)
+        let relay = match c {
+            Cause::Changed {
+                field,
+                site: Some(w),
+            }
+            | Cause::Rebind {
+                field, to: Some(w), ..
+            } => {
+                let x = eng.def_value(*w, *field);
+                let (mut cur, mut k) = (*w, 0u32);
+                while k < 100_000 {
+                    match eng.reaching_def(cur, *field) {
+                        Some(p) if p != cur && eng.def_value(p, *field) == x => {
+                            cur = p;
+                            k += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                let first = eng.reaching_def(cur, *field);
+                let val: String = x
+                    .map(|x| v.render(x))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(60)
+                    .collect();
+                format!(
+                    "{k}\t{}\t{}\t{}",
+                    cur.raw(),
+                    first.map_or(0, phitex_defuse::NodeId::raw),
+                    val.replace(['\t', '\n'], " ")
+                )
+            }
+            _ => "\t\t\t".to_owned(),
+        };
+        let _ = writeln!(
+            s,
+            "{i}\t{h}\t{}\t{op}\t{kind}\t{field}\t{extra}\t{}\t{}\t{}\t{}\t{}\t{unit}\t{parent}\t{relay}\t{text}",
+            n.raw(),
+            t[0],
+            t[1],
+            t[2],
+            t[3],
+            times.get(&n.raw()).copied().unwrap_or(0)
+        );
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(s.as_bytes());
+    }
 }
 
 /// A node: its operation and the start of its first argument.

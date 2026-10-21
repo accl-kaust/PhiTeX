@@ -134,6 +134,23 @@ impl Default for Slot {
     }
 }
 
+/// Whether `m` is a definition of a command's transient state outside
+/// the table of equivalents (§1266 `after_token`: set by one command,
+/// emptied by the next assignment, never saved or restored by a group)
+/// that leaves the value the run read before it: then it changes
+/// nothing at any position, in a scope or not, and is not published (an
+/// empty token and no definition are the same). A run that reads the
+/// state and leaves another value (sets a token and leaves it pending,
+/// or empties one a run before it left pending) still publishes it.
+fn unchanged_transient(m: &Meta, x: ValueId) -> bool {
+    m.loc == crate::fields::cell::AFTERTOKEN
+        && match m.eng {
+            Some(Some(e)) => e == x,
+            Some(None) => x == ValueId::UNIT,
+            None => false,
+        }
+}
+
 /// What a run defined at a location.
 #[derive(Clone)]
 struct Meta {
@@ -1285,6 +1302,9 @@ impl State {
             if (top || *l != Locality::Global) && m.eng == Some(Some(x)) {
                 continue;
             }
+            if unchanged_transient(m, x) {
+                continue;
+            }
             out.push((m.loc, x, *l));
         }
         for (loc, val, l) in &self.scope_extra {
@@ -1317,7 +1337,7 @@ impl State {
             return None;
         }
         let x = self.encode(val, v)?;
-        if (top || *l == Locality::Local) && m.eng == Some(Some(x)) {
+        if ((top || *l == Locality::Local) && m.eng == Some(Some(x))) || unchanged_transient(m, x) {
             None
         } else {
             Some(x)

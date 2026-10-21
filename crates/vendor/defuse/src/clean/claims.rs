@@ -151,10 +151,11 @@ impl World {
     /// reach and not ending it.
     pub(crate) fn held_by(&self, core: &Core, s: Id) -> Option<Id> {
         let sn = self.node(s)?;
-        if self.claimers.get(&sn.unit).is_none_or(|m| m.is_empty()) {
+        let un = self.unit_opt(sn.unit)?;
+        if un.claimers.is_empty() {
             return None;
         }
-        let hs = self.holders.get(&sn.unit)?;
+        let hs = &un.holders;
         // The nearest earlier holder that holds `s` back (it re-checks when
         // that one finishes).
         let mut k = sn.pos;
@@ -352,8 +353,8 @@ impl World {
     /// The claimers of unit `u` before position `p` whose window reaches
     /// `p`, by position.
     pub(crate) fn stab(&self, u: u32, p: super::world::Pos) -> Vec<(super::world::Pos, Id)> {
-        let Some(m) = self.claim_at.get(&u) else { return Vec::new() };
-        stab_forward(m, p)
+        let Some(un) = self.unit_opt(u) else { return Vec::new() };
+        stab_forward(&un.claim_at, p)
     }
 }
 
@@ -451,8 +452,8 @@ impl Builder<'_> {
             let mut queues: FxHashMap<u32, std::collections::BTreeSet<(super::world::Pos, Id)>> = FxHashMap::default();
             for u in full {
                 let q = queues.entry(u).or_default();
-                if let Some(m) = self.w.claim_at.get(&u) {
-                    q.extend(m.iter().map(|(&p, &(c, _))| (p, c)));
+                if let Some(un) = self.w.unit_opt(u) {
+                    q.extend(un.claim_at.iter().map(|(&p, &(c, _))| (p, c)));
                 }
             }
             for (u, p) in points {
@@ -515,17 +516,16 @@ impl Builder<'_> {
         self.w.claims.insert(id, st, &NoMeasure);
         self.w.refresh_holder(id);
         self.w.refresh_claim_at(id);
-        let mut m = self.w.claimers.get(&n.unit).cloned().unwrap_or_default();
-        m.insert(id, (), &NoMeasure);
-        self.w.claimers.insert(n.unit, m, &NoMeasure);
+        self.w.with_unit(n.unit, |un| {
+            un.claimers.insert(id, (), &NoMeasure);
+        });
         self.w.claims_todo.insert(id, (), &NoMeasure);
     }
 
     fn unindex_claimer(&mut self, u: u32, id: Id) {
-        if let Some(mut m) = self.w.claimers.get(&u).cloned() {
-            m.remove(&id, &NoMeasure);
-            self.w.claimers.insert(u, m, &NoMeasure);
-        }
+        self.w.with_unit_if(u, |un| {
+            un.claimers.remove(&id, &NoMeasure);
+        });
     }
 
     /// A claimer's run claimed `n` (`None`: made no claim).
@@ -556,9 +556,11 @@ impl Builder<'_> {
         self.w.claims.insert(id, st, &NoMeasure);
         self.w.refresh_holder(id);
         self.w.refresh_claim_at(id);
-        let mut m = self.w.claimers.get(&u).cloned().unwrap_or_default();
-        m.insert(id, (), &NoMeasure);
-        self.w.claimers.insert(u, m, &NoMeasure);
+        if self.w.unit_opt(u).is_none_or(|un| !un.claimers.contains_key(&id)) {
+            self.w.with_unit(u, |un| {
+                un.claimers.insert(id, (), &NoMeasure);
+            });
+        }
         self.w.claims_todo.insert(id, (), &NoMeasure);
     }
 

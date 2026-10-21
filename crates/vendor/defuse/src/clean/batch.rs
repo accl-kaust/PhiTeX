@@ -4,14 +4,14 @@
 //! writes only to the indexes kept per field: the definitions, the readers,
 //! the contributions and the range readers of `(unit, field)`. A step's
 //! merge records those writes ([`FieldOp`]) instead of making them; a flush
-//! groups them by key, takes each key's maps out of the world, applies the
+//! groups them by key, takes each key's cell out of the world, applies the
 //! groups in parallel (each in the order its writes were recorded, which
-//! is text order) and puts the maps back. Different keys share nothing, so
+//! is text order) and puts the cells back. Different keys share nothing, so
 //! the order between groups does not matter.
 
 use super::core::Core;
-use super::ptree::{NoMeasure, PMap};
-use super::world::{AccMeasure, Entry, FieldDefs, FrameId, Id, Key, Pos, World};
+use super::ptree::NoMeasure;
+use super::world::{AccMeasure, Entry, FieldCell, FrameId, Id, Key, Pos, World};
 use crate::api::Locality;
 use crate::values::{Field, FxHashMap, ValueId};
 
@@ -31,14 +31,11 @@ pub(crate) enum FieldOp {
     Contrib { pos: Pos, x: Option<ValueId> },
 }
 
-/// One key's maps, taken out of the world while its writes are applied.
+/// One key's cell, taken out of the world while its writes are applied.
 struct Group {
     key: (u32, Field),
     ops: Vec<FieldOp>,
-    defs: FieldDefs,
-    readers: PMap<(Pos, Id), ()>,
-    contribs: PMap<Pos, ValueId, ValueId>,
-    range_readers: PMap<(Pos, Id), Pos>,
+    cell: FieldCell,
     defs_touched: bool,
     acc_touched: bool,
     /// Readers to re-ask on the field (`true`: past the shadow bound,
@@ -55,33 +52,33 @@ impl Group {
             match op {
                 FieldOp::Reader { pos, id, on } => {
                     if on {
-                        self.readers.insert((pos, id), (), &NoMeasure);
+                        self.cell.readers.insert((pos, id), (), &NoMeasure);
                     } else {
-                        self.readers.remove(&(pos, id), &NoMeasure);
+                        self.cell.readers.remove(&(pos, id), &NoMeasure);
                     }
                 }
                 FieldOp::RangeReader { lo, hi, id, on } => {
                     if on {
-                        self.range_readers.insert((hi, id), lo, &NoMeasure);
+                        self.cell.range_readers.insert((hi, id), lo, &NoMeasure);
                     } else {
-                        self.range_readers.remove(&(hi, id), &NoMeasure);
+                        self.cell.range_readers.remove(&(hi, id), &NoMeasure);
                     }
                 }
                 FieldOp::File { pos, fr, e, at, if_changed } => {
                     if if_changed {
                         let have = if e.loc == Locality::Global {
-                            self.defs.globals.get(&pos)
+                            self.cell.defs.globals.get(&pos)
                         } else {
-                            self.defs.local.get(&fr).and_then(|m| m.get(&pos))
+                            self.cell.defs.local.get(&fr).and_then(|m| m.get(&pos))
                         };
                         if have.is_some_and(|h| h.node == e.node && h.val == e.val && h.loc == e.loc) {
                             continue;
                         }
                     }
                     if e.loc == Locality::Global {
-                        self.defs.globals.insert(pos, e, &NoMeasure);
+                        self.cell.defs.globals.insert(pos, e, &NoMeasure);
                     } else {
-                        self.defs.local.upsert(fr, &NoMeasure, |m| {
+                        self.cell.defs.local.upsert(fr, &NoMeasure, |m| {
                             m.insert(pos, e, &NoMeasure);
                         });
                     }
@@ -89,15 +86,15 @@ impl Group {
                 }
                 FieldOp::Unfile { pos, fr, global, at } => {
                     if global {
-                        self.defs.globals.remove(&pos, &NoMeasure);
+                        self.cell.defs.globals.remove(&pos, &NoMeasure);
                     } else {
                         let mut empty = false;
-                        self.defs.local.update(&fr, &NoMeasure, |m| {
+                        self.cell.defs.local.update(&fr, &NoMeasure, |m| {
                             m.remove(&pos, &NoMeasure);
                             empty = m.is_empty();
                         });
                         if empty {
-                            self.defs.local.remove(&fr, &NoMeasure);
+                            self.cell.defs.local.remove(&fr, &NoMeasure);
                         }
                     }
                     self.def_changed(core, at, fr, global);
@@ -110,15 +107,15 @@ impl Group {
                     };
                     match x {
                         Some(v) => {
-                            self.contribs.insert(pos, v, &m);
+                            self.cell.contribs.insert(pos, v, &m);
                         }
                         None => {
-                            self.contribs.remove(&pos, &m);
+                            self.cell.contribs.remove(&pos, &m);
                         }
                     }
                     self.acc_touched = true;
                     self.recheck.extend(
-                        self.range_readers
+                        self.cell.range_readers
                             .range(std::ops::Bound::Excluded(&(pos, Id::MAX)), std::ops::Bound::Unbounded)
                             .filter(|(_, lo)| **lo < pos)
                             .map(|(k, _)| {
@@ -137,15 +134,15 @@ impl Group {
         self.defs_touched = true;
         let lo = at.saturating_sub(1);
         let f = self.key.1;
-        let hi = super::build::shadow_end(core, Some(&self.defs), f, at, fr, global);
+        let hi = super::build::shadow_end(core, Some(&self.cell.defs), f, at, fr, global);
         self.recheck.extend(
-            self.readers
+            self.cell.readers
                 .range(std::ops::Bound::Excluded(&(lo, Id::MAX)), std::ops::Bound::Excluded(&(hi, 0)))
                 .map(|(k, ())| (k.1, f, false)),
         );
         if hi != Pos::MAX && super::build::scoped_check() {
             self.recheck.extend(
-                self.readers
+                self.cell.readers
                     .range(std::ops::Bound::Excluded(&(hi - 1, Id::MAX)), std::ops::Bound::Unbounded)
                     .map(|(k, ())| (k.1, f, true)),
             );
@@ -189,10 +186,7 @@ impl Pending {
                 groups.push(Group {
                     key,
                     ops: Vec::new(),
-                    defs: w.defs.get(&key).cloned().unwrap_or_default(),
-                    readers: w.readers.get(&key).cloned().unwrap_or_default(),
-                    contribs: w.contribs.get(&key).cloned().unwrap_or_default(),
-                    range_readers: w.range_readers.get(&key).cloned().unwrap_or_default(),
+                    cell: w.field(key.0, key.1).cloned().unwrap_or_default(),
                     defs_touched: false,
                     acc_touched: false,
                     recheck: Vec::new(),
@@ -245,14 +239,7 @@ impl Pending {
         let mut recheck = Vec::new();
         for g in groups {
             let key = g.key;
-            w.defs.insert(key, g.defs, &NoMeasure);
-            w.readers.insert(key, g.readers, &NoMeasure);
-            if !g.contribs.is_empty() || w.contribs.get(&key).is_some() {
-                w.contribs.insert(key, g.contribs, &NoMeasure);
-            }
-            if !g.range_readers.is_empty() || w.range_readers.get(&key).is_some() {
-                w.range_readers.insert(key, g.range_readers, &NoMeasure);
-            }
+            w.fields.insert(key, std::sync::Arc::new(g.cell), &NoMeasure);
             if g.defs_touched {
                 w.touch_key(Key::Defs(key.0, key.1));
             }

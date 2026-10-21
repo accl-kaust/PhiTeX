@@ -315,7 +315,8 @@ pub(crate) struct Frame {
     pub kind: Option<ValueId>,
 }
 
-/// A unit's order and frames.
+/// A unit: its order and frames, and everything indexed by position in
+/// it (a cell, written as a whole).
 #[derive(Clone, Default)]
 pub(crate) struct Unit {
     /// The nodes by position (counted: ranks for sibling walks).
@@ -325,6 +326,60 @@ pub(crate) struct Unit {
     pub app: Id,
     /// The unit's own environment (an application's `set_env`).
     pub env: PMap<Field, ValueId>,
+    /// Readers of the scope structure at their position (kinds, sequence
+    /// frames).
+    pub kind_readers: PMap<(Pos, Id), ()>,
+    /// Readers of following siblings (`following`, `claimed`, streams), by
+    /// position, each with how far its window reaches.
+    pub fwd_readers: super::claims::Windows,
+    /// Readers of earlier siblings (`prev_sibling_where`), by position,
+    /// each with the lowest position its walk reached.
+    pub back_readers: super::claims::Windows,
+    /// Nodes in work (dirty or held), by position.
+    pub work: PMap<Pos, Id, usize>,
+    /// Nodes in work without a result that may contribute to an
+    /// accumulator (see [`World::range_blocker`]).
+    pub acc_open: PMap<Pos, Id>,
+    /// Its claimers.
+    pub claimers: PMap<Id, ()>,
+    /// Claimers by position, each with how far its window reaches
+    /// (summarised: the farthest reach in a subtree).
+    pub claim_at: PMap<Pos, (Id, Pos), Pos>,
+    /// Pending claimers in work that hold later siblings back.
+    pub holders: PMap<Pos, Id>,
+    /// Nodes in work whose definition set is pending, by what they may
+    /// define (any field, a name, a prefix: `pset_key`) and by position.
+    pub psets: PMap<u64, PMap<Pos, Id>>,
+    /// The same nodes by position only (most reads see none).
+    pub pset_nodes: PMap<Pos, Id>,
+    /// Entries of `psets` by key bucket (`key % 64`): a key whose bucket is
+    /// empty is not looked up.
+    pub pset_buckets: Buckets,
+}
+
+/// A per-unit position index of [`Unit`].
+#[derive(Copy, Clone)]
+enum PosIx {
+    PsetNodes,
+    AccOpen,
+    Holders,
+}
+
+impl PosIx {
+    fn of(self, un: &Unit) -> &PMap<Pos, Id> {
+        match self {
+            PosIx::PsetNodes => &un.pset_nodes,
+            PosIx::AccOpen => &un.acc_open,
+            PosIx::Holders => &un.holders,
+        }
+    }
+    fn of_mut(self, un: &mut Unit) -> &mut PMap<Pos, Id> {
+        match self {
+            PosIx::PsetNodes => &mut un.pset_nodes,
+            PosIx::AccOpen => &mut un.acc_open,
+            PosIx::Holders => &mut un.holders,
+        }
+    }
 }
 
 /// One definition entry in a field's index.
@@ -342,6 +397,24 @@ pub(crate) struct Entry {
 pub(crate) struct FieldDefs {
     pub local: PMap<FrameId, PMap<Pos, Entry>>,
     pub globals: PMap<Pos, Entry>,
+}
+
+/// One field of one unit: everything keyed by it.
+#[derive(Clone, Default)]
+pub(crate) struct FieldCell {
+    pub defs: FieldDefs,
+    /// Its readers, by the position they read at.
+    pub readers: PMap<(Pos, Id), ()>,
+    /// Contributions to it (an accumulator), folded by its monoid in
+    /// every subtree.
+    pub contribs: PMap<Pos, ValueId, ValueId>,
+    /// Its range readers: by the end of their window and the reader, the
+    /// window's start.
+    pub range_readers: PMap<(Pos, Id), Pos>,
+    /// Contributors in work: without a result that declare a
+    /// contribution to it, and with one that contributed to it.
+    pub acc_static: PMap<Pos, Id>,
+    pub acc_res: PMap<Pos, Id>,
 }
 
 /// Whether node `n` is done and publishes loop-back fields.
@@ -406,45 +479,18 @@ pub(crate) struct World {
     /// Units renumbered so far (positions filed before then moved).
     pub relabels: u64,
     pub nodes: PMap<Id, Node>,
-    pub units: PMap<u32, Unit>,
-    pub defs: PMap<(u32, Field), FieldDefs>,
-    /// Readers of a field, by the position they read at.
-    pub readers: PMap<(u32, Field), PMap<(Pos, Id), ()>>,
+    pub units: PMap<u32, Arc<Unit>>,
+    /// Each field of each unit: its definitions, readers, contributions
+    /// and contributors in work (a cell, written as a whole).
+    pub fields: PMap<(u32, Field), Arc<FieldCell>>,
     /// Readers of a node's output.
     pub out_readers: PMap<Id, PMap<Id, ()>>,
-    /// Readers of the scope structure at their position (kinds, sequence
-    /// frames), by unit.
-    pub kind_readers: PMap<u32, PMap<(Pos, Id), ()>>,
-    /// Readers of following siblings (`following`, `claimed`, streams), by
-    /// unit and position, each with how far its window reaches.
-    pub fwd_readers: PMap<u32, super::claims::Windows>,
-    /// Readers of earlier siblings (`prev_sibling_where`), by unit and
-    /// position, each with the lowest position its walk reached.
-    pub back_readers: PMap<u32, super::claims::Windows>,
-    /// Contributions to accumulators, by unit and field, folded by the
-    /// field's monoid in every subtree.
-    pub contribs: PMap<(u32, Field), PMap<Pos, ValueId, ValueId>>,
-    /// Range readers of an accumulator: by the end of their window and the
-    /// reader, the window's start.
-    pub range_readers: PMap<(u32, Field), PMap<(Pos, Id), Pos>>,
-    /// Nodes in work (dirty or held), by unit and position.
-    pub work: PMap<u32, PMap<Pos, Id, usize>>,
-    /// The nodes in work that may contribute to an accumulator (see
-    /// [`World::range_blocker`]), by unit and position: without a result
-    /// (`acc_open`; those declaring their contributions to a field also in
-    /// `acc_static` under it), and with one, under each field it
-    /// contributed to (`acc_res`).
-    pub acc_open: PMap<u32, PMap<Pos, Id>>,
-    pub acc_static: PMap<(u32, Field), PMap<Pos, Id>>,
-    pub acc_res: PMap<(u32, Field), PMap<Pos, Id>>,
     /// Loop-back fields' values for this round.
     pub loops: PMap<Field, ValueId>,
     /// The version each key last changed at.
     pub changed: PMap<Key, u64>,
     /// Claimers' state, by claimer.
     pub claims: PMap<Id, super::claims::ClaimSt>,
-    /// The claimers of each unit.
-    pub claimers: PMap<u32, PMap<Id, ()>>,
     /// Nodes whose claim hook is still to be asked (texts made since).
     pub unregistered: PMap<Id, ()>,
     /// Units whose claims are to be resolved again, whole.
@@ -453,36 +499,95 @@ pub(crate) struct World {
     pub claim_points: PMap<(u32, Pos), ()>,
     /// Claimers to resolve again (their own state changed).
     pub claims_todo: PMap<Id, ()>,
-    /// Claimers by unit and position, each with how far its window
-    /// reaches (summarised: the farthest reach in a subtree).
-    pub claim_at: PMap<u32, PMap<Pos, (Id, Pos), Pos>>,
-    /// Pending claimers in work that hold later siblings back, by unit and
-    /// position.
-    pub holders: PMap<u32, PMap<Pos, Id>>,
-    /// Nodes in work whose definition set is pending, by unit, by what
-    /// they may define (any field, a name, a prefix: `pset_key`) and by
-    /// position.
-    pub psets: PMap<(u32, u64), PMap<Pos, Id>>,
-    /// The same nodes by unit and position only (most reads see none).
-    pub pset_nodes: PMap<u32, PMap<Pos, Id>>,
-    /// Entries of `psets` by unit and key bucket (`key % 64`): a key whose
-    /// bucket is empty is not looked up.
-    pub pset_buckets: PMap<u32, Buckets>,
     /// Nodes marked at creation by their operation (settled reports).
     pub op_marked: PMap<Id, ()>,
     /// The final nodes ([`crate::api::Operation::final_only`]).
     pub fins: PMap<Id, ()>,
     /// The done nodes that publish loop-back fields.
     pub publishers: PMap<Id, ()>,
+    /// Placers made dirty by a change (a read that broke, a new text) whose
+    /// placements are not made again yet: the nodes they placed wait for
+    /// them (their texts may be stale).
+    pub stale: PMap<Id, ()>,
 }
 
 impl World {
+    /// Field `f` of unit `u`, if anything is filed under it.
+    #[inline]
+    pub(crate) fn field(&self, u: u32, f: Field) -> Option<&FieldCell> {
+        self.fields.get(&(u, f)).map(|c| &**c)
+    }
+
+    /// Changes field `f` of unit `u` (made if new).
+    #[inline]
+    pub(crate) fn with_field<R>(&mut self, u: u32, f: Field, g: impl FnOnce(&mut FieldCell) -> R) -> R {
+        let mut g = Some(g);
+        let mut r = None;
+        self.fields.upsert((u, f), &NoMeasure, |c| r = Some((g.take().expect("once"))(Arc::make_mut(c))));
+        r.expect("ran")
+    }
+
+    /// The fields of unit `u` with a cell.
+    pub(crate) fn fields_of(&self, u: u32) -> Vec<Field> {
+        self.fields
+            .range(std::ops::Bound::Included(&(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
+            .take_while(|(k, _)| k.0 == u)
+            .map(|(k, _)| k.1)
+            .collect()
+    }
+
     pub(crate) fn node(&self, id: Id) -> Option<&Node> {
         self.nodes.get(&id)
     }
 
     pub(crate) fn unit(&self, u: u32) -> &Unit {
         self.units.get(&u).expect("a live unit")
+    }
+
+    /// Unit `u`, if live.
+    #[inline]
+    pub(crate) fn unit_opt(&self, u: u32) -> Option<&Unit> {
+        self.units.get(&u).map(|c| &**c)
+    }
+
+    /// Changes unit `u` (made if new: an add to its indexes).
+    #[inline]
+    pub(crate) fn with_unit<R>(&mut self, u: u32, g: impl FnOnce(&mut Unit) -> R) -> R {
+        let mut g = Some(g);
+        let mut r = None;
+        self.units.upsert(u, &NoMeasure, |c| r = Some((g.take().expect("once"))(Arc::make_mut(c))));
+        r.expect("ran")
+    }
+
+    /// Changes unit `u` if it is live (a removal from its indexes: a unit
+    /// gone stays gone).
+    #[inline]
+    pub(crate) fn with_unit_if(&mut self, u: u32, g: impl FnOnce(&mut Unit)) {
+        self.units.update(&u, &NoMeasure, |c| g(Arc::make_mut(c)));
+    }
+
+    /// Sets (`on`) or clears node `id` at `p` in unit `u`'s index `ix`
+    /// (clearing only its own entry); whether it changed.
+    fn unit_set(&mut self, u: u32, ix: PosIx, p: Pos, id: Id, on: bool) -> bool {
+        let has = self.unit_opt(u).and_then(|un| ix.of(un).get(&p)).copied();
+        if on == (has == Some(id)) || (!on && has != Some(id)) {
+            return false;
+        }
+        self.with_unit(u, |un| {
+            let m = ix.of_mut(un);
+            if on {
+                m.insert(p, id, &NoMeasure);
+            } else {
+                m.remove(&p, &NoMeasure);
+            }
+        });
+        true
+    }
+
+    /// Unit `u`'s nodes in work by position.
+    #[inline]
+    pub(crate) fn work_of(&self, u: u32) -> Option<&PMap<Pos, Id, usize>> {
+        self.unit_opt(u).map(|un| &un.work)
     }
 
     /// The node after `id` in its unit's order.
@@ -584,7 +689,7 @@ impl World {
     /// `u`: the nearest earlier entry in a frame of its chain, or the
     /// nearest earlier global. `skip` passes a node's own entries.
     pub(crate) fn reaching(&self, u: u32, f: Field, pos: Pos, fr: FrameId, skip: Id) -> Option<(Pos, Entry)> {
-        let fd = self.defs.get(&(u, f))?;
+        let fd = &self.field(u, f)?.defs;
         let mut best: Option<(Pos, Entry)> = None;
         let take = |best: &mut Option<(Pos, Entry)>, m: &PMap<Pos, Entry>| {
             let mut k = pos;
@@ -683,14 +788,14 @@ impl World {
 
     /// Adds a node to its unit's order at `pos`.
     pub(crate) fn link(&mut self, u: u32, pos: Pos, id: Id) {
-        let mut un = self.units.get(&u).cloned().unwrap_or_default();
-        un.order.insert(pos, id, &Count);
-        self.units.insert(u, un, &NoMeasure);
+        self.with_unit(u, |un| {
+            un.order.insert(pos, id, &Count);
+        });
     }
 
     /// Removes a node from its unit's order.
     pub(crate) fn unlink(&mut self, u: u32, pos: Pos) {
-        self.units.update(&u, &NoMeasure, |un| {
+        self.with_unit_if(u, |un| {
             un.order.remove(&pos, &Count);
         });
     }
@@ -698,7 +803,8 @@ impl World {
     /// Files a definition entry of node `id` (at `pos`, in frame `fr` for
     /// a local).
     pub(crate) fn file_def(&mut self, u: u32, f: Field, pos: Pos, fr: FrameId, e: Entry) {
-        self.defs.upsert((u, f), &NoMeasure, |fd| {
+        self.with_field(u, f, |c| {
+            let fd = &mut c.defs;
             if e.loc == Locality::Global {
                 fd.globals.insert(pos, e, &NoMeasure);
             } else {
@@ -711,7 +817,11 @@ impl World {
 
     /// Removes a definition entry.
     pub(crate) fn unfile_def(&mut self, u: u32, f: Field, pos: Pos, fr: FrameId, global: bool) {
-        self.defs.update(&(u, f), &NoMeasure, |fd| {
+        if self.field(u, f).is_none() {
+            return;
+        }
+        self.with_field(u, f, |c| {
+            let fd = &mut c.defs;
             if global {
                 fd.globals.remove(&pos, &NoMeasure);
             } else {
@@ -729,20 +839,22 @@ impl World {
 
     /// Adds a reader of `f` at `pos`.
     pub(crate) fn add_reader(&mut self, u: u32, f: Field, pos: Pos, id: Id) {
-        self.readers.upsert((u, f), &NoMeasure, |m| {
-            m.insert((pos, id), (), &NoMeasure);
+        self.with_field(u, f, |c| {
+            c.readers.insert((pos, id), (), &NoMeasure);
         });
     }
 
     pub(crate) fn drop_reader(&mut self, u: u32, f: Field, pos: Pos, id: Id) {
-        self.readers.update(&(u, f), &NoMeasure, |m| {
-            m.remove(&(pos, id), &NoMeasure);
-        });
+        if self.field(u, f).is_some_and(|c| c.readers.contains_key(&(pos, id))) {
+            self.with_field(u, f, |c| {
+                c.readers.remove(&(pos, id), &NoMeasure);
+            });
+        }
     }
 
     /// The readers of `f` in unit `u` reading at a position in `(lo, hi)`.
     pub(crate) fn readers_between(&self, u: u32, f: Field, lo: Pos, hi: Pos) -> Vec<Id> {
-        let Some(m) = self.readers.get(&(u, f)) else {
+        let Some(m) = self.field(u, f).map(|c| &c.readers) else {
             return Vec::new();
         };
         m.range(
@@ -771,24 +883,29 @@ impl World {
     }
 
     pub(crate) fn add_kind_reader(&mut self, u: u32, p: Pos, id: Id) {
-        self.kind_readers.upsert(u, &NoMeasure, |m| {
-            m.insert((p, id), (), &NoMeasure);
+        self.with_unit(u, |un| {
+            un.kind_readers.insert((p, id), (), &NoMeasure);
         });
     }
 
     pub(crate) fn drop_kind_reader(&mut self, u: u32, p: Pos, id: Id) {
-        self.kind_readers.update(&u, &NoMeasure, |m| {
-            m.remove(&(p, id), &NoMeasure);
-        });
+        if self.is_kind_reader(u, p, id) {
+            self.with_unit_if(u, |un| {
+                un.kind_readers.remove(&(p, id), &NoMeasure);
+            });
+        }
     }
 
     /// Files reader `id` at `p` in a window index (`back`: backward) with
     /// its reach; `None` takes it out.
     pub(crate) fn set_window(&mut self, back: bool, u: u32, p: Pos, id: Id, reach: Option<Pos>) {
-        let map = if back { &mut self.back_readers } else { &mut self.fwd_readers };
+        if reach.is_none() && self.window_of(back, u, p, id).is_none() {
+            return;
+        }
         // (In place: a copy of the unit's windows would copy every path.)
-        map.upsert(u, &NoMeasure, |m| match reach {
+        self.with_unit(u, |un| match reach {
             Some(r) => {
+                let m = if back { &mut un.back_readers } else { &mut un.fwd_readers };
                 if back {
                     m.insert(p, (id, r), &super::claims::MinLow);
                 } else {
@@ -796,6 +913,7 @@ impl World {
                 }
             }
             None => {
+                let m = if back { &mut un.back_readers } else { &mut un.fwd_readers };
                 if m.get(&p).is_some_and(|e| e.0 == id) {
                     if back {
                         m.remove(&p, &super::claims::MinLow);
@@ -810,13 +928,13 @@ impl World {
     /// Node `id`'s entry in a window index at `p` (`back`: backward), if
     /// it holds it.
     pub(crate) fn window_of(&self, back: bool, u: u32, p: Pos, id: Id) -> Option<Pos> {
-        let map = if back { &self.back_readers } else { &self.fwd_readers };
-        map.get(&u).and_then(|m| m.get(&p)).filter(|e| e.0 == id).map(|e| e.1)
+        let un = self.unit_opt(u)?;
+        if back { &un.back_readers } else { &un.fwd_readers }.get(&p).filter(|e| e.0 == id).map(|e| e.1)
     }
 
     /// Whether node `id` is a kind (scope) reader at `p`.
     pub(crate) fn is_kind_reader(&self, u: u32, p: Pos, id: Id) -> bool {
-        self.kind_readers.get(&u).is_some_and(|m| m.contains_key(&(p, id)))
+        self.unit_opt(u).is_some_and(|un| un.kind_readers.contains_key(&(p, id)))
     }
 
     /// Replaces a node's record (the in-work index follows its state).
@@ -829,14 +947,14 @@ impl World {
         if was.as_ref() != Some(&now) {
             if let Some((u, p, ks)) = was {
                 if !ks.is_empty() {
-                    index_set(&mut self.pset_nodes, u, p, id, false);
+                    self.unit_set(u, PosIx::PsetNodes, p, id, false);
                 }
                 for k in ks {
                     self.pset_set(u, k, p, id, false);
                 }
             }
             if !now.2.is_empty() {
-                index_set(&mut self.pset_nodes, now.0, now.1, id, true);
+                self.unit_set(now.0, PosIx::PsetNodes, now.1, id, true);
             }
             for &k in &now.2 {
                 self.pset_set(now.0, k, now.1, id, true);
@@ -855,12 +973,10 @@ impl World {
     }
 
     fn unclaim_at(&mut self, u: u32, p: Pos, id: Id) {
-        if let Some(m) = self.claim_at.get(&u)
-            && m.get(&p).is_some_and(|e| e.0 == id)
-        {
-            let mut m = m.clone();
-            m.remove(&p, &super::claims::MaxReach);
-            self.claim_at.insert(u, m, &NoMeasure);
+        if self.unit_opt(u).is_some_and(|un| un.claim_at.get(&p).is_some_and(|e| e.0 == id)) {
+            self.with_unit_if(u, |un| {
+                un.claim_at.remove(&p, &super::claims::MaxReach);
+            });
         }
     }
 
@@ -872,10 +988,10 @@ impl World {
         match self.claims.get(&id) {
             Some(st) => {
                 let reach = st.reach;
-                let mut m = self.claim_at.get(&u).cloned().unwrap_or_default();
-                if m.get(&p) != Some(&(id, reach)) {
-                    m.insert(p, (id, reach), &super::claims::MaxReach);
-                    self.claim_at.insert(u, m, &NoMeasure);
+                if self.unit_opt(u).is_none_or(|un| un.claim_at.get(&p) != Some(&(id, reach))) {
+                    self.with_unit(u, |un| {
+                        un.claim_at.insert(p, (id, reach), &super::claims::MaxReach);
+                    });
                 }
             }
             None => self.unclaim_at(u, p, id),
@@ -891,13 +1007,7 @@ impl World {
     }
 
     fn unhold(&mut self, u: u32, p: Pos, id: Id) {
-        if let Some(m) = self.holders.get(&u)
-            && m.get(&p) == Some(&id)
-        {
-            let mut m = m.clone();
-            m.remove(&p, &NoMeasure);
-            self.holders.insert(u, m, &NoMeasure);
-        }
+        self.unit_set(u, PosIx::Holders, p, id, false);
     }
 
     /// Files node `id` in the holders index if it holds (after its node or
@@ -906,14 +1016,7 @@ impl World {
         let Some(n) = self.nodes.get(&id) else { return };
         let (u, p) = (n.unit, n.pos);
         let on = self.is_holder(id, n);
-        let has = self.holders.get(&u).is_some_and(|m| m.get(&p) == Some(&id));
-        if on && !has {
-            let mut m = self.holders.get(&u).cloned().unwrap_or_default();
-            m.insert(p, id, &NoMeasure);
-            self.holders.insert(u, m, &NoMeasure);
-        } else if !on && has {
-            self.unhold(u, p, id);
-        }
+        self.unit_set(u, PosIx::Holders, p, id, on);
     }
 
     fn put_node(&mut self, id: Id, n: Node) {
@@ -975,7 +1078,7 @@ impl World {
             self.unhold(u, p, id);
             self.unclaim_at(u, p, id);
             if !ks.is_empty() {
-                index_set(&mut self.pset_nodes, u, p, id, false);
+                self.unit_set(u, PosIx::PsetNodes, p, id, false);
             }
             for k in ks {
                 self.pset_set(u, k, p, id, false);
@@ -994,18 +1097,18 @@ impl World {
 
     /// The dirty nodes (from the in-work index).
     pub(crate) fn dirty_nodes(&self) -> Vec<Id> {
-        self.work.iter().flat_map(|(_, m)| m.iter().map(|(_, &id)| id)).filter(|&id| self.node(id).is_some_and(|n| n.st == St::Dirty)).collect()
+        self.units.iter().flat_map(|(_, un)| un.work.iter().map(|(_, &id)| id)).filter(|&id| self.node(id).is_some_and(|n| n.st == St::Dirty)).collect()
     }
 
     fn set_work(&mut self, u: u32, p: Pos, id: Option<Id>) {
-        self.work.upsert(u, &NoMeasure, |m| match id {
-            Some(x) => {
-                m.insert(p, x, &Count);
-            }
-            None => {
-                m.remove(&p, &Count);
-            }
-        });
+        match id {
+            Some(x) => self.with_unit(u, |un| {
+                un.work.insert(p, x, &Count);
+            }),
+            None => self.with_unit_if(u, |un| {
+                un.work.remove(&p, &Count);
+            }),
+        }
     }
 
     /// Files node `n` (`on`) in the accumulator indexes, or takes it out.
@@ -1019,15 +1122,15 @@ impl World {
         let (u, p) = (n.unit, n.pos);
         match &n.res {
             None => {
-                index_set(&mut self.acc_open, u, p, id, on);
+                self.unit_set(u, PosIx::AccOpen, p, id, on);
                 for &(f, _) in stat.unwrap_or_default() {
-                    index_set(&mut self.acc_static, (u, f), p, id, on);
+                    self.field_index_set(u, f, false, p, id, on);
                 }
             }
             Some(r) => {
                 for &(f, _) in &r.contribs {
                     if !stat.is_some_and(|cs| cs.iter().any(|c| c.0 == f)) {
-                        index_set(&mut self.acc_res, (u, f), p, id, on);
+                        self.field_index_set(u, f, true, p, id, on);
                     }
                 }
             }
@@ -1043,8 +1146,8 @@ impl World {
         loop {
             let open = self.first_open(f, u, lo, hi);
             let res = self
-                .acc_res
-                .get(&(u, f))
+                .field(u, f)
+                .map(|c| &c.acc_res)
                 .and_then(|m| m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)).next())
                 .map(|(&p, &x)| (p, x));
             let x = match (open, res) {
@@ -1066,8 +1169,8 @@ impl World {
         loop {
             let open = self.last_open(f, u, lo, hi);
             let res = self
-                .acc_res
-                .get(&(u, f))
+                .field(u, f)
+                .map(|c| &c.acc_res)
                 .and_then(|m| m.below(&hi))
                 .filter(|(p, _)| **p > lo)
                 .map(|(&p, &x)| (p, x));
@@ -1086,13 +1189,13 @@ impl World {
     /// that does not declare its contribution to `f` (as [`Self::first_open`],
     /// from the end).
     fn last_open(&self, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<(Pos, Id)> {
-        let open = self.acc_open.get(&u)?;
+        let open = &self.unit_opt(u)?.acc_open;
         let a = open.rank(&lo) + usize::from(open.contains_key(&lo));
         let b = open.rank(&hi);
         if a >= b {
             return None;
         }
-        let Some(st) = self.acc_static.get(&(u, f)).filter(|m| !m.is_empty()) else {
+        let Some(st) = self.field(u, f).map(|c| &c.acc_static).filter(|m| !m.is_empty()) else {
             return open.nth(b - 1).map(|(&p, &x)| (p, x));
         };
         let s1 = st.rank(&hi);
@@ -1119,13 +1222,13 @@ impl World {
     /// prefix-closed subset, so the first not among them is found by
     /// bisection on counts (O(log² n)).
     fn first_open(&self, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<(Pos, Id)> {
-        let open = self.acc_open.get(&u)?;
+        let open = &self.unit_opt(u)?.acc_open;
         let a = open.rank(&lo) + usize::from(open.contains_key(&lo));
         let b = open.rank(&hi);
         if a >= b {
             return None;
         }
-        let Some(st) = self.acc_static.get(&(u, f)).filter(|m| !m.is_empty()) else {
+        let Some(st) = self.field(u, f).map(|c| &c.acc_static).filter(|m| !m.is_empty()) else {
             return open.nth(a).map(|(&p, &x)| (p, x));
         };
         let s0 = st.rank(&lo) + usize::from(st.contains_key(&lo));
@@ -1198,14 +1301,25 @@ impl World {
     fn pset_set(&mut self, u: u32, k: u64, p: Pos, id: Id, on: bool) {
         // (An entry filed over another node's at `p` takes its place: the
         // count stays.)
-        let other = on && self.psets.get(&(u, k)).and_then(|m| m.get(&p)).is_some_and(|&x| x != id);
-        if index_set(&mut self.psets, (u, k), p, id, on) && !other {
-            self.pset_buckets.upsert(u, &NoMeasure, |b| {
-                let b = Arc::make_mut(&mut b.0);
+        let has = self.unit_opt(u).and_then(|un| un.psets.get(&k)).and_then(|m| m.get(&p)).copied();
+        let other = on && has.is_some_and(|x| x != id);
+        if on == (has == Some(id)) || (!on && has != Some(id)) {
+            return;
+        }
+        self.with_unit(u, |un| {
+            un.psets.upsert(k, &NoMeasure, |m| {
+                if on {
+                    m.insert(p, id, &NoMeasure);
+                } else {
+                    m.remove(&p, &NoMeasure);
+                }
+            });
+            if !other {
+                let b = Arc::make_mut(&mut un.pset_buckets.0);
                 let i = (k % 64) as usize;
                 b[i] = if on { b[i] + 1 } else { b[i] - 1 };
-            });
-        }
+            }
+        });
     }
 
     pub(crate) fn pending_set_between(&self, core: &super::core::Core, u: u32, f: Field, lo: Pos, hi: Pos, me: Id) -> Option<Id> {
@@ -1214,7 +1328,8 @@ impl World {
         let pending = |x: Id| {
             self.node(x).is_some_and(|n| n.text.stat.defs.is_none() && (n.wide || core.may_cover(n.may(), n.text.op, &n.text.args, f)))
         };
-        let m = self.pset_nodes.get(&u)?;
+        let un = self.unit_opt(u)?;
+        let m = &un.pset_nodes;
         let mut few: [Id; 8] = [NONE; 8];
         let mut k = 0;
         for (_, &x) in m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)) {
@@ -1237,12 +1352,12 @@ impl World {
         // The sets that may hold `f`: any field, its name, its prefixes
         // (rolled over the name in one pass).
         let mut best: Option<(Pos, Id)> = None;
-        let buckets = self.pset_buckets.get(&u).cloned();
+        let buckets = &un.pset_buckets;
         let mut look = |k: u64| {
-            if buckets.as_ref().is_some_and(|b| b.0[(k % 64) as usize] == 0) {
+            if buckets.0[(k % 64) as usize] == 0 {
                 return;
             }
-            let Some(m) = self.psets.get(&(u, k)) else { return };
+            let Some(m) = un.psets.get(&k) else { return };
             let upto = best.map_or(hi, |b| b.0);
             let hit = m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&upto)).find(|&(_, &x)| {
                 x != me
@@ -1271,12 +1386,12 @@ impl World {
     /// Sets (or with `None` removes) node `id`'s contribution to `f` at
     /// `pos`.
     pub(crate) fn set_contrib(&mut self, m: &AccMeasure<'_>, u: u32, f: Field, pos: Pos, x: Option<ValueId>) {
-        self.contribs.upsert((u, f), &NoMeasure, |t| match x {
+        self.with_field(u, f, |c| match x {
             Some(v) => {
-                t.insert(pos, v, m);
+                c.contribs.insert(pos, v, m);
             }
             None => {
-                t.remove(&pos, m);
+                c.contribs.remove(&pos, m);
             }
         });
     }
@@ -1284,27 +1399,29 @@ impl World {
     /// The fold of `f`'s contributions in unit `u` strictly between `lo`
     /// and `hi`.
     pub(crate) fn fold(&self, m: &AccMeasure<'_>, u: u32, f: Field, lo: Pos, hi: Pos) -> ValueId {
-        match self.contribs.get(&(u, f)) {
+        match self.field(u, f).map(|c| &c.contribs) {
             Some(t) => t.fold(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi), m),
             None => m.zero(),
         }
     }
 
     pub(crate) fn add_range_reader(&mut self, u: u32, f: Field, lo: Pos, hi: Pos, id: Id) {
-        self.range_readers.upsert((u, f), &NoMeasure, |m| {
-            m.insert((hi, id), lo, &NoMeasure);
+        self.with_field(u, f, |c| {
+            c.range_readers.insert((hi, id), lo, &NoMeasure);
         });
     }
 
     pub(crate) fn drop_range_reader(&mut self, u: u32, f: Field, hi: Pos, id: Id) {
-        self.range_readers.update(&(u, f), &NoMeasure, |m| {
-            m.remove(&(hi, id), &NoMeasure);
-        });
+        if self.field(u, f).is_some_and(|c| c.range_readers.contains_key(&(hi, id))) {
+            self.with_field(u, f, |c| {
+                c.range_readers.remove(&(hi, id), &NoMeasure);
+            });
+        }
     }
 
     /// The range readers of `f` whose window holds position `q`.
     pub(crate) fn range_readers_over(&self, u: u32, f: Field, q: Pos) -> Vec<Id> {
-        let Some(m) = self.range_readers.get(&(u, f)) else {
+        let Some(m) = self.field(u, f).map(|c| &c.range_readers) else {
             return Vec::new();
         };
         m.range(std::ops::Bound::Excluded(&(q, Id::MAX)), std::ops::Bound::Unbounded)
@@ -1314,27 +1431,26 @@ impl World {
     }
 }
 
-/// Sets (`on`) or clears node `id` at position `p` of unit `u` in a
-/// per-unit position index (clearing only its own entry).
-/// Files (`on`) or takes out `id` at `p` under `u`; whether `id` was
-/// added there or removed from there.
-fn index_set<U: Ord + Clone>(map: &mut PMap<U, PMap<Pos, Id>>, u: U, p: Pos, id: Id, on: bool) -> bool {
-    let has = map.get(&u).and_then(|m| m.get(&p)).copied();
-    if on == (has == Some(id)) {
-        return false;
-    }
-    if !on && has != Some(id) {
-        return false;
-    }
-    map.upsert(u, &NoMeasure, |m| {
-        if on {
-            m.insert(p, id, &NoMeasure);
-        } else {
-            m.remove(&p, &NoMeasure);
+impl World {
+    /// [`index_set`] on field `f`'s contributors in work (`res`: those with
+    /// a result, else those declaring).
+    fn field_index_set(&mut self, u: u32, f: Field, res: bool, p: Pos, id: Id, on: bool) -> bool {
+        let has = self.field(u, f).and_then(|c| if res { &c.acc_res } else { &c.acc_static }.get(&p)).copied();
+        if on == (has == Some(id)) || (!on && has != Some(id)) {
+            return false;
         }
-    });
-    true
+        self.with_field(u, f, |c| {
+            let m = if res { &mut c.acc_res } else { &mut c.acc_static };
+            if on {
+                m.insert(p, id, &NoMeasure);
+            } else {
+                m.remove(&p, &NoMeasure);
+            }
+        });
+        true
+    }
 }
+
 
 /// The pending-set index keys of node `n`: none unless it is in work with
 /// its definition set pending; 0 for any field; else a key per name or
