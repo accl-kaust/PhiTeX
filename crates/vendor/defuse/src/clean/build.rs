@@ -253,12 +253,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Marks a node dirty (its committed result kept, as a guess for its
-    /// readers, until its run commits).
-    pub(crate) fn make_dirty(&mut self, id: Id) {
-        self.make_dirty_for(id, crate::api::Rerun::Other);
-    }
-
     /// Marks a node dirty for reason `why`.
     pub(crate) fn make_dirty_for(&mut self, id: Id, why: crate::api::Rerun) {
         let Some(n) = self.w.node(id) else { return };

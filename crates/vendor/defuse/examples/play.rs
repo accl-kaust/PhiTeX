@@ -7,7 +7,17 @@
 //! A playback run makes the recorded run's `Ctx` calls in order and checks
 //! each answer against the recording; when an answer differs from every
 //! recorded run of that node's text, the run is a divergence (counted and
-//! printed, the run returns its best recorded result).
+//! printed, the run returns its best recorded result). A run the engine
+//! stops makes the calls the recorded run made after its stop (a `park`)
+//! and ends as it ended.
+//!
+//! A hook or the provider answers as it last answered at that point of the
+//! recording (a client's answers may change between evaluations).
+//!
+//! A process may record several engines (a format built in an engine of
+//! its own before the document's): each is replayed in turn, in a fresh
+//! engine, or only engine `E` (`--engine E`, the instance in the lines'
+//! `e`).
 //!
 //! `cargo run --release --features observe --example play -- REC [--engine E]
 //!   [--threads T] [--spec off|predicted|all] [--budget B]`
@@ -29,13 +39,13 @@
 mod common;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::Threads;
 use defuse::{
-    Claim, Ctx, EditSource, Effect, Engine, Field, Greedy, Limits, Locality, LoopStart, MayDefine, Monoid, NodeId,
-    OpId, Operation, ProjId, Speculation, Stop, UnitId, Until, Value, ValueId, Values,
+    CapPolicy, Claim, Ctx, EditSource, Effect, Engine, Field, Greedy, Limits, Locality, LoopStart, MayDefine, Monoid,
+    NodeId, OpId, Operation, ProjId, Speculation, Stop, UnitId, Until, Value, ValueId, Values,
 };
 use serde_json::{Value as J, json};
 
@@ -43,25 +53,44 @@ fn de<T: serde::de::DeserializeOwned>(j: &J) -> T {
     serde_json::from_value(j.clone()).unwrap_or_else(|e| panic!("bad recording field {j}: {e}"))
 }
 
+/// Answers by the index of the line that recorded them, in order.
+type Timed = Vec<(usize, J)>;
+
 /// Everything the playback hooks answer from.
 #[derive(Default)]
 struct Book {
-    /// (op, method, args, extra) -> answer.
-    statics: HashMap<String, J>,
-    /// (op, method, args) -> (items taken from `following`, answer).
-    takes: HashMap<String, Vec<(Vec<(OpId, Vec<ValueId>)>, J)>>,
-    /// (op, args) -> recorded runs: their calls and results.
-    runs: HashMap<String, Vec<(Vec<J>, J)>>,
+    /// (op, method, args, extra) -> answers.
+    statics: HashMap<String, Timed>,
+    /// (op, method, args) -> (line, items taken from `following`, answer).
+    takes: HashMap<String, Vec<(usize, Vec<(OpId, Vec<ValueId>)>, J)>>,
+    /// (op, args) -> recorded runs.
+    runs: HashMap<String, Vec<Run>>,
     /// (field, method, args) -> answer.
     monoid: HashMap<String, J>,
     /// (projection, value) -> answer.
     proj: HashMap<String, J>,
-    /// field -> provider answers in order.
-    env: HashMap<String, J>,
+    /// field -> the provider's answers (their lines).
+    env: HashMap<String, Timed>,
 }
 
 static DIVERGED: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Where the replay is in the recording: the line of the engine call being
+/// made, or of the evaluation's end while it evaluates.
+static AT: AtomicUsize = AtomicUsize::new(0);
+
+/// The answer last recorded at or before [`AT`] (else the first).
+fn now(list: &Timed) -> &J {
+    let k = list.partition_point(|(i, _)| *i <= AT.load(Ordering::Relaxed));
+    &list[k.saturating_sub(1)].1
+}
+
+fn miss(what: std::fmt::Arguments<'_>) {
+    if MISSES.fetch_add(1, Ordering::Relaxed) < 20 {
+        eprintln!("play: no recorded {what}");
+    }
+}
 
 fn key(parts: &[&J]) -> String {
     parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("|")
@@ -83,11 +112,9 @@ impl PlayOp {
             .statics
             .get(&key(&[&json!(self.id), &json!(m), &json!(args), &x]))
         {
-            Some(r) => de(r),
+            Some(r) => de(now(r)),
             None => {
-                if MISSES.fetch_add(1, Ordering::Relaxed) < 20 {
-                    eprintln!("play: no recorded {m} of {} {args:?} {x}", self.name);
-                }
+                miss(format_args!("{m} of {} {args:?} {x}", self.name));
                 dflt
             }
         }
@@ -101,17 +128,17 @@ impl PlayOp {
         dflt: T,
     ) -> T {
         let Some(list) = self.book.takes.get(&key(&[&json!(self.id), &json!(m), &json!(args)])) else {
-            if MISSES.fetch_add(1, Ordering::Relaxed) < 20 {
-                eprintln!("play: no recorded {m} of {} {args:?}", self.name);
-            }
+            miss(format_args!("{m} of {} {args:?}", self.name));
             return dflt;
         };
         let mut got: Vec<(OpId, Vec<ValueId>)> = Vec::new();
         let mut done = false;
-        // The shortest recorded take that matches what the iterator gives.
-        let mut order: Vec<&(Vec<(OpId, Vec<ValueId>)>, J)> = list.iter().collect();
-        order.sort_by_key(|(t, _)| t.len());
-        for (took, r) in order {
+        // A recorded take that matches what the iterator gives: of those
+        // recorded so far the latest, then the shortest.
+        let at = AT.load(Ordering::Relaxed);
+        let mut order: Vec<&(usize, Vec<(OpId, Vec<ValueId>)>, J)> = list.iter().collect();
+        order.sort_by_key(|(i, t, _)| (*i > at, if *i > at { 0 } else { usize::MAX - i }, t.len()));
+        for (_, took, r) in order {
             while got.len() < took.len() && !done {
                 match it.next() {
                     Some(x) => got.push(x),
@@ -122,7 +149,7 @@ impl PlayOp {
                 return de(r);
             }
         }
-        MISSES.fetch_add(1, Ordering::Relaxed);
+        miss(format_args!("{m} of {} {args:?} taking {got:?}", self.name));
         dflt
     }
 }
@@ -154,9 +181,7 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "contribute" => json!(cx.contribute(de(&g(0)), de(&g(1)))),
         "acc_range" => return res(cx.acc_range(de(&g(0)), de::<Option<NodeId>>(&g(1)))),
         "acc_range_to" => return res(cx.acc_range_to(de(&g(0)), de(&g(1)), de(&g(2)))),
-        #[cfg(feature = "clean")]
         "acc_fold" => return res(cx.acc_fold(de(&g(0)), de(&g(1)), de(&g(2)))),
-        #[cfg(feature = "clean")]
         "acc_next" => return res(cx.acc_next(de(&g(0)), de(&g(1)))),
         "scope_kind" => return res(cx.scope_kind()),
         "set_kind" => json!(cx.set_kind(de(&g(0)))),
@@ -180,9 +205,8 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "take_prev_contribution" => return res(cx.take_prev_contribution(de(&g(0)), de(&g(1)))),
         "set_env" => json!(cx.set_env(de(&g(0)), de(&g(1)))),
         "follow_after" => json!(cx.follow_after(de(&g(0)), de(&g(1)), de(&g(2)))),
-        #[cfg(feature = "clean")]
         "follow_after_any" => json!(cx.follow_after_any(de(&g(0)), de(&g(1)), de(&g(2)))),
-        "park" => json!(cx.park(Box::new(()))),
+        "park" => json!(cx.park(Box::new(Vec::<usize>::new()))),
         "parked" => json!(cx.parked().is_some()),
         "restart" => json!(cx.restart()),
         "diagnostic" => json!(cx.diagnostic(de(&g(0)))),
@@ -278,12 +302,23 @@ impl PlayOp {
             eprintln!("play: no recorded run of {} {:?}", self.name, cx.args());
             return Ok(ValueId::UNIT);
         };
+        // The candidates, the latest recorded by this point first: a call
+        // whose answer picks none of them (a definition, say) is made as
+        // the client last made it.
+        let at = AT.load(Ordering::Relaxed);
         let mut live: Vec<usize> = (0..runs.len()).collect();
+        live.sort_by_key(|&c| {
+            let o = &runs[c].origins;
+            match o.partition_point(|&x| x <= at) {
+                0 => (1, o[0]),
+                k => (0, usize::MAX - o[k - 1]),
+            }
+        });
         let mut i = 0;
         loop {
             // A candidate that ends here returns its result.
-            if let Some(&c) = live.iter().find(|&&c| runs[c].0.len() == i) {
-                return match &runs[c].1 {
+            if let Some(&c) = live.iter().find(|&&c| runs[c].calls.len() == i) {
+                return match &runs[c].r {
                     J::Object(o) => Ok(de(&o["ok"])),
                     _ => {
                         // Recorded as stopped without a stopping call here:
@@ -293,25 +328,56 @@ impl PlayOp {
                     }
                 };
             }
-            let c0 = &runs[live[0]].0[i];
+            let c0 = &runs[live[0]].calls[i];
             let (m, a) = (c0[0].as_str().unwrap_or(""), c0[1].clone());
-            let got = call(cx, m, &a);
+            let got = match m {
+                // The token parked names the recorded runs that parked it:
+                // the run goes on as one that resumed them.
+                "parked" => {
+                    let t = cx.parked();
+                    let ans = json!(t.is_some());
+                    if let Some(Ok(by)) = t.map(|t| t.downcast::<Vec<usize>>()) {
+                        let next: Vec<usize> = live
+                            .iter()
+                            .copied()
+                            .filter(|&c| runs[c].resumes.iter().any(|r| by.contains(r)))
+                            .collect();
+                        if !next.is_empty() {
+                            live = next;
+                        }
+                    }
+                    Ok(ans)
+                }
+                _ => runs[live[0]].call(cx, i),
+            };
             let ans = match &got {
                 Ok(j) => j.clone(),
                 Err(_) => json!("stop"),
             };
             live.retain(|&c| {
-                runs[c].0.len() > i && runs[c].0[i][0] == c0[0] && (runs[c].0[i][2] == ans || runs[c].0[i][2] == "*")
+                let r = &runs[c].calls;
+                r.len() > i && r[i][0] == c0[0] && (r[i][2] == ans || r[i][2] == "*")
             });
             if let Err(stop) = got {
+                // The calls the client made after the stop (it parks its
+                // state, say), and its result, as a run that stopped here
+                // recorded them.
+                if let Some(&c) = live.iter().find(|&&c| runs[c].calls[i][2] == "stop") {
+                    for j in i + 1..runs[c].calls.len() {
+                        let _ = runs[c].call(cx, j);
+                    }
+                    if let J::Object(o) = &runs[c].r {
+                        return Ok(de(&o["ok"]));
+                    }
+                }
                 return Err(stop);
             }
             if live.is_empty() {
                 DIVERGED.fetch_add(1, Ordering::Relaxed);
                 let want: Vec<String> = runs
                     .iter()
-                    .filter(|r| r.0.len() > i)
-                    .map(|r| r.0[i][2].to_string())
+                    .filter(|r| r.calls.len() > i)
+                    .map(|r| r.calls[i][2].to_string())
                     .collect();
                 eprintln!(
                     "play: {} {:?} diverged at call {i} ({m} {a}): got {ans}, recorded {}",
@@ -326,6 +392,32 @@ impl PlayOp {
     }
 }
 
+/// A recorded run of a text (identical runs merged).
+#[derive(Default)]
+struct Run {
+    /// Its `Ctx` calls (method, arguments, answer) and its result.
+    calls: Vec<J>,
+    r: J,
+    /// The lines of the runs it stands for, and of the stopped runs they
+    /// resumed.
+    origins: Vec<usize>,
+    resumes: Vec<usize>,
+}
+
+impl Run {
+    /// Makes call `i` on `cx`; a park keeps the runs this one stands for.
+    fn call(&self, cx: &mut Ctx<'_>, i: usize) -> Result<J, Stop> {
+        let c = &self.calls[i];
+        match c[0].as_str().unwrap_or("") {
+            "park" => {
+                cx.park(Box::new(self.origins.clone()));
+                Ok(J::Null)
+            }
+            m => call(cx, m, &c[1]),
+        }
+    }
+}
+
 struct PlayMonoid {
     book: Arc<Book>,
     field: J,
@@ -333,10 +425,13 @@ struct PlayMonoid {
 
 impl Monoid for PlayMonoid {
     fn empty(&self, _: &Values) -> ValueId {
-        self.book
-            .monoid
-            .get(&key(&[&self.field, &json!("empty"), &J::Null]))
-            .map_or(ValueId::NIL, de)
+        match self.book.monoid.get(&key(&[&self.field, &json!("empty"), &J::Null])) {
+            Some(r) => de(r),
+            None => {
+                miss(format_args!("empty of accumulator {}", self.field));
+                ValueId::NIL
+            }
+        }
     }
     fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
         if let Some(r) = self
@@ -346,8 +441,10 @@ impl Monoid for PlayMonoid {
         {
             return de(r);
         }
-        // Not recorded (the engine grouped the fold another way): the
-        // recorded accumulators are sequences, sums and list concatenations.
+        // Not recorded (the engine grouped the fold another way): a guess
+        // that holds for sequences, sums and list concatenations (not for
+        // a client's own monoid: counted).
+        miss(format_args!("combine of accumulator {} {a:?} {b:?}", self.field));
         match (&*v.get(a), &*v.get(b)) {
             (Value::Int(x), Value::Int(y)) => v.int(x + y),
             (Value::List(x), Value::List(y)) => v.list(x.iter().chain(y.iter()).copied().collect()),
@@ -404,7 +501,13 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
             let id = want.as_u64().unwrap_or(0);
             let b = book.clone();
             eng.register_projection(Arc::new(move |v: ValueId, _: &Values| {
-                b.proj.get(&key(&[&json!(id), &json!(v)])).map_or(v, de)
+                match b.proj.get(&key(&[&json!(id), &json!(v)])) {
+                    Some(r) => de(r),
+                    None => {
+                        miss(format_args!("projection {id} of {v:?}"));
+                        v
+                    }
+                }
             }));
         }
         "declare_accumulator" => {
@@ -419,7 +522,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "set_env_provider" => {
             let b = book.clone();
             eng.set_env_provider(Box::new(move |_: &Values, f: Field| {
-                b.env.get(&json!(f).to_string()).and_then(|l| {
+                b.env.get(&json!(f).to_string()).map(now).and_then(|l| {
                     // A recording with `known` says which null it was; an
                     // older one wrote "absent" and "unknown" alike, and its
                     // build completed: absent.
@@ -446,15 +549,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "remove" => eng.remove(de(&g(0))),
         "declare_sequence" => eng.declare_sequence(de(&g(0))),
         "declare_loopback" => eng.declare_loopback(de(&g(0)), de(&g(1))),
-        // (The clean core's; the round core declares them one by one.)
-        #[cfg(feature = "clean")]
         "declare_loopbacks" => eng.declare_loopbacks(&de::<Vec<(Field, ValueId)>>(&g(0))),
-        #[cfg(not(feature = "clean"))]
-        "declare_loopbacks" => {
-            for (f, init) in de::<Vec<(Field, ValueId)>>(&g(0)) {
-                eng.declare_loopback(f, init);
-            }
-        }
         "set_loop_start" => eng.set_loop_start(de::<LoopStart>(&g(0))),
         "set_max_rounds" => eng.set_max_rounds(de(&g(0))),
         "set_limits" => eng.set_limits(de::<Limits>(&g(0))),
@@ -470,9 +565,59 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "mark" => eng.mark(de(&g(0))),
         "unmark" => eng.unmark(de(&g(0))),
         "set_version" => eng.set_version(de(&g(0))),
+        "set_stable" => eng.set_stable(de(&g(0))),
+        "set_heights" => eng.set_heights(de(&g(0))),
+        "set_round_cap_policy" => eng.set_round_cap_policy(de::<CapPolicy>(&g(0))),
+        "refresh_where" => {
+            let texts: std::collections::HashSet<(OpId, Vec<ValueId>)> = de(a);
+            eng.refresh_where(&|op, args, _| texts.contains(&(op, args.to_vec())));
+        }
         "pin" | "unpin" | "evaluate_begin" | "evaluate_end" => {}
         other => eprintln!("play: skipped engine call {other}"),
     }
+}
+
+/// A run's calls without the calls a public `Ctx` call made inside and a
+/// recording before format 2 wrote too: each right before the call that
+/// made it.
+fn single_calls(calls: Vec<J>) -> Vec<J> {
+    let mut out: Vec<J> = Vec::with_capacity(calls.len());
+    for c in calls {
+        let (m, a, r) = (c[0].as_str().unwrap_or(""), &c[1], &c[2]);
+        loop {
+            let Some(p) = out.last() else { break };
+            let (pm, pa, pr) = (p[0].as_str().unwrap_or(""), &p[1], &p[2]);
+            let inner = match (pm, m) {
+                // `define`, `push_contribution`: through `define_with`;
+                // `take_prev_contribution` defines its field the same way.
+                ("define_with", "define" | "push_contribution") => pa[0] == a[0] && pa[1] == a[1],
+                ("define_with", "take_prev_contribution") => pa[0] == a[0],
+                // `follow_after` and `follow_after_any` placing it as `follow`.
+                ("follow", "follow_after" | "follow_after_any") => pa[0] == a[1] && pa[1] == a[2] && pr == r,
+                // `acc_range` is `acc_range_to` the node.
+                ("acc_range_to", "acc_range") => pa[0] == a[0] && pa[1] == a[1] && pa[2].is_null() && pr == r,
+                // `claimed`, for a claim the run made: `following` 0, 1, ..
+                ("following", "claimed") => {
+                    let n = out.iter().rev().take_while(|p| p[0] == "following").count();
+                    let tail = &out[out.len() - n..];
+                    let ks: Vec<Option<u64>> = tail.iter().map(|p| p[1][0].as_u64()).collect();
+                    let got: Vec<&J> = tail.iter().map(|p| &p[2]).filter(|x| !x.is_null()).collect();
+                    let want: Vec<&J> = r.as_array().map(|v| v.iter().collect()).unwrap_or_default();
+                    if ks.iter().enumerate().all(|(i, k)| *k == Some(i as u64)) && got == want {
+                        out.truncate(out.len() - n);
+                    }
+                    false
+                }
+                _ => false,
+            };
+            if !inner {
+                break;
+            }
+            out.pop();
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn intern(vals: &Values, l: &J) -> ValueId {
@@ -495,46 +640,140 @@ fn intern(vals: &Values, l: &J) -> ValueId {
     got
 }
 
-#[allow(clippy::too_many_lines)]
+/// The command line.
+struct Opts {
+    argv: Vec<String>,
+    threads: usize,
+    budget: usize,
+    spec: Speculation,
+}
+
+impl Opts {
+    fn opt(&self, name: &str) -> Option<String> {
+        self.argv
+            .iter()
+            .position(|a| a == name)
+            .and_then(|i| self.argv.get(i + 1))
+            .cloned()
+    }
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let path = argv
         .get(1)
-        .expect("usage: play REC [--engine E] [--threads T] [--spec off|predicted|all] [--budget B]");
-    let opt = |name: &str| {
-        argv.iter()
-            .position(|a| a == name)
-            .and_then(|i| argv.get(i + 1))
-            .cloned()
+        .expect("usage: play REC [--engine E] [--threads T] [--spec off|predicted|all] [--budget B]")
+        .clone();
+    let mut o = Opts {
+        argv,
+        threads: 1,
+        budget: 64,
+        spec: Speculation::Off,
     };
-    let threads: usize = opt("--threads").map_or(1, |s| s.parse().unwrap());
-    let budget: usize = opt("--budget").map_or(64, |s| s.parse().unwrap());
-    let spec = match opt("--spec").as_deref() {
+    o.threads = o.opt("--threads").map_or(1, |s| s.parse().unwrap());
+    o.budget = o.opt("--budget").map_or(64, |s| s.parse().unwrap());
+    o.spec = match o.opt("--spec").as_deref() {
         Some("all") => Speculation::All,
         Some("predicted") => Speculation::Predicted,
         _ => Speculation::Off,
     };
     let text = std::fs::read_to_string(path).expect("read recording");
     let lines: Vec<J> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-    // The engine: the one asked for, else the first that evaluated.
-    let engine = opt("--engine").map(|s| s.parse::<u64>().unwrap()).or_else(|| {
-        lines
-            .iter()
-            .find(|l| l["k"] == "api" && l["f"] == "evaluate_begin")
-            .and_then(|l| l["e"].as_u64())
-    });
-    let Some(engine) = engine else {
+    // The engines, in the order they first evaluated: the one asked for,
+    // else every one.
+    let mut engines: Vec<(u64, u64, u64)> = Vec::new();
+    for l in &lines {
+        let Some(e) = l["e"].as_u64() else { continue };
+        let at = match engines.iter().position(|x| x.0 == e) {
+            Some(k) => k,
+            None if l["k"] == "api" && l["f"] == "evaluate_begin" => {
+                engines.push((e, 0, 0));
+                engines.len() - 1
+            }
+            None => continue,
+        };
+        if l["k"] == "api" && l["f"] == "evaluate_begin" {
+            engines[at].1 += 1;
+        } else if l["k"] == "run" {
+            engines[at].2 += 1;
+        }
+    }
+    if engines.is_empty() {
         eprintln!("play: the recording has no evaluation");
         std::process::exit(2);
-    };
+    }
+    for (e, n, r) in &engines {
+        println!("engine {e}: {n} evaluations, {r} runs recorded");
+    }
+    if let Some(e) = o.opt("--engine").map(|s| s.parse::<u64>().unwrap()) {
+        engines.retain(|x| x.0 == e);
+        if engines.is_empty() {
+            eprintln!("play: no evaluation of engine {e} in the recording");
+            std::process::exit(2);
+        }
+    }
+    // A recording before format 2 wrote a `Ctx` call also as the public
+    // calls it made inside.
+    let v2 = lines.iter().any(|l| l["k"] == "rec" && l["v"].as_u64() >= Some(2));
+    let mut evals = 0;
+    for &(e, _, _) in &engines {
+        let (d0, m0) = (DIVERGED.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed));
+        println!("replaying engine {e}");
+        let n = replay(&lines, e, v2, &o);
+        println!(
+            "engine {e}: replayed {n} evaluations; {} divergent runs, {} unrecorded hook answers",
+            DIVERGED.load(Ordering::Relaxed) - d0,
+            MISSES.load(Ordering::Relaxed) - m0
+        );
+        evals += n;
+    }
+    println!(
+        "replayed {evals} evaluations; {} divergent runs, {} unrecorded hook answers",
+        DIVERGED.load(Ordering::Relaxed),
+        MISSES.load(Ordering::Relaxed)
+    );
+    if defuse::obs::enabled() {
+        print!("probes:\n{}", defuse::obs::snapshot());
+    }
+}
+
+
+/// Replays engine `engine` of the recording in a fresh engine; returns the
+/// number of evaluations.
+#[allow(clippy::too_many_lines)]
+fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
+    let (threads, budget, spec) = (o.threads, o.budget, o.spec);
+    let argv = &o.argv;
+    let opt = |name: &str| o.opt(name);
     // Values are recorded once, under the engine that first made them: a
     // client may share its value table between engines.
-    let lines: Vec<J> = lines
-        .into_iter()
+    let lines: Vec<J> = all
+        .iter()
         .filter(|l| l["e"].as_u64() == Some(engine) || l["k"] == "val")
+        .cloned()
         .collect();
     let mut book = Book::default();
-    for l in &lines {
+    // Each node's last stopped run: from its start (`None`: not known),
+    // and its line.
+    let mut stopped: HashMap<String, (Option<Vec<J>>, usize)> = HashMap::new();
+    // Identical runs of a text are one candidate: (text, run) -> its index.
+    let mut merged: HashMap<String, usize> = HashMap::new();
+    let mut add = |book: &mut Book, text: &String, calls: Vec<J>, r: &J, origin: usize, resumes: Option<usize>| {
+        let runs = book.runs.entry(text.clone()).or_default();
+        let k = *merged
+            .entry(format!("{text}|{}", json!([calls, r])))
+            .or_insert_with(|| {
+                runs.push(Run {
+                    calls,
+                    r: r.clone(),
+                    ..Run::default()
+                });
+                runs.len() - 1
+            });
+        runs[k].origins.push(origin);
+        runs[k].resumes.extend(resumes);
+    };
+    for (at, l) in lines.iter().enumerate() {
         match l["k"].as_str().unwrap_or("") {
             "st" => {
                 let m = &l["m"];
@@ -542,18 +781,49 @@ fn main() {
                     book.takes
                         .entry(key(&[&l["op"], m, &l["a"]]))
                         .or_default()
-                        .push((de(&l["x"]), l["r"].clone()));
+                        .push((at, de(&l["x"]), l["r"].clone()));
                 } else {
                     book.statics
-                        .insert(key(&[&l["op"], m, &l["a"], &l["x"]]), l["r"].clone());
+                        .entry(key(&[&l["op"], m, &l["a"], &l["x"]]))
+                        .or_default()
+                        .push((at, l["r"].clone()));
                 }
             }
             "run" => {
-                let calls = l["calls"].as_array().cloned().unwrap_or_default();
-                book.runs
-                    .entry(key(&[&l["op"], &l["a"]]))
-                    .or_default()
-                    .push((calls, l["r"].clone()));
+                let mut calls = l["calls"].as_array().cloned().unwrap_or_default();
+                if !v2 {
+                    calls = single_calls(calls);
+                }
+                let (r, text) = (&l["r"], key(&[&l["op"], &l["a"]]));
+                // A resumed run (its first call answered `parked` true) is
+                // recorded from where it stopped, after its node's stopped
+                // run; when the replay restarts it instead, the run from
+                // its start is the stopped run's up to its blocked read
+                // (answered now: any answer) and the resumed calls.
+                let resumed = calls.first().is_some_and(|c| c[0] == "parked" && c[2] == true);
+                let node = l["node"].to_string();
+                let prev = if resumed { stopped.remove(&node) } else { None };
+                let from_start = match &prev {
+                    None if resumed => None,
+                    None => Some(calls.clone()),
+                    Some((p, _)) => p.as_ref().filter(|p| p.len() >= 2 && p[p.len() - 1][0] == "park").map(|p| {
+                        let mut c: Vec<J> = p[..p.len() - 1].to_vec();
+                        if let Some(last) = c.last_mut() {
+                            last[2] = json!("*");
+                        }
+                        c.extend(calls[1..].iter().cloned());
+                        c
+                    }),
+                };
+                if let (true, Some(c)) = (resumed, &from_start) {
+                    add(&mut book, &text, c.clone(), r, at, None);
+                }
+                if *r == json!("stop") {
+                    stopped.insert(node, (from_start, at));
+                } else {
+                    stopped.remove(&node);
+                }
+                add(&mut book, &text, calls, r, at, prev.map(|p| p.1));
             }
             "mono" => {
                 let a = if l["m"] == "empty" { J::Null } else { l["a"].clone() };
@@ -563,34 +833,10 @@ fn main() {
                 book.proj.insert(key(&[&l["p"], &l["a"]]), l["r"].clone());
             }
             "env" => {
-                book.env.insert(l["f"].to_string(), l.clone());
+                book.env.entry(l["f"].to_string()).or_default().push((at, l.clone()));
             }
             _ => {}
         }
-    }
-    for runs in book.runs.values_mut() {
-        // A resumed run (its first call answered `parked` true) is recorded
-        // from where it stopped; when the replay restarts it instead, the
-        // fresh run is the stopped run's calls up to its blocked read
-        // (answered now: any answer) followed by the resumed calls.
-        let mut fresh = Vec::new();
-        let mut stopped: Option<&Vec<J>> = None;
-        for (calls, r) in runs.iter() {
-            let resumed = calls.first().is_some_and(|c| c[0] == "parked" && c[2] == true);
-            if let (true, Some(prev)) = (resumed, stopped) {
-                if prev.len() >= 2 && prev[prev.len() - 1][0] == "park" {
-                    let mut c: Vec<J> = prev[..prev.len() - 1].to_vec();
-                    if let Some(last) = c.last_mut() {
-                        last[2] = json!("*");
-                    }
-                    c.extend(calls[1..].iter().cloned());
-                    fresh.push((c, r.clone()));
-                }
-            }
-            stopped = (*r == json!("stop")).then_some(calls);
-        }
-        runs.extend(fresh);
-        runs.dedup();
     }
     let book = Arc::new(book);
     let units = Arc::new(Mutex::new(Vec::new()));
@@ -603,8 +849,8 @@ fn main() {
     if let Some(n) = opt("--stable").map(|s| s.parse::<usize>().unwrap()) {
         let mut reads: std::collections::HashMap<String, (J, u64)> = std::collections::HashMap::new();
         for runs in book.runs.values() {
-            for (calls, _) in runs {
-                for c in calls {
+            for run in runs {
+                for c in &run.calls {
                     if c[0] == "use_field" {
                         let f = c[1][0].clone();
                         reads.entry(f.to_string()).or_insert((f, 0)).1 += 1;
@@ -633,7 +879,8 @@ fn main() {
                 eng.pin(v);
             }
             "api" if l["f"] == "evaluate_begin" => {
-                // Gather this evaluation's absorbed batches.
+                // Gather this evaluation's absorbed batches; it answers as
+                // the recording did by its end.
                 let mut batches = std::collections::VecDeque::new();
                 let mut cur: Option<Vec<J>> = None;
                 let mut want = J::Null;
@@ -651,6 +898,7 @@ fn main() {
                         batches.push_back(b);
                     } else if l["k"] == "api" && l["f"] == "evaluate_end" {
                         want = l["r"].clone();
+                        AT.store(i - 1, Ordering::Relaxed);
                         break;
                     } else if l["k"] == "api" {
                         if let Some(c) = cur.as_mut() {
@@ -693,7 +941,6 @@ fn main() {
                 for l in stale.iter().take(10) {
                     println!("    {l}");
                 }
-                #[cfg(feature = "clean")]
                 if let Ok(rep) = &r
                     && std::env::var_os("PLAY_DAG").is_some()
                 {
@@ -744,17 +991,6 @@ fn main() {
                         rep.realised_critical_path,
                         rep.realised_critical_time.as_secs_f64() * 1e3
                     );
-                    let rd: u64 = rep.read_ns.iter().map(|e| e.1).sum();
-                    println!(
-                        "  engine reads in runs {:.1} ms ({:.0}% of op): {}",
-                        ms(rd),
-                        100.0 * rd as f64 / op.max(1) as f64,
-                        rep.read_ns
-                            .iter()
-                            .map(|(k, n)| format!("{k} {:.1}", ms(*n)))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
                     if std::env::var_os("DEFUSE_RCHAIN").is_some() {
                         // The realised chain, deepest first: why each run
                         // came after the next.
@@ -775,6 +1011,7 @@ fn main() {
                 }
             }
             "api" => {
+                AT.store(i - 1, Ordering::Relaxed);
                 if l["f"] == "push" {
                     pushes.push((l["r"].clone(), l["a"][1].clone(), l["a"][2].clone()));
                 } else if l["f"] == "register" {
@@ -830,14 +1067,7 @@ fn main() {
             );
         }
     }
-    println!(
-        "replayed {evals} evaluations; {} divergent runs, {} unrecorded hook answers",
-        DIVERGED.load(Ordering::Relaxed),
-        MISSES.load(Ordering::Relaxed)
-    );
-    if defuse::obs::enabled() {
-        print!("probes:\n{}", defuse::obs::snapshot());
-    }
+    evals
 }
 
 fn short(j: &J) -> String {
@@ -849,7 +1079,6 @@ fn short(j: &J) -> String {
 /// with these run times: the critical path, and a list schedule (longest
 /// path to the end first) on P workers, with commits free or each taking
 /// PLAY_COMMIT_US on one committer.
-#[cfg(feature = "clean")]
 fn sched_study(eng: &defuse::Engine, rep: &defuse::Report) {
     use std::collections::{BinaryHeap, HashMap, VecDeque};
     let g = eng.dependency_graph();

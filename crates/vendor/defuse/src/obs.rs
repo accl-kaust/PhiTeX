@@ -554,26 +554,3 @@ pub fn chrome_trace() -> String {
 #[cfg(feature = "profile")]
 #[doc(hidden)]
 pub use imp::{Guard, add as add_impl, count as count_impl, enter as enter_impl, lock_wait};
-
-/// Adds to a counter (profile builds only).
-macro_rules! count {
-    ($c:ident) => {
-        $crate::obs::count!($c, 1)
-    };
-    ($c:ident, $n:expr) => {{
-        #[cfg(feature = "profile")]
-        $crate::obs::count_impl($crate::obs::Counter::$c, $n as u64);
-    }};
-}
-
-/// Times the rest of the enclosing block (profile builds only):
-/// `span!(Evaluate);`
-macro_rules! span {
-    ($s:ident) => {
-        #[cfg(feature = "profile")]
-        let _obs_guard = $crate::obs::enter_impl($crate::obs::Span::$s);
-    };
-}
-
-pub(crate) use count;
-pub(crate) use span;

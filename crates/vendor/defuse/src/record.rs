@@ -9,7 +9,11 @@
 //! nothing of the client in it.
 //!
 //! Lines carry `e`, the engine's value-table instance, since a process may
-//! record more than one engine.
+//! record more than one engine. The first line, `{"k": "rec", "v": 2}`,
+//! names the format: from version 2 a `Ctx` call is written once (not
+//! also as the public calls it makes inside), and a hook's answer is
+//! written again whenever it differs from the last one for those
+//! arguments (before, only the first time that answer was given).
 
 #![allow(clippy::needless_pass_by_value, clippy::explicit_iter_loop)]
 
@@ -22,7 +26,7 @@ use serde::Serialize;
 use serde_json::{Value as J, json};
 
 use crate::api::{Claim, Effect, Locality, MayDefine, Monoid, Operation, Stop, Until};
-use crate::values::{Field, FxHashSet, Value, ValueId, Values};
+use crate::values::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
 use crate::{Ctx, OpId};
 
 thread_local! {
@@ -36,7 +40,9 @@ pub(crate) fn named(raw: u64) {
 }
 
 pub(crate) struct Recorder {
-    out: Mutex<(BufWriter<File>, FxHashSet<u64>, FxHashSet<u64>)>,
+    /// The file, the values written, and for `once` lines the last line
+    /// written of each (line without its answer, by hash).
+    out: Mutex<(BufWriter<File>, FxHashSet<u64>, FxHashMap<u64, u64>)>,
 }
 
 static REC: OnceLock<Option<Recorder>> = OnceLock::new();
@@ -46,8 +52,10 @@ pub(crate) fn rec() -> Option<&'static Recorder> {
     REC.get_or_init(|| {
         let path = std::env::var_os("DEFUSE_RECORD")?;
         let f = File::create(path).ok()?;
+        let mut w = BufWriter::new(f);
+        let _ = writeln!(w, "{}", json!({"k": "rec", "v": 2}));
         Some(Recorder {
-            out: Mutex::new((BufWriter::new(f), FxHashSet::default(), FxHashSet::default())),
+            out: Mutex::new((w, FxHashSet::default(), FxHashMap::default())),
         })
     })
     .as_ref()
@@ -67,17 +75,25 @@ fn hash_of(s: &str) -> u64 {
 
 impl Recorder {
     /// Writes `line` (tagged with the engine), after the definitions of
-    /// the values named since the last line. `once`: skip a line written
-    /// before.
+    /// the values named since the last line. `once`: skip the line when
+    /// the last one written with the same fields but `r` was this one.
     pub(crate) fn line(&self, vals: &Values, mut line: J, once: bool) {
         let names: Vec<u64> = NAMED.with(|n| std::mem::take(&mut *n.borrow_mut()));
+        let mut asked = 0;
         if let J::Object(m) = &mut line {
             m.insert("e".into(), json!(vals.instance()));
+            if once {
+                let r = m.remove("r");
+                asked = hash_of(&line.to_string());
+                if let (J::Object(m), Some(r)) = (&mut line, r) {
+                    m.insert("r".into(), r);
+                }
+            }
         }
         let text = line.to_string();
         let mut g = self.out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (w, seen, lines) = &mut *g;
-        if once && !lines.insert(hash_of(&text)) {
+        if once && lines.insert(asked, hash_of(&text)) == Some(hash_of(&text)) {
             // Skipped: the values named so far that are not written yet
             // go out with the next line.
             let mut rest: Vec<u64> = names.into_iter().filter(|r| !seen.contains(r)).collect();
@@ -149,6 +165,36 @@ pub(crate) fn stop_or<T: Serialize>(r: &Result<T, Stop>) -> J {
     match r {
         Ok(x) => json!({"ok": j(x)}),
         Err(_) => json!("stop"),
+    }
+}
+
+/// A predicate that notes the texts it passed (`Engine::refresh_where`).
+pub(crate) struct Asked<'a> {
+    pred: &'a dyn Fn(OpId, &[ValueId], &Values) -> bool,
+    passed: RefCell<FxHashSet<(OpId, Vec<ValueId>)>>,
+}
+
+impl<'a> Asked<'a> {
+    pub(crate) fn new(pred: &'a dyn Fn(OpId, &[ValueId], &Values) -> bool) -> Self {
+        Asked {
+            pred,
+            passed: RefCell::default(),
+        }
+    }
+
+    pub(crate) fn ask(&self, op: OpId, args: &[ValueId], values: &Values) -> bool {
+        let r = (self.pred)(op, args, values);
+        if r {
+            self.passed.borrow_mut().insert((op, args.to_vec()));
+        }
+        r
+    }
+
+    /// The texts passed, in order.
+    pub(crate) fn passed(&self) -> J {
+        let mut v: Vec<(OpId, Vec<ValueId>)> = self.passed.borrow().iter().cloned().collect();
+        v.sort_unstable();
+        j(&v)
     }
 }
 
