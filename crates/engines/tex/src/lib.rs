@@ -45,6 +45,7 @@ mod nest;
 mod nodes;
 mod ops;
 mod pages;
+mod parbreak;
 mod pdfout;
 mod pdfprim;
 mod pkgrec;

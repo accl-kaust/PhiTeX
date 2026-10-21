@@ -32,12 +32,11 @@ use crate::val::{int_of, list_of, str_of};
 pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
     let v = cx.values();
-    // the scan's last state first: every continuation before this node
-    // may define it, so the read waits, parked, until the last page has
-    // fired and placed its finisher; read first, the pages are all there
-    // (a node started before would assemble the pages so far and run
-    // again at each page added)
-    cx.use_field(v.field(crate::pages::SCAN))?;
+    // where the pages end first: the page builder defines it once every
+    // page's finisher is placed; read first, the pages are all there (a
+    // node started before would assemble the pages so far and run again
+    // at each page added)
+    cx.use_field(v.field(crate::pages::PAGES_END))?;
     let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
     let pdf = is_pdf(v, &pages);
     let r = if pdf {
@@ -151,7 +150,7 @@ fn is_pdf(v: &Values, pages: &[ValueId]) -> bool {
 pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
     let v = cx.values();
-    cx.use_field(v.field(crate::pages::SCAN))?;
+    cx.use_field(v.field(crate::pages::PAGES_END))?;
     let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
     if !is_pdf(v, &pages) {
         // (its declared definition made in every mode: none here)

@@ -1560,6 +1560,7 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.confirmations,
         r.mispredictions
     );
+    eprintln!("{}", crate::pages::Feedback::report());
     eprintln!(
         "rounds: {}, final nodes run {}, capped at the round limit: {}",
         r.rounds,
@@ -1975,9 +1976,10 @@ impl Graph {
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
-        let scan = eng.register(Arc::new(crate::pages::Scan(shared.clone())));
+        let pages = eng.register(Arc::new(crate::pages::Pages(shared.clone())));
         let finish = eng.register(Arc::new(crate::pages::Finish(shared.clone())));
         let resume = eng.register(Arc::new(crate::pages::Resume(shared.clone())));
+        let brk = eng.register(Arc::new(crate::parbreak::Break(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi(shared.clone())));
         let link = eng.register(Arc::new(crate::ops::Link(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
@@ -1998,9 +2000,10 @@ impl Graph {
         let ops = Ops {
             exec,
             put,
-            scan,
+            pages,
             finish,
             resume,
+            brk,
             tool,
             toolnode,
             pdfpage,
@@ -2012,9 +2015,7 @@ impl Graph {
             pkg_loads: Arc::new(Mutex::new(None)),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
-            scan_guess: Arc::default(),
             fin_defs_start: Arc::default(),
-            scan_guess_start: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
             class_proj,
@@ -2696,8 +2697,6 @@ impl Graph {
                 let o = &self.ops;
                 let fd = o.fin_defs.locked().clone();
                 *o.fin_defs_start.locked() = Arc::new(fd);
-                let sg = o.scan_guess.locked().clone();
-                *o.scan_guess_start.locked() = Arc::new(sg);
             }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
@@ -4361,14 +4360,12 @@ impl Build {
         }
         crate::timeline::lap("engine: the environment pushed");
         job_env(&mut g, unit, &env, &opts);
-        // (the first page's scan, where the job begins: each page's scan
-        // places the next one's after the piece its page fires in,
-        // `crate::pages::Scan`)
+        // (the page builder, one node where the job begins: it folds the
+        // pieces' profiles to the unit's end and places every page's
+        // finisher, `crate::pages::Pages`)
         {
-            let v = g.eng.values();
-            let args = vec![v.int(-3), v.int(0)];
-            let scan = g.ops.scan;
-            g.eng.push(unit, scan, args);
+            let pages = g.ops.pages;
+            g.eng.push(unit, pages, Vec::new());
         }
         // §1337: `\everyjob`, before the job's first line
         let every = env

@@ -14,8 +14,9 @@
 //! the box 255 not packaged ([`PageBuilder::measure_only`]); around it
 //! the bookkeeping of [`crate::pages::PageState::fold_items`] (§679's
 //! interline glue from the previous depth, deletions, markers). The
-//! scan steps (`crate::pages::Scan`) run it; where a page fires, the
-//! step builds the page from the items and compares the decisions.
+//! page builder's node (`crate::pages::Pages`) runs it over every
+//! profile; a page's finisher builds the page from the items at its
+//! decisions.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -423,6 +424,7 @@ fn is_marker(x: &PItem) -> bool {
 
 /// A page fired by the scan: at candidate `k`, its `\outputpenalty`,
 /// the profile items after the candidate.
+#[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
 pub(crate) struct ScanFire {
     pub k: u32,
     pub output_penalty: i32,
@@ -498,6 +500,7 @@ impl ScanState {
     }
 
     /// Notes the page's length after `piece` (or [`MATERIAL`]) folded.
+    #[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
     pub(crate) fn note_piece(&mut self, piece: i64) {
         self.page_lens.push((piece, self.pb.page.len()));
     }
@@ -732,6 +735,7 @@ fn size_report() -> String {
 
 /// Whether profile items hold an `\end` marker (the scan then reads
 /// `\deadcycles`, §1054).
+#[expect(dead_code, reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)")]
 pub(crate) fn has_end(items: &[PItem]) -> bool {
     items.iter().any(|x| matches!(x, PItem::End(_)))
 }

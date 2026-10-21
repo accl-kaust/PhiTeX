@@ -3614,6 +3614,13 @@ pub(crate) fn kind_of(text: &str, named: FileKind) -> FileKind {
 /// The hint of an output routine's text (`\output` shown as source,
 /// `crate::pages`), read whole under the format's definitions: what
 /// the finisher running it may define.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the layers skeleton: used once its stubs are filled (docs/spec-layers.md §7)"
+    )
+)]
 pub(crate) fn routine_hint(text: &str, defs: &Defs) -> Hint {
     let t = text_hints(text, FileKind::Document, defs);
     let mut h = t.at_until(0, text.len());

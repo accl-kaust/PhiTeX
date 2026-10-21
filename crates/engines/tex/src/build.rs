@@ -871,7 +871,13 @@ impl Run<'_, '_> {
             // §1096: error_count:=0
             self.error_count = 0;
             if !items.is_empty() {
-                self.line_break(md, items, false)?;
+                // (layer 3: the lines as a node of their own where the
+                // piece ends here, `crate::parbreak`)
+                if self.break_as_node(md) {
+                    self.place_break(md, items)?;
+                } else {
+                    self.line_break(md, items, false)?;
+                }
             }
             self.normal_paragraph()?;
         }

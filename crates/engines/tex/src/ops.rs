@@ -605,7 +605,7 @@ impl Operation for Dvi {
         "dvi"
     }
     /// No page profiles or items (the pieces' units, `crate::pages`):
-    /// the last page's scan, which reads them to the unit's end, does not
+    /// the page builder, which reads them to the unit's end, does not
     /// wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         Some(crate::pages::no_units(v))
@@ -613,14 +613,14 @@ impl Operation for Dvi {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
     }
-    /// The scan's last state and the accumulators the file is made of:
+    /// Where the pages end and the accumulators the file is made of:
     /// the node waits while a page node or writer step before it is in
     /// work instead of starting, stopping at a range and running again
     /// (an edit's end node ran twice: once stopped at `pages` while the
     /// edited page's finisher ran).
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [crate::pages::SCAN, "pages", crate::assemble::LINKED]
+            [crate::pages::PAGES_END, "pages", crate::assemble::LINKED]
                 .iter()
                 .map(|&f| v.field(f))
                 .collect(),
@@ -646,7 +646,7 @@ impl Operation for Link {
         "link"
     }
     /// No page profiles or items (the pieces' units, `crate::pages`):
-    /// the last page's scan, which reads them to the unit's end, does not
+    /// the page builder, which reads them to the unit's end, does not
     /// wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         Some(crate::pages::no_units(v))
@@ -658,7 +658,7 @@ impl Operation for Link {
     /// records before it are done.
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [crate::pages::SCAN, "pages", crate::pdfout::XPAGES]
+            [crate::pages::PAGES_END, "pages", crate::pdfout::XPAGES]
                 .iter()
                 .map(|&f| v.field(f))
                 .collect(),
@@ -720,7 +720,7 @@ impl Operation for Files {
         "files"
     }
     /// No page profiles or items (the pieces' units, `crate::pages`):
-    /// the last page's scan, which reads them to the unit's end, does not
+    /// the page builder, which reads them to the unit's end, does not
     /// wait for it.
     fn static_contribs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         Some(crate::pages::no_units(v))
@@ -733,10 +733,10 @@ impl Operation for Files {
     /// Held until every contributor before it is done, instead of
     /// starting and parking at the range again for each one still in
     /// work (the root parked 349 times on para4000).
-    /// And the page chain's end ([`crate::pages::CHAIN_END`]): every
+    /// And where the pages end ([`crate::pages::PAGES_END`]): every
     /// page's finisher, which writes and opens streams, is in the range.
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
-        let mut out = vec![v.field("loopfiles"), v.field(crate::pages::CHAIN_END)];
+        let mut out = vec![v.field("loopfiles"), v.field(crate::pages::PAGES_END)];
         match args.first() {
             None => out.push(v.field(crate::run::WNAMES)),
             Some(&n) => {
@@ -757,8 +757,8 @@ impl Operation for Files {
         };
         let listed: Vec<String> = list_of(v, listed).iter().map(|&n| str_of(v, n)).collect();
         // (the written text is complete once every page's finisher is
-        // placed: the chain's end, defined by its last scan)
-        cx.use_field(v.field(crate::pages::CHAIN_END))?;
+        // placed: where the pages end, defined by the page builder)
+        cx.use_field(v.field(crate::pages::PAGES_END))?;
         match cx.args().first() {
             None => files_root(cx, listed),
             Some(&n) => {

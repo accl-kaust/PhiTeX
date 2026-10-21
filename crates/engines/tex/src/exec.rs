@@ -324,8 +324,8 @@ fn clock_probe() -> u64 {
 
 /// The node kinds the cold accounting splits op time by (spec-final §1):
 /// a package load is an `exec` run of a load's text.
-pub(crate) const KINDS: [&str; 9] = [
-    "exec", "load", "scan", "finish", "resume", "files", "link", "dvi", "put",
+pub(crate) const KINDS: [&str; 10] = [
+    "exec", "load", "pages", "break", "finish", "resume", "files", "link", "dvi", "put",
 ];
 
 /// The executor of an evaluation, with its counters: the time its

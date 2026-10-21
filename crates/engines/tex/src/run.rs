@@ -162,11 +162,13 @@ pub(crate) fn record_check(
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
-    /// A scan step over the pieces' profiles, a page's finisher and the
-    /// rest of a cut piece (`crate::pages`).
-    pub scan: OpId,
+    /// The page builder (one node), a page's finisher and the rest of a
+    /// cut piece (`crate::pages`).
+    pub pages: OpId,
     pub finish: OpId,
     pub resume: OpId,
+    /// A paragraph's line breaking (`crate::parbreak::Break`).
+    pub brk: OpId,
     /// A tool's run that a read makes (`crate::tools::ToolRun`).
     pub tool: OpId,
     /// A `\write18`'s tool node (`crate::tools::ToolNode`).
@@ -227,20 +229,7 @@ pub(crate) struct Ops {
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
-    /// The guess cache of the scan (spec-final §3.4): what the scan's
-    /// continuation after page `j` fired defined the last time it ran
-    /// (the scan state and its material), the prediction of a
-    /// continuation made anew for page `j` (an edit's: its steps run on
-    /// it in parallel, the engine confirms it when the real one comes).
-    pub scan_guess: std::sync::Arc<std::sync::Mutex<ScanGuesses>>,
-    /// [`Ops::scan_guess`] as the evaluation began: what the guesses
-    /// read (no node guesses from what another node of the same
-    /// evaluation wrote).
-    pub scan_guess_start: std::sync::Arc<std::sync::Mutex<std::sync::Arc<ScanGuesses>>>,
 }
-
-/// The scan's guess table ([`Ops::scan_guess`]).
-pub(crate) type ScanGuesses = crate::FxHashMap<i64, (ValueId, ValueId)>;
 
 /// The finishers' table ([`Ops::fin_defs`]).
 pub(crate) type FinTable = crate::FxHashMap<u64, crate::pages::FinDefs>;
@@ -1158,10 +1147,12 @@ impl<'c, 'a> Run<'c, 'a> {
             "exec"
         } else if op == o.resume {
             "resume"
-        } else if op == o.scan {
-            "scan"
+        } else if op == o.pages {
+            "pages"
         } else if op == o.finish {
             "finish"
+        } else if op == o.brk {
+            "break"
         } else {
             "other"
         }

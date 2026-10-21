@@ -115,3 +115,41 @@ finished and written again.
 Dropped on 2026-10-21: polishing the serial merge (lazy filing, the
 per-drain builder, parallel filing, a tree merge), tuning CLEAN_FLOW,
 the scan and continuation chain, and evaluating in rounds.
+
+## 8. The code (the skeleton, 2026-10-21)
+
+Steps 1 and 2 of §7, on today's engine. The scan, the continuation and
+their fields (`scan:state`, `scan:from:j`, `scan:mat:j`, `rtn:j`) are
+gone.
+
+| Layer | File | What is there | Stub to fill |
+|---|---|---|---|
+| 2 | `crates/engines/tex/src/pages/piece.rs` | candidates, cuts, `Resume`, a piece's units and main-list tail, the finisher's check of a piece | |
+| 3 | `crates/engines/tex/src/parbreak.rs` | `Break` (one paragraph's lines, a child of the piece), `BreakIn` | `Break::run`, `Run::place_break`, `Run::break_as_node` (false: lines still broken in the piece) |
+| 4 | `crates/engines/tex/src/pages/builder.rs` | `Pages` (one node, pushed where the job begins), `PageLoop` (parked between attempts), `Src`/`Span` (where each item on a page came from), `Run::place_pages`, `Run::rtn_guess`, `PageState` (the builder on real nodes) | `Run::page_loop` |
+| 5 | `crates/engines/tex/src/pages/finish.rs` | `Finish`, `FinishIn` (its arguments, `arg`), the routine, ship-out, the predictions | `Run::finisher_args`, `Run::define_page_start` |
+| §3 | `crates/engines/tex/src/pages/feedback.rs` | `Feedback` (the named cases, counted), `PageStart`, `\pagetotal` | |
+
+The interfaces between the layers are fields and accumulators:
+
+- 2/3 → 4: `vprof` (profiles) and `pitems` (items), one unit per piece
+  and per paragraph's lines.
+- 4 → 5: a finisher's arguments (`FinishIn`): the spans of items its
+  page is made of, the window of `pitems` they are in, the builder's
+  state where the page began and its decisions there, the marks in
+  force, the guess of what its routine gives back.
+- 5 → 4: `pages:miss`, only where a routine gave back other than the
+  guess.
+- 5 → 2: the routine's definitions (fields, predicted) and
+  `pages:start` for `\pagetotal`.
+- 4 → 6: `pages:end`, read by the writers and the files.
+
+Code that only exists until a stub is filled carries
+`#[expect(dead_code, …)]`: the expectation fails once the code is used,
+so it is removed with the stub.
+
+Known before the skeleton (gate of the merged base b7ab9721, jobs
+15768–15778): `latexmk_corpus_{image_twice,char_string,version_class}`
+hit the loud check of a read of the pages' objects after a candidate no
+pass can end at (`Feedback::ObjectNumbers`); `pages::vsize_document_pages`
+runs 116 times for 105 nodes (bound 1.1).
