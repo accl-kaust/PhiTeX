@@ -1543,6 +1543,13 @@ impl<'c, 'a> Run<'c, 'a> {
     /// A write [`Run::reg_map_ok`] allowed: the map composed onto the
     /// run's own and the value the run sees updated; nothing defined.
     pub(crate) fn reg_apply_map(&mut self, loc: Loc, map: crate::regfold::Affine) {
+        if crate::exec::obs_flag!("PHITEX_REG_TRACE") {
+            eprintln!(
+                "reg-map: node {} register {:?} {map:?}",
+                self.cx.node().raw(),
+                self.count_reg(loc)
+            );
+        }
         let own = self.reg_pending.get(&loc).copied().unwrap_or(crate::regfold::Affine::ID);
         self.reg_pending.insert(loc, own.then(map));
         if self.st.is_loaded(loc) {
