@@ -2,7 +2,7 @@
 //! world; a run either commits (a new world) or parks on what it waits for.
 //! Quiet, the loop-back rounds and the final phase follow.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::build::Builder;
 use super::ctx::{Spec, Wait};
@@ -45,6 +45,9 @@ struct Run {
     base: Option<super::ctx::Base>,
     /// It parked its token continuing (`Ctx::park_continuing`).
     park_cont: bool,
+    /// It resumed a kept state; the log length of the world it ran on.
+    resumed: bool,
+    log_at: u64,
 }
 
 /// The evaluation's scheduling state.
@@ -567,6 +570,8 @@ impl Engine {
         rep.created = std::mem::take(&mut self.created);
         rep.freed = std::mem::take(&mut self.freed);
         rep.rebinds = std::mem::take(&mut self.rebinds);
+        rep.kept_asked = std::mem::take(&mut self.kept_asked);
+        rep.kept_held = std::mem::take(&mut self.kept_held);
         rep.edits = self.edits;
         rep.version = self.version;
         if let Some(t) = rep.round_times.last_mut() {
@@ -1407,6 +1412,8 @@ impl Engine {
             span: None,
             base: None,
             park_cont: false,
+            resumed: false,
+            log_at: 0,
         })
     }
 
@@ -1484,18 +1491,53 @@ impl Engine {
     /// Where placer `p`'s kept state stands on a read that no longer holds
     /// (the first one's start, see [`Self::broken_from`]); asked once per
     /// world version while they hold.
-    fn kept_broken(&self, s: &mut Sched, p: Id) -> Option<Pos> {
-        let (_, reads, _) = self.kept.get(&p)?;
-        if s.kept_ok.get(&p) == Some(&self.w.ver) {
+    fn kept_broken(&mut self, s: &mut Sched, p: Id) -> Option<Pos> {
+        if !self.kept.contains_key(&p) || s.kept_ok.get(&p) == Some(&self.w.ver) {
             return None;
         }
-        match reads.iter().find(|r| !super::build::holds(&self.core, &self.w, p, r)) {
-            Some(r) => Some(self.broken_from(p, r)),
+        match self.kept_first_broken(p) {
+            Some(r) => Some(self.broken_from(p, &r)),
             None => {
                 s.kept_ok.insert(p, self.w.ver);
                 None
             }
         }
+    }
+
+    /// The first of node `id`'s kept reads that no longer holds: asked of
+    /// those its index names (a change since its last check reaches
+    /// them), or all; none broken, the index is brought up to now.
+    fn kept_first_broken(&mut self, id: Id) -> Option<Read> {
+        let reads = &self.kept.get(&id)?.1;
+        let n = reads.len();
+        let ask = self.kept_ix.get(&id).and_then(|ix| ix.suspects(&self.w, n));
+        let holds = |r: &Read| super::build::holds(&self.core, &self.w, id, r);
+        let broken = match &ask {
+            Some(v) => v.iter().map(|&i| &reads[i]).find(|r| !holds(r)),
+            None => reads.iter().find(|r| !holds(r)),
+        };
+        let asked = ask.as_ref().map_or(n, Vec::len) as u64;
+        if kept_check()
+            && ask.is_some()
+            && broken.is_none()
+            && let Some(r) = reads.iter().find(|r| !holds(r))
+        {
+            panic!("kept state of {id}: its index missed a broken read {r:?}");
+        }
+        let broken = broken.cloned();
+        self.kept_asked += asked;
+        self.kept_held += n as u64;
+        if broken.is_some() {
+            self.kept_ix.remove(&id);
+        } else {
+            let ix = self.kept_ix.entry(id).or_default();
+            if ask.is_none() {
+                *ix = KeptIx::new(&self.w, self.w.log_len);
+            }
+            ix.from = self.w.log_len;
+            ix.add(&self.w, id, reads);
+        }
+        broken
     }
 
     fn prepare(&mut self, s: &mut Sched, rep: &mut Report, k: (u32, Pos, Id)) -> Option<Kept> {
@@ -1562,8 +1604,9 @@ impl Engine {
             bump(&mut rep.runs_by_op, self.core.op_name(n.text.op));
         }
         // A stopped run's kept state: resumed while its reads hold.
+        let broken = if self.kept.contains_key(&id) { self.kept_first_broken(id) } else { None };
         Some(match self.kept.remove(&id) {
-            Some((tok, reads, base)) => match reads.iter().find(|r| !super::build::holds(&self.core, &self.w, id, r)) {
+            Some((tok, reads, base)) => match broken.as_ref() {
                 None => {
                     rep.resumed += 1;
                     Some((tok, reads, base))
@@ -1748,7 +1791,7 @@ impl Engine {
                         return Err(e);
                     }
                 }
-                Outcome::Stopped(r, wait) => {
+                Outcome::Stopped(mut r, wait) => {
                     rep.stops += 1;
                     self.stopped += 1;
                     if let Some(rw) = r.range_wait {
@@ -1793,7 +1836,17 @@ impl Engine {
                         let nk = r.kids.iter().filter(|x| !matches!(x.place, super::world::Place::Marker(_))).count();
                         let b = r.base.unwrap_or_default();
                         let base = r.park_cont.then_some((b.0 + r.kids.len(), b.1 + r.conts.len(), b.2 + nk));
-                        self.kept.insert(id, (k, r.res.reads.clone(), base));
+                        // (Its reads indexed: those it held before as they
+                        // were, its new ones now.)
+                        let reads = std::mem::take(&mut r.res.reads);
+                        let ix = match self.kept_ix.remove(&id) {
+                            Some(ix) if r.resumed => ix,
+                            _ => KeptIx::new(&self.w, r.log_at),
+                        };
+                        let mut ix = ix;
+                        ix.add(&self.w, id, &reads);
+                        self.kept_ix.insert(id, ix);
+                        self.kept.insert(id, (k, reads, base));
                     }
                     // Applications asked for: made now; an application's
                     // environment set before its body runs.
@@ -2339,6 +2392,7 @@ impl Engine {
         let mut moved = Vec::new();
         for &(f, x) in vals {
             if self.w.loops.get(&f) != Some(&x) {
+                self.w.note(super::world::Change::Loop(f));
                 self.w.loops.insert(f, x, &NoMeasure);
                 moved.push(f);
             }
@@ -2763,6 +2817,7 @@ impl Merge<'_> {
                     if let Some(k) = r.kept
                         && (!r.park_cont || (r.kids.is_empty() && r.conts.is_empty()))
                     {
+                        eng.kept_ix.remove(&id);
                         eng.kept.insert(id, (k, r.res.reads.clone(), r.park_cont.then(|| r.base.unwrap_or_default())));
                     }
                     eng.enqueue(s, id);
@@ -3033,6 +3088,7 @@ impl Merge<'_> {
                 if let Some(k) = r.kept
                     && (!r.park_cont || (r.kids.is_empty() && r.conts.is_empty()))
                 {
+                    eng.kept_ix.remove(&id);
                     eng.kept.insert(id, (k, r.res.reads.clone(), r.park_cont.then(|| r.base.unwrap_or_default())));
                 }
                 eng.enqueue(s, id);
@@ -3159,6 +3215,7 @@ fn run_job(
     careful: bool,
     fuel: Option<u64>,
 ) -> Outcome {
+    let (resumed, log_at) = (resume.is_some(), w.log_len);
     let (kept, reads, base) = match resume {
         Some((t, r, b)) => (Some(t), r, Some(b)),
         None => (None, Vec::new(), None),
@@ -3218,6 +3275,8 @@ fn run_job(
         span: t_start.zip(super::core::now()),
         base: cx.base,
         park_cont: cx.park_cont,
+        resumed,
+        log_at,
     };
     match r {
         Ok(Ok(out)) => {
@@ -3279,4 +3338,128 @@ fn bump_field(list: &mut Vec<(Field, u64)>, f: Field) {
         Some(x) => x.1 += 1,
         None => list.push((f, 1)),
     }
+}
+
+/// A kept state's reads indexed by the changes that may break them
+/// (`World::log`): a resume asks again only the reads a change since its
+/// last check names, not every read it holds (a page builder parked after
+/// every piece holds thousands).
+#[derive(Default)]
+pub(crate) struct KeptIx {
+    /// The log the reads were last checked by, with its length then, and
+    /// the renumbering the positions below are of.
+    log: super::world::Log,
+    from: u64,
+    relabels: u64,
+    /// How many of the kept reads are indexed (the rest: asked always).
+    n: usize,
+    /// Windows by field: by end, each start with its read.
+    ranges: FxHashMap<(u32, Field), BTreeMap<Pos, Vec<(Pos, usize)>>>,
+    /// Use reads by field: by the position read at.
+    uses: FxHashMap<(u32, Field), BTreeMap<Pos, Vec<usize>>>,
+    nodes: FxHashMap<Id, Vec<usize>>,
+    frames: FxHashMap<u32, Vec<usize>>,
+    order: FxHashMap<u32, Vec<usize>>,
+    loops: FxHashMap<Field, Vec<usize>>,
+    always: Vec<usize>,
+}
+
+impl KeptIx {
+    /// An index of no reads, checked as of world `w`.
+    fn new(w: &World, at: u64) -> KeptIx {
+        KeptIx {
+            log: w.log.clone(),
+            from: at,
+            relabels: w.relabels,
+            ..KeptIx::default()
+        }
+    }
+
+    /// Indexes node `me`'s kept reads past those indexed, by `w`'s positions.
+    fn add(&mut self, w: &World, me: Id, reads: &[Read]) {
+        for (i, r) in reads.iter().enumerate().skip(self.n) {
+            let mut node = |x: Id, ix: &mut Self| {
+                if x != super::world::NONE && x != me {
+                    ix.nodes.entry(x).or_default().push(i);
+                }
+            };
+            match r {
+                Read::Use { f, at, after, own, site, .. } => match w.read_point(*at, *after, *own) {
+                    Some((u, pos, _, _)) => {
+                        self.uses.entry((u, *f)).or_default().entry(pos).or_default().push(i);
+                        self.frames.entry(u).or_default().push(i);
+                        if *after {
+                            self.order.entry(u).or_default().push(i);
+                        }
+                        node(*at, self);
+                        node(*site, self);
+                    }
+                    None => self.always.push(i),
+                },
+                Read::Range { f, from, to, past, .. } => match w.window(me, *from, *to, *past) {
+                    Some((u, lo, hi)) => {
+                        self.ranges.entry((u, *f)).or_default().entry(hi).or_default().push((lo, i));
+                        node(*from, self);
+                        node(*to, self);
+                    }
+                    None => self.always.push(i),
+                },
+                Read::Out { node: x, .. } | Read::Placed { node: x, .. } | Read::At { node: x, .. } => {
+                    if *x == me {
+                        self.always.push(i);
+                    } else {
+                        node(*x, self);
+                    }
+                }
+                Read::Loop { f, .. } => self.loops.entry(*f).or_default().push(i),
+                _ => self.always.push(i),
+            }
+        }
+        self.n = self.n.max(reads.len());
+    }
+
+    /// The reads (by index, of `n` held) to ask again on `w`: those a
+    /// change since the last check names, the unindexed and those asked
+    /// always; `None`: all (another branch, a renumbering, changes
+    /// forgotten).
+    fn suspects(&self, w: &World, n: usize) -> Option<Vec<usize>> {
+        if !self.log.same(&w.log) || w.relabels != self.relabels || n < self.n {
+            return None;
+        }
+        let changes = w.log.since(self.from, w.log_len)?;
+        let mut out: Vec<usize> = self.always.clone();
+        out.extend(self.n..n);
+        let mut add = |v: Option<&Vec<usize>>| out.extend(v.into_iter().flatten().copied());
+        for c in changes {
+            match c {
+                super::world::Change::All => return None,
+                super::world::Change::Field(u, f, p) => {
+                    if let Some(m) = self.ranges.get(&(u, f)) {
+                        for (_, v) in m.range((std::ops::Bound::Excluded(p), std::ops::Bound::Unbounded)) {
+                            add(Some(&v.iter().filter(|e| e.0 < p).map(|e| e.1).collect()));
+                        }
+                    }
+                    if let Some(m) = self.uses.get(&(u, f)) {
+                        for (_, v) in m.range((std::ops::Bound::Excluded(p), std::ops::Bound::Unbounded)) {
+                            add(Some(v));
+                        }
+                    }
+                }
+                super::world::Change::Node(x) => add(self.nodes.get(&x)),
+                super::world::Change::Order(u) => add(self.order.get(&u)),
+                super::world::Change::Frames(u) => add(self.frames.get(&u)),
+                super::world::Change::Loop(f) => add(self.loops.get(&f)),
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
+    }
+}
+
+/// Whether CLEAN_KEPT_CHECK asks every kept state checked in full too,
+/// against the reads its index asked.
+fn kept_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CLEAN_KEPT_CHECK").is_ok_and(|v| v == "1"))
 }

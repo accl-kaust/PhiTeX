@@ -874,6 +874,11 @@ pub struct Report {
     pub cutoffs: u64,
     /// Nodes whose bindings (definition sites read) changed.
     pub rebinds: u64,
+    /// Kept states' reads asked again before resuming (or checking a
+    /// placer), and the reads those states held: a state asks only the
+    /// reads a change since its last check may break.
+    pub kept_asked: u64,
+    pub kept_held: u64,
     pub created: u64,
     pub freed: u64,
     pub rounds: u64,
