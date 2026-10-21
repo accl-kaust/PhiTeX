@@ -816,59 +816,98 @@ impl Run<'_, '_> {
             held.push((f, l, self.st.id_of(l, v)));
         }
         held.sort_unstable_by_key(|x| (x.0.0.raw(), x.1));
-        let mut per = Vec::with_capacity(n);
+        // (a candidate's `[value]` lists, one per value: the same value
+        // stands at many candidates)
+        let kvs: std::cell::RefCell<phitex_defuse::FxHashMap<Option<ValueId>, ValueId>> = std::cell::RefCell::default();
+        let kv_list = |x: Option<ValueId>| {
+            *kvs.borrow_mut()
+                .entry(x)
+                .or_insert_with(|| v.list(x.into_iter().collect()))
+        };
+        let before = v.str(BEFORE_PIECE);
+        // (each field's name as it stands over a stretch of candidates:
+        // its standing, its value there, the first candidate of the
+        // stretch and the last one this candidate's names had it at)
+        let mut open: phitex_defuse::FxHashMap<ValueId, (bool, ValueId, usize, usize)> =
+            phitex_defuse::FxHashMap::default();
+        let mut stretches: Vec<(ValueId, bool, ValueId, usize, usize)> = Vec::new();
+        let mut cuts = Vec::with_capacity(n);
         for (i, m) in marks.iter().enumerate() {
             if Some(m.k) == last {
-                per.push(v.list(vec![v.list(Vec::new()), v.int(0)]));
-                continue;
-            }
-            // (`[value]` or `[]` (absent) where the run had it; one it had
-            // neither read nor defined before is what reached the piece,
-            // [`BEFORE_PIECE`], the finisher reads it there)
-            let kv_of = |l: Loc| match at.get(i, l) {
-                Some(Some(x)) => v.list(x.into_iter().collect()),
-                Some(None) => v.str(BEFORE_PIECE),
-                None => ValueId::UNIT,
-            };
-            // (a binding local to a group of the run open at the
-            // candidate, restored at the group's close after it: the
-            // routine runs inside that group and sees the binding, which
-            // the run's end no longer holds, §1012)
-            let restored = held.iter().filter_map(|&(f, l, end)| match at.get(i, l) {
-                Some(Some(x)) if x != end => Some((f.0, false, v.list(x.into_iter().collect()))),
-                _ => None,
-            });
-            let mut streams: Vec<(ValueId, bool, ValueId)> = self
-                .streams_since(m.contribs)
-                .into_iter()
-                .map(|f| (f.0, false, ValueId::UNIT))
-                .collect();
-            streams.sort_by_key(|x| x.0.raw());
-            // (by field, a standing definition first; at a tie the
-            // locals, then the definitions after the candidate, then the
-            // restored ones, then the streams: one stable sort of all of
-            // them in that order)
-            let names = merge_stable(restored, streams);
-            let after = defs
-                .iter()
-                .filter(|d| d.3 > m.stamp && !(d.4 && d.5.is_some_and(|g| g > m.gids)))
-                .map(|d| (d.0.0, d.1, kv_of(d.2)));
-            let own = merge_stable(after, names);
-            let locals = locals.iter().map(|&(l, f)| (f.0, false, kv_of(l)));
-            let mut names = merge_stable(locals, own);
-            names.dedup_by_key(|x| x.0);
-            // (with whether the run could end there: a finisher of a page
-            // firing at a candidate where it could not runs its routine
-            // as if there, and the piece's definitions after it stand)
-            let names = v.list(
-                names
+                cuts.push(v.int(0));
+            } else {
+                // (`[value]` or `[]` (absent) where the run had it; one it
+                // had neither read nor defined before is what reached the
+                // piece, [`BEFORE_PIECE`], the finisher reads it there)
+                let kv_of = |l: Loc| match at.get(i, l) {
+                    Some(Some(x)) => kv_list(x),
+                    Some(None) => before,
+                    None => ValueId::UNIT,
+                };
+                // (a binding local to a group of the run open at the
+                // candidate, restored at the group's close after it: the
+                // routine runs inside that group and sees the binding,
+                // which the run's end no longer holds, §1012)
+                let restored = held.iter().filter_map(|&(f, l, end)| match at.get(i, l) {
+                    Some(Some(x)) if x != end => Some((f.0, false, kv_list(x))),
+                    _ => None,
+                });
+                let mut streams: Vec<(ValueId, bool, ValueId)> = self
+                    .streams_since(m.contribs)
                     .into_iter()
-                    .map(|(f, g, kv)| v.list(vec![f, v.int(i64::from(g)), kv]))
-                    .collect(),
-            );
-            per.push(v.list(vec![names, v.int(i64::from(m.cuttable))]));
+                    .map(|f| (f.0, false, ValueId::UNIT))
+                    .collect();
+                streams.sort_by_key(|x| x.0.raw());
+                // (by field, a standing definition first; at a tie the
+                // locals, then the definitions after the candidate, then
+                // the restored ones, then the streams: one stable sort of
+                // all of them in that order)
+                let names = merge_stable(restored, streams);
+                let after = defs
+                    .iter()
+                    .filter(|d| d.3 > m.stamp && !(d.4 && d.5.is_some_and(|g| g > m.gids)))
+                    .map(|d| (d.0.0, d.1, kv_of(d.2)));
+                let own = merge_stable(after, names);
+                let locals = locals.iter().map(|&(l, f)| (f.0, false, kv_of(l)));
+                let mut names = merge_stable(locals, own);
+                names.dedup_by_key(|x| x.0);
+                for (f, g, kv) in names {
+                    match open.get_mut(&f) {
+                        Some(o) if o.0 == g && o.1 == kv => o.3 = i,
+                        _ => {
+                            if let Some(o) = open.insert(f, (g, kv, i, i)) {
+                                stretches.push((f, o.0, o.1, o.2, o.3 + 1));
+                            }
+                        }
+                    }
+                }
+                // (with whether the run could end there: a finisher of a
+                // page firing at a candidate where it could not runs its
+                // routine as if there, and the piece's definitions after
+                // it stand)
+                cuts.push(v.int(i64::from(m.cuttable)));
+            }
+            // (a name this candidate's names lack ends its stretch)
+            open.retain(|&f, o| {
+                if o.3 == i {
+                    return true;
+                }
+                stretches.push((f, o.0, o.1, o.2, o.3 + 1));
+                false
+            });
         }
-        (v.list(rs), v.list(per))
+        stretches.extend(open.into_iter().map(|(f, o)| (f, o.0, o.1, o.2, o.3 + 1)));
+        // (by field, then by the stretch's first candidate: one list
+        // whatever order the run met them in)
+        stretches.sort_unstable_by_key(|x| (x.0.raw(), x.3));
+        let stretches = stretches
+            .into_iter()
+            .map(|(f, g, kv, lo, hi)| {
+                let n = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
+                v.list(vec![f, v.int(i64::from(g)), kv, n(lo), n(hi)])
+            })
+            .collect();
+        (v.list(rs), v.list(vec![v.list(stretches), v.list(cuts)]))
     }
 
     /// A piece's end when no page needs finding in its own run: its
@@ -1712,4 +1751,29 @@ fn merge_stable(
     }
     out.extend(b);
     out
+}
+
+/// A piece's names at candidate `k` from its check data
+/// ([`Run::check_data`]): the names list (each `[field, standing,
+/// value]`, by field) and whether the run could end there; `UNIT` and
+/// `false` past its candidates. Kept as stretches of candidates each
+/// name stands over, one list for the piece, not a list per candidate:
+/// a piece with thousands of candidates has its definitions after each.
+pub(crate) fn names_at(v: &Values, data: ValueId, k: u32) -> (ValueId, bool) {
+    let d = list_of(v, data);
+    let (Some(&stretches), Some(&cuts)) = (d.first(), d.get(1)) else {
+        return (ValueId::UNIT, false);
+    };
+    let k = i64::from(k);
+    let Some(&cut) = list_of(v, cuts).get(usize::try_from(k).unwrap_or(usize::MAX)) else {
+        return (ValueId::UNIT, false);
+    };
+    let names = list_of(v, stretches)
+        .into_iter()
+        .filter_map(|s| {
+            let s = list_of(v, s);
+            (int_of(v, s[3]) <= k && k < int_of(v, s[4])).then(|| v.list(s[..3].to_vec()))
+        })
+        .collect();
+    (v.list(names), int_of(v, cut) != 0)
 }

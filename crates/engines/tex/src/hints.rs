@@ -3760,12 +3760,6 @@ pub(crate) fn document_text_of(v: &Values, id: ValueId) -> bool {
     b
 }
 
-/// The regime of a file read by `\input`: its text value `id`, named
-/// `name`.
-pub(crate) fn file_kind_of(v: &Values, id: ValueId, name: ValueId) -> FileKind {
-    kind_of(&str_of(v, id), FileKind::from_path(&str_of(v, name)))
-}
-
 /// The analysis of a file read by `\input`: its text value `id`, named
 /// `name`.
 pub(crate) fn file_hints(reg: &Registry, v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
