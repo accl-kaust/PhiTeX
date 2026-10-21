@@ -1171,29 +1171,10 @@ impl Run<'_, '_> {
         } else {
             -1000
         };
-        // §1260
-        let count = self.cint(crate::fields::cell::FONTCOUNT)?;
-        let mut found = None;
-        for f in 1..=count {
-            let info = self.font_get(f, crate::fields::FontCell::Info)?;
-            if let Some(i) = crate::fonts::info(self.v, info)
-                && i.name == name
-            {
-                let same = if s > 0 {
-                    s == i.size
-                } else {
-                    i.size == phitex_typeset::arith::xn_over_d(i.dsize, -s, 1000).value
-                };
-                if same {
-                    found = Some(f);
-                    break;
-                }
-            }
-        }
-        let f = match found {
-            Some(f) => f,
-            None => self.read_font_info(&name, s)?,
-        };
+        // §1260: a font of the same name and size is that font, its key
+        // the font's own ([`crate::fonts::key_of`]): one read, of that
+        // font's fields, never of the fonts loaded before
+        let f = self.read_font_info(&name, s)?;
         let v = self.v;
         self.define_cs(&u, &Mean::Font(f), global);
         // §1257: the font identifier
@@ -1203,8 +1184,13 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// `read_font_info` (§560): a new font, or the null font if the TFM
-    /// can't be had.
+    /// `read_font_info` (§560) behind §1260's search: the font `name` at
+    /// `s` by its key ([`crate::fonts::pick_key`]), loaded here unless a
+    /// font of that name and size was loaded before (§1260: that font);
+    /// the null font if the TFM can't be had. A load contributes the
+    /// font to the line (`fontload`, in TeX's order of loads, which is
+    /// where its number comes from, [`crate::pdfout::font_load`]) and is
+    /// the last font loaded (`fontlast`, §578).
     pub(crate) fn read_font_info(&mut self, name: &str, s: i32) -> R<i64> {
         let key = format!("{name}.tfm");
         let Some(file) = self.file(&key)? else {
@@ -1216,8 +1202,21 @@ impl Run<'_, '_> {
             self.log("error", "Font not loadable")?;
             return Ok(0);
         };
-        let f = self.cint(crate::fields::cell::FONTCOUNT)? + 1;
-        self.set_cell(crate::fields::cell::FONTCOUNT, v.int(f), true);
+        // (§1260: `s > 0` is the size; a scaled load's size is the
+        // design size scaled, `l.at.size` both ways)
+        let size = l.at.size;
+        let mut held = false;
+        let k = crate::fonts::pick_key(name, size, &mut |k| {
+            let info = self.font_get(k, crate::fields::FontCell::Info)?;
+            let other = crate::fonts::info(v, info).map(|i| i.name != name || i.size != size);
+            held = other == Some(false);
+            Ok::<_, crate::run::Halt>(other)
+        })?;
+        let f = i64::from(k);
+        if held {
+            return Ok(f);
+        }
+        self.set("fontlast", v.int(f), true);
         self.font_loaded(f);
         crate::pdfout::font_load(self, name, l.at.size, f);
         let info = v.list(vec![
@@ -1225,7 +1224,10 @@ impl Run<'_, '_> {
             v.int(i64::from(l.at.size)),
             v.int(i64::from(l.at.design_size)),
             file,
-            v.int(i64::from(s)),
+            // (the size the TFM is read at again: the font's own, however
+            // the load asked for it, `at` or `scaled`, so that the same
+            // font loaded either way has the same fields)
+            v.int(i64::from(l.at.size)),
         ]);
         self.font_set(f, crate::fields::FontCell::Info, info, true);
         let params = l.at.params.clone();

@@ -3177,13 +3177,12 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    #[cold]
+    #[inline]
     fn font_loc_slow(&mut self, f: i64, c: crate::fields::FontCell) -> Loc {
-        let name = crate::fields::font_cell_name(f, c);
         let fld = self
             .ops
             .fields
-            .get_at(self.v, self.cx.values_epoch(), &name);
+            .font_field(self.v, self.cx.values_epoch(), f, c);
         self.loc_of(fld)
     }
 
