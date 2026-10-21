@@ -264,6 +264,9 @@ pub(crate) struct LoopFire {
     pub held_named: bool,
     /// The marks on the page, in order (ids in [`PageLoop::marks`]).
     pub marks: Vec<u32>,
+    /// The best break where it is a penalty (§1013: 10000 after this
+    /// fire, not before).
+    pub brk: Option<Src>,
     /// What goes back to the contributions (§1017), with their sources:
     /// the page from its best break on, the item that fired it, the
     /// contributions after it.
@@ -487,8 +490,9 @@ fn build_t(
                 let held = held_srcs(&f, &srcs, &ins, holding);
                 let held_named = held.is_some();
                 // (§1013: the best break, a penalty, is 10000 from here on)
+                let mut brk = None;
                 if f.output_penalty < phitex_typeset::linebreak::INF_PENALTY {
-                    let brk = srcs.get(f.best).map_or(s.src, |b| b.src);
+                    brk = srcs.get(f.best).map_or(s.src, |b| b.src);
                     if let Some(b) = brk
                         && !lp.inf.contains(&b)
                     {
@@ -525,6 +529,7 @@ fn build_t(
                     held,
                     held_named,
                     marks: f.marks.clone(),
+                    brk,
                     carried,
                 });
             }
@@ -1196,7 +1201,7 @@ impl Run<'_, '_> {
             .inf
             .iter()
             .copied()
-            .filter(|&b| spans.iter().any(|sp| span_srcs(sp).any(|x| x == b)))
+            .filter(|&b| Some(b) != f.brk && spans.iter().any(|sp| span_srcs(sp).any(|x| x == b)))
             .collect();
         let fin = FinishIn {
             j,
