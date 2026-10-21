@@ -93,6 +93,8 @@ pub struct Engine {
     pub(crate) kept: FxHashMap<Id, super::ctx::KeptState>,
     /// The kept states' reads indexed by what may break them.
     pub(crate) kept_ix: FxHashMap<Id, super::eval::KeptIx>,
+    /// Continuing placers' placements as their last stop left them.
+    pub(crate) cont_memo: FxHashMap<Id, super::build::ContMemo>,
     pub(crate) marked: FxHashSet<Id>,
     pub(crate) settled_out: Vec<Settled>,
     pub(crate) edits: u64,
@@ -154,6 +156,7 @@ impl Engine {
             pending: Vec::new(),
             kept: FxHashMap::default(),
             kept_ix: FxHashMap::default(),
+            cont_memo: FxHashMap::default(),
             marked: FxHashSet::default(),
             settled_out: Vec::new(),
             edits: 0,

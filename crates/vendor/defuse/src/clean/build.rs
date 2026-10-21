@@ -91,6 +91,32 @@ pub(crate) struct Builder<'a> {
     /// attempts made (the first this many of those committed), which
     /// stand.
     pub cont: Option<(usize, usize)>,
+    /// A continuing placer's placements as its last stop left them
+    /// (`ContMemo`): taken by its next stop's commit, made again by it.
+    pub cont_memo: Option<ContMemo>,
+}
+
+/// The ordinal of a placement among its placer's of its kind: by place,
+/// op and (after a node) anchor.
+type PlaceKey = (u64, crate::api::OpId, u64);
+
+/// What a continuing placer's stop committed, for its next stop: its result
+/// then (by address: unchanged since, its placements are as left), how
+/// many placements its attempts had made, all live, and the ordinals they
+/// took. The next stop places only its new ones, not walking the earlier.
+pub(crate) struct ContMemo {
+    res: usize,
+    bk: usize,
+    bc: usize,
+    ord_k: FxHashMap<PlaceKey, u32>,
+    ord_c: FxHashMap<PlaceKey, u32>,
+}
+
+/// Whether CLEAN_KEPT_CHECK asks a continuing placer's stop to place as
+/// without its memo too, and compare.
+fn memo_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CLEAN_KEPT_CHECK").is_ok_and(|v| v == "1"))
 }
 
 impl<'a> Builder<'a> {
@@ -113,6 +139,7 @@ impl<'a> Builder<'a> {
             hold: None,
             counts: Counts::default(),
             cont: None,
+            cont_memo: None,
         }
     }
 
@@ -1185,15 +1212,21 @@ impl<'a> Builder<'a> {
         let cont = self.cont.is_some();
         let (bk, bc) = self.cont.unwrap_or((0, 0));
         let (bk, bc) = (bk.min(old.0.len()), bc.min(old.1.len()));
-        let key = |place: Place, op: crate::api::OpId| match place {
-            Place::Child => (1, op, 0),
-            Place::Cont => (2, op, 0),
-            Place::After(a) => (3, op, a),
-            Place::Marker(o) => (4 + u64::from(o), op, 0),
-            Place::Top => (6, op, 0),
+        let key = |place: Place, op: crate::api::OpId| -> PlaceKey {
+            match place {
+                Place::Child => (1, op, 0),
+                Place::Cont => (2, op, 0),
+                Place::After(a) => (3, op, a),
+                Place::Marker(o) => (4 + u64::from(o), op, 0),
+                Place::Top => (6, op, 0),
+            }
         };
+        // (A stop continuing its last: what it committed, as its memo
+        // has it; else walked.)
+        let res_ptr = n.res.as_ref().map_or(0, |r| Arc::as_ptr(r) as usize);
+        let memo = if cont && prefix { self.cont_memo.take().filter(|m| m.res == res_ptr && m.bk == bk && m.bc == bc) } else { None };
         // (Continuing: the ordinals go on from the placements committed.)
-        let seed = |ids: &[Id]| -> FxHashMap<(u64, crate::api::OpId, u64), u32> {
+        let seed = |ids: &[Id]| -> FxHashMap<PlaceKey, u32> {
             let mut ord = FxHashMap::default();
             if cont {
                 for x in ids {
@@ -1204,33 +1237,54 @@ impl<'a> Builder<'a> {
             }
             ord
         };
-        let assign = |specs: &[Spec], mut ord: FxHashMap<(u64, crate::api::OpId, u64), u32>| -> Vec<Id> {
-            specs
+        let assign = |specs: &[Spec], mut ord: FxHashMap<PlaceKey, u32>| -> (Vec<Id>, FxHashMap<PlaceKey, u32>) {
+            let v = specs
                 .iter()
                 .map(|s| {
                     let k = ord.entry(key(s.place, s.op)).or_insert(0);
                     *k += 1;
                     Self::placed_id(id, s.place, s.op, *k)
                 })
-                .collect()
+                .collect();
+            (v, ord)
         };
-        let kid_ids = assign(kids, seed(&old.0[..bk]));
-        let cont_ids = assign(conts, seed(&old.1[..bc]));
-        let own: FxHashSet<Id> = old.0[..bk].iter().chain(&old.1[..bc]).copied().collect();
-        // Gone: freed (a stopped run's: not yet made, kept; a continued
-        // run's earlier attempts' stand).
-        let mut keep: FxHashSet<Id> = kid_ids.iter().chain(&cont_ids).copied().collect();
-        keep.extend(old.0[..bk].iter().chain(&old.1[..bc]).copied());
-        if !prefix {
-            for &x in old.0.iter().chain(&old.1) {
-                if !keep.contains(&x) {
-                    self.free(x);
+        let (seed_k, seed_c) = match &memo {
+            Some(m) => {
+                if memo_check() {
+                    assert!(m.ord_k == seed(&old.0[..bk]) && m.ord_c == seed(&old.1[..bc]), "placer {id}: its memo's ordinals are not its placements'");
+                    assert!(old.0[..bk].iter().chain(&old.1[..bc]).all(|&x| self.w.node(x).is_some() && !self.w.awaiting.contains_key(&x)), "placer {id}: its memo's placements are not all live and made");
+                }
+                (m.ord_k.clone(), m.ord_c.clone())
+            }
+            None => (seed(&old.0[..bk]), seed(&old.1[..bc])),
+        };
+        let (kid_ids, ord_k) = assign(kids, seed_k);
+        let (cont_ids, ord_c) = assign(conts, seed_c);
+        // (Its earlier attempts': asked only where a continuation of its
+        // goes after them.)
+        let mut own: Option<FxHashSet<Id>> = None;
+        let mut keep: FxHashSet<Id> = FxHashSet::default();
+        if memo.is_some() {
+            // (Its earlier attempts' were made, and stand.)
+            for x in kid_ids.iter().chain(&cont_ids) {
+                self.w.awaiting.remove(x, &NoMeasure);
+            }
+        } else {
+            // Gone: freed (a stopped run's: not yet made, kept; a continued
+            // run's earlier attempts' stand).
+            keep.extend(kid_ids.iter().chain(&cont_ids).copied());
+            keep.extend(old.0[..bk].iter().chain(&old.1[..bc]).copied());
+            if !prefix {
+                for &x in old.0.iter().chain(&old.1) {
+                    if !keep.contains(&x) {
+                        self.free(x);
+                    }
                 }
             }
-        }
-        // (Made again: no longer waiting for this placer.)
-        for x in &keep {
-            self.w.awaiting.remove(x, &NoMeasure);
+            // (Made again: no longer waiting for this placer.)
+            for x in &keep {
+                self.w.awaiting.remove(x, &NoMeasure);
+            }
         }
         // Kids: in order after `id` (each after the previous one's subtree;
         // continuing, after those committed).
@@ -1256,7 +1310,12 @@ impl<'a> Builder<'a> {
                     let mut b = self.after_conts(anchor, self.w.subtree_end(anchor), id, spec.place);
                     // (Its earlier attempts' there, not the earlier
                     // result's: one of those is what this one makes again.)
-                    while cont && let Some(y) = self.w.next(b).filter(|y| own.contains(y) && self.w.node(*y).is_some_and(|yn| yn.place == spec.place)) {
+                    while cont
+                        && let Some(y) = self.w.next(b).filter(|y| {
+                            self.w.node(*y).is_some_and(|yn| yn.place == spec.place && yn.parent == id)
+                                && own.get_or_insert_with(|| old.0[..bk].iter().chain(&old.1[..bc]).copied().collect()).contains(y)
+                        })
+                    {
                         b = self.extent_end(y);
                     }
                     b
@@ -1269,15 +1328,23 @@ impl<'a> Builder<'a> {
             // Its earlier attempts', its own, then (stopped) the earlier
             // result's it has not made again.
             let made: FxHashSet<Id> = kid_ids.iter().chain(&cont_ids).copied().collect();
+            let live = memo.is_some();
             let join = |own: &[Id], new: Vec<Id>, rest: &[Id]| -> Vec<Id> {
-                let mut v: Vec<Id> = own.iter().copied().filter(|&x| self.w.node(x).is_some()).collect();
+                let mut v: Vec<Id> = if live { own.to_vec() } else { own.iter().copied().filter(|&x| self.w.node(x).is_some()).collect() };
                 v.extend(new);
                 if prefix {
                     v.extend(rest.iter().copied().filter(|x| !made.contains(x) && self.w.node(*x).is_some()));
                 }
                 v
             };
-            return (join(&old.0[..bk], kid_ids, &old.0[bk..]), join(&old.1[..bc], cont_ids, &old.1[bc..]));
+            let (nk, nc) = (kid_ids.len(), cont_ids.len());
+            let out = (join(&old.0[..bk], kid_ids, &old.0[bk..]), join(&old.1[..bc], cont_ids, &old.1[bc..]));
+            // (Its memo for the next stop, all its attempts' live: its
+            // result's address set when committed.)
+            if prefix && (live || (out.0.len() >= bk + nk && out.1.len() >= bc + nc && out.0[..bk].len() == bk && old.0[..bk] == out.0[..bk] && old.1[..bc] == out.1[..bc])) {
+                self.cont_memo = Some(ContMemo { res: 0, bk: bk + nk, bc: bc + nc, ord_k, ord_c });
+            }
+            return out;
         }
         if prefix {
             let mut kid_ids = kid_ids;
@@ -1645,7 +1712,11 @@ impl<'a> Builder<'a> {
         let mut res = n2.res.as_deref().cloned().unwrap_or_default();
         res.kids = k;
         res.conts = c;
-        n2.res = Some(Arc::new(res));
+        let res = Arc::new(res);
+        if let Some(m) = &mut self.cont_memo {
+            m.res = Arc::as_ptr(&res) as usize;
+        }
+        n2.res = Some(res);
         self.w.put(id, n2);
     }
 }

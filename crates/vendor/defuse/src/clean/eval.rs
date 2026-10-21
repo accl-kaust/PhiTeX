@@ -613,6 +613,7 @@ impl Engine {
         // (The changes no kept state's index looks back to are forgotten.)
         let kept = &self.kept;
         self.kept_ix.retain(|id, _| kept.contains_key(id));
+        self.cont_memo.retain(|id, _| kept.contains_key(id));
         let low = self.kept_ix.values().filter(|ix| ix.log.same(&self.w.log)).map(|ix| ix.from).min();
         self.w.log.forget(low.unwrap_or(self.w.log_len));
         rep.kept_asked = std::mem::take(&mut self.kept_asked);
@@ -1966,8 +1967,12 @@ impl Engine {
                         let mut b = Builder::new(&self.core, w);
                         if unfold {
                             b.cont = r.base.map(|x| (x.0, x.1));
+                            b.cont_memo = self.cont_memo.remove(&id);
                             super::core::prof::time(43, || b.commit_unfolding(id, &r.kids, &r.conts));
                             b.cont = None;
+                            if let Some(m) = b.cont_memo.take() {
+                                self.cont_memo.insert(id, m);
+                            }
                         }
                         let gone = past(&b.w);
                         if !gone.is_empty() {
