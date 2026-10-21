@@ -306,7 +306,9 @@ impl Clone for State {
             spill_ix: self.spill_ix.clone(),
             touched: self.touched.clone(),
             metas: {
-                let mut m = METAS_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+                let mut m = METAS_POOL
+                    .with(|p| p.borrow_mut().pop())
+                    .unwrap_or_default();
                 m.extend_from_slice(&self.metas);
                 m
             },
@@ -408,7 +410,9 @@ impl State {
             touched: TOUCHED_POOL
                 .with(|p| p.borrow_mut().pop())
                 .unwrap_or_else(|| Vec::with_capacity(256)),
-            metas: METAS_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default(),
+            metas: METAS_POOL
+                .with(|p| p.borrow_mut().pop())
+                .unwrap_or_default(),
             scope_extra: Vec::new(),
             save: Vec::new(),
             defined: Vec::new(),
