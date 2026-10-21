@@ -166,6 +166,10 @@ pub(crate) struct PageLoop {
     /// `\deadcycles` as the routine of the page fired last left it
     /// ([`RTN`]'s third element; 0 where it has none).
     pub rtn_dead: i64,
+    /// What each routine (by its hint) gave back on the last page fired
+    /// on the text, `\deadcycles` left out: the next page's guess
+    /// ([`FinishIn::rtn_guess`]).
+    pub last_rtn: Vec<(ValueId, ValueId)>,
     /// The piece the page fired last fired in and `rtn_dead`
     /// ([`FinishIn::prev_fire`]).
     pub prev_fire: (i64, i64),
@@ -222,6 +226,7 @@ impl PageLoop {
             began: (crate::build::IGNORE_DEPTH_STATE, None),
             top_marks: ValueId::UNIT,
             rtn_dead: 0,
+            last_rtn: Vec::new(),
             prev_fire: (-1, 0),
             marks: Vec::new(),
             misses: Vec::new(),
@@ -769,6 +774,7 @@ struct LoopSnap {
     top_marks: ValueId,
     rtn_dead: i64,
     prev_fire: (i64, i64),
+    last_rtn: Vec<(ValueId, ValueId)>,
     pend: Vec<(crate::vprof::PItem, SrcRef)>,
     page_src: Vec<SrcRef>,
     page_ins: Vec<Option<u16>>,
@@ -792,6 +798,7 @@ impl PageLoop {
             top_marks: self.top_marks,
             rtn_dead: self.rtn_dead,
             prev_fire: self.prev_fire,
+            last_rtn: self.last_rtn.clone(),
             pend: self.pend.clone(),
             page_src: self.page_src.clone(),
             page_ins: self.page_ins.clone(),
@@ -814,6 +821,7 @@ impl PageLoop {
         self.top_marks = s.top_marks;
         self.rtn_dead = s.rtn_dead;
         self.prev_fire = s.prev_fire;
+        self.last_rtn = s.last_rtn;
         self.pend = s.pend;
         self.page_src = s.page_src;
         self.page_ins = s.page_ins;
@@ -1078,7 +1086,18 @@ impl Run<'_, '_> {
         }
         let after = first.and_then(|(_, p)| lp.prev.get(&p).copied().flatten());
         let hint = self.output_hint_at(node)?;
-        let rtn_guess = self.rtn_guess(hint);
+        // (the guess: what the routine gave back on the page before that
+        // fired on the text, where one did in this loop, else its last
+        // value as the evaluation began; nothing for a page fired in a
+        // routine's material, so no chain of pages grows on guesses)
+        let rtn_guess = if in_material {
+            v.list(vec![v.list(Vec::new()), v.list(Vec::new())])
+        } else {
+            lp.last_rtn
+                .iter()
+                .find(|e| e.0 == hint)
+                .map_or_else(|| self.rtn_guess(hint), |e| e.1)
+        };
         let rtns: Vec<(i64, ValueId)> = {
             let mut pages: Vec<i64> = spans
                 .iter()
@@ -1154,6 +1173,17 @@ impl Run<'_, '_> {
             .find(|m| m.0 == j)
             .map_or(rtn_guess, |m| m.1);
         let rs = list_of(v, rtn);
+        if !in_material {
+            let given = if rs.len() > 2 {
+                v.list(rs[..2].to_vec())
+            } else {
+                rtn
+            };
+            match lp.last_rtn.iter_mut().find(|e| e.0 == hint) {
+                Some(e) => e.1 = given,
+                None => lp.last_rtn.push((hint, given)),
+            }
+        }
         let mut markers = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
         let list = rs.get(1).map(|&x| list_of(v, x)).unwrap_or_default();
         // (`\deadcycles` as the routine left it, where not 0: what an
