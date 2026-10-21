@@ -966,6 +966,10 @@ impl Run<'_, '_> {
     /// candidate ([`Halt::Recut`], [`Run::finish_candidate`]), its rest a
     /// resume placed after the pages firing there, which reads their
     /// objects. (`why`: the reader, for the trace.)
+    #[allow(
+        clippy::assertions_on_constants,
+        reason = "a debug or observe build stops on the defect"
+    )]
     pub(crate) fn order_after_pages(&mut self, why: &str) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
