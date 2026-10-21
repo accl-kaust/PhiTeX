@@ -912,16 +912,28 @@ impl Run<'_, '_> {
     /// resume (items contributed since the one before aside).
     fn cuttable_here(&mut self, newgraf: bool) -> bool {
         let op = self.cx.op();
-        // (spec-page-chain §4.1: at every candidate, inside the run's
-        // own groups, conditionals and paragraph too: the continuation
-        // carries them, [`Run::cont_encode`], and the routine of a page
-        // firing there runs before the rest, which reads what it leaves.
-        // The scan never cuts a piece. TODO(fire-chain): `newgraf` and
-        // the forced-fire test were the old conditions; delete them, and
-        // `check_cut`/`split_piece`, once nothing reaches them)
-        let _ = newgraf;
+        // (inside a group or a conditional of the run's own only where
+        // the builder is made to fire: a penalty of `eject_penalty` or
+        // less put on the list since the candidate before, §1005; the
+        // routine runs there, and the rest reads what it defines (a page
+        // so far saved in a box, a column height), so the rest is a
+        // node after the routine. Never inside a list of the run's own)
+        // (a paragraph's start is a cut too, its level just pushed and
+        // carried by the continuation with its list and the input
+        // `\everypar` left (§1091): the page firing there has its
+        // finisher before the paragraph's commands, which read what the
+        // routine leaves, as they come after it in tex.web)
+        let par_start = newgraf
+            && self.conds.is_empty()
+            && self.nest.last().is_some_and(|l| l.owns && l.group == 0)
+            && self.nest.len() == 1;
+        let open_ok = !self.open_span()
+            || par_start
+            || (self.nest.iter().all(|l| !l.owns && l.group != 0)
+                && self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs)));
         (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
+            && open_ok
             && self.has_input()
     }
 
