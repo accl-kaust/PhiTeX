@@ -272,3 +272,80 @@ pub(crate) fn font_def(l: &Loaded, name: &str) -> phitex_dvi::FontDef {
         widths: l.at.chars.iter().map(|c| c.map(|d| d.width)).collect(),
     }
 }
+
+/// The keys a font may have: above the null font (0), below the ids the
+/// PDF link gives the local fonts of virtual fonts (`pdfout`'s
+/// `LOCAL_FONTS`), and below 2³¹ (the writer stores a copy's base as a
+/// negative number).
+const KEY_SPAN: u32 = 0x5FFF_FFFE;
+
+/// The key of the font of file `name` at `size` sp, `salt` 0 unless a
+/// collision moved it ([`pick_key`]): what a font is known by in every
+/// value and field. It depends on the font alone (TeX's §1260 identity:
+/// the same name and the same size), never on when it was first loaded;
+/// the number TeX gives it, its rank in the order of first loads, is
+/// computed only where the output needs it (the DVI writer, the PDF
+/// link's `/F` names, `\pdffontname`).
+pub(crate) fn key_of(name: &str, size: i32, salt: u32) -> u32 {
+    let h = phitex_defuse::hash_bytes(
+        phitex_defuse::hash_words(0x666f_6e74_6b65_7900, &[u64::from(size.cast_unsigned()), u64::from(salt)]),
+        name.as_bytes(),
+    );
+    1 + u32::try_from(h % u64::from(KEY_SPAN)).unwrap_or(0)
+}
+
+/// The key of the font `name` at `size`: [`key_of`], salted while the
+/// key is another font's (`other(key)`: `Some(true)` another font has
+/// it, `Some(false)` this font, `None` no font). A collision is reported
+/// under `observe` (`PHITEX_FONT_TRACE`); only a collision makes a key
+/// depend on which of the two fonts was loaded first.
+pub(crate) fn pick_key<E>(
+    name: &str,
+    size: i32,
+    other: &mut dyn FnMut(u32) -> Result<Option<bool>, E>,
+) -> Result<u32, E> {
+    let mut salt = 0;
+    loop {
+        let k = key_of(name, size, salt);
+        if other(k)? == Some(true) {
+            if crate::exec::obs_flag!("PHITEX_FONT_TRACE") {
+                eprintln!("font-trace: key {k} of {name} at {size}sp is another font's: salted ({salt})");
+            }
+            salt += 1;
+            continue;
+        }
+        return Ok(k);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_depends_on_the_font_alone() {
+        assert_eq!(key_of("cmr10", 655_360, 0), key_of("cmr10", 655_360, 0));
+        assert_ne!(key_of("cmr10", 655_360, 0), key_of("cmr10", 786_432, 0));
+        assert_ne!(key_of("cmr10", 655_360, 0), key_of("cmbx10", 655_360, 0));
+        let k = key_of("cmr10", 655_360, 0);
+        assert!(k > 0 && k <= KEY_SPAN);
+    }
+
+    #[test]
+    fn a_colliding_key_is_salted() {
+        // (the first key of cmr10 at 10pt held by another font: the
+        // salted key, which nothing holds)
+        let first = key_of("cmr10", 655_360, 0);
+        let mut asked = Vec::new();
+        let k = pick_key::<()>("cmr10", 655_360, &mut |k| {
+            asked.push(k);
+            Ok((k == first).then_some(true))
+        })
+        .unwrap();
+        assert_eq!(k, key_of("cmr10", 655_360, 1));
+        assert_eq!(asked, vec![first, k]);
+        // (the key held by the same font: that font)
+        let k = pick_key::<()>("cmr10", 655_360, &mut |_| Ok(Some(false))).unwrap();
+        assert_eq!(k, first);
+    }
+}
