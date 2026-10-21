@@ -4,7 +4,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use super::build::{Builder, PUSH_GAP, new_unit};
+use super::build::{Builder, new_unit};
 use super::core::{Core, lock};
 use super::world::{Id, Place, Pos, St, World};
 use crate::api::{
@@ -229,8 +229,7 @@ impl Engine {
     }
 
     /// Writes an engine call when recording (`a`: its arguments, taken
-    /// before the call moved them) with its result, as the round core
-    /// writes it.
+    /// before the call moved them) with its result, as `play` reads it.
     #[cfg(feature = "observe")]
     fn rec_call<R: serde::Serialize>(&self, f: &str, a: Option<serde_json::Value>, r: &R) {
         if let Some(a) = a {
@@ -448,7 +447,7 @@ impl Engine {
     /// The fold of accumulator `f` over `unit`.
     #[must_use]
     pub fn acc_value(&self, unit: UnitId, f: Field) -> Option<ValueId> {
-        let mo = self.core.accs.get(&f)?;
+        let mo = self.core.acc(f)?;
         let m = super::world::AccMeasure {
             m: &**mo,
             v: &self.core.values,
@@ -459,20 +458,37 @@ impl Engine {
     pub fn declare_accumulator(&mut self, f: Field, m: Arc<dyn Monoid>) {
         #[cfg(feature = "observe")]
         let m: Arc<dyn Monoid> = {
-            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), serde_json::Value::Null);
+            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), serde_json::json!(m.speculate()));
             Arc::new(crate::record::RecMonoid { inner: m, field: f })
         };
         self.core_mut().accs.insert(f, m);
     }
 
+    /// Declares every field whose name starts with `prefix` (and has no
+    /// accumulator of its own) an accumulator with monoid `m`, as
+    /// [`Engine::declare_accumulator`] each would; the first declared
+    /// prefix that matches wins.
+    pub fn declare_accumulator_prefix(&mut self, prefix: &str, m: Arc<dyn Monoid>) {
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.core.values, "declare_accumulator_prefix", crate::record::j(&(prefix,)), serde_json::json!(m.speculate()));
+        let core = self.core_mut();
+        core.acc_prefixes.push((prefix.to_string(), m));
+        // (Fields resolved before see the new prefix.)
+        core.acc_memo = crate::sync::Table::new();
+    }
+
     /// Marks `f` stable (a hint; the clean core needs none).
     pub fn set_stable(&mut self, f: Field) {
         self.core_mut().stable.insert(f);
+        #[cfg(feature = "observe")]
+        self.rec_call("set_stable", crate::record::rec().map(|_| crate::record::j(&(&f,))), &());
     }
 
     /// Whether evaluations compute heights and the critical chain.
     pub fn set_heights(&mut self, on: bool) {
         self.heights = on;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_heights", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
     }
 
     pub fn declare_sequence(&mut self, f: Field) {
@@ -549,10 +565,9 @@ impl Engine {
     /// `Error`).
     pub fn set_round_cap_policy(&mut self, p: CapPolicy) {
         self.cap_policy = p;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_round_cap_policy", crate::record::rec().map(|_| crate::record::j(&(&p,))), &());
     }
-
-    /// A scheduling hint of the round core (no effect here).
-    pub fn set_successor_affinity(&mut self, _on: bool) {}
 
     /// Bounds an evaluation (see [`Limits`]); exceeding one is an error.
     pub fn set_limits(&mut self, l: Limits) {
@@ -884,6 +899,19 @@ impl Engine {
     /// Re-runs the nodes whose text passes `pred`, their texts analysed
     /// again (their hooks' answers may depend on context that changed).
     pub fn refresh_where(&mut self, pred: &dyn Fn(OpId, &[ValueId], &Values) -> bool) {
+        // (Recorded as the texts the predicate passed: the only texts it
+        // is asked about are the cached ones and the nodes'.)
+        #[cfg(feature = "observe")]
+        if crate::record::rec().is_some() {
+            let asked = crate::record::Asked::new(pred);
+            self.refresh_where_inner(&|op, args, v| asked.ask(op, args, v));
+            crate::record::api(&self.core.values, "refresh_where", asked.passed(), serde_json::Value::Null);
+            return;
+        }
+        self.refresh_where_inner(pred);
+    }
+
+    fn refresh_where_inner(&mut self, pred: &dyn Fn(OpId, &[ValueId], &Values) -> bool) {
         // Cached analyses no node holds now go too: a text made later is
         // analysed afresh.
         for v in lock(&self.core.texts).values_mut() {
@@ -1033,7 +1061,7 @@ impl Engine {
     }
 
     /// The realised chain, deepest first: each run, its height, and why it
-    /// came after the next (as the round core's `DEFUSE_RCHAIN` prints it).
+    /// came after the next (as `play` prints it with `DEFUSE_RCHAIN`).
     #[must_use]
     pub fn realised_chain(&self) -> Vec<(NodeId, u64, String)> {
         self.chain.iter().map(|c| (c.0, u64::from(c.1), format!("{:?}", c.2))).collect()
@@ -1045,15 +1073,8 @@ impl Engine {
         self.chain.clone()
     }
 
-    pub(crate) fn kept_of(&mut self, id: Id) -> Option<Box<dyn Any + Send>> {
-        self.kept.remove(&id).map(|k| k.0)
-    }
-
     pub(crate) fn hook_error(&self) -> Option<crate::api::EvalError> {
         lock(&self.core.hook_error).take()
     }
 
-    pub(crate) fn push_gap() -> Pos {
-        PUSH_GAP
-    }
 }

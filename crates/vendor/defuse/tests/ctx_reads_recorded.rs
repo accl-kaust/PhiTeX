@@ -13,6 +13,8 @@ const READS: &[&str] = &[
     "apply",
     "acc_range",
     "acc_range_to",
+    "acc_fold",
+    "acc_next",
     "scope_kind",
     "claimed",
     "following",
@@ -33,6 +35,7 @@ const WRITES: &[&str] = &[
     "child",
     "follow",
     "follow_after",
+    "follow_after_any",
     "open_scope",
     "close_scope",
     "contribute",
@@ -64,7 +67,7 @@ const LOCAL: &[&str] = &[
 
 #[test]
 fn every_ctx_method_is_classified() {
-    let src = include_str!("../src/core/ctx.rs");
+    let src = include_str!("../src/clean/ctx.rs");
     let mut missing = Vec::new();
     for line in src.lines() {
         let Some(rest) = line.strip_prefix("    pub fn ") else {

@@ -39,6 +39,10 @@ pub(crate) struct Core {
     pub op_names: Vec<&'static str>,
     pub projs: Vec<Projection>,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
+    /// Accumulators declared by field-name prefix, first declared first,
+    /// and each field's resolution among them (made on first use).
+    pub acc_prefixes: Vec<(String, Arc<dyn Monoid>)>,
+    pub acc_memo: crate::sync::Table<Option<Arc<dyn Monoid>>>,
     pub seqs: FxHashSet<Field>,
     pub stable: FxHashSet<Field>,
     /// Declared loop-back fields and their initial values.
@@ -76,6 +80,28 @@ pub(crate) struct Core {
 }
 
 impl Core {
+    /// Field `f`'s accumulator: declared for it, or by the first declared
+    /// prefix of its name (resolved once per field).
+    pub(crate) fn acc(&self, f: Field) -> Option<&Arc<dyn Monoid>> {
+        if let Some(m) = self.accs.get(&f) {
+            return Some(m);
+        }
+        if self.acc_prefixes.is_empty() {
+            return None;
+        }
+        self.acc_memo
+            .get_or_insert(f.0.raw().max(1), || {
+                let m = self
+                    .values
+                    .with_str(f.0, |name| self.acc_prefixes.iter().find(|(p, _)| name.starts_with(p.as_str())).map(|(_, m)| Arc::clone(m)))
+                    .flatten();
+                #[cfg(feature = "observe")]
+                let m = m.map(|inner| -> Arc<dyn Monoid> { Arc::new(crate::record::RecMonoid { inner, field: f }) });
+                m
+            })
+            .as_ref()
+    }
+
     pub(crate) fn new() -> Core {
         Core {
             values: Values::new(),
@@ -83,6 +109,8 @@ impl Core {
             op_names: Vec::new(),
             projs: Vec::new(),
             accs: FxHashMap::default(),
+            acc_prefixes: Vec::new(),
+            acc_memo: crate::sync::Table::new(),
             seqs: FxHashSet::default(),
             stable: FxHashSet::default(),
             loops: FxHashMap::default(),
@@ -210,7 +238,7 @@ impl Core {
             let mut out: Vec<(Field, ValueId)> = Vec::new();
             for (f, x) in cs.drain(..) {
                 if let Some(c) = out.iter_mut().find(|c| c.0 == f) {
-                    c.1 = self.accs.get(&f).map_or(x, |m| m.combine(v, c.1, x));
+                    c.1 = self.acc(f).map_or(x, |m| m.combine(v, c.1, x));
                 } else {
                     out.push((f, x));
                 }

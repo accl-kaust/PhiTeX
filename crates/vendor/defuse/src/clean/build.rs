@@ -253,12 +253,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Marks a node dirty (its committed result kept, as a guess for its
-    /// readers, until its run commits).
-    pub(crate) fn make_dirty(&mut self, id: Id) {
-        self.make_dirty_for(id, crate::api::Rerun::Other);
-    }
-
     /// Marks a node dirty for reason `why`.
     pub(crate) fn make_dirty_for(&mut self, id: Id, why: crate::api::Rerun) {
         let Some(n) = self.w.node(id) else { return };
@@ -401,7 +395,7 @@ impl<'a> Builder<'a> {
             .map(|(k, _)| *k)
             .collect();
         for k in keys {
-            let Some(mo) = self.core.accs.get(&k.1) else { continue };
+            let Some(mo) = self.core.acc(k.1) else { continue };
             let m = AccMeasure {
                 m: &**mo,
                 v: &self.core.values,
@@ -572,11 +566,7 @@ impl<'a> Builder<'a> {
                     Locality::ScopeAt(k) => k.min(opens - 1),
                     _ => 0,
                 };
-                if b.before {
-                    FrameId::opened(id, k)
-                } else {
-                    FrameId::opened(id, k)
-                }
+                FrameId::opened(id, k)
             }
         }
     }
@@ -643,7 +633,7 @@ impl<'a> Builder<'a> {
     /// Sets a contribution to accumulator `f` at `pos` (a field declared
     /// no accumulator keeps none).
     pub(crate) fn contrib(&mut self, u: u32, f: Field, pos: Pos, x: Option<ValueId>) {
-        let Some(mo) = self.core.accs.get(&f) else { return };
+        let Some(mo) = self.core.acc(f) else { return };
         if let Some(d) = &mut self.defer {
             d.push(u, f, super::batch::FieldOp::Contrib { pos, x });
             return;
@@ -1676,7 +1666,7 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
             Err(_) => false,
         },
         Read::Range { f, from, to, val, past } => {
-            let Some(mo) = core.accs.get(f) else {
+            let Some(mo) = core.acc(*f) else {
                 return *val == ValueId::UNIT;
             };
             let m = AccMeasure {

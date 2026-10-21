@@ -9,23 +9,15 @@ license = "MIT OR Apache-2.0"
 # Only with the `observe` feature (the default build has no dependencies).
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt"], optional = true }
 
 [features]
-# Observability probes (counters, timed spans, Chrome traces): see `obs`.
+# Diagnostics: the engine's phase timers and counters (CLEAN_PROF), traces
+# (CLEAN_DEBUG), scoped checks (CLEAN_SCOPED_CHECK) and the `obs` probes.
 # Off by default; release builds compile every probe out.
 profile = []
-# Debug visibility: a scheduler dump every DEFUSE_DUMP_EVERY seconds and on
-# SIGINT/SIGTERM, written to DEFUSE_DUMP (else stderr), plus per-node
-# select counts; the dump is also written when an evaluation fails with
-# NoProgress, Deadline or a runaway. Off by default.
-observe = ["dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber"]
-# The light trace (`DEFUSE_LTRACE`, see `core::ltrace`): off by default,
-# when release builds carry no hook and read no environment.
-ltrace = []
-# The clean core (`docs/clean-core.md`), built beside the round core.
-clean = []
+# Recording for replay (DEFUSE_RECORD=path, replayed by examples/play.rs).
+# Off by default.
+observe = ["dep:serde", "dep:serde_json"]
 
 [profile.release]
 debug = 1
@@ -39,7 +31,3 @@ debug = true
 [[example]]
 name = "play"
 required-features = ["observe"]
-
-[[test]]
-name = "ltrace"
-required-features = ["ltrace"]

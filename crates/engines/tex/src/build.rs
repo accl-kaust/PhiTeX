@@ -582,7 +582,13 @@ impl Run<'_, '_> {
             } else {
                 out.extend(last);
                 st.since_bp = since;
-                st.pd = self.main_pd_before()?;
+                // (the depth before this node only where this run's own
+                // first box needs it for its interline glue, §679: a box
+                // before any `\prevdepth` setting of its own; a reader of
+                // the main list's last item reads nothing else)
+                if own_box_needs_depth(v, &own) {
+                    st.pd = self.main_pd_before()?;
+                }
             }
         } else {
             // a list is this run's or the engine's (lid 0): no list is
@@ -3354,8 +3360,32 @@ pub(crate) struct ListFold {
     pub since_bp: usize,
     /// The space factor at the end (§1034).
     pub sf: i32,
-    /// The previous depth at the end (§679).
+    /// The previous depth at the end (§679). Of the main list, only where
+    /// the run's own items set or need it (`\prevdepth` of the main list
+    /// is [`Run::prev_depth`]'s, which reads the depth before itself).
     pub pd: i32,
+}
+
+/// Whether a run's own main-list entries (`items` units) put a box on
+/// the list before any previous-depth setting of their own: its
+/// interline glue is made from the depth before the run (§679).
+fn own_box_needs_depth(v: &Values, own: &[ValueId]) -> bool {
+    for &s in own {
+        for x in v.seq_to_vec(s) {
+            let Some((l, item)) = entry_pair(v, x) else {
+                continue;
+            };
+            if int_of(v, l) != 0 {
+                continue;
+            }
+            match nodes::tag(v, item) {
+                nodes::T_VBOX => return true,
+                nodes::T_PD => return false,
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// A transition setting the previous depth to `d`.

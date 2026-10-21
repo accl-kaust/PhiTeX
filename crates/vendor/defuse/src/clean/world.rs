@@ -957,16 +957,6 @@ impl World {
         });
     }
 
-    /// The nodes in work in unit `u` strictly between positions `lo` and
-    /// `hi`, in order.
-    pub(crate) fn work_between(&self, u: u32, lo: Pos, hi: Pos) -> impl Iterator<Item = Id> + '_ {
-        self.work
-            .get(&u)
-            .into_iter()
-            .flat_map(move |m| m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)))
-            .map(|(_, &x)| x)
-    }
-
     /// Files node `n` (`on`) in the accumulator indexes, or takes it out.
     fn acc_index(&mut self, id: Id, n: &Node, on: bool) {
         // (Declaring no contributions at all, or all of them, is
@@ -1120,8 +1110,11 @@ impl World {
             }
             // An accumulator: held while a node before it in work may
             // still contribute (it would stop on the fold otherwise).
-            if core.accs.contains_key(&f) {
-                if let Some(x) = self.range_blocker_last(id, f, u, 0, pos) {
+            if let Some(m) = core.acc(f) {
+                // (A guessed fold does not wait: `Monoid::speculate`.)
+                if !(predict && m.speculate())
+                    && let Some(x) = self.range_blocker_last(id, f, u, 0, pos)
+                {
                     return Err(Some(x));
                 }
                 continue;
@@ -1170,7 +1163,7 @@ impl World {
         let pending = |x: Id| {
             self.node(x).is_some_and(|n| n.text.stat.defs.is_none() && (n.wide || core.may_cover(n.may(), n.text.op, &n.text.args, f)))
         };
-        let Some(m) = self.pset_nodes.get(&u) else { return None };
+        let m = self.pset_nodes.get(&u)?;
         let mut few: [Id; 8] = [NONE; 8];
         let mut k = 0;
         for (_, &x) in m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)) {

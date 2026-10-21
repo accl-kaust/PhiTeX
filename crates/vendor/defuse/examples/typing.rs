@@ -258,8 +258,8 @@ fn bench(n: usize, o: &Opts) {
             }
             if o.slow && t > Duration::from_millis(50) {
                 println!(
-                    "slow {name:<12} round {round:>3} {t:>10.3?}  run {} cut {} rebnd {} waits {} execs {} rounds {} region {}",
-                    r.nodes_run, r.cutoffs, r.rebinds, r.pending_waits, r.runs, r.rounds, r.scope_region
+                    "slow {name:<12} round {round:>3} {t:>10.3?}  run {} cut {} rebnd {} waits {} execs {} rounds {}",
+                    r.nodes_run, r.cutoffs, r.rebinds, r.pending_waits, r.runs, r.rounds
                 );
             }
             stats[kind].push((t, r));

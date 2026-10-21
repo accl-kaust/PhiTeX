@@ -122,6 +122,9 @@ pub struct Face {
     has_glyph_names: bool,
     /// Control boxes computed so far, packed (see [`pack_bbox`]).
     bbox_cache: Box<[AtomicU64]>,
+    /// The Graphite face (`hb_graphite2_shaper_face_data`), for a face
+    /// with a `Silf` table that graphite2 loads.
+    graphite: Option<Box<phitex_graphite::Face>>,
 }
 
 const BBOX_EMPTY: u64 = u64::MAX;
@@ -315,6 +318,13 @@ impl Face {
             ),
             index & 0xFFFF,
         )?;
+        let graphite = find(b"Silf").and_then(|_| {
+            let get = |t: u32| {
+                let &(_, o, l) = tables.iter().find(|e| e.0 == t)?;
+                d.get(o as usize..(o + l) as usize).map(<[u8]>::to_vec)
+            };
+            phitex_graphite::Face::new(&get).map(Box::new)
+        });
         let n_cache = num_glyphs.min(0x1_0000) as usize;
         let bbox_cache = (0..n_cache).map(|_| AtomicU64::new(BBOX_EMPTY)).collect();
         Some(Arc::new(Face {
@@ -337,6 +347,7 @@ impl Face {
             vmtx,
             has_glyph_names,
             bbox_cache,
+            graphite,
         }))
     }
 
@@ -375,6 +386,12 @@ impl Face {
     pub fn table(&self, t: Tag) -> Option<&[u8]> {
         let &(_, o, l) = self.tables.iter().find(|e| e.0 == t)?;
         self.data.get(o as usize..(o + l) as usize)
+    }
+
+    /// The Graphite face, if the face has a `Silf` table graphite2 loads.
+    #[must_use]
+    pub fn graphite(&self) -> Option<&phitex_graphite::Face> {
+        self.graphite.as_deref()
     }
 
     /// The outline format.

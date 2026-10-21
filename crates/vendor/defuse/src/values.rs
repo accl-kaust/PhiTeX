@@ -203,13 +203,6 @@ const INT_MIN: i64 = -(1 << 60);
 const INT_MAX: i64 = (1 << 60) - 1;
 
 impl Values {
-    /// Frees the value table's replaced generations (see `Table::reclaim`).
-    pub(crate) fn reclaim(&mut self) {
-        self.table.reclaim();
-    }
-}
-
-impl Values {
     #[must_use]
     pub fn new() -> Values {
         Values::default()
