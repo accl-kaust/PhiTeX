@@ -791,7 +791,7 @@ impl Run<'_, '_> {
         // (every definition of the run, by field once, a standing one
         // first: a candidate's are those made after it, filtered in
         // order, [`State::defined_since`])
-        let mut defs: Vec<(Field, bool, Loc, u64, bool, Option<u32>)> = self
+        let mut defs: Vec<RunDef> = self
             .st
             .defined_stamped()
             .into_iter()
@@ -1753,6 +1753,11 @@ pub(crate) fn names_at(v: &Values, data: ValueId, k: u32) -> (ValueId, bool) {
     (v.list(names), int_of(v, cut) != 0)
 }
 
+/// A definition the run made: its field, whether it stands, its
+/// location, its stamp, whether local and the group it was made in
+/// ([`State::defined_stamped`]).
+type RunDef = (Field, bool, Loc, u64, bool, Option<u32>);
+
 /// A field's name over a stretch of candidates `[lo, hi)`: the field,
 /// whether its definition stands, its value there.
 type Stretch = (ValueId, bool, ValueId, usize, usize);
@@ -1767,7 +1772,7 @@ struct NameSources<'a> {
     marks: &'a [CandMark],
     is_last: &'a [bool],
     locals: &'a [(Loc, Field)],
-    defs: &'a [(Field, bool, Loc, u64, bool, Option<u32>)],
+    defs: &'a [RunDef],
     held: &'a [(Field, Loc, Option<ValueId>)],
     streams: &'a [Vec<Field>],
     at: &'a crate::runstate::AtCandidates,
@@ -1845,6 +1850,57 @@ impl NameSources<'_> {
     /// field's name is looked at only where one of its sources changes.
     fn by_field(&self, kv_at: &dyn Fn(usize, Loc) -> ValueId) -> Vec<Stretch> {
         let n = self.n;
+        let lasts: Vec<usize> = (0..n).filter(|&i| self.is_last[i]).collect();
+        let mut out: Vec<Stretch> = Vec::new();
+        let mut cuts: Vec<usize> = Vec::new();
+        for (f, mut srcs) in self.sources() {
+            srcs.sort_by_key(|s| s.rank);
+            cuts.clear();
+            cuts.extend([0, n]);
+            for &i in &lasts {
+                cuts.extend([i, i + 1]);
+            }
+            for s in &srcs {
+                for &(a, b) in &s.covers {
+                    cuts.extend([a, b]);
+                }
+                if let Some(l) = s.loc {
+                    cuts.extend(self.at.history(l).iter().map(|x| x.0 + 1));
+                }
+            }
+            cuts.retain(|&c| c <= n);
+            cuts.sort_unstable();
+            cuts.dedup();
+            let mut cur: Option<Stretch> = None;
+            for w in cuts.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let name = if self.is_last[a] {
+                    None
+                } else {
+                    srcs.iter()
+                        .find(|s| s.covers.iter().any(|&(lo, hi)| lo <= a && a < hi))
+                        .map(|s| (s.stands, s.loc.map_or(ValueId::UNIT, |l| kv_at(a, l))))
+                };
+                match (&mut cur, name) {
+                    (Some(c), Some((g, kv))) if c.1 == g && c.2 == kv && c.4 == a => c.4 = b,
+                    (_, name) => {
+                        if let Some(c) = cur.take() {
+                            out.push(c);
+                        }
+                        cur = name.map(|(g, kv)| (f, g, kv, a, b));
+                    }
+                }
+            }
+            if let Some(c) = cur {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Each field's sources, with the candidates each covers.
+    fn sources(&self) -> phitex_defuse::FxHashMap<ValueId, Vec<NameSource>> {
+        let n = self.n;
         let mut by: phitex_defuse::FxHashMap<ValueId, Vec<NameSource>> = phitex_defuse::FxHashMap::default();
         for (k, &(l, f)) in self.locals.iter().enumerate() {
             by.entry(f.0).or_default().push(NameSource {
@@ -1906,51 +1962,6 @@ impl NameSources<'_> {
                 loc: None,
             });
         }
-        let lasts: Vec<usize> = (0..n).filter(|&i| self.is_last[i]).collect();
-        let mut out: Vec<Stretch> = Vec::new();
-        let mut cuts: Vec<usize> = Vec::new();
-        for (f, mut srcs) in by {
-            srcs.sort_by_key(|s| s.rank);
-            cuts.clear();
-            cuts.extend([0, n]);
-            for &i in &lasts {
-                cuts.extend([i, i + 1]);
-            }
-            for s in &srcs {
-                for &(a, b) in &s.covers {
-                    cuts.extend([a, b]);
-                }
-                if let Some(l) = s.loc {
-                    cuts.extend(self.at.history(l).iter().map(|x| x.0 + 1));
-                }
-            }
-            cuts.retain(|&c| c <= n);
-            cuts.sort_unstable();
-            cuts.dedup();
-            let mut cur: Option<Stretch> = None;
-            for w in cuts.windows(2) {
-                let (a, b) = (w[0], w[1]);
-                let name = if self.is_last[a] {
-                    None
-                } else {
-                    srcs.iter()
-                        .find(|s| s.covers.iter().any(|&(lo, hi)| lo <= a && a < hi))
-                        .map(|s| (s.stands, s.loc.map_or(ValueId::UNIT, |l| kv_at(a, l))))
-                };
-                match (&mut cur, name) {
-                    (Some(c), Some((g, kv))) if c.1 == g && c.2 == kv && c.4 == a => c.4 = b,
-                    (_, name) => {
-                        if let Some(c) = cur.take() {
-                            out.push(c);
-                        }
-                        cur = name.map(|(g, kv)| (f, g, kv, a, b));
-                    }
-                }
-            }
-            if let Some(c) = cur {
-                out.push(c);
-            }
-        }
-        out
+        by
     }
 }
