@@ -385,8 +385,13 @@ pub(crate) struct Input {
 struct Snap {
     len: usize,
     from: usize,
-    saved: Vec<(Level, (usize, u8, i64, usize), u64)>,
+    saved: Vec<Saved>,
 }
+
+/// A level saved for a rewind ([`Snap`]): the level, its line's
+/// `(loc, state, endch, len)` or its file's `(off, _, _, pos)`, and the
+/// push that filled its slot.
+type Saved = (Level, (usize, u8, i64, usize), u64);
 
 /// The least arena size, in tokens, at which a run compacts it.
 pub(crate) const ARENA_COMPACT: usize = 1 << 22;
@@ -412,7 +417,7 @@ impl Input {
 
     /// Level `t` with its line's or file's position and the push that
     /// filled its slot, for [`Snap`].
-    fn saved(&self, t: usize) -> (Level, (usize, u8, i64, usize), u64) {
+    fn saved(&self, t: usize) -> Saved {
         let l = self.levels[t];
         match l.kind {
             kind::LINE => {
