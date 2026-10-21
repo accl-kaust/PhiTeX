@@ -123,6 +123,8 @@ fn main() {
         if e.flags & (LOADABLE | SFNT) != (LOADABLE | SFNT) {
             unloadable += 1;
         }
+        // (stored: a job's name lookups read them, not derive them)
+        e.fc_names = Some(fc_names(&e));
         if check {
             let mine = fc_names(&e);
             let set = |v: &Vec<String>| {

@@ -32,13 +32,14 @@ use alloc::sync::Arc;
 use crate::dvi::{ScanSpecials, ScanSpecialsExt};
 pub use crate::glyphrun::{ColorSpec, GlyphRun, GlyphSource};
 use crate::io::Files;
+pub use crate::obj::BatchDeflate;
 use crate::obj::Deflate;
 use crate::pdfdev::PdfRect;
 use crate::pdfdoc::{PdfDevSetting, PdfEncSetting, PdfObjSetting, PdfSetting};
 use crate::prelude::*;
 
 /// How xdvipdfmx is run.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Options {
     /// `-o`: the PDF's name (hashed into the subset tags and the ID).
     pub pdf_filename: Option<Vec<u8>>,
@@ -54,6 +55,9 @@ pub struct Options {
     /// libpaper's system paper name (none: `a4`; `dvipdfmx.cfg` sets
     /// `p a4` anyway).
     pub system_paper: Option<Vec<u8>>,
+    /// Whether each page's [`PageOut::glyph_runs`] are made (a viewer's
+    /// side output; the PDF is the same either way).
+    pub glyph_runs: bool,
 }
 
 impl Default for Options {
@@ -66,6 +70,7 @@ impl Default for Options {
             now: 0,
             utc_offset_min: 0,
             system_paper: None,
+            glyph_runs: false,
         }
     }
 }
@@ -75,7 +80,8 @@ impl Default for Options {
 pub struct PageOut {
     /// The PDF bytes written during the call.
     pub pdf: Vec<u8>,
-    /// The page's glyphs, as [`crate::glyphrun`] describes them.
+    /// The page's glyphs, as [`crate::glyphrun`] describes them (none
+    /// unless [`Options::glyph_runs`]).
     pub glyph_runs: Vec<GlyphRun>,
 }
 
@@ -106,6 +112,7 @@ impl Session {
         dpx.session.now = options.now;
         dpx.session.utc_offset_min = options.utc_offset_min;
         dpx.session.system_paper_name = options.system_paper.clone();
+        dpx.runs.on = options.glyph_runs;
         let mut argv = vec![b"xdvipdfmx".to_vec()];
         argv.extend(options.args.iter().cloned());
         if let Some(p) = &options.pdf_filename {
@@ -130,6 +137,7 @@ impl Session {
         if dvi2pts == 0.0 {
             crate::fatal!("dvi_init() failed!");
         }
+        dpx.pdf_fontmaps_started();
         Ok(Session {
             dpx,
             argv,
@@ -313,11 +321,30 @@ impl Session {
             crate::fatal!("No pages fall in range!");
         }
         let d = &mut *self.dpx;
-        d.spc_exec_at_end_document()?;
-        d.pdf_close_document()?;
-        d.pdf_close_fontmaps();
-        d.dvi_close();
+        // (the streams of the end, the fonts' above all, compressed in
+        // one batch if the host gave a batch deflater)
+        d.o.defer_streams();
+        let r = (|| {
+            d.spc_exec_at_end_document()?;
+            d.pdf_close_document()?;
+            d.pdf_close_fontmaps();
+            d.dvi_close();
+            Ok(())
+        })();
+        if let Err(e) = r {
+            // (what was written, the pending streams in place)
+            let _ = d.o.resolve_pending();
+            return Err(e);
+        }
         Ok(d.o.take_output())
+    }
+
+    /// Compresses the streams of [`Session::finish`] (the fonts', the
+    /// last object streams) with `batch`, all at once, which the host
+    /// may run in parallel; the bytes are the same as with the
+    /// session's deflater alone.
+    pub fn set_batch_deflate(&mut self, batch: BatchDeflate) {
+        self.dpx.o.set_batch_deflate(batch);
     }
 
     /// What was written but not yet taken: after an `Err`, the output
@@ -344,6 +371,43 @@ impl Session {
         }
         out.extend(s.finish()?);
         Ok(out)
+    }
+}
+
+/// Conversions that start alike, as a watch's builds of a document do:
+/// the start [`Session::new`] makes (the options, the config file, the
+/// font maps it reads, the preamble) is kept, and each conversion goes on
+/// from a copy of it ([`Session::snapshot`]) while the options and the
+/// preamble are the same. The copies share the kept start's files and
+/// deflater (the host's).
+#[derive(Default)]
+pub struct Starts {
+    kept: Option<(Options, Vec<u8>, Session)>,
+}
+
+impl Starts {
+    /// A session as `Session::new(options, files, deflate, preamble)`
+    /// starts it: a copy of the kept start if it was made with the same
+    /// options and preamble (`files` and `deflate` then unused), else a
+    /// new start, kept.
+    pub fn session(
+        &mut self,
+        options: Options,
+        files: Box<dyn Files>,
+        deflate: Deflate,
+        preamble: &[u8],
+    ) -> Result<Session> {
+        if let Some((o, p, s)) = &self.kept
+            && *o == options
+            && p.as_slice() == preamble
+        {
+            return Ok(s.snapshot());
+        }
+        self.kept = None;
+        let s = Session::new(options.clone(), files, deflate, preamble)?;
+        let copy = s.snapshot();
+        self.kept = Some((options, preamble.to_vec(), s));
+        Ok(copy)
     }
 }
 
@@ -577,6 +641,95 @@ mod tests {
     const PNG: &[u8] = include_bytes!("../../../../tests/e2e/png-rgb8.png");
     const JPEG: &[u8] = include_bytes!("../../../../tests/e2e/xpic-exif300.jpg");
     const PDF: &[u8] = include_bytes!("../../../../tests/e2e/xpic-three.pdf");
+
+    const CMR10_TFM: &[u8] = include_bytes!("../../../fonts/tfm/tests/fixtures/cmr10.tfm");
+    const CMR10_PFB: &[u8] = include_bytes!("../../pdf/tests/fixtures/cmr10.pfb");
+
+    /// One page showing "A" in cmr10, and the PDF and the page's glyph
+    /// runs with `glyph_runs` as given; the end's streams compressed in a
+    /// batch (backwards, as a parallel host may) if `batch`.
+    fn cmr10_page(glyph_runs: bool, batch: bool) -> (Vec<u8>, Vec<GlyphRun>, usize) {
+        // (the map line first: the font embedded from its Type 1 file)
+        let mut p = page(b"pdf:mapline cmr10 CMR10 <cmr10.pfb");
+        p.pop();
+        p.extend([crate::dvi::FNT_DEF1, 0]);
+        p.extend_from_slice(&CMR10_TFM[24..28]);
+        p.extend(655_360u32.to_be_bytes());
+        p.extend(655_360u32.to_be_bytes());
+        p.extend([0, 5]);
+        p.extend_from_slice(b"cmr10");
+        p.extend([crate::dvi::FNT_NUM_0, b'A', crate::dvi::EOP]);
+        /// cmr10's metrics and Type 1 program, whatever the suffix asked.
+        struct Cmr10;
+        impl Files for Cmr10 {
+            fn find(&mut self, name: &[u8], f: crate::io::Format, _: &[u8]) -> Option<Vec<u8>> {
+                use crate::io::Format;
+                if !name.starts_with(b"cmr10") {
+                    return None;
+                }
+                match f {
+                    Format::Tfm => Some(b"cmr10.tfm".to_vec()),
+                    Format::Type1 => Some(b"cmr10.pfb".to_vec()),
+                    _ => None,
+                }
+            }
+            fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+                match path {
+                    b"cmr10.tfm" => Some(Arc::from(CMR10_TFM)),
+                    b"cmr10.pfb" => Some(Arc::from(CMR10_PFB)),
+                    _ => None,
+                }
+            }
+        }
+        let files = Cmr10;
+        let options = Options {
+            source_date_epoch: Some(0),
+            glyph_runs,
+            ..Options::default()
+        };
+        let deflate: Deflate = Box::new(|l, d: &[u8]| phitex_codecs::deflate::compress(d, l));
+        let mut s = Session::new(options, Box::new(files), deflate, &preamble()).expect("starts");
+        let batched = Rc::new(core::cell::Cell::new(0));
+        if batch {
+            let n = batched.clone();
+            s.set_batch_deflate(Box::new(move |jobs: &[(i32, &[u8])]| {
+                n.set(n.get() + jobs.len());
+                let mut out: Vec<Vec<u8>> = jobs
+                    .iter()
+                    .rev()
+                    .map(|&(l, d)| phitex_codecs::deflate::compress(d, l))
+                    .collect();
+                out.reverse();
+                out
+            }));
+        }
+        let page = s.page(&p).unwrap_or_else(|e| panic!("page: {e}"));
+        let mut pdf = page.pdf;
+        pdf.extend(s.finish().unwrap_or_else(|e| panic!("finish: {e}")));
+        (pdf, page.glyph_runs, batched.get())
+    }
+
+    #[test]
+    fn glyph_runs_only_when_asked() {
+        let (pdf_on, runs_on, _) = cmr10_page(true, false);
+        let (pdf_off, runs_off, _) = cmr10_page(false, false);
+        assert_eq!(runs_on.len(), 1, "{runs_on:?}");
+        assert!(
+            matches!(&runs_on[0].source, GlyphSource::Type1 { glyph_name, .. } if glyph_name == b"A"),
+            "{runs_on:?}"
+        );
+        assert!(runs_off.is_empty());
+        assert!(pdf_on == pdf_off, "the PDF does not depend on the runs");
+    }
+
+    #[test]
+    fn batch_deflate_same_bytes() {
+        let (one, _, _) = cmr10_page(false, false);
+        let (batch, _, n) = cmr10_page(false, true);
+        assert!(one == batch, "the batch's PDF differs");
+        // (the font program and the last object stream, at least)
+        assert!(n >= 2, "{n} streams in the batch");
+    }
 
     #[test]
     fn truncated_xdv() {

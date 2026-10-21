@@ -112,6 +112,28 @@ pub struct XrefEntry {
 /// A deflater: zlib's `compress2` at the given level.
 pub type Deflate = Box<dyn FnMut(i32, &[u8]) -> Vec<u8>>;
 
+/// A deflater of many streams at once (each `(level, data)` as
+/// [`Deflate`] compresses it, the results in order): the host may
+/// compress them in parallel ([`PdfOut::set_batch_deflate`]).
+pub type BatchDeflate = Box<dyn FnMut(&[(i32, &[u8])]) -> Vec<Vec<u8>>>;
+
+/// A stream whose compression waits for the batch
+/// ([`PdfOut::defer_streams`]): its bytes go in at `at` once compressed.
+#[derive(Clone)]
+struct Pending {
+    /// Where in `out` the stream's bytes go.
+    at: usize,
+    /// `file_position` there, without the pending streams before it.
+    pos: usize,
+    /// The stream's dictionary as written with a `/Length` of `k + 1`
+    /// digits, at `dicts[k]`: the bytes and where the digits are (the
+    /// rest is the same whatever the digits: the line breaks of
+    /// `out_white` depend on lengths only).
+    dicts: Vec<(Vec<u8>, usize)>,
+    level: i32,
+    data: Vec<u8>,
+}
+
 /// The arena and the writer (`struct pdf_out`).
 #[derive(Clone)]
 pub struct PdfOut {
@@ -144,6 +166,11 @@ pub struct PdfOut {
 
     /// Shared by snapshots (none: `Default`'s writer, never deflating).
     deflate: Option<Rc<RefCell<Deflate>>>,
+    /// The host's batch deflater, if it gives one.
+    batch: Option<Rc<RefCell<BatchDeflate>>>,
+    /// Streams written but not compressed yet (while deferring).
+    pending: Vec<Pending>,
+    deferring: bool,
     /// Files read for their objects (`pdf_file`), by number.
     pub files: Vec<crate::pdfread::PdfFile>,
     /// Where `parse_xref_table` found `trailer`.
@@ -175,6 +202,9 @@ impl PdfOut {
             current_objstm: None,
             free_list: Vec::new(),
             deflate: Some(Rc::new(RefCell::new(deflate))),
+            batch: None,
+            pending: Vec::new(),
+            deferring: false,
             files: Vec::new(),
             trailer_pos: 0,
         }
@@ -1132,6 +1162,9 @@ impl PdfOut {
             } else {
                 self.put(dict, b"Filter", name)?;
             }
+            if self.deferring && self.defer_stream(dict, &mut filtered)? {
+                return Ok(());
+            }
             filtered = (self.deflate.as_ref().expect("deflater").borrow_mut())(
                 self.compression_level,
                 &filtered,
@@ -1146,6 +1179,131 @@ impl PdfOut {
         }
         self.out_str(b"\n")?;
         self.out_str(b"endstream")?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // Streams compressed together.
+
+    /// The host's batch deflater: with it, the streams written between
+    /// [`PdfOut::defer_streams`] and the end's cross-reference section are
+    /// compressed in one batch (in parallel, if the host does so). The
+    /// bytes are the same as without it.
+    pub fn set_batch_deflate(&mut self, batch: BatchDeflate) {
+        self.batch = Some(Rc::new(RefCell::new(batch)));
+    }
+
+    /// From now on, compressed streams wait for the batch (when the host
+    /// gave a batch deflater): their bytes are put in place, and the
+    /// offsets after them moved, by [`PdfOut::resolve_pending`].
+    pub fn defer_streams(&mut self) {
+        self.deferring = self.batch.is_some();
+    }
+
+    /// `dict` with `/Length` `len` written alone, as it would be at
+    /// line position `line`.
+    fn dict_alone(&mut self, dict: Obj, n: Obj, len: f64, line: usize) -> Result<Vec<u8>> {
+        self.set_number(n, len)?;
+        let (out, pos, at) = (
+            core::mem::take(&mut self.out),
+            self.file_position,
+            self.line_position,
+        );
+        self.line_position = line;
+        let r = self.write_obj(Some(dict));
+        let bytes = core::mem::replace(&mut self.out, out);
+        self.file_position = pos;
+        self.line_position = at;
+        r?;
+        Ok(bytes)
+    }
+
+    /// `write_stream`'s rest for stream dictionary `dict` and the data to
+    /// compress, deferred: false (nothing done) if the dictionary's
+    /// `/Length` cannot be found in it written.
+    fn defer_stream(&mut self, dict: Obj, data: &mut Vec<u8>) -> Result<bool> {
+        let len = data.len();
+        // zlib's `compressBound`
+        let bound = len + (len >> 12) + (len >> 14) + (len >> 25) + 13;
+        let digits = |mut v: usize| {
+            let mut d = 1;
+            while v >= 10 {
+                v /= 10;
+                d += 1;
+            }
+            d
+        };
+        let n = self.new_number(0.0);
+        self.put(dict, b"Length", n)?;
+        let line = self.line_position;
+        let mut dicts = Vec::new();
+        for d in 1..=digits(bound) {
+            let lo = 10u64.pow(d as u32 - 1);
+            let a = self.dict_alone(dict, n, lo as f64, line)?;
+            let b = self.dict_alone(dict, n, (lo * 10 - 1) as f64, line)?;
+            let Some(k) = a.iter().zip(&b).position(|(x, y)| x != y) else {
+                return Ok(false);
+            };
+            if a.len() != b.len() || a.len() < k + d || a[k + d..] != b[k + d..] {
+                return Ok(false);
+            }
+            dicts.push((a, k));
+        }
+        self.pending.push(Pending {
+            at: self.out.len(),
+            pos: self.file_position,
+            dicts,
+            level: self.compression_level,
+            data: core::mem::take(data),
+        });
+        // (as after `endstream`)
+        self.line_position = b"endstream".len();
+        Ok(true)
+    }
+
+    /// The pending streams compressed (the host's batch) and put in
+    /// place: the offsets of the objects after each moved by its length.
+    /// Deferring ends.
+    pub fn resolve_pending(&mut self) -> Result<()> {
+        self.deferring = false;
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let pending = core::mem::take(&mut self.pending);
+        let jobs: Vec<(i32, &[u8])> = pending.iter().map(|p| (p.level, &p.data[..])).collect();
+        let packed = (self.batch.as_ref().expect("batch deflater").borrow_mut())(&jobs);
+        let mut out = Vec::with_capacity(self.out.len() + packed.iter().map(Vec::len).sum::<usize>());
+        let (mut last, mut total) = (0, 0);
+        let mut moved: Vec<(usize, usize)> = Vec::with_capacity(pending.len());
+        for (p, z) in pending.iter().zip(&packed) {
+            let mut lb = Buf::new();
+            lb.uint(z.len() as u32);
+            let Some((dict, k)) = p.dicts.get(lb.0.len() - 1) else {
+                crate::fatal!("deflate: a stream compressed past zlib's bound");
+            };
+            out.extend_from_slice(&self.out[last..p.at]);
+            last = p.at;
+            let start = out.len();
+            out.extend_from_slice(&dict[..*k]);
+            out.extend_from_slice(&lb.0);
+            out.extend_from_slice(&dict[k + lb.0.len()..]);
+            out.extend_from_slice(b"\nstream\n");
+            out.extend_from_slice(z);
+            out.extend_from_slice(b"\nendstream");
+            total += out.len() - start;
+            moved.push((p.pos, total));
+        }
+        out.extend_from_slice(&self.out[last..]);
+        self.out = out;
+        self.file_position += total;
+        for e in &mut self.xref {
+            if e.kind == 1 {
+                let k = moved.partition_point(|&(pos, _)| pos <= e.field2 as usize);
+                if k > 0 {
+                    e.field2 += moved[k - 1].1 as u32;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1258,6 +1416,7 @@ impl PdfOut {
         if let Some(s) = self.current_objstm.take() {
             self.release_objstm(s)?;
         }
+        self.resolve_pending()?;
         if let Some(xs) = self.xref_stream {
             self.label_obj(xs)?;
         }

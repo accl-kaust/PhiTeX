@@ -13,11 +13,11 @@
 //! every listed face's bytes from its absolute TeX Live path, and writes
 //! [`FontIndex::to_bytes`]. Paths in the index are those absolute paths.
 //!
-//! # The format (version 1, stable)
+//! # The format (version 2, stable; version 1 is read too)
 //!
 //! All integers big-endian.
 //! ```text
-//! "PXFI" u16 version=1
+//! "PXFI" u16 version=2
 //! u32 npaths, then per path: u16 len, UTF-8 bytes
 //! u32 nentries, then per entry:
 //!   u32 path index, u32 face index, u16 flags
@@ -30,7 +30,14 @@
 //!   if flags & HAS_INSTANCE: u16 the named instance's subfamily name id
 //!   u16 nrecords, then per record: u16 platform, encoding, language,
 //!   name id, u16 len, bytes
+//!   if flags & HAS_FC_NAMES (version 2): fontconfig's family, style and
+//!   full names, each list u16 count, then per name u16 len, UTF-8 bytes
 //! ```
+//!
+//! fontconfig's names ([`FcNames`]) are derived from the records by the
+//! name matching's rules (`xetex::fontmgr::fc_names`): the index builder
+//! stores them, so that a job's first name lookup reads them instead of
+//! deriving them for every face of the list.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -42,7 +49,7 @@ use crate::names::{INDEXED_IDS, NameRecord, read_name_table};
 use crate::{Tag, tag};
 
 const MAGIC: &[u8; 4] = b"PXFI";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 /// The face can be opened (FreeType opens it and it is scalable).
 pub const LOADABLE: u16 = 1;
@@ -60,6 +67,7 @@ pub const WOFF: u16 = 64;
 /// the index builder from `fc-list`.
 pub const VARIABLE: u16 = 128;
 const HAS_INSTANCE: u16 = 256;
+const HAS_FC_NAMES: u16 = 512;
 const KEPT: u16 = LOADABLE | SFNT | WOFF | VARIABLE;
 
 /// One face in the list.
@@ -88,6 +96,18 @@ pub struct FaceEntry {
     pub instance_subfamily: Option<u16>,
     /// Name records 1, 2, 4, 6, 16 and 17 as FreeType reads them.
     pub names: Vec<NameRecord>,
+    /// fontconfig's names of the face, as the index builder stored them
+    /// (none: derived from `names` where needed).
+    pub fc_names: Option<FcNames>,
+}
+
+/// fontconfig's family, style and full names of a face (`FC_FAMILY`,
+/// `FC_STYLE`, `FC_FULLNAME`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FcNames {
+    pub family: Vec<String>,
+    pub style: Vec<String>,
+    pub fullname: Vec<String>,
 }
 
 impl FaceEntry {
@@ -143,6 +163,7 @@ impl FaceEntry {
             names: table(tag(b"name"))
                 .map(|d| read_name_table(d, &INDEXED_IDS))
                 .unwrap_or_default(),
+            fc_names: None,
         };
         if let Some(fvar) = table(tag(b"fvar")) {
             let rd = |o: usize| crate::face::rd_u16(fvar, o);
@@ -269,6 +290,9 @@ impl FontIndex {
             if e.fc_style.is_some() {
                 flags |= HAS_FC;
             }
+            if e.fc_names.is_some() {
+                flags |= HAS_FC_NAMES;
+            }
             w.u32(pi);
             w.u32(e.index);
             w.u16(flags);
@@ -308,6 +332,14 @@ impl FontIndex {
                 w.u16(r.name_id);
                 w.bytes(&r.bytes);
             }
+            if let Some(fc) = &e.fc_names {
+                for list in [&fc.family, &fc.style, &fc.fullname] {
+                    w.u16(list.len() as u16);
+                    for n in list {
+                        w.bytes(n.as_bytes());
+                    }
+                }
+            }
         }
         w.0
     }
@@ -316,7 +348,7 @@ impl FontIndex {
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<FontIndex> {
         let mut r = Reader(b, 0);
-        if r.take(4)? != MAGIC || r.u16()? != VERSION {
+        if r.take(4)? != MAGIC || !(1..=VERSION).contains(&r.u16()?) {
             return None;
         }
         let np = r.u32()? as usize;
@@ -374,6 +406,21 @@ impl FontIndex {
                     bytes: r.bytes()?,
                 });
             }
+            let fc_names = if flags & HAS_FC_NAMES != 0 {
+                let mut list = || -> Option<Vec<String>> {
+                    let n = r.u16()? as usize;
+                    (0..n)
+                        .map(|_| String::from_utf8(r.bytes()?).ok())
+                        .collect()
+                };
+                Some(FcNames {
+                    family: list()?,
+                    style: list()?,
+                    fullname: list()?,
+                })
+            } else {
+                None
+            };
             entries.push(FaceEntry {
                 path,
                 index,
@@ -385,6 +432,7 @@ impl FontIndex {
                 fc_style,
                 instance_subfamily,
                 names,
+                fc_names,
             });
         }
         Some(FontIndex { entries })
