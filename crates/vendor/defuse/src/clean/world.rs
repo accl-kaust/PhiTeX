@@ -957,16 +957,6 @@ impl World {
         });
     }
 
-    /// The nodes in work in unit `u` strictly between positions `lo` and
-    /// `hi`, in order.
-    pub(crate) fn work_between(&self, u: u32, lo: Pos, hi: Pos) -> impl Iterator<Item = Id> + '_ {
-        self.work
-            .get(&u)
-            .into_iter()
-            .flat_map(move |m| m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)))
-            .map(|(_, &x)| x)
-    }
-
     /// Files node `n` (`on`) in the accumulator indexes, or takes it out.
     fn acc_index(&mut self, id: Id, n: &Node, on: bool) {
         // (Declaring no contributions at all, or all of them, is

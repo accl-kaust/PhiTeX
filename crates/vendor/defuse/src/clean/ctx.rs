@@ -308,7 +308,11 @@ impl<'a> Ctx<'a> {
 
     /// The definition of `f` reaching the position just after node `at`
     /// (what it unfolded or claims included): the value and its defining
-    /// node (`None`: the unit's start value).
+    /// node (`None`: the unit's start value). `at` is any other node of
+    /// this unit, before or past this one (a page builder reading the
+    /// state at the pieces after it): a definition coming in or changing
+    /// up to `at` re-asks, as for any read. One past this node may reach
+    /// this node's own definition, read as it last committed.
     ///
     /// # Errors
     ///
@@ -327,7 +331,8 @@ impl<'a> Ctx<'a> {
         self.use_field_pos(f, at, true)
     }
 
-    /// The definition of `f` reaching the position just before node `at`.
+    /// The definition of `f` reaching the position just before node `at`
+    /// (before or past this one, as [`Ctx::use_field_at`]).
     ///
     /// # Errors
     ///
@@ -358,7 +363,8 @@ impl<'a> Ctx<'a> {
             self.reads.push(Read::At { node: a, there: false });
             return Ok(FieldAt::Gone);
         }
-        if !self.w.before(a, self.me) {
+        // (Before or past the reader in its unit, not the reader itself.)
+        if a == self.me || self.w.node(a).is_none_or(|n| n.unit != self.unit) {
             self.error = Some(crate::api::EvalError::BadPosition {
                 node: self.node(),
                 at,
@@ -436,7 +442,7 @@ impl<'a> Ctx<'a> {
             .node(self.me)
             .and_then(|n| n.text.stat.defs.as_ref().and_then(|d| d.iter().find(|e| e.0 == f).map(|e| e.1)))
             .unwrap_or(Locality::Local);
-        self.define_with(f, x, loc);
+        self.define_with_inner(f, x, loc);
     }
 
     pub fn define_with(&mut self, f: Field, x: ValueId, loc: Locality) {
@@ -581,7 +587,7 @@ impl<'a> Ctx<'a> {
         let ok = self.w.node(at.0).is_some_and(|n| n.unit == self.unit && !matches!(n.place, Place::Marker(_)))
             && if any { at.0 != self.me } else { self.w.before(at.0, self.me) };
         if !ok {
-            return self.follow(op, args);
+            return self.follow_inner(op, args);
         }
         self.reads.push(Read::At {
             node: at.0,
@@ -756,7 +762,7 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn acc_range_inner(&mut self, f: Field, from: Option<NodeId>) -> Result<ValueId, Stop> {
-        self.acc_range_to(f, from, None)
+        self.acc_range_to_inner(f, from, None)
     }
 
     /// The fold of accumulator `f` over the window `(from, to]`.
@@ -1014,7 +1020,7 @@ impl<'a> Ctx<'a> {
                 .collect();
         }
         let n = self.claim.unwrap_or(0);
-        (0..n).filter_map(|i| self.following(i)).collect()
+        (0..n).filter_map(|i| self.following_inner(i)).collect()
     }
 
     /// The `i`-th following sibling's text (never waits).
@@ -1145,7 +1151,7 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn push_contribution_inner(&mut self, f: Field, x: ValueId) {
-        self.define_with(f, x, Locality::Local);
+        self.define_with_inner(f, x, Locality::Local);
     }
 
     fn seq(&mut self, f: Field, prev: bool) -> Result<Option<ValueId>, Stop> {
@@ -1223,7 +1229,7 @@ impl<'a> Ctx<'a> {
             Some(r) => super::seq::repl(v, r),
             None => super::seq::take(v),
         };
-        self.define_with(f, x, Locality::Local);
+        self.define_with_inner(f, x, Locality::Local);
         Ok(got)
     }
 

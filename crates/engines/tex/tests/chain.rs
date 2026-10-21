@@ -57,37 +57,32 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
             };
             let b = common::build(opts, Some(&common::plain()), &src);
             eprintln!(
-                "{name} at {t} threads: wall {:?}, busy {:?}, busy/wall {:.2}, runs {}, stops {}, raises {}, speculations {}/{}/{}, waits_by_kind {:?}",
+                "{name} at {t} threads: wall {:?}, busy {:?}, busy/wall {:.2}, runs {}, stops {}, speculations {}/{}/{}",
                 b.stats.wall,
                 b.stats.busy,
                 b.stats.busy.as_secs_f64() / b.stats.wall.as_secs_f64().max(1e-9),
                 b.stats.runs,
                 b.stats.stops,
-                b.stats.raises,
                 b.stats.speculations,
                 b.stats.confirmations,
-                b.stats.mispredictions,
-                b.stats.waits_by_kind
+                b.stats.mispredictions
             );
         }
     }
     {
         let s = &b.stats;
         eprintln!(
-            "{name}: {} token-frame nodes, {} text nodes; waits_by_kind {:?}, hints {} bounded / {} any / {} demoted / {} violations / {} undeclared, speculations {}, raises {}, stops {}, pending sets {} ({} defining)",
+            "{name}: {} token-frame nodes, {} text nodes; hints {} bounded / {} any / {} demoted / {} violations / {} undeclared, speculations {}, stops {}, pending sets {}",
             s.nodes_token_frames,
             s.nodes_text_frames,
-            s.waits_by_kind,
             s.nodes_bounded,
             s.nodes_any,
             s.hints_demoted,
             s.regime_violations,
             s.undeclared_definitions,
             s.speculations,
-            s.raises,
             s.stops,
-            s.pending_sets,
-            s.pending_sets_defining
+            s.pending_sets
         );
         for (k, l) in b.chain_waits().iter().enumerate() {
             eprintln!("  {name} wait {k}: {l}");
@@ -120,13 +115,12 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
         }
     }
     eprintln!(
-        "{name}: {} nodes run, {} runs, critical path {:?}, realised cp {}, peak running {}, ready mean {:.2}, page steps {}, chain {} links: {by:?}",
+        "{name}: {} nodes run, {} runs, critical path {:?}, realised cp {}, peak running {}, page steps {}, chain {} links: {by:?}",
         b.stats.nodes_run,
         b.stats.runs,
         b.stats.critical_path,
         b.stats.realised_critical_path,
         b.stats.peak_running,
-        b.stats.ready_mean(),
         b.stats.page_steps,
         c.len()
     );
@@ -218,12 +212,11 @@ fn speculation_ab() {
                 };
                 let s = &b.stats;
                 eprintln!(
-                    "{name} t{t} {label:9} same {same} cp {:?} nodes {} runs {} stops {} raises {} spec {}/{}/{} busy/wall {:.2} wall {:?}",
+                    "{name} t{t} {label:9} same {same} cp {:?} nodes {} runs {} stops {} spec {}/{}/{} busy/wall {:.2} wall {:?}",
                     s.critical_path,
                     s.nodes_run,
                     s.runs,
                     s.stops,
-                    s.raises,
                     s.speculations,
                     s.confirmations,
                     s.mispredictions,
