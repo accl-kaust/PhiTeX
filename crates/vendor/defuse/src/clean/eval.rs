@@ -1992,7 +1992,17 @@ impl Engine {
                         site: Some(NodeId(*site)),
                     });
                 }
-                Read::Out { node, .. } | Read::Placed { node, .. } => offer(hs, *node, Cause::Output { of: NodeId(*node) }),
+                Read::Out { node, .. } => offer(hs, *node, Cause::Output { of: NodeId(*node) }),
+                // (A placed output read with the reader's guess standing in
+                // is a link only when it made the run, as a guessed fold.)
+                Read::Placed { node, val, or, .. } => {
+                    let made = or.is_none()
+                        || matches!(cause, Some(crate::api::Rerun::Output { of }) if of == NodeId(*node))
+                        || old.as_ref().is_some_and(|o| o.reads.iter().any(|r| matches!(r, Read::Placed { node: x, val: v, .. } if x == node && v != val)));
+                    if made {
+                        offer(hs, *node, Cause::Output { of: NodeId(*node) });
+                    }
+                }
                 // (A range's last contributor: a chain through an
                 // accumulator falls by one through each.)
                 Read::Range { f, from, to, past, val } => {
