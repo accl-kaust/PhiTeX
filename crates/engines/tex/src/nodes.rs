@@ -414,10 +414,89 @@ pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
 
 pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode {
     let mut b = decode_box_head(v, xs);
-    b.list = xs
-        .get(9)
-        .map_or_else(Vec::new, |&l| decode_list(v, l, side));
+    b.list = xs.get(9).map_or_else(Vec::new, |&l| {
+        take_made(l).map_or_else(|| decode_list(v, l, side), |m| checked_made(v, l, m))
+    });
     b
+}
+
+/// The lists line breaking made, native, by their values' ids: a page
+/// shipped takes its lines' lists from here instead of decoding them
+/// from the values the line breaking encoded them to (ids are the
+/// content's, so a list here is its value's decoding). Only lists that
+/// decode without the side tables (no mark, whatsit, insertion,
+/// adjustment, leaders or unset box anywhere in them); bounded by their
+/// nodes, emptied when full.
+struct Made {
+    lists: phitex_defuse::FxHashMap<u64, List>,
+    nodes: usize,
+}
+
+static MADE: std::sync::Mutex<Option<Made>> = std::sync::Mutex::new(None);
+
+/// The nodes [`MADE`] holds at most.
+const MADE_NODES: usize = 1 << 22;
+
+thread_local! {
+    /// Set while a page is decoded for shipping ([`take_made`]).
+    pub(crate) static TAKE_MADE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether `list` decodes the same without the side tables: none of
+/// its nodes, at any depth, is one the decoding numbers in them.
+fn side_free(list: &[Node]) -> bool {
+    list.iter().all(|n| match n {
+        Node::Mark(_) | Node::Whatsit(..) | Node::Ins(_) | Node::Adjust(_) | Node::Unset(_) => false,
+        Node::Glue(g) => g.leader.is_none(),
+        Node::Box(b) => side_free(&b.list),
+        Node::Disc(d) => side_free(&d.pre) && side_free(&d.post) && side_free(&d.replace),
+        _ => true,
+    })
+}
+
+/// Keeps line `list`, encoded as `id`, for the page that ships it; the
+/// list back where it is not kept.
+pub(crate) fn keep_made(id: ValueId, list: List) -> Option<List> {
+    if !side_free(&list) {
+        return Some(list);
+    }
+    let mut g = MADE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let m = g.get_or_insert_with(|| Made {
+        lists: phitex_defuse::FxHashMap::default(),
+        nodes: 0,
+    });
+    if m.nodes + list.len() > MADE_NODES {
+        m.lists.clear();
+        m.nodes = 0;
+    }
+    m.nodes += list.len();
+    if let Some(old) = m.lists.insert(id.raw(), list) {
+        m.nodes -= old.len();
+    }
+    None
+}
+
+/// Line list `id` as line breaking made it, taken, while a page is
+/// decoded for shipping.
+fn take_made(id: ValueId) -> Option<List> {
+    if !TAKE_MADE.with(std::cell::Cell::get) {
+        return None;
+    }
+    let mut g = MADE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let m = g.as_mut()?;
+    let l = m.lists.remove(&id.raw())?;
+    m.nodes -= l.len();
+    Some(l)
+}
+
+/// A list taken from [`MADE`]; under `observe`, `PHITEX_MADE_CHECK`
+/// checks it against its value's decoding.
+fn checked_made(v: &Values, id: ValueId, m: List) -> List {
+    if crate::exec::obs_flag!("PHITEX_MADE_CHECK") {
+        let d = decode_list(v, id, &mut Side::default());
+        assert!(d == m, "a made line list differs from its value's decoding");
+    }
+    m
 }
 
 /// A box's dimensions and glue setting, its list empty.
