@@ -48,6 +48,7 @@ mod pages;
 mod pdfout;
 mod pdfprim;
 mod pkgrec;
+mod regfold;
 mod prims;
 mod print;
 mod prof;

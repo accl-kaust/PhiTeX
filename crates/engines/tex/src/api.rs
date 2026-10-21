@@ -6141,6 +6141,12 @@ fn declare_fields(eng: &mut Engine) {
     }
     let lines = eng.values().field("lines");
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
+    // (the integer registers' writes that outlive their runs, as maps:
+    // `crate::regfold`)
+    eng.declare_accumulator_prefix(
+        crate::regfold::ACC_PREFIX,
+        Arc::new(crate::regfold::AffineMonoid),
+    );
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
     let rels = eng.values().field(crate::pdfprim::RT_RELS);

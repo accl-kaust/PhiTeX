@@ -766,7 +766,12 @@ impl Run<'_, '_> {
                 let l = self.quantity_loc(cmd::ASSIGN_INT, self.cur.chr);
                 self.scan_optional_equals()?;
                 let n = self.scan_int()?;
-                self.set_loc(l, Entry::int(n), global);
+                // (an integer register's: a map, `crate::regfold`)
+                if self.reg_map_ok(l, global)? {
+                    self.reg_apply_map(l, crate::regfold::Affine::set(n));
+                } else {
+                    self.set_loc(l, Entry::int(n), global);
+                }
             }
             cmd::ASSIGN_DIMEN => {
                 let l = self.quantity_loc(cmd::ASSIGN_DIMEN, self.cur.chr);
@@ -1018,6 +1023,22 @@ impl Run<'_, '_> {
             self.scan_optional_equals()?;
         } else {
             let _ = self.scan_keyword("by")?;
+        }
+        // (an integer register set, or advanced by a constant, where the
+        // map alone decides it: the old value not read, the write a map
+        // the run contributes, `crate::regfold`)
+        if p == 0 && (q == cmd::REGISTER || q == cmd::ADVANCE) {
+            let l = self.loc_of(field);
+            if self.reg_map_ok(l, global)? {
+                let x = self.scan_int()?;
+                let map = if q == cmd::ADVANCE {
+                    crate::regfold::Affine::add(x)
+                } else {
+                    crate::regfold::Affine::set(x)
+                };
+                self.reg_apply_map(l, map);
+                return Ok(());
+            }
         }
         // (§1238: the old value is read for `\advance`, `\multiply` and
         // `\divide` only; an assignment replaces it unseen)
