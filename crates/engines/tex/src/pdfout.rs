@@ -2507,12 +2507,12 @@ const LINK_SNAP: usize = 8;
 struct LinkSnap {
     at: usize,
     st: PdfState,
-    /// The writer's digest ([`PdfState::digest`]), taken with it.
-    dg: u64,
-    /// Its digest but for the characters used and those characters
-    /// ([`PdfState::digest_sans_chars`], [`PdfState::used_chars`]).
-    dg_sans: u64,
-    chars: Vec<(FontId, [bool; 256])>,
+    /// The writer's digest ([`PdfState::digest`]), its digest but for the
+    /// characters used and those characters
+    /// ([`PdfState::digest_sans_chars`], [`PdfState::used_chars`]): taken
+    /// when a later link first compares a writer with this one (most
+    /// snapshots are never compared).
+    digests: Option<(u64, u64, Vec<(FontId, [bool; 256])>)>,
     nums: FontNums,
     forms: Forms,
     /// The read-time object numbers the link numbered otherwise
@@ -2686,7 +2686,18 @@ struct LinkMemo {
 /// link had at snapshot `sn`: its records from there on are then the
 /// same bytes ([`finish_exact`]). The forms compared only when there are
 /// none (a document with forms runs on).
-fn same_writer(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &LinkSnap) -> bool {
+impl LinkSnap {
+    /// [`LinkSnap::digests`], taken now if not yet.
+    fn digests(&mut self) -> &(u64, u64, Vec<(FontId, [bool; 256])>) {
+        if self.digests.is_none() {
+            let st = &mut self.st;
+            self.digests = Some((st.digest(), st.digest_sans_chars(), st.used_chars()));
+        }
+        self.digests.as_ref().expect("taken above")
+    }
+}
+
+fn same_writer(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &mut LinkSnap) -> bool {
     let none = forms.whats.is_empty()
         && forms.fonts.is_empty()
         && sn.forms.whats.is_empty()
@@ -2696,7 +2707,7 @@ fn same_writer(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &LinkSnap)
     }
     // (the snapshot's digest taken when it was kept: no copy of its
     // writer, no formatting)
-    *nums == sn.nums && st.digest() == sn.dg
+    *nums == sn.nums && st.digest() == sn.digests().0
 }
 
 /// [`same_writer`] but for the characters the pages used: `st` has used
@@ -2705,7 +2716,12 @@ fn same_writer(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &LinkSnap)
 /// (the characters used are read at the file's end only, the fonts'
 /// subsets), and the end's writer is the last link's with `st`'s
 /// characters added.
-fn same_writer_but_chars(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &LinkSnap) -> bool {
+fn same_writer_but_chars(
+    st: &mut PdfState,
+    nums: &FontNums,
+    forms: &Forms,
+    sn: &mut LinkSnap,
+) -> bool {
     let none = forms.whats.is_empty()
         && forms.fonts.is_empty()
         && sn.forms.whats.is_empty()
@@ -2716,12 +2732,13 @@ fn same_writer_but_chars(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: 
     // (the snapshot's digest and characters taken when it was kept: no
     // copy of its writer)
     let mine = st.used_chars();
-    let covers = sn.chars.iter().all(|(f, c)| {
+    let (_, dg_sans, chars) = sn.digests();
+    let covers = chars.iter().all(|(f, c)| {
         mine.iter()
             .find(|m| m.0 == *f)
             .is_some_and(|m| c.iter().zip(&m.1).all(|(&a, &b)| !a || b))
     });
-    covers && st.digest_sans_chars() == sn.dg_sans
+    covers && st.digest_sans_chars() == *dg_sans
 }
 
 fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
@@ -2899,10 +2916,10 @@ pub(crate) fn finish_exact(
         let tt = std::time::Instant::now();
         if i > start
             && tries < 8
-            && let Some(m) = old.as_ref()
-            && let Some(sn) = m.snaps.iter().find(|sn| sn.at == i)
+            && let Some(m) = old.as_mut()
             && m.ids.len() == ids.len()
             && m.ids[i..] == ids[i..]
+            && let Some(sn) = m.snaps.iter_mut().find(|sn| sn.at == i)
         {
             tries += 1;
             if reloc == sn.reloc && same_writer(&mut st, &nums, &forms, sn) {
@@ -2922,9 +2939,7 @@ pub(crate) fn finish_exact(
         if i > start && (i - start).is_multiple_of(LINK_SNAP) {
             snaps.push(LinkSnap {
                 at: i,
-                dg: st.digest(),
-                dg_sans: st.digest_sans_chars(),
-                chars: st.used_chars(),
+                digests: None,
                 st: st.clone(),
                 nums: nums.clone(),
                 forms: forms.clone(),
@@ -3141,9 +3156,7 @@ pub(crate) fn finish_exact(
     }
     let end = LinkSnap {
         at: xpages.len(),
-        dg: 0,
-        dg_sans: 0,
-        chars: Vec::new(),
+        digests: None,
         st: st.clone(),
         nums: nums.clone(),
         forms: forms.clone(),
