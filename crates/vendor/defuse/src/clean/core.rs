@@ -45,9 +45,7 @@ pub(crate) struct Core {
     pub acc_memo: crate::sync::Table<Option<Arc<dyn Monoid>>>,
     pub seqs: FxHashSet<Field>,
     pub stable: FxHashSet<Field>,
-    /// A run resumed from its kept state continues its placements
-    /// (`Engine::set_continue_placements`).
-    pub cont_placements: bool,
+
     /// Declared loop-back fields and their initial values.
     pub loops: FxHashMap<Field, ValueId>,
     /// Loop-backs declared by runs, taken in when the evaluation is quiet.
@@ -116,7 +114,7 @@ impl Core {
             acc_memo: crate::sync::Table::new(),
             seqs: FxHashSet::default(),
             stable: FxHashSet::default(),
-            cont_placements: false,
+
             loops: FxHashMap::default(),
             loops_later: Mutex::new(Vec::new()),
             env: RwLock::new(Env::default()),

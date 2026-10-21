@@ -43,6 +43,8 @@ struct Run {
     /// It continued from its kept state (`Ctx::base`): its placements are
     /// its new ones, after those its earlier attempts made.
     base: Option<super::ctx::Base>,
+    /// It parked its token continuing (`Ctx::park_continuing`).
+    park_cont: bool,
 }
 
 /// The evaluation's scheduling state.
@@ -1400,6 +1402,7 @@ impl Engine {
             fold_redo: false,
             span: None,
             base: None,
+            park_cont: false,
         })
     }
 
@@ -1772,11 +1775,12 @@ impl Engine {
                         eprintln!("stop {id} on {wait:?} reads {:?} node {:?}", r.res.reads, self.w.node(match wait { Wait::Node(x, _) => x, _ => id }));
                     }
                     if let Some(k) = r.kept {
-                        // (The placements made so far, this attempt's
-                        // committed below.)
+                        // (Continuing: the placements made so far, this
+                        // attempt's committed below.)
                         let nk = r.kids.iter().filter(|x| !matches!(x.place, super::world::Place::Marker(_))).count();
                         let b = r.base.unwrap_or_default();
-                        self.kept.insert(id, (k, r.res.reads.clone(), (b.0 + r.kids.len(), b.1 + r.conts.len(), b.2 + nk)));
+                        let base = r.park_cont.then_some((b.0 + r.kids.len(), b.1 + r.conts.len(), b.2 + nk));
+                        self.kept.insert(id, (k, r.res.reads.clone(), base));
                     }
                     // Applications asked for: made now; an application's
                     // environment set before its body runs.
@@ -2671,9 +2675,9 @@ impl Merge<'_> {
                     // (Its placements are not made: a continuing token would
                     // stand on them, and goes.)
                     if let Some(k) = r.kept
-                        && (!eng.core.cont_placements || (r.kids.is_empty() && r.conts.is_empty()))
+                        && (!r.park_cont || (r.kids.is_empty() && r.conts.is_empty()))
                     {
-                        eng.kept.insert(id, (k, r.res.reads.clone(), r.base.unwrap_or_default()));
+                        eng.kept.insert(id, (k, r.res.reads.clone(), r.park_cont.then(|| r.base.unwrap_or_default())));
                     }
                     eng.enqueue(s, id);
                     None
@@ -2941,9 +2945,9 @@ impl Merge<'_> {
                 // (Its placements are not made: a continuing token would
                 // stand on them, and goes.)
                 if let Some(k) = r.kept
-                    && (!eng.core.cont_placements || (r.kids.is_empty() && r.conts.is_empty()))
+                    && (!r.park_cont || (r.kids.is_empty() && r.conts.is_empty()))
                 {
-                    eng.kept.insert(id, (k, r.res.reads.clone(), r.base.unwrap_or_default()));
+                    eng.kept.insert(id, (k, r.res.reads.clone(), r.park_cont.then(|| r.base.unwrap_or_default())));
                 }
                 eng.enqueue(s, id);
                 return Ok(());
@@ -3080,9 +3084,7 @@ fn run_job(
     let mut cx = Ctx::new(core, w, id, kept);
     cx.reads = reads;
     // (Continuing: the placements its earlier attempts made stand.)
-    if core.cont_placements
-        && let Some(b) = base
-    {
+    if let Some(b) = base.flatten() {
         cx.base = Some(b);
         cx.nkids = b.2;
     }
@@ -3128,6 +3130,7 @@ fn run_job(
         fold_redo: false,
         span: t_start.zip(super::core::now()),
         base: cx.base,
+        park_cont: cx.park_cont,
     };
     match r {
         Ok(Ok(out)) => {

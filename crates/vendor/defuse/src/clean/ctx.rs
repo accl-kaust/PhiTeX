@@ -17,7 +17,8 @@ pub(crate) type Base = (usize, usize, usize);
 
 /// A stopped run's kept state: its token (`Ctx::park`), the reads its
 /// attempts made (it resumes while they hold), its placements so far.
-pub(crate) type KeptState = (Box<dyn Any + Send>, Vec<Read>, Base);
+/// (The placements only when it parked continuing: `Ctx::park_continuing`.)
+pub(crate) type KeptState = (Box<dyn Any + Send>, Vec<Read>, Option<Base>);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Spec {
@@ -57,6 +58,8 @@ pub struct Ctx<'a> {
     pub(crate) diag: Vec<ValueId>,
     pub(crate) wait: Option<Wait>,
     pub(crate) kept: Option<Box<dyn Any + Send>>,
+    /// The kept token was parked continuing (`park_continuing`).
+    pub(crate) park_cont: bool,
     /// Resumed from a kept state.
     pub(crate) resumed: bool,
     /// A resumed run continues: the placements its earlier attempts made
@@ -129,6 +132,7 @@ impl<'a> Ctx<'a> {
             base: None,
             named_gone: false,
             kept,
+            park_cont: false,
             restart: false,
             error: None,
             claim: None,
@@ -1363,6 +1367,23 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn park_inner(&mut self, token: Box<dyn Any + Send>) {
         self.kept = Some(token);
+        self.park_cont = false;
+    }
+
+    /// As [`Ctx::park`], for a run that continues: resumed from `token`
+    /// (its reads holding), the placements this run's attempts made so
+    /// far stand, and it makes only new ones, after them; child and
+    /// continuation indices (and [`Ctx::output_of`]) go on from theirs.
+    /// A run that starts over (no token, a token whose reads broke,
+    /// [`Ctx::restart`]) makes all of them, as with `park`, where every
+    /// attempt makes all its placements again.
+    pub fn park_continuing(&mut self, token: Box<dyn Any + Send>) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
+        self.park_inner(token);
+        self.park_cont = true;
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "park_continuing", a, serde_json::Value::Null);
     }
 
     /// The token a stopped run of this node kept.

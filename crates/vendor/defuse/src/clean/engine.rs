@@ -497,18 +497,6 @@ impl Engine {
         self.rec_call("set_stable", crate::record::rec().map(|_| crate::record::j(&(&f,))), &());
     }
 
-    /// Whether a run resumed from its kept token (`Ctx::parked` gave it
-    /// back, its reads holding) continues its placements: those its earlier
-    /// attempts committed stand, and it makes only the ones it has not
-    /// (child and continuation indices go on from theirs). Off (the
-    /// default), every attempt makes all its placements again. A run that
-    /// starts over makes all of them either way.
-    pub fn set_continue_placements(&mut self, on: bool) {
-        self.core_mut().cont_placements = on;
-        #[cfg(feature = "observe")]
-        self.rec_call("set_continue_placements", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
-    }
-
     /// Whether evaluations compute heights and the critical chain.
     pub fn set_heights(&mut self, on: bool) {
         self.heights = on;

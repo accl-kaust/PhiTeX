@@ -221,6 +221,7 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "follow_after" => json!(cx.follow_after(de(&g(0)), de(&g(1)), de(&g(2)))),
         "follow_after_any" => json!(cx.follow_after_any(de(&g(0)), de(&g(1)), de(&g(2)))),
         "park" => json!(cx.park(Box::new(Vec::<usize>::new()))),
+        "park_continuing" => json!(cx.park_continuing(Box::new(Vec::<usize>::new()))),
         "parked" => json!(cx.parked().is_some()),
         "restart" => json!(cx.restart()),
         "diagnostic" => json!(cx.diagnostic(de(&g(0)))),
@@ -452,6 +453,10 @@ impl Run {
         match c[0].as_str().unwrap_or("") {
             "park" => {
                 cx.park(Box::new(self.origins.clone()));
+                Ok(J::Null)
+            }
+            "park_continuing" => {
+                cx.park_continuing(Box::new(self.origins.clone()));
                 Ok(J::Null)
             }
             m => call(cx, m, &c[1]),
@@ -752,7 +757,6 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "unmark" => eng.unmark(de(&g(0))),
         "set_version" => eng.set_version(de(&g(0))),
         "set_stable" => eng.set_stable(de(&g(0))),
-        "set_continue_placements" => eng.set_continue_placements(de(&g(0))),
         "set_heights" => eng.set_heights(de(&g(0))),
         "set_round_cap_policy" => eng.set_round_cap_policy(de::<CapPolicy>(&g(0))),
         "refresh_where" => {
@@ -1038,7 +1042,7 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                 let from_start = match &prev {
                     None if resumed => None,
                     None => Some(calls.clone()),
-                    Some((p, _)) => p.as_ref().filter(|p| p.len() >= 2 && p[p.len() - 1][0] == "park").map(|p| {
+                    Some((p, _)) => p.as_ref().filter(|p| p.len() >= 2 && (p[p.len() - 1][0] == "park" || p[p.len() - 1][0] == "park_continuing")).map(|p| {
                         let mut c: Vec<J> = p[..p.len() - 1].to_vec();
                         if let Some(last) = c.last_mut() {
                             last[2] = json!("*");

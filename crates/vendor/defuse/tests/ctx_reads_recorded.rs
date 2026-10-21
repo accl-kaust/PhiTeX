@@ -48,6 +48,7 @@ const WRITES: &[&str] = &[
     "push_contribution",
     "set_env",
     "park",
+    "park_continuing",
     "restart",
     "diagnostic",
 ];
