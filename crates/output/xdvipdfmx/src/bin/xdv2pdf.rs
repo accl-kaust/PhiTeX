@@ -4,17 +4,19 @@
 //! The PDF goes to stdout. `-o` is the PDF's name as xdvipdfmx is told it
 //! (the subset tags hash it; default: FILE's, with `.pdf`); `--dvi` gives
 //! xdvipdfmx a DVI name, as when it reads a file and not a pipe. Files are
-//! found with `kpsewhich`; streams are compressed with the system zlib's
-//! `compress2`, as xdvipdfmx compresses them.
+//! found by kpathsea in process (`phitex-kpse`, as the CLI's viewer finds
+//! them); streams are compressed with the system zlib's `compress2`, as
+//! xdvipdfmx compresses them.
 #![expect(unsafe_code, reason = "FFI to the system zlib")]
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, c_int, c_ulong};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use phitex_kpse::{Format as KpseFormat, Kpse};
 use phitex_xdvipdfmx::api::{Options, Session, split_xdv};
 use phitex_xdvipdfmx::io::{Files, Format};
 
@@ -53,29 +55,48 @@ fn deflate(level: i32, data: &[u8]) -> Vec<u8> {
 /// A lookup: the name, the format, the program name.
 type Query = (Vec<u8>, Format, Vec<u8>);
 
-/// kpathsea, through `kpsewhich`, its answers cached.
-#[derive(Default)]
+fn kpse_format(format: Format) -> KpseFormat {
+    match format {
+        Format::Fontmap => KpseFormat::FontMap,
+        Format::Type1 => KpseFormat::Type1,
+        Format::TrueType => KpseFormat::TrueType,
+        Format::OpenType => KpseFormat::OpenType,
+        Format::Cmap => KpseFormat::Cmap,
+        Format::Sfd => KpseFormat::Sfd,
+        Format::Enc => KpseFormat::Enc,
+        Format::Tfm => KpseFormat::Tfm,
+        Format::Ofm => KpseFormat::Ofm,
+        Format::Vf => KpseFormat::Vf,
+        Format::Ovf => KpseFormat::Ovf,
+        Format::Pict => KpseFormat::Pict,
+        Format::Tex => KpseFormat::Tex,
+        Format::ProgramText => KpseFormat::ProgramText,
+        Format::ProgramBinary => KpseFormat::ProgramBinary,
+    }
+}
+
+/// kpathsea in process (`phitex-kpse`) as `dvipdfmx`, from the TeX
+/// Live of the `tex` on the PATH, its answers cached.
 struct Kpsewhich {
+    kpse: Kpse,
     found: HashMap<Query, Option<Vec<u8>>>,
 }
 
-fn format_name(format: Format) -> &'static str {
-    match format {
-        Format::Fontmap => "map",
-        Format::Type1 => "type1 fonts",
-        Format::TrueType => "truetype fonts",
-        Format::OpenType => "opentype fonts",
-        Format::Cmap => "cmap files",
-        Format::Sfd => "subfont definition files",
-        Format::Enc => "enc files",
-        Format::Tfm => "tfm",
-        Format::Ofm => "ofm",
-        Format::Vf => "vf",
-        Format::Ovf => "ovf",
-        Format::Pict => "graphic/figure",
-        Format::Tex => "tex",
-        Format::ProgramText => "other text files",
-        Format::ProgramBinary => "other binary files",
+impl Default for Kpsewhich {
+    fn default() -> Self {
+        let dir = std::env::var_os("PATH")
+            .and_then(|p| {
+                std::env::split_paths(&p)
+                    .map(|d| d.join("tex"))
+                    .filter_map(|t| t.canonicalize().ok())
+                    .find(|t| t.is_file())
+                    .and_then(|t| t.parent().map(Path::to_path_buf))
+            })
+            .unwrap_or_else(|| PathBuf::from("/usr/bin"));
+        Kpsewhich {
+            kpse: Kpse::new(&dir, "dvipdfmx", "pdftex"),
+            found: HashMap::new(),
+        }
     }
 }
 
@@ -85,17 +106,9 @@ impl Files for Kpsewhich {
         if let Some(r) = self.found.get(&key) {
             return r.clone();
         }
-        let out = Command::new("kpsewhich")
-            .arg(format!("-progname={}", String::from_utf8_lossy(progname)))
-            .arg(format!("-format={}", format_name(format)))
-            .arg(OsStr::from_bytes(name))
-            .output()
-            .ok()?;
-        let mut path = out.stdout;
-        while path.last() == Some(&b'\n') {
-            path.pop();
-        }
-        let r = (out.status.success() && !path.is_empty()).then_some(path);
+        self.kpse.reset_program_name(progname);
+        let r = self.kpse.find_file(name, kpse_format(format), false);
+        self.kpse.reset_program_name(b"dvipdfmx");
         self.found.insert(key, r.clone());
         r
     }

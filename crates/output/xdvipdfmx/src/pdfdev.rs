@@ -210,6 +210,9 @@ pub struct PdfDev {
     pub fonts: Vec<DevFont>,
     /// `format_buffer` (scratch).
     pub format_buffer: Buf,
+    /// `sbuf0` (scratch: `handle_multibyte_string`'s output, kept between
+    /// calls as C's static is, not allocated and zeroed for each string).
+    pub sbuf0: Vec<u8>,
 }
 
 /// pdfdev.c's statics.
@@ -604,7 +607,8 @@ impl Dpx {
         if enc_id < 0 {
             return Ok((0, s.to_vec()));
         }
-        let mut out = vec![0u8; FORMAT_BUF_SIZE];
+        let mut out = core::mem::take(&mut self.dev.pdev.sbuf0);
+        out.resize(FORMAT_BUF_SIZE, 0);
         let (mut inpos, mut outpos) = (0usize, 0usize);
         let mut inbytesleft = s.len() as i32;
         let mut outbytesleft = FORMAT_BUF_SIZE as i32;
@@ -618,11 +622,13 @@ impl Dpx {
             &mut outpos,
             &mut outbytesleft,
         )?;
-        if inbytesleft != 0 {
-            return Ok((-1, Vec::new()));
-        }
-        out.truncate(FORMAT_BUF_SIZE - outbytesleft as usize);
-        Ok((0, out))
+        let r = if inbytesleft != 0 {
+            (-1, Vec::new())
+        } else {
+            (0, out[..FORMAT_BUF_SIZE - outbytesleft as usize].to_vec())
+        };
+        self.dev.pdev.sbuf0 = out;
+        Ok(r)
     }
 
     /// `pdf_dev_set_string`.
