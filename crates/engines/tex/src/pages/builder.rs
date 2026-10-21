@@ -816,11 +816,11 @@ pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: 
 /// whatever page `j`'s own miss; one changed by it is a defect (its
 /// finisher placed anew on its own miss).
 fn guess_check(node: u64, j: i64, how: impl std::hash::Hash, guess: ValueId) {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hasher as _;
     type Seen = Option<phitex_defuse::FxHashMap<(u64, i64, u64), ValueId>>;
     static SEEN: std::sync::Mutex<Seen> = std::sync::Mutex::new(None);
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    how.hash(&mut h);
+    std::hash::Hash::hash(&how, &mut h);
     let key = (node, j, h.finish());
     let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let prev = *seen.get_or_insert_with(Default::default).entry(key).or_insert(guess);
