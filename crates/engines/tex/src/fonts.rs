@@ -101,9 +101,12 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
 /// map beside it.
 #[derive(Default)]
 pub(crate) struct FontTable {
-    direct: Vec<Option<(FontId, (Arc<Loaded>, Vec<i32>))>>,
-    far: FxHashMap<FontId, (Arc<Loaded>, Vec<i32>)>,
+    direct: Vec<Option<(FontId, Metrics)>>,
+    far: FxHashMap<FontId, Metrics>,
 }
+
+/// A font's metrics and its `\fontdimen`s ([`FontTable`]).
+type Metrics = (Arc<Loaded>, Vec<i32>);
 
 impl FontTable {
     const DIRECT: usize = 1 << 8;

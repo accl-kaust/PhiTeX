@@ -6174,6 +6174,7 @@ fn declare_fields(eng: &mut Engine) {
         "pkgrecs",
         "gdefs",
         crate::pdfout::XPAGES,
+        crate::pdfout::FONT_LOADS,
         crate::vprof::VPROF,
         crate::pages::PITEMS,
         crate::run::SEEDED,
