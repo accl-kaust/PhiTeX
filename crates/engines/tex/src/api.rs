@@ -6586,6 +6586,7 @@ fn debug_nodes(eng: &Engine, when: &str) {
             if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS")
                 .is_some_and(|l| l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw())))
             {
+                out.push_str(&format!("    node {}\n", eng.debug_node(n)));
                 for l in eng.debug_reads(n).lines() {
                     out.push_str(&format!("    read {}\n", l.replace("}, ", "},\n    read ")));
                 }
