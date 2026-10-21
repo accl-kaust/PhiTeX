@@ -529,6 +529,12 @@ impl Run<'_, '_> {
             cmd::TOKS_REGISTER..=cmd::SET_INTERACTION => self.prefixed_command()?,
             cmd::AFTER_ASSIGNMENT => {
                 // §1268
+                // (the token pending before this one, read first: a run
+                // that ends with the state it found publishes nothing,
+                // `runstate::unchanged_transient`, so it must know what
+                // it found; a pending token only a run before it set
+                // reaches it)
+                self.get_loc(crate::fields::cell::AFTERTOKEN)?;
                 self.get_token();
                 self.ck()?;
                 let t = self.cur.tok.encode(self.v);
