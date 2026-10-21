@@ -1972,6 +1972,18 @@ impl Engine {
                 }
             }
         };
+        // (A guessed fold, `Monoid::speculate`, is a link only when it made
+        // this run: its change the cause, or its value not the last
+        // result's; one that stood waited for nothing.)
+        let cause = super::core::lock(&self.core.causes).get(&id).copied();
+        let old = self.w.node(id).and_then(|n| n.res.clone());
+        let moved = |f: Field, from: Id, to: Id, val: ValueId| {
+            !self.core.acc(f).is_some_and(|m| m.speculate())
+                || matches!(cause, Some(crate::api::Rerun::Range { field: Some(g) }) if g == f)
+                || old.as_ref().is_some_and(|o| {
+                    o.reads.iter().any(|r| matches!(r, Read::Range { f: g, from: a, to: b, val: v, .. } if *g == f && *a == from && *b == to && *v != val))
+                })
+        };
         for r in &res.reads {
             match r {
                 Read::Use { f, site, .. } if *site != super::world::NONE => {
@@ -1983,8 +1995,9 @@ impl Engine {
                 Read::Out { node, .. } | Read::Placed { node, .. } => offer(hs, *node, Cause::Output { of: NodeId(*node) }),
                 // (A range's last contributor: a chain through an
                 // accumulator falls by one through each.)
-                Read::Range { f, from, to, past, .. } => {
+                Read::Range { f, from, to, past, val } => {
                     if !fold_redo
+                        && moved(*f, *from, *to, *val)
                         && let Some((u, lo, hi)) = self.w.window(id, *from, *to, *past)
                         && let Some((p, _)) = self.w.field(u, *f).map(|c| &c.contribs).and_then(|m| m.below(&hi)).filter(|(p, _)| **p > lo)
                         && let Some(&x) = self.w.unit(u).order.get(p)
