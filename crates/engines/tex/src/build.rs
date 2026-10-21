@@ -1207,20 +1207,34 @@ impl Run<'_, '_> {
             }
             if display && k == last_k {
                 just_box = Some(line.packed.node);
-            } else if seen & nodes::SEEN_MARK != 0
-                || (seen & nodes::SEEN_LAZY != 0 && {
-                    // (a shallow box's list decoded now: the line kept as
-                    // its value decodes)
-                    let ok = nodes::materialize_lazy(v, &mut line.packed.node.list, &side);
-                    nodes::made_stat(if ok { 5 } else { 6 });
-                    !ok
-                })
-            {
-                nodes::made_stat(1);
-                phitex_typeset::linebreak::recycle_line(line.packed.node.list);
-            } else if let Some(l) = nodes::keep_made(list, line.packed.node.list) {
-                // (kept for the page that ships it, else reused)
-                phitex_typeset::linebreak::recycle_line(l);
+            } else {
+                // (its marks and whatsits numbered as its value's
+                // decoding numbers them, its shallow boxes' lists
+                // decoded: the line kept as its value decodes)
+                let (mut marks, mut whats) = (Vec::new(), Vec::new());
+                let ok = seen == 0
+                    || nodes::localize(
+                        v,
+                        &mut line.packed.node.list,
+                        &side,
+                        &mut marks,
+                        &mut whats,
+                    );
+                nodes::made_stat(if seen == 0 {
+                    0
+                } else if ok {
+                    5
+                } else {
+                    6
+                });
+                let kept = if ok {
+                    nodes::keep_made(list, line.packed.node.list, marks, whats)
+                } else {
+                    Some(line.packed.node.list)
+                };
+                if let Some(l) = kept {
+                    phitex_typeset::linebreak::recycle_line(l);
+                }
             }
         }
         // the paragraph's lines: one contribution
