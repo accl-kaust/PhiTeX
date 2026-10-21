@@ -1014,8 +1014,9 @@ impl Run<'_, '_> {
         let t_p4 = std::time::Instant::now();
         // (the page's hash: its value, what it is made of, known on the
         // write side every round; its PDF side runs once, at the end)
-        if let Node::Box(bx) = &page_box
-            && pos.pdf
+        // (the box handed over: the writer's piece keeps it, no copy)
+        if pos.pdf
+            && let Node::Box(bx) = page_box
         {
             crate::pdfout::ship(self, page, bx, &side, &ids)?;
         }

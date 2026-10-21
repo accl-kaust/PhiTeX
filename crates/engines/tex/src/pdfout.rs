@@ -1586,7 +1586,7 @@ pub(crate) fn action_of(v: &Values, x: ValueId) -> Option<Action> {
 pub(crate) fn ship(
     r: &mut Run<'_, '_>,
     page: ValueId,
-    bx: &BoxNode,
+    bx: BoxNode,
     side: &Side,
     ids: &[u32],
 ) -> R<()> {
@@ -1619,7 +1619,7 @@ pub(crate) fn ship(
         r.param("pdfdestmargin")?,
         r.param("pdfthreadmargin")?,
     ];
-    let marks = mark_events(v, bx, &resolved);
+    let marks = mark_events(v, &bx, &resolved);
     page_allocs(r, ids, &fonts, &side.whats, marks)?;
     ship_apart(r, page, &p, bx, &side.whats, &resolved, fonts, margins)
 }
@@ -1653,7 +1653,7 @@ fn ship_apart(
     r: &mut Run<'_, '_>,
     page_v: ValueId,
     p: &[ValueId],
-    bx: &BoxNode,
+    bx: BoxNode,
     side_whats: &[ValueId],
     resolved: &FxHashMap<u32, ValueId>,
     fonts: Fonts,
@@ -1690,7 +1690,7 @@ fn ship_apart(
         margins,
         whats,
         fonts,
-        bx: Arc::new(bx.clone()),
+        bx: Arc::new(bx),
         made: OnceLock::new(),
         pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
         node: i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
