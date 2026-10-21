@@ -409,17 +409,33 @@ pub(crate) fn debug() -> bool {
     false
 }
 
+/// The wall clock of the Report's merge and link times (none on wasm32).
+pub(crate) fn now() -> Option<std::time::Instant> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return Some(std::time::Instant::now());
+    #[cfg(target_arch = "wasm32")]
+    None
+}
+
+/// Nanoseconds since `t` (0 without a clock).
+pub(crate) fn ns_since(t: Option<std::time::Instant>) -> u64 {
+    t.map_or(0, |t| u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX))
+}
+
 /// Phase timers (`CLEAN_PROF`): nanoseconds per phase, summed.
 pub(crate) mod prof {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    pub(crate) const NAMES: [&str; 25] = [
+    pub(crate) const NAMES: [&str; 31] = [
         "op", "apply", "settle_claims", "settle", "frames", "held_by", "prepare", "unguess", "absorb", "commit", "place", "reads", "defs", "contribs", "claimed", "outs",
         "set_contrib", "range_readers",
         "read_at", "pset_between", "flush", "reaching",
         // (Steps: choosing batches, the executor's calls, all of it.)
         "select", "execute", "steps",
+        // (Filing reads, `reads` split: the keys made, entries looked up,
+        // filed or unfiled by kind, scope and sibling windows.)
+        "rd_keys", "rd_has", "rd_field", "rd_out", "rd_range", "rd_agg",
     ];
-    pub(crate) static NS: [AtomicU64; 25] = [const { AtomicU64::new(0) }; 25];
+    pub(crate) static NS: [AtomicU64; 31] = [const { AtomicU64::new(0) }; 31];
     /// Whether `CLEAN_PROF` asks for them (`profile` builds only: without
     /// the feature every probe compiles away).
     #[inline]
@@ -453,15 +469,40 @@ pub(crate) mod prof {
             NS[i].fetch_add(u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX), Relaxed);
         }
     }
+    /// Times its scope under phase `i` (dropped at its end).
+    pub(crate) struct Span(usize, Option<std::time::Instant>);
+    impl Span {
+        #[inline]
+        pub(crate) fn new(i: usize) -> Self {
+            Span(i, start())
+        }
+    }
+    impl Drop for Span {
+        #[inline]
+        fn drop(&mut self) {
+            stop(self.0, self.1);
+        }
+    }
+    /// Adds `n` to event counter `i`.
+    #[inline]
+    pub(crate) fn add(i: usize, n: u64) {
+        if on() {
+            CN[i].fetch_add(n, Relaxed);
+        }
+    }
     /// Event counters (shown with the timers).
-    pub(crate) const COUNTS: [&str; 26] = [
+    pub(crate) const COUNTS: [&str; 31] = [
         "results", "clean", "data_conflict", "shape_conflict", "placing", "effect_change", "deferred", "st_kids", "st_effect", "st_claim", "st_env", "st_stop", "flushes",
         // (Rechecks queued, by source; reads settle asked.)
         "rk_freed", "rk_shape", "rk_out", "rk_kind", "rk_moved", "rk_outchg", "rk_field", "rk_reads", "rk_acc",
         // (The lane: runs past its first; why it stopped.)
         "lane_runs", "lane_none", "lane_end", "lane_held",
+        // (Filing reads: reads committed, keys made, duplicate keys among
+        // them, entries filed or unfiled, reruns whose old entries were
+        // made again from their reads, not as filed.)
+        "rd_reads", "rd_keyn", "rd_dups", "rd_filed", "rd_refile",
     ];
-    pub(crate) static CN: [AtomicU64; 26] = [const { AtomicU64::new(0) }; 26];
+    pub(crate) static CN: [AtomicU64; 31] = [const { AtomicU64::new(0) }; 31];
     #[inline]
     pub(crate) fn count(i: usize) {
         if on() {

@@ -114,6 +114,9 @@ pub struct Engine {
     pub(crate) stopped: u64,
     /// The last evaluation's critical chain, highest first.
     pub(crate) chain: Vec<(NodeId, u32, crate::api::Cause)>,
+    /// Its runs' queueing, start, end and commit (ns since the evaluation
+    /// started).
+    pub(crate) chain_at: Vec<(NodeId, [u64; 4])>,
 }
 
 impl Default for Engine {
@@ -161,6 +164,7 @@ impl Engine {
             t_seen: (0, 0, 0),
             stopped: 0,
             chain: Vec::new(),
+            chain_at: Vec::new(),
         };
         eng.register(Arc::new(OpenOp));
         eng.register(Arc::new(CloseOp));
@@ -437,11 +441,21 @@ impl Engine {
         self.w.reaching(u, f, pos, fr, n.0).map(|(_, e)| NodeId(e.node))
     }
 
-    /// The value `n` defines for `f`.
+    /// The value `n` defines for `f` (constant time after the first ask of
+    /// a node with many definitions).
     #[must_use]
     pub fn def_value(&self, n: NodeId, f: Field) -> Option<ValueId> {
-        let x = self.w.node(n.0)?;
-        x.res.as_ref()?.defs.iter().find(|d| d.f == f).map(|d| d.val)
+        self.w.node(n.0)?.res.as_ref()?.def_value(f)
+    }
+
+    /// Every field `n` defines with its value (as [`Self::def_value`] gives
+    /// each: a field defined at more than one locality, the first made),
+    /// in the order it made them: a node's final values in one pass.
+    #[must_use]
+    pub fn defs_of(&self, n: NodeId) -> Vec<(Field, ValueId)> {
+        let Some(res) = self.w.node(n.0).and_then(|x| x.res.clone()) else { return Vec::new() };
+        let mut seen = FxHashSet::default();
+        res.defs.iter().filter(|d| seen.insert(d.f)).map(|d| (d.f, d.val)).collect()
     }
 
     /// The fold of accumulator `f` over `unit`.
@@ -1065,6 +1079,15 @@ impl Engine {
     #[must_use]
     pub fn realised_chain(&self) -> Vec<(NodeId, u64, String)> {
         self.chain.iter().map(|c| (c.0, u64::from(c.1), format!("{:?}", c.2))).collect()
+    }
+
+    /// The critical chain's runs (as [`Self::critical_chain`]) by wall
+    /// time: when each was last queued, started, ended and committed, in
+    /// ns since the last evaluation started (zeros on wasm32). Summed:
+    /// `Report::critical_links`.
+    #[must_use]
+    pub fn critical_chain_times(&self) -> Vec<(NodeId, [u64; 4])> {
+        self.chain_at.clone()
     }
 
     /// The critical chain with each run's height.

@@ -1397,6 +1397,14 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         .map(|(k, d, n)| format!("{k} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
         .collect();
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
+    if crate::exec::prof_flag!("PHITEX_CLOCK_PROBE") {
+        let c: Vec<String> = ex
+            .clock_by_kind()
+            .into_iter()
+            .map(|(k, n, a, b)| format!("{k} {a:.2}/{b:.2} GHz ({n})"))
+            .collect();
+        eprintln!("acct: clock at run start/end by kind: {}", c.join(", "));
+    }
     // (what stays parked at the end: the nodes whose wait chains end at
     // the environment, and each chain's head with the field it asks)
     let waits: Vec<String> = r

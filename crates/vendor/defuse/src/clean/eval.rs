@@ -38,6 +38,8 @@ struct Run {
     /// Committed on a broken guessed fold, to run again: its folds waited
     /// for nothing.
     fold_redo: bool,
+    /// When it started and ended (the critical chain's link times).
+    span: Option<(std::time::Instant, std::time::Instant)>,
 }
 
 /// The evaluation's scheduling state.
@@ -74,6 +76,10 @@ struct Sched {
     /// While a step's lane runs: the nodes its commits queued (its
     /// candidates to run next).
     lane_new: Option<Vec<Id>>,
+    /// When each node was last queued, and that time as of its run's
+    /// start (the critical chain's link times).
+    ready_at: FxHashMap<Id, std::time::Instant>,
+    ran_ready: FxHashMap<Id, std::time::Instant>,
 }
 
 impl Sched {
@@ -86,6 +92,7 @@ impl Sched {
             refutes: std::mem::take(&mut self.refutes),
             guessed: std::mem::take(&mut self.guessed),
             fold_refutes: std::mem::take(&mut self.fold_refutes),
+            ran_ready: std::mem::take(&mut self.ran_ready),
             ..Sched::default()
         }
     }
@@ -119,9 +126,30 @@ struct Heights {
     /// Each node's entry (in `h`, `t`) as of the run that last changed its
     /// contributions: what a range read over it waited for (a rerun that
     /// contributes the same is not waited for).
-    hc: FxHashMap<Id, (Height, u64)>,
+    hc: FxHashMap<Id, (Height, u64, [u64; 4])>,
     /// What each parked node last waited on.
     woke: FxHashMap<Id, (Id, Option<Field>)>,
+    /// The evaluation's start, and for each node's last committed run
+    /// when it was queued, started, ended and committed (ns since).
+    epoch: Option<std::time::Instant>,
+    at: FxHashMap<Id, [u64; 4]>,
+    /// The node `height` just filed in `hc` (its commit time goes there too).
+    hc_new: Option<Id>,
+}
+
+impl Heights {
+    /// Node `id`'s run committed now.
+    fn committed(&mut self, id: Id) {
+        let c = self.epoch.map_or(0, |e| super::core::ns_since(Some(e)));
+        if let Some(a) = self.at.get_mut(&id) {
+            a[3] = c;
+        }
+        if self.hc_new.take() == Some(id)
+            && let Some(e) = self.hc.get_mut(&id)
+        {
+            e.2[3] = c;
+        }
+    }
 }
 
 impl Engine {
@@ -249,6 +277,7 @@ impl Engine {
         let deadline = self.limits.time.map(|d| t0 + d);
         let mut hs = Heights {
             on: self.heights,
+            epoch: super::core::now(),
             ..Heights::default()
         };
         let mut from_old = had_old;
@@ -543,7 +572,10 @@ impl Engine {
         rep.nodes_conservative = rep.refuted_nodes;
         rep.refutations_max = s.refutes.values().copied().max().unwrap_or(0);
         rep.refuted_by_field.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.0.raw().cmp(&b.0.0.raw())));
-        self.chain = if hs.on { chain_of(&hs) } else { Vec::new() };
+        let chain = if hs.on { chain_of(&hs) } else { Vec::new() };
+        rep.critical_links = link_times(&chain);
+        self.chain_at = chain.iter().map(|c| (c.0, c.3)).collect();
+        self.chain = chain.into_iter().map(|c| (c.0, c.1, c.2)).collect();
         rep.critical_path = self.chain.first().map_or(0, |c| c.1);
         rep.realised_critical_path = self.chain.first().map_or(0, |c| c.1 + 1);
         rep.realised_critical_time = std::time::Duration::from_nanos(hs.t.values().copied().max().unwrap_or(0));
@@ -568,6 +600,9 @@ impl Engine {
         }
         s.queued.insert(id);
         s.queue.insert((n.unit, n.pos, id));
+        if let Some(t) = super::core::now() {
+            s.ready_at.insert(id, t);
+        }
         if let Some(v) = s.lane_new.as_mut() {
             v.push(id);
         }
@@ -591,9 +626,17 @@ impl Engine {
     ) -> Result<bool, EvalError> {
         // (The flow is opt-in: merging in the workers under one lock cost
         // more than it saved, 2026-10-20: para4000 j2-j48 ~700 ms against
-        // steps ~350-430 ms.)
-        static FLOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if exec.parallelism() > 1 && *FLOW.get_or_init(|| std::env::var_os("CLEAN_FLOW").is_some()) {
+        // steps ~350-430 ms. CLEAN_FLOW=2: the combining merge.)
+        static FLOW: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        let flow = *FLOW.get_or_init(|| match std::env::var("CLEAN_FLOW").as_deref() {
+            Ok("2") => 2,
+            Ok("0") | Err(_) => 0,
+            Ok(_) => 1,
+        });
+        if exec.parallelism() > 1 && flow == 2 {
+            return self.drain_flow2(s, rep, ran, cut, deadline, hs, src, per_round, rounds, sched, exec);
+        }
+        if exec.parallelism() > 1 && flow == 1 {
             return self.drain_flow(s, rep, ran, cut, deadline, hs, src, per_round, rounds, sched, exec);
         }
         if exec.parallelism() > 1 || exec.steps() {
@@ -1024,6 +1067,174 @@ impl Engine {
         Ok(false)
     }
 
+    /// Runs dirty nodes on the executor's workers without steps, merging
+    /// by combining (CLEAN_FLOW=2): a worker that finishes hands its result
+    /// in and takes the merge if it is free (never waiting for it); the
+    /// holder merges every result handed in that no running job comes
+    /// before in text order, picks the next ready nodes, publishes the
+    /// world once (the snapshot jobs then start on) and lets go, taking it
+    /// again if a result came in meanwhile. Workers wait only for work.
+    /// Edits are taken in between epochs of a few hundred merges.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn drain_flow2(
+        &mut self,
+        s: &mut Sched,
+        rep: &mut Report,
+        ran: &mut FxHashSet<Id>,
+        cut: &mut FxHashSet<Id>,
+        deadline: Option<std::time::Instant>,
+        hs: &mut Heights,
+        src: &mut dyn EditSource,
+        per_round: bool,
+        rounds: u64,
+        sched: &mut dyn Scheduler,
+        exec: &mut dyn Executor,
+    ) -> Result<bool, EvalError> {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let par = exec.parallelism().max(1);
+        let window = (par * 8).max(64);
+        let predict = sched.speculation_budget() > 0;
+        let fuel = sched.fuel();
+        let mut idle: u32 = 0;
+        loop {
+            if s.queue.is_empty() && !self.requeue_hint_parked(s) {
+                break;
+            }
+            rep.max_ready = rep.max_ready.max(s.queue.len());
+            self.check_deadline(s, rep, deadline)?;
+            let core = std::sync::Arc::clone(&self.core);
+            let q = std::sync::Mutex::new(FlowQ {
+                ready: std::collections::BTreeMap::new(),
+                running: FxHashSet::default(),
+                done: Vec::new(),
+                latest: std::sync::Arc::new(self.w.clone()),
+                stop: false,
+            });
+            let flow = std::sync::Mutex::new(Flow {
+                m: Merge {
+                    eng: &mut *self,
+                    s: &mut *s,
+                    rep: &mut *rep,
+                    ran: &mut *ran,
+                    cut: &mut *cut,
+                    hs: &mut *hs,
+                    next: 0,
+                    applied: 0,
+                    parked: 0,
+                    err: None,
+                },
+                sched: crate::sync::SendMut::new(&mut *sched),
+                buf: std::collections::VecDeque::new(),
+                fueled: FxHashSet::default(),
+                inflight: FxHashSet::default(),
+                done: Vec::new(),
+                merged: 0,
+                stop: false,
+            });
+            let cv = std::sync::Condvar::new();
+            // A result was handed in (or the first pick is due): whoever
+            // finds the merge free takes it.
+            let want = AtomicBool::new(true);
+            let budget = 256usize;
+            // (Round times: ops' and the merge's ns, summed over workers.)
+            let (op_ns, merge_ns) = (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0));
+            let run = |_: usize| {
+                loop {
+                    // (The holder looks again after letting go: a result
+                    // handed in while it held the merge is not left.)
+                    while want.load(SeqCst) {
+                        let Ok(mut g) = flow.try_lock() else { break };
+                        want.store(false, SeqCst);
+                        let t = super::core::now();
+                        g.combine(&q, &cv, par, window, predict, budget, deadline);
+                        merge_ns.fetch_add(super::core::ns_since(t), SeqCst);
+                    }
+                    let mut qg = super::core::lock(&q);
+                    if qg.stop {
+                        break;
+                    }
+                    if let Some((_, (id, resume, careful, fueled))) = qg.ready.pop_first() {
+                        qg.running.insert(id);
+                        let snap = std::sync::Arc::clone(&qg.latest);
+                        drop(qg);
+                        let got = if snap.node(id).is_some_and(|n| n.st == St::Dirty) {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            let t = std::time::Instant::now();
+                            let o = super::core::prof::time(0, || run_job(&core, &snap, id, resume, predict && !careful, careful, fueled.then_some(fuel)));
+                            #[cfg(not(target_arch = "wasm32"))]
+                            let d = t.elapsed();
+                            #[cfg(target_arch = "wasm32")]
+                            let d = std::time::Duration::ZERO;
+                            op_ns.fetch_add(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX), SeqCst);
+                            Ok((o, d))
+                        } else {
+                            Err(resume)
+                        };
+                        let mut qg = super::core::lock(&q);
+                        qg.running.remove(&id);
+                        qg.done.push((id, snap, got));
+                        drop(qg);
+                        want.store(true, SeqCst);
+                        continue;
+                    }
+                    // (A result handed in meanwhile is the holder's: it looks
+                    // again after letting go; waiting here, not spinning.)
+                    if want.load(SeqCst) && flow.try_lock().is_ok() {
+                        continue;
+                    }
+                    drop(cv.wait(qg).unwrap_or_else(std::sync::PoisonError::into_inner));
+                }
+                crate::api::RunResult(())
+            };
+            let mut out = Vec::with_capacity(par);
+            exec.execute(par, &run, &mut out);
+            let mut f = flow.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+            f.m.eng.t_op += op_ns.into_inner();
+            f.m.eng.t_commit += merge_ns.into_inner();
+            let qd = q.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+            // (Jobs no worker took, or chosen and not handed out: not
+            // runs; their nodes run again.)
+            let left = qd.ready.into_values().map(|(id, r, _, _)| (id, r));
+            for (id, resume) in f.buf.drain(..).chain(left) {
+                f.m.eng.unrun(f.m.rep, id);
+                if let Some(r) = resume {
+                    f.m.eng.kept.insert(id, r);
+                }
+                f.m.eng.enqueue(f.m.s, id);
+            }
+            for (id, ..) in qd.done {
+                f.m.eng.enqueue(f.m.s, id);
+            }
+            let (applied, parked, err) = (f.m.applied, f.m.parked, f.m.err.take());
+            drop(f);
+            if let Some(e) = err {
+                return Err(e);
+            }
+            rep.steps += 1;
+            width(rep, applied);
+            idle = if applied == 0 && parked == 0 && !s.queue.is_empty() { idle + 1 } else { 0 };
+            if idle > self.limits.idle_rounds {
+                let waiters = s
+                    .queue
+                    .iter()
+                    .map(|k| crate::api::Waiter {
+                        node: NodeId(k.2),
+                        on: crate::api::WaitOn::Queued,
+                    })
+                    .collect();
+                return Err(EvalError::NoProgress {
+                    rounds: idle,
+                    waiters,
+                    report: Box::new(rep.clone()),
+                });
+            }
+            if self.step_absorb(s, rep, src, per_round, rounds)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// A batch from the ready window: the first of the queue in text order
     /// whose read hints do not wait on a node in work (learned waits), at
     /// least the first, as the scheduler picks among them; the others go
@@ -1175,6 +1386,7 @@ impl Engine {
             range_wait: None,
             narrowed: None,
             fold_redo: false,
+            span: None,
         })
     }
 
@@ -1224,6 +1436,9 @@ impl Engine {
     fn prepare(&mut self, s: &mut Sched, rep: &mut Report, k: (u32, Pos, Id)) -> Option<Kept> {
         let id = k.2;
         s.queued.remove(&id);
+        if let Some(&t) = s.ready_at.get(&id) {
+            s.ran_ready.insert(id, t);
+        }
         let n = self.w.node(id)?;
         if n.st != St::Dirty {
             return None;
@@ -1312,6 +1527,26 @@ impl Engine {
         outcome: Outcome,
         fresh: bool,
     ) -> Result<(), EvalError> {
+        let t = super::core::now();
+        let r = self.apply_one(s, rep, ran, cut, hs, id, outcome, fresh);
+        rep.merge.total += super::core::ns_since(t);
+        rep.merged += 1;
+        r
+    }
+
+    /// [`Self::apply`] untimed.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_one(
+        &mut self,
+        s: &mut Sched,
+        rep: &mut Report,
+        ran: &mut FxHashSet<Id>,
+        cut: &mut FxHashSet<Id>,
+        hs: &mut Heights,
+        id: Id,
+        outcome: Outcome,
+        fresh: bool,
+    ) -> Result<(), EvalError> {
             match outcome {
                 Outcome::Failed(mut e) => {
                     if let EvalError::NoProgress { rounds, .. } = &mut e {
@@ -1365,7 +1600,10 @@ impl Engine {
                     }
                     if hs.on {
                         let t_ns = s.time.get(&id).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
-                        self.height(hs, id, &r.res, r.fold_redo, t_ns);
+                        let t = super::core::now();
+                        let span = r.span.map(|(a, b)| (s.ran_ready.get(&id).copied().unwrap_or(a).min(a), a, b));
+                        self.height(hs, id, &r.res, r.fold_redo, span, t_ns);
+                        rep.merge.heights += super::core::ns_since(t);
                     }
                     let dbg = super::core::debug().then(|| format!("{:?} out {}", r.res.reads, self.core.values.render(r.res.out)));
                     let w = std::mem::take(&mut self.w);
@@ -1379,6 +1617,7 @@ impl Engine {
                         eprintln!("run {id} reads {d} dirty {:?} woken {:?}", m.dirty, m.woken);
                     }
                     m.counts.add_to(rep);
+                    rep.merge.add(&m.counts.merge);
                     let (dirty, created, freed, woken) = (m.dirty, m.created, m.freed, m.woken);
                     self.rebinds += m.rebinds;
                     self.w = m.w;
@@ -1389,6 +1628,10 @@ impl Engine {
                     }
                     self.created += created;
                     self.freed += freed.len() as u64;
+                    if hs.on {
+                        hs.committed(id);
+                    }
+                    let t = super::core::now();
                     for x in &freed {
                         self.kept.remove(x);
                         s.parked.remove(x);
@@ -1402,6 +1645,7 @@ impl Engine {
                     for x in woken {
                         self.wake(s, x);
                     }
+                    rep.merge.wake += super::core::ns_since(t);
                     if let Some(e) = self.hook_error() {
                         return Err(e);
                     }
@@ -1564,7 +1808,7 @@ impl Engine {
     /// (A range read is over the window's last contributor as it last
     /// contributed; none on a `fold_redo` commit, whose folds waited for
     /// nothing.)
-    fn height(&self, hs: &mut Heights, id: Id, res: &Res, fold_redo: bool, t_ns: u64) {
+    fn height(&self, hs: &mut Heights, id: Id, res: &Res, fold_redo: bool, span: Option<(std::time::Instant, std::time::Instant, std::time::Instant)>, t_ns: u64) {
         use crate::api::Cause;
         let mut best: Option<(u32, Id, Cause)> = None;
         let mut best_t = 0u64;
@@ -1651,9 +1895,14 @@ impl Engine {
             Some((h, x, c)) => (h + 1, Some(x), c),
             None => (0, None, created),
         };
+        let rel = |t: std::time::Instant| hs.epoch.map_or(0, |e| u64::try_from(t.saturating_duration_since(e).as_nanos()).unwrap_or(u64::MAX));
+        let at = span.map_or([0; 4], |(q, a, b)| [rel(q), rel(a), rel(b), rel(b)]);
+        hs.at.insert(id, at);
         let same = self.w.node(id).and_then(|n| n.res.as_ref()).is_some_and(|old| old.contribs == res.contribs);
+        hs.hc_new = None;
         if !same || !hs.hc.contains_key(&id) {
-            hs.hc.insert(id, (v.clone(), best_t + t_ns));
+            hs.hc.insert(id, (v.clone(), best_t + t_ns, at));
+            hs.hc_new = Some(id);
         }
         hs.h.insert(id, v);
         hs.t.insert(id, best_t + t_ns);
@@ -1931,8 +2180,27 @@ fn bump(list: &mut Vec<(&'static str, u64)>, name: &'static str) {
     }
 }
 
-/// The critical chain: from the highest run down its links.
-fn chain_of(hs: &Heights) -> Vec<(NodeId, u32, crate::api::Cause)> {
+/// The chain's time by link: each run against the one below it (`chain`
+/// is highest first).
+fn link_times(chain: &[(NodeId, u32, crate::api::Cause, [u64; 4])]) -> crate::api::LinkTimes {
+    let mut t = crate::api::LinkTimes::default();
+    for (k, c) in chain.iter().enumerate() {
+        let [ready, start, end, commit] = c.3;
+        let below = chain.get(k + 1).map_or(0, |b| b.3[3]);
+        // (Queued before the one below committed: ready since.)
+        let ready = ready.max(below);
+        t.held += ready.saturating_sub(below);
+        t.dispatch += start.saturating_sub(ready);
+        t.op += end.saturating_sub(start);
+        t.wait_merge += commit.saturating_sub(end);
+        t.links += 1;
+    }
+    t
+}
+
+/// The critical chain: from the highest run down its links, with each
+/// run's queueing, start, end and commit.
+fn chain_of(hs: &Heights) -> Vec<(NodeId, u32, crate::api::Cause, [u64; 4])> {
     let Some((&top, _)) = hs.h.iter().max_by_key(|(id, v)| (v.0, std::cmp::Reverse(**id))) else {
         return Vec::new();
     };
@@ -1941,9 +2209,9 @@ fn chain_of(hs: &Heights) -> Vec<(NodeId, u32, crate::api::Cause)> {
     // (Through a range link, the contributor as it last contributed.)
     let mut via_range = false;
     while let Some(id) = x {
-        let e = if via_range { hs.hc.get(&id).map(|e| &e.0).or_else(|| hs.h.get(&id)) } else { hs.h.get(&id) };
-        let Some((h, next, c)) = e else { break };
-        out.push((NodeId(id), *h, c.clone()));
+        let e = if via_range { hs.hc.get(&id).map(|e| (&e.0, e.2)) } else { None };
+        let Some(((h, next, c), at)) = e.or_else(|| hs.h.get(&id).map(|e| (e, hs.at.get(&id).copied().unwrap_or_default()))) else { break };
+        out.push((NodeId(id), *h, c.clone(), at));
         via_range = matches!(c, crate::api::Cause::Range { .. });
         x = *next;
         if out.len() > hs.h.len() + hs.hc.len() {
@@ -2014,6 +2282,26 @@ struct Flow<'a> {
     stop: bool,
 }
 
+/// A job ready to start: its node, kept state, whether careful, whether
+/// fueled.
+type FlowJob = (Id, Kept, bool, bool);
+
+/// A job's run and its time; `Err`: not run (its node no longer dirty on
+/// the world it was to run on), its kept state back.
+type FlowRun = Result<(Outcome, std::time::Duration), Kept>;
+
+/// CLEAN_FLOW=2's hand-over between workers and the merge (each held
+/// briefly): jobs ready to start (by text position), the ones running,
+/// results handed in (with the world each ran on), and the world last
+/// published.
+struct FlowQ {
+    ready: std::collections::BTreeMap<(u32, Pos, Id), FlowJob>,
+    running: FxHashSet<Id>,
+    done: Vec<(Id, std::sync::Arc<World>, FlowRun)>,
+    latest: std::sync::Arc<World>,
+    stop: bool,
+}
+
 impl Flow<'_> {
     /// The next node to run: from the batch chosen last, else a new one.
     fn pick(&mut self, window: usize, predict: bool) -> Option<(Id, Kept)> {
@@ -2051,6 +2339,95 @@ impl Flow<'_> {
             }
         }
         self.buf.pop_front()
+    }
+
+    /// CLEAN_FLOW=2's merge, by the worker holding it: merges the results
+    /// handed in that no running job comes before in text order (as a
+    /// step's merge would), then fills the ready jobs up to the workers,
+    /// publishing the world once; at the epoch's end (nothing ready,
+    /// running or handed in) everyone stops.
+    #[allow(clippy::too_many_arguments)]
+    fn combine(&mut self, q: &std::sync::Mutex<FlowQ>, cv: &std::sync::Condvar, par: usize, window: usize, predict: bool, budget: usize, deadline: Option<std::time::Instant>) {
+        let key = |w: &World, x: Id| w.node(x).map_or((u32::MAX, Pos::MAX), |n| (n.unit, n.pos));
+        let mut merged_any = false;
+        loop {
+            let mut now = Vec::new();
+            {
+                let mut qg = super::core::lock(q);
+                let w = &self.m.eng.w;
+                let first_running = qg.running.iter().map(|&x| key(w, x)).min();
+                let mut done = std::mem::take(&mut qg.done);
+                done.sort_by_key(|r| std::cmp::Reverse(key(w, r.0)));
+                while done.last().is_some_and(|r| first_running.is_none_or(|fr| key(w, r.0) < fr)) {
+                    now.push(done.pop().expect("checked"));
+                }
+                qg.done = done;
+            }
+            if now.is_empty() {
+                break;
+            }
+            merged_any = true;
+            for (id, snap, got) in now {
+                self.inflight.remove(&id);
+                if self.m.err.is_some() {
+                    continue;
+                }
+                let (o, d) = match got {
+                    Ok(r) => r,
+                    Err(resume) => {
+                        // (Not run: its node went or finished meanwhile;
+                        // dirty again, it is queued again.)
+                        self.m.eng.unrun(self.m.rep, id);
+                        if self.m.eng.w.node(id).is_some_and(|n| n.st == St::Dirty) {
+                            if let Some(r) = resume {
+                                self.m.eng.kept.insert(id, r);
+                            }
+                            self.m.eng.enqueue(self.m.s, id);
+                        }
+                        continue;
+                    }
+                };
+                *self.m.s.time.entry(id).or_default() += d;
+                let ahead = self.m.eng.w.node(id).is_some_and(|n| self.m.eng.w.work.get(&n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
+                if let Err(e) = self.m.one(&snap, usize::from(ahead), id, o, &mut Sequential) {
+                    self.m.err = Some(e);
+                }
+                self.merged += 1;
+            }
+        }
+        if self.m.err.is_none()
+            && let Err(e) = self.m.eng.check_deadline(self.m.s, self.m.rep, deadline)
+        {
+            self.m.err = Some(e);
+        }
+        self.stop |= self.m.err.is_some();
+        // The next jobs, chosen without the hand-over held.
+        let (ready, running) = {
+            let qg = super::core::lock(q);
+            (qg.ready.len(), qg.running.len())
+        };
+        let mut jobs = Vec::new();
+        if !self.stop && self.merged < budget {
+            while ready + running + jobs.len() < par + 1 {
+                let Some((id, resume)) = self.pick(window, predict) else { break };
+                let careful = self.m.s.refutes.contains_key(&id);
+                let fueled = self.fueled.remove(&id);
+                self.inflight.insert(id);
+                jobs.push((key(&self.m.eng.w, id), (id, resume, careful, fueled)));
+            }
+        }
+        let mut qg = super::core::lock(q);
+        if merged_any || !jobs.is_empty() {
+            qg.latest = std::sync::Arc::new(self.m.eng.w.clone());
+        }
+        for (k, j) in jobs {
+            qg.ready.insert((k.0, k.1, j.0), j);
+        }
+        if self.stop || (qg.ready.is_empty() && qg.running.is_empty() && qg.done.is_empty()) {
+            qg.stop = true;
+        }
+        drop(qg);
+        cv.notify_all();
     }
 }
 
@@ -2361,6 +2738,7 @@ impl Merge<'_> {
     fn one_inner(&mut self, snap: &World, i: usize, id: Id, o: Outcome) -> Result<(), EvalError> {
         let (eng, s, rep) = (&mut *self.eng, &mut *self.s, &mut *self.rep);
         if !eng.w.node(id).is_some_and(|n| n.st == St::Dirty) {
+            rep.merged += 1;
             return Ok(());
         }
         // Re-texted by an earlier commit of this step (a placer's): the run
@@ -2370,6 +2748,7 @@ impl Merge<'_> {
             _ => false,
         };
         if !same_text {
+            rep.merged += 1;
             eng.enqueue(s, id);
             return Ok(());
         }
@@ -2385,6 +2764,7 @@ impl Merge<'_> {
         // contributions (which do not depend on what it read), and run
         // again; refuted, they would stay unseen and its step's later
         // readers guess wrong again, one commit a step.
+        let tv = super::core::now();
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
                 let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate()));
@@ -2402,10 +2782,13 @@ impl Merge<'_> {
         let o = match o {
             // (Counted when it commits again.)
             Outcome::Done(mut r) if redo.is_some() => {
+                let v = super::core::ns_since(tv);
+                (rep.merge.validate, rep.merge.total) = (rep.merge.validate + v, rep.merge.total + v);
                 r.fold_redo = true;
                 Outcome::Done(r)
             }
             Outcome::Stopped(r, _) if r.fuel_out => {
+                rep.merged += 1;
                 rep.fuel_outs += 1;
                 s.no_fuel.insert(id);
                 if let Some(k) = r.kept {
@@ -2416,6 +2799,8 @@ impl Merge<'_> {
             }
             Outcome::Done(r) => match r.res.reads.iter().find(|rd| !super::build::holds(&eng.core, &eng.w, id, rd)) {
                 Some(rd) => {
+                    rep.merge.validate += super::core::ns_since(tv);
+                    let tr = super::core::now();
                     // A read an earlier commit of this step broke.
                     eng.core.cause(id, super::build::why_broken(&eng.core, &eng.w, id, rd));
                     if !matches!(rd, Read::Range { f, .. } if fold_guess(&eng.core, s, id, *f, true)) {
@@ -2427,9 +2812,14 @@ impl Merge<'_> {
                         bump_field(&mut rep.refuted_by_field, *f);
                     }
                     eng.enqueue(s, id);
+                    rep.merge.refute += super::core::ns_since(tr);
+                    rep.merge.total += super::core::ns_since(tv);
+                    rep.merged += 1;
                     return Ok(());
                 }
                 None => {
+                    let v = super::core::ns_since(tv);
+                    (rep.merge.validate, rep.merge.total) = (rep.merge.validate + v, rep.merge.total + v);
                     rep.predictions_confirmed += u64::from(r.predicted > 0);
                     rep.confirmations += u64::from(ahead);
                     Outcome::Done(r)
@@ -2443,6 +2833,7 @@ impl Merge<'_> {
         }
         super::core::prof::time(1, || eng.apply(s, rep, self.ran, self.cut, self.hs, id, o, false))?;
         if let Some((_, why)) = redo {
+            let tr = super::core::now();
             eng.core.cause(id, why);
             let w = std::mem::take(&mut eng.w);
             let mut b = Builder::new(&eng.core, w);
@@ -2456,6 +2847,8 @@ impl Merge<'_> {
             for x in m.woken {
                 eng.wake(s, x);
             }
+            let r = super::core::ns_since(tr);
+            (rep.merge.refute, rep.merge.total) = (rep.merge.refute + r, rep.merge.total + r);
         }
         // A stop that parks its node (it leaves the queue) moves on.
         if !done && !s.queued.contains(&id) {
@@ -2525,6 +2918,7 @@ fn run_job(
     // Run ahead of a node before it still in work: what it reads may
     // change yet (a guess).
     let ahead = w.node(id).is_some_and(|n| w.work.get(&n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
+    let t_start = super::core::now();
     let mut cx = Ctx::new(core, w, id, kept);
     cx.reads = reads;
     cx.predict = predict;
@@ -2548,6 +2942,8 @@ fn run_job(
             reads: cx.reads,
             diag: cx.diag,
             claim: cx.claim,
+            filed: None,
+            def_ix: std::sync::OnceLock::new(),
         },
         kids: cx.kids,
         conts: cx.conts,
@@ -2561,6 +2957,7 @@ fn run_job(
         range_wait: cx.range_wait,
         narrowed: cx.narrowed,
         fold_redo: false,
+        span: t_start.zip(super::core::now()),
     };
     match r {
         Ok(Ok(out)) => Outcome::Done(run(cx, out)),
