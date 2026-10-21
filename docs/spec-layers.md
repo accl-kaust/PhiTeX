@@ -96,9 +96,20 @@ finished and written again.
 - Text order lives only inside cells. Steps, batches, the barrier, the
   lane, flow and the merge are gone. Output stays byte-identical at every
   thread count, and every Ctx call keeps its meaning.
-- Layers are ranked units in one engine, with composite stable positions
-  (the placer's position plus an ordinal). No layer needs claims or
-  `follow_after_any`.
+- Layers whose results the text reads as values (a paragraph's lines,
+  the page loop's fold) are ranked units in one engine, with composite
+  stable positions (the placer's position plus an ordinal).
+- A finisher defines fields the text after its page reads, and
+  definitions are scoped to a unit, so finishers stay in the text's unit,
+  placed right after the piece their page fired in
+  (`follow_after_any`). Its position is the composite (the anchor's
+  position, the placer, an ordinal): appended within the anchor's slot,
+  no renumbering (IncEngine2, 2026-10-21).
+- A run's placements are committed at every stop, a park between
+  attempts included. So the page builder's node places each finisher as
+  its page fires, and the finishers run while it is still folding. A
+  later attempt makes the same placement again; one no longer made is
+  freed. (This comes on today's engine first, ahead of the cells.)
 
 ## 7. Order of work
 

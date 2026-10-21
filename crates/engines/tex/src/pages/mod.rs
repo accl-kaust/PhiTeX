@@ -118,6 +118,26 @@ pub(crate) const PAGE_START: &str = "pages:start";
 /// ([`Feedback::RoutineGivesBack`]).
 pub(crate) const PAGE_MISS: &str = "pages:miss";
 
+/// [`PAGE_MISS`]'s fold: a sequence, read past its contributors still in
+/// work as they last contributed (nothing, for a node that never did,
+/// [`phitex_defuse::Monoid::speculate`]). Only finishers contribute to
+/// it, and only where they miss: the page builder reads it whole at its
+/// loop's start without waiting for the text after it, and runs again
+/// where a finisher's miss comes in.
+pub(crate) struct MissMonoid;
+
+impl phitex_defuse::Monoid for MissMonoid {
+    fn empty(&self, _: &Values) -> ValueId {
+        ValueId::NIL
+    }
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        v.seq_concat(a, b)
+    }
+    fn speculate(&self) -> bool {
+        true
+    }
+}
+
 /// The page accumulators' declared contributions of a node that gives
 /// none of them: so a range read of a window holding it does not wait
 /// for it, only for the pieces (and the finishers' misses, guessed none).
