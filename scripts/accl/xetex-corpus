@@ -4,22 +4,31 @@
 # built with TeX Live's xelatex and xdvipdfmx, each XDV converted and
 # compared byte for byte with xdvipdfmx's PDF (in a job):
 #   scripts/accl/accl submit cmd bash scripts/accl/xetex-corpus
+# Then the fonts and shaping check: the same documents traced
+# (corpus.sh shapes), every font request and native word again through
+# phitex-otf (its otf-xdv example), reported (not a red line).
 # summary.txt: the count, the versions of the oracle, each failure's first
-# difference (DIFFS.txt); FAIL.txt and the failures' files beside it.
+# difference (DIFFS.txt), the shaping counts (otf-xdv.txt); FAIL.txt and
+# the failures' files beside it.
 set -u
 cd "$(dirname "$0")/../.."
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 t0=$(date +%s)
-cargo build -q --release -p phitex-xdvipdfmx --features cli --bin xdv2pdf > "$r/build.txt" 2>&1 || { grep -E "^error|-->" -A5 "$r/build.txt" | head -40 | tee "$r/summary.txt"; exit 1; }
+{ cargo build -q --release -p phitex-xdvipdfmx --features cli --bin xdv2pdf && cargo build -q --release -p phitex-otf --example otf-index --example otf-xdv; } > "$r/build.txt" 2>&1 || { grep -E "^error|-->" -A5 "$r/build.txt" | head -40 | tee "$r/summary.txt"; exit 1; }
 t1=$(date +%s)
 C=crates/output/xdvipdfmx/tools/corpus.sh
 n=$($C build "$w/corpus" 2> "$r/corpus-build.txt")
 t2=$(date +%s)
 res=$($C check "$w/corpus" "$PWD/target/release/xdv2pdf")
 t3=$(date +%s)
+$C shapes "$w/shapes" > /dev/null 2> "$r/shapes-build.txt"
+target/release/examples/otf-index "$w/index" > "$r/otf-index.txt" 2>&1
+target/release/examples/otf-xdv "$w/index" "$w/shapes" --examples 40 > "$r/otf-xdv.txt" 2>&1
+t4=$(date +%s)
 {
-  echo "xdvipdfmx corpus: $res ($n XDVs; build: xdv2pdf $((t1 - t0)) s, corpus $((t2 - t1)) s, check $((t3 - t2)) s)"
+  echo "xdvipdfmx corpus: $res ($n XDVs; build: binaries $((t1 - t0)) s, corpus $((t2 - t1)) s, check $((t3 - t2)) s; shaping $((t4 - t3)) s)"
   echo "oracle: $(xetex --version 2>&1 | head -1); $(xdvipdfmx --version 2>&1 | head -1)"
+  grep -E '^(fonts|words|time):' "$r/otf-xdv.txt"
   cat "$w/corpus/DIFFS.txt"
 } > "$r/summary.txt"
 cp "$w/corpus/FAIL.txt" "$w/corpus/DIFFS.txt" "$r/"

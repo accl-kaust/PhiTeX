@@ -1688,6 +1688,7 @@ dependencies = [
  "brotli-decompressor",
  "harfrust",
  "libm",
+ "phitex-kpse",
  "read-fonts",
  "skrifa",
  "unicode-bidi",

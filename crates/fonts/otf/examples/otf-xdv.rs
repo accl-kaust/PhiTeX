@@ -44,16 +44,35 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::cell::RefCell;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
+use phitex_kpse::{Format, Kpse};
 use phitex_otf::index::FontIndex;
 use phitex_otf::shape::Shaper;
 use phitex_otf::xetex::{self, XeTeXFont, fontmgr::FontManager};
 use phitex_otf::{FontSource, KpseFormat};
 
-struct Src;
+/// The files: kpathsea in process (`phitex-kpse`) as `xetex`, from the
+/// TeX Live of the `tex` on the PATH.
+struct Src(RefCell<Kpse>);
+
+impl Src {
+    fn new() -> Src {
+        let dir = std::env::var_os("PATH")
+            .and_then(|p| {
+                std::env::split_paths(&p)
+                    .map(|d| d.join("tex"))
+                    .filter_map(|t| t.canonicalize().ok())
+                    .find(|t| t.is_file())
+                    .and_then(|t| t.parent().map(Path::to_path_buf))
+            })
+            .unwrap_or_else(|| PathBuf::from("/usr/bin"));
+        Src(RefCell::new(Kpse::new(&dir, "xetex", "xetex")))
+    }
+}
 
 impl FontSource for Src {
     fn read(&self, path: &str) -> Option<Arc<[u8]>> {
@@ -64,18 +83,13 @@ impl FontSource for Src {
             return Path::new(name).exists().then(|| name.to_string());
         }
         let fmt = match format {
-            KpseFormat::OpenType => "opentype fonts",
-            KpseFormat::TrueType => "truetype fonts",
-            KpseFormat::Type1 => "type1 fonts",
-            KpseFormat::MiscFonts => "misc fonts",
+            KpseFormat::OpenType => Format::OpenType,
+            KpseFormat::TrueType => Format::TrueType,
+            KpseFormat::Type1 => Format::Type1,
+            KpseFormat::MiscFonts => Format::MiscFonts,
         };
-        let out = Command::new("kpsewhich")
-            .arg(format!("-format={fmt}"))
-            .arg(name)
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        (!s.is_empty()).then_some(s)
+        let p = self.0.borrow_mut().find_file(name.as_bytes(), fmt, false)?;
+        Some(String::from_utf8_lossy(&p).into_owned())
     }
 }
 
@@ -290,7 +304,7 @@ fn same(def: &Def, f: &XeTeXFont) -> bool {
         && def.embolden.unwrap_or(0) == fixed(f.embolden)
 }
 
-fn check(mgr: &mut FontManager, xdv: &Path, t: &mut Tally, max_ex: usize, memo: bool) {
+fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: usize, memo: bool) {
     let doc = xdv.display().to_string();
     let Ok(log) = std::fs::read(xdv.with_extension("log")) else {
         return;
@@ -307,7 +321,7 @@ fn check(mgr: &mut FontManager, xdv: &Path, t: &mut Tally, max_ex: usize, memo: 
         }
         t.fonts += 1;
         let t0 = Instant::now();
-        let (f, _) = xetex::find_native_font(mgr, &Src, &spec, size, 0);
+        let (f, _) = xetex::find_native_font(mgr, src, &spec, size, 0);
         t.load_ns += t0.elapsed().as_nanos();
         // What XeTeX found: a native file (its path), a TFM or nothing
         // (no native font), or a path it printed unreadably (its name
@@ -451,12 +465,13 @@ fn main() {
     let mut xdvs: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout).lines().map(PathBuf::from).collect();
     xdvs.sort();
     let index = Arc::new(index);
+    let src = Src::new();
     let mut t = Tally::default();
     let mut per_doc = Vec::new();
     for x in &xdvs {
         let mut mgr = FontManager::new(index.clone());
         let mut dt = Tally::default();
-        check(&mut mgr, x, &mut dt, max_ex, memo);
+        check(&mut mgr, &src, x, &mut dt, max_ex, memo);
         per_doc.push(format!(
             "{}: fonts {} (path differs {}, unloaded {}, extra {}, by name {}), XDV fonts {} unmatched {}, words {} ok {} (fresh {}) bad {} no font {}; load {} ms, {} layouts {} ms",
             x.strip_prefix(&dir).unwrap_or(x).display(),
