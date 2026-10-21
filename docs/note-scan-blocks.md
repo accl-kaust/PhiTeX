@@ -1,6 +1,6 @@
 # Scan blocks instead of a scan step per cut: parked (2026-10-21)
 
-Status: parked. The code is on branch `r5-blk` (one commit on dev d8ba5b98).
+Status: parked. The code is on branch `r5-blk` (one commit on dev 8723a884).
 Dev keeps a scan step after every cut.
 
 ## The finding
@@ -15,10 +15,10 @@ an 80 us scan op.
 What a step needs from the step before is only the state at the start of the
 current page (`scan:block` changes only where a page fires, 692 times in
 about 4000 steps). The steps were grouped in blocks of about 64 pieces
-(`block_end`) before commit 6858b324; since then every cut also places its
+(`block_end`) before commit 42b0bf5b; since then every cut also places its
 own step.
 
-## Why 6858b324 placed a step after every cut
+## Why 42b0bf5b placed a step after every cut
 
 A page that fires at a cut must be placed by a node whose window does not
 include the rest of the cut piece. The rest (the resume) reads what the
@@ -40,7 +40,7 @@ Walls, plain release builds, one node (job 15345):
 
 | para4000 | -j 1 | -j 8 | -j 16 | -j 32 | runs |
 |---|---|---|---|---|---|
-| dev d8ba5b98 | 3.19 s | 2.93 s | 3.23 s | 3.23 s | 15668 |
+| dev 8723a884 | 3.19 s | 2.93 s | 3.23 s | 3.23 s | 15668 |
 | r5-blk | 2.76 s | 2.23 s | 2.31 s | 2.54 s | 11311 |
 
 para4000 is exact. The rest is not (job 15344):

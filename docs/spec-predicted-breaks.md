@@ -154,7 +154,7 @@ index and keys) and read the pieces' items and profiles through fields the
 exec nodes define. A changed piece then re-runs the same scan node, whose
 value cutoff stops the chain as soon as the breaks agree.
 
-## 8. S0 findings (2026-10-16 03:40, para4000, pages-skel 924edfaf)
+## 8. S0 findings (2026-10-16 03:40, para4000, pages-skel 35460875)
 
 - Exec nodes read neither `ps` nor `vtail` (0 reads). The chain readers are the
   5201 folds and the 692 finishers; the end node reads `ps` once. The realised

@@ -76,38 +76,38 @@ The edit bar is not in `gate-fast`. Measure it on `$D` with
 amsedit shards still compare each edit history with its cold build, and
 a difference there is still a red.)
 
-Record the gate (dev 9afea351, the clean core, gate jobs 15413–15421,
+Record the gate (dev af7eca5d, the clean core, gate jobs 15413–15421,
 15424, 15425 on acclnode01, 2026-10-21; the gate builds with profile and
 observe):
 
 | bar | value | job | commit | met |
 |---|---|---|---|---|
-| every shard green | all green: build, lint, suites, latex 0–2, ams, amsedit 8, amsedit 16, para, cg | 15413–15421, 15424, 15425 | 9afea351 | yes |
-| amsldoc md5 at -j 1 / 8 / 16 = `98c96e00…` | 98c96e00 / 98c96e00 / 98c96e00, 44 pages, 0 stale reads | 15419 | 9afea351 | yes |
-| amsldoc cold rounds ≤ 3 (latexmk) | 3 | 15419 | 9afea351 | yes |
-| amsedit histories equal cold (8, 16 threads) | same, same (10 edits each) | 15420, 15421 | 9afea351 | yes |
-| para4000 md5 at -j 1 / 8 / 16 = `41467932…` | same at all three, and at -j 32; edit histories (50 edits) same at -j 8 and 16 | 15424 | 9afea351 | yes |
-| the clean core | `crates/vendor/defuse` built with `clean` (dev since bf7644bf) | | 9afea351 | yes |
+| every shard green | all green: build, lint, suites, latex 0–2, ams, amsedit 8, amsedit 16, para, cg | 15413–15421, 15424, 15425 | af7eca5d | yes |
+| amsldoc md5 at -j 1 / 8 / 16 = `98c96e00…` | 98c96e00 / 98c96e00 / 98c96e00, 44 pages, 0 stale reads | 15419 | af7eca5d | yes |
+| amsldoc cold rounds ≤ 3 (latexmk) | 3 | 15419 | af7eca5d | yes |
+| amsedit histories equal cold (8, 16 threads) | same, same (10 edits each) | 15420, 15421 | af7eca5d | yes |
+| para4000 md5 at -j 1 / 8 / 16 = `41467932…` | same at all three, and at -j 32; edit histories (50 edits) same at -j 8 and 16 | 15424 | af7eca5d | yes |
+| the clean core | `crates/vendor/defuse` built with `clean` (dev since 333f6c67) | | af7eca5d | yes |
 | one letter ≤ 16 ms (-j 8) | ~17 ms (edit-reps, pinned, node01, r4-speed's latest) | | | **no** |
 | line re-break ≤ 16 ms (-j 8) | ~19–22 ms (edit-reps, pinned, node01, r4-speed's latest) | | | **no** |
 | heading ≤ 50 ms | 136 ms (r5-edits' last check) | | | **no** |
 | label ≤ 50 ms | 226 ms (r5-edits' last check); amsldoc's label sits in a table float, whose floor is ~57 ms: the user's decision on how to measure it is pending | | | **no** |
 | preamble definition ≤ 50 ms | 43 ms (r5-edits' last check) | | | yes |
-| realised critical path ≤ 6 (amsldoc, -j 8) | 698 nodes | 15419 | 9afea351 | **no** |
-| runs per node ≤ 1.1 (amsldoc, -j 8) | 1.37 | 15419 | 9afea351 | **no** |
+| realised critical path ≤ 6 (amsldoc, -j 8) | 698 nodes | 15419 | af7eca5d | **no** |
+| runs per node ≤ 1.1 (amsldoc, -j 8) | 1.37 | 15419 | af7eca5d | **no** |
 
 Recorded beside the bars, not gated:
 
 | | value | job | commit |
 |---|---|---|---|
-| amsldoc cold wall at -j 1 / 8 / 16 (pdfTeX: 3.0 s a run) | 4.35 / 6.20 / 6.42 s (profile and observe build) | 15419 | 9afea351 |
-| amsldoc cold wall at -j 1 / 8 / 16, release build, one node | 2.78 / 3.34–3.57 / 3.47 s | 15404 | 6003aab8 |
-| amsldoc cold at -j 8: idle, commit, op bodies | 27.7 s summed, 1.50 s, 4.98 s | 15419 | 9afea351 |
-| amsldoc one-word edit at -j 8 / 16 (amsedit, 10 edits) | median 24 / 24 ms, max 34 / 34 ms | 15419 | 9afea351 |
-| para4000 wall at -j 1 / 8 / 16 / 32 (profile build) | 3.09 / 3.22 / 3.28 / 3.53 s | 15424 | 9afea351 |
-| para4000 wall at -j 1 / 8, release | 2.93 / 2.76 s (pdfTeX: 0.734 s) | 15424 | 9afea351 |
-| para4000 realised critical path (-j 1 / 8) | 6093 / 4321 nodes | 15424 | 9afea351 |
-| para4000 -j 1 under callgrind | 20.3 G Ir; node bodies 156 k Ir a command (pdfTeX ~2.9 k) | 15425 | 9afea351 |
+| amsldoc cold wall at -j 1 / 8 / 16 (pdfTeX: 3.0 s a run) | 4.35 / 6.20 / 6.42 s (profile and observe build) | 15419 | af7eca5d |
+| amsldoc cold wall at -j 1 / 8 / 16, release build, one node | 2.78 / 3.34–3.57 / 3.47 s | 15404 | 3e0cabca |
+| amsldoc cold at -j 8: idle, commit, op bodies | 27.7 s summed, 1.50 s, 4.98 s | 15419 | af7eca5d |
+| amsldoc one-word edit at -j 8 / 16 (amsedit, 10 edits) | median 24 / 24 ms, max 34 / 34 ms | 15419 | af7eca5d |
+| para4000 wall at -j 1 / 8 / 16 / 32 (profile build) | 3.09 / 3.22 / 3.28 / 3.53 s | 15424 | af7eca5d |
+| para4000 wall at -j 1 / 8, release | 2.93 / 2.76 s (pdfTeX: 0.734 s) | 15424 | af7eca5d |
+| para4000 realised critical path (-j 1 / 8) | 6093 / 4321 nodes | 15424 | af7eca5d |
+| para4000 -j 1 under callgrind | 20.3 G Ir; node bodies 156 k Ir a command (pdfTeX ~2.9 k) | 15425 | af7eca5d |
 
 Why cold amsldoc does not scale with threads, and what was ruled out:
 [note-cold-scaling.md](note-cold-scaling.md); the scan's chain and the
@@ -118,14 +118,14 @@ with the pinned toolchain:
 
 | check | result | commit |
 |---|---|---|
-| `cargo fmt --all --check` | clean after f8c4f328 (the vendored engine's own test file is left as it is) | f8c4f328 |
-| `cargo clippy --workspace --exclude defuse --no-deps --all-targets -D warnings` | clean | f8c4f328 |
-| `cargo test --workspace --no-run` | compiles | f8c4f328 |
-| `cargo check --target wasm32-unknown-unknown` (the pure crates) | passes | f8c4f328 |
-| `cargo clippy --target wasm32-wasip1-threads -p phitex-wasm --no-deps` | clean | f8c4f328 |
+| `cargo fmt --all --check` | clean after 400c72ef (the vendored engine's own test file is left as it is) | 400c72ef |
+| `cargo clippy --workspace --exclude defuse --no-deps --all-targets -D warnings` | clean | 400c72ef |
+| `cargo test --workspace --no-run` | compiles | 400c72ef |
+| `cargo check --target wasm32-unknown-unknown` (the pure crates) | passes | 400c72ef |
+| `cargo clippy --target wasm32-wasip1-threads -p phitex-wasm --no-deps` | clean | 400c72ef |
 | `scripts/wasm.sh check` | not run: under bubblewrap Node's WASI refuses a preopened root directory (`UVWASI_EACCES`), and the cluster's image has no Node | |
-| no `claude.ai` in files | none | f8c4f328 |
-| no `claude.ai` in commit messages since `main` | **five** (`Claude-Session:` trailers on 291d695a, 3580c450, 4de2c281, 6953bbf3, 5eaae244, 2026-10-11) | |
+| no `claude.ai` in files | none | 400c72ef |
+| no `claude.ai` in commit messages since `main` | **five** (`Claude-Session:` trailers on 43dd8b7a, 3dbb4614, b9e0a985, 49ba2d93, 4f6e007d, 2026-10-11) | |
 
 ## 3. The notes
 

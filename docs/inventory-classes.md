@@ -7,7 +7,7 @@ R98 hint claim -> Claim::None/Count, R137 Resume Pending. Today a mistake in any
 after the engine change = a re-run. Then audit each for cost, delete those that do not pay.
 
 ## 2. Special cases to delete (granularity rule, names of LaTeX/expl3 commands or file kinds in code)
-- R82/R83 can_leave_scope restrictions + text_opens_group: DELETED in loopback-units cd3dd81d (B).
+- R82/R83 can_leave_scope restrictions + text_opens_group: DELETED in loopback-units 0d1155c9 (B).
 - R84 next_opens_group: text test for \begin/\begingroup; re-check after B.
 - R64-R67 static \input text matching (`\input name` / `\input{name}`, \def\input guard, texmf path test):
   run-time slicing (R68/R69) already covers every route; delete the static path once the sweep shows

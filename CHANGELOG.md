@@ -114,7 +114,7 @@ lists what has to be green before it reaches `main`.
   paragraph with expanded fonts (and writes the scale), PhiTeX with the
   fonts as they are, so the lines differ. The largest cause of
   difference in the corpus sweep (about 120 documents; sweep job 14495,
-  dev e74c84e3, 2026-10-20).
+  dev b89bb387, 2026-10-20).
   Repro: `bench/corpus-repro/microtype-expansion.tex`.
 - **Type 3 (bitmap, PK) fonts in PDF:** pdfTeX embeds them; PhiTeX
   writes a DVI file instead of the PDF.

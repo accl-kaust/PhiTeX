@@ -2,7 +2,7 @@
 
 Owner: edit-tail agent, for Phi. Branch `edit-tail`.
 
-## 1. Measure (566fb842, before)
+## 1. Measure (9f17dec5, before)
 
 amsldoc, release CLI, `watch --exact-pdf`, a one-word edit after the cold
 build (`target/tools/edit.sh`: `bench/watchedit.py` with `--exact-pdf`,

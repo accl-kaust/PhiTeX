@@ -5,7 +5,7 @@ Status: parked (cold scaling is not an alpha bar). A sibling of
 
 ## The question
 
-amsldoc's cold build is slower at `-j 8` than at `-j 1` (dev d8ba5b98:
+amsldoc's cold build is slower at `-j 8` than at `-j 1` (dev 8723a884:
 round wall 2737 ms at `-j 1`, 3721 ms at `-j 8`; job 15350). The work is
 nearly serial (969 engine steps at `-j 8`, about 2 jobs a step, the steps'
 longest jobs 2.2 s of 2.96 s op time), and on top of that every run is
@@ -18,9 +18,9 @@ Op time by kind, amsldoc, `-j 8` with the default window against
 
 | commit, job | | exec per run | finish per run | resume per run | op in all |
 |---|---|---|---|---|---|
-| 940c1ddb, 15373 | default `-j 8` | 0.49 ms | 4.57 ms | 1.94 ms | 3106 ms (2132 runs) |
+| 5c64b72d, 15373 | default `-j 8` | 0.49 ms | 4.57 ms | 1.94 ms | 3106 ms (2132 runs) |
 | | `CLEAN_WINDOW=1` | 0.27 ms | 3.17 ms | 1.56 ms | 2339 ms (1886 runs) |
-| 6003aab8, 15404 | default `-j 8` | 0.460 ms | 4.39 ms | 1.83 ms | 2837 ms |
+| 3e0cabca, 15404 | default `-j 8` | 0.460 ms | 4.39 ms | 1.83 ms | 2837 ms |
 | | `CLEAN_WINDOW=1` | 0.237 ms | 2.77 ms | 1.32 ms | 2006 ms |
 
 With one job a step, op time per run is `-j 1`'s exactly; with

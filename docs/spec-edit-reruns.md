@@ -1,8 +1,8 @@
 # Why a one-word edit re-runs exec nodes (amsldoc census)
 
-Owner: edit-causes agent, for Phi. Branch `edit-causes` (from edit-sweep 6e710e39).
+Owner: edit-causes agent, for Phi. Branch `edit-causes` (from edit-sweep 80d36f53).
 
-## 1. Census (accl job 11869, release, commit f5ca7e9e, 2026-10-16)
+## 1. Census (accl job 11869, release, commit 35689536, 2026-10-16)
 
 Instrument: `PHITEX_RUN_LOG=1` records every run attempt (`Stats::run_log`:
 node, op, resumed, speculative, how it ended, round); a rerun's cause gets
@@ -73,18 +73,18 @@ finish 5-9, fold 6-9 (`ps`).
 
 | step | commit | exec runs, 5 main-text edits | cold rounds / runs | new resumes + new exec (5 edits) |
 |---|---|---|---|---|
-| baseline (census) | f5ca7e9e | 48/40/27/24/2 | 2 / ~2300 | 43 + 12 |
-| locals counted only where they differ at the candidate | 4bb78f85 | 46/40/27/25/2 | - | |
-| resume and fold positional identity (cherry-pick of profiles 4d1965e3) | 81df5e96 | 42/36/23/21/2 | 2 / 2306 | 0 + 0 |
-| defines-side own fold dropped entirely (rejected) | 5655c2c6 | 32/32/22/17/2 | 3 / 3013 | |
-| defined after a candidate counts only if its value differs from the one at the candidate | 8bb7a72a, a7cc35b4 | 39/36/23/21/2 -> 38/35/23/21/2 | 2 / 2348 | 0 + 0 |
-| own-fold prediction only on fields more than half of a routine's runs read | 9817cbf4, b0a4491d | 35/34/23/21/2 | 2 / 2463 | 0 + 0 |
+| baseline (census) | 35689536 | 48/40/27/24/2 | 2 / ~2300 | 43 + 12 |
+| locals counted only where they differ at the candidate | cb314601 | 46/40/27/25/2 | - | |
+| resume and fold positional identity (cherry-pick of profiles b9ce2fd3) | 3e6c3321 | 42/36/23/21/2 | 2 / 2306 | 0 + 0 |
+| defines-side own fold dropped entirely (rejected) | c65b4631 | 32/32/22/17/2 | 3 / 3013 | |
+| defined after a candidate counts only if its value differs from the one at the candidate | 0396eaac, d98a02c6 | 39/36/23/21/2 -> 38/35/23/21/2 | 2 / 2348 | 0 + 0 |
+| own-fold prediction only on fields more than half of a routine's runs read | 5d8d463a, d17aa341 | 35/34/23/21/2 | 2 / 2463 | 0 + 0 |
 
 amsldoc `--exact-pdf` at j1 and j8 is byte-identical to the epoch oracle
 after every step. The sweep's comparisons against cold builds show no
 differences. The suites match the baseline: the edits reds
 one_word_edit_reruns_little and pdf_edit_reruns_one_page_step are red at
-6e710e39 too, and relaxed_page_edit, red at 6e710e39, is green.
+80d36f53 too, and relaxed_page_edit, red at 80d36f53, is green.
 
 What is left on the main-text edits (11884): `pdf:state` 92 of 115 exec
 runs (edit-tail's split of the writer-state key) and `ps` 19. The

@@ -159,7 +159,7 @@ nodes' source positions; it fails on any forbidden link above, on any
 test asserts the same runs-per-node bound on the vsize document. Bytes identical to pdfTeX remain necessary; they are
 not the acceptance.
 
-## Status (measured, accl jobs 8557/8586, tex-paragraph 879f11a8/951dafc0)
+## Status (measured, accl jobs 8557/8586, tex-paragraph 6b3687aa/0106cb0b)
 
 - Story document: one round 0.210 s at 1 thread; critical path 248 -> 8
   after `no_scope`.

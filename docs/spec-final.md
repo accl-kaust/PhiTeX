@@ -22,9 +22,9 @@ para4000 0.734 s and para400 0.217 s on one accl core (pinned, 2026-10-17);
 amsldoc with pdflatex converged (latexmk) 3 s. pdfTeX's cost is 288 ns and
 about 2,900 Ir per command, 63 Ir per token.
 
-| bar | measure | today (dcb6e93c / 566fb842) | finish line |
+| bar | measure | today (153e6625 / 9f17dec5) | finish line |
 |---|---|---|---|
-| bytes | md5 vs oracle, amsldoc and para4000, j1/j8/j16/j32, cold AND after an edit history (50 one-word edits at random places, then the PDF equal to a cold build of the final text, at j8 and j16) | amsldoc exact cold at j1/j8/j16 (31935925); edit histories at j8/j16 never run | identical at every thread count, cold and after edit histories, 0 stale reads (PHITEX_CHECK_READS=1), refuted counters reported |
+| bytes | md5 vs oracle, amsldoc and para4000, j1/j8/j16/j32, cold AND after an edit history (50 one-word edits at random places, then the PDF equal to a cold build of the final text, at j8 and j16) | amsldoc exact cold at j1/j8/j16 (5a56dd37); edit histories at j8/j16 never run | identical at every thread count, cold and after edit histories, 0 stale reads (PHITEX_CHECK_READS=1), refuted counters reported |
 | cold | wall, release, pinned whole cores | para4000 4.71 s at j8; amsldoc 34.6 s at j8 | para4000 < 0.734 s at j8; amsldoc < 3 s at j8 |
 | scaling | wall at 1/4/8/16/32 vs busy | j8 = j1 | wall(N) ≤ 1.25 × busy/N + critical-path time, up to 32 |
 | edit | one-word edit, release, PDF written and equal to a cold build of the edited text | 0.2 s (mid-doc, edit-tail) | ≤ 16 ms on para4000 and amsldoc, of which fixed cost ≤ 10 ms |
@@ -146,7 +146,7 @@ on para4000 and amsldoc; finisher refutations 0 on amsldoc cold.
 3. A round re-runs only the readers of loop-back fields whose value
    changed; never the document.
 4. **Cuts are forward definitions, never loop-backs.** Measured on
-   redesign2 f53423cd (amsldoc j8): 13 loop rounds, 5,397 runs for 2,100
+   redesign2 6d62d851 (amsldoc j8): 13 loop rounds, 5,397 runs for 2,100
    live nodes, 931 speculation mispredictions, because the end node
    publishes the cuts (`cut:<node>`) as loop-backs that pieces before it
    read. The finisher of page p, which decides where its page ends inside
@@ -243,7 +243,7 @@ on para4000; the §0 scaling bar.
 
 ## 9b. The parallel shape: nothing waits that could have guessed
 
-Measured on redesign2 f53423cd, para4000 cold (gate 12285):
+Measured on redesign2 6d62d851, para4000 cold (gate 12285):
 
 | | j1 | j8 |
 |---|---|---|
