@@ -6,8 +6,9 @@
 //! `build` command begins one at the process's start and prints it when
 //! its files are written.
 
+use crate::exec::LockWait as _;
 use std::fmt::Write as _;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 struct Line {
@@ -23,7 +24,7 @@ struct Line {
 static LINE: Mutex<Option<Line>> = Mutex::new(None);
 
 fn with(f: impl FnOnce(&mut Line)) {
-    let mut g = LINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut g = LINE.locked();
     if let Some(l) = g.as_mut() {
         f(l);
     }
@@ -37,7 +38,7 @@ pub fn begin_at(t: Instant) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    *LINE.lock().unwrap_or_else(PoisonError::into_inner) = Some(Line {
+    *LINE.locked() = Some(Line {
         start: t,
         epoch: now.saturating_sub(t.elapsed()).as_secs_f64(),
         last: t,
@@ -47,9 +48,7 @@ pub fn begin_at(t: Instant) {
 
 /// Whether a timeline is going on.
 pub fn active() -> bool {
-    LINE.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .is_some()
+    LINE.locked().is_some()
 }
 
 /// The phase `name` ends now (its time: since the last phase ended).
@@ -70,7 +69,7 @@ pub fn note(name: &str, d: Duration) {
 /// The timeline printed (phases of 0.3 ms or more, and the rest summed)
 /// and ended.
 pub fn end(label: &str) {
-    let Some(l) = LINE.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+    let Some(l) = LINE.locked().take() else {
         return;
     };
     let ms = |d: Duration| d.as_secs_f64() * 1e3;

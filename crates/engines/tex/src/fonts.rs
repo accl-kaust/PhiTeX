@@ -2,8 +2,9 @@
 //! parsed once per (file, size) for the process, and answered to
 //! `phitex-typeset` through its `Fonts` trait.
 
+use crate::exec::LockWait as _;
 use phitex_defuse::FxHashMap;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use phitex_defuse::{ValueId, Values};
 use phitex_tfm::{ScaledFont, Tfm};
@@ -36,11 +37,7 @@ pub(crate) fn bytes_of(text: &str) -> Vec<u8> {
 /// (§568: `s<0` is `scaled -s`).
 pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
     let key = (file.raw(), s);
-    if let Some(x) = cache()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
+    if let Some(x) = cache().locked().get(&key) {
         return x.clone();
     }
     let xs = list_of(v, file);
@@ -51,10 +48,7 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
         let at = tfm.at(z).ok()?;
         Some(Arc::new(Loaded { tfm, at }))
     });
-    cache()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, loaded.clone());
+    cache().locked().insert(key, loaded.clone());
     loaded
 }
 

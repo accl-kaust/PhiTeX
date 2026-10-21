@@ -2,6 +2,7 @@
 //! `prefixed_command` and the mode-independent commands): what a node
 //! does with the first token of its input.
 
+use crate::exec::LockWait as _;
 use std::rc::Rc;
 
 use phitex_defuse::{Value, ValueId};
@@ -1894,12 +1895,7 @@ impl Run<'_, '_> {
         };
         // (web2c §1374: `kpse_out_name_ok` refuses the name, and
         // `prompt_file_name` ends a nonstop job, §530)
-        let ok = self
-            .ops
-            .out_ok
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let ok = self.ops.out_ok.locked().clone();
         let allowed = match ok {
             Some(f) => f(&name),
             None => out_name_ok_p(&name),

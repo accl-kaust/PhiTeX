@@ -7,9 +7,10 @@
 //! document, one for a whole format. Files a run reads come in place
 //! from the environment provider (`Graph::provide`).
 
+use crate::exec::LockWait as _;
 use phitex_defuse::FxHashMap;
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use phitex_defuse::{
     Engine, Field, NodeId, OpId, Report, SeqMonoid, SumMonoid, UnitId, Value, ValueId, Values,
@@ -261,7 +262,7 @@ impl EditSender {
     /// [`EditSender::send_shared`] with what the sender knows of the
     /// change ([`Hint`]).
     pub fn send_edit(&self, text: Arc<str>, hint: Option<Hint>) -> u64 {
-        let mut p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut p = self.0.locked();
         p.version += 1;
         // (a hint against a text the engine has not taken is no hint)
         let hint = if p.text.is_some() { None } else { hint };
@@ -272,15 +273,11 @@ impl EditSender {
     /// Whether a text waits that no build has taken.
     #[must_use]
     pub fn pending(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .text
-            .is_some()
+        self.0.locked().text.is_some()
     }
 
     fn take(&self) -> Option<(Arc<str>, Option<Hint>, u64)> {
-        let mut p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut p = self.0.locked();
         let v = p.version;
         p.text.take().map(|(t, h)| (t, h, v))
     }
@@ -360,7 +357,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
                     range = Some(r);
                     // (the line starts: those in the range made again,
                     // those after it moved)
-                    let mut ls = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+                    let mut ls = self.lines.locked();
                     if let Some(v) = ls.as_mut() {
                         let (a, b, c) = r;
                         let i = v.partition_point(|&k| k <= a);
@@ -392,10 +389,10 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             *self.raw = Some(raw);
             if let Some(t) = t {
                 *self.text = t;
-                *self.lines.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                *self.lines.locked() = None;
             }
         } else {
-            *self.lines.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            *self.lines.locked() = None;
             *self.canon = false;
             self.marks.set(Vec::new());
             *self.raw = None;
@@ -1499,6 +1496,22 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         r.realised_critical_time.as_secs_f64() * 1e3
     );
     {
+        // (the locks runs found held, by call site: what concurrent runs
+        // wait on one another for)
+        let waits = crate::exec::lock_waits();
+        let all: std::time::Duration = waits.iter().map(|w| w.2).sum();
+        let top: Vec<String> = waits
+            .iter()
+            .take(12)
+            .map(|(at, n, d)| format!("{at} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
+            .collect();
+        eprintln!(
+            "acct: lock waits {:.3} ms in all; by site: {}",
+            all.as_secs_f64() * 1e3,
+            top.join(", ")
+        );
+    }
+    {
         // (the executor's dispatch: a step's batch handed to the pool
         // waits for its longest job, and for the hand-over and the wake
         // of the workers and of the caller around it)
@@ -1761,11 +1774,7 @@ impl Stats {
             self.reruns.push((n.raw(), op, why));
         }
         if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
-            let log = std::mem::take(
-                &mut *crate::ops::RUN_LOG
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            let log = std::mem::take(&mut *crate::ops::RUN_LOG.locked());
             let round = self.rounds;
             for (n, resumed, spec, how) in log {
                 let op = eng
@@ -2324,15 +2333,14 @@ impl Graph {
                     return None;
                 }
                 let cell = cut
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .locked()
                     .entry(name.to_owned())
                     .or_default()
                     .clone();
                 let m = cell.get_or_init(|| {
                     let found = finder_u(name);
                     let hash = file_hash(found.as_ref());
-                    let defs = defs.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                    let defs = defs.locked().clone();
                     let es = found
                         .map(|(path, bytes)| file_units(v, &reg, &defs, name, &path, &bytes))
                         .unwrap_or_default();
@@ -2368,8 +2376,7 @@ impl Graph {
                 return None;
             }
             let cell = answered
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .locked()
                 .entry(name.to_owned())
                 .or_default()
                 .clone();
@@ -2529,10 +2536,7 @@ impl Graph {
         let v = self.eng.values();
         let f = v.field("streams");
         let streams = self.eng.acc_value(unit, f);
-        let mut m = self
-            .opened_memo
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut m = self.opened_memo.locked();
         if let Some((from, names)) = &*m
             && *from == streams
         {
@@ -2758,22 +2762,10 @@ impl Graph {
             // routines' guesses read, [`crate::run::Ops::fin_defs_start`])
             {
                 let o = &self.ops;
-                let fd = o
-                    .fin_defs
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                *o.fin_defs_start
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Arc::new(fd);
-                let sg = o
-                    .scan_guess
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                *o.scan_guess_start
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Arc::new(sg);
+                let fd = o.fin_defs.locked().clone();
+                *o.fin_defs_start.locked() = Arc::new(fd);
+                let sg = o.scan_guess.locked().clone();
+                *o.scan_guess_start.locked() = Arc::new(sg);
             }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
@@ -3150,12 +3142,7 @@ impl Graph {
                 {
                     continue;
                 }
-                let defs = self
-                    .ops
-                    .defs
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
+                let defs = self.ops.defs.locked().clone();
                 let found = finder(&name);
                 if !self.reads.iter().any(|(n, _)| *n == name) {
                     self.queries.push((name.clone(), found.is_some()));
@@ -3571,15 +3558,11 @@ type MarksState = (Vec<(u32, String)>, bool);
 
 impl Marks {
     fn get(&self) -> Vec<(u32, String)> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .0
-            .clone()
+        self.0.locked().0.clone()
     }
 
     fn set(&self, ms: Vec<(u32, String)>) {
-        let mut m = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut m = self.0.locked();
         if m.0 != ms {
             *m = (ms, true);
         }
@@ -3587,7 +3570,7 @@ impl Marks {
 
     /// The `doc:marks` value; the environment holds them from here.
     fn value(&self, v: &Values) -> ValueId {
-        let mut m = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut m = self.0.locked();
         m.1 = false;
         v.list(
             m.0.iter()
@@ -3598,7 +3581,7 @@ impl Marks {
 
     /// Whether marks changed since the environment was set.
     fn dirty(&self) -> bool {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).1
+        self.0.locked().1
     }
 }
 
@@ -3914,11 +3897,7 @@ fn is_tex_text(name: &str) -> bool {
 fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
     static C: OnceLock<Mutex<FxHashMap<[u8; 32], Defs>>> = OnceLock::new();
     let cache = C.get_or_init(|| Mutex::new(FxHashMap::default()));
-    if let Some(d) = cache
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&c.key)
-    {
+    if let Some(d) = cache.locked().get(&c.key) {
         return d.clone();
     }
     let t0 = std::time::Instant::now();
@@ -3951,10 +3930,7 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         );
     }
     let d: Defs = Arc::new(defs);
-    cache
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(c.key, d.clone());
+    cache.locked().insert(c.key, d.clone());
     d
 }
 
@@ -3969,12 +3945,7 @@ impl Options {
 
 fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> {
     let finder = opts.prelude_finder();
-    let candidates: Vec<Arc<Cached>> = env_cache()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-        .cloned()
-        .unwrap_or_default();
+    let candidates: Vec<Arc<Cached>> = env_cache().locked().get(&key).cloned().unwrap_or_default();
     let t0 = std::time::Instant::now();
     let given = opts
         .prelude_bytes
@@ -4139,12 +4110,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         diags,
     });
     if c.errors.is_empty() {
-        env_cache()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(key)
-            .or_default()
-            .push(c.clone());
+        env_cache().locked().entry(key).or_default().push(c.clone());
     }
     c
 }
@@ -4456,14 +4422,8 @@ impl Build {
         // round's values, the fields still moving a warning)
         g.eng
             .set_round_cap_policy(phitex_defuse::CapPolicy::Finalize);
-        (*g.ops.out_ok.lock().unwrap_or_else(PoisonError::into_inner))
-            .clone_from(&opts.out_name_ok);
-        g.ops
-            .tool_opts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .bibtex
-            .clone_from(&opts.bibtex);
+        (*g.ops.out_ok.locked()).clone_from(&opts.out_name_ok);
+        g.ops.tool_opts.locked().bibtex.clone_from(&opts.bibtex);
         g.tool_finder.clone_from(&opts.tool_finder);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
@@ -4533,7 +4493,7 @@ impl Build {
                 g.eng.push(unit, exec, args);
             }
         }
-        *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
+        *g.ops.defs.locked() = defs.clone();
         let doc = is_doc(prelude, document);
         // the package loads' records (`crate::pkgrec`); a load never seen
         // runs optimistically under speculation
@@ -4546,11 +4506,7 @@ impl Build {
             predict,
         )));
         // (the loads' predictions, asked by the engine per load node)
-        g.ops
-            .pkg_loads
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone_from(&g.loads);
+        g.ops.pkg_loads.locked().clone_from(&g.loads);
         crate::timeline::lap("engine: the job's environment, the loads' records");
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
         // (the pages: each piece places the finisher of a page that ends
@@ -4731,13 +4687,7 @@ impl Build {
     /// (`crate::pkgrec::entry`), so an evaluation in which no load ran
     /// leaves the merged records as they were.
     fn merge_load_records(&mut self) {
-        self.loads_ran = !self
-            .g
-            .ops
-            .pkg_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_empty();
+        self.loads_ran = !self.g.ops.pkg_log.locked().is_empty();
         if self.loads_ran
             && let Some(l) = &self.g.loads
         {
@@ -4795,12 +4745,7 @@ impl Build {
         crate::timeline::lap("engine: the nodes' offsets (progress)");
         let mut stats = Stats::default();
         self.g.queries.clear();
-        self.g
-            .ops
-            .pkg_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        self.g.ops.pkg_log.locked().clear();
         let loads = self.g.loads.clone();
         let mut absorb = Absorb {
             edits: &self.edits,
@@ -4975,13 +4920,7 @@ impl Build {
         if cut {
             self.g.drop_units(name);
             let v = self.g.eng.values();
-            let defs = self
-                .g
-                .ops
-                .defs
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
+            let defs = self.g.ops.defs.locked().clone();
             match &found {
                 Some((path, bytes)) => {
                     let es = file_units(v, &self.g.ops.hints, &defs, name, path, bytes);
@@ -5260,13 +5199,7 @@ impl Build {
                     Some((*n, crate::pkgrec::load_key(src.text(&self.text))?))
                 })
                 .collect();
-            let log = self
-                .g
-                .ops
-                .pkg_log
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
+            let log = self.g.ops.pkg_log.locked().clone();
             let mut chain: FxHashMap<String, u64> = FxHashMap::default();
             for (n, k) in &keyed {
                 let runs = log.iter().filter(|r| r.0 == n.raw()).count();
@@ -5309,11 +5242,7 @@ impl Build {
             stats.pkg_recorded = l.given[0].load(std::sync::atomic::Ordering::Relaxed);
             stats.pkg_optimistic = l.given[1].load(std::sync::atomic::Ordering::Relaxed);
             // each prediction against what the load's last run published
-            let predicted = l
-                .predicted
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
+            let predicted = l.predicted.locked().clone();
             if !predicted.is_empty() {
                 let fresh: FxHashMap<String, crate::pkgrec::Rec> =
                     self.fresh_records().into_iter().collect();
@@ -5354,13 +5283,7 @@ impl Build {
                 }
             }
         }
-        let log = self
-            .g
-            .ops
-            .pkg_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let log = self.g.ops.pkg_log.locked().clone();
         stats.pkg_runs = log.len() as u64;
         // the most load runs at once, and the span from the first's start
         // to the last's end
@@ -5421,12 +5344,18 @@ impl Build {
     #[must_use]
     pub fn link_pages(&self) -> (u64, u64) {
         let v = self.g.eng.values();
-        let acc = self.g.eng.acc_value(self.unit, v.field(crate::pdfout::LINKED));
+        let acc = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field(crate::pdfout::LINKED));
         acc.map(|a| v.seq_to_vec(a))
             .and_then(|es| es.last().copied())
             .map_or((0, 0), |e| {
                 let xs = list_of(v, e);
-                let n = |k: usize| xs.get(k).map_or(0, |&x| u64::try_from(int_of(v, x)).unwrap_or(0));
+                let n = |k: usize| {
+                    xs.get(k)
+                        .map_or(0, |&x| u64::try_from(int_of(v, x)).unwrap_or(0))
+                };
                 (n(0), n(1))
             })
     }
@@ -5437,7 +5366,7 @@ impl Build {
     pub fn files(&self) -> Vec<(String, String)> {
         let v = self.g.eng.values();
         let streams = self.g.eng.acc_value(self.unit, v.field("streams"));
-        let mut m = self.memo.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut m = self.memo.locked();
         if let Some((from, fs)) = &m.files
             && *from == streams
         {
@@ -5524,20 +5453,13 @@ impl Build {
             self.g.eng.acc_value(self.unit, v.field("pagehash")),
             self.g.eval_errors.len(),
         );
-        if let Some((k, x)) = &self
-            .memo
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .output
+        if let Some((k, x)) = &self.memo.locked().output
             && *k == key
         {
             return x.clone();
         }
         let x = self.output_made();
-        self.memo
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .output = Some((key, x.clone()));
+        self.memo.locked().output = Some((key, x.clone()));
         x
     }
 
@@ -5553,7 +5475,7 @@ impl Build {
         let n = self.pages().len();
         crate::timeline::note("output: the pages", t0.elapsed());
         let t0 = std::time::Instant::now();
-        let mut memo = self.memo.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut memo = self.memo.locked();
         let (fatal, fatal_pdf) = memo.log.update(
             v,
             &self.opts.name,
@@ -5682,7 +5604,7 @@ impl Build {
         // search, not by counting the text before it)
         crate::timeline::note("diagnostics: the nodes' spans", t_spans.elapsed());
         let t_lines = std::time::Instant::now();
-        let mut kept = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut kept = self.lines.locked();
         let made;
         let doc_lines: &[usize] = if contiguous {
             kept.get_or_insert_with(|| line_starts(doc))
@@ -6159,20 +6081,13 @@ impl Build {
         let v = self.g.eng.values();
         let f = v.field("pagehash");
         let acc = self.g.eng.acc_value(self.unit, f);
-        if let Some((k, x)) = &self
-            .memo
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pages
+        if let Some((k, x)) = &self.memo.locked().pages
             && *k == acc
         {
             return x.clone();
         }
         let x = self.pages_made();
-        self.memo
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pages = Some((acc, x.clone()));
+        self.memo.locked().pages = Some((acc, x.clone()));
         x
     }
 
@@ -6445,9 +6360,7 @@ fn decl_trace(eng: &Engine, f: Field, init: ValueId) {
     if !crate::exec::obs_flag!("PHITEX_DECL_TRACE") {
         return;
     }
-    let mut l = LAST
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut l = LAST.locked();
     let prev = l.get_or_insert_with(FxHashMap::default).insert(f, init);
     let name = field_name(eng.values(), f);
     let fam = name.split(':').next().unwrap_or("").to_owned();
@@ -6467,9 +6380,7 @@ fn env_trace(eng: &Engine, env: &[(Field, ValueId)]) {
     if !crate::exec::obs_flag!("PHITEX_DECL_TRACE") {
         return;
     }
-    let mut l = LAST
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut l = LAST.locked();
     let old = l.take().unwrap_or_default();
     let new: FxHashMap<Field, ValueId> = env.iter().copied().collect();
     let v = eng.values();

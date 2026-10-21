@@ -42,6 +42,7 @@
 //! `PHITEX_HINTS=1` prints each distinct node text's answer and cause;
 //! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
 
+use crate::exec::LockWait as _;
 use phitex_defuse::FxHashMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
@@ -3553,7 +3554,7 @@ struct Prepared {
 /// the whole analysis instead of one computed on its own without the
 /// definitions.
 pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
-    let mut bn = reg.by_name.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut bn = reg.by_name.locked();
     if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, t)) {
         bn.insert(name.raw(), t.clone());
     }
@@ -3564,20 +3565,14 @@ pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
 /// frame) gets it from here, as the unit's slice of the whole file's
 /// analysis.
 pub(crate) fn register_unit(reg: &Registry, key: ValueId, hint: Arc<str>) {
-    reg.units
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key.raw(), hint);
+    reg.units.locked().insert(key.raw(), hint);
 }
 
 /// Withdraws the analysis registered under `name` (a document whose
 /// text is no longer one analysed whole): its nodes' hints answer
 /// `Any`, as before anything was registered.
 pub(crate) fn unregister_text(reg: &Registry, name: ValueId) {
-    reg.by_name
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .remove(&name.raw());
+    reg.by_name.locked().remove(&name.raw());
 }
 
 /// Whether a text is written for INITEX's catcodes: its first `{` comes
@@ -3688,17 +3683,14 @@ pub(crate) fn text_hints_with(
             h.finish()
         }),
     );
-    if let Some((d, t)) = texts()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
+    if let Some((d, t)) = texts().locked().get(&key)
         && d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
     {
         return t.clone();
     }
     let own = own.unwrap_or_else(|| own_definitions_from(text, named, start).0);
     let t = Arc::new(analyse_with(text, kind, defs, own, start));
-    let mut c = texts().lock().unwrap_or_else(PoisonError::into_inner);
+    let mut c = texts().locked();
     if c.len() > 256 {
         c.clear();
     }
@@ -3751,11 +3743,7 @@ pub(crate) fn file_kind_of(v: &Values, id: ValueId, name: ValueId) -> FileKind {
 /// The analysis of a file read by `\input`: its text value `id`, named
 /// `name`.
 pub(crate) fn file_hints(reg: &Registry, v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
-    let known = by_id()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&id.raw())
-        .cloned();
+    let known = by_id().locked().get(&id.raw()).cloned();
     #[allow(clippy::single_match_else)]
     let t = match known {
         Some(t) => t,
@@ -3766,10 +3754,7 @@ pub(crate) fn file_hints(reg: &Registry, v: &Values, id: ValueId, name: ValueId)
             // definitions, which the frame does not name; a call it
             // cannot bound answers `Any`, never a narrower set)
             let t = text_hints(&text, FileKind::from_path(&nm), no_defs());
-            by_id()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(id.raw(), t.clone());
+            by_id().locked().insert(id.raw(), t.clone());
             t
         }
     };
@@ -3798,10 +3783,7 @@ pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
         reads: Kept::Ready(reads_now(reg, v, args)),
         lines: Some(crate::run::text_lines(v, args)),
     };
-    reg.prepared
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(args_key(args), p);
+    reg.prepared.locked().insert(args_key(args), p);
 }
 
 /// The answer `f` takes from a node's prepared ones, if it was prepared.
@@ -3810,7 +3792,7 @@ fn take_prepared<T>(
     args: &[ValueId],
     f: impl FnOnce(&mut Prepared) -> Option<T>,
 ) -> Option<T> {
-    let mut p = reg.prepared.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut p = reg.prepared.locked();
     if p.is_empty() {
         return None;
     }
@@ -3826,10 +3808,7 @@ pub(crate) fn prepared_lines(reg: &Registry, args: &[ValueId]) -> Option<ValueId
 /// The push the answers were [`prepare`]d for is done: those it did not
 /// take are dropped (a later node with the same arguments asks again).
 pub(crate) fn prepared_done(reg: &Registry) {
-    reg.prepared
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
+    reg.prepared.locked().clear();
 }
 
 /// The hint of a node from its arguments: the extra argument when the
@@ -3844,27 +3823,17 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
             .clone();
     }
     let key = args_key(args);
-    if let Some(h) = reg
-        .hints
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
+    if let Some(h) = reg.hints.locked().get(&key) {
         return h.clone();
     }
     let mut registry = false;
     let h = match hint_value(v, args) {
         // (the hint argument's string decoded once per build)
         Some(hv) => {
-            let known = reg
-                .decoded
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&hv.raw())
-                .cloned();
+            let known = reg.decoded.locked().get(&hv.raw()).cloned();
             known.unwrap_or_else(|| {
                 let h = Arc::new(compute_hint(reg, v, args, &mut registry));
-                let mut d = reg.decoded.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut d = reg.decoded.locked();
                 if d.len() > 1 << 16 {
                     d.clear();
                 }
@@ -3879,7 +3848,7 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
         // edit registers again: the arguments alone do not name it)
         return h;
     }
-    let mut c = reg.hints.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut c = reg.hints.locked();
     if c.len() > 1 << 20 {
         c.clear();
     }
@@ -3943,12 +3912,7 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
                 // (what the registry holds now: not cached by the
                 // arguments, `hint_of_args`)
                 *registry = true;
-                let t = reg
-                    .by_name
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .get(&name.raw())
-                    .cloned();
+                let t = reg.by_name.locked().get(&name.raw()).cloned();
                 return match t {
                     Some(t) => t.at_until(at, at + text.len()),
                     None => Hint::any("file not analysed yet", &text),
@@ -4057,13 +4021,9 @@ fn compute_hint(reg: &Registry, v: &Values, args: &[ValueId], registry: &mut boo
             // analysis, registered when the file was cut into units;
             // what the registry holds now, not cached by the arguments)
             *registry = true;
-            let h = xs.get(1).and_then(|&k| {
-                reg.units
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .get(&k.raw())
-                    .cloned()
-            });
+            let h = xs
+                .get(1)
+                .and_then(|&k| reg.units.locked().get(&k.raw()).cloned());
             match h {
                 Some(h) if frames.len() == 1 => Hint::decode(&h),
                 _ => Hint::any("unit not analysed", ""),
@@ -4201,17 +4161,13 @@ fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     // (an answer is the hint's alone: made once per hint string)
     let hv = hint_value(v, args).filter(|_| !crate::exec::obs_flag!("PHITEX_HINTS"));
     if let Some(hv) = hv
-        && let Some(m) = reg
-            .answers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&hv.raw())
+        && let Some(m) = reg.answers.locked().get(&hv.raw())
     {
         return m.clone();
     }
     let m = may_define_answer(reg, v, args);
     if let Some(hv) = hv {
-        let mut a = reg.answers.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut a = reg.answers.locked();
         if a.len() > 1 << 16 {
             a.clear();
         }

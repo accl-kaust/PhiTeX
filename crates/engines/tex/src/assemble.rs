@@ -16,6 +16,7 @@
 //!   them; what the commands and the pages' writers guessed given back
 //!   as loop-backs for the next round.
 
+use crate::exec::LockWait as _;
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
 use phitex_typeset::node::Node;
 
@@ -81,19 +82,14 @@ type Linked = std::collections::VecDeque<(u64, std::sync::Arc<Vec<u8>>)>;
 
 /// The files linked in values table `instance` dropped: its build goes.
 pub(crate) fn forget_linked(instance: u64) {
-    linked_files()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .retain(|(i, _)| *i != instance);
+    linked_files().locked().retain(|(i, _)| *i != instance);
 }
 
 /// The value standing for file bytes `b` ([`linked_files`]).
 fn bytes_value(v: &phitex_defuse::Values, b: Vec<u8>, hash: Option<u64>) -> ValueId {
     let h = hash.unwrap_or_else(|| phitex_defuse::hash_bytes(0x6c69_6e6b_6564, &b));
     let n = b.len();
-    let mut all = linked_files()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut all = linked_files().locked();
     let k = if let Some(k) = all.iter().position(|(i, _)| *i == v.instance()) {
         k
     } else {
@@ -123,8 +119,7 @@ pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::s
     {
         let h = u64::from_ne_bytes(int_of(v, xs[1]).to_ne_bytes());
         return linked_files()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .locked()
             .iter()
             .find(|(i, _)| *i == v.instance())
             .and_then(|(_, m)| m.iter().find(|e| e.0 == h).map(|e| e.1.clone()))
@@ -219,9 +214,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
     );
     let ids: Vec<u64> = pages.iter().map(|p| p.raw()).collect();
     let (mut w, start, mut snaps) = {
-        let m = dvi_memo()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let m = dvi_memo().locked();
         let found = m.as_ref().filter(|m| m.head == head).and_then(|m| {
             let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
             m.snaps
@@ -298,9 +291,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
             dvi_page(v, &mut w, page, &defs);
         }
     }
-    *dvi_memo()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(DviMemo { head, ids, snaps });
+    *dvi_memo().locked() = Some(DviMemo { head, ids, snaps });
     let bytes = w.finish();
     Ok(v.intern(Value::Str(latin1(&bytes).into_boxed_str())))
 }

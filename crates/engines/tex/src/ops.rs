@@ -4,6 +4,7 @@
 //! end of the prelude) and `Files` (the files read back next round).
 //! The pages' (`Fold`, `Finish`, `Resume`) are in `crate::pages`.
 
+use crate::exec::LockWait as _;
 use std::sync::{Arc, OnceLock};
 
 use phitex_defuse::{
@@ -128,8 +129,7 @@ pub(crate) fn run_node_parking(
             _ => b'x',
         };
         RUN_LOG
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .locked()
             .push((r.cx.node().raw(), r.resumed, r.cx.is_speculative(), how));
     }
     // (a long run, the format's: its commands' time, then its finish)
@@ -251,11 +251,7 @@ impl Operation for Exec {
         if !crate::pkgrec::is_load(v, args) {
             return None;
         }
-        let loads = ops(&self.0)
-            .pkg_loads
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()?;
+        let loads = ops(&self.0).pkg_loads.locked().clone()?;
         let &fr = args.first()?;
         let &f = list_of(v, fr).first()?;
         let text = str_of(v, *list_of(v, f).get(1)?);
@@ -478,8 +474,7 @@ impl Operation for Exec {
             Ok(())
         });
         if load && res.is_ok() {
-            log.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            log.locked()
                 .push((node, t0, std::time::Instant::now(), spec));
         }
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
@@ -934,10 +929,7 @@ fn file_node(
     if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
         eprintln!("aux-trace: publish wfile {name}: {} bytes:\n{t}", t.len());
     }
-    let defs = defs_lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+    let defs = defs_lock.locked().clone();
     let t0 = std::time::Instant::now();
     let order = written_units(cx, name, &t, &defs);
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -1002,10 +994,7 @@ fn seed_decls(
     };
     let wf = v.field(&format!("wfile:{name}"));
     if keys == mark {
-        let hints = defs_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let hints = defs_lock.locked().clone();
         let text = str_of(v, seed);
         let (order, units) = units_of(v, name, &text, &hints);
         for (key, u) in units {
@@ -1144,7 +1133,11 @@ pub(crate) fn units_of<'t>(
 /// as the round before wrote it is not analysed again: amsldoc's index
 /// file, 40 kB, 125 ms).
 fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
-    type Kept = (std::sync::Weak<phitex_source::pass::Definitions>, Arc<[usize]>, bool);
+    type Kept = (
+        std::sync::Weak<phitex_source::pass::Definitions>,
+        Arc<[usize]>,
+        bool,
+    );
     static MEMO: std::sync::OnceLock<std::sync::Mutex<FxHashMap<(u64, usize), Kept>>> =
         std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
@@ -1152,10 +1145,7 @@ fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
         phitex_defuse::hash_bytes(0x756e_6974_656e_6473, text.as_bytes()),
         Arc::as_ptr(defs) as usize,
     );
-    if let Some((d, ends, sl)) = memo
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
+    if let Some((d, ends, sl)) = memo.locked().get(&key)
         && d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
     {
         return (ends.clone(), *sl);
@@ -1173,7 +1163,7 @@ fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
     // (the job's own text: what kind of file it is comes from its text)
     let sliceable = crate::inputs::document_text(text);
     let ends: Arc<[usize]> = ends.into();
-    let mut m = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut m = memo.locked();
     if m.len() > 64 {
         m.clear();
     }

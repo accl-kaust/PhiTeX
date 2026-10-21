@@ -7,6 +7,7 @@
 //! run parked ([`Run::begin_command`], [`Run::rewind`]); no hashing
 //! per command.
 
+use crate::exec::LockWait as _;
 use crate::input::{self, Level, Range, Seg, kind, ty};
 use crate::input::{MID_LINE, NEW_LINE, SKIP_BLANKS};
 use crate::run::{Cur, Halt, R, Run};
@@ -818,9 +819,7 @@ impl Run<'_, '_> {
             .following(self.pulled - 1)
             .and_then(|(_, a)| a.first().map(|&x| self.v.render(x)))
             .unwrap_or_default();
-        let mut seen = SEEN
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut seen = SEEN.locked();
         let i = seen.iter().position(|x| *x == sib).unwrap_or_else(|| {
             seen.push(sib.clone());
             seen.len() - 1

@@ -1026,3 +1026,70 @@ impl Drop for NodeTimer {
         }
     }
 }
+
+/// A lock whose waits are counted (`profile`): where a run finds it held,
+/// the time it waits, by the call site ([`lock_waits`], the `acct: lock
+/// waits` line). Without `profile`, a plain lock.
+pub(crate) trait LockWait<T: ?Sized> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T: ?Sized> LockWait<T> for std::sync::Mutex<T> {
+    #[track_caller]
+    fn locked(&self) -> std::sync::MutexGuard<'_, T> {
+        use std::sync::{PoisonError, TryLockError};
+        if !cfg!(feature = "profile") {
+            return self.lock().unwrap_or_else(PoisonError::into_inner);
+        }
+        match self.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                let at = std::panic::Location::caller();
+                let t = clock().now();
+                let g = self.lock().unwrap_or_else(PoisonError::into_inner);
+                if let (Some(a), Some(b)) = (t, clock().now()) {
+                    note_wait(at, b.saturating_sub(a));
+                }
+                g
+            }
+        }
+    }
+}
+
+/// The waits by call site: `(site, waits, nanoseconds)`.
+static WAITS: std::sync::Mutex<Vec<(&'static std::panic::Location<'static>, u64, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn note_wait(at: &'static std::panic::Location<'static>, ns: u64) {
+    let mut w = WAITS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match w.iter_mut().find(|e| std::ptr::eq(e.0, at)) {
+        Some(e) => {
+            e.1 += 1;
+            e.2 += ns;
+        }
+        None => w.push((at, 1, ns)),
+    }
+}
+
+/// (`profile`) The lock waits so far by call site, longest first, and
+/// cleared: `(file:line, waits, wait)`.
+pub(crate) fn lock_waits() -> Vec<(String, u64, std::time::Duration)> {
+    let mut w = std::mem::take(
+        &mut *WAITS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    w.sort_by_key(|e| std::cmp::Reverse(e.2));
+    w.into_iter()
+        .map(|(at, n, ns)| {
+            (
+                format!("{}:{}", at.file(), at.line()),
+                n,
+                std::time::Duration::from_nanos(ns),
+            )
+        })
+        .collect()
+}
