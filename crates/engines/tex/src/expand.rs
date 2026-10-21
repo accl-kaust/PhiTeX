@@ -96,8 +96,10 @@ impl Run<'_, '_> {
                     // §369: `scanner_status:=normal` while the token is
                     // read (`\everyeof{\noexpand}`: a file's end met here
                     // is no runaway, §336)
+                    // (only the token is used: of its meaning, the class a
+                    // stored token's fetch reads)
                     let was = self.scanner.take();
-                    self.get_token();
+                    self.get_token_stored();
                     self.scanner = was;
                     self.ck()?;
                     let t = self.cur.tok;
