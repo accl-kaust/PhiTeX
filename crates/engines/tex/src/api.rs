@@ -6328,7 +6328,6 @@ fn declare_fields(eng: &mut Engine) {
         "pkgrecs",
         "gdefs",
         crate::pdfout::XPAGES,
-        crate::pdfout::FONT_LOADS,
         crate::vprof::VPROF,
         crate::pages::PITEMS,
         crate::run::SEEDED,
@@ -6356,6 +6355,11 @@ fn declare_fields(eng: &mut Engine) {
     // text in work: `crate::pages::MissMonoid`)
     let miss = eng.values().field(crate::pages::PAGE_MISS);
     eng.declare_accumulator(miss, Arc::new(crate::pages::MissMonoid));
+    // (a page written apart reads the fonts' loads before it for its
+    // provisional numbers, which the link corrects: read past the pieces
+    // in work, as few of them load a font, not waiting for all)
+    let loads = eng.values().field(crate::pdfout::FONT_LOADS);
+    eng.declare_accumulator(loads, Arc::new(crate::pages::MissMonoid));
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
     let rels = eng.values().field(crate::pdfprim::RT_RELS);

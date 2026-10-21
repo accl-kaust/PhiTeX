@@ -122,12 +122,15 @@ pub(crate) const PAGE_MISS: &str = "pages:miss";
 /// (§1246): after the eight of `\pagegoal` and its kin (§1245).
 pub(crate) const DEAD_SLOT: i64 = 8;
 
-/// [`PAGE_MISS`]'s fold: a sequence, read past its contributors still in
-/// work as they last contributed (nothing, for a node that never did,
-/// [`phitex_defuse::Monoid::speculate`]). Only finishers contribute to
-/// it, and only where they miss: the page builder reads it whole at its
-/// loop's start without waiting for the text after it, and runs again
-/// where a finisher's miss comes in.
+/// A sequence read past its contributors still in work as they last
+/// contributed (nothing, for a node that never did,
+/// [`phitex_defuse::Monoid::speculate`]); a contribution that comes in
+/// otherwise re-asks the reader. For an accumulator few nodes contribute
+/// to, read where waiting for every node in the window would chain the
+/// readers on the text: [`PAGE_MISS`] (only finishers that miss, read
+/// whole by the page builder at its loop's start), and the fonts' loads
+/// (`crate::pdfout::FONT_LOADS`, a page written apart's provisional
+/// numbers, which the link corrects).
 pub(crate) struct MissMonoid;
 
 impl phitex_defuse::Monoid for MissMonoid {
