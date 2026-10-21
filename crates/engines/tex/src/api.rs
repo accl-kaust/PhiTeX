@@ -4482,6 +4482,15 @@ impl Build {
         }
         crate::timeline::lap("engine: the environment pushed");
         job_env(&mut g, unit, &env, &opts);
+        // (the first page's scan, where the job begins: each page's scan
+        // places the next one's after the piece its page fires in,
+        // `crate::pages::Scan`)
+        {
+            let v = g.eng.values();
+            let args = vec![v.int(-3), v.int(0)];
+            let scan = g.ops.scan;
+            g.eng.push(unit, scan, args);
+        }
         // §1337: `\everyjob`, before the job's first line
         let every = env
             .iter()
@@ -4513,8 +4522,8 @@ impl Build {
         g.ops.pkg_loads.locked().clone_from(&g.loads);
         crate::timeline::lap("engine: the job's environment, the loads' records");
         let (nodes, incr) = g.push_document(unit, &text, defs, doc);
-        // (the pages: each piece places the finisher of a page that ends
-        // in it, `crate::pages`; nothing of them is pushed here)
+        // (the pages: the first page's scan, pushed above, places the
+        // rest, `crate::pages`)
         // (the files' node, then the link and the end node: new text
         // pieces go before all three; the files' node, whose run gives the
         // loop-backs, before the link and the end node, which run once
