@@ -1,0 +1,7 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0 \pdfobjcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=100pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt \topskip=10pt
+\def\l#1{\indent\pdfximage height 8pt {png-gray.png}\pdfrefximage\pdflastximage\message{[I#1=\the\pdflastximage]} Line #1\par}
+\count1=1
+\def\next{\expandafter\l\expandafter{\the\count1}\advance\count1 by 1 \ifnum\count1<25 \expandafter\next\fi}
+\next
+\end

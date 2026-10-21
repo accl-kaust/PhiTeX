@@ -372,6 +372,11 @@ pub(crate) struct CandMark {
     /// Whether items came on the main list since the candidate before:
     /// a page can fire here (§994).
     pub fresh: bool,
+    /// Whether a second pass can end the run here ([`Halt::Recut`]): a
+    /// candidate it could cut at, or a paragraph's start at the run's
+    /// outer level (the level just pushed, the continuation carrying its
+    /// list and the input `\everypar` left, §1091).
+    pub restartable: bool,
 }
 
 /// A finisher's page: its index and what the routine leaves for the
@@ -839,7 +844,14 @@ impl Run<'_, '_> {
         };
         self.note_candidate(k)?;
         self.cand += 1;
-        let cuttable = fresh && self.cuttable_here();
+        // (or the candidate a second pass ends at, `Halt::Recut`)
+        let can = self.cuttable_here();
+        let restartable = can
+            || (newgraf
+                && self.conds.is_empty()
+                && self.nest.len() == 1
+                && self.nest.last().is_some_and(|l| l.owns && l.group == 0));
+        let cuttable = fresh && (can || (restartable && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -851,6 +863,7 @@ impl Run<'_, '_> {
             nest: self.nest.len(),
             cuttable,
             fresh,
+            restartable,
         });
         self.st.mark_candidate();
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
@@ -945,41 +958,42 @@ impl Run<'_, '_> {
     }
 
     /// A read of the objects the pages shipped before this run
-    /// (`crate::pdfout::page_offset`), or an object made whose number is
-    /// counted after them (`crate::pdfprim`), in a piece that ran through a
-    /// candidate a page can fire at (inside a span of its own): pdfTeX
-    /// ships that page before the command, and the scan, not this run,
-    /// knows whether it fires. The piece ends before the command (its
-    /// input put back as the command found it), its rest a resume placed
-    /// after the pages firing in it, which reads their objects. A
-    /// command that changed anything before the read cannot be put back:
-    /// it reads on, and says so.
-    pub(crate) fn order_after_pages(&mut self) -> R<()> {
+    /// (`crate::pdfout::page_offset`), or an object made whose number
+    /// counts them (`crate::pdfprim`), in a piece that ran through a
+    /// candidate a page can fire at: pdfTeX ships that page before the
+    /// command, and the scan, not this run, knows whether it fires. The
+    /// run goes again from its start and ends at the first such
+    /// candidate ([`Halt::Recut`], [`Run::finish_candidate`]), its rest a
+    /// resume placed after the pages firing there, which reads their
+    /// objects. (`why`: the reader, for the trace.)
+    pub(crate) fn order_after_pages(&mut self, why: &str) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
-        if !piece || self.cut.is_some() || !self.cand_marks.iter().any(|m| m.fresh) {
+        if !piece || self.cut.is_some() {
             return Ok(());
         }
-        if !self.rewind() {
-            if crate::exec::obs_flag!("PHITEX_PAGE_TRACE")
-                || crate::exec::prof_flag!("PHITEX_TEX_TIME")
-            {
-                eprintln!(
-                    "  pages' objects read after a candidate a piece runs through, past a change: piece {}",
-                    self.cx.node().raw()
-                );
-            }
+        let Some(m) = self.cand_marks.iter().find(|m| m.fresh) else {
+            return Ok(());
+        };
+        let (k, restartable) = (m.k, m.restartable);
+        if !restartable {
+            // (a candidate inside a span of the run's own no pass can end
+            // at: a page firing there would be missing from the number)
+            let msg = format!(
+                "the pages' objects read in a piece after a candidate a page can fire at and no pass can end at ({why}, candidate {k}): a number here may miss that page's objects (node {})",
+                self.cx.node().raw()
+            );
+            assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
+            self.engine_diag(&msg);
             return Ok(());
         }
         if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
             eprintln!(
-                "page-trace: node {} ends before a read of the pages' objects (candidate {})",
-                self.cx.node().raw(),
-                self.cand
+                "page-trace: node {} ends at candidate {k}: a read of the pages' objects after it ({why})",
+                self.cx.node().raw()
             );
         }
-        self.cut = Some(self.cand);
-        Err(Halt::Cut)
+        Err(Halt::Recut(k))
     }
 
     /// `PHITEX_CAND_TRACE`: the candidate `k` and what decided its cut.

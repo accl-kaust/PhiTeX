@@ -569,9 +569,9 @@ fn one_word_edit_reruns_little() {
                 ("exec", 1),
                 ("finish", 1),
                 ("link", 1),
-                ("pdfpage", 1),
-                // (the paragraph's rest after the cut at its start)
-                ("resume", 1)
+                // (one node a paragraph: no rest after a cut at its
+                // start)
+                ("pdfpage", 1)
             ],
             "runs by op at {t} threads"
         );
@@ -732,7 +732,12 @@ fn a_link_removed_reruns_its_piece_and_page_only() {
     let d = common::first_difference(&b.output().0, &cold.output().0);
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert_eq!(common::runs_of(&b, "exec"), 1, "only the edited piece");
-    assert!(common::runs_of(&b, "finish") <= 1, "only its page's finisher");
+    // (a page fires at paragraph 150's start: its one piece lies in
+    // both pages' ranges, and the earlier page's finisher reads the
+    // piece's profile by range and runs again, its output unchanged. A
+    // finisher reading only the part of a straddling piece it uses, its
+    // range up to the candidate, would run once: an edits-phase item)
+    assert!(common::runs_of(&b, "finish") <= 2, "only the finishers of the pages it is on");
     // (the edited piece's own continuation, where a page fires inside
     // it, and no other)
     assert!(common::runs_of(&b, "resume") <= 1, "no later continuation");

@@ -101,6 +101,15 @@ pub(crate) fn run_node_parking(
     };
     let t_body = std::time::Instant::now();
     let mut res = body(&mut r);
+    // (a second pass from the start, ending at the candidate the first
+    // asked for: deterministic, one at most, `Halt::Recut`)
+    if let Err(Halt::Recut(k)) = res {
+        let cx = r.cx;
+        cx.restart();
+        r = Run::new(cx, o);
+        r.stop_at = Some(k);
+        res = body(&mut r);
+    }
     // the run's end on the page (`crate::pages`): its items folded into
     // the page state, a finisher placed where a page finishes; a page
     // finishing inside the piece is a cut: the run goes again from the
@@ -143,6 +152,7 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Starve) => "starve",
                 Err(Halt::Fatal) => "fatal",
                 Err(Halt::Cut) => "cut",
+                Err(Halt::Recut(_)) => "recut",
             },
             r.cx.is_speculative(),
             r.resumed,
@@ -158,6 +168,7 @@ pub(crate) fn run_node_parking(
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
                 Err(Halt::Cut) => "cut".to_owned(),
+                Err(Halt::Recut(k)) => format!("recut at {k}"),
             }
         );
     }
@@ -203,6 +214,9 @@ pub(crate) fn run_node_parking(
             }
             Err(s)
         }
+        // (a second pass ends at its candidate, before the read that
+        // asked for it)
+        Err(Halt::Recut(k)) => unreachable!("a second pass passed its candidate {k}"),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
             Ok(r.stall("starve", u))

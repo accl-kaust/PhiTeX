@@ -34,6 +34,12 @@ pub(crate) enum Halt {
     /// (`crate::pages`, spec-final A1): it ends there, its continuation
     /// the resume piece's.
     Cut,
+    /// The run read or made a number that counts the objects of the
+    /// pages shipped before it after passing candidate `k`, where a page
+    /// can fire (`crate::pages`, [`Run::order_after_pages`]): it goes
+    /// again from its start and ends at `k`, its rest a resume after the
+    /// pages firing there.
+    Recut(u32),
 }
 
 impl From<Stop> for Halt {
@@ -768,6 +774,8 @@ pub(crate) struct Run<'c, 'a> {
     pub ins_pending: Vec<u16>,
     pub fin: Option<crate::pages::FinCtx>,
     pub cut: Option<u32>,
+    /// The candidate a second pass ends at ([`Halt::Recut`]).
+    pub stop_at: Option<u32>,
     /// While a character run's lookahead expands (§1038): its list and
     /// its effect on the space factor so far, its nodes not on the list
     /// yet; the tail is its last character ([`Run::space_factor`],
@@ -927,6 +935,7 @@ impl<'c, 'a> Run<'c, 'a> {
             ins_pending: Vec::new(),
             fin: None,
             cut: None,
+            stop_at: None,
             chars_live: None,
             chars_eff: i32::MIN,
             tool_cut: None,

@@ -1288,11 +1288,6 @@ pub(crate) fn command_forms(
     if r.param("pdfoutput")? <= 0 {
         return Ok(None);
     }
-    // (a writer command whose numbers TeX may read back counts the
-    // objects of a page firing at a candidate this piece ran through
-    // before it: it runs after that page's finisher,
-    // `Run::order_after_pages`; before anything of it is recorded)
-    r.order_after_pages()?;
     let v = r.v;
     let mut fs = fonts_for(r, fonts, false)?;
     // (an image the command writes: the files its fonts ask for)
@@ -1910,6 +1905,14 @@ pub(crate) fn page_allocs(
     let rt_dests = r.get(RT_DESTS)?.unwrap_or_else(|| v.list(Vec::new()));
     let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
     let rt_pages = r.get(RT_PAGES)?.unwrap_or_else(|| v.list(Vec::new()));
+    // (where the page broke, for a page firing inside a piece: the
+    // piece and its candidate, [`page_offset_at`])
+    let brk = r
+        .fin
+        .as_ref()
+        .and_then(|c| c.brk)
+        .filter(|b| b.2)
+        .map_or(ValueId::UNIT, |(pid, k, _)| v.list(vec![v.int(pid), v.int(k)]));
     let e = v.list(vec![
         v.int(fixed),
         v.list(names),
@@ -1923,6 +1926,7 @@ pub(crate) fn page_allocs(
         marks,
         v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())),
         rt_pages,
+        brk,
     ]);
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
@@ -2077,7 +2081,7 @@ pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
 fn allocs_range(r: &mut Run<'_, '_>, why: &str) -> R<ValueId> {
     // (what a page firing at a candidate this piece ran through made
     // comes first: `Run::order_after_pages`)
-    r.order_after_pages()?;
+    r.order_after_pages(why)?;
     if crate::exec::obs_flag!("PHITEX_ALLOCS_TRACE") {
         eprintln!("allocs-read: node {} {why}", r.cx.node().raw());
     }
@@ -2435,16 +2439,29 @@ fn rt_new(v: &Values, f: &AllocFold, fonts: Option<ValueId>, dests: Option<Value
     i64::try_from(new(fonts, &f.fonts) + new(dests, &f.dests)).unwrap_or(0)
 }
 
-/// [`page_offset`] where node `at` is (a [`crate::pdfprim::REL`]
-/// number it made, read in another node): the pages' allocations up to
-/// and including it.
-pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
+/// [`page_offset`] where node `at` is, at its candidate count `c` (a
+/// [`crate::pdfprim::REL`] number it made, read in another node): the
+/// pages' allocations up to and including it, with those of the pages
+/// that fired inside it before `c` (their finishers sit after it,
+/// pdfTeX ships them before), and not those firing there later.
+pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
     if at == r.cx.node().raw() {
         return page_offset(r);
     }
     let v = r.v;
     let to = phitex_defuse::NodeId::from_raw(at);
-    let range = r.cx.acc_range_to(v.field(ALLOCS), None, Some(to))?;
+    let mut range = r.cx.acc_range_to(v.field(ALLOCS), None, Some(to))?;
+    let me = i64::from_ne_bytes(at.to_ne_bytes());
+    let after = r.cx.acc_range(v.field(ALLOCS), Some(to))?;
+    for u in v.seq_to_vec(after) {
+        let brk = list_of(v, u).get(12).map(|&b| list_of(v, b)).unwrap_or_default();
+        if let [pid, k] = brk[..]
+            && int_of(v, pid) == me
+            && int_of(v, k) < c
+        {
+            range = v.seq_concat(range, v.seq_unit(u));
+        }
+    }
     let f = fold_allocs(v, range);
     let mut there = |name: &str| -> R<Option<ValueId>> {
         Ok(match r.cx.use_field_at(v.field(name), Some(to))? {
@@ -2546,7 +2563,8 @@ pub(crate) fn form_whatsit_nums(
         let node = xs
             .get(at)
             .map_or(0, |&x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()));
-        let n = crate::pdfprim::rel_number(r, node, k)?;
+        // (as the page's writer numbers it: the pages before the node)
+        let n = crate::pdfprim::rel_number(r, node, k, 0)?;
         if let (Ok(t), Ok(n)) = (usize::try_from(t), usize::try_from(n)) {
             map.insert(t, n);
         }

@@ -959,10 +959,6 @@ fn alloc_rel(r: &mut Run<'_, '_>) -> R<(i64, i64)> {
         r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
         return Ok((n, 0));
     }
-    // (its number counts the objects of a page firing at a candidate the
-    // piece ran through before it: made after that page's finisher,
-    // `Run::order_after_pages`)
-    r.order_after_pages()?;
     let v = r.v;
     let me = r.cx.node().raw();
     let key = phitex_defuse::hash_words(0x7265_6c6f_626a_0001, &[me, r.pdf_occ as u64]);
@@ -984,7 +980,8 @@ fn node_int(r: &Run<'_, '_>) -> ValueId {
 
 /// A last-object cell's value for number `(n, k)` this run made
 /// ([`alloc_rel`]): a [`REL`] number with the node that made it and
-/// the node's count up to it, `[n, node, k]`.
+/// the node's count up to it and the candidates it had passed,
+/// `[n, node, k, candidate]`.
 fn last_num(r: &Run<'_, '_>, (n, k): (i64, i64)) -> ValueId {
     let v = r.v;
     if n & REL == 0 {
@@ -994,6 +991,7 @@ fn last_num(r: &Run<'_, '_>, (n, k): (i64, i64)) -> ValueId {
         v.int(n),
         v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())),
         v.int(k),
+        v.int(i64::from(r.cand)),
     ])
 }
 
@@ -1006,14 +1004,17 @@ fn resolved_num(r: &mut Run<'_, '_>, x: ValueId) -> R<i64> {
         return Ok(v.as_int(x).unwrap_or(0));
     };
     let at = u64::from_ne_bytes(int_of(v, at).to_ne_bytes());
-    rel_number(r, at, int_of(v, k))
+    let c = xs.get(3).map_or(0, |&c| int_of(v, c));
+    rel_number(r, at, int_of(v, k), c)
 }
 
 /// The number TeX reads back for the [`REL`] object node `at` made as
 /// its `k`-th read-time object: the read-time objects before the node
 /// ([`rt_before`]), `k`, and the objects of the pages shipped before it.
-pub(crate) fn rel_number(r: &mut Run<'_, '_>, at: u64, k: i64) -> R<i64> {
-    Ok(rt_before(r, at)? + k + crate::pdfout::page_offset_at(r, at)?)
+/// `c`: the candidates the node had passed where it made it (the pages
+/// firing inside it before then come first).
+pub(crate) fn rel_number(r: &mut Run<'_, '_>, at: u64, k: i64, c: i64) -> R<i64> {
+    Ok(rt_before(r, at)? + k + crate::pdfout::page_offset_at(r, at, c)?)
 }
 
 // ------------------------------------------------------------ `\pdfmatch`
