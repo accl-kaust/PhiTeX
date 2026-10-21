@@ -2512,7 +2512,7 @@ struct LinkSnap {
     /// ([`PdfState::digest_sans_chars`], [`PdfState::used_chars`]): taken
     /// when a later link first compares a writer with this one (most
     /// snapshots are never compared).
-    digests: Option<(u64, u64, Vec<(FontId, [bool; 256])>)>,
+    digests: Option<SnapDigests>,
     nums: FontNums,
     forms: Forms,
     /// The read-time object numbers the link numbered otherwise
@@ -2686,9 +2686,13 @@ struct LinkMemo {
 /// link had at snapshot `sn`: its records from there on are then the
 /// same bytes ([`finish_exact`]). The forms compared only when there are
 /// none (a document with forms runs on).
+/// A snapshot's digest, its digest but for the characters used, and the
+/// characters used ([`LinkSnap`]).
+type SnapDigests = (u64, u64, Vec<(FontId, [bool; 256])>);
+
 impl LinkSnap {
     /// [`LinkSnap::digests`], taken now if not yet.
-    fn digests(&mut self) -> &(u64, u64, Vec<(FontId, [bool; 256])>) {
+    fn digests(&mut self) -> &SnapDigests {
         if self.digests.is_none() {
             let st = &mut self.st;
             self.digests = Some((st.digest(), st.digest_sans_chars(), st.used_chars()));
