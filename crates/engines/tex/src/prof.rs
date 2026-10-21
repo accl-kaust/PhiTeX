@@ -204,3 +204,91 @@ pub(crate) mod caches {
         eprintln!("acct: thread caches: {}", parts.join(", "));
     }
 }
+
+/// (`profile`, `PHITEX_PAGES_PROF=1`) The page builder's loop
+/// (`crate::pages::builder`), its time per phase summed over its
+/// attempts, with the units it folded, printed when the evaluation ends.
+pub(crate) mod pages {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub(crate) const NEXT: usize = 0;
+    pub(crate) const DECODE: usize = 1;
+    pub(crate) const RESOLVE: usize = 2;
+    pub(crate) const CLASSES: usize = 3;
+    pub(crate) const DROP: usize = 4;
+    pub(crate) const SNAP: usize = 5;
+    pub(crate) const FOLD: usize = 6;
+    pub(crate) const FIRE: usize = 7;
+    pub(crate) const RESTORE: usize = 8;
+    pub(crate) const ATTEMPT: usize = 9;
+    const N: usize = 10;
+    const NAMES: [&str; N] = [
+        "acc_next (the next contributor)",
+        "decode + marks",
+        "resolve_prof_of",
+        "insertion classes",
+        "drop_units",
+        "snap",
+        "fold_unit (fires included)",
+        "  of which on_fire",
+        "restore (a stop)",
+        "attempt (all of it)",
+    ];
+    static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
+    static UNITS: AtomicU64 = AtomicU64::new(0);
+    static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+
+    #[inline]
+    pub(crate) fn on() -> bool {
+        crate::exec::prof_flag!("PHITEX_PAGES_PROF")
+    }
+
+    /// A probe's start (`None` when off).
+    #[inline]
+    pub(crate) fn start() -> Option<std::time::Instant> {
+        on().then(std::time::Instant::now)
+    }
+
+    /// Phase `i` gains the time since `t0`.
+    #[inline]
+    pub(crate) fn add(i: usize, t0: Option<std::time::Instant>) {
+        if let Some(t0) = t0 {
+            NS[i].fetch_add(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(0), Relaxed);
+        }
+    }
+
+    /// One unit folded.
+    #[inline]
+    pub(crate) fn unit() {
+        if on() {
+            UNITS.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// One attempt of the loop.
+    #[inline]
+    pub(crate) fn attempt() {
+        if on() {
+            ATTEMPTS.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// The summary, reset.
+    pub(crate) fn print() {
+        if !on() {
+            return;
+        }
+        let units = UNITS.swap(0, Relaxed);
+        let attempts = ATTEMPTS.swap(0, Relaxed);
+        if attempts == 0 {
+            return;
+        }
+        eprintln!("pagesprof: {attempts} attempts, {units} units; ms total, µs per unit:");
+        for (k, name) in NAMES.iter().enumerate() {
+            let ns = NS[k].swap(0, Relaxed);
+            #[allow(clippy::cast_precision_loss)]
+            let (ms, per) = (ns as f64 / 1e6, ns as f64 / 1e3 / units.max(1) as f64);
+            eprintln!("pagesprof:   {name:<34} {ms:9.2} {per:8.2}");
+        }
+    }
+}

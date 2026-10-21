@@ -511,6 +511,7 @@ impl Drop for Threads {
         widths::print();
         crate::prof::print();
         crate::prof::caches::print();
+        crate::prof::pages::print();
         if phitex_defuse::obs::enabled() && prof_flag!("PHITEX_OBS") {
             eprint!("probes (evaluation):\n{}", phitex_defuse::obs::snapshot());
             phitex_defuse::obs::reset();
