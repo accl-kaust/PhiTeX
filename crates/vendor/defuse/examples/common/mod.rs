@@ -1057,6 +1057,21 @@ fn unfold_output(cx: &mut Ctx<'_>, ops: Ops, src: ValueId, st: ValueId, h: Value
     cx.close_scope();
 }
 
+/// `SeqMonoid`, its folds guessed when predicting (`SPEC_FOLD`).
+struct GuessSeq;
+
+impl defuse::Monoid for GuessSeq {
+    fn empty(&self, v: &Values) -> ValueId {
+        SeqMonoid.empty(v)
+    }
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        SeqMonoid.combine(v, a, b)
+    }
+    fn speculate(&self) -> bool {
+        true
+    }
+}
+
 /// An emitted fold output: defines `out`, `k` and `state` inside its
 /// scope and contributes its height to `out`. Arguments `[h, k, state]`.
 struct OutputOp;
@@ -1858,7 +1873,13 @@ impl Lang {
         let ops = Ops { stmt, apply, output };
         cell.set(ops).expect("fresh");
         let out = out_field(eng.values());
-        eng.declare_accumulator(out, Arc::new(SeqMonoid));
+        // SPEC_FOLD=1: `out`'s readers guess past contributors in work
+        // (`Monoid::speculate`).
+        if std::env::var_os("SPEC_FOLD").is_some() {
+            eng.declare_accumulator(out, Arc::new(GuessSeq));
+        } else {
+            eng.declare_accumulator(out, Arc::new(SeqMonoid));
+        }
         let seq = items_seq(eng.values());
         eng.declare_sequence(seq);
         Lang {

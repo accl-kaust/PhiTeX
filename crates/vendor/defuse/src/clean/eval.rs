@@ -35,6 +35,9 @@ struct Run {
     fuel_out: bool,
     range_wait: Option<(Field, Id, Id, bool)>,
     narrowed: Option<super::world::May>,
+    /// Committed on a broken guessed fold, to run again: its folds waited
+    /// for nothing.
+    fold_redo: bool,
 }
 
 /// The evaluation's scheduling state.
@@ -64,6 +67,10 @@ struct Sched {
     /// Nodes a batch left out by their read hints, parked on the node in
     /// work they wait on (not scanned again until it is done).
     hint_parked: FxHashMap<Id, Id>,
+    /// Refutations of guessed folds (`Monoid::speculate`) by node: the
+    /// first two do not make it careful (the contributors' last
+    /// contributions stand on the next run).
+    fold_refutes: FxHashMap<Id, u32>,
     /// While a step's lane runs: the nodes its commits queued (its
     /// candidates to run next).
     lane_new: Option<Vec<Id>>,
@@ -78,6 +85,7 @@ impl Sched {
             time: std::mem::take(&mut self.time),
             refutes: std::mem::take(&mut self.refutes),
             guessed: std::mem::take(&mut self.guessed),
+            fold_refutes: std::mem::take(&mut self.fold_refutes),
             ..Sched::default()
         }
     }
@@ -96,15 +104,22 @@ fn cause_of(r: crate::api::Rerun) -> crate::api::Cause {
     }
 }
 
+/// A run's height, the run it stood on, and why.
+type Height = (u32, Option<Id>, crate::api::Cause);
+
 /// Heights of the runs of one evaluation: each run's height and the link
 /// to the run it stood on.
 #[derive(Default)]
 struct Heights {
     on: bool,
-    h: FxHashMap<Id, (u32, Option<Id>, crate::api::Cause)>,
+    h: FxHashMap<Id, Height>,
     /// The longest chain by run time ending at each run (ns, its own
     /// run time included), over the links `h` offers.
     t: FxHashMap<Id, u64>,
+    /// Each node's entry (in `h`, `t`) as of the run that last changed its
+    /// contributions: what a range read over it waited for (a rerun that
+    /// contributes the same is not waited for).
+    hc: FxHashMap<Id, (Height, u64)>,
     /// What each parked node last waited on.
     woke: FxHashMap<Id, (Id, Option<Field>)>,
 }
@@ -1159,6 +1174,7 @@ impl Engine {
             fuel_out: false,
             range_wait: None,
             narrowed: None,
+            fold_redo: false,
         })
     }
 
@@ -1331,6 +1347,10 @@ impl Engine {
                         // guess that broke (a round's loop-back aside; a
                         // rerun for a committed value's change is none).
                         match super::core::lock(&self.core.causes).get(&id).copied() {
+                            Some(crate::api::Rerun::Range { field: Some(f) }) if fold_guess(&self.core, s, id, f, true) => {
+                                rep.mispredictions += 1;
+                                bump_field(&mut rep.refuted_by_field, f);
+                            }
                             Some(crate::api::Rerun::Changed { field, .. } | crate::api::Rerun::Rebind { field }) => {
                                 rep.mispredictions += 1;
                                 *s.refutes.entry(id).or_default() += 1;
@@ -1345,7 +1365,7 @@ impl Engine {
                     }
                     if hs.on {
                         let t_ns = s.time.get(&id).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
-                        self.height(hs, id, &r.res, t_ns);
+                        self.height(hs, id, &r.res, r.fold_redo, t_ns);
                     }
                     let dbg = super::core::debug().then(|| format!("{:?} out {}", r.res.reads, self.core.values.render(r.res.out)));
                     let w = std::mem::take(&mut self.w);
@@ -1541,13 +1561,21 @@ impl Engine {
 
     /// Node `id`'s run committed `res`: its height, one above the highest
     /// run of this evaluation it read from, waited on or was made by.
-    fn height(&self, hs: &mut Heights, id: Id, res: &Res, t_ns: u64) {
+    /// (A range read is over the window's last contributor as it last
+    /// contributed; none on a `fold_redo` commit, whose folds waited for
+    /// nothing.)
+    fn height(&self, hs: &mut Heights, id: Id, res: &Res, fold_redo: bool, t_ns: u64) {
         use crate::api::Cause;
         let mut best: Option<(u32, Id, Cause)> = None;
         let mut best_t = 0u64;
         let mut offer = |hs: &Heights, x: Id, c: Cause| {
-            if let Some(&(h, _, _)) = hs.h.get(&x) {
-                best_t = best_t.max(hs.t.get(&x).copied().unwrap_or(0));
+            // (A range's contributor: as it last contributed.)
+            let at = match c {
+                Cause::Range { .. } => hs.hc.get(&x).map(|e| (e.0.0, e.1)),
+                _ => None,
+            };
+            if let Some((h, t)) = at.or_else(|| hs.h.get(&x).map(|e| (e.0, hs.t.get(&x).copied().unwrap_or(0)))) {
+                best_t = best_t.max(t);
                 if best.as_ref().is_none_or(|b| h > b.0) {
                     best = Some((h, x, c));
                 }
@@ -1562,6 +1590,21 @@ impl Engine {
                     });
                 }
                 Read::Out { node, .. } => offer(hs, *node, Cause::Output { of: NodeId(*node) }),
+                // (A range's last contributor: a chain through an
+                // accumulator falls by one through each.)
+                Read::Range { f, from, to, past, .. } => {
+                    if !fold_redo
+                        && let Some((u, lo, hi)) = self.w.window(id, *from, *to, *past)
+                        && let Some((p, _)) = self.w.contribs.get(&(u, *f)).and_then(|m| m.below(&hi)).filter(|(p, _)| **p > lo)
+                        && let Some(&x) = self.w.unit(u).order.get(p)
+                        && x != id
+                    {
+                        offer(hs, x, Cause::Range {
+                            field: *f,
+                            from: Some(NodeId(x)),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -1608,6 +1651,10 @@ impl Engine {
             Some((h, x, c)) => (h + 1, Some(x), c),
             None => (0, None, created),
         };
+        let same = self.w.node(id).and_then(|n| n.res.as_ref()).is_some_and(|old| old.contribs == res.contribs);
+        if !same || !hs.hc.contains_key(&id) {
+            hs.hc.insert(id, (v.clone(), best_t + t_ns));
+        }
         hs.h.insert(id, v);
         hs.t.insert(id, best_t + t_ns);
     }
@@ -1891,11 +1938,15 @@ fn chain_of(hs: &Heights) -> Vec<(NodeId, u32, crate::api::Cause)> {
     };
     let mut out = Vec::new();
     let mut x = Some(top);
+    // (Through a range link, the contributor as it last contributed.)
+    let mut via_range = false;
     while let Some(id) = x {
-        let Some((h, next, c)) = hs.h.get(&id) else { break };
+        let e = if via_range { hs.hc.get(&id).map(|e| &e.0).or_else(|| hs.h.get(&id)) } else { hs.h.get(&id) };
+        let Some((h, next, c)) = e else { break };
         out.push((NodeId(id), *h, c.clone()));
+        via_range = matches!(c, crate::api::Cause::Range { .. });
         x = *next;
-        if out.len() > hs.h.len() {
+        if out.len() > hs.h.len() + hs.hc.len() {
             break;
         }
     }
@@ -2329,7 +2380,31 @@ impl Merge<'_> {
         // job's commit may change.)
         let ahead = i > 0;
         rep.speculations += u64::from(ahead);
+        // A result whose only broken reads are guessed folds
+        // (`Monoid::speculate`), placing nothing: committed for its
+        // contributions (which do not depend on what it read), and run
+        // again; refuted, they would stay unseen and its step's later
+        // readers guess wrong again, one commit a step.
+        let redo = match &o {
+            Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
+                let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate()));
+                let mut broken = r.res.reads.iter().filter(|rd| !super::build::holds(&eng.core, &eng.w, id, rd));
+                match broken.next() {
+                    Some(rd) if speculated(rd) && broken.all(speculated) => {
+                        let Read::Range { f, .. } = rd else { unreachable!("a fold") };
+                        fold_guess(&eng.core, s, id, *f, false).then(|| (*f, super::build::why_broken(&eng.core, &eng.w, id, rd)))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         let o = match o {
+            // (Counted when it commits again.)
+            Outcome::Done(mut r) if redo.is_some() => {
+                r.fold_redo = true;
+                Outcome::Done(r)
+            }
             Outcome::Stopped(r, _) if r.fuel_out => {
                 rep.fuel_outs += 1;
                 s.no_fuel.insert(id);
@@ -2343,7 +2418,9 @@ impl Merge<'_> {
                 Some(rd) => {
                     // A read an earlier commit of this step broke.
                     eng.core.cause(id, super::build::why_broken(&eng.core, &eng.w, id, rd));
-                    *s.refutes.entry(id).or_default() += 1;
+                    if !matches!(rd, Read::Range { f, .. } if fold_guess(&eng.core, s, id, *f, true)) {
+                        *s.refutes.entry(id).or_default() += 1;
+                    }
                     rep.mispredictions += 1;
                     rep.predictions_refuted += u64::from(r.predicted > 0);
                     if let Read::Use { f, .. } | Read::Range { f, .. } | Read::Seq { f, .. } = rd {
@@ -2365,6 +2442,21 @@ impl Merge<'_> {
             self.applied += 1;
         }
         super::core::prof::time(1, || eng.apply(s, rep, self.ran, self.cut, self.hs, id, o, false))?;
+        if let Some((_, why)) = redo {
+            eng.core.cause(id, why);
+            let w = std::mem::take(&mut eng.w);
+            let mut b = Builder::new(&eng.core, w);
+            b.make_dirty_for(id, why);
+            let m = b.finish();
+            m.counts.add_to(rep);
+            eng.w = m.w;
+            for x in m.dirty {
+                eng.enqueue(s, x);
+            }
+            for x in m.woken {
+                eng.wake(s, x);
+            }
+        }
         // A stop that parks its node (it leaves the queue) moves on.
         if !done && !s.queued.contains(&id) {
             self.parked += 1;
@@ -2468,6 +2560,7 @@ fn run_job(
         fuel_out: cx.fuel_out,
         range_wait: cx.range_wait,
         narrowed: cx.narrowed,
+        fold_redo: false,
     };
     match r {
         Ok(Ok(out)) => Outcome::Done(run(cx, out)),
@@ -2481,6 +2574,19 @@ fn run_job(
             message: super::core::panic_message(&*p),
         }),
     }
+}
+
+/// Whether a refutation of `id`'s read of accumulator `f` is one of a
+/// guessed fold's first two (`Monoid::speculate`): the node runs again
+/// guessing, not carefully, its contributors now as they last contributed.
+/// `count`: this refutation is counted (else only asked).
+fn fold_guess(core: &super::core::Core, s: &mut Sched, id: Id, f: Field, count: bool) -> bool {
+    if !core.acc(f).is_some_and(|m| m.speculate()) {
+        return false;
+    }
+    let c = s.fold_refutes.entry(id).or_default();
+    *c += u32::from(count);
+    *c <= 2
 }
 
 /// Whether the steps run a lane (`CLEAN_LANE` set, not to `0`; read once).

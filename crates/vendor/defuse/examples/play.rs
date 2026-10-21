@@ -82,6 +82,8 @@ struct Book {
     proj: HashMap<String, J>,
     /// field -> the provider's answers (their lines).
     env: HashMap<String, Timed>,
+    /// Every string value recorded (the fields a prefix declaration names).
+    strs: Vec<String>,
 }
 
 static DIVERGED: AtomicU64 = AtomicU64::new(0);
@@ -464,6 +466,8 @@ struct PlayMonoid {
     book: Arc<Book>,
     field: J,
     exact: bool,
+    /// The client monoid's `speculate` (its declaration's answer).
+    speculate: bool,
     /// The recorded empty value.
     zero: Option<ValueId>,
 }
@@ -508,6 +512,9 @@ impl PlayMonoid {
 }
 
 impl Monoid for PlayMonoid {
+    fn speculate(&self) -> bool {
+        self.speculate
+    }
     fn empty(&self, _: &Values) -> ValueId {
         self.zero().unwrap_or_else(|| {
             miss(format_args!("empty of accumulator {}", self.field));
@@ -667,9 +674,29 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
                     book: book.clone(),
                     field: a.clone(),
                     exact: book.exact.contains(&a.to_string()),
+                    speculate: want.as_bool().unwrap_or(false),
                     zero: book.monoid.get(&key(&[a, &json!("empty"), &J::Null])).map(de),
                 }),
             );
+        }
+        "declare_accumulator_prefix" => {
+            // (The engine resolves a prefix per field; each recorded field
+            // under it is declared on its own, answering from its lines.)
+            let prefix = a[0].as_str().unwrap_or("");
+            for name in book.strs.iter().filter(|n| n.starts_with(prefix)) {
+                let f = Field(eng.values().str(name));
+                let fj = json!(f);
+                eng.declare_accumulator(
+                    f,
+                    Arc::new(PlayMonoid {
+                        book: book.clone(),
+                        field: fj.clone(),
+                        exact: book.exact.contains(&fj.to_string()),
+                        speculate: want.as_bool().unwrap_or(false),
+                        zero: book.monoid.get(&key(&[&fj, &json!("empty"), &J::Null])).map(de),
+                    }),
+                );
+            }
         }
         "set_env_provider" => {
             let b = book.clone();
@@ -1033,6 +1060,9 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
             }
             "proj" => {
                 book.proj.insert(key(&[&l["p"], &l["a"]]), l["r"].clone());
+            }
+            "val" if l["t"] == "str" => {
+                book.strs.extend(l["x"].as_str().map(str::to_string));
             }
             "env" => {
                 book.env.entry(l["f"].to_string()).or_default().push((at, l.clone()));

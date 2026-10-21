@@ -447,7 +447,7 @@ impl Engine {
     /// The fold of accumulator `f` over `unit`.
     #[must_use]
     pub fn acc_value(&self, unit: UnitId, f: Field) -> Option<ValueId> {
-        let mo = self.core.accs.get(&f)?;
+        let mo = self.core.acc(f)?;
         let m = super::world::AccMeasure {
             m: &**mo,
             v: &self.core.values,
@@ -458,10 +458,23 @@ impl Engine {
     pub fn declare_accumulator(&mut self, f: Field, m: Arc<dyn Monoid>) {
         #[cfg(feature = "observe")]
         let m: Arc<dyn Monoid> = {
-            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), serde_json::Value::Null);
+            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), serde_json::json!(m.speculate()));
             Arc::new(crate::record::RecMonoid { inner: m, field: f })
         };
         self.core_mut().accs.insert(f, m);
+    }
+
+    /// Declares every field whose name starts with `prefix` (and has no
+    /// accumulator of its own) an accumulator with monoid `m`, as
+    /// [`Engine::declare_accumulator`] each would; the first declared
+    /// prefix that matches wins.
+    pub fn declare_accumulator_prefix(&mut self, prefix: &str, m: Arc<dyn Monoid>) {
+        #[cfg(feature = "observe")]
+        crate::record::api(&self.core.values, "declare_accumulator_prefix", crate::record::j(&(prefix,)), serde_json::json!(m.speculate()));
+        let core = self.core_mut();
+        core.acc_prefixes.push((prefix.to_string(), m));
+        // (Fields resolved before see the new prefix.)
+        core.acc_memo = crate::sync::Table::new();
     }
 
     /// Marks `f` stable (a hint; the clean core needs none).
