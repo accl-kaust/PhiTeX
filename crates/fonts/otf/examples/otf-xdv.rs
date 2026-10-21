@@ -311,6 +311,19 @@ fn same(def: &Def, f: &XeTeXFont) -> bool {
         && def.embolden.unwrap_or(0) == fixed(f.embolden)
 }
 
+/// A font request loaded (a function of its own: `callgrind
+/// --toggle-collect='*load_font*'` counts the loads alone).
+#[inline(never)]
+fn load_font(mgr: &mut FontManager, src: &Src, spec: &str, size: i32) -> (Option<XeTeXFont>, Vec<xetex::Diagnostic>) {
+    xetex::find_native_font(mgr, src, spec, size, 0)
+}
+
+/// A word laid out (`--toggle-collect='*shape_word*'`).
+#[inline(never)]
+fn shape_word(f: &mut XeTeXFont, shaper: &mut Shaper, text: &[u16], ls: i32) -> xetex::NativeLayout {
+    f.layout_word(shaper, text, ls)
+}
+
 fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: usize, memo: bool) {
     let doc = xdv.display().to_string();
     let Ok(log) = std::fs::read(xdv.with_extension("log")) else {
@@ -328,7 +341,7 @@ fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: us
         }
         t.fonts += 1;
         let t0 = Instant::now();
-        let (f, _) = xetex::find_native_font(mgr, src, &spec, size, 0);
+        let (f, _) = load_font(mgr, src, &spec, size);
         t.load_ns += t0.elapsed().as_nanos();
         // What XeTeX found: a native file (its path), a TFM or nothing
         // (no native font), or a path it printed unreadably (its name
@@ -410,7 +423,7 @@ fn check(mgr: &mut FontManager, src: &Src, xdv: &Path, t: &mut Tally, max_ex: us
             let f = &mut fonts[i].1;
             let ls = f.letter_space;
             let t0 = Instant::now();
-            let l = f.layout_word(&mut shaper, text, ls);
+            let l = shape_word(f, &mut shaper, text, ls);
             t.shape_ns += t0.elapsed().as_nanos();
             t.layouts += 1;
             let got = (l.width, l.glyphs.iter().map(|g| (g.x, g.y, g.gid)).collect::<Vec<_>>());

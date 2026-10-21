@@ -9,12 +9,15 @@
 //! xdvipdfmx compresses them.
 #![expect(unsafe_code, reason = "FFI to the system zlib")]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{OsStr, c_int, c_ulong};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use phitex_kpse::{Format as KpseFormat, Kpse};
 use phitex_xdvipdfmx::api::{Options, Session, split_xdv};
@@ -100,6 +103,25 @@ impl Default for Kpsewhich {
     }
 }
 
+/// The files of a process: one [`Kpsewhich`], its lookups and the files
+/// read kept for every conversion the process makes.
+#[derive(Clone, Default)]
+struct Shared(Rc<RefCell<Kpsewhich>>, Rc<RefCell<HashMap<Vec<u8>, Option<Arc<[u8]>>>>>);
+
+impl Files for Shared {
+    fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
+        self.0.borrow_mut().find(name, format, progname)
+    }
+
+    fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
+        self.1
+            .borrow_mut()
+            .entry(path.to_vec())
+            .or_insert_with(|| std::fs::read(OsStr::from_bytes(path)).ok().map(Arc::from))
+            .clone()
+    }
+}
+
 impl Files for Kpsewhich {
     fn find(&mut self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
         let key = (name.to_vec(), format, progname.to_vec());
@@ -119,18 +141,20 @@ impl Files for Kpsewhich {
 }
 
 fn main() {
+    let t0 = Instant::now();
     let mut args = std::env::args().skip(1);
-    let (mut pdf, mut dvi, mut input, mut resume) = (None, None, None, false);
+    let (mut pdf, mut dvi, mut input, mut resume, mut repeat) = (None, None, None, false, 1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => pdf = args.next(),
             "--dvi" => dvi = args.next(),
             "--check-resume" => resume = true,
+            "--repeat" => repeat = args.next().and_then(|n| n.parse().ok()).unwrap_or(1),
             _ => input = Some(a),
         }
     }
     let Some(input) = input else {
-        eprintln!("usage: xdv2pdf [-o NAME.pdf] [--dvi NAME.xdv] FILE.xdv > OUT.pdf");
+        eprintln!("usage: xdv2pdf [-o NAME.pdf] [--dvi NAME.xdv] [--repeat N] FILE.xdv > OUT.pdf");
         std::process::exit(2);
     };
     let pdf =
@@ -151,6 +175,32 @@ fn main() {
         check_resume(options, &xdv);
         return;
     }
+    let files = Shared::default();
+    if repeat > 1 {
+        // `--repeat N`: the same XDV converted N times in this process,
+        // as a watch converts each build: the first conversion cold, the
+        // others warm (the host's files and lookups kept). Each one's
+        // time to stderr; all must give the same bytes, the last to
+        // stdout.
+        let first = cold_run(&options, &files, &xdv);
+        eprintln!("xdv2pdf: conversion 1: {:.3} ms", ms(t0));
+        for k in 2..=repeat {
+            let t = Instant::now();
+            let again = warm_run(&options, &files, &xdv);
+            eprintln!("xdv2pdf: conversion {k}: {:.3} ms", ms(t));
+            if again != first {
+                eprintln!("xdv2pdf: conversion {k} differs from the first");
+                std::process::exit(1);
+            }
+        }
+        let (bytes, err) = first;
+        std::io::stdout().write_all(&bytes).expect("stdout");
+        if let Some(e) = err {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // Page by page, as xdvipdfmx writes: when it stops on an error
     // (`ERROR` prints its message and exits), its output file keeps what
     // was written until then, and so does stdout here.
@@ -158,7 +208,7 @@ fn main() {
     let (pre, pages) = split_xdv(&xdv);
     let mut session = match Session::new(
         options,
-        Box::new(Kpsewhich::default()),
+        Box::new(files),
         Box::new(deflate),
         &xdv[..pre],
     ) {
@@ -181,6 +231,53 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(1);
     }
+}
+
+fn ms(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+/// One whole conversion: the bytes written and the fatal error that
+/// stopped it, if one did.
+fn convert(options: &Options, files: &Shared, xdv: &[u8]) -> (Vec<u8>, Option<String>) {
+    let (pre, pages) = split_xdv(xdv);
+    let mut session = match Session::new(
+        options.clone(),
+        Box::new(files.clone()),
+        Box::new(deflate),
+        &xdv[..pre],
+    ) {
+        Ok(s) => s,
+        Err(e) => return (Vec::new(), Some(e.to_string())),
+    };
+    let mut out = Vec::new();
+    let result = (|| {
+        for &(a, b) in &pages {
+            out.extend(session.page(&xdv[a..b])?.pdf);
+        }
+        out.extend(session.finish()?);
+        Ok::<(), phitex_xdvipdfmx::ctx::Fatal>(())
+    })();
+    match result {
+        Ok(()) => (out, None),
+        Err(e) => {
+            out.extend(session.written());
+            (out, Some(e.to_string()))
+        }
+    }
+}
+
+/// The first conversion (a function of its own: profiles tell it apart).
+#[inline(never)]
+fn cold_run(options: &Options, files: &Shared, xdv: &[u8]) -> (Vec<u8>, Option<String>) {
+    convert(options, files, xdv)
+}
+
+/// A later conversion in the same process (`callgrind
+/// --toggle-collect='*warm_run*'` counts these alone).
+#[inline(never)]
+fn warm_run(options: &Options, files: &Shared, xdv: &[u8]) -> (Vec<u8>, Option<String>) {
+    convert(options, files, xdv)
 }
 
 /// `--check-resume`: the incremental link's test. A cold run keeps a
