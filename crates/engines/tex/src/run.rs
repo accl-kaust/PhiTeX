@@ -1511,8 +1511,9 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// A write of integer register `loc` as a map of its value
     /// ([`crate::regfold`]), where the map alone decides it for every
-    /// reader after the run: a document piece's write (not a routine's,
-    /// a format's or a recorded load's) before its first candidate (a
+    /// reader after the run: a document piece's write, or a routine's
+    /// global one (not a format's or a recorded load's), before its first
+    /// candidate (a
     /// page firing inside the piece runs its routine before the later
     /// writes) and not where a job-written file is read back (the
     /// read-back's run notes the values its writes replace, `note_pre`),
@@ -1523,9 +1524,12 @@ impl<'c, 'a> Run<'c, 'a> {
     /// the write is [`Run::reg_apply_map`]'s.
     pub(crate) fn reg_map_ok(&mut self, loc: Loc, global: bool) -> R<bool> {
         let op = self.cx.op();
+        // (a routine's global write too: its run's own groups, the output
+        // routine's among them, hold no binding a global write passes)
+        let routine = op == self.ops.finish && global;
         if self.count_reg(loc).is_none()
-            || !(op == self.ops.exec || op == self.ops.resume)
-            || !self.doc
+            || !(op == self.ops.exec || op == self.ops.resume || routine)
+            || (!self.doc && !routine)
             || self.rec_load
             || self.interp.is_some()
             || self.read_back_done

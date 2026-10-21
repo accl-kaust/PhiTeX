@@ -25,12 +25,64 @@
 
 use super::*;
 
+/// A routine's give-back as [`RTN`] holds it: `[markers, list]`, and
+/// `[markers, list, dead, maps]` where `\deadcycles` is not 0 or the
+/// routine wrote integer registers globally (`maps`: `[[n, keep, add]…]`,
+/// [`crate::regfold::Affine`]).
+pub(crate) fn rtn_value(
+    v: &Values,
+    markers: ValueId,
+    list: ValueId,
+    dead: i64,
+    maps: &[(i32, crate::regfold::Affine)],
+) -> ValueId {
+    if dead == 0 && maps.is_empty() {
+        return v.list(vec![markers, list]);
+    }
+    let ms = maps
+        .iter()
+        .map(|&(n, m)| v.list(vec![v.int(i64::from(n)), v.int(i64::from(m.keep)), v.int(i64::from(m.add))]))
+        .collect();
+    v.list(vec![markers, list, v.int(dead), v.list(ms)])
+}
+
+/// The register maps of a give-back ([`rtn_value`]).
+pub(crate) fn rtn_maps(v: &Values, x: ValueId) -> Vec<(i32, crate::regfold::Affine)> {
+    list_of(v, x)
+        .get(3)
+        .map(|&ms| list_of(v, ms))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| match list_of(v, e)[..] {
+            [n, k, a] => Some((
+                i32::try_from(int_of(v, n)).ok()?,
+                crate::regfold::Affine {
+                    keep: int_of(v, k) != 0,
+                    add: i32::try_from(int_of(v, a)).unwrap_or(0),
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A give-back as a guess: `\deadcycles` 0 (a page shipped: a dead cycle
+/// guessed would grow a chain of pages on guesses), its maps kept.
+pub(crate) fn rtn_as_guess(v: &Values, x: ValueId) -> ValueId {
+    let xs = list_of(v, x);
+    if xs.len() < 3 {
+        return x;
+    }
+    rtn_value(v, xs[0], xs[1], 0, &rtn_maps(v, x))
+}
+
 /// What a finisher's output routine gives back to the main list
 /// (§1026): `[markers, list]`, the run's own main-list items (page
 /// parameter markers) and the routine's list, without the held-over
-/// insertions (the page builder has them); a third element,
-/// `\deadcycles` as the routine left it, where not 0 (a page not
-/// shipped: §1054's `\end` after it reads it). The page builder folds the
+/// insertions (the page builder has them); then, where not nothing,
+/// `\deadcycles` as the routine left it (a page not shipped: §1054's
+/// `\end` after it reads it) and the maps of its global integer register
+/// writes ([`rtn_value`]). The page builder folds the
 /// next page on its guess of it ([`FinishIn::rtn_guess`]); a finisher
 /// whose routine gave otherwise says so ([`PAGE_MISS`]).
 pub(crate) const RTN: &str = "rtn";
@@ -611,13 +663,17 @@ impl Run<'_, '_> {
         let c = self.fin.clone().unwrap_or_default();
         let list = c.pending.get(c.held_n..).unwrap_or_default().to_vec();
         // (and `\deadcycles` as it leaves it where not 0, a page not
-        // shipped: what `\end` reads after it, §1054)
+        // shipped: what `\end` reads after it, §1054; and the maps its
+        // global writes of integer registers are, `crate::regfold`)
         let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
-        let mut x = vec![v.list(raw), v.list(list)];
-        if dead != 0 {
-            x.push(v.int(dead));
+        let mut maps: Vec<(i32, crate::regfold::Affine)> = Vec::new();
+        for (&l, &m) in &self.reg_pending {
+            if let Some(n) = self.count_reg(l) {
+                maps.push((n, m));
+            }
         }
-        let x = v.list(x);
+        maps.sort_by_key(|e| e.0);
+        let x = rtn_value(v, v.list(raw), v.list(list), dead, &maps);
         self.cx.define_with(v.field(RTN), x, Locality::Global);
         // (a routine that gave back other than the page builder folded
         // the next page on: the real material for the builder's node,
@@ -1469,11 +1525,21 @@ impl Operation for Finish {
         crate::fields::add_record_prefixes(&mut ps);
         MayDefine::Prefixes(ps)
     }
-    /// No pieces' units ([`no_units`]), and its global definitions as
-    /// the last run of the routine gave them ([`Finish::gdefs_guess`]).
+    /// No pieces' units ([`no_units`]), its global definitions as the
+    /// last run of the routine gave them ([`Finish::gdefs_guess`]), and
+    /// its register maps as the page builder guessed them.
     fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         let mut out = no_units(v);
         out.push((v.field(GDEFS), self.gdefs_guess(args, v)));
+        // (the maps of its routine's global integer register writes, as
+        // the page builder guessed them, [`FinishIn::rtn_guess`]: the
+        // page counter's readers fold past it while it runs,
+        // `crate::regfold`)
+        if let Some(fin) = FinishIn::of(v, args) {
+            for (n, m) in rtn_maps(v, fin.rtn_guess) {
+                out.push((crate::regfold::acc_field(v, n), m.encode(v)));
+            }
+        }
         Some(out)
     }
     /// What the last finisher running the same routine defined, with

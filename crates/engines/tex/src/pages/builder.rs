@@ -777,17 +777,8 @@ impl Run<'_, '_> {
             .locked()
             .get(&fin_key(v, hint, &[]))
             .and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1))
-            // (`\deadcycles` guessed 0, a page shipped: a dead cycle
-            // guessed from the last run would grow a chain of pages on
-            // guesses)
-            .map_or_else(empty, |x| {
-                let xs = list_of(v, x);
-                if xs.len() > 2 {
-                    v.list(xs[..2].to_vec())
-                } else {
-                    x
-                }
-            })
+            // (`\deadcycles` guessed 0, its register maps kept)
+            .map_or_else(empty, |x| crate::pages::finish::rtn_as_guess(v, x))
     }
 }
 
@@ -1329,11 +1320,7 @@ impl Run<'_, '_> {
             .map_or(rtn_guess, |m| m.1);
         let rs = list_of(v, rtn);
         if !in_material {
-            let given = if rs.len() > 2 {
-                v.list(rs[..2].to_vec())
-            } else {
-                rtn
-            };
+            let given = crate::pages::finish::rtn_as_guess(v, rtn);
             match lp.last_rtn.iter_mut().find(|e| e.0 == key) {
                 Some(e) => e.1 = given,
                 None => lp.last_rtn.push((key, given)),
