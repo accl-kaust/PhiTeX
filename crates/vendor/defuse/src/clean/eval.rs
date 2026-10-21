@@ -186,6 +186,9 @@ struct Link {
     next: Option<usize>,
     cause: crate::api::Cause,
     at: [u64; 4],
+    /// Of the runs it stood on, the one committed last (what let it
+    /// start), and why: the chain by time.
+    last: Option<(usize, crate::api::Cause)>,
 }
 
 impl Heights {
@@ -643,6 +646,7 @@ impl Engine {
         let chain = if hs.on { chain_of(&hs) } else { Vec::new() };
         rep.critical_links = link_times(&chain);
         self.chain_at = chain.iter().map(|c| (c.0, c.3)).collect();
+        self.chain_time = if hs.on { chain_by_time(&hs) } else { Vec::new() };
         self.chain = chain.into_iter().map(|c| (c.0, c.1, c.2)).collect();
         rep.critical_path = self.chain.first().map_or(0, |c| c.1);
         rep.realised_critical_path = self.chain.first().map_or(0, |c| c.1 + 1);
@@ -2103,6 +2107,7 @@ impl Engine {
         use crate::api::Cause;
         let mut best: Option<(u32, Id, Cause, Option<usize>)> = None;
         let mut best_t = 0u64;
+        let mut last: Option<(u64, usize, Cause)> = None;
         let mut offer = |hs: &Heights, x: Id, c: Cause| {
             // (A range's contributor: as it last contributed.)
             let (at, k) = match c {
@@ -2110,6 +2115,11 @@ impl Engine {
                 _ => (None, None),
             };
             let k = k.or_else(|| hs.cur.get(&x)).copied();
+            if let Some(k) = k
+                && last.as_ref().is_none_or(|l| hs.runs[k].at[3] > l.0)
+            {
+                last = Some((hs.runs[k].at[3], k, c.clone()));
+            }
             if let Some((h, t)) = at.or_else(|| hs.h.get(&x).map(|e| (e.0, hs.t.get(&x).copied().unwrap_or(0)))) {
                 best_t = best_t.max(t);
                 if best.as_ref().is_none_or(|b| h > b.0) {
@@ -2223,6 +2233,7 @@ impl Engine {
             next: link,
             cause: v.2.clone(),
             at,
+            last: last.map(|l| (l.1, l.2)),
         });
         hs.cur.insert(id, k);
         if !stop && (!same || !hs.hc.contains_key(&id)) {
@@ -2594,6 +2605,20 @@ fn chain_of(hs: &Heights) -> Vec<(NodeId, u32, crate::api::Cause, [u64; 4])> {
     while let Some(e) = k.map(|k| &hs.runs[k]) {
         out.push((NodeId(e.id), e.h, e.cause.clone(), e.at));
         k = e.next;
+    }
+    out
+}
+
+/// The chain by time: from the run committed last back through, for each
+/// run, the run it stood on that committed last (what let it start), with
+/// why, and when each was queued, started, ended and committed.
+fn chain_by_time(hs: &Heights) -> Vec<(NodeId, crate::api::Cause, [u64; 4])> {
+    let mut out = Vec::new();
+    let mut k = (0..hs.runs.len()).max_by_key(|&k| hs.runs[k].at[3]);
+    while let Some(e) = k.map(|k| &hs.runs[k]) {
+        let why = e.last.as_ref().map_or_else(|| e.cause.clone(), |l| l.1.clone());
+        out.push((NodeId(e.id), why, e.at));
+        k = e.last.as_ref().map(|l| l.0);
     }
     out
 }

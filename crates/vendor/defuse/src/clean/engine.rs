@@ -123,6 +123,8 @@ pub struct Engine {
     /// Its runs' queueing, start, end and commit (ns since the evaluation
     /// started).
     pub(crate) chain_at: Vec<(NodeId, [u64; 4])>,
+    /// The last evaluation's chain by time (`Engine::critical_chain_by_time`).
+    pub(crate) chain_time: Vec<(NodeId, crate::api::Cause, [u64; 4])>,
 }
 
 impl Default for Engine {
@@ -175,6 +177,7 @@ impl Engine {
             stopped: 0,
             chain: Vec::new(),
             chain_at: Vec::new(),
+            chain_time: Vec::new(),
         };
         eng.register(Arc::new(OpenOp));
         eng.register(Arc::new(CloseOp));
@@ -1118,6 +1121,20 @@ impl Engine {
     #[must_use]
     pub fn critical_chain_times(&self) -> Vec<(NodeId, [u64; 4])> {
         self.chain_at.clone()
+    }
+
+    /// The last evaluation's chain by time, from the run committed last
+    /// back: for each run, of the runs it stood on (its reads' definers and
+    /// contributors, outputs, its placer, what woke it), the one committed
+    /// last, which let it start; with why, and when each was queued,
+    /// started, ended and committed (ns since the evaluation started). Its
+    /// gaps (a start after the previous commit) are waits on none of
+    /// these: a step's barrier, scheduling. ([`Self::critical_chain`] is
+    /// by height: the longest chain of links, whose gaps may hide another
+    /// run that let one start.)
+    #[must_use]
+    pub fn critical_chain_by_time(&self) -> Vec<(NodeId, crate::api::Cause, [u64; 4])> {
+        self.chain_time.clone()
     }
 
     /// The critical chain with each run's height.
