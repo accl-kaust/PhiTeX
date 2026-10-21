@@ -760,37 +760,34 @@ impl Run<'_, '_> {
         if !inside_possible {
             return (ValueId::UNIT, ValueId::UNIT);
         }
-        let mut rs: Vec<ValueId> = self
+        let mut rs: Vec<(Field, ValueId)> = self
             .st
             .read_values()
             .into_iter()
-            .map(|(l, x)| {
-                let f = self.loc_field(l);
-                v.list(vec![f.0, opt_val(x)])
-            })
+            .map(|(l, x)| (self.loc_field(l), opt_val(x)))
             .collect();
         // (a meaning read by its class only: no value a routine's
         // definition can equal, so any global definition of it by the
         // routine counts as a change, [`Run::check_cut`])
         let class = v.str("\u{1}class");
-        rs.extend(
-            self.class_read_fields()
-                .into_iter()
-                .map(|f| v.list(vec![f.0, class])),
-        );
+        rs.extend(self.class_read_fields().into_iter().map(|f| (f, class)));
         // (by field, never by location: a location's number is the order
         // the job's runs first met its field in, which the threads decide,
         // so a value holding them in that order differs between two
-        // builds of one text)
-        rs.sort_by_key(|x| list_of(v, *x).first().map(|f| f.raw()));
+        // builds of one text; stable, as the value list's)
+        rs.sort_by_key(|x| x.0.0.raw());
+        let rs: Vec<ValueId> = rs.into_iter().map(|(f, x)| v.list(vec![f.0, x])).collect();
         let gids = self.st.gid_mark();
-        let locals: Vec<(Loc, Field)> = self
+        let mut locals: Vec<(Loc, Field)> = self
             .st
             .defined_since(v, 0, gids)
             .into_iter()
             .filter(|(_, _, l)| *l == Locality::Local)
             .map(|(l, _, _)| (l, self.loc_field(l)))
             .collect();
+        // (by field once for every candidate: a candidate's names are
+        // these merged with its own, the first of a field kept)
+        locals.sort_by_key(|x| x.1.0.raw());
         let marks = self.cand_marks.clone();
         // (a location defined after a candidate with its value there,
         // where the run had it: the page's routine, which runs at the
@@ -812,10 +809,7 @@ impl Run<'_, '_> {
                 Some(None) => v.str(BEFORE_PIECE),
                 None => ValueId::UNIT,
             };
-            let mut names: Vec<(ValueId, bool, ValueId)> = locals
-                .iter()
-                .map(|&(l, f)| (f.0, false, kv_of(l)))
-                .collect();
+            let mut names: Vec<(ValueId, bool, ValueId)> = Vec::new();
             for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
                 let stands = self.st.def_stands(l);
                 names.push((self.loc_field(l).0, stands, kv_of(l)));
@@ -841,7 +835,19 @@ impl Run<'_, '_> {
                     .into_iter()
                     .map(|f| (f.0, false, ValueId::UNIT)),
             );
-            names.sort_unstable_by_key(|x| (x.0.raw(), !x.1));
+            // (the locals first at a tie, as if pushed before these and
+            // sorted stably: by field, a standing definition first)
+            names.sort_by_key(|x| (x.0.raw(), !x.1));
+            let mut merged = Vec::with_capacity(locals.len() + names.len());
+            let mut own = names.into_iter().peekable();
+            for &(l, f) in &locals {
+                while let Some(x) = own.next_if(|x| (x.0.raw(), !x.1) < (f.0.raw(), true)) {
+                    merged.push(x);
+                }
+                merged.push((f.0, false, kv_of(l)));
+            }
+            merged.extend(own);
+            let mut names = merged;
             names.dedup_by_key(|x| x.0);
             // (with whether the run could end there: a finisher of a page
             // firing at a candidate where it could not runs its routine
