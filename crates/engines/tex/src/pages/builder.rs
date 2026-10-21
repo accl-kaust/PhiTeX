@@ -28,9 +28,12 @@
 //! guess, never the real value, so a miss read back does not change the
 //! finisher it came from.
 //!
-//! At its end the node places every page's finisher right after the
-//! piece its page fired in ([`Run::place_pages`]; today's engine:
-//! `follow_after_any`), and defines [`PAGES_END`].
+//! It places each page's finisher right after the piece its page fired
+//! in as the page fires ([`Run::place_finisher`], `follow_after_any`):
+//! the engine publishes a run's placements at every stop, so finishers
+//! run while the loop still folds. A parked loop saves work, not output:
+//! every attempt places again the pages it had. At its end it defines
+//! [`PAGES_END`].
 //!
 //! What the loop reads where a piece is (the page parameters, an
 //! insertion class's registers, `\deadcycles` at `\end`) it reads at that
@@ -206,7 +209,11 @@ impl Run<'_, '_> {
     /// where `lp` stands to the unit's end:
     ///
     /// 1. once, the misses ([`PAGE_MISS`], `acc_fold` from this node to
-    ///    the unit's end) into `lp.misses`;
+    ///    the unit's end, which reads past the text in work,
+    ///    [`MissMonoid`]) into `lp.misses`; then every page already in
+    ///    `lp.pages` placed again, in order ([`Run::place_finisher`]): a
+    ///    parked token saves work, not output, and every attempt makes
+    ///    its whole result;
     /// 2. each contributor after `lp.cur` ([`phitex_defuse::Ctx::acc_next`]
     ///    on [`crate::vprof::VPROF`]): its units decoded, their markers
     ///    resolved where the piece is ([`Run::resolve_prof_of`]),
@@ -216,7 +223,10 @@ impl Run<'_, '_> {
     ///    takes, what waits, what is discarded at the page's top);
     /// 3. where a page fires (§1005, §1014–§1017): its [`FinishIn`] from
     ///    `lp.srcs` up to the fire and the builder's decisions, pushed on
-    ///    `lp.pages` with the piece it fired in; `lp.srcs` keeps what goes
+    ///    `lp.pages` with the piece it fired in and its finisher placed at
+    ///    once ([`Run::place_finisher`]: the engine publishes a run's
+    ///    placements at every stop, so the finishers run while the loop
+    ///    still folds); `lp.srcs` keeps what goes
     ///    back to the contributions (the page's items from the best break
     ///    on, §1017), after the held-over insertions ([`Src::Held`]) and
     ///    the routine's material ([`Src::Rtn`]: the miss read back where
@@ -249,24 +259,27 @@ impl Run<'_, '_> {
             .unwrap_or_else(empty)
     }
 
-    /// The loop's end: every page's finisher placed right after the
-    /// piece its page fired in, in page order (today's engine:
-    /// `follow_after_any`; on the cells engine a node of layer 5's unit
-    /// at the piece's position), and where the pages end defined.
-    pub(crate) fn place_pages(&mut self, lp: &PageLoop) {
+    /// A page's finisher placed right after the piece its page fired in
+    /// (`follow_after_any`, its position the composite of the piece's, the
+    /// placer and the order placed; docs/spec-layers.md §6).
+    pub(crate) fn place_finisher(&mut self, at: phitex_defuse::NodeId, fin: &FinishIn) {
         let v = self.v;
-        for (at, fin) in &lp.pages {
-            if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
-                eprintln!(
-                    "place finisher of page {} (piece {} candidate {})",
-                    fin.j,
-                    at.raw(),
-                    fin.k
-                );
-            }
-            self.cx
-                .follow_after_any(*at, self.ops.finish, fin.args(v));
+        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "place finisher of page {} (piece {} candidate {})",
+                fin.j,
+                at.raw(),
+                fin.k
+            );
         }
+        self.cx.follow_after_any(at, self.ops.finish, fin.args(v));
+    }
+
+    /// The loop's end: where the pages end, once every finisher is
+    /// placed ([`Run::page_loop`] placed them).
+    pub(crate) fn place_pages(&mut self, lp: &PageLoop) {
+        let _ = lp;
+        let v = self.v;
         self.cx
             .define_with(v.field(PAGES_END), ValueId::UNIT, Locality::Global);
     }

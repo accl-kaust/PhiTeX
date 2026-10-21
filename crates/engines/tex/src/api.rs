@@ -6144,6 +6144,10 @@ fn declare_fields(eng: &mut Engine) {
         crate::regfold::ACC_PREFIX,
         Arc::new(crate::regfold::AffineMonoid),
     );
+    // (the finishers' misses of the page builder's guess, read past the
+    // text in work: `crate::pages::MissMonoid`)
+    let miss = eng.values().field(crate::pages::PAGE_MISS);
+    eng.declare_accumulator(miss, Arc::new(crate::pages::MissMonoid));
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
     let rels = eng.values().field(crate::pdfprim::RT_RELS);
