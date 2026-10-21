@@ -380,7 +380,7 @@ impl Engine {
                                 s = s.fresh();
                                 self.start_world(&mut s, &d);
                             } else {
-                                self.ev_done.push((self.w.clone(), Vec::new()));
+                                self.ev_done.push((self.w.snapshot(), Vec::new()));
                                 from_old = false;
                                 moved_vs_old |= had_old;
                             }
@@ -411,7 +411,7 @@ impl Engine {
                         self.start_world(&mut s, &d);
                         self.set_loops(&mut s, &loops);
                     } else {
-                        self.ev_done.push((self.w.clone(), Vec::new()));
+                        self.ev_done.push((self.w.snapshot(), Vec::new()));
                     }
                 }
                 // Held nodes run; final nodes the final phase itself places
@@ -1726,13 +1726,29 @@ impl Engine {
                     // on (a child it waits for, or a page builder parked
                     // between attempts whose finishers can run meanwhile):
                     // its next run places them again, the same nodes.
-                    if matches!(wait, Wait::Child(_)) || !r.kids.is_empty() || !r.conts.is_empty() {
-                        if let Some(e) = self.runaway(id, &r.kids, &r.conts) {
+                    // What it still holds before the node it now waits on and
+                    // did not place again goes: this attempt is past it (it
+                    // would run on arguments from before, and the wait may
+                    // stand on it: Pages waits on a node that waits on a
+                    // finisher it holds).
+                    let unfold = matches!(wait, Wait::Child(_)) || !r.kids.is_empty() || !r.conts.is_empty();
+                    let past = |w: &World| match &wait {
+                        Wait::Node(x, _) if !w.awaiting.is_empty() => super::build::passed(w, id, *x),
+                        _ => Vec::new(),
+                    };
+                    if unfold || !past(&self.w).is_empty() {
+                        if unfold && let Some(e) = self.runaway(id, &r.kids, &r.conts) {
                             return Err(e);
                         }
                         let w = std::mem::take(&mut self.w);
                         let mut b = Builder::new(&self.core, w);
-                        b.commit_unfolding(id, &r.kids, &r.conts);
+                        if unfold {
+                            b.commit_unfolding(id, &r.kids, &r.conts);
+                        }
+                        let gone = past(&b.w);
+                        if !gone.is_empty() {
+                            b.free_placed(id, &gone);
+                        }
                         let m = b.finish();
                         let (dirty, created, freed, woken) = (m.dirty, m.created, m.freed, m.woken);
                         self.rebinds += m.rebinds;

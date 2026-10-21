@@ -8,6 +8,7 @@ mod seq;
 mod core;
 mod ctx;
 mod engine;
+mod live;
 mod eval;
 pub(crate) mod ptree;
 mod world;

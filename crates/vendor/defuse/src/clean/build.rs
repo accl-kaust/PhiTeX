@@ -143,9 +143,7 @@ impl<'a> Builder<'a> {
 
     /// A field reader filed (`on`) or not.
     fn reader(&mut self, u: u32, f: Field, pos: Pos, id: Id, on: bool) {
-        if let Some(d) = &mut self.defer {
-            d.push(u, f, super::batch::FieldOp::Reader { pos, id, on });
-        } else if on {
+        if on {
             self.w.add_reader(u, f, pos, id);
         } else {
             self.w.drop_reader(u, f, pos, id);
@@ -375,9 +373,6 @@ impl<'a> Builder<'a> {
             for (fr, m) in c.defs.local.iter() {
                 nf.local.insert(*fr, re(m), &NoMeasure);
             }
-            let mut readers: Vec<((Pos, Id), ())> = c.readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
-            readers.sort_by_key(|x| x.0);
-            readers.dedup_by_key(|x| x.0);
             let contribs = match self.core.acc(f) {
                 Some(mo) if !c.contribs.is_empty() => {
                     let m = AccMeasure {
@@ -390,29 +385,52 @@ impl<'a> Builder<'a> {
                 }
                 _ => c.contribs.clone(),
             };
-            let mut ranges: Vec<((Pos, Id), Pos)> = c.range_readers.iter().map(|(&(p, id), &lo)| ((remap(p), id), remap(lo))).collect();
-            ranges.sort_by_key(|x| x.0);
-            ranges.dedup_by_key(|x| x.0);
             self.w.with_field(u, f, |c| {
                 c.defs = nf;
-                c.readers = PMap::from_sorted(readers, &NoMeasure);
                 c.contribs = contribs;
-                c.range_readers = PMap::from_sorted(ranges, &NoMeasure);
             });
         }
-        // Scope and sibling readers and the work of the unit: keys and
-        // reaches.
         let re = |p: Pos| if p == Pos::MAX || p == 0 { p } else { remap(p) };
+        // The unit's readers (live), with workers' filing held off: what a
+        // worker filed before is at the old positions and moves here; what
+        // it would file after at old positions it files no more (the count
+        // moved).
+        {
+            let rd = self.w.rd.clone();
+            let mut count = rd.relabels_mut();
+            *count += 1;
+            for f in rd.fields_of(u) {
+                let c = rd.field(u, f).expect("listed");
+                let mut readers: Vec<((Pos, Id), ())> = c.readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
+                readers.sort_by_key(|x| x.0);
+                readers.dedup_by_key(|x| x.0);
+                let mut ranges: Vec<((Pos, Id), Pos)> = c.range_readers.iter().map(|(&(p, id), &lo)| ((remap(p), id), remap(lo))).collect();
+                ranges.sort_by_key(|x| x.0);
+                ranges.dedup_by_key(|x| x.0);
+                rd.set_field(
+                    u,
+                    f,
+                    super::live::FieldReaders {
+                        readers: PMap::from_sorted(readers, &NoMeasure),
+                        range_readers: PMap::from_sorted(ranges, &NoMeasure),
+                    },
+                );
+            }
+            if let Some(c) = rd.unit(u) {
+                let mut v: Vec<((Pos, Id), ())> = c.kind_readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
+                v.sort_by_key(|x| x.0);
+                let kind_readers = PMap::from_sorted(v, &NoMeasure);
+                let mut v: Vec<(Pos, (Id, Pos))> = c.fwd_readers.iter().map(|(&p, &(id, r))| (remap(p), (id, re(r)))).collect();
+                v.sort_by_key(|x| x.0);
+                let fwd_readers = PMap::from_sorted(v, &super::claims::MaxReach);
+                let mut v: Vec<(Pos, (Id, Pos))> = c.back_readers.iter().map(|(&p, &(id, r))| (remap(p), (id, re(r)))).collect();
+                v.sort_by_key(|x| x.0);
+                let back_readers = PMap::from_sorted(v, &super::claims::MinLow);
+                rd.set_unit(u, super::live::UnitReaders { kind_readers, fwd_readers, back_readers });
+            }
+        }
+        // The work of the unit.
         self.w.with_unit(u, |c| {
-            let mut v: Vec<((Pos, Id), ())> = c.kind_readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
-            v.sort_by_key(|x| x.0);
-            c.kind_readers = PMap::from_sorted(v, &NoMeasure);
-            let mut v: Vec<(Pos, (Id, Pos))> = c.fwd_readers.iter().map(|(&p, &(id, r))| (remap(p), (id, re(r)))).collect();
-            v.sort_by_key(|x| x.0);
-            c.fwd_readers = PMap::from_sorted(v, &super::claims::MaxReach);
-            let mut v: Vec<(Pos, (Id, Pos))> = c.back_readers.iter().map(|(&p, &(id, r))| (remap(p), (id, re(r)))).collect();
-            v.sort_by_key(|x| x.0);
-            c.back_readers = PMap::from_sorted(v, &super::claims::MinLow);
             let mut v: Vec<(Pos, Id)> = old_work.iter().map(|(&p, &x)| (remap(p), x)).collect();
             v.sort_by_key(|x| x.0);
             c.work = PMap::from_sorted(v, &Count);
@@ -589,12 +607,11 @@ impl<'a> Builder<'a> {
         self.w.unlink(n.unit, n.pos);
         self.w.drop_node(id);
         // Its readers and those of its position.
-        if let Some(m) = self.w.out_readers.get(&id).cloned() {
+        if let Some(m) = self.w.rd.take_outs(id) {
             for (&r, ()) in m.iter() {
                 self.recheck(r, 13);
             }
         }
-        self.w.out_readers.remove(&id, &NoMeasure);
         self.shape_at(n.unit, n.pos);
         self.w.touch_key(Key::Out(id));
         // (Scope markers are not nodes to the client.)
@@ -637,12 +654,7 @@ impl<'a> Builder<'a> {
     /// resolved again.
     pub(crate) fn shape_at(&mut self, u: u32, p: Pos) {
         self.shape_changed(u);
-        let mut hit: Vec<Id> = Vec::new();
-        if let Some(un) = self.w.unit_opt(u) {
-            hit.extend(super::claims::stab_forward(&un.fwd_readers, p).into_iter().map(|e| e.1));
-            hit.extend(super::claims::stab_backward(&un.back_readers, p).into_iter().map(|e| e.1));
-        }
-        for r in hit {
+        for r in self.w.window_readers_at(u, p) {
             self.recheck(r, 14);
         }
         self.claim_point(u, p);
@@ -745,10 +757,8 @@ impl<'a> Builder<'a> {
     /// Node `x`'s output is gone or changed: its readers are re-asked.
     pub(crate) fn out_gone(&mut self, x: Id) {
         self.w.touch_key(Key::Out(x));
-        if let Some(m) = self.w.out_readers.get(&x).cloned() {
-            for (&r, ()) in m.iter() {
-                self.recheck(r, 15);
-            }
+        for r in self.w.out_readers_of(x) {
+            self.recheck(r, 15);
         }
     }
 
@@ -938,12 +948,8 @@ impl<'a> Builder<'a> {
         }
         // The scope readers in the walked stretch are re-asked (also when
         // nothing moved: a frame that is gone leaves no trace in the walk).
-        if let Some(m) = self.w.unit_opt(u).map(|un| &un.kind_readers) {
-            let hit: Vec<Id> = m
-                .range(std::ops::Bound::Included(&(from, 0)), std::ops::Bound::Included(&(walked, Id::MAX)))
-                .map(|(&(_, r), ())| r)
-                .collect();
-            for r in hit {
+        {
+            for r in self.w.kind_readers_in(u, from, walked) {
                 self.recheck(r, 16);
             }
         }
@@ -1327,9 +1333,9 @@ impl<'a> Builder<'a> {
     fn has_key(&self, id: Id, k: ReadKey) -> bool {
         let _t = super::core::prof::Span::new(26);
         match k {
-            ReadKey::Field(u, f, pos) => self.w.field(u, f).is_some_and(|c| c.readers.contains_key(&(pos, id))),
-            ReadKey::Out(x) => self.w.out_readers.get(&x).is_some_and(|m| m.contains_key(&id)),
-            ReadKey::Range(ru, f, lo, hi) => self.w.field(ru, f).and_then(|c| c.range_readers.get(&(hi, id))) == Some(&lo),
+            ReadKey::Field(u, f, pos) => self.w.rd.field(u, f).is_some_and(|c| c.readers.contains_key(&(pos, id))),
+            ReadKey::Out(x) => self.w.rd.outs(x).is_some_and(|m| m.contains_key(&id)),
+            ReadKey::Range(ru, f, lo, hi) => self.w.rd.field(ru, f).and_then(|c| c.range_readers.get(&(hi, id)).copied()) == Some(lo),
         }
     }
 
@@ -1426,9 +1432,7 @@ impl<'a> Builder<'a> {
                 }
             }
             ReadKey::Range(ru, f, lo, hi) => {
-                if let Some(d) = &mut self.defer {
-                    d.push(ru, f, super::batch::FieldOp::RangeReader { lo, hi, id, on });
-                } else if on {
+                if on {
                     self.w.add_range_reader(ru, f, lo, hi, id);
                 } else {
                     self.w.drop_range_reader(ru, f, hi, id);
@@ -1605,10 +1609,8 @@ impl<'a> Builder<'a> {
         super::core::prof::time(15, || {
             if out_changed {
                 self.w.touch_key(Key::Out(id));
-                if let Some(m) = self.w.out_readers.get(&id).cloned() {
-                    for (&r, ()) in m.iter() {
-                        self.recheck(r, 18);
-                    }
+                for r in self.w.out_readers_of(id) {
+                    self.recheck(r, 18);
                 }
             }
         });
@@ -1620,6 +1622,19 @@ impl<'a> Builder<'a> {
 
     /// Commits a stopped run's unfolding only (its children made, so the
     /// run can wait for them).
+    /// Frees the placements `gone` of placer `id` (see [`passed`]).
+    pub(crate) fn free_placed(&mut self, id: Id, gone: &[Id]) {
+        for &k in gone {
+            self.free(k);
+        }
+        let Some(mut n) = self.w.node(id).cloned() else { return };
+        let mut res = n.res.as_deref().cloned().unwrap_or_default();
+        res.kids.retain(|k| !gone.contains(k));
+        res.conts.retain(|k| !gone.contains(k));
+        n.res = Some(Arc::new(res));
+        self.w.put(id, n);
+    }
+
     pub(crate) fn commit_unfolding(&mut self, id: Id, kids: &[Spec], conts: &[Spec]) {
         let Some(n) = self.w.node(id).cloned() else { return };
         let (k, c) = self.place_some(id, kids, conts, true);
@@ -1630,6 +1645,19 @@ impl<'a> Builder<'a> {
         n2.res = Some(Arc::new(res));
         self.w.put(id, n2);
     }
+}
+
+/// What placer `id`, stopped on node `x`, still holds before `x` (in its
+/// unit) and did not place again: its attempt is past it.
+pub(crate) fn passed(w: &World, id: Id, x: Id) -> Vec<Id> {
+    let (Some(n), Some(xn)) = (w.node(id), w.node(x)) else { return Vec::new() };
+    let Some(res) = n.res.as_ref() else { return Vec::new() };
+    res.kids
+        .iter()
+        .chain(&res.conts)
+        .copied()
+        .filter(|&k| w.awaiting.contains_key(&k) && w.node(k).is_some_and(|kn| kn.parent == id && kn.unit == xn.unit && kn.pos < xn.pos))
+        .collect()
 }
 
 /// A node's contributions as filed: its run's, else its text's declared.

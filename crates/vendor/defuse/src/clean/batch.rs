@@ -15,12 +15,9 @@ use super::world::{AccMeasure, Entry, FieldCell, FrameId, Id, Key, Pos, World};
 use crate::api::Locality;
 use crate::values::{Field, FxHashMap, ValueId};
 
-/// One write to a field's indexes.
+/// One write to a field's indexes (its readers are filed at once, in
+/// the live reader indexes).
 pub(crate) enum FieldOp {
-    /// A reader of the field at `pos` (`on`), or not.
-    Reader { pos: Pos, id: Id, on: bool },
-    /// A range reader of the accumulator over `(lo, hi)`, or not.
-    RangeReader { lo: Pos, hi: Pos, id: Id, on: bool },
     /// A definition entry filed (`if_changed`: unless the same is filed);
     /// the readers after `at` are re-asked.
     File { pos: Pos, fr: FrameId, e: Entry, at: Pos, if_changed: bool },
@@ -36,6 +33,8 @@ struct Group {
     key: (u32, Field),
     ops: Vec<FieldOp>,
     cell: FieldCell,
+    /// The world's reader indexes (live).
+    rd: super::live::Readers,
     defs_touched: bool,
     acc_touched: bool,
     /// Readers to re-ask on the field (`true`: past the shadow bound,
@@ -50,20 +49,6 @@ impl Group {
         let f = self.key.1;
         for op in std::mem::take(&mut self.ops) {
             match op {
-                FieldOp::Reader { pos, id, on } => {
-                    if on {
-                        self.cell.readers.insert((pos, id), (), &NoMeasure);
-                    } else {
-                        self.cell.readers.remove(&(pos, id), &NoMeasure);
-                    }
-                }
-                FieldOp::RangeReader { lo, hi, id, on } => {
-                    if on {
-                        self.cell.range_readers.insert((hi, id), lo, &NoMeasure);
-                    } else {
-                        self.cell.range_readers.remove(&(hi, id), &NoMeasure);
-                    }
-                }
                 FieldOp::File { pos, fr, e, at, if_changed } => {
                     if if_changed {
                         let have = if e.loc == Locality::Global {
@@ -114,15 +99,17 @@ impl Group {
                         }
                     }
                     self.acc_touched = true;
-                    self.recheck.extend(
-                        self.cell.range_readers
-                            .range(std::ops::Bound::Excluded(&(pos, Id::MAX)), std::ops::Bound::Unbounded)
-                            .filter(|(_, lo)| **lo < pos)
-                            .map(|(k, _)| {
-                                super::core::prof::count(21);
-                                (k.1, f, false)
-                            }),
-                    );
+                    if let Some(c) = self.rd.field(self.key.0, f) {
+                        self.recheck.extend(
+                            c.range_readers
+                                .range(std::ops::Bound::Excluded(&(pos, Id::MAX)), std::ops::Bound::Unbounded)
+                                .filter(|(_, lo)| **lo < pos)
+                                .map(|(k, _)| {
+                                    super::core::prof::count(21);
+                                    (k.1, f, false)
+                                }),
+                        );
+                    }
                 }
             }
         }
@@ -135,14 +122,15 @@ impl Group {
         let lo = at.saturating_sub(1);
         let f = self.key.1;
         let hi = super::build::shadow_end(core, Some(&self.cell.defs), f, at, fr, global);
+        let Some(c) = self.rd.field(self.key.0, f) else { return };
         self.recheck.extend(
-            self.cell.readers
+            c.readers
                 .range(std::ops::Bound::Excluded(&(lo, Id::MAX)), std::ops::Bound::Excluded(&(hi, 0)))
                 .map(|(k, ())| (k.1, f, false)),
         );
         if hi != Pos::MAX && super::build::scoped_check() {
             self.recheck.extend(
-                self.cell.readers
+                c.readers
                     .range(std::ops::Bound::Excluded(&(hi - 1, Id::MAX)), std::ops::Bound::Unbounded)
                     .map(|(k, ())| (k.1, f, true)),
             );
@@ -162,9 +150,7 @@ pub(crate) struct Pending {
 
 impl Pending {
     pub(crate) fn push(&mut self, u: u32, f: Field, op: FieldOp) {
-        if !matches!(op, FieldOp::Reader { .. } | FieldOp::RangeReader { .. }) {
-            self.fields.insert(f);
-        }
+        self.fields.insert(f);
         self.ops.push(((u, f), op));
     }
 
@@ -187,6 +173,7 @@ impl Pending {
                     key,
                     ops: Vec::new(),
                     cell: w.field(key.0, key.1).cloned().unwrap_or_default(),
+                    rd: w.rd.clone(),
                     defs_touched: false,
                     acc_touched: false,
                     recheck: Vec::new(),

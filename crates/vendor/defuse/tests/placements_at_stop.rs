@@ -80,7 +80,7 @@ impl Operation for Ops {
                     let Some((x, _)) = cx.acc_next(vprof, k.after)? else { break };
                     k.after = Some(x);
                     k.folded += 1;
-                    if k.folded % PER == 0 {
+                    if k.folded.is_multiple_of(PER) {
                         let n = i64::try_from(k.folded / PER).unwrap();
                         cx.follow_after_any(x, op, vec![v.str("fin"), v.int(n)]);
                         k.pages.push((x, n));

@@ -832,10 +832,8 @@ impl Engine {
                 .iter()
                 .filter(|(_, un)| un.app != super::world::NONE && self.w.node(un.app).is_some())
                 .filter(|&(&u, un)| {
-                    let readers = self.w.out_readers.get(&un.app);
-                    !readers.is_some_and(|m| {
-                        m.iter().any(|(&r, ())| roots.contains(&r) || self.w.node(r).is_some_and(|n| n.unit != u))
-                    })
+                    let readers = self.w.out_readers_of(un.app);
+                    !readers.iter().any(|&r| roots.contains(&r) || self.w.node(r).is_some_and(|n| n.unit != u))
                 })
                 .map(|(&u, un)| (u, un.app))
                 .collect();
