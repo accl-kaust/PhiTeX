@@ -1144,6 +1144,7 @@ impl<'a> Builder<'a> {
         };
         let kid_ids = assign(kids, seed(&old.0[..bk]));
         let cont_ids = assign(conts, seed(&old.1[..bc]));
+        let own: FxHashSet<Id> = old.0[..bk].iter().chain(&old.1[..bc]).copied().collect();
         // Gone: freed (a stopped run's: not yet made, kept; a continued
         // run's earlier attempts' stand).
         let mut keep: FxHashSet<Id> = kid_ids.iter().chain(&cont_ids).copied().collect();
@@ -1181,7 +1182,9 @@ impl<'a> Builder<'a> {
                 // continuing, after its own committed there too.)
                 None => {
                     let mut b = self.after_conts(anchor, self.w.subtree_end(anchor), id, spec.place);
-                    while cont && let Some(y) = self.w.next(b).filter(|&y| self.w.node(y).is_some_and(|yn| yn.parent == id && yn.place == spec.place)) {
+                    // (Its earlier attempts' there, not the earlier
+                    // result's: one of those is what this one makes again.)
+                    while cont && let Some(y) = self.w.next(b).filter(|y| own.contains(y) && self.w.node(*y).is_some_and(|yn| yn.place == spec.place)) {
                         b = self.extent_end(y);
                     }
                     b
@@ -1273,15 +1276,18 @@ impl<'a> Builder<'a> {
         let text = self.core.text(Some(x), spec.op, spec.args.clone());
         match self.w.node(x).cloned() {
             Some(old) => {
-                // Kept: in place when still right after `after`.
-                let right = self.w.next(after) == Some(x);
+                // Kept: in place when still right after `after` (or it is
+                // `after` itself: where it is).
+                let right = after == x || self.w.next(after) == Some(x);
                 if !right {
                     if super::core::debug() {
                         eprintln!("moved {x}: placed by {parent} after {after}, whose next is {:?}", self.w.next(after));
                     }
-                    // Moved: made again at its new place.
+                    // Moved: made again at its new place (taken before it
+                    // goes: `after` may go with it).
+                    let p = self.w.node(after).map_or(0, |e| e.pos);
                     self.free(x);
-                    return self.make_placed(parent, pn, x, text, spec.place, depth, after);
+                    return self.make_placed_at(parent, pn, x, text, spec.place, depth, p);
                 }
                 if !Arc::ptr_eq(&old.text, &text) && (old.text.op != text.op || old.text.args != text.args) {
                     self.retext(x, text);
@@ -1294,8 +1300,14 @@ impl<'a> Builder<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn make_placed(&mut self, parent: Id, pn: &Node, x: Id, text: Arc<Text>, place: Place, depth: u32, after: Id) -> Id {
-        let u = pn.unit;
         let p = self.w.node(after).map_or(0, |e| e.pos);
+        self.make_placed_at(parent, pn, x, text, place, depth, p)
+    }
+
+    /// As [`Self::make_placed`], right after position `p`.
+    #[allow(clippy::too_many_arguments)]
+    fn make_placed_at(&mut self, parent: Id, pn: &Node, x: Id, text: Arc<Text>, place: Place, depth: u32, p: Pos) -> Id {
+        let u = pn.unit;
         let pos = self.positions_after(u, p, 1)[0];
         self.create(x, text, u, parent, place, depth, pos);
         self.frames_from(u, pos);

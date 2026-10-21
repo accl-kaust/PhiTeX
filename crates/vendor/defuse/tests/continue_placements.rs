@@ -15,6 +15,7 @@ use std::sync::{Arc, OnceLock};
 use defuse::{Ctx, Engine, Field, Locality, NodeId, OpId, Operation, Stop, ValueId, Values};
 
 const N: usize = 12;
+const SLOW: usize = 6;
 
 struct Ops {
     me: OnceLock<OpId>,
@@ -121,6 +122,11 @@ impl Operation for Ops {
                 Ok(v.int(sum))
             }
             "kid" => Ok(v.int(v.as_int(a[1]).unwrap_or(0) * v.as_int(a[2]).unwrap_or(1))),
+            "slow" => {
+                cx.acc_range(f, None)?;
+                cx.contribute(f, a[1]);
+                Ok(a[1])
+            }
             _ => {
                 cx.contribute(f, a[1]);
                 Ok(a[1])
@@ -180,13 +186,15 @@ fn trace(cont: bool, sp: defuse::Speculation, threads: usize) -> Vec<Vec<Option<
     let pa = eng.push(u, op, pa);
     let p = vec![eng.values().str("pages")];
     eng.push(u, op, p);
-    let piece = |eng: &Engine, h: i64| {
+    // (Piece `SLOW` folds the pieces before it: an edit before it leaves
+    // it in work when `Pages` runs, which stops on it and resumes.)
+    let piece = |eng: &Engine, i: usize, h: i64| {
         let v = eng.values();
-        vec![v.str("piece"), v.int(h)]
+        vec![v.str(if i == SLOW { "slow" } else { "piece" }), v.int(h)]
     };
     let ids: Vec<NodeId> = (0..N)
         .map(|i| {
-            let a = piece(&eng, i64::try_from(i).unwrap() + 1);
+            let a = piece(&eng, i, i64::try_from(i).unwrap() + 1);
             eng.push(u, op, a)
         })
         .collect();
@@ -202,7 +210,7 @@ fn trace(cont: bool, sp: defuse::Speculation, threads: usize) -> Vec<Vec<Option<
     eval(&mut eng);
     snap(&eng);
     for (k, h) in [(3usize, 30i64), (0, 7), (N - 1, 2)] {
-        let a = piece(&eng, h);
+        let a = piece(&eng, k, h);
         eng.replace(ids[k], op, a);
         let a = {
             let v = eng.values();
