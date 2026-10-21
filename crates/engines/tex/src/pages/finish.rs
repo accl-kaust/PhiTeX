@@ -560,10 +560,15 @@ pub(crate) struct FinCtx {
 
 impl Run<'_, '_> {
     /// A finisher's end: what its routine gives back to the main list
-    /// ([`RTN`]); the fold continuation placed after it folds that.
-    #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn define_rtn(&mut self, raw: Vec<ValueId>) -> R<()> {
+    /// ([`RTN`]): its items, then the page parameters it set where no
+    /// item of its own noted them (§987: the build after the routine,
+    /// §1026, reads them as the routine left them, not as they reached
+    /// the piece the page fired in).
+    pub(crate) fn define_rtn(&mut self, mut raw: Vec<ValueId>) -> R<()> {
         let v = self.v;
+        if self.st.take_page_params() {
+            raw.push(self.page_params_marker()?);
+        }
         let c = self.fin.clone().unwrap_or_default();
         let list = c.pending.get(c.held_n..).unwrap_or_default().to_vec();
         let x = v.list(vec![v.list(raw), v.list(list)]);

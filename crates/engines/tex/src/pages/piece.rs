@@ -44,9 +44,10 @@ pub(crate) struct CandMark {
     /// a page can fire here (§994).
     pub fresh: bool,
     /// Whether a second pass can end the run here ([`Halt::Recut`]): a
-    /// candidate it could cut at, or a paragraph's start at the run's
-    /// outer level (the level just pushed, the continuation carrying its
-    /// list and the input `\everypar` left, §1091).
+    /// candidate it could cut at, or a paragraph's start on the main
+    /// vertical list (the level just pushed, below it only groups of the
+    /// run's that own no list; the continuation carrying the levels, the
+    /// paragraph's list and the input `\everypar` left, §1091).
     pub restartable: bool,
 }
 
@@ -106,11 +107,16 @@ impl Run<'_, '_> {
         self.cand += 1;
         // (or the candidate a second pass ends at, `Halt::Recut`)
         let can = self.cuttable_here();
+        // (a paragraph's start: its level just pushed on top, below it
+        // only groups the run opened on the main vertical list, which own
+        // no list: the continuation carries every level, §1091's list
+        // and the input `\everypar` left, as a cut inside such groups)
         let restartable = can
             || (newgraf
                 && self.conds.is_empty()
-                && self.nest.len() == 1
-                && self.nest.last().is_some_and(|l| l.owns && l.group == 0));
+                && self.nest.split_last().is_some_and(|(top, below)| {
+                    top.owns && top.group == 0 && below.iter().all(|l| !l.owns && l.group != 0)
+                }));
         let cuttable = fresh && (can || (restartable && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
