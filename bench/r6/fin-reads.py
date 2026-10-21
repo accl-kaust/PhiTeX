@@ -51,7 +51,8 @@ def as_int(ints, e, x):
 
 
 def main(path):
-    names, strs, ints = {}, {}, {}
+    names, strs, ints, lists = {}, {}, {}, {}
+    extra = {}  # (e, node) -> (calls, [pitems units], [fields read by name-less calls])
     last = {}  # (e, node) -> (op name, reads [(f, x)], writes [(f, x, read before, x read)])
     with gzip.open(path, "rt") as fh:
         for line in fh:
@@ -63,6 +64,8 @@ def main(path):
                     strs[(e, ln["id"])] = ln["x"]
                 elif ln["t"] == "int":
                     ints[(e, ln["id"])] = ln["x"]
+                elif ln["t"] in ("list", "seq") and len(ln["x"]) <= 64:
+                    lists[(e, ln["id"])] = ln["x"]
             elif k == "api" and ln.get("f") == "register":
                 names[(e, raw(ln["r"]))] = ln["a"][0]
             elif k == "run" and ln.get("r") != "stop":
@@ -79,6 +82,13 @@ def main(path):
                         f = raw(a[0])
                         writes.append((f, raw(a[1]), f in seen, seen.get(f)))
                 last[(e, json.dumps(ln["node"]))] = (op, reads, writes)
+                units, ranges = [], []
+                for m, a, r in ln["calls"]:
+                    if m == "contribute":
+                        units.append((raw(a[0]), a[1] if isinstance(a[1], int) else raw(a[1])))
+                    elif m in ("acc_range", "acc_range_to"):
+                        ranges.append(raw(a[0]))
+                extra[(e, json.dumps(ln["node"]))] = (len(ln["calls"]), units, ranges)
     anystr = {i: x for (_, i), x in strs.items()}
     fname = lambda e, f: strs.get((e, f)) or anystr.get(f, f"#{f}")
     # who wrote (field, value)
@@ -154,8 +164,9 @@ def main(path):
         fields = collections.Counter()
         if top is None:
             return 0, fields
-        k = top
-        while True:
+        k, walked = top, set()
+        while k not in walked:
+            walked.add(k)
             d, step = depth(k)
             if not step:
                 break
@@ -201,6 +212,67 @@ def main(path):
     for n, _ in rows[:45]:
         a, b, c = kinds[n]
         print(f"   {a:7d} {b:7d}  {n}: {dict(c.most_common(6))}")
+    tail(path, names, strs, ints, lists, last, extra)
+
+
+def tail(path, names, strs, ints, lists, last, extra):
+    fname = lambda e, f: strs.get((e, f), f"#{f}")
+    L = lambda e, x: lists.get((e, x))
+    # 4. resumes: what they hold
+    hist = collections.Counter()
+    sizes = collections.Counter()
+    cands = collections.Counter()
+    for key, (op, reads, writes) in last.items():
+        if op not in PIECES:
+            continue
+        e = key[0]
+        ncalls, units, ranges = extra[key]
+        pit = None
+        for f, u in units:
+            if fname(e, f) == "pitems":
+                seq = L(e, u)
+                pit = L(e, seq[0]) if seq else None
+        items = L(e, pit[2]) if pit and len(pit) > 2 else None
+        n_items = len(items) if items is not None else -1
+        per = L(e, pit[4]) if pit and len(pit) > 4 else None
+        last_k = as_int(ints, e, pit[1]) if pit else None
+        if op == "resume":
+            cls = "no pitems unit" if pit is None else ("empty (0 items)" if n_items == 0 else ("1-2 items" if n_items <= 2 else "3+ items"))
+            hist[cls] += 1
+            sizes[min(ncalls // 10 * 10, 200)] += 1
+        # 5. candidates inside the piece's own groups/conditionals
+        if per:
+            for i, c in enumerate(per):
+                pc = L(e, c)
+                if not pc or len(pc) < 2:
+                    continue
+                cut = as_int(ints, e, pc[1])
+                if i == last_k:
+                    cands["at the piece's end"] += 1
+                elif cut == 0:
+                    cands["inside (the run could not end there)"] += 1
+                else:
+                    cands["could end there, did not"] += 1
+    print("\n4. resumes by what their items unit holds:", dict(hist))
+    print("   resumes by engine calls in their last run (bucket of 10):", dict(sorted(sizes.items())))
+    print("\n5. candidates of the pieces (from their check data; a piece with one candidate at its end has none):", dict(cands))
+    # 6. page-state readers
+    ps = collections.Counter()
+    for key, (op, reads, writes) in last.items():
+        if op not in PIECES:
+            continue
+        e = key[0]
+        seen = set()
+        for f, _ in reads:
+            n = fname(e, f)
+            if n.split(":")[0] in ("scan", "main", "vlist", "page", "pages") or n in ("deadcycles", "outputpenalty", "insertpenalties"):
+                seen.add(n)
+        for f in extra[key][2]:
+            n = fname(e, f)
+            seen.add("range " + n)
+        for n in seen:
+            ps[n] += 1
+    print("\n6. pieces reading page/list state, by field (pieces):", dict(ps.most_common(30)))
 
 
 if __name__ == "__main__":
