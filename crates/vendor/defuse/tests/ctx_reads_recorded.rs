@@ -12,6 +12,7 @@ const READS: &[&str] = &[
     "use_env",
     "output_of",
     "placed_output",
+    "placed_output_or",
     "apply",
     "acc_range",
     "acc_range_to",

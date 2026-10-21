@@ -222,6 +222,7 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "follow_after" => json!(cx.follow_after(de(&g(0)), de(&g(1)), de(&g(2)))),
         "follow_after_any" => json!(cx.follow_after_any(de(&g(0)), de(&g(1)), de(&g(2)))),
         "placed_output" => json!(cx.placed_output(de(&g(0)))),
+        "placed_output_or" => json!(cx.placed_output_or(de(&g(0)), de(&g(1)))),
         "park" => json!(cx.park(Box::new(Vec::<usize>::new()))),
         "park_continuing" => json!(cx.park_continuing(Box::new(Vec::<usize>::new()))),
         "parked" => json!(cx.parked().is_some()),

@@ -140,12 +140,14 @@ pub(crate) enum Read {
     Out { node: Id, val: Option<ValueId> },
     /// The output of a node the reader placed (`Ctx::placed_output`), as
     /// it last committed under the text it was placed with (`op`,
-    /// `args`): `None` while it has no result of that text.
+    /// `args`): `None` while it has no result of that text; with `or`
+    /// (`Ctx::placed_output_or`), that value instead of none.
     Placed {
         node: Id,
         op: crate::api::OpId,
         args: Arc<[ValueId]>,
         val: Option<ValueId>,
+        or: Option<ValueId>,
     },
     /// The kind of the scope a node is in.
     Kind { at: Id, val: Option<ValueId> },
