@@ -31,6 +31,10 @@ fn cache() -> &'static Cache {
 }
 
 pub(crate) fn bytes_of(text: &str) -> Vec<u8> {
+    // (ASCII: the bytes are the characters)
+    if text.is_ascii() {
+        return text.as_bytes().to_vec();
+    }
     text.chars()
         .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
         .collect()
