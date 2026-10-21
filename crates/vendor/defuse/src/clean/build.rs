@@ -267,7 +267,8 @@ impl<'a> Builder<'a> {
         }
         self.core.cause(id, why);
         let mut n = n.clone();
-        n.st = St::Dirty;
+        // (A final node waits for the final phase, its last result kept.)
+        n.st = if n.text.stat.fin { St::Held } else { St::Dirty };
         // (Running again: its text's bound until it narrows again.)
         n.narrowed = None;
         self.w.put(id, n);

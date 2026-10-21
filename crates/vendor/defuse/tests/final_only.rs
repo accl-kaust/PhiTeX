@@ -251,3 +251,23 @@ fn at_the_round_cap_finalize_runs_the_final_phase_on_the_last_round() {
         assert_eq!(b.ops.writer_runs.load(Relaxed), 0, "{i}: no final phase after an error");
     }
 }
+
+/// From the previous evaluation's loop-back values (`LoopStart::Previous`,
+/// PhiTeX's): an edit that takes rounds again dirties the final node, which
+/// waits for the final phase instead of running in every round.
+#[test]
+fn from_previous_values_a_final_node_runs_once_per_evaluation() {
+    for i in 0..9 {
+        let mut b = build(true, 3);
+        b.eng.set_loop_start(defuse::LoopStart::Previous);
+        let rep = eval(&mut b.eng, i).expect("evaluate");
+        assert!(rep.rounds >= 3, "{i}: {} rounds", rep.rounds);
+        assert_eq!(b.ops.writer_runs.load(Relaxed), 1, "{i}: cold");
+        let a = vec![b.eng.values().str("inc"), b.eng.values().int(5)];
+        b.eng.replace(b.inc, b.op, a);
+        let rep = eval(&mut b.eng, i + 1).expect("edit inc");
+        assert!(rep.rounds >= 2, "{i}: {} rounds after the edit", rep.rounds);
+        assert_eq!(b.ops.writer_runs.load(Relaxed), 2, "{i}: the writer ran once more");
+        assert_eq!(int(&b.eng, b.r), Some(501), "{i}: edit inc");
+    }
+}
