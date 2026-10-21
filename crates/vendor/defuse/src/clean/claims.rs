@@ -80,13 +80,15 @@ impl World {
     }
 
     /// Whether `x` was placed (`follow_after`, or as a continuation of
-    /// such a node) by a node after `me`.
+    /// such a node) by a node after `me`, or after `me` or one of its
+    /// continuations by any node (a node placed after a text by another
+    /// is never that text's to claim, as a page's finisher after a piece).
     fn placed_after_view(&self, me: Id, x: &Node) -> bool {
         let Some(m) = self.node(me) else { return false };
         let mut x = x;
         loop {
             match x.place {
-                Place::After(_) => return self.node(x.parent).is_some_and(|p| p.pos > m.pos),
+                Place::After(a) => return a == me || self.own_cont(me, a) || self.node(x.parent).is_some_and(|p| p.pos > m.pos),
                 Place::Cont => match self.node(x.parent) {
                     Some(p) => x = p,
                     None => return false,

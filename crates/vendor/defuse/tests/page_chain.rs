@@ -17,7 +17,6 @@
 //! set the page goal; the scan reads the goal in force at each piece it
 //! takes with `use_field_at` past itself.
 
-#![cfg(feature = "clean")]
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering::Relaxed;

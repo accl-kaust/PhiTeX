@@ -538,8 +538,8 @@ impl Engine {
             .collect();
         causes.sort_by_key(|c| c.0);
         rep.rerun_causes = causes;
-        // (Complete runs, as the round core counts them: a stopped attempt
-        // is not one; the limits count attempts.)
+        // (Complete runs: a stopped attempt is not one; the limits count
+        // attempts.)
         rep.runs -= self.stopped;
         self.core.hold_fin.store(self.loop_start != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
         super::core::prof::dump();
@@ -1874,18 +1874,6 @@ impl Engine {
             .collect()
     }
 
-    fn dirty_all(&mut self, s: &mut Sched, ids: &[Id]) {
-        let w = std::mem::take(&mut self.w);
-        let mut b = Builder::new(&self.core, w);
-        for &id in ids {
-            b.make_dirty(id);
-        }
-        let m = b.finish();
-        self.w = m.w;
-        for id in m.dirty {
-            self.enqueue(s, id);
-        }
-    }
 }
 
 /// Adds one to `name`'s count in `list`.
