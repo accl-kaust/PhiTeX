@@ -3540,45 +3540,6 @@ pub(crate) struct Registry {
     decoded: Mutex<FxHashMap<u64, Arc<Hint>>>,
     /// [`may_define`]'s answer by the hint string's value.
     answers: Mutex<FxHashMap<u64, MayDefine>>,
-    /// The hints decoded and [`may_define`]'s answers by the hint
-    /// string without its excerpt ([`hint_shape`]): the slices of a
-    /// document whose commands are alike (each paragraph of plain text)
-    /// differ in their excerpts alone.
-    shapes: Mutex<FxHashMap<String, (Arc<Hint>, Option<MayDefine>)>>,
-}
-
-/// A hint string without its excerpt, and the excerpt: what
-/// [`Hint::decode`] makes of the string but for the excerpt it copies.
-fn hint_shape(t: &str) -> (String, &str) {
-    let mut it = t.splitn(4, '\x1e');
-    let tag = it.next().unwrap_or("");
-    let cause = it.next().unwrap_or("");
-    let excerpt = it.next().unwrap_or("");
-    let rest = it.next();
-    let mut s = String::with_capacity(t.len() - excerpt.len() + 2);
-    s.push_str(tag);
-    s.push('\x1e');
-    s.push_str(cause);
-    s.push('\x1e');
-    match rest {
-        Some(r) => {
-            s.push('1');
-            s.push_str(r);
-        }
-        None => s.push('0'),
-    }
-    (s, excerpt)
-}
-
-/// The node's hint argument's shape ([`hint_shape`]), if it has one.
-fn shape_of(v: &Values, hv: ValueId) -> Option<(String, String)> {
-    match &*v.get(hv) {
-        Value::Str(t) => {
-            let (s, e) = hint_shape(t);
-            Some((s, e.to_owned()))
-        }
-        _ => None,
-    }
 }
 
 /// An answer kept for its one question, or taken.
@@ -3891,30 +3852,7 @@ pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<
         Some(hv) => {
             let known = reg.decoded.locked().get(&hv.raw()).cloned();
             known.unwrap_or_else(|| {
-                // (a hint of the same shape decoded already: its excerpt
-                // this one's)
-                let shape = shape_of(v, hv);
-                let alike = shape
-                    .as_ref()
-                    .and_then(|(s, _)| reg.shapes.locked().get(s).map(|x| x.0.clone()));
-                let h = match (alike, &shape) {
-                    (Some(h), Some((_, e))) if h.excerpt == *e => h,
-                    (Some(h), Some((_, e))) => Arc::new(Hint {
-                        excerpt: e.clone(),
-                        ..(*h).clone()
-                    }),
-                    _ => {
-                        let h = Arc::new(compute_hint(reg, v, args, &mut registry));
-                        if let Some((s, _)) = shape {
-                            let mut c = reg.shapes.locked();
-                            if c.len() > 1 << 16 {
-                                c.clear();
-                            }
-                            c.entry(s).or_insert_with(|| (h.clone(), None));
-                        }
-                        h
-                    }
-                };
+                let h = Arc::new(compute_hint(reg, v, args, &mut registry));
                 let mut d = reg.decoded.locked();
                 if d.len() > 1 << 16 {
                     d.clear();
@@ -4247,17 +4185,7 @@ fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     {
         return m.clone();
     }
-    // (the answer is the hint's but for its excerpt: one per shape)
-    let shape = hv.and_then(|hv| shape_of(v, hv)).map(|x| x.0);
-    let alike = shape
-        .as_ref()
-        .and_then(|s| reg.shapes.locked().get(s).and_then(|x| x.1.clone()));
-    let m = alike.unwrap_or_else(|| may_define_answer(reg, v, args));
-    if let Some(s) = shape
-        && let Some(x) = reg.shapes.locked().get_mut(&s)
-    {
-        x.1.get_or_insert_with(|| m.clone());
-    }
+    let m = may_define_answer(reg, v, args);
     if let Some(hv) = hv {
         let mut a = reg.answers.locked();
         if a.len() > 1 << 16 {
