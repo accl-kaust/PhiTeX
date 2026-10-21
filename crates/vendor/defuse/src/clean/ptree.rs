@@ -281,6 +281,30 @@ impl<K: Ord + Clone, V: Clone, S: Clone> Child<K, V, S> {
         self.sum.get_or_init(|| self.node.measure(m))
     }
 
+    /// [`PMap::visit_where`] on this subtree.
+    fn visit<M: Measure<K, V, S = S>>(&self, lo: Bound<&K>, m: &M, skip: &dyn Fn(&S) -> bool, f: &mut dyn FnMut(&K, &V)) {
+        if skip(self.sum(m)) {
+            return;
+        }
+        match &*self.node {
+            Node::Leaf(es) => {
+                for (k, v) in &es[lower_index(es, lo)..] {
+                    f(k, v);
+                }
+            }
+            Node::Inner { keys, kids } => {
+                let a = match lo {
+                    Bound::Unbounded => 0,
+                    Bound::Included(k) | Bound::Excluded(k) => prefix(keys, |s| s <= k),
+                };
+                kids[a].visit(lo, m, skip, f);
+                for c in &kids[a + 1..] {
+                    c.visit(Bound::Unbounded, m, skip, f);
+                }
+            }
+        }
+    }
+
     /// Recomputes the count and summary after the node changed.
     fn refresh<M: Measure<K, V, S = S>>(&mut self, _m: &M) {
         self.len = self.node.count();
@@ -699,6 +723,15 @@ impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
             root.fold(lo, hi, m, &mut acc);
         }
         acc.unwrap_or_else(|| m.zero())
+    }
+
+    /// The entries from `lo` on, in key order, to `f`, but for whole
+    /// subtrees whose summary `skip` rejects (a subtree's summary rejected
+    /// means none of its entries is wanted): O(log n) per entry visited.
+    pub fn visit_where<M: Measure<K, V, S = S>>(&self, lo: Bound<&K>, m: &M, skip: &dyn Fn(&S) -> bool, f: &mut dyn FnMut(&K, &V)) {
+        if let Some(root) = &self.root {
+            root.visit(lo, m, skip, f);
+        }
     }
 
     /// Number of entries with key < k (O(log n)).

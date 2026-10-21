@@ -100,15 +100,10 @@ impl Group {
                     }
                     self.acc_touched = true;
                     if let Some(c) = self.rd.field(self.key.0, f) {
-                        self.recheck.extend(
-                            c.range_readers
-                                .range(std::ops::Bound::Excluded(&(pos, Id::MAX)), std::ops::Bound::Unbounded)
-                                .filter(|(_, lo)| **lo < pos)
-                                .map(|(k, _)| {
-                                    super::core::prof::count(21);
-                                    (k.1, f, false)
-                                }),
-                        );
+                        self.recheck.extend(c.over(pos).into_iter().map(|r| {
+                            super::core::prof::count(21);
+                            (r, f, false)
+                        }));
                     }
                 }
             }

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use super::claims::Windows;
 use super::core::lock;
-use super::ptree::{NoMeasure, PMap};
+use super::ptree::{Measure, NoMeasure, PMap};
 use super::world::{Id, Pos, ReadKey};
 use crate::values::{Field, FxHashMap};
 
@@ -79,7 +79,43 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone + Default> Sharded<K, V> {
 #[derive(Clone, Default)]
 pub(crate) struct FieldReaders {
     pub readers: PMap<(Pos, Id), ()>,
-    pub range_readers: PMap<(Pos, Id), Pos>,
+    pub range_readers: Ranges,
+}
+
+/// Range readers by the end of their window and the reader, each with the
+/// window's start; summed by the least start (what starts at or past a
+/// point is passed whole).
+pub(crate) type Ranges = PMap<(Pos, Id), Pos, Pos>;
+
+/// [`Ranges`]'s summary: the least window start.
+pub(crate) struct LeastStart;
+
+impl Measure<(Pos, Id), Pos> for LeastStart {
+    type S = Pos;
+    fn zero(&self) -> Pos {
+        Pos::MAX
+    }
+    fn of(&self, _: &(Pos, Id), lo: &Pos) -> Pos {
+        *lo
+    }
+    fn add(&self, a: &Pos, b: &Pos) -> Pos {
+        (*a).min(*b)
+    }
+}
+
+impl FieldReaders {
+    /// The range readers whose window `(lo, hi)` holds position `q`
+    /// (`lo < q < hi`), in window-end order: the windows after `q` walked
+    /// but for runs of them that all start at or past it.
+    pub(crate) fn over(&self, q: Pos) -> Vec<Id> {
+        let mut out = Vec::new();
+        self.range_readers.visit_where(std::ops::Bound::Excluded(&(q, Id::MAX)), &LeastStart, &|&lo| lo >= q, &mut |k, &lo| {
+            if lo < q {
+                out.push(k.1);
+            }
+        });
+        out
+    }
 }
 
 /// A unit's structure readers: of the scope structure at their position,
@@ -259,5 +295,42 @@ impl Readers {
 
     pub(crate) fn set_field(&self, u: u32, f: Field, r: FieldReaders) {
         self.i().fields.insert((u, f), r);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `FieldReaders::over` finds what a walk of every window after the
+    /// point finds.
+    #[test]
+    fn over_is_the_walk() {
+        let mut r = FieldReaders::default();
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        for id in 1..400u64 {
+            let lo = next(1000);
+            let hi = lo + 1 + next(300);
+            r.range_readers.insert((hi, id), lo, &LeastStart);
+            if next(5) == 0 {
+                let k = (next(1300), next(400));
+                r.range_readers.remove(&k, &LeastStart);
+            }
+        }
+        for q in 0..1400 {
+            let walk: Vec<Id> = r
+                .range_readers
+                .range(std::ops::Bound::Excluded(&(q, Id::MAX)), std::ops::Bound::Unbounded)
+                .filter(|(_, lo)| **lo < q)
+                .map(|(k, _)| k.1)
+                .collect();
+            assert_eq!(r.over(q), walk, "at {q}");
+        }
     }
 }

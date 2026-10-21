@@ -83,6 +83,9 @@ struct Sched {
     /// start (the critical chain's link times).
     ready_at: FxHashMap<Id, std::time::Instant>,
     ran_ready: FxHashMap<Id, std::time::Instant>,
+    /// Placers whose kept state's reads were found to hold, with the world
+    /// version they held at.
+    kept_ok: FxHashMap<Id, u64>,
 }
 
 impl Sched {
@@ -888,6 +891,7 @@ impl Engine {
             if let Some(mut n) = self.w.node(id).cloned() {
                 n.st = St::Held;
                 self.w.put(id, n);
+                self.w.ver = super::live::fresh_epoch();
             }
         }
     }
@@ -1438,6 +1442,30 @@ impl Engine {
     /// Whether queued node `k` is to run now (and with what kept state): it
     /// is dirty where it was queued, and no pending claim holds it back.
     #[allow(clippy::type_complexity)]
+    /// Placer `p` starts over, its kept state broken: what it placed waits
+    /// for it, as for a placer a change dirtied.
+    fn stale_placer(&mut self, p: Id) {
+        if let Some(r) = self.w.node(p).and_then(|n| n.res.clone()) {
+            for &x in r.kids.iter().chain(&r.conts) {
+                self.w.awaiting.insert(x, (), &NoMeasure);
+            }
+        }
+    }
+
+    /// Whether placer `p`'s kept state stands on reads that no longer hold
+    /// (asked once per world version while they hold).
+    fn kept_broken(&self, s: &mut Sched, p: Id) -> bool {
+        let Some((_, reads)) = self.kept.get(&p) else { return false };
+        if s.kept_ok.get(&p) == Some(&self.w.ver) {
+            return false;
+        }
+        let broken = reads.iter().any(|r| !super::build::holds(&self.core, &self.w, p, r));
+        if !broken {
+            s.kept_ok.insert(p, self.w.ver);
+        }
+        broken
+    }
+
     fn prepare(&mut self, s: &mut Sched, rep: &mut Report, k: (u32, Pos, Id)) -> Option<Kept> {
         let id = k.2;
         s.queued.remove(&id);
@@ -1468,6 +1496,17 @@ impl Engine {
         // placer to place it again (as it was: it runs; with new arguments:
         // a new text; a run that ends without it: it goes).
         let placer = n.parent;
+        // A placer stopped on a kept state whose reads broke (a node it
+        // read went) is such a placer too: it starts over now (its kept
+        // state is of a world before), and what it placed waits for it.
+        if self.kept.contains_key(&placer) && self.kept_broken(s, placer) {
+            self.kept.remove(&placer);
+            s.kept_ok.remove(&placer);
+            s.parked.remove(&placer);
+            s.range_wait.remove(&placer);
+            self.enqueue(s, placer);
+            self.stale_placer(placer);
+        }
         if self.w.awaiting.contains_key(&id) && self.w.node(placer).is_some_and(|p| super::world::in_work(p.st)) {
             s.parked.insert(id, Wait::Node(placer, None));
             s.placed.entry(placer).or_default().push(id);
@@ -1495,6 +1534,8 @@ impl Engine {
                 Some(r) => {
                     rep.restarted += 1;
                     bump(&mut rep.restarted_by, read_kind(r));
+                    // (Starting over, it is a stale placer.)
+                    self.stale_placer(id);
                     None
                 }
             },
@@ -1678,6 +1719,7 @@ impl Engine {
                     {
                         n.narrowed = Some(std::sync::Arc::new(m));
                         self.w.put(id, n);
+                        self.w.ver = super::live::fresh_epoch();
                         self.wake(s, id);
                     }
                     if r.pset_wait {
@@ -1695,6 +1737,7 @@ impl Engine {
                     {
                         st.early = Some(n);
                         self.w.claims.insert(id, st, &NoMeasure);
+                        self.w.ver = super::live::fresh_epoch();
                         self.w.refresh_holder(id);
                         self.w.refresh_claim_at(id);
                         self.wake(s, id);
