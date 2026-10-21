@@ -16,6 +16,9 @@ use crate::val::{int_of, list_of, str_of};
 pub(crate) struct Loaded {
     pub tfm: Tfm,
     pub at: ScaledFont,
+    /// The digest of `at` a PDF writer's font state carries, made once
+    /// ([`phitex_pdf::metrics_hash`]).
+    pub at_hash: OnceLock<u64>,
 }
 
 type Cache = Mutex<FxHashMap<(u64, i32), Option<Arc<Loaded>>>>;
@@ -28,6 +31,10 @@ fn cache() -> &'static Cache {
 }
 
 pub(crate) fn bytes_of(text: &str) -> Vec<u8> {
+    // (ASCII: the bytes are the characters)
+    if text.is_ascii() {
+        return text.as_bytes().to_vec();
+    }
     text.chars()
         .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
         .collect()
@@ -46,7 +53,11 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
         let tfm = phitex_tfm::parse(&bytes).ok()?;
         let z = tfm.size_for(s);
         let at = tfm.at(z).ok()?;
-        Some(Arc::new(Loaded { tfm, at }))
+        Some(Arc::new(Loaded {
+            tfm,
+            at,
+            at_hash: OnceLock::new(),
+        }))
     });
     cache().locked().insert(key, loaded.clone());
     loaded

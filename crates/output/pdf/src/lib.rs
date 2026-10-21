@@ -376,6 +376,13 @@ pub struct VirtualFont {
 }
 
 /// The caller's fonts, by TeX's internal font number (`null_font` is 0).
+/// The digest of metrics `m` a writer's font state carries
+/// ([`FontSource::metrics_hash`]).
+#[must_use]
+pub fn metrics_hash(m: &ScaledFont) -> u64 {
+    digest::debug_hash(m)
+}
+
 pub trait FontSource {
     /// The metrics at the font's size (`font_size`, `char_width`, ...).
     fn metrics(&self, f: FontId) -> &ScaledFont;
@@ -391,6 +398,24 @@ pub trait FontSource {
     /// map lines given with `\pdfmapline`).
     fn file(&self, _name: &[u8]) -> Option<Vec<u8>> {
         None
+    }
+    /// [`FontSource::font_file`], shared where the source holds it so
+    /// (no copy for each page that loads the font).
+    fn font_file_shared(&self, f: FontId) -> Option<std::sync::Arc<[u8]>> {
+        self.font_file(f).map(Into::into)
+    }
+    /// [`FontSource::encoding_file`], shared where the source holds it so.
+    fn encoding_file_shared(&self, f: FontId) -> Option<std::sync::Arc<[u8]>> {
+        self.encoding_file(f).map(Into::into)
+    }
+    /// [`FontSource::file`], shared where the source holds it so.
+    fn file_shared(&self, name: &[u8]) -> Option<std::sync::Arc<[u8]>> {
+        self.file(name).map(Into::into)
+    }
+    /// The digest of the font's metrics ([`metrics_hash`]), kept where
+    /// the source keeps it (each page's writer loads the font anew).
+    fn metrics_hash(&self, f: FontId) -> u64 {
+        metrics_hash(self.metrics(f))
     }
     /// The font's expansion, if it is an expanded font.
     fn expansion(&self, _f: FontId) -> Option<Expansion> {

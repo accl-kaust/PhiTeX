@@ -948,8 +948,12 @@ impl Run<'_, '_> {
         let mut side = Side::default();
         // (the page's boxes are decoded once, here, for the writer: their
         // decodings are not kept for a later decode)
+        // (its lines' lists as line breaking made them, where it kept
+        // them, [`nodes::keep_made`])
         let prev = crate::val::NO_KEEP.with(|c| c.replace(true));
+        let take = nodes::TAKE_MADE.with(|c| c.replace(true));
         let decoded = nodes::decode(v, b, &mut side);
+        nodes::TAKE_MADE.with(|c| c.set(take));
         crate::val::NO_KEEP.with(|c| c.set(prev));
         let Some(Node::Box(bx)) = decoded else {
             return Ok(());

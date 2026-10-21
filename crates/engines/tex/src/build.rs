@@ -1196,7 +1196,8 @@ impl Run<'_, '_> {
         let mut out = Vec::with_capacity(para.lines.len() * 2);
         for (k, line) in para.lines.into_iter().enumerate() {
             self.box_report(true, line.packed.report, true);
-            let b = nodes::encode_box(v, &line.packed.node, &side);
+            let (list, plain) = nodes::encode_list_side_free(v, &line.packed.node.list, &side);
+            let b = nodes::encode_box_with(v, &line.packed.node, list);
             out.push(v.list(vec![tv, b, bs, ls, lsl]));
             for a in &line.packed.adjustments {
                 out.push(nodes::encode(v, a, &side));
@@ -1206,8 +1207,11 @@ impl Run<'_, '_> {
             }
             if display && k == last_k {
                 just_box = Some(line.packed.node);
-            } else {
+            } else if !plain {
                 phitex_typeset::linebreak::recycle_line(line.packed.node.list);
+            } else if let Some(l) = nodes::keep_made(list, line.packed.node.list) {
+                // (kept for the page that ships it, else reused)
+                phitex_typeset::linebreak::recycle_line(l);
             }
         }
         // the paragraph's lines: one contribution
