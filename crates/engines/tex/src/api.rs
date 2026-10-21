@@ -2845,6 +2845,21 @@ impl Graph {
                     r.nodes_run
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
+                // (the guesses this edit paid for: refuted runs, the
+                // fields they were refuted on, and the parked runs that
+                // started over and why)
+                let v = self.eng.values();
+                let mut by: Vec<(String, u64)> = r
+                    .refuted_by_field
+                    .iter()
+                    .map(|&(f, n)| (crate::val::field_name(v, f), n))
+                    .collect();
+                by.sort_by_key(|e| std::cmp::Reverse(e.1));
+                by.truncate(8);
+                eprintln!(
+                    "acct-edit: guesses: speculations {} mispredictions {} refuted nodes {} restarted {} by {:?}; refuted by field {by:?}",
+                    r.speculations, r.mispredictions, r.refuted_nodes, r.restarted, r.restarted_by
+                );
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
