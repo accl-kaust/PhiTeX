@@ -178,9 +178,15 @@ pub(crate) struct PageLoop {
     pub inf: Vec<Src>,
     /// What each routine (by its hint) gave back on the last page fired
     /// on the text at each `\outputpenalty` (every ordinary one alike,
-    /// `i32::MAX`), `\deadcycles` left out: the
-    /// guess of a later page fired there ([`FinishIn::rtn_guess`]).
-    pub last_rtn: Vec<((ValueId, i32), ValueId)>,
+    /// `i32::MAX`), after a page that left dead cycles or not
+    /// ([`RtnKey`]), `\deadcycles` left out only on a page `\end` fired:
+    /// the guess of a later page fired there ([`FinishIn::rtn_guess`]).
+    pub last_rtn: Vec<(RtnKey, ValueId)>,
+    /// The page fired last: its key and what its routine gave back as
+    /// the loop folded it (read or guessed), `\deadcycles` included: a
+    /// routine stepping through dead cycles gives back one more item each
+    /// cycle ([`step_rtn`]).
+    pub prev_rtn: Option<(RtnKey, ValueId)>,
     /// The markers each routine gave back last (the page parameters it
     /// sets): an ordinary page's guess where none fired before it.
     pub last_markers: Vec<(ValueId, ValueId)>,
@@ -250,6 +256,7 @@ impl PageLoop {
             dead: 0,
             inf: Vec::new(),
             last_rtn: Vec::new(),
+            prev_rtn: None,
             last_markers: Vec::new(),
             prev_fire: (-1, 0),
             marks: Vec::new(),
@@ -878,6 +885,37 @@ fn node_short(n: &Node) -> String {
     }
 }
 
+/// The key of a routine's give-back the loop guesses from
+/// ([`PageLoop::last_rtn`]): the routine's hint, the page's class
+/// ([`crate::pages::finish::pen_class`]) and whether the page before
+/// left dead cycles.
+pub(crate) type RtnKey = (ValueId, i32, bool);
+
+/// The penalty `\end` fires a page at (§1054).
+pub(crate) const END_PENALTY: i32 = -0o10000000000;
+
+/// A dead cycle's give-back guessed from the one before it (`x`, which
+/// left `\deadcycles` above 0): its list one item longer (the last again:
+/// a routine holding back the `\write`s of the pages it did not ship,
+/// one more each cycle) and `\deadcycles` one more; `None` where `x`
+/// left none or gave back no list.
+pub(crate) fn step_rtn(v: &Values, x: ValueId) -> Option<ValueId> {
+    let xs = list_of(v, x);
+    let dead = xs.get(2).map_or(0, |&d| int_of(v, d));
+    if dead <= 0 {
+        return None;
+    }
+    let mut list = list_of(v, *xs.get(1)?);
+    list.push(*list.last()?);
+    Some(crate::pages::finish::rtn_value(
+        v,
+        xs[0],
+        v.list(list),
+        dead + 1,
+        &crate::pages::finish::rtn_maps(v, x),
+    ))
+}
+
 /// Whether the page builder parks continuing
 /// ([`phitex_defuse::Ctx::park_continuing`]): resumed, it places only the
 /// pages new since its stop.
@@ -897,7 +935,8 @@ struct LoopSnap {
     dead: i64,
     inf: Vec<Src>,
     prev_fire: (i64, i64),
-    last_rtn: Vec<((ValueId, i32), ValueId)>,
+    last_rtn: Vec<(RtnKey, ValueId)>,
+    prev_rtn: Option<(RtnKey, ValueId)>,
     last_markers: Vec<(ValueId, ValueId)>,
     pend: Vec<(crate::vprof::PItem, SrcRef)>,
     page_src: Vec<SrcRef>,
@@ -925,6 +964,7 @@ impl PageLoop {
             inf: self.inf.clone(),
             prev_fire: self.prev_fire,
             last_rtn: self.last_rtn.clone(),
+            prev_rtn: self.prev_rtn,
             last_markers: self.last_markers.clone(),
             pend: self.pend.clone(),
             page_src: self.page_src.clone(),
@@ -951,6 +991,7 @@ impl PageLoop {
         self.inf = s.inf;
         self.prev_fire = s.prev_fire;
         self.last_rtn = s.last_rtn;
+        self.prev_rtn = s.prev_rtn;
         self.last_markers = s.last_markers;
         self.pend = s.pend;
         self.page_src = s.page_src;
@@ -1219,10 +1260,26 @@ impl Run<'_, '_> {
         // for a page fired in a routine's material, so no chain of pages
         // grows on guesses)
         let ordinary = f.output_penalty > -10001;
-        let key = (hint, if ordinary { i32::MAX } else { f.output_penalty });
+        // (and whether the page before left dead cycles, §1012: a
+        // routine's run after a page it did not ship goes otherwise)
+        let key = (
+            hint,
+            crate::pages::finish::pen_class(f.output_penalty),
+            lp.prev_fire.1 > 0,
+        );
         let empty = || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]);
+        // (a dead cycle after one of the same routine and class, not one
+        // `\end` fired, §1054: the page before's give-back one item longer
+        // and `\deadcycles` one more, [`step_rtn`])
+        let stepped = (!in_material && key.2 && f.output_penalty != END_PENALTY)
+            .then_some(lp.prev_rtn)
+            .flatten()
+            .filter(|p| p.0.0 == key.0 && p.0.1 == key.1)
+            .and_then(|p| step_rtn(v, p.1));
         let rtn_guess = if in_material {
             empty()
+        } else if let Some(x) = stepped {
+            x
         } else {
             match lp.last_rtn.iter().find(|e| e.0 == key) {
                 Some(e) => e.1,
@@ -1242,7 +1299,12 @@ impl Run<'_, '_> {
                 self.cx.values_epoch(),
                 self.rtn_guess(hint, key.1),
             );
-            guess_check(self.cx.node().raw(), j, (eval, key, in_material, &lp.last_rtn, &lp.last_markers), rtn_guess);
+            guess_check(
+                self.cx.node().raw(),
+                j,
+                (eval, key, in_material, &lp.last_rtn, &lp.prev_rtn, &lp.last_markers),
+                rtn_guess,
+            );
         }
         let rtns: Vec<(i64, ValueId)> = {
             let mut pages: Vec<i64> = spans
@@ -1340,8 +1402,16 @@ impl Run<'_, '_> {
         // fired)
         let rtn = self.cx.placed_output_or(at, rtn_guess);
         let rs = list_of(v, rtn);
+        lp.prev_rtn = Some((key, rtn));
         if !in_material {
-            let given = crate::pages::finish::rtn_as_guess(v, rtn);
+            // (`\deadcycles` kept but on a page `\end` fired: a dead cycle
+            // guessed there would fire another, §1054, and grow a chain of
+            // pages on guesses)
+            let given = if f.output_penalty == END_PENALTY {
+                crate::pages::finish::rtn_as_guess(v, rtn)
+            } else {
+                rtn
+            };
             match lp.last_rtn.iter_mut().find(|e| e.0 == key) {
                 Some(e) => e.1 = given,
                 None => lp.last_rtn.push((key, given)),
