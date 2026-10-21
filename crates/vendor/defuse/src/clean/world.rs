@@ -194,9 +194,9 @@ pub(crate) struct Res {
     pub diag: Vec<ValueId>,
     /// The claim the run made (`Ctx::claim`), overriding the declared one.
     pub claim: Option<usize>,
-    /// The reader entries its reads were filed as (sorted, distinct), as
-    /// of renumbering `World::relabels`: the next commit moves exactly
-    /// these.
+    /// The reader entries at fixed places a worker filed ahead for this
+    /// run (sorted, distinct), with the renumbering epoch it made them at
+    /// (`World::relabels`): the merge files the run by them.
     pub filed: Option<(u64, Arc<[ReadKey]>)>,
     /// Its definitions by field (the first of each), made when first
     /// asked of a result with many (`Engine::def_value`).
@@ -462,7 +462,8 @@ impl Default for Buckets {
 pub(crate) struct World {
     /// Bumped by every merge.
     pub ver: u64,
-    /// Units renumbered so far (positions filed before then moved).
+    /// The last renumbering's epoch (`live::fresh_epoch`; 0: none yet):
+    /// positions taken at another may have moved since.
     pub relabels: u64,
     pub nodes: PMap<Id, Node>,
     pub units: PMap<u32, Arc<Unit>>,

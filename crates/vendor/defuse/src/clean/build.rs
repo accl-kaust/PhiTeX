@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use super::core::Core;
 use super::ctx::Spec;
+use super::live::Slot;
 use super::ptree::{Count, NoMeasure, PMap};
 use super::world::{ReadKey, 
     AccMeasure, Def, Entry, Frame, FrameId, Id, Key, NONE, Node, Place, Pos, Read, Res, St, Text, Unit, World,
@@ -138,15 +139,6 @@ impl<'a> Builder<'a> {
             std::collections::hash_map::Entry::Vacant(e) => {
                 e.insert(Some(vec![f]));
             }
-        }
-    }
-
-    /// A field reader filed (`on`) or not.
-    fn reader(&mut self, u: u32, f: Field, pos: Pos, id: Id, on: bool) {
-        if on {
-            self.w.add_reader(u, f, pos, id);
-        } else {
-            self.w.drop_reader(u, f, pos, id);
         }
     }
 
@@ -321,7 +313,8 @@ impl<'a> Builder<'a> {
     /// Renumbers unit `u` evenly; returns the new position of what was at
     /// `keep`.
     fn relabel(&mut self, u: u32, keep: Pos) -> Pos {
-        self.w.relabels += 1;
+        let epoch = super::live::fresh_epoch();
+        self.w.relabels = epoch;
         // (Claim windows are positions: the unit's claims resolve again.)
         self.w.claims_dirty.insert(u, (), &NoMeasure);
         self.w.claim_points = Default::default();
@@ -398,7 +391,12 @@ impl<'a> Builder<'a> {
         {
             let rd = self.w.rd.clone();
             let mut count = rd.relabels_mut();
-            *count += 1;
+            *count = epoch;
+            rd.remap_slots(|k| match k {
+                ReadKey::Field(ku, f, p) if ku == u => ReadKey::Field(ku, f, remap(p)),
+                ReadKey::Range(ku, f, lo, hi) if ku == u => ReadKey::Range(ku, f, remap(lo), remap(hi)),
+                k => k,
+            });
             for f in rd.fields_of(u) {
                 let c = rd.field(u, f).expect("listed");
                 let mut readers: Vec<((Pos, Id), ())> = c.readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
@@ -463,6 +461,20 @@ impl<'a> Builder<'a> {
             narrowed: None,
         };
         let statics = n.text.stat.contribs.clone();
+        // (A placed id comes back: filed for anew. Positions workers took
+        // of it before it went are stale: a new epoch.)
+        let back = self.w.rd.with_slot(id, |s| {
+            let gone = matches!(s, Slot::Gone);
+            if gone {
+                *s = Slot::None;
+            }
+            gone
+        });
+        if back {
+            let epoch = super::live::fresh_epoch();
+            self.w.relabels = epoch;
+            *self.w.rd.relabels_mut() = epoch;
+        }
         self.w.put(id, n);
         self.w.link(u, pos, id);
         self.w.unregistered.insert(id, (), &NoMeasure);
@@ -602,6 +614,15 @@ impl<'a> Builder<'a> {
             }
             self.drop_reads(id, &n, &res);
         }
+        // (What workers filed for a run not committed goes too; a late one
+        // files nothing.)
+        let w = &self.w;
+        w.rd.with_slot(id, |s| {
+            for &k in s.keys() {
+                index_key(w, id, k, false);
+            }
+            *s = Slot::Gone;
+        });
         self.unfile_all(id, &n);
         self.claimer_gone(id, n.unit);
         self.w.unlink(n.unit, n.pos);
@@ -1225,86 +1246,62 @@ impl<'a> Builder<'a> {
 
     // ---------------------------------------------------------------- reads
 
-    /// Registers a committed run's reads in the reader indexes; the
-    /// entries filed.
-    pub(crate) fn add_reads(&mut self, id: Id, n: &Node, reads: &[Read]) -> Arc<[ReadKey]> {
-        let (keys, agg) = self.read_keys(id, n, reads);
-        for &k in &keys {
-            self.index_key(id, k, true);
+    /// Files node `id`'s committed reads (`res`): the entries its slot
+    /// holds become exactly these (its fixed ones as a worker made them
+    /// ahead, when made at the renumbering now), its scope and sibling
+    /// windows as they ask.
+    fn file_reads(&mut self, id: Id, n: &Node, res: &Res) {
+        let fixed: Arc<[ReadKey]> = match res.filed.as_ref().filter(|(e, _)| *e == self.w.relabels) {
+            Some((_, k)) => k.clone(),
+            None => read_keys(&self.w, id, n, &res.reads, Which::Fixed).0.into(),
+        };
+        let (moving, agg) = read_keys(&self.w, id, n, &res.reads, Which::Moving);
+        // (Ranges sort last: still sorted.)
+        if moving.is_empty() {
+            self.refile(id, &fixed);
+        } else {
+            let keys: Vec<ReadKey> = fixed.iter().copied().chain(moving).collect();
+            self.refile(id, &keys);
         }
         let t = super::core::prof::start();
-        self.index_agg(id, n, agg, true);
+        self.reindex_agg(id, n, agg);
         super::core::prof::stop(30, t);
-        keys.into()
+    }
+
+    /// Node `id`'s filed entries made exactly `keys` (sorted, distinct):
+    /// only those that differ are unfiled and filed.
+    fn refile(&mut self, id: Id, keys: &[ReadKey]) {
+        let w = &self.w;
+        w.rd.with_slot(id, |s| {
+            diff(s.keys(), keys, |k, on| index_key(w, id, k, on));
+            *s = if keys.is_empty() { Slot::None } else { Slot::Keys(keys.into()) };
+        });
     }
 
     /// Takes a result's reads out of the reader indexes.
     pub(crate) fn drop_reads(&mut self, id: Id, n: &Node, res: &Res) {
-        let (keys, agg) = self.read_keys(id, n, &res.reads);
-        let filed = res.filed.as_ref().filter(|(e, _)| *e == self.w.relabels);
-        match filed {
-            Some((_, ks)) => {
-                for &k in ks.iter() {
-                    self.index_key(id, k, false);
-                }
-            }
-            None => {
-                for &k in &keys {
-                    self.index_key(id, k, false);
-                }
-            }
-        }
+        self.refile(id, &[]);
+        let (_, agg) = read_keys(&self.w, id, n, &res.reads, Which::Moving);
         self.index_agg(id, n, agg, false);
     }
 
-    /// Moves node `id`'s reader entries from result `old`'s to those of
-    /// read log `new`: only the entries that differ are unfiled and filed
-    /// (a run that reads what it read before touches no index); the
-    /// entries filed.
-    fn reindex_reads(&mut self, id: Id, n: &Node, old: &Res, new: &[Read]) -> Arc<[ReadKey]> {
-        let (kn, an) = self.read_keys(id, n, new);
-        if let Some((_, ko)) = old.filed.as_ref().filter(|(e, _)| *e == self.w.relabels) {
-            // (As filed: both sorted.)
-            let (mut a, mut b) = (0, 0);
-            while a < ko.len() || b < kn.len() {
-                match (ko.get(a), kn.get(b)) {
-                    (Some(x), Some(y)) if x == y => {
-                        a += 1;
-                        b += 1;
-                    }
-                    (Some(&x), y) if y.is_none_or(|y| x < *y) => {
-                        self.index_key(id, x, false);
-                        a += 1;
-                    }
-                    (_, Some(&y)) => {
-                        self.index_key(id, y, true);
-                        b += 1;
-                    }
-                    _ => unreachable!("one side left"),
-                }
-            }
-        } else {
-            super::core::prof::count(30);
-            let (ko, _) = self.read_keys(id, n, &old.reads);
-            let ko: FxHashSet<ReadKey> = ko.into_iter().collect();
-            let kns: FxHashSet<ReadKey> = kn.iter().copied().collect();
-            for &k in ko.difference(&kns) {
-                self.index_key(id, k, false);
-            }
-            // (An entry in both is filed if it is not there: one filed at a
-            // position that moved since, as dropping and filing it again
-            // would.)
-            for &k in &kn {
-                if !ko.contains(&k) || !self.has_key(id, k) {
-                    self.index_key(id, k, true);
-                }
+    /// Files (`on`) or unfiles node `id`'s scope reader entry and sibling
+    /// windows.
+    fn index_agg(&mut self, id: Id, n: &Node, agg: ReadAgg, on: bool) {
+        let u = n.unit;
+        if agg.kind {
+            if on {
+                self.w.add_kind_reader(u, n.pos, id);
+            } else {
+                self.w.drop_kind_reader(u, n.pos, id);
             }
         }
-        // (Windows hang on subtree extents that move: filed again.)
-        let t = super::core::prof::start();
-        self.reindex_agg(id, n, an);
-        super::core::prof::stop(30, t);
-        kn.into()
+        if let Some(r) = agg.fwd {
+            self.w.set_window(false, u, n.pos, id, on.then_some(r));
+        }
+        if let Some(l) = agg.back {
+            self.w.set_window(true, u, n.pos, id, on.then_some(l));
+        }
     }
 
     /// Files node `id`'s scope reader entry and sibling windows (at its
@@ -1328,144 +1325,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Whether node `id`'s reader entry `k` is filed (deferred writes
-    /// aside: a node's own are its commit's).
-    fn has_key(&self, id: Id, k: ReadKey) -> bool {
-        let _t = super::core::prof::Span::new(26);
-        match k {
-            ReadKey::Field(u, f, pos) => self.w.rd.field(u, f).is_some_and(|c| c.readers.contains_key(&(pos, id))),
-            ReadKey::Out(x) => self.w.rd.outs(x).is_some_and(|m| m.contains_key(&id)),
-            ReadKey::Range(ru, f, lo, hi) => self.w.rd.field(ru, f).and_then(|c| c.range_readers.get(&(hi, id)).copied()) == Some(lo),
-        }
-    }
-
-    /// The index entries of read log `reads` of node `id`, and its scope
-    /// and sibling windows.
-    fn read_keys(&self, id: Id, n: &Node, reads: &[Read]) -> (Vec<ReadKey>, ReadAgg) {
-        let _t = super::core::prof::Span::new(25);
-        if super::core::prof::on() {
-            super::core::prof::add(26, reads.len() as u64);
-        }
-        let u = n.unit;
-        let mut keys = Vec::with_capacity(reads.len());
-        let mut agg = ReadAgg::default();
-        // Just past node `x`'s subtree (a change there is in the window).
-        let past = |w: &World, x: Id| -> Pos {
-            let e = w.subtree_end(x);
-            w.node(e).and_then(|en| w.unit(en.unit).order.above(&en.pos).map(|(&p, _)| p)).unwrap_or(Pos::MAX)
-        };
-        for r in reads {
-            match r {
-                Read::Use { f, at, after, .. } => {
-                    keys.push(ReadKey::Field(u, *f, self.read_pos(*at, *after, n)));
-                    // (Its answer follows the frame chain it reads through.)
-                    agg.kind = true;
-                }
-                Read::Out { node, .. } | Read::At { node, .. } => keys.push(ReadKey::Out(*node)),
-                Read::Kind { .. } => agg.kind = true,
-                Read::Range { f, from, to, past, .. } => {
-                    if let Some((ru, lo, hi)) = self.w.window(id, *from, *to, *past) {
-                        keys.push(ReadKey::Range(ru, *f, lo, hi));
-                    }
-                    // (Its anchors going moves its window.)
-                    for x in [*from, *to] {
-                        if x != NONE {
-                            keys.push(ReadKey::Out(x));
-                        }
-                    }
-                }
-                Read::Seq { f, .. } => {
-                    keys.push(ReadKey::Field(u, *f, n.pos));
-                    agg.kind = true;
-                }
-                Read::Sib { ans, .. } => {
-                    let r = ans.map_or(Pos::MAX, |(x, _)| past(&self.w, x));
-                    agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
-                }
-                Read::Claimed { list } => {
-                    let r = list.last().map_or(Pos::MAX, |&(x, _)| past(&self.w, x));
-                    agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
-                }
-                Read::Prev { ans, .. } => {
-                    let l = ans.and_then(|x| self.w.node(x)).map_or(0, |x| x.pos);
-                    agg.back = Some(agg.back.map_or(l, |b| b.min(l)));
-                }
-                Read::Stream { outs, end, fields } => {
-                    let r = end.map_or(Pos::MAX, |e| past(&self.w, e));
-                    agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
-                    keys.extend(outs.iter().map(|&(x, _)| ReadKey::Out(x)));
-                    for &(f, x) in fields {
-                        if let Some(xn) = self.w.node(x) {
-                            keys.push(ReadKey::Field(xn.unit, f, xn.pos));
-                        }
-                    }
-                }
-                Read::Loop { .. } | Read::Env { .. } | Read::IsLoop { .. } => {}
-            }
-        }
-        // (Sorted and distinct: filed once each, diffed by merging.)
-        keys.sort_unstable();
-        let n0 = keys.len();
-        keys.dedup();
-        if super::core::prof::on() {
-            super::core::prof::add(27, n0 as u64);
-            super::core::prof::add(28, (n0 - keys.len()) as u64);
-        }
-        (keys, agg)
-    }
-
-    /// Files (`on`) or unfiles one reader entry of node `id`.
-    fn index_key(&mut self, id: Id, k: ReadKey, on: bool) {
-        super::core::prof::count(29);
-        let _t = super::core::prof::Span::new(match k {
-            ReadKey::Field(..) => 27,
-            ReadKey::Out(_) => 28,
-            ReadKey::Range(..) => 29,
-        });
-        match k {
-            ReadKey::Field(u, f, pos) => self.reader(u, f, pos, id, on),
-            ReadKey::Out(x) => {
-                if on {
-                    self.w.add_out_reader(x, id);
-                } else {
-                    self.w.drop_out_reader(x, id);
-                }
-            }
-            ReadKey::Range(ru, f, lo, hi) => {
-                if on {
-                    self.w.add_range_reader(ru, f, lo, hi, id);
-                } else {
-                    self.w.drop_range_reader(ru, f, hi, id);
-                }
-            }
-        }
-    }
-
-    /// Files (`on`) or unfiles node `id`'s scope reader entry and sibling
-    /// windows.
-    fn index_agg(&mut self, id: Id, n: &Node, agg: ReadAgg, on: bool) {
-        let u = n.unit;
-        if agg.kind {
-            if on {
-                self.w.add_kind_reader(u, n.pos, id);
-            } else {
-                self.w.drop_kind_reader(u, n.pos, id);
-            }
-        }
-        if let Some(r) = agg.fwd {
-            self.w.set_window(false, u, n.pos, id, on.then_some(r));
-        }
-        if let Some(l) = agg.back {
-            self.w.set_window(true, u, n.pos, id, on.then_some(l));
-        }
-    }
-
-    /// The position a use read is filed at: its node's (a read after a
-    /// subtree at the node, conservatively: any change after it re-asks).
-    fn read_pos(&self, at: Id, _after: bool, n: &Node) -> Pos {
-        self.w.node(at).map_or(n.pos, |x| x.pos)
-    }
-
     // --------------------------------------------------------------- commit
 
     /// Commits node `id`'s run: placements, definitions, output; the
@@ -1483,11 +1342,8 @@ impl<'a> Builder<'a> {
         let n = self.w.node(id).cloned().expect("live");
         // Reads: the index follows the new log.
         let t = super::core::now();
-        let filed = super::core::prof::time(11, || match &old {
-            Some(o) => self.reindex_reads(id, &n, o, &res.reads),
-            None => self.add_reads(id, &n, &res.reads),
-        });
-        res.filed = Some((self.w.relabels, filed));
+        super::core::prof::time(11, || self.file_reads(id, &n, &res));
+        res.filed = None;
         self.counts.merge.reads += super::core::ns_since(t);
         let t_defs = super::core::prof::start();
         let t = super::core::now();
@@ -1885,6 +1741,198 @@ pub(crate) fn scoped_check() -> bool {
     false
 }
 
+
+/// Which of a read log's reader entries to make.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Which {
+    /// Those at fixed places (fields at positions, outputs): what a
+    /// worker files ahead of the merge (positions move only with a
+    /// renumbering).
+    Fixed,
+    /// The rest: range windows, the scope entry and sibling windows
+    /// (extents that move with structure, its own placements' too).
+    Moving,
+}
+
+/// The reader entries (`which` of them) of read log `reads` of node `id`
+/// in world `w`, sorted and distinct, and its scope and sibling windows.
+fn read_keys(w: &World, id: Id, n: &Node, reads: &[Read], which: Which) -> (Vec<ReadKey>, ReadAgg) {
+    let _t = super::core::prof::Span::new(25);
+    if super::core::prof::on() {
+        super::core::prof::add(26, reads.len() as u64);
+    }
+    let (fixed, moving) = (which == Which::Fixed, which == Which::Moving);
+    let u = n.unit;
+    let mut keys = Vec::with_capacity(if fixed { reads.len() } else { 0 });
+    let mut agg = ReadAgg::default();
+    // Just past node `x`'s subtree (a change there is in the window).
+    let past = |x: Id| -> Pos {
+        let e = w.subtree_end(x);
+        w.node(e).and_then(|en| w.unit(en.unit).order.above(&en.pos).map(|(&p, _)| p)).unwrap_or(Pos::MAX)
+    };
+    for r in reads {
+        match r {
+            Read::Use { f, at, .. } => {
+                if fixed {
+                    keys.push(ReadKey::Field(u, *f, read_pos(w, *at, n)));
+                }
+                // (Its answer follows the frame chain it reads through.)
+                agg.kind |= moving;
+            }
+            Read::Out { node, .. } | Read::At { node, .. } => {
+                if fixed {
+                    keys.push(ReadKey::Out(*node));
+                }
+            }
+            Read::Kind { .. } => agg.kind |= moving,
+            Read::Range { f, from, to, past, .. } => {
+                if moving && let Some((ru, lo, hi)) = w.window(id, *from, *to, *past) {
+                    keys.push(ReadKey::Range(ru, *f, lo, hi));
+                }
+                // (Its anchors going moves its window.)
+                if fixed {
+                    for x in [*from, *to] {
+                        if x != NONE {
+                            keys.push(ReadKey::Out(x));
+                        }
+                    }
+                }
+            }
+            Read::Seq { f, .. } => {
+                if fixed {
+                    keys.push(ReadKey::Field(u, *f, n.pos));
+                }
+                agg.kind |= moving;
+            }
+            Read::Sib { ans, .. } if moving => {
+                let r = ans.map_or(Pos::MAX, |(x, _)| past(x));
+                agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
+            }
+            Read::Claimed { list } if moving => {
+                let r = list.last().map_or(Pos::MAX, |&(x, _)| past(x));
+                agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
+            }
+            Read::Prev { ans, .. } if moving => {
+                let l = ans.and_then(|x| w.node(x)).map_or(0, |x| x.pos);
+                agg.back = Some(agg.back.map_or(l, |b| b.min(l)));
+            }
+            Read::Stream { outs, end, fields } => {
+                if moving {
+                    let r = end.map_or(Pos::MAX, past);
+                    agg.fwd = Some(agg.fwd.map_or(r, |f| f.max(r)));
+                }
+                if fixed {
+                    keys.extend(outs.iter().map(|&(x, _)| ReadKey::Out(x)));
+                    for &(f, x) in fields {
+                        if let Some(xn) = w.node(x) {
+                            keys.push(ReadKey::Field(xn.unit, f, xn.pos));
+                        }
+                    }
+                }
+            }
+            Read::Sib { .. } | Read::Claimed { .. } | Read::Prev { .. } | Read::Loop { .. } | Read::Env { .. } | Read::IsLoop { .. } => {}
+        }
+    }
+    // (Sorted and distinct: filed once each, diffed by merging.)
+    keys.sort_unstable();
+    let n0 = keys.len();
+    keys.dedup();
+    if super::core::prof::on() {
+        super::core::prof::add(27, n0 as u64);
+        super::core::prof::add(28, (n0 - keys.len()) as u64);
+    }
+    (keys, agg)
+}
+
+/// The position a use read is filed at: its node's (a read after a
+/// subtree at the node, conservatively: any change after it re-asks).
+fn read_pos(w: &World, at: Id, n: &Node) -> Pos {
+    w.node(at).map_or(n.pos, |x| x.pos)
+}
+
+/// Files (`on`) or unfiles one reader entry of node `id`.
+fn index_key(w: &World, id: Id, k: ReadKey, on: bool) {
+    super::core::prof::count(29);
+    let _t = super::core::prof::Span::new(match k {
+        ReadKey::Field(..) => 27,
+        ReadKey::Out(_) => 28,
+        ReadKey::Range(..) => 29,
+    });
+    match (k, on) {
+        (ReadKey::Field(u, f, pos), true) => w.add_reader(u, f, pos, id),
+        (ReadKey::Field(u, f, pos), false) => w.drop_reader(u, f, pos, id),
+        (ReadKey::Out(x), true) => w.add_out_reader(x, id),
+        (ReadKey::Out(x), false) => w.drop_out_reader(x, id),
+        (ReadKey::Range(ru, f, lo, hi), true) => w.add_range_reader(ru, f, lo, hi, id),
+        (ReadKey::Range(ru, f, _, hi), false) => w.drop_range_reader(ru, f, hi, id),
+    }
+}
+
+/// Walks sorted, distinct `old` and `new` together: `step(k, false)` for
+/// each entry only in `old`, `step(k, true)` for each only in `new`.
+fn diff(old: &[ReadKey], new: &[ReadKey], mut step: impl FnMut(ReadKey, bool)) {
+    let (mut a, mut b) = (0, 0);
+    while a < old.len() || b < new.len() {
+        match (old.get(a), new.get(b)) {
+            (Some(x), Some(y)) if x == y => {
+                a += 1;
+                b += 1;
+            }
+            (Some(&x), y) if y.is_none_or(|y| x < *y) => {
+                step(x, false);
+                a += 1;
+            }
+            (_, Some(&y)) => {
+                step(y, true);
+                b += 1;
+            }
+            _ => unreachable!("one side left"),
+        }
+    }
+}
+
+/// A worker's filing of its run's reads (`reads`, of node `id`, run on
+/// world `w`) ahead of the merge: the entries at fixed places it lacks
+/// are added to the node's (it may hold more for a while: a run not
+/// committed; never fewer), unless a renumbering came since `w` was
+/// taken. The entries made, with the renumbering they were made at, for
+/// the merge to file the committed run by.
+pub(crate) fn file_ahead(w: &World, id: Id, reads: &[Read]) -> Option<(u64, Arc<[ReadKey]>)> {
+    let n = w.node(id)?;
+    let epoch = w.rd.relabels();
+    if *epoch != w.relabels {
+        return None;
+    }
+    let (keys, _) = read_keys(w, id, n, reads, Which::Fixed);
+    w.rd.with_slot(id, |s| {
+        if matches!(s, Slot::Gone) {
+            return;
+        }
+        let mut all = Vec::with_capacity(s.keys().len().max(keys.len()));
+        diff(s.keys(), &keys, |k, on| {
+            if on {
+                index_key(w, id, k, true);
+            }
+        });
+        // (Both sorted: their union.)
+        let (old, mut b) = (s.keys(), 0);
+        for &k in old {
+            while b < keys.len() && keys[b] < k {
+                all.push(keys[b]);
+                b += 1;
+            }
+            if b < keys.len() && keys[b] == k {
+                b += 1;
+            }
+            all.push(k);
+        }
+        all.extend_from_slice(&keys[b..]);
+        if !all.is_empty() {
+            *s = Slot::Keys(all.into());
+        }
+    });
+    Some((*epoch, keys.into()))
+}
 
 /// A read log's scope reader entry and sibling windows.
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
