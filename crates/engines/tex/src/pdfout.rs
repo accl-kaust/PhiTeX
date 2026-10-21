@@ -1288,6 +1288,11 @@ pub(crate) fn command_forms(
     if r.param("pdfoutput")? <= 0 {
         return Ok(None);
     }
+    // (a writer command whose numbers TeX may read back counts the
+    // objects of a page firing at a candidate this piece ran through
+    // before it: it runs after that page's finisher,
+    // `Run::order_after_pages`; before anything of it is recorded)
+    r.order_after_pages()?;
     let v = r.v;
     let mut fs = fonts_for(r, fonts, false)?;
     // (an image the command writes: the files its fonts ask for)
@@ -2070,6 +2075,9 @@ pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
 /// The allocations before this node ([`ALLOCS`]); `PHITEX_ALLOCS_TRACE`
 /// (observe): which node read them.
 fn allocs_range(r: &mut Run<'_, '_>, why: &str) -> R<ValueId> {
+    // (what a page firing at a candidate this piece ran through made
+    // comes first: `Run::order_after_pages`)
+    r.order_after_pages()?;
     if crate::exec::obs_flag!("PHITEX_ALLOCS_TRACE") {
         eprintln!("allocs-read: node {} {why}", r.cx.node().raw());
     }
@@ -2405,7 +2413,6 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
 /// before it plus this. A fold of the accumulator's range before this
 /// node: no round, no loop-back.
 pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
-    r.order_after_pages()?;
     let v = r.v;
     let range = allocs_range(r, "page_offset")?;
     let f = fold_allocs(v, range);

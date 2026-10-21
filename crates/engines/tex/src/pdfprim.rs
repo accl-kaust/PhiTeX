@@ -959,6 +959,10 @@ fn alloc_rel(r: &mut Run<'_, '_>) -> R<(i64, i64)> {
         r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
         return Ok((n, 0));
     }
+    // (its number counts the objects of a page firing at a candidate the
+    // piece ran through before it: made after that page's finisher,
+    // `Run::order_after_pages`)
+    r.order_after_pages()?;
     let v = r.v;
     let me = r.cx.node().raw();
     let key = phitex_defuse::hash_words(0x7265_6c6f_626a_0001, &[me, r.pdf_occ as u64]);

@@ -945,7 +945,8 @@ impl Run<'_, '_> {
     }
 
     /// A read of the objects the pages shipped before this run
-    /// (`crate::pdfout::page_offset`) in a piece that ran through a
+    /// (`crate::pdfout::page_offset`), or an object made whose number is
+    /// counted after them (`crate::pdfprim`), in a piece that ran through a
     /// candidate a page can fire at (inside a span of its own): pdfTeX
     /// ships that page before the command, and the scan, not this run,
     /// knows whether it fires. The piece ends before the command (its
