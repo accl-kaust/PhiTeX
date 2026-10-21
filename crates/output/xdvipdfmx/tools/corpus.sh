@@ -3,11 +3,14 @@
 #
 #   tools/corpus.sh build DIR    # XDVs and their oracle PDFs into DIR
 #   tools/corpus.sh check DIR [BIN] [FILTER]  # BIN (xdv2pdf) on each, cmp
+#   tools/corpus.sh shapes DIR   # the same documents for otf-xdv (no PDFs)
 #
 # Run inside scripts/sandbox. The oracle PDF is xelatex's own: xelatex
 # pipes its XDV into `xdvipdfmx -q -E -o NAME.pdf` (stdin, so no DVI name;
 # the subset tags hash "NAME.pdf"), which is what `build` runs on each XDV,
-# in the XDV's directory, with oracle.sh's environment.
+# in the XDV's directory, with oracle.sh's environment. `shapes` runs the
+# documents as oracle.sh --shaping does: fonts traced, each word's text in
+# the XDV (crates/fonts/otf's otf-xdv example checks them).
 #
 # Each document runs in a directory of its own, CORPUS_JOBS (all CPUs) at
 # a time. `check` writes DIR/FAIL.txt (one XDV a line) and DIR/DIFFS.txt
@@ -18,7 +21,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../../.." && pwd)"
 export FORCE_SOURCE_DATE=1 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 export FONTCONFIG_FILE="$repo/scripts/xetex/fonts.conf"
-export here repo
+export here repo shaping=
 jobs="${CORPUS_JOBS:-$(nproc)}"
 
 oracle_pdf() { # DIR NAME: DIR/NAME.pdf from DIR/NAME.xdv, as xelatex does
@@ -28,19 +31,22 @@ oracle_pdf() { # DIR NAME: DIR/NAME.pdf from DIR/NAME.xdv, as xelatex does
 # one document: KIND SRC OUTDIR (KIND: an l3build test's package, or
 # `probe` for a document run as oracle.sh runs it)
 one() {
-  local kind="$1" f="$2" d="$3" n
+  local kind="$1" f="$2" d="$3" n first
   n="$(basename "$f" .tex)"; n="${n%.lvt}"
   mkdir -p "$d"
   if [ "$kind" = probe ]; then
     TEXINPUTS="$repo/upstream/latex2e/base/doc:$repo/bench/amsldoc:${TEXINPUTS:-}" \
-      "$repo/scripts/xetex/oracle.sh" --latex --no-pdf "$f" "$d" || true
+      "$repo/scripts/xetex/oracle.sh" --latex --no-pdf ${shaping:+--shaping} "$f" "$d" || true
   else
     cp "$f" "$d/$n.tex"
-    (cd "$d" && TEXINPUTS="$repo/upstream/$kind//:$repo/upstream/$kind/testfiles:" \
-      timeout 120 xelatex -interaction=nonstopmode -no-pdf "$n.tex" \
+    first="$n.tex"
+    [ -z "$shaping" ] || first="\\XeTeXtracingfonts=1 \\XeTeXgenerateactualtext=1 \\input $n.tex "
+    (cd "$d" && [ -z "$shaping" ] || export max_print_line=1000000
+      TEXINPUTS="$repo/upstream/$kind//:$repo/upstream/$kind/testfiles:" \
+      timeout 120 xelatex -interaction=nonstopmode -no-pdf "$first" \
       </dev/null >/dev/null 2>&1) || true
   fi
-  if [ -s "$d/$n.xdv" ]; then oracle_pdf "$d" "$n"; fi
+  if [ -s "$d/$n.xdv" ] && [ -z "$shaping" ]; then oracle_pdf "$d" "$n"; fi
 }
 
 build() {
@@ -106,6 +112,7 @@ check() {
 
 case "${1:-}" in
   build) build "${2:?DIR}" ;;
+  shapes) export shaping=1; build "${2:?DIR}" ;;
   check) check "${2:?DIR}" "${3:-}" "${4:-}" ;;
   *) sed -n '2,6p' "$0"; exit 2 ;;
 esac
