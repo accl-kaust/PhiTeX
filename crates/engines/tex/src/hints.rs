@@ -3734,6 +3734,20 @@ fn by_id() -> &'static Cache<u64> {
     C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
+/// [`crate::inputs::document_text`] of the text value `id`, known once
+/// per text (ids are the content's: a test made each time a file is
+/// reached scanned the whole text, a copy of it first).
+pub(crate) fn document_text_of(v: &Values, id: ValueId) -> bool {
+    static C: OnceLock<Mutex<FxHashMap<u64, bool>>> = OnceLock::new();
+    let c = C.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(&b) = c.locked().get(&id.raw()) {
+        return b;
+    }
+    let b = crate::inputs::document_text(&str_of(v, id));
+    c.locked().insert(id.raw(), b);
+    b
+}
+
 /// The regime of a file read by `\input`: its text value `id`, named
 /// `name`.
 pub(crate) fn file_kind_of(v: &Values, id: ValueId, name: ValueId) -> FileKind {
