@@ -753,7 +753,7 @@ impl Engine {
                     Read::Kind { at, .. } => d.extend(w.node(*at).and_then(|x| opener(x.frame))),
                     Read::Range { f, from, to, past, .. } => {
                         if let Some((ru, lo, hi)) = w.window(id, *from, *to, *past)
-                            && let Some(m) = w.contribs.get(&(ru, *f))
+                            && let Some(m) = w.field(ru, *f).map(|c| &c.contribs)
                         {
                             let order = &w.unit(ru).order;
                             d.extend(
@@ -1035,20 +1035,21 @@ impl Engine {
         for (&id, n) in self.w.nodes.iter() {
             want.put(id, n.clone());
         }
-        let list_u = |m: &super::ptree::PMap<u32, super::ptree::PMap<Pos, Id>>| -> Vec<(u32, Pos, Id)> {
-            m.iter().flat_map(|(&u, s)| s.iter().map(move |(&p, &x)| (u, p, x))).collect()
+        let list_u = |w: &World| -> Vec<(u32, Pos, Id)> { w.units.iter().flat_map(|(&u, un)| un.acc_open.iter().map(move |(&p, &x)| (u, p, x))).collect() };
+        let list_f = |w: &World, res: bool| -> Vec<(u32, u64, Pos, Id)> {
+            w.fields
+                .iter()
+                .flat_map(|(&(u, f), c)| if res { &c.acc_res } else { &c.acc_static }.iter().map(move |(&p, &x)| (u, f.0.raw(), p, x)))
+                .collect()
         };
-        let list_f = |m: &super::ptree::PMap<(u32, crate::values::Field), super::ptree::PMap<Pos, Id>>| -> Vec<(u32, u64, Pos, Id)> {
-            m.iter().flat_map(|(&(u, f), s)| s.iter().map(move |(&p, &x)| (u, f.0.raw(), p, x))).collect()
-        };
-        if list_u(&self.w.acc_open) != list_u(&want.acc_open) {
-            out.push(format!("acc_open {:?}, the nodes file {:?}", list_u(&self.w.acc_open), list_u(&want.acc_open)));
+        if list_u(&self.w) != list_u(&want) {
+            out.push(format!("acc_open {:?}, the nodes file {:?}", list_u(&self.w), list_u(&want)));
         }
-        if list_f(&self.w.acc_static) != list_f(&want.acc_static) {
-            out.push(format!("acc_static {:?}, the nodes file {:?}", list_f(&self.w.acc_static), list_f(&want.acc_static)));
+        if list_f(&self.w, false) != list_f(&want, false) {
+            out.push(format!("acc_static {:?}, the nodes file {:?}", list_f(&self.w, false), list_f(&want, false)));
         }
-        if list_f(&self.w.acc_res) != list_f(&want.acc_res) {
-            out.push(format!("acc_res {:?}, the nodes file {:?}", list_f(&self.w.acc_res), list_f(&want.acc_res)));
+        if list_f(&self.w, true) != list_f(&want, true) {
+            out.push(format!("acc_res {:?}, the nodes file {:?}", list_f(&self.w, true), list_f(&want, true)));
         }
         let ids = |m: &super::ptree::PMap<Id, ()>| -> Vec<Id> { m.iter().map(|(&x, _)| x).collect() };
         if ids(&self.w.fins) != ids(&want.fins) {

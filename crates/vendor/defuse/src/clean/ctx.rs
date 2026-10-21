@@ -874,7 +874,7 @@ impl<'a> Ctx<'a> {
         };
         // The next committed (or listed) contribution, not this node's.
         let order = &self.w.unit(u).order;
-        let next = self.w.contribs.get(&(u, f)).and_then(|m| {
+        let next = self.w.field(u, f).map(|c| &c.contribs).and_then(|m| {
             m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Unbounded)
                 .filter_map(|(p, _)| order.get(p).map(|&x| (*p, x)))
                 .find(|&(_, x)| x != self.me)

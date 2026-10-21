@@ -69,6 +69,9 @@ struct Sched {
     /// Nodes a batch left out by their read hints, parked on the node in
     /// work they wait on (not scanned again until it is done).
     hint_parked: FxHashMap<Id, Id>,
+    /// Nodes waiting for their placer's placements to be made again, by
+    /// placer.
+    placed: FxHashMap<Id, Vec<Id>>,
     /// Refutations of guessed folds (`Monoid::speculate`) by node: the
     /// first two do not make it careful (the contributors' last
     /// contributions stand on the next run).
@@ -978,7 +981,7 @@ impl Engine {
                             continue;
                         }
                         *g.m.s.time.entry(id).or_default() += d;
-                        let ahead = g.m.eng.w.node(id).is_some_and(|n| g.m.eng.w.work.get(&n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
+                        let ahead = g.m.eng.w.node(id).is_some_and(|n| g.m.eng.w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
                         if let Err(e) = g.m.one(&snap, usize::from(ahead), id, o, &mut Sequential) {
                             g.m.err = Some(e);
                         }
@@ -1290,7 +1293,7 @@ impl Engine {
             }
             // A node refuted this evaluation runs in text order: when
             // nothing before it in its unit is in work (or it is first).
-            if !first && s.refutes.contains_key(&k.2) && self.w.work.get(&k.0).is_some_and(|m| m.below(&k.1).is_some()) {
+            if !first && s.refutes.contains_key(&k.2) && self.w.work_of(k.0).is_some_and(|m| m.below(&k.1).is_some()) {
                 continue;
             }
             s.queue.remove(&k);
@@ -1457,6 +1460,16 @@ impl Engine {
             s.range_wait.insert(id, (f, from, to, past));
             s.parked.insert(id, Wait::Node(x, Some(f)));
             s.waiters.entry(x).or_default().push(id);
+            return None;
+        }
+        // Placed by a placer that runs again for a change: it waits for the
+        // placer's placements (made again as they were: it runs; with new
+        // arguments: a new text; not made: it goes).
+        let placer = n.parent;
+        if placer != super::world::NONE && self.w.stale.contains_key(&placer) && self.w.node(placer).is_some_and(|p| super::world::in_work(p.st)) {
+            s.parked.insert(id, Wait::Node(placer, None));
+            s.placed.entry(placer).or_default().push(id);
+            rep.stops += 1;
             return None;
         }
         // Held back by an earlier claimer whose claim is pending.
@@ -1739,6 +1752,12 @@ impl Engine {
                             self.wake(s, x);
                         }
                     }
+                    // (Stopped, its placements so far made: what it placed
+                    // waits no longer, even if it stopped before placing.)
+                    if self.w.stale.contains_key(&id) {
+                        self.w.stale.remove(&id, &NoMeasure);
+                    }
+                    self.wake_placed(s, id);
                     let subject = match &wait {
                         Wait::Child(k) => self
                             .w
@@ -1850,7 +1869,7 @@ impl Engine {
                 Read::Range { f, from, to, past, .. } => {
                     if !fold_redo
                         && let Some((u, lo, hi)) = self.w.window(id, *from, *to, *past)
-                        && let Some((p, _)) = self.w.contribs.get(&(u, *f)).and_then(|m| m.below(&hi)).filter(|(p, _)| **p > lo)
+                        && let Some((p, _)) = self.w.field(u, *f).map(|c| &c.contribs).and_then(|m| m.below(&hi)).filter(|(p, _)| **p > lo)
                         && let Some(&x) = self.w.unit(u).order.get(p)
                         && x != id
                     {
@@ -2013,7 +2032,7 @@ impl Engine {
             if n.st != St::Done {
                 continue;
             }
-            if self.w.work.get(&n.unit).is_some_and(|m| m.below(&n.pos).is_some()) {
+            if self.w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()) {
                 continue;
             }
             let out = n.out().unwrap_or(ValueId::UNIT);
@@ -2046,6 +2065,17 @@ impl Engine {
     /// Requeues the nodes waiting on `x` (it committed or went).
     fn wake(&self, s: &mut Sched, x: Id) {
         if let Some(v) = s.waiters.remove(&x) {
+            for id in v {
+                s.parked.remove(&id);
+                self.enqueue(s, id);
+            }
+        }
+        self.wake_placed(s, x);
+    }
+
+    /// The nodes waiting for placer `x`'s placements: they go on.
+    fn wake_placed(&self, s: &mut Sched, x: Id) {
+        if let Some(v) = s.placed.remove(&x) {
             for id in v {
                 s.parked.remove(&id);
                 self.enqueue(s, id);
@@ -2399,7 +2429,7 @@ impl Flow<'_> {
                     }
                 };
                 *self.m.s.time.entry(id).or_default() += d;
-                let ahead = self.m.eng.w.node(id).is_some_and(|n| self.m.eng.w.work.get(&n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
+                let ahead = self.m.eng.w.node(id).is_some_and(|n| self.m.eng.w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
                 if let Err(e) = self.m.one(&snap, usize::from(ahead), id, o, &mut Sequential) {
                     self.m.err = Some(e);
                 }
@@ -2635,7 +2665,7 @@ impl Merge<'_> {
             s.lane_new = Some(cands);
             // (Held by its hints, or refuted and behind a node in work: it
             // waits for the step.)
-            let behind = s.refutes.contains_key(&k.2) && eng.w.work.get(&k.0).is_some_and(|m| m.below(&k.1).is_some());
+            let behind = s.refutes.contains_key(&k.2) && eng.w.work_of(k.0).is_some_and(|m| m.below(&k.1).is_some());
             if behind || eng.w.hint_blocker(&eng.core, k.2, predict).is_err() {
                 count(25);
                 return Ok(None);
@@ -2928,7 +2958,7 @@ fn run_job(
     };
     // Run ahead of a node before it still in work: what it reads may
     // change yet (a guess).
-    let ahead = w.node(id).is_some_and(|n| w.work.get(&n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
+    let ahead = w.node(id).is_some_and(|n| w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
     let t_start = super::core::now();
     let mut cx = Ctx::new(core, w, id, kept);
     cx.reads = reads;

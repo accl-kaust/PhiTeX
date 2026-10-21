@@ -43,7 +43,7 @@ impl World {
     /// order (`Err`: an entry's node has not made it yet).
     pub(crate) fn seq_ops(&self, core: &Core, me: Id, f: Field) -> Result<Vec<SeqOp>, Id> {
         let Some((u, pos, fr)) = self.frame_at(me, false) else { return Ok(Vec::new()) };
-        let Some(fd) = self.defs.get(&(u, f)) else { return Ok(Vec::new()) };
+        let Some(fd) = self.field(u, f).map(|c| &c.defs) else { return Ok(Vec::new()) };
         let Some(m) = fd.local.get(&fr) else { return Ok(Vec::new()) };
         let mut out = Vec::new();
         for (_, e) in m.range(std::ops::Bound::Unbounded, std::ops::Bound::Excluded(&pos)) {
