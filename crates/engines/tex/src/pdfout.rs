@@ -3450,7 +3450,17 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
         // (the last link's snapshots from there on, at this line's
         // records and counts)
         let (g0, e0, p0, s0) = (got.len(), errors.len(), placed, shipped);
+        // (each with the characters this line's records before `i` used
+        // and the last link's before `j` did not, as the end's writer
+        // below: a later link starting from one of them starts from the
+        // characters this line's pages used, not the last link's)
         snaps.extend(m.snaps.into_iter().filter(|x| x.at >= j).map(|mut x| {
+            if let Some(c) = &chars_added {
+                x.st.add_used_chars(c);
+                if let Some(d) = x.digests.as_mut() {
+                    d.2 = x.st.used_chars();
+                }
+            }
             x.at = x.at - j + i;
             x.got = x.got - sg + g0;
             x.errors = x.errors - se + e0;

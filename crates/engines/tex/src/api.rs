@@ -2811,6 +2811,15 @@ impl Graph {
                 );
                 crate::timeline::lap("engine: the reads checked again (PHITEX_CHECK_READS only)");
             }
+            if crate::exec::obs_flag!("PHITEX_CHECK_INVARIANTS") {
+                // (debug: the units' positions and frames recomputed from
+                // each unit's start after this evaluation, observe only)
+                let lines = self.eng.check_invariants();
+                for l in &lines {
+                    eprintln!("check_invariants: {l}");
+                }
+                eprintln!("check_invariants: {} failing", lines.len());
+            }
             if crate::exec::prof_flag!("PHITEX_ROUND_ACCT") {
                 // (the edit's cost by round, cheap enough for the edit
                 // histories the gate times: the runs and the per-round
