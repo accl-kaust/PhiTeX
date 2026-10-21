@@ -89,7 +89,8 @@ pub(crate) struct Builder<'a> {
 impl<'a> Builder<'a> {
     pub(crate) fn new(core: &'a Core, w: World) -> Builder<'a> {
         let mut w = w;
-        w.ver += 1;
+        // (A version no world had: one kept apart never shares it.)
+        w.ver = super::live::fresh_epoch();
         Builder {
             core,
             w,
@@ -410,7 +411,7 @@ impl<'a> Builder<'a> {
                     f,
                     super::live::FieldReaders {
                         readers: PMap::from_sorted(readers, &NoMeasure),
-                        range_readers: PMap::from_sorted(ranges, &NoMeasure),
+                        range_readers: PMap::from_sorted(ranges, &super::live::LeastStart),
                     },
                 );
             }

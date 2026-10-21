@@ -460,7 +460,8 @@ impl Default for Buckets {
 /// The state of one round.
 #[derive(Clone, Default)]
 pub(crate) struct World {
-    /// Bumped by every merge.
+    /// A version stamp, new with every merge (and every change made
+    /// outside one): one no other world has (`live::fresh_epoch`).
     pub ver: u64,
     /// The last renumbering's epoch (`live::fresh_epoch`; 0: none yet):
     /// positions taken at another may have moved since.
@@ -1428,13 +1429,13 @@ impl World {
 
     pub(crate) fn add_range_reader(&self, u: u32, f: Field, lo: Pos, hi: Pos, id: Id) {
         self.rd.with_field(u, f, |c| {
-            c.range_readers.insert((hi, id), lo, &NoMeasure);
+            c.range_readers.insert((hi, id), lo, &super::live::LeastStart);
         });
     }
 
     pub(crate) fn drop_range_reader(&self, u: u32, f: Field, hi: Pos, id: Id) {
         self.rd.with_field(u, f, |c| {
-            c.range_readers.remove(&(hi, id), &NoMeasure);
+            c.range_readers.remove(&(hi, id), &super::live::LeastStart);
         });
     }
 
@@ -1443,10 +1444,7 @@ impl World {
         let Some(c) = self.rd.field(u, f) else {
             return Vec::new();
         };
-        c.range_readers.range(std::ops::Bound::Excluded(&(q, Id::MAX)), std::ops::Bound::Unbounded)
-            .filter(|(_, lo)| **lo < q)
-            .map(|(k, _)| k.1)
-            .collect()
+        c.over(q)
     }
 }
 
