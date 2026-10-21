@@ -3511,24 +3511,22 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a token of a skipped conditional branch, or one fetched only to
         // be stored or matched: of its meaning only the class
-        // `pass_text`, a definition's parameter scan and the outer check
-        // look at, §494, §476, §479, §336, [`crate::val::step_projection`];
-        // not inside an alignment of the run's, whose tab marks and
-        // braces `get_next` watches, nor while a line is interpreted or a
-        // load recorded, which read meanings in full; an input marker,
-        // a file's end, read in full too)
+        // `pass_text`, a definition's parameter scan, an alignment's
+        // template insertion and the outer check look at, §494, §476,
+        // §479, §342, §336, [`crate::val::step_projection`]; not while a
+        // line is interpreted or a load recorded, which read meanings in
+        // full; an input marker, a file's end, read in full too)
         if (self.in_skip || self.step_reads)
-            && self.aopen == 0
             && self.interp.is_none()
             && !self.rec_load
             && !tok.as_cs().is_some_and(|n| n.starts_with('\u{10FFFE}'))
             && let Some(k) = self.step_lookup(tok)?
         {
+            let code = |base: i64| i32::try_from(k - base).unwrap_or(0);
             let (c, h) = match k {
-                k if k >= crate::val::STEP_PARAM => (
-                    cmd::MAC_PARAM,
-                    i32::try_from(k - crate::val::STEP_PARAM).unwrap_or(0),
-                ),
+                k if k >= crate::val::STEP_CR => (cmd::CAR_RET, code(crate::val::STEP_CR)),
+                k if k >= crate::val::STEP_TAB => (cmd::TAB_MARK, code(crate::val::STEP_TAB)),
+                k if k >= crate::val::STEP_PARAM => (cmd::MAC_PARAM, code(crate::val::STEP_PARAM)),
                 crate::val::STEP_IF => (cmd::IF_TEST, 0),
                 crate::val::STEP_OUTER => (cmd::OUTER_CALL, 0),
                 k if k >= crate::val::STEP_FI => (
