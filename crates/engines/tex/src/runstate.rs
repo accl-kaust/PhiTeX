@@ -249,6 +249,35 @@ pub(crate) struct State {
     /// location defined after it and before the next one for the first
     /// time since it, the entry the location held at the candidate.
     cands: Vec<(u64, Vec<(Loc, Entry)>)>,
+    /// The table as it stood at [`State::checkpoint`], kept as it
+    /// changes: [`State::rollback`] puts it back.
+    undo: Option<Box<Undo>>,
+}
+
+/// What [`State::rollback`] puts back: each slot and metas entry as it
+/// was before the first change since the checkpoint, the lengths of the
+/// vectors that only grow meanwhile, the others whole, and the
+/// counters.
+pub(crate) struct Undo {
+    slots: Vec<(Loc, Slot)>,
+    logged: phitex_defuse::FxHashSet<Loc>,
+    metas: Vec<(usize, Meta)>,
+    metas_logged: phitex_defuse::FxHashSet<usize>,
+    lens: [usize; 7],
+    spill_added: Vec<Field>,
+    save: Vec<Saved>,
+    defined: Vec<Loc>,
+    base_defs: Vec<Loc>,
+    scope_extra: Vec<(Loc, Entry, Locality)>,
+    cont_locs: Vec<Loc>,
+    cands: Vec<(u64, Vec<(Loc, Entry)>)>,
+    kinds: Option<FxHashMap<Loc, bool>>,
+    stamp: u64,
+    pp_dirty: bool,
+    next_gid: u32,
+    cat_gen: u64,
+    any_gen: u64,
+    muts: u64,
 }
 
 thread_local! {
@@ -328,6 +357,7 @@ impl Clone for State {
             any_gen: new_cat_gen(),
             muts: self.muts,
             cands: self.cands.clone(),
+            undo: None,
         }
     }
 }
@@ -429,7 +459,129 @@ impl State {
             any_gen: new_cat_gen(),
             muts: 0,
             cands: Vec::new(),
+            undo: None,
         }
+    }
+
+    /// Starts keeping the table's changes for a [`State::rollback`]
+    /// (instead of a copy of the whole table): false if it keeps them
+    /// already.
+    pub(crate) fn checkpoint(&mut self) -> bool {
+        if self.undo.is_some() {
+            return false;
+        }
+        self.undo = Some(Box::new(Undo {
+            slots: Vec::new(),
+            logged: phitex_defuse::FxHashSet::default(),
+            metas: Vec::new(),
+            metas_logged: phitex_defuse::FxHashSet::default(),
+            lens: [
+                self.metas.len(),
+                self.touched.len(),
+                self.glues.len(),
+                self.toks.len(),
+                self.macros.len(),
+                self.eq.len(),
+                self.spill.len(),
+            ],
+            spill_added: Vec::new(),
+            save: self.save.clone(),
+            defined: self.defined.clone(),
+            base_defs: self.base_defs.clone(),
+            scope_extra: self.scope_extra.clone(),
+            cont_locs: self.cont_locs.clone(),
+            cands: self.cands.clone(),
+            kinds: self.kinds.clone(),
+            stamp: self.stamp,
+            pp_dirty: self.pp_dirty,
+            next_gid: self.next_gid,
+            cat_gen: self.cat_gen,
+            any_gen: self.any_gen,
+            muts: self.muts,
+        }));
+        true
+    }
+
+    /// The table as it stood at the [`State::checkpoint`].
+    pub(crate) fn rollback(&mut self) {
+        let Some(u) = self.undo.take() else {
+            return;
+        };
+        let [metas, touched, glues, toks, macros, eq, spill] = u.lens;
+        self.metas.truncate(metas);
+        for (i, m) in u.metas {
+            self.metas[i] = m;
+        }
+        self.touched.truncate(touched);
+        self.glues.truncate(glues);
+        self.toks.truncate(toks);
+        self.macros.truncate(macros);
+        for (loc, sl) in u.slots {
+            if loc & SPILL == 0 {
+                if let Some(x) = self.eq.get_mut(loc as usize) {
+                    *x = sl;
+                }
+            } else if let Some(x) = self.spill.get_mut((loc & !SPILL) as usize) {
+                *x = sl;
+            }
+        }
+        // (slots made since: dropped, as the table did not have them)
+        self.eq.truncate(eq);
+        self.spill.truncate(spill);
+        for f in u.spill_added {
+            self.spill_ix.remove(&f);
+        }
+        self.save = u.save;
+        self.defined = u.defined;
+        self.base_defs = u.base_defs;
+        self.scope_extra = u.scope_extra;
+        self.cont_locs = u.cont_locs;
+        self.cands = u.cands;
+        self.kinds = u.kinds;
+        self.stamp = u.stamp;
+        self.pp_dirty = u.pp_dirty;
+        self.next_gid = u.next_gid;
+        self.cat_gen = u.cat_gen;
+        self.any_gen = u.any_gen;
+        self.muts = u.muts;
+    }
+
+    /// The changes kept since a [`State::checkpoint`], taken.
+    pub(crate) fn take_undo(&mut self) -> Option<Box<Undo>> {
+        self.undo.take()
+    }
+
+    /// Changes kept since a checkpoint, put back ([`State::take_undo`]).
+    pub(crate) fn set_undo(&mut self, u: Option<Box<Undo>>) {
+        self.undo = u;
+    }
+
+    /// Notes slot `loc` before a change, while a checkpoint stands.
+    #[inline]
+    fn log_slot(&mut self, loc: Loc) {
+        let Some(u) = self.undo.as_mut() else { return };
+        if !u.logged.insert(loc) {
+            return;
+        }
+        let old = if loc & SPILL == 0 {
+            self.eq.get(loc as usize).cloned()
+        } else {
+            self.spill.get((loc & !SPILL) as usize).cloned()
+        };
+        u.slots.push((loc, old.unwrap_or_default()));
+    }
+
+    /// Metas entry `mi`, to change, noted first while a checkpoint
+    /// stands.
+    #[inline]
+    fn meta_mut(&mut self, mi: usize) -> &mut Meta {
+        if let Some(u) = self.undo.as_mut()
+            && mi < u.lens[0]
+            && u.metas_logged.insert(mi)
+        {
+            u.metas.push((mi, self.metas[mi].clone()));
+        }
+        &mut self.metas[mi]
     }
 
     /// A page-builder candidate passed: the entries the locations
@@ -500,6 +652,9 @@ impl State {
     }
 
     fn slot(&mut self, loc: Loc) -> &mut Slot {
+        if self.undo.is_some() {
+            self.log_slot(loc);
+        }
         let s = if loc & SPILL == 0 {
             let i = loc as usize;
             if i >= self.eq.len() {
@@ -538,6 +693,9 @@ impl State {
         }
         let i = u32::try_from(self.spill.len()).unwrap_or(0);
         self.spill_ix.insert(f, i);
+        if let Some(u) = self.undo.as_mut() {
+            u.spill_added.push(f);
+        }
         let l = SPILL | i;
         self.slot(l).field = Some(f);
         l
@@ -723,6 +881,9 @@ impl State {
     /// The loaded entry of `loc` (call [`State::is_loaded`] first).
     #[inline]
     fn entry_mut(&mut self, loc: Loc) -> &mut Entry {
+        if self.undo.is_some() {
+            self.log_slot(loc);
+        }
         if loc & SPILL == 0 {
             &mut self.eq[loc as usize].e
         } else {
@@ -764,10 +925,11 @@ impl State {
         else {
             return;
         };
-        if let Some(m) = self.metas.get_mut(m - 1)
-            && matches!(m.publ, Some((_, Locality::Local)))
-        {
-            m.publ = None;
+        if matches!(
+            self.metas.get(m - 1).map(|m| &m.publ),
+            Some(Some((_, Locality::Local)))
+        ) {
+            self.meta_mut(m - 1).publ = None;
         }
     }
 
@@ -1023,7 +1185,7 @@ impl State {
         if !global && grp.is_some() {
             self.defined.push(loc);
         }
-        let m = &mut self.metas[mi];
+        let m = self.meta_mut(mi);
         m.ldef_stamp = st;
         m.ldef_local = !global;
         m.ldef_gid = if global { None } else { grp };
@@ -1084,7 +1246,7 @@ impl State {
         // definition does not say; `\multiply\doublecol@number` in
         // multicol's environment group)
         let save_gid = self.slot_ref(loc).map_or(0, |s| s.save_gid);
-        let m = &mut self.metas[mi];
+        let m = self.meta_mut(mi);
         m.ldef_stamp = st;
         m.ldef_local = true;
         if base {
@@ -1150,9 +1312,9 @@ impl State {
             let meta = slot.meta;
             if let Some(m) = usize::try_from(meta)
                 .ok()
-                .filter(|&m| m > 0)
-                .and_then(|m| self.metas.get_mut(m - 1))
+                .filter(|&m| m > 0 && m <= self.metas.len())
             {
+                let m = self.meta_mut(m - 1);
                 (m.ldef_stamp, m.ldef_local, m.ldef_gid) = s.ldef;
             }
         }
@@ -1170,7 +1332,7 @@ impl State {
             let mi = self.meta(loc);
             if self.metas[mi].ldef_local && self.metas[mi].ldef_stamp > open_stamp {
                 let val = self.slot(loc).e;
-                self.metas[mi].publ = Some((val, Locality::Local));
+                self.meta_mut(mi).publ = Some((val, Locality::Local));
             }
         }
         self.save.truncate(save_base.min(self.save.len()));
@@ -1498,7 +1660,7 @@ impl State {
                 }
                 None => {
                     let val = self.slot(loc).e;
-                    self.metas[mi].publ = Some((val, Locality::Scope));
+                    self.meta_mut(mi).publ = Some((val, Locality::Scope));
                 }
             }
         }
@@ -1589,7 +1751,7 @@ impl State {
     pub(crate) fn publish_in_scope(&mut self, loc: Loc) {
         self.muts += 1;
         let mi = self.meta(loc);
-        if let Some((_, l)) = &mut self.metas[mi].publ {
+        if let Some((_, l)) = &mut self.meta_mut(mi).publ {
             *l = Locality::Scope;
         }
     }
@@ -2052,7 +2214,7 @@ impl State {
         if is_page_param(loc) {
             self.pp_dirty = true;
         }
-        let m = &mut self.metas[mi];
+        let m = self.meta_mut(mi);
         m.ldef_stamp = st;
         m.ldef_local = false;
         m.ldef_gid = None;
