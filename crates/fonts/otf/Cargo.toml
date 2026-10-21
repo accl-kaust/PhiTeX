@@ -16,6 +16,10 @@ libm = "0.2.16"
 # WOFF2 faces (TeX Live has 45; fontconfig lists Gentium's before its TTFs).
 brotli-decompressor = { version = "5.0.3", default-features = false }
 
+[dev-dependencies]
+# (otf-xdv's file lookups, as kpathsea makes them)
+phitex-kpse = { path = "../../tools/kpse" }
+
 [lints]
 workspace = true
 

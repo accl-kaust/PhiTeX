@@ -2,19 +2,25 @@
 # The Unicode engines' oracle (DESIGN 4.7): runs TeX Live's xetex (or
 # another engine) on FILE.tex in OUTDIR, deterministically and with TeX
 # Live's fonts only.
-#   scripts/xetex/oracle.sh [--engine E] [--latex] [--no-pdf] FILE.tex OUTDIR [ARGS...]
+#   scripts/xetex/oracle.sh [--engine E] [--latex] [--no-pdf] [--shaping] FILE.tex OUTDIR [ARGS...]
 # E is xetex (the default) or luatex (luahbtex for --latex, as lualatex);
 # --latex runs the LaTeX format. Writes OUTDIR/NAME.{xdv,pdf,log,aux,...}.
 # With --no-pdf xetex keeps its XDV (`xetex -no-pdf`); without it xetex
 # pipes into xdvipdfmx as it does for users, and the PDF is the oracle's.
+# --shaping (xetex), for checking fonts and shaping: the log traces every
+# font request and the file it resolved to (\XeTeXtracingfonts=1, lines
+# unbroken) and the XDV holds each native word's text
+# (\XeTeXgenerateactualtext=1: not the XDV of a plain run); the job name
+# is FILE's as without it.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-engine=xetex latex= nopdf=
+engine=xetex latex= nopdf= shaping=
 while [ $# -gt 0 ]; do
   case "$1" in
     --engine) engine="$2"; shift 2 ;;
     --latex) latex=1; shift ;;
     --no-pdf) nopdf=-no-pdf; shift ;;
+    --shaping) shaping=1; shift ;;
     *) break ;;
   esac
 done
@@ -33,4 +39,9 @@ export TEXMFVAR="/tmp/phitex-oracle-texmfvar-$engine"
 export FORCE_SOURCE_DATE=1 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 export TEXINPUTS="$(dirname "$src"):${TEXINPUTS:-}"
 cd "$out"
-"$prog" -interaction=nonstopmode $nopdf "$@" "$src" </dev/null >/dev/null || true
+if [ -n "$shaping" ]; then
+  max_print_line=1000000 "$prog" -interaction=nonstopmode $nopdf "$@" \
+    "\\XeTeXtracingfonts=1 \\XeTeXgenerateactualtext=1 \\input $src " </dev/null >/dev/null || true
+else
+  "$prog" -interaction=nonstopmode $nopdf "$@" "$src" </dev/null >/dev/null || true
+fi
