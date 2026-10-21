@@ -57,15 +57,22 @@ All of these must hold in the table:
       round core was removed in defuse 57b36bb; there is no `clean`
       feature) and is gate-cleared by its author.
 - [ ] **para4000:** the md5 is the bar's at `-j 1`, `-j 8` and `-j 16`.
-- [ ] **Chains:** the realised critical path and the runs per live node
-      are no worse than the last `main` gate's (bars: critical path ≤ 6
-      on the exact-PDF document, runs per node ≤ 1.1). Record them below.
+- [ ] **Chains:** runs per live node ≤ 1.1 on amsldoc at `-j 8`. The
+      critical path's bar is the page chain's (section 3: ≤ 2 × fires +
+      10); the old "≤ 6" predates the page-chain design and is dropped
+      (2026-10-21). Record both below.
 
 ## 3. Scaling (an alpha bar, the user's decision of 2026-10-21)
 
 Threads must pay off. Measure on `$D` with release builds, **on one quiet
 accl node** (the whole node, `-c 32`), cold, 3 interleaved repetitions
-each, the median counting, the engine's lane as `$D` ships it:
+each, the median counting, the engine's lane as `$D` ships it, under the
+node's own CPU frequency governor (`ondemand` on harrier and acclnode01: what
+a user's machine does; no `--cpu-freq`, no spinners; the user's decision of
+2026-10-21). Record the node and its governor beside every number. The `-j 1`
+baseline runs one core at full boost (3.1-3.5 GHz on harrier against
+2.2-2.5 GHz for workers left idle between jobs, docs/note-cold-scaling.md), so
+the ratio to `-j 1` also counts idle time the governor turns into lower clocks:
 
 - [ ] **para4000:** `-j 8` wall ≤ 1.0 s; `-j 16` and `-j 32` no slower than
       `-j 8`; `-j 8` at least 3× faster than `-j 1`.
@@ -91,7 +98,9 @@ The edit bar is not in `gate-fast`. Measure it on `$D` with
 - [ ] **One letter** and **a line re-break**: each ≤ 16 ms. This is a hard
       bar.
 - [ ] **A heading**, **a label** and **a preamble definition**: each
-      ≤ 50 ms.
+      ≤ 50 ms. The label edited is one outside a float (the user's
+      decision of 2026-10-21; a label in a table float is recorded, not
+      gated).
 - [ ] **A page added** is measured and recorded, not gated.
 
 (The user dropped "watch equals cold" as a bar on 2026-10-18. The
@@ -149,7 +158,33 @@ with the pinned toolchain:
 | no `claude.ai` in files | none | 400c72ef |
 | no `claude.ai` in commit messages since `main` | **five** (`Claude-Session:` trailers on 43dd8b7a, 3dbb4614, b9e0a985, 49ba2d93, 4f6e007d, 2026-10-11) | |
 
-## 5. The notes
+## 5. SyncTeX (in the alpha, the user's decision of 2026-10-21)
+
+docs/spec-synctex.md, on `$D`:
+
+- [ ] `phitex build --synctex` writes `JOB.synctex.gz`; the `synctex`
+      tool's answers (a point's file and line, a line's boxes) agree with
+      pdflatex's file on amsldoc and the latex suite's documents; every
+      miss listed.
+- [ ] `phitex watch`: every glyph's source place reaches the browser
+      (`origins`); a double-click opens the word's place in the editor;
+      the editor's cursor and selection highlight their glyphs.
+- [ ] Off costs nothing (amsldoc callgrind Ir and peak RSS within noise);
+      on, the PDF bytes are unchanged and an edit's cost is recorded.
+
+## 6. The first build
+
+A first build makes the LaTeX format: it is the engine's largest node, so
+it shows the engine's weaknesses (2026-10-21: 19.9 s and 990 MB against
+`pdftex -ini`'s 6.06 s and 63 MB; docs/note-sequential-region.md). The
+user: optimize it, don't hide it.
+
+- [ ] A one-page LaTeX document's first build (empty cache): wall and
+      peak memory recorded beside `pdftex -ini` plus pdflatex on the same
+      node, with the engine's final-values pass (E1) and the format as a
+      sequential region (E2) landed or their state stated.
+
+## 7. The notes
 
 - [ ] `CHANGELOG.md`'s "Known not to work" matches the gate. Every red
       that is waived is listed with its cause. The "Speed" item carries
@@ -160,7 +195,7 @@ with the pinned toolchain:
 - [ ] `phitex --help` and `phitex --compat=pdflatex -help` match the
       README. Exit statuses are pdflatex's: 0 on success, 1 otherwise.
 
-## 6. Main
+## 8. Main
 
 - [ ] **The user confirms**, naming `$D`.
 - [ ] Then, and only then, the user (or someone at the user's word)

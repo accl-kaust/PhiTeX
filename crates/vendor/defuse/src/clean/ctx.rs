@@ -295,6 +295,13 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Whether a range read of accumulator `f` folds its contributors in
+    /// work as they last contributed (`Monoid::speculate`, predicting, not
+    /// running carefully).
+    fn guess_fold(&self, f: Field) -> bool {
+        self.predict && !self.careful && self.core.acc(f).is_some_and(|m| m.speculate())
+    }
+
     /// Whether node `id` is in work in this world.
     fn in_work(&self, id: Id) -> bool {
         self.w.node(id).is_some_and(|n| matches!(n.st, St::Dirty | St::Held))
@@ -730,7 +737,7 @@ impl<'a> Ctx<'a> {
     fn contribute_inner(&mut self, f: Field, x: ValueId) {
         if let Some(&i) = self.ix.get(&(2, f, 0)) {
             let c = &mut self.contribs[i];
-            c.1 = match self.core.accs.get(&f) {
+            c.1 = match self.core.acc(f) {
                 Some(m) => m.combine(&self.core.values, c.1, x),
                 None => x,
             };
@@ -829,13 +836,18 @@ impl<'a> Ctx<'a> {
                 .find(|&(_, x)| x != self.me)
         });
         let hi = next.map_or(Pos::MAX, |(p, _)| p + 1);
-        // (A node before it in work that may contribute comes first.)
+        // (A node before it in work that may contribute comes first;
+        // guessing, it is passed as it last contributed.)
         if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
-            let to = next.map_or(NONE, |(_, x)| x);
-            self.range_wait = Some((f, from, to, true));
-            return Err(self.stop(Wait::Node(x, Some(f))));
+            if self.guess_fold(f) {
+                self.guessed = true;
+            } else {
+                let to = next.map_or(NONE, |(_, x)| x);
+                self.range_wait = Some((f, from, to, true));
+                return Err(self.stop(Wait::Node(x, Some(f))));
+            }
         }
-        let val = match self.core.accs.get(&f) {
+        let val = match self.core.acc(f) {
             Some(mo) => {
                 let m = super::world::AccMeasure {
                     m: &**mo,
@@ -858,17 +870,22 @@ impl<'a> Ctx<'a> {
         };
         // A node in the window still in work that may contribute: waited
         // for (one that declares its contributions, or whose last run made
-        // none to `f`, is folded as it stands; its change re-asks).
+        // none to `f`, is folded as it stands; its change re-asks), unless
+        // the fold is guessed (`Monoid::speculate`).
         if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
-            if super::core::debug() && self.w.node(x).is_some_and(|n| !matches!(n.st, St::Dirty | St::Held)) {
-                eprintln!("range {} of {f:?}: blocker {x} in state {:?}", self.me, self.w.node(x).map(|n| n.st));
+            if self.guess_fold(f) {
+                self.guessed = true;
+            } else {
+                if super::core::debug() && self.w.node(x).is_some_and(|n| !matches!(n.st, St::Dirty | St::Held)) {
+                    eprintln!("range {} of {f:?}: blocker {x} in state {:?}", self.me, self.w.node(x).map(|n| n.st));
+                }
+                // (It waits for the whole range: re-parked on the next blocker
+                // without running while one is left.)
+                self.range_wait = Some((f, from, to, past));
+                return Err(self.stop(Wait::Node(x, Some(f))));
             }
-            // (It waits for the whole range: re-parked on the next blocker
-            // without running while one is left.)
-            self.range_wait = Some((f, from, to, past));
-            return Err(self.stop(Wait::Node(x, Some(f))));
         }
-        let val = match self.core.accs.get(&f) {
+        let val = match self.core.acc(f) {
             Some(mo) => {
                 let m = super::world::AccMeasure {
                     m: &**mo,

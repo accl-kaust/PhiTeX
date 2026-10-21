@@ -405,6 +405,10 @@ impl Monoid for RecMonoid {
         }
         r
     }
+    fn speculate(&self) -> bool {
+        // (Recorded as the declaration's answer.)
+        self.inner.speculate()
+    }
 }
 
 /// A projection that records its answers.

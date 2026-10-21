@@ -103,7 +103,7 @@ impl Group {
                     self.def_changed(core, at, fr, global);
                 }
                 FieldOp::Contrib { pos, x } => {
-                    let Some(mo) = core.accs.get(&f) else { continue };
+                    let Some(mo) = core.acc(f) else { continue };
                     let m = AccMeasure {
                         m: &**mo,
                         v: &core.values,

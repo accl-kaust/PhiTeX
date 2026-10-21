@@ -291,6 +291,19 @@ pub trait Operation: Send + Sync {
 pub trait Monoid: Send + Sync {
     fn empty(&self, values: &Values) -> ValueId;
     fn combine(&self, values: &Values, a: ValueId, b: ValueId) -> ValueId;
+
+    /// Whether a range read of this accumulator, when the scheduler
+    /// predicts, folds the contributors still in work as they last
+    /// contributed (nothing, if they never ran) instead of waiting for
+    /// them. A contributor that then contributes otherwise re-asks the
+    /// reader, which runs again on the committed values only. For
+    /// accumulators whose contributions do not depend on what their
+    /// contributors read (counter writes: set or add a constant), so a
+    /// cold build settles in two waves; a guess that is mostly wrong
+    /// costs a run per reader.
+    fn speculate(&self) -> bool {
+        false
+    }
 }
 
 /// Answers an environment read the engine does not hold
