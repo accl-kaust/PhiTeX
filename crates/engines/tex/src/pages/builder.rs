@@ -163,6 +163,12 @@ pub(crate) struct PageLoop {
     /// `\botmark` of every class before it), `[[class, mark]…]`
     /// ([`FinishIn::top_marks`]); unit for none.
     pub top_marks: ValueId,
+    /// `\deadcycles` as the routine of the page fired last left it
+    /// ([`RTN`]'s third element; 0 where it has none).
+    pub rtn_dead: i64,
+    /// The piece the page fired last fired in and `rtn_dead`
+    /// ([`FinishIn::prev_fire`]).
+    pub prev_fire: (i64, i64),
     /// The marks the profiles' mark items name (a unit's marks given ids
     /// here as it is decoded, [`remap_marks`]).
     pub marks: Vec<ValueId>,
@@ -215,6 +221,8 @@ impl PageLoop {
             post_k: 0,
             began: (crate::build::IGNORE_DEPTH_STATE, None),
             top_marks: ValueId::UNIT,
+            rtn_dead: 0,
+            prev_fire: (-1, 0),
             marks: Vec::new(),
             misses: Vec::new(),
             pages: Vec::new(),
@@ -748,6 +756,8 @@ struct LoopSnap {
     post_k: u32,
     began: (FoldState, Option<ValueId>),
     top_marks: ValueId,
+    rtn_dead: i64,
+    prev_fire: (i64, i64),
     pend: Vec<(crate::vprof::PItem, SrcRef)>,
     page_src: Vec<SrcRef>,
     page_ins: Vec<Option<u16>>,
@@ -769,6 +779,8 @@ impl PageLoop {
             post_k: self.post_k,
             began: self.began,
             top_marks: self.top_marks,
+            rtn_dead: self.rtn_dead,
+            prev_fire: self.prev_fire,
             pend: self.pend.clone(),
             page_src: self.page_src.clone(),
             page_ins: self.page_ins.clone(),
@@ -789,6 +801,8 @@ impl PageLoop {
         self.post_k = s.post_k;
         self.began = s.began;
         self.top_marks = s.top_marks;
+        self.rtn_dead = s.rtn_dead;
+        self.prev_fire = s.prev_fire;
         self.pend = s.pend;
         self.page_src = s.page_src;
         self.page_ins = s.page_ins;
@@ -964,7 +978,7 @@ impl Run<'_, '_> {
         node: phitex_defuse::NodeId,
         pid: i64,
         items: Vec<crate::vprof::PItem>,
-        dead: i64,
+        mut dead: i64,
         classes: &[(u16, InsertClass)],
     ) -> R<()> {
         use crate::vprof::PItem;
@@ -993,7 +1007,10 @@ impl Run<'_, '_> {
                     let mut fire = build_t(lp, *k, dead, &mut live);
                     let mut in_material = false;
                     while let Some(f) = fire {
-                        fire = self.on_fire(lp, node, pid, &f, in_material, dead, classes)?;
+                        fire = self.on_fire(lp, node, pid, &f, in_material, classes)?;
+                        // (§1054 after a page fired: `\deadcycles` as its
+                        // routine left it, given back with its material)
+                        dead = lp.rtn_dead;
                         in_material = true;
                     }
                 }
@@ -1024,7 +1041,6 @@ impl Run<'_, '_> {
         pid: i64,
         f: &LoopFire,
         in_material: bool,
-        dead: i64,
         classes: &[(u16, InsertClass)],
     ) -> R<Option<LoopFire>> {
         use crate::vprof::PItem;
@@ -1097,6 +1113,7 @@ impl Run<'_, '_> {
             post: u32::try_from(post).unwrap_or(0),
             post_markers: lp.post_markers.clone(),
             post_k: lp.post_k,
+            prev_fire: lp.prev_fire,
         };
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
@@ -1127,6 +1144,10 @@ impl Run<'_, '_> {
         let rs = list_of(v, rtn);
         let mut markers = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
         let list = rs.get(1).map(|&x| list_of(v, x)).unwrap_or_default();
+        // (`\deadcycles` as the routine left it, where not 0: what an
+        // `\end` in the material after it reads, §1054)
+        lp.rtn_dead = rs.get(2).map_or(0, |&x| int_of(v, x));
+        lp.prev_fire = (pid, lp.rtn_dead);
         self.resolve_params_of(pid, &mut markers)?;
         let m_len = markers.len();
         let rtn_value = v.list(vec![v.list(markers.clone()), v.list(list.clone())]);
@@ -1284,6 +1305,7 @@ impl Run<'_, '_> {
         }
         lp.st.fold.since_bp = 0;
         let mut live = |n: u16| class_in(classes, n);
+        let dead = lp.rtn_dead;
         Ok(build_t(lp, f.k, dead, &mut live))
     }
 

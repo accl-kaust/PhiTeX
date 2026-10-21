@@ -28,7 +28,9 @@ use super::*;
 /// What a finisher's output routine gives back to the main list
 /// (§1026): `[markers, list]`, the run's own main-list items (page
 /// parameter markers) and the routine's list, without the held-over
-/// insertions (the page builder has them). The page builder folds the
+/// insertions (the page builder has them); a third element,
+/// `\deadcycles` as the routine left it, where not 0 (a page not
+/// shipped: §1054's `\end` after it reads it). The page builder folds the
 /// next page on its guess of it ([`FinishIn::rtn_guess`]); a finisher
 /// whose routine gave otherwise says so ([`PAGE_MISS`]).
 pub(crate) const RTN: &str = "rtn";
@@ -115,6 +117,11 @@ pub(crate) struct FinishIn {
     pub post: u32,
     pub post_markers: Vec<ValueId>,
     pub post_k: u32,
+    /// The piece the page before fired in (its raw id, -1 none) and
+    /// `\deadcycles` as its routine left it ([`RTN`]'s third element):
+    /// what §1054's `\end` reads in the post-output build and in the
+    /// rest of that piece.
+    pub prev_fire: (i64, i64),
 }
 
 impl FinishIn {
@@ -146,6 +153,8 @@ impl FinishIn {
             v.int(i64::from(self.post)),
             v.list(self.post_markers.clone()),
             v.int(i64::from(self.post_k)),
+            v.int(self.prev_fire.0),
+            v.int(self.prev_fire.1),
         ]);
         let mut out = vec![v.int(self.j)];
         out.extend([ValueId::UNIT; 8]);
@@ -213,6 +222,10 @@ impl FinishIn {
             post: p.get(16).map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
             post_markers: p.get(17).map(|&x| list_of(v, x)).unwrap_or_default(),
             post_k: p.get(18).map_or(0, |&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
+            prev_fire: (
+                p.get(19).map_or(-1, |&x| int_of(v, x)),
+                p.get(20).map_or(0, |&x| int_of(v, x)),
+            ),
         })
     }
 }
@@ -382,11 +395,7 @@ impl Run<'_, '_> {
                 }
             }
             ps.pending.extend(fin.post_markers.iter().copied());
-            let dead = if crate::pages::has_end(v, &ps.pending) {
-                self.dead_at(at)?
-            } else {
-                0
-            };
+            let dead = fin.prev_fire.1;
             let bp = v.list(vec![v.int(nodes::T_BUILD_PAGE), v.int(i64::from(fin.post_k))]);
             let mut live = |c: u16| self.insert_class_at(c, at);
             fire = ps.fold_items(v, &[bp], dead, &mut live)?;
@@ -408,10 +417,14 @@ impl Run<'_, '_> {
                 Src::Piece { piece, .. } => crate::pages::node_of(piece),
                 _ => at,
             };
-            let dead = if crate::pages::has_end(v, &raw) || crate::pages::has_end(v, &ps.pending) {
-                self.dead_at(p_at)?
-            } else {
+            // (as the loop: the rest of the piece the page before fired
+            // in reads `\deadcycles` as that routine left it)
+            let dead = if !(crate::pages::has_end(v, &raw) || crate::pages::has_end(v, &ps.pending)) {
                 0
+            } else if matches!(s.src, Src::Piece { piece, .. } if piece == fin.prev_fire.0) {
+                fin.prev_fire.1
+            } else {
+                self.dead_at(p_at)?
             };
             let mut live = |c: u16| self.insert_class_at(c, p_at);
             fire = ps.fold_items(v, &raw, dead, &mut live)?;
@@ -561,7 +574,8 @@ pub(crate) struct FinCtx {
 impl Run<'_, '_> {
     /// A finisher's end: what its routine gives back to the main list
     /// ([`RTN`]): its items, then the page parameters it set where no
-    /// item of its own noted them (§987: the build after the routine,
+    /// item of its own noted them, its list, and `\deadcycles` where not
+    /// 0 (§1054's `\end` reads it) (§987: the build after the routine,
     /// §1026, reads them as the routine left them, not as they reached
     /// the piece the page fired in).
     pub(crate) fn define_rtn(&mut self, mut raw: Vec<ValueId>) -> R<()> {
@@ -571,7 +585,14 @@ impl Run<'_, '_> {
         }
         let c = self.fin.clone().unwrap_or_default();
         let list = c.pending.get(c.held_n..).unwrap_or_default().to_vec();
-        let x = v.list(vec![v.list(raw), v.list(list)]);
+        // (and `\deadcycles` as it leaves it where not 0, a page not
+        // shipped: what `\end` reads after it, §1054)
+        let dead = self.cint(crate::fields::cell::DEADCYCLES)?;
+        let mut x = vec![v.list(raw), v.list(list)];
+        if dead != 0 {
+            x.push(v.int(dead));
+        }
+        let x = v.list(x);
         self.cx.define_with(v.field(RTN), x, Locality::Global);
         // (a routine that gave back other than the page builder folded
         // the next page on: the real material for the builder's node,
