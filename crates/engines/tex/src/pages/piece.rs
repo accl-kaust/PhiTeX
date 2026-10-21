@@ -1680,9 +1680,3 @@ pub(crate) fn unit_items(v: &Values, u: ValueId) -> Vec<ValueId> {
         .map(|&x| list_of(v, x))
         .unwrap_or_default()
 }
-
-/// Whether items hold an `\end` marker (the builder then reads
-/// `\deadcycles`, §1054).
-pub(crate) fn has_end(v: &Values, raw: &[ValueId]) -> bool {
-    raw.iter().any(|&x| nodes::tag(v, x) == nodes::T_END)
-}

@@ -683,9 +683,3 @@ fn size_report() -> String {
         n * 8 / l.max(1)
     )
 }
-
-/// Whether profile items hold an `\end` marker (the scan then reads
-/// `\deadcycles`, §1054).
-pub(crate) fn has_end(items: &[PItem]) -> bool {
-    items.iter().any(|x| matches!(x, PItem::End(_)))
-}
