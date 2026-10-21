@@ -548,6 +548,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The locations a load's run first read from the engine while
     /// skipping (`PHITEX_PKG_TRACE`: which chaining reads are skips).
     pub skip_first: Vec<Loc>,
+    /// The integer registers' writes this run made as maps of their
+    /// value, composed in order, contributed at its end instead of
+    /// definitions ([`crate::regfold`], [`Run::reg_write_map`]).
+    pub reg_pending: phitex_defuse::FxHashMap<Loc, crate::regfold::Affine>,
     /// Whether the node is a package load at the unit's top level, whose
     /// run is recorded (`crate::pkgrec`) and publishes its net effect.
     pub rec_load: bool,
@@ -850,6 +854,7 @@ impl<'c, 'a> Run<'c, 'a> {
             in_skip: false,
             skip_from: (None, 0),
             skip_first: Vec::new(),
+            reg_pending: phitex_defuse::FxHashMap::default(),
             rec_load: false,
             no_pull: false,
             st: crate::runstate::State::new(),
@@ -1079,9 +1084,35 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             match r? {
                 phitex_defuse::FieldAt::Def(x, by) if g == f || by == Some(at) => {
+                    // (an integer register: with the maps contributed
+                    // after its definition up to the point applied,
+                    // `crate::regfold`)
+                    if g == f
+                        && let Some(n) = self.count_reg(loc)
+                    {
+                        let acc = crate::regfold::acc_field(self.v, n);
+                        let m = crate::regfold::Affine::decode(
+                            self.v,
+                            self.cx.acc_range_to(acc, by, Some(at))?,
+                        );
+                        let y = m.apply(crate::val::i32_of(self.v, Some(x)));
+                        return Ok(Some(self.v.int(i64::from(y))));
+                    }
                     return Ok(Some(x));
                 }
-                phitex_defuse::FieldAt::Unset if g == f => return Ok(Some(ValueId::UNIT)),
+                phitex_defuse::FieldAt::Unset if g == f => {
+                    if let Some(n) = self.count_reg(loc) {
+                        let acc = crate::regfold::acc_field(self.v, n);
+                        let m = crate::regfold::Affine::decode(
+                            self.v,
+                            self.cx.acc_range_to(acc, None, Some(at))?,
+                        );
+                        if m != crate::regfold::Affine::ID {
+                            return Ok(Some(self.v.int(i64::from(m.apply(0)))));
+                        }
+                    }
+                    return Ok(Some(ValueId::UNIT));
+                }
                 phitex_defuse::FieldAt::Gone => return Ok(None),
                 _ => {}
             }
@@ -1409,6 +1440,30 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         let f = self.loc_field(loc);
+        // (an integer register: its definition reaching here with the
+        // maps contributed after it applied, and this run's own,
+        // `crate::regfold`)
+        if let Some(n) = self.count_reg(loc) {
+            let acc = crate::regfold::acc_field(self.v, n);
+            let r = self.cx.acc_range_after_def(acc, f);
+            if r.is_err() {
+                note_stop(self.op_name(), f);
+            }
+            let (base, fold) = r?;
+            let v = self.v;
+            let x = crate::val::i32_of(v, base);
+            let mut m = crate::regfold::Affine::decode(v, fold);
+            if let Some(&own) = self.reg_pending.get(&loc) {
+                m = m.then(own);
+            }
+            let y = if base.is_none() && m == crate::regfold::Affine::ID {
+                None
+            } else {
+                Some(v.int(i64::from(m.apply(x))))
+            };
+            self.st.fill(loc, y);
+            return Ok(());
+        }
         let r = self.cx.use_field(f);
         if r.is_err() {
             note_stop(self.op_name(), f);
@@ -1437,6 +1492,101 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.st.fill(loc, r?);
         Ok(())
+    }
+
+    /// The integer register at location `loc`, if it is one.
+    pub(crate) fn count_reg(&self, loc: Loc) -> Option<i32> {
+        let l = loc as usize;
+        if l.wrapping_sub(crate::fields::REG0) < 256 {
+            return i32::try_from(l - crate::fields::REG0).ok();
+        }
+        if l < crate::fields::NSLOT {
+            return None;
+        }
+        let f = self.st.field(loc)?;
+        crate::val::field_name(self.v, f)
+            .strip_prefix("count:")
+            .and_then(|n| n.parse::<i32>().ok())
+    }
+
+    /// A write of integer register `loc` as a map of its value
+    /// ([`crate::regfold`]), where the map alone decides it for every
+    /// reader after the run: a document piece's write (not a routine's,
+    /// a format's or a recorded load's) before its first candidate (a
+    /// page firing inside the piece runs its routine before the later
+    /// writes) and not where a job-written file is read back (the
+    /// read-back's run notes the values its writes replace, `note_pre`),
+    /// outside every group of the document and, unless global,
+    /// of the run, and with no definition of the register by the run
+    /// itself (a global `\advance` adds to the value in force, which a
+    /// binding of the run's or of an open group may hold, §279). Then
+    /// the write is [`Run::reg_apply_map`]'s.
+    pub(crate) fn reg_map_ok(&mut self, loc: Loc, global: bool) -> R<bool> {
+        let op = self.cx.op();
+        if self.count_reg(loc).is_none()
+            || !(op == self.ops.exec || op == self.ops.resume)
+            || !self.doc
+            || self.rec_load
+            || self.interp.is_some()
+            || self.read_back_done
+            || self.read_point_here
+            || !self.cand_marks.is_empty()
+            || (!global && self.innermost_group().is_some())
+            || self.st.defined_after(loc, 0)
+            || self.scope_kind()?.is_some()
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// A write [`Run::reg_map_ok`] allowed: the map composed onto the
+    /// run's own and the value the run sees updated; nothing defined.
+    pub(crate) fn reg_apply_map(&mut self, loc: Loc, map: crate::regfold::Affine) {
+        let own = self.reg_pending.get(&loc).copied().unwrap_or(crate::regfold::Affine::ID);
+        self.reg_pending.insert(loc, own.then(map));
+        if self.st.is_loaded(loc) {
+            let x = map.apply(self.st.int_of(loc, self.v));
+            self.st.fill(loc, Some(self.v.int(i64::from(x))));
+        }
+        self.muts += 1;
+    }
+
+    /// Field `f` as it reaches node `at` (after it, or before it with
+    /// `before`), as [`phitex_defuse::Ctx::use_field_at`] and
+    /// [`phitex_defuse::Ctx::use_field_before`] give it; an integer
+    /// register with the maps contributed after its definition up to `at`
+    /// applied, `at`'s own included (they precede its first candidate,
+    /// [`crate::regfold`]).
+    pub(crate) fn field_at(
+        &mut self,
+        f: Field,
+        at: phitex_defuse::NodeId,
+        before: bool,
+    ) -> Result<phitex_defuse::FieldAt, phitex_defuse::Stop> {
+        let r = if before {
+            self.cx.use_field_before(f, at)?
+        } else {
+            self.cx.use_field_at(f, Some(at))?
+        };
+        let Some(n) = crate::val::field_name(self.v, f)
+            .strip_prefix("count:")
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            return Ok(r);
+        };
+        let (x, site) = match r {
+            phitex_defuse::FieldAt::Def(x, site) => (Some(x), site),
+            phitex_defuse::FieldAt::Unset => (None, None),
+            phitex_defuse::FieldAt::Gone => return Ok(r),
+        };
+        let acc = crate::regfold::acc_field(self.v, n);
+        let m = crate::regfold::Affine::decode(self.v, self.cx.acc_range_to(acc, site, Some(at))?);
+        if m == crate::regfold::Affine::ID {
+            return Ok(r);
+        }
+        let y = self.v.int(i64::from(m.apply(crate::val::i32_of(self.v, x))));
+        Ok(phitex_defuse::FieldAt::Def(y, site))
     }
 
     /// The engine value of location `loc` in the run's view.
@@ -4285,6 +4435,12 @@ impl<'c, 'a> Run<'c, 'a> {
         if cfg!(feature = "observe") {
             self.check_contribs_complete();
         }
+        for (l, m) in std::mem::take(&mut self.reg_pending) {
+            if let Some(n) = self.count_reg(l) {
+                let v = self.v;
+                self.contribs.push((crate::regfold::acc_field(v, n), m.encode(v)));
+            }
+        }
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);
         }
@@ -4755,6 +4911,7 @@ pub(crate) struct Parked {
     fread: Vec<(String, u64)>,
     fmiss: Vec<String>,
     skip_first: Vec<Field>,
+    reg_pending: Vec<(Field, crate::regfold::Affine)>,
     /// The incompleat noads ([`Run::incs`]), the streams closed
     /// ([`Run::closed`]) and the errors counted ([`Run::error_count`]):
     /// the run's state like the rest, kept over the park.
@@ -4905,6 +5062,10 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|l| self.loc_field(l))
                 .collect(),
+            reg_pending: std::mem::take(&mut self.reg_pending)
+                .into_iter()
+                .map(|(l, m)| (self.loc_field(l), m))
+                .collect(),
             incs: std::mem::take(&mut self.incs),
             closed: std::mem::take(&mut self.closed),
             error_count: self.error_count,
@@ -5020,6 +5181,11 @@ impl<'c, 'a> Run<'c, 'a> {
         r.fread = p.fread;
         r.fmiss = p.fmiss;
         r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
+        r.reg_pending = p
+            .reg_pending
+            .into_iter()
+            .map(|(f, m)| (r.loc_of(f), m))
+            .collect();
         r.incs = p.incs;
         r.closed = p.closed;
         r.error_count = p.error_count;
