@@ -732,11 +732,12 @@ impl Operation for Pages {
         // committed at the stop stay and it places only new pages)
         let resumed = parked.is_some();
         let mut lp = parked.unwrap_or_else(PageLoop::new);
-        lp.resumed = resumed && crate::pages::CONTINUE_PLACEMENTS;
+        lp.resumed = resumed;
         match r.page_loop(&mut lp) {
             Ok(()) => {}
             Err(Halt::Stop(s)) => {
-                r.cx.park(Box::new(lp));
+                // (a run that continues: resumed, its placements stand)
+                r.cx.park_continuing(Box::new(lp));
                 return Err(s);
             }
             Err(_) => unreachable!("the page builder's loop runs no command"),
@@ -973,7 +974,7 @@ impl Run<'_, '_> {
     ///    over, every page already in `lp.pages` placed again, in order
     ///    ([`Run::place_finisher`]); one resumed from the loop's kept token
     ///    continues: its placements committed at its stop stand
-    ///    (`Engine::set_continue_placements`);
+    ///    ([`phitex_defuse::Ctx::park_continuing`]);
     /// 2. each contributor after `lp.cur` ([`phitex_defuse::Ctx::acc_next`]
     ///    on [`crate::vprof::VPROF`]): its units decoded, their markers
     ///    resolved where the piece is ([`Run::resolve_prof_of`]),

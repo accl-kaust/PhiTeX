@@ -118,11 +118,6 @@ pub(crate) const PAGE_START: &str = "pages:start";
 /// ([`Feedback::RoutineGivesBack`]).
 pub(crate) const PAGE_MISS: &str = "pages:miss";
 
-/// Whether a run resumed from its kept token continues its placements
-/// (`Engine::set_continue_placements`): the page builder then places
-/// only the pages new since its stop ([`PageLoop::resumed`]).
-pub(crate) const CONTINUE_PLACEMENTS: bool = false;
-
 /// A `T_SET_PAGE` marker's slot for `\deadcycles` set by the text
 /// (§1246): after the eight of `\pagegoal` and its kin (§1245).
 pub(crate) const DEAD_SLOT: i64 = 8;
