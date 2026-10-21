@@ -2035,34 +2035,21 @@ impl Run<'_, '_> {
 
     /// The page parameters (§980) reaching the position just after node
     /// `at`, as a `T_PAGE_PARAMS` marker: what a piece's `[tag]` marker
-    /// means, read where the piece is (the record `pagepar`, or its cells
-    /// where it is not defined there, as [`Run::eng_read`] reads them).
+    /// means, read where the piece is (each parameter's field, as
+    /// [`Run::eng_read`] reads them).
     pub(crate) fn page_params_at(&mut self, at: i64) -> R<ValueId> {
+        use crate::fields::Par;
         let v = self.v;
         let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(at.to_ne_bytes()));
-        let b = crate::fields::B_PAGE;
-        let rf = self.ops.fields.slot_field(crate::fields::record_loc(b));
-        let n = crate::fields::record_len(b);
-        let cells = match self.cx.use_field_after_own(rf, at)? {
-            phitex_defuse::FieldAt::Def(x, _) => Some(list_of(v, x)).filter(|xs| xs.len() == n),
-            phitex_defuse::FieldAt::Gone => return self.page_params_marker(),
-            phitex_defuse::FieldAt::Unset => None,
-        };
-        let absent = crate::fields::record_absent(v);
-        let mut xs = Vec::with_capacity(n);
-        for i in 0..n {
-            let x = if let Some(c) = &cells {
-                (c[i] != absent).then_some(c[i])
-            } else {
-                let loc =
-                    crate::runstate::Loc::try_from(crate::fields::record_cell(b, i)).unwrap_or(0);
-                let f = self.loc_field(loc);
-                match self.cx.use_field_after_own(f, at)? {
-                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                    _ => None,
-                }
-            };
-            xs.push(x);
+        let mut xs = Vec::with_capacity(4);
+        for p in [Par::vsize, Par::maxdepth, Par::topskip, Par::holdinginserts] {
+            let loc = crate::runstate::Loc::try_from(p as usize).unwrap_or(0);
+            let f = self.loc_field(loc);
+            xs.push(match self.cx.use_field_after_own(f, at)? {
+                phitex_defuse::FieldAt::Def(x, _) => Some(x),
+                phitex_defuse::FieldAt::Gone => return self.page_params_marker(),
+                phitex_defuse::FieldAt::Unset => None,
+            });
         }
         let int = |x: Option<ValueId>| v.int(i64::from(crate::val::i32_of(v, x)));
         Ok(v.list(vec![

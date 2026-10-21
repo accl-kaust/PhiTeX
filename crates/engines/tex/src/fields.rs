@@ -32,13 +32,11 @@ const STATIC: &[&str] = &[
     "f",
     "aftertoken",
     "align:open",
-    // (the records, [`B_CAT`], [`B_PAR`], [`B_PAGE`], [`B_SF`], [`B_LC`])
+    // (the records, [`B_CAT`], [`B_SF`], [`B_LC`])
     "cattab",
-    "parpar",
-    "pagepar",
     "sftab",
     "lctab",
-    // (e-TeX's penalty arrays: components of `parpar`)
+    // (e-TeX's penalty arrays)
     "param:interlinepenalties",
     "param:clubpenalties",
     "param:widowpenalties",
@@ -333,110 +331,43 @@ pub(crate) mod cell {
 
 // ------------------------------------------------------------ records
 
-/// The records: each a field holding several cells' values in one list,
-/// read by a run once in place of each cell's field (one engine read
-/// for the character-class table, one for the paragraph and page
-/// parameters). Inside a run the cells stay per location; a run that
-/// defines a cell defines its record at its end too ([`crate::run`]).
-/// The cells' own fields are defined as before, for their readers by
-/// name.
+/// The records: each a field holding the 256 values of a character
+/// code table in one list, read by a run once in place of each cell's
+/// field (one engine read for the character-class table). Inside a run
+/// the cells stay per location; a run that defines a cell defines its
+/// record at its end too ([`crate::run`]). The cells' own fields are
+/// defined as before, for their readers by name.
+///
+/// The paragraph's and the page builder's parameters are no record: a
+/// run reads each one it uses by its own field. As one record, a change
+/// of any one (`\\clubpenalty` by a heading's `\\everypar`, `\\parshape`
+/// by a list) changed what every later paragraph read, though most read
+/// none of the cells it changed.
 pub(crate) const B_CAT: usize = 0;
-pub(crate) const B_PAR: usize = 1;
-/// The page builder's parameters (§980), apart from the paragraph's:
-/// an output routine sets `\\vsize` (plain's `vs.tex`, LaTeX's
-/// `\\@colroom`), which the paragraphs after it do not read.
-pub(crate) const B_PAGE: usize = 2;
 /// The space factor codes of characters 0–255 (`sf:<c>`), which every
 /// character a paragraph appends reads (§1034).
-pub(crate) const B_SF: usize = 3;
+pub(crate) const B_SF: usize = 1;
 /// The lowercase codes of characters 0–255 (`lc:<c>`), which the
 /// hyphenation pass reads for each letter of a word (§897).
-pub(crate) const B_LC: usize = 4;
-pub(crate) const NREC: usize = 5;
-pub(crate) const RECORDS: [&str; NREC] = ["cattab", "parpar", "pagepar", "sftab", "lctab"];
+pub(crate) const B_LC: usize = 2;
+pub(crate) const NREC: usize = 3;
+pub(crate) const RECORDS: [&str; NREC] = ["cattab", "sftab", "lctab"];
 
 /// The code tables that are records: record, location of code 0, name
 /// prefix.
 const CODE_RECORDS: [(usize, usize, &str); 2] =
     [(B_SF, CODE0 + 2 * 256, "sf:"), (B_LC, CODE0, "lc:")];
 
-/// The parameters of `pagepar`.
-const PAGEPAR: &[Par] = &[Par::vsize, Par::maxdepth, Par::topskip, Par::holdinginserts];
-
-/// The parameters of `parpar` known by name.
-const PARPAR: &[Par] = &[
-    Par::hsize,
-    Par::hbadness,
-    Par::hfuzz,
-    Par::vbadness,
-    Par::vfuzz,
-    Par::overfullrule,
-    Par::boxmaxdepth,
-    Par::baselineskip,
-    Par::lineskip,
-    Par::lineskiplimit,
-    Par::parskip,
-    Par::parindent,
-    Par::looseness,
-    Par::hangindent,
-    Par::hangafter,
-    Par::pretolerance,
-    Par::tolerance,
-    Par::emergencystretch,
-    Par::linepenalty,
-    Par::hyphenpenalty,
-    Par::exhyphenpenalty,
-    Par::adjdemerits,
-    Par::doublehyphendemerits,
-    Par::finalhyphendemerits,
-    Par::leftskip,
-    Par::rightskip,
-    Par::parfillskip,
-    Par::lastlinefit,
-    Par::clubpenalty,
-    Par::widowpenalty,
-    Par::displaywidowpenalty,
-    Par::brokenpenalty,
-    Par::interlinepenalty,
-    Par::uchyph,
-    Par::lefthyphenmin,
-    Par::righthyphenmin,
-    Par::language,
-    Par::spaceskip,
-    Par::xspaceskip,
-    Par::endlinechar,
-];
-
-/// The state cells of `parpar` (after [`PARPAR`]).
-const PARPAR_CELLS: [&str; 5] = [
-    "parshape",
-    "param:interlinepenalties",
-    "param:clubpenalties",
-    "param:widowpenalties",
-    "param:displaywidowpenalties",
-];
-
 /// The number of cells of record `b`.
-pub(crate) fn record_len(b: usize) -> usize {
-    match b {
-        B_CAT | B_SF | B_LC => 256,
-        B_PAR => PARPAR.len() + PARPAR_CELLS.len(),
-        _ => PAGEPAR.len(),
-    }
+pub(crate) fn record_len(_b: usize) -> usize {
+    256
 }
 
 /// The location of cell `i` of record `b`.
 pub(crate) fn record_cell(b: usize, i: usize) -> usize {
-    if b == B_CAT {
-        CAT0 + i
-    } else if let Some(&(_, at, _)) = CODE_RECORDS.iter().find(|r| r.0 == b) {
-        at + i
-    } else if b == B_PAGE {
-        PAGEPAR[i] as usize
-    } else if i < PARPAR.len() {
-        PARPAR[i] as usize
-    } else {
-        STATIC0 + static_index(PARPAR_CELLS[i - PARPAR.len()])
+    match CODE_RECORDS.iter().find(|r| r.0 == b) {
+        Some(&(_, at, _)) => at + i,
+        None => CAT0 + i,
     }
 }
 
@@ -448,7 +379,6 @@ pub(crate) fn record_loc(b: usize) -> usize {
 /// The record a location is a cell of, and its index there.
 #[inline]
 pub(crate) fn record_of(loc: usize) -> Option<(usize, usize)> {
-    static IX: std::sync::OnceLock<Vec<(u8, u8)>> = std::sync::OnceLock::new();
     if loc.wrapping_sub(CAT0) < 256 {
         return Some((B_CAT, loc - CAT0));
     }
@@ -458,23 +388,7 @@ pub(crate) fn record_of(loc: usize) -> Option<(usize, usize)> {
             .find(|r| loc.wrapping_sub(r.1) < 256)
             .map(|r| (r.0, loc - r.1));
     }
-    if loc >= NSLOT {
-        return None;
-    }
-    let ix = IX.get_or_init(|| {
-        let mut t = vec![(u8::MAX, 0); NSLOT];
-        for b in [B_PAR, B_PAGE] {
-            for i in 0..record_len(b) {
-                t[record_cell(b, i)] = (
-                    u8::try_from(b).unwrap_or(u8::MAX),
-                    u8::try_from(i).unwrap_or(u8::MAX),
-                );
-            }
-        }
-        t
-    });
-    let (b, i) = ix[loc];
-    (b != u8::MAX).then_some((b as usize, i as usize))
+    None
 }
 
 /// The field name of cell `i` of record `b`.
@@ -489,16 +403,13 @@ pub(crate) fn record_cell_name(b: usize, i: usize) -> String {
 pub(crate) fn record_cell_name_into(b: usize, i: usize, out: &mut String) {
     use std::fmt::Write as _;
     out.clear();
-    if b == B_CAT {
-        let _ = write!(out, "cat:{i}");
-    } else if let Some(&(_, _, p)) = CODE_RECORDS.iter().find(|r| r.0 == b) {
-        let _ = write!(out, "{p}{i}");
-    } else if b == B_PAGE {
-        let _ = write!(out, "param:{}", PARAMS[PAGEPAR[i] as usize]);
-    } else if i < PARPAR.len() {
-        let _ = write!(out, "param:{}", PARAMS[PARPAR[i] as usize]);
-    } else {
-        out.push_str(PARPAR_CELLS[i - PARPAR.len()]);
+    match CODE_RECORDS.iter().find(|r| r.0 == b) {
+        Some(&(_, _, p)) => {
+            let _ = write!(out, "{p}{i}");
+        }
+        None => {
+            let _ = write!(out, "cat:{i}");
+        }
     }
 }
 
@@ -512,23 +423,12 @@ pub(crate) fn record_of_name(name: &str) -> Option<usize> {
             return c.parse::<u32>().ok().filter(|&c| c < 256).map(|_| b);
         }
     }
-    if PARPAR_CELLS.contains(&name) {
-        return Some(B_PAR);
-    }
-    let p = name.strip_prefix("param:")?;
-    if PAGEPAR.iter().any(|&q| PARAMS[q as usize] == p) {
-        return Some(B_PAGE);
-    }
-    PARPAR
-        .iter()
-        .any(|&q| PARAMS[q as usize] == p)
-        .then_some(B_PAR)
+    None
 }
 
 /// The records whose cells a declaration by prefix (or exact name)
 /// covers: each record a prefix may define a cell of.
 pub(crate) fn records_of_prefix(p: &str) -> [bool; NREC] {
-    static NAMES: std::sync::OnceLock<[Vec<String>; 2]> = std::sync::OnceLock::new();
     // (a table of the 256 character codes, by its name prefix)
     let table = |t: &str| {
         if p.len() <= t.len() {
@@ -539,12 +439,7 @@ pub(crate) fn records_of_prefix(p: &str) -> [bool; NREC] {
             })
         }
     };
-    let names = NAMES.get_or_init(|| {
-        [B_PAR, B_PAGE].map(|b| (0..record_len(b)).map(|i| record_cell_name(b, i)).collect())
-    });
-    let par = names[0].iter().any(|n| n.starts_with(p));
-    let page = names[1].iter().any(|n| n.starts_with(p));
-    [table("cat:"), par, page, table("sf:"), table("lc:")]
+    [table("cat:"), table("sf:"), table("lc:")]
 }
 
 /// Adds the records a declared set by prefixes covers to it.
