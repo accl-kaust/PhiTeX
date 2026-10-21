@@ -1463,10 +1463,10 @@ impl Engine {
             return None;
         }
         // Placed by a placer that runs again for a change: it waits for the
-        // placer's placements (made again as they were: it runs; with new
-        // arguments: a new text; not made: it goes).
+        // placer to place it again (as it was: it runs; with new arguments:
+        // a new text; a run that ends without it: it goes).
         let placer = n.parent;
-        if placer != super::world::NONE && self.w.stale.contains_key(&placer) && self.w.node(placer).is_some_and(|p| super::world::in_work(p.st)) {
+        if self.w.awaiting.contains_key(&id) && self.w.node(placer).is_some_and(|p| super::world::in_work(p.st)) {
             s.parked.insert(id, Wait::Node(placer, None));
             s.placed.entry(placer).or_default().push(id);
             rep.stops += 1;
@@ -1752,10 +1752,14 @@ impl Engine {
                             self.wake(s, x);
                         }
                     }
-                    // (Stopped, its placements so far made: what it placed
-                    // waits no longer, even if it stopped before placing.)
-                    if self.w.stale.contains_key(&id) {
-                        self.w.stale.remove(&id, &NoMeasure);
+                    // (Stopped, its placements so far made again: those go
+                    // on; a node it placed and now waits for itself goes on
+                    // too, as it stands, or neither would.)
+                    if let Wait::Node(x, _) = &wait
+                        && self.w.awaiting.contains_key(x)
+                        && self.w.node(*x).is_some_and(|xn| xn.parent == id)
+                    {
+                        self.w.awaiting.remove(x, &NoMeasure);
                     }
                     self.wake_placed(s, id);
                     let subject = match &wait {

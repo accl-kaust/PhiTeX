@@ -505,10 +505,10 @@ pub(crate) struct World {
     pub fins: PMap<Id, ()>,
     /// The done nodes that publish loop-back fields.
     pub publishers: PMap<Id, ()>,
-    /// Placers made dirty by a change (a read that broke, a new text) whose
-    /// placements are not made again yet: the nodes they placed wait for
-    /// them (their texts may be stale).
-    pub stale: PMap<Id, ()>,
+    /// Placed nodes whose placer runs again for a change (a read that
+    /// broke, a new text) and has not placed them again yet: they wait for
+    /// it (their texts may be stale).
+    pub awaiting: PMap<Id, ()>,
 }
 
 impl World {

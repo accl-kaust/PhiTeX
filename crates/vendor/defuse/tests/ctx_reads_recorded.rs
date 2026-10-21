@@ -84,3 +84,31 @@ fn every_ctx_method_is_classified() {
         "unclassified Ctx methods (record a Pred for a read): {missing:?}"
     );
 }
+
+/// The `fn` names inside the block starting at `start` (to its closing
+/// brace at column 0).
+fn fns_in(src: &str, start: &str) -> Vec<String> {
+    let i = src.find(start).unwrap_or_else(|| panic!("{start} not found"));
+    let body = &src[i..];
+    let end = body.find("\n}\n").expect("block end");
+    body[..end]
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("fn "))
+        .map(|r| r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect())
+        .collect()
+}
+
+#[test]
+fn every_operation_hook_is_recorded_and_replayed() {
+    // A hook the recorder does not forward answers its default while
+    // recording: the recorded build is not the build (a client's
+    // `final_only` or `contribs_complete` lost made a cycle).
+    let hooks = fns_in(include_str!("../src/api.rs"), "pub trait Operation");
+    let rec = fns_in(include_str!("../src/record.rs"), "impl Operation for RecOp");
+    let play = fns_in(include_str!("../examples/play.rs"), "impl Operation for PlayOp");
+    let missing: Vec<(&str, &String)> = hooks
+        .iter()
+        .flat_map(|h| [("recorder", &rec), ("player", &play)].into_iter().filter(move |(_, l)| !l.contains(h)).map(move |(w, _)| (w, h)))
+        .collect();
+    assert!(missing.is_empty(), "Operation hooks not forwarded: {missing:?}");
+}

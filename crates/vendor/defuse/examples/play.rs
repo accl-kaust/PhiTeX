@@ -261,6 +261,12 @@ impl Operation for PlayOp {
     fn predicted_defs(&self, args: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
         self.st("predicted_defs", args, J::Null, None)
     }
+    fn contribs_complete(&self, args: &[ValueId], _: &Values) -> bool {
+        self.st("contribs_complete", args, J::Null, false)
+    }
+    fn final_only(&self, args: &[ValueId], _: &Values) -> bool {
+        self.st("final_only", args, J::Null, false)
+    }
     fn effect(&self, args: &[ValueId], _: &Values) -> Effect {
         self.st("effect", args, J::Null, Effect::None)
     }

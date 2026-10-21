@@ -267,6 +267,16 @@ impl Operation for RecOp {
         self.st(values, "predicted_defs", args, J::Null, j(&r));
         r
     }
+    fn contribs_complete(&self, args: &[ValueId], values: &Values) -> bool {
+        let r = self.inner.contribs_complete(args, values);
+        self.st(values, "contribs_complete", args, J::Null, j(&r));
+        r
+    }
+    fn final_only(&self, args: &[ValueId], values: &Values) -> bool {
+        let r = self.inner.final_only(args, values);
+        self.st(values, "final_only", args, J::Null, j(&r));
+        r
+    }
     fn effect(&self, args: &[ValueId], values: &Values) -> Effect {
         let r = self.inner.effect(args, values);
         self.st(values, "effect", args, J::Null, j(&r));

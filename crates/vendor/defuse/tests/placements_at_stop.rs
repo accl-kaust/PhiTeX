@@ -42,11 +42,18 @@ struct Kept {
 
 impl Operation for Ops {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        Some(if tag(v, a) == "fin" { vec![(fields(v).1, Locality::Global)] } else { Vec::new() })
+        match tag(v, a).as_str() {
+            "fin" => Some(vec![(fields(v).1, Locality::Global)]),
+            "knob" => None,
+            _ => Some(Vec::new()),
+        }
     }
     fn static_contribs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
-        // (Pieces contribute their height; nothing else does.)
-        (tag(v, a) != "piece").then(Vec::new)
+        // (Pieces contribute their height, finishers a miss at most.)
+        match tag(v, a).as_str() {
+            "piece" | "fin" => None,
+            _ => Some(Vec::new()),
+        }
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -79,11 +86,25 @@ impl Operation for Ops {
                         k.pages.push((x, n));
                     }
                 }
+                // The pages' misses, once, at the end (as PhiTeX's pages:miss).
+                let me = cx.node();
+                let _ = cx.acc_fold(v.field("acc:miss"), Some(me), None)?;
                 Ok(v.int(i64::try_from(k.pages.len()).unwrap()))
             }
             "fin" => {
-                cx.define(page, a[1]);
+                // A page that misses defines another value and says so.
+                let miss = cx.use_field(v.field("missat"))? == Some(a[1]);
+                let n = v.as_int(a[1]).unwrap();
+                cx.define(page, v.int(if miss { n + 100 } else { n }));
+                if miss {
+                    cx.contribute(v.field("acc:miss"), v.int(1));
+                }
                 Ok(a[1])
+            }
+            "knob" => {
+                // (The page whose routine misses.)
+                cx.define(v.field("missat"), a[1]);
+                Ok(ValueId::UNIT)
             }
             _ => {
                 self.piece_runs.fetch_add(1, Relaxed);
@@ -187,6 +208,63 @@ fn a_page_builder_parked_between_attempts_places_its_finishers_as_pages_fire() {
         eng.replace(a0, op, a);
         let r = eval(&mut eng);
         assert_eq!(seen(&ops), reference(), "j{threads} edit: {r:?}");
+        assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+    }
+}
+
+#[test]
+fn a_page_builder_that_starts_over_and_stops_early_keeps_its_later_finishers() {
+    // An edit makes page 3's routine miss: it defines another value (the
+    // pieces after it run again) and contributes a miss, which breaks P's
+    // read of the misses; P starts over with no token, places pages 1-3
+    // again and stops on a piece after page 3, still in work. Its
+    // finishers further on stay (a stop makes a prefix of its placements)
+    // and wait for P to place them again; the same pages: none is freed or
+    // made again.
+    for threads in [1usize, 4] {
+        let ops = Arc::new(Ops {
+            me: OnceLock::new(),
+            piece_runs: AtomicU64::new(0),
+            seen: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        });
+        let mut eng = Engine::new();
+        let acc = fields(eng.values()).0;
+        eng.declare_accumulator(acc, Arc::new(defuse::SumMonoid));
+        let op = eng.register(ops.clone());
+        let _ = ops.me.set(op);
+        let u = eng.new_unit();
+        let miss = eng.values().field("acc:miss");
+        eng.declare_accumulator(miss, Arc::new(defuse::SumMonoid));
+        let knob = {
+            let v = eng.values();
+            vec![v.str("knob"), v.int(999)]
+        };
+        let knob = eng.push(u, op, knob);
+        let p = vec![eng.values().str("pages")];
+        eng.push(u, op, p);
+        let a0 = {
+            let v = eng.values();
+            vec![v.str("piece"), v.int(1), v.int(0)]
+        };
+        eng.push(u, op, a0);
+        let eval = |eng: &mut Engine| {
+            if threads == 1 {
+                eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::Off, 0), &mut defuse::Sequential)
+            } else {
+                eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::Off, 0), &mut Threads(threads))
+            }
+            .expect("evaluate")
+        };
+        eval(&mut eng);
+        let a = {
+            let v = eng.values();
+            vec![v.str("knob"), v.int(3)]
+        };
+        eng.replace(knob, op, a);
+        let r = eval(&mut eng);
+        let want: Vec<i64> = reference().into_iter().map(|k| if k == 3 { 103 } else { k }).collect();
+        assert_eq!(ops.seen.lock().unwrap().values().copied().collect::<Vec<i64>>(), want, "j{threads}: {r:?}");
+        assert_eq!((r.freed, r.created), (0, 0), "j{threads}: finishers freed and made again: {r:?}");
         assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
     }
 }

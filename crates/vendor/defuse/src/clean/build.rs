@@ -271,10 +271,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Node `id` (`n`) runs again for a change: what it placed waits for
-    /// its placements to be made again.
-    fn stale_placer(&mut self, id: Id, n: &Node) {
-        if n.res.as_ref().is_some_and(|r| !r.kids.is_empty() || !r.conts.is_empty()) {
-            self.w.stale.insert(id, (), &NoMeasure);
+    /// its next run to place it again (or to finish without it).
+    fn stale_placer(&mut self, _id: Id, n: &Node) {
+        if let Some(r) = n.res.as_ref() {
+            for &x in r.kids.iter().chain(&r.conts) {
+                self.w.awaiting.insert(x, (), &NoMeasure);
+            }
         }
     }
 
@@ -573,7 +575,7 @@ impl<'a> Builder<'a> {
     /// Frees node `id` and everything it unfolded.
     pub(crate) fn free(&mut self, id: Id) {
         let Some(n) = self.w.node(id).cloned() else { return };
-        self.w.stale.remove(&id, &NoMeasure);
+        self.w.awaiting.remove(&id, &NoMeasure);
         if let Some(res) = n.res.clone() {
             for &k in res.kids.iter().chain(&res.conts) {
                 if self.w.node(k).is_some_and(|c| c.parent == id) {
@@ -1035,9 +1037,15 @@ impl<'a> Builder<'a> {
     /// place and subtree, gone ones are freed, new ones made; returns the
     /// kids' and continuations' ids.
     pub(crate) fn place(&mut self, id: Id, kids: &[Spec], conts: &[Spec]) -> (Vec<Id>, Vec<Id>) {
+        self.place_some(id, kids, conts, false)
+    }
+
+    /// As [`Self::place`]; `prefix`: the placements of a run that stopped,
+    /// so far: the earlier ones it did not make (yet) stay, after them.
+    fn place_some(&mut self, id: Id, kids: &[Spec], conts: &[Spec], prefix: bool) -> (Vec<Id>, Vec<Id>) {
         let u = self.w.node(id).map(|n| n.unit).expect("live");
         self.hold = Some((u, Pos::MAX, Vec::new()));
-        let r = self.place_held(id, kids, conts);
+        let r = self.place_held(id, kids, conts, prefix);
         // The frames walked once, from the lowest placement; then the new
         // nodes' declared definitions filed in them.
         if let Some((u, p, ids)) = self.hold.take() {
@@ -1051,7 +1059,7 @@ impl<'a> Builder<'a> {
         r
     }
 
-    fn place_held(&mut self, id: Id, kids: &[Spec], conts: &[Spec]) -> (Vec<Id>, Vec<Id>) {
+    fn place_held(&mut self, id: Id, kids: &[Spec], conts: &[Spec], prefix: bool) -> (Vec<Id>, Vec<Id>) {
         let n = self.w.node(id).cloned().expect("live");
         let old: (Vec<Id>, Vec<Id>) = n.res.as_ref().map_or((Vec::new(), Vec::new()), |r| (r.kids.clone(), r.conts.clone()));
         let assign = |specs: &[Spec]| -> Vec<Id> {
@@ -1074,12 +1082,18 @@ impl<'a> Builder<'a> {
         };
         let kid_ids = assign(kids);
         let cont_ids = assign(conts);
-        // Gone: freed.
+        // Gone: freed (a stopped run's: not yet made, kept).
         let keep: FxHashSet<Id> = kid_ids.iter().chain(&cont_ids).copied().collect();
-        for &x in old.0.iter().chain(&old.1) {
-            if !keep.contains(&x) {
-                self.free(x);
+        if !prefix {
+            for &x in old.0.iter().chain(&old.1) {
+                if !keep.contains(&x) {
+                    self.free(x);
+                }
             }
+        }
+        // (Made again: no longer waiting for this placer.)
+        for x in &keep {
+            self.w.awaiting.remove(x, &NoMeasure);
         }
         // Kids: in order after `id` (each after the previous one's subtree).
         let mut after = id;
@@ -1100,6 +1114,13 @@ impl<'a> Builder<'a> {
             };
             let end = self.put_placed(id, &n, c, spec, depth, base);
             last_cont.insert(anchor, end);
+        }
+        if prefix {
+            let mut kid_ids = kid_ids;
+            let mut cont_ids = cont_ids;
+            kid_ids.extend(old.0.iter().copied().filter(|x| !keep.contains(x) && self.w.node(*x).is_some()));
+            cont_ids.extend(old.1.iter().copied().filter(|x| !keep.contains(x) && self.w.node(*x).is_some()));
+            return (kid_ids, cont_ids);
         }
         (kid_ids, cont_ids)
     }
@@ -1593,7 +1614,6 @@ impl<'a> Builder<'a> {
         });
         super::core::prof::time(14, || self.run_claimed(id, claim));
         self.counts.merge.outs += super::core::ns_since(t);
-        self.w.stale.remove(&id, &NoMeasure);
         self.woken.push(id);
         out_changed
     }
@@ -1602,14 +1622,13 @@ impl<'a> Builder<'a> {
     /// run can wait for them).
     pub(crate) fn commit_unfolding(&mut self, id: Id, kids: &[Spec], conts: &[Spec]) {
         let Some(n) = self.w.node(id).cloned() else { return };
-        let (k, c) = self.place(id, kids, conts);
+        let (k, c) = self.place_some(id, kids, conts, true);
         let mut n2 = self.w.node(id).cloned().unwrap_or(n);
         let mut res = n2.res.as_deref().cloned().unwrap_or_default();
         res.kids = k;
         res.conts = c;
         n2.res = Some(Arc::new(res));
         self.w.put(id, n2);
-        self.w.stale.remove(&id, &NoMeasure);
     }
 }
 
