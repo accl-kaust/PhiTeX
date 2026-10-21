@@ -209,11 +209,11 @@ pub(crate) struct Ops {
     /// a token only stepped over reads whether its meaning is `\outer`
     /// ([`Run::outer_lookup`]).
     pub outer_proj: phitex_defuse::ProjId,
-    /// The skip projection of meanings ([`crate::val::skip_projection`]):
-    /// a token stepped over in a skipped conditional branch reads only
-    /// whether its meaning opens or ends a conditional, or is `\outer`
-    /// ([`Run::skip_lookup`]).
-    pub skip_proj: phitex_defuse::ProjId,
+    /// The step projection of meanings ([`crate::val::step_projection`]):
+    /// a token stepped over in a skipped conditional branch, or fetched
+    /// only to be stored or matched, reads only its meaning's class
+    /// ([`Run::step_lookup`]).
+    pub step_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -579,13 +579,18 @@ pub(crate) struct Run<'c, 'a> {
     /// (`\expandafter`'s first, §368): a meaning not this run's own is
     /// read only as whether it is `\outer` ([`Run::outer_lookup`]).
     pub outer_reads: bool,
+    /// Set while a token is fetched only to be stored or matched, never
+    /// expanded (a macro's arguments, a definition's parameter text and
+    /// body, a token list's body, §392, §473–§479): a meaning not this
+    /// run's own is read only by its class ([`Run::step_lookup`]).
+    pub step_reads: bool,
     /// The meanings this run read as outer or not only (kept over a park
     /// like [`Run::class_memo`]).
     pub outer_memo: phitex_defuse::FxHashMap<Loc, bool>,
-    /// The meanings this run read through the skip projection only, with
-    /// the class ([`Run::skip_lookup`]; kept over a park like
+    /// The meanings this run read through the step projection only, with
+    /// the class ([`Run::step_lookup`]; kept over a park like
     /// [`Run::class_memo`]).
-    pub skip_memo: phitex_defuse::FxHashMap<Loc, i64>,
+    pub step_memo: phitex_defuse::FxHashMap<Loc, i64>,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -849,8 +854,9 @@ impl<'c, 'a> Run<'c, 'a> {
             class_reads: false,
             class_memo: phitex_defuse::FxHashMap::default(),
             outer_reads: false,
+            step_reads: false,
             outer_memo: phitex_defuse::FxHashMap::default(),
-            skip_memo: phitex_defuse::FxHashMap::default(),
+            step_memo: phitex_defuse::FxHashMap::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -3495,25 +3501,31 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
-        // (a token of a skipped conditional branch: of its meaning only
-        // the class `pass_text` and the outer check look at, §494, §336;
+        // (a token of a skipped conditional branch, or one fetched only to
+        // be stored or matched: of its meaning only the class
+        // `pass_text`, a definition's parameter scan and the outer check
+        // look at, §494, §476, §479, §336, [`crate::val::step_projection`];
         // not inside an alignment of the run's, whose tab marks and
         // braces `get_next` watches, nor while a line is interpreted or a
         // load recorded, which read meanings in full; an input marker,
         // a file's end, read in full too)
-        if self.in_skip
+        if (self.in_skip || self.step_reads)
             && self.aopen == 0
             && self.interp.is_none()
             && !self.rec_load
             && !tok.as_cs().is_some_and(|n| n.starts_with('\u{10FFFE}'))
-            && let Some(k) = self.skip_lookup(tok)?
+            && let Some(k) = self.step_lookup(tok)?
         {
             let (c, h) = match k {
-                crate::val::SKIP_IF => (cmd::IF_TEST, 0),
-                crate::val::SKIP_OUTER => (cmd::OUTER_CALL, 0),
-                k if k >= crate::val::SKIP_FI => (
+                k if k >= crate::val::STEP_PARAM => (
+                    cmd::MAC_PARAM,
+                    i32::try_from(k - crate::val::STEP_PARAM).unwrap_or(0),
+                ),
+                crate::val::STEP_IF => (cmd::IF_TEST, 0),
+                crate::val::STEP_OUTER => (cmd::OUTER_CALL, 0),
+                k if k >= crate::val::STEP_FI => (
                     cmd::FI_OR_ELSE,
-                    i32::try_from(k - crate::val::SKIP_FI).unwrap_or(0),
+                    i32::try_from(k - crate::val::STEP_FI).unwrap_or(0),
                 ),
                 _ => (cmd::RELAX, 256),
             };
@@ -3582,28 +3594,29 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(c))
     }
 
-    /// The class of `tok`'s meaning a skipped conditional branch needs,
-    /// read through the engine's skip projection
-    /// ([`crate::val::skip_projection`]) where the run has not bound it
+    /// The class of `tok`'s meaning a token stepped over in a skipped
+    /// conditional branch, or fetched only to be stored or matched, needs,
+    /// read through the engine's step projection
+    /// ([`crate::val::step_projection`]) where the run has not bound it
     /// itself: a redefinition within the class leaves this run standing.
     /// `None` where it is this run's own, or not defined (read in full).
     #[inline(never)]
-    fn skip_lookup(&mut self, tok: Tok) -> R<Option<i64>> {
+    fn step_lookup(&mut self, tok: Tok) -> R<Option<i64>> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
         if self.st.is_loaded(l) {
             return Ok(None);
         }
-        if let Some(&k) = self.skip_memo.get(&l) {
+        if let Some(&k) = self.step_memo.get(&l) {
             return Ok(Some(k));
         }
         let f = self.loc_field(l);
-        let Some(x) = self.cx.use_field_proj(f, self.ops.skip_proj)? else {
+        let Some(x) = self.cx.use_field_proj(f, self.ops.step_proj)? else {
             return Ok(None);
         };
         let k = int_of(self.v, x);
-        self.skip_memo.insert(l, k);
+        self.step_memo.insert(l, k);
         Ok(Some(k))
     }
 
@@ -3681,7 +3694,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .class_memo
             .keys()
             .chain(self.outer_memo.keys())
-            .chain(self.skip_memo.keys())
+            .chain(self.step_memo.keys())
             .copied()
             .collect();
         let mut fs: Vec<Field> = ls.into_iter().map(|l| self.loc_field(l)).collect();
@@ -4721,7 +4734,7 @@ pub(crate) struct Parked {
     /// the run like its table's, kept over the park.
     class_memo: Vec<(Field, u8)>,
     outer_memo: Vec<(Field, bool)>,
-    skip_memo: Vec<(Field, i64)>,
+    step_memo: Vec<(Field, i64)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -4871,7 +4884,7 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|(l, o)| (self.loc_field(l), o))
                 .collect(),
-            skip_memo: std::mem::take(&mut self.skip_memo)
+            step_memo: std::mem::take(&mut self.step_memo)
                 .into_iter()
                 .map(|(l, k)| (self.loc_field(l), k))
                 .collect(),
@@ -4984,8 +4997,8 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .map(|(f, o)| (r.loc_of(f), o))
             .collect();
-        r.skip_memo = p
-            .skip_memo
+        r.step_memo = p
+            .step_memo
             .into_iter()
             .map(|(f, k)| (r.loc_of(f), k))
             .collect();

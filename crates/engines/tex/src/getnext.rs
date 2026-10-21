@@ -413,8 +413,18 @@ impl Run<'_, '_> {
             self.cur.tok = t;
             return t;
         }
-        self.next_or_end();
+        self.get_token_stored();
         self.cur.tok
+    }
+
+    /// `get_token` for a token that is stored or matched, never expanded
+    /// (a macro's arguments, a definition's parameter text and body, a
+    /// token list's body, §392, §473–§479): of a control sequence's
+    /// meaning only its class is read ([`Run::step_lookup`]).
+    pub(crate) fn get_token_stored(&mut self) {
+        let was = std::mem::replace(&mut self.step_reads, true);
+        self.next_or_end();
+        self.step_reads = was;
     }
 
     /// `get_x_token` (§380): a halt is raised, never returned.
