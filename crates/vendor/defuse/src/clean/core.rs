@@ -368,10 +368,17 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Whether `CLEAN_DEBUG` asks for traces (read once).
+/// Whether `CLEAN_DEBUG` asks for traces (read once; `profile` builds
+/// only: without the feature every trace compiles away).
+#[inline]
 pub(crate) fn debug() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CLEAN_DEBUG").is_some())
+    #[cfg(feature = "profile")]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("CLEAN_DEBUG").is_some())
+    }
+    #[cfg(not(feature = "profile"))]
+    false
 }
 
 /// Phase timers (`CLEAN_PROF`): nanoseconds per phase, summed.
@@ -385,11 +392,20 @@ pub(crate) mod prof {
         "select", "execute", "steps",
     ];
     pub(crate) static NS: [AtomicU64; 25] = [const { AtomicU64::new(0) }; 25];
+    /// Whether `CLEAN_PROF` asks for them (`profile` builds only: without
+    /// the feature every probe compiles away).
+    #[inline]
     pub(crate) fn on() -> bool {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var_os("CLEAN_PROF").is_some())
+        #[cfg(feature = "profile")]
+        {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ON.get_or_init(|| std::env::var_os("CLEAN_PROF").is_some())
+        }
+        #[cfg(not(feature = "profile"))]
+        false
     }
     /// Times `f` under phase `i`.
+    #[inline]
     pub(crate) fn time<T>(i: usize, f: impl FnOnce() -> T) -> T {
         if !on() {
             return f();
@@ -400,6 +416,7 @@ pub(crate) mod prof {
         r
     }
     /// A phase start, for spans `time` cannot wrap.
+    #[inline]
     pub(crate) fn start() -> Option<std::time::Instant> {
         on().then(std::time::Instant::now)
     }
@@ -409,12 +426,15 @@ pub(crate) mod prof {
         }
     }
     /// Event counters (shown with the timers).
-    pub(crate) const COUNTS: [&str; 22] = [
+    pub(crate) const COUNTS: [&str; 26] = [
         "results", "clean", "data_conflict", "shape_conflict", "placing", "effect_change", "deferred", "st_kids", "st_effect", "st_claim", "st_env", "st_stop", "flushes",
         // (Rechecks queued, by source; reads settle asked.)
         "rk_freed", "rk_shape", "rk_out", "rk_kind", "rk_moved", "rk_outchg", "rk_field", "rk_reads", "rk_acc",
+        // (The lane: runs past its first; why it stopped.)
+        "lane_runs", "lane_none", "lane_end", "lane_held",
     ];
-    pub(crate) static CN: [AtomicU64; 22] = [const { AtomicU64::new(0) }; 22];
+    pub(crate) static CN: [AtomicU64; 26] = [const { AtomicU64::new(0) }; 26];
+    #[inline]
     pub(crate) fn count(i: usize) {
         if on() {
             CN[i].fetch_add(1, Relaxed);

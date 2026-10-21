@@ -163,6 +163,7 @@ impl<T> Table<T> {
     }
 
     /// Whether no value is in.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
