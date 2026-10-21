@@ -368,12 +368,14 @@ impl<'a> Builder<'a> {
             *hp = map.get(hp).copied().unwrap_or(0);
         }
         // Nodes.
+        self.w.quiet = true;
         for &(q, id) in &order {
             if let Some(mut nd) = self.w.node(id).cloned() {
                 nd.pos = q;
                 self.w.put(id, nd);
             }
         }
+        self.w.quiet = false;
         let mut frames = PMap::new();
         for (&f, fr) in un.frames.iter() {
             let mut fr = *fr;

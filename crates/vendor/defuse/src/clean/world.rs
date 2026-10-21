@@ -529,6 +529,9 @@ pub(crate) struct World {
     /// its copies: see [`Log`]), and how many of them this one has.
     pub log: Log,
     pub log_len: u64,
+    /// Changes go unnoted (a renumbering's moves: its change of all
+    /// covers them).
+    pub quiet: bool,
 }
 
 /// A change to a world, as a kept state's reads see it (which of them it
@@ -560,6 +563,8 @@ struct LogInner {
     /// The number of the first change kept (earlier ones forgotten).
     base: u64,
     v: Vec<Change>,
+    /// The number of the last change of all.
+    all: Option<u64>,
 }
 
 impl Log {
@@ -571,7 +576,7 @@ impl Log {
     /// The changes numbered `from..to`, or `None` when some are forgotten.
     pub(crate) fn since(&self, from: u64, to: u64) -> Option<Vec<Change>> {
         let g = super::core::lock(&self.0);
-        if from < g.base || to > g.base + g.v.len() as u64 || from > to {
+        if from < g.base || to > g.base + g.v.len() as u64 || from > to || g.all.is_some_and(|a| a >= from && a < to) {
             return None;
         }
         Some(g.v[(from - g.base) as usize..(to - g.base) as usize].to_vec())
@@ -669,6 +674,9 @@ impl World {
     /// Records change `c` (made to this world).
     #[inline]
     pub(crate) fn note(&mut self, c: Change) {
+        if self.quiet {
+            return;
+        }
         let mut g = super::core::lock(&self.log.0);
         // (A copy behind the branch's end: its changes are another branch.)
         if self.log_len != g.base + g.v.len() as u64 {
@@ -676,6 +684,9 @@ impl World {
             self.log = Log::default();
             g = super::core::lock(&self.log.0);
             g.base = self.log_len;
+        }
+        if matches!(c, Change::All) {
+            g.all = Some(g.base + g.v.len() as u64);
         }
         g.v.push(c);
         self.log_len = g.base + g.v.len() as u64;

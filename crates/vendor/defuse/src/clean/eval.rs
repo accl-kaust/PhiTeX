@@ -149,6 +149,23 @@ struct Heights {
     at: FxHashMap<Id, [u64; 4]>,
     /// The node `height` just filed in `hc` (its commit time goes there too).
     hc_new: Option<Id>,
+    /// Every run's entry, in commit order, its link naming the entry of
+    /// the run it stood on as it was then (a node's later runs do not
+    /// move it: the chain walks back in time); each node's last entry,
+    /// and its entry as of the run that last changed its contributions.
+    runs: Vec<Link>,
+    cur: FxHashMap<Id, usize>,
+    cur_c: FxHashMap<Id, usize>,
+}
+
+/// A run's entry in the chain: its node, height, link and why, and when
+/// it was queued, started, ended and committed.
+struct Link {
+    id: Id,
+    h: u32,
+    next: Option<usize>,
+    cause: crate::api::Cause,
+    at: [u64; 4],
 }
 
 impl Heights {
@@ -162,6 +179,9 @@ impl Heights {
             && let Some(e) = self.hc.get_mut(&id)
         {
             e.2[3] = c;
+        }
+        if let Some(&k) = self.cur.get(&id) {
+            self.runs[k].at[3] = c;
         }
     }
 }
@@ -570,6 +590,11 @@ impl Engine {
         rep.created = std::mem::take(&mut self.created);
         rep.freed = std::mem::take(&mut self.freed);
         rep.rebinds = std::mem::take(&mut self.rebinds);
+        // (The changes no kept state's index looks back to are forgotten.)
+        let kept = &self.kept;
+        self.kept_ix.retain(|id, _| kept.contains_key(id));
+        let low = self.kept_ix.values().filter(|ix| ix.log.same(&self.w.log)).map(|ix| ix.from).min();
+        self.w.log.forget(low.unwrap_or(self.w.log_len));
         rep.kept_asked = std::mem::take(&mut self.kept_asked);
         rep.kept_held = std::mem::take(&mut self.kept_held);
         rep.edits = self.edits;
@@ -1508,6 +1533,7 @@ impl Engine {
     /// those its index names (a change since its last check reaches
     /// them), or all; none broken, the index is brought up to now.
     fn kept_first_broken(&mut self, id: Id) -> Option<Read> {
+        let _t = super::core::prof::Span::new(46);
         let reads = &self.kept.get(&id)?.1;
         let n = reads.len();
         let ask = self.kept_ix.get(&id).and_then(|ix| ix.suspects(&self.w, n));
@@ -1517,6 +1543,10 @@ impl Engine {
             None => reads.iter().find(|r| !holds(r)),
         };
         let asked = ask.as_ref().map_or(n, Vec::len) as u64;
+        if ask.is_none() {
+            super::core::prof::add(31, u64::from(!self.kept_ix.contains_key(&id)));
+            super::core::prof::add(37, n as u64);
+        }
         if kept_check()
             && ask.is_some()
             && broken.is_none()
@@ -1535,7 +1565,7 @@ impl Engine {
                 *ix = KeptIx::new(&self.w, self.w.log_len);
             }
             ix.from = self.w.log_len;
-            ix.add(&self.w, id, reads);
+            super::core::prof::time(45, || ix.add(&self.w, id, reads));
         }
         broken
     }
@@ -1742,7 +1772,7 @@ impl Engine {
                         let t_ns = s.time.get(&id).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
                         let t = super::core::now();
                         let span = r.span.map(|(a, b)| (s.ran_ready.get(&id).copied().unwrap_or(a).min(a), a, b));
-                        self.height(hs, id, &r.res, r.fold_redo, span, t_ns);
+                        self.height(hs, id, &r.res, r.fold_redo, span, t_ns, false);
                         rep.merge.heights += super::core::ns_since(t);
                     }
                     let dbg = super::core::debug().then(|| format!("{:?} out {}", r.res.reads, self.core.values.render(r.res.out)));
@@ -1792,7 +1822,16 @@ impl Engine {
                     }
                 }
                 Outcome::Stopped(mut r, wait) => {
+                    let _t = super::core::prof::Span::new(42);
                     rep.stops += 1;
+                    // (An attempt whose placements are committed below: its
+                    // entry in the chain, what it placed standing on it.)
+                    if hs.on && (matches!(wait, Wait::Child(_)) || !r.kids.is_empty() || !r.conts.is_empty()) {
+                        let t_ns = s.time.get(&id).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+                        let span = r.span.map(|(a, b)| (s.ran_ready.get(&id).copied().unwrap_or(a).min(a), a, b));
+                        self.height(hs, id, &r.res, r.fold_redo, span, t_ns, true);
+                        hs.committed(id);
+                    }
                     self.stopped += 1;
                     if let Some(rw) = r.range_wait {
                         s.range_wait.insert(id, rw);
@@ -1844,7 +1883,7 @@ impl Engine {
                             _ => KeptIx::new(&self.w, r.log_at),
                         };
                         let mut ix = ix;
-                        ix.add(&self.w, id, &reads);
+                        super::core::prof::time(45, || ix.add(&self.w, id, &reads));
                         self.kept_ix.insert(id, ix);
                         self.kept.insert(id, (k, reads, base));
                     }
@@ -1878,7 +1917,7 @@ impl Engine {
                     // finisher it holds).
                     let unfold = matches!(wait, Wait::Child(_)) || !r.kids.is_empty() || !r.conts.is_empty();
                     let past = |w: &World| match &wait {
-                        Wait::Node(x, _) if !w.awaiting.is_empty() => super::build::passed(w, id, *x),
+                        Wait::Node(x, _) if !w.awaiting.is_empty() => super::core::prof::time(44, || super::build::passed(w, id, *x)),
                         _ => Vec::new(),
                     };
                     if unfold || !past(&self.w).is_empty() {
@@ -1889,7 +1928,7 @@ impl Engine {
                         let mut b = Builder::new(&self.core, w);
                         if unfold {
                             b.cont = r.base.map(|x| (x.0, x.1));
-                            b.commit_unfolding(id, &r.kids, &r.conts);
+                            super::core::prof::time(43, || b.commit_unfolding(id, &r.kids, &r.conts));
                             b.cont = None;
                         }
                         let gone = past(&b.w);
@@ -2008,20 +2047,24 @@ impl Engine {
     /// (A range read is over the window's last contributor as it last
     /// contributed; none on a `fold_redo` commit, whose folds waited for
     /// nothing.)
-    fn height(&self, hs: &mut Heights, id: Id, res: &Res, fold_redo: bool, span: Option<(std::time::Instant, std::time::Instant, std::time::Instant)>, t_ns: u64) {
+    /// (`stop`: an attempt that stopped, its placements committed: what it
+    /// placed stands on it; its contributions are not committed.)
+    #[allow(clippy::too_many_arguments)]
+    fn height(&self, hs: &mut Heights, id: Id, res: &Res, fold_redo: bool, span: Option<(std::time::Instant, std::time::Instant, std::time::Instant)>, t_ns: u64, stop: bool) {
         use crate::api::Cause;
-        let mut best: Option<(u32, Id, Cause)> = None;
+        let mut best: Option<(u32, Id, Cause, Option<usize>)> = None;
         let mut best_t = 0u64;
         let mut offer = |hs: &Heights, x: Id, c: Cause| {
             // (A range's contributor: as it last contributed.)
-            let at = match c {
-                Cause::Range { .. } => hs.hc.get(&x).map(|e| (e.0.0, e.1)),
-                _ => None,
+            let (at, k) = match c {
+                Cause::Range { .. } => (hs.hc.get(&x).map(|e| (e.0.0, e.1)), hs.cur_c.get(&x)),
+                _ => (None, None),
             };
+            let k = k.or_else(|| hs.cur.get(&x)).copied();
             if let Some((h, t)) = at.or_else(|| hs.h.get(&x).map(|e| (e.0, hs.t.get(&x).copied().unwrap_or(0)))) {
                 best_t = best_t.max(t);
                 if best.as_ref().is_none_or(|b| h > b.0) {
-                    best = Some((h, x, c));
+                    best = Some((h, x, c, k));
                 }
             }
         };
@@ -2114,8 +2157,9 @@ impl Engine {
                 }
             }
         }
+        let link = best.as_ref().and_then(|b| b.3);
         let v = match best {
-            Some((h, x, c)) => (h + 1, Some(x), c),
+            Some((h, x, c, _)) => (h + 1, Some(x), c),
             None => (0, None, created),
         };
         let rel = |t: std::time::Instant| hs.epoch.map_or(0, |e| u64::try_from(t.saturating_duration_since(e).as_nanos()).unwrap_or(u64::MAX));
@@ -2123,9 +2167,19 @@ impl Engine {
         hs.at.insert(id, at);
         let same = self.w.node(id).and_then(|n| n.res.as_ref()).is_some_and(|old| old.contribs == res.contribs);
         hs.hc_new = None;
-        if !same || !hs.hc.contains_key(&id) {
+        let k = hs.runs.len();
+        hs.runs.push(Link {
+            id,
+            h: v.0,
+            next: link,
+            cause: v.2.clone(),
+            at,
+        });
+        hs.cur.insert(id, k);
+        if !stop && (!same || !hs.hc.contains_key(&id)) {
             hs.hc.insert(id, (v.clone(), best_t + t_ns, at));
             hs.hc_new = Some(id);
+            hs.cur_c.insert(id, k);
         }
         hs.h.insert(id, v);
         hs.t.insert(id, best_t + t_ns);
@@ -2485,19 +2539,12 @@ fn chain_of(hs: &Heights) -> Vec<(NodeId, u32, crate::api::Cause, [u64; 4])> {
     let Some((&top, _)) = hs.h.iter().max_by_key(|(id, v)| (v.0, std::cmp::Reverse(**id))) else {
         return Vec::new();
     };
+    // (Each link to an earlier entry: the walk ends.)
     let mut out = Vec::new();
-    let mut x = Some(top);
-    // (Through a range link, the contributor as it last contributed.)
-    let mut via_range = false;
-    while let Some(id) = x {
-        let e = if via_range { hs.hc.get(&id).map(|e| (&e.0, e.2)) } else { None };
-        let Some(((h, next, c), at)) = e.or_else(|| hs.h.get(&id).map(|e| (e, hs.at.get(&id).copied().unwrap_or_default()))) else { break };
-        out.push((NodeId(id), *h, c.clone(), at));
-        via_range = matches!(c, crate::api::Cause::Range { .. });
-        x = *next;
-        if out.len() > hs.h.len() + hs.hc.len() {
-            break;
-        }
+    let mut k = hs.cur.get(&top).copied();
+    while let Some(e) = k.map(|k| &hs.runs[k]) {
+        out.push((NodeId(e.id), e.h, e.cause.clone(), e.at));
+        k = e.next;
     }
     out
 }
@@ -3365,11 +3412,12 @@ pub(crate) struct KeptIx {
 }
 
 impl KeptIx {
-    /// An index of no reads, checked as of world `w`.
-    fn new(w: &World, at: u64) -> KeptIx {
+    /// An index of no reads, checked as of length `from` of `w`'s log
+    /// (its positions `w`'s).
+    fn new(w: &World, from: u64) -> KeptIx {
         KeptIx {
             log: w.log.clone(),
-            from: at,
+            from,
             relabels: w.relabels,
             ..KeptIx::default()
         }
@@ -3378,7 +3426,7 @@ impl KeptIx {
     /// Indexes node `me`'s kept reads past those indexed, by `w`'s positions.
     fn add(&mut self, w: &World, me: Id, reads: &[Read]) {
         for (i, r) in reads.iter().enumerate().skip(self.n) {
-            let mut node = |x: Id, ix: &mut Self| {
+            let node = |x: Id, ix: &mut Self| {
                 if x != super::world::NONE && x != me {
                     ix.nodes.entry(x).or_default().push(i);
                 }
@@ -3423,33 +3471,81 @@ impl KeptIx {
     /// always; `None`: all (another branch, a renumbering, changes
     /// forgotten).
     fn suspects(&self, w: &World, n: usize) -> Option<Vec<usize>> {
-        if !self.log.same(&w.log) || w.relabels != self.relabels || n < self.n {
+        let why = if !self.log.same(&w.log) {
+            32
+        } else if w.relabels != self.relabels {
+            33
+        } else if n < self.n {
+            34
+        } else {
+            0
+        };
+        if why != 0 {
+            super::core::prof::add(why, 1);
             return None;
         }
-        let changes = w.log.since(self.from, w.log_len)?;
+        let Some(changes) = w.log.since(self.from, w.log_len) else {
+            super::core::prof::add(35, 1);
+            return None;
+        };
+        // (The changes by what they name first: a field's positions, once
+        // each; then the reads they name, each index looked up once.)
+        let mut fields: FxHashMap<(u32, Field), Vec<Pos>> = FxHashMap::default();
+        let (mut nodes, mut order, mut frames, mut loops) =
+            (FxHashSet::default(), FxHashSet::default(), FxHashSet::default(), FxHashSet::default());
+        for c in changes {
+            match c {
+                super::world::Change::All => {
+                    super::core::prof::add(36, 1);
+                    return None;
+                }
+                super::world::Change::Field(u, f, p) => fields.entry((u, f)).or_default().push(p),
+                super::world::Change::Node(x) => {
+                    nodes.insert(x);
+                }
+                super::world::Change::Order(u) => {
+                    order.insert(u);
+                }
+                super::world::Change::Frames(u) => {
+                    frames.insert(u);
+                }
+                super::world::Change::Loop(f) => {
+                    loops.insert(f);
+                }
+            }
+        }
         let mut out: Vec<usize> = self.always.clone();
         out.extend(self.n..n);
         let mut add = |v: Option<&Vec<usize>>| out.extend(v.into_iter().flatten().copied());
-        for c in changes {
-            match c {
-                super::world::Change::All => return None,
-                super::world::Change::Field(u, f, p) => {
-                    if let Some(m) = self.ranges.get(&(u, f)) {
-                        for (_, v) in m.range((std::ops::Bound::Excluded(p), std::ops::Bound::Unbounded)) {
-                            add(Some(&v.iter().filter(|e| e.0 < p).map(|e| e.1).collect()));
-                        }
-                    }
-                    if let Some(m) = self.uses.get(&(u, f)) {
-                        for (_, v) in m.range((std::ops::Bound::Excluded(p), std::ops::Bound::Unbounded)) {
-                            add(Some(v));
-                        }
-                    }
+        for (k, mut ps) in fields {
+            ps.sort_unstable();
+            ps.dedup();
+            let low = std::ops::Bound::Excluded(ps[0]);
+            // (A window: when a change is inside it; a use: when one is
+            // before it.)
+            if let Some(m) = self.ranges.get(&k) {
+                for (&hi, v) in m.range((low, std::ops::Bound::Unbounded)) {
+                    let inside = |lo: Pos| ps.get(ps.partition_point(|&q| q <= lo)).is_some_and(|&q| q < hi);
+                    add(Some(&v.iter().filter(|e| inside(e.0)).map(|e| e.1).collect()));
                 }
-                super::world::Change::Node(x) => add(self.nodes.get(&x)),
-                super::world::Change::Order(u) => add(self.order.get(&u)),
-                super::world::Change::Frames(u) => add(self.frames.get(&u)),
-                super::world::Change::Loop(f) => add(self.loops.get(&f)),
             }
+            if let Some(m) = self.uses.get(&k) {
+                for (_, v) in m.range((low, std::ops::Bound::Unbounded)) {
+                    add(Some(v));
+                }
+            }
+        }
+        for x in &nodes {
+            add(self.nodes.get(x));
+        }
+        for u in &order {
+            add(self.order.get(u));
+        }
+        for u in &frames {
+            add(self.frames.get(u));
+        }
+        for f in &loops {
+            add(self.loops.get(f));
         }
         out.sort_unstable();
         out.dedup();

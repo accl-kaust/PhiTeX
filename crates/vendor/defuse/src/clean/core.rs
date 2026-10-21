@@ -427,7 +427,7 @@ pub(crate) fn ns_since(t: Option<std::time::Instant>) -> u64 {
 /// Phase timers (`CLEAN_PROF`): nanoseconds per phase, summed.
 pub(crate) mod prof {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    pub(crate) const NAMES: [&str; 42] = [
+    pub(crate) const NAMES: [&str; 47] = [
         "op", "apply", "settle_claims", "settle", "frames", "held_by", "prepare", "unguess", "absorb", "commit", "place", "reads", "defs", "contribs", "claimed", "outs",
         "set_contrib", "range_readers",
         "read_at", "pset_between", "flush", "reaching",
@@ -444,8 +444,11 @@ pub(crate) mod prof {
         // and claim entries, the in-work index, the contributors' index,
         // the node map.)
         "put_pset", "put_claims", "put_work", "put_acc", "put_map",
+        // (A stop: all of it; its unfolding committed; what it is past;
+        // its kept reads indexed; kept states' reads re-asked.)
+        "stop", "unfold", "passed", "kept_ix", "kept_ask",
     ];
-    pub(crate) static NS: [AtomicU64; 42] = [const { AtomicU64::new(0) }; 42];
+    pub(crate) static NS: [AtomicU64; 47] = [const { AtomicU64::new(0) }; 47];
     /// Whether `CLEAN_CONFLICTS` asks for the conflict counts (what keys
     /// a step's commits changed under its later results; `profile` builds
     /// only): every change is logged by key for them.
@@ -515,7 +518,7 @@ pub(crate) mod prof {
         }
     }
     /// Event counters (shown with the timers).
-    pub(crate) const COUNTS: [&str; 31] = [
+    pub(crate) const COUNTS: [&str; 38] = [
         "results", "clean", "data_conflict", "shape_conflict", "placing", "effect_change", "deferred", "st_kids", "st_effect", "st_claim", "st_env", "st_stop", "flushes",
         // (Rechecks queued, by source; reads settle asked.)
         "rk_freed", "rk_shape", "rk_out", "rk_kind", "rk_moved", "rk_outchg", "rk_field", "rk_reads", "rk_acc",
@@ -525,8 +528,12 @@ pub(crate) mod prof {
         // them, entries filed or unfiled, reruns whose old entries were
         // made again from their reads, not as filed.)
         "rd_reads", "rd_keyn", "rd_dups", "rd_filed", "rd_refile",
+        // (Kept states asked in full, why: no index, another log branch, a
+        // renumbering, fewer reads, changes forgotten, a change of all;
+        // the reads asked so.)
+        "kx_none", "kx_branch", "kx_relabel", "kx_short", "kx_forgot", "kx_all", "kx_reads",
     ];
-    pub(crate) static CN: [AtomicU64; 31] = [const { AtomicU64::new(0) }; 31];
+    pub(crate) static CN: [AtomicU64; 38] = [const { AtomicU64::new(0) }; 38];
     #[inline]
     pub(crate) fn count(i: usize) {
         if on() {
