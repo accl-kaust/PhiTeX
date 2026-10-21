@@ -1092,11 +1092,9 @@ impl Run<'_, '_> {
         // (the same test as for a file the text names, `inputs.rs`: a
         // file that ends itself early or reads its own line numbers is
         // read inline)
-        crate::hints::file_kind_of(self.v, f.id, f.name) == phitex_source::pass::FileKind::Document
-            && crate::inputs::document_file(
-                &crate::val::str_of(self.v, f.name),
-                &crate::val::str_of(self.v, f.id),
-            )
+        phitex_source::pass::FileKind::from_path(&crate::val::str_of(self.v, f.name))
+            == phitex_source::pass::FileKind::Document
+            && crate::hints::document_text_of(self.v, f.id)
     }
 
     // ---------------------------------------------------- line scanning

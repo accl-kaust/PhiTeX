@@ -1362,7 +1362,7 @@ pub struct DefSet {
 /// The hasher of [`Acc`]'s sets: a multiply-rotate over the bytes, eight
 /// at a time (names, no adversary).
 #[derive(Default, Clone, Copy)]
-struct Fx(u64);
+pub(crate) struct Fx(u64);
 
 impl Fx {
     fn mix(&mut self, x: u64) {

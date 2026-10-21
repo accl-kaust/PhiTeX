@@ -760,37 +760,46 @@ impl Run<'_, '_> {
         if !inside_possible {
             return (ValueId::UNIT, ValueId::UNIT);
         }
-        let mut rs: Vec<ValueId> = self
+        let mut rs: Vec<(Field, ValueId)> = self
             .st
             .read_values()
             .into_iter()
-            .map(|(l, x)| {
-                let f = self.loc_field(l);
-                v.list(vec![f.0, opt_val(x)])
-            })
+            .map(|(l, x)| (self.loc_field(l), opt_val(x)))
             .collect();
         // (a meaning read by its class only: no value a routine's
         // definition can equal, so any global definition of it by the
         // routine counts as a change, [`Run::check_cut`])
         let class = v.str("\u{1}class");
-        rs.extend(
-            self.class_read_fields()
-                .into_iter()
-                .map(|f| v.list(vec![f.0, class])),
-        );
+        rs.extend(self.class_read_fields().into_iter().map(|f| (f, class)));
         // (by field, never by location: a location's number is the order
         // the job's runs first met its field in, which the threads decide,
         // so a value holding them in that order differs between two
-        // builds of one text)
-        rs.sort_by_key(|x| list_of(v, *x).first().map(|f| f.raw()));
+        // builds of one text; stable, as the value list's)
+        rs.sort_by_key(|x| x.0.0.raw());
+        let rs: Vec<ValueId> = rs.into_iter().map(|(f, x)| v.list(vec![f.0, x])).collect();
         let gids = self.st.gid_mark();
-        let locals: Vec<(Loc, Field)> = self
+        let mut locals: Vec<(Loc, Field)> = self
             .st
             .defined_since(v, 0, gids)
             .into_iter()
             .filter(|(_, _, l)| *l == Locality::Local)
             .map(|(l, _, _)| (l, self.loc_field(l)))
             .collect();
+        // (by field once for every candidate: a candidate's names are
+        // these merged with its own, the first of a field kept)
+        locals.sort_by_key(|x| x.1.0.raw());
+        // (every definition of the run, by field once, a standing one
+        // first: a candidate's are those made after it, filtered in
+        // order, [`State::defined_since`])
+        let mut defs: Vec<RunDef> = self
+            .st
+            .defined_stamped()
+            .into_iter()
+            .map(|(l, stamp, local, gid)| {
+                (self.loc_field(l), self.st.def_stands(l), l, stamp, local, gid)
+            })
+            .collect();
+        defs.sort_by_key(|x| (x.0.0.raw(), !x.1));
         let marks = self.cand_marks.clone();
         // (a location defined after a candidate with its value there,
         // where the run had it: the page's routine, which runs at the
@@ -798,63 +807,82 @@ impl Run<'_, '_> {
         // value: the routine reading it after the run cuts the piece,
         // [`Run::check_cut`])
         let at = self.st.at_candidates(v);
-        let mut per = Vec::with_capacity(n);
-        for (i, m) in marks.iter().enumerate() {
-            if Some(m.k) == last {
-                per.push(v.list(vec![v.list(Vec::new()), v.int(0)]));
-                continue;
-            }
-            // (`[value]` or `[]` (absent) where the run had it; one it had
-            // neither read nor defined before is what reached the piece,
-            // [`BEFORE_PIECE`], the finisher reads it there)
-            let kv_of = |l: Loc| match at.get(i).and_then(|a| a.get(&l).copied()) {
-                Some(Some(x)) => v.list(x.into_iter().collect()),
-                Some(None) => v.str(BEFORE_PIECE),
-                None => ValueId::UNIT,
-            };
-            let mut names: Vec<(ValueId, bool, ValueId)> = locals
-                .iter()
-                .map(|&(l, f)| (f.0, false, kv_of(l)))
-                .collect();
-            for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
-                let stands = self.st.def_stands(l);
-                names.push((self.loc_field(l).0, stands, kv_of(l)));
-            }
-            // (a binding local to a group of the run open at the
-            // candidate, restored at the group's close after it: the
-            // routine runs inside that group and sees the binding, which
-            // the run's end no longer holds, §1012)
-            if let Some(a) = at.get(i) {
-                let mut restored: Vec<Loc> = a
-                    .iter()
-                    .filter_map(|(&l, &x)| x.map(|x| (l, x)))
-                    .filter(|&(l, x)| self.st.id_of(l, v) != x)
-                    .map(|(l, _)| l)
-                    .collect();
-                restored.sort_unstable();
-                for l in restored {
-                    names.push((self.loc_field(l).0, false, kv_of(l)));
-                }
-            }
-            names.extend(
-                self.streams_since(m.contribs)
-                    .into_iter()
-                    .map(|f| (f.0, false, ValueId::UNIT)),
-            );
-            names.sort_unstable_by_key(|x| (x.0.raw(), !x.1));
-            names.dedup_by_key(|x| x.0);
-            // (with whether the run could end there: a finisher of a page
-            // firing at a candidate where it could not runs its routine
-            // as if there, and the piece's definitions after it stand)
-            let names = v.list(
-                names
-                    .into_iter()
-                    .map(|(f, g, kv)| v.list(vec![f, v.int(i64::from(g)), kv]))
-                    .collect(),
-            );
-            per.push(v.list(vec![names, v.int(i64::from(m.cuttable))]));
+        // (each location some candidate holds, by field (then location),
+        // with its value where the run ends: a candidate's restored
+        // bindings are these filtered, in order)
+        let mut held: Vec<(Field, Loc, Option<ValueId>)> = Vec::new();
+        for l in at.locs() {
+            let f = self.loc_field(l);
+            held.push((f, l, self.st.id_of(l, v)));
         }
-        (v.list(rs), v.list(per))
+        held.sort_unstable_by_key(|x| (x.0.0.raw(), x.1));
+        // (a candidate's `[value]` lists, one per value: the same value
+        // stands at many candidates)
+        let kvs: std::cell::RefCell<phitex_defuse::FxHashMap<Option<ValueId>, ValueId>> = std::cell::RefCell::default();
+        let kv_list = |x: Option<ValueId>| {
+            *kvs.borrow_mut()
+                .entry(x)
+                .or_insert_with(|| v.list(x.into_iter().collect()))
+        };
+        let before = v.str(BEFORE_PIECE);
+        // (`[value]` or `[]` (absent) where the run had it; one it had
+        // neither read nor defined before is what reached the piece,
+        // [`BEFORE_PIECE`], the finisher reads it there)
+        let kv_at = |i: usize, l: Loc| match at.get(i, l) {
+            Some(Some(x)) => kv_list(x),
+            Some(None) => before,
+            None => ValueId::UNIT,
+        };
+        // (the files written after each candidate)
+        let streams: Vec<Vec<Field>> = marks.iter().map(|m| self.streams_since(m.contribs)).collect();
+        let is_last: Vec<bool> = marks.iter().map(|m| Some(m.k) == last).collect();
+        // (with whether the run could end there: a finisher of a page
+        // firing at a candidate where it could not runs its routine as if
+        // there, and the piece's definitions after it stand)
+        let cuts: Vec<ValueId> = marks
+            .iter()
+            .zip(&is_last)
+            .map(|(m, &l)| v.int(i64::from(m.cuttable && !l)))
+            .collect();
+        let src = NameSources {
+            n,
+            marks: &marks,
+            is_last: &is_last,
+            locals: &locals,
+            defs: &defs,
+            held: &held,
+            streams: &streams,
+            at: &at,
+        };
+        // (the candidates in the run's order, their stamps, groups and
+        // contributions growing: each name's stretches found from where
+        // its sources change, not from every candidate's names)
+        let monotone = marks.windows(2).all(|w| {
+            w[0].stamp <= w[1].stamp && w[0].gids <= w[1].gids && w[0].contribs <= w[1].contribs
+        });
+        let mut stretches = if monotone {
+            src.by_field(&kv_at)
+        } else {
+            src.by_candidate(&kv_at)
+        };
+        if crate::exec::obs_flag!("PHITEX_STRETCHES_CHECK") && monotone {
+            let mut a = stretches.clone();
+            let mut b = src.by_candidate(&kv_at);
+            a.sort_unstable_by_key(|x| (x.0.raw(), x.3));
+            b.sort_unstable_by_key(|x| (x.0.raw(), x.3));
+            assert!(a == b, "check data stretches differ: {} by field, {} by candidate", a.len(), b.len());
+        }
+        // (by field, then by the stretch's first candidate: one list
+        // whatever order the run met them in)
+        stretches.sort_unstable_by_key(|x| (x.0.raw(), x.3));
+        let stretches = stretches
+            .into_iter()
+            .map(|(f, g, kv, lo, hi)| {
+                let n = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
+                v.list(vec![f, v.int(i64::from(g)), kv, n(lo), n(hi)])
+            })
+            .collect();
+        (v.list(rs), v.list(vec![v.list(stretches), v.list(cuts)]))
     }
 
     /// A piece's end when no page needs finding in its own run: its
@@ -1679,4 +1707,261 @@ pub(crate) fn unit_items(v: &Values, u: ValueId) -> Vec<ValueId> {
         .get(2)
         .map(|&x| list_of(v, x))
         .unwrap_or_default()
+}
+
+/// Two lists each sorted by field then standing first, merged in that
+/// order, `a`'s before `b`'s at a tie: a stable sort of `a` then `b`.
+fn merge_stable(
+    a: impl Iterator<Item = (ValueId, bool, ValueId)>,
+    b: Vec<(ValueId, bool, ValueId)>,
+) -> Vec<(ValueId, bool, ValueId)> {
+    let key = |x: &(ValueId, bool, ValueId)| (x.0.raw(), !x.1);
+    let mut out = Vec::with_capacity(b.len());
+    let mut b = b.into_iter().peekable();
+    for x in a {
+        while let Some(y) = b.next_if(|y| key(y) < key(&x)) {
+            out.push(y);
+        }
+        out.push(x);
+    }
+    out.extend(b);
+    out
+}
+
+/// A piece's names at candidate `k` from its check data
+/// ([`Run::check_data`]): the names list (each `[field, standing,
+/// value]`, by field) and whether the run could end there; `UNIT` and
+/// `false` past its candidates. Kept as stretches of candidates each
+/// name stands over, one list for the piece, not a list per candidate:
+/// a piece with thousands of candidates has its definitions after each.
+pub(crate) fn names_at(v: &Values, data: ValueId, k: u32) -> (ValueId, bool) {
+    let d = list_of(v, data);
+    let (Some(&stretches), Some(&cuts)) = (d.first(), d.get(1)) else {
+        return (ValueId::UNIT, false);
+    };
+    let k = i64::from(k);
+    let Some(&cut) = list_of(v, cuts).get(usize::try_from(k).unwrap_or(usize::MAX)) else {
+        return (ValueId::UNIT, false);
+    };
+    let names = list_of(v, stretches)
+        .into_iter()
+        .filter_map(|s| {
+            let s = list_of(v, s);
+            (int_of(v, s[3]) <= k && k < int_of(v, s[4])).then(|| v.list(s[..3].to_vec()))
+        })
+        .collect();
+    (v.list(names), int_of(v, cut) != 0)
+}
+
+/// A definition the run made: its field, whether it stands, its
+/// location, its stamp, whether local and the group it was made in
+/// ([`State::defined_stamped`]).
+type RunDef = (Field, bool, Loc, u64, bool, Option<u32>);
+
+/// A field's name over a stretch of candidates `[lo, hi)`: the field,
+/// whether its definition stands, its value there.
+type Stretch = (ValueId, bool, ValueId, usize, usize);
+
+/// What a piece's names at its candidates are made of
+/// ([`Run::check_data`]): a candidate's names are its locals, the
+/// definitions after it, its restored bindings and the files written
+/// after it, by field, a standing definition first, the first of a
+/// field kept (at a tie, in that order).
+struct NameSources<'a> {
+    n: usize,
+    marks: &'a [CandMark],
+    is_last: &'a [bool],
+    locals: &'a [(Loc, Field)],
+    defs: &'a [RunDef],
+    held: &'a [(Field, Loc, Option<ValueId>)],
+    streams: &'a [Vec<Field>],
+    at: &'a crate::runstate::AtCandidates,
+}
+
+/// One source of a field's name ([`NameSources::by_field`]): its rank
+/// at a tie (not standing, source, place in it), whether it stands, the
+/// candidates it covers and the location its value is read at (none: no
+/// value).
+struct NameSource {
+    rank: (bool, u8, usize),
+    stands: bool,
+    covers: Vec<(usize, usize)>,
+    loc: Option<Loc>,
+}
+
+impl NameSources<'_> {
+    /// Every candidate's names, each made in full, folded into stretches.
+    fn by_candidate(&self, kv_at: &dyn Fn(usize, Loc) -> ValueId) -> Vec<Stretch> {
+        let mut open: phitex_defuse::FxHashMap<ValueId, (bool, ValueId, usize, usize)> =
+            phitex_defuse::FxHashMap::default();
+        let mut stretches: Vec<Stretch> = Vec::new();
+        for (i, m) in self.marks.iter().enumerate() {
+            if !self.is_last[i] {
+                let kv_of = |l: Loc| kv_at(i, l);
+                // (a binding local to a group of the run open at the
+                // candidate, restored at the group's close after it: the
+                // routine runs inside that group and sees the binding,
+                // which the run's end no longer holds, §1012)
+                let restored = self.held.iter().filter_map(|&(f, l, end)| match self.at.get(i, l) {
+                    Some(Some(x)) if x != end => Some((f.0, false, kv_of(l))),
+                    _ => None,
+                });
+                let mut streams: Vec<(ValueId, bool, ValueId)> =
+                    self.streams[i].iter().map(|f| (f.0, false, ValueId::UNIT)).collect();
+                streams.sort_by_key(|x| x.0.raw());
+                let names = merge_stable(restored, streams);
+                let after = self
+                    .defs
+                    .iter()
+                    .filter(|d| d.3 > m.stamp && !(d.4 && d.5.is_some_and(|g| g > m.gids)))
+                    .map(|d| (d.0.0, d.1, kv_of(d.2)));
+                let own = merge_stable(after, names);
+                let locals = self.locals.iter().map(|&(l, f)| (f.0, false, kv_of(l)));
+                let mut names = merge_stable(locals, own);
+                names.dedup_by_key(|x| x.0);
+                for (f, g, kv) in names {
+                    match open.get_mut(&f) {
+                        Some(o) if o.0 == g && o.1 == kv => o.3 = i,
+                        _ => {
+                            if let Some(o) = open.insert(f, (g, kv, i, i)) {
+                                stretches.push((f, o.0, o.1, o.2, o.3 + 1));
+                            }
+                        }
+                    }
+                }
+            }
+            // (a name this candidate's names lack ends its stretch)
+            open.retain(|&f, o| {
+                if o.3 == i {
+                    return true;
+                }
+                stretches.push((f, o.0, o.1, o.2, o.3 + 1));
+                false
+            });
+        }
+        stretches.extend(open.into_iter().map(|(f, o)| (f, o.0, o.1, o.2, o.3 + 1)));
+        stretches
+    }
+
+    /// The stretches field by field, the candidates in the run's order
+    /// (their stamps, groups and contributions growing): a definition
+    /// covers the candidates before it that its group is open at, a
+    /// value changes only where a candidate holds the location, so a
+    /// field's name is looked at only where one of its sources changes.
+    fn by_field(&self, kv_at: &dyn Fn(usize, Loc) -> ValueId) -> Vec<Stretch> {
+        let n = self.n;
+        let lasts: Vec<usize> = (0..n).filter(|&i| self.is_last[i]).collect();
+        let mut out: Vec<Stretch> = Vec::new();
+        let mut cuts: Vec<usize> = Vec::new();
+        for (f, mut srcs) in self.sources() {
+            srcs.sort_by_key(|s| s.rank);
+            cuts.clear();
+            cuts.extend([0, n]);
+            for &i in &lasts {
+                cuts.extend([i, i + 1]);
+            }
+            for s in &srcs {
+                for &(a, b) in &s.covers {
+                    cuts.extend([a, b]);
+                }
+                if let Some(l) = s.loc {
+                    cuts.extend(self.at.history(l).iter().map(|x| x.0 + 1));
+                }
+            }
+            cuts.retain(|&c| c <= n);
+            cuts.sort_unstable();
+            cuts.dedup();
+            let mut cur: Option<Stretch> = None;
+            for w in cuts.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let name = if self.is_last[a] {
+                    None
+                } else {
+                    srcs.iter()
+                        .find(|s| s.covers.iter().any(|&(lo, hi)| lo <= a && a < hi))
+                        .map(|s| (s.stands, s.loc.map_or(ValueId::UNIT, |l| kv_at(a, l))))
+                };
+                match (&mut cur, name) {
+                    (Some(c), Some((g, kv))) if c.1 == g && c.2 == kv && c.4 == a => c.4 = b,
+                    (_, name) => {
+                        if let Some(c) = cur.take() {
+                            out.push(c);
+                        }
+                        cur = name.map(|(g, kv)| (f, g, kv, a, b));
+                    }
+                }
+            }
+            if let Some(c) = cur {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Each field's sources, with the candidates each covers.
+    fn sources(&self) -> phitex_defuse::FxHashMap<ValueId, Vec<NameSource>> {
+        let n = self.n;
+        let mut by: phitex_defuse::FxHashMap<ValueId, Vec<NameSource>> = phitex_defuse::FxHashMap::default();
+        for (k, &(l, f)) in self.locals.iter().enumerate() {
+            by.entry(f.0).or_default().push(NameSource {
+                rank: (true, 0, k),
+                stands: false,
+                covers: vec![(0, n)],
+                loc: Some(l),
+            });
+        }
+        for (k, d) in self.defs.iter().enumerate() {
+            // (made after the candidate: a stamp past the candidate's)
+            let hi = self.marks.partition_point(|m| m.stamp < d.3);
+            // (a local one of a group opened after the candidate: left
+            // out there)
+            let lo = match d.5 {
+                Some(g) if d.4 => self.marks.partition_point(|m| m.gids < g),
+                _ => 0,
+            };
+            by.entry(d.0.0).or_default().push(NameSource {
+                rank: (!d.1, 1, k),
+                stands: d.1,
+                covers: if lo < hi { vec![(lo, hi)] } else { Vec::new() },
+                loc: Some(d.2),
+            });
+        }
+        for (k, &(f, l, end)) in self.held.iter().enumerate() {
+            let mut covers = Vec::new();
+            let mut from = 0;
+            for &(j, x) in self.at.history(l) {
+                if let Some(x) = x
+                    && x != end
+                {
+                    covers.push((from, j + 1));
+                }
+                from = j + 1;
+            }
+            by.entry(f.0).or_default().push(NameSource {
+                rank: (true, 2, k),
+                stands: false,
+                covers,
+                loc: Some(l),
+            });
+        }
+        let mut written: phitex_defuse::FxHashMap<ValueId, Vec<(usize, usize)>> = phitex_defuse::FxHashMap::default();
+        for (i, fs) in self.streams.iter().enumerate() {
+            for f in fs {
+                let c = written.entry(f.0).or_default();
+                match c.last_mut() {
+                    Some(r) if r.1 == i => r.1 = i + 1,
+                    _ => c.push((i, i + 1)),
+                }
+            }
+        }
+        for (f, covers) in written {
+            by.entry(f).or_default().push(NameSource {
+                rank: (true, 3, 0),
+                stands: false,
+                covers,
+                loc: None,
+            });
+        }
+        by
+    }
 }

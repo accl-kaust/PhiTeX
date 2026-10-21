@@ -556,13 +556,10 @@ impl Run<'_, '_> {
         if at_end || own.is_empty() {
             args.extend([ValueId::UNIT; 5]);
         } else {
-            // (`[names, cuttable]` at the candidate)
-            let at_k = list_of(v, a(4))
-                .get(usize::try_from(fire.k).unwrap_or(usize::MAX))
-                .map(|&x| list_of(v, x))
-                .unwrap_or_default();
-            let defs_k = at_k.first().copied().unwrap_or(ValueId::UNIT);
-            cuttable = at_k.get(1).is_some_and(|&x| int_of(v, x) != 0);
+            // (the names at the candidate, and whether the run could end
+            // there)
+            let defs_k;
+            (defs_k, cuttable) = super::piece::names_at(v, a(4), fire.k);
             args.extend([v.list(rest.clone()), v.int(pid), v.int(i64::from(fire.k)), a(3), defs_k]);
         }
         args.extend(pos.get(arg::HINT..arg::PAGE).unwrap_or_default().iter().copied());
@@ -1017,8 +1014,9 @@ impl Run<'_, '_> {
         let t_p4 = std::time::Instant::now();
         // (the page's hash: its value, what it is made of, known on the
         // write side every round; its PDF side runs once, at the end)
-        if let Node::Box(bx) = &page_box
-            && pos.pdf
+        // (the box handed over: the writer's piece keeps it, no copy)
+        if pos.pdf
+            && let Node::Box(bx) = page_box
         {
             crate::pdfout::ship(self, page, bx, &side, &ids)?;
         }
