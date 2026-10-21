@@ -207,8 +207,9 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
     // the same from its start, are not shipped again: the writer goes on
     // from its state after them, kept every `DVI_SNAP` pages; the fonts
     // defined before a page are the prefix's)
+    let (nums, nums_hash) = font_numbers(cx)?;
     let head = phitex_defuse::hash_bytes(
-        phitex_defuse::hash_words(v.instance(), &[u64::from(mag.cast_unsigned())]),
+        phitex_defuse::hash_words(v.instance(), &[u64::from(mag.cast_unsigned()), nums_hash]),
         comment.as_bytes(),
     );
     let ids: Vec<u64> = pages.iter().map(|p| p.raw()).collect();
@@ -230,6 +231,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
         });
         found.unwrap_or_else(|| (phitex_dvi::DviWriter::new(mag, &comment), 0, Vec::new()))
     };
+    w.set_font_numbers(nums.clone());
     // (the pages' fonts by id, resolved here from the fonts' fields: a
     // font's fields are defined once, at its load)
     let mut defs: phitex_defuse::FxHashMap<u32, phitex_dvi::FontDef> =
@@ -273,6 +275,7 @@ fn dvi_file(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop> {
         let mut ex = crate::exec::Inner(crate::exec::threads(None));
         crate::exec::map_on(&mut ex, rest.len(), &|i| {
             let mut wi = phitex_dvi::DviWriter::new(mag, &comment);
+            wi.set_font_numbers(nums.clone());
             for &f in &before[i] {
                 if let Some(d) = defs.get(&f) {
                     wi.assume_defined(f, d.clone());
@@ -334,6 +337,37 @@ fn dvi_page_kept(
     let fonts = |f: u32| font_def_of(defs, f);
     let mut wh = |h: u32, _leaders: bool| special_of(v, &whats, h);
     w.ship_out_kept(&bx, counts, &fonts, &mut wh).ok()
+}
+
+/// The fonts' numbers by key (TeX's `f`, which its DVI file writes as
+/// `f - 1`): their ranks in the order of first loads, the format's
+/// fonts first ([`crate::api::FONT_ORDER`]), then the line's
+/// `fontload` records in TeX's order; and a hash of that order.
+fn font_numbers(
+    cx: &mut Ctx<'_>,
+) -> Result<(std::sync::Arc<std::collections::BTreeMap<u32, u32>>, u64), Stop> {
+    let v = cx.values();
+    let mut order: Vec<i64> = field(cx, crate::api::FONT_ORDER)?
+        .map(|x| list_of(v, x).iter().map(|&k| int_of(v, k)).collect())
+        .unwrap_or_default();
+    let line = v.seq_to_vec(cx.acc_range(v.field(crate::pdfout::XPAGES), None)?);
+    for x in crate::pdfout::order_line(v, &line) {
+        if let Some(k) = crate::pdfout::fontload_key(v, x)
+            && !order.contains(&k)
+        {
+            order.push(k);
+        }
+    }
+    let nums: std::collections::BTreeMap<u32, u32> = order
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &k)| Some((u32::try_from(k).ok()?, u32::try_from(i + 1).ok()?)))
+        .collect();
+    let hash = phitex_defuse::hash_words(
+        0,
+        &order.iter().map(|&k| k.cast_unsigned()).collect::<Vec<u64>>(),
+    );
+    Ok((std::sync::Arc::new(nums), hash))
 }
 
 /// A page entry's box (decoded), counts and whatsits.
@@ -451,24 +485,29 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         .map(|x| str_of(v, x))
         .unwrap_or_default();
     let g2u = field(cx, "pdf:glyphtounicode")?;
-    let fonts = int_field(cx, "fontcount")?;
-    // (the fonts loaded before the line's first load record, a format's:
-    // numbered first, by their fields, defined once at their loads)
-    let first = xpages.iter().find_map(|&x| {
-        let xs = list_of(v, x);
-        (xs.first().map(|&k| str_of(v, k)).as_deref() == Some("fontload"))
-            .then(|| xs.get(3).map_or(0, |&n| int_of(v, n)))
-    });
-    let n0 = first.map_or(fonts, |k| k - 1);
+    // (the format's fonts by key, numbered first in the order it loaded
+    // them, by their fields, defined once at their loads; then the
+    // line's, in the order of their first loads)
+    let order: Vec<i64> = field(cx, crate::api::FONT_ORDER)?
+        .map(|x| list_of(v, x).iter().map(|&k| int_of(v, k)).collect())
+        .unwrap_or_default();
     let mut seed = Vec::new();
-    for id in 1..=n0 {
-        let name = crate::fields::font_cell_name(id, crate::fields::FontCell::Info);
+    for &k in &order {
+        let name = crate::fields::font_cell_name(k, crate::fields::FontCell::Info);
         let info = cx.use_field(v.field(&name))?;
-        seed.push(
-            crate::fonts::info(v, info)
-                .map(|i| (i.name, i.size))
-                .unwrap_or_default(),
-        );
+        let (n, sz) = crate::fonts::info(v, info)
+            .map(|i| (i.name, i.size))
+            .unwrap_or_default();
+        seed.push((u32::try_from(k).unwrap_or(0), n, sz));
+    }
+    let mut fonts: Vec<u32> = seed.iter().map(|s| s.0).collect();
+    for &x in &xpages {
+        if let Some(k) = crate::pdfout::fontload_key(v, x)
+            && let Ok(k) = u32::try_from(k)
+            && !fonts.contains(&k)
+        {
+            fonts.push(k);
+        }
     }
     let f = crate::pdfout::EndFields {
         date,

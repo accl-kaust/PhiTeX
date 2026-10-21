@@ -598,8 +598,9 @@ impl Run<'_, '_> {
         }
         let count = self.font_int(f, crate::fields::FontCell::Fdn)?;
         if n > count {
-            let last = self.cint(crate::fields::cell::FONTCOUNT)?;
-            if f < last || f == 0 {
+            // (§578: only the font loaded last, `font_ptr`, grows)
+            let last = self.get("fontlast")?.map_or(0, |x| crate::val::int_of(self.v, x));
+            if f != last || f == 0 {
                 return Ok(None);
             }
             // §580: the parameters of the last font grow

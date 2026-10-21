@@ -1868,7 +1868,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
             // whose characters carry the spacing; the copy here has the
             // original's metrics
         }
-        let nf = copy_font(r, f, &suffix)?;
+        let nf = copy_font(r, f, &suffix, &t)?;
         r.define_cs(&u, &Mean::Font(nf), global);
         let id = Tok::cs(&format!("\u{10FFFE}F{nf}\u{2}{t}"));
         r.define_cs(&id, &Mean::Font(nf), true);
@@ -1878,15 +1878,29 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
     Ok(false)
 }
 
-/// A new font with `f`'s metrics (and its name plus `suffix`).
-fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str) -> R<i64> {
+/// A new font with `f`'s metrics (and its name plus `suffix`), named
+/// `t`: its key that of the copy of `f` with `suffix` named `t`
+/// ([`crate::fonts::key_of`]; the same copy made again is that font).
+fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str, t: &str) -> R<i64> {
     let v = r.v;
     let info = r.font_get(f, crate::fields::FontCell::Info)?;
     let Some(i) = crate::fonts::info(v, info) else {
         return Ok(0);
     };
-    let nf = r.cint(crate::fields::cell::FONTCOUNT)? + 1;
-    r.set_cell(crate::fields::cell::FONTCOUNT, v.int(nf), true);
+    let sig = format!("{}{suffix}\u{1}{f}\u{1}{t}", i.name);
+    let copy_name = format!("{}{suffix}", i.name);
+    let mut held = false;
+    let k = crate::fonts::pick_key(&sig, i.size, &mut |k| {
+        let x = r.font_get(k, crate::fields::FontCell::Info)?;
+        let other = crate::fonts::info(v, x).map(|j| j.name != copy_name || j.size != i.size);
+        held = other == Some(false);
+        Ok::<_, crate::run::Halt>(other)
+    })?;
+    let nf = i64::from(k);
+    if held {
+        return Ok(nf);
+    }
+    r.set("fontlast", v.int(nf), true);
     r.font_loaded(nf);
     crate::pdfout::font_load(r, &format!("{}{suffix}", i.name), i.size, nf);
     let mut xs = vec![

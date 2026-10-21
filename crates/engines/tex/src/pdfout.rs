@@ -510,10 +510,11 @@ impl FontNums {
         }
     }
 
-    /// The fonts a format brought, numbered from 1.
-    fn seed(&mut self, fonts: &[(String, i32)]) {
-        for (i, (n, sz)) in fonts.iter().enumerate() {
-            self.put(FontId::try_from(i + 1).unwrap_or(0), n, *sz, false);
+    /// The fonts a format brought, by key, numbered from 1 in the order
+    /// it loaded them.
+    fn seed(&mut self, fonts: &[(FontId, String, i32)]) {
+        for (k, n, sz) in fonts {
+            self.put(*k, n, *sz, false);
         }
     }
 
@@ -551,15 +552,13 @@ impl FontNums {
         id
     }
 
-    /// The fonts loaded after the last record, `t` in all (none but a
-    /// load without its record).
-    fn end(&mut self, t: i64) {
-        let mut f: FontId = 1;
-        while i64::from(f) <= t {
+    /// The fonts loaded after the last record, by key in the order of
+    /// their loads (none but a load without its record).
+    fn end(&mut self, order: &[FontId]) {
+        for &f in order {
             if !self.done.contains(&f) {
                 self.put(f, "", 0, false);
             }
-            f += 1;
         }
     }
 
@@ -579,8 +578,10 @@ impl FontNums {
     ) -> FxHashMap<FontId, FontId> {
         let mut fwd = FxHashMap::default();
         let loads = loads.unwrap_or_else(|| {
+            // (in the order of the fonts' numbers: their keys say nothing
+            // of it)
             let mut vfs: Vec<FontId> = fonts.vfs.keys().copied().collect();
-            vfs.sort_unstable();
+            vfs.sort_unstable_by_key(|&f| (self.tag(f), f));
             vfs.into_iter().map(|f| (true, f)).collect()
         });
         for (vf, f) in loads {
@@ -673,8 +674,15 @@ impl FontSource for Mapped<'_> {
 /// A font load where it runs (spec-final A3): font `id` of `name` at
 /// `size`, a record of the line ([`XPAGES`]) the link numbers the fonts
 /// by ([`FontNums`]).
+/// The font key of a `fontload` record ([`font_load`]), if `x` is one.
+pub(crate) fn fontload_key(v: &Values, x: ValueId) -> Option<i64> {
+    let xs = list_of(v, x);
+    (xs.len() == 4 && str_of(v, xs[0]) == "fontload").then(|| int_of(v, xs[3]))
+}
+
 pub(crate) fn font_load(r: &mut Run<'_, '_>, name: &str, size: i32, id: i64) {
     let v = r.v;
+    r.contribute(FONT_LOADS, v.seq_unit(v.int(id)));
     let e = v.list(vec![
         v.str("fontload"),
         v.str(name),
@@ -881,7 +889,18 @@ pub(crate) struct Fonts {
     /// is the step's handle of one, which the link resolves against the
     /// fonts loaded before it, [`FontNums`]).
     locals: Vec<(String, i32)>,
+    /// The fonts' numbers as the step sees them, by key (TeX's: their
+    /// ranks in the order of the loads before it, [`FONT_LOADS`]): the
+    /// names its content gives them, which the link rewrites only where
+    /// the fonts the shipouts loaded moved them ([`FontNums`]).
+    nums: FxHashMap<FontId, FontId>,
 }
+
+/// The fonts' loads, by key, where they ran (a sequence): the order a
+/// step reads its fonts' provisional numbers from ([`Fonts::nums`]); the
+/// line's `fontload` records ([`font_load`]) are the exact order, in
+/// TeX's order of runs ([`order_line`]).
+pub(crate) const FONT_LOADS: &str = "fontloads";
 
 /// The first handle of a virtual font's local font in a step's fonts
 /// ([`Fonts::locals`]); the link's own for the local fonts it numbers
@@ -920,6 +939,11 @@ impl Fonts {
         files.sort_unstable_by(|a, b| a.0.cmp(b.0));
         for (n, b) in files {
             h = phitex_defuse::hash_words(phitex_defuse::hash_bytes(h, n), &[blob_hash(b)]);
+        }
+        let mut nums: Vec<(FontId, FontId)> = self.nums.iter().map(|(&k, &n)| (k, n)).collect();
+        nums.sort_unstable();
+        for (k, n) in nums {
+            h = phitex_defuse::hash_words(h, &[u64::from(k), u64::from(n)]);
         }
         phitex_defuse::hash_words(h, &[u64::from(self.space.unwrap_or(0))])
     }
@@ -1022,6 +1046,9 @@ impl FontSource for Fonts {
     fn virtual_font(&self, f: FontId) -> Option<VirtualFont> {
         self.vfs.get(&f).cloned()
     }
+    fn tag(&self, f: FontId) -> Option<FontId> {
+        self.nums.get(&f).copied()
+    }
 }
 
 /// `store_scaled` of `vf_def_font` (pdfTeX's vfpacket code, as §575
@@ -1088,6 +1115,12 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     // (`vf_def_font`): a local font of a name and size this step has is
     // that font, else a handle of its own ([`Fonts::locals`]); nothing of
     // the document's font table is read, the link numbers the local fonts
+    let nums = load_numbers(r)?;
+    for &f in ids {
+        if let Some(&n) = nums.get(&i64::from(f)) {
+            out.nums.insert(f, FontId::try_from(n).unwrap_or(0));
+        }
+    }
     let mut known: Vec<(u32, String, i32, ValueId, i32)> = Vec::new();
     for &f in ids {
         if let Some(i) = crate::fonts::info(v, r.font_get(f, crate::fields::FontCell::Info)?)
@@ -1140,8 +1173,8 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
         .collect();
     if space && let Some(x) = r.file("pdftexspace.tfm")? {
         // pdfTeX loads the space font at the shipout that first needs
-        // it, as the next internal font number (the engine's
-        // `fontcount` does not count it)
+        // it, as the next internal font number (the engine numbers no
+        // font for it)
         let id = // a page written apart: one id for every page, outside the
             // fonts' range, numbered by the link where it is first
             // loaded ([`FontNums`])
@@ -2473,17 +2506,96 @@ pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
     Ok(f.objects + rt_new(v, &f, fonts, dests))
 }
 
-/// Font `n`'s name number as pdfTeX gives it (`\\pdffontname`): the
-/// engine's number after the fonts the shipouts before this run loaded
-/// ([`ALLOCS`]), which pdfTeX numbers as it loads them.
-pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, n: i64) -> R<i64> {
+/// Font `f`'s name number as pdfTeX gives it (`\\pdffontname`): its
+/// number in the order of first loads ([`font_number`]) after the fonts
+/// the shipouts before this run loaded ([`ALLOCS`]), which pdfTeX
+/// numbers as it loads them.
+pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
+    let n = font_number(r, f)?;
     let v = r.v;
     let range = allocs_range(r, "font_tag_read")?;
     Ok(n + fold_allocs(v, range).ship_fonts)
 }
 
+/// The fonts' numbers as a step sees them: their ranks in the order of
+/// first loads, the format's fonts first ([`crate::api::FONT_ORDER`]),
+/// then the loads before this run ([`FONT_LOADS`], in the order of the
+/// runs' places) and this run's own. A provisional numbering (a page
+/// written apart names its fonts by it): the link numbers by the line's
+/// records in TeX's order ([`FontNums`]) and rewrites a name it moved.
+pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
+    let v = r.v;
+    let mut out: FxHashMap<i64, i64> = FxHashMap::default();
+    let put = |k: i64, out: &mut FxHashMap<i64, i64>| {
+        let n = i64::try_from(out.len()).unwrap_or(0) + 1;
+        out.entry(k).or_insert(n);
+    };
+    if let Some(x) = r.get(crate::api::FONT_ORDER)? {
+        for k in list_of(v, x) {
+            put(int_of(v, k), &mut out);
+        }
+    }
+    let f = v.field(FONT_LOADS);
+    let before = r.cx.acc_range(f, None)?;
+    for k in v.seq_to_vec(before) {
+        put(int_of(v, k), &mut out);
+    }
+    for &(g, x) in &r.contribs {
+        if g == f {
+            for k in v.seq_to_vec(x) {
+                put(int_of(v, k), &mut out);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The number TeX gives font `f` (a key, [`crate::fonts::key_of`]): its
+/// rank in the order of first loads, the format's fonts first
+/// ([`crate::api::FONT_ORDER`]), then the line's `fontload` records
+/// before this run in TeX's order ([`order_line`]) and this run's own.
+/// Only output reads it (`\\pdffontname`; the writers number the fonts
+/// of the whole line the same way).
+pub(crate) fn font_number(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
+    let v = r.v;
+    if f == 0 {
+        return Ok(0);
+    }
+    let format_fonts: Vec<i64> = r
+        .get(crate::api::FONT_ORDER)?
+        .map(|x| list_of(v, x).iter().map(|&k| int_of(v, k)).collect())
+        .unwrap_or_default();
+    let mut seen: FxHashMap<i64, i64> = FxHashMap::default();
+    for (i, &k) in format_fonts.iter().enumerate() {
+        seen.entry(k).or_insert(i64::try_from(i).unwrap_or(0) + 1);
+    }
+    if let Some(&n) = seen.get(&f) {
+        return Ok(n);
+    }
+    let line = v.seq_to_vec(r.cx.acc_range(v.field(XPAGES), None)?);
+    let own: Vec<ValueId> = r
+        .contribs
+        .iter()
+        .filter(|(g, _)| *g == v.field(XPAGES))
+        .flat_map(|&(_, x)| v.seq_to_vec(x))
+        .collect();
+    let mut n = i64::try_from(seen.len()).unwrap_or(0);
+    for x in order_line(v, &line).into_iter().chain(own) {
+        if let Some(k) = fontload_key(v, x)
+            && !seen.contains_key(&k)
+        {
+            n += 1;
+            seen.insert(k, n);
+            if k == f {
+                return Ok(n);
+            }
+        }
+    }
+    Ok(0)
+}
+
 /// The id of `pdftexspace` in the pages written apart (none of the
-/// engine's: its fonts are numbered from 1 by `fontcount`).
+/// engine's: its fonts are known by their keys, `crate::fonts::key_of`).
 pub(crate) const SPACE_FONT: FontId = FontId::MAX - 15;
 
 /// The fixed parts of the exact file the end node reads: the fields
@@ -2492,11 +2604,12 @@ pub(crate) struct EndFields {
     pub date: String,
     pub jobname: String,
     pub g2u: Option<ValueId>,
-    /// `fontcount`: the fonts loaded in all.
-    pub fonts: i64,
-    /// The fonts loaded before the line's first `fontload` record (a
-    /// format's), name and size by number from 1 ([`FontNums::seed`]).
-    pub seed: Vec<(String, i32)>,
+    /// The fonts loaded in all, by key in the order of their first loads
+    /// (the format's, then the line's).
+    pub fonts: Vec<FontId>,
+    /// The format's fonts, key, name and size in the order it loaded them
+    /// ([`FontNums::seed`]).
+    pub seed: Vec<(FontId, String, i32)>,
     pub info_omit_date: i32,
     pub suppress_ptex_info: i32,
 }
@@ -2987,10 +3100,10 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
             .concat()
             .as_slice(),
     );
-    for (n, sz) in &f.seed {
+    for (k, n, sz) in &f.seed {
         head = phitex_defuse::hash_words(
             phitex_defuse::hash_bytes(head, n.as_bytes()),
-            &[u64::from(sz.cast_unsigned())],
+            &[u64::from(sz.cast_unsigned()), u64::from(*k)],
         );
     }
     let mut chunks_of: Vec<Vec<phitex_pdf::Chunk>> = Vec::with_capacity(xpages.len());
@@ -3368,7 +3481,7 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
     }
     // the fonts loaded after the last record (none but a load without
     // its record)
-    nums.end(f.fonts);
+    nums.end(&f.fonts);
     if let Some(c) = st.flush_chunk() {
         bytes.push(c);
     }

@@ -241,6 +241,10 @@ pub struct DviWriter {
     max_push: i32,
     last_bop: i32,
     fonts: BTreeMap<FontId, FontDef>,
+    /// The fonts' DVI numbers plus one by id, where the ids are not the
+    /// numbers ([`DviWriter::set_font_numbers`]); none: an id is its
+    /// number.
+    nums: Option<std::sync::Arc<BTreeMap<FontId, u32>>>,
     down: Vec<Movement>,
     right: Vec<Movement>,
     dvi_h: Scaled,
@@ -418,6 +422,7 @@ impl DviWriter {
             max_push: 0,
             last_bop: -1,
             fonts: BTreeMap::new(),
+            nums: None,
             down: Vec::new(),
             right: Vec::new(),
             dvi_h: 0,
@@ -501,8 +506,24 @@ impl DviWriter {
         }
     }
 
+    /// The fonts' numbers (TeX's `f`, the DVI's `f - 1`) by the ids the
+    /// boxes give them, where they differ: a client whose fonts are known
+    /// by keys numbers them in the order TeX loaded them.
+    pub fn set_font_numbers(&mut self, nums: std::sync::Arc<BTreeMap<FontId, u32>>) {
+        self.nums = Some(nums);
+    }
+
+    /// Font `f`'s number (TeX's `f`).
+    fn num(&self, f: FontId) -> FontId {
+        self.nums
+            .as_ref()
+            .and_then(|m| m.get(&f).copied())
+            .unwrap_or(f)
+    }
+
     /// `dvi_font_def(f)` (§602; web2c's two-byte form above 256 fonts).
-    fn dvi_font_def(&mut self, f: FontId) {
+    fn dvi_font_def(&mut self, id: FontId) {
+        let f = self.num(id);
         let n = f - 1;
         if f <= 256 {
             self.dvi_out(op::FNT_DEF1);
@@ -512,7 +533,7 @@ impl DviWriter {
             self.dvi_out(low(n / 0o400));
             self.dvi_out(low(n));
         }
-        let d = self.fonts[&f].clone();
+        let d = self.fonts[&id].clone();
         for b in d.checksum {
             self.dvi_out(b);
         }
@@ -723,6 +744,8 @@ impl DviWriter {
                 e.insert(fonts(f));
                 self.dvi_font_def(f);
             }
+            let id = f;
+            let f = self.num(id);
             let n = f - 1;
             if f <= 64 {
                 self.dvi_out(op::FNT_NUM_0 + low(n));
@@ -734,7 +757,7 @@ impl DviWriter {
                 self.dvi_out(low(n / 0o400));
                 self.dvi_out(low(n));
             }
-            self.dvi_f = Some(f);
+            self.dvi_f = Some(id);
         }
         // §620 (web2c: a character that doesn't exist is not output)
         let width = self.fonts[&f].widths.get(usize::from(c)).copied().flatten();
@@ -1246,7 +1269,8 @@ impl DviWriter {
         self.dvi_out(a);
         self.dvi_out(b);
         // §643: from the highest font number down
-        let used: Vec<FontId> = self.fonts.keys().rev().copied().collect();
+        let mut used: Vec<FontId> = self.fonts.keys().copied().collect();
+        used.sort_unstable_by_key(|&f| std::cmp::Reverse(self.num(f)));
         for f in used {
             self.dvi_font_def(f);
         }

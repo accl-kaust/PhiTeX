@@ -292,7 +292,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "font" => &[
             "fd:",
             "fdn:",
-            "fontcount",
+            "fontlast",
             "fontid:",
             "fontinfo:",
             "hc:",

@@ -1003,7 +1003,9 @@ impl Rd<'_> {
 /// the serialised environment's layout, the node args, the `Fields` set,
 /// the hint args or the state fields' names change: a prelude exported
 /// under another layout is refused (rebuilt), never loaded.
-pub const PRELUDE_LAYOUT: u32 = 3;
+// (4: fonts by key, `crate::fonts::key_of`; the format's font order
+// `fontorder`)
+pub const PRELUDE_LAYOUT: u32 = 4;
 
 /// The exported prelude's magic, before the layout and the engine's
 /// identity.
@@ -1042,6 +1044,26 @@ fn engine_identity() -> u64 {
         }
         h
     })
+}
+
+/// The format's fonts by key in the order it loaded them (`fontorder`,
+/// an environment field): TeX numbers a document's fonts after them,
+/// in the order of the document's first loads ([`font_order`]).
+pub(crate) const FONT_ORDER: &str = "fontorder";
+
+/// The fonts' keys in the order of their first `fontload` records in
+/// `line` (the line's accumulator, a sequence), each once.
+pub(crate) fn font_order(v: &Values, line: Option<ValueId>) -> Vec<i64> {
+    let mut seen = phitex_defuse::FxHashSet::default();
+    let mut out = Vec::new();
+    for x in line.map(|l| v.seq_to_vec(l)).unwrap_or_default() {
+        if let Some(k) = crate::pdfout::fontload_key(v, x)
+            && seen.insert(k)
+        {
+            out.push(k);
+        }
+    }
+    out
 }
 
 /// The key of a prelude: the layout and the engine, its text and
@@ -3311,12 +3333,6 @@ const STABLE_FIELDS: &[&str] = &[
     "lctab",
     "patterns",
     "font",
-    "fontinfo:1",
-    "hc:1",
-    "fd:1:2",
-    "fd:1:3",
-    "fd:1:4",
-    "fd:1:7",
     "cs:par",
     "param:everypar",
 ];
@@ -3963,6 +3979,15 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         t_settle = t_start.elapsed();
         m_settle = mem_mb();
         env = final_bindings(&g, unit, end, env);
+        // (the order the prelude's fonts were loaded in, by key: the
+        // first numbers of a document's fonts, [`FONT_ORDER`])
+        let v = g.eng.values();
+        let order = font_order(v, g.eng.acc_value(unit, v.field(crate::pdfout::XPAGES)));
+        env.retain(|(k, _)| k != FONT_ORDER);
+        env.push((
+            FONT_ORDER.to_owned(),
+            v.list(order.into_iter().map(|k| v.int(k)).collect()),
+        ));
     }
     let t_bindings = t_start.elapsed();
     let m_bindings = mem_mb();
@@ -4423,6 +4448,31 @@ impl Build {
         for f in STABLE_FIELDS {
             let f = g.eng.values().field(f);
             g.eng.set_stable(f);
+        }
+        // (and the format's first font's cells, by its key: its
+        // metrics, hyphen character and the parameters spacing reads)
+        let first_font = {
+            let v = g.eng.values();
+            cached
+                .env
+                .iter()
+                .find(|(k, _)| k == FONT_ORDER)
+                .map(|(_, t)| import(v, t))
+                .and_then(|x| list_of(v, x).first().map(|&k| int_of(v, k)))
+        };
+        if let Some(k) = first_font {
+            use crate::fields::{FontCell, font_cell_name};
+            for c in [
+                FontCell::Info,
+                FontCell::Hc,
+                FontCell::Fd(2),
+                FontCell::Fd(3),
+                FontCell::Fd(4),
+                FontCell::Fd(7),
+            ] {
+                let f = g.eng.values().field(&font_cell_name(k, c));
+                g.eng.set_stable(f);
+            }
         }
         let edits = opts.edits.clone().unwrap_or_default();
         let mut b = Build {
@@ -6277,6 +6327,7 @@ fn declare_fields(eng: &mut Engine) {
         "pkgrecs",
         "gdefs",
         crate::pdfout::XPAGES,
+        crate::pdfout::FONT_LOADS,
         crate::vprof::VPROF,
         crate::pages::PITEMS,
         crate::run::SEEDED,
