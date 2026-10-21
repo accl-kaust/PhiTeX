@@ -372,6 +372,20 @@ pub(crate) struct Input {
     /// between commands ([`Input::compact`]): four times what survived
     /// the last compaction, at least [`ARENA_COMPACT`].
     pub compact_at: usize,
+    /// The levels as the command in progress found them, saved as they
+    /// come on top ([`Input::snapshot`]).
+    snap: Option<Snap>,
+}
+
+/// The levels a command found, saved lazily ([`Input::snapshot`]): a
+/// level below the top is read only once it is on top again, so each is
+/// saved when it comes on top (the top when the command began, then
+/// each one a pop uncovers). The levels below `from` are as the command
+/// found them; `saved[k]` is the one at index `len - 1 - k`.
+struct Snap {
+    len: usize,
+    from: usize,
+    saved: Vec<(Level, (usize, u8, i64, usize), u64)>,
 }
 
 /// The least arena size, in tokens, at which a run compacts it.
@@ -392,6 +406,49 @@ impl Input {
             text: Vec::new(),
             text_at: 0,
             compact_at: ARENA_COMPACT,
+            snap: None,
+        }
+    }
+
+    /// Level `t` with its line's or file's position and the push that
+    /// filled its slot, for [`Snap`].
+    fn saved(&self, t: usize) -> (Level, (usize, u8, i64, usize), u64) {
+        let l = self.levels[t];
+        match l.kind {
+            kind::LINE => {
+                let x = &self.lines[l.a as usize];
+                (
+                    l,
+                    (x.loc, x.state, x.endch, x.buf.len()),
+                    self.line_push.get(l.a as usize).copied().unwrap_or(0),
+                )
+            }
+            kind::FILE => {
+                let f = &self.files[l.a as usize];
+                (
+                    l,
+                    (f.off, 0, 0, f.pos_chars()),
+                    self.file_push.get(l.a as usize).copied().unwrap_or(0),
+                )
+            }
+            _ => (l, (0, 0, 0, 0), 0),
+        }
+    }
+
+    /// After a pop: the level uncovered, saved for the command's rewind
+    /// where it is one the command found and not saved yet.
+    #[inline]
+    fn uncovered(&mut self) {
+        let Some(from) = self.snap.as_ref().map(|s| s.from) else {
+            return;
+        };
+        let n = self.levels.len();
+        if n > 0 && n - 1 < from {
+            let e = self.saved(n - 1);
+            if let Some(s) = self.snap.as_mut() {
+                s.saved.push(e);
+                s.from = n - 1;
+            }
         }
     }
 
@@ -422,6 +479,7 @@ impl Input {
         while let Some(l) = self.levels.last() {
             if l.kind == kind::TOKS && l.a >= l.b {
                 self.levels.pop();
+                self.uncovered();
             } else {
                 break;
             }
@@ -468,6 +526,7 @@ impl Input {
             kind::FILE => self.free_files.push(l.a),
             _ => {}
         }
+        self.uncovered();
         Some(l)
     }
 
@@ -614,30 +673,22 @@ impl Input {
         }
     }
 
-    /// Where the levels stand, for a rewind: each level copied (four
-    /// words), plus the lines' and files' positions.
-    pub(crate) fn snapshot(&self, into: &mut Snapshot) {
-        into.levels.clear();
-        into.levels.extend_from_slice(&self.levels);
-        into.lines.clear();
-        into.pushes.clear();
-        for l in &self.levels {
-            match l.kind {
-                kind::LINE => {
-                    let x = &self.lines[l.a as usize];
-                    into.lines.push((x.loc, x.state, x.endch, x.buf.len()));
-                    into.pushes
-                        .push(self.line_push.get(l.a as usize).copied().unwrap_or(0));
-                }
-                kind::FILE => {
-                    let f = &self.files[l.a as usize];
-                    into.lines.push((f.off, 0, 0, f.pos_chars()));
-                    into.pushes
-                        .push(self.file_push.get(l.a as usize).copied().unwrap_or(0));
-                }
-                _ => {}
-            }
+    /// Where the levels stand, for a rewind: the top level saved now
+    /// (with its line's or file's position), each level below it when a
+    /// pop uncovers it ([`Snap`]): a command reads the levels below the
+    /// top only once they are on top, so no copy of the whole stack.
+    pub(crate) fn snapshot(&mut self, into: &mut Snapshot) {
+        let len = self.levels.len();
+        let mut saved = self.snap.take().map(|s| s.saved).unwrap_or_default();
+        saved.clear();
+        if len > 0 {
+            saved.push(self.saved(len - 1));
         }
+        self.snap = Some(Snap {
+            len,
+            from: len.saturating_sub(1),
+            saved,
+        });
         into.text_at = self.text_at;
         into.arena = self.arena.mark();
     }
@@ -678,32 +729,31 @@ impl Input {
     /// Puts the levels back as [`Input::snapshot`] found them. False if
     /// a line was reduced in place beyond what can be restored.
     pub(crate) fn restore(&mut self, s: &Snapshot) -> bool {
-        // levels pushed since are dropped (their lines/files freed)
-        while self.levels.len() > s.levels.len() {
+        let Some(sn) = self.snap.take() else {
+            return false;
+        };
+        // levels pushed since are dropped (their lines/files freed), and
+        // those the command found above `from`, saved
+        while self.levels.len() > sn.from {
             self.pop();
         }
         // (each line or file slot must still hold the line or file it
         // held then: one spent since and refilled holds another)
-        let mut k = 0;
-        for l in &s.levels {
+        for (l, _, push) in &sn.saved {
             let now = match l.kind {
                 kind::LINE => self.line_push.get(l.a as usize),
                 kind::FILE => self.file_push.get(l.a as usize),
                 _ => continue,
             };
-            if now.copied() != s.pushes.get(k).copied() {
+            if now.copied() != Some(*push) {
                 return false;
             }
-            k += 1;
         }
-        self.levels.clear();
-        self.levels.extend_from_slice(&s.levels);
-        let mut k = 0;
-        for l in &s.levels {
+        debug_assert_eq!(sn.from + sn.saved.len(), sn.len);
+        for &(l, (loc, state, endch, len), _) in sn.saved.iter().rev() {
+            self.levels.push(l);
             match l.kind {
                 kind::LINE => {
-                    let (loc, state, endch, len) = s.lines[k];
-                    k += 1;
                     let Some(x) = self.lines.get_mut(l.a as usize) else {
                         return false;
                     };
@@ -716,13 +766,11 @@ impl Input {
                     x.endch = endch;
                 }
                 kind::FILE => {
-                    let (off, _, _, pos) = s.lines[k];
-                    k += 1;
                     let Some(f) = self.files.get_mut(l.a as usize) else {
                         return false;
                     };
-                    f.off = off;
-                    f.set_pos_chars(pos);
+                    f.off = loc;
+                    f.set_pos_chars(len);
                 }
                 _ => {}
             }
@@ -737,12 +785,6 @@ impl Input {
 /// Where the input stood when a command began ([`Input::snapshot`]).
 #[derive(Default)]
 pub(crate) struct Snapshot {
-    pub levels: Vec<Level>,
-    /// `(loc, state, endch, len)` per line level, `(off, _, _, pos)` per
-    /// file level, in level order.
-    pub lines: Vec<(usize, u8, i64, usize)>,
-    /// The push that filled each of those slots ([`Input::push_line`]).
-    pub pushes: Vec<u64>,
     pub text_at: usize,
     pub arena: u32,
 }
