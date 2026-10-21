@@ -170,9 +170,13 @@ pub(crate) struct PageLoop {
     /// fire on (§1013), wherever they are folded again.
     pub inf: Vec<Src>,
     /// What each routine (by its hint) gave back on the last page fired
-    /// on the text at each `\outputpenalty`, `\deadcycles` left out: the
+    /// on the text at each `\outputpenalty` (every ordinary one alike,
+    /// `i32::MAX`), `\deadcycles` left out: the
     /// guess of a later page fired there ([`FinishIn::rtn_guess`]).
     pub last_rtn: Vec<((ValueId, i32), ValueId)>,
+    /// The markers each routine gave back last (the page parameters it
+    /// sets): an ordinary page's guess where none fired before it.
+    pub last_markers: Vec<(ValueId, ValueId)>,
     /// The piece the page fired last fired in and `rtn_dead`
     /// ([`FinishIn::prev_fire`]).
     pub prev_fire: (i64, i64),
@@ -231,6 +235,7 @@ impl PageLoop {
             rtn_dead: 0,
             inf: Vec::new(),
             last_rtn: Vec::new(),
+            last_markers: Vec::new(),
             prev_fire: (-1, 0),
             marks: Vec::new(),
             misses: Vec::new(),
@@ -717,9 +722,10 @@ impl Run<'_, '_> {
     /// else nothing given back. The guess of page `j`
     /// ([`FinishIn::rtn_guess`], made in [`Run::page_loop`]) is what the
     /// same routine gave back on the last page the loop fired on the text
-    /// before `j` at the same `\outputpenalty` (the miss it read, or that
-    /// page's own guess where it read none); else nothing for a penalty
-    /// above -10001 (an ordinary page ships), this for a special one;
+    /// before `j` at the same `\outputpenalty`, every one above -10001
+    /// alike (the miss it read, or that page's own guess where it read
+    /// none); else for an ordinary page the markers the routine gave back
+    /// last and no list (it ships), this for a special one;
     /// nothing for a page fired in a routine's material (no chain of
     /// pages grows on guesses). It depends on the pages before `j` alone:
     /// a page's own miss never changes it.
@@ -841,6 +847,7 @@ struct LoopSnap {
     inf: Vec<Src>,
     prev_fire: (i64, i64),
     last_rtn: Vec<((ValueId, i32), ValueId)>,
+    last_markers: Vec<(ValueId, ValueId)>,
     pend: Vec<(crate::vprof::PItem, SrcRef)>,
     page_src: Vec<SrcRef>,
     page_ins: Vec<Option<u16>>,
@@ -866,6 +873,7 @@ impl PageLoop {
             inf: self.inf.clone(),
             prev_fire: self.prev_fire,
             last_rtn: self.last_rtn.clone(),
+            last_markers: self.last_markers.clone(),
             pend: self.pend.clone(),
             page_src: self.page_src.clone(),
             page_ins: self.page_ins.clone(),
@@ -890,6 +898,7 @@ impl PageLoop {
         self.inf = s.inf;
         self.prev_fire = s.prev_fire;
         self.last_rtn = s.last_rtn;
+        self.last_markers = s.last_markers;
         self.pend = s.pend;
         self.page_src = s.page_src;
         self.page_ins = s.page_ins;
@@ -1165,18 +1174,25 @@ impl Run<'_, '_> {
         let hint = self.output_hint_at(node)?;
         // (the guess: what the routine gave back on the last page before
         // fired on the text at the same `\outputpenalty`, which the
-        // routine branches on; else nothing for an ordinary page, which
-        // ships, and the routine's last value as the evaluation began for
-        // a special one; nothing for a page fired in a routine's
-        // material, so no chain of pages grows on guesses)
-        let key = (hint, f.output_penalty);
+        // routine branches on, every ordinary one (above -10001, a page
+        // shipped) alike; else for an ordinary page the markers it gave
+        // back last (the page parameters it sets) and no list, for a
+        // special one its last value as the evaluation began; nothing
+        // for a page fired in a routine's material, so no chain of pages
+        // grows on guesses)
+        let ordinary = f.output_penalty > -10001;
+        let key = (hint, if ordinary { i32::MAX } else { f.output_penalty });
         let empty = || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]);
         let rtn_guess = if in_material {
             empty()
         } else {
             match lp.last_rtn.iter().find(|e| e.0 == key) {
                 Some(e) => e.1,
-                None if f.output_penalty > -10001 => empty(),
+                None if ordinary => lp
+                    .last_markers
+                    .iter()
+                    .find(|e| e.0 == hint)
+                    .map_or_else(empty, |e| v.list(vec![e.1, v.list(Vec::new())])),
                 None => self.rtn_guess(hint),
             }
         };
@@ -1281,6 +1297,11 @@ impl Run<'_, '_> {
             match lp.last_rtn.iter_mut().find(|e| e.0 == key) {
                 Some(e) => e.1 = given,
                 None => lp.last_rtn.push((key, given)),
+            }
+            let m = rs.first().copied().unwrap_or_else(|| v.list(Vec::new()));
+            match lp.last_markers.iter_mut().find(|e| e.0 == hint) {
+                Some(e) => e.1 = m,
+                None => lp.last_markers.push((hint, m)),
             }
         }
         let mut markers = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
