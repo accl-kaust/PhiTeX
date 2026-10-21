@@ -222,6 +222,7 @@ def tail(path, names, strs, ints, lists, last, extra):
     hist = collections.Counter()
     sizes = collections.Counter()
     cands = collections.Counter()
+    npieces_with = inside_pieces = 0
     for key, (op, reads, writes) in last.items():
         if op not in PIECES:
             continue
@@ -242,12 +243,15 @@ def tail(path, names, strs, ints, lists, last, extra):
             sizes[min(ncalls // 10 * 10, 200)] += 1
         # 5. candidates inside the piece's own groups/conditionals
         if per:
+            npieces_with += 1
+            if any((L(e, c) or [0, 0])[1:2] and as_int(ints, e, L(e, c)[1]) == 0 for c in per[:-1]):
+                inside_pieces += 1
             for i, c in enumerate(per):
                 pc = L(e, c)
                 if not pc or len(pc) < 2:
                     continue
                 cut = as_int(ints, e, pc[1])
-                if i == last_k:
+                if i == len(per) - 1 and last_k is not None and last_k >= 0:
                     cands["at the piece's end"] += 1
                 elif cut == 0:
                     cands["inside (the run could not end there)"] += 1
@@ -255,6 +259,7 @@ def tail(path, names, strs, ints, lists, last, extra):
                     cands["could end there, did not"] += 1
     print("\n4. resumes by what their items unit holds:", dict(hist))
     print("   resumes by engine calls in their last run (bucket of 10):", dict(sorted(sizes.items())))
+    print("   pieces with a candidate inside:", inside_pieces, "of", npieces_with)
     print("\n5. candidates of the pieces (from their check data; a piece with one candidate at its end has none):", dict(cands))
     # 6. page-state readers
     ps = collections.Counter()
