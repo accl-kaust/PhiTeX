@@ -458,6 +458,9 @@ fn build_t(
             None
         };
         let before = lp.st.pb.page.len();
+        if crate::exec::obs_str!("PHITEX_PAGE_DUMP").is_some_and(|d| d == lp.st.j.to_string()) {
+            eprintln!("dump loop page {}: {} from {:?}", lp.st.j, node_short(&p), s.src);
+        }
         let ins_n = if let Node::Ins(i) = &p { Some(i.number) } else { None };
         let out = {
             let mut class = |n: u16| {
@@ -829,6 +832,22 @@ fn guess_check(node: u64, j: i64, how: impl std::hash::Hash, guess: ValueId) {
         "page {}: its routine's guess changed with nothing before it changed (its own miss read back?)",
         j + 1
     );
+}
+
+/// (`observe`, `PHITEX_PAGE_DUMP=<page>`) A node in a line: its kind and
+/// what the page builder measures of it.
+fn node_short(n: &Node) -> String {
+    match n {
+        Node::Box(b) => format!("box {:?} {}+{}", b.kind, b.height, b.depth),
+        Node::Rule(r) => format!("rule {}+{}", r.height, r.depth),
+        Node::Glue(g) => format!("glue {}", g.spec.width),
+        Node::Kern(w, _) => format!("kern {w}"),
+        Node::Penalty(p) => format!("penalty {p}"),
+        Node::Mark(_) => "mark".to_owned(),
+        Node::Ins(i) => format!("ins {} {}+{}", i.number, i.height, i.depth),
+        Node::Whatsit(..) => "whatsit".to_owned(),
+        _ => "other".to_owned(),
+    }
 }
 
 /// What the loop saves before folding a unit, put back where the fold
@@ -1794,6 +1813,9 @@ impl PageState {
                         |c| c.1,
                     )
                 };
+                if crate::exec::obs_str!("PHITEX_PAGE_DUMP").is_some_and(|d| d == self.j.to_string()) {
+                    eprintln!("dump fin page {}: {}", self.j, node_short(&p));
+                }
                 self.pb.contribute(p, next.as_ref(), &params, &mut class)
             };
             if let Some(h) = halt {
