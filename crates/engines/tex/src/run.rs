@@ -2443,8 +2443,12 @@ impl<'c, 'a> Run<'c, 'a> {
             self.contribs.push((f, entries));
             self.contribute(WNAMES, v.seq_unit(n));
         }
-        let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);
-        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        // (a routine's writes, made at its `\shipout`, are on no list:
+        // what it gives back to the main list holds none, §1374)
+        if op != self.ops.finish {
+            let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);
+            self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        }
     }
 
     /// The page parameters in force, as a `T_PAGE_PARAMS` marker on the

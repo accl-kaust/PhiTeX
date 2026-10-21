@@ -702,7 +702,7 @@ impl Run<'_, '_> {
             // (`\deadcycles` guessed 0, a page shipped: a dead cycle
             // guessed from the last run would grow a chain of pages on
             // guesses)
-            .map(|x| {
+            .map_or_else(empty, |x| {
                 let xs = list_of(v, x);
                 if xs.len() > 2 {
                     v.list(xs[..2].to_vec())
@@ -710,7 +710,6 @@ impl Run<'_, '_> {
                     x
                 }
             })
-            .unwrap_or_else(empty)
     }
 }
 
@@ -775,8 +774,8 @@ pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: 
 /// anew on its own miss).
 fn guess_check(node: u64, j: i64, misses: &[(i64, ValueId)], how: impl std::hash::Hash, guess: ValueId) {
     use std::hash::{Hash, Hasher};
-    static SEEN: std::sync::Mutex<Option<phitex_defuse::FxHashMap<(u64, i64, u64), ValueId>>> =
-        std::sync::Mutex::new(None);
+    type Seen = Option<phitex_defuse::FxHashMap<(u64, i64, u64), ValueId>>;
+    static SEEN: std::sync::Mutex<Seen> = std::sync::Mutex::new(None);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for m in misses.iter().filter(|m| m.0 < j) {
         m.hash(&mut h);
