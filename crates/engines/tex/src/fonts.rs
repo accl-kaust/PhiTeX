@@ -94,25 +94,31 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
     })
 }
 
-/// A view's fonts by id: an array indexed by the font's number (the
-/// metrics of a character a load and an index away, no hashing per
-/// character); a number past [`FontTable::DIRECT`] in a map beside it.
+/// A view's fonts by id (a font's key, [`key_of`]): a slot per key's
+/// low bits holding the key and its font (the metrics of a character a
+/// load, a compare and an index away, no hashing per character; a key
+/// is a hash, its low bits spread); a key whose slot another holds in a
+/// map beside it.
 #[derive(Default)]
 pub(crate) struct FontTable {
-    direct: Vec<Option<(Arc<Loaded>, Vec<i32>)>>,
+    direct: Vec<Option<(FontId, (Arc<Loaded>, Vec<i32>))>>,
     far: FxHashMap<FontId, (Arc<Loaded>, Vec<i32>)>,
 }
 
 impl FontTable {
-    const DIRECT: usize = 1 << 16;
+    const DIRECT: usize = 1 << 8;
+
+    #[inline]
+    fn slot(f: FontId) -> usize {
+        f as usize & (Self::DIRECT - 1)
+    }
 
     #[inline]
     pub(crate) fn get(&self, f: FontId) -> Option<&(Arc<Loaded>, Vec<i32>)> {
-        let i = f as usize;
-        if i < Self::DIRECT {
-            self.direct.get(i).and_then(Option::as_ref)
-        } else {
-            self.far.get(&f)
+        match self.direct.get(Self::slot(f)) {
+            Some(Some((k, x))) if *k == f => Some(x),
+            _ if self.far.is_empty() => None,
+            _ => self.far.get(&f),
         }
     }
 
@@ -127,26 +133,29 @@ impl FontTable {
     }
 
     pub(crate) fn insert(&mut self, f: FontId, x: (Arc<Loaded>, Vec<i32>)) {
-        let i = f as usize;
-        if i < Self::DIRECT {
-            if self.direct.len() <= i {
-                self.direct.resize_with(i + 1, || None);
+        if self.direct.is_empty() {
+            self.direct.resize_with(Self::DIRECT, || None);
+        }
+        let i = Self::slot(f);
+        match &mut self.direct[i] {
+            e @ None => *e = Some((f, x)),
+            Some((k, y)) if *k == f => *y = x,
+            Some(_) => {
+                self.far.insert(f, x);
             }
-            self.direct[i] = Some(x);
-        } else {
-            self.far.insert(f, x);
         }
     }
 
-    /// The fonts' numbers (the direct ones in order, then the others).
+    /// The fonts' keys, in order.
     pub(crate) fn ids(&self) -> Vec<FontId> {
-        self.direct
+        let mut ids: Vec<FontId> = self
+            .direct
             .iter()
-            .enumerate()
-            .filter(|(_, x)| x.is_some())
-            .filter_map(|(i, _)| FontId::try_from(i).ok())
+            .filter_map(|x| x.as_ref().map(|x| x.0))
             .chain(self.far.keys().copied())
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 }
 

@@ -951,6 +951,30 @@ impl Fields {
         })
     }
 
+    /// The field of font `f`'s cell `c` ([`font_cell_name`]), kept per
+    /// thread (a font is known by its key: most fonts' cells have no
+    /// fixed location).
+    #[allow(clippy::unused_self)]
+    pub(crate) fn font_field(&self, v: &Values, epoch: u64, f: i64, c: FontCell) -> Field {
+        let code = match c {
+            FontCell::Info => -1,
+            FontCell::Id => -2,
+            FontCell::Fdn => -3,
+            FontCell::Hc => -4,
+            FontCell::Sc => -5,
+            FontCell::Fd(k) => k,
+        };
+        if let Some(fld) = with_names(v, epoch, |n| n.fonts.get(&(f, code)).copied()) {
+            return fld;
+        }
+        let fld = v.field(&font_cell_name(f, c));
+        with_names(v, epoch, |n| {
+            bounded(&mut n.fonts);
+            n.fonts.insert((f, code), fld);
+        });
+        fld
+    }
+
     /// The field `<fam>:<key>`, kept per thread as [`Self::get_at`]
     /// keeps names (formatted and interned once an epoch).
     #[allow(clippy::unused_self)]
@@ -998,6 +1022,8 @@ struct Named {
     fields: FxHashMap<u32, Field>,
     /// The fields of the keyed families ([`Fam`]), by family and key.
     keyed: [FxHashMap<Box<str>, Field>; FAMS],
+    /// The fonts' cells' fields by font and cell ([`Fields::font_field`]).
+    fonts: FxHashMap<(i64, i32), Field>,
 }
 
 /// The field families keyed by a name (`<family>:<key>`): files, the
