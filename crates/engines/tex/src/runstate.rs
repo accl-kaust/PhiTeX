@@ -1365,6 +1365,19 @@ impl State {
         out
     }
 
+    /// (observe) The global definitions [`State::published`] keeps
+    /// although their value is the engine's value the run read there.
+    pub(crate) fn published_as_read(&self, v: &Values) -> Vec<Loc> {
+        self.metas
+            .iter()
+            .filter(|m| {
+                matches!(&m.publ, Some((val, Locality::Global))
+                    if self.encode(val, v).is_some_and(|x| m.eng == Some(Some(x))))
+            })
+            .map(|m| m.loc)
+            .collect()
+    }
+
     /// Whether the run has a local definition at its base level that
     /// changes the engine's value (one [`State::published`] keeps), made
     /// outside every group of the run: while a group is open, a

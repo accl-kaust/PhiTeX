@@ -1820,6 +1820,29 @@ impl Run<'_, '_> {
         } else {
             v.list(names)
         };
+        if crate::exec::obs_flag!("PHITEX_FIN_DEFS") {
+            let all: Vec<String> = self
+                .st
+                .published(v, false)
+                .into_iter()
+                .map(|d| crate::val::field_name(v, self.loc_field(d.0)))
+                .collect();
+            let same: Vec<String> = self
+                .st
+                .published_as_read(v)
+                .into_iter()
+                .map(|l| crate::val::field_name(v, self.loc_field(l)))
+                .collect();
+            eprintln!(
+                "fin-defs node {} spec {}: {} published, {} global as read: {}  ALL: {}",
+                self.cx.node().raw(),
+                self.cx.is_speculative(),
+                all.len(),
+                same.len(),
+                same.join(" "),
+                all.join(" ")
+            );
+        }
         let at = fin_at(v, &self.cx.args());
         self.contribute(GDEFS, gdefs_unit(v, x, at));
         x
