@@ -53,13 +53,35 @@ All of these must hold in the table:
       pdflatex run by latexmk, 44 pages.
 - [ ] **Rounds:** amsldoc's cold rounds are ≤ latexmk's pdflatex runs (3).
       A round-cap warning is a red.
-- [ ] **The clean core:** the vendored engine is the clean core
-      (`crates/vendor/defuse` built with its `clean` feature, as
-      `crates/core/defuse/Cargo.toml` asks for it).
+- [ ] **The engine:** the vendored defuse has only the clean core (the
+      round core was removed in defuse 57b36bb; there is no `clean`
+      feature) and is gate-cleared by its author.
 - [ ] **para4000:** the md5 is the bar's at `-j 1`, `-j 8` and `-j 16`.
 - [ ] **Chains:** the realised critical path and the runs per live node
       are no worse than the last `main` gate's (bars: critical path ≤ 6
       on the exact-PDF document, runs per node ≤ 1.1). Record them below.
+
+## 3. Scaling (an alpha bar, the user's decision of 2026-10-21)
+
+Threads must pay off. Measure on `$D` with release builds, **on one quiet
+accl node** (the whole node, `-c 32`), cold, 3 interleaved repetitions
+each, the median counting, the engine's lane as `$D` ships it:
+
+- [ ] **para4000:** `-j 8` wall ≤ 1.0 s; `-j 16` and `-j 32` no slower than
+      `-j 8`; `-j 8` at least 3× faster than `-j 1`.
+- [ ] **amsldoc:** `-j 8` wall faster than `-j 1`, and `-j 16` no slower
+      than `-j 8`.
+- [ ] **The page chain:** the realised critical path (Report
+      `critical_path`) ≤ 2 × fires + 10 links on para4000 and amsldoc
+      (docs/spec-page-chain.md §1.2).
+- [ ] **Beside pdflatex:** pdflatex's time for the same document on the
+      same node, recorded next to the walls (cold faster than pdflatex is
+      the project's goal; record it, the bars above gate).
+
+Record the table (commit, node, jobs, walls at `-j 1/8/16/32`, critical
+paths) below with the gate.
+
+## 4. Edits
 
 The edit bar is not in `gate-fast`. Measure it on `$D` with
 `ACCL_COMMIT=$D scripts/accl/accl submit cmd bash scripts/accl/edit-classes`
@@ -127,7 +149,7 @@ with the pinned toolchain:
 | no `claude.ai` in files | none | 400c72ef |
 | no `claude.ai` in commit messages since `main` | **five** (`Claude-Session:` trailers on 43dd8b7a, 3dbb4614, b9e0a985, 49ba2d93, 4f6e007d, 2026-10-11) | |
 
-## 3. The notes
+## 5. The notes
 
 - [ ] `CHANGELOG.md`'s "Known not to work" matches the gate. Every red
       that is waived is listed with its cause. The "Speed" item carries
@@ -138,7 +160,7 @@ with the pinned toolchain:
 - [ ] `phitex --help` and `phitex --compat=pdflatex -help` match the
       README. Exit statuses are pdflatex's: 0 on success, 1 otherwise.
 
-## 4. Main
+## 6. Main
 
 - [ ] **The user confirms**, naming `$D`.
 - [ ] Then, and only then, the user (or someone at the user's word)
