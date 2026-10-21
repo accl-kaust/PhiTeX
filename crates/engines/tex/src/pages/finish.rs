@@ -340,33 +340,19 @@ impl Run<'_, '_> {
         let pid = me(fin.piece);
         // (the window's units, by piece: their items with the markers
         // resolved where each piece is)
-        let mut window = v.seq_to_vec(self.fold_own(PITEMS, fin.after, Some(fin.piece))?);
+        let window = v.seq_to_vec(self.fold_own(PITEMS, fin.after, Some(fin.piece))?);
         let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
         let names_own = fin.spans.iter().any(|s| {
             matches!(s.src, Src::Piece { piece, .. } | Src::Held { piece, .. } if piece == pid)
         });
         if names_own && !window.iter().any(|&u| unit_pid(u) == pid) {
-            // (the piece stands after this finisher in the view, a window
-            // up to this node not reaching it: placed again, the page
-            // builder to place the finisher after it again. Its items read
-            // past this node, contributor by contributor, waiting while
-            // one is in work; a piece no longer there leaves this view
-            // stale, its page not made, which the builder's run replaces)
-            window.clear();
-            let f = v.field(PITEMS);
-            let mut cur = fin.after;
-            let mut found = false;
-            while let Some((n, u)) = self.cx.acc_next(f, cur)? {
-                window.extend(v.seq_to_vec(u));
-                if n == fin.piece {
-                    found = true;
-                    break;
-                }
-                cur = Some(n);
-            }
-            if !found {
-                return Ok((pos.to_vec(), None));
-            }
+            // (the piece stands after this finisher in the view, placed
+            // again, the page builder to place the finisher after it
+            // again: a view the engine replaces, the window read here to
+            // the piece re-asked when the piece comes before this node.
+            // No page made on it, and none waited for: the piece may read
+            // what this node defines)
+            return Ok((Vec::new(), None));
         }
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
@@ -1674,6 +1660,22 @@ impl Operation for Finish {
                     Some(fin) => r.finisher_args(&fin, &pos)?,
                     None => (pos.clone(), None),
                 };
+                // (a view in which the page's piece is not before this
+                // node: no page, [`Run::finisher_args`])
+                // (its output the guess the page builder folded on, which
+                // leaves the builder as it is)
+                if args.is_empty() {
+                    r.fin = Some(FinCtx {
+                        j: pos.first().map_or(0, |&x| int_of(v, x)),
+                        pending: Vec::new(),
+                        held_n: 0,
+                        rtn: FinishIn::of(v, &pos).map(|f| f.rtn_guess),
+                        args: Vec::new(),
+                        brk: None,
+                    });
+                    give_no_units(r);
+                    return Ok(());
+                }
                 let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
                 r.fin = Some(FinCtx {
                     j: int_of(v, a(0)),
