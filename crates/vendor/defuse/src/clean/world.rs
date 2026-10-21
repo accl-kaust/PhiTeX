@@ -1110,8 +1110,11 @@ impl World {
             }
             // An accumulator: held while a node before it in work may
             // still contribute (it would stop on the fold otherwise).
-            if core.accs.contains_key(&f) {
-                if let Some(x) = self.range_blocker_last(id, f, u, 0, pos) {
+            if let Some(m) = core.acc(f) {
+                // (A guessed fold does not wait: `Monoid::speculate`.)
+                if !(predict && m.speculate())
+                    && let Some(x) = self.range_blocker_last(id, f, u, 0, pos)
+                {
                     return Err(Some(x));
                 }
                 continue;

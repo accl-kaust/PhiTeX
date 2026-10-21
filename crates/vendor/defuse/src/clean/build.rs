@@ -395,7 +395,7 @@ impl<'a> Builder<'a> {
             .map(|(k, _)| *k)
             .collect();
         for k in keys {
-            let Some(mo) = self.core.accs.get(&k.1) else { continue };
+            let Some(mo) = self.core.acc(k.1) else { continue };
             let m = AccMeasure {
                 m: &**mo,
                 v: &self.core.values,
@@ -633,7 +633,7 @@ impl<'a> Builder<'a> {
     /// Sets a contribution to accumulator `f` at `pos` (a field declared
     /// no accumulator keeps none).
     pub(crate) fn contrib(&mut self, u: u32, f: Field, pos: Pos, x: Option<ValueId>) {
-        let Some(mo) = self.core.accs.get(&f) else { return };
+        let Some(mo) = self.core.acc(f) else { return };
         if let Some(d) = &mut self.defer {
             d.push(u, f, super::batch::FieldOp::Contrib { pos, x });
             return;
@@ -1666,7 +1666,7 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
             Err(_) => false,
         },
         Read::Range { f, from, to, val, past } => {
-            let Some(mo) = core.accs.get(f) else {
+            let Some(mo) = core.acc(*f) else {
                 return *val == ValueId::UNIT;
             };
             let m = AccMeasure {
