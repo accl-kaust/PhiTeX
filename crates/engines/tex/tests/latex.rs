@@ -59,22 +59,19 @@ fn options(name: &str, dir: &Path, comment: &str, fixpoint: bool, pdf: bool) -> 
 fn report(name: &str, b: &Build) -> String {
     let s = &b.stats;
     let mut out = format!(
-        "{name}: {} nodes run, {} runs, {} stops ({} resumed, {} restarted {:?}), {} gated, ready mean {:.2}, {} live, {} rounds, {} loop rounds, {} waits, starved {}, wall {:?}\n  waits by kind {:?}",
+        "{name}: {} nodes run, {} runs, {} stops ({} resumed, {} restarted {:?}), {} live, {} rounds, {} loop rounds, {} waits, starved {}, wall {:?}",
         s.nodes_run,
         s.runs,
         s.stops,
         s.resumed,
         s.restarted,
         s.restarted_by,
-        s.gated,
-        s.ready_mean(),
         s.live,
         s.rounds,
         s.loop_rounds,
         s.pending_waits,
         s.starved,
-        s.wall,
-        s.waits_by_kind
+        s.wall
     );
     let _ = std::fmt::Write::write_fmt(
         &mut out,
@@ -89,12 +86,6 @@ fn report(name: &str, b: &Build) -> String {
             *by.entry(format!("{kind} {field}")).or_default() += 1;
         }
         let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\n  chain by cause {by:?}"));
-    }
-    for &(n, w) in &s.top_waited {
-        let _ = std::fmt::Write::write_fmt(
-            &mut out,
-            format_args!("\n  waited on {w}x: {}", b.describe_node(n)),
-        );
     }
     out
 }
