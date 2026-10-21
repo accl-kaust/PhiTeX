@@ -2064,6 +2064,8 @@ impl Graph {
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         let outer_proj = eng.register_projection(Arc::new(crate::val::outer_projection));
+        let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
+        let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
         // (handles held outside the graph: pinned, or a value sweep
         // frees them while a run still defines through them)
         for f in fields.handles() {
@@ -2093,6 +2095,8 @@ impl Graph {
             pdf_cmds: Arc::default(),
             class_proj,
             outer_proj,
+            step_proj,
+            defined_proj,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);

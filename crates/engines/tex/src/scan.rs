@@ -817,7 +817,7 @@ impl Run<'_, '_> {
         if macro_def {
             // §474
             loop {
-                self.get_token();
+                self.get_token_stored();
                 self.ck()?;
                 let tok = self.cur.tok;
                 if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
@@ -830,7 +830,7 @@ impl Run<'_, '_> {
                 if self.cur.cmd == cmd::MAC_PARAM {
                     // §476
                     let s = Tok::ch(MATCH_CAT, tok.chr());
-                    self.get_token();
+                    self.get_token_stored();
                     self.ck()?;
                     let nt = self.cur.tok;
                     if !nt.is_cs_or_active() && nt.cat() == Some(1) {
@@ -913,7 +913,11 @@ impl Run<'_, '_> {
                 // definition made before the halt surfaced, so a run
                 // resumed after it keeps the sentinel for the meaning)
                 if macro_def && tok.is_cs_or_active() {
-                    self.set_cur(tok)?;
+                    // (§479: whether it is the macro parameter character)
+                    let was = std::mem::replace(&mut self.step_reads, true);
+                    let r = self.set_cur(tok);
+                    self.step_reads = was;
+                    r?;
                 }
             }
             let tok = self.cur.tok;
@@ -939,7 +943,7 @@ impl Run<'_, '_> {
                     self.get_x_token();
                     self.ck()?;
                 } else {
-                    self.get_token();
+                    self.get_token_stored();
                     self.ck()?;
                 }
                 if self.cur.cmd != cmd::MAC_PARAM {
