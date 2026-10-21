@@ -26,7 +26,7 @@ default = ["rayon"]
 rayon = ["dep:rayon"]
 # the engine's probes, printed after each evaluation with PHITEX_OBS=1
 profile = ["phitex-defuse/profile", "phitex-pdf/profile"]
-# the engine's scheduler dumps: DEFUSE_DUMP=<file>, DEFUSE_DUMP_EVERY=<s>; its light trace: DEFUSE_LTRACE=<file>
+# the engine's recording for replay (DEFUSE_RECORD=<file>), and the traces under PHITEX_*_TRACE
 observe = ["phitex-defuse/observe", "phitex-pdf/observe"]
 
 [dev-dependencies]
