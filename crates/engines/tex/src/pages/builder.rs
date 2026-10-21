@@ -238,6 +238,20 @@ pub(crate) struct PageLoop {
     /// Each piece's place among those folded (the earliest a page names
     /// starts its finisher's window).
     pub order: phitex_defuse::FxHashMap<i64, u64>,
+    /// What the loop read where the owner of the units it folds last is
+    /// ([`OwnerReads`]): a piece's unit and its paragraphs' lines' units
+    /// share it. Kept where a stop rolls a unit back (its reads stand).
+    pub own: OwnerReads,
+}
+
+/// The reads at one owner piece ([`crate::vprof::unit_owner`]): its page
+/// parameters and its insertion classes' registers, read once for all
+/// the units it owns ([`Run::resolve_prof_of`], [`Run::insert_class_at`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OwnerReads {
+    pub owner: Option<i64>,
+    pub params: Option<PageParams>,
+    pub classes: Vec<(u16, InsertClass)>,
 }
 
 impl PageLoop {
@@ -274,6 +288,7 @@ impl PageLoop {
             page_ins: Vec::new(),
             held_nodes: Vec::new(),
             order: phitex_defuse::FxHashMap::default(),
+            own: OwnerReads::default(),
         }
     }
 }
@@ -1084,7 +1099,15 @@ impl Run<'_, '_> {
                 remap_marks(&mut items, &crate::vprof::unit_marks(v, x), &mut lp.marks);
                 pp::add(pp::DECODE, t);
                 let t = pp::start();
-                let r = self.resolve_prof_of(pid, &mut items);
+                // (the piece whose run made its items: the contributor)
+                let owner = pid;
+                if lp.own.owner != Some(owner) {
+                    lp.own = OwnerReads {
+                        owner: Some(owner),
+                        ..OwnerReads::default()
+                    };
+                }
+                let r = self.resolve_prof_of_with(owner, &mut items, &mut lp.own);
                 pp::add(pp::RESOLVE, t);
                 r?;
                 let t = pp::start();
@@ -1103,11 +1126,17 @@ impl Run<'_, '_> {
                 }
                 let mut classes = Vec::with_capacity(ns.len());
                 for n in ns {
+                    if let Some(&c) = lp.own.classes.iter().find(|c| c.0 == n) {
+                        classes.push(c);
+                        continue;
+                    }
                     let c = self.insert_class_at(n, at);
                     if c.is_err() {
                         pp::add(pp::CLASSES, t);
                     }
-                    classes.push((n, c?));
+                    let c = (n, c?);
+                    lp.own.classes.push(c);
+                    classes.push(c);
                 }
                 pp::add(pp::CLASSES, t);
                 // (units no page needs any more dropped, before the
@@ -1115,15 +1144,21 @@ impl Run<'_, '_> {
                 let t = pp::start();
                 Self::drop_units(lp);
                 pp::add(pp::DROP, t);
+                // (a unit with no build in it fires no page, and its fold
+                // reads nothing: no stop to roll back)
                 let t = pp::start();
-                let snap = lp.snap();
+                let fires = items.iter().any(|x| matches!(x, crate::vprof::PItem::Build(_)));
+                let snap = fires.then(|| lp.snap());
                 pp::add(pp::SNAP, t);
                 let t = pp::start();
                 let r = self.fold_unit(lp, node, pid, items, &classes);
                 pp::add(pp::FOLD, t);
                 if let Err(h) = r {
                     let t = pp::start();
-                    lp.restore(snap);
+                    assert!(snap.is_some(), "a unit with no build stopped in its fold");
+                    if let Some(snap) = snap {
+                        lp.restore(snap);
+                    }
                     pp::add(pp::RESTORE, t);
                     return Err(h);
                 }
@@ -1607,14 +1642,28 @@ impl Run<'_, '_> {
 
     /// Drops the units older than every source the current page's input
     /// names (their items are folded again only from there on).
+    /// The first piece the input names is the oldest: `lp.srcs` names
+    /// the pieces' items in the order they were folded (a fire keeps a
+    /// suffix of them, after the routine's material and the held-over
+    /// insertions, which name no unit), so no other is looked up.
     fn drop_units(lp: &mut PageLoop) {
-        let mut keep = lp.frontier.0;
-        for s in &lp.srcs {
-            if let Src::Piece { piece, .. } = s
-                && let Some(i) = lp.units.iter().position(|u| u.pid == *piece)
-            {
-                keep = keep.min(i);
+        let first = lp.srcs.iter().find_map(|s| match s {
+            Src::Piece { piece, .. } => Some(*piece),
+            _ => None,
+        });
+        let keep = first
+            .and_then(|p| lp.units.iter().position(|u| u.pid == p))
+            .map_or(lp.frontier.0, |i| i.min(lp.frontier.0));
+        if cfg!(feature = "observe") {
+            let mut all = lp.frontier.0;
+            for s in &lp.srcs {
+                if let Src::Piece { piece, .. } = s
+                    && let Some(i) = lp.units.iter().position(|u| u.pid == *piece)
+                {
+                    all = all.min(i);
+                }
             }
+            assert_eq!(keep, all, "the page's input names an older piece after a newer one");
         }
         if keep > 0 {
             lp.units.drain(..keep);
@@ -2156,28 +2205,37 @@ impl Run<'_, '_> {
     /// that changed them, and the scan's decision would part from the
     /// items')
     pub(crate) fn resolve_prof_of(&mut self, pid: i64, items: &mut [crate::vprof::PItem]) -> R<()> {
-        let mut m = None;
-        let mut classes: Vec<(u16, InsertClass)> = Vec::new();
+        self.resolve_prof_of_with(pid, items, &mut OwnerReads::default())
+    }
+
+    /// [`Run::resolve_prof_of`] with what was read at `pid` already
+    /// (`own`, which gains what this reads).
+    pub(crate) fn resolve_prof_of_with(
+        &mut self,
+        pid: i64,
+        items: &mut [crate::vprof::PItem],
+        own: &mut OwnerReads,
+    ) -> R<()> {
         for x in items.iter_mut() {
             if let crate::vprof::PItem::InsParams(n, c @ None) = x {
                 let n = *n;
-                *c = Some(if let Some(&(_, k)) = classes.iter().find(|k| k.0 == n) {
+                *c = Some(if let Some(&(_, k)) = own.classes.iter().find(|k| k.0 == n) {
                     k
                 } else {
                     let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(pid.to_ne_bytes()));
                     let k = self.insert_class_at(n, at)?;
-                    classes.push((n, k));
+                    own.classes.push((n, k));
                     k
                 });
                 continue;
             }
             if let crate::vprof::PItem::Params(p @ None) = x {
-                let pp = if let Some(pp) = m {
+                let pp = if let Some(pp) = own.params {
                     pp
                 } else {
                     let mm = self.page_params_at(pid)?;
                     let pp = params_of(self.v, mm);
-                    m = Some(pp);
+                    own.params = Some(pp);
                     pp
                 };
                 *p = Some(pp);
