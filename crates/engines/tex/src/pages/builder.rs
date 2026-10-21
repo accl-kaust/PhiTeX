@@ -810,18 +810,16 @@ pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: 
 }
 
 /// (`observe`) Page `j`'s guess depends on the pages before it alone
-/// ([`Run::rtn_guess`]): the same misses of the pages before `j`, the
-/// same routine, give the same guess in every attempt; a guess changed
-/// by page `j`'s own miss read back is a defect (its finisher placed
-/// anew on its own miss).
-fn guess_check(node: u64, j: i64, misses: &[(i64, ValueId)], how: impl std::hash::Hash, guess: ValueId) {
+/// ([`Run::rtn_guess`]): the same give-backs of the pages before `j`
+/// (what the loop took for them, misses read or guesses), the same
+/// routine and `\outputpenalty`, give the same guess in every attempt,
+/// whatever page `j`'s own miss; one changed by it is a defect (its
+/// finisher placed anew on its own miss).
+fn guess_check(node: u64, j: i64, how: impl std::hash::Hash, guess: ValueId) {
     use std::hash::{Hash, Hasher};
     type Seen = Option<phitex_defuse::FxHashMap<(u64, i64, u64), ValueId>>;
     static SEEN: std::sync::Mutex<Seen> = std::sync::Mutex::new(None);
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    for m in misses.iter().filter(|m| m.0 < j) {
-        m.hash(&mut h);
-    }
     how.hash(&mut h);
     let key = (node, j, h.finish());
     let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1204,7 +1202,7 @@ impl Run<'_, '_> {
                 self.cx.values_epoch(),
                 self.rtn_guess(hint),
             );
-            guess_check(self.cx.node().raw(), j, &lp.misses, (eval, key, in_material), rtn_guess);
+            guess_check(self.cx.node().raw(), j, (eval, key, in_material, &lp.last_rtn, &lp.last_markers), rtn_guess);
         }
         let rtns: Vec<(i64, ValueId)> = {
             let mut pages: Vec<i64> = spans
