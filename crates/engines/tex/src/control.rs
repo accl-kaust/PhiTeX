@@ -1206,7 +1206,10 @@ impl Run<'_, '_> {
             v.int(i64::from(l.at.size)),
             v.int(i64::from(l.at.design_size)),
             file,
-            v.int(i64::from(s)),
+            // (the size the TFM is read at again: the font's own, however
+            // the load asked for it, `at` or `scaled`, so that the same
+            // font loaded either way has the same fields)
+            v.int(i64::from(l.at.size)),
         ]);
         self.font_set(f, crate::fields::FontCell::Info, info, true);
         let params = l.at.params.clone();
