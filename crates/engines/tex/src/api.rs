@@ -2014,6 +2014,7 @@ impl Graph {
         let outer_proj = eng.register_projection(Arc::new(crate::val::outer_projection));
         let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
+        let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));
         // (handles held outside the graph: pinned, or a value sweep
         // frees them while a run still defines through them)
         for f in fields.handles() {
@@ -2044,6 +2045,7 @@ impl Graph {
             outer_proj,
             step_proj,
             defined_proj,
+            tail_proj,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);

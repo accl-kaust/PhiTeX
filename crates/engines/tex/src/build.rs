@@ -523,6 +523,22 @@ impl Run<'_, '_> {
         Ok(crate::nest::of_values(self.list_items(lid)?.0))
     }
 
+    /// [`Self::list_last`] for a reader of the last item's kind only (a
+    /// glue, kern or penalty item whole, a box as `[tag, h]`, anything
+    /// else as `[tag]`, [`crate::val::tail_projection`]): the main list
+    /// as the pieces before left it, before this run appended to it,
+    /// reads that projection of [`MAIN_LAST`], so a piece after another
+    /// paragraph's last line reads only that a box ends the list.
+    pub(crate) fn list_last_kind(&mut self, lid: i64) -> R<(Option<ValueId>, usize)> {
+        if lid != 0 || self.level_of(lid).is_some() {
+            return self.list_last(lid);
+        }
+        let f = self.list_fold_(lid, true)?;
+        let v = self.v;
+        let last = f.items.iter().rev().find(|&&x| !is_marker(v, x)).copied();
+        Ok((last, f.since_bp))
+    }
+
     /// The last item of list `lid` and the count [`Self::list_items`]
     /// gives, without copying a local list.
     pub(crate) fn list_last(&mut self, lid: i64) -> R<(Option<ValueId>, usize)> {
@@ -539,8 +555,14 @@ impl Run<'_, '_> {
     /// list's transitions are folded left to right from 1000 (§1091,
     /// §1083), and each waiting space gets its glue from the factor where
     /// it stands (§1041–§1044).
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn list_fold(&mut self, lid: i64) -> R<ListFold> {
+        self.list_fold_(lid, false)
+    }
+
+    /// [`Self::list_fold`]; `kind_only`: the main list's last item before
+    /// this run read as its kind only ([`Self::list_last_kind`]).
+    #[allow(clippy::too_many_lines)]
+    fn list_fold_(&mut self, lid: i64, kind_only: bool) -> R<ListFold> {
         let v = self.v;
         let f = v.field("items");
         let mut out: Vec<ValueId> = Vec::new();
@@ -563,9 +585,6 @@ impl Run<'_, '_> {
             // [`MAIN_PD`]), not every item since the start; a deletion
             // of this run's reaching past that item reads the items
             // themselves, a real dependency
-            let last = self.eng_read(v.field(MAIN_LAST))?;
-            let since = self.eng_read(v.field(MAIN_SINCE))?;
-            let (last, since, at_least) = MainTail::of_last(v, last, since);
             let deletes = own.iter().any(|&s| {
                 v.seq_to_vec(s).iter().any(|&x| {
                     let xs = list_of(v, x);
@@ -574,6 +593,13 @@ impl Run<'_, '_> {
             });
             // (a count that is a lower bound, `MainTail::since_at_least`:
             // the deletion may reach past the last item)
+            let last = if kind_only && !deletes {
+                self.cx.use_field_proj(v.field(MAIN_LAST), self.ops.tail_proj)?
+            } else {
+                self.eng_read(v.field(MAIN_LAST))?
+            };
+            let since = self.eng_read(v.field(MAIN_SINCE))?;
+            let (last, since, at_least) = MainTail::of_last(v, last, since);
             if deletes && (since > 1 || at_least) {
                 let all = self.cx.acc_range(f, None)?;
                 fold_entries(v, 0, &v.seq_to_vec(all), &mut st, &mut out);
@@ -1392,9 +1418,11 @@ impl Run<'_, '_> {
                 if md.m.abs() == 203 {
                     None
                 } else {
-                    let (last, since) = self.list_last(md.lid)?;
+                    let (last, since) = self.list_last_kind(md.lid)?;
                     let ok = last.is_some_and(|x| nodes::tag(v, x) == nodes::T_BOX)
                         && !(md.m == 1 && since == 0);
+                    // (the box itself only where it is taken)
+                    let last = if ok { self.list_last(md.lid)?.0 } else { None };
                     if ok {
                         let m = nodes::marker(v, T_DELETE);
                         self.append(md.lid, m);
@@ -1577,7 +1605,7 @@ impl Run<'_, '_> {
             11 => nodes::T_KERN,
             _ => nodes::T_PENALTY,
         };
-        let (last, since) = self.list_last(md.lid)?;
+        let (last, since) = self.list_last_kind(md.lid)?;
         if md.m == 1 && since == 0 {
             // §1106: nothing can be taken from the current page
             return Ok(());
@@ -2770,7 +2798,7 @@ impl Run<'_, '_> {
         let last = if self.mode_zero || self.chars_live.is_some_and(|(l, _)| l == md.lid) {
             None
         } else {
-            self.list_last(md.lid)?.0
+            self.list_last_kind(md.lid)?.0
         };
         let v = self.v;
         let tag = last.map_or(-1, |x| nodes::tag(v, x));

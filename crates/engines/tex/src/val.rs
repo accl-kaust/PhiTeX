@@ -1009,6 +1009,30 @@ pub(crate) fn defined_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(i64::from(Mean::decode(v, Some(x)) != Mean::Undefined))
 }
 
+/// What a reader of the main list's last item by its kind needs of it
+/// ([`crate::build::MAIN_LAST`]: `\\lastskip`, `\\lastkern`,
+/// `\\lastpenalty`, §424; `\\unskip` and its kind, §1105;
+/// `\\lastnodetype`; whether `\\lastbox` takes it, §1080): a glue, kern
+/// or penalty item whole, a box as its tag and whether it is horizontal
+/// (`[tag, h]`, [`crate::nodes::box_is_h`]'s field), anything else as its
+/// tag alone (`[tag]`); no item stays none. A pure projection for the
+/// engine: a paragraph ending with another line box than the one before
+/// leaves such a reader standing.
+pub(crate) fn tail_projection(x: ValueId, v: &Values) -> ValueId {
+    use crate::nodes::{T_BOX, T_GLUE, T_KERN, T_PENALTY};
+    let Some((tag, h)) = v.with_list(x, |xs| {
+        let tag = xs.first().map_or(-1, |&t| int_of(v, t));
+        (tag, xs.get(1).copied())
+    }) else {
+        return x;
+    };
+    match tag {
+        T_GLUE | T_KERN | T_PENALTY => x,
+        T_BOX => v.list(vec![v.int(T_BOX), h.unwrap_or(ValueId::UNIT)]),
+        t => v.list(vec![v.int(t)]),
+    }
+}
+
 /// [`step_projection`]'s class of a meaning that opens a conditional.
 pub(crate) const STEP_IF: i64 = 1;
 /// [`step_projection`]'s class of an `\outer` macro.

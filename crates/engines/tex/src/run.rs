@@ -226,6 +226,10 @@ pub(crate) struct Ops {
     /// ([`crate::val::defined_projection`]): `\csname` reads only whether
     /// the name it makes is defined ([`Run::defined_lookup`]).
     pub defined_proj: phitex_defuse::ProjId,
+    /// The kind projection of the main list's last item
+    /// ([`crate::val::tail_projection`]): a reader of its kind reads that,
+    /// not the item ([`Run::list_last_kind`]).
+    pub tail_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -1140,6 +1144,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let r = self.cx.use_field(f);
         if r.is_err() {
             note_stop(self.op_name(), f);
+        }
+        if crate::exec::obs_flag!("PHITEX_READS") {
+            self.trace_read(f, r.is_err());
         }
         r
     }
