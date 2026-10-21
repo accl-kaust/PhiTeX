@@ -1016,22 +1016,25 @@ fn engine_identity() -> u64 {
     static ID: OnceLock<u64> = OnceLock::new();
     *ID.get_or_init(|| {
         let own = u64::from_str_radix(env!("PHITEX_TEX_SRC_HASH"), 16).unwrap_or(0);
-        let srcs: [&[u8]; 15] = [
+        let srcs: [&[u8]; 18] = [
             include_bytes!("../../../vendor/defuse/Cargo.toml"),
             include_bytes!("../../../vendor/defuse/src/lib.rs"),
             include_bytes!("../../../vendor/defuse/src/api.rs"),
             include_bytes!("../../../vendor/defuse/src/values.rs"),
             include_bytes!("../../../vendor/defuse/src/sync.rs"),
             include_bytes!("../../../vendor/defuse/src/obs.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/mod.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/commit.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/ctx.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/edit.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/eval.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/order.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/query.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/report.rs"),
-            include_bytes!("../../../vendor/defuse/src/core/run.rs"),
+            include_bytes!("../../../vendor/defuse/src/record.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/mod.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/batch.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/build.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/claims.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/core.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/ctx.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/engine.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/eval.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/ptree.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/seq.rs"),
+            include_bytes!("../../../vendor/defuse/src/clean/world.rs"),
         ];
         let mut h = own;
         for s in srcs {
@@ -1397,10 +1400,6 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
     #[allow(clippy::cast_precision_loss)]
     let rpn = r.runs as f64 / live as f64;
     eprintln!(
-        "acct: memo {} bytes (the previous evaluation's round results)",
-        r.memo_bytes
-    );
-    eprintln!(
         "acct: {} rounds, {} runs, {} live nodes, {rpn:.2} runs/node, raises {} ({:.2}% of runs), pending waits {} ({:.2}% of runs), round wall minus op {per_run_us:.1} us/run at {} threads",
         r.round_times.len(),
         r.runs,
@@ -1418,21 +1417,6 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         .map(|(k, d, n)| format!("{k} {:.3} ms/{n}", d.as_secs_f64() * 1e3))
         .collect();
     eprintln!("acct: op time by kind: {}", kinds.join(", "));
-    // (the time inside the engine's reads by kind, and the op bodies:
-    // the op time less it)
-    let read_total: u64 = r.read_ns.iter().map(|&(_, n)| n).sum();
-    let reads: Vec<String> = r
-        .read_ns
-        .iter()
-        .filter(|&&(_, n)| n > 0)
-        .map(|&(k, n)| format!("{k} {:.3} ms", ms(n)))
-        .collect();
-    eprintln!(
-        "acct: read_ns by kind: {}; total {:.3} ms; op bodies (op minus reads) {:.3} ms",
-        reads.join(", "),
-        ms(read_total),
-        ms(op.saturating_sub(read_total))
-    );
     // (what stays parked at the end: the nodes whose wait chains end at
     // the environment, and each chain's head with the field it asks)
     let waits: Vec<String> = r
@@ -2834,11 +2818,6 @@ impl Graph {
             }
             crate::timeline::lap("engine: evaluate (the runs, their commits)");
             t_mark = std::time::Instant::now();
-            if tm {
-                // (the scans a stable field's definition made through its
-                // readers, `STABLE_FIELDS`: about none, or the list is wrong)
-                eprintln!("stable fields: {} scans", r.stable_scans);
-            }
             crate::timeline::lap("engine: the evaluation's report");
             if crate::exec::obs_flag!("PHITEX_CHECK_READS") {
                 // (debug: every committed node's reads checked again
@@ -2883,54 +2862,14 @@ impl Graph {
                     r.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
                 ops.sort_unstable();
                 eprintln!(
-                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits/wall by round [{}], memo {} bytes, {} runs, {} nodes run, runs by op {ops:?}",
+                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits/wall by round [{}], {} runs, {} nodes run, runs by op {ops:?}",
                     t0.elapsed().as_secs_f64() * 1e3,
                     r.rounds,
                     rounds.join(" "),
-                    r.memo_bytes,
                     r.runs,
                     r.nodes_run
                 );
-                eprintln!(
-                    "acct-edit: quick path held {}, refused by {}",
-                    r.quick_held,
-                    r.quick_refused.as_deref().unwrap_or("-")
-                );
-                // (the memo's misses grouped by why, node and value ids
-                // taken out, most first, with their count by round)
-                let mut by: FxHashMap<String, (u64, MissRounds)> = FxHashMap::default();
-                for m in &r.memo_misses {
-                    let e = by.entry(miss_kind(&m.why)).or_default();
-                    e.0 += 1;
-                    *e.1.entry(m.round).or_default() += 1;
-                }
-                let mut by: Vec<(String, (u64, MissRounds))> = by.into_iter().collect();
-                by.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
-                for (why, (n, rounds)) in by.iter().take(40) {
-                    let rs: Vec<String> = rounds
-                        .iter()
-                        .map(|(k, c)| {
-                            if *k == u32::MAX {
-                                format!("final:{c}")
-                            } else {
-                                format!("{k}:{c}")
-                            }
-                        })
-                        .collect();
-                    eprintln!("acct-edit: memo miss {n:6} [{}] {why}", rs.join(" "));
-                }
-                if crate::exec::prof_flag!("PHITEX_MEMO_MISSES") {
-                    // (every miss, with its node's operation and text)
-                    for m in &r.memo_misses {
-                        eprintln!(
-                            "acct-edit: miss round {} node {} [{}]: {}",
-                            m.round,
-                            m.node.raw(),
-                            describe(&self.eng, m.node),
-                            m.why
-                        );
-                    }
-                }
+                eprintln!("acct-edit: quick path held {}", r.quick_held);
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
@@ -6165,28 +6104,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
         }
     }
     row[b.len()]
-}
-
-/// Memo misses by round (`acct-edit:` lines).
-type MissRounds = std::collections::BTreeMap<u32, u64>;
-
-/// A memo miss's reason without its node and value ids (digit runs),
-/// so that misses group by kind and field.
-fn miss_kind(why: &str) -> String {
-    let mut out = String::with_capacity(why.len());
-    let mut digits = false;
-    for c in why.chars() {
-        if c.is_ascii_digit() {
-            if !digits {
-                out.push('#');
-            }
-            digits = true;
-        } else {
-            digits = false;
-            out.push(c);
-        }
-    }
-    out.chars().take(160).collect()
 }
 
 /// A node: its operation and the start of its first argument.
