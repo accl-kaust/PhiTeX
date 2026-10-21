@@ -884,9 +884,9 @@ fn node_short(n: &Node) -> String {
 }
 
 /// Whether the page builder parks continuing
-/// ([`phitex_defuse::Ctx::park_continuing`]): off until a placement made
-/// by a continued attempt reads its window as one made afresh does.
-const CONTINUES: bool = false;
+/// ([`phitex_defuse::Ctx::park_continuing`]): resumed, it places only the
+/// pages new since its stop.
+const CONTINUES: bool = true;
 
 /// What the loop saves before folding a unit, put back where the fold
 /// stops on a read ([`Halt::Stop`]): the unit is folded again whole.
