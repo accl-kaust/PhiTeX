@@ -1194,9 +1194,9 @@ impl Run<'_, '_> {
         let lsl = v.int(i64::from(self.ipar(Par::lineskiplimit)?));
         let tv = v.int(nodes::T_VBOX);
         let mut out = Vec::with_capacity(para.lines.len() * 2);
-        for (k, line) in para.lines.into_iter().enumerate() {
+        for (k, mut line) in para.lines.into_iter().enumerate() {
             self.box_report(true, line.packed.report, true);
-            let (list, plain) = nodes::encode_list_side_free(v, &line.packed.node.list, &side);
+            let (list, seen) = nodes::encode_list_side_free(v, &line.packed.node.list, &side);
             let b = nodes::encode_box_with(v, &line.packed.node, list);
             out.push(v.list(vec![tv, b, bs, ls, lsl]));
             for a in &line.packed.adjustments {
@@ -1207,7 +1207,15 @@ impl Run<'_, '_> {
             }
             if display && k == last_k {
                 just_box = Some(line.packed.node);
-            } else if !plain {
+            } else if seen & nodes::SEEN_MARK != 0
+                || (seen & nodes::SEEN_LAZY != 0 && {
+                    // (a shallow box's list decoded now: the line kept as
+                    // its value decodes)
+                    let ok = nodes::materialize_lazy(v, &mut line.packed.node.list, &side);
+                    nodes::made_stat(if ok { 5 } else { 6 });
+                    !ok
+                })
+            {
                 nodes::made_stat(1);
                 phitex_typeset::linebreak::recycle_line(line.packed.node.list);
             } else if let Some(l) = nodes::keep_made(list, line.packed.node.list) {

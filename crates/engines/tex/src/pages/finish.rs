@@ -961,8 +961,8 @@ impl Run<'_, '_> {
                 .map(|x| x.load(std::sync::atomic::Ordering::Relaxed))
                 .collect();
             eprintln!(
-                "made-stats: kept {} side {} full {} taken {} decoded {}",
-                n[0], n[1], n[2], n[3], n[4]
+                "made-stats: kept {} side {} full {} taken {} decoded {} lazy kept {} lazy not {}",
+                n[0], n[1], n[2], n[3], n[4], n[5], n[6]
             );
         }
         let Some(Node::Box(bx)) = decoded else {

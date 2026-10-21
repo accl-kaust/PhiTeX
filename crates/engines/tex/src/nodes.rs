@@ -221,11 +221,11 @@ pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
 
 pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
     if let Some(x) = lazy_value(b, side) {
-        side_seen();
+        side_seen(SEEN_LAZY);
         return x;
     }
     if let Some(l) = lazy_list(b, side) {
-        side_seen();
+        side_seen(SEEN_LAZY);
         return encode_box_with(v, b, l);
     }
     encode_box_with(v, b, encode_list(v, &b.list, side))
@@ -314,7 +314,7 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
             encode_list(v, &x.list, side),
         ]),
         Node::Mark(k) => {
-            side_seen();
+            side_seen(SEEN_MARK);
             v.list(vec![
                 i(v, T_MARK),
                 side.marks
@@ -339,7 +339,7 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
             encode_list(v, &d.replace, side),
         ]),
         Node::Whatsit(k, dims) => {
-            side_seen();
+            side_seen(SEEN_MARK);
             let mut xs = vec![
                 i(v, T_WHATSIT),
                 side.whats
@@ -433,15 +433,18 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
 }
 
 /// (observe) `PHITEX_MADE_STATS`: lines kept, not kept (side tables),
-/// not kept (full), taken, and box lists decoded while shipping.
-pub(crate) static MADE_STATS: [std::sync::atomic::AtomicU64; 5] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+/// not kept (full), taken, box lists decoded while shipping, lines
+/// with shallow boxes kept and not kept.
+pub(crate) static MADE_STATS: [std::sync::atomic::AtomicU64; 7] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 7];
 
 /// Counts event `k` of [`MADE_STATS`] (under `observe`, while a page
 /// is decoded for shipping for `k = 4`).
 #[inline]
 pub(crate) fn made_stat(k: usize) {
-    if crate::exec::obs_flag!("PHITEX_MADE_STATS") && (k != 4 || TAKE_MADE.with(std::cell::Cell::get)) {
+    if crate::exec::obs_flag!("PHITEX_MADE_STATS")
+        && (k != 4 || TAKE_MADE.with(std::cell::Cell::get))
+    {
         MADE_STATS[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -467,7 +470,7 @@ thread_local! {
     /// Set by an encoding that met a node of the side tables (a mark, a
     /// whatsit, a shallow box's list): its value decodes to another
     /// list than the one encoded, or touches the decoding's tables.
-    static SIDE_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SIDE_SEEN: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     /// Set while a page is decoded for shipping ([`take_made`]).
     pub(crate) static TAKE_MADE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -498,17 +501,60 @@ pub(crate) fn keep_made(id: ValueId, list: List) -> Option<List> {
 
 /// [`encode_list`] of `list`, and whether it met no node of the side
 /// tables ([`SIDE_SEEN`]).
-pub(crate) fn encode_list_side_free(v: &Values, list: &[Node], side: &Side) -> (ValueId, bool) {
-    let was = SIDE_SEEN.with(|c| c.replace(false));
+pub(crate) fn encode_list_side_free(v: &Values, list: &[Node], side: &Side) -> (ValueId, u8) {
+    let was = SIDE_SEEN.with(|c| c.replace(0));
     let x = encode_list(v, list, side);
-    let seen = SIDE_SEEN.with(|c| c.replace(was || c.get()));
-    (x, !seen)
+    let seen = SIDE_SEEN.with(|c| c.replace(was | c.get()));
+    (x, seen)
 }
+
+/// [`SIDE_SEEN`]'s bit for a mark or a whatsit.
+pub(crate) const SEEN_MARK: u8 = 1;
+/// [`SIDE_SEEN`]'s bit for a shallow box's list ([`decode_shallow`]).
+pub(crate) const SEEN_LAZY: u8 = 2;
 
 /// Notes an encoding that met a node of the side tables ([`SIDE_SEEN`]).
 #[inline]
-fn side_seen() {
-    SIDE_SEEN.with(|c| c.set(true));
+fn side_seen(bit: u8) {
+    SIDE_SEEN.with(|c| c.set(c.get() | bit));
+}
+
+/// `list` (a line's, encoded with `side`) with each shallow box's list
+/// decoded in place ([`decode_shallow`]): the list its value decodes
+/// to, where nothing in those lists goes to the side tables; `false`
+/// (the list left part done) where something does.
+pub(crate) fn materialize_lazy(v: &Values, list: &mut [Node], side: &Side) -> bool {
+    for n in list.iter_mut() {
+        let ok = match n {
+            Node::Box(b) => match b.list.as_slice() {
+                [Node::Whatsit(h, None)] if *h >= LAZY => {
+                    let Some(&l) = side.lazy.get((*h - LAZY) as usize) else {
+                        return false;
+                    };
+                    let mut s = Side::default();
+                    let d = decode_list(v, l, &mut s);
+                    if !(s.marks.is_empty() && s.whats.is_empty() && s.lazy.is_empty()) {
+                        return false;
+                    }
+                    b.list = d;
+                    true
+                }
+                _ => materialize_lazy(v, &mut b.list, side),
+            },
+            Node::Disc(d) => {
+                materialize_lazy(v, &mut d.pre, side)
+                    && materialize_lazy(v, &mut d.post, side)
+                    && materialize_lazy(v, &mut d.replace, side)
+            }
+            Node::Ins(_) | Node::Adjust(_) | Node::Unset(_) => false,
+            Node::Glue(g) => g.leader.is_none(),
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 /// Line list `id` as line breaking made it, taken, while a page is
