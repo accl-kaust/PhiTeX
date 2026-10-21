@@ -261,11 +261,15 @@ primitives.
   - its own glyph usage;
   - the objects it introduces.
   This is as in `docs/spec-redesign.md` §1.
-- **The link** numbers objects and byte offsets by prefix sums in fire
-  order, and renders only changed records.
+- **The link** renders only the records that changed, in fire order. How
+  it numbers is the writer's own: pdfTeX's writer uses prefix sums of
+  object counts and byte lengths; xdvipdfmx numbers objects at first use
+  and fills object streams as it goes, so its link is a memoized fold
+  resumed from per-page snapshots (docs/spec-xetex.md).
 - **Writers:** the interface names no output format. pdfTeX's writer
-  implements it now. The XDV + xdvipdfmx writer (r7-xetex) implements it
-  later and must need no change to §4.
+  implements it now. The XDV + xdvipdfmx writer implements it later
+  (docs/spec-xetex.md: a page's record is its XDV bytes and the fonts it
+  uses) and needs no change to §4.
 - **Read-time PDF commands:** they stay effects with relocatable handles
   (§1 of spec-redesign).
 
