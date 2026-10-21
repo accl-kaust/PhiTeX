@@ -1622,6 +1622,19 @@ impl<'a> Builder<'a> {
 
     /// Commits a stopped run's unfolding only (its children made, so the
     /// run can wait for them).
+    /// Frees the placements `gone` of placer `id` (see [`passed`]).
+    pub(crate) fn free_placed(&mut self, id: Id, gone: &[Id]) {
+        for &k in gone {
+            self.free(k);
+        }
+        let Some(mut n) = self.w.node(id).cloned() else { return };
+        let mut res = n.res.as_deref().cloned().unwrap_or_default();
+        res.kids.retain(|k| !gone.contains(k));
+        res.conts.retain(|k| !gone.contains(k));
+        n.res = Some(Arc::new(res));
+        self.w.put(id, n);
+    }
+
     pub(crate) fn commit_unfolding(&mut self, id: Id, kids: &[Spec], conts: &[Spec]) {
         let Some(n) = self.w.node(id).cloned() else { return };
         let (k, c) = self.place_some(id, kids, conts, true);
@@ -1632,6 +1645,19 @@ impl<'a> Builder<'a> {
         n2.res = Some(Arc::new(res));
         self.w.put(id, n2);
     }
+}
+
+/// What placer `id`, stopped on node `x`, still holds before `x` (in its
+/// unit) and did not place again: its attempt is past it.
+pub(crate) fn passed(w: &World, id: Id, x: Id) -> Vec<Id> {
+    let (Some(n), Some(xn)) = (w.node(id), w.node(x)) else { return Vec::new() };
+    let Some(res) = n.res.as_ref() else { return Vec::new() };
+    res.kids
+        .iter()
+        .chain(&res.conts)
+        .copied()
+        .filter(|&k| w.awaiting.contains_key(&k) && w.node(k).is_some_and(|kn| kn.parent == id && kn.unit == xn.unit && kn.pos < xn.pos))
+        .collect()
 }
 
 /// A node's contributions as filed: its run's, else its text's declared.
