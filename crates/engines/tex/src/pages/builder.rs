@@ -189,6 +189,9 @@ pub(crate) struct PageLoop {
     /// The pages fired so far: the piece each fired in, its finisher's
     /// input.
     pub pages: Vec<(phitex_defuse::NodeId, FinishIn)>,
+    /// Each page's finisher arguments as placed ([`FinishIn::args`]),
+    /// made once: every attempt places the pages again.
+    pub page_args: Vec<Vec<ValueId>>,
     /// Whether the loop has read [`PAGE_MISS`] (once, at its start).
     pub misses_read: bool,
     /// The contributions not yet looked at, with their sources.
@@ -240,6 +243,7 @@ impl PageLoop {
             marks: Vec::new(),
             misses: Vec::new(),
             pages: Vec::new(),
+            page_args: Vec::new(),
             misses_read: false,
             pend: Vec::new(),
             page_src: Vec::new(),
@@ -925,6 +929,7 @@ impl PageLoop {
         // is noted, or the pages are truncated with it)
         self.units.truncate(s.units);
         self.pages.truncate(s.pages);
+        self.page_args.truncate(s.pages);
         self.rtns.truncate(s.rtns);
         self.frontier = s.frontier;
         self.last_fire = s.last_fire;
@@ -992,8 +997,8 @@ impl Run<'_, '_> {
                 lp.misses.iter().map(|m| m.0).collect::<Vec<_>>()
             );
         }
-        for (at, fin) in &lp.pages {
-            self.place_finisher(*at, fin);
+        for ((at, fin), args) in lp.pages.iter().zip(&lp.page_args) {
+            self.place_finisher(*at, fin, args.clone());
         }
         let vprof = v.field(crate::vprof::VPROF);
         while let Some((node, u)) = self.cx.acc_next(vprof, lp.cur)? {
@@ -1047,8 +1052,10 @@ impl Run<'_, '_> {
                 // next attempt, which folds the unit again whole, makes
                 // the same placements, never one fewer than the stop
                 // published)
-                for (at, fin) in &lp.pages[placed..] {
-                    self.place_finisher(*at, fin);
+                for i in placed..lp.pages.len() {
+                    let args = lp.pages[i].1.args(v);
+                    self.place_finisher(lp.pages[i].0, &lp.pages[i].1, args.clone());
+                    lp.page_args.push(args);
                 }
             }
             lp.cur = Some(node);
@@ -1517,12 +1524,11 @@ impl Run<'_, '_> {
         }
     }
 
-
     /// A page's finisher placed right after the piece its page fired in
     /// (`follow_after_any`, its position the composite of the piece's, the
-    /// placer and the order placed; docs/spec-layers.md §6).
-    pub(crate) fn place_finisher(&mut self, at: phitex_defuse::NodeId, fin: &FinishIn) {
-        let v = self.v;
+    /// placer and the order placed; docs/spec-layers.md §6), its
+    /// arguments `fin`'s ([`FinishIn::args`], made once a page).
+    pub(crate) fn place_finisher(&mut self, at: phitex_defuse::NodeId, fin: &FinishIn, args: Vec<ValueId>) {
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
                 "place finisher of page {} (piece {} candidate {})",
@@ -1531,7 +1537,7 @@ impl Run<'_, '_> {
                 fin.k
             );
         }
-        self.cx.follow_after_any(at, self.ops.finish, fin.args(v));
+        self.cx.follow_after_any(at, self.ops.finish, args);
     }
 
     /// The loop's end: where the pages end, once every finisher is
