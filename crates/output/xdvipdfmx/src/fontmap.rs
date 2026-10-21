@@ -2,8 +2,11 @@
 //! XeTeX's native fonts).
 //!
 //! The map is `self.fontmap.fontmap`, an [`HtTable`] of [`FontmapRec`]s
-//! keyed by TeX font name (`None` before `pdf_init_fontmaps`). Lookups
-//! return an owned copy of the record. SFD subfonts (`foo@SFD@`) need
+//! keyed by TeX font name (`None` before `pdf_init_fontmaps`), over
+//! `self.fontmap.start`, the records the session's start read (its config
+//! file's map files), shared by the session's copies
+//! ([`Dpx::pdf_fontmaps_started`]). Lookups return an owned copy of the
+//! record. SFD subfonts (`foo@SFD@`) need
 //! subfont.c, which is not ported: those paths are fatal errors.
 
 use crate::dpxutil::HtTable;
@@ -94,8 +97,11 @@ pub struct FontmapRec {
 /// fontmap.c's statics.
 #[derive(Clone, Debug, Default)]
 pub struct State {
-    /// `fontmap` (NULL before `pdf_init_fontmaps`).
-    pub fontmap: Option<HtTable<FontmapRec>>,
+    /// `fontmap` (NULL before `pdf_init_fontmaps`): the records put since
+    /// the session's start, a removed one as `None`.
+    pub fontmap: Option<HtTable<Option<FontmapRec>>>,
+    /// The records of the session's start, under `fontmap`.
+    pub start: Option<Rc<HtTable<FontmapRec>>>,
 }
 
 /// `pdf_init_fontmap_record`.
@@ -196,11 +202,9 @@ fn fill_in_defaults(mrec: &mut FontmapRec, tex_name: &[u8]) {
 /// `buf.len()` bytes, NUL-terminated; what is past the NUL is left from
 /// earlier lines, as in C) and cuts it at `%`. False at the end.
 fn readline(buf: &mut [u8], fp: &mut MemFile) -> bool {
-    let Some(line) = fp.mfgets(buf.len()) else {
+    let Some(n) = fp.mfgets_into(buf) else {
         return false;
     };
-    let n = line.len();
-    buf[..n].copy_from_slice(&line);
     buf[n] = 0;
     // strchr(p, '%') within the C string
     let len = cstr(buf).len();
@@ -830,6 +834,34 @@ impl Dpx {
     /// `pdf_init_fontmaps`.
     pub fn pdf_init_fontmaps(&mut self) {
         self.fontmap.fontmap = Some(HtTable::ht_init_table());
+        self.fontmap.start = None;
+    }
+
+    /// The session's start is read: the records so far become the start
+    /// its copies share (the map is the same, and a copy does not copy
+    /// it).
+    pub fn pdf_fontmaps_started(&mut self) {
+        let Some(t) = self.fontmap.fontmap.as_mut() else {
+            return;
+        };
+        let mut start = match self.fontmap.start.take() {
+            Some(s) => Rc::unwrap_or_clone(s),
+            None => HtTable::ht_init_table(),
+        };
+        for chain in &mut t.table {
+            for e in chain.drain(..) {
+                match e.value {
+                    Some(v) => {
+                        start.ht_insert_table(&e.key, v);
+                    }
+                    None => {
+                        start.ht_remove_table(&e.key);
+                    }
+                }
+            }
+        }
+        t.count = 0;
+        self.fontmap.start = Some(Rc::new(start));
     }
 
     /// `pdf_close_fontmaps`. (C then calls subfont.c's
@@ -840,9 +872,10 @@ impl Dpx {
             t.ht_clear_table();
         }
         self.fontmap.fontmap = None;
+        self.fontmap.start = None;
     }
 
-    fn fontmap_table(&mut self) -> &mut HtTable<FontmapRec> {
+    fn fontmap_table(&mut self) -> &mut HtTable<Option<FontmapRec>> {
         self.fontmap
             .fontmap
             .as_mut()
@@ -898,7 +931,7 @@ impl Dpx {
             let kp = mrec.map_name.clone().unwrap_or_default();
             match mode {
                 FONTMAP_RMODE_REPLACE => {
-                    self.pdf_insert_fontmap_record(&kp, &mrec)?;
+                    self.fontmap_insert(&kp, mrec)?;
                 }
                 FONTMAP_RMODE_APPEND => {
                     self.pdf_append_fontmap_record(&kp, &mrec)?;
@@ -925,14 +958,13 @@ impl Dpx {
             fatal!("SFD subfonts are not supported.");
         }
 
-        let t = self.fontmap_table();
-        if t.ht_lookup_table(kp).is_none() {
+        if self.pdf_lookup_fontmap_ref(kp).is_none() {
             let mut m = FontmapRec::default();
             pdf_copy_fontmap_record(&mut m, mrec);
             if m.map_name.as_deref() == Some(kp) {
                 m.map_name = None;
             }
-            t.ht_insert_table(kp, m);
+            self.fontmap_table().ht_insert_table(kp, Some(m));
         }
 
         Ok(0)
@@ -945,7 +977,17 @@ impl Dpx {
             fatal!("SFD subfonts are not supported.");
         }
 
-        self.fontmap_table().ht_remove_table(kp);
+        // (a record of the start is hidden, one put since dropped)
+        if self
+            .fontmap
+            .start
+            .as_ref()
+            .is_some_and(|t| t.ht_lookup_table(kp).is_some())
+        {
+            self.fontmap_table().ht_insert_table(kp, None);
+        } else {
+            self.fontmap_table().ht_remove_table(kp);
+        }
 
         Ok(0)
     }
@@ -972,17 +1014,44 @@ impl Dpx {
             m.map_name = None;
         }
         let ret = m.clone();
-        self.fontmap_table().ht_insert_table(kp, m);
+        self.fontmap_table().ht_insert_table(kp, Some(m));
 
         Ok(Some(ret))
     }
 
+    /// `pdf_insert_fontmap_record` of a record the caller is done with:
+    /// the record itself is put (as the copy C puts, `design_size` aside),
+    /// and no copy returned.
+    fn fontmap_insert(&mut self, kp: &[u8], mut mrec: FontmapRec) -> Result<()> {
+        if fontmap_invalid(&mrec) {
+            warn!("Invalid fontmap record...");
+            return Ok(());
+        }
+        if let Some((_fnt_name, _sfd_name)) = chop_sfd_name(kp) {
+            // (not ported: subfont.c)
+            fatal!("SFD subfonts are not supported.");
+        }
+        mrec.opt.design_size = FontmapOpt::default().design_size;
+        if mrec.map_name.as_deref() == Some(kp) {
+            mrec.map_name = None;
+        }
+        self.fontmap_table().ht_insert_table(kp, Some(mrec));
+        Ok(())
+    }
+
     /// `pdf_lookup_fontmap_record`: a copy of the record.
     pub fn pdf_lookup_fontmap_record(&mut self, kp: &[u8]) -> Option<FontmapRec> {
-        self.fontmap
-            .fontmap
-            .as_ref()
-            .and_then(|t| t.ht_lookup_table(kp).cloned())
+        self.pdf_lookup_fontmap_ref(kp).cloned()
+    }
+
+    /// The record of `kp`: put since the start (or removed), else the
+    /// start's.
+    fn pdf_lookup_fontmap_ref(&self, kp: &[u8]) -> Option<&FontmapRec> {
+        let t = self.fontmap.fontmap.as_ref()?;
+        match t.ht_lookup_table(kp) {
+            Some(r) => r.as_ref(),
+            None => self.fontmap.start.as_ref()?.ht_lookup_table(kp),
+        }
     }
 
     /// `pdf_insert_native_fontmap_record`: a copy of the record inserted.

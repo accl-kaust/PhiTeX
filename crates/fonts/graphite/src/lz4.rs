@@ -79,9 +79,14 @@ pub(crate) fn decompress(src: &[u8], out_size: usize) -> Option<Vec<u8>> {
         {
             return None;
         }
+        // (byte by byte: a match nearer than its length repeats itself,
+        // copied a distance at a time)
         let pcpy = dst - match_dist;
-        for k in 0..match_len {
-            out[dst + k] = out[pcpy + k];
+        let mut k = 0;
+        while k < match_len {
+            let n = match_dist.min(match_len - k);
+            out.copy_within(pcpy + k..pcpy + k + n, dst + k);
+            k += n;
         }
         dst += match_len;
         room -= match_len;

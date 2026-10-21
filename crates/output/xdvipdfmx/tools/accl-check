@@ -1,0 +1,16 @@
+#!/bin/bash
+# The XeTeX libraries built, linted and unit-tested on accl (a `cmd` job):
+#   scripts/accl/accl submit cmd bash crates/output/xdvipdfmx/tools/accl-check
+set -u
+cd "$(dirname "$0")/../../../.."
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+P="-p phitex-xdvipdfmx -p phitex-otf -p phitex-graphite -p phitex-kpse -p phitex-codecs"
+{
+  cargo clippy -q --no-deps --all-targets $P --features phitex-xdvipdfmx/cli -- -D warnings 2>&1 | head -150
+  echo "clippy exit ${PIPESTATUS[0]}"
+  cargo test -q --release $P --features phitex-xdvipdfmx/cli 2>&1 | grep -E -A4 '^test result|FAILED|panicked|error' | head -80
+  echo "test exit ${PIPESTATUS[0]}"
+  cargo build -q -p phitex-cli 2>&1 | head -40
+  echo "cli build exit ${PIPESTATUS[0]}"
+} > "$r/summary.txt" 2>&1
+cat "$r/summary.txt"

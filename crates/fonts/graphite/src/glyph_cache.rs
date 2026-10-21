@@ -286,7 +286,8 @@ impl<'a> Loader<'a> {
 /// offset is before `end - 1`.
 fn glat_pairs(glat: &[u8], start: usize, end: usize, w: usize) -> Vec<(u16, u16)> {
     let peek_w = |o: usize| if w == 1 { u32::from(u8_at(glat, o)) } else { u32::from(u16_at(glat, o)) };
-    let mut out = Vec::new();
+    // (two bytes a value at least: the pairs' bound)
+    let mut out = Vec::with_capacity(end.saturating_sub(start) / 2);
     let mut e = start;
     let mut v = start + 2 * w;
     let mut n: u32 = 0;

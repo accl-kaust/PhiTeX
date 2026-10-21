@@ -83,6 +83,7 @@ pub fn dvi_to_pdf(dvi: &[u8], pdf_name: &str, date: i64) -> Result<Vec<u8>, Stri
         now: date,
         utc_offset_min: 0,
         system_paper: None,
+        glyph_runs: false,
     };
     Session::convert(
         options,

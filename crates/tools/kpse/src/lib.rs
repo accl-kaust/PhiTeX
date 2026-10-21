@@ -563,6 +563,12 @@ pub struct Kpse {
     /// `kpse->followup_search`: false only for the `texmf.cnf` search.
     followup_search: bool,
     paths: HashMap<Format, Bytes>,
+    /// Every search path made, by program name and format: a path is a
+    /// function of those (the environment and `texmf.cnf` as the
+    /// process found them), so a program name searched as before (a
+    /// driver switching names between lookups) does not expand its
+    /// variables again. ([`Kpse::drop_cwd`] changes `paths` only.)
+    made: HashMap<(Bytes, Format), Bytes>,
     element_dirs_cache: HashMap<Bytes, Vec<Bytes>>,
     /// Inside [`Kpse::find_file_trail`]: each candidate tried and not
     /// found, in order.
@@ -595,6 +601,7 @@ impl Kpse {
             db: None,
             followup_search: false,
             paths: HashMap::new(),
+            made: HashMap::new(),
             element_dirs_cache: HashMap::new(),
             trail: None,
         }
@@ -838,6 +845,11 @@ impl Kpse {
         if let Some(p) = self.paths.get(&format) {
             return p.clone();
         }
+        if let Some(p) = self.made.get(&(self.program_name.clone(), format)) {
+            let p = p.clone();
+            self.paths.insert(format, p.clone());
+            return p;
+        }
         let info = format_info(format);
         let (envs, default_path): (Vec<Bytes>, Bytes) =
             if matches!(format, Format::ProgramText | Format::ProgramBinary) {
@@ -892,6 +904,8 @@ impl Kpse {
                 .join(&b':');
         }
         self.paths.insert(format, path.clone());
+        self.made
+            .insert((self.program_name.clone(), format), path.clone());
         path
     }
 
