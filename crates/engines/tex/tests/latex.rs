@@ -577,9 +577,8 @@ fn pdf_opts(name: &str, dir: &Path) -> Options {
 /// After a one-word edit (one paragraph touched): the build equals a
 /// cold one of the new text, and what re-ran is the node model's
 /// (`common::assert_edit_cost`) for the pages whose content changed
-/// from `before` (the page hashes before the edit; with the cold
-/// build's fold runs).
-fn edit_check(name: &str, b: &Build, cold: &Build, (before, cold_folds): (&[u64], u64)) {
+/// from `before` (the page hashes before the edit).
+fn edit_check(name: &str, b: &Build, cold: &Build, before: &[u64]) {
     let pages = b.pages().len() as u64;
     eprintln!(
         "edit {name}: {} nodes run, {} runs, {pages} pages; {}",
@@ -594,7 +593,7 @@ fn edit_check(name: &str, b: &Build, cold: &Build, (before, cold_folds): (&[u64]
     if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
         panic!("{name}: edit differs from cold: {d}");
     }
-    common::assert_edit_cost(name, b, 1, before, cold_folds);
+    common::assert_edit_cost(name, b, 1, before);
 }
 
 /// The paragraphs of a LaTeX body: its blank-line-separated chunks
@@ -626,10 +625,10 @@ fn latex_paragraph_nodes() {
     let (mut b, regions) = cold_nodes("paras30", &dir, &src);
     assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
     let new = quack(&src, "Paragraph 17 of the text: the quick ");
-    let before = (b.pages(), common::runs_of(&b, "scan"));
+    let before = b.pages();
     b.edit(&new);
     let cold = common::build(pdf_opts("paras30", &dir), Some(&prelude(true)), &new);
-    edit_check("paras30", &b, &cold, (&before.0, before.1));
+    edit_check("paras30", &b, &cold, &before);
 }
 
 /// `pdflatex` on an article with an abstract, two sections, itemize,
@@ -660,10 +659,10 @@ fn latex_environments() {
         "{own} paragraph nodes for {want} paragraphs outside a box, {taken} paragraphs taken by another node's run"
     );
     let new = quack(&src, "Item 3 of the list: the quick ");
-    let before = (b.pages(), common::runs_of(&b, "scan"));
+    let before = b.pages();
     b.edit(&new);
     let cold = common::build(pdf_opts("envs", &dir), Some(&prelude(true)), &new);
-    edit_check("envs", &b, &cold, (&before.0, before.1));
+    edit_check("envs", &b, &cold, &before);
 }
 
 /// `pdflatex` on a book whose chapters and section are followed by
@@ -832,12 +831,12 @@ fn latex_input_include() {
     assert!(regions >= 10, "{regions} document nodes: chap1 not sliced");
     let chap1 = common::read(&dir.join("chap1.tex"));
     let new = quack(&chap1, "Paragraph 5 of chapter one: the quick ");
-    let before = (b.pages(), common::runs_of(&b, "scan"));
+    let before = b.pages();
     b.edit_file("chap1.tex", Some(new.as_bytes()));
     std::fs::write(dir.join("chap1.tex"), &new).expect("write");
     let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
     let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
-    edit_check("inputs", &b, &cold, (&before.0, before.1));
+    edit_check("inputs", &b, &cold, &before);
 }
 
 /// An article with one paragraph between blank lines (the ladder's
@@ -850,10 +849,10 @@ fn latex_one_paragraph() {
     let src = common::read(&dir.join("red02.tex"));
     let (mut b, _) = cold_nodes("red02", &dir, &src);
     let new = src.replace("Hello", "Hallo");
-    let before = (b.pages(), common::runs_of(&b, "scan"));
+    let before = b.pages();
     b.edit(&new);
     let cold = common::build(pdf_opts("red02", &dir), Some(&prelude(true)), &new);
-    edit_check("red02", &b, &cold, (&before.0, before.1));
+    edit_check("red02", &b, &cold, &before);
 }
 
 /// A heading and three paragraphs (`pdfdocs/secpars.tex`): the first
@@ -866,10 +865,10 @@ fn latex_heading_paragraphs() {
     let src = common::read(&dir.join("secpars.tex"));
     let (mut b, _) = cold_nodes("secpars", &dir, &src);
     let new = quack(&src, "The first paragraph after the heading: the ");
-    let before = (b.pages(), common::runs_of(&b, "scan"));
+    let before = b.pages();
     b.edit(&new);
     let cold = common::build(pdf_opts("secpars", &dir), Some(&prelude(true)), &new);
-    edit_check("secpars", &b, &cold, (&before.0, before.1));
+    edit_check("secpars", &b, &cold, &before);
 }
 
 /// The chain census gate (`common::Census`) on a `pdflatex` document:
@@ -911,10 +910,10 @@ fn latex_utf8_edit() {
     let bytes = |w: &str| -> String { w.bytes().map(char::from).collect() };
     let new = src.replacen(&bytes("crème"), &bytes("crêpe"), 1);
     assert_ne!(new, src, "the edited word is in the text");
-    let before = (b.pages(), common::runs_of(&b, "scan"));
+    let before = b.pages();
     b.edit(&new);
     let cold = common::build(pdf_opts("utf8", &dir), Some(&prelude(true)), &new);
-    edit_check("utf8", &b, &cold, (&before.0, before.1));
+    edit_check("utf8", &b, &cold, &before);
 }
 
 /// A `multicols` index after a heading whose `\addcontentsline` lands on

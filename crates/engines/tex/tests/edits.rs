@@ -602,7 +602,7 @@ fn pdf_edit_reruns_one_page_step() {
     let opts = || common::options("./p400.tex", "p400", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
     assert!(b.is_pdf());
-    let (before, cold_folds) = (b.pages(), common::runs_of(&b, "scan"));
+    let before = b.pages();
     let text = src.replacen(
         "Paragraph 3 has some words",
         "Paragraph 3 has some wordz",
@@ -620,7 +620,7 @@ fn pdf_edit_reruns_one_page_step() {
     let d = common::first_difference(&b.output().0, &cold.output().0);
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert!(steps <= 1, "{steps} page steps re-run");
-    common::assert_edit_cost("p400", &b, 1, &before, cold_folds);
+    common::assert_edit_cost("p400", &b, 1, &before);
 }
 
 /// Exact PDF, a one-word edit on page k of n with read-time writer
@@ -679,7 +679,14 @@ fn exact_pdf_edit_on_page_k_reruns_its_piece_finisher_place_and_the_link_only() 
         "the edit is on a middle page"
     );
     assert_eq!(common::runs_of(&b, "exec"), 1, "only the edited piece");
-    assert_eq!(common::runs_of(&b, "finish"), 1, "only its page's finisher");
+    // (its page's finisher, and the page before's where that page fired
+    // in the edited piece: a finisher reads its page's items up to the
+    // piece it fired in, the page builder one node over the whole text;
+    // the page equal, a cutoff)
+    assert!(
+        common::runs_of(&b, "finish") <= 2,
+        "only its page's finisher and the page before's"
+    );
     // (the placement's node may start once and stop at a pending
     // definition set before it, then run: two runs of the one node; no
     // other page's placement runs)
@@ -796,13 +803,13 @@ fn pdf_para_edit_measure() {
 
 /// An edit that moves page breaks (a paragraph made two lines longer)
 /// in a plain document whose sections end with `\vfill\eject`: the
-/// scan re-runs from the edited piece's page only while the breaks
-/// move, and stops at the first page whose break comes out where it
-/// was (the section's `\eject`: the scan state after it is equal, so
-/// no step after it runs again). Bound: the scan steps of the touched
-/// pages and of the page after them, where the scan finds the break
-/// equal (steps per page of the cold build, rounded up, times the
-/// touched pages and one), and one finisher per touched page; the
+/// page builder, one node over the whole text, runs again once (and
+/// stops at most once for each piece run again), and its finishers
+/// placed again run only where their pages changed: from the edited
+/// piece's page to the first page whose break comes out where it was
+/// (the section's `\eject`), and one more (the page that fired in the
+/// edited piece reads its items to the candidate: a cutoff where its
+/// page is equal). Bound: one finisher per touched page and one; the
 /// output equals a cold build.
 #[test]
 fn moving_breaks_rescan_touched_pages_and_one() {
@@ -825,8 +832,6 @@ fn moving_breaks_rescan_touched_pages_and_one() {
     let opts = || common::options("./mb.tex", "mb", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
     let before = b.pages();
-    let cold_scans = common::runs_of(&b, "scan");
-    let per_page = cold_scans.div_ceil(before.len().max(1) as u64);
     let text = src.replacen(
         "Section 5 paragraph 1 has words",
         "Section 5 paragraph 1 has many more words than the others, many more words than \
@@ -840,7 +845,7 @@ fn moving_breaks_rescan_touched_pages_and_one() {
     let after = b.pages();
     let touched = common::pages_touched(&before, &after);
     eprintln!(
-        "moving breaks: {} pages, touched {touched:?}, edit runs by op {:?}, cold scans {cold_scans}",
+        "moving breaks: {} pages, touched {touched:?}, edit runs by op {:?}",
         after.len(),
         b.stats.runs_by_op
     );
@@ -849,12 +854,10 @@ fn moving_breaks_rescan_touched_pages_and_one() {
         "pages touched {touched:?}"
     );
     let n = touched.len() as u64;
-    let scans = common::runs_of(&b, "scan");
+    let pages = common::runs_of(&b, "pages");
     let fins = common::runs_of(&b, "finish");
-    let bound = per_page * (n + 1);
-    assert!(
-        scans <= bound,
-        "{scans} scan runs, bound {bound} ({per_page} a page, {n} pages and one)"
-    );
-    assert!(fins <= n, "{fins} finisher runs, bound {n}");
+    // (one run of the one page builder node, and a stop at most for each
+    // piece run again: the edited one and a neighbour)
+    assert!(pages <= 3, "{pages} page builder runs, bound 3");
+    assert!(fins <= n + 1, "{fins} finisher runs, bound {}", n + 1);
 }

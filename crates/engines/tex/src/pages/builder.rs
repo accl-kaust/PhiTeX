@@ -758,10 +758,12 @@ impl Run<'_, '_> {
     ///    takes, what waits, what is discarded at the page's top);
     /// 3. where a page fires (§1005, §1014–§1017): its [`FinishIn`] from
     ///    `lp.srcs` up to the fire and the builder's decisions, pushed on
-    ///    `lp.pages` with the piece it fired in and its finisher placed at
-    ///    once ([`Run::place_finisher`]: the engine publishes a run's
-    ///    placements at every stop, so the finishers run while the loop
-    ///    still folds); `lp.srcs` keeps what goes
+    ///    `lp.pages` with the piece it fired in and its finisher placed
+    ///    once the unit it fired in is folded ([`Run::place_finisher`]:
+    ///    the engine publishes a run's placements at every stop, so the
+    ///    finishers run while the loop still folds; a fold stopped inside
+    ///    a unit places none of its pages, so no attempt places fewer
+    ///    than the stop before it published); `lp.srcs` keeps what goes
     ///    back to the contributions (the page's items from the best break
     ///    on, §1017), after the held-over insertions ([`Src::Held`]) and
     ///    the routine's material ([`Src::Rtn`]: the miss read back where
@@ -789,6 +791,14 @@ impl Run<'_, '_> {
         // order, before folding further: a park keeps work, not output,
         // so every attempt makes its whole result, the same calls giving
         // the same nodes; a page not placed again is freed)
+        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "pages {}: attempt, {} pages placed again, from {:?}",
+                self.cx.node().raw(),
+                lp.pages.len(),
+                lp.cur.map(phitex_defuse::NodeId::raw)
+            );
+        }
         for (at, fin) in &lp.pages {
             self.place_finisher(*at, fin);
         }
@@ -824,9 +834,18 @@ impl Run<'_, '_> {
                 // snapshot a stop puts back)
                 Self::drop_units(lp);
                 let snap = lp.snap();
+                let placed = lp.pages.len();
                 if let Err(h) = self.fold_unit(lp, node, pid, items, dead, &classes) {
                     lp.restore(snap);
                     return Err(h);
+                }
+                // (the pages the unit fired placed once its fold is
+                // through: a fold stopped inside it places none, so the
+                // next attempt, which folds the unit again whole, makes
+                // the same placements, never one fewer than the stop
+                // published)
+                for (at, fin) in &lp.pages[placed..] {
+                    self.place_finisher(*at, fin);
                 }
             }
             lp.cur = Some(node);
@@ -1025,7 +1044,6 @@ impl Run<'_, '_> {
                 f.output_penalty
             );
         }
-        self.place_finisher(node, &fin);
         lp.pages.push((node, fin));
         lp.last_fire = Some((node, pid, f.k));
         // (the routine's material, §1026: its real one where it missed

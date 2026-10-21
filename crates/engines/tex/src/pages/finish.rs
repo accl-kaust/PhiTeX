@@ -258,6 +258,24 @@ impl Run<'_, '_> {
         // (the window's units, by piece: their items with the markers
         // resolved where each piece is)
         let window = v.seq_to_vec(self.fold_own(PITEMS, fin.after, Some(fin.piece))?);
+        if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+            eprintln!(
+                "finisher {} of page {} runs (piece {} candidate {}, after {:?}, {} spans, window {:?})",
+                self.cx.node().raw(),
+                fin.j,
+                fin.piece.raw(),
+                fin.k,
+                fin.after.map(phitex_defuse::NodeId::raw),
+                fin.spans.len(),
+                window
+                    .iter()
+                    .map(|&u| (
+                        list_of(v, u).first().map_or(-1, |&x| int_of(v, x)),
+                        unit_items(v, u).len()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
         let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
         let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
         let mut want: Vec<i64> = vec![pid];

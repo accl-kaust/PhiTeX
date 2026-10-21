@@ -175,30 +175,31 @@ pub fn runs_of(b: &Build, op: &str) -> u64 {
 }
 
 /// What an edit may run in the node model, by operation (runs, not
-/// nodes): the touched pieces' `exec` (and one more); the `scan` step
-/// of every piece on a touched page (one per piece and one per page
-/// after its finisher: the edited piece's and the ones after it on its
-/// page; steps per page = the cold build's scan runs / its pages,
-/// rounded up);
-/// one `finish` and one `resume` per touched page; a `place` for every
-/// page from the first touched one to the last (in exact mode place
-/// replays the PDF state in order); the link and the end node (`dvi`) once each; nothing
-/// of any other operation; and at most 1.1 runs a node.
-/// `cold_folds` and `before` are the cold build's scan runs and page
-/// hashes.
+/// nodes): the touched pieces' `exec` (and one more); the page builder,
+/// ONE `pages` node over the whole text (docs/spec-layers.md layer 4):
+/// it runs again where a piece's profile changed, and its attempts are
+/// that run and one stop at most for each piece run again that it
+/// waits for (its loop reads the pieces in order, `acc_next`); one
+/// `finish` a touched page and one more: a finisher reads its page's
+/// items up to the piece its page fired in, so the page before the
+/// edited piece's, when it fired in that piece, runs again too (its
+/// page equal, a cutoff); one `resume` per touched page; a `place` for
+/// every page from the first touched one to the last (in exact mode
+/// place replays the PDF state in order); the link and the end node
+/// (`dvi`) once each; nothing of any other operation; and at most 1.1
+/// runs a node. `before` holds the cold build's page hashes.
 #[must_use]
-pub fn edit_cost_failures(b: &Build, touched: u64, before: &[u64], cold_folds: u64) -> Vec<String> {
+pub fn edit_cost_failures(b: &Build, touched: u64, before: &[u64]) -> Vec<String> {
     let after = b.pages();
     let pages = pages_touched(before, &after);
     let n = pages.len() as u64;
-    let per_page = cold_folds.div_ceil(before.len().max(1) as u64);
     let to_end = pages
         .first()
         .map_or(0, |&k| (after.len().max(before.len()) - k) as u64);
     let bounds = [
         ("exec", touched + 1),
-        ("scan", per_page * n),
-        ("finish", n),
+        ("pages", 1 + touched + 1),
+        ("finish", n + 1),
         // (a page's PDF side, once the loop-backs settle: the pages
         // touched)
         ("pdfpage", n),
@@ -229,14 +230,14 @@ pub fn edit_cost_failures(b: &Build, touched: u64, before: &[u64], cold_folds: u
 
 /// Asserts [`edit_cost_failures`] on an edit, printing the runs by
 /// operation and the touched pages either way.
-pub fn assert_edit_cost(name: &str, b: &Build, touched: u64, before: &[u64], cold_folds: u64) {
+pub fn assert_edit_cost(name: &str, b: &Build, touched: u64, before: &[u64]) {
     eprintln!(
-        "{name}: edit runs by op {:?}; {touched} touched pieces, pages touched {:?} of {}, cold folds {cold_folds}",
+        "{name}: edit runs by op {:?}; {touched} touched pieces, pages touched {:?} of {}",
         b.stats.runs_by_op,
         pages_touched(before, &b.pages()),
         b.pages().len()
     );
-    let f = edit_cost_failures(b, touched, before, cold_folds);
+    let f = edit_cost_failures(b, touched, before);
     assert!(
         f.is_empty(),
         "{name}: edit ran beyond the node model: {}",

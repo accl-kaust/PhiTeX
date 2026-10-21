@@ -19,9 +19,9 @@
 //!
 //! Per edit (then undone, so each starts from the cold text):
 //! - the node-model bounds of `common::edit_cost_failures` (exec runs
-//!   at most 2: the edited unit and one neighbour; folds, finishes,
-//!   resumes and places by the pages touched; one end node; no other
-//!   operation);
+//!   at most 2: the edited unit and one neighbour; the one page builder
+//!   node; finishes, resumes and places by the pages touched; one end
+//!   node; no other operation);
 //! - granularity: the edited offset lies in a node of its own text
 //!   (`Build::node_spans`), and that node spans at most 2 units; an
 //!   `exec` run again because a whole file's value changed (a field
@@ -595,7 +595,6 @@ fn sweep(
             head.push_str("; cold equals the oracle");
         }
     }
-    let cold_folds = common::runs_of(&b, "scan");
     let ts = texts(&b, name, &dir, &src);
     let census_on = std::env::var_os("PHITEX_SWEEP_CENSUS").is_some();
     let mut known: std::collections::HashSet<u64> = b.stats.run_log.iter().map(|x| x.0).collect();
@@ -638,7 +637,7 @@ fn sweep(
             let t1 = std::time::Instant::now();
             apply(&mut b, at, &new);
             let wall = t1.elapsed();
-            let mut v = common::edit_cost_failures(&b, 1, &before, cold_folds);
+            let mut v = common::edit_cost_failures(&b, 1, &before);
             for x in &mut v {
                 if !x.contains(':') {
                     *x = format!("runs/node: {x}");
