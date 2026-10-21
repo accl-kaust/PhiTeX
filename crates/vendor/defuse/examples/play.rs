@@ -1199,7 +1199,7 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                         "  runs {} stops {} rounds {} steps {}",
                         rep.nodes_run, rep.stops, rep.rounds, rep.steps
                     );
-                    println!("  restarted_by {:?} resumed {}", rep.restarted_by, rep.resumed);
+                    println!("  restarted_by {:?} resumed {} kept reads asked {} of {}", rep.restarted_by, rep.resumed, rep.kept_asked, rep.kept_held);
                     // Where the time went, and two bounds on the wall time:
                     // the busy time spread over the workers, and the
                     // critical path at the mean run's cost.

@@ -91,12 +91,17 @@ pub struct Engine {
     /// Kept tokens of stopped runs (`Ctx::park`).
     /// with the reads the stopped run made (it resumes while they hold).
     pub(crate) kept: FxHashMap<Id, super::ctx::KeptState>,
+    /// The kept states' reads indexed by what may break them.
+    pub(crate) kept_ix: FxHashMap<Id, super::eval::KeptIx>,
     pub(crate) marked: FxHashSet<Id>,
     pub(crate) settled_out: Vec<Settled>,
     pub(crate) edits: u64,
     pub(crate) created: u64,
     pub(crate) freed: u64,
     pub(crate) rebinds: u64,
+    /// (`Report::kept_asked`, `Report::kept_held`.)
+    pub(crate) kept_asked: u64,
+    pub(crate) kept_held: u64,
     pub(crate) rerun_text: Vec<Id>,
     /// Whether evaluations compute heights and the critical chain.
     pub(crate) heights: bool,
@@ -148,12 +153,15 @@ impl Engine {
             version: 0,
             pending: Vec::new(),
             kept: FxHashMap::default(),
+            kept_ix: FxHashMap::default(),
             marked: FxHashSet::default(),
             settled_out: Vec::new(),
             edits: 0,
             created: 0,
             freed: 0,
             rebinds: 0,
+            kept_asked: 0,
+            kept_held: 0,
             rerun_text: Vec::new(),
             heights: true,
             defer: None,
@@ -545,6 +553,7 @@ impl Engine {
         self.each_world(|w| {
             for (&f, &init) in &new {
                 if w.loops.get(&f).is_none() {
+                    w.note(super::world::Change::Loop(f));
                     w.loops.insert(f, init, &super::ptree::NoMeasure);
                 }
             }
@@ -605,6 +614,9 @@ impl Engine {
 
     /// Supplies environment fields (replacing the previous ones).
     pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
+        // (A read no definition reaches reads the environment: kept
+        // states ask all their reads again.)
+        self.w.note(super::world::Change::All);
         let new: FxHashMap<Field, ValueId> = env.into_iter().collect();
         #[cfg(feature = "observe")]
         {
@@ -627,6 +639,7 @@ impl Engine {
     /// Declares environment fields absent (a read gets `None` instead of
     /// waiting).
     pub fn set_environment_absent(&mut self, absent: impl IntoIterator<Item = Field>) {
+        self.w.note(super::world::Change::All);
         let new: FxHashSet<Field> = absent.into_iter().collect();
         #[cfg(feature = "observe")]
         {
@@ -672,6 +685,7 @@ impl Engine {
 
     /// Sets an environment field of an application's unit.
     pub fn set_env(&mut self, unit: UnitId, field: Field, value: ValueId) {
+        self.w.note(super::world::Change::All);
         self.edit(|b| b.set_unit_env(unit.0, field, value));
         #[cfg(feature = "observe")]
         self.rec_call("set_env", crate::record::rec().map(|_| crate::record::j(&(&unit, &field, &value))), &());
@@ -687,6 +701,7 @@ impl Engine {
     }
 
     pub fn set_env_provider(&mut self, provider: Box<crate::api::EnvProvider>) {
+        self.w.note(super::world::Change::All);
         #[cfg(feature = "observe")]
         let provider = {
             crate::record::api(&self.core.values, "set_env_provider", serde_json::Value::Null, serde_json::Value::Null);
@@ -696,6 +711,7 @@ impl Engine {
     }
 
     pub fn clear_env_provider(&mut self) {
+        self.w.note(super::world::Change::All);
         self.core_mut().provider = None;
         #[cfg(feature = "observe")]
         self.rec_call("clear_env_provider", crate::record::rec().map(|_| crate::record::j(&())), &());

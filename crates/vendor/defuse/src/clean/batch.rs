@@ -41,6 +41,8 @@ struct Group {
     /// under CLEAN_SCOPED_CHECK only).
     recheck: Vec<(Id, Field, bool)>,
     done: bool,
+    /// The positions it changed (definitions and contributions).
+    changed: Vec<Pos>,
 }
 
 impl Group {
@@ -48,6 +50,9 @@ impl Group {
         self.done = true;
         let f = self.key.1;
         for op in std::mem::take(&mut self.ops) {
+            self.changed.push(match op {
+                FieldOp::File { pos, .. } | FieldOp::Unfile { pos, .. } | FieldOp::Contrib { pos, .. } => pos,
+            });
             match op {
                 FieldOp::File { pos, fr, e, at, if_changed } => {
                     if if_changed {
@@ -173,6 +178,7 @@ impl Pending {
                     acc_touched: false,
                     recheck: Vec::new(),
                     done: false,
+                    changed: Vec::new(),
                 });
                 groups.len() - 1
             });
@@ -221,6 +227,9 @@ impl Pending {
         let mut recheck = Vec::new();
         for g in groups {
             let key = g.key;
+            for &p in &g.changed {
+                w.note(super::world::Change::Field(key.0, key.1, p));
+            }
             w.fields.insert(key, std::sync::Arc::new(g.cell), &NoMeasure);
             if g.defs_touched {
                 w.touch_key(Key::Defs(key.0, key.1));

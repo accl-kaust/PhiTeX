@@ -525,8 +525,68 @@ pub(crate) struct World {
     /// broke, a new text) and has not placed them again yet: they wait for
     /// it (their texts may be stale).
     pub awaiting: PMap<Id, ()>,
+    /// The changes made to the worlds of this branch, in order (shared by
+    /// its copies: see [`Log`]), and how many of them this one has.
+    pub log: Log,
+    pub log_len: u64,
 }
 
+/// A change to a world, as a kept state's reads see it (which of them it
+/// may break: see `eval::KeptIx`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// A definition or contribution of `f` at a position.
+    Field(u32, Field, Pos),
+    /// A node's cell (its state, result, text or place), or its going.
+    Node(Id),
+    /// A unit's order.
+    Order(u32),
+    /// A unit's frames.
+    Frames(u32),
+    Loop(Field),
+    /// Anything (a renumbering).
+    All,
+}
+
+/// The changes made to a branch of worlds, shared by its copies, each
+/// world counting how many it has (`World::log_len`): a world taken
+/// before has fewer. A new branch (a world kept apart and taken back,
+/// [`World::snapshot`]) starts a new log.
+#[derive(Clone, Default)]
+pub(crate) struct Log(Arc<std::sync::Mutex<LogInner>>);
+
+#[derive(Default)]
+struct LogInner {
+    /// The number of the first change kept (earlier ones forgotten).
+    base: u64,
+    v: Vec<Change>,
+}
+
+impl Log {
+    /// Whether two worlds share the log (are of one branch).
+    pub(crate) fn same(&self, o: &Log) -> bool {
+        Arc::ptr_eq(&self.0, &o.0)
+    }
+
+    /// The changes numbered `from..to`, or `None` when some are forgotten.
+    pub(crate) fn since(&self, from: u64, to: u64) -> Option<Vec<Change>> {
+        let g = super::core::lock(&self.0);
+        if from < g.base || to > g.base + g.v.len() as u64 || from > to {
+            return None;
+        }
+        Some(g.v[(from - g.base) as usize..(to - g.base) as usize].to_vec())
+    }
+
+    /// Forgets the changes before number `upto`.
+    pub(crate) fn forget(&self, upto: u64) {
+        let mut g = super::core::lock(&self.0);
+        if upto > g.base {
+            let k = ((upto - g.base) as usize).min(g.v.len());
+            g.v.drain(..k);
+            g.base += k as u64;
+        }
+    }
+}
 impl World {
     /// Whether `other` is this world unchanged, as a read sees it (every
     /// map a read's answer stands on shares its root): a run on one
@@ -601,7 +661,24 @@ impl World {
     pub(crate) fn snapshot(&self) -> World {
         let mut w = self.clone();
         w.rd = self.rd.snapshot();
+        w.log = Log::default();
+        w.log_len = 0;
         w
+    }
+
+    /// Records change `c` (made to this world).
+    #[inline]
+    pub(crate) fn note(&mut self, c: Change) {
+        let mut g = super::core::lock(&self.log.0);
+        // (A copy behind the branch's end: its changes are another branch.)
+        if self.log_len != g.base + g.v.len() as u64 {
+            drop(g);
+            self.log = Log::default();
+            g = super::core::lock(&self.log.0);
+            g.base = self.log_len;
+        }
+        g.v.push(c);
+        self.log_len = g.base + g.v.len() as u64;
     }
 
     /// Sets (`on`) or clears node `id` at `p` in unit `u`'s index `ix`
@@ -844,6 +921,7 @@ impl World {
 
     /// Adds a node to its unit's order at `pos`.
     pub(crate) fn link(&mut self, u: u32, pos: Pos, id: Id) {
+        self.note(Change::Order(u));
         self.with_unit(u, |un| {
             un.order.insert(pos, id, &Count);
         });
@@ -851,6 +929,7 @@ impl World {
 
     /// Removes a node from its unit's order.
     pub(crate) fn unlink(&mut self, u: u32, pos: Pos) {
+        self.note(Change::Order(u));
         self.with_unit_if(u, |un| {
             un.order.remove(&pos, &Count);
         });
@@ -859,6 +938,7 @@ impl World {
     /// Files a definition entry of node `id` (at `pos`, in frame `fr` for
     /// a local).
     pub(crate) fn file_def(&mut self, u: u32, f: Field, pos: Pos, fr: FrameId, e: Entry) {
+        self.note(Change::Field(u, f, pos));
         self.with_field(u, f, |c| {
             let fd = &mut c.defs;
             if e.loc == Locality::Global {
@@ -876,6 +956,7 @@ impl World {
         if self.field(u, f).is_none() {
             return;
         }
+        self.note(Change::Field(u, f, pos));
         self.with_field(u, f, |c| {
             let fd = &mut c.defs;
             if global {
@@ -1100,6 +1181,7 @@ impl World {
     }
 
     fn put_node(&mut self, id: Id, n: Node) {
+        self.note(Change::Node(id));
         let t = super::core::prof::start();
         let (fin, publ) = (n.text.stat.fin, publishes(&n));
         if self.nodes.get(&id).is_none_or(|o| o.text.stat.fin != fin) {
@@ -1152,6 +1234,7 @@ impl World {
 
     /// Removes a node's record.
     pub(crate) fn drop_node(&mut self, id: Id) {
+        self.note(Change::Node(id));
         if let Some(o) = self.nodes.get(&id) {
             let (u, p, w, ks) = (o.unit, o.pos, in_work(o.st), pset_keys(o));
             let o = w.then(|| o.clone());
@@ -1470,6 +1553,7 @@ impl World {
     /// Sets (or with `None` removes) node `id`'s contribution to `f` at
     /// `pos`.
     pub(crate) fn set_contrib(&mut self, m: &AccMeasure<'_>, u: u32, f: Field, pos: Pos, x: Option<ValueId>) {
+        self.note(Change::Field(u, f, pos));
         self.with_field(u, f, |c| match x {
             Some(v) => {
                 c.contribs.insert(pos, v, m);

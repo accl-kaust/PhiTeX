@@ -323,6 +323,7 @@ impl<'a> Builder<'a> {
     /// Renumbers unit `u` evenly; returns the new position of what was at
     /// `keep`.
     fn relabel(&mut self, u: u32, keep: Pos) -> Pos {
+        self.w.note(super::world::Change::All);
         let epoch = super::live::fresh_epoch();
         self.w.relabels = epoch;
         // (Claim windows are positions: the unit's claims resolve again.)
@@ -792,6 +793,7 @@ impl<'a> Builder<'a> {
         if un.env.get(&f) == Some(&x) {
             return;
         }
+        self.w.note(super::world::Change::Field(u, f, 0));
         self.w.with_unit(u, |un| {
             un.env.insert(f, x, &NoMeasure);
         });
@@ -1047,6 +1049,7 @@ impl<'a> Builder<'a> {
         }
         self.w.with_unit(u, |c| c.frames = frames);
         if !changed_frames.is_empty() || !moved.is_empty() {
+            self.w.note(super::world::Change::Frames(u));
             self.shape_changed(u);
         }
         // The scope readers in the walked stretch are re-asked (also when
