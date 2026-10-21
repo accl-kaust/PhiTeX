@@ -932,6 +932,59 @@ pub(crate) fn outer_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(i64::from(outer))
 }
 
+/// What a token stepped over or stored without expansion reads of its
+/// meaning: a skipped conditional branch counts the conditionals it opens
+/// and closes and stops at an `\else`, `\or` or `\fi` of its own level,
+/// whose code its caller reads (§494); an alignment's `get_next` watches
+/// for a tab mark or `\cr` (§342); a definition's parameter text and
+/// body look for the macro parameter character (§476, §479); `get_next`
+/// checks an `\outer` macro's validity (§336); a macro's arguments and a
+/// token list's body test the token alone (§392, §473). Nothing else of
+/// the meaning is used. [`STEP_IF`], [`STEP_OUTER`], [`STEP_FI`] plus the
+/// `\fi`/`\else`/`\or` code, [`STEP_PARAM`] plus the character,
+/// [`STEP_TAB`] or [`STEP_CR`] plus the code, or 0.
+/// A pure projection for the engine: a redefinition that keeps the name in
+/// its class leaves the reading run standing.
+pub(crate) fn step_projection(x: ValueId, v: &Values) -> ValueId {
+    let m = Mean::decode(v, Some(x));
+    let c = if let Mean::Macro(mm) = &m {
+        if mm.flags & 2 != 0 { STEP_OUTER } else { 0 }
+    } else {
+        match m.cmd_chr() {
+            (cmd::IF_TEST, _) => STEP_IF,
+            (cmd::FI_OR_ELSE, h) => STEP_FI + i64::from(h),
+            (cmd::MAC_PARAM, h) => STEP_PARAM + i64::from(h),
+            (cmd::TAB_MARK, h) => STEP_TAB + i64::from(h),
+            (cmd::CAR_RET, h) => STEP_CR + i64::from(h),
+            _ => 0,
+        }
+    };
+    v.int(c)
+}
+
+/// Whether a meaning is defined, as `\csname` needs it (§372): a name
+/// it makes that is undefined becomes `\relax`; nothing else of the
+/// meaning is used there. A pure projection for the engine: a
+/// redefinition of a defined name leaves the reading run standing.
+pub(crate) fn defined_projection(x: ValueId, v: &Values) -> ValueId {
+    v.int(i64::from(Mean::decode(v, Some(x)) != Mean::Undefined))
+}
+
+/// [`step_projection`]'s class of a meaning that opens a conditional.
+pub(crate) const STEP_IF: i64 = 1;
+/// [`step_projection`]'s class of an `\outer` macro.
+pub(crate) const STEP_OUTER: i64 = 2;
+/// [`step_projection`]'s class of `\fi`, `\else` and `\or`, plus the code.
+pub(crate) const STEP_FI: i64 = 16;
+/// [`step_projection`]'s class of the macro parameter character, plus the
+/// character.
+pub(crate) const STEP_PARAM: i64 = 1 << 32;
+/// [`step_projection`]'s class of an alignment tab mark, plus its code: an
+/// alignment's `get_next` inserts a template at one (§342).
+pub(crate) const STEP_TAB: i64 = 2 << 32;
+/// [`step_projection`]'s class of `\cr` and `\crcr`, plus the code (§342).
+pub(crate) const STEP_CR: i64 = 3 << 32;
+
 /// A meaning (§222): what a control sequence or active character is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Mean {

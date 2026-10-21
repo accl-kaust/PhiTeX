@@ -96,8 +96,10 @@ impl Run<'_, '_> {
                     // §369: `scanner_status:=normal` while the token is
                     // read (`\everyeof{\noexpand}`: a file's end met here
                     // is no runaway, §336)
+                    // (only the token is used: of its meaning, the class a
+                    // stored token's fetch reads)
                     let was = self.scanner.take();
-                    self.get_token();
+                    self.get_token_stored();
                     self.scanner = was;
                     self.ck()?;
                     let t = self.cur.tok;
@@ -180,7 +182,12 @@ impl Run<'_, '_> {
             let t = self.cur.tok;
             self.back_input(t);
         }
-        if self.mean_of(t)? == Mean::Undefined {
+        // (§372: of the name's meaning only whether it is defined)
+        let undefined = match self.defined_lookup(t)? {
+            Some(d) => !d,
+            None => self.mean_of(t)? == Mean::Undefined,
+        };
+        if undefined {
             let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(self.v);
             let f = t.field_name().unwrap_or_default();
             self.set(&f, relax, false);
