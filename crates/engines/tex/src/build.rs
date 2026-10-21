@@ -1208,6 +1208,7 @@ impl Run<'_, '_> {
             if display && k == last_k {
                 just_box = Some(line.packed.node);
             } else if !plain {
+                nodes::made_stat(1);
                 phitex_typeset::linebreak::recycle_line(line.packed.node.list);
             } else if let Some(l) = nodes::keep_made(list, line.packed.node.list) {
                 // (kept for the page that ships it, else reused)

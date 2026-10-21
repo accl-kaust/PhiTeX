@@ -955,6 +955,16 @@ impl Run<'_, '_> {
         let decoded = nodes::decode(v, b, &mut side);
         nodes::TAKE_MADE.with(|c| c.set(take));
         crate::val::NO_KEEP.with(|c| c.set(prev));
+        if crate::exec::obs_flag!("PHITEX_MADE_STATS") {
+            let n: Vec<u64> = nodes::MADE_STATS
+                .iter()
+                .map(|x| x.load(std::sync::atomic::Ordering::Relaxed))
+                .collect();
+            eprintln!(
+                "made-stats: kept {} side {} full {} taken {} decoded {}",
+                n[0], n[1], n[2], n[3], n[4]
+            );
+        }
         let Some(Node::Box(bx)) = decoded else {
             return Ok(());
         };

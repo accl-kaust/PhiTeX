@@ -421,9 +421,29 @@ pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
 pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode {
     let mut b = decode_box_head(v, xs);
     b.list = xs.get(9).map_or_else(Vec::new, |&l| {
-        take_made(l).map_or_else(|| decode_list(v, l, side), |m| checked_made(v, l, m))
+        take_made(l).map_or_else(
+            || {
+                made_stat(4);
+                decode_list(v, l, side)
+            },
+            |m| checked_made(v, l, m),
+        )
     });
     b
+}
+
+/// (observe) `PHITEX_MADE_STATS`: lines kept, not kept (side tables),
+/// not kept (full), taken, and box lists decoded while shipping.
+pub(crate) static MADE_STATS: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// Counts event `k` of [`MADE_STATS`] (under `observe`, while a page
+/// is decoded for shipping for `k = 4`).
+#[inline]
+pub(crate) fn made_stat(k: usize) {
+    if crate::exec::obs_flag!("PHITEX_MADE_STATS") && (k != 4 || TAKE_MADE.with(std::cell::Cell::get)) {
+        MADE_STATS[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The lists line breaking made, native, by their values' ids: a page
@@ -465,8 +485,10 @@ pub(crate) fn keep_made(id: ValueId, list: List) -> Option<List> {
         nodes: 0,
     });
     if m.nodes + list.len() > MADE_NODES {
+        made_stat(2);
         return Some(list);
     }
+    made_stat(0);
     m.nodes += list.len();
     if let Some(old) = m.lists.insert(id.raw(), list) {
         m.nodes -= old.len();
@@ -501,6 +523,7 @@ fn take_made(id: ValueId) -> Option<List> {
     let m = g.as_mut()?;
     let l = m.lists.remove(&id.raw())?;
     m.nodes -= l.len();
+    made_stat(3);
     Some(l)
 }
 
