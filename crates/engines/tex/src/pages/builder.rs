@@ -31,9 +31,9 @@
 //! It places each page's finisher right after the piece its page fired
 //! in as the page fires ([`Run::place_finisher`], `follow_after_any`):
 //! the engine publishes a run's placements at every stop, so finishers
-//! run while the loop still folds. A parked loop saves work, not output:
-//! every attempt places again the pages it had. At its end it defines
-//! [`PAGES_END`].
+//! run while the loop still folds. An attempt resumed from the parked
+//! loop continues the placements it committed; one that starts over
+//! places again the pages it had. At its end it defines [`PAGES_END`].
 //!
 //! What the loop reads where a piece is (the page parameters, an
 //! insertion class's registers) it reads at that piece, a read past its
@@ -199,6 +199,10 @@ pub(crate) struct PageLoop {
     /// Each page's finisher arguments as placed ([`FinishIn::args`]),
     /// made once: every attempt places the pages again.
     pub page_args: Vec<Vec<ValueId>>,
+    /// Whether this attempt continues from the loop's kept token (its
+    /// placements so far committed: only new pages are placed) or starts
+    /// over (every page placed again).
+    pub resumed: bool,
     /// Whether the loop has read [`PAGE_MISS`] (once, at its start).
     pub misses_read: bool,
     /// The contributions not yet looked at, with their sources.
@@ -252,6 +256,7 @@ impl PageLoop {
             misses: Vec::new(),
             pages: Vec::new(),
             page_args: Vec::new(),
+            resumed: false,
             misses_read: false,
             pend: Vec::new(),
             page_src: Vec::new(),
@@ -723,7 +728,11 @@ impl Operation for Pages {
             .map(|b| *b);
         // (a run, for its reads where a piece is; no text runs in it)
         let mut r = Run::new(cx, o);
+        // (resumed from its token: the run continues, its placements
+        // committed at the stop stay and it places only new pages)
+        let resumed = parked.is_some();
         let mut lp = parked.unwrap_or_else(PageLoop::new);
+        lp.resumed = resumed;
         match r.page_loop(&mut lp) {
             Ok(()) => {}
             Err(Halt::Stop(s)) => {
@@ -960,10 +969,11 @@ impl Run<'_, '_> {
     ///
     /// 1. once, the misses ([`PAGE_MISS`], `acc_fold` from this node to
     ///    the unit's end, which reads past the text in work,
-    ///    [`MissMonoid`]) into `lp.misses`; then every page already in
-    ///    `lp.pages` placed again, in order ([`Run::place_finisher`]): a
-    ///    parked token saves work, not output, and every attempt makes
-    ///    its whole result;
+    ///    [`MissMonoid`]) into `lp.misses`; then, where the attempt starts
+    ///    over, every page already in `lp.pages` placed again, in order
+    ///    ([`Run::place_finisher`]); one resumed from the loop's kept token
+    ///    continues: its placements committed at its stop stand
+    ///    (`Engine::set_continue_placements`);
     /// 2. each contributor after `lp.cur` ([`phitex_defuse::Ctx::acc_next`]
     ///    on [`crate::vprof::VPROF`]): its units decoded, their markers
     ///    resolved where the piece is ([`Run::resolve_prof_of`]),
@@ -1002,10 +1012,9 @@ impl Run<'_, '_> {
                 .collect();
             lp.misses_read = true;
         }
-        // (the pages an attempt before fired: placed again, in page
-        // order, before folding further: a park keeps work, not output,
-        // so every attempt makes its whole result, the same calls giving
-        // the same nodes; a page not placed again is freed)
+        // (the pages an attempt before fired: placed again, in page order,
+        // where the attempt starts over, the same calls giving the same
+        // nodes; a resumed attempt continues the placements it committed)
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
                 "pages {}: attempt, {} pages placed again, from {:?}, misses {:?}",
@@ -1015,8 +1024,10 @@ impl Run<'_, '_> {
                 lp.misses.iter().map(|m| m.0).collect::<Vec<_>>()
             );
         }
-        for ((at, fin), args) in lp.pages.iter().zip(&lp.page_args) {
-            self.place_finisher(*at, fin, args.clone());
+        if !lp.resumed {
+            for ((at, fin), args) in lp.pages.iter().zip(&lp.page_args) {
+                self.place_finisher(*at, fin, args.clone());
+            }
         }
         let vprof = v.field(crate::vprof::VPROF);
         while let Some((node, u)) = self.cx.acc_next(vprof, lp.cur)? {

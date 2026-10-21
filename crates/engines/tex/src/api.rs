@@ -6356,6 +6356,10 @@ fn declare_fields(eng: &mut Engine) {
     // text in work: `crate::pages::MissMonoid`)
     let miss = eng.values().field(crate::pages::PAGE_MISS);
     eng.declare_accumulator(miss, Arc::new(crate::pages::MissMonoid));
+    // (a run resumed from its kept token continues its placements: the
+    // page builder places only the pages new since its stop,
+    // `crate::pages::PageLoop::resumed`)
+    eng.set_continue_placements(true);
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
     let rels = eng.values().field(crate::pdfprim::RT_RELS);
