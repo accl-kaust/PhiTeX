@@ -2926,6 +2926,10 @@ fn predicted_definitions_let_a_chain_overlap_and_a_wrong_one_reruns_its_readers(
         .expect("evaluate");
     // No predictions: the chain waits link by link.
     assert_eq!(r.realised_critical_path, u32::try_from(N).unwrap(), "{r:?}");
+    // Every run is on it: its time is theirs.
+    let total: std::time::Duration = r.run_times.iter().map(|x| x.1).sum();
+    assert!(r.realised_critical_time > std::time::Duration::ZERO, "{r:?}");
+    assert_eq!(r.realised_critical_time, total, "{r:?}");
     let reference = outs(&plain, &pids);
     for sched in ["seq", "spec", "random", "par"] {
         for predict in [Some(pred_truth(N)), Some(wrong.clone())] {

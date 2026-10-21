@@ -154,6 +154,10 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "contribute" => json!(cx.contribute(de(&g(0)), de(&g(1)))),
         "acc_range" => return res(cx.acc_range(de(&g(0)), de::<Option<NodeId>>(&g(1)))),
         "acc_range_to" => return res(cx.acc_range_to(de(&g(0)), de(&g(1)), de(&g(2)))),
+        #[cfg(feature = "clean")]
+        "acc_fold" => return res(cx.acc_fold(de(&g(0)), de(&g(1)), de(&g(2)))),
+        #[cfg(feature = "clean")]
+        "acc_next" => return res(cx.acc_next(de(&g(0)), de(&g(1)))),
         "scope_kind" => return res(cx.scope_kind()),
         "set_kind" => json!(cx.set_kind(de(&g(0)))),
         "set_kinds" => json!(cx.set_kinds(&de::<Vec<ValueId>>(&g(0)))),
@@ -176,6 +180,8 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "take_prev_contribution" => return res(cx.take_prev_contribution(de(&g(0)), de(&g(1)))),
         "set_env" => json!(cx.set_env(de(&g(0)), de(&g(1)))),
         "follow_after" => json!(cx.follow_after(de(&g(0)), de(&g(1)), de(&g(2)))),
+        #[cfg(feature = "clean")]
+        "follow_after_any" => json!(cx.follow_after_any(de(&g(0)), de(&g(1)), de(&g(2)))),
         "park" => json!(cx.park(Box::new(()))),
         "parked" => json!(cx.parked().is_some()),
         "restart" => json!(cx.restart()),
@@ -440,6 +446,15 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "remove" => eng.remove(de(&g(0))),
         "declare_sequence" => eng.declare_sequence(de(&g(0))),
         "declare_loopback" => eng.declare_loopback(de(&g(0)), de(&g(1))),
+        // (The clean core's; the round core declares them one by one.)
+        #[cfg(feature = "clean")]
+        "declare_loopbacks" => eng.declare_loopbacks(&de::<Vec<(Field, ValueId)>>(&g(0))),
+        #[cfg(not(feature = "clean"))]
+        "declare_loopbacks" => {
+            for (f, init) in de::<Vec<(Field, ValueId)>>(&g(0)) {
+                eng.declare_loopback(f, init);
+            }
+        }
         "set_loop_start" => eng.set_loop_start(de::<LoopStart>(&g(0))),
         "set_max_rounds" => eng.set_max_rounds(de(&g(0))),
         "set_limits" => eng.set_limits(de::<Limits>(&g(0))),

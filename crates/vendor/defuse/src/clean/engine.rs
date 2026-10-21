@@ -173,6 +173,16 @@ impl Engine {
     }
 
     pub fn register(&mut self, op: Arc<dyn Operation>) -> OpId {
+        #[cfg(feature = "observe")]
+        #[allow(clippy::cast_possible_truncation)]
+        // The two built-in operations are the engine's own: not recorded.
+        let op: Arc<dyn Operation> = if crate::record::rec().is_some() && self.core.ops.len() >= 2 {
+            let id = OpId(self.core.ops.len() as u32);
+            crate::record::api(&self.core.values, "register", serde_json::json!([op.name()]), crate::record::j(&id));
+            Arc::new(crate::record::RecOp { inner: op, id })
+        } else {
+            op
+        };
         let name = op.name();
         self.core_mut().ops.push(op);
         self.core_mut().op_names.push(name);
@@ -186,6 +196,13 @@ impl Engine {
     ///
     /// If more than 65,533 projections are registered.
     pub fn register_projection(&mut self, p: crate::api::Projection) -> crate::api::ProjId {
+        #[cfg(feature = "observe")]
+        #[allow(clippy::cast_possible_truncation)]
+        let p = {
+            let id = (self.core.projs.len() + 2) as u16;
+            crate::record::api(&self.core.values, "register_projection", serde_json::Value::Null, serde_json::json!(id));
+            crate::record::rec_projection(id, p)
+        };
         self.core_mut().projs.push(p);
         crate::api::ProjId(u16::try_from(self.core.projs.len() + 1).expect("too many projections"))
     }
@@ -206,7 +223,19 @@ impl Engine {
         let u = self.core.alloc_unit();
         self.units += 1;
         self.each_world(|w| new_unit(w, u, super::world::NONE));
+        #[cfg(feature = "observe")]
+        self.rec_call("new_unit", crate::record::rec().map(|_| crate::record::j(&())), &UnitId(u));
         UnitId(u)
+    }
+
+    /// Writes an engine call when recording (`a`: its arguments, taken
+    /// before the call moved them) with its result, as the round core
+    /// writes it.
+    #[cfg(feature = "observe")]
+    fn rec_call<R: serde::Serialize>(&self, f: &str, a: Option<serde_json::Value>, r: &R) {
+        if let Some(a) = a {
+            crate::record::api(&self.core.values, f, a, crate::record::j(r));
+        }
     }
 
     fn fresh(&mut self) -> Id {
@@ -288,10 +317,16 @@ impl Engine {
 
     /// Appends a node at the end of `unit`.
     pub fn push(&mut self, unit: UnitId, op: OpId, args: Vec<ValueId>) -> NodeId {
-        self.make_top(unit.0, Anchor::End, op, args)
+        #[cfg(feature = "observe")]
+        let a = crate::record::rec().map(|_| crate::record::j(&(&unit, &op, &args)));
+        let r = self.make_top(unit.0, Anchor::End, op, args);
+        #[cfg(feature = "observe")]
+        self.rec_call("push", a, &r);
+        r
     }
 
-    /// Appends `n` nodes to the end of `unit`, in order.
+    /// Appends `n` nodes to the end of `unit`, in order (recorded as the
+    /// pushes it is).
     pub fn push_many(&mut self, unit: UnitId, op: OpId, args: Vec<Vec<ValueId>>) -> Vec<NodeId> {
         args.into_iter().map(|a| self.push(unit, op, a)).collect()
     }
@@ -299,10 +334,14 @@ impl Engine {
     /// Keeps the node's applications alive across collections.
     pub fn add_root(&mut self, n: NodeId) {
         self.roots.push(n);
+        #[cfg(feature = "observe")]
+        self.rec_call("add_root", crate::record::rec().map(|_| crate::record::j(&(&n,))), &());
     }
 
     pub fn remove_root(&mut self, node: NodeId) {
         self.roots.retain(|&r| r != node);
+        #[cfg(feature = "observe")]
+        self.rec_call("remove_root", crate::record::rec().map(|_| crate::record::j(&(&node,))), &());
     }
 
     /// # Panics
@@ -310,7 +349,12 @@ impl Engine {
     /// If `node` is not a live node.
     pub fn insert_after(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let u = self.w.node(node.0).expect("insert_after: a live node").unit;
-        self.make_top(u, Anchor::After(node.0), op, args)
+        #[cfg(feature = "observe")]
+        let a = crate::record::rec().map(|_| crate::record::j(&(&node, &op, &args)));
+        let r = self.make_top(u, Anchor::After(node.0), op, args);
+        #[cfg(feature = "observe")]
+        self.rec_call("insert_after", a, &r);
+        r
     }
 
     /// # Panics
@@ -318,11 +362,24 @@ impl Engine {
     /// If `node` is not a live node.
     pub fn insert_before(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) -> NodeId {
         let u = self.w.node(node.0).expect("insert_before: a live node").unit;
-        self.make_top(u, Anchor::Before(node.0), op, args)
+        #[cfg(feature = "observe")]
+        let a = crate::record::rec().map(|_| crate::record::j(&(&node, &op, &args)));
+        let r = self.make_top(u, Anchor::Before(node.0), op, args);
+        #[cfg(feature = "observe")]
+        self.rec_call("insert_before", a, &r);
+        r
     }
 
     /// Replaces a node's text; the node keeps its id.
     pub fn replace(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::rec().map(|_| crate::record::j(&(&node, &op, &args)));
+        self.replace_inner(node, op, args);
+        #[cfg(feature = "observe")]
+        self.rec_call("replace", a, &());
+    }
+
+    fn replace_inner(&mut self, node: NodeId, op: OpId, args: Vec<ValueId>) {
         if self.w.node(node.0).is_none() {
             return;
         }
@@ -333,11 +390,12 @@ impl Engine {
 
     /// Removes a node and its subtree.
     pub fn remove(&mut self, node: NodeId) {
-        if self.w.node(node.0).is_none() {
-            return;
+        if self.w.node(node.0).is_some() {
+            self.edit(|b| b.free(node.0));
+            self.roots.retain(|&r| r != node);
         }
-        self.edit(|b| b.free(node.0));
-        self.roots.retain(|&r| r != node);
+        #[cfg(feature = "observe")]
+        self.rec_call("remove", crate::record::rec().map(|_| crate::record::j(&(&node,))), &());
     }
 
     /// The committed output of a node (`None`: not run, claimed or gone).
@@ -399,6 +457,11 @@ impl Engine {
     }
 
     pub fn declare_accumulator(&mut self, f: Field, m: Arc<dyn Monoid>) {
+        #[cfg(feature = "observe")]
+        let m: Arc<dyn Monoid> = {
+            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), serde_json::Value::Null);
+            Arc::new(crate::record::RecMonoid { inner: m, field: f })
+        };
         self.core_mut().accs.insert(f, m);
     }
 
@@ -414,15 +477,25 @@ impl Engine {
 
     pub fn declare_sequence(&mut self, f: Field) {
         self.core_mut().seqs.insert(f);
+        #[cfg(feature = "observe")]
+        self.rec_call("declare_sequence", crate::record::rec().map(|_| crate::record::j(&(&f,))), &());
     }
 
     pub fn declare_loopback(&mut self, f: Field, init: ValueId) {
-        self.declare_loopbacks(&[(f, init)]);
+        self.declare_loopbacks_inner(&[(f, init)]);
+        #[cfg(feature = "observe")]
+        self.rec_call("declare_loopback", crate::record::rec().map(|_| crate::record::j(&(&f, &init))), &());
     }
 
     /// Declares several loop-back fields at once: one pass over the runs
     /// (a field declared already is left as it is).
     pub fn declare_loopbacks(&mut self, fields: &[(Field, ValueId)]) {
+        self.declare_loopbacks_inner(fields);
+        #[cfg(feature = "observe")]
+        self.rec_call("declare_loopbacks", crate::record::rec().map(|_| crate::record::j(&(fields,))), &());
+    }
+
+    fn declare_loopbacks_inner(&mut self, fields: &[(Field, ValueId)]) {
         let mut new: FxHashMap<Field, ValueId> = FxHashMap::default();
         for &(f, init) in fields {
             if !self.core.loops.contains_key(&f) {
@@ -462,10 +535,14 @@ impl Engine {
     pub fn set_loop_start(&mut self, s: LoopStart) {
         self.loop_start = s;
         self.core.hold_fin.store(s != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "observe")]
+        self.rec_call("set_loop_start", crate::record::rec().map(|_| crate::record::j(&(&s,))), &());
     }
 
     pub fn set_max_rounds(&mut self, n: u64) {
         self.max_rounds = n;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_max_rounds", crate::record::rec().map(|_| crate::record::j(&(&n,))), &());
     }
 
     /// What reaching the round cap does ([`crate::CapPolicy`]; default
@@ -479,7 +556,11 @@ impl Engine {
 
     /// Bounds an evaluation (see [`Limits`]); exceeding one is an error.
     pub fn set_limits(&mut self, l: Limits) {
+        #[cfg(feature = "observe")]
+        let a = crate::record::rec().map(|_| crate::record::j(&(&l,)));
         self.limits = l;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_limits", a, &());
     }
 
     #[must_use]
@@ -490,6 +571,12 @@ impl Engine {
     /// Supplies environment fields (replacing the previous ones).
     pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
         let new: FxHashMap<Field, ValueId> = env.into_iter().collect();
+        #[cfg(feature = "observe")]
+        {
+            let mut v: Vec<(Field, ValueId)> = new.iter().map(|(&f, &x)| (f, x)).collect();
+            v.sort_unstable();
+            crate::record::api(&self.core.values, "set_environment", crate::record::j(&v), serde_json::Value::Null);
+        }
         // By answer: a field whose answer stays (the provider's underneath
         // one no longer supplied, say) wakes no reader.
         let changed = {
@@ -506,6 +593,12 @@ impl Engine {
     /// waiting).
     pub fn set_environment_absent(&mut self, absent: impl IntoIterator<Item = Field>) {
         let new: FxHashSet<Field> = absent.into_iter().collect();
+        #[cfg(feature = "observe")]
+        {
+            let mut v: Vec<Field> = new.iter().copied().collect();
+            v.sort_unstable();
+            crate::record::api(&self.core.values, "set_environment_absent", crate::record::j(&v), serde_json::Value::Null);
+        }
         let changed = {
             let mut e = self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let fs: Vec<Field> = new.symmetric_difference(&e.absent).copied().collect();
@@ -545,6 +638,8 @@ impl Engine {
     /// Sets an environment field of an application's unit.
     pub fn set_env(&mut self, unit: UnitId, field: Field, value: ValueId) {
         self.edit(|b| b.set_unit_env(unit.0, field, value));
+        #[cfg(feature = "observe")]
+        self.rec_call("set_env", crate::record::rec().map(|_| crate::record::j(&(&unit, &field, &value))), &());
     }
 
     /// The environment's supplied fields.
@@ -557,16 +652,32 @@ impl Engine {
     }
 
     pub fn set_env_provider(&mut self, provider: Box<crate::api::EnvProvider>) {
+        #[cfg(feature = "observe")]
+        let provider = {
+            crate::record::api(&self.core.values, "set_env_provider", serde_json::Value::Null, serde_json::Value::Null);
+            crate::record::rec_provider(provider)
+        };
         self.core_mut().provider = Some(provider);
     }
 
     pub fn clear_env_provider(&mut self) {
         self.core_mut().provider = None;
+        #[cfg(feature = "observe")]
+        self.rec_call("clear_env_provider", crate::record::rec().map(|_| crate::record::j(&())), &());
     }
 
-    pub fn pin(&mut self, _v: ValueId) {}
+    /// (Values are never swept here: every id stays valid.)
+    #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
+    pub fn pin(&mut self, v: ValueId) {
+        #[cfg(feature = "observe")]
+        self.rec_call("pin", crate::record::rec().map(|_| crate::record::j(&(&v,))), &());
+    }
 
-    pub fn unpin(&mut self, _v: ValueId) {}
+    #[cfg_attr(not(feature = "observe"), allow(unused_variables))]
+    pub fn unpin(&mut self, v: ValueId) {
+        #[cfg(feature = "observe")]
+        self.rec_call("unpin", crate::record::rec().map(|_| crate::record::j(&(&v,))), &());
+    }
 
     #[must_use]
     pub fn values_epoch(&self) -> u64 {
@@ -611,8 +722,8 @@ impl Engine {
                     Read::Use { site, .. } => d.push(*site),
                     Read::Out { node, .. } | Read::At { node, .. } => d.push(*node),
                     Read::Kind { at, .. } => d.extend(w.node(*at).and_then(|x| opener(x.frame))),
-                    Read::Range { f, from, to, .. } => {
-                        if let Some((ru, lo, hi)) = w.window(id, *from, *to)
+                    Read::Range { f, from, to, past, .. } => {
+                        if let Some((ru, lo, hi)) = w.window(id, *from, *to, *past)
                             && let Some(m) = w.contribs.get(&(ru, *f))
                         {
                             let order = &w.unit(ru).order;
@@ -659,6 +770,8 @@ impl Engine {
     /// output nodes, say), at creation.
     pub fn mark_op(&mut self, op: OpId) {
         self.core.marked_ops.write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(op);
+        #[cfg(feature = "observe")]
+        self.rec_call("mark_op", crate::record::rec().map(|_| crate::record::j(&(&op,))), &());
     }
 
     #[must_use]
@@ -674,6 +787,13 @@ impl Engine {
     /// Frees the applications no live node outside them reads (nor a
     /// root), until none is left; the number of nodes freed.
     pub fn collect_garbage(&mut self) -> usize {
+        let r = self.collect_garbage_inner();
+        #[cfg(feature = "observe")]
+        self.rec_call("collect_garbage", crate::record::rec().map(|_| crate::record::j(&())), &r);
+        r
+    }
+
+    fn collect_garbage_inner(&mut self) -> usize {
         let roots: FxHashSet<Id> = self.roots.iter().map(|r| r.0).collect();
         let mut total = 0;
         loop {
@@ -741,14 +861,20 @@ impl Engine {
 
     pub fn mark(&mut self, n: NodeId) {
         self.marked.insert(n.0);
+        #[cfg(feature = "observe")]
+        self.rec_call("mark", crate::record::rec().map(|_| crate::record::j(&(&n,))), &());
     }
 
     pub fn unmark(&mut self, n: NodeId) {
         self.marked.remove(&n.0);
+        #[cfg(feature = "observe")]
+        self.rec_call("unmark", crate::record::rec().map(|_| crate::record::j(&(&n,))), &());
     }
 
     pub fn set_version(&mut self, v: u64) {
         self.version = v;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_version", crate::record::rec().map(|_| crate::record::j(&(&v,))), &());
     }
 
     pub fn take_settled(&mut self) -> Vec<Settled> {
@@ -881,6 +1007,13 @@ impl Engine {
         }
         if list_f(&self.w.acc_res) != list_f(&want.acc_res) {
             out.push(format!("acc_res {:?}, the nodes file {:?}", list_f(&self.w.acc_res), list_f(&want.acc_res)));
+        }
+        let ids = |m: &super::ptree::PMap<Id, ()>| -> Vec<Id> { m.iter().map(|(&x, _)| x).collect() };
+        if ids(&self.w.fins) != ids(&want.fins) {
+            out.push(format!("fins {:?}, the nodes file {:?}", ids(&self.w.fins), ids(&want.fins)));
+        }
+        if ids(&self.w.publishers) != ids(&want.publishers) {
+            out.push(format!("publishers {:?}, the nodes file {:?}", ids(&self.w.publishers), ids(&want.publishers)));
         }
         out
     }
