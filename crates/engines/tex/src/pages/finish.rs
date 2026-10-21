@@ -340,7 +340,34 @@ impl Run<'_, '_> {
         let pid = me(fin.piece);
         // (the window's units, by piece: their items with the markers
         // resolved where each piece is)
-        let window = v.seq_to_vec(self.fold_own(PITEMS, fin.after, Some(fin.piece))?);
+        let mut window = v.seq_to_vec(self.fold_own(PITEMS, fin.after, Some(fin.piece))?);
+        let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
+        let names_own = fin.spans.iter().any(|s| {
+            matches!(s.src, Src::Piece { piece, .. } | Src::Held { piece, .. } if piece == pid)
+        });
+        if names_own && !window.iter().any(|&u| unit_pid(u) == pid) {
+            // (the piece stands after this finisher in the view, a window
+            // up to this node not reaching it: placed again, the page
+            // builder to place the finisher after it again. Its items read
+            // past this node, contributor by contributor, waiting while
+            // one is in work; a piece no longer there leaves this view
+            // stale, its page not made, which the builder's run replaces)
+            window.clear();
+            let f = v.field(PITEMS);
+            let mut cur = fin.after;
+            let mut found = false;
+            while let Some((n, u)) = self.cx.acc_next(f, cur)? {
+                window.extend(v.seq_to_vec(u));
+                if n == fin.piece {
+                    found = true;
+                    break;
+                }
+                cur = Some(n);
+            }
+            if !found {
+                return Ok((pos.to_vec(), None));
+            }
+        }
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
                 "finisher {} of page {} runs (piece {} candidate {}, after {:?}, {} spans, window {:?})",
@@ -359,7 +386,6 @@ impl Run<'_, '_> {
                     .collect::<Vec<_>>()
             );
         }
-        let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
         let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
         let mut want: Vec<i64> = vec![pid];
         for s in &fin.spans {
