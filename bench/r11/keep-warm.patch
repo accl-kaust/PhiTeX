@@ -1,0 +1,210 @@
+diff --git a/crates/engines/tex/src/exec.rs b/crates/engines/tex/src/exec.rs
+index 9c8a6674..071b441f 100644
+--- a/crates/engines/tex/src/exec.rs
++++ b/crates/engines/tex/src/exec.rs
+@@ -345,6 +345,9 @@ pub(crate) struct Threads {
+     pooled_jobs: AtomicU64,
+     pooled_ns: AtomicU64,
+     pooled_longest_ns: AtomicU64,
++    /// Whether this executor counts as an evaluation on its pool's
++    /// [`Keep`] (from its first batch on the pool to its drop).
++    held: std::sync::atomic::AtomicBool,
+ }
+ 
+ impl Threads {
+@@ -360,6 +363,7 @@ impl Threads {
+             pooled_jobs: AtomicU64::new(0),
+             pooled_ns: AtomicU64::new(0),
+             pooled_longest_ns: AtomicU64::new(0),
++            held: std::sync::atomic::AtomicBool::new(false),
+         }
+     }
+ 
+@@ -450,6 +454,18 @@ impl Threads {
+         self.ops.peak.load(Ordering::Relaxed)
+     }
+ 
++    /// From now to its drop this executor's evaluation runs on its pool:
++    /// the pool's workers wait for its batches busy ([`on_pool`]).
++    fn hold(&self) {
++        #[cfg(feature = "rayon")]
++        if !cfg!(target_arch = "wasm32")
++            && !prof_flag!("PHITEX_NO_KEEP")
++            && !self.held.swap(true, Ordering::AcqRel)
++        {
++            keep_of(self.n).live.fetch_add(1, Ordering::AcqRel);
++        }
++    }
++
+     /// Runs one job (a worker's loop over runs): the operations it runs
+     /// count on this executor's counters.
+     fn job<R>(&self, f: impl FnOnce() -> R) -> R {
+@@ -508,6 +524,12 @@ fn threads_possible() -> bool {
+ /// on: the engine's probes (spans and counters) printed, then reset.
+ impl Drop for Threads {
+     fn drop(&mut self) {
++        // (the pool's workers stop waiting busy now, unless another
++        // evaluation runs on it)
++        #[cfg(feature = "rayon")]
++        if self.held.load(Ordering::Acquire) {
++            keep_of(self.n).live.fetch_sub(1, Ordering::AcqRel);
++        }
+         widths::print();
+         crate::prof::print();
+         crate::prof::caches::print();
+@@ -547,6 +569,7 @@ impl Executor for Threads {
+         let longest = AtomicU64::new(0);
+         // one job a task: each costs a run
+         let t0 = now();
++        self.hold();
+         on_pool(self.n, n, 1, &|i| {
+             let t = now();
+             let _ = slots[i].set(self.node_job(|| run(i)));
+@@ -594,6 +617,7 @@ impl Threads {
+         }
+         let grain = (n / (self.n * 8)).clamp(4, GRAIN);
+         trace(n, self.n);
++        self.hold();
+         parallel(self.n, n, grain, f);
+     }
+ }
+@@ -619,6 +643,7 @@ impl Executor for Coarse {
+             return;
+         }
+         trace(n, self.0.n);
++        self.0.hold();
+         parallel(self.0.n, n, 1, &|i| self.0.job(|| f(i)));
+     }
+ 
+@@ -691,14 +716,129 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync))
+ }
+ 
+ /// `f(i)` for every `i < n` on the pool of `threads` workers.
++///
++/// Natively the workers and the calling thread wait for work busy, for
++/// up to [`KEEP`] after their last job, before they sleep (OpenMP's
++/// blocktime): an evaluation's steps hand the pool a few runs at a time,
++/// so a worker that slept between them left its core idle most of the
++/// time, and the frequency governor clocked that core down (amsldoc at
++/// `-j 8` on accl: 2.2-2.5 GHz at a run's start against 3.1 at `-j 1`,
++/// every run costing that much more for the same cycles), the core's
++/// caches flushed in its deep idle states, and each wake cost a
++/// futex round trip. Kept busy, a core runs the next job at full clock.
+ #[cfg(feature = "rayon")]
+ fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
+     use rayon::prelude::*;
+-    pool(threads).install(|| {
+-        (0..n).into_par_iter().with_min_len(grain).for_each(f);
++    let p = pool(threads);
++    if cfg!(target_arch = "wasm32") || prof_flag!("PHITEX_NO_KEEP") {
++        p.install(|| {
++            (0..n).into_par_iter().with_min_len(grain).for_each(f);
++        });
++        return;
++    }
++    keepers(&p, threads);
++    // (one task a chunk, in index order through the pool's queue; the
++    // caller waits busy for the last, then blocks in the scope's end)
++    let left = AtomicUsize::new(n.div_ceil(grain.max(1)));
++    p.in_place_scope(|s| {
++        for c in (0..n).step_by(grain.max(1)) {
++            let left = &left;
++            s.spawn(move |_| {
++                for i in c..(c + grain.max(1)).min(n) {
++                    f(i);
++                }
++                left.fetch_sub(1, Ordering::Release);
++            });
++        }
++        wait_busy(keep_of(threads), || (left.load(Ordering::Acquire) > 0).then_some(false));
+     });
+ }
+ 
++/// How long a worker (or a caller waiting for its batch) with nothing
++/// to run waits busy for more before it sleeps ([`on_pool`]).
++#[cfg(feature = "rayon")]
++const KEEP: std::time::Duration = std::time::Duration::from_millis(20);
++
++/// A pool's busy waiting ([`keep`]): its workers waiting busy now, and
++/// the executors ([`Threads`]) running an evaluation on it now. Workers
++/// wait busy only while an evaluation runs: its executor's drop ends
++/// their wait at once, so nothing spins between evaluations.
++#[cfg(feature = "rayon")]
++#[derive(Default)]
++pub(crate) struct Keep {
++    keeping: AtomicUsize,
++    live: AtomicUsize,
++}
++
++/// The pool of `threads`'s [`Keep`].
++#[cfg(feature = "rayon")]
++fn keep_of(threads: usize) -> &'static Keep {
++    use std::sync::{Mutex, PoisonError};
++    static K: OnceLock<Mutex<phitex_defuse::FxHashMap<usize, &'static Keep>>> = OnceLock::new();
++    K.get_or_init(Default::default)
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .entry(threads)
++        .or_insert_with(|| Box::leak(Box::default()))
++}
++
++/// Every worker of `p` not waiting busy now begins to ([`keep`]), while
++/// an evaluation runs on it.
++#[cfg(feature = "rayon")]
++fn keepers(p: &rayon::ThreadPool, threads: usize) {
++    let k = keep_of(threads);
++    if k.live.load(Ordering::Acquire) > 0 && k.keeping.load(Ordering::Relaxed) < threads {
++        p.spawn_broadcast(move |_| keep(k));
++    }
++}
++
++/// Waits busy, calling `turn()` each turn: `None` ends the wait,
++/// `Some(true)` says the turn did work (the wait's clock starts again),
++/// `Some(false)` that it found none. The wait also ends once the
++/// evaluation ends or [`KEEP`] passes without work: a pause each idle
++/// turn, the thread yielded every 64.
++#[cfg(feature = "rayon")]
++fn wait_busy(k: &Keep, mut turn: impl FnMut() -> Option<bool>) {
++    let mut since = std::time::Instant::now();
++    let mut spins = 0u32;
++    loop {
++        match turn() {
++            None => return,
++            Some(true) => {
++                since = std::time::Instant::now();
++                continue;
++            }
++            Some(false) => {}
++        }
++        spins = spins.wrapping_add(1);
++        if spins % 64 == 0 {
++            if k.live.load(Ordering::Acquire) == 0 || since.elapsed() > KEEP {
++                return;
++            }
++            std::thread::yield_now();
++        }
++        std::hint::spin_loop();
++    }
++}
++
++/// A worker waits busy: it runs the pool's jobs as they come, and
++/// returns to the pool's own loop (which sleeps) once none came for
++/// [`KEEP`] or the evaluation ended. A worker already keeping returns
++/// at once.
++#[cfg(feature = "rayon")]
++fn keep(k: &'static Keep) {
++    thread_local! {
++        static KEEPING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++    }
++    if KEEPING.with(|c| c.replace(true)) {
++        return;
++    }
++    k.keeping.fetch_add(1, Ordering::Relaxed);
++    wait_busy(k, || Some(matches!(rayon::yield_now(), Some(rayon::Yield::Executed))));
++    k.keeping.fetch_sub(1, Ordering::Relaxed);
++    KEEPING.with(|c| c.set(false));
++}
++
+ /// Every worker of the pool of `threads` adds its probe counts and spans
+ /// to the totals (a no-op without the `profile` feature, so the broadcast
+ /// is skipped).

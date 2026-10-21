@@ -221,8 +221,10 @@ impl CsId {
         type Table = (FxHashMap<&'static str, CsId>, u32, u32);
         static TABLE: OnceLock<std::sync::Mutex<Table>> = OnceLock::new();
         if let Some(c) = LOCAL.with(|l| l.borrow().get(name).copied()) {
+            crate::prof::caches::hit(crate::prof::caches::CS);
             return c;
         }
+        let m = crate::prof::caches::miss(crate::prof::caches::CS);
         let c = {
             let mut t = TABLE.get_or_init(Default::default).locked();
             if let Some(&c) = t.0.get(name) {
@@ -257,6 +259,7 @@ impl CsId {
             }
         };
         LOCAL.with(|l| l.borrow_mut().insert(Box::from(name), c));
+        crate::prof::caches::made(m);
         c
     }
 
@@ -554,6 +557,7 @@ pub(crate) fn char_node_id(
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.instance != v.instance() || c.epoch != epoch {
+            crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
                 instance: v.instance(),
                 epoch,
@@ -567,9 +571,12 @@ pub(crate) fn char_node_id(
         (k == key).then_some(x)
     });
     if let Some(x) = hit {
+        crate::prof::caches::hit(crate::prof::caches::ENC_CHAR);
         return x;
     }
+    let m = crate::prof::caches::miss(crate::prof::caches::ENC_CHAR);
     let x = make();
+    crate::prof::caches::made(m);
     ENCODED.with(|c| {
         if let Some(e) = c.borrow_mut().chars.get_mut(slot) {
             *e = (key, x);
@@ -643,6 +650,7 @@ fn encoded<K: std::hash::Hash + Eq>(
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.instance != v.instance() || c.epoch != epoch {
+            crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
                 instance: v.instance(),
                 epoch,
@@ -652,9 +660,12 @@ fn encoded<K: std::hash::Hash + Eq>(
         map(&mut c).get(&key).copied()
     });
     if let Some(x) = hit {
+        crate::prof::caches::hit(crate::prof::caches::ENC);
         return x;
     }
+    let m = crate::prof::caches::miss(crate::prof::caches::ENC);
     let x = make();
+    crate::prof::caches::made(m);
     ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         let m = map(&mut c);
@@ -685,6 +696,7 @@ pub(crate) fn str_id(v: &Values, s: &str) -> ValueId {
                 .flatten()
         });
         if let Some(x) = hit {
+            crate::prof::caches::hit(crate::prof::caches::ENC);
             return x;
         }
     }
@@ -703,6 +715,7 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.instance != v.instance() || c.epoch != epoch {
+            crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
                 instance: v.instance(),
                 epoch,
@@ -712,9 +725,12 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
         c.toks.get(&t).copied()
     });
     if let Some(x) = hit {
+        crate::prof::caches::hit(crate::prof::caches::ENC_TOK);
         return x;
     }
+    let m = crate::prof::caches::miss(crate::prof::caches::ENC_TOK);
     let x = t.encode(v);
+    crate::prof::caches::made(m);
     ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.toks.len() >= DECODED_MAX {
@@ -739,6 +755,16 @@ pub(crate) fn frame_of(
 /// mark or whatsit (then it is a function of its value alone: a box and
 /// its list included).
 pub(crate) fn leaf_of(v: &Values, id: ValueId) -> Option<phitex_typeset::node::Node> {
+    let r = leaf_of_cached(v, id);
+    if r.is_some() {
+        crate::prof::caches::hit(crate::prof::caches::LEAF);
+    } else {
+        crate::prof::caches::made(crate::prof::caches::miss(crate::prof::caches::LEAF));
+    }
+    r
+}
+
+fn leaf_of_cached(v: &Values, id: ValueId) -> Option<phitex_typeset::node::Node> {
     DECODED.with(|c| {
         let c = c.borrow();
         (c.instance == v.instance())
@@ -787,6 +813,16 @@ const CHAR_NODES_DEC_SIZE: usize = 1 << 12;
 
 /// The character node `id` decoded before on this thread, if it is one.
 pub(crate) fn char_node_of(v: &Values, id: ValueId) -> Option<(u32, u16)> {
+    let r = char_node_of_cached(v, id);
+    if r.is_some() {
+        crate::prof::caches::hit(crate::prof::caches::DEC_CHAR);
+    } else {
+        crate::prof::caches::made(crate::prof::caches::miss(crate::prof::caches::DEC_CHAR));
+    }
+    r
+}
+
+fn char_node_of_cached(v: &Values, id: ValueId) -> Option<(u32, u16)> {
     let raw = id.raw();
     CHAR_NODES_DEC.with(|c| {
         let c = c.borrow();
@@ -832,9 +868,12 @@ fn decoded<T: Clone>(
         map(&mut c).get(&id).cloned()
     });
     if let Some(x) = hit {
+        crate::prof::caches::hit(crate::prof::caches::DEC);
         return x;
     }
+    let m = crate::prof::caches::miss(crate::prof::caches::DEC);
     let x = make();
+    crate::prof::caches::made(m);
     DECODED.with(|c| {
         let mut c = c.borrow_mut();
         let m = map(&mut c);
@@ -1282,6 +1321,7 @@ fn macro_id(v: &Values, m: &Rc<Macro>) -> ValueId {
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.instance != v.instance() || c.epoch != epoch {
+            crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
                 instance: v.instance(),
                 epoch,
@@ -1291,9 +1331,12 @@ fn macro_id(v: &Values, m: &Rc<Macro>) -> ValueId {
         c.macros.get(&key).map(|e| e.1)
     });
     if let Some(x) = hit {
+        crate::prof::caches::hit(crate::prof::caches::ENC_MACRO);
         return x;
     }
+    let mm = crate::prof::caches::miss(crate::prof::caches::ENC_MACRO);
     let x = Mean::Macro(m.clone()).encode_new(v);
+    crate::prof::caches::made(mm);
     remember_macro(v, m, x);
     DECODED.with(|c| {
         let mut c = c.borrow_mut();
@@ -1317,6 +1360,7 @@ fn remember_macro(v: &Values, m: &Rc<Macro>, id: ValueId) {
     ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.instance != v.instance() || c.epoch != epoch {
+            crate::prof::caches::hit(crate::prof::caches::ENC_RESET);
             *c = Encoded {
                 instance: v.instance(),
                 epoch,
