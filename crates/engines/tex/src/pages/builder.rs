@@ -1283,7 +1283,9 @@ impl Run<'_, '_> {
         } else {
             match lp.last_rtn.iter().find(|e| e.0 == key) {
                 Some(e) => e.1,
-                None if ordinary => lp
+                // (and on a page `\end` fired, §1054: the routine runs as on
+                // an ordinary one, its markers kept)
+                None if ordinary || f.output_penalty == END_PENALTY => lp
                     .last_markers
                     .iter()
                     .find(|e| e.0 == hint)
