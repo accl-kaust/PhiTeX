@@ -93,6 +93,9 @@ pub enum Sched {
     /// Greedy without speculation on this many threads (wide batches
     /// apply in parallel slices).
     Par(usize),
+    /// Speculative greedy, each of this many workers on a thread of its
+    /// own (the stepless drains: CLEAN_OCC, CLEAN_FLOW).
+    Workers(usize),
 }
 
 impl Sched {
@@ -102,6 +105,7 @@ impl Sched {
             "spec" => Some(Sched::Spec(3)),
             "random" => Some(Sched::Random(0)),
             "par" => Some(Sched::Par(4)),
+            "workers" => Some(Sched::Workers(4)),
             s if s.starts_with("random:") => s[7..].parse().ok().map(Sched::Random),
             s => s.strip_prefix("spec:").and_then(|t| t.parse().ok()).map(Sched::Spec),
         }
@@ -131,6 +135,7 @@ pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
     let r = match sched {
         Sched::Seq => eng.evaluate_sequential(),
         Sched::Par(t) => eng.evaluate(&mut Greedy::default(), &mut Threads(t)),
+        Sched::Workers(t) => eng.evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut super::Workers(t)),
         Sched::Spec(t) => eng.evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(t)),
         Sched::Random(_) => eng.evaluate(&mut RandomScheduler::new(m, m.is_multiple_of(2)), &mut Sequential),
     };
