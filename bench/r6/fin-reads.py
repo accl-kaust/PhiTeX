@@ -42,6 +42,14 @@ def raw(x):
     return x
 
 
+def as_int(ints, e, x):
+    """An integer value: inline (tag 2, a sign-extended 61-bit payload) or a big one."""
+    if isinstance(x, int) and x >> 61 == 2:
+        p = x & ((1 << 61) - 1)
+        return p - (1 << 61) if p >> 60 else p
+    return ints.get((e, x))
+
+
 def main(path):
     names, strs, ints = {}, {}, {}
     last = {}  # (e, node) -> (op name, reads [(f, x)], writes [(f, x, read before, x read)])
@@ -154,11 +162,11 @@ def main(path):
             n = fname(e, f)
             if rb:
                 kinds[n][0] += 1
-                a, b = ints.get((e, xr)), ints.get((e, x))
+                a, b = as_int(ints, e, xr), as_int(ints, e, x)
                 kinds[n][2]["+%d" % (b - a) if a is not None and b is not None else "?"] += 1
             else:
                 kinds[n][1] += 1
-                b = ints.get((e, x))
+                b = as_int(ints, e, x)
                 kinds[n][2]["=%s" % b if b is not None else "=?"] += 1
     print("\n3. piece writes by kind for the linked fields (read-modify-write | set | most common forms)")
     for n, _ in rows[:45]:
