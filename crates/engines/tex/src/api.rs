@@ -261,6 +261,10 @@ impl EditSender {
 
     /// [`EditSender::send_shared`] with what the sender knows of the
     /// change ([`Hint`]).
+    #[allow(
+        clippy::must_use_candidate,
+        reason = "a send; the version is for whoever wants it"
+    )]
     pub fn send_edit(&self, text: Arc<str>, hint: Option<Hint>) -> u64 {
         let mut p = self.0.locked();
         p.version += 1;
