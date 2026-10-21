@@ -232,7 +232,10 @@ impl Run<'_, '_> {
     /// run goes again from its start and ends at the first such
     /// candidate ([`Halt::Recut`], [`Run::finish_candidate`]), its rest a
     /// resume placed after the pages firing there, which reads their
-    /// objects. (`why`: the reader, for the trace.)
+    /// objects. Where no pass can end at it (inside a conditional of the
+    /// run's own), the read stands where no page fires at the run's
+    /// candidates ([`Run::page_fires_in_own`]). (`why`: the reader, for
+    /// the trace.)
     #[allow(
         clippy::assertions_on_constants,
         reason = "a debug or observe build stops on the defect"
@@ -247,6 +250,12 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let (k, restartable) = (m.k, m.restartable);
+        // (no pass can end there: complete where no page fires at any of
+        // the run's candidates, the page builder's fold over the profiles
+        // to its own says, [`Feedback::PageSoFar`])
+        if !restartable && !self.page_fires_in_own()? {
+            return Ok(());
+        }
         if !restartable {
             // (a candidate inside a span of the run's own no pass can end
             // at: a page firing there would be missing from the number)

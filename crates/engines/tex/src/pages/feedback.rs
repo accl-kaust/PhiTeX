@@ -188,6 +188,30 @@ impl Run<'_, '_> {
     /// candidate folded in (the contributions after it are not on the
     /// page), read, not defined.
     pub(crate) fn page_dimen(&mut self, m: i32) -> R<i32> {
+        let (st, _) = self.page_so_far()?;
+        if st.pb.contents == Contents::Empty {
+            return Ok(if m == 0 { MAX_DIMEN } else { 0 });
+        }
+        Ok(st.pb.so_far[usize::try_from(m).unwrap_or(0).min(7)])
+    }
+
+    /// Whether a page fires at one of this piece's candidates so far
+    /// ([`Feedback::PageSoFar`]: the page where the piece's page began,
+    /// the profiles from there, its own items up to its last candidate):
+    /// a page firing at none of them ships nothing before the commands
+    /// after them (§1005), so what they read of the pages' objects is
+    /// complete. True where a page fires before the piece (the fold does
+    /// not know the routine's material after it).
+    pub(crate) fn page_fires_in_own(&mut self) -> R<bool> {
+        let (_, fired) = self.page_so_far()?;
+        Ok(fired.is_some())
+    }
+
+    /// The page builder over the profiles where this piece's page began
+    /// ([`PAGE_START`]) to its own last candidate: its state, stopped at
+    /// the first page firing, and where that page fired (`Some(true)` in
+    /// this piece's own items, `Some(false)` before them).
+    fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>)> {
         let v = self.v;
         let raw = self.own_outer_items();
         let last = raw
@@ -208,15 +232,15 @@ impl Run<'_, '_> {
             items.push(x);
         }
         items.push(crate::vprof::decode(&crate::vprof::encode(v, &head)));
+        let own = items.len() - 1;
         let mut rd = RunReaching(self, None);
-        for x in &items {
+        let mut fired = None;
+        for (i, x) in items.iter().enumerate() {
             if st.fold_items(x, dead, &mut rd) {
+                fired = Some(i == own);
                 break;
             }
         }
-        if st.pb.contents == Contents::Empty {
-            return Ok(if m == 0 { MAX_DIMEN } else { 0 });
-        }
-        Ok(st.pb.so_far[usize::try_from(m).unwrap_or(0).min(7)])
+        Ok((st, fired))
     }
 }
