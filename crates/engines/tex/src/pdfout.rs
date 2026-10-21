@@ -2484,11 +2484,10 @@ const LINK_SNAP: usize = 8;
 struct LinkSnap {
     at: usize,
     st: PdfState,
-    /// The writer's digest ([`PdfState::digest`]), its digest but for the
-    /// characters used and those characters
-    /// ([`PdfState::digest_sans_chars`], [`PdfState::used_chars`]): taken
-    /// when a later link first compares a writer with this one (most
-    /// snapshots are never compared).
+    /// The writer's digests ([`PdfState::digest_parts`]) and the
+    /// characters it used ([`PdfState::used_chars`]): taken when a later
+    /// link first compares a writer with this one (most snapshots are
+    /// never compared).
     digests: Option<SnapDigests>,
     nums: FontNums,
     forms: Forms,
@@ -2659,12 +2658,9 @@ struct LinkMemo {
     chunk_base: usize,
 }
 
-/// Whether the writer `st` with `nums` and `forms` is the one the last
-/// link had at snapshot `sn`: its records from there on are then the
-/// same bytes ([`finish_exact`]). The forms compared only when there are
-/// none (a document with forms runs on).
-/// A snapshot's digest, its digest but for the characters used, and the
-/// characters used ([`LinkSnap`]).
+/// A snapshot's digests ([`PdfState::digest_parts`]: but for the
+/// object stream's bytes, and those bytes) and the characters its
+/// writer used ([`LinkSnap`]).
 type SnapDigests = (u64, u64, Vec<(FontId, [bool; 256])>);
 
 impl LinkSnap {
@@ -2672,54 +2668,148 @@ impl LinkSnap {
     fn digests(&mut self) -> &SnapDigests {
         if self.digests.is_none() {
             let st = &mut self.st;
-            self.digests = Some((st.digest(), st.digest_sans_chars(), st.used_chars()));
+            let (core, os) = st.digest_parts();
+            self.digests = Some((core, os, st.used_chars()));
         }
         self.digests.as_ref().expect("taken above")
     }
 }
 
-fn same_writer(st: &mut PdfState, nums: &FontNums, forms: &Forms, sn: &mut LinkSnap) -> bool {
-    let none = forms.whats.is_empty()
-        && forms.fonts.is_empty()
-        && sn.forms.whats.is_empty()
-        && sn.forms.fonts.is_empty();
-    if !none {
-        return false;
-    }
-    // (the snapshot's digest taken when it was kept: no copy of its
-    // writer, no formatting)
-    *nums == sn.nums && st.digest() == sn.digests().0
+/// How a writer compares with the last link's at a snapshot
+/// ([`compare_writer`]).
+enum SameWriter {
+    /// The same writer: the records from there on are the same bytes.
+    Same,
+    /// The same but for the characters the pages used: the writer has
+    /// used every character the snapshot's had (and maybe more). The
+    /// records from there on are the same bytes (the characters used
+    /// are read at the file's end only, the fonts' subsets), and the
+    /// end's writer is the last link's with these characters added.
+    ButChars,
+    /// The same but for the bytes of the objects in the object stream
+    /// being filled, which only the step writing that stream reads: the
+    /// two are the same once that stream is written
+    /// ([`PdfState::os_stream`]).
+    ButObjectStream,
+    /// Another writer.
+    Other,
 }
 
-/// [`same_writer`] but for the characters the pages used: `st` has used
-/// every character the snapshot's writer had (and maybe more), and is
-/// that writer otherwise. The records after it are then the same bytes
-/// (the characters used are read at the file's end only, the fonts'
-/// subsets), and the end's writer is the last link's with `st`'s
-/// characters added.
-fn same_writer_but_chars(
+/// How the writer `st` with `nums`, `forms` and `reloc` compares with
+/// the one the last link had at snapshot `sn` ([`finish_exact`]). The
+/// forms compared only when there are none (a document with forms runs
+/// on).
+fn compare_writer(
     st: &mut PdfState,
     nums: &FontNums,
     forms: &Forms,
+    reloc: &Reloc,
     sn: &mut LinkSnap,
-) -> bool {
+) -> SameWriter {
     let none = forms.whats.is_empty()
         && forms.fonts.is_empty()
         && sn.forms.whats.is_empty()
         && sn.forms.fonts.is_empty();
-    if !none || *nums != sn.nums {
-        return false;
+    if !none || *nums != sn.nums || *reloc != sn.reloc {
+        return SameWriter::Other;
     }
-    // (the snapshot's digest and characters taken when it was kept: no
-    // copy of its writer)
+    // (the snapshot's digests taken once: no copy of its writer)
+    let (core, os) = st.digest_parts();
+    let (sn_core, sn_os, chars) = sn.digests();
+    if core != *sn_core {
+        return SameWriter::Other;
+    }
     let mine = st.used_chars();
-    let (_, dg_sans, chars) = sn.digests();
     let covers = chars.iter().all(|(f, c)| {
         mine.iter()
             .find(|m| m.0 == *f)
             .is_some_and(|m| c.iter().zip(&m.1).all(|(&a, &b)| !a || b))
     });
-    covers && st.digest_sans_chars() == *dg_sans
+    if !covers {
+        SameWriter::Other
+    } else if os != *sn_os {
+        SameWriter::ButObjectStream
+    } else if mine == *chars {
+        SameWriter::Same
+    } else {
+        SameWriter::ButChars
+    }
+}
+
+/// Why the writer at record `i` is not the last link's there
+/// (`PHITEX_LINK_WHY`, observe): the writer's fields that differ, with
+/// their first differing lines.
+#[cold]
+fn link_why(i: usize, st: &PdfState, nums: &FontNums, reloc: &Reloc, sn: &LinkSnap) {
+    use std::fmt::Write as _;
+    // (a field of the writer: a line indented by one level)
+    fn fields(s: &str) -> Vec<(String, Vec<&str>)> {
+        let mut out: Vec<(String, Vec<&str>)> = Vec::new();
+        for l in s.lines() {
+            let top = l.starts_with("    ") && !l.starts_with("     ");
+            if top || out.is_empty() {
+                let name = l.trim().split(':').next().unwrap_or("").to_owned();
+                out.push((name, Vec::new()));
+            }
+            if let Some(f) = out.last_mut() {
+                f.1.push(l);
+            }
+        }
+        out
+    }
+    let a = format!("{st:#?}");
+    let b = format!("{:#?}", sn.st);
+    let (fa, fb) = (fields(&a), fields(&b));
+    let mut msg = format!(
+        "link why at record {i}: font numbers {}, reloc {}",
+        if *nums == sn.nums { "equal" } else { "differ" },
+        if *reloc == sn.reloc {
+            "equal".to_owned()
+        } else {
+            format!("differs: {reloc:?} vs {:?}", sn.reloc)
+        }
+    );
+    for (n, la) in &fa {
+        let Some((_, lb)) = fb.iter().find(|x| x.0 == *n) else {
+            let _ = write!(msg, "\n  field {n}: not in the last link's");
+            continue;
+        };
+        if la == lb {
+            continue;
+        }
+        let p = la.iter().zip(lb).take_while(|(x, y)| x == y).count();
+        let q = la[p..]
+            .iter()
+            .rev()
+            .zip(lb[p..].iter().rev())
+            .take_while(|(x, y)| x == y)
+            .count();
+        let _ = write!(
+            msg,
+            "\n  field {n}: lines {}..{} of {} differ (last link's {}..{} of {})",
+            p,
+            la.len() - q,
+            la.len(),
+            p,
+            lb.len() - q,
+            lb.len()
+        );
+        for l in la[p..la.len() - q].iter().take(6) {
+            let _ = write!(
+                msg,
+                "\n    now  {}",
+                l.chars().take(160).collect::<String>()
+            );
+        }
+        for l in lb[p..lb.len() - q].iter().take(6) {
+            let _ = write!(
+                msg,
+                "\n    last {}",
+                l.chars().take(160).collect::<String>()
+            );
+        }
+    }
+    eprintln!("{msg}");
 }
 
 fn link_memo() -> &'static Mutex<Option<LinkMemo>> {
@@ -2762,13 +2852,42 @@ pub(crate) const LINKED: &str = "pdf:linked";
 /// the pages tree: by the final state's digest) and the cross-reference
 /// section, by the prefix sums of the chunks' lengths
 /// (`phitex_pdf::Tail::link`).
-#[allow(clippy::too_many_lines)]
 pub(crate) fn finish_exact(
     v: &Values,
     f: &EndFields,
     xpages: &[ValueId],
     cmds: &CmdMemo,
 ) -> Linked {
+    let out = link(v, f, xpages, cmds, true);
+    if crate::exec::obs_flag!("PHITEX_LINK_CHECK") {
+        // (the file linked from the last link's records, and from the
+        // start: the same bytes)
+        let full = link(v, f, xpages, cmds, false);
+        let at = out
+            .file
+            .iter()
+            .zip(&full.file)
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(
+            out.file == full.file && out.errors == full.errors,
+            "link check: the file linked from the last link's records ({} bytes) is not the \
+             file linked from the start ({} bytes): they differ from byte {at}",
+            out.file.len(),
+            full.file.len()
+        );
+        eprintln!(
+            "link check: {} bytes, the same linked from the start",
+            out.file.len()
+        );
+    }
+    out
+}
+
+/// [`finish_exact`]'s link, from the last link's records (`memo`, kept
+/// for the next) or from the start.
+#[allow(clippy::too_many_lines)]
+fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: bool) -> Linked {
     let none = Linked {
         file: Vec::new(),
         hash: None,
@@ -2854,7 +2973,10 @@ pub(crate) fn finish_exact(
     // (the last link's memo, taken: an edit's records after the change
     // that are the last link's again, from a writer state equal to the
     // one it had there, are copied too, `resync` below)
-    let mut old: Option<LinkMemo> = link_memo().locked().take().filter(|m| m.head == head);
+    let mut old: Option<LinkMemo> = memo
+        .then(|| link_memo().locked().take())
+        .flatten()
+        .filter(|m| m.head == head);
     if let Some(m) = old.as_mut() {
         let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
         if let Some(sn) = m.snaps.iter().rev().find(|sn| sn.at <= same && sn.at > 0) {
@@ -2883,32 +3005,68 @@ pub(crate) fn finish_exact(
     let mut parts: Vec<Vec<phitex_pdf::Part>> = Vec::with_capacity(xpages.len() - start);
     // (where the records are the last link's again from a writer equal
     // to its own there: the rest copied, spec-final §6.2 past the edit)
-    let mut resync: Option<usize> = None;
+    let mut resync: Option<(usize, usize)> = None;
     // (where the writer there had used other characters: those of the
-    // pages before, added to the last link's end, [`same_writer_but_chars`])
+    // pages before, added to the last link's end, [`SameWriter::ButChars`])
     let mut chars_added: Option<Vec<(FontId, [bool; 256])>> = None;
     let mut tries = 0usize;
+    // (the records the line and the last link end with alike, and how
+    // many more records the last link had: record `i` of the line is
+    // its record `i + more` there)
+    let (suffix, more) = old.as_ref().map_or((0, 0), |m| {
+        let n = m
+            .ids
+            .iter()
+            .rev()
+            .zip(ids.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        (n, m.ids.len().cast_signed() - ids.len().cast_signed())
+    });
+    // (a writer the same as the last link's but for the object stream
+    // being filled: compared again once that stream is written)
+    let mut os_wait: Option<usize> = None;
     let (mut t_try, mut t_snap) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     for (i, (&x, pc)) in xpages.iter().zip(&pcs).enumerate().skip(start) {
         let tt = std::time::Instant::now();
+        if os_wait.is_some_and(|c| st.os_stream() != c) {
+            os_wait = None;
+        }
         if i > start
             && tries < 8
+            && os_wait.is_none()
+            && ids.len() - i <= suffix
             && let Some(m) = old.as_mut()
-            && m.ids.len() == ids.len()
-            && m.ids[i..] == ids[i..]
-            && let Some(sn) = m.snaps.iter_mut().find(|sn| sn.at == i)
+            && let Some(j) = i.checked_add_signed(more)
+            && let Some(sn) = m.snaps.iter_mut().find(|sn| sn.at == j)
         {
-            tries += 1;
-            if reloc == sn.reloc && same_writer(&mut st, &nums, &forms, sn) {
-                resync = Some(i);
-                t_try += tt.elapsed();
-                break;
-            }
-            if reloc == sn.reloc && same_writer_but_chars(&mut st, &nums, &forms, sn) {
-                resync = Some(i);
-                chars_added = Some(st.used_chars());
-                t_try += tt.elapsed();
-                break;
+            match compare_writer(&mut st, &nums, &forms, &reloc, sn) {
+                SameWriter::Same => {
+                    resync = Some((i, j));
+                    t_try += tt.elapsed();
+                    break;
+                }
+                SameWriter::ButChars => {
+                    resync = Some((i, j));
+                    chars_added = Some(st.used_chars());
+                    t_try += tt.elapsed();
+                    break;
+                }
+                SameWriter::ButObjectStream => {
+                    os_wait = Some(st.os_stream());
+                    if crate::exec::obs_flag!("PHITEX_LINK_WHY") {
+                        eprintln!(
+                            "link why at record {i}: the same but for object stream {}'s bytes",
+                            st.os_stream()
+                        );
+                    }
+                }
+                SameWriter::Other => {
+                    tries += 1;
+                    if crate::exec::obs_flag!("PHITEX_LINK_WHY") {
+                        link_why(i, &st, &nums, &reloc, sn);
+                    }
+                }
             }
         }
         t_try += tt.elapsed();
@@ -3065,7 +3223,7 @@ pub(crate) fn finish_exact(
     crate::timeline::note(
         &format!(
             "link: records {start}..{} replayed ({tries} resync tries)",
-            resync.unwrap_or(xpages.len())
+            resync.map_or(xpages.len(), |r| r.0)
         ),
         t_loop.saturating_sub(t_pre),
     );
@@ -3108,14 +3266,24 @@ pub(crate) fn finish_exact(
     }
     let t_parts = t_parts.elapsed();
     let mut resynced = 0usize;
-    if let Some(i) = resync
+    if let Some((i, j)) = resync
         && let Some(mut m) = old.take()
-        && let Some(sn) = m.snaps.iter().find(|sn| sn.at == i)
+        && let Some(sn) = m.snaps.iter().find(|sn| sn.at == j)
     {
         let (sg, se, sp, ss) = (sn.got, sn.errors, sn.placed, sn.shipped);
         resynced = xpages.len() - i;
-        chunks_of.extend(m.chunks.drain(i - m.chunk_base..));
-        snaps.extend(m.snaps.into_iter().filter(|x| x.at >= i));
+        chunks_of.extend(m.chunks.drain(j - m.chunk_base..));
+        // (the last link's snapshots from there on, at this line's
+        // records and counts)
+        let (g0, e0, p0, s0) = (got.len(), errors.len(), placed, shipped);
+        snaps.extend(m.snaps.into_iter().filter(|x| x.at >= j).map(|mut x| {
+            x.at = x.at - j + i;
+            x.got = x.got - sg + g0;
+            x.errors = x.errors - se + e0;
+            x.placed = x.placed - sp + p0;
+            x.shipped = x.shipped - ss + s0;
+            x
+        }));
         got.extend(m.got[sg..].iter().copied());
         errors.extend(m.errors.drain(se..));
         placed += m.end.placed - sp;
@@ -3143,16 +3311,18 @@ pub(crate) fn finish_exact(
         placed,
         shipped,
     };
-    *link_memo().locked() = Some(LinkMemo {
-        head,
-        ids,
-        chunks: chunks_of,
-        snaps,
-        got: got.clone(),
-        errors: errors.clone(),
-        end,
-        chunk_base: 0,
-    });
+    if memo {
+        *link_memo().locked() = Some(LinkMemo {
+            head,
+            ids,
+            chunks: chunks_of,
+            snaps,
+            got: got.clone(),
+            errors: errors.clone(),
+            end,
+            chunk_base: 0,
+        });
+    }
     {
         use crate::timeline::note;
         note("link: linked: before the records", t_pre);

@@ -581,13 +581,14 @@ impl std::fmt::Debug for ObjStm {
     // (the buffer by its length and content hash: formatting each byte
     // as a number cost the state's digest more than the rest of it)
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ObjStm")
-            .field("enable", &self.enable)
-            .field("mode", &self.mode)
-            .field("buf", &digest::Bytes(&self.buf))
-            .field("cur", &self.cur)
-            .field("list", &self.list)
-            .finish()
+        let mut d = f.debug_struct("ObjStm");
+        d.field("enable", &self.enable).field("mode", &self.mode);
+        if digest::sans_os() {
+            d.field("buf_len", &self.buf.len());
+        } else {
+            d.field("buf", &digest::Bytes(&self.buf));
+        }
+        d.field("cur", &self.cur).field("list", &self.list).finish()
     }
 }
 

@@ -348,7 +348,9 @@ impl PdfState {
             &mut self.last_arg_other_subr3,
         )?;
         let made = std::sync::Arc::new((e.clone(), fd.desc.clone(), self.last_arg_other_subr3));
-        let mut m = MEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut m = MEMO
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if m.len() >= 256 {
             m.remove(0);
         }

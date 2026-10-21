@@ -10,7 +10,10 @@ n = int(sys.argv[1]); work = sys.argv[2]; res = sys.argv[3]; bins = sys.argv[4:]
 cache = os.path.join(work, "cache"); os.makedirs(cache, exist_ok=True)
 env = dict(ec.ENV, PHITEX_CACHE_DIR=cache)
 ec.cold(bins[0].split("=")[1], "bench/amsldoc", os.path.join(work, "warm"), cache, 8, os.path.join(res, "warm.log"))
-CL = [c for c in ec.CLASSES if c[0] in ("one letter", "line, re-break")]
+# (EDIT_CLASSES: the classes by name, blanks as "_", "," between and
+# dropped: one_letter,line_re-break,label; default the hard bar's two)
+want = os.environ.get("EDIT_CLASSES", "one_letter,line_re-break").split(",")
+CL = [c for c in ec.CLASSES if c[0].replace(",", "").replace(" ", "_") in want]
 walls = {}
 ws = []
 for nb in bins:
