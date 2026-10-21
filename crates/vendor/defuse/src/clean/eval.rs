@@ -1709,31 +1709,42 @@ impl Engine {
                             self.wake(s, x);
                         }
                     }
-                    let subject = match &wait {
-                        Wait::Child(k) => {
-                            if let Some(e) = self.runaway(id, &r.kids, &r.conts) {
-                                return Err(e);
-                            }
-                            let w = std::mem::take(&mut self.w);
-                            let mut b = Builder::new(&self.core, w);
-                            b.commit_unfolding(id, &r.kids, &r.conts);
-                            let m = b.finish();
-                            let (dirty, created, freed, woken) = (m.dirty, m.created, m.freed, m.woken);
-                            self.rebinds += m.rebinds;
-                            self.w = m.w;
-                            self.created += created;
-                            self.freed += freed.len() as u64;
-                            for x in dirty {
-                                self.enqueue(s, x);
-                            }
-                            for x in woken {
-                                self.wake(s, x);
-                            }
-                            self.w
-                                .node(id)
-                                .and_then(|n| n.res.as_ref())
-                                .and_then(|r| r.kids.get(*k).copied())
+                    // Its placements so far are made now, whatever it stops
+                    // on (a child it waits for, or a page builder parked
+                    // between attempts whose finishers can run meanwhile):
+                    // its next run places them again, the same nodes.
+                    if matches!(wait, Wait::Child(_)) || !r.kids.is_empty() || !r.conts.is_empty() {
+                        if let Some(e) = self.runaway(id, &r.kids, &r.conts) {
+                            return Err(e);
                         }
+                        let w = std::mem::take(&mut self.w);
+                        let mut b = Builder::new(&self.core, w);
+                        b.commit_unfolding(id, &r.kids, &r.conts);
+                        let m = b.finish();
+                        let (dirty, created, freed, woken) = (m.dirty, m.created, m.freed, m.woken);
+                        self.rebinds += m.rebinds;
+                        self.w = m.w;
+                        self.created += created;
+                        self.freed += freed.len() as u64;
+                        for x in &freed {
+                            self.kept.remove(x);
+                            s.parked.remove(x);
+                            s.env.remove(x);
+                            self.wake(s, *x);
+                        }
+                        for x in dirty {
+                            self.enqueue(s, x);
+                        }
+                        for x in woken {
+                            self.wake(s, x);
+                        }
+                    }
+                    let subject = match &wait {
+                        Wait::Child(k) => self
+                            .w
+                            .node(id)
+                            .and_then(|n| n.res.as_ref())
+                            .and_then(|r| r.kids.get(*k).copied()),
                         Wait::Node(x, _) => Some(*x),
                         Wait::Env(f) => {
                             s.env.insert(id, *f);

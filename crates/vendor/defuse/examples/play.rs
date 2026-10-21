@@ -1310,16 +1310,24 @@ fn short(j: &J) -> String {
 }
 
 /// The best any scheduler could do on this evaluation's dependency graph
-/// with these run times: the critical path, and a list schedule (longest
-/// path to the end first) on P workers, with commits free or each taking
-/// PLAY_COMMIT_US on one committer.
+/// with these run times (scaled to PLAY_OP_TOTAL_MS in all when set: a
+/// live run's op time): the critical path, and a list schedule (longest
+/// path to the end first) on P workers, with commits free, each taking
+/// PLAY_COMMIT_US on one committer (a serial merge), or each taking it on
+/// the worker that ran the node (commits in parallel: a mergeless engine).
 fn sched_study(eng: &defuse::Engine, rep: &defuse::Report) {
     use std::collections::{BinaryHeap, HashMap, VecDeque};
     let g = eng.dependency_graph();
     let idx: HashMap<defuse::NodeId, usize> = g.iter().enumerate().map(|(i, (n, _))| (*n, i)).collect();
     let times: HashMap<defuse::NodeId, f64> = rep.run_times.iter().map(|(n, d)| (*n, d.as_secs_f64() * 1e3)).collect();
     let n = g.len();
-    let t: Vec<f64> = g.iter().map(|(x, _)| times.get(x).copied().unwrap_or(0.0)).collect();
+    let mut t: Vec<f64> = g.iter().map(|(x, _)| times.get(x).copied().unwrap_or(0.0)).collect();
+    if let Some(want) = std::env::var("PLAY_OP_TOTAL_MS").ok().and_then(|s| s.parse::<f64>().ok()) {
+        let have: f64 = t.iter().sum();
+        if have > 0.0 {
+            t.iter_mut().for_each(|x| *x *= want / have);
+        }
+    }
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut indeg = vec![0usize; n];
     let mut edges = 0;
@@ -1384,7 +1392,9 @@ fn sched_study(eng: &defuse::Engine, rep: &defuse::Report) {
     }
     println!("  dag: nodes {n} edges {edges} cycles broken {broken}; run time {total:.1} ms; critical path {crit:.1} ms over {len} runs");
     let commit_us: f64 = std::env::var("PLAY_COMMIT_US").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0);
-    let sim = |p: usize, c: f64| -> f64 {
+    // `c`: one committer's time per result (ms); `own`: each node's own
+    // commit time, paid by its worker.
+    let sim = |p: usize, c: f64, own: f64| -> f64 {
         // Ready by priority (longest path to the end first).
         #[derive(PartialEq)]
         struct R(f64, usize);
@@ -1436,14 +1446,25 @@ fn sched_study(eng: &defuse::Engine, rep: &defuse::Report) {
             while free > 0 {
                 let Some(R(_, x)) = ready.pop() else { break };
                 free -= 1;
-                ev.push(std::cmp::Reverse((now + ns(t[x]), 1, x)));
+                ev.push(std::cmp::Reverse((now + ns(t[x] + own), 1, x)));
             }
         }
         now.max(committer) as f64 / 1e6
     };
     let mut line = String::from("  ideal:");
     for p in [1usize, 2, 4, 8, 16, 32, 48] {
-        line += &format!(" j{p} {:.1}/{:.1}", sim(p, 0.0), sim(p, commit_us / 1e3));
+        line += &format!(" j{p} {:.1}/{:.1}/{:.1}", sim(p, 0.0, 0.0), sim(p, commit_us / 1e3, 0.0), sim(p, 0.0, commit_us / 1e3));
     }
-    println!("{line}  (ms; free commits / one committer at {commit_us} us each)");
+    println!("{line}  (ms; free commits / one committer at {commit_us} us each / each worker its own at {commit_us} us)");
+    // The chain with each node's own commit: the mergeless floor.
+    let mut bl2 = vec![0.0f64; n];
+    for &i in order.iter().rev() {
+        let m = succ[i].iter().filter(|&&s| pos[s] > pos[i]).map(|&s| bl2[s]).fold(0.0, f64::max);
+        bl2[i] = t[i] + commit_us / 1e3 + m;
+    }
+    println!(
+        "  chain: {len} of {n} nodes ({:.2}%); critical path {crit:.1} ms, {:.1} ms with own commits; run time {total:.1} ms",
+        100.0 * len as f64 / n.max(1) as f64,
+        bl2.iter().copied().fold(0.0, f64::max)
+    );
 }
