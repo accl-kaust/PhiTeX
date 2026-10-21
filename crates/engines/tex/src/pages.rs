@@ -11,18 +11,19 @@
 //!   space factor, the last item: [`crate::build::MAIN_LAST`], read from
 //!   the piece before only where its items leave it standing), gives its vertical
 //!   profile and its items as units of two accumulators
-//!   ([`crate::vprof::VPROF`], [`PITEMS`]) and places its scan step
-//!   ([`Scan`]) after it.
+//!   ([`crate::vprof::VPROF`], [`PITEMS`]).
 //! - The scan is TeX's page builder (§980–§1010) over the profiles, one
-//!   node a page, after the document's last piece ([`Run::scan_page`],
-//!   spec-page-chain §4.3): from where its page begins, which the
-//!   continuation of the page before defines ([`scan_from_field`]), it
-//!   folds the profiles of the pieces after that anchor until its page
-//!   fires, places the page's finisher ([`Finish`]) and continuation
-//!   right after the piece the page fires in, its break
-//!   ([`Run::place_break`]: its range and candidate, no items) their
-//!   argument, and the next page's scan after itself. The pieces never
-//!   wait for it, and it never cuts one. The finisher and the continuation assemble the page
+//!   node a page where the page begins in the text ([`Scan`],
+//!   [`Run::scan_page`], spec-page-chain §4.3): the first page's where
+//!   the job begins, the others' right after the continuation of the
+//!   page before, which defines the state they begin from
+//!   ([`scan_from_field`]). It folds the profiles of the pieces after
+//!   that one at a time until its page fires, reading nothing past the
+//!   piece it fires in, and places the page's finisher ([`Finish`]), its
+//!   continuation and the next page's scan right after that piece, the
+//!   break ([`Run::place_break`]: its range and candidate, no items) the
+//!   first two's argument. The pieces never wait for it, and it never
+//!   cuts one. The finisher and the continuation assemble the page
 //!   from the pieces' items by the break's range with the same builder
 //!   ([`Run::assemble_page`], [`PageState::fold_items`]: `\box255`, the
 //!   insertions, the marks), so an edit inside a page that moves no
@@ -31,7 +32,7 @@
 //!   own on its page, defines what the routine defines for everything
 //!   after it, and what it gives back to the main list ([`RTN`]); the
 //!   continuation after it reads that on the finisher's prediction, so
-//!   the scan does not wait for the routine.
+//!   the next page's scan does not wait for the routine.
 //! - A piece ends at every page-builder candidate it can end at (inside
 //!   a group or conditional of its own only where the page is made to
 //!   fire, which the rest after the routine reads): its continuation
@@ -44,9 +45,9 @@
 //!   after it ([`Run::check_cut`]). The piece's PDF
 //!   records after the candidate go after the page in the line
 //!   (`crate::pdfout::order_line`).
-//! - Nothing reads the whole list, nothing is replayed: one scan state
-//!   per page, one finisher per page, a step per piece reading only the
-//!   profiles since its page began.
+//! - Nothing reads the whole list, nothing is replayed: one scan, one
+//!   finisher and one continuation per page, the scan reading only the
+//!   profiles of its page.
 
 use crate::exec::LockWait as _;
 use phitex_defuse::{
@@ -1210,8 +1211,8 @@ impl Run<'_, '_> {
     /// The run's end on the page. A piece with items for the main list
     /// defines what it leaves the next piece of the main list
     /// ([`Run::define_main_tail`]), gives its
-    /// profile and its items as units ([`Run::contribute_units`]) and
-    /// places its scan step ([`Scan`]) after it; its own run never reads
+    /// profile and its items as units ([`Run::contribute_units`]); its
+    /// own run never reads
     /// the page. A piece whose run ended at a page-builder candidate with
     /// input after it leaves the rest to a resume piece
     /// ([`Run::fold_here`], spec-final A1). A piece with nothing
@@ -4671,18 +4672,17 @@ impl crate::vprof::Reaching for RunReaching<'_, '_, '_> {
 
 /// The page chain's nodes (spec-page-chain §4.3, §4.4), one op:
 ///
-/// - A page's scan, arguments `[-3, j]`: placed after the document's
-///   last piece (by `\end`'s piece for the first page, by the scan of
-///   the page before for the others), it reads where page `j` begins
-///   ([`scan_from_field`]: the document's start for the first page),
-///   folds the profiles of the pieces after that anchor with the page
-///   builder until page `j` fires ([`Run::scan_window`]), and places the
-///   page's finisher and continuation right after the piece it fires in
-///   ([`Run::place_break`], [`Run::place_cont`]), then the next page's
-///   scan after itself. It defines nothing and its reads end at the piece
-///   its page fires in: no piece it reads comes after that page's
-///   finisher. One scan per page: the chain is the pages', not the
-///   pieces'.
+/// - A page's scan, arguments `[-3, j]`: where page `j` begins in the
+///   text (pushed where the job begins for the first page; placed by the
+///   scan of the page before right after that page's continuation for
+///   the others), it reads where page `j` begins ([`scan_from_field`]),
+///   folds the profiles of the pieces after that anchor one at a time
+///   with the page builder until page `j` fires ([`Run::scan_window`]),
+///   and places the page's finisher, its continuation and the next
+///   page's scan right after the piece it fires in ([`Run::place_break`],
+///   [`Run::place_cont`]). It defines nothing and reads nothing past
+///   that piece, so no piece it reads comes after that page's finisher.
+///   One scan per page: the chain is the pages', not the pieces'.
 /// - A continuation, arguments `[-2, j, state, material, break]`: right
 ///   after page `j`'s finisher, it assembles the page from the break
 ///   ([`Run::assemble_page`]: what the page leaves, the held-over
