@@ -756,7 +756,8 @@ impl Operation for Pages {
 
 impl Run<'_, '_> {
     /// A routine's give-back as the evaluation began (§1026): its last
-    /// value on another page (`crate::run::Ops::fin_defs` then, so every
+    /// value on another page of the class `pen`
+    /// ([`crate::pages::finish::pen_class`]; `crate::run::Ops::fin_defs` then, so every
     /// attempt of the loop guesses the same), `\deadcycles` left out,
     /// else nothing given back. The guess of page `j`
     /// ([`FinishIn::rtn_guess`], made in [`Run::page_loop`]) is what the
@@ -768,7 +769,7 @@ impl Run<'_, '_> {
     /// nothing for a page fired in a routine's material (no chain of
     /// pages grows on guesses). It depends on the pages before `j` alone:
     /// a page's own output never changes it.
-    pub(crate) fn rtn_guess(&self, hint: ValueId) -> ValueId {
+    pub(crate) fn rtn_guess(&self, hint: ValueId, pen: i32) -> ValueId {
         let v = self.v;
         let empty = || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]);
         if hint == ValueId::UNIT {
@@ -778,7 +779,7 @@ impl Run<'_, '_> {
         self.ops
             .fin_defs_start
             .locked()
-            .get(&fin_key(v, hint, &[]))
+            .get(&crate::pages::finish::fin_key_class(hint, pen))
             .and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1))
             // (`\deadcycles` guessed 0, its register maps kept)
             .map_or_else(empty, |x| crate::pages::finish::rtn_as_guess(v, x))
@@ -1230,7 +1231,7 @@ impl Run<'_, '_> {
                     .iter()
                     .find(|e| e.0 == hint)
                     .map_or_else(empty, |e| v.list(vec![e.1, v.list(Vec::new())])),
-                None => self.rtn_guess(hint),
+                None => self.rtn_guess(hint, key.1),
             }
         };
         if cfg!(feature = "observe") {
@@ -1239,7 +1240,7 @@ impl Run<'_, '_> {
             let eval = (
                 std::ptr::from_ref(v) as usize,
                 self.cx.values_epoch(),
-                self.rtn_guess(hint),
+                self.rtn_guess(hint, key.1),
             );
             guess_check(self.cx.node().raw(), j, (eval, key, in_material, &lp.last_rtn, &lp.last_markers), rtn_guess);
         }

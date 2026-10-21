@@ -1364,9 +1364,26 @@ pub(crate) const FINISHER_FIELDS: &[&str] = &[
     "pdf:",
 ];
 
-/// A finisher's entry in `Ops::fin_defs`: its routine (the hint `t`).
-pub(crate) fn fin_key(_: &Values, t: ValueId, _: &[ValueId]) -> u64 {
-    t.raw()
+/// A finisher's entry in `Ops::fin_defs`: its routine (the hint `t`)
+/// and its page's class ([`pen_class`]), from its arguments `args` (an
+/// ordinary page where they hold none).
+pub(crate) fn fin_key(v: &Values, t: ValueId, args: &[ValueId]) -> u64 {
+    let pen = FinishIn::of(v, args).map_or(i32::MAX, |f| pen_class(f.output_penalty));
+    fin_key_class(t, pen)
+}
+
+/// The class of a page fired at `\outputpenalty` `p`: every ordinary
+/// one (above -10001, §1013) alike, `i32::MAX`; a special one its own,
+/// which its routine branches on (a float page, a cleared page): the
+/// routine defines and gives back otherwise in each class, so each has
+/// its own history ([`FinDefs`]).
+pub(crate) fn pen_class(p: i32) -> i32 {
+    if p > -10001 { i32::MAX } else { p }
+}
+
+/// [`fin_key`] of routine `t` on a page of class `pen`.
+pub(crate) fn fin_key_class(t: ValueId, pen: i32) -> u64 {
+    t.raw() ^ u64::from(pen.cast_unsigned()).rotate_left(32).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 /// Finishers created with a prediction of their definitions, and
@@ -1774,7 +1791,7 @@ impl Run<'_, '_> {
             );
         }
         let mut m = self.ops.fin_defs.locked();
-        let e = m.entry(fin_key(v, t, args)).or_default();
+        let e = m.entry(fin_key(v, t, &self.cx.args())).or_default();
         e.gdefs = Some(gdefs);
         for &(f, x) in &out {
             if !e.seen.contains(&f) {
@@ -1789,7 +1806,7 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_PRED_SHOW") {
             // (the page's class: the penalty it fired at, whether in a
             // routine's material, the dead cycles before it)
-            let fin = FinishIn::of(v, args);
+            let fin = FinishIn::of(v, &self.cx.args());
             let class = fin.as_ref().map_or_else(String::new, |f| {
                 format!("pen {} mat {} prev_dead {}", f.output_penalty, f.in_material, f.prev_fire.1)
             });
