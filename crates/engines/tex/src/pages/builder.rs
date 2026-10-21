@@ -971,6 +971,15 @@ impl Run<'_, '_> {
         while let Some((node, u)) = self.cx.acc_next(vprof, lp.cur)? {
             for x in v.seq_to_vec(u) {
                 let (pid, ints) = crate::vprof::unit_parts(v, x);
+                if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                    eprintln!(
+                        "pages {}: unit of piece {pid} from node {} after {:?} ({} ints)",
+                        self.cx.node().raw(),
+                        node.raw(),
+                        lp.cur.map(phitex_defuse::NodeId::raw),
+                        ints.len()
+                    );
+                }
                 let mut items = crate::vprof::decode(&ints);
                 remap_marks(&mut items, &crate::vprof::unit_marks(v, x), &mut lp.marks);
                 self.resolve_prof_of(pid, &mut items)?;
