@@ -216,7 +216,13 @@ fn hr_features(fs: &[Feature]) -> Vec<harfrust::Feature> {
 /// Prepares the buffer and the plan's properties: (buffer, script,
 /// language).
 fn prepare(req: &ShapeRequest) -> harfrust::Buffer {
-    let mut buffer = harfrust::Buffer::new();
+    prepare_into(harfrust::Buffer::new(), req)
+}
+
+/// [`prepare`] in a buffer used before (`hb_buffer_clear_contents`: its
+/// memory kept).
+fn prepare_into(mut buffer: harfrust::Buffer, req: &ShapeRequest) -> harfrust::Buffer {
+    buffer.clear();
     add_utf16(&mut buffer, &req.text, req.start, req.len);
     buffer.set_direction(hr_direction(req.direction));
     buffer.set_script(
@@ -289,6 +295,9 @@ pub struct Shaper {
     pub memo_capacity: usize,
     /// The plans' bound, in entries.
     pub plan_capacity: usize,
+    /// The buffer of the last call, cleared and filled again by the next
+    /// (as XeTeX keeps one HarfBuzz buffer).
+    buffer: Option<harfrust::Buffer>,
 }
 
 impl Default for Shaper {
@@ -299,6 +308,7 @@ impl Default for Shaper {
             memo_on: true,
             memo_capacity: 1 << 16,
             plan_capacity: 1 << 10,
+            buffer: None,
         }
     }
 }
@@ -325,6 +335,21 @@ impl Shaper {
         self.memo.retain(|k, _| keep.contains(&k.0));
     }
 
+    /// `hb_buffer_guess_segment_properties`' script for `text`: the first
+    /// character's that is not Common, Inherited or Unknown.
+    pub fn guess_script(&mut self, text: &[u16]) -> Option<Tag> {
+        let mut b = self.buffer.take().unwrap_or_default();
+        b.clear();
+        for r in char::decode_utf16(text.iter().copied()) {
+            b.push(u32::from(r.unwrap_or('\u{FFFD}')), 0);
+        }
+        b.set_direction(HrDirection::LeftToRight);
+        b.guess_segment_properties();
+        let s = b.script().map(|s| u32::from_be_bytes(s.tag().to_be_bytes()));
+        self.buffer = Some(b);
+        s
+    }
+
     /// [`shape`], with the plan reused and the result memoized.
     pub fn shape(&mut self, face: &Face, req: &ShapeRequest) -> Arc<[ShapedGlyph]> {
         let key = (face.key(), req.clone());
@@ -333,7 +358,8 @@ impl Shaper {
         {
             return r.clone();
         }
-        let mut buffer = prepare(req);
+        let spare = self.buffer.take().unwrap_or_default();
+        let mut buffer = prepare_into(spare, req);
         let features = hr_features(&req.features);
         let pk = PlanKey {
             face: face.key(),
@@ -370,6 +396,7 @@ impl Shaper {
         } else {
             Arc::from(Vec::new())
         };
+        self.buffer = Some(buffer);
         if self.memo_on {
             if self.memo.len() >= self.memo_capacity {
                 self.memo.clear();

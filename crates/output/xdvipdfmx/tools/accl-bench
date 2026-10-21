@@ -29,12 +29,16 @@ gx=
 crates/fonts/graphite/tools/corpus.sh build "$w/gc" "$gx" > "$r/gcorpus-build.txt" 2>&1
 $B/examples/otf-index "$w/index" > "$r/otf-index.txt" 2>&1
 t1=$(date +%s)
+# (byte-identical at one thread and at every CPU's: the end's streams
+# compressed one by one, then in a parallel batch)
+res1=$(PHITEX_THREADS=1 $C check "$w/corpus" "$B/xdv2pdf")
+cp "$w/corpus/FAIL.txt" "$r/FAIL-1.txt" 2> /dev/null
 res=$($C check "$w/corpus" "$B/xdv2pdf")
 ann() { callgrind_annotate --inclusive=yes --threshold=99 "$1" | head -${2:-70}; }
 A=$(find "$w/corpus" -name 'amsldoc-fs.xdv' | head -1)
 {
-  echo "node $(hostname), $(nproc) CPUs, commit $(git rev-parse --short=12 HEAD)"
-  echo "xdvipdfmx corpus: $res"
+  echo "node ${SLURMD_NODENAME:-$(cat /proc/sys/kernel/hostname)}, $(nproc) CPUs, commit $(git rev-parse --short=12 HEAD)"
+  echo "xdvipdfmx corpus: $res at $(nproc) threads, $res1 at 1"
   # amsldoc: wall (5 processes, each 1 cold + 4 warm)
   ad=$(dirname "$A")
   for i in 1 2 3 4 5; do
@@ -42,9 +46,16 @@ A=$(find "$w/corpus" -name 'amsldoc-fs.xdv' | head -1)
   done > "$r/amsldoc-walls.txt"
   med() { sort -n | awk '{a[NR]=$1} END {print a[int((NR+1)/2)]}'; }
   echo "amsldoc xdv2pdf wall: cold $(awk '$1==1{print $2}' "$r/amsldoc-walls.txt" | med) ms, warm $(awk '$1>1{print $2}' "$r/amsldoc-walls.txt" | med) ms (medians)"
+  for i in 1 2 3 4 5; do
+    (cd "$ad" && PHITEX_THREADS=1 "$B/xdv2pdf" --repeat 5 -o amsldoc-fs.pdf amsldoc-fs.xdv 2>&1 >/dev/null | sed -n 's/.*conversion \([0-9]*\): \(.*\) ms/\1 \2/p')
+  done > "$r/amsldoc-walls-1.txt"
+  echo "amsldoc xdv2pdf wall at 1 thread: cold $(awk '$1==1{print $2}' "$r/amsldoc-walls-1.txt" | med) ms, warm $(awk '$1>1{print $2}' "$r/amsldoc-walls-1.txt" | med) ms (medians)"
   (cd "$ad" && valgrind --tool=callgrind --callgrind-out-file="$r/cg-cold.out" "$B/xdv2pdf" -o amsldoc-fs.pdf amsldoc-fs.xdv 2> "$r/cg-cold.err" > /dev/null)
   (cd "$ad" && valgrind --tool=callgrind --toggle-collect='*warm_run*' --callgrind-out-file="$r/cg-warm.out" "$B/xdv2pdf" --repeat 2 -o amsldoc-fs.pdf amsldoc-fs.xdv 2> "$r/cg-warm.err" > /dev/null)
-  echo "amsldoc xdv2pdf instructions: cold $(sed -n 's/.*Collected : //p' "$r/cg-cold.err"), warm $(sed -n 's/.*Collected : //p' "$r/cg-warm.err")"
+  (cd "$ad" && valgrind --tool=callgrind --callgrind-out-file=/dev/null "$B/xdv2pdf" --repeat 2 -o amsldoc-fs.pdf amsldoc-fs.xdv 2> "$r/cg-two.err" > /dev/null)
+  # (warm: two conversions less the cold one)
+  c1=$(sed -n 's/.*Collected : //p' "$r/cg-cold.err") c2=$(sed -n 's/.*Collected : //p' "$r/cg-two.err")
+  echo "amsldoc xdv2pdf instructions: cold $c1, warm $((c2 - c1))"
   # the corpus: wall sums, one process at a time; instructions
   find "$w/corpus" -name '*.xdv' | sort > "$w/xdvs.txt"
   : > "$r/corpus-walls.txt"
@@ -59,8 +70,8 @@ A=$(find "$w/corpus" -name 'amsldoc-fs.xdv' | head -1)
     local d n c wm; d=$(dirname "$1") n=$(basename "$1" .xdv)
     [ -s "$d/$n.pdf" ] || return 0
     c=$(cd "$d" && valgrind --tool=callgrind --callgrind-out-file=/dev/null "$B/xdv2pdf" -o "$n.pdf" "$n.xdv" 2>&1 >/dev/null | sed -n 's/.*Collected : //p')
-    wm=$(cd "$d" && valgrind --tool=callgrind --toggle-collect='*warm_run*' --callgrind-out-file=/dev/null "$B/xdv2pdf" --repeat 2 -o "$n.pdf" "$n.xdv" 2>&1 >/dev/null | sed -n 's/.*Collected : //p')
-    echo "$n $c $wm"
+    wm=$(cd "$d" && valgrind --tool=callgrind --callgrind-out-file=/dev/null "$B/xdv2pdf" --repeat 2 -o "$n.pdf" "$n.xdv" 2>&1 >/dev/null | sed -n 's/.*Collected : //p')
+    echo "$n $c $((wm - c))"
   }
   export -f cgone
   xargs -d '\n' -P "$(nproc)" -I{} bash -c 'cgone "$1"' _ {} < "$w/xdvs.txt" > "$r/corpus-instr.txt"

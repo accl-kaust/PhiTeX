@@ -25,10 +25,12 @@ impl Sparse {
     pub(crate) fn new(pairs: impl Iterator<Item = (u16, u16)> + Clone) -> Sparse {
         let mut nchunks: u32 = 0;
         let mut lastkey: i64 = -1;
+        let mut count = 0usize;
         for (k, v) in pairs.clone() {
             if v == 0 {
                 continue;
             }
+            count += 1;
             if i64::from(k) <= lastkey {
                 return Sparse { chunks: Vec::new(), values: Vec::new(), valid: false };
             }
@@ -42,7 +44,7 @@ impl Sparse {
             return Sparse { chunks: Vec::new(), values: Vec::new(), valid: true };
         }
         let mut chunks = alloc::vec![(0u64, 0u16); nchunks as usize];
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(count);
         let mut ci: usize = 0;
         for (k, v) in pairs {
             if v == 0 {

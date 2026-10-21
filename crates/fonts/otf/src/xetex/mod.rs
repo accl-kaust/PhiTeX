@@ -479,7 +479,7 @@ pub fn find_native_font(
             .or_else(|| src.find_file(&file, KpseFormat::Type1));
         if let Some(path) = path
             && let Some(data) = src.read(&path)
-            && let Some(face) = Face::new(data, index)
+            && let Some(face) = mgr.face(data, index)
         {
             if scaled_size < 0 {
                 let dsize = d2fix(design_size(&face));
@@ -526,7 +526,7 @@ pub fn find_native_font(
             let entry = mgr.entry(found.font).clone();
             ld.name_of_file = full.clone();
             if let Some(data) = src.read(&entry.path)
-                && let Some(face) = Face::new(data, entry.index)
+                && let Some(face) = mgr.face(data, entry.index)
             {
                 if scaled_size < 0 {
                     let dsize = d2fix(design_size(&face));
@@ -1152,7 +1152,7 @@ impl XeTeXFont {
         let script = req
             .script
             .filter(|&s| harfrust::Script::from_iso15924_tag(harfrust::Tag::from_u32(s)).is_some());
-        let script = script.or_else(|| guess_script(&text[start..start + len]));
+        let script = script.or_else(|| shaper.guess_script(&text[start..start + len]));
         // `/GR` on a face graphite2 loads: the `graphite2` shaper. (Where
         // it fails XeTeX stops, "all shapers failed"; this shapes as
         // OpenType instead.)
@@ -1804,19 +1804,6 @@ fn ex_constant(n: i32) -> Option<u32> {
         13 => 26, // STACK_GAP_MIN
         _ => return None,
     })
-}
-
-/// `hb_buffer_guess_segment_properties`' script: the first character's
-/// that is not Common, Inherited or Unknown.
-fn guess_script(text: &[u16]) -> Option<Tag> {
-    let mut b = harfrust::Buffer::new();
-    for r in char::decode_utf16(text.iter().copied()) {
-        b.push(u32::from(r.unwrap_or('\u{FFFD}')), 0);
-    }
-    b.set_direction(harfrust::Direction::LeftToRight);
-    b.guess_segment_properties();
-    b.script()
-        .map(|s| u32::from_be_bytes(s.tag().to_be_bytes()))
 }
 
 /// `hb_script_get_horizontal_direction(s) == HB_DIRECTION_RTL`.
