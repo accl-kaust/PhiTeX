@@ -28,6 +28,20 @@
 #                        published as ~/DIR (atomically), not in the results
 #   ACCL_STORE_IN=A:B    before the task, ~/A, ~/B copied into $w/bin
 #   ACCL_NO_CARGO=1      the crates are not copied in (the task builds nothing)
+#
+# A workspace kept between jobs (an agent's edit-build loop):
+#   ACCL_WS=NAME         the workspace is /tmp/$USER-ws-NAME on the node,
+#                        kept after the job: its checkout moves to the
+#                        commit (only the files that differ are rewritten,
+#                        so their times say what changed) and its target
+#                        directories stay, so a build after an edit is
+#                        incremental (`--profile fastdev`: ~25 s for an
+#                        edit in phitex-tex, against ~185 s for a fresh
+#                        release build). Seen at ACCL_ROOT, /gw by default.
+#                        Jobs with one NAME on a node run one at a time
+#                        (a lock); the node is the driver's to pin (`accl`
+#                        pins ACCL_WS_NODE, acclnode01 by default). Remove
+#                        one with `accl ws-clean NAME`.
 # and ~/code/flinner/phitex-accl/gate-control (the recorded control timings)
 # is copied to $w/gate-control.
 #
@@ -48,20 +62,45 @@ shift 2
 sif=$HOME/shared-cache/phitex/${ACCL_IMAGE:-phitex-2026-09-25-tools}.sif
 cache=$HOME/shared-cache/phitex
 here=$HOME/code/flinner/phitex-accl
-w=/tmp/$USER-$SLURM_JOB_ID
+if [ -n "${ACCL_WS:-}" ]; then
+  # (a workspace kept between jobs, see the header: one job at a time)
+  w=/tmp/$USER-ws-$ACCL_WS
+  root=${ACCL_ROOT:-/gw}
+  mkdir -p "$w"
+  exec 9> "$w.lock"
+  flock 9
+else
+  w=/tmp/$USER-$SLURM_JOB_ID
+  root=${ACCL_ROOT:-$w}
+fi
 out=$HOME/code/flinner/phitex-runs/$task-$SLURM_JOB_ID
 r=$w/results
-root=${ACCL_ROOT:-$w}
 # (a full node disk corrupts results silently: fail at once below 20 GB free)
 free=$(df -Pk /tmp | awk 'NR==2{print $4}'); [ "$free" -ge 20971520 ] || { echo "FAILED: /tmp on $(hostname) has only $((free/1048576)) GB free (need 20); leftovers: $(ls -d /tmp/$USER-* 2>/dev/null | wc -l) of ours"; exit 75; }
+rm -rf "$r"
 mkdir -p "$w/cargo" "$out" "$r"
-# (the results reach the shared home however the job ends)
-trap 'cp -a "$r/." "$out/" 2>/dev/null; rm -rf "$w"' EXIT
+# (the results reach the shared home however the job ends; a kept
+# workspace keeps all but them)
+if [ -n "${ACCL_WS:-}" ]; then
+  trap 'cp -a "$r/." "$out/" 2>/dev/null; rm -rf "$r"' EXIT
+else
+  trap 'cp -a "$r/." "$out/" 2>/dev/null; rm -rf "$w"' EXIT
+fi
 exec > >(tee "$out/job.log") 2>&1
 [ -d "$here/tasks" ] && cp -a "$here/tasks" "$w/tasks"  # (machine mode's task scripts, gone with b8c6a5d; `cmd` needs none)
 
-git clone -q "$HOME/code/flinner/phitex.git" "$w/phitex"
-git -C "$w/phitex" -c advice.detachedHead=false checkout -q "$commit"
+if [ -n "${ACCL_WS:-}" ] && [ -d "$w/phitex/.git" ]; then
+  # (the kept checkout moved to the commit: unchanged files keep their
+  # times; the target directories and the upstream copy stay)
+  git -C "$w/phitex" fetch -q origin "+refs/wip/$commit:refs/wip/$commit" 2>/dev/null \
+    || git -C "$w/phitex" fetch -q origin
+  git -C "$w/phitex" -c advice.detachedHead=false checkout -q --force --detach "$commit"
+  git -C "$w/phitex" clean -ffdxq -e '/target*' -e /upstream
+else
+  rm -rf "$w/phitex"
+  git clone -q "$HOME/code/flinner/phitex.git" "$w/phitex"
+  git -C "$w/phitex" -c advice.detachedHead=false checkout -q "$commit"
+fi
 cd "$w/phitex"
 echo "node $(hostname), $SLURM_CPUS_ON_NODE CPUs allocated, commit $(git rev-parse --short=12 HEAD), task $task $*"
 echo "start $(date +%T)"
@@ -104,6 +143,8 @@ if [ -d "$cache/upstream-$key" ] && [ -n "${ACCL_NO_CARGO:-}" ]; then
   mkdir -p upstream
   ubind="--bind $cache/upstream-$key:$root/phitex/upstream:ro"
 elif [ -d "$cache/upstream-$key" ]; then
+  # (a kept workspace's copy replaced: the same times, cp -a)
+  rm -rf upstream
   cp -a "$cache/upstream-$key" upstream
 else
   net scripts/fetch-upstream.sh
@@ -185,6 +226,7 @@ case $task in
     # ACCL_COURSE, passed with `--export=ALL,ACCL_COURSE=DIR` in ACCL_OPTS,
     # names another copy with the same src/ and aux/)
     course=${ACCL_COURSE:-$HOME/code/tmp/np-course}
+    rm -rf "$w/course" "$w/aux"
     cp -a "$course/src" "$w/course"
     cp -a "$course/aux" "$w/aux"
     status=0

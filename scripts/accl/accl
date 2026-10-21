@@ -9,6 +9,7 @@
 #   accl log <job>                 a job's output so far
 #   accl cancel <job>...           cancel your jobs
 #   accl snap                      only snapshot and push; prints the commit
+#   accl ws-clean NAME             remove the kept workspace NAME (ACCL_WS) from its node
 #   accl ci-oracle LIST            TeX Live's builds of a manual list, cached
 #   accl ci-discover               the manual candidates of the CI image
 #
@@ -74,6 +75,10 @@ submit() {
   c=$(snap)
   sync_scripts
   opts="$(preset "$@") ${ACCL_OPTS:-}"
+  # (a kept workspace, job.sbatch's ACCL_WS: on its node, every job)
+  if [ -n "${ACCL_WS:-}" ]; then
+    opts="$opts -w ${ACCL_WS_NODE:-acclnode01} --export=ALL,ACCL_WS=$ACCL_WS"
+  fi
   echo "accl: commit $c, $opts" >&2
   $SSH $H "$slurm cd code/flinner/phitex-runs && sbatch --parsable -J phitex-$task $opts \$HOME/code/flinner/phitex-accl/job.sbatch $c $(printf '%q ' "$@")"
 }
@@ -139,6 +144,10 @@ case $cmd in
   q) $SSH $H "$slurm squeue -u \$USER -o '%.8i %.12j %.9T %.10M %.4C %.6m %R'" ;;
   log) $SSH $H "cat code/flinner/phitex-runs/phitex-$1.out" ;;
   cancel) $SSH $H "$slurm scancel $*" ;;
+  ws-clean)
+    # (a job on the workspace's node, after any job holding its lock)
+    n=${1:?accl ws-clean NAME}
+    $SSH $H "$slurm cd code/flinner/phitex-runs && sbatch --parsable -J ws-clean -p build --qos=build4 -c 1 --mem=1G -t 00:30:00 -w ${ACCL_WS_NODE:-acclnode01} --wrap 'flock /tmp/\$USER-ws-$n.lock rm -rf /tmp/\$USER-ws-$n; rm -f /tmp/\$USER-ws-$n.lock'" ;;
   ci-oracle)
     ci_sync
     # (the list beside the harness, not in it: a sync would remove it)
