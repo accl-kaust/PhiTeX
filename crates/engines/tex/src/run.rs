@@ -723,6 +723,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The run read a job-written file back ([`Run::read_back`]): what
     /// it defines from then on keeps its value there ([`Run::note_pre`]).
     pub read_back_done: bool,
+    /// A lookup of the output writer's own (a font's file at a
+    /// `\shipout`, `crate::pdfout::file_bytes`), not the text's: a file
+    /// looked for in vain there is no read-back point.
+    pub writer_lookup: bool,
     /// The outermost macro being expanded at the read-back (its input
     /// level): what the run defines while it is still on the input
     /// stack keeps its value at the read-back ([`Run::note_pre`]).
@@ -913,6 +917,7 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_base: 0,
             closed: Vec::new(),
             read_back_done: false,
+            writer_lookup: false,
             read_back_at: None,
             read_point_here: false,
             interp_point: None,
@@ -2323,7 +2328,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // next round's lines are read, [`Run::note_read_point`]; one this
         // job writes and reads back per field is known here, another may
         // be opened for writing by this run later, [`Run::written_decl`])
-        if x.is_none() && self.interp.is_none() {
+        if x.is_none() && self.interp.is_none() && !self.writer_lookup {
             if per_field.is_some() {
                 self.note_read_point();
                 self.mark_read_point(key)?;

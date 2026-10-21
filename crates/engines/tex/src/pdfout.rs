@@ -1078,7 +1078,11 @@ fn store_scaled_f(sq: i32, z: i32) -> i32 {
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
     static M: OnceLock<Once<Arc<[u8]>>> = OnceLock::new();
     let v = r.v;
-    Ok(r.file(name)?.and_then(|x| {
+    // (the writer's lookup: a file absent here is no read-back point)
+    let was = std::mem::replace(&mut r.writer_lookup, true);
+    let found = r.file(name);
+    r.writer_lookup = was;
+    Ok(found?.and_then(|x| {
         let &t = list_of(v, x).get(1)?;
         // (a pure function's memo by the text's value: every page step
         // asks for its fonts' files)
