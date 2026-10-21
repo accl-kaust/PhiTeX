@@ -958,6 +958,14 @@ pub(crate) fn step_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(c)
 }
 
+/// Whether a meaning is defined, as `\csname` needs it (§372): a name
+/// it makes that is undefined becomes `\relax`; nothing else of the
+/// meaning is used there. A pure projection for the engine: a
+/// redefinition of a defined name leaves the reading run standing.
+pub(crate) fn defined_projection(x: ValueId, v: &Values) -> ValueId {
+    v.int(i64::from(Mean::decode(v, Some(x)) != Mean::Undefined))
+}
+
 /// [`step_projection`]'s class of a meaning that opens a conditional.
 pub(crate) const STEP_IF: i64 = 1;
 /// [`step_projection`]'s class of an `\outer` macro.

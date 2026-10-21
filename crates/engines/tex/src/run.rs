@@ -214,6 +214,10 @@ pub(crate) struct Ops {
     /// only to be stored or matched, reads only its meaning's class
     /// ([`Run::step_lookup`]).
     pub step_proj: phitex_defuse::ProjId,
+    /// The definedness projection of meanings
+    /// ([`crate::val::defined_projection`]): `\csname` reads only whether
+    /// the name it makes is defined ([`Run::defined_lookup`]).
+    pub defined_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -591,6 +595,9 @@ pub(crate) struct Run<'c, 'a> {
     /// the class ([`Run::step_lookup`]; kept over a park like
     /// [`Run::class_memo`]).
     pub step_memo: phitex_defuse::FxHashMap<Loc, i64>,
+    /// The meanings this run read as defined or not only
+    /// ([`Run::defined_lookup`]; kept over a park like [`Run::class_memo`]).
+    pub defined_memo: phitex_defuse::FxHashMap<Loc, bool>,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -857,6 +864,7 @@ impl<'c, 'a> Run<'c, 'a> {
             step_reads: false,
             outer_memo: phitex_defuse::FxHashMap::default(),
             step_memo: phitex_defuse::FxHashMap::default(),
+            defined_memo: phitex_defuse::FxHashMap::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -3620,6 +3628,30 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(k))
     }
 
+    /// Whether `tok`'s meaning is defined, read through the engine's
+    /// definedness projection ([`crate::val::defined_projection`]) where
+    /// the run has not bound it itself, nor interprets a line or records a
+    /// load (which read meanings in full): a redefinition of a defined
+    /// name leaves this run standing. `None` where read in full.
+    pub(crate) fn defined_lookup(&mut self, tok: Tok) -> R<Option<bool>> {
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(None);
+        };
+        if self.st.is_loaded(l) || self.interp.is_some() || self.rec_load {
+            return Ok(None);
+        }
+        if let Some(&d) = self.defined_memo.get(&l) {
+            return Ok(Some(d));
+        }
+        let f = self.loc_field(l);
+        let d = match self.cx.use_field_proj(f, self.ops.defined_proj)? {
+            Some(x) => int_of(self.v, x) != 0,
+            None => return Ok(None),
+        };
+        self.defined_memo.insert(l, d);
+        Ok(Some(d))
+    }
+
     /// Whether `tok`'s meaning is an `\outer` macro, read through the
     /// engine's outer projection ([`crate::val::outer_projection`]) where
     /// the run has not bound it itself: a redefinition that keeps it
@@ -3695,6 +3727,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .keys()
             .chain(self.outer_memo.keys())
             .chain(self.step_memo.keys())
+            .chain(self.defined_memo.keys())
             .copied()
             .collect();
         let mut fs: Vec<Field> = ls.into_iter().map(|l| self.loc_field(l)).collect();
@@ -4735,6 +4768,7 @@ pub(crate) struct Parked {
     class_memo: Vec<(Field, u8)>,
     outer_memo: Vec<(Field, bool)>,
     step_memo: Vec<(Field, i64)>,
+    defined_memo: Vec<(Field, bool)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -4888,6 +4922,10 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|(l, k)| (self.loc_field(l), k))
                 .collect(),
+            defined_memo: std::mem::take(&mut self.defined_memo)
+                .into_iter()
+                .map(|(l, d)| (self.loc_field(l), d))
+                .collect(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -5001,6 +5039,11 @@ impl<'c, 'a> Run<'c, 'a> {
             .step_memo
             .into_iter()
             .map(|(f, k)| (r.loc_of(f), k))
+            .collect();
+        r.defined_memo = p
+            .defined_memo
+            .into_iter()
+            .map(|(f, d)| (r.loc_of(f), d))
             .collect();
         r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
