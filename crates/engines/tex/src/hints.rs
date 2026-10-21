@@ -1797,6 +1797,11 @@ struct Analysis<'t> {
     /// The hash of each of the pass's regimes' content (a run's key
     /// across texts, [`run_hint`]).
     reg_hash: Vec<u64>,
+    /// The characters the text's and the format's definitions make
+    /// active, looked up at the first character asked about (the read
+    /// noted then, as at every later one: one lookup, not one per
+    /// character of every run, [`Analysis::is_active`]).
+    active: std::cell::Cell<Option<u128>>,
 }
 
 /// Names that start a paragraph in vertical mode (§1090): the text
@@ -2007,6 +2012,7 @@ impl Analysis<'_> {
             visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
             reg_hash,
+            active: std::cell::Cell::new(None),
         }
     }
 
@@ -2522,8 +2528,14 @@ impl Analysis<'_> {
 
     fn is_active(&self, c: char) -> bool {
         c == '~'
-            || (c.is_ascii()
-                && (self.defs.active_chars() | self.prelude.active_chars()) >> (c as u32) & 1 == 1)
+            || (c.is_ascii() && {
+                let m = self.active.get().unwrap_or_else(|| {
+                    let m = self.defs.active_chars() | self.prelude.active_chars();
+                    self.active.set(Some(m));
+                    m
+                });
+                m >> (c as u32) & 1 == 1
+            })
     }
 
     /// Whether `name` is a format macro the text itself does not define:
@@ -3734,10 +3746,18 @@ fn by_id() -> &'static Cache<u64> {
     C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
-/// The regime of a file read by `\input`: its text value `id`, named
-/// `name`.
-pub(crate) fn file_kind_of(v: &Values, id: ValueId, name: ValueId) -> FileKind {
-    kind_of(&str_of(v, id), FileKind::from_path(&str_of(v, name)))
+/// [`crate::inputs::document_text`] of the text value `id`, known once
+/// per text (ids are the content's: a test made each time a file is
+/// reached scanned the whole text, a copy of it first).
+pub(crate) fn document_text_of(v: &Values, id: ValueId) -> bool {
+    static C: OnceLock<Mutex<FxHashMap<u64, bool>>> = OnceLock::new();
+    let c = C.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(&b) = c.locked().get(&id.raw()) {
+        return b;
+    }
+    let b = crate::inputs::document_text(&str_of(v, id));
+    c.locked().insert(id.raw(), b);
+    b
 }
 
 /// The analysis of a file read by `\input`: its text value `id`, named

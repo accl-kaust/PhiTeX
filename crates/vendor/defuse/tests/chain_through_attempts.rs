@@ -72,5 +72,10 @@ fn the_chain_walks_back_through_a_placers_attempts() {
         assert!(chain.len() <= 2 * usize::try_from(N).unwrap() + 1, "seq {seq}: {chain:?}");
         let kids = chain.iter().filter(|c| c.0 != p).count();
         assert!(kids >= usize::try_from(N).unwrap() - 1, "seq {seq}: the children on the chain: {chain:?}");
+        // By time: from the last commit back, each run committed before the
+        // one it let start; through the parent's attempts and children too.
+        let by_time = eng.critical_chain_by_time();
+        assert!(by_time.len() >= chain.len(), "seq {seq}: {by_time:?}");
+        assert!(by_time.windows(2).all(|w| w[1].2[3] <= w[0].2[3]), "seq {seq}: {by_time:?}");
     }
 }
