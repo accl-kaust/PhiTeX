@@ -6545,6 +6545,33 @@ fn structural_diff(
 /// those nodes (`debug_node`: label, state, flags; the parent) at the
 /// evaluation's start and end.
 fn debug_nodes(eng: &Engine, when: &str) {
+    // (`PHITEX_NODE_DUMP=<file>`, after the evaluation: the main unit's
+    // nodes in text order, each its operation, a digest of its arguments
+    // and of its output, to compare two runs' committed nodes)
+    if when == "after the evaluation"
+        && let Some(path) = crate::exec::obs_str!("PHITEX_NODE_DUMP")
+        && let Some(root) = eng.node_info(phitex_defuse::NodeId::from_raw(1))
+    {
+        use std::hash::{Hash as _, Hasher as _};
+        let v = eng.values();
+        let dig = |x: ValueId| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v.render(x).hash(&mut h);
+            h.finish()
+        };
+        let mut out = String::new();
+        for n in eng.order(root.unit) {
+            let Some(i) = eng.node_info(n) else { continue };
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for &a in &i.args {
+                dig(a).hash(&mut h);
+            }
+            let o = eng.output(n).map_or(0, dig);
+            let head: String = i.args.first().map(|&a| v.render(a)).unwrap_or_default().chars().take(60).collect();
+            out.push_str(&format!("{} {} {:?} args {:016x} out {o:016x} {head}\n", n.raw(), i.op, i.state, h.finish()));
+        }
+        let _ = std::fs::write(path, out);
+    }
     // (`PHITEX_ORDER_AROUND=a,b`: the unit's nodes in text order from
     // node `a` to node `b`, each as the engine has it)
     if let Some(ab) = crate::exec::obs_str!("PHITEX_ORDER_AROUND") {
