@@ -444,6 +444,7 @@ impl<'a> Builder<'a> {
     /// pending, dirty.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create(&mut self, id: Id, text: Arc<Text>, u: u32, parent: Id, place: Place, depth: u32, pos: Pos) {
+        let _t = super::core::prof::Span::new(31);
         let st = if text.stat.fin { St::Held } else { St::Dirty };
         if self.core.marked_ops.read().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&text.op) {
             self.w.op_marked.insert(id, (), &NoMeasure);
@@ -505,6 +506,7 @@ impl<'a> Builder<'a> {
     /// Files a new node's declared definitions as pending (after its frame
     /// is known).
     fn file_declared(&mut self, id: Id) {
+        let _t = super::core::prof::Span::new(32);
         let Some(n) = self.w.node(id).cloned() else { return };
         let Some(decl) = n.text.stat.defs.clone() else { return };
         for &(f, loc) in decl.iter() {
@@ -519,6 +521,7 @@ impl<'a> Builder<'a> {
 
     /// Files an entry (`if_changed`: unless the same is filed).
     fn file_if(&mut self, id: Id, n: &Node, f: Field, loc: Locality, val: Option<ValueId>, if_changed: bool) {
+        let _t = super::core::prof::Span::new(34);
         let fr = self.def_frame(id, n, loc);
         let pos = def_pos(n, loc);
         let e = Entry { node: id, val, loc };
@@ -591,9 +594,11 @@ impl<'a> Builder<'a> {
             Some(fr) => shadow_end(self.core, self.w.field(u, f).map(|c| &c.defs), f, at, fr, global),
             None => Pos::MAX,
         };
+        let t = super::core::prof::start();
         for r in self.w.readers_between(u, f, at.saturating_sub(1), hi) {
             self.recheck_on(r, f);
         }
+        super::core::prof::stop(35, t);
         // (CLEAN_SCOPED_CHECK: the readers past the bound are asked too,
         // a broken one named.)
         if hi != Pos::MAX && scoped_check() {
@@ -675,6 +680,7 @@ impl<'a> Builder<'a> {
     /// readers whose windows reach it are re-asked, the claims reaching it
     /// resolved again.
     pub(crate) fn shape_at(&mut self, u: u32, p: Pos) {
+        let _t = super::core::prof::Span::new(33);
         self.shape_changed(u);
         for r in self.w.window_readers_at(u, p) {
             self.recheck(r, 14);
@@ -1429,11 +1435,13 @@ impl<'a> Builder<'a> {
         n2.narrowed = None;
         let new_defs = res.defs.clone();
         let claim = res.claim;
+        let t_put = super::core::prof::start();
         n2.res = Some(Arc::new(res));
         if n2.st == St::Dirty {
             n2.st = St::Done;
         }
         self.w.put(id, n2.clone());
+        super::core::prof::stop(36, t_put);
         // Scope entries filed where the old effect put them move with it.
         if effect_changed {
             let mut keys: Vec<(Field, Locality)> = old_defs.iter().map(|d| (d.f, d.loc)).collect();
