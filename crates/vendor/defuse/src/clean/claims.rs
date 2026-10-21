@@ -660,7 +660,7 @@ impl Builder<'_> {
                     self.free(k);
                 }
             }
-            self.drop_reads(x, &n, &res.reads);
+            self.drop_reads(x, &n, &res);
         }
         // (Freeing its unfolding may have moved its frame: as it is now.)
         let n = self.w.node(x).cloned().unwrap_or(n);

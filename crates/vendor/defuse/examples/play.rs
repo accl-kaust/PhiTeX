@@ -193,6 +193,7 @@ fn call(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "apply" => return res(cx.apply(de(&g(0)), de(&g(1)))),
         "contribute" => json!(cx.contribute(de(&g(0)), de(&g(1)))),
         "acc_range" => return res(cx.acc_range(de(&g(0)), de::<Option<NodeId>>(&g(1)))),
+        "acc_range_after_def" => return res(cx.acc_range_after_def(de(&g(0)), de(&g(1)))),
         "acc_range_to" => return res(cx.acc_range_to(de(&g(0)), de(&g(1)), de(&g(2)))),
         "acc_fold" => return res(cx.acc_fold(de(&g(0)), de(&g(1)), de(&g(2)))),
         "acc_next" => return res(cx.acc_next(de(&g(0)), de(&g(1)))),

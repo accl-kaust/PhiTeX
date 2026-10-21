@@ -60,6 +60,10 @@ pub struct Ctx<'a> {
     /// Where each definition, publication, contribution and environment
     /// field is in its list; the children unfolded (markers aside).
     ix: FxHashMap<(u8, Field, u8), usize>,
+    /// Each definition read made (field, at, after, projection): its
+    /// entry in `reads`. The world a run sees does not change, so the same
+    /// question asked again has the same answer and is not logged again.
+    read_ix: FxHashMap<(Field, Id, bool, u16), usize>,
     nkids: usize,
     /// The run stopped on a pending definition set.
     pub(crate) pset_wait: bool,
@@ -110,6 +114,7 @@ impl<'a> Ctx<'a> {
             apps: Vec::new(),
             env: Vec::new(),
             ix: FxHashMap::default(),
+            read_ix: FxHashMap::default(),
             nkids: 0,
             pset_wait: false,
             predict: false,
@@ -203,8 +208,20 @@ impl<'a> Ctx<'a> {
     /// Reads `f` at node `at` (before it, or after its subtree when
     /// `after`): the value and the site.
     fn read_at(&mut self, f: Field, at: Id, after: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
+        let key = (f, at, after, proj);
+        if let Some(&i) = self.read_ix.get(&key) {
+            match self.reads[i] {
+                Read::Use { site, val, .. } => return Ok(val.map(|v| (v, site))),
+                Read::Loop { val, .. } => return Ok(Some((val, NONE))),
+                _ => {}
+            }
+        }
         let t = super::core::prof::start();
+        let before = self.reads.len();
         let r = self.read_at_inner(f, at, after, proj);
+        if r.is_ok() && self.reads.len() == before + 1 {
+            self.read_ix.insert(key, before);
+        }
         super::core::prof::stop(18, t);
         r
     }
@@ -766,6 +783,33 @@ impl<'a> Ctx<'a> {
         self.acc_range_to_inner(f, from, None)
     }
 
+    /// A register kept as definitions and contributions: the definition
+    /// of `f` reaching this node (as [`Self::use_field`]), and the fold of
+    /// accumulator `acc`'s contributions after that definition's node
+    /// (its own excluded) and before this one, from the unit's start when
+    /// none reaches or it is the environment's. One read of each: a
+    /// different definition reaching, or a contribution changing in the
+    /// window, re-asks; the fold guesses as [`Self::acc_range`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] while the definition, or a node in the window, is in work.
+    pub fn acc_range_after_def(&mut self, acc: Field, f: Field) -> Result<(Option<ValueId>, ValueId), Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&acc, &f, )) } else { serde_json::Value::Null };
+        let r = self.acc_range_after_def_inner(acc, f);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "acc_range_after_def", a, crate::record::stop_or(&r));
+        r
+    }
+
+    fn acc_range_after_def_inner(&mut self, acc: Field, f: Field) -> Result<(Option<ValueId>, ValueId), Stop> {
+        let def = self.read_at(f, self.me, false, 0)?;
+        let from = def.map(|d| d.1).filter(|&s| s != NONE).map(NodeId);
+        let fold = self.acc_range_to_inner(acc, from, None)?;
+        Ok((def.map(|d| d.0), fold))
+    }
+
     /// The fold of accumulator `f` over the window `(from, to]`.
     ///
     /// # Errors
@@ -1304,6 +1348,7 @@ impl<'a> Ctx<'a> {
         self.kept = None;
         self.restart = true;
         self.reads.clear();
+        self.read_ix.clear();
         self.defs.clear();
         self.contribs.clear();
         self.pubs.clear();

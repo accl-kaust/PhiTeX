@@ -90,6 +90,21 @@ impl Operation for Ops {
     }
 }
 
+/// The merge's phases are parts of its total, every result went through
+/// it, and the critical chain's link times are its runs' (within the wall).
+fn times_add_up(eng: &Engine, r: &defuse::Report, wall: u64) {
+    let m = &r.merge;
+    let parts = m.validate + m.refute + m.place + m.reads + m.defs + m.contribs + m.outs + m.dependents + m.wake + m.heights;
+    assert!(m.total > 0 && parts <= m.total, "{m:?}");
+    assert!(r.merged >= r.runs, "merged {} runs {}: {r:?}", r.merged, r.runs);
+    let l = &r.critical_links;
+    assert_eq!(l.links, u64::from(r.realised_critical_path), "{l:?}");
+    assert!(l.op > 0 && l.held + l.dispatch + l.op + l.wait_merge <= wall, "{l:?} wall {wall}");
+    let at = eng.critical_chain_times();
+    assert_eq!(at.len() as u64, l.links);
+    assert!(at.iter().all(|(_, [q, s, e, c])| q <= s && s <= e && e <= c && *c <= wall), "{at:?}");
+}
+
 /// The counters each piece sees, sequentially.
 fn reference(bumped: Option<usize>) -> Vec<Vec<i64>> {
     let mut c = [0i64; K];
@@ -180,8 +195,11 @@ fn counter_folds_give_the_sequential_values_and_guessing_cuts_the_chain() {
     for guess in [false, true] {
         for threads in [1usize, 4, 8] {
             let (mut eng, ops, ids, op) = build(guess);
+            let t0 = std::time::Instant::now();
             let r = eval(&mut eng, threads);
+            let wall = u64::try_from(t0.elapsed().as_nanos()).unwrap();
             assert_eq!(seen(&eng, &ids), want, "guess {guess}, j{threads}: cold");
+            times_add_up(&eng, &r, wall);
             let cold_runs = ops.runs.load(Relaxed);
             // One guess and one exact run per piece at most.
             assert!(cold_runs <= 2 * N as u64 + 8, "guess {guess}, j{threads}: {cold_runs} runs: {r:?}");

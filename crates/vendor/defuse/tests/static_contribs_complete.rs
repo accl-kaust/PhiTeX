@@ -12,11 +12,15 @@ use defuse::{Ctx, Engine, Field, Locality, Operation, Stop, ValueId, Values};
 
 /// The executor's calls so far (the batch a run is in).
 static BATCH: AtomicU64 = AtomicU64::new(0);
+/// Runs started and ended so far, in order.
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A run: its tag, index, batch, and when it started and ended (`SEQ`).
+type Seen = (String, i64, u64, u64, u64);
 
 struct Ops {
     complete: bool,
-    /// Each run: its tag, index and batch.
-    seen: Mutex<Vec<(String, i64, u64)>>,
+    seen: Mutex<Vec<Seen>>,
 }
 
 fn tag(v: &Values, a: &[ValueId]) -> String {
@@ -42,6 +46,7 @@ impl Operation for Ops {
         self.complete
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let started = SEQ.fetch_add(1, Relaxed);
         let v = cx.values();
         let a = cx.args();
         let t = tag(v, &a);
@@ -57,7 +62,7 @@ impl Operation for Ops {
             _ => cx.acc_range(v.field("pos"), None)?,
         };
         let i = v.as_int(a[1]).unwrap_or(-1);
-        self.seen.lock().unwrap().push((t, i, BATCH.load(Relaxed)));
+        self.seen.lock().unwrap().push((t, i, BATCH.load(Relaxed), started, SEQ.fetch_add(1, Relaxed)));
         Ok(out)
     }
 }
@@ -139,10 +144,17 @@ fn a_complete_list_lets_readers_of_other_fields_pass() {
             .unwrap();
         assert_eq!(outs(&eng, &rs), want, "complete {complete}");
         assert_eq!(r.stops, 0, "complete {complete}");
-        // Whether some reader ran in the batch of the `e` just before it.
         let seen = ops.seen.lock().unwrap().clone();
-        let batch = |t: &str, i: i64| seen.iter().find(|x| x.0 == t && x.1 == i).map(|x| x.2);
-        let beside = (0..20).any(|i| batch("s", i).is_some() && batch("s", i) == batch("e", i));
-        assert_eq!(beside, complete, "complete {complete}: {seen:?}");
+        let run = |t: &str, i: i64| seen.iter().find(|x| x.0 == t && x.1 == i);
+        if complete {
+            // Some reader ran in the batch of the `e` just before it.
+            let beside = (0..20).any(|i| run("s", i).zip(run("e", i)).is_some_and(|(s, e)| s.2 == e.2));
+            assert!(beside, "complete: {seen:?}");
+        } else {
+            // Every reader started after the `e` before it ended (in a
+            // later batch, or after it in the lane).
+            let held = (0..20).all(|i| run("s", i).zip(run("e", i)).is_none_or(|(s, e)| s.3 > e.4));
+            assert!(held, "not complete: {seen:?}");
+        }
     }
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::ptree::{Count, Measure, NoMeasure, PMap};
 use crate::api::{Brackets, Effect, Locality, MayDefine, OpId};
-use crate::values::{Field, ValueId};
+use crate::values::{Field, FxHashMap, ValueId};
 
 /// A node id (`NodeId`'s raw value).
 pub(crate) type Id = u64;
@@ -167,6 +167,17 @@ pub(crate) fn text_key(t: &Arc<Text>) -> usize {
     Arc::as_ptr(t) as usize
 }
 
+/// One reader index entry a read files.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) enum ReadKey {
+    /// A reader of field `f` of a unit at a position.
+    Field(u32, Field, Pos),
+    /// A reader of a node's output (or of its being there).
+    Out(Id),
+    /// A range reader of an accumulator over a window.
+    Range(u32, Field, Pos, Pos),
+}
+
 /// A committed run's result.
 #[derive(Clone, Debug)]
 pub(crate) struct Res {
@@ -183,6 +194,31 @@ pub(crate) struct Res {
     pub diag: Vec<ValueId>,
     /// The claim the run made (`Ctx::claim`), overriding the declared one.
     pub claim: Option<usize>,
+    /// The reader entries its reads were filed as (sorted, distinct), as
+    /// of renumbering `World::relabels`: the next commit moves exactly
+    /// these.
+    pub filed: Option<(u64, Arc<[ReadKey]>)>,
+    /// Its definitions by field (the first of each), made when first
+    /// asked of a result with many (`Engine::def_value`).
+    pub def_ix: std::sync::OnceLock<Arc<FxHashMap<Field, ValueId>>>,
+}
+
+impl Res {
+    /// The value it defines for `f` (defined at more than one locality,
+    /// the first made).
+    pub(crate) fn def_value(&self, f: Field) -> Option<ValueId> {
+        if self.defs.len() <= 16 {
+            return self.defs.iter().find(|d| d.f == f).map(|d| d.val);
+        }
+        let ix = self.def_ix.get_or_init(|| {
+            let mut m = FxHashMap::default();
+            for d in &self.defs {
+                m.entry(d.f).or_insert(d.val);
+            }
+            Arc::new(m)
+        });
+        ix.get(&f).copied()
+    }
 }
 
 impl Default for Res {
@@ -199,6 +235,8 @@ impl Default for Res {
             reads: Vec::new(),
             diag: Vec::new(),
             claim: None,
+            filed: None,
+            def_ix: std::sync::OnceLock::new(),
         }
     }
 }
@@ -365,6 +403,8 @@ impl Default for Buckets {
 pub(crate) struct World {
     /// Bumped by every merge.
     pub ver: u64,
+    /// Units renumbered so far (positions filed before then moved).
+    pub relabels: u64,
     pub nodes: PMap<Id, Node>,
     pub units: PMap<u32, Unit>,
     pub defs: PMap<(u32, Field), FieldDefs>,
@@ -746,8 +786,8 @@ impl World {
     /// its reach; `None` takes it out.
     pub(crate) fn set_window(&mut self, back: bool, u: u32, p: Pos, id: Id, reach: Option<Pos>) {
         let map = if back { &mut self.back_readers } else { &mut self.fwd_readers };
-        let mut m = map.get(&u).cloned().unwrap_or_default();
-        match reach {
+        // (In place: a copy of the unit's windows would copy every path.)
+        map.upsert(u, &NoMeasure, |m| match reach {
             Some(r) => {
                 if back {
                     m.insert(p, (id, r), &super::claims::MinLow);
@@ -764,8 +804,19 @@ impl World {
                     }
                 }
             }
-        }
-        map.insert(u, m, &NoMeasure);
+        });
+    }
+
+    /// Node `id`'s entry in a window index at `p` (`back`: backward), if
+    /// it holds it.
+    pub(crate) fn window_of(&self, back: bool, u: u32, p: Pos, id: Id) -> Option<Pos> {
+        let map = if back { &self.back_readers } else { &self.fwd_readers };
+        map.get(&u).and_then(|m| m.get(&p)).filter(|e| e.0 == id).map(|e| e.1)
+    }
+
+    /// Whether node `id` is a kind (scope) reader at `p`.
+    pub(crate) fn is_kind_reader(&self, u: u32, p: Pos, id: Id) -> bool {
+        self.kind_readers.get(&u).is_some_and(|m| m.contains_key(&(p, id)))
     }
 
     /// Replaces a node's record (the in-work index follows its state).

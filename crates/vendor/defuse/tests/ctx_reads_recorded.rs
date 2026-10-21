@@ -13,6 +13,7 @@ const READS: &[&str] = &[
     "apply",
     "acc_range",
     "acc_range_to",
+    "acc_range_after_def",
     "acc_fold",
     "acc_next",
     "scope_kind",

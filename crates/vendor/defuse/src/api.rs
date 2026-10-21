@@ -788,6 +788,73 @@ pub struct RoundTimes {
     pub memo_hits: u64,
 }
 
+/// Where the realised critical chain's time went (ns, wall clock; zero on
+/// wasm32), each link being a run that waited for the one below it: from
+/// the one below committing to the run being queued (`held`: parked on a
+/// wait, held for the final phase, a later round or the environment;
+/// from the evaluation's start for the lowest), queued to starting
+/// (`dispatch`), running (`op`, its committed run only), and from its end
+/// to its commit (`wait_merge`). A run queued before the one below
+/// committed counts as queued from then; one that started before (a
+/// guess) has neither. Per run: [`crate::Engine::critical_chain_times`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub struct LinkTimes {
+    pub held: u64,
+    pub dispatch: u64,
+    pub op: u64,
+    pub wait_merge: u64,
+    /// Links.
+    pub links: u64,
+}
+
+/// The serial merge's time by phase (ns; zero on wasm32), over
+/// [`Report::merged`] results. `total` is all of it; the phases are
+/// parts of it, the rest (setting up and finishing builders, counting)
+/// being `total` less their sum.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub struct MergeTimes {
+    pub total: u64,
+    /// Checking a result's reads against the world.
+    pub validate: u64,
+    /// A refuted result: its cause, queued again.
+    pub refute: u64,
+    /// Placing children and continuations.
+    pub place: u64,
+    /// Filing its reads (the reader indexes).
+    pub reads: u64,
+    /// Field writes: definitions (and the node's new result stored).
+    pub defs: u64,
+    /// Field writes: contributions, with the range readers over them.
+    pub contribs: u64,
+    /// Outputs and claims.
+    pub outs: u64,
+    /// Re-asking the readers its changes reached, and settling claims
+    /// (the dependents).
+    pub dependents: u64,
+    /// Queueing the nodes made dirty and waking the woken.
+    pub wake: u64,
+    /// Heights for the critical chain.
+    pub heights: u64,
+}
+
+impl MergeTimes {
+    pub(crate) fn add(&mut self, o: &Self) {
+        self.total += o.total;
+        self.validate += o.validate;
+        self.refute += o.refute;
+        self.place += o.place;
+        self.reads += o.reads;
+        self.defs += o.defs;
+        self.contribs += o.contribs;
+        self.outs += o.outs;
+        self.dependents += o.dependents;
+        self.wake += o.wake;
+        self.heights += o.heights;
+    }
+}
+
 /// What an evaluation did. The first seven counters (`nodes_run` ..
 /// `restarts`) are canonical: functions of the texts before and after,
 /// equal under every schedule.
@@ -865,6 +932,14 @@ pub struct Report {
     /// runs that waited for each other, by the sum of their run times
     /// (zero on wasm32).
     pub realised_critical_time: std::time::Duration,
+    /// The realised chain's links by wall time ([`LinkTimes`]), summed
+    /// over its runs.
+    pub critical_links: LinkTimes,
+    /// Results through the serial merge (committed, stopped or refuted).
+    pub merged: u64,
+    /// The serial merge's time (ns): checking, committing or refuting
+    /// each result and queueing what it changed, by phase.
+    pub merge: MergeTimes,
     /// Each node's run time in this evaluation (all its attempts), longest
     /// first (empty on wasm32).
     pub run_times: Vec<(NodeId, std::time::Duration)>,
