@@ -200,11 +200,13 @@ impl Run<'_, '_> {
     /// the profiles from there, its own items up to its last candidate):
     /// a page firing at none of them ships nothing before the commands
     /// after them (§1005), so what they read of the pages' objects is
-    /// complete. True where a page fires before the piece (the fold does
-    /// not know the routine's material after it).
+    /// complete. A page firing before the piece's own items says the page
+    /// start read is not yet the finisher's placed before the piece (its
+    /// page fired after that start): the run goes again when it is, and
+    /// decides then.
     pub(crate) fn page_fires_in_own(&mut self) -> R<bool> {
         let (_, fired) = self.page_so_far()?;
-        Ok(fired.is_some())
+        Ok(fired == Some(true))
     }
 
     /// The page builder over the profiles where this piece's page began
