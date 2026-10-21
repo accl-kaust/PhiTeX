@@ -1787,14 +1787,25 @@ impl Run<'_, '_> {
             }
         }
         if crate::exec::obs_flag!("PHITEX_PRED_SHOW") {
+            // (the page's class: the penalty it fired at, whether in a
+            // routine's material, the dead cycles before it)
+            let fin = FinishIn::of(v, args);
+            let class = fin.as_ref().map_or_else(String::new, |f| {
+                format!("pen {} mat {} prev_dead {}", f.output_penalty, f.in_material, f.prev_fire.1)
+            });
+            let r = |x: ValueId| v.render(x).chars().take(120).collect::<String>();
             for (f, x) in e.predict(v, j) {
                 let got = out.iter().find(|d| d.0 == f).map(|d| d.1);
                 if got != Some(x) {
+                    let name = crate::val::field_name(v, f);
+                    let prev = e.prev.iter().find(|d| d.0 == f).map(|d| d.1);
                     eprintln!(
-                        "pred page {j}: {} predicted {} got {}",
-                        crate::val::field_name(v, f),
-                        v.render(x),
-                        got.map_or_else(|| "nothing".to_owned(), |g| v.render(g))
+                        "pred page {j} ({class}; last {} prev {}): {name} predicted {} got {} (last two {})",
+                        e.last_j,
+                        e.prev_j,
+                        r(x),
+                        got.map_or_else(|| "nothing".to_owned(), r),
+                        if prev == e.last.iter().find(|d| d.0 == f).map(|d| d.1) { "equal" } else { "differ" }
                     );
                 }
             }
