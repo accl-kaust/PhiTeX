@@ -35,7 +35,9 @@ pub(crate) enum Feedback {
     /// page parameters it set) and `\deadcycles` as it leaves it where not
     /// 0 (a page not shipped, which §1054's `\end` after it reads): the
     /// page builder folds the next page on a guess
-    /// ([`FinishIn::rtn_guess`], `\deadcycles` always guessed 0); a
+    /// ([`FinishIn::rtn_guess`]: what the same routine gave back on the
+    /// last page fired on the text before it, `\deadcycles` always
+    /// guessed 0, nothing after a page fired in a routine's material); a
     /// finisher whose routine gave otherwise contributes the real one to
     /// [`PAGE_MISS`], and the page builder's node runs again on it.
     RoutineGivesBack,

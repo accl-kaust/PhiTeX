@@ -104,8 +104,9 @@ pub(crate) struct FinishIn {
     /// classes, §1012): `[[class, mark]…]`.
     pub top_marks: ValueId,
     /// What the page builder guessed this page's routine gives back,
-    /// and folded the next page on ([`Feedback::RoutineGivesBack`]): the
-    /// guess, never the real value read back, so a miss does not change
+    /// and folded the next page on ([`Feedback::RoutineGivesBack`],
+    /// [`Run::rtn_guess`]): from the pages before this one only, never
+    /// this page's real value read back, so its own miss does not change
     /// this node.
     pub rtn_guess: ValueId,
     /// How many of the spans the post-output build of the page before
@@ -602,6 +603,15 @@ impl Run<'_, '_> {
         if guess.is_some_and(|g| g != x) {
             Feedback::RoutineGivesBack.missed();
             let j = pos.first().map_or(0, |&y| int_of(v, y));
+            if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                let r = |y: ValueId| v.render(y).chars().take(300).collect::<String>();
+                eprintln!(
+                    "miss: page {j} (finisher {}): guess {} real {}",
+                    self.cx.node().raw(),
+                    guess.map_or_else(String::new, r),
+                    r(x)
+                );
+            }
             self.contribute(PAGE_MISS, v.seq_unit(v.list(vec![v.int(j), x])));
         }
         if let Some(c) = self.fin.as_mut() {

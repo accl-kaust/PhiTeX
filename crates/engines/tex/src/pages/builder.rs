@@ -677,10 +677,16 @@ impl Operation for Pages {
 }
 
 impl Run<'_, '_> {
-    /// What page `j`'s routine is guessed to give back to the main list
-    /// (§1026, [`FinishIn::rtn_guess`]): its last value on another page
-    /// (`crate::run::Ops::fin_defs` as the evaluation began, so every
-    /// attempt of the loop guesses the same), else nothing given back.
+    /// A routine's give-back as the evaluation began (§1026): its last
+    /// value on another page (`crate::run::Ops::fin_defs` then, so every
+    /// attempt of the loop guesses the same), `\deadcycles` left out,
+    /// else nothing given back. The guess of page `j`
+    /// ([`FinishIn::rtn_guess`], made in [`Run::page_loop`]) is what the
+    /// same routine gave back on the last page the loop fired on the text
+    /// before `j` (the miss it read, or that page's own guess where it
+    /// read none), else this; nothing for a page fired in a routine's
+    /// material (no chain of pages grows on guesses). It depends on the
+    /// pages before `j` alone: a page's own miss never changes it.
     pub(crate) fn rtn_guess(&self, hint: ValueId) -> ValueId {
         let v = self.v;
         let empty = || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]);
@@ -760,6 +766,30 @@ pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: 
     }
     cur.sort_by_key(|e| e.0);
     v.list(cur.into_iter().map(|(c, m)| v.list(vec![v.int(c), m])).collect())
+}
+
+/// (`observe`) Page `j`'s guess depends on the pages before it alone
+/// ([`Run::rtn_guess`]): the same misses of the pages before `j`, the
+/// same routine, give the same guess in every attempt; a guess changed
+/// by page `j`'s own miss read back is a defect (its finisher placed
+/// anew on its own miss).
+fn guess_check(node: u64, j: i64, misses: &[(i64, ValueId)], how: impl std::hash::Hash, guess: ValueId) {
+    use std::hash::{Hash, Hasher};
+    static SEEN: std::sync::Mutex<Option<phitex_defuse::FxHashMap<(u64, i64, u64), ValueId>>> =
+        std::sync::Mutex::new(None);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for m in misses.iter().filter(|m| m.0 < j) {
+        m.hash(&mut h);
+    }
+    how.hash(&mut h);
+    let key = (node, j, h.finish());
+    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let prev = *seen.get_or_insert_with(Default::default).entry(key).or_insert(guess);
+    assert!(
+        prev == guess,
+        "page {}: its routine's guess changed with nothing before it changed (its own miss read back?)",
+        j + 1
+    );
 }
 
 /// What the loop saves before folding a unit, put back where the fold
@@ -1098,6 +1128,16 @@ impl Run<'_, '_> {
                 .find(|e| e.0 == hint)
                 .map_or_else(|| self.rtn_guess(hint), |e| e.1)
         };
+        if cfg!(feature = "observe") {
+            // (the evaluation: its values and their epoch, the guesses
+            // it began with)
+            let eval = (
+                std::ptr::from_ref(v) as usize,
+                self.cx.values_epoch(),
+                self.rtn_guess(hint),
+            );
+            guess_check(self.cx.node().raw(), j, &lp.misses, (eval, hint, in_material), rtn_guess);
+        }
         let rtns: Vec<(i64, ValueId)> = {
             let mut pages: Vec<i64> = spans
                 .iter()
