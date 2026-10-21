@@ -267,8 +267,10 @@ impl<'a> Builder<'a> {
         }
         self.core.cause(id, why);
         let mut n = n.clone();
-        // (A final node waits for the final phase, its last result kept.)
-        n.st = if n.text.stat.fin { St::Held } else { St::Dirty };
+        // (A final node, past the evaluation's first round, waits for the
+        // final phase, its last result kept.)
+        let hold = n.text.stat.fin && self.core.hold_fin.load(std::sync::atomic::Ordering::Relaxed);
+        n.st = if hold { St::Held } else { St::Dirty };
         // (Running again: its text's bound until it narrows again.)
         n.narrowed = None;
         self.w.put(id, n);
@@ -811,7 +813,10 @@ impl<'a> Builder<'a> {
             self.shape_at(n.unit, n.pos);
             return;
         }
-        m.st = if m.text.stat.fin { St::Held } else { St::Dirty };
+        // (A final node: as made dirty, held past the evaluation's first
+        // round.)
+        let hold = m.text.stat.fin && self.core.hold_fin.load(std::sync::atomic::Ordering::Relaxed);
+        m.st = if hold { St::Held } else { St::Dirty };
         // Scope entries filed in the frames the old text opened move to the
         // ones the new text opens (or to its own frame); they keep their
         // values until the run.

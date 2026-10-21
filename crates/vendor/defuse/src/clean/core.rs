@@ -68,6 +68,11 @@ pub(crate) struct Core {
     pub causes: Mutex<FxHashMap<u64, crate::api::Rerun>>,
     /// The provider's answers this evaluation.
     pub env_provided: std::sync::atomic::AtomicU64,
+    /// Final nodes made dirty are held for the final phase: always, but
+    /// from the previous values (`LoopStart::Previous`) only from an
+    /// evaluation's second round on (in its first they run in the round,
+    /// their result kept if no later round changes what they read).
+    pub hold_fin: std::sync::atomic::AtomicBool,
 }
 
 impl Core {
@@ -94,6 +99,7 @@ impl Core {
             app_units: Mutex::new(FxHashMap::default()),
             causes: Mutex::new(FxHashMap::default()),
             env_provided: std::sync::atomic::AtomicU64::new(0),
+            hold_fin: std::sync::atomic::AtomicBool::new(true),
             asking: Mutex::new(()),
         }
     }

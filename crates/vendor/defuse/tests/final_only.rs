@@ -271,3 +271,23 @@ fn from_previous_values_a_final_node_runs_once_per_evaluation() {
         assert_eq!(int(&b.eng, b.r), Some(501), "{i}: edit inc");
     }
 }
+
+/// A one-round edit: the final node made dirty runs in the round (with
+/// the other work, not after it), once, and no final phase follows.
+#[test]
+fn a_one_round_edit_runs_its_final_node_in_the_round() {
+    for i in 0..9 {
+        let mut b = build(false, 3);
+        b.eng.set_loop_start(defuse::LoopStart::Previous);
+        eval(&mut b.eng, i).expect("evaluate");
+        let before = b.ops.writer_runs.load(Relaxed);
+        let a = vec![b.eng.values().str("w"), b.eng.values().int(7)];
+        b.eng.replace(b.w, b.op, a);
+        let rep = eval(&mut b.eng, i + 1).expect("edit w");
+        assert_eq!(rep.rounds, 1, "{i}");
+        assert_eq!(b.ops.writer_runs.load(Relaxed), before + 1, "{i}: once");
+        assert_eq!(rep.final_nodes_run, 0, "{i}: no final phase");
+        // (No loop-backs: `n` reads as -1.)
+        assert_eq!(int(&b.eng, b.w), Some(-93), "{i}");
+    }
+}

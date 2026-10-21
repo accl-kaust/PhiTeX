@@ -166,6 +166,7 @@ impl Engine {
         // The provider is asked again about fields it did not know.
         self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner).unknown.clear();
         self.core.env_provided.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.core.hold_fin.store(self.loop_start != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
         let mut s = Sched::default();
         // Per-round worlds: each round starts from its own old world (the
         // edits already applied to it), the final phase from the old final
@@ -299,6 +300,11 @@ impl Engine {
                     } else {
                         self.round_done(&mut rep, &mut round_runs, from_old);
                         rounds += 1;
+                        // Another round: final nodes wait for the final
+                        // phase from here (the dirty ones as well).
+                        if !self.core.hold_fin.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            self.hold_dirty_finals();
+                        }
                         if per_round {
                             if let Some((w, d)) = self.ev_olds.pop_front() {
                                 let done = std::mem::replace(&mut self.w, w);
@@ -514,6 +520,7 @@ impl Engine {
         // (Complete runs, as the round core counts them: a stopped attempt
         // is not one; the limits count attempts.)
         rep.runs -= self.stopped;
+        self.core.hold_fin.store(self.loop_start != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
         super::core::prof::dump();
         Ok(rep)
     }
@@ -761,6 +768,18 @@ impl Engine {
     /// it is), takes the next ready node and runs it on the world then; edits
     /// are taken in between epochs of a few hundred merges.
     #[allow(clippy::too_many_arguments)]
+    /// The final nodes waiting to run in the round: held for the final
+    /// phase instead.
+    fn hold_dirty_finals(&mut self) {
+        let ids: Vec<Id> = self.w.nodes.iter().filter(|(_, n)| n.st == St::Dirty && n.text.stat.fin).map(|(&id, _)| id).collect();
+        for id in ids {
+            if let Some(mut n) = self.w.node(id).cloned() {
+                n.st = St::Held;
+                self.w.put(id, n);
+            }
+        }
+    }
+
     /// Nodes parked by their hints whose blocker left work without waking
     /// them, queued again (when the queue ran dry); whether there were any.
     fn requeue_hint_parked(&self, s: &mut Sched) -> bool {

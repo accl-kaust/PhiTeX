@@ -461,6 +461,7 @@ impl Engine {
 
     pub fn set_loop_start(&mut self, s: LoopStart) {
         self.loop_start = s;
+        self.core.hold_fin.store(s != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_max_rounds(&mut self, n: u64) {
