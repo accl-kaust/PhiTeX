@@ -121,8 +121,11 @@ const GRAIN: usize = 64;
 /// paragraph region, a page step or a format (hundreds of microseconds
 /// to seconds), so any batch of two or more is worth a hand-off to the
 /// pool.
+/// (`profile`, `PHITEX_POOL_SINGLE`: a batch of one job goes to the pool
+/// too, to study a run's cost on another thread than the one before
+/// without company.)
 fn job_grain() -> usize {
-    2
+    if prof_flag!("PHITEX_POOL_SINGLE") { 1 } else { 2 }
 }
 
 /// How the host starts a worker thread: it runs the closure on a new
@@ -296,6 +299,27 @@ pub(crate) struct OpCounters {
     running: AtomicUsize,
     /// the most operations running at once
     peak: AtomicUsize,
+    /// (`PHITEX_CLOCK_PROBE`) by kind: the clock probe's nanoseconds at
+    /// the runs' starts, at their ends, and the runs probed
+    probe: [[AtomicU64; 3]; KINDS.len()],
+}
+
+/// The iterations of [`clock_probe`]'s chain.
+const PROBE_ITERS: u64 = 4096;
+
+/// (`profile`, `PHITEX_CLOCK_PROBE`) The nanoseconds a fixed chain of
+/// dependent multiply-adds takes on this core now: its clock at the
+/// moment (the chain is 4 cycles an iteration on the nodes measured).
+#[inline(never)]
+fn clock_probe() -> u64 {
+    let t = std::time::Instant::now();
+    let a = std::hint::black_box(0x9E37_79B9_u64);
+    let mut x = std::hint::black_box(1u64);
+    for _ in 0..PROBE_ITERS {
+        x = x.wrapping_mul(a).wrapping_add(1);
+    }
+    std::hint::black_box(x);
+    u64::try_from(t.elapsed().as_nanos()).unwrap_or(0)
 }
 
 /// The node kinds the cold accounting splits op time by (spec-final §1):
@@ -374,6 +398,25 @@ impl Threads {
                     self.ops.kind_runs[i].load(Ordering::Relaxed),
                 )
             })
+            .collect()
+    }
+
+    /// (`PHITEX_CLOCK_PROBE`) By kind: the runs probed and the mean
+    /// clock (GHz, at 4 cycles an iteration) at their starts and ends.
+    pub(crate) fn clock_by_kind(&self) -> Vec<(&'static str, u64, f64, f64)> {
+        #[allow(clippy::cast_precision_loss)]
+        let ghz = |ns: u64, n: u64| {
+            if ns == 0 { 0.0 } else { (PROBE_ITERS * 4 * n) as f64 / ns as f64 }
+        };
+        KINDS
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| {
+                let p = &self.ops.probe[i];
+                let n = p[2].load(Ordering::Relaxed);
+                (k, n, ghz(p[0].load(Ordering::Relaxed), n), ghz(p[1].load(Ordering::Relaxed), n))
+            })
+            .filter(|x| x.1 > 0)
             .collect()
     }
 
@@ -467,6 +510,7 @@ impl Drop for Threads {
     fn drop(&mut self) {
         widths::print();
         crate::prof::print();
+        crate::prof::caches::print();
         if phitex_defuse::obs::enabled() && prof_flag!("PHITEX_OBS") {
             eprint!("probes (evaluation):\n{}", phitex_defuse::obs::snapshot());
             phitex_defuse::obs::reset();
@@ -661,8 +705,12 @@ fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
 #[cfg(feature = "rayon")]
 fn flush_workers(threads: usize) {
     if cfg!(feature = "profile") {
-        pool(threads).broadcast(|_| phitex_defuse::obs::flush());
+        pool(threads).broadcast(|_| {
+            phitex_defuse::obs::flush();
+            crate::prof::caches::flush();
+        });
         phitex_defuse::obs::flush();
+        crate::prof::caches::flush();
     }
 }
 
@@ -1001,6 +1049,9 @@ impl NodeTimer {
         let ops = JOB_OPS.with(|c| c.borrow().clone()).map(|o| {
             let c = o.running.fetch_add(1, Ordering::Relaxed) + 1;
             o.peak.fetch_max(c, Ordering::Relaxed);
+            if prof_flag!("PHITEX_CLOCK_PROBE") {
+                o.probe[kind][0].fetch_add(clock_probe(), Ordering::Relaxed);
+            }
             (o, clock().now(), kind)
         });
         let trace = prof_flag!("PHITEX_TEX_TIME").then(|| (std::time::Instant::now(), op, node));
@@ -1017,6 +1068,10 @@ impl Drop for NodeTimer {
             }
             o.kind_runs[kind].fetch_add(1, Ordering::Relaxed);
             o.running.fetch_sub(1, Ordering::Relaxed);
+            if prof_flag!("PHITEX_CLOCK_PROBE") {
+                o.probe[kind][1].fetch_add(clock_probe(), Ordering::Relaxed);
+                o.probe[kind][2].fetch_add(1, Ordering::Relaxed);
+            }
         }
         if let Some((t, op, node)) = self.trace {
             later(format!(
