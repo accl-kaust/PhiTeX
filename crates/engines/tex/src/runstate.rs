@@ -352,7 +352,7 @@ impl Drop for State {
 /// A location's value at a candidate ([`State::at_candidates`]): the
 /// candidate's index, and the value (`None`: not known there).
 #[allow(clippy::option_option)]
-type AtCandidate = (usize, Option<Option<ValueId>>);
+pub(crate) type AtCandidate = (usize, Option<Option<ValueId>>);
 
 /// The values at the candidates of the locations defined after them
 /// ([`State::at_candidates`]).
@@ -367,6 +367,12 @@ impl AtCandidates {
     pub(crate) fn get(&self, i: usize, loc: Loc) -> Option<Option<Option<ValueId>>> {
         let h = self.by_loc.get(&loc)?;
         h.get(h.partition_point(|x| x.0 < i)).map(|x| x.1)
+    }
+
+    /// `loc`'s entries at the candidates, by candidate.
+    #[allow(clippy::option_option)]
+    pub(crate) fn history(&self, loc: Loc) -> &[AtCandidate] {
+        self.by_loc.get(&loc).map_or(&[], Vec::as_slice)
     }
 
     /// Every location defined after some candidate.
