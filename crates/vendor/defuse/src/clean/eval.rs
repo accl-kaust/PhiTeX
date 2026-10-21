@@ -70,6 +70,10 @@ struct Sched {
     no_fuel: FxHashSet<Id>,
     /// How often each node's result was refuted.
     refutes: FxHashMap<Id, u32>,
+    /// Nodes refuted on a guess that failed: they run carefully. (Not
+    /// for a definition whose definer ran again for a loop-back value that
+    /// moved: the round's own news, not a guess that keeps failing.)
+    careful: FxHashSet<Id>,
     /// Nodes whose committed result rests on a guess.
     guessed: FxHashSet<Id>,
     /// Nodes whose run stopped on an accumulator range, with the range.
@@ -97,6 +101,21 @@ struct Sched {
 }
 
 impl Sched {
+    /// Whether node `id` runs carefully (committed values only, after the
+    /// nodes before it in work).
+    fn careful(&self, id: Id) -> bool {
+        self.careful.contains(&id)
+    }
+
+    /// A refutation of node `id`'s result; `news`: of a loop-back value's
+    /// move (it does not make the node careful).
+    fn refuted(&mut self, id: Id, news: bool) {
+        *self.refutes.entry(id).or_default() += 1;
+        if !news {
+            self.careful.insert(id);
+        }
+    }
+
     /// A schedule for another world: the run counts and causes go on.
     fn fresh(&mut self) -> Sched {
         Sched {
@@ -104,6 +123,7 @@ impl Sched {
             why: std::mem::take(&mut self.why),
             time: std::mem::take(&mut self.time),
             refutes: std::mem::take(&mut self.refutes),
+            careful: std::mem::take(&mut self.careful),
             guessed: std::mem::take(&mut self.guessed),
             fold_refutes: std::mem::take(&mut self.fold_refutes),
             ran_ready: std::mem::take(&mut self.ran_ready),
@@ -616,7 +636,7 @@ impl Engine {
         times.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         rep.run_times = times;
         rep.refuted_nodes = s.refutes.len() as u64;
-        rep.nodes_conservative = rep.refuted_nodes;
+        rep.nodes_conservative = s.careful.len() as u64;
         rep.refutations_max = s.refutes.values().copied().max().unwrap_or(0);
         rep.refuted_by_field.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.0.raw().cmp(&b.0.0.raw())));
         let chain = if hs.on { chain_of(&hs) } else { Vec::new() };
@@ -813,7 +833,7 @@ impl Engine {
             let fuel = sched.fuel();
             // A node refuted this evaluation runs on committed values only:
             // no predictions, and a definer in work is waited for.
-            let careful: FxHashSet<Id> = chosen.iter().copied().filter(|x| s.refutes.contains_key(x)).collect();
+            let careful: FxHashSet<Id> = chosen.iter().copied().filter(|&x| s.careful(x)).collect();
             let slots: Vec<std::sync::Mutex<Option<(Outcome, std::time::Duration)>>> = (0..jobs.len()).map(|_| std::sync::Mutex::new(None)).collect();
             let core = std::sync::Arc::clone(&self.core);
             // The lane (CLEAN_LANE): the first job runs on the world itself
@@ -1045,7 +1065,7 @@ impl Engine {
                     // The next ready node, unless the epoch is over.
                     let job = if g.merged < budget { g.pick(window, predict) } else { None };
                     if let Some((id, resume)) = job {
-                        let careful = g.m.s.refutes.contains_key(&id);
+                        let careful = g.m.s.careful(id);
                         let fueled = g.fueled.remove(&id);
                         g.inflight.insert(id);
                         let snap = g.m.eng.w.clone();
@@ -1338,7 +1358,7 @@ impl Engine {
             }
             // A node refuted this evaluation runs in text order: when
             // nothing before it in its unit is in work (or it is first).
-            if !first && s.refutes.contains_key(&k.2) && self.w.work_of(k.0).is_some_and(|m| m.below(&k.1).is_some()) {
+            if !first && s.careful(k.2) && self.w.work_of(k.0).is_some_and(|m| m.below(&k.1).is_some()) {
                 continue;
             }
             s.queue.remove(&k);
@@ -1751,20 +1771,32 @@ impl Engine {
                         // Committed again: its earlier result rested on a
                         // guess that broke (a round's loop-back aside; a
                         // rerun for a committed value's change is none).
-                        match super::core::lock(&self.core.causes).get(&id).copied() {
+                        let why = super::core::lock(&self.core.causes).get(&id).copied();
+                        match why {
                             Some(crate::api::Rerun::Range { field: Some(f) }) if fold_guess(&self.core, s, id, f, true) => {
                                 rep.mispredictions += 1;
                                 bump_field(&mut rep.refuted_by_field, f);
                             }
-                            Some(crate::api::Rerun::Changed { field, .. } | crate::api::Rerun::Rebind { field }) => {
+                            Some(crate::api::Rerun::Changed { field, .. }) => {
                                 rep.mispredictions += 1;
-                                *s.refutes.entry(id).or_default() += 1;
+                                let site = self.w.node(id).and_then(|n| n.res.clone()).and_then(|o| {
+                                    o.reads.iter().find_map(|rd| match rd {
+                                        Read::Use { f, site, .. } if *f == field => Some(*site),
+                                        _ => None,
+                                    })
+                                });
+                                s.refuted(id, site.is_some_and(|x| self.loop_news(x)));
+                                bump_field(&mut rep.refuted_by_field, field);
+                            }
+                            Some(crate::api::Rerun::Rebind { field }) => {
+                                rep.mispredictions += 1;
+                                s.refuted(id, false);
                                 bump_field(&mut rep.refuted_by_field, field);
                             }
                             Some(crate::api::Rerun::Loop { .. }) => {}
                             _ => {
                                 rep.mispredictions += 1;
-                                *s.refutes.entry(id).or_default() += 1;
+                                s.refuted(id, false);
                             }
                         }
                     }
@@ -2021,6 +2053,12 @@ impl Engine {
     }
 
     /// The unfolding limits: a run of `id` placing `kids` and `conts`.
+    /// Whether definer `x` last ran again for a loop-back value that moved
+    /// (what it defines changed with the round).
+    fn loop_news(&self, x: Id) -> bool {
+        x != super::world::NONE && matches!(super::core::lock(&self.core.causes).get(&x), Some(crate::api::Rerun::Loop { .. }))
+    }
+
     fn runaway(&self, id: Id, kids: &[Spec], conts: &[Spec]) -> Option<EvalError> {
         let created = u32::try_from(kids.len() + conts.len()).unwrap_or(u32::MAX);
         let depth = self.w.node(id).map_or(0, |n| n.depth);
@@ -2745,7 +2783,7 @@ impl Flow<'_> {
         if !self.stop && self.merged < budget {
             while ready + running + jobs.len() < par + 1 {
                 let Some((id, resume)) = self.pick(window, predict) else { break };
-                let careful = self.m.s.refutes.contains_key(&id);
+                let careful = self.m.s.careful(id);
                 let fueled = self.fueled.remove(&id);
                 self.inflight.insert(id);
                 jobs.push((key(&self.m.eng.w, id), (id, resume, careful, fueled)));
@@ -2915,7 +2953,7 @@ impl Merge<'_> {
             match self.lane_next(busy, predict, op, want, &mut others) {
                 Ok(Some((x, r))) => {
                     count(22);
-                    job = Some((x, r, self.s.refutes.contains_key(&x), false));
+                    job = Some((x, r, self.s.careful(x), false));
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -2964,7 +3002,7 @@ impl Merge<'_> {
             s.lane_new = Some(cands);
             // (Held by its hints, or refuted and behind a node in work: it
             // waits for the step.)
-            let behind = s.refutes.contains_key(&k.2) && eng.w.work_of(k.0).is_some_and(|m| m.below(&k.1).is_some());
+            let behind = s.careful(k.2) && eng.w.work_of(k.0).is_some_and(|m| m.below(&k.1).is_some());
             if behind || eng.w.hint_blocker(&eng.core, k.2, predict).is_err() {
                 count(25);
                 return Ok(None);
@@ -3154,7 +3192,8 @@ impl Merge<'_> {
                     // A read an earlier commit of this step broke.
                     eng.core.cause(id, super::build::why_broken(&eng.core, &eng.w, id, rd));
                     if !matches!(rd, Read::Range { f, .. } if fold_guess(&eng.core, s, id, *f, true)) {
-                        *s.refutes.entry(id).or_default() += 1;
+                        let news = matches!(rd, Read::Use { site, .. } if eng.loop_news(*site));
+                        s.refuted(id, news);
                     }
                     rep.mispredictions += 1;
                     rep.predictions_refuted += u64::from(r.predicted > 0);
