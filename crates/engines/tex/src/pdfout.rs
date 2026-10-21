@@ -652,6 +652,18 @@ impl FontSource for Mapped<'_> {
     fn file(&self, name: &[u8]) -> Option<Vec<u8>> {
         self.fonts.file(name)
     }
+    fn font_file_shared(&self, f: FontId) -> Option<Arc<[u8]>> {
+        self.fonts.font_file_shared(self.step(f))
+    }
+    fn encoding_file_shared(&self, f: FontId) -> Option<Arc<[u8]>> {
+        self.fonts.encoding_file_shared(self.step(f))
+    }
+    fn file_shared(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        self.fonts.file_shared(name)
+    }
+    fn metrics_hash(&self, f: FontId) -> u64 {
+        self.fonts.metrics_hash(self.step(f))
+    }
     fn map_by_ps_name(&self, ps_name: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
         self.fonts.map_by_ps_name(ps_name, slant, extend)
     }
@@ -1028,11 +1040,26 @@ impl FontSource for Fonts {
         self.by_id.get(&f)?.enc.as_ref().map(|b| b.to_vec())
     }
     fn file(&self, name: &[u8]) -> Option<Vec<u8>> {
-        let f = self.files.get(name).map(|b| b.to_vec());
+        self.file_shared(name).map(|b| b.to_vec())
+    }
+    fn font_file_shared(&self, f: FontId) -> Option<Arc<[u8]>> {
+        self.by_id.get(&f)?.ff.clone()
+    }
+    fn encoding_file_shared(&self, f: FontId) -> Option<Arc<[u8]>> {
+        self.by_id.get(&f)?.enc.clone()
+    }
+    fn file_shared(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        let f = self.files.get(name).cloned();
         if f.is_none() {
             self.missed.locked().insert(name.to_vec());
         }
         f
+    }
+    fn metrics_hash(&self, f: FontId) -> u64 {
+        self.by_id.get(&f).map_or_else(
+            || phitex_pdf::metrics_hash(self.metrics(f)),
+            |x| *x.loaded.at_hash.get_or_init(|| phitex_pdf::metrics_hash(&x.loaded.at)),
+        )
     }
     fn map_by_ps_name(&self, ps_name: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
         self.ps

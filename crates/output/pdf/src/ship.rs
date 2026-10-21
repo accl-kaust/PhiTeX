@@ -223,29 +223,27 @@ impl PdfState {
         };
         let file = map.as_ref().filter(|m| m.is_fontfile()).and_then(|m| {
             if own {
-                src.font_file(f)
+                src.font_file_shared(f)
             } else {
-                src.file(m.ff_name.as_deref().unwrap_or_default())
-                    .or_else(|| src.font_file(f))
+                src.file_shared(m.ff_name.as_deref().unwrap_or_default())
+                    .or_else(|| src.font_file_shared(f))
             }
         });
         let enc = map.as_ref().filter(|m| m.is_reencoded()).and_then(|m| {
             if own {
-                src.encoding_file(f)
+                src.encoding_file_shared(f)
             } else {
-                src.file(m.encname.as_deref().unwrap_or_default())
-                    .or_else(|| src.encoding_file(f))
+                src.file_shared(m.encname.as_deref().unwrap_or_default())
+                    .or_else(|| src.encoding_file_shared(f))
             }
         });
         self.rec_font(crate::replay::FontEv::Load(f));
-        let file: Option<std::sync::Arc<[u8]>> = file.map(Into::into);
-        let enc: Option<std::sync::Arc<[u8]>> = enc.map(Into::into);
         self.fonts.insert(
             f,
             std::sync::Arc::new(FontState {
                 name,
                 metrics: src.metrics(f).clone(),
-                metrics_hash: crate::digest::debug_hash(src.metrics(f)),
+                metrics_hash: src.metrics_hash(f),
                 map,
                 file,
                 enc,
