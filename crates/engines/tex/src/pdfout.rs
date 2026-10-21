@@ -26,10 +26,11 @@
 //!   a command's step applied), then the tail and the cross-reference section by
 //!   the prefix sums of the chunks' lengths.
 
+use crate::exec::LockWait as _;
 use std::collections::{BTreeMap, BTreeSet};
 
 use phitex_defuse::FxHashMap;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use phitex_defuse::{ValueId, Values};
 use phitex_pdf::map::{MapEntry, parse_line, parse_map, parse_map_ps};
@@ -81,7 +82,7 @@ pub(crate) fn line_push(r: &mut Run<'_, '_>, e: ValueId) {
 /// becomes `a, page, m0, b`.
 pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
     let brks: Vec<(ValueId, i64, i64)> = {
-        let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
+        let m = pieces().locked();
         xpages
             .iter()
             .filter_map(|&x| {
@@ -159,7 +160,7 @@ pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
 /// it and its break; a command's node; a marker; another record as it is.
 pub(crate) fn line_show(v: &Values, x: ValueId) -> String {
     if let Some(k) = v.as_int(x) {
-        let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
+        let m = pieces().locked();
         return match m.get(&u64::from_ne_bytes(k.to_ne_bytes())) {
             Some(pc) => format!(
                 "page {} node {} brk {:?}",
@@ -289,13 +290,7 @@ pub(crate) fn note_read_time(r: &mut Run<'_, '_>, n: i64) {
     if serial == 0 {
         return;
     }
-    if let Some(c) = r
-        .ops
-        .pdf_cmds
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&serial)
-    {
+    if let Some(c) = r.ops.pdf_cmds.locked().get(&serial) {
         c.rt.store(n.cast_unsigned(), std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -424,12 +419,7 @@ type Once<V> = Mutex<FxHashMap<u64, Arc<OnceLock<V>>>>;
 
 /// The memo's value for `key`, `f` run only by the key's first caller.
 fn once<V: Clone>(m: &Once<V>, key: u64, f: impl FnOnce() -> V) -> V {
-    let cell = m
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(key)
-        .or_default()
-        .clone();
+    let cell = m.locked().entry(key).or_default().clone();
     cell.get_or_init(f).clone()
 }
 
@@ -810,8 +800,7 @@ pub(crate) fn note_image_files(
         if let Ok(n) = st.ximage(spec.clone()) {
             let _ = st.write_ximage(n, &fonts);
         }
-        let missed =
-            std::mem::take(&mut *fonts.missed.lock().unwrap_or_else(PoisonError::into_inner));
+        let missed = std::mem::take(&mut *fonts.missed.locked());
         let new: Vec<Vec<u8>> = missed.into_iter().filter(|n| !have.contains(n)).collect();
         if new.is_empty() {
             break;
@@ -948,13 +937,13 @@ fn blob_hash(b: &Arc<[u8]>) -> u64 {
     }
     let key = Arc::as_ptr(b).cast::<u8>() as usize;
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-    if let Some((w, h)) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&key)
+    if let Some((w, h)) = m.locked().get(&key)
         && w.upgrade().is_some_and(|a| Arc::ptr_eq(&a, b))
     {
         return *h;
     }
     let h = phitex_defuse::hash_bytes(0, b).max(1);
-    let mut m = m.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut m = m.locked();
     if m.len() > 4096 {
         m.retain(|_, (w, _)| w.strong_count() > 0);
     }
@@ -1017,10 +1006,7 @@ impl FontSource for Fonts {
     fn file(&self, name: &[u8]) -> Option<Vec<u8>> {
         let f = self.files.get(name).map(|b| b.to_vec());
         if f.is_none() {
-            self.missed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(name.to_vec());
+            self.missed.locked().insert(name.to_vec());
         }
         f
     }
@@ -1243,7 +1229,7 @@ fn fresh(v: &Values, date: String, jobname: &str, g2u: Option<ValueId>) -> PdfSt
         None => PdfState::new(PdfParams::default()),
         Some(t) => {
             let key = (v.instance(), t.raw());
-            let mut m = g2u_states().lock().unwrap_or_else(PoisonError::into_inner);
+            let mut m = g2u_states().locked();
             if let Some(k) = m.iter().position(|e| e.0 == key) {
                 m[k].1.clone()
             } else {
@@ -1324,21 +1310,17 @@ pub(crate) fn command_forms(
     words.extend(wparams.iter().map(|&p| u64::from(p.cast_unsigned())));
     let serial = phitex_defuse::hash_words(0x6364_6d73_6572_0001, &words);
     let born = CMD_BORN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    r.ops
-        .pdf_cmds
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(
-            serial,
-            Arc::new(Cmd {
-                f: Mutex::new(Box::new(f)),
-                fonts: fs,
-                wparams,
-                node: r.cx.node().raw(),
-                born,
-                rt: std::sync::atomic::AtomicU64::new(0),
-            }),
-        );
+    r.ops.pdf_cmds.locked().insert(
+        serial,
+        Arc::new(Cmd {
+            f: Mutex::new(Box::new(f)),
+            fonts: fs,
+            wparams,
+            node: r.cx.node().raw(),
+            born,
+            rt: std::sync::atomic::AtomicU64::new(0),
+        }),
+    );
     r.pdf_cmd = serial;
     let e = v.list(vec![
         v.str("cmd"),
@@ -1712,11 +1694,7 @@ fn ship_apart(
     words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
     words.extend(pc.wparams.iter().map(|&m| u64::from(m.cast_unsigned())));
     let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
-    pieces()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(key)
-        .or_insert_with(|| Arc::new(pc));
+    pieces().locked().entry(key).or_insert_with(|| Arc::new(pc));
     // the page's place in the file: its record in the line, where it
     // shipped; the link numbers its objects after every record before
     // it and before every one after
@@ -1822,8 +1800,7 @@ impl phitex_defuse::Operation for PdfPage {
             return Ok(ValueId::UNIT);
         };
         let pc = pieces()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .locked()
             .get(&u64::from_ne_bytes(k.to_ne_bytes()))
             .cloned();
         if let Some(pc) = pc {
@@ -2328,7 +2305,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     static M: OnceLock<AllocMemo> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
     let k = (v.instance(), range.raw());
-    if let Some(x) = m.lock().unwrap_or_else(PoisonError::into_inner).get(&k) {
+    if let Some(x) = m.locked().get(&k) {
         return x.clone();
     }
     let mut out = AllocFold::default();
@@ -2415,7 +2392,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     out.fonts = Arc::new(seen);
     out.dests = Arc::new(seen_dest);
     out.os_written = written;
-    let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut g = m.locked();
     if g.len() > 1 << 12 {
         g.clear();
     }
@@ -2813,7 +2790,7 @@ pub(crate) fn finish_exact(
     let mut errors: Vec<(String, i64)> = Vec::new();
     let (mut placed, mut shipped) = (0usize, 0usize);
     let pcs: Vec<Option<Arc<PagePiece>>> = {
-        let m = pieces().lock().unwrap_or_else(PoisonError::into_inner);
+        let m = pieces().locked();
         xpages
             .iter()
             .map(|&x| {
@@ -2826,7 +2803,7 @@ pub(crate) fn finish_exact(
     // this link can have dropped)
     let hi = CMD_BORN.load(std::sync::atomic::Ordering::Relaxed);
     let serials: FxHashMap<u64, Arc<Cmd>> = {
-        let mut m = cmds.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut m = cmds.locked();
         // (the tag compared as a value: no string made per record)
         let cmd_tag = v.str("cmd");
         let serials: FxHashMap<u64, Arc<Cmd>> = xpages
@@ -2877,11 +2854,7 @@ pub(crate) fn finish_exact(
     // (the last link's memo, taken: an edit's records after the change
     // that are the last link's again, from a writer state equal to the
     // one it had there, are copied too, `resync` below)
-    let mut old: Option<LinkMemo> = link_memo()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take()
-        .filter(|m| m.head == head);
+    let mut old: Option<LinkMemo> = link_memo().locked().take().filter(|m| m.head == head);
     if let Some(m) = old.as_mut() {
         let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
         if let Some(sn) = m.snaps.iter().rev().find(|sn| sn.at <= same && sn.at > 0) {
@@ -3045,7 +3018,7 @@ pub(crate) fn finish_exact(
                     let fwd = nums.resolve(&c.fonts, None);
                     let src = Mapped::new(&c.fonts, &nums, &fwd);
                     let out = {
-                        let mut g = c.f.lock().unwrap_or_else(PoisonError::into_inner);
+                        let mut g = c.f.locked();
                         (*g)(&mut st, &mut forms, &src)
                     };
                     let rt = c.rt.load(std::sync::atomic::Ordering::Relaxed);
@@ -3170,7 +3143,7 @@ pub(crate) fn finish_exact(
         placed,
         shipped,
     };
-    *link_memo().lock().unwrap_or_else(PoisonError::into_inner) = Some(LinkMemo {
+    *link_memo().locked() = Some(LinkMemo {
         head,
         ids,
         chunks: chunks_of,
@@ -3212,20 +3185,13 @@ pub(crate) fn finish_exact(
     // cross-reference section
     let key = st.digest();
     let t1 = std::time::Instant::now();
-    let kept = tails()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-        .cloned();
+    let kept = tails().locked().get(&key).cloned();
     let tail = match kept {
         Some(t) => Ok(Some(t)),
         None => st.tail().map(|t| {
             let t = t.map(Arc::new);
             if let Some(t) = &t {
-                tails()
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(key, t.clone());
+                tails().locked().insert(key, t.clone());
             }
             t
         }),

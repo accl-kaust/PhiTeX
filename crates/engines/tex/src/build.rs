@@ -11,7 +11,8 @@
 //! accumulator `items` that carry its id, folded by the reader
 //! ([`Run::list_fold`]).
 
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use crate::exec::LockWait as _;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use phitex_defuse::{Effect, Value, ValueId, Values};
 use phitex_typeset::glue::Glue;
@@ -1220,11 +1221,7 @@ impl Run<'_, '_> {
         let x = self.get_loc(crate::fields::cell::PATTERNS)?;
         let key = x.map_or(0, ValueId::raw);
         let cache = C.get_or_init(|| Mutex::new(phitex_defuse::FxHashMap::default()));
-        if let Some(p) = cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&key)
-        {
+        if let Some(p) = cache.locked().get(&key) {
             return Ok(p.clone());
         }
         let v = self.v;
@@ -1248,10 +1245,7 @@ impl Run<'_, '_> {
             }
         }
         let p = Arc::new(p);
-        cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key, p.clone());
+        cache.locked().insert(key, p.clone());
         Ok(p)
     }
 
@@ -3165,11 +3159,7 @@ pub(crate) fn fold_entries(
         ];
         words.extend(block.iter().map(|x| x.raw()));
         let key = phitex_defuse::hash_words(13, &words);
-        let hit = block_cache()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&key)
-            .cloned();
+        let hit = block_cache().locked().get(&key).cloned();
         if let Some(m) = hit {
             out.extend(m.out.iter().map(|x| match x {
                 Ok(id) => *id,
@@ -3211,9 +3201,7 @@ pub(crate) fn fold_entries(
                 })
                 .collect(),
         };
-        let mut c = block_cache()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut c = block_cache().locked();
         if c.len() > 1 << 18 {
             c.clear();
         }

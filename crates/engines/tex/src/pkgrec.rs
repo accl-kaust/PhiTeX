@@ -14,8 +14,9 @@
 //! and the run's own sets replace the record. A load never seen gets
 //! [`crate::hints::optimistic_hint`] under speculation.
 
+use crate::exec::LockWait as _;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, PoisonError};
 
 use phitex_defuse::{FxHashMap, ValueId, Values};
 
@@ -265,12 +266,7 @@ impl LoadHints {
     /// they are now.
     fn matching(&self, v: &Values, text: &str) -> Option<(String, Rec)> {
         let k = load_key(text)?;
-        let r = self
-            .recs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&k)
-            .cloned()?;
+        let r = self.recs.locked().get(&k).cloned()?;
         r.matches(|n| Some(self.hash_now(v, n))).then_some((k, r))
     }
 
@@ -296,39 +292,27 @@ impl LoadHints {
     /// now: the id its text value has (as a run's `fread` records it), 0
     /// when absent.
     fn hash_now(&self, v: &Values, name: &str) -> u64 {
-        if let Some(&h) = self
-            .now
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(name)
-        {
+        if let Some(&h) = self.now.locked().get(name) {
             return h;
         }
         let h = (self.finder)(name).map_or(0, |(_, bytes)| {
             let text: String = bytes.iter().map(|&b| char::from(b)).collect();
             v.str(&text).raw()
         });
-        self.now
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(name.to_owned(), h);
+        self.now.locked().insert(name.to_owned(), h);
         h
     }
 
     /// File `name` changed: asked again next time.
     pub(crate) fn forget(&self, name: &str) {
-        self.now
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(name);
+        self.now.locked().remove(name);
     }
 
     /// Whether the record of the load `text` lists file `name`.
     pub(crate) fn reads_file(&self, text: &str, name: &str) -> bool {
         load_key(text).is_some_and(|k| {
             self.recs
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .locked()
                 .get(&k)
                 .is_some_and(|r| r.files.iter().any(|(n, _)| n == name))
         })
@@ -339,12 +323,7 @@ impl LoadHints {
     /// `None`: the text's own hint.
     pub(crate) fn hint_for(&self, v: &Values, text: &str) -> Option<String> {
         let k = load_key(text)?;
-        let rec = self
-            .recs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&k)
-            .cloned();
+        let rec = self.recs.locked().get(&k).cloned();
         if crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
             match &rec {
                 None => eprintln!("pkgrec: {k}: no record"),
@@ -372,10 +351,7 @@ impl LoadHints {
         {
             self.given[0].fetch_add(1, Ordering::Relaxed);
             if self.predict {
-                self.predicted
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(k, r.values);
+                self.predicted.locked().insert(k, r.values);
             }
             return Some(h);
         }
@@ -388,14 +364,14 @@ impl LoadHints {
 
     /// The records with `fresh` (load key, record) replacing theirs.
     pub(crate) fn merge(&self, fresh: Vec<(String, Rec)>) {
-        let mut r = self.recs.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut r = self.recs.locked();
         for (k, x) in fresh {
             r.insert(k, x);
         }
     }
 
     pub(crate) fn bytes(&self) -> Vec<u8> {
-        serialise(&self.recs.lock().unwrap_or_else(PoisonError::into_inner))
+        serialise(&self.recs.locked())
     }
 }
 

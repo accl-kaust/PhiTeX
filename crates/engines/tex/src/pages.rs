@@ -48,6 +48,7 @@
 //!   per page, one finisher per page, a step per piece reading only the
 //!   profiles since its page began.
 
+use crate::exec::LockWait as _;
 use phitex_defuse::{
     Claim, Ctx, Effect, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
 };
@@ -4112,10 +4113,7 @@ impl Finish {
         let t = args.get(9).copied().unwrap_or(ValueId::UNIT);
         let j = args.get(10).map_or(0, |&x| int_of(v, x));
         let o = ops(&self.0);
-        let m = o
-            .fin_defs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let m = o.fin_defs.locked();
         let d = (t != ValueId::UNIT)
             .then(|| m.get(&fin_key(v, t, args)))
             .flatten();
@@ -4158,8 +4156,7 @@ impl Finish {
         }
         ops(&self.0)
             .fin_defs_start
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .locked()
             .get(&fin_key(v, t, args))
             .and_then(|d| d.gdefs)
             .map_or(ValueId::NIL, |x| gdefs_unit(v, x, fin_at(v, args)))
@@ -4186,8 +4183,7 @@ impl Operation for Finish {
         }
         let mut names: Vec<Field> = ops(&self.0)
             .fin_defs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .locked()
             .get(&fin_key(v, t, args))
             .map(|d| {
                 let mut ns: Vec<Field> = d
@@ -4231,8 +4227,7 @@ impl Operation for Finish {
         // only its readers run again)
         let known = ops(&self.0)
             .fin_defs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .locked()
             .get(&fin_key(v, t, args))
             .map(FinDefs::names);
         if let Some(mut names) = known {
@@ -4510,11 +4505,7 @@ impl Run<'_, '_> {
                 )
             );
         }
-        let mut m = self
-            .ops
-            .fin_defs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut m = self.ops.fin_defs.locked();
         let e = m.entry(fin_key(v, t, args)).or_default();
         e.gdefs = Some(gdefs);
         for &(f, x) in &out {
@@ -4586,11 +4577,7 @@ impl Run<'_, '_> {
         let mut text = String::new();
         self.show_toks_into(&mut text, &toks)?;
         let h = {
-            let defs = self
-                .ops
-                .defs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let defs = self.ops.defs.locked();
             crate::hints::routine_hint(&text, &defs)
         };
         Ok(v.str(&h.encode()))
@@ -4846,11 +4833,7 @@ impl Operation for Scan {
             ]);
         }
         let j = int_of(v, *args.get(1)?);
-        let (st, mat) = *ops(&self.0)
-            .scan_guess_start
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&j)?;
+        let (st, mat) = *ops(&self.0).scan_guess_start.locked().get(&j)?;
         Some(vec![
             (v.field(SCAN), st),
             (v.field(SCAN_MAT), mat),
@@ -4990,8 +4973,7 @@ fn rtn_guess(o: &crate::run::Ops, v: &Values, pos: &[ValueId]) -> ValueId {
     let last = (t != ValueId::UNIT)
         .then(|| {
             o.fin_defs_start
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .locked()
                 .get(&fin_key(v, t, pos))
                 .and_then(|d| d.last.iter().find(|e| e.0 == v.field(RTN)).map(|e| e.1))
         })
@@ -5155,9 +5137,7 @@ impl Run<'_, '_> {
         // the longest prefix folded before, short of this step's unit
         let last = units.len() - 1;
         let (mut from, memo) = {
-            let m = scan_memo()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let m = scan_memo().locked();
             (1..=last)
                 .rev()
                 .find_map(|k| m.get(&keys[k]).map(|st| (k, st.clone())))
@@ -5200,9 +5180,7 @@ impl Run<'_, '_> {
                     break;
                 }
                 if clean && i < last {
-                    let mut m = scan_memo()
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut m = scan_memo().locked();
                     if m.len() > 1 << 16 {
                         m.clear();
                     }
@@ -5537,11 +5515,7 @@ impl Run<'_, '_> {
                 if int_of(v, b.get(3).copied().unwrap_or(ValueId::UNIT)) != -2
                     && let Some(&j) = self.cx.args().get(1)
                 {
-                    self.ops
-                        .scan_guess
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(int_of(v, j), (x, mat));
+                    self.ops.scan_guess.locked().insert(int_of(v, j), (x, mat));
                 }
                 Ok(Placed::State)
             }

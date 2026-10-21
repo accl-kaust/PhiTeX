@@ -22,6 +22,7 @@
 //! defines the output's field (`toolout:<name>`, [`out_field`]), which a
 //! later read of that name reads.
 
+use crate::exec::LockWait as _;
 use phitex_defuse::{Ctx, Field, Locality, Operation, Stop, ValueId, Values};
 
 use crate::api::ToolSearch;
@@ -291,11 +292,7 @@ impl Operation for ToolRun {
             .get(3)
             .map(|&l| list_of(v, l).iter().map(|&a| str_of(v, a)).collect())
             .unwrap_or_default();
-        let opts = ops(&self.0)
-            .tool_opts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let opts = ops(&self.0).tool_opts.locked().clone();
         let mut served = Served::default();
         // (the input first: as a `\write18`'s node read it, else as the
         // round before wrote it; none written, no run)
@@ -438,7 +435,13 @@ pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<Valu
             let _ = cx.use_field(w)?;
             continue;
         }
-        return Ok(Some(command_args(v, t, output, &input, std::slice::from_ref(&input))));
+        return Ok(Some(command_args(
+            v,
+            t,
+            output,
+            &input,
+            std::slice::from_ref(&input),
+        )));
     }
     Ok(None)
 }

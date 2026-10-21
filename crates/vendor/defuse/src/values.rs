@@ -218,10 +218,7 @@ impl Values {
     }
 
     fn put(&self, id: ValueId, make: impl FnOnce() -> Entry) -> ValueId {
-        self.table.get_or_insert(id.0, || {
-            self.count.fetch_add(1, Ordering::Relaxed);
-            make()
-        });
+        self.table.get_or_insert(id.0, make);
         id
     }
 
@@ -245,7 +242,7 @@ impl Values {
     /// Number of values in the table.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        self.table.len()
     }
 
     #[must_use]

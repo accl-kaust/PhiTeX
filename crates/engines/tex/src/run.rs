@@ -8,6 +8,7 @@
 //! the node's own text. What TeX keeps between commands is read through
 //! fields (`Run::get`), the scope kind and contributions.
 
+use crate::exec::LockWait as _;
 use std::rc::Rc;
 
 use crate::input::{Line, MID_LINE, NEW_LINE, Seg};
@@ -87,11 +88,7 @@ pub(crate) fn record_check(
     eng: &phitex_defuse::Engine,
     start: &phitex_defuse::FxHashMap<Field, ValueId>,
 ) -> usize {
-    let mut readers = std::mem::take(
-        &mut *RECORD_READERS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
+    let mut readers = std::mem::take(&mut *RECORD_READERS.locked());
     readers.sort_unstable();
     readers.dedup();
     let v = eng.values();
@@ -414,9 +411,7 @@ static STOPS: std::sync::Mutex<Option<StopTable>> = std::sync::Mutex::new(None);
 #[cold]
 pub(crate) fn note_stop(op: &'static str, f: Field) {
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-        let mut m = STOPS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut m = STOPS.locked();
         *m.get_or_insert_with(Default::default)
             .entry((op, f))
             .or_default() += 1;
@@ -426,11 +421,7 @@ pub(crate) fn note_stop(op: &'static str, f: Field) {
 /// The fields runs stopped on most since the last call, with the
 /// readers' kind and counts.
 pub(crate) fn take_stops(v: &Values, n: usize) -> Vec<(String, u64)> {
-    let m = STOPS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-        .unwrap_or_default();
+    let m = STOPS.locked().take().unwrap_or_default();
     let mut xs: Vec<(String, u64)> = m
         .into_iter()
         .map(|((op, f), k)| (format!("{op} {}", crate::val::field_name(v, f)), k))
@@ -1140,10 +1131,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // record is compared with its cells after the evaluation,
         // [`record_check`])
         if cells.is_some() && crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
-            RECORD_READERS
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((self.cx.node(), b));
+            RECORD_READERS.locked().push((self.cx.node(), b));
         }
         self.recs[b] = Some(cells.clone());
         Ok(cells)
@@ -2455,7 +2443,9 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.interp.is_some() {
             return Ok(());
         }
-        let me = self.v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+        let me = self
+            .v
+            .int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         let f = format!("wread:{key}");
         if self.get(&f)? == Some(me)
             && self.get(&format!("wopen:{key}"))?.is_none()
@@ -3796,12 +3786,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 .collect();
         }
         let text = str_of(v, f.id);
-        let defs = self
-            .ops
-            .defs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let defs = self.ops.defs.locked().clone();
         let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
         crate::hints::register_text(&self.ops.hints, f.name, &t);
         let mut out = Vec::new();

@@ -4,6 +4,7 @@
 //! has category 13) or `Str("\\name")` for a control sequence (§289).
 //! A meaning is a `List` tagged by its first element (§222–§225).
 
+use crate::exec::LockWait as _;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -223,10 +224,7 @@ impl CsId {
             return c;
         }
         let c = {
-            let mut t = TABLE
-                .get_or_init(Default::default)
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut t = TABLE.get_or_init(Default::default).locked();
             if let Some(&c) = t.0.get(name) {
                 c
             } else {

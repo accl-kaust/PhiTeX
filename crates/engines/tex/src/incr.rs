@@ -22,8 +22,9 @@
 //! the same and whose key is the same keeps its analysis, the others are
 //! analysed again.
 
+use crate::exec::LockWait as _;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use phitex_source::pass::{self, Definitions, FileKind};
 use phitex_source::{Paragraphs, Source, UnitId};
@@ -429,7 +430,7 @@ impl Incr {
                 c.todo.push(k);
                 let t = &text[p.start..p.start + p.len];
                 let (own, end) = cached_own.unwrap_or_else(|| {
-                    let mut slot = owns[k].lock().unwrap_or_else(PoisonError::into_inner);
+                    let mut slot = owns[k].locked();
                     let end = match &*slot {
                         Some(_) if start.is_none() => ends[k],
                         _ => {
@@ -534,10 +535,7 @@ impl Incr {
             {
                 return (e.th.clone(), e.keys.clone(), e.reads.clone(), false);
             }
-            let own = owns[k]
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take();
+            let own = owns[k].locked().take();
             let (th, keys, reads) = analyse(
                 chunk_text(&parts[k]),
                 &c.ins[k].1,
@@ -548,16 +546,15 @@ impl Incr {
         };
         // (the analyses' summed time, for `PHITEX_TEX_TIME`)
         let busy = std::sync::atomic::AtomicU64::new(0);
-        let made: Vec<Made> =
-            crate::exec::map_on(&mut ex, c.todo.len(), &|x| {
-                let t = std::time::Instant::now();
-                let r = analyse_todo(x);
-                busy.fetch_add(
-                    u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                r
-            });
+        let made: Vec<Made> = crate::exec::map_on(&mut ex, c.todo.len(), &|x| {
+            let t = std::time::Instant::now();
+            let r = analyse_todo(x);
+            busy.fetch_add(
+                u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            r
+        });
         let t_made = t0.elapsed();
         let analysed = made.iter().filter(|m| m.3).count();
         let mut made = made.into_iter();

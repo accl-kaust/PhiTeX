@@ -109,10 +109,27 @@ impl<T> Inner<T> {
     }
 }
 
+/// Counter stripes: one per thread (round robin), each on its own cache
+/// line, so inserting threads do not share one counter's line.
+const STRIPES: usize = 64;
+
+#[repr(align(128))]
+#[derive(Default)]
+struct Stripe(AtomicUsize);
+
+/// This thread's counter stripe.
+fn stripe() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static MINE: usize = NEXT.fetch_add(1, Ordering::Relaxed) % STRIPES;
+    }
+    MINE.with(|m| *m)
+}
+
 /// An insert-only concurrent map from non-zero keys to `T`.
 pub struct Table<T> {
     cur: AtomicPtr<Inner<T>>,
-    count: AtomicUsize,
+    count: Box<[Stripe]>,
     grow: Mutex<Vec<*mut Inner<T>>>,
 }
 
@@ -135,9 +152,19 @@ impl<T> Table<T> {
         let first = Box::into_raw(Box::new(Inner::new(1 << 12)));
         Table {
             cur: AtomicPtr::new(first),
-            count: AtomicUsize::new(0),
+            count: (0..STRIPES).map(|_| Stripe::default()).collect(),
             grow: Mutex::new(vec![first]),
         }
+    }
+
+    /// The number of values (the inserts that won).
+    pub fn len(&self) -> usize {
+        self.count.iter().map(|c| c.0.load(Ordering::Relaxed)).sum()
+    }
+
+    /// Whether no value is in.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     fn inner(&self) -> &Inner<T> {
@@ -191,9 +218,14 @@ impl<T> Table<T> {
             }
             t = now;
         }
-        let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+        // (Counted on this thread's stripe; the stripes are summed every
+        // `step` inserts of it, so a table grows at most a sixteenth past
+        // three quarters full.)
+        let c = self.count[stripe()].0.fetch_add(1, Ordering::Relaxed) + 1;
         // SAFETY: as above.
-        if n * 4 > (unsafe { (*t).mask } + 1) * 3 {
+        let cap = unsafe { (*t).mask } + 1;
+        let step = (cap / (STRIPES * 16)).max(1);
+        if c % step == 0 && self.len() * 4 > cap * 3 {
             self.grow_from(t);
         }
         // SAFETY: values are freed only in `drop`.
@@ -207,7 +239,10 @@ impl<T> Table<T> {
         }
         // SAFETY: generations are freed only in `drop`.
         let old = unsafe { &*t };
-        let new = Box::into_raw(Box::new(Inner::new((old.mask + 1) * 2)));
+        // (Four times while small, where growth comes often and is cheap;
+        // twice once large, where the slots dominate memory.)
+        let grow = if old.mask + 1 < 1 << 20 { 4 } else { 2 };
+        let new = Box::into_raw(Box::new(Inner::new((old.mask + 1) * grow)));
         // SAFETY: `new` is fresh and owned by `all` from here.
         unsafe { (*new).prev.store(t, Ordering::Release) };
         all.push(new);

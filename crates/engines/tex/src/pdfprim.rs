@@ -873,8 +873,7 @@ fn rels_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
     let range = if own {
         r.cx.acc_range(f, None)?
     } else {
-        r.cx
-            .acc_range_to(f, None, Some(phitex_defuse::NodeId::from_raw(at)))?
+        r.cx.acc_range_to(f, None, Some(phitex_defuse::NodeId::from_raw(at)))?
     };
     let me = i64::from_ne_bytes(at.to_ne_bytes());
     let brk = if own {
@@ -963,7 +962,8 @@ fn alloc_rel(r: &mut Run<'_, '_>) -> R<(i64, i64)> {
     let v = r.v;
     let me = r.cx.node().raw();
     let key = phitex_defuse::hash_words(0x7265_6c6f_626a_0001, &[me, r.pdf_occ as u64]);
-    let t = i64::from_ne_bytes((key & (u64::MAX >> 1) & !(REL.cast_unsigned())).to_ne_bytes()) | REL;
+    let t =
+        i64::from_ne_bytes((key & (u64::MAX >> 1) & !(REL.cast_unsigned())).to_ne_bytes()) | REL;
     r.rt_made += 1;
     r.rt_rels += 1;
     let u = v.seq_unit(v.list(vec![node_int(r), v.int(i64::from(r.cand))]));
