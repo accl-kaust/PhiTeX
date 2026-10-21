@@ -380,7 +380,7 @@ impl Engine {
                                 s = s.fresh();
                                 self.start_world(&mut s, &d);
                             } else {
-                                self.ev_done.push((self.w.clone(), Vec::new()));
+                                self.ev_done.push((self.w.snapshot(), Vec::new()));
                                 from_old = false;
                                 moved_vs_old |= had_old;
                             }
@@ -411,7 +411,7 @@ impl Engine {
                         self.start_world(&mut s, &d);
                         self.set_loops(&mut s, &loops);
                     } else {
-                        self.ev_done.push((self.w.clone(), Vec::new()));
+                        self.ev_done.push((self.w.snapshot(), Vec::new()));
                     }
                 }
                 // Held nodes run; final nodes the final phase itself places

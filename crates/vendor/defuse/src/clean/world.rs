@@ -326,15 +326,6 @@ pub(crate) struct Unit {
     pub app: Id,
     /// The unit's own environment (an application's `set_env`).
     pub env: PMap<Field, ValueId>,
-    /// Readers of the scope structure at their position (kinds, sequence
-    /// frames).
-    pub kind_readers: PMap<(Pos, Id), ()>,
-    /// Readers of following siblings (`following`, `claimed`, streams), by
-    /// position, each with how far its window reaches.
-    pub fwd_readers: super::claims::Windows,
-    /// Readers of earlier siblings (`prev_sibling_where`), by position,
-    /// each with the lowest position its walk reached.
-    pub back_readers: super::claims::Windows,
     /// Nodes in work (dirty or held), by position.
     pub work: PMap<Pos, Id, usize>,
     /// Nodes in work without a result that may contribute to an
@@ -403,14 +394,9 @@ pub(crate) struct FieldDefs {
 #[derive(Clone, Default)]
 pub(crate) struct FieldCell {
     pub defs: FieldDefs,
-    /// Its readers, by the position they read at.
-    pub readers: PMap<(Pos, Id), ()>,
     /// Contributions to it (an accumulator), folded by its monoid in
     /// every subtree.
     pub contribs: PMap<Pos, ValueId, ValueId>,
-    /// Its range readers: by the end of their window and the reader, the
-    /// window's start.
-    pub range_readers: PMap<(Pos, Id), Pos>,
     /// Contributors in work: without a result that declare a
     /// contribution to it, and with one that contributed to it.
     pub acc_static: PMap<Pos, Id>,
@@ -483,8 +469,10 @@ pub(crate) struct World {
     /// Each field of each unit: its definitions, readers, contributions
     /// and contributors in work (a cell, written as a whole).
     pub fields: PMap<(u32, Field), Arc<FieldCell>>,
-    /// Readers of a node's output.
-    pub out_readers: PMap<Id, PMap<Id, ()>>,
+    /// The reader indexes (of fields, ranges, outputs, structure), live:
+    /// shared by this world's copies (see `live`; a kept world takes a
+    /// [`World::snapshot`]).
+    pub rd: super::live::Readers,
     /// Loop-back fields' values for this round.
     pub loops: PMap<Field, ValueId>,
     /// The version each key last changed at.
@@ -564,6 +552,14 @@ impl World {
     #[inline]
     pub(crate) fn with_unit_if(&mut self, u: u32, g: impl FnOnce(&mut Unit)) {
         self.units.update(&u, &NoMeasure, |c| g(Arc::make_mut(c)));
+    }
+
+    /// This world as it is now, its reader indexes copied: a world kept
+    /// (a round's) that later changes to this one do not reach.
+    pub(crate) fn snapshot(&self) -> World {
+        let mut w = self.clone();
+        w.rd = self.rd.snapshot();
+        w
     }
 
     /// Sets (`on`) or clears node `id` at `p` in unit `u`'s index `ix`
@@ -838,26 +834,24 @@ impl World {
     }
 
     /// Adds a reader of `f` at `pos`.
-    pub(crate) fn add_reader(&mut self, u: u32, f: Field, pos: Pos, id: Id) {
-        self.with_field(u, f, |c| {
+    pub(crate) fn add_reader(&self, u: u32, f: Field, pos: Pos, id: Id) {
+        self.rd.with_field(u, f, |c| {
             c.readers.insert((pos, id), (), &NoMeasure);
         });
     }
 
-    pub(crate) fn drop_reader(&mut self, u: u32, f: Field, pos: Pos, id: Id) {
-        if self.field(u, f).is_some_and(|c| c.readers.contains_key(&(pos, id))) {
-            self.with_field(u, f, |c| {
-                c.readers.remove(&(pos, id), &NoMeasure);
-            });
-        }
+    pub(crate) fn drop_reader(&self, u: u32, f: Field, pos: Pos, id: Id) {
+        self.rd.with_field(u, f, |c| {
+            c.readers.remove(&(pos, id), &NoMeasure);
+        });
     }
 
     /// The readers of `f` in unit `u` reading at a position in `(lo, hi)`.
     pub(crate) fn readers_between(&self, u: u32, f: Field, lo: Pos, hi: Pos) -> Vec<Id> {
-        let Some(m) = self.field(u, f).map(|c| &c.readers) else {
+        let Some(c) = self.rd.field(u, f) else {
             return Vec::new();
         };
-        m.range(
+        c.readers.range(
             std::ops::Bound::Excluded(&(lo, Id::MAX)),
             std::ops::Bound::Excluded(&(hi, 0)),
         )
@@ -865,45 +859,57 @@ impl World {
         .collect()
     }
 
-    pub(crate) fn add_out_reader(&mut self, of: Id, id: Id) {
-        self.out_readers.upsert(of, &NoMeasure, |m| {
-            m.insert(id, (), &NoMeasure);
-        });
+    pub(crate) fn add_out_reader(&self, of: Id, id: Id) {
+        self.rd.add_out(of, id);
     }
 
-    pub(crate) fn drop_out_reader(&mut self, of: Id, id: Id) {
-        let mut empty = false;
-        self.out_readers.update(&of, &NoMeasure, |m| {
-            m.remove(&id, &NoMeasure);
-            empty = m.is_empty();
-        });
-        if empty {
-            self.out_readers.remove(&of, &NoMeasure);
-        }
+    pub(crate) fn drop_out_reader(&self, of: Id, id: Id) {
+        self.rd.drop_out(of, id);
     }
 
-    pub(crate) fn add_kind_reader(&mut self, u: u32, p: Pos, id: Id) {
-        self.with_unit(u, |un| {
+    /// The readers of node `of`'s output.
+    pub(crate) fn out_readers_of(&self, of: Id) -> Vec<Id> {
+        self.rd.outs(of).map_or_else(Vec::new, |m| m.iter().map(|(&r, ())| r).collect())
+    }
+
+    pub(crate) fn add_kind_reader(&self, u: u32, p: Pos, id: Id) {
+        self.rd.with_unit(u, |un| {
             un.kind_readers.insert((p, id), (), &NoMeasure);
         });
     }
 
-    pub(crate) fn drop_kind_reader(&mut self, u: u32, p: Pos, id: Id) {
-        if self.is_kind_reader(u, p, id) {
-            self.with_unit_if(u, |un| {
-                un.kind_readers.remove(&(p, id), &NoMeasure);
-            });
-        }
+    pub(crate) fn drop_kind_reader(&self, u: u32, p: Pos, id: Id) {
+        self.rd.with_unit(u, |un| {
+            un.kind_readers.remove(&(p, id), &NoMeasure);
+        });
+    }
+
+    /// The scope readers of unit `u` reading at a position in `[lo, hi]`.
+    pub(crate) fn kind_readers_in(&self, u: u32, lo: Pos, hi: Pos) -> Vec<Id> {
+        self.rd.unit(u).map_or_else(Vec::new, |un| {
+            un.kind_readers
+                .range(std::ops::Bound::Included(&(lo, 0)), std::ops::Bound::Included(&(hi, Id::MAX)))
+                .map(|(&(_, r), ())| r)
+                .collect()
+        })
+    }
+
+    /// The sibling readers of unit `u` whose windows hold position `p`.
+    pub(crate) fn window_readers_at(&self, u: u32, p: Pos) -> Vec<Id> {
+        let Some(un) = self.rd.unit(u) else { return Vec::new() };
+        let mut hit: Vec<Id> = super::claims::stab_forward(&un.fwd_readers, p).into_iter().map(|e| e.1).collect();
+        hit.extend(super::claims::stab_backward(&un.back_readers, p).into_iter().map(|e| e.1));
+        hit
     }
 
     /// Files reader `id` at `p` in a window index (`back`: backward) with
     /// its reach; `None` takes it out.
-    pub(crate) fn set_window(&mut self, back: bool, u: u32, p: Pos, id: Id, reach: Option<Pos>) {
+    pub(crate) fn set_window(&self, back: bool, u: u32, p: Pos, id: Id, reach: Option<Pos>) {
         if reach.is_none() && self.window_of(back, u, p, id).is_none() {
             return;
         }
         // (In place: a copy of the unit's windows would copy every path.)
-        self.with_unit(u, |un| match reach {
+        self.rd.with_unit(u, |un| match reach {
             Some(r) => {
                 let m = if back { &mut un.back_readers } else { &mut un.fwd_readers };
                 if back {
@@ -928,13 +934,13 @@ impl World {
     /// Node `id`'s entry in a window index at `p` (`back`: backward), if
     /// it holds it.
     pub(crate) fn window_of(&self, back: bool, u: u32, p: Pos, id: Id) -> Option<Pos> {
-        let un = self.unit_opt(u)?;
+        let un = self.rd.unit(u)?;
         if back { &un.back_readers } else { &un.fwd_readers }.get(&p).filter(|e| e.0 == id).map(|e| e.1)
     }
 
     /// Whether node `id` is a kind (scope) reader at `p`.
     pub(crate) fn is_kind_reader(&self, u: u32, p: Pos, id: Id) -> bool {
-        self.unit_opt(u).is_some_and(|un| un.kind_readers.contains_key(&(p, id)))
+        self.rd.unit(u).is_some_and(|un| un.kind_readers.contains_key(&(p, id)))
     }
 
     /// Replaces a node's record (the in-work index follows its state).
@@ -1405,26 +1411,24 @@ impl World {
         }
     }
 
-    pub(crate) fn add_range_reader(&mut self, u: u32, f: Field, lo: Pos, hi: Pos, id: Id) {
-        self.with_field(u, f, |c| {
+    pub(crate) fn add_range_reader(&self, u: u32, f: Field, lo: Pos, hi: Pos, id: Id) {
+        self.rd.with_field(u, f, |c| {
             c.range_readers.insert((hi, id), lo, &NoMeasure);
         });
     }
 
-    pub(crate) fn drop_range_reader(&mut self, u: u32, f: Field, hi: Pos, id: Id) {
-        if self.field(u, f).is_some_and(|c| c.range_readers.contains_key(&(hi, id))) {
-            self.with_field(u, f, |c| {
-                c.range_readers.remove(&(hi, id), &NoMeasure);
-            });
-        }
+    pub(crate) fn drop_range_reader(&self, u: u32, f: Field, hi: Pos, id: Id) {
+        self.rd.with_field(u, f, |c| {
+            c.range_readers.remove(&(hi, id), &NoMeasure);
+        });
     }
 
     /// The range readers of `f` whose window holds position `q`.
     pub(crate) fn range_readers_over(&self, u: u32, f: Field, q: Pos) -> Vec<Id> {
-        let Some(m) = self.field(u, f).map(|c| &c.range_readers) else {
+        let Some(c) = self.rd.field(u, f) else {
             return Vec::new();
         };
-        m.range(std::ops::Bound::Excluded(&(q, Id::MAX)), std::ops::Bound::Unbounded)
+        c.range_readers.range(std::ops::Bound::Excluded(&(q, Id::MAX)), std::ops::Bound::Unbounded)
             .filter(|(_, lo)| **lo < q)
             .map(|(k, _)| k.1)
             .collect()
