@@ -762,13 +762,26 @@ impl<'a> Ctx<'a> {
     pub fn placed_output(&mut self, i: usize) -> Option<ValueId> {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&i, )) } else { serde_json::Value::Null };
-        let r = self.placed_output_inner(i);
+        let r = self.placed_output_inner(i, None);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "placed_output", a, crate::record::j(&r));
         r
     }
 
-    fn placed_output_inner(&mut self, i: usize) -> Option<ValueId> {
+    /// As [`Ctx::placed_output`], `used` standing in for none (the guess
+    /// the reader goes on with): the read stands while the continuation
+    /// has no result of its text or outputs `used`, and is re-asked only
+    /// when another output commits.
+    pub fn placed_output_or(&mut self, i: usize, used: ValueId) -> ValueId {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&i, &used, )) } else { serde_json::Value::Null };
+        let r = self.placed_output_inner(i, Some(used)).unwrap_or(used);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "placed_output_or", a, crate::record::j(&r));
+        r
+    }
+
+    fn placed_output_inner(&mut self, i: usize, or: Option<ValueId>) -> Option<ValueId> {
         let bc = self.base.map_or(0, |b| b.1);
         let committed: &[Id] = self.w.node(self.me).and_then(|n| n.res.as_ref()).map_or(&[], |r| &r.conts[..]);
         let (node, op, args) = if i < bc {
@@ -794,8 +807,8 @@ impl<'a> Ctx<'a> {
             let ord = u32::try_from(earlier + mine + 1).unwrap_or(u32::MAX);
             (super::build::Builder::placed_id(self.me, s.place, s.op, ord), s.op, s.args.clone())
         };
-        let val = self.w.node(node).and_then(|n| n.placed_out(op, &args));
-        self.reads.push(Read::Placed { node, op, args, val });
+        let val = self.w.node(node).and_then(|n| n.placed_out(op, &args)).or(or);
+        self.reads.push(Read::Placed { node, op, args, val, or });
         val
     }
 

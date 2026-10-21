@@ -341,6 +341,23 @@ impl<'a> Builder<'a> {
         }
         let new_keep = if keep == 0 { 0 } else { map.get(&keep).copied().unwrap_or(keep) };
         let remap = |p: Pos| -> Pos { map.get(&p).copied().unwrap_or(p) };
+        // (A position between nodes, a window's end past one: it moves
+        // with the node before it, staying before the next.)
+        let olds: Vec<Pos> = un.order.iter().map(|(&p, _)| p).collect();
+        let news: Vec<Pos> = order.iter().map(|x| x.0).collect();
+        let bound = |p: Pos| -> Pos {
+            if p == 0 || p == Pos::MAX {
+                return p;
+            }
+            match olds.binary_search(&p) {
+                Ok(i) => news[i],
+                Err(0) => news.first().map_or(p, |&f| p.min(f.saturating_sub(1))),
+                Err(i) => {
+                    let n = news[i - 1].saturating_add(p - olds[i - 1]);
+                    news.get(i).map_or(n, |&nx| n.min(nx.saturating_sub(1)))
+                }
+            }
+        };
         // (Frames held back to walk from a position: that position moves
         // too; one that names no node walks the whole unit.)
         if let Some((hu, hp, _)) = &mut self.hold
@@ -401,7 +418,7 @@ impl<'a> Builder<'a> {
                 c.contribs = contribs;
             });
         }
-        let re = |p: Pos| if p == Pos::MAX || p == 0 { p } else { remap(p) };
+        let re = bound;
         // The unit's readers (live), with workers' filing held off: what a
         // worker filed before is at the old positions and moves here; what
         // it would file after at old positions it files no more (the count
@@ -412,7 +429,7 @@ impl<'a> Builder<'a> {
             *count = epoch;
             rd.remap_slots(|k| match k {
                 ReadKey::Field(ku, f, p) if ku == u => ReadKey::Field(ku, f, remap(p)),
-                ReadKey::Range(ku, f, lo, hi) if ku == u => ReadKey::Range(ku, f, remap(lo), remap(hi)),
+                ReadKey::Range(ku, f, lo, hi) if ku == u => ReadKey::Range(ku, f, bound(lo), bound(hi)),
                 k => k,
             });
             for f in rd.fields_of(u) {
@@ -420,7 +437,7 @@ impl<'a> Builder<'a> {
                 let mut readers: Vec<((Pos, Id), ())> = c.readers.iter().map(|(&(p, id), ())| ((remap(p), id), ())).collect();
                 readers.sort_by_key(|x| x.0);
                 readers.dedup_by_key(|x| x.0);
-                let mut ranges: Vec<((Pos, Id), Pos)> = c.range_readers.iter().map(|(&(p, id), &lo)| ((remap(p), id), remap(lo))).collect();
+                let mut ranges: Vec<((Pos, Id), Pos)> = c.range_readers.iter().map(|(&(p, id), &lo)| ((bound(p), id), bound(lo))).collect();
                 ranges.sort_by_key(|x| x.0);
                 ranges.dedup_by_key(|x| x.0);
                 rd.set_field(
@@ -1707,7 +1724,7 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
         Read::Loop { f, val } => w.loops.get(f) == Some(val),
         Read::Env { f, val } => core.env_get(w, *f).flatten() == *val,
         Read::Out { node, val } => w.node(*node).and_then(Node::out) == *val,
-        Read::Placed { node, op, args, val } => w.node(*node).and_then(|n| n.placed_out(*op, args)) == *val,
+        Read::Placed { node, op, args, val, or } => w.node(*node).and_then(|n| n.placed_out(*op, args)).or(*or) == *val,
         Read::Kind { at, val } => w.kind_at(*at) == *val,
         Read::IsLoop { f, val } => core.is_loop(*f) == *val,
         Read::At { node, there } => w.node(*node).is_some() == *there,
