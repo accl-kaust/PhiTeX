@@ -2405,6 +2405,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
 /// before it plus this. A fold of the accumulator's range before this
 /// node: no round, no loop-back.
 pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
+    r.order_after_pages()?;
     let v = r.v;
     let range = allocs_range(r, "page_offset")?;
     let f = fold_allocs(v, range);

@@ -369,6 +369,9 @@ pub(crate) struct CandMark {
     /// ([`Run::finish_candidate`]): not inside a group or a conditional
     /// of its own, with input left.
     pub cuttable: bool,
+    /// Whether items came on the main list since the candidate before:
+    /// a page can fire here (§994).
+    pub fresh: bool,
 }
 
 /// A finisher's page: its index and what the routine leaves for the
@@ -836,7 +839,7 @@ impl Run<'_, '_> {
         };
         self.note_candidate(k)?;
         self.cand += 1;
-        let cuttable = fresh && self.cuttable_here(newgraf);
+        let cuttable = fresh && self.cuttable_here();
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -847,6 +850,7 @@ impl Run<'_, '_> {
             sig: self.st.sig(),
             nest: self.nest.len(),
             cuttable,
+            fresh,
         });
         self.st.mark_candidate();
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
@@ -919,7 +923,7 @@ impl Run<'_, '_> {
 
     /// Whether the run can end at the candidate it is at, its rest a
     /// resume (items contributed since the one before aside).
-    fn cuttable_here(&mut self, newgraf: bool) -> bool {
+    fn cuttable_here(&mut self) -> bool {
         let op = self.cx.op();
         // (inside a group or a conditional of the run's own only where
         // the builder is made to fire: a penalty of `eject_penalty` or
@@ -927,23 +931,54 @@ impl Run<'_, '_> {
         // routine runs there, and the rest reads what it defines (a page
         // so far saved in a box, a column height), so the rest is a
         // node after the routine. Never inside a list of the run's own)
-        // (a paragraph's start is a cut too, its level just pushed and
-        // carried by the continuation with its list and the input
-        // `\everypar` left (§1091): the page firing there has its
-        // finisher before the paragraph's commands, which read what the
-        // routine leaves, as they come after it in tex.web)
-        let par_start = newgraf
-            && self.conds.is_empty()
-            && self.nest.last().is_some_and(|l| l.owns && l.group == 0)
-            && self.nest.len() == 1;
+        // (a paragraph's start is inside its own level, as any candidate
+        // inside a span of the run's own: a page firing there is rare,
+        // and its finisher checks the paragraph's commands after it,
+        // [`Run::check_cut`]; one node a paragraph, not two)
         let open_ok = !self.open_span()
-            || par_start
             || (self.nest.iter().all(|l| !l.owns && l.group != 0)
                 && self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs)));
         (op == self.ops.exec || op == self.ops.resume)
             && (self.top || self.doc)
             && open_ok
             && self.has_input()
+    }
+
+    /// A read of the objects the pages shipped before this run
+    /// (`crate::pdfout::page_offset`) in a piece that ran through a
+    /// candidate a page can fire at (inside a span of its own): pdfTeX
+    /// ships that page before the command, and the scan, not this run,
+    /// knows whether it fires. The piece ends before the command (its
+    /// input put back as the command found it), its rest a resume placed
+    /// after the pages firing in it, which reads their objects. A
+    /// command that changed anything before the read cannot be put back:
+    /// it reads on, and says so.
+    pub(crate) fn order_after_pages(&mut self) -> R<()> {
+        let op = self.cx.op();
+        let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
+        if !piece || self.cut.is_some() || !self.cand_marks.iter().any(|m| m.fresh) {
+            return Ok(());
+        }
+        if !self.rewind() {
+            if crate::exec::obs_flag!("PHITEX_PAGE_TRACE")
+                || crate::exec::prof_flag!("PHITEX_TEX_TIME")
+            {
+                eprintln!(
+                    "  pages' objects read after a candidate a piece runs through, past a change: piece {}",
+                    self.cx.node().raw()
+                );
+            }
+            return Ok(());
+        }
+        if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+            eprintln!(
+                "page-trace: node {} ends before a read of the pages' objects (candidate {})",
+                self.cx.node().raw(),
+                self.cand
+            );
+        }
+        self.cut = Some(self.cand);
+        Err(Halt::Cut)
     }
 
     /// `PHITEX_CAND_TRACE`: the candidate `k` and what decided its cut.
