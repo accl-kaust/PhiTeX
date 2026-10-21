@@ -521,6 +521,34 @@ impl<K: fmt::Debug + Ord + Clone, V: fmt::Debug + Clone, S: Clone> fmt::Debug fo
 }
 
 impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
+    /// The greatest entry with key <= k.
+    #[cfg(test)]
+    pub fn at_or_below(&self, k: &K) -> Option<(&K, &V)> {
+        self.root.as_ref()?.node.pred(k, true).map(|(k, v)| (k, v))
+    }
+
+    #[cfg(test)]
+    pub fn first(&self) -> Option<(&K, &V)> {
+        let (k, v) = self.root.as_ref()?.node.first();
+        Some((k, v))
+    }
+
+    /// The whole tree's summary (O(1) once made).
+    #[cfg(test)]
+    pub fn summary<M: Measure<K, V, S = S>>(&self, m: &M) -> S {
+        self.root.as_ref().map_or_else(|| m.zero(), |c| c.sum(m).clone())
+    }
+
+    /// Whether two maps share the same root (O(1); for "unchanged" checks).
+    #[cfg(test)]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.root, &other.root) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(&a.node, &b.node),
+            _ => false,
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -610,11 +638,6 @@ impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
         self.root.as_ref()?.node.pred(k, false).map(|(k, v)| (k, v))
     }
 
-    /// The greatest entry with key <= k.
-    pub fn at_or_below(&self, k: &K) -> Option<(&K, &V)> {
-        self.root.as_ref()?.node.pred(k, true).map(|(k, v)| (k, v))
-    }
-
     /// The least entry with key > k.
     pub fn above(&self, k: &K) -> Option<(&K, &V)> {
         self.root.as_ref()?.node.succ(k, false).map(|(k, v)| (k, v))
@@ -623,11 +646,6 @@ impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
     /// The least entry with key >= k.
     pub fn at_or_above(&self, k: &K) -> Option<(&K, &V)> {
         self.root.as_ref()?.node.succ(k, true).map(|(k, v)| (k, v))
-    }
-
-    pub fn first(&self) -> Option<(&K, &V)> {
-        let (k, v) = self.root.as_ref()?.node.first();
-        Some((k, v))
     }
 
     pub fn last(&self) -> Option<(&K, &V)> {
@@ -682,11 +700,6 @@ impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
         acc.unwrap_or_else(|| m.zero())
     }
 
-    /// The whole tree's summary (O(1) once made).
-    pub fn summary<M: Measure<K, V, S = S>>(&self, m: &M) -> S {
-        self.root.as_ref().map_or_else(|| m.zero(), |c| c.sum(m).clone())
-    }
-
     /// Number of entries with key < k (O(log n)).
     pub fn rank(&self, k: &K) -> usize {
         self.rank_by(k, false)
@@ -728,15 +741,6 @@ impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
                 }
                 Node::Leaf(es) => return Some((&es[i].0, &es[i].1)),
             }
-        }
-    }
-
-    /// Whether two maps share the same root (O(1); for "unchanged" checks).
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        match (&self.root, &other.root) {
-            (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(&a.node, &b.node),
-            _ => false,
         }
     }
 
@@ -1397,7 +1401,7 @@ mod tests {
         out.expect("reps > 0")
     }
 
-    /// `cargo test --release --features clean --lib clean::ptree::tests::bench -- --ignored --nocapture`
+    /// `cargo test --release --lib clean::ptree::tests::bench -- --ignored --nocapture`
     #[test]
     #[ignore = "benchmark"]
     fn bench() {

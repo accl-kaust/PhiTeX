@@ -1,6 +1,12 @@
 //! The clean core's `DEFUSE_RECORD` recording: a small program with
 //! loop-back fields, an accumulator, the environment (supplied and from a
 //! provider), edits between evaluations and edits absorbed during one.
+//! Then, as a client that builds its format first does, more engines in
+//! the same process: runs that stop, park and resume more than once, read
+//! a range that stops, place a continuation through `follow_after`; a
+//! provider and a hook whose answers change between evaluations, with
+//! `refresh_where`; the calls that tune an engine (`set_stable`,
+//! `set_heights`, `set_round_cap_policy`).
 //!
 //! The test checks the recording holds what `play` replays from: every
 //! engine call, the static answers, the runs with their calls, the
@@ -8,13 +14,14 @@
 //! `scripts/record-clean.sh` replays it with `play` and checks the replay
 //! is the recording's.
 
-#![cfg(all(feature = "clean", feature = "observe"))]
+#![cfg(feature = "observe")]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use defuse::{
-    Ctx, Edit, EditQueue, Engine, Field, Greedy, Locality, NodeId, Operation, Sequential, Stop, SumMonoid, Value,
-    ValueId, Values,
+    CapPolicy, Ctx, Edit, EditQueue, Engine, Field, Greedy, Locality, NodeId, OpId, Operation, Sequential, Stop,
+    SumMonoid, Value, ValueId, Values,
 };
 use serde_json::Value as J;
 
@@ -58,6 +65,95 @@ impl Operation for Toy {
                 Ok(got.unwrap_or(ValueId::UNIT))
             }
         }
+    }
+}
+
+/// The second engine's operation: `["leaf", x]` is `x`; `["chain", a, b]`
+/// applies `leaf a` and `leaf b`, parking its stage at each stop, and
+/// contributes 1 to `pos`; `["rd"]` folds `pos` before it, parking at the
+/// stop; `["fa"]` places a continuation after itself through
+/// `follow_after`; `["sc"]` contributes 1 to `pos` (5 when `big`) and says
+/// so statically; `["env"]` reads environment field `eb`.
+struct Pg {
+    big: Arc<AtomicBool>,
+}
+
+impl Pg {
+    fn amount(&self, v: &Values) -> ValueId {
+        v.int(if self.big.load(Ordering::Relaxed) { 5 } else { 1 })
+    }
+}
+
+impl Operation for Pg {
+    fn name(&self) -> &'static str {
+        "pg"
+    }
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn static_contribs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
+        (text(v, args.first()) == "sc").then(|| vec![(v.field("pos"), self.amount(v))])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let (me, pos) = (cx.op(), v.field("pos"));
+        let leaf = |x: ValueId| vec![v.str("leaf"), x];
+        match text(v, a.first()).as_str() {
+            "leaf" => Ok(a[1]),
+            "chain" => {
+                let stage = cx.parked().and_then(|t| t.downcast::<u8>().ok()).map_or(0, |b| *b);
+                if stage == 0 {
+                    if let Err(s) = cx.apply(me, leaf(a[1])) {
+                        cx.park(Box::new(0u8));
+                        return Err(s);
+                    }
+                }
+                match cx.apply(me, leaf(a[2])) {
+                    Ok(y) => {
+                        cx.contribute(pos, v.int(1));
+                        Ok(y)
+                    }
+                    Err(s) => {
+                        cx.park(Box::new(1u8));
+                        Err(s)
+                    }
+                }
+            }
+            "rd" => {
+                let _ = cx.parked();
+                cx.acc_range(pos, None).inspect_err(|_| cx.park(Box::new(())))
+            }
+            "fa" => {
+                let me_node = cx.node();
+                Ok(v.int(cx.follow_after(me_node, me, leaf(v.int(9))) as i64))
+            }
+            "sc" => {
+                cx.contribute(pos, self.amount(v));
+                Ok(ValueId::UNIT)
+            }
+            _ => Ok(cx.use_env(v.field("eb"))?.unwrap_or(ValueId::NIL)),
+        }
+    }
+}
+
+/// The third engine's operation: publishes loop-back `lb` + 1 (never
+/// settles).
+struct Inc;
+
+impl Operation for Inc {
+    fn name(&self) -> &'static str {
+        "inc"
+    }
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let lb = v.field("lb");
+        let x = cx.use_field(lb)?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        cx.publish(lb, v.int(x + 1));
+        Ok(ValueId::UNIT)
     }
 }
 
@@ -145,8 +241,78 @@ fn a_clean_recording_holds_what_play_replays() {
         .expect("absorbing");
     assert_eq!(eng.output(nodes[0]), Some(int(&eng, 35)), "lb1: 2 + 10 + 2 + 20 + 1");
 
+    // A second engine in the same process.
+    let big = Arc::new(AtomicBool::new(false));
+    let known = Arc::new(AtomicBool::new(false));
+    let mut eng2 = Engine::new();
+    let pg = eng2.register(Arc::new(Pg { big: big.clone() }));
+    eng2.declare_accumulator(field(&eng2, "pos"), Arc::new(SumMonoid));
+    eng2.set_stable(field(&eng2, "pos"));
+    eng2.set_heights(true);
+    let k2 = known.clone();
+    eng2.set_env_provider(Box::new(move |vals: &Values, f: Field| {
+        (f == vals.field("eb") && k2.load(Ordering::Relaxed)).then(|| Some(vals.int(7)))
+    }));
+    let u2 = eng2.new_unit();
+    let s = |e: &Engine, xs: &[&str]| xs.iter().map(|x| e.values().str(x)).collect::<Vec<_>>();
+    let chain = vec![eng2.values().str("chain"), int(&eng2, 1), int(&eng2, 2)];
+    let n2 = [
+        eng2.push(u2, pg, chain),
+        eng2.push(u2, pg, s(&eng2, &["rd"])),
+        eng2.push(u2, pg, s(&eng2, &["fa"])),
+        eng2.push(u2, pg, s(&eng2, &["sc"])),
+        eng2.push(u2, pg, s(&eng2, &["rd"])),
+        eng2.push(u2, pg, s(&eng2, &["env"])),
+    ];
+    let r = eng2.evaluate_sequential().expect("the second engine");
+    assert!(r.resumed >= 3, "the chain resumes twice, the range read once: {r:?}");
+    assert_eq!(eng2.output(n2[0]), Some(int(&eng2, 2)));
+    assert_eq!(eng2.output(n2[1]), Some(int(&eng2, 1)));
+    assert_eq!(eng2.output(n2[4]), Some(int(&eng2, 2)));
+    // The client's context changes: the provider knows `eb` now, and the
+    // `sc` texts' hooks answer again.
+    known.store(true, Ordering::Relaxed);
+    big.store(true, Ordering::Relaxed);
+    eng2.refresh_where(&|op: OpId, args: &[ValueId], v: &Values| op == pg && text(v, args.first()) == "sc");
+    eng2.evaluate_sequential().expect("the second engine again");
+    assert_eq!(eng2.output(n2[4]), Some(int(&eng2, 6)));
+    assert_eq!(eng2.output(n2[5]), Some(int(&eng2, 7)));
+
+    // A third: the round cap ends the rounds instead of failing.
+    let mut eng3 = Engine::new();
+    let inc = eng3.register(Arc::new(Inc));
+    eng3.declare_loopback(field(&eng3, "lb"), int(&eng3, 0));
+    eng3.set_max_rounds(3);
+    eng3.set_round_cap_policy(CapPolicy::Finalize);
+    let u3 = eng3.new_unit();
+    eng3.push(u3, inc, Vec::new());
+    let r = eng3.evaluate_sequential().expect("capped, not failed");
+    assert!(r.capped.is_some(), "{r:?}");
+
     let text = std::fs::read_to_string(&path).expect("the recording");
-    let lines: Vec<J> = text.lines().map(|l| serde_json::from_str(l).expect("a JSON line")).collect();
+    let all: Vec<J> = text.lines().map(|l| serde_json::from_str(l).expect("a JSON line")).collect();
+    assert_eq!(all[0], serde_json::json!({"k": "rec", "v": 2}), "the format line first");
+    let of = |e: &Engine| -> Vec<J> {
+        let i = e.values().instance();
+        all.iter().filter(|l| l["e"] == i).cloned().collect()
+    };
+    let (lines2, lines3) = (of(&eng2), of(&eng3));
+    let api2 = |f: &str| lines2.iter().filter(|l| l["k"] == "api" && l["f"] == f).count();
+    for f in ["set_stable", "set_heights", "refresh_where"] {
+        assert_eq!(api2(f), 1, "no {f} line");
+    }
+    assert!(lines3.iter().any(|l| l["k"] == "api" && l["f"] == "set_round_cap_policy"));
+    // Each `Ctx` call once: `follow_after` placing its continuation as
+    // `follow`, `acc_range` reading as `acc_range_to`.
+    let calls: Vec<&J> = lines2.iter().filter(|l| l["k"] == "run").flat_map(|l| l["calls"].as_array().unwrap()).collect();
+    let called = |m: &str| calls.iter().filter(|c| c[0] == m).count();
+    assert!(called("follow_after") >= 1 && called("acc_range") >= 1);
+    assert_eq!((called("follow"), called("acc_range_to")), (0, 0));
+    // The provider's answers for `eb`: unknown, then 7.
+    let env: Vec<&J> = lines2.iter().filter(|l| l["k"] == "env").collect();
+    assert!(env.first().is_some_and(|l| l["known"] == false) && env.last().is_some_and(|l| l["known"] == true));
+
+    let lines = of(&eng);
     let api = |f: &str| lines.iter().filter(|l| l["k"] == "api" && l["f"] == f).count();
     let kind = |k: &str| lines.iter().filter(|l| l["k"] == k).count();
     // (The built-ins are the engine's own: only the client's op.)

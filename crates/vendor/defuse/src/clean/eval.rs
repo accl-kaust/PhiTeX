@@ -538,8 +538,8 @@ impl Engine {
             .collect();
         causes.sort_by_key(|c| c.0);
         rep.rerun_causes = causes;
-        // (Complete runs, as the round core counts them: a stopped attempt
-        // is not one; the limits count attempts.)
+        // (Complete runs: a stopped attempt is not one; the limits count
+        // attempts.)
         rep.runs -= self.stopped;
         self.core.hold_fin.store(self.loop_start != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
         super::core::prof::dump();
@@ -715,7 +715,8 @@ impl Engine {
             // and commits at once, then runs what its commits queued while
             // the step's other jobs run (a chain goes on without waiting
             // for the step's end).
-            let lane_on = lane() && exec.parallelism() > 1 && jobs.len() > 1;
+            let par = exec.parallelism().max(1);
+            let lane_on = lane() && par > 1;
             let mut m = Merge {
                 eng: &mut *self,
                 s: &mut *s,
@@ -738,7 +739,7 @@ impl Engine {
                     if lane_on && i == 0 {
                         lane_ran.store(true, std::sync::atomic::Ordering::Relaxed);
                         let mut g = super::core::lock(&lane_m);
-                        let d = g.lane(&core, &jobs[0], &careful, &fueled, fuel, predict, &busy_ids, &left, deadline);
+                        let d = g.lane(&core, &jobs[0], &careful, &fueled, fuel, predict, &busy_ids, &left, par, deadline);
                         lane_busy.fetch_add(d, std::sync::atomic::Ordering::Relaxed);
                         return crate::api::RunResult(());
                     }
@@ -1873,18 +1874,6 @@ impl Engine {
             .collect()
     }
 
-    fn dirty_all(&mut self, s: &mut Sched, ids: &[Id]) {
-        let w = std::mem::take(&mut self.w);
-        let mut b = Builder::new(&self.core, w);
-        for &id in ids {
-            b.make_dirty(id);
-        }
-        let m = b.finish();
-        self.w = m.w;
-        for id in m.dirty {
-            self.enqueue(s, id);
-        }
-    }
 }
 
 /// Adds one to `name`'s count in `list`.
@@ -2057,7 +2046,8 @@ impl Merge<'_> {
     }
 
     /// The step's lane: runs `first` on the world as it is and commits it,
-    /// then, while the step's other jobs (`busy`) run (`left` of them), the
+    /// then, while the step's other jobs (`busy`) run (`left` of them), or
+    /// its commits queued fewer than `par` nodes off the chain, the
     /// chain on from it: the first ready node its commits queued that runs
     /// the first node's operation (a scan's next scan, not the pieces it
     /// unfolded), or the node the last run stopped on;
@@ -2073,14 +2063,17 @@ impl Merge<'_> {
         predict: bool,
         busy: &FxHashSet<Id>,
         left: &std::sync::atomic::AtomicUsize,
+        par: usize,
         deadline: Option<std::time::Instant>,
     ) -> u64 {
         use super::core::prof::count;
         let mut t_ops = 0u64;
         let mut job = Some((first.0, super::core::lock(&first.1).take(), careful.contains(&first.0), fueled.contains(&first.0)));
         self.s.lane_new = Some(Vec::new());
-        // (The chain's operation: its first node's.)
+        // (The chain's operation: its first node's. `others`: the nodes its
+        // commits queued off the chain, for the next step's workers.)
         let op = self.eng.w.node(first.0).map(|n| n.text.op);
+        let mut others: FxHashSet<Id> = FxHashSet::default();
         while let Some((id, resume, careful, fueled)) = job.take() {
             #[cfg(not(target_arch = "wasm32"))]
             let t = std::time::Instant::now();
@@ -2121,7 +2114,10 @@ impl Merge<'_> {
                     self.parked += 1;
                 }
             }
-            if left.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            // (The step's other jobs done and enough queued to feed the
+            // workers: the step ends; while too little is, the chain
+            // goes on here rather than a step per link.)
+            if left.load(std::sync::atomic::Ordering::Acquire) == 0 && others.len() >= par {
                 count(24);
                 break;
             }
@@ -2129,7 +2125,7 @@ impl Merge<'_> {
                 self.err = Some(e);
                 break;
             }
-            match self.lane_next(busy, predict, op, want) {
+            match self.lane_next(busy, predict, op, want, &mut others) {
                 Ok(Some((x, r))) => {
                     count(22);
                     job = Some((x, r, self.s.refutes.contains_key(&x), false));
@@ -2149,7 +2145,14 @@ impl Merge<'_> {
     /// queued, else the first, in text order, of those its commits queued
     /// that runs operation `op`, when ready to run now (prepared), if any.
     #[allow(clippy::type_complexity)]
-    fn lane_next(&mut self, busy: &FxHashSet<Id>, predict: bool, op: Option<crate::api::OpId>, want: Option<Id>) -> Result<Option<(Id, Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>)>, EvalError> {
+    fn lane_next(
+        &mut self,
+        busy: &FxHashSet<Id>,
+        predict: bool,
+        op: Option<crate::api::OpId>,
+        want: Option<Id>,
+        others: &mut FxHashSet<Id>,
+    ) -> Result<Option<(Id, Option<(Box<dyn std::any::Any + Send>, Vec<Read>)>)>, EvalError> {
         use super::core::prof::count;
         let (eng, s, rep) = (&mut *self.eng, &mut *self.s, &mut *self.rep);
         if let Some(x) = want
@@ -2163,6 +2166,7 @@ impl Merge<'_> {
             let mut cands = s.lane_new.take().unwrap_or_default();
             cands.retain(|x| s.queued.contains(x) && !busy.contains(x));
             let chain = |x: Id| Some(x) == want || eng.w.node(x).is_some_and(|n| Some(n.text.op) == op);
+            others.extend(cands.iter().copied().filter(|&x| !chain(x)));
             let best = cands.iter().filter(|&&x| chain(x)).filter_map(|&x| eng.w.node(x).map(|n| (n.unit, n.pos, x))).filter(|k| s.queue.contains(k)).min();
             let Some(k) = best else {
                 s.lane_new = Some(cands);

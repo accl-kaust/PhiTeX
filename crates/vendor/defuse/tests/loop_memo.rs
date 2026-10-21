@@ -350,7 +350,7 @@ fn histories_mix(
                 eprintln!(
                     "step {step}: {texts:?}\n  got  {got:?}\n  want {want:?}\n  rep rounds {:?} quick {:?} restarts {:?}",
                     rep.as_ref().map(|r| r.rounds),
-                    rep.as_ref().map(|r| (r.quick_held, r.quick_refused.clone())),
+                    rep.as_ref().map(|r| r.quick_held),
                     rep.as_ref().map(|r| r.restarts)
                 );
             }

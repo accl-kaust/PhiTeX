@@ -511,6 +511,7 @@ impl WaitKind {
 
 /// What reaching [`crate::Engine::set_max_rounds`]'s cap does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub enum CapPolicy {
     /// The evaluation fails with [`EvalError::NonConvergence`].
     #[default]
@@ -561,8 +562,8 @@ pub enum EvalError {
         /// The evaluation's counters up to here.
         report: Box<Report>,
     },
-    /// [`crate::Ctx::use_field_at`] named a node that is not earlier in the
-    /// reader's unit.
+    /// [`crate::Ctx::use_field_at`] named the reader itself or a node of
+    /// another unit.
     BadPosition {
         node: NodeId,
         at: NodeId,
@@ -636,7 +637,7 @@ impl std::fmt::Display for EvalError {
             EvalError::BadPosition { node, at } => {
                 write!(
                     f,
-                    "node {node:?} read a field at {at:?}, which is not earlier in its unit"
+                    "node {node:?} read a field at {at:?}, a position it may not read at"
                 )
             }
             EvalError::OpPanicked { node, op, message } => {
@@ -774,19 +775,6 @@ pub struct RoundTimes {
     pub memo_hits: u64,
 }
 
-/// Why a node ran instead of reusing its per-round memo entry
-/// ([`LoopStart::PerRound`]).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MemoMiss {
-    pub node: NodeId,
-    /// The round (1-based; `u32::MAX` for the final phase).
-    pub round: u32,
-    /// What failed: no entry, its text changed, a node its entry names is
-    /// gone, or the first read that no longer holds (its kind, the field
-    /// and the node it names, where it has them).
-    pub why: String,
-}
-
 /// What an evaluation did. The first seven counters (`nodes_run` ..
 /// `restarts`) are canonical: functions of the texts before and after,
 /// equal under every schedule.
@@ -838,13 +826,6 @@ pub struct Report {
     pub effects_refuted: u64,
     /// Siblings claimed or released by those claims.
     pub claim_siblings: u64,
-    /// Free-running jobs whose run made exactly one node ready.
-    pub sole_successor: u64,
-    /// Free-running jobs whose run made two or more ready.
-    pub many_successors: u64,
-    /// Sole successors run next on the same worker
-    /// (`Engine::set_successor_affinity`).
-    pub kept_successors: u64,
     pub refuted_by_field: Vec<(Field, u64)>,
     pub refuted_nodes: u64,
     pub refutations_max: u32,
@@ -883,15 +864,6 @@ pub struct Report {
     /// ran conservatively afterwards, on committed values only. High
     /// counts mean a hint or prediction is costing parallelism.
     pub nodes_conservative: u64,
-    /// Changes of a stable field's definition (`Engine::set_stable`) that
-    /// found readers to touch: many mean a field marked stable is not.
-    pub stable_scans: u64,
-    /// Time the operations' runs spent inside the engine's read calls
-    /// (`use_field`, `scope_kind`, ...), by kind, in nanoseconds summed
-    /// over workers: estimated from one call in 64. Of a run's time
-    /// (`RoundTimes::op_ns`), this is the engine's share; the rest is the
-    /// operation's own code.
-    pub read_ns: Vec<(&'static str, u64)>,
     pub env_stalled: u64,
     pub env_waits: Vec<(NodeId, Field)>,
     pub env_provided: u64,
@@ -901,21 +873,10 @@ pub struct Report {
     /// run at once.
     pub max_ready: usize,
     pub critical_path: u32,
-    pub scope_region: u64,
     /// The edits made so far, those absorbed during the evaluation included.
     pub edits: u64,
     /// The sum of the batch sizes over the steps.
     pub ready_total: u64,
-    /// Values freed by the sweep.
-    pub values_freed: u64,
-    /// Unfolded-text memo lookups that found the text.
-    pub text_memo_hits: u64,
-    /// Unfolded-text memo lookups that produced it.
-    pub text_memo_misses: u64,
-    /// Lexical applications found in the memo.
-    pub app_memo_hits: u64,
-    /// Lexical applications created.
-    pub app_memo_misses: u64,
     /// Speculative runs kept whose shape (children, claim, scope effect or
     /// definition set) differed from the node's previous shape.
     pub spec_shape_changes: u64,
@@ -928,19 +889,9 @@ pub struct Report {
     /// Under [`CapPolicy::Finalize`], when the round cap was reached: the
     /// loop-back fields that were still moving.
     pub capped: Option<Vec<Field>>,
-    /// Bytes held by the per-round store after the evaluation
-    /// ([`LoopStart::PerRound`]; an estimate).
-    pub memo_bytes: u64,
-    /// Under [`LoopStart::PerRound`], after edits: why the evaluation ran
-    /// the rounds from the initial values instead of keeping the quick
-    /// path's result (`None`: the quick path held, or no edits).
-    pub quick_refused: Option<String>,
     /// Under [`LoopStart::PerRound`]: the quick path held (the edits were
     /// evaluated from the last fixed point only).
     pub quick_held: bool,
-    /// Under [`LoopStart::PerRound`], outside the quick path: every memo
-    /// entry not reused, and why (a node offered no entry included).
-    pub memo_misses: Vec<MemoMiss>,
     pub resettled: u64,
     /// At a `NoProgress` stop: each node waited on that is not itself
     /// waiting, and its state (why nothing wakes the waiters).

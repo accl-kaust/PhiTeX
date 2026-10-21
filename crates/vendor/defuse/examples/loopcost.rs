@@ -3,7 +3,7 @@
 //! `work` µs), a counter that climbs to `rounds - 1` (so cold takes
 //! `rounds` rounds), and `n` plain paragraphs; the edit re-texts one
 //! paragraph (its page, which reads it and `refs`, runs again). Prints
-//! runs, memo hits, wall and memo bytes per start.
+//! runs, results reused and wall per start.
 //!
 //! `cargo run --release --example loopcost -- [n] [rounds] [work_us] [split]`
 //!
@@ -138,7 +138,7 @@ fn main() {
         let hits: u64 = e.round_times.iter().map(|t| t.memo_hits).sum();
         walls.sort_by(f64::total_cmp);
         println!(
-            "{start:?}: cold {:.1} ms ({} rounds, {} runs); edit median {:.3} ms, {} runs, {} memo hits, {} rounds, memo {} KB",
+            "{start:?}: cold {:.1} ms ({} rounds, {} runs); edit median {:.3} ms, {} runs, {} reused, {} rounds",
             cold.as_secs_f64() * 1e3,
             r.rounds,
             r.runs,
@@ -146,23 +146,6 @@ fn main() {
             e.runs,
             hits,
             e.rounds,
-            e.memo_bytes / 1024
         );
-        if let Some(q) = &e.quick_refused {
-            println!("  quick path refused: {q}");
-        }
-        // Misses by reason, numbers folded.
-        let mut by: std::collections::BTreeMap<String, usize> = Default::default();
-        for m in &e.memo_misses {
-            let w: String = m
-                .why
-                .chars()
-                .map(|c| if c.is_ascii_digit() { '#' } else { c })
-                .collect();
-            *by.entry(format!("round {}: {w}", m.round)).or_default() += 1;
-        }
-        for (w, c) in by {
-            println!("  miss {c:>6} {w}");
-        }
     }
 }

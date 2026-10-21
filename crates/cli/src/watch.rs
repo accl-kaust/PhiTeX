@@ -924,30 +924,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         ),
                     ));
                 }
-                let waits: Vec<String> = x
-                    .waits_by_kind
-                    .iter()
-                    .filter(|(_, n)| *n > 0)
-                    .map(|(k, n)| format!("{n} {k}"))
-                    .collect();
-                if !waits.is_empty() || x.gated > 0 {
-                    let mut w = waits.join(" · ");
-                    if x.gated > 0 {
-                        w.push_str(&format!(" · {} gated", x.gated));
-                    }
-                    if let Some((id, n)) = x.top_waited.first() {
-                        w.push_str(&format!(" · most on node {id} ×{n}"));
-                    }
-                    rows.push(("waits".to_owned(), w.trim_start_matches(" · ").to_owned()));
-                }
                 if x.max_ready > 0 {
-                    rows.push((
-                        "ready".to_owned(),
-                        format!(
-                            "{:.1} a step on average · at most {}",
-                            x.ready_mean, x.max_ready
-                        ),
-                    ));
+                    rows.push(("ready".to_owned(), format!("at most {} a step", x.max_ready)));
                 }
                 let [bounded, any, viol, undecl, stops, waits] = x.hints;
                 if bounded + any > 0 {
@@ -968,8 +946,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     rows.push((
                         "ahead".to_owned(),
                         format!(
-                            "{} run ahead · {} confirmed · {} run again · {} raises · {} out of fuel",
-                            x.speculations, x.confirmations, x.mispredictions, x.raises, x.fuel_outs
+                            "{} run ahead · {} confirmed · {} run again · {} out of fuel",
+                            x.speculations, x.confirmations, x.mispredictions, x.fuel_outs
                         ),
                     ));
                 }
@@ -1004,9 +982,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 "batches": x.batches,
                 "batches_inline": x.batches_inline,
                 "max_batch": x.max_batch,
-                "waits_by_kind": x.waits_by_kind.iter().map(|(k, n)| json!({"kind": k, "waits": n})).collect::<Vec<_>>(),
-                "top_waited": x.top_waited.iter().map(|(id, n)| json!({"node": id, "waits": n})).collect::<Vec<_>>(),
-                "gated": x.gated,
                 "hints": {
                     "bounded": x.hints[0],
                     "any": x.hints[1],
@@ -1015,13 +990,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     "stops": x.hints[4],
                     "pending_waits": x.hints[5],
                 },
-                "ready_mean": x.ready_mean,
                 "max_ready": x.max_ready,
                 "speculation": {
                     "run": x.speculations,
                     "confirmed": x.confirmations,
                     "mispredicted": x.mispredictions,
-                    "raises": x.raises,
                     "fuel_outs": x.fuel_outs,
                 },
             })),

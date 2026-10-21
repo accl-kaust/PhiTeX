@@ -184,21 +184,13 @@ pub struct RunInfo {
     pub batches: u64,
     pub batches_inline: u64,
     pub max_batch: usize,
-    /// The engine's waits by kind, the most-waited nodes (id, waits), and
-    /// the steps held back at a gate.
-    pub waits_by_kind: Vec<(&'static str, u64)>,
-    pub top_waited: Vec<(u64, u64)>,
-    pub gated: u64,
     /// The steps run ahead of their inputs, those confirmed, those run
-    /// again, the raises, the runs out of fuel; the most steps ready at
-    /// once and the mean per scheduler step.
+    /// again, the runs out of fuel; the most steps ready at once.
     pub speculations: u64,
     pub confirmations: u64,
     pub mispredictions: u64,
-    pub raises: u64,
     pub fuel_outs: u64,
     pub max_ready: usize,
-    pub ready_mean: f64,
     /// The parser's hints: nodes bounded, nodes that may define anything,
     /// hints whose assumptions failed, definitions outside a bound, the
     /// stops and pending waits.
@@ -943,16 +935,11 @@ impl Session {
                 batches: s.batches,
                 batches_inline: s.batches_inline,
                 max_batch: s.jobs_max_batch,
-                waits_by_kind: s.waits_by_kind.clone(),
-                top_waited: s.top_waited.clone(),
-                gated: s.gated,
                 speculations: s.speculations,
                 confirmations: s.confirmations,
                 mispredictions: s.mispredictions,
-                raises: s.raises,
                 fuel_outs: s.fuel_outs,
                 max_ready: s.max_ready,
-                ready_mean: s.ready_mean(),
                 hints: [
                     s.nodes_bounded,
                     s.nodes_any,

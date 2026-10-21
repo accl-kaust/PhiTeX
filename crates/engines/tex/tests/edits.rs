@@ -538,7 +538,7 @@ fn one_word_edit_reruns_little() {
         b.edit(&text);
         let st = &b.stats;
         eprintln!(
-            "para4000 edit at {t} threads: runs by op {:?}, {} runs of {} nodes, pages touched {:?} of {}, speculations {} mispredicted {} stopped {} reshaped {}, loop rounds {}",
+            "para4000 edit at {t} threads: runs by op {:?}, {} runs of {} nodes, pages touched {:?} of {}, speculations {} mispredicted {}, loop rounds {}",
             st.runs_by_op,
             st.runs,
             st.nodes_run,
@@ -546,8 +546,6 @@ fn one_word_edit_reruns_little() {
             b.pages().len(),
             st.speculations,
             st.mispredictions,
-            st.spec_stops,
-            st.spec_shape_changes,
             st.loop_rounds
         );
         for (n, op, why) in &st.reruns {
@@ -578,11 +576,7 @@ fn one_word_edit_reruns_little() {
             "runs by op at {t} threads"
         );
         assert_eq!(st.runs, st.nodes_run, "a node ran twice at {t} threads");
-        assert_eq!(
-            (st.mispredictions, st.spec_stops, st.spec_shape_changes),
-            (0, 0, 0),
-            "speculative runs dropped at {t} threads"
-        );
+        assert_eq!(st.mispredictions, 0, "speculative runs dropped at {t} threads");
     }
 }
 

@@ -7,14 +7,14 @@ publish = false
 description = "PhiTeX's side of the engine: re-exports defuse (the TeX-free def-use graph evaluator, vendored under crates/vendor/defuse and never edited here) and holds what PhiTeX adds around it without knowing TeX"
 
 [dependencies]
-defuse = { path = "../../vendor/defuse", features = ["clean"] }
+defuse = { path = "../../vendor/defuse" }
 
 [features]
 # the engine's probes (defuse::obs): spans and counters, profiling only
 profile = ["defuse/profile"]
-# the engine's scheduler dumps (DEFUSE_DUMP, DEFUSE_DUMP_EVERY, on SIGTERM and on NoProgress)
-# and its light trace (DEFUSE_LTRACE, DEFUSE_LTRACE_FIELDS); release builds carry neither
-observe = ["defuse/observe", "defuse/ltrace"]
+# the engine's scheduler dumps (DEFUSE_DUMP, DEFUSE_DUMP_EVERY, on SIGTERM and on NoProgress);
+# release builds carry none
+observe = ["defuse/observe"]
 
 [lints]
 workspace = true
