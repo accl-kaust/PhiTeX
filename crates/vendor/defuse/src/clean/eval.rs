@@ -1459,6 +1459,9 @@ impl Engine {
             for &x in r.kids.iter().chain(&r.conts) {
                 if self.w.node(x).is_none_or(|xn| xn.pos > from) {
                     self.w.awaiting.insert(x, (), &NoMeasure);
+                    if super::core::debug() {
+                        eprintln!("stale kept {p}: {x} waits for it (past {from})");
+                    }
                 }
             }
         }
@@ -1527,6 +1530,9 @@ impl Engine {
         if self.kept.contains_key(&placer)
             && let Some(from) = self.kept_broken(s, placer)
         {
+            if super::core::debug() {
+                eprintln!("stale kept {placer}: its kept reads broke (seen running {id}); it starts over");
+            }
             self.kept.remove(&placer);
             s.kept_ok.remove(&placer);
             s.parked.remove(&placer);
@@ -1561,6 +1567,9 @@ impl Engine {
                 Some(r) => {
                     rep.restarted += 1;
                     bump(&mut rep.restarted_by, read_kind(r));
+                    if super::core::debug() {
+                        eprintln!("restart {id}: kept read broken {r:?}");
+                    }
                     // (Starting over, it is a stale placer.)
                     let from = self.broken_from(id, r);
                     self.stale_placer(id, from);
@@ -1828,6 +1837,9 @@ impl Engine {
                         }
                         let gone = past(&b.w);
                         if !gone.is_empty() {
+                            if super::core::debug() {
+                                eprintln!("passed {id}: frees {gone:?}, stopped on {wait:?}");
+                            }
                             b.free_placed(id, &gone);
                         }
                         let m = b.finish();

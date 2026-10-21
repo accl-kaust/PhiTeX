@@ -269,8 +269,11 @@ impl<'a> Builder<'a> {
 
     /// Node `id` (`n`) runs again for a change: what it placed waits for
     /// its next run to place it again (or to finish without it).
-    fn stale_placer(&mut self, _id: Id, n: &Node) {
+    fn stale_placer(&mut self, id: Id, n: &Node) {
         if let Some(r) = n.res.as_ref() {
+            if super::core::debug() && !(r.kids.is_empty() && r.conts.is_empty()) {
+                eprintln!("stale placer {id}: {} placements wait for it", r.kids.len() + r.conts.len());
+            }
             for &x in r.kids.iter().chain(&r.conts) {
                 self.w.awaiting.insert(x, (), &NoMeasure);
             }
@@ -625,6 +628,9 @@ impl<'a> Builder<'a> {
     /// Frees node `id` and everything it unfolded.
     pub(crate) fn free(&mut self, id: Id) {
         let Some(n) = self.w.node(id).cloned() else { return };
+        if super::core::debug() && n.parent != NONE {
+            eprintln!("free {id} (placed by {})", n.parent);
+        }
         self.w.awaiting.remove(&id, &NoMeasure);
         if let Some(res) = n.res.clone() {
             for &k in res.kids.iter().chain(&res.conts) {
