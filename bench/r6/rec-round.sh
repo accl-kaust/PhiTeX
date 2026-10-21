@@ -8,6 +8,9 @@ export CARGO_BUILD_JOBS=16
 git log --oneline -1
 sed -i 's/features = \["clean"\]/features = []/' crates/core/defuse/Cargo.toml
 grep -n "defuse = " crates/core/defuse/Cargo.toml
+# (the round core has declare_loopback only: the batch declared one by one)
+perl -0pi -e 's/self\.eng\.declare_loopbacks\((&[^;]*?)\);/for &(lf, lx) in ($1).iter() { self.eng.declare_loopback(lf, lx); }/g' crates/engines/tex/src/api.rs
+grep -c "declare_loopbacks" crates/engines/tex/src/api.rs
 cargo build -q --release -p phitex-cli --features phitex-tex/observe > "$r/build.txt" 2>&1 || { grep -E "^error|-->" -A7 "$r/build.txt" | head -60 | tee -a "$r/summary.txt"; exit 1; }
 mkdir -p "$w/bin/o"; cp target/release/phitex "$w/bin/o/phitex"
 E="SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_CACHE_DIR=$w/cache"
