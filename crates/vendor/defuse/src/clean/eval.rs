@@ -219,6 +219,8 @@ impl Engine {
     ) -> Result<Report, EvalError> {
         let t0 = std::time::Instant::now();
         let mut rep = Report::default();
+        // (No run is out: no late filing for a node gone.)
+        self.w.rd.purge_gone();
         (self.t_op, self.t_commit, self.t_idle) = (0, 0, 0);
         self.t_seen = (0, 0, 0);
         self.stopped = 0;
@@ -2826,10 +2828,15 @@ impl Merge<'_> {
         // again; refuted, they would stay unseen and its step's later
         // readers guess wrong again, one commit a step.
         let tv = super::core::now();
+        // (The world as the run saw it: its reads hold, but the
+        // environment's, which is not the world's.)
+        let same = snap.same_as(&eng.w);
+        rep.merge.unchanged += u64::from(same);
+        let asked = |rd: &Read| !same || matches!(rd, Read::Env { .. });
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
                 let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate()));
-                let mut broken = r.res.reads.iter().filter(|rd| !super::build::holds(&eng.core, &eng.w, id, rd));
+                let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd));
                 match broken.next() {
                     Some(rd) if speculated(rd) && broken.all(speculated) => {
                         let Read::Range { f, .. } = rd else { unreachable!("a fold") };
@@ -2858,7 +2865,7 @@ impl Merge<'_> {
                 eng.enqueue(s, id);
                 return Ok(());
             }
-            Outcome::Done(r) => match r.res.reads.iter().find(|rd| !super::build::holds(&eng.core, &eng.w, id, rd)) {
+            Outcome::Done(r) => match r.res.reads.iter().find(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd)) {
                 Some(rd) => {
                     rep.merge.validate += super::core::ns_since(tv);
                     let tr = super::core::now();
@@ -2963,6 +2970,13 @@ fn conflict_counts(snap: &World, w: &World, id: Id, o: &Outcome) {
 }
 
 /// Runs node `id` against world `w` (any thread).
+/// Whether workers file their runs' reads (`CLEAN_FILE_AHEAD`, default
+/// on).
+fn file_ahead() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CLEAN_FILE_AHEAD").as_deref() != Ok("0"))
+}
+
 fn run_job(
     core: &super::core::Core,
     w: &World,
@@ -2987,6 +3001,10 @@ fn run_job(
     cx.fuel = fuel;
     let op = core.ops[cx.op.0 as usize].clone();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
+    if cx.named_gone && r.as_ref().is_ok() {
+        drop(cx);
+        return run_job(core, w, id, None, predict, careful, fuel);
+    }
     if let Some(e) = cx.error.take() {
         return Outcome::Failed(e);
     }
@@ -3021,7 +3039,15 @@ fn run_job(
         span: t_start.zip(super::core::now()),
     };
     match r {
-        Ok(Ok(out)) => Outcome::Done(run(cx, out)),
+        Ok(Ok(out)) => {
+            let mut r = run(cx, out);
+            // Its reads filed here, off the merge (`CLEAN_FILE_AHEAD=0`:
+            // all by the merge).
+            if file_ahead() {
+                r.res.filed = super::build::file_ahead(w, id, &r.res.reads);
+            }
+            Outcome::Done(r)
+        }
         Ok(Err(_)) => {
             let wait = cx.wait.take().unwrap_or(Wait::Node(id, None));
             Outcome::Stopped(run(cx, ValueId::UNIT), wait)

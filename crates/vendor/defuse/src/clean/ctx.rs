@@ -49,6 +49,11 @@ pub struct Ctx<'a> {
     pub(crate) diag: Vec<ValueId>,
     pub(crate) wait: Option<Wait>,
     pub(crate) kept: Option<Box<dyn Any + Send>>,
+    /// Resumed from a kept state.
+    pub(crate) resumed: bool,
+    /// A resumed run named a node that is gone (its kept state is of a
+    /// world before): it runs again from the start.
+    pub(crate) named_gone: bool,
     pub(crate) restart: bool,
     pub(crate) error: Option<crate::api::EvalError>,
     /// The run's claim (`claim`).
@@ -107,6 +112,8 @@ impl<'a> Ctx<'a> {
             kinds: Vec::new(),
             diag: Vec::new(),
             wait: None,
+            resumed: kept.is_some(),
+            named_gone: false,
             kept,
             restart: false,
             error: None,
@@ -385,6 +392,7 @@ impl<'a> Ctx<'a> {
         };
         let a = at.0;
         if self.w.node(a).is_none_or(|n| matches!(n.place, Place::Marker(_))) {
+            self.named_gone |= self.resumed && self.w.node(a).is_none();
             self.reads.push(Read::At { node: a, there: false });
             return Ok(FieldAt::Gone);
         }
@@ -867,8 +875,22 @@ impl<'a> Ctx<'a> {
         r
     }
 
+    /// Node `x`, named by this run as a window's end, as the window takes
+    /// it: one gone is read as gone and taken as none (a resumed run that
+    /// names one starts over: its kept state names what is no longer
+    /// there).
+    fn anchor(&mut self, x: Option<NodeId>) -> Id {
+        let Some(x) = x else { return NONE };
+        if self.w.node(x.0).is_some() {
+            return x.0;
+        }
+        self.reads.push(Read::At { node: x.0, there: false });
+        self.named_gone |= self.resumed;
+        NONE
+    }
+
     fn acc_next_inner(&mut self, f: Field, after: Option<NodeId>) -> Result<Option<(NodeId, ValueId)>, Stop> {
-        let from = after.map_or(NONE, |n| n.0);
+        let from = self.anchor(after);
         let Some((u, lo, _)) = self.w.window(self.me, from, NONE, true) else {
             return Ok(None);
         };
@@ -907,8 +929,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn acc_window(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, past: bool) -> Result<ValueId, Stop> {
-        let from = from.map_or(NONE, |n| n.0);
-        let to = to.map_or(NONE, |n| n.0);
+        let from = self.anchor(from);
+        let to = self.anchor(to);
         let Some((u, lo, hi)) = self.w.window(self.me, from, to, past) else {
             return Ok(ValueId::UNIT);
         };

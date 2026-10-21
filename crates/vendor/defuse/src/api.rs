@@ -837,6 +837,9 @@ pub struct MergeTimes {
     pub wake: u64,
     /// Heights for the critical chain.
     pub heights: u64,
+    /// Results whose world was unchanged since their run (a count: their
+    /// reads hold unchecked).
+    pub unchanged: u64,
 }
 
 impl MergeTimes {
@@ -852,6 +855,7 @@ impl MergeTimes {
         self.dependents += o.dependents;
         self.wake += o.wake;
         self.heights += o.heights;
+        self.unchanged += o.unchanged;
     }
 }
 

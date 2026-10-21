@@ -15,6 +15,13 @@ use crate::values::{Field, FxHashMap};
 
 const SHARDS: usize = 64;
 
+/// A renumbering epoch never used before (by any world: worlds kept apart
+/// never share one).
+pub(crate) fn fresh_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A map sharded by key hash, each shard behind its own lock.
 pub(crate) struct Sharded<K, V> {
     shards: Box<[Mutex<FxHashMap<K, V>>]>,
@@ -84,20 +91,38 @@ pub(crate) struct UnitReaders {
     pub back_readers: Windows,
 }
 
-/// A node's filed entries with the renumbering count they were made at.
-pub(crate) type Filed = Option<(u64, Arc<[ReadKey]>)>;
+/// The entries a node's reads are filed as: every entry the index holds
+/// for it (sorted, distinct). A worker adds what its run read before the
+/// merge commits it, so they may be more than its committed reads need
+/// (a run not committed); never fewer.
+#[derive(Clone, Default)]
+pub(crate) enum Slot {
+    #[default]
+    None,
+    Keys(Arc<[ReadKey]>),
+    /// The node is gone: a late worker files nothing.
+    Gone,
+}
+
+impl Slot {
+    pub(crate) fn keys(&self) -> &[ReadKey] {
+        match self {
+            Slot::Keys(k) => k,
+            _ => &[],
+        }
+    }
+}
 
 struct Inner {
     fields: Sharded<(u32, Field), FieldReaders>,
     units: Sharded<u32, UnitReaders>,
     /// Readers of a node's output (or of its being there).
     outs: Sharded<Id, PMap<Id, ()>>,
-    /// The entries each node's reads are filed as now (sorted, distinct),
-    /// with the renumbering count they were made at.
-    filed: Sharded<Id, Filed>,
-    /// Units renumbered so far: filing made at an older count is stale. A
-    /// renumbering holds it for writing while it moves the entries; a
-    /// worker filing holds it for reading.
+    /// The entries each node's reads are filed as.
+    filed: Sharded<Id, Slot>,
+    /// The last renumbering's epoch (`World::relabels`): a worker's keys
+    /// made at another are stale. A renumbering holds it for writing while
+    /// it moves the entries; a worker filing holds it for reading.
     relabels: RwLock<u64>,
 }
 
@@ -184,25 +209,40 @@ impl Readers {
         });
     }
 
-    /// What node `id`'s reads are filed as, if made at renumbering count
-    /// `r`.
-    #[allow(dead_code, reason = "worker filing (step 2b)")]
-    pub(crate) fn filed(&self, id: Id) -> Filed {
-        self.i().filed.get(&id).flatten()
+    /// Node `id`'s filed entries, held while `f` changes them (and the
+    /// index entries with them).
+    pub(crate) fn with_slot<R>(&self, id: Id, f: impl FnOnce(&mut Slot) -> R) -> R {
+        self.i().filed.with(id, f)
     }
 
-    #[allow(dead_code, reason = "worker filing (step 2b)")]
-    pub(crate) fn set_filed(&self, id: Id, keys: Filed) {
-        self.i().filed.insert(id, keys);
+    /// Forgets the slots of nodes gone (no worker runs: none files one
+    /// again).
+    pub(crate) fn purge_gone(&self) {
+        for s in self.i().filed.shards.iter() {
+            lock(s).retain(|_, v| !matches!(v, Slot::Gone));
+        }
     }
 
-    /// The renumbering count, held for reading (a filing at this count).
-    #[allow(dead_code, reason = "worker filing (step 2b)")]
+    /// Every slot's entries mapped by `f` (a renumbering).
+    pub(crate) fn remap_slots(&self, f: impl Fn(ReadKey) -> ReadKey) {
+        for s in self.i().filed.shards.iter() {
+            for v in lock(s).values_mut() {
+                if let Slot::Keys(ks) = v {
+                    let mut n: Vec<ReadKey> = ks.iter().map(|&k| f(k)).collect();
+                    n.sort_unstable();
+                    n.dedup();
+                    *ks = n.into();
+                }
+            }
+        }
+    }
+
+    /// The renumbering epoch, held for reading (a filing at this epoch).
     pub(crate) fn relabels(&self) -> std::sync::RwLockReadGuard<'_, u64> {
         self.i().relabels.read().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The renumbering count, held for writing (a renumbering).
+    /// The renumbering epoch, held for writing (a renumbering).
     pub(crate) fn relabels_mut(&self) -> std::sync::RwLockWriteGuard<'_, u64> {
         self.i().relabels.write().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
