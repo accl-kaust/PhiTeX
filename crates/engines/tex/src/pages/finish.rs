@@ -656,19 +656,33 @@ impl Run<'_, '_> {
         if let Some(c) = self.fin.as_mut() {
             c.held_n = held.len();
         }
-        // §1012: the marks
-        let mut top = self
-            .get_loc(crate::fields::cell::MARK_TOP)?
-            .filter(|&x| x != ValueId::UNIT);
-        let bot = self
-            .get_loc(crate::fields::cell::MARK_BOT)?
-            .filter(|&x| x != ValueId::UNIT);
+        // §1012: the marks; those in force where the page began (every
+        // class's `\botmark` before it) the page builder's, from its
+        // arguments ([`FinishIn::top_marks`]), not the finisher before's
+        let before: Vec<(i64, ValueId)> = FinishIn::of(v, &self.cx.args())
+            .map(|f| f.top_marks)
+            .filter(|&m| m != ValueId::UNIT)
+            .map(|m| {
+                list_of(v, m)
+                    .into_iter()
+                    .filter_map(|e| match list_of(v, e)[..] {
+                        [c, m] => Some((int_of(v, c), m)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let bot = before.iter().find(|e| e.0 == 0).map(|e| e.1);
+        // (TeX's `top_mark:=bot_mark` where one is; none before the first)
+        let top = bot;
         let mut first = None;
         let mut new_bot = bot;
-        if bot.is_some() {
-            top = bot;
-        }
-        crate::etex::fire_marks_values(self, &marks, None)?;
+        let classes: Vec<ValueId> = before
+            .iter()
+            .filter(|e| e.0 != 0)
+            .map(|&(c, m)| v.list(vec![v.int(c), m, ValueId::UNIT, m]))
+            .collect();
+        crate::etex::fire_marks_values(self, &marks, Some(&classes))?;
         for &m in &marks {
             if crate::etex::is_class_mark(v, Some(m)) {
                 continue;
@@ -678,7 +692,7 @@ impl Run<'_, '_> {
             }
             new_bot = Some(m);
         }
-        if top.is_some() && first.is_none() {
+        if first.is_none() {
             first = top;
         }
         for (name, m) in [

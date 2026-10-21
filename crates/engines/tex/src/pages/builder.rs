@@ -159,9 +159,13 @@ pub(crate) struct PageLoop {
     /// The builder's state where the current page began: the main list's
     /// fold and the page parameters in force ([`FinishIn::fold`]).
     pub began: (FoldState, Option<ValueId>),
-    /// The marks in force where the current page began (unused: a
-    /// finisher reads the marks the one before left, predicted).
+    /// The marks in force where the current page began (§1012: the
+    /// `\botmark` of every class before it), `[[class, mark]…]`
+    /// ([`FinishIn::top_marks`]); unit for none.
     pub top_marks: ValueId,
+    /// The marks the profiles' mark items name (a unit's marks given ids
+    /// here as it is decoded, [`remap_marks`]).
+    pub marks: Vec<ValueId>,
     /// The routines' real material where it missed the guess
     /// ([`PAGE_MISS`]), read once at the loop's start: `(page, rtn)`.
     pub misses: Vec<(i64, ValueId)>,
@@ -211,6 +215,7 @@ impl PageLoop {
             post_k: 0,
             began: (crate::build::IGNORE_DEPTH_STATE, None),
             top_marks: ValueId::UNIT,
+            marks: Vec::new(),
             misses: Vec::new(),
             pages: Vec::new(),
             misses_read: false,
@@ -240,6 +245,8 @@ pub(crate) struct LoopFire {
     /// said where the page is noted).
     pub held: Vec<(Src, Node)>,
     pub held_named: bool,
+    /// The marks on the page, in order (ids in [`PageLoop::marks`]).
+    pub marks: Vec<u32>,
     /// What goes back to the contributions (§1017), with their sources:
     /// the page from its best break on, the item that fired it, the
     /// contributions after it.
@@ -475,6 +482,7 @@ fn build_t(
                     classes: f.ins_records.iter().map(|r| r.n).collect(),
                     held,
                     held_named,
+                    marks: f.marks.clone(),
                     carried,
                 });
             }
@@ -676,6 +684,60 @@ impl Run<'_, '_> {
     }
 }
 
+/// A decoded unit's mark items given ids in the loop's table: `ms` are
+/// the unit's marks ([`crate::vprof::unit_marks`]), an item's index into
+/// them becomes the index of the mark pushed on `table` (a mark the
+/// profile names none of, `u32::MAX`, stays).
+pub(crate) fn remap_marks(items: &mut [crate::vprof::PItem], ms: &[ValueId], table: &mut Vec<ValueId>) {
+    use crate::vprof::PItem;
+    for x in items {
+        match x {
+            PItem::Node(Node::Mark(i)) => {
+                *i = match ms.get(*i as usize) {
+                    Some(&m) => {
+                        table.push(m);
+                        u32::try_from(table.len() - 1).unwrap_or(u32::MAX)
+                    }
+                    None => u32::MAX,
+                };
+            }
+            PItem::End(ys) => remap_marks(ys, ms, table),
+            _ => {}
+        }
+    }
+}
+
+/// The marks in force after a page (§1012–§1014): `before`'s
+/// (`[[class, mark]…]`, unit for none), each class's last mark on the
+/// page (`page`, ids in `table`) in its place.
+pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: &[ValueId]) -> ValueId {
+    if page.is_empty() {
+        return before;
+    }
+    let mut cur: Vec<(i64, ValueId)> = if before == ValueId::UNIT {
+        Vec::new()
+    } else {
+        list_of(v, before)
+            .into_iter()
+            .filter_map(|e| match list_of(v, e)[..] {
+                [c, m] => Some((int_of(v, c), m)),
+                _ => None,
+            })
+            .collect()
+    };
+    for &k in page {
+        let Some(&m) = table.get(k as usize) else { continue };
+        let (c, text) = crate::etex::mark_class(v, m);
+        let c = i64::from(c);
+        match cur.iter_mut().find(|e| e.0 == c) {
+            Some(e) => e.1 = text,
+            None => cur.push((c, text)),
+        }
+    }
+    cur.sort_by_key(|e| e.0);
+    v.list(cur.into_iter().map(|(c, m)| v.list(vec![v.int(c), m])).collect())
+}
+
 /// What the loop saves before folding a unit, put back where the fold
 /// stops on a read ([`Halt::Stop`]): the unit is folded again whole.
 struct LoopSnap {
@@ -685,6 +747,7 @@ struct LoopSnap {
     post_markers: Vec<ValueId>,
     post_k: u32,
     began: (FoldState, Option<ValueId>),
+    top_marks: ValueId,
     pend: Vec<(crate::vprof::PItem, SrcRef)>,
     page_src: Vec<SrcRef>,
     page_ins: Vec<Option<u16>>,
@@ -705,6 +768,7 @@ impl PageLoop {
             post_markers: self.post_markers.clone(),
             post_k: self.post_k,
             began: self.began,
+            top_marks: self.top_marks,
             pend: self.pend.clone(),
             page_src: self.page_src.clone(),
             page_ins: self.page_ins.clone(),
@@ -724,6 +788,7 @@ impl PageLoop {
         self.post_markers = s.post_markers;
         self.post_k = s.post_k;
         self.began = s.began;
+        self.top_marks = s.top_marks;
         self.pend = s.pend;
         self.page_src = s.page_src;
         self.page_ins = s.page_ins;
@@ -807,6 +872,7 @@ impl Run<'_, '_> {
             for x in v.seq_to_vec(u) {
                 let (pid, ints) = crate::vprof::unit_parts(v, x);
                 let mut items = crate::vprof::decode(&ints);
+                remap_marks(&mut items, &crate::vprof::unit_marks(v, x), &mut lp.marks);
                 self.resolve_prof_of(pid, &mut items)?;
                 let at = node_of(pid);
                 let dead = if crate::vprof::has_end(&items) {
@@ -1045,6 +1111,9 @@ impl Run<'_, '_> {
             );
         }
         lp.pages.push((node, fin));
+        // (§1012: the marks in force where the next page begins, the
+        // `\botmark` of every class after this page's marks)
+        lp.top_marks = bot_marks_after(v, lp.top_marks, &f.marks, &lp.marks);
         lp.last_fire = Some((node, pid, f.k));
         // (the routine's material, §1026: its real one where it missed
         // the guess; its page parameter markers resolved where the page
@@ -1063,7 +1132,10 @@ impl Run<'_, '_> {
         let rtn_value = v.list(vec![v.list(markers.clone()), v.list(list.clone())]);
         let mut raw = markers;
         raw.extend(list);
-        let rtn_items = std::sync::Arc::new(crate::vprof::decode(&crate::vprof::encode(v, &raw)));
+        let (ints, ms) = crate::vprof::encode_marks(v, &raw);
+        let mut rtn_items = crate::vprof::decode(&ints);
+        remap_marks(&mut rtn_items, &ms, &mut lp.marks);
+        let rtn_items = std::sync::Arc::new(rtn_items);
         lp.rtns.push((j, rtn_value, std::sync::Arc::clone(&rtn_items)));
         // (the next page's input, in the order §1026 puts it back: the
         // routine's markers, the held-over insertions, its list, then

@@ -586,12 +586,12 @@ impl Run<'_, '_> {
         cut: bool,
     ) {
         let v = self.v;
-        let ints = crate::vprof::encode(v, raw);
+        let (ints, marks) = crate::vprof::encode_marks(v, raw);
         crate::vprof::count_unit(&ints);
         let pid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         self.contribute(
             crate::vprof::VPROF,
-            v.seq_unit(crate::vprof::unit(v, pid, &ints)),
+            v.seq_unit(crate::vprof::unit(v, pid, &ints, marks)),
         );
         let it = v.list(vec![
             v.int(pid),

@@ -39,7 +39,7 @@ const P_BOX: i64 = 3; // kind (0 h, 1 v, 2 rule), h, d
 const P_GLUE: i64 = 4; // glue4
 const P_KERN: i64 = 5; // w
 const P_PEN: i64 = 6; // n
-const P_MARK: i64 = 7;
+const P_MARK: i64 = 7; // index in the unit's marks ([`encode_marks`]), -1 none
 const P_WHAT: i64 = 8;
 const P_WHATS: i64 = 9; // h, d
 const P_INS: i64 = 10; // n, h, d, float cost, split top skip glue4, len, items
@@ -67,12 +67,22 @@ fn put_glue(out: &mut Vec<i64>, g: &Glue) {
 
 /// A piece's raw main-list items as a profile (one item per raw item).
 pub(crate) fn encode(v: &Values, raw: &[ValueId]) -> Vec<i64> {
+    encode_marks(v, raw).0
+}
+
+/// [`encode`], and the marks on the list in order (each a mark node's
+/// value, as `crate::nodes` keeps it: its text, or `[-1, class, text]`
+/// for a class other than 0): a profile's mark item carries its index
+/// there ([`PItem`]'s `Node::Mark`), so the page builder over the
+/// profiles knows the marks each page holds (§1012).
+pub(crate) fn encode_marks(v: &Values, raw: &[ValueId]) -> (Vec<i64>, Vec<ValueId>) {
     let mut out = Vec::with_capacity(raw.len() * 4);
     let mut ilp: Option<(Glue, Glue, i32)> = None;
+    let mut marks = Vec::new();
     for &x in raw {
-        push_item(v, x, &mut out, &mut ilp);
+        push_item(v, x, &mut out, &mut ilp, &mut marks);
     }
-    out
+    (out, marks)
 }
 
 /// The profile as a value: a list of inline integers.
@@ -80,10 +90,16 @@ pub(crate) fn value(v: &Values, ints: &[i64]) -> ValueId {
     v.list(ints.iter().map(|&i| v.int(i)).collect())
 }
 
-/// A piece's unit of [`VPROF`]: `[piece, profile]`, the piece's node
-/// (its raw id) and its profile ([`value`]).
-pub(crate) fn unit(v: &Values, piece: i64, ints: &[i64]) -> ValueId {
-    v.list(vec![v.int(piece), value(v, ints)])
+/// A piece's unit of [`VPROF`]: `[piece, profile, marks]`, the piece's
+/// node (its raw id), its profile ([`value`]) and the marks its mark
+/// items name ([`encode_marks`]).
+pub(crate) fn unit(v: &Values, piece: i64, ints: &[i64], marks: Vec<ValueId>) -> ValueId {
+    v.list(vec![v.int(piece), value(v, ints), v.list(marks)])
+}
+
+/// A unit's marks ([`unit`]).
+pub(crate) fn unit_marks(v: &Values, x: ValueId) -> Vec<ValueId> {
+    list_of(v, x).get(2).map(|&m| list_of(v, m)).unwrap_or_default()
 }
 
 /// A unit's piece and profile.
@@ -101,8 +117,18 @@ fn i32_at(v: &Values, x: ValueId, k: usize) -> i32 {
     i32::try_from(int_at(v, x, k)).unwrap_or(0)
 }
 
-fn push_item(v: &Values, x: ValueId, out: &mut Vec<i64>, ilp: &mut Option<(Glue, Glue, i32)>) {
+fn push_item(
+    v: &Values,
+    x: ValueId,
+    out: &mut Vec<i64>,
+    ilp: &mut Option<(Glue, Glue, i32)>,
+    marks: &mut Vec<ValueId>,
+) {
     match nodes::tag(v, x) {
+        nodes::T_MARK => {
+            out.extend([P_MARK, i64::try_from(marks.len()).unwrap_or(-1)]);
+            marks.push(list_of(v, x).get(1).copied().unwrap_or(ValueId::UNIT));
+        }
         nodes::T_VBOX => {
             let ys = list_of(v, x);
             let b = ys.get(1).copied().unwrap_or(ValueId::UNIT);
@@ -162,7 +188,7 @@ fn push_item(v: &Values, x: ValueId, out: &mut Vec<i64>, ilp: &mut Option<(Glue,
                 i64::try_from(xs.len().saturating_sub(1)).unwrap_or(0),
             ]);
             for &y in xs.iter().skip(1) {
-                push_item(v, y, out, ilp);
+                push_item(v, y, out, ilp, marks);
             }
         }
         nodes::T_ABORT => out.push(P_ABORT),
@@ -193,7 +219,8 @@ pub(crate) fn push_node(n: &Node, out: &mut Vec<i64>) {
         }
         Node::Kern(w, _) => out.extend([P_KERN, i64::from(*w)]),
         Node::Penalty(p) => out.extend([P_PEN, i64::from(*p)]),
-        Node::Mark(_) => out.push(P_MARK),
+        // (a mark inside another node, not on the main list: no page's)
+        Node::Mark(_) => out.extend([P_MARK, -1]),
         Node::Whatsit(_, Some(s)) => out.extend([P_WHATS, i64::from(s.height), i64::from(s.depth)]),
         Node::Whatsit(..) | Node::Language { .. } => out.push(P_WHAT),
         Node::Ins(i) => {
@@ -291,7 +318,7 @@ impl Reader<'_> {
             P_GLUE => Node::glue(self.glue()),
             P_KERN => Node::Kern(self.n32(), KernKind::Explicit),
             P_PEN => Node::Penalty(self.n32()),
-            P_MARK => Node::Mark(0),
+            P_MARK => Node::Mark(u32::try_from(self.next()).unwrap_or(u32::MAX)),
             P_WHAT => Node::Whatsit(0, None),
             P_WHATS => {
                 let (height, depth) = (self.n32(), self.n32());
