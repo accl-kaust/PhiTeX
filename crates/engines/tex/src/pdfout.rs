@@ -2741,6 +2741,7 @@ fn compare_writer(
 /// their first differing lines.
 #[cold]
 fn link_why(i: usize, st: &PdfState, nums: &FontNums, reloc: &Reloc, sn: &LinkSnap) {
+    use std::fmt::Write as _;
     // (a field of the writer: a line indented by one level)
     fn fields(s: &str) -> Vec<(String, Vec<&str>)> {
         let mut out: Vec<(String, Vec<&str>)> = Vec::new();
@@ -2770,7 +2771,7 @@ fn link_why(i: usize, st: &PdfState, nums: &FontNums, reloc: &Reloc, sn: &LinkSn
     );
     for (n, la) in &fa {
         let Some((_, lb)) = fb.iter().find(|x| x.0 == *n) else {
-            msg.push_str(&format!("\n  field {n}: not in the last link's"));
+            let _ = write!(msg, "\n  field {n}: not in the last link's");
             continue;
         };
         if la == lb {
@@ -2783,7 +2784,8 @@ fn link_why(i: usize, st: &PdfState, nums: &FontNums, reloc: &Reloc, sn: &LinkSn
             .zip(lb[p..].iter().rev())
             .take_while(|(x, y)| x == y)
             .count();
-        msg.push_str(&format!(
+        let _ = write!(
+            msg,
             "\n  field {n}: lines {}..{} of {} differ (last link's {}..{} of {})",
             p,
             la.len() - q,
@@ -2791,12 +2793,20 @@ fn link_why(i: usize, st: &PdfState, nums: &FontNums, reloc: &Reloc, sn: &LinkSn
             p,
             lb.len() - q,
             lb.len()
-        ));
+        );
         for l in la[p..la.len() - q].iter().take(6) {
-            msg.push_str(&format!("\n    now  {}", l.chars().take(160).collect::<String>()));
+            let _ = write!(
+                msg,
+                "\n    now  {}",
+                l.chars().take(160).collect::<String>()
+            );
         }
         for l in lb[p..lb.len() - q].iter().take(6) {
-            msg.push_str(&format!("\n    last {}", l.chars().take(160).collect::<String>()));
+            let _ = write!(
+                msg,
+                "\n    last {}",
+                l.chars().take(160).collect::<String>()
+            );
         }
     }
     eprintln!("{msg}");
@@ -2853,7 +2863,12 @@ pub(crate) fn finish_exact(
         // (the file linked from the last link's records, and from the
         // start: the same bytes)
         let full = link(v, f, xpages, cmds, false);
-        let at = out.file.iter().zip(&full.file).take_while(|(a, b)| a == b).count();
+        let at = out
+            .file
+            .iter()
+            .zip(&full.file)
+            .take_while(|(a, b)| a == b)
+            .count();
         assert!(
             out.file == full.file && out.errors == full.errors,
             "link check: the file linked from the last link's records ({} bytes) is not the \
