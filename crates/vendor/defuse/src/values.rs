@@ -13,7 +13,7 @@
 use std::fmt::Write as _;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sync::Table;
 
@@ -128,7 +128,6 @@ enum Entry {
 /// The value store.
 pub struct Values {
     table: Table<Entry>,
-    count: AtomicUsize,
     instance: u64,
 }
 
@@ -137,7 +136,6 @@ impl Default for Values {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Values {
             table: Table::new(),
-            count: AtomicUsize::new(0),
             instance: NEXT.fetch_add(1, Ordering::Relaxed),
         }
     }

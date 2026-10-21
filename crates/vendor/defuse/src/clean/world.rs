@@ -144,8 +144,11 @@ pub(crate) enum Read {
     /// A position: whether `node` is there (`use_field_at`).
     At { node: Id, there: bool },
     /// The fold of accumulator `f` over the window after `from` (`NONE`:
-    /// the unit's start) up to `to` (`NONE`: the reader).
-    Range { f: Field, from: Id, to: Id, val: ValueId },
+    /// the unit's start) up to `to` (`NONE`: the reader); `past`: `to` may
+    /// lie past the reader (`Ctx::acc_fold`, `Ctx::acc_next`; with `to`
+    /// `NONE`, the window runs to the unit's end), else the window stops
+    /// at it.
+    Range { f: Field, from: Id, to: Id, val: ValueId, past: bool },
     /// The `i`-th following sibling (`Ctx::following`): its id and text.
     Sib { i: u32, ans: Option<(Id, usize)> },
     /// The siblings a declared count claim holds (`Ctx::claimed`).
@@ -303,6 +306,11 @@ pub(crate) struct FieldDefs {
     pub globals: PMap<Pos, Entry>,
 }
 
+/// Whether node `n` is done and publishes loop-back fields.
+fn publishes(n: &Node) -> bool {
+    n.st == St::Done && n.res.as_ref().is_some_and(|r| !r.pubs.is_empty())
+}
+
 /// Whether a node in state `st` is in work.
 pub(crate) fn in_work(st: St) -> bool {
     matches!(st, St::Dirty | St::Held)
@@ -422,6 +430,10 @@ pub(crate) struct World {
     pub pset_buckets: PMap<u32, Buckets>,
     /// Nodes marked at creation by their operation (settled reports).
     pub op_marked: PMap<Id, ()>,
+    /// The final nodes ([`crate::api::Operation::final_only`]).
+    pub fins: PMap<Id, ()>,
+    /// The done nodes that publish loop-back fields.
+    pub publishers: PMap<Id, ()>,
 }
 
 impl World {
@@ -571,16 +583,17 @@ impl World {
 
     /// The window of a range read by `me` from `from` up to `to`: the
     /// positions strictly between which contributions fold.
-    pub(crate) fn window(&self, me: Id, from: Id, to: Id) -> Option<(u32, Pos, Pos)> {
+    pub(crate) fn window(&self, me: Id, from: Id, to: Id, past: bool) -> Option<(u32, Pos, Pos)> {
         let n = self.node(me)?;
         let u = n.unit;
         let lo = self
             .node(from)
             .filter(|a| a.unit == u && from != NONE)
             .map_or(0, |a| a.pos);
-        let mut hi = n.pos;
+        // (Past the reader with no end: to the unit's end.)
+        let mut hi = if past && to == NONE { Pos::MAX } else { n.pos };
         if let Some(t) = self.node(to).filter(|t| t.unit == u && to != NONE)
-            && t.pos < hi
+            && (past || t.pos < hi)
         {
             hi = t.pos + 1;
         }
@@ -853,6 +866,21 @@ impl World {
     }
 
     fn put_node(&mut self, id: Id, n: Node) {
+        let (fin, publ) = (n.text.stat.fin, publishes(&n));
+        if self.nodes.get(&id).is_none_or(|o| o.text.stat.fin != fin) {
+            if fin {
+                self.fins.insert(id, (), &NoMeasure);
+            } else {
+                self.fins.remove(&id, &NoMeasure);
+            }
+        }
+        if self.nodes.get(&id).is_none_or(|o| publishes(o) != publ) {
+            if publ {
+                self.publishers.insert(id, (), &NoMeasure);
+            } else {
+                self.publishers.remove(&id, &NoMeasure);
+            }
+        }
         let was = self.nodes.get(&id).map(|o| (o.unit, o.pos, in_work(o.st)));
         let now = (n.unit, n.pos, in_work(n.st));
         if was != Some(now) {
@@ -904,6 +932,18 @@ impl World {
         }
         self.nodes.remove(&id, &NoMeasure);
         self.op_marked.remove(&id, &NoMeasure);
+        self.fins.remove(&id, &NoMeasure);
+        self.publishers.remove(&id, &NoMeasure);
+    }
+
+    /// The final nodes in state `st` (from the index, not the whole world).
+    pub(crate) fn fins_in(&self, st: St) -> Vec<Id> {
+        self.fins.iter().filter(|(id, _)| self.node(**id).is_some_and(|n| n.st == st)).map(|(&id, _)| id).collect()
+    }
+
+    /// The dirty nodes (from the in-work index).
+    pub(crate) fn dirty_nodes(&self) -> Vec<Id> {
+        self.work.iter().flat_map(|(_, m)| m.iter().map(|(_, &id)| id)).filter(|&id| self.node(id).is_some_and(|n| n.st == St::Dirty)).collect()
     }
 
     fn set_work(&mut self, u: u32, p: Pos, id: Option<Id>) {
