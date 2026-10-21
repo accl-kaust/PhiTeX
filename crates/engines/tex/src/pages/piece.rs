@@ -788,6 +788,18 @@ impl Run<'_, '_> {
         // (by field once for every candidate: a candidate's names are
         // these merged with its own, the first of a field kept)
         locals.sort_by_key(|x| x.1.0.raw());
+        // (every definition of the run, by field once, a standing one
+        // first: a candidate's are those made after it, filtered in
+        // order, [`State::defined_since`])
+        let mut defs: Vec<(Field, bool, Loc, u64, bool, Option<u32>)> = self
+            .st
+            .defined_stamped()
+            .into_iter()
+            .map(|(l, stamp, local, gid)| {
+                (self.loc_field(l), self.st.def_stands(l), l, stamp, local, gid)
+            })
+            .collect();
+        defs.sort_by_key(|x| (x.0.0.raw(), !x.1));
         let marks = self.cand_marks.clone();
         // (a location defined after a candidate with its value there,
         // where the run had it: the page's routine, which runs at the
@@ -810,10 +822,6 @@ impl Run<'_, '_> {
                 None => ValueId::UNIT,
             };
             let mut names: Vec<(ValueId, bool, ValueId)> = Vec::new();
-            for (l, _, _) in self.st.defined_since(v, m.stamp, m.gids) {
-                let stands = self.st.def_stands(l);
-                names.push((self.loc_field(l).0, stands, kv_of(l)));
-            }
             // (a binding local to a group of the run open at the
             // candidate, restored at the group's close after it: the
             // routine runs inside that group and sees the binding, which
@@ -835,19 +843,17 @@ impl Run<'_, '_> {
                     .into_iter()
                     .map(|f| (f.0, false, ValueId::UNIT)),
             );
-            // (the locals first at a tie, as if pushed before these and
-            // sorted stably: by field, a standing definition first)
+            // (by field, a standing definition first; at a tie the
+            // locals, then the definitions after the candidate, then
+            // these: one stable sort of all of them in that order)
             names.sort_by_key(|x| (x.0.raw(), !x.1));
-            let mut merged = Vec::with_capacity(locals.len() + names.len());
-            let mut own = names.into_iter().peekable();
-            for &(l, f) in &locals {
-                while let Some(x) = own.next_if(|x| (x.0.raw(), !x.1) < (f.0.raw(), true)) {
-                    merged.push(x);
-                }
-                merged.push((f.0, false, kv_of(l)));
-            }
-            merged.extend(own);
-            let mut names = merged;
+            let after = defs
+                .iter()
+                .filter(|d| d.3 > m.stamp && !(d.4 && d.5.is_some_and(|g| g > m.gids)))
+                .map(|d| (d.0.0, d.1, kv_of(d.2)));
+            let own = merge_stable(after, names);
+            let locals = locals.iter().map(|&(l, f)| (f.0, false, kv_of(l)));
+            let mut names = merge_stable(locals, own);
             names.dedup_by_key(|x| x.0);
             // (with whether the run could end there: a finisher of a page
             // firing at a candidate where it could not runs its routine
@@ -1685,4 +1691,23 @@ pub(crate) fn unit_items(v: &Values, u: ValueId) -> Vec<ValueId> {
         .get(2)
         .map(|&x| list_of(v, x))
         .unwrap_or_default()
+}
+
+/// Two lists each sorted by field then standing first, merged in that
+/// order, `a`'s before `b`'s at a tie: a stable sort of `a` then `b`.
+fn merge_stable(
+    a: impl Iterator<Item = (ValueId, bool, ValueId)>,
+    b: Vec<(ValueId, bool, ValueId)>,
+) -> Vec<(ValueId, bool, ValueId)> {
+    let key = |x: &(ValueId, bool, ValueId)| (x.0.raw(), !x.1);
+    let mut out = Vec::with_capacity(b.len());
+    let mut b = b.into_iter().peekable();
+    for x in a {
+        while let Some(y) = b.next_if(|y| key(y) < key(&x)) {
+            out.push(y);
+        }
+        out.push(x);
+    }
+    out.extend(b);
+    out
 }

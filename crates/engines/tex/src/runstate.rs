@@ -1241,6 +1241,19 @@ impl State {
         self.defined_since_by(v, since, gids, false)
     }
 
+    /// Every location the run defined: its latest definition's stamp,
+    /// whether local, and the group it was made in. [`State::defined_since`]
+    /// of any stamp and group mark is these filtered as it filters them
+    /// (`stamp > since`, no local one of a group opened after `gids`), in
+    /// this order.
+    pub(crate) fn defined_stamped(&self) -> Vec<(Loc, u64, bool, Option<u32>)> {
+        self.metas
+            .iter()
+            .filter(|m| m.ldef_stamp > 0)
+            .map(|m| (m.loc, m.ldef_stamp, m.ldef_local, m.ldef_gid))
+            .collect()
+    }
+
     /// [`State::defined_since`] in the order of the latest definitions
     /// (their stamps), not of the locations' first definitions in the
     /// run: what a stretch of the run defined, listed as that stretch

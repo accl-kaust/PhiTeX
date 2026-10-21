@@ -1797,6 +1797,11 @@ struct Analysis<'t> {
     /// The hash of each of the pass's regimes' content (a run's key
     /// across texts, [`run_hint`]).
     reg_hash: Vec<u64>,
+    /// The characters the text's and the format's definitions make
+    /// active, looked up at the first character asked about (the read
+    /// noted then, as at every later one: one lookup, not one per
+    /// character of every run, [`Analysis::is_active`]).
+    active: std::cell::Cell<Option<u128>>,
 }
 
 /// Names that start a paragraph in vertical mode (§1090): the text
@@ -2007,6 +2012,7 @@ impl Analysis<'_> {
             visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
             reg_hash,
+            active: std::cell::Cell::new(None),
         }
     }
 
@@ -2522,8 +2528,14 @@ impl Analysis<'_> {
 
     fn is_active(&self, c: char) -> bool {
         c == '~'
-            || (c.is_ascii()
-                && (self.defs.active_chars() | self.prelude.active_chars()) >> (c as u32) & 1 == 1)
+            || (c.is_ascii() && {
+                let m = self.active.get().unwrap_or_else(|| {
+                    let m = self.defs.active_chars() | self.prelude.active_chars();
+                    self.active.set(Some(m));
+                    m
+                });
+                m >> (c as u32) & 1 == 1
+            })
     }
 
     /// Whether `name` is a format macro the text itself does not define:
