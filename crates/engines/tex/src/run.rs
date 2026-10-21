@@ -4547,7 +4547,9 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.effect != Effect::None {
             self.cx.set_effect(self.effect);
         }
-        ValueId::UNIT
+        // (a finisher's output: what its routine gave back, which the
+        // page builder reads where it placed it, `crate::pages::RTN`)
+        self.fin.as_ref().and_then(|c| c.rtn).unwrap_or(ValueId::UNIT)
     }
 
     /// The following siblings this run takes, once its input is read

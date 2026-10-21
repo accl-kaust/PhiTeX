@@ -39,8 +39,9 @@ pub(crate) enum Feedback {
     /// last page fired on the text before it at the same
     /// `\outputpenalty`, `\deadcycles` always guessed 0, nothing for a
     /// page fired in a routine's material); a
-    /// finisher whose routine gave otherwise contributes the real one to
-    /// [`PAGE_MISS`], and the page builder's node runs again on it.
+    /// finisher's output is what its routine gave
+    /// ([`phitex_defuse::Ctx::placed_output`]), and the page builder's
+    /// node runs again where that is not the guess.
     RoutineGivesBack,
     /// The page parameters and an insertion class's registers (§980,
     /// §1008), set by text or by a routine: read by the page builder

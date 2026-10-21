@@ -16,7 +16,7 @@
 //!   ([`FinDefs::predict`]): the finishers run in parallel.
 //! - It defines what the routine defines for the text after it
 //!   ([`Feedback::OutputState`]), what the routine gives back ([`RTN`],
-//!   and [`PAGE_MISS`] where that is not what the page builder guessed),
+//!   also its output, which the page builder reads where it placed it),
 //!   and where the next page begins for the text's `\pagetotal`
 //!   ([`PAGE_START`], [`Run::define_page_start`]).
 //! - A page firing at a candidate inside a piece that could not end
@@ -83,8 +83,9 @@ pub(crate) fn rtn_as_guess(v: &Values, x: ValueId) -> ValueId {
 /// `\deadcycles` as the routine left it (a page not shipped: §1054's
 /// `\end` after it reads it) and the maps of its global integer register
 /// writes ([`rtn_value`]). The page builder folds the
-/// next page on its guess of it ([`FinishIn::rtn_guess`]); a finisher
-/// whose routine gave otherwise says so ([`PAGE_MISS`]).
+/// next page on its guess of it ([`FinishIn::rtn_guess`]) until the
+/// finisher's output, this value, says otherwise
+/// ([`phitex_defuse::Ctx::placed_output`]).
 pub(crate) const RTN: &str = "rtn";
 
 /// A finisher's arguments (a node's arguments are what the engine knows
@@ -676,8 +677,8 @@ impl Run<'_, '_> {
         let x = rtn_value(v, v.list(raw), v.list(list), dead, &maps);
         self.cx.define_with(v.field(RTN), x, Locality::Global);
         // (a routine that gave back other than the page builder folded
-        // the next page on: the real material for the builder's node,
-        // [`Feedback::RoutineGivesBack`])
+        // the next page on: counted; the builder's node reads the real
+        // material as the finisher's output, [`Feedback::RoutineGivesBack`])
         let pos = self.cx.args();
         let guess = FinishIn::of(v, &pos).map(|f| f.rtn_guess);
         if guess.is_some_and(|g| g != x) {
@@ -692,7 +693,6 @@ impl Run<'_, '_> {
                     r(x)
                 );
             }
-            self.contribute(PAGE_MISS, v.seq_unit(v.list(vec![v.int(j), x])));
         }
         if let Some(c) = self.fin.as_mut() {
             c.rtn = Some(x);

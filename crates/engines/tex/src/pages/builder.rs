@@ -18,22 +18,22 @@
 //! over), the marks in force where it began. No finisher reads another's
 //! page, and none reads the profiles.
 //!
-//! The next page begins with what the routine gives back (§1026), which
-//! the loop folds on a guess ([`FinishIn::rtn_guess`],
-//! [`Feedback::RoutineGivesBack`]): the routine's last value on another
-//! page, or nothing. A finisher whose routine gave otherwise contributes
-//! the real one to [`PAGE_MISS`], which the loop reads whole at its
-//! start; the node runs again on it and folds that page's next page on
-//! the real material. The guess in a finisher's arguments stays the
-//! guess, never the real value, so a miss read back does not change the
-//! finisher it came from.
-//!
 //! It places each page's finisher right after the piece its page fired
 //! in as the page fires ([`Run::place_finisher`], `follow_after_any`):
 //! the engine publishes a run's placements at every stop, so finishers
 //! run while the loop still folds. An attempt resumed from the parked
 //! loop continues the placements it committed; one that starts over
 //! places again the pages it had. At its end it defines [`PAGES_END`].
+//!
+//! The next page begins with what the routine gives back (§1026): the
+//! finisher's output ([`RTN`], [`phitex_defuse::Ctx::placed_output`]),
+//! read where the loop placed it, and while the finisher has none, a
+//! guess ([`FinishIn::rtn_guess`], [`Feedback::RoutineGivesBack`]): the
+//! routine's last value on another page, or nothing. A finisher's
+//! output coming in otherwise runs the node again, which folds that
+//! page's next page on it. The guess in a finisher's arguments stays the
+//! guess, never the real value, so the output read back does not change
+//! the finisher it came from.
 //!
 //! What the loop reads where a piece is (the page parameters, an
 //! insertion class's registers) it reads at that piece, a read past its
@@ -190,9 +190,6 @@ pub(crate) struct PageLoop {
     /// The marks the profiles' mark items name (a unit's marks given ids
     /// here as it is decoded, [`remap_marks`]).
     pub marks: Vec<ValueId>,
-    /// The routines' real material where it missed the guess
-    /// ([`PAGE_MISS`]), read once at the loop's start: `(page, rtn)`.
-    pub misses: Vec<(i64, ValueId)>,
     /// The pages fired so far: the piece each fired in, its finisher's
     /// input.
     pub pages: Vec<(phitex_defuse::NodeId, FinishIn)>,
@@ -203,8 +200,11 @@ pub(crate) struct PageLoop {
     /// placements so far committed: only new pages are placed) or starts
     /// over (every page placed again).
     pub resumed: bool,
-    /// Whether the loop has read [`PAGE_MISS`] (once, at its start).
-    pub misses_read: bool,
+    /// The finishers this run placed, page by page: their arguments and
+    /// the placement's index ([`phitex_defuse::Ctx::placed_output`]).
+    /// Kept where a stop rolls a unit back: a page fired again is not
+    /// placed twice.
+    pub placed: Vec<(Vec<ValueId>, usize)>,
     /// The contributions not yet looked at, with their sources.
     pub pend: Vec<(crate::vprof::PItem, SrcRef)>,
     /// The sources of the builder's page, item for item.
@@ -253,11 +253,10 @@ impl PageLoop {
             last_markers: Vec::new(),
             prev_fire: (-1, 0),
             marks: Vec::new(),
-            misses: Vec::new(),
             pages: Vec::new(),
             page_args: Vec::new(),
             resumed: false,
-            misses_read: false,
+            placed: Vec::new(),
             pend: Vec::new(),
             page_src: Vec::new(),
             units: Vec::new(),
@@ -759,12 +758,12 @@ impl Run<'_, '_> {
     /// ([`FinishIn::rtn_guess`], made in [`Run::page_loop`]) is what the
     /// same routine gave back on the last page the loop fired on the text
     /// before `j` at the same `\outputpenalty`, every one above -10001
-    /// alike (the miss it read, or that page's own guess where it read
+    /// alike (the output it read, or that page's own guess where it read
     /// none); else for an ordinary page the markers the routine gave back
     /// last and no list (it ships), this for a special one;
     /// nothing for a page fired in a routine's material (no chain of
     /// pages grows on guesses). It depends on the pages before `j` alone:
-    /// a page's own miss never changes it.
+    /// a page's own output never changes it.
     pub(crate) fn rtn_guess(&self, hint: ValueId) -> ValueId {
         let v = self.v;
         let empty = || v.list(vec![v.list(Vec::new()), v.list(Vec::new())]);
@@ -838,10 +837,10 @@ pub(crate) fn bot_marks_after(v: &Values, before: ValueId, page: &[u32], table: 
 
 /// (`observe`) Page `j`'s guess depends on the pages before it alone
 /// ([`Run::rtn_guess`]): the same give-backs of the pages before `j`
-/// (what the loop took for them, misses read or guesses), the same
+/// (what the loop took for them, outputs read or guesses), the same
 /// routine and `\outputpenalty`, give the same guess in every attempt,
-/// whatever page `j`'s own miss; one changed by it is a defect (its
-/// finisher placed anew on its own miss).
+/// whatever page `j`'s own output; one changed by it is a defect (its
+/// finisher placed anew on its own output).
 fn guess_check(node: u64, j: i64, how: impl std::hash::Hash, guess: ValueId) {
     use std::hash::Hasher as _;
     type Seen = Option<phitex_defuse::FxHashMap<(u64, i64, u64), ValueId>>;
@@ -853,7 +852,7 @@ fn guess_check(node: u64, j: i64, how: impl std::hash::Hash, guess: ValueId) {
     let prev = *seen.get_or_insert_with(Default::default).entry(key).or_insert(guess);
     assert!(
         prev == guess,
-        "page {}: its routine's guess changed with nothing before it changed (its own miss read back?)",
+        "page {}: its routine's guess changed with nothing before it changed (its own output read back?)",
         j + 1
     );
 }
@@ -968,9 +967,7 @@ impl Run<'_, '_> {
     /// The page builder's loop over the profiles (the module's doc), from
     /// where `lp` stands to the unit's end:
     ///
-    /// 1. once, the misses ([`PAGE_MISS`], `acc_fold` from this node to
-    ///    the unit's end, which reads past the text in work,
-    ///    [`MissMonoid`]) into `lp.misses`; then, where the attempt starts
+    /// 1. where the attempt starts
     ///    over, every page already in `lp.pages` placed again, in order
     ///    ([`Run::place_finisher`]); one resumed from the loop's kept token
     ///    continues: its placements committed at its stop stand
@@ -985,49 +982,36 @@ impl Run<'_, '_> {
     /// 3. where a page fires (§1005, §1014–§1017): its [`FinishIn`] from
     ///    `lp.srcs` up to the fire and the builder's decisions, pushed on
     ///    `lp.pages` with the piece it fired in and its finisher placed
-    ///    once the unit it fired in is folded ([`Run::place_finisher`]:
-    ///    the engine publishes a run's placements at every stop, so the
-    ///    finishers run while the loop still folds; a fold stopped inside
-    ///    a unit places none of its pages, so no attempt places fewer
-    ///    than the stop before it published); `lp.srcs` keeps what goes
+    ///    as it fires ([`Run::place_finisher`]: the engine publishes a
+    ///    run's placements at every stop, so the finishers run while the
+    ///    loop still folds; a page fired again after a stop rolled its
+    ///    unit back is placed already, `lp.placed`); `lp.srcs` keeps what goes
     ///    back to the contributions (the page's items from the best break
     ///    on, §1017), after the held-over insertions ([`Src::Held`]) and
-    ///    the routine's material ([`Src::Rtn`]: the miss read back where
-    ///    the page has one, else the guess, [`Run::rtn_guess`]), which
+    ///    the routine's material ([`Src::Rtn`]: the finisher's output
+    ///    where it has one, else the guess, [`Run::rtn_guess`]), which
     ///    are folded first; `lp.began` and `lp.top_marks` the new page's.
     ///
     /// A read of a piece still in work stops ([`Halt::Stop`]): the node
     /// parks `lp` and goes on from it.
     pub(crate) fn page_loop(&mut self, lp: &mut PageLoop) -> R<()> {
         let v = self.v;
-        if !lp.misses_read {
-            let me = self.cx.node();
-            let x = self.cx.acc_fold(v.field(PAGE_MISS), Some(me), None)?;
-            lp.misses = v
-                .seq_to_vec(x)
-                .into_iter()
-                .filter_map(|e| match list_of(v, e)[..] {
-                    [j, rtn] => Some((int_of(v, j), rtn)),
-                    _ => None,
-                })
-                .collect();
-            lp.misses_read = true;
-        }
         // (the pages an attempt before fired: placed again, in page order,
         // where the attempt starts over, the same calls giving the same
         // nodes; a resumed attempt continues the placements it committed)
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
-                "pages {}: attempt, {} pages placed again, from {:?}, misses {:?}",
+                "pages {}: attempt, {} pages placed again, from {:?}",
                 self.cx.node().raw(),
                 lp.pages.len(),
-                lp.cur.map(phitex_defuse::NodeId::raw),
-                lp.misses.iter().map(|m| m.0).collect::<Vec<_>>()
+                lp.cur.map(phitex_defuse::NodeId::raw)
             );
         }
         if !lp.resumed {
+            lp.placed.clear();
             for ((at, fin), args) in lp.pages.iter().zip(&lp.page_args) {
-                self.place_finisher(*at, fin, args.clone());
+                let i = self.place_finisher(*at, fin, args.clone());
+                lp.placed.push((args.clone(), i));
             }
         }
         let vprof = v.field(crate::vprof::VPROF);
@@ -1067,20 +1051,9 @@ impl Run<'_, '_> {
                 // snapshot a stop puts back)
                 Self::drop_units(lp);
                 let snap = lp.snap();
-                let placed = lp.pages.len();
                 if let Err(h) = self.fold_unit(lp, node, pid, items, &classes) {
                     lp.restore(snap);
                     return Err(h);
-                }
-                // (the pages the unit fired placed once its fold is
-                // through: a fold stopped inside it places none, so the
-                // next attempt, which folds the unit again whole, makes
-                // the same placements, never one fewer than the stop
-                // published)
-                for i in placed..lp.pages.len() {
-                    let args = lp.pages[i].1.args(v);
-                    self.place_finisher(lp.pages[i].0, &lp.pages[i].1, args.clone());
-                    lp.page_args.push(args);
                 }
             }
             lp.cur = Some(node);
@@ -1304,20 +1277,33 @@ impl Run<'_, '_> {
                 f.output_penalty
             );
         }
+        // (placed as it fires, its output read below; a page fired again
+        // after a stop rolled its unit back is placed already, with the
+        // same arguments)
+        let args = fin.args(v);
+        let idx = lp.pages.len();
+        let at = if let Some(p) = lp.placed.get(idx) {
+            assert!(
+                !cfg!(feature = "observe") || p.0 == args,
+                "page {}: fired again with other arguments than it was placed with",
+                j + 1
+            );
+            p.1
+        } else {
+            let i = self.place_finisher(node, &fin, args.clone());
+            lp.placed.push((args.clone(), i));
+            i
+        };
         lp.pages.push((node, fin));
+        lp.page_args.push(args);
         // (§1012: the marks in force where the next page begins, the
         // `\botmark` of every class after this page's marks)
         lp.top_marks = bot_marks_after(v, lp.top_marks, &f.marks, &lp.marks);
         lp.last_fire = Some((node, pid, f.k));
-        // (the routine's material, §1026: its real one where it missed
-        // the guess; its page parameter markers resolved where the page
-        // fired)
-        let rtn = lp
-            .misses
-            .iter()
-            .rev()
-            .find(|m| m.0 == j)
-            .map_or(rtn_guess, |m| m.1);
+        // (the routine's material, §1026: the finisher's output, the
+        // guess while it has none; its page parameter markers resolved
+        // where the page fired)
+        let rtn = self.cx.placed_output(at).unwrap_or(rtn_guess);
         let rs = list_of(v, rtn);
         if !in_material {
             let given = crate::pages::finish::rtn_as_guess(v, rtn);
@@ -1533,7 +1519,7 @@ impl Run<'_, '_> {
     /// (`follow_after_any`, its position the composite of the piece's, the
     /// placer and the order placed; docs/spec-layers.md §6), its
     /// arguments `fin`'s ([`FinishIn::args`], made once a page).
-    pub(crate) fn place_finisher(&mut self, at: phitex_defuse::NodeId, fin: &FinishIn, args: Vec<ValueId>) {
+    pub(crate) fn place_finisher(&mut self, at: phitex_defuse::NodeId, fin: &FinishIn, args: Vec<ValueId>) -> usize {
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
                 "place finisher of page {} (piece {} candidate {})",
@@ -1542,7 +1528,7 @@ impl Run<'_, '_> {
                 fin.k
             );
         }
-        self.cx.follow_after_any(at, self.ops.finish, args);
+        self.cx.follow_after_any(at, self.ops.finish, args)
     }
 
     /// The loop's end: where the pages end, once every finisher is

@@ -110,14 +110,6 @@ pub(crate) const PAGES_END: &str = "pages:end";
 /// finisher's view of the next page.
 pub(crate) const PAGE_START: &str = "pages:start";
 
-/// The finishers whose routine gave back to the main list other than the
-/// page builder guessed (§1026; [`FinishIn::rtn_guess`]): one unit
-/// `[j, rtn]` per such finisher, none from the others (each declares none,
-/// [`Finish::static_contribs`]). Read whole by the page builder's node,
-/// which folds page `j + 1` on the real material where a unit says so
-/// ([`Feedback::RoutineGivesBack`]).
-pub(crate) const PAGE_MISS: &str = "pages:miss";
-
 /// A `T_SET_PAGE` marker's slot for `\deadcycles` set by the text
 /// (§1246): after the eight of `\pagegoal` and its kin (§1245).
 pub(crate) const DEAD_SLOT: i64 = 8;
@@ -127,10 +119,8 @@ pub(crate) const DEAD_SLOT: i64 = 8;
 /// [`phitex_defuse::Monoid::speculate`]); a contribution that comes in
 /// otherwise re-asks the reader. For an accumulator few nodes contribute
 /// to, read where waiting for every node in the window would chain the
-/// readers on the text: [`PAGE_MISS`] (only finishers that miss, read
-/// whole by the page builder at its loop's start), and the fonts' loads
-/// (`crate::pdfout::FONT_LOADS`, a page written apart's provisional
-/// numbers, which the link corrects).
+/// readers on the text: the fonts' loads (`crate::pdfout::FONT_LOADS`,
+/// a page written apart's provisional numbers, which the link corrects).
 pub(crate) struct MissMonoid;
 
 impl phitex_defuse::Monoid for MissMonoid {
@@ -147,12 +137,11 @@ impl phitex_defuse::Monoid for MissMonoid {
 
 /// The page accumulators' declared contributions of a node that gives
 /// none of them: so a range read of a window holding it does not wait
-/// for it, only for the pieces (and the finishers' misses, guessed none).
+/// for it, only for the pieces.
 pub(crate) fn no_units(v: &Values) -> Vec<(Field, ValueId)> {
     vec![
         (v.field(crate::vprof::VPROF), ValueId::NIL),
         (v.field(PITEMS), ValueId::NIL),
-        (v.field(PAGE_MISS), ValueId::NIL),
     ]
 }
 
@@ -197,7 +186,7 @@ impl PageNode {
     }
 
     /// The accumulators the node's own code folds (reads by range): the
-    /// profiles and the finishers' misses where the pages are built, a
+    /// profiles where the pages are built, a
     /// page's items where it is assembled, the finishers' global
     /// definitions after a cut. Its read hint names each of them: the
     /// engine's gate holds the node while a contributor before it is in
@@ -205,7 +194,7 @@ impl PageNode {
     /// [`Run::fold_own`] folds only these (checked under `observe`).
     pub(crate) const fn folds(self) -> &'static [&'static str] {
         match self {
-            PageNode::Pages => &[crate::vprof::VPROF, PAGE_MISS],
+            PageNode::Pages => &[crate::vprof::VPROF],
             PageNode::Finish => &[PITEMS, GDEFS],
             PageNode::Resume => &[GDEFS],
         }

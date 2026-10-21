@@ -6351,10 +6351,6 @@ fn declare_fields(eng: &mut Engine) {
         crate::regfold::ACC_PREFIX,
         Arc::new(crate::regfold::AffineMonoid),
     );
-    // (the finishers' misses of the page builder's guess, read past the
-    // text in work: `crate::pages::MissMonoid`)
-    let miss = eng.values().field(crate::pages::PAGE_MISS);
-    eng.declare_accumulator(miss, Arc::new(crate::pages::MissMonoid));
     // (a page written apart reads the fonts' loads before it for its
     // provisional numbers, which the link corrects: read past the pieces
     // in work, as few of them load a font, not waiting for all)

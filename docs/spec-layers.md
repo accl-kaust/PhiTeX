@@ -149,8 +149,8 @@ The interfaces between the layers are fields and accumulators:
   page is made of, the window of `pitems` they are in, the builder's
   state where the page began and its decisions there, the marks in
   force, the guess of what its routine gives back.
-- 5 → 4: `pages:miss`, only where a routine gave back other than the
-  guess.
+- 5 → 4: the finisher's output, what its routine gave back, read by
+  the page builder where it placed it (`Ctx::placed_output`).
 - 5 → 2: the routine's definitions (fields, predicted) and
   `pages:start` for `\pagetotal`.
 - 4 → 6: `pages:end`, read by the writers and the files.
