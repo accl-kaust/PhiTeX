@@ -9,8 +9,9 @@ use std::sync::{Arc, OnceLock};
 
 use defuse::{Brackets, Ctx, Effect, Engine, Field, Locality, NodeId, OpId, Operation, Stop, ValueId, Values};
 
-/// Finishers placed after `a`: more than halving the gap after it allows.
-const K: i64 = 60;
+/// Finishers placed after `a`: more than the gap after it holds, each
+/// placed a step after the last.
+const K: i64 = 1100;
 
 struct Ops {
     me: OnceLock<OpId>,

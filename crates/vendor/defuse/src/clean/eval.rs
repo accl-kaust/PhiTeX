@@ -1776,6 +1776,7 @@ impl Engine {
                         rep.merge.heights += super::core::ns_since(t);
                     }
                     let dbg = super::core::debug().then(|| format!("{:?} out {}", r.res.reads, self.core.values.render(r.res.out)));
+                    let s0 = super::core::prof::snapshot();
                     let w = std::mem::take(&mut self.w);
                     let mut b = Builder::new(&self.core, w);
                     b.app_env(id, &r.env);
@@ -1801,6 +1802,11 @@ impl Engine {
                     self.freed += freed.len() as u64;
                     if hs.on {
                         hs.committed(id);
+                    }
+                    if s0.is_some()
+                        && let Some(n) = self.w.node(id)
+                    {
+                        super::core::prof::by_op(self.core.op_name(n.text.op), s0);
                     }
                     let t = super::core::now();
                     for x in &freed {

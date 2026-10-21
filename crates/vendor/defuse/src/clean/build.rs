@@ -16,6 +16,8 @@ use crate::values::{Field, FxHashMap, FxHashSet, ValueId, hash_words};
 
 /// The label gap between two pushed nodes.
 pub(crate) const PUSH_GAP: Pos = 1 << 40;
+/// The most a position placed between two others is past the first.
+const STEP_GAP: Pos = 1 << 30;
 
 /// What a builder made.
 pub(crate) struct Made {
@@ -282,14 +284,17 @@ impl<'a> Builder<'a> {
 
     // ------------------------------------------------------------ positions
 
-    /// `k` positions strictly between `a` and `b`, evenly spread; `None`
-    /// when the gap is too small.
-    fn spread(a: Pos, b: Pos, k: usize) -> Option<Vec<Pos>> {
+    /// `k` positions strictly between `a` and `b`, evenly spread, at most
+    /// `most` apart; `None` when the gap is too small.
+    fn spread(a: Pos, b: Pos, k: usize, most: Pos) -> Option<Vec<Pos>> {
         let k = k as u64;
         if b <= a || b - a <= k {
             return None;
         }
-        let step = (b - a) / (k + 1);
+        // (Close after `a`, not halfway: what is placed after one node is
+        // placed after the last placed there next, and halving the gap
+        // each time would renumber the unit every few dozen.)
+        let step = ((b - a) / (k + 1)).min(most);
         Some((1..=k).map(|i| a + step * i).collect())
     }
 
@@ -305,24 +310,25 @@ impl<'a> Builder<'a> {
     /// `k` new positions right after position `after` (0: the unit's start);
     /// the unit is renumbered when the gap is too small.
     fn positions_after(&mut self, u: u32, after: Pos, k: usize) -> Vec<Pos> {
-        let hi = self.next_pos(u, after);
-        let hi = if hi == Pos::MAX {
-            after.saturating_add(PUSH_GAP * (k as u64 + 1))
-        } else {
-            hi
+        // (Past the last: a push's gap each.)
+        let bounds = |b: &Self, after: Pos| match b.next_pos(u, after) {
+            Pos::MAX => (after.saturating_add(PUSH_GAP * (k as u64 + 1)), PUSH_GAP),
+            hi => (hi, STEP_GAP),
         };
-        if let Some(v) = Self::spread(after, hi, k) {
+        let (hi, most) = bounds(self, after);
+        if let Some(v) = Self::spread(after, hi, k, most) {
             return v;
         }
         let after = self.relabel(u, after);
-        let hi = self.next_pos(u, after);
-        let hi = if hi == Pos::MAX { after + PUSH_GAP * (k as u64 + 1) } else { hi };
-        Self::spread(after, hi, k).expect("a renumbered unit has room")
+        let (hi, most) = bounds(self, after);
+        Self::spread(after, hi, k, most).expect("a renumbered unit has room")
     }
 
     /// Renumbers unit `u` evenly; returns the new position of what was at
     /// `keep`.
     fn relabel(&mut self, u: u32, keep: Pos) -> Pos {
+        super::core::prof::count(43);
+        let _t = super::core::prof::Span::new(47);
         self.w.note(super::world::Change::All);
         let epoch = super::live::fresh_epoch();
         self.w.relabels = epoch;
@@ -1318,6 +1324,7 @@ impl<'a> Builder<'a> {
         loop {
             let mut e = self.w.subtree_end(x);
             while let Some(y) = self.w.next(e).filter(|&y| self.w.node(y).is_some_and(|yn| yn.place == Place::After(x))) {
+                super::core::prof::count(41);
                 e = self.extent_end(y);
             }
             let Some(ep) = self.w.node(e).map(|n| n.pos) else { return e };
@@ -1325,6 +1332,7 @@ impl<'a> Builder<'a> {
                 r.conts
                     .iter()
                     .rev()
+                    .inspect(|_| super::core::prof::count(42))
                     .find(|&&c| self.w.node(c).is_some_and(|cn| cn.place == Place::Cont && cn.parent == x && cn.pos > ep))
                     .copied()
             });
@@ -1339,6 +1347,7 @@ impl<'a> Builder<'a> {
     /// (its exact predecessor), making it if new and retexting it if its
     /// text changed; returns the last node of its extent.
     fn put_placed(&mut self, parent: Id, pn: &Node, x: Id, spec: &Spec, depth: u32, after: Id) -> Id {
+        super::core::prof::count(38);
         let text = self.core.text(Some(x), spec.op, spec.args.clone());
         match self.w.node(x).cloned() {
             Some(old) => {
@@ -1351,6 +1360,7 @@ impl<'a> Builder<'a> {
                     }
                     // Moved: made again at its new place (taken before it
                     // goes: `after` may go with it).
+                    super::core::prof::count(40);
                     let p = self.w.node(after).map_or(0, |e| e.pos);
                     self.free(x);
                     return self.make_placed_at(parent, pn, x, text, spec.place, depth, p);
@@ -1360,7 +1370,10 @@ impl<'a> Builder<'a> {
                 }
                 self.extent_end(x)
             }
-            None => self.make_placed(parent, pn, x, text, spec.place, depth, after),
+            None => {
+                super::core::prof::count(39);
+                self.make_placed(parent, pn, x, text, spec.place, depth, after)
+            }
         }
     }
 

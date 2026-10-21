@@ -427,7 +427,7 @@ pub(crate) fn ns_since(t: Option<std::time::Instant>) -> u64 {
 /// Phase timers (`CLEAN_PROF`): nanoseconds per phase, summed.
 pub(crate) mod prof {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    pub(crate) const NAMES: [&str; 47] = [
+    pub(crate) const NAMES: [&str; 48] = [
         "op", "apply", "settle_claims", "settle", "frames", "held_by", "prepare", "unguess", "absorb", "commit", "place", "reads", "defs", "contribs", "claimed", "outs",
         "set_contrib", "range_readers",
         "read_at", "pset_between", "flush", "reaching",
@@ -447,8 +447,10 @@ pub(crate) mod prof {
         // (A stop: all of it; its unfolding committed; what it is past;
         // its kept reads indexed; kept states' reads re-asked.)
         "stop", "unfold", "passed", "kept_ix", "kept_ask",
+        // (Renumberings.)
+        "relabel",
     ];
-    pub(crate) static NS: [AtomicU64; 47] = [const { AtomicU64::new(0) }; 47];
+    pub(crate) static NS: [AtomicU64; 48] = [const { AtomicU64::new(0) }; 48];
     /// Whether `CLEAN_CONFLICTS` asks for the conflict counts (what keys
     /// a step's commits changed under its later results; `profile` builds
     /// only): every change is logged by key for them.
@@ -518,7 +520,7 @@ pub(crate) mod prof {
         }
     }
     /// Event counters (shown with the timers).
-    pub(crate) const COUNTS: [&str; 38] = [
+    pub(crate) const COUNTS: [&str; 44] = [
         "results", "clean", "data_conflict", "shape_conflict", "placing", "effect_change", "deferred", "st_kids", "st_effect", "st_claim", "st_env", "st_stop", "flushes",
         // (Rechecks queued, by source; reads settle asked.)
         "rk_freed", "rk_shape", "rk_out", "rk_kind", "rk_moved", "rk_outchg", "rk_field", "rk_reads", "rk_acc",
@@ -532,17 +534,54 @@ pub(crate) mod prof {
         // renumbering, fewer reads, changes forgotten, a change of all;
         // the reads asked so.)
         "kx_none", "kx_branch", "kx_relabel", "kx_short", "kx_forgot", "kx_all", "kx_reads",
+        // (Placing: placements committed, made new, moved; extents walked:
+        // follow nodes stepped over, continuations scanned.)
+        "pl_specs", "pl_made", "pl_moved", "ext_follow", "ext_scan",
+        "relabels",
     ];
-    pub(crate) static CN: [AtomicU64; 38] = [const { AtomicU64::new(0) }; 38];
+    pub(crate) static CN: [AtomicU64; 44] = [const { AtomicU64::new(0) }; 44];
     #[inline]
     pub(crate) fn count(i: usize) {
         if on() {
             CN[i].fetch_add(1, Relaxed);
         }
     }
+    /// The phase timers now (a commit's start, for `by_op`).
+    pub(crate) fn snapshot() -> Option<(std::time::Instant, [u64; 48], [u64; 44])> {
+        on().then(|| (std::time::Instant::now(), std::array::from_fn(|i| NS[i].load(Relaxed)), std::array::from_fn(|i| CN[i].load(Relaxed))))
+    }
+    /// Commits by op: how many, their time, and the phases' share of it.
+    #[allow(clippy::type_complexity)]
+    static BY_OP: std::sync::Mutex<Option<std::collections::HashMap<String, (u64, u64, [u64; 48], [u64; 44])>>> = std::sync::Mutex::new(None);
+    /// A commit of an `op` run, since `s0` (`snapshot`), done.
+    pub(crate) fn by_op(op: &str, s0: Option<(std::time::Instant, [u64; 48], [u64; 44])>) {
+        let Some((t, s0, c0)) = s0 else { return };
+        let ns = u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let mut g = BY_OP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = g.get_or_insert_with(Default::default).entry(op.to_string()).or_insert((0, 0, [0; 48], [0; 44]));
+        e.0 += 1;
+        e.1 += ns;
+        for (i, x) in e.2.iter_mut().enumerate() {
+            *x += NS[i].load(Relaxed).saturating_sub(s0[i]);
+        }
+        for (i, x) in e.3.iter_mut().enumerate() {
+            *x += CN[i].load(Relaxed).saturating_sub(c0[i]);
+        }
+    }
     pub(crate) fn dump() {
         if !on() {
             return;
+        }
+        if let Some(m) = BY_OP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+            let mut v: Vec<_> = m.into_iter().collect();
+            v.sort_by_key(|e| std::cmp::Reverse(e.1.1));
+            for (op, (n, ns, ph, cn)) in v.into_iter().take(12) {
+                let mut p: Vec<(usize, u64)> = ph.iter().copied().enumerate().filter(|e| e.1 > 0).collect();
+                p.sort_by_key(|e| std::cmp::Reverse(e.1));
+                let p: Vec<String> = p.iter().take(14).map(|(i, x)| format!("{} {:.1}", NAMES[*i], *x as f64 / 1e6)).collect();
+                let c: Vec<String> = cn.iter().enumerate().filter(|e| *e.1 > 0).map(|(i, x)| format!("{} {x}", COUNTS[i])).collect();
+                eprintln!("clean commits by op: {op}: {n} commits {:.1}ms ({:.1}us each): {} | {}", ns as f64 / 1e6, ns as f64 / 1e3 / n.max(1) as f64, p.join(", "), c.join(", "));
+            }
         }
         let c: Vec<String> = COUNTS.iter().zip(&CN).map(|(n, x)| format!("{n} {}", x.swap(0, Relaxed))).collect();
         eprintln!("clean counts: {}", c.join(", "));
