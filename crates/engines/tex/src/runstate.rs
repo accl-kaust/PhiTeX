@@ -349,6 +349,38 @@ impl Drop for State {
     }
 }
 
+/// A location's value at a candidate ([`State::at_candidates`]): the
+/// candidate's index, and the value (`None`: not known there).
+#[allow(clippy::option_option)]
+pub(crate) type AtCandidate = (usize, Option<Option<ValueId>>);
+
+/// The values at the candidates of the locations defined after them
+/// ([`State::at_candidates`]).
+pub(crate) struct AtCandidates {
+    by_loc: FxHashMap<Loc, Vec<AtCandidate>>,
+}
+
+impl AtCandidates {
+    /// `loc`'s value at candidate `i`: `None` where nothing after the
+    /// candidate defined it.
+    #[allow(clippy::option_option)]
+    pub(crate) fn get(&self, i: usize, loc: Loc) -> Option<Option<Option<ValueId>>> {
+        let h = self.by_loc.get(&loc)?;
+        h.get(h.partition_point(|x| x.0 < i)).map(|x| x.1)
+    }
+
+    /// `loc`'s entries at the candidates, by candidate.
+    #[allow(clippy::option_option)]
+    pub(crate) fn history(&self, loc: Loc) -> &[AtCandidate] {
+        self.by_loc.get(&loc).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every location defined after some candidate.
+    pub(crate) fn locs(&self) -> impl Iterator<Item = Loc> + '_ {
+        self.by_loc.keys().copied()
+    }
+}
+
 impl State {
     pub(crate) fn new() -> State {
         State {
@@ -399,18 +431,23 @@ impl State {
     /// for each candidate passed, in order, each such location with its
     /// engine value there (`None`: not known here, the run had neither
     /// read nor defined it before).
-    #[allow(clippy::option_option)]
-    pub(crate) fn at_candidates(&self, v: &Values) -> Vec<FxHashMap<Loc, Option<Option<ValueId>>>> {
-        let mut out = vec![FxHashMap::default(); self.cands.len()];
-        let mut acc: FxHashMap<Loc, Option<Option<ValueId>>> = FxHashMap::default();
-        for (i, (_, xs)) in self.cands.iter().enumerate().rev() {
-            for &(l, e) in xs.iter().rev() {
+    /// Kept by location: a location's value at candidate `i` is its
+    /// first entry at a candidate from `i` on ([`AtCandidates::get`]),
+    /// each entry encoded once, no map per candidate.
+    pub(crate) fn at_candidates(&self, v: &Values) -> AtCandidates {
+        let mut by_loc: FxHashMap<Loc, Vec<AtCandidate>> = FxHashMap::default();
+        for (i, (_, xs)) in self.cands.iter().enumerate() {
+            for &(l, e) in xs {
+                let h = by_loc.entry(l).or_default();
+                // (the first entry at a candidate is the value there)
+                if h.last().is_some_and(|x| x.0 == i) {
+                    continue;
+                }
                 let x = (e.flags & LOADED != 0).then(|| self.encode(&e, v));
-                acc.insert(l, x);
+                h.push((i, x));
             }
-            out[i].clone_from(&acc);
         }
-        out
+        AtCandidates { by_loc }
     }
 
     /// The catcode generation: equal while no category code below 256
@@ -1239,6 +1276,19 @@ impl State {
         gids: u32,
     ) -> Vec<(Loc, Option<ValueId>, Locality)> {
         self.defined_since_by(v, since, gids, false)
+    }
+
+    /// Every location the run defined: its latest definition's stamp,
+    /// whether local, and the group it was made in. [`State::defined_since`]
+    /// of any stamp and group mark is these filtered as it filters them
+    /// (`stamp > since`, no local one of a group opened after `gids`), in
+    /// this order.
+    pub(crate) fn defined_stamped(&self) -> Vec<(Loc, u64, bool, Option<u32>)> {
+        self.metas
+            .iter()
+            .filter(|m| m.ldef_stamp > 0)
+            .map(|m| (m.loc, m.ldef_stamp, m.ldef_local, m.ldef_gid))
+            .collect()
     }
 
     /// [`State::defined_since`] in the order of the latest definitions

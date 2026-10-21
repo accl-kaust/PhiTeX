@@ -218,8 +218,13 @@ fn find<'v, T: PartialEq>(
 
 std::thread_local! {
     /// The names looked up on this thread while [`with_reads`] runs.
-    static READS: std::cell::RefCell<Option<HashSet<String>>> = const { std::cell::RefCell::new(None) };
+    static READS: std::cell::RefCell<Option<ReadSet>> = const { std::cell::RefCell::new(None) };
 }
+
+/// The names a [`with_reads`] notes, hashed with
+/// [`crate::pass::hints::Fx`] (a lookup per name looked up: no
+/// adversary, and the order is sorted out at the end).
+type ReadSet = HashSet<String, std::hash::BuildHasherDefault<crate::pass::hints::Fx>>;
 
 /// A lookup of `name` in any definitions, noted while [`with_reads`]
 /// runs on this thread.
@@ -249,7 +254,7 @@ pub const READ_ALL: &str = "\u{1}all";
 /// each of these names what they gave, [`Definitions::name_digest`],
 /// is analysed the same).
 pub fn with_reads<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
-    let outer = READS.with(|r| r.borrow_mut().replace(HashSet::new()));
+    let outer = READS.with(|r| r.borrow_mut().replace(ReadSet::default()));
     let x = f();
     let set = READS.with(|r| std::mem::replace(&mut *r.borrow_mut(), outer));
     let mut names: Vec<String> = set.unwrap_or_default().into_iter().collect();
