@@ -883,12 +883,13 @@ impl<'a> Ctx<'a> {
     }
 
     /// Whether a view (root `root`, path `path`) can be passed on: a use's,
-    /// or a whole composition.
+    /// a fold's (`acc_view`: followed while its window stands), or a whole
+    /// composition.
     fn passable(&self, root: u32, path: u32) -> bool {
         if root & super::world::COMPOSED != 0 {
             return path == 0;
         }
-        matches!(self.reads.get(root as usize), Some(Read::Use { .. }))
+        matches!(self.reads.get(root as usize), Some(Read::Use { .. } | Read::Range { .. }))
     }
 
     /// Composes a list of `parts` (a [`View`] of it): the run's own values
