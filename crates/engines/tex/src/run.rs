@@ -5361,6 +5361,11 @@ impl<'c, 'a> Run<'c, 'a> {
         r.doc = p.doc;
         r.fread = p.fread;
         r.fmiss = p.fmiss;
+        // (the table first: the locations below are its, a location past
+        // the fixed ones named by the field the table notes for it,
+        // `Run::loc_of`; noted in a table the parked one then replaced,
+        // a counter past 255 lost its name and its map, `Run::count_reg`)
+        r.st = crate::runstate::State::unpark(p.st);
         r.skip_first = p.skip_first.into_iter().map(|f| r.loc_of(f)).collect();
         r.reg_pending = p
             .reg_pending
@@ -5392,7 +5397,6 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
-        r.st = crate::runstate::State::unpark(p.st);
         r.contribs = p.contribs;
         r.kids = p.kids;
         r.effect = p.effect;

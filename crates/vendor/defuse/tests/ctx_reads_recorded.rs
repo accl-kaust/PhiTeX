@@ -49,6 +49,7 @@ const WRITES: &[&str] = &[
     "define_in_scope",
     "define_in_scope_at",
     "define_from",
+    "define_set",
     "contribute_from",
     "publish_from",
     "output_from",

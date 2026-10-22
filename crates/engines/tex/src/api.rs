@@ -7150,3 +7150,68 @@ mod canonical_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod park_tests {
+    use super::*;
+    use phitex_defuse::{Ctx, Locality, Operation, Stop};
+
+    /// The test's body as a node's run (a [`crate::run::Run`] lives in a
+    /// node's context): a run that looked up `\count316` and holds a map of
+    /// `\count315` parks at a command's start and resumes from its park.
+    struct ParkAndResume(Ops);
+
+    impl Operation for ParkAndResume {
+        fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+            Some(Vec::new())
+        }
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let o = &self.0;
+            let f = cx.values().field("count:315");
+            let other = cx.values().field("count:316");
+            let map = crate::regfold::Affine { keep: true, add: 1 };
+            let parked = {
+                let mut r = crate::run::Run::new(cx, o);
+                // (another location past the fixed ones first: the
+                // resumed table numbers them in the run's order)
+                let _ = r.loc_of(other);
+                let l = r.loc_of(f);
+                assert_eq!(r.count_reg(l), Some(315), "the location names count:315");
+                r.reg_pending.insert(l, map);
+                r.begin_command();
+                r.park().expect("a run at a command's start parks")
+            };
+            let Ok(mut r) = crate::run::Run::from_parked(cx, o, parked) else {
+                panic!("the park resumes in its own epoch");
+            };
+            // (the map's location as the resumed run holds it, before any
+            // lookup of the field notes it again: what its end reads,
+            // `Run::finish`)
+            let held: Vec<_> = r.reg_pending.iter().map(|(&l, m)| (l, m.keep, m.add)).collect();
+            assert_eq!(held.len(), 1, "the resumed run holds one map");
+            let (l, keep, add) = held[0];
+            assert_eq!(
+                r.count_reg(l),
+                Some(315),
+                "the resumed run's location of its map names count:315"
+            );
+            assert_eq!((keep, add), (true, 1), "the map is the one parked");
+            assert_eq!(r.loc_of(f), l, "the field's location is the map's");
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// A run parked with a map of a counter past 255 (a location past the
+    /// fixed ones, named by the field its table notes) resumes with it:
+    /// the resumed run restores its table before it maps the parked maps
+    /// back to locations (`Run::from_parked`).
+    #[test]
+    fn a_resumed_run_keeps_its_map_of_a_counter_past_255() {
+        let mut g = Graph::new(None, Some(1));
+        let op = g.eng.register(Arc::new(ParkAndResume(g.ops.clone())));
+        let u = g.eng.new_unit();
+        let n = g.eng.push(u, op, Vec::new());
+        g.eng.evaluate_sequential().expect("the run resumes its park with its map");
+        assert_eq!(g.eng.output(n), Some(ValueId::UNIT));
+    }
+}
