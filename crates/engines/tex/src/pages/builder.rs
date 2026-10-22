@@ -1003,6 +1003,14 @@ impl Run<'_, '_> {
             let t = pp::start();
             let next = self.cx.acc_next(vprof, lp.cur);
             pp::add(pp::NEXT, t);
+            // (`PHITEX_PAGES_STOPS=1`, profile: where the loop stops)
+            if next.is_err() && crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+                eprintln!(
+                    "pages-stop: acc_next after {:?} ({} pages)",
+                    lp.cur.map(phitex_defuse::NodeId::raw),
+                    lp.pages.len()
+                );
+            }
             let Some((node, u)) = next? else { break };
             for x in v.seq_to_vec(u) {
                 pp::unit();
@@ -1031,6 +1039,9 @@ impl Run<'_, '_> {
                 }
                 let r = self.resolve_prof_of_with(owner, &mut items, &mut lp.own);
                 pp::add(pp::RESOLVE, t);
+                if r.is_err() && crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+                    eprintln!("pages-stop: resolving the markers of piece {owner} ({} pages)", lp.pages.len());
+                }
                 r?;
                 let t = pp::start();
                 let at = node_of(pid);
@@ -2026,7 +2037,15 @@ impl Run<'_, '_> {
             fields.push(self.loc_field(l));
         }
         for f in fields {
-            match self.field_at(f, at, false)? {
+            let r = self.field_at(f, at, false);
+            if r.is_err() && crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+                eprintln!(
+                    "pages-stop: {} after piece {}",
+                    crate::val::field_name(v, f),
+                    at.raw()
+                );
+            }
+            match r? {
                 phitex_defuse::FieldAt::Def(x, _) => xs.push(Some(x)),
                 phitex_defuse::FieldAt::Unset => xs.push(None),
                 phitex_defuse::FieldAt::Gone => return self.insert_class(n),
@@ -2055,7 +2074,11 @@ impl Run<'_, '_> {
         let b = crate::fields::B_PAGE;
         let rf = self.ops.fields.slot_field(crate::fields::record_loc(b));
         let n = crate::fields::record_len(b);
-        let cells = match self.cx.use_field_after_own(rf, at)? {
+        let cells = self.cx.use_field_after_own(rf, at);
+        if cells.is_err() && crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+            eprintln!("pages-stop: the page parameters after piece {}", at.raw());
+        }
+        let cells = match cells? {
             phitex_defuse::FieldAt::Def(x, _) => Some(list_of(v, x)).filter(|xs| xs.len() == n),
             phitex_defuse::FieldAt::Gone => return self.page_params_marker(),
             phitex_defuse::FieldAt::Unset => None,
