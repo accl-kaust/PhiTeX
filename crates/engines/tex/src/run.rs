@@ -5437,6 +5437,12 @@ impl Run<'_, '_> {
         &mut self,
         k: usize,
     ) -> Option<(u64, Vec<(Field, Locality, Option<ValueId>)>)> {
+        // (observe, `PHITEX_MARK_PATCH=1`: a run's contributions at its
+        // end hold its slots' values too (a piece's check data, its
+        // records), which a patch of its definitions does not reach: off)
+        if !crate::exec::obs_flag!("PHITEX_MARK_PATCH") {
+            return None;
+        }
         let old = self.old_marks.clone()?;
         let (op, oh) = old.snaps.get(k)?;
         let (np, nh) = self.mark_snaps.get(k)?.clone();
