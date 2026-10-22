@@ -5747,8 +5747,9 @@ fn mark_why(node: u64, k: usize, old: &Parked, new: &Parked) {
 }
 
 /// A digest of a run's state at a mark ([`Run::take_mark`]): equal for
-/// equal states. Not of what the run gave the engine so far (its
-/// contributions and children): the engine compares those itself.
+/// equal states, what the run will give the engine at its end too (its
+/// contributions and children so far: kept in the run until then, the
+/// engine's own comparison does not see them).
 fn parked_digest(p: &Parked) -> u64 {
     parked_digest_with(parked_rest(p), p.st.slot_sum())
 }
@@ -5840,6 +5841,17 @@ fn parked_rest(p: &Parked) -> u64 {
     }
     (p.rec_load, p.no_pull).hash(&mut h);
     w(&mut h, p.st.rest_hash());
+    w(&mut h, p.contribs.len() as u64);
+    for (f, x) in &p.contribs {
+        (f.0.raw(), x.raw()).hash(&mut h);
+    }
+    w(&mut h, p.kids.len() as u64);
+    for (o, a) in &p.kids {
+        format!("{o:?}").hash(&mut h);
+        for x in a {
+            w(&mut h, x.raw());
+        }
+    }
     format!("{:?}", p.effect).hash(&mut h);
     (&p.conds, &p.if_codes, p.cond_loaded, p.cond_stop, p.astate, p.aopen).hash(&mut h);
     (p.lines_entered, p.lines_read, p.eof, p.radix, p.pdf_occ, p.rt_made, p.rt_cells, p.rt_rels, p.muts).hash(&mut h);
