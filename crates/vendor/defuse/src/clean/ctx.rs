@@ -954,12 +954,48 @@ impl<'a> Ctx<'a> {
         }
         match self.reads.get(root as usize) {
             _ if soft => {}
-            _ if self.passable(root, path) => self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: x }),
+            _ if self.passable(root, path) => self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: x, set: None }),
             Some(&Read::Loop { f: from, .. }) if path == 0 => self.forwards.push((f, loc, from)),
             _ => self.view_read(root, path),
         }
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "define_from", a, serde_json::Value::Null);
+    }
+
+    /// Defines `f` as view `v`'s value with its part at path `p` replaced
+    /// by `x` (a cell of a record: an index of a list, a key of an
+    /// association list, nested). The run depends only on that part being
+    /// there: when the rest of `v`'s value changes, `f` is made again and
+    /// refiled, the node not run again. Returns false, defining nothing,
+    /// if the part is not there.
+    pub fn define_set(&mut self, f: Field, v: View, p: crate::api::PathId, x: ValueId, loc: Locality) -> bool {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&f), crate::record::j(&v), self.core.rec_steps(p.0), crate::record::j(&x), crate::record::j(&loc)]) } else { serde_json::Value::Null };
+        let r = self.define_set_inner(f, v, p.0, x, loc);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "define_set", a, crate::record::j(&r));
+        r
+    }
+
+    fn define_set_inner(&mut self, f: Field, v: View, p: u32, x: ValueId, loc: Locality) -> bool {
+        let (root, path, base) = self.views[v.0 as usize];
+        let mut at = path;
+        for &s in self.core.path_steps(p) {
+            at = self.core.extend_path(at, s);
+        }
+        let set = self.core.set_path(p, base, x);
+        if set.is_none() || !self.passable(root, path) {
+            // (Not one a part is set in: read in full.)
+            self.view_read(root, path);
+        } else {
+            self.view_read(root, self.core.extend_path(at, crate::api::Step::Present));
+        }
+        let Some(y) = set else { return false };
+        self.define_with_inner(f, y, loc);
+        if self.passable(root, path) {
+            self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: base, set: Some((p, x)) });
+        }
+        true
     }
 
     /// Contributes view `v`'s value to accumulator `f`, passed on as
@@ -972,7 +1008,7 @@ impl<'a> Ctx<'a> {
         let first = !self.ix.contains_key(&(2, f, 0));
         self.contribute_inner(f, x);
         if first && self.passable(root, path) {
-            self.passes.push(super::world::Pass { to: super::world::PassTo::Contrib(f), read: root, path, val: x });
+            self.passes.push(super::world::Pass { to: super::world::PassTo::Contrib(f), read: root, path, val: x, set: None });
         } else {
             self.view_read(root, path);
         }
@@ -1003,7 +1039,7 @@ impl<'a> Ctx<'a> {
         let (root, path, x) = self.views[v.0 as usize];
         self.passes.retain(|p| p.to != super::world::PassTo::Out);
         if self.passable(root, path) {
-            self.passes.push(super::world::Pass { to: super::world::PassTo::Out, read: root, path, val: x });
+            self.passes.push(super::world::Pass { to: super::world::PassTo::Out, read: root, path, val: x, set: None });
         } else {
             self.view_read(root, path);
             self.out_from = Some(x);

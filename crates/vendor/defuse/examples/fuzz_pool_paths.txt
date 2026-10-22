@@ -54,3 +54,8 @@ pack u = z, (k[2], 1)
 print u
 q = pg + 1
 print pg
+cell l[1] = x + 1
+cell l[0] = a
+cell m[1][0] = x
+cell m[2] = 8
+{ cell l[2] = 6  print l }

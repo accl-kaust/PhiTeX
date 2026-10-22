@@ -731,6 +731,14 @@ impl Engine {
         self.rec_call("set_run_time_hint", crate::record::rec().map(|_| crate::record::j(&(&node, &t))), &());
     }
 
+    /// The run times [`Self::set_long_runs`] goes by (kept while a limit is
+    /// set): for a client to cache as hints for a later build.
+    pub fn run_times(&self) -> Vec<(NodeId, std::time::Duration)> {
+        let mut v: Vec<_> = self.run_time.iter().map(|(&n, &t)| (NodeId(n), t)).collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Whether a loop-back declared with options that differ from its
     /// first declaration's is an error ([`crate::EvalError::ConflictingLoopOptions`],
     /// naming both declarers): on by default in debug and `observe` builds.

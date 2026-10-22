@@ -300,6 +300,10 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "define_with" => json!(cx.define_with(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "define_forward" => return res(cx.define_forward(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "publish" => json!(cx.publish(de(&g(0)), de(&g(1)))),
+        "define_set" => {
+            let p = cx.path(&steps(cx, &g(2)));
+            json!(cx.define_set(de(&g(0)), de::<defuse::View>(&g(1)), p, de(&g(3)), de::<Locality>(&g(4))))
+        }
         "define_from" => json!(cx.define_from(de(&g(0)), de::<defuse::View>(&g(1)), de::<Locality>(&g(2)))),
         "contribute_from" => json!(cx.contribute_from(de(&g(0)), de::<defuse::View>(&g(1)))),
         "publish_from" => json!(cx.publish_from(de(&g(0)), de::<defuse::View>(&g(1)))),
@@ -1258,9 +1262,18 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
     let book = Arc::new(book);
     let units = Arc::new(Mutex::new(Vec::new()));
     let mut eng = Engine::new();
-    // PLAY_LONG_MS=n: `Engine::set_long_runs` at n ms.
+    // PLAY_LONG_MS=n: `Engine::set_long_runs` at n ms. PLAY_LONG_HINTS=
+    // file: run times hinted from it (`Engine::set_run_time_hint`), as an
+    // earlier play saved them with PLAY_LONG_SAVE=file.
     if let Some(ms) = std::env::var("PLAY_LONG_MS").ok().and_then(|s| s.parse::<u64>().ok()) {
         eng.set_long_runs(Some(std::time::Duration::from_millis(ms)));
+    }
+    if let Ok(p) = std::env::var("PLAY_LONG_HINTS") {
+        let hints: Vec<(NodeId, std::time::Duration)> = serde_json::from_str(&std::fs::read_to_string(&p).expect("PLAY_LONG_HINTS")).expect("PLAY_LONG_HINTS");
+        eprintln!("long-run hints: {}", hints.len());
+        for (n, t) in hints {
+            eng.set_run_time_hint(n, t);
+        }
     }
     if argv.iter().any(|a| a == "--no-heights") {
         eng.set_heights(false);
@@ -1509,6 +1522,9 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                 of_op.len()
             );
         }
+    }
+    if let Ok(p) = std::env::var("PLAY_LONG_SAVE") {
+        std::fs::write(&p, serde_json::to_string(&eng.run_times()).unwrap()).expect("PLAY_LONG_SAVE");
     }
     evals
 }

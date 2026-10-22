@@ -1978,7 +1978,7 @@ impl Engine {
         let mut u = self.early_pending.first().map(|x| x.0);
         while let Some(unit) = u {
             let Some(&(_, pos, _)) = self.early_pending.range((Included((unit, 0, low)), Unbounded)).next() else { break };
-            let ready = all || self.w.work_of(unit).and_then(|m| m.at_or_above(&0)).is_none_or(|(&p, _)| pos < p);
+            let ready = all || self.w.work_of(unit).and_then(|m| m.at_or_above(&0)).is_none_or(|(&p, _)| pos < p) && self.publisher_settled(unit, pos);
             if ready {
                 let group: Vec<(u32, Pos, Field)> = self.early_pending.range((Included((unit, pos, low)), Excluded((unit, pos.saturating_add(1), low)))).copied().collect();
                 let mut fields = Vec::with_capacity(group.len());
@@ -1994,6 +1994,19 @@ impl Engine {
             u = self.early_pending.range((Excluded((unit, Pos::MAX, Field(ValueId::from_raw(u64::MAX)))), Unbounded)).next().map(|x| x.0);
         }
         Ok(false)
+    }
+
+    /// Whether the run of the publisher at `pos` in unit `u` is settled:
+    /// every read holds strictly (none standing on a definer in work or
+    /// still to come: a guess, a prediction), and no early field it read
+    /// has a move pending. Else what it published may be transient.
+    fn publisher_settled(&self, u: u32, pos: Pos) -> bool {
+        let Some(id) = self.w.unit(u).order.get(&pos).copied() else { return true };
+        let Some(res) = self.w.node(id).and_then(|n| n.res.as_deref()) else { return false };
+        res.reads.iter().all(|r| match r {
+            Read::Loop { f, .. } => !self.early_pending.iter().any(|k| k.2 == *f),
+            r => super::build::holds_with(&self.core, &self.w, id, r, true),
+        })
     }
 
     /// The run audit's account of node `id`'s run (of `t`), which replaced

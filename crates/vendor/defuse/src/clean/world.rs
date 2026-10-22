@@ -243,6 +243,9 @@ pub(crate) struct Pass {
     pub read: u32,
     pub path: u32,
     pub val: ValueId,
+    /// Passed with a part replaced (`Ctx::define_set`): the path from the
+    /// value passed, and what it is set to there.
+    pub set: Option<(u32, ValueId)>,
 }
 
 /// The token a run kept for a later run to resume from one of its marks
