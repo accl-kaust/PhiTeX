@@ -901,6 +901,51 @@ impl MergeTimes {
     }
 }
 
+/// An evaluation's run audit (`Engine::set_run_audit`).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct RunAudit {
+    /// Runs of nodes that had a result, and their time.
+    pub reruns: u64,
+    pub rerun_time: std::time::Duration,
+    /// Of those, the runs whose effects outside the run all came out as
+    /// before: in commit order, and their time.
+    pub wasted: Vec<WastedRun>,
+    pub wasted_time: std::time::Duration,
+}
+
+/// A run that changed nothing outside itself ([`RunAudit::wasted`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WastedRun {
+    pub node: NodeId,
+    /// What made it run again (the last when several did; `None`: not
+    /// known, e.g. a run on its own).
+    pub cause: Option<Rerun>,
+    pub time: std::time::Duration,
+}
+
+impl RunAudit {
+    /// The wasted runs by cause kind (`Rerun`'s variant, with its field
+    /// when it names one): count and time, the most time first.
+    #[must_use]
+    pub fn by_cause(&self) -> Vec<(String, u64, std::time::Duration)> {
+        let mut m: std::collections::BTreeMap<String, (u64, std::time::Duration)> = std::collections::BTreeMap::new();
+        for w in &self.wasted {
+            let k = match w.cause {
+                None => "unknown".to_string(),
+                // (By field: the values it changed between apart.)
+                Some(Rerun::Changed { field, .. }) => format!("Changed {{ field: {field:?} }}"),
+                Some(c) => format!("{c:?}"),
+            };
+            let e = m.entry(k).or_default();
+            e.0 += 1;
+            e.1 += w.time;
+        }
+        let mut v: Vec<_> = m.into_iter().map(|(k, (n, t))| (k, n, t)).collect();
+        v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        v
+    }
+}
+
 /// An early loop-back field's evaluation (`Engine::declare_loopback_early`).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EarlyLoop {
@@ -1064,6 +1109,10 @@ pub struct Report {
     /// changed this evaluation, by field (not canonical: their changes, and
     /// with them `rounds`, depend on the schedule).
     pub early_loops: Vec<EarlyLoop>,
+    /// With `Engine::set_run_audit`: the runs that were reruns, and those
+    /// of them that changed nothing (not canonical: a schedule may run a
+    /// node more often).
+    pub audit: Option<RunAudit>,
     /// Under [`LoopStart::PerRound`]: the quick path held (the edits were
     /// evaluated from the last fixed point only).
     pub quick_held: bool,

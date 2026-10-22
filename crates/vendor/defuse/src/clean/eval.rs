@@ -73,6 +73,9 @@ struct Sched {
     why: FxHashMap<Id, std::collections::VecDeque<crate::api::Cause>>,
     /// Each node's run time (all its attempts).
     time: FxHashMap<Id, std::time::Duration>,
+    /// Each node's last attempt's time, until its commit takes it (the
+    /// run audit's).
+    last_ran: FxHashMap<Id, std::time::Duration>,
     /// Nodes whose speculative run ran out of fuel: they run in full.
     no_fuel: FxHashSet<Id>,
     /// How often each node's result was refuted.
@@ -302,6 +305,7 @@ impl Engine {
     ) -> Result<Report, EvalError> {
         let t0 = std::time::Instant::now();
         let mut rep = Report::default();
+        self.audit = self.audit_on.then(crate::api::RunAudit::default);
         // (No run is out: no late filing for a node gone.)
         self.w.rd.purge_gone();
         (self.t_op, self.t_commit, self.t_idle) = (0, 0, 0);
@@ -733,6 +737,7 @@ impl Engine {
             .collect();
         causes.sort_by_key(|c| c.0);
         rep.rerun_causes = causes;
+        rep.audit = self.audit.take();
         // (Complete runs: a stopped attempt is not one; the limits count
         // attempts.)
         rep.runs -= self.stopped;
@@ -850,6 +855,7 @@ impl Engine {
             };
             idle = 0;
             *s.time.entry(id).or_default() += d;
+            s.last_ran.insert(id, d);
             self.t_op += u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
             let applied = matches!(outcome, Outcome::Done(_));
             let tc = std::time::Instant::now();
@@ -1129,6 +1135,7 @@ impl Engine {
                             continue;
                         }
                         *g.m.s.time.entry(id).or_default() += d;
+                        g.m.s.last_ran.insert(id, d);
                         let ahead = g.m.eng.w.node(id).is_some_and(|n| g.m.eng.w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
                         if let Err(e) = g.m.one(&snap, usize::from(ahead), id, o, &mut Sequential) {
                             g.m.err = Some(e);
@@ -1846,6 +1853,21 @@ impl Engine {
         Ok(())
     }
 
+    /// The run audit's account of node `id`'s run (of `t`), which replaced
+    /// result `old`: wasted when the new result changes nothing outside
+    /// the run.
+    fn audit_run(&mut self, id: Id, old: &Res, t: std::time::Duration) {
+        let same = self.w.node(id).and_then(|n| n.res.as_deref()).is_some_and(|new| same_effects(old, new));
+        let cause = if same { super::core::lock(&self.core.causes).get(&id).copied() } else { None };
+        let Some(a) = self.audit.as_mut() else { return };
+        a.reruns += 1;
+        a.rerun_time += t;
+        if same {
+            a.wasted_time += t;
+            a.wasted.push(crate::api::WastedRun { node: NodeId(id), cause, time: t });
+        }
+    }
+
     /// Where the loop-backs start: with an early field, from the last
     /// values (its rounds are not kept, `LoopStart::Previous`).
     pub(crate) fn loop_start_now(&self) -> LoopStart {
@@ -2003,6 +2025,8 @@ impl Engine {
                     }
                     let dbg = super::core::debug().then(|| format!("{:?} out {}", r.res.reads, self.core.values.render(r.res.out)));
                     let s0 = super::core::prof::snapshot();
+                    // (The run audit: the result it replaces.)
+                    let audit_old = if self.audit.is_some() { self.w.node(id).and_then(|n| n.res.clone()) } else { None };
                     let w = std::mem::take(&mut self.w);
                     let mut b = Builder::new(&self.core, w);
                     b.app_env(id, &r.env);
@@ -2019,6 +2043,10 @@ impl Engine {
                     let (dirty, created, freed, woken) = (m.dirty, m.created, m.freed, m.woken);
                     self.rebinds += m.rebinds;
                     self.w = m.w;
+                    let ran = s.last_ran.remove(&id);
+                    if let (Some(o), Some(t)) = (audit_old, ran) {
+                        self.audit_run(id, &o, t);
+                    }
                     if changed {
                         cut.remove(&id);
                     } else {
@@ -2876,6 +2904,23 @@ fn read_kind(r: &Read) -> &'static str {
     }
 }
 
+/// Whether results `a` and `b` have the same effects outside their runs:
+/// output, definitions, contributions, publications, scope effect and
+/// kinds, placements, diagnostics and claim.
+fn same_effects(a: &Res, b: &Res) -> bool {
+    a.out == b.out
+        && a.defs == b.defs
+        && a.contribs == b.contribs
+        && a.pubs == b.pubs
+        && a.effect == b.effect
+        && a.kinds == b.kinds
+        && a.kids == b.kids
+        && a.conts == b.conts
+        && a.diag == b.diag
+        && a.claim == b.claim
+        && a.forwards == b.forwards
+}
+
 /// The loop-back values world `w`'s publications give (every declared
 /// field: unpublished, its initial value).
 fn publications_of(core: &super::core::Core, w: &World) -> Result<Vec<(Field, ValueId)>, EvalError> {
@@ -3024,6 +3069,7 @@ impl Flow<'_> {
                     }
                 };
                 *self.m.s.time.entry(id).or_default() += d;
+                self.m.s.last_ran.insert(id, d);
                 let ahead = self.m.eng.w.node(id).is_some_and(|n| self.m.eng.w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
                 if let Err(e) = self.m.one(&snap, usize::from(ahead), id, o, &mut Sequential) {
                     self.m.err = Some(e);
@@ -3106,6 +3152,7 @@ impl Merge<'_> {
                 continue;
             }
             *self.s.time.entry(id).or_default() += d;
+            self.s.last_ran.insert(id, d);
             if let Err(e) = self.one(snap, i, id, o, exec) {
                 self.err = Some(e);
             }
@@ -3156,6 +3203,7 @@ impl Merge<'_> {
             let d = std::time::Duration::ZERO;
             t_ops += u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
             *self.s.time.entry(id).or_default() += d;
+            self.s.last_ran.insert(id, d);
             let (eng, s, rep) = (&mut *self.eng, &mut *self.s, &mut *self.rep);
             // (What it stopped on, if in work: the chain's next link.)
             let want = match &o {

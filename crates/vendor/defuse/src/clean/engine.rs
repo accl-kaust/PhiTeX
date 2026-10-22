@@ -92,6 +92,10 @@ pub struct Engine {
     pub(crate) early_live: bool,
     pub(crate) early_changes: FxHashMap<Field, u32>,
     pub(crate) early_frozen: FxHashSet<Field>,
+    /// Whether evaluations audit their runs (`set_run_audit`), and the
+    /// running evaluation's audit.
+    pub(crate) audit_on: bool,
+    pub(crate) audit: Option<crate::api::RunAudit>,
     pub(crate) limits: Limits,
     pub(crate) roots: Vec<NodeId>,
     pub(crate) version: u64,
@@ -167,6 +171,8 @@ impl Engine {
             early_live: false,
             early_changes: FxHashMap::default(),
             early_frozen: FxHashSet::default(),
+            audit_on: false,
+            audit: None,
             limits: Limits::default(),
             roots: Vec::new(),
             version: 0,
@@ -599,6 +605,19 @@ impl Engine {
         self.declare_loopbacks_inner(&[(f, init)]);
         #[cfg(feature = "observe")]
         self.rec_call("declare_loopback", crate::record::rec().map(|_| crate::record::j(&(&f, &init))), &());
+    }
+
+    /// Audits every evaluation's runs ([`crate::Report::audit`]): each run
+    /// of a node that had a result is compared with that result, and one
+    /// whose effects outside the run (output, definitions, contributions,
+    /// publications, scope effect and kinds, placements, diagnostics,
+    /// claim) all came out the same is reported wasted, with what made it
+    /// run again and its time. Off by default (the comparison costs a
+    /// little per commit).
+    pub fn set_run_audit(&mut self, on: bool) {
+        self.audit_on = on;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_run_audit", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
     }
 
     /// Declares loop-back field `f` (as [`Self::declare_loopback`]; a

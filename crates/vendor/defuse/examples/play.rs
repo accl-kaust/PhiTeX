@@ -171,6 +171,43 @@ impl PlayOp {
     }
 }
 
+/// The run audit: reruns, the wasted ones, and those by cause (the field
+/// named), the most time first.
+fn print_audit(eng: &Engine, a: &defuse::RunAudit) {
+    use defuse::Rerun;
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    println!(
+        "  audit: reruns {} ({:.2} ms), wasted {} ({:.2} ms)",
+        a.reruns,
+        ms(a.rerun_time),
+        a.wasted.len(),
+        ms(a.wasted_time)
+    );
+    let name = |f: defuse::Field| eng.values().as_str(f.0).unwrap_or_else(|| format!("{f:?}"));
+    let mut by: std::collections::BTreeMap<String, (u64, std::time::Duration)> = std::collections::BTreeMap::new();
+    for w in &a.wasted {
+        let k = match w.cause {
+            None => "unknown".to_string(),
+            Some(Rerun::Changed { field, .. }) => format!("changed {}", name(field)),
+            Some(Rerun::Rebind { field }) => format!("rebind {}", name(field)),
+            Some(Rerun::Loop { field }) => format!("loop {}", name(field)),
+            Some(Rerun::Environment { field }) => format!("env {}", name(field)),
+            Some(Rerun::Range { field: Some(f) }) => format!("range {}", name(f)),
+            Some(Rerun::Woken { field: Some(f) }) => format!("woken {}", name(f)),
+            Some(Rerun::Refuted { field: Some(f) }) => format!("refuted {}", name(f)),
+            Some(c) => format!("{c:?}"),
+        };
+        let e = by.entry(k).or_default();
+        e.0 += 1;
+        e.1 += w.time;
+    }
+    let mut v: Vec<_> = by.into_iter().collect();
+    v.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+    for (k, (n, t)) in v.iter().take(15) {
+        println!("    wasted {n:5} {:8.2} ms  {k}", ms(*t));
+    }
+}
+
 /// Makes one recorded call on `cx`; returns its answer as recorded, or
 /// `Err` with the run's stop when the call stopped it.
 #[allow(clippy::too_many_lines)]
@@ -815,6 +852,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "guess_from_last" => eng.guess_from_last(de(&g(0))),
         "set_claim_window" => eng.set_claim_window(de(&g(0))),
         "set_claim_chain" => eng.set_claim_chain(de(&g(0))),
+        "set_run_audit" => eng.set_run_audit(de(&g(0))),
         "wait_on_pending" => eng.wait_on_pending(de(&g(0))),
         "set_heights" => eng.set_heights(de(&g(0))),
         "set_round_cap_policy" => eng.set_round_cap_policy(de::<CapPolicy>(&g(0))),
@@ -1186,6 +1224,10 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                 eng.pin(v);
             }
             "api" if l["f"] == "evaluate_begin" => {
+                // PLAY_AUDIT=1: the run audit (wasted reruns) printed.
+                if std::env::var_os("PLAY_AUDIT").is_some() {
+                    eng.set_run_audit(true);
+                }
                 // PLAY_WAIT_PENDING=<names>: those fields' readers wait on
                 // pending definition sets whatever was recorded.
                 if let Ok(ns) = std::env::var("PLAY_WAIT_PENDING") {
@@ -1274,6 +1316,9 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                         "  mispredictions {} refuted nodes {} claims past reach {} claimed after run {}; refuted by field {by:?}",
                         rep.mispredictions, rep.refuted_nodes, rep.claims_past_reach, rep.claimed_after_run
                     );
+                    if let Some(a) = &rep.audit {
+                        print_audit(&eng, a);
+                    }
                     // Where the time went, and two bounds on the wall time:
                     // the busy time spread over the workers, and the
                     // critical path at the mean run's cost.
