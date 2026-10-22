@@ -2828,6 +2828,18 @@ impl<'c, 'a> Run<'c, 'a> {
                 let Some(x) = self.cx.use_field(wd)? else {
                     continue;
                 };
+                // (`PHITEX_KEYS_SHOW=part`, profile: the value a read-back
+                // of a key whose id has `part` finds, by node)
+                if cfg!(feature = "profile")
+                    && crate::exec::env_str!("PHITEX_KEYS_SHOW").is_some_and(|p| id.contains(p))
+                {
+                    let xs = list_of(v, x);
+                    eprintln!(
+                        "keys-read: {id} = {} node {}",
+                        xs.first().map_or_else(|| "(none: its initial value)".to_owned(), |&d| crate::val::show_def(v, d)),
+                        self.cx.node().raw()
+                    );
+                }
                 x
             };
             let xs = list_of(v, x);
