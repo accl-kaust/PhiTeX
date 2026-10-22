@@ -1235,7 +1235,17 @@ impl Run<'_, '_> {
             // again through its value, `crate::nodes::unit_shape`)
             if seen == 0 {
                 let f = nodes::native_fonts(&line.packed.node.list).map(|ids| {
-                    v.list(ids.into_iter().map(|f| v.int(i64::from(f))).collect())
+                    // (one value a set of fonts: the lines share few)
+                    let ids = ids.as_slice();
+                    let k = phitex_defuse::hash_words(0, &ids.iter().map(|&f| u64::from(f)).collect::<Vec<_>>());
+                    match self.font_sets.get(&k) {
+                        Some((s, x)) if s.as_slice() == ids => *x,
+                        _ => {
+                            let x = v.list(ids.iter().map(|&f| v.int(i64::from(f))).collect());
+                            self.font_sets.insert(k, (ids.to_vec(), x));
+                            x
+                        }
+                    }
                 });
                 self.line_fonts.insert(b, f);
             }

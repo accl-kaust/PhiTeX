@@ -482,13 +482,14 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
 
     let t_acc = t0.elapsed();
     let xpages = crate::pdfout::order_line(v, &line);
-    // (the pages' boxes, their lines' lists in them, each page's to its
-    // record, `crate::pages::REALPAGES`)
-    let boxes = crate::pages::real_pages(
-        v,
-        cx.acc_range(v.field(crate::pages::REALPAGES), None)?,
-    );
-    let reals = crate::pdfout::pair_reals(v, &line, &boxes, &xpages);
+    // (the pieces' items, by piece: the pages' sealed lines,
+    // `crate::pages::seal`)
+    let mut units = crate::FxHashMap::default();
+    for u in v.seq_to_vec(cx.acc_range(v.field(crate::pages::PITEMS), None)?) {
+        if let Some(Some((p, items))) = v.with_list(u, |xs| Some((v.as_int(*xs.first()?)?, *xs.get(2)?))) {
+            units.entry(p).or_insert(items);
+        }
+    }
     if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
         for (tag, l) in [("in", &line), ("out", &xpages)] {
             for &x in l {
@@ -536,7 +537,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };
     let t_seed = t0.elapsed();
-    let l = crate::pdfout::finish_exact(v, &f, &xpages, &reals, &o.pdf_cmds);
+    let l = crate::pdfout::finish_exact(v, &f, &xpages, &units, &o.pdf_cmds);
     let t_fin = t0.elapsed();
     // a page the link shipped and the writer could not write is the
     // job's error, in the log and loudly, naming the node that shipped
@@ -565,6 +566,12 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
             v.int(i64::try_from(l.shipped).unwrap_or(0)),
         ])),
     );
+    // (each page's identity, for a viewer: `crate::api::Build::pages`)
+    let shown = l
+        .shown
+        .iter()
+        .fold(ValueId::NIL, |a, &h| v.seq_concat(a, v.seq_unit(v.int(i64::from_ne_bytes(h.to_ne_bytes())))));
+    cx.contribute(v.field(crate::pdfout::SHOWN), shown);
     let x = bytes_value(v, l.file, l.hash);
     {
         use crate::timeline::note;

@@ -6322,9 +6322,9 @@ impl Build {
         let v = self.g.eng.values();
         let f = v.field("pagehash");
         let acc = self.g.eng.acc_value(self.unit, f).map(|x| {
-            // (and the pages' boxes: a PDF page's entry is its shape,
-            // its lines' lists in its box, `crate::pages::REALPAGES`)
-            let r = self.g.eng.acc_value(self.unit, v.field(crate::pages::REALPAGES));
+            // (and the pages as the link has them: a PDF page's entry is
+            // its shape, `crate::pdfout::SHOWN`)
+            let r = self.g.eng.acc_value(self.unit, v.field(crate::pdfout::SHOWN));
             v.list(vec![x, r.unwrap_or(ValueId::UNIT)])
         });
         if let Some((k, x)) = &self.memo.locked().pages
@@ -6351,17 +6351,17 @@ impl Build {
                     .collect()
             })
             .unwrap_or_default();
-        // (a PDF page's hash is its shape's: its box's too, where the
-        // pages' boxes are one a page)
-        let boxes = self
+        // (a PDF page's hash is its shape's: the link's identity of it
+        // too, its sealed lines in it, `crate::pdfout::SHOWN`)
+        let shown = self
             .g
             .eng
-            .acc_value(self.unit, v.field(crate::pages::REALPAGES))
-            .map(|x| crate::pages::real_pages(v, x))
+            .acc_value(self.unit, v.field(crate::pdfout::SHOWN))
+            .map(|x| v.seq_to_vec(x))
             .unwrap_or_default();
-        if boxes.len() == out.len() {
-            for (h, b) in out.iter_mut().zip(boxes) {
-                *h = phitex_defuse::hash_words(*h, &[b.raw()]);
+        if shown.len() == out.len() {
+            for (h, s) in out.iter_mut().zip(shown) {
+                *h = phitex_defuse::hash_words(*h, &[s.raw()]);
             }
         }
         out
@@ -6727,8 +6727,8 @@ fn declare_fields(eng: &mut Engine) {
     eng.declare_accumulator(loads, Arc::new(crate::pages::MissMonoid));
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
-    let real = eng.values().field(crate::pages::REALPAGES);
-    eng.declare_accumulator(real, Arc::new(crate::pages::ListSeqMonoid));
+    let shown = eng.values().field(crate::pdfout::SHOWN);
+    eng.declare_accumulator(shown, Arc::new(SeqMonoid));
     let rels = eng.values().field(crate::pdfprim::RT_RELS);
     eng.declare_accumulator(rels, Arc::new(SeqMonoid));
     let linked = eng.values().field(crate::pdfout::LINKED);

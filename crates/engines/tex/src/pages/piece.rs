@@ -602,6 +602,7 @@ impl Run<'_, '_> {
             crate::vprof::VPROF,
             v.seq_unit(crate::vprof::unit(v, pid, &ints, marks)),
         );
+        let shape = crate::nodes::unit_shape(v, pid, raw, &self.line_fonts).unwrap_or(ValueId::UNIT);
         let it = v.list(vec![
             v.int(pid),
             v.int(last.map_or(-1, i64::from)),
@@ -614,7 +615,7 @@ impl Run<'_, '_> {
             v.int(i64::from(cut)),
             // (the items' shape, their lines sealed: what a PDF page's
             // finisher reads, `crate::pages::seal`; none: the items)
-            crate::nodes::unit_shape(v, pid, raw, &self.line_fonts).unwrap_or(ValueId::UNIT),
+            shape,
         ]);
         self.contribute(PITEMS, v.seq_unit(it));
     }

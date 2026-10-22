@@ -8,76 +8,54 @@
 //! definition, a contribution, the routine's give-back, a box opened), a
 //! stand-in is replaced by the line's own glue setting and list, read
 //! then ([`Run::unseal`]). The page itself leaves as its shape (the
-//! `pages` entry, the page's key) and as the page box with its lines
-//! passed on from the window, not read ([`REALPAGES`],
-//! [`Run::contribute_real_pages`]): a word that keeps its line's
-//! dimensions changes the page's writer's input, not the finisher's.
+//! `pages` entry, the page's key): its writer (`crate::pdfout::PdfPage`)
+//! and the link read the lines from the pieces' units
+//! ([`crate::nodes::fill_sealed`]). A word that keeps its line's
+//! dimensions changes the writer's input, not the finisher's.
 //!
 //! Example: a page of lines A, B, C; a word edited in B. The finisher's
-//! reads (the window's shapes) hold; the composed page box follows B and
-//! is refiled; the page's PDF side (`crate::pdfout::PdfPage`) and the
-//! link run again.
+//! reads (the window's shapes) hold; the page's PDF side, which reads
+//! B's unit, and the link run again.
 
-use phitex_defuse::{Part, Step, ValueId, Values, View};
+use phitex_defuse::{Step, ValueId, View};
 
 use crate::nodes;
 use crate::run::Run;
-use crate::val::list_of;
-
-/// The pages' boxes as shipped, their lines' lists in place: one entry a
-/// shipped page, each finisher contributing the list of its pages'
-/// boxes ([`ListSeqMonoid`]). Read by a page's PDF side and the link.
-pub(crate) const REALPAGES: &str = "pdf:realpages";
-
-/// A sequence whose contributions are lists: each list's elements in
-/// order, so a contribution can be composed ([`phitex_defuse::Ctx::compose`]
-/// makes lists).
-pub(crate) struct ListSeqMonoid;
-
-/// `x` as a sequence: a list's elements, a sequence as it is.
-pub(crate) fn as_seq(v: &Values, x: ValueId) -> ValueId {
-    match v.with_list(x, <[ValueId]>::to_vec) {
-        Some(xs) => xs
-            .into_iter()
-            .fold(ValueId::NIL, |a, y| v.seq_concat(a, v.seq_unit(y))),
-        None if x == ValueId::UNIT => ValueId::NIL,
-        None => x,
-    }
-}
-
-impl phitex_defuse::Monoid for ListSeqMonoid {
-    fn empty(&self, _: &Values) -> ValueId {
-        ValueId::NIL
-    }
-    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
-        v.seq_concat(as_seq(v, a), as_seq(v, b))
-    }
-}
-
-/// The elements of a [`REALPAGES`] fold, in order.
-pub(crate) fn real_pages(v: &Values, x: ValueId) -> Vec<ValueId> {
-    v.seq_to_vec(as_seq(v, x))
-}
 
 /// A finisher's sealed lines: the view of each piece's unit's items the
 /// run read by its shape, and the views of the line boxes made from them.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Sealing {
-    units: crate::FxHashMap<i64, View>,
+    units: crate::FxHashMap<i64, (View, u32)>,
     lines: crate::FxHashMap<(i64, u32), View>,
+    /// The window the units were read in: after which node (none: the
+    /// unit's start), to which piece (raw ids).
+    window: Option<(Option<i64>, i64)>,
 }
 
 impl Sealing {
     pub(crate) fn is_empty(&self) -> bool {
         self.units.is_empty()
     }
+
+    /// The window the sealed units were read in and each one's place in
+    /// it (by piece, sorted): where the page's writer reads them
+    /// (`crate::pdfout::PdfPage`).
+    pub(crate) fn places(&self) -> Option<(Option<i64>, i64, Vec<(i64, u32)>)> {
+        let (after, to) = self.window?;
+        let mut at: Vec<(i64, u32)> = self.units.iter().map(|(&p, &(_, i))| (p, i)).collect();
+        at.sort_unstable();
+        Some((after, to, at))
+    }
 }
 
 impl Run<'_, '_> {
-    /// Piece `piece`'s unit read by its shape: `items` the view of its
-    /// items, for its sealed lines.
-    pub(crate) fn seal_unit(&mut self, piece: i64, items: View) {
-        self.sealed.units.insert(piece, items);
+    /// Piece `piece`'s unit read by its shape, at place `i` of the window
+    /// after `after` to `to`: `items` the view of its items, for its
+    /// sealed lines.
+    pub(crate) fn seal_unit(&mut self, piece: i64, items: View, i: u32, after: Option<i64>, to: i64) {
+        self.sealed.units.insert(piece, (items, i));
+        self.sealed.window = Some((after, to));
     }
 
     /// The view of sealed line `s`'s box in its unit's items.
@@ -85,7 +63,7 @@ impl Run<'_, '_> {
         if let Some(&l) = self.sealed.lines.get(&(s.piece, s.k)) {
             return Some(l);
         }
-        let items = *self.sealed.units.get(&s.piece)?;
+        let (items, _) = *self.sealed.units.get(&s.piece)?;
         let item = self.cx.at(items, Step::Index(s.k))?;
         let l = self.cx.at(item, Step::Index(1))?;
         self.sealed.lines.insert((s.piece, s.k), l);
@@ -137,67 +115,5 @@ impl Run<'_, '_> {
         };
         memo.insert(x, y);
         y
-    }
-
-    /// Whether `x` holds a sealed line.
-    fn holds_sealed(&self, x: ValueId, memo: &mut crate::FxHashMap<ValueId, bool>) -> bool {
-        if let Some(&b) = memo.get(&x) {
-            return b;
-        }
-        let v = self.v;
-        let b = match v.with_list(x, <[ValueId]>::to_vec) {
-            None => false,
-            Some(xs) if xs.len() == 5 && v.as_int(xs[0]) == Some(nodes::T_SEALED) => true,
-            Some(xs) => xs.into_iter().any(|e| self.holds_sealed(e, memo)),
-        };
-        memo.insert(x, b);
-        b
-    }
-
-    /// Box value `x` as a composition: its sealed lines passed on from the
-    /// window (a line's box whole where its head is as its piece made it,
-    /// else its glue setting and list), the rest its own.
-    fn real_part(&mut self, x: ValueId, memo: &mut crate::FxHashMap<ValueId, bool>) -> Part {
-        let v = self.v;
-        if !self.holds_sealed(x, memo) {
-            return Part::Val(x);
-        }
-        let xs = list_of(v, x);
-        if xs.len() == 10
-            && v.as_int(xs[0]) == Some(nodes::T_BOX)
-            && let Some(s) = nodes::sealed_of(v, xs[9])
-        {
-            let line = self.sealed_line(s);
-            if let Some(l) = line
-                && nodes::head_hash(&xs[..6]) == s.head
-            {
-                return Part::View(l);
-            }
-            let mut parts: Vec<Part> = xs[..6].iter().map(|&e| Part::Val(e)).collect();
-            for j in 6..10 {
-                match line.and_then(|l| self.cx.at(l, Step::Index(j))) {
-                    Some(p) => parts.push(Part::View(p)),
-                    None => parts.push(Part::Val(xs[j as usize])),
-                }
-            }
-            return Part::View(self.cx.compose(&parts));
-        }
-        let parts: Vec<Part> = xs.into_iter().map(|e| self.real_part(e, memo)).collect();
-        Part::View(self.cx.compose(&parts))
-    }
-
-    /// The pages this run shipped ([`Run::real_pages`], their boxes as the
-    /// run has them) contributed to [`REALPAGES`] with their sealed
-    /// lines passed on: one contribution, the list of the boxes.
-    pub(crate) fn contribute_real_pages(&mut self) {
-        if self.real_pages.is_empty() {
-            return;
-        }
-        let v = self.v;
-        let pages = std::mem::take(&mut self.real_pages);
-        let mut memo = crate::FxHashMap::default();
-        let parts: Vec<Part> = pages.into_iter().map(|b| self.real_part(b, &mut memo)).collect();
-        let c = self.cx.compose(&parts);
-        self.cx.contribute_from(v.field(REALPAGES), c);
     }
 }

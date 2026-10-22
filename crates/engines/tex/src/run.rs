@@ -829,9 +829,8 @@ pub(crate) struct Run<'c, 'a> {
     /// their nodes; `None` for a line not sealed
     /// ([`crate::nodes::unit_shape`]).
     pub(crate) line_fonts: crate::FxHashMap<ValueId, Option<ValueId>>,
-    /// A finisher's shipped page boxes as the run has them, for
-    /// [`crate::pages::REALPAGES`] (`crate::pages::Run::contribute_real_pages`).
-    pub(crate) real_pages: Vec<ValueId>,
+    /// The font sets of those lines, each as one value.
+    pub(crate) font_sets: crate::FxHashMap<u64, (Vec<u32>, ValueId)>,
     /// The main loop's `lig_stack`, kept between words (§1034).
     pub(crate) lig_buf: Vec<crate::build::LigItem>,
 }
@@ -979,7 +978,7 @@ impl<'c, 'a> Run<'c, 'a> {
             fin_box: None,
             sealed: crate::pages::Sealing::default(),
             line_fonts: crate::FxHashMap::default(),
-            real_pages: Vec::new(),
+            font_sets: crate::FxHashMap::default(),
             lig_buf: Vec::new(),
             reach_reads: 0,
         }
@@ -4620,14 +4619,13 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.contribs.push((crate::regfold::acc_field(v, n), m.encode(v)));
             }
         }
-        // (a finisher's pages leave as their shapes, `pages`, and as
-        // their boxes with the sealed lines' lists passed on)
+        // (a finisher's pages leave as their shapes, `pages`: their
+        // writers read the lines, `crate::pdfout::PdfPage`)
         let pages_f = self.v.field("pages");
         for (f, x) in std::mem::take(&mut self.contribs) {
             let x = if f == pages_f { x } else { self.unseal(x) };
             self.cx.contribute(f, x);
         }
-        self.contribute_real_pages();
         // (a page's PDF side is a child of the run that shipped it, named
         // by its place among the run's shipouts, never by what it holds:
         // the pages' keys are a definition of the run's, read by those
@@ -5163,7 +5161,6 @@ pub(crate) struct Parked {
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
     sealed: crate::pages::Sealing,
-    real_pages: Vec<ValueId>,
 }
 
 impl Run<'_, '_> {
@@ -5331,7 +5328,6 @@ impl Run<'_, '_> {
             ins_pending: std::mem::take(&mut self.ins_pending),
             fin: self.fin.take(),
             sealed: std::mem::take(&mut self.sealed),
-            real_pages: std::mem::take(&mut self.real_pages),
         })
     }
 }
@@ -5459,7 +5455,6 @@ impl<'c, 'a> Run<'c, 'a> {
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
         r.sealed = p.sealed;
-        r.real_pages = p.real_pages;
         r.resumed = true;
         Ok(r)
     }

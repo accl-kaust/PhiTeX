@@ -1015,18 +1015,105 @@ pub(crate) fn sealed_of(v: &Values, l: ValueId) -> Option<Sealed> {
     .flatten()
 }
 
-/// The hash of a box's head (its value's words before its list).
+/// The hash of a box's head (its value's words before its list), in 56
+/// bits (an integer kept in its value's id, never interned).
 pub(crate) fn head_hash(head: &[ValueId]) -> i64 {
     let words: Vec<u64> = head.iter().map(|x| x.raw()).collect();
-    i64::from_ne_bytes(phitex_defuse::hash_words(0x7365_616c_6564_0001, &words).to_ne_bytes())
+    i64::try_from(phitex_defuse::hash_words(0x7365_616c_6564_0001, &words) >> 8).unwrap_or(0)
+}
+
+/// The sealed lines in `list` (shallow boxes whose stand-ins `lazy`
+/// holds, [`T_SEALED`], at any depth) given their glue settings and
+/// lists: `line` gives a line's box as its piece made it (its unit's
+/// items, `crate::pages::seal`); each line's box hashed into `h` in
+/// order. `false` where a line is not found.
+pub(crate) fn fill_sealed(
+    v: &Values,
+    list: &mut [Node],
+    lazy: &[ValueId],
+    line: &mut dyn FnMut(&Sealed) -> Option<ValueId>,
+    h: &mut u64,
+) -> bool {
+    for n in list.iter_mut() {
+        let ok = match n {
+            Node::Box(b) => {
+                let stand_in = match b.list.as_slice() {
+                    [Node::Whatsit(k, None)] if *k >= LAZY => {
+                        lazy.get((*k - LAZY) as usize).and_then(|&l| sealed_of(v, l))
+                    }
+                    _ => None,
+                };
+                match stand_in {
+                    Some(s) => {
+                        let Some(x) = line(&s) else { return false };
+                        let Some(xs) = v.with_list(x, |xs| <[ValueId; 10]>::try_from(xs).ok()).flatten() else {
+                            return false;
+                        };
+                        b.glue = decode_box_head(v, &xs).glue;
+                        let mut side = Side::default();
+                        b.list = take_made(xs[9], &mut side).unwrap_or_else(|| decode_list(v, xs[9], &mut side));
+                        *h = phitex_defuse::hash_words(*h, &[x.raw()]);
+                        true
+                    }
+                    None => fill_sealed(v, &mut b.list, lazy, line, h),
+                }
+            }
+            Node::Ins(i) => fill_sealed(v, &mut i.list, lazy, line, h),
+            Node::Adjust(l) => fill_sealed(v, l, lazy, line, h),
+            Node::Unset(u) => fill_sealed(v, &mut u.list, lazy, line, h),
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// A few font ids, sorted, without an allocation for a line's usual
+/// one to four ([`native_fonts`]).
+#[derive(Default)]
+pub(crate) struct FontIds {
+    few: [u32; 8],
+    n: usize,
+    more: Vec<u32>,
+}
+
+impl FontIds {
+    fn insert(&mut self, f: u32) {
+        if !self.more.is_empty() {
+            if let Err(i) = self.more.binary_search(&f) {
+                self.more.insert(i, f);
+            }
+            return;
+        }
+        let s = &self.few[..self.n];
+        let Err(i) = s.binary_search(&f) else { return };
+        if self.n == self.few.len() {
+            self.more = self.few.to_vec();
+            self.more.insert(i, f);
+            return;
+        }
+        self.few.copy_within(i..self.n, i + 1);
+        self.few[i] = f;
+        self.n += 1;
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u32] {
+        if self.more.is_empty() { &self.few[..self.n] } else { &self.more }
+    }
 }
 
 /// [`list_fonts`] of a native list (its fonts' ids, sorted).
-pub(crate) fn native_fonts(list: &[Node]) -> Option<Vec<u32>> {
-    fn walk(l: &[Node], out: &mut std::collections::BTreeSet<u32>) -> bool {
+pub(crate) fn native_fonts(list: &[Node]) -> Option<FontIds> {
+    fn walk(l: &[Node], out: &mut FontIds) -> bool {
+        let mut last = None;
         l.iter().all(|n| match n {
             Node::Char { font, .. } => {
-                out.insert(*font);
+                if last != Some(*font) {
+                    out.insert(*font);
+                    last = Some(*font);
+                }
                 true
             }
             Node::Lig(g) => {
@@ -1040,8 +1127,8 @@ pub(crate) fn native_fonts(list: &[Node]) -> Option<Vec<u32>> {
             _ => false,
         })
     }
-    let mut out = std::collections::BTreeSet::new();
-    walk(list, &mut out).then(|| out.into_iter().collect())
+    let mut out = FontIds::default();
+    walk(list, &mut out).then_some(out)
 }
 
 /// The fonts of box list `l`'s characters at any depth (sorted ids), or

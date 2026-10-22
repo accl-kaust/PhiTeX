@@ -651,7 +651,9 @@ impl Run<'_, '_> {
             };
             let mut raw = match self.cx.at(u, Step::Index(2)) {
                 Some(x) if shape.is_some() => {
-                    self.seal_unit(p, x);
+                    let raw_id = |n: phitex_defuse::NodeId| i64::from_ne_bytes(n.raw().to_ne_bytes());
+                    let place = u32::try_from(i).unwrap_or(u32::MAX);
+                    self.seal_unit(p, x, place, fin.after.map(raw_id), raw_id(fin.piece));
                     list_of(v, shape.unwrap_or(ValueId::UNIT))
                 }
                 Some(x) => {
@@ -1137,10 +1139,7 @@ impl Run<'_, '_> {
         if pos.pdf
             && let Node::Box(bx) = page_box
         {
-            crate::pdfout::ship(self, page, &bx, &side, &ids)?;
-            // (the page's box for its writer, its sealed lines' lists
-            // passed on at the run's end, `crate::pages::REALPAGES`)
-            self.real_pages.push(b);
+            crate::pdfout::ship(self, page, bx, &side, &ids)?;
         }
         let shown = Some(page.raw());
         phitex_pdf::phase::add(4, t_p4);

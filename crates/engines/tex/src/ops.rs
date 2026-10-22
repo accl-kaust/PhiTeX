@@ -669,10 +669,11 @@ impl Operation for Link {
         Some(vec![(v.field(crate::assemble::LINKED), Locality::Global)])
     }
     /// What the file is made of: held until the pages and the line's
-    /// records before it are done.
+    /// records before it are done (and the pieces' items: the pages'
+    /// sealed lines, `crate::pages::seal`).
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [crate::pages::PAGES_END, "pages", crate::pdfout::XPAGES]
+            [crate::pages::PAGES_END, "pages", crate::pdfout::XPAGES, crate::pages::PITEMS]
                 .iter()
                 .map(|&f| v.field(f))
                 .collect(),
