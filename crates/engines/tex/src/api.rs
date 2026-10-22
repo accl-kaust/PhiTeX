@@ -5884,6 +5884,7 @@ impl Build {
                         "Raised to height {to} by {:?} ({how:?})",
                         by.map(|n| n.raw() % 100_000)
                     ),
+                    Cause::Held { by, why } => format!("Held ({why:?}) by [{}]", d(Some(by))),
                 };
                 format!("{i:4} h{h:<5} {why}\n       node [{}]", describe(eng, n))
             })
@@ -6020,6 +6021,11 @@ impl Build {
                 Cause::Raised { to, .. } => {
                     out.push(format!("Raised to {to}\n    node: {}", describe(n)));
                 }
+                Cause::Held { by, why } => out.push(format!(
+                    "Held ({why:?})\n    waiter: {}\n    holder: {}",
+                    describe(n),
+                    describe(by)
+                )),
                 _ => {}
             }
         }
@@ -6040,6 +6046,7 @@ impl Build {
                 Cause::Changed { field, site } => (site, Some(field)),
                 Cause::Rebind { field, to, .. } => (to, Some(field)),
                 Cause::Woken { by, field, .. } => (Some(by), field),
+                Cause::Held { by, .. } => (Some(by), None),
                 Cause::Output { of } => (Some(of), None),
                 _ => (None, None),
             };
@@ -6099,6 +6106,7 @@ impl Build {
                     ),
                     // the height it was raised to is in the dump, not the key
                     Cause::Raised { .. } => ("Raised", String::new()),
+                    Cause::Held { why, .. } => ("Held", format!("{why:?}")),
                 };
                 (what, kind.to_owned(), field)
             })
@@ -6277,6 +6285,7 @@ fn dump_chain(eng: &Engine, r: &Report, path: &str) {
                 from_hint.map(|(f, _)| fname(f)).unwrap_or_default(),
             ),
             Cause::Raised { to, how, .. } => ("Raised", format!("{how:?}"), to.to_string()),
+            Cause::Held { by, why } => ("Held", format!("{why:?}"), by.raw().to_string()),
         };
         let info = eng.node_info(*n);
         let op = info.as_ref().map_or("?", |i| i.op);

@@ -407,6 +407,22 @@ pub enum Cause {
     /// or waited for stands at the level below (for
     /// [`Engine::critical_chain`], which goes on from `by`; `None`: gone).
     Raised { to: u32, by: Option<NodeId>, how: Lifted },
+    /// It was held back before it ran, last by `by` (for
+    /// [`Engine::critical_chain`]): a pending claimer before it, a node in
+    /// work before it while it ran carefully (refuted, in text order), or
+    /// the node its read hints wait on.
+    Held { by: NodeId, why: Hold },
+}
+
+/// What held a node back before it ran ([`Cause::Held`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// A pending claimer before it, its claim not known.
+    Claim,
+    /// A node in work before it, while it runs carefully.
+    Careful,
+    /// The node its read hints wait on (`Operation::reads`).
+    Hint,
 }
 
 /// What [`crate::Ctx::use_field_at`] found at a position.
