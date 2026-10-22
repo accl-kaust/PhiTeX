@@ -2990,7 +2990,9 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<Option<ValueId>> {
         let v = self.v;
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
-        let st = self.st.clone();
+        // (the table kept as it changes and put back after, not copied
+        // whole for each line: a copy where it keeps changes already)
+        let st = (!self.st.checkpoint()).then(|| self.st.clone());
         let (nc, nk) = (self.contribs.len(), self.kids.len());
         let nest_len = self.nest.len();
         let conds = self.conds.clone();
@@ -3078,7 +3080,16 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.interp = None;
         self.input = input;
-        self.st = st;
+        match st {
+            // (the outer line's kept changes go on: what this line
+            // changed it noted, and the copy puts back)
+            Some(st) => {
+                let u = self.st.take_undo();
+                self.st = st;
+                self.st.set_undo(u);
+            }
+            None => self.st.rollback(),
+        }
         // (what the line writes to other files is not kept: TeX writes
         // it as `\enddocument` reads the file back, which this run does
         // where it reads the text it wrote, `start_input`)

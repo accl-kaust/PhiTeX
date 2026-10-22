@@ -95,6 +95,8 @@ pub struct Engine {
     pub(crate) kept_ix: FxHashMap<Id, super::eval::KeptIx>,
     /// Continuing placers' placements as their last stop left them.
     pub(crate) cont_memo: FxHashMap<Id, super::build::ContMemo>,
+    /// The text each kept state's token was parked under.
+    pub(crate) kept_text: FxHashMap<Id, std::sync::Arc<super::world::Text>>,
     pub(crate) marked: FxHashSet<Id>,
     pub(crate) settled_out: Vec<Settled>,
     pub(crate) edits: u64,
@@ -159,6 +161,7 @@ impl Engine {
             kept: FxHashMap::default(),
             kept_ix: FxHashMap::default(),
             cont_memo: FxHashMap::default(),
+            kept_text: FxHashMap::default(),
             marked: FxHashSet::default(),
             settled_out: Vec::new(),
             edits: 0,
@@ -485,7 +488,7 @@ impl Engine {
     pub fn declare_accumulator(&mut self, f: Field, m: Arc<dyn Monoid>) {
         #[cfg(feature = "observe")]
         let m: Arc<dyn Monoid> = {
-            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), serde_json::json!(m.speculate()));
+            crate::record::api(&self.core.values, "declare_accumulator", crate::record::j(&f), crate::record::monoid_mode(&*m));
             Arc::new(crate::record::RecMonoid { inner: m, field: f })
         };
         self.core_mut().accs.insert(f, m);
@@ -501,7 +504,7 @@ impl Engine {
     /// prefix that matches wins.
     pub fn declare_accumulator_prefix(&mut self, prefix: &str, m: Arc<dyn Monoid>) {
         #[cfg(feature = "observe")]
-        crate::record::api(&self.core.values, "declare_accumulator_prefix", crate::record::j(&(prefix,)), serde_json::json!(m.speculate()));
+        crate::record::api(&self.core.values, "declare_accumulator_prefix", crate::record::j(&(prefix,)), crate::record::monoid_mode(&*m));
         let core = self.core_mut();
         core.acc_prefixes.push((prefix.to_string(), m));
         // (Fields resolved before see the new prefix.)
@@ -523,6 +526,18 @@ impl Engine {
         self.heights = on;
         #[cfg(feature = "observe")]
         self.rec_call("set_heights", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
+    }
+
+    /// Opts field `f` in to guessing from the last evaluation: a reader
+    /// that would wait on a definer declared, not yet made, of `f` takes
+    /// the value its result from a previous evaluation read at the same
+    /// point, as a guess the merge validates (the definer's commit re-asks
+    /// it). When predicting only; a result of the evaluation running is
+    /// never guessed from, so a cold build is as without it.
+    pub fn guess_from_last(&mut self, f: Field) {
+        self.core_mut().guess_last.insert(f);
+        #[cfg(feature = "observe")]
+        self.rec_call("guess_from_last", crate::record::rec().map(|_| crate::record::j(&(&f,))), &());
     }
 
     pub fn declare_sequence(&mut self, f: Field) {
@@ -1071,7 +1086,7 @@ impl Engine {
         let list_f = |w: &World, res: bool| -> Vec<(u32, u64, Pos, Id)> {
             w.fields
                 .iter()
-                .flat_map(|(&(u, f), c)| if res { &c.acc_res } else { &c.acc_static }.iter().map(move |(&p, &x)| (u, f.0.raw(), p, x)))
+                .flat_map(|(&k, c)| if res { &c.acc_res } else { &c.acc_static }.iter().map(move |(&p, &x)| (k.unit(), k.field().0.raw(), p, x)))
                 .collect()
         };
         if list_u(&self.w) != list_u(&want) {

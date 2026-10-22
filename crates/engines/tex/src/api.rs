@@ -2813,6 +2813,15 @@ impl Graph {
                 );
                 crate::timeline::lap("engine: the reads checked again (PHITEX_CHECK_READS only)");
             }
+            if crate::exec::obs_flag!("PHITEX_CHECK_INVARIANTS") {
+                // (debug: the units' positions and frames recomputed from
+                // each unit's start after this evaluation, observe only)
+                let lines = self.eng.check_invariants();
+                for l in &lines {
+                    eprintln!("check_invariants: {l}");
+                }
+                eprintln!("check_invariants: {} failing", lines.len());
+            }
             if crate::exec::prof_flag!("PHITEX_ROUND_ACCT") {
                 // (the edit's cost by round, cheap enough for the edit
                 // histories the gate times: the runs and the per-round
@@ -2838,6 +2847,21 @@ impl Graph {
                     r.nodes_run
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
+                // (the guesses this edit paid for: refuted runs, the
+                // fields they were refuted on, and the parked runs that
+                // started over and why)
+                let v = self.eng.values();
+                let mut by: Vec<(String, u64)> = r
+                    .refuted_by_field
+                    .iter()
+                    .map(|&(f, n)| (crate::val::field_name(v, f), n))
+                    .collect();
+                by.sort_by_key(|e| std::cmp::Reverse(e.1));
+                by.truncate(8);
+                eprintln!(
+                    "acct-edit: guesses: speculations {} mispredictions {} refuted nodes {} restarted {} by {:?}; refuted by field {by:?}",
+                    r.speculations, r.mispredictions, r.refuted_nodes, r.restarted, r.restarted_by
+                );
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
@@ -3235,7 +3259,7 @@ impl Graph {
 
 /// A file's bytes as TeX's characters, one each (Latin-1): ASCII bytes
 /// are their characters' UTF-8 already, copied at once.
-fn latin1(bytes: &[u8]) -> String {
+pub(crate) fn latin1(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes)
         && s.is_ascii()
     {
@@ -6547,6 +6571,57 @@ fn structural_diff(
 /// those nodes (`debug_node`: label, state, flags; the parent) at the
 /// evaluation's start and end.
 fn debug_nodes(eng: &Engine, when: &str) {
+    // (`PHITEX_NODE_DUMP=<file>`, after the evaluation: the main unit's
+    // nodes in text order, each its operation, a digest of its arguments
+    // and of its output, to compare two runs' committed nodes)
+    if when == "after the evaluation"
+        && let Some(path) = crate::exec::obs_str!("PHITEX_NODE_DUMP")
+        && let Some(root) = eng.node_info(phitex_defuse::NodeId::from_raw(1))
+    {
+        use std::fmt::Write as _;
+        use std::hash::{Hash as _, Hasher as _};
+        let v = eng.values();
+        let dig = |x: ValueId| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v.render(x).hash(&mut h);
+            h.finish()
+        };
+        let mut out = String::new();
+        for n in eng.order(root.unit) {
+            let Some(i) = eng.node_info(n) else { continue };
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for &a in &i.args {
+                dig(a).hash(&mut h);
+            }
+            let o = eng.output(n).map_or(0, dig);
+            let head: String = i.args.first().map(|&a| v.render(a)).unwrap_or_default().chars().take(60).collect();
+            let _ = write!(
+                out,
+                "{} {} {:?} parent {:?} args {:016x} out {o:016x} {head}",
+                n.raw(),
+                i.op,
+                i.state,
+                i.parent.map(phitex_defuse::NodeId::raw),
+                h.finish()
+            );
+            // (a page's finisher: what it gave back; `PHITEX_NODE_DUMP_READS`
+            // names nodes whose reads follow)
+            if i.op == "finish" {
+                let r: String = eng.output(n).map(|x| v.render(x)).unwrap_or_default().chars().take(300).collect();
+                let _ = write!(out, " | {r}");
+            }
+            out.push('\n');
+            if crate::exec::obs_str!("PHITEX_NODE_DUMP_READS")
+                .is_some_and(|l| l.split(',').any(|x| x.trim().parse::<u64>().ok() == Some(n.raw())))
+            {
+                let _ = writeln!(out, "    node {}", eng.debug_node(n));
+                for l in eng.debug_reads(n).lines() {
+                    let _ = writeln!(out, "    read {}", l.replace("}, ", "},\n    read "));
+                }
+            }
+        }
+        let _ = std::fs::write(path, out);
+    }
     // (`PHITEX_ORDER_AROUND=a,b`: the unit's nodes in text order from
     // node `a` to node `b`, each as the engine has it)
     if let Some(ab) = crate::exec::obs_str!("PHITEX_ORDER_AROUND") {

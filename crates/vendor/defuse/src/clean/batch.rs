@@ -230,7 +230,7 @@ impl Pending {
             for &p in &g.changed {
                 w.note(super::world::Change::Field(key.0, key.1, p));
             }
-            w.fields.insert(key, std::sync::Arc::new(g.cell), &NoMeasure);
+            w.fields.insert(super::world::FKey::new(key.0, key.1), std::sync::Arc::new(g.cell), &NoMeasure);
             if g.defs_touched {
                 w.touch_key(Key::Defs(key.0, key.1));
             }

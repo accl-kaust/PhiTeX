@@ -12,6 +12,7 @@ fn sched() -> Sched {
         Ok("spec") => Sched::Spec(3),
         Ok("spec1") => Sched::Spec(1),
         Ok("par") => Sched::Par(4),
+        Ok("workers") => Sched::Workers(4),
         _ => Sched::Seq,
     }
 }

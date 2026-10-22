@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::ptree::{Count, Measure, NoMeasure, PMap};
 use crate::api::{Brackets, Effect, Locality, MayDefine, OpId};
-use crate::values::{Field, FxHashMap, ValueId};
+use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
 
 /// A node id (`NodeId`'s raw value).
 pub(crate) type Id = u64;
@@ -215,9 +215,42 @@ pub(crate) struct Res {
     pub def_ix: std::sync::OnceLock<Arc<FxHashMap<Field, ValueId>>>,
     /// The text it was committed under ([`text_key`]; 0: not yet).
     pub text: usize,
+    /// The evaluation its run ran in (`Core::eval_no`; 0: none).
+    pub eval: u64,
+    /// What the node's last result from an earlier evaluation read of the
+    /// fields guessed from the last (`Engine::guess_from_last`), carried
+    /// through its commits in this one (`Res::last_reads`).
+    pub last: Option<Arc<LastReads>>,
+}
+
+/// A node's definition reads of the fields guessed from the last, as its
+/// last result from an earlier evaluation made them: by field and point.
+#[derive(Debug, Default)]
+pub(crate) struct LastReads {
+    pub vals: FxHashMap<(Field, Id, bool, bool), ValueId>,
+    pub fields: FxHashSet<Field>,
 }
 
 impl Res {
+    /// What the node read of the fields guessed from the last in its last
+    /// result from an evaluation before `cur`: this one's reads when it is
+    /// one, else what this one carried.
+    pub(crate) fn last_reads(&self, core: &super::core::Core, cur: u64) -> Option<Arc<LastReads>> {
+        if self.eval >= cur {
+            return self.last.clone();
+        }
+        let mut l = LastReads::default();
+        for rd in &self.reads {
+            if let Read::Use { f, at, after, own, val: Some(v), .. } = *rd
+                && core.guess_last.contains(&f)
+            {
+                l.vals.entry((f, at, after, own)).or_insert(v);
+                l.fields.insert(f);
+            }
+        }
+        (!l.vals.is_empty()).then(|| Arc::new(l))
+    }
+
     /// The value it defines for `f` (defined at more than one locality,
     /// the first made).
     pub(crate) fn def_value(&self, f: Field) -> Option<ValueId> {
@@ -252,6 +285,8 @@ impl Default for Res {
             filed: None,
             def_ix: std::sync::OnceLock::new(),
             text: 0,
+            eval: 0,
+            last: None,
         }
     }
 }
@@ -496,7 +531,7 @@ pub(crate) struct World {
     pub units: PMap<u32, Arc<Unit>>,
     /// Each field of each unit: its definitions, readers, contributions
     /// and contributors in work (a cell, written as a whole).
-    pub fields: PMap<(u32, Field), Arc<FieldCell>>,
+    pub fields: PMap<FKey, Arc<FieldCell>>,
     /// The reader indexes (of fields, ranges, outputs, structure), live:
     /// shared by this world's copies (see `live`; a kept world takes a
     /// [`World::snapshot`]).
@@ -532,6 +567,25 @@ pub(crate) struct World {
     /// Changes go unnoted (a renumbering's moves: its change of all
     /// covers them).
     pub quiet: bool,
+}
+
+/// A field cell's key: its unit, then its field, as one number (ordered
+/// as the pair; one comparison where a node of the field map is searched).
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct FKey(u128);
+
+impl FKey {
+    pub(crate) fn new(u: u32, f: Field) -> FKey {
+        FKey((u128::from(u) << 64) | u128::from(f.0.raw()))
+    }
+
+    pub(crate) fn unit(self) -> u32 {
+        (self.0 >> 64) as u32
+    }
+
+    pub(crate) fn field(self) -> Field {
+        Field(ValueId::from_raw(self.0 as u64))
+    }
 }
 
 /// A change to a world, as a kept state's reads see it (which of them it
@@ -610,7 +664,7 @@ impl World {
     /// Field `f` of unit `u`, if anything is filed under it.
     #[inline]
     pub(crate) fn field(&self, u: u32, f: Field) -> Option<&FieldCell> {
-        self.fields.get(&(u, f)).map(|c| &**c)
+        self.fields.get(&FKey::new(u, f)).map(|c| &**c)
     }
 
     /// Changes field `f` of unit `u` (made if new).
@@ -618,16 +672,16 @@ impl World {
     pub(crate) fn with_field<R>(&mut self, u: u32, f: Field, g: impl FnOnce(&mut FieldCell) -> R) -> R {
         let mut g = Some(g);
         let mut r = None;
-        self.fields.upsert((u, f), &NoMeasure, |c| r = Some((g.take().expect("once"))(Arc::make_mut(c))));
+        self.fields.upsert(FKey::new(u, f), &NoMeasure, |c| r = Some((g.take().expect("once"))(Arc::make_mut(c))));
         r.expect("ran")
     }
 
     /// The fields of unit `u` with a cell.
     pub(crate) fn fields_of(&self, u: u32) -> Vec<Field> {
         self.fields
-            .range(std::ops::Bound::Included(&(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
-            .take_while(|(k, _)| k.0 == u)
-            .map(|(k, _)| k.1)
+            .range(std::ops::Bound::Included(&FKey::new(u, Field(ValueId::from_raw(0)))), std::ops::Bound::Unbounded)
+            .take_while(|(k, _)| k.unit() == u)
+            .map(|(k, _)| k.field())
             .collect()
     }
 
@@ -861,6 +915,60 @@ impl World {
                 break;
             }
             g = frm.parent;
+        }
+        take(&mut best, &fd.globals);
+        best
+    }
+
+    /// Frame `fr`'s chain in unit `u`, innermost first, each frame with its
+    /// start (the root last; a frame the unit no longer has ends it).
+    pub(crate) fn chain_starts(&self, u: u32, fr: FrameId) -> Vec<(FrameId, Pos)> {
+        let un = self.unit(u);
+        let mut out = Vec::new();
+        let mut g = fr;
+        for _ in 0..=1 << 16 {
+            if g.is_root() {
+                out.push((g, 0));
+                break;
+            }
+            let Some(frm) = un.frames.get(&g) else {
+                out.push((g, Pos::MAX));
+                break;
+            };
+            out.push((g, frm.start));
+            g = frm.parent;
+        }
+        out
+    }
+
+    /// As [`Self::reaching`], in definitions `fd`, along the chain
+    /// [`Self::chain_starts`] gives.
+    pub(crate) fn reaching_in(fd: &FieldDefs, chain: &[(FrameId, Pos)], pos: Pos, skip: Id) -> Option<(Pos, Entry)> {
+        let mut best: Option<(Pos, Entry)> = None;
+        let take = |best: &mut Option<(Pos, Entry)>, m: &PMap<Pos, Entry>| {
+            let mut k = pos;
+            while let Some((&p, e)) = m.below(&k) {
+                if best.is_some_and(|b| b.0 >= p) {
+                    return;
+                }
+                if e.node != skip {
+                    *best = Some((p, *e));
+                    return;
+                }
+                k = p;
+            }
+        };
+        for &(g, start) in chain {
+            if let Some(m) = fd.local.get(&g) {
+                take(&mut best, m);
+            }
+            // (The root, or a frame gone: the chain ends.)
+            if g.is_root() || start == Pos::MAX {
+                break;
+            }
+            if best.is_some_and(|b| b.0 > start) {
+                break;
+            }
         }
         take(&mut best, &fd.globals);
         best
@@ -1339,6 +1447,32 @@ impl World {
         }
     }
 
+    /// The first node in `(lo, hi)` (other than `me`) in work without a
+    /// result that may contribute to `f` (a range read waits for these
+    /// when it guesses those that ran: `Monoid::guess_ran`).
+    pub(crate) fn range_blocker_open(&self, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let mut lo = lo;
+        loop {
+            let (p, x) = self.first_open(f, u, lo, hi)?;
+            if x != me {
+                return Some(x);
+            }
+            lo = p;
+        }
+    }
+
+    /// The last such node before `hi` (other than `me`).
+    pub(crate) fn range_blocker_open_last(&self, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let mut hi = hi;
+        loop {
+            let (p, x) = self.last_open(f, u, lo, hi)?;
+            if x != me {
+                return Some(x);
+            }
+            hi = p;
+        }
+    }
+
     /// The last such blocker in `(lo, hi)` before `hi` (other than `me`):
     /// the one a reader parked on is woken by last, when commits come in
     /// text order.
@@ -1436,6 +1570,8 @@ impl World {
         let Some(fs) = n.text.stat.reads.as_ref() else { return Ok(()) };
         let Some((u, pos, fr)) = self.frame_at(id, false) else { return Ok(()) };
         let working = |x: Id| self.node(x).is_some_and(|d| in_work(d.st)).then_some(x);
+        // (The frame chain walked once, for every hinted field.)
+        let mut chain: Option<Vec<(FrameId, Pos)>> = None;
         for &f in fs.iter() {
             if self.loops.get(&f).is_some() {
                 continue;
@@ -1443,24 +1579,31 @@ impl World {
             // An accumulator: held while a node before it in work may
             // still contribute (it would stop on the fold otherwise).
             if let Some(m) = core.acc(f) {
-                // (A guessed fold does not wait: `Monoid::speculate`.)
-                if !(predict && m.speculate())
-                    && let Some(x) = self.range_blocker_last(id, f, u, 0, pos)
-                {
+                // (A guessed fold does not wait: `Monoid::speculate`; one
+                // that guesses those that ran waits for those that did not.)
+                let x = if predict && m.speculate() {
+                    None
+                } else if predict && m.guess_ran() {
+                    self.range_blocker_open_last(id, f, u, 0, pos)
+                } else {
+                    self.range_blocker_last(id, f, u, 0, pos)
+                };
+                if let Some(x) = x {
                     return Err(Some(x));
                 }
                 continue;
             }
-            let reach = self.reaching(u, f, pos, fr, id);
+            let reach = self.field(u, f).and_then(|c| Self::reaching_in(&c.defs, chain.get_or_insert_with(|| self.chain_starts(u, fr)), pos, id));
             if let Some((_, e)) = reach {
                 let busy = e.val.is_none() || self.node(e.node).is_some_and(|d| in_work(d.st));
                 // (A definer in work that predicts the field: its
                 // prediction stands in, when predictions are used.)
                 let predicted = predict
-                    && self
+                    && (self
                         .node(e.node)
                         .and_then(|d| d.text.stat.preds.as_ref())
-                        .is_some_and(|ps| ps.iter().any(|p| p.0 == f));
+                        .is_some_and(|ps| ps.iter().any(|p| p.0 == f))
+                        || (e.val.is_none() && self.read_last(core, id, f)));
                 if busy && !predicted {
                     return Err(working(e.node));
                 }
@@ -1470,6 +1613,21 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    /// Whether node `id`'s last result from a previous evaluation read `f`
+    /// (carried through its commits in this one), a field guessed from the last (`Engine::guess_from_last`): its read
+    /// guesses that, and need not wait.
+    fn read_last(&self, core: &super::core::Core, id: Id, f: Field) -> bool {
+        if !core.guess_last.contains(&f) {
+            return false;
+        }
+        let Some(r) = self.node(id).and_then(|n| n.res.as_ref()) else { return false };
+        if r.eval < core.eval_no.load(std::sync::atomic::Ordering::Relaxed) {
+            r.reads.iter().any(|rd| matches!(rd, Read::Use { f: g, val: Some(_), .. } if *g == f))
+        } else {
+            r.last.as_ref().is_some_and(|l| l.fields.contains(&f))
+        }
     }
 
     /// The first node in work strictly between `lo` and `hi` in unit `u`
@@ -1510,7 +1668,10 @@ impl World {
         let m = &un.pset_nodes;
         let mut few: [Id; 8] = [NONE; 8];
         let mut k = 0;
-        for (_, &x) in m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)) {
+        // (Stepped entry by entry: the window is usually empty, one descent.)
+        let mut at = lo;
+        while let Some((&p, &x)) = m.above(&at).filter(|e| *e.0 < hi) {
+            at = p;
             if x == me {
                 continue;
             }
@@ -1537,14 +1698,17 @@ impl World {
             }
             let Some(m) = un.psets.get(&k) else { return };
             let upto = best.map_or(hi, |b| b.0);
-            let hit = m.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&upto)).find(|&(_, &x)| {
-                x != me
+            let mut at = lo;
+            while let Some((&p, &x)) = m.above(&at).filter(|e| *e.0 < upto) {
+                at = p;
+                if x != me
                     && self.node(x).is_some_and(|n| {
                         n.text.stat.defs.is_none() && (n.wide || core.may_cover(n.may(), n.text.op, &n.text.args, f))
                     })
-            });
-            if let Some((&p, &x)) = hit {
-                best = Some((p, x));
+                {
+                    best = Some((p, x));
+                    break;
+                }
             }
         };
         look(0);

@@ -182,7 +182,7 @@ fn int_field(cx: &mut Ctx<'_>, name: &str) -> Result<i64, Stop> {
 
 /// Bytes as a string of characters 0–255 (the file as a value).
 fn latin1(bytes: &[u8]) -> String {
-    bytes.iter().map(|&b| char::from(b)).collect()
+    crate::api::latin1(bytes)
 }
 
 // ----------------------------------------------------------------- DVI

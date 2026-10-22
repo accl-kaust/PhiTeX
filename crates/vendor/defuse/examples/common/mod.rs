@@ -1057,8 +1057,9 @@ fn unfold_output(cx: &mut Ctx<'_>, ops: Ops, src: ValueId, st: ValueId, h: Value
     cx.close_scope();
 }
 
-/// `SeqMonoid`, its folds guessed when predicting (`SPEC_FOLD`).
-struct GuessSeq;
+/// `SeqMonoid`, its folds guessed when predicting (`SPEC_FOLD`; with
+/// `SPEC_FOLD=ran`, past contributors that ran only: `Monoid::guess_ran`).
+struct GuessSeq(bool);
 
 impl defuse::Monoid for GuessSeq {
     fn empty(&self, v: &Values) -> ValueId {
@@ -1068,7 +1069,10 @@ impl defuse::Monoid for GuessSeq {
         SeqMonoid.combine(v, a, b)
     }
     fn speculate(&self) -> bool {
-        true
+        !self.0
+    }
+    fn guess_ran(&self) -> bool {
+        self.0
     }
 }
 
@@ -1876,7 +1880,7 @@ impl Lang {
         // SPEC_FOLD=1: `out`'s readers guess past contributors in work
         // (`Monoid::speculate`).
         if std::env::var_os("SPEC_FOLD").is_some() {
-            eng.declare_accumulator(out, Arc::new(GuessSeq));
+            eng.declare_accumulator(out, Arc::new(GuessSeq(std::env::var("SPEC_FOLD").is_ok_and(|v| v == "ran"))));
         } else {
             eng.declare_accumulator(out, Arc::new(SeqMonoid));
         }
@@ -1946,6 +1950,13 @@ impl Program {
             for name in ["x", "y", "u", "w", "g", "s", "k", "z", "q", "r", "cap"] {
                 let f = eng.values().field(name);
                 eng.set_stable(f);
+            }
+        }
+        if std::env::var_os("FUZZ_GUESS_LAST").is_some() {
+            // Guessed from the last evaluation: results must not change.
+            for name in ["x", "y", "u", "w", "g", "s", "k", "z", "q", "r", "cap"] {
+                let f = eng.values().field(name);
+                eng.guess_from_last(f);
             }
         }
         let unit = eng.new_unit();
@@ -2251,6 +2262,28 @@ impl Pool {
         // Workers still inside `chunks` only find `next >= n` from here on;
         // the pointer is dead once this job's generation is replaced.
         st.n = 0;
+    }
+}
+
+/// An executor that runs each job on a thread of its own, at once: the
+/// workers of a stepless drain (`execute(n, worker)`) all run together.
+pub struct Workers(pub usize);
+
+impl Executor for Workers {
+    fn parallelism(&self) -> usize {
+        self.0.max(1)
+    }
+
+    fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> RunResult + Sync), out: &mut Vec<RunResult>) {
+        let got: Vec<RunResult> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..n).map(|i| sc.spawn(move || run(i))).collect();
+            hs.into_iter().map(|h| h.join().expect("a worker panicked")).collect()
+        });
+        out.extend(got);
+    }
+
+    fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        (0..n).for_each(f);
     }
 }
 

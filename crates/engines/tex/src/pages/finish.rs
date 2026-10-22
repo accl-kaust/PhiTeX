@@ -341,6 +341,19 @@ impl Run<'_, '_> {
         // (the window's units, by piece: their items with the markers
         // resolved where each piece is)
         let window = v.seq_to_vec(self.fold_own(PITEMS, fin.after, Some(fin.piece))?);
+        let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
+        let names_own = fin.spans.iter().any(|s| {
+            matches!(s.src, Src::Piece { piece, .. } | Src::Held { piece, .. } if piece == pid)
+        });
+        if names_own && !window.iter().any(|&u| unit_pid(u) == pid) {
+            // (the piece stands after this finisher in the view, placed
+            // again, the page builder to place the finisher after it
+            // again: a view the engine replaces, the window read here to
+            // the piece re-asked when the piece comes before this node.
+            // No page made on it, and none waited for: the piece may read
+            // what this node defines)
+            return Ok((Vec::new(), None));
+        }
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             eprintln!(
                 "finisher {} of page {} runs (piece {} candidate {}, after {:?}, {} spans, window {:?})",
@@ -359,7 +372,6 @@ impl Run<'_, '_> {
                     .collect::<Vec<_>>()
             );
         }
-        let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
         let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
         let mut want: Vec<i64> = vec![pid];
         for s in &fin.spans {
@@ -936,9 +948,23 @@ impl Run<'_, '_> {
         let mut side = Side::default();
         // (the page's boxes are decoded once, here, for the writer: their
         // decodings are not kept for a later decode)
+        // (its lines' lists as line breaking made them, where it kept
+        // them, [`nodes::keep_made`])
         let prev = crate::val::NO_KEEP.with(|c| c.replace(true));
+        let take = nodes::TAKE_MADE.with(|c| c.replace(true));
         let decoded = nodes::decode(v, b, &mut side);
+        nodes::TAKE_MADE.with(|c| c.set(take));
         crate::val::NO_KEEP.with(|c| c.set(prev));
+        if crate::exec::obs_flag!("PHITEX_MADE_STATS") {
+            let n: Vec<u64> = nodes::MADE_STATS
+                .iter()
+                .map(|x| x.load(std::sync::atomic::Ordering::Relaxed))
+                .collect();
+            eprintln!(
+                "made-stats: kept {} side {} full {} taken {} decoded {} lazy kept {} lazy not {}",
+                n[0], n[1], n[2], n[3], n[4], n[5], n[6]
+            );
+        }
         let Some(Node::Box(bx)) = decoded else {
             return Ok(());
         };
@@ -1648,6 +1674,22 @@ impl Operation for Finish {
                     Some(fin) => r.finisher_args(&fin, &pos)?,
                     None => (pos.clone(), None),
                 };
+                // (a view in which the page's piece is not before this
+                // node: no page, [`Run::finisher_args`])
+                // (its output the guess the page builder folded on, which
+                // leaves the builder as it is)
+                if args.is_empty() {
+                    r.fin = Some(FinCtx {
+                        j: pos.first().map_or(0, |&x| int_of(v, x)),
+                        pending: Vec::new(),
+                        held_n: 0,
+                        rtn: FinishIn::of(v, &pos).map(|f| f.rtn_guess),
+                        args: Vec::new(),
+                        brk: None,
+                    });
+                    give_no_units(r);
+                    return Ok(());
+                }
                 let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
                 r.fin = Some(FinCtx {
                     j: int_of(v, a(0)),
@@ -1788,6 +1830,29 @@ impl Run<'_, '_> {
         } else {
             v.list(names)
         };
+        if crate::exec::obs_flag!("PHITEX_FIN_DEFS") {
+            let all: Vec<String> = self
+                .st
+                .published(v, false)
+                .into_iter()
+                .map(|d| crate::val::field_name(v, self.loc_field(d.0)))
+                .collect();
+            let same: Vec<String> = self
+                .st
+                .published_as_read(v)
+                .into_iter()
+                .map(|l| crate::val::field_name(v, self.loc_field(l)))
+                .collect();
+            eprintln!(
+                "fin-defs node {} spec {}: {} published, {} global as read: {}  ALL: {}",
+                self.cx.node().raw(),
+                self.cx.is_speculative(),
+                all.len(),
+                same.len(),
+                same.join(" "),
+                all.join(" ")
+            );
+        }
         let at = fin_at(v, &self.cx.args());
         self.contribute(GDEFS, gdefs_unit(v, x, at));
         x

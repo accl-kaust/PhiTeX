@@ -304,6 +304,18 @@ pub trait Monoid: Send + Sync {
     fn speculate(&self) -> bool {
         false
     }
+
+    /// As [`Self::speculate`] for the contributors in work that have a
+    /// committed result: a range read of this accumulator, when the
+    /// scheduler predicts, folds those as they last contributed, and
+    /// waits for the ones that never ran. For accumulators whose
+    /// contributions usually stand when their contributor runs again (a
+    /// piece re-run for a change elsewhere), where a cold build has
+    /// nothing to fold yet: the reader runs ahead of re-runs, not of
+    /// first runs. Validated as a guessed fold is.
+    fn guess_ran(&self) -> bool {
+        false
+    }
 }
 
 /// Answers an environment read the engine does not hold
@@ -957,6 +969,10 @@ pub struct Report {
     pub predictions_confirmed: u64,
     /// Speculative runs that read a predicted value and were refuted.
     pub predictions_refuted: u64,
+    /// Reads that guessed from a previous evaluation
+    /// ([`crate::Engine::guess_from_last`]), in every run merged (none in
+    /// an evaluation where no node has a result from an earlier one).
+    pub guessed_from_last: u64,
     /// Nodes refuted this evaluation (a guess or prediction broke) that
     /// ran conservatively afterwards, on committed values only (not those
     /// refuted only on a definition whose definer ran again for a

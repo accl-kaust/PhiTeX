@@ -419,6 +419,15 @@ impl Monoid for RecMonoid {
         // (Recorded as the declaration's answer.)
         self.inner.speculate()
     }
+    fn guess_ran(&self) -> bool {
+        self.inner.guess_ran()
+    }
+}
+
+/// A monoid's guessing, as a declaration records it: `speculate`'s answer,
+/// or "ran" when it guesses those that ran (`Monoid::guess_ran`).
+pub(crate) fn monoid_mode(m: &dyn Monoid) -> serde_json::Value {
+    if m.guess_ran() && !m.speculate() { serde_json::json!("ran") } else { serde_json::json!(m.speculate()) }
 }
 
 /// A projection that records its answers.

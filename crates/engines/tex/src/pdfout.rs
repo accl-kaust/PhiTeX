@@ -652,6 +652,18 @@ impl FontSource for Mapped<'_> {
     fn file(&self, name: &[u8]) -> Option<Vec<u8>> {
         self.fonts.file(name)
     }
+    fn font_file_shared(&self, f: FontId) -> Option<Arc<[u8]>> {
+        self.fonts.font_file_shared(self.step(f))
+    }
+    fn encoding_file_shared(&self, f: FontId) -> Option<Arc<[u8]>> {
+        self.fonts.encoding_file_shared(self.step(f))
+    }
+    fn file_shared(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        self.fonts.file_shared(name)
+    }
+    fn metrics_hash(&self, f: FontId) -> u64 {
+        self.fonts.metrics_hash(self.step(f))
+    }
     fn map_by_ps_name(&self, ps_name: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
         self.fonts.map_by_ps_name(ps_name, slant, extend)
     }
@@ -1028,11 +1040,30 @@ impl FontSource for Fonts {
         self.by_id.get(&f)?.enc.as_ref().map(|b| b.to_vec())
     }
     fn file(&self, name: &[u8]) -> Option<Vec<u8>> {
-        let f = self.files.get(name).map(|b| b.to_vec());
+        self.file_shared(name).map(|b| b.to_vec())
+    }
+    fn font_file_shared(&self, f: FontId) -> Option<Arc<[u8]>> {
+        self.by_id.get(&f)?.ff.clone()
+    }
+    fn encoding_file_shared(&self, f: FontId) -> Option<Arc<[u8]>> {
+        self.by_id.get(&f)?.enc.clone()
+    }
+    fn file_shared(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        let f = self.files.get(name).cloned();
         if f.is_none() {
             self.missed.locked().insert(name.to_vec());
         }
         f
+    }
+    fn metrics_hash(&self, f: FontId) -> u64 {
+        self.by_id.get(&f).map_or_else(
+            || phitex_pdf::metrics_hash(self.metrics(f)),
+            |x| {
+                *x.loaded
+                    .at_hash
+                    .get_or_init(|| phitex_pdf::metrics_hash(&x.loaded.at))
+            },
+        )
     }
     fn map_by_ps_name(&self, ps_name: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
         self.ps
@@ -2528,22 +2559,41 @@ pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
 /// written apart names its fonts by it): the link numbers by the line's
 /// records in TeX's order ([`FontNums`]) and rewrites a name it moved.
 pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
+    static M: OnceLock<Once<Arc<FxHashMap<i64, i64>>>> = OnceLock::new();
     let v = r.v;
-    let mut out: FxHashMap<i64, i64> = FxHashMap::default();
     let put = |k: i64, out: &mut FxHashMap<i64, i64>| {
         let n = i64::try_from(out.len()).unwrap_or(0) + 1;
         out.entry(k).or_insert(n);
     };
-    if let Some(x) = r.get(crate::api::FONT_ORDER)? {
-        for k in list_of(v, x) {
-            put(int_of(v, k), &mut out);
-        }
-    }
+    let order = r.get(crate::api::FONT_ORDER)?;
     let f = v.field(FONT_LOADS);
     let before = r.cx.acc_range(f, None)?;
-    for k in v.seq_to_vec(before) {
-        put(int_of(v, k), &mut out);
+    // (the numbers of the format's fonts and of the loads before the run:
+    // a pure function's memo by those values, every page step asks)
+    let key = phitex_defuse::hash_words(
+        0x6c6f_6164_6e75_6d73,
+        &[order.map_or(0, ValueId::raw), before.raw()],
+    );
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    {
+        let mut g = m.locked();
+        if g.len() > 1 << 10 {
+            g.clear();
+        }
     }
+    let base = once(m, key, || {
+        let mut out: FxHashMap<i64, i64> = FxHashMap::default();
+        if let Some(x) = order {
+            for k in list_of(v, x) {
+                put(int_of(v, k), &mut out);
+            }
+        }
+        for k in v.seq_to_vec(before) {
+            put(int_of(v, k), &mut out);
+        }
+        Arc::new(out)
+    });
+    let mut out = (*base).clone();
     for &(g, x) in &r.contribs {
         if g == f {
             for k in v.seq_to_vec(x) {
@@ -3419,7 +3469,17 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
         // (the last link's snapshots from there on, at this line's
         // records and counts)
         let (g0, e0, p0, s0) = (got.len(), errors.len(), placed, shipped);
+        // (each with the characters this line's records before `i` used
+        // and the last link's before `j` did not, as the end's writer
+        // below: a later link starting from one of them starts from the
+        // characters this line's pages used, not the last link's)
         snaps.extend(m.snaps.into_iter().filter(|x| x.at >= j).map(|mut x| {
+            if let Some(c) = &chars_added {
+                x.st.add_used_chars(c);
+                if let Some(d) = x.digests.as_mut() {
+                    d.2 = x.st.used_chars();
+                }
+            }
             x.at = x.at - j + i;
             x.got = x.got - sg + g0;
             x.errors = x.errors - se + e0;

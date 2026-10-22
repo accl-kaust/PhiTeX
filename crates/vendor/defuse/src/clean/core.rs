@@ -45,6 +45,11 @@ pub(crate) struct Core {
     pub acc_memo: crate::sync::Table<Option<Arc<dyn Monoid>>>,
     pub seqs: FxHashSet<Field>,
     pub stable: FxHashSet<Field>,
+    /// Fields a reader guesses from its last evaluation's read of them
+    /// while their definer is declared, not made (`Engine::guess_from_last`).
+    pub guess_last: FxHashSet<Field>,
+    /// The evaluation running (or last run): counted from 1 at each start.
+    pub eval_no: std::sync::atomic::AtomicU64,
 
     /// Declared loop-back fields and their initial values.
     pub loops: FxHashMap<Field, ValueId>,
@@ -56,7 +61,7 @@ pub(crate) struct Core {
     /// once ask it once).
     pub asking: Mutex<()>,
     /// Texts analysed, by `(op, args)` hash.
-    pub texts: Mutex<FxHashMap<u64, Vec<Arc<Text>>>>,
+    pub texts: Mutex<FxHashMap<u64, Texts>>,
     /// Texts cached, and how many there were after the last pruning.
     pub texts_n: std::sync::atomic::AtomicUsize,
     pub texts_kept: std::sync::atomic::AtomicUsize,
@@ -114,6 +119,8 @@ impl Core {
             acc_memo: crate::sync::Table::new(),
             seqs: FxHashSet::default(),
             stable: FxHashSet::default(),
+            guess_last: FxHashSet::default(),
+            eval_no: std::sync::atomic::AtomicU64::new(0),
 
             loops: FxHashMap::default(),
             loops_later: Mutex::new(Vec::new()),
@@ -196,7 +203,7 @@ impl Core {
             v.retain(|x| Arc::strong_count(x) > 1);
             !v.is_empty()
         });
-        let kept = t.values().map(Vec::len).sum();
+        let kept = t.values().map(Texts::len).sum();
         self.texts_n.store(kept, Relaxed);
         self.texts_kept.store(kept, Relaxed);
     }
@@ -422,6 +429,59 @@ pub(crate) fn now() -> Option<std::time::Instant> {
 /// Nanoseconds since `t` (0 without a clock).
 pub(crate) fn ns_since(t: Option<std::time::Instant>) -> u64 {
     t.map_or(0, |t| u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX))
+}
+
+/// The interned texts of one hash: one, held in place (no allocation), or
+/// those that collide.
+pub enum Texts {
+    One(Arc<Text>),
+    Many(Vec<Arc<Text>>),
+}
+
+impl Default for Texts {
+    fn default() -> Texts {
+        Texts::Many(Vec::new())
+    }
+}
+
+impl Texts {
+    pub fn iter(&self) -> std::slice::Iter<'_, Arc<Text>> {
+        match self {
+            Texts::One(x) => std::slice::from_ref(x).iter(),
+            Texts::Many(v) => v.iter(),
+        }
+    }
+
+    pub fn push(&mut self, x: Arc<Text>) {
+        match self {
+            Texts::Many(v) if v.is_empty() => *self = Texts::One(x),
+            Texts::Many(v) => v.push(x),
+            Texts::One(y) => *self = Texts::Many(vec![y.clone(), x]),
+        }
+    }
+
+    pub fn retain(&mut self, f: impl FnMut(&Arc<Text>) -> bool) {
+        let mut v: Vec<Arc<Text>> = match std::mem::take(self) {
+            Texts::One(x) => vec![x],
+            Texts::Many(v) => v,
+        };
+        v.retain(f);
+        *self = match v.len() {
+            1 => Texts::One(v.pop().expect("one")),
+            _ => Texts::Many(v),
+        };
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Texts::One(_) => 1,
+            Texts::Many(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Phase timers (`CLEAN_PROF`): nanoseconds per phase, summed.

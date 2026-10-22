@@ -30,6 +30,8 @@ struct Run {
     env: Vec<(Field, ValueId)>,
     pset_wait: bool,
     predicted: u32,
+    /// Reads it guessed from the last (`Engine::guess_from_last`).
+    from_last: u32,
     /// It read a prediction or a definer in work.
     guessed: bool,
     fuel_out: bool,
@@ -48,6 +50,8 @@ struct Run {
     /// It resumed a kept state; the log length of the world it ran on.
     resumed: bool,
     log_at: u64,
+    /// The text the run ran under (a token it parked is of that text).
+    text: Option<std::sync::Arc<super::world::Text>>,
 }
 
 /// The evaluation's scheduling state.
@@ -76,6 +80,8 @@ struct Sched {
     careful: FxHashSet<Id>,
     /// Nodes whose committed result rests on a guess.
     guessed: FxHashSet<Id>,
+    /// Whether the scheduler predicts (runs guess).
+    predict: bool,
     /// Nodes whose run stopped on an accumulator range, with the range.
     range_wait: FxHashMap<Id, (Field, Id, Id, bool)>,
     /// Nodes a batch left out by their read hints, parked on the node in
@@ -245,6 +251,7 @@ impl Engine {
         let src: &mut dyn EditSource = &mut rsrc;
         #[cfg(feature = "observe")]
         crate::record::api(&self.core.values, "evaluate_begin", serde_json::Value::Null, serde_json::Value::Null);
+        self.core.eval_no.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let r = self.evaluate_inner(sched, exec, src);
         #[cfg(feature = "observe")]
         {
@@ -617,6 +624,7 @@ impl Engine {
         let kept = &self.kept;
         self.kept_ix.retain(|id, _| kept.contains_key(id));
         self.cont_memo.retain(|id, _| kept.contains_key(id));
+        self.kept_text.retain(|id, _| kept.contains_key(id));
         let low = self.kept_ix.values().filter(|ix| ix.log.same(&self.w.log)).map(|ix| ix.from).min();
         self.w.log.forget(low.unwrap_or(self.w.log_len));
         rep.kept_asked = std::mem::take(&mut self.kept_asked);
@@ -816,6 +824,7 @@ impl Engine {
             .unwrap_or_else(|| (exec.parallelism().max(1) * 8).max(64));
         let mut idle: u32 = 0;
         let predict = sched.speculation_budget() > 0;
+        s.predict = predict;
         loop {
             if s.queue.is_empty() {
                 if self.requeue_hint_parked(s) {
@@ -997,6 +1006,7 @@ impl Engine {
         let par = exec.parallelism().max(1);
         let window = (par * 8).max(64);
         let predict = sched.speculation_budget() > 0;
+        s.predict = predict;
         let fuel = sched.fuel();
         let mut idle: u32 = 0;
         loop {
@@ -1167,6 +1177,7 @@ impl Engine {
         let par = exec.parallelism().max(1);
         let window = (par * 8).max(64);
         let predict = sched.speculation_budget() > 0;
+        s.predict = predict;
         let fuel = sched.fuel();
         let mut idle: u32 = 0;
         loop {
@@ -1454,6 +1465,7 @@ impl Engine {
             env: Vec::new(),
             pset_wait: false,
             predicted: 0,
+            from_last: 0,
             guessed: false,
             fuel_out: false,
             range_wait: None,
@@ -1464,6 +1476,7 @@ impl Engine {
             park_cont: false,
             resumed: false,
             log_at: 0,
+            text: None,
         })
     }
 
@@ -1530,10 +1543,10 @@ impl Engine {
 
     /// Where placer `p`'s broken read `r` starts to differ: a range read's
     /// window start (what it read before it stands), else anywhere.
-    fn broken_from(&self, p: Id, r: &Read) -> Pos {
+    fn broken_from(&self, p: Id, b: &Broken) -> Pos {
         let pu = self.w.node(p).map(|n| n.unit);
-        match r {
-            Read::Range { from, .. } => self.w.node(*from).filter(|n| Some(n.unit) == pu).map_or(0, |n| n.pos),
+        match b {
+            Broken::Read(Read::Range { from, .. }) => self.w.node(*from).filter(|n| Some(n.unit) == pu).map_or(0, |n| n.pos),
             _ => 0,
         }
     }
@@ -1546,7 +1559,7 @@ impl Engine {
             return None;
         }
         match self.kept_first_broken(p) {
-            Some(r) => Some(self.broken_from(p, &r)),
+            Some(b) => Some(self.broken_from(p, &b)),
             None => {
                 s.kept_ok.insert(p, self.w.ver);
                 None
@@ -1557,8 +1570,16 @@ impl Engine {
     /// The first of node `id`'s kept reads that no longer holds: asked of
     /// those its index names (a change since its last check reaches
     /// them), or all; none broken, the index is brought up to now.
-    fn kept_first_broken(&mut self, id: Id) -> Option<Read> {
+    fn kept_first_broken(&mut self, id: Id) -> Option<Broken> {
         let _t = super::core::prof::Span::new(46);
+        // (A token is of the text it was parked under: the node given
+        // another since, by its placer or an edit, starts over.)
+        if let Some(t) = self.kept_text.get(&id)
+            && self.w.node(id).is_some_and(|n| !std::sync::Arc::ptr_eq(&n.text, t))
+        {
+            self.kept_ix.remove(&id);
+            return Some(Broken::Text);
+        }
         let reads = &self.kept.get(&id)?.1;
         let n = reads.len();
         let ask = self.kept_ix.get(&id).and_then(|ix| ix.suspects(&self.w, n));
@@ -1592,7 +1613,7 @@ impl Engine {
             ix.from = self.w.log_len;
             super::core::prof::time(45, || ix.add(&self.w, id, reads));
         }
-        broken
+        broken.map(Broken::Read)
     }
 
     fn prepare(&mut self, s: &mut Sched, rep: &mut Report, k: (u32, Pos, Id)) -> Option<Kept> {
@@ -1612,9 +1633,13 @@ impl Engine {
         }
         // Stopped on a range: parked again, without a run, while the range
         // still has a node in work.
+        // (Guessing those that ran, `Monoid::guess_ran`: while one that
+        // never ran is.)
+        let guessing = s.predict && !s.careful(id);
+        let ran = |f: Field| guessing && self.core.acc(f).is_some_and(|m| m.guess_ran());
         if let Some((f, from, to, past)) = s.range_wait.remove(&id)
             && let Some((u, lo, hi)) = self.w.window(id, from, to, past)
-            && let Some(x) = self.w.range_blocker_last(id, f, u, lo, hi)
+            && let Some(x) = if ran(f) { self.w.range_blocker_open_last(id, f, u, lo, hi) } else { self.w.range_blocker_last(id, f, u, lo, hi) }
         {
             s.range_wait.insert(id, (f, from, to, past));
             s.parked.insert(id, Wait::Node(x, Some(f)));
@@ -1668,7 +1693,10 @@ impl Engine {
                 }
                 Some(r) => {
                     rep.restarted += 1;
-                    bump(&mut rep.restarted_by, read_kind(r));
+                    bump(&mut rep.restarted_by, match r {
+                        Broken::Read(rd) => read_kind(rd),
+                        Broken::Text => "text: changed",
+                    });
                     if super::core::debug() {
                         eprintln!("restart {id}: kept read broken {r:?}");
                     }
@@ -1929,6 +1957,9 @@ impl Engine {
                         super::core::prof::time(45, || ix.add(&self.w, id, &reads));
                         self.kept_ix.insert(id, ix);
                         self.kept.insert(id, (k, reads, base));
+                        if let Some(t) = r.text.clone() {
+                            self.kept_text.insert(id, t);
+                        }
                     }
                     // Applications asked for: made now; an application's
                     // environment set before its body runs.
@@ -2133,7 +2164,7 @@ impl Engine {
         let cause = super::core::lock(&self.core.causes).get(&id).copied();
         let old = self.w.node(id).and_then(|n| n.res.clone());
         let moved = |f: Field, from: Id, to: Id, val: ValueId| {
-            !self.core.acc(f).is_some_and(|m| m.speculate())
+            !self.core.acc(f).is_some_and(|m| m.speculate() || m.guess_ran())
                 || matches!(cause, Some(crate::api::Rerun::Range { field: Some(g) }) if g == f)
                 || old.as_ref().is_some_and(|o| {
                     o.reads.iter().any(|r| matches!(r, Read::Range { f: g, from: a, to: b, val: v, .. } if *g == f && *a == from && *b == to && *v != val))
@@ -2623,6 +2654,14 @@ fn chain_by_time(hs: &Heights) -> Vec<(NodeId, crate::api::Cause, [u64; 4])> {
     out
 }
 
+/// Why a kept state no longer stands: a read of it broke, or the node's
+/// text is not the one its token was parked under.
+#[derive(Debug)]
+enum Broken {
+    Read(Read),
+    Text,
+}
+
 /// A read's kind, as `Report::restarted_by` names why a kept state went.
 fn read_kind(r: &Read) -> &'static str {
     match r {
@@ -2940,6 +2979,9 @@ impl Merge<'_> {
                     {
                         eng.kept_ix.remove(&id);
                         eng.kept.insert(id, (k, r.res.reads.clone(), r.park_cont.then(|| r.base.unwrap_or_default())));
+                        if let Some(t) = r.text.clone() {
+                            eng.kept_text.insert(id, t);
+                        }
                     }
                     eng.enqueue(s, id);
                     None
@@ -3167,6 +3209,9 @@ impl Merge<'_> {
         // job's commit may change.)
         let ahead = i > 0;
         rep.speculations += u64::from(ahead);
+        if let Outcome::Done(r) | Outcome::Stopped(r, _) = &o {
+            rep.guessed_from_last += u64::from(r.from_last);
+        }
         // A result whose only broken reads are guessed folds
         // (`Monoid::speculate`), placing nothing: committed for its
         // contributions (which do not depend on what it read), and run
@@ -3180,7 +3225,7 @@ impl Merge<'_> {
         let asked = |rd: &Read| !same || matches!(rd, Read::Env { .. });
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
-                let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate()));
+                let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate() || m.guess_ran()));
                 let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd));
                 match broken.next() {
                     Some(rd) if speculated(rd) && broken.all(speculated) => {
@@ -3211,6 +3256,9 @@ impl Merge<'_> {
                 {
                     eng.kept_ix.remove(&id);
                     eng.kept.insert(id, (k, r.res.reads.clone(), r.park_cont.then(|| r.base.unwrap_or_default())));
+                    if let Some(t) = r.text.clone() {
+                        eng.kept_text.insert(id, t);
+                    }
                 }
                 eng.enqueue(s, id);
                 return Ok(());
@@ -3338,6 +3386,7 @@ fn run_job(
     fuel: Option<u64>,
 ) -> Outcome {
     let (resumed, log_at) = (resume.is_some(), w.log_len);
+    let text = w.node(id).map(|n| n.text.clone());
     let (kept, reads, base) = match resume {
         Some((t, r, b)) => (Some(t), r, Some(b)),
         None => (None, Vec::new(), None),
@@ -3365,8 +3414,9 @@ fn run_job(
     if let Some(e) = cx.error.take() {
         return Outcome::Failed(e);
     }
-    let run = |cx: Ctx<'_>, out: ValueId| Run {
+    let run = |mut cx: Ctx<'_>, out: ValueId| Run {
         res: Res {
+            last: cx.last_reads(),
             out,
             defs: cx.defs,
             contribs: cx.contribs,
@@ -3381,6 +3431,7 @@ fn run_job(
             filed: None,
             def_ix: std::sync::OnceLock::new(),
             text: 0,
+            eval: core.eval_no.load(std::sync::atomic::Ordering::Relaxed),
         },
         kids: cx.kids,
         conts: cx.conts,
@@ -3389,6 +3440,7 @@ fn run_job(
         env: cx.env,
         pset_wait: cx.pset_wait,
         predicted: cx.predicted,
+        from_last: cx.from_last,
         guessed: cx.guessed || cx.predicted > 0 || ahead,
         fuel_out: cx.fuel_out,
         range_wait: cx.range_wait,
@@ -3398,6 +3450,7 @@ fn run_job(
         base: cx.base,
         park_cont: cx.park_cont,
         resumed,
+        text: text.clone(),
         log_at,
     };
     match r {
@@ -3427,7 +3480,7 @@ fn run_job(
 /// guessing, not carefully, its contributors now as they last contributed.
 /// `count`: this refutation is counted (else only asked).
 fn fold_guess(core: &super::core::Core, s: &mut Sched, id: Id, f: Field, count: bool) -> bool {
-    if !core.acc(f).is_some_and(|m| m.speculate()) {
+    if !core.acc(f).is_some_and(|m| m.speculate() || m.guess_ran()) {
         return false;
     }
     let c = s.fold_refutes.entry(id).or_default();

@@ -81,10 +81,11 @@ pub(crate) struct Builder<'a> {
     /// A step's merge: the field writes recorded, not made
     /// ([`super::batch`]).
     pub defer: Option<super::batch::Pending>,
-    /// While a run's placements are made: the unit, the lowest position
-    /// whose frames are to be walked again, and the nodes whose declared
-    /// definitions are to be filed once they are.
-    hold: Option<(u32, Pos, Vec<Id>)>,
+    /// While a run's placements are made: the unit, the positions whose
+    /// frames are to be walked again (each: a walk stops where the frames
+    /// agree again, short of a placement further on), and the nodes whose
+    /// declared definitions are to be filed once they are.
+    hold: Option<(u32, Vec<Pos>, Vec<Id>)>,
     pub counts: Counts,
     /// The run committed continued from its kept state (`Ctx::base`): its
     /// placements go after the children and continuations its earlier
@@ -230,7 +231,15 @@ impl<'a> Builder<'a> {
                 }
                 a
             };
-            let mut broken = res.reads.iter().find(|r| asked(r) && !holds(self.core, &self.w, id, r));
+            let mut a = Asker::default();
+            let check = memo_check();
+            let mut broken = res.reads.iter().find(|r| {
+                asked(r) && {
+                    let ok = holds_asked(self.core, &self.w, id, r, &mut a);
+                    assert!(!check || ok == holds(self.core, &self.w, id, r), "reader {id}: its read {r:?} asked with memo: {ok}");
+                    !ok
+                }
+            });
             // (CLEAN_SCOPED_CHECK: a read of another field broken too is
             // an invalidation missed elsewhere; named, and taken.)
             if broken.is_none() && on.is_some() && scoped_check() {
@@ -394,11 +403,12 @@ impl<'a> Builder<'a> {
         };
         // (Frames held back to walk from a position: that position moves
         // too; one that names no node walks the whole unit.)
-        if let Some((hu, hp, _)) = &mut self.hold
+        if let Some((hu, hps, _)) = &mut self.hold
             && *hu == u
-            && *hp != Pos::MAX
         {
-            *hp = map.get(hp).copied().unwrap_or(0);
+            for hp in hps.iter_mut() {
+                *hp = map.get(hp).copied().unwrap_or(0);
+            }
         }
         // Nodes.
         self.w.quiet = true;
@@ -966,10 +976,10 @@ impl<'a> Builder<'a> {
     /// frame stack agrees with what it was; nodes whose frame changed have
     /// their definitions filed again and their readers re-asked.
     pub(crate) fn frames_from(&mut self, u: u32, from: Pos) {
-        if let Some((hu, hp, _)) = &mut self.hold
+        if let Some((hu, hps, _)) = &mut self.hold
             && *hu == u
         {
-            *hp = (*hp).min(from);
+            hps.push(from);
             return;
         }
         self.frames_now(u, from);
@@ -1191,12 +1201,14 @@ impl<'a> Builder<'a> {
     /// so far: the earlier ones it did not make (yet) stay, after them.
     fn place_some(&mut self, id: Id, kids: &[Spec], conts: &[Spec], prefix: bool) -> (Vec<Id>, Vec<Id>) {
         let u = self.w.node(id).map(|n| n.unit).expect("live");
-        self.hold = Some((u, Pos::MAX, Vec::new()));
+        self.hold = Some((u, Vec::new(), Vec::new()));
         let r = self.place_held(id, kids, conts, prefix);
-        // The frames walked once, from the lowest placement; then the new
+        // The frames walked from each placement, in order; then the new
         // nodes' declared definitions filed in them.
-        if let Some((u, p, ids)) = self.hold.take() {
-            if p != Pos::MAX {
+        if let Some((u, mut ps, ids)) = self.hold.take() {
+            ps.sort_unstable();
+            ps.dedup();
+            for p in ps {
                 self.frames_now(u, p);
             }
             for x in ids {
@@ -1767,6 +1779,59 @@ fn frame_kind(n: &Node, k: u8) -> Option<ValueId> {
 /// Whether read `r` of node `me` still gets the answer it got.
 pub(crate) fn holds(core: &Core, w: &World, me: Id, r: &Read) -> bool {
     holds_with(core, w, me, r, false)
+}
+
+/// What asking one reader's reads of one world looks up again and again
+/// (as a run's `Ctx` keeps it): the last read point, the last frame chain,
+/// the field cells.
+#[derive(Default)]
+pub(crate) struct Asker<'w> {
+    point: Option<((Id, bool, bool), Option<(u32, Pos, FrameId, Id)>)>,
+    chain: Option<((u32, FrameId), Vec<(FrameId, Pos)>)>,
+    cells: FxHashMap<(u32, Field), Option<&'w super::world::FieldCell>>,
+}
+
+/// As [`holds`], with `a`'s lookups (of `w`, unchanged since).
+pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &mut Asker<'w>) -> bool {
+    let Read::Use { f, at, after, own, val, proj, .. } = r else {
+        return holds_with(core, w, me, r, false);
+    };
+    if w.loops.get(f).is_some() {
+        return false;
+    }
+    let key = (*at, *after, *own);
+    let point = match &a.point {
+        Some((k, p)) if *k == key => *p,
+        _ => {
+            let p = w.read_point(*at, *after, *own);
+            a.point = Some((key, p));
+            p
+        }
+    };
+    let Some((u, pos, fr, skip)) = point else {
+        return false;
+    };
+    let reach = match *a.cells.entry((u, *f)).or_insert_with(|| w.field(u, *f)) {
+        None => None,
+        Some(cell) => {
+            if a.chain.as_ref().is_none_or(|c| c.0 != (u, fr)) {
+                a.chain = Some(((u, fr), w.chain_starts(u, fr)));
+            }
+            World::reaching_in(&cell.defs, &a.chain.as_ref().expect("set").1, pos, skip)
+        }
+    };
+    let v2 = match reach {
+        Some((_, e)) => match e.val {
+            Some(v) => Some(v),
+            // (A definer in work: the answer stands as a guess.)
+            None => return true,
+        },
+        None => w.env_of(core, u, *f),
+    };
+    if *proj != 0 {
+        return v2.map(|x| core.project(*proj, x)) == val.map(|x| core.project(*proj, x));
+    }
+    v2 == *val
 }
 
 /// Whether read `r` of node `me` still holds; `strict`: a definition still

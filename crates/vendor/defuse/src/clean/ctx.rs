@@ -5,7 +5,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::core::Core;
-use super::world::{Def, Id, NONE, Place, Pos, Read, St, World};
+use super::world::{Def, FieldCell, FrameId, Id, LastReads, NONE, Place, Pos, Read, St, World};
 use crate::api::{Effect, FieldAt, Locality, NodeId, OpId, Stop};
 use crate::values::FxHashMap;
 use crate::values::{Field, ValueId, Values};
@@ -96,6 +96,12 @@ pub struct Ctx<'a> {
     pub(crate) guessed: bool,
     /// Reads answered by a prediction.
     pub(crate) predicted: u32,
+    /// Its last result from a previous evaluation's definition reads of
+    /// the fields guessed from the last (`Engine::guess_from_last`): taken
+    /// on first need.
+    last: Option<Option<Arc<LastReads>>>,
+    /// Reads it guessed from the last.
+    pub(crate) from_last: u32,
     /// A speculative run's read budget; spent, the run stops (`fuel_out`).
     pub(crate) fuel: Option<u64>,
     pub(crate) fuel_out: bool,
@@ -106,6 +112,12 @@ pub struct Ctx<'a> {
     /// The calls of a recorded run (`observe`; `RecOp::run` collects them).
     #[cfg(feature = "observe")]
     pub(crate) calls: std::cell::RefCell<Option<crate::record::Calls>>,
+    /// What the run's reads look up again and again in its one world: the
+    /// last read point asked (with the fuel a read there spends), the
+    /// frame chain of the last frame read in, and field cells.
+    point: Option<((Id, bool, bool), Option<(u32, Pos, FrameId, Id)>, u64)>,
+    chain: Option<((u32, FrameId), Vec<(FrameId, Pos)>)>,
+    cells: FxHashMap<(u32, Field), Option<&'a FieldCell>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -118,7 +130,8 @@ impl<'a> Ctx<'a> {
             unit: n.unit,
             op: n.text.op,
             args: n.text.args.clone(),
-            reads: Vec::new(),
+            // (About as many as its last run read.)
+            reads: Vec::with_capacity(n.res.as_ref().map_or(0, |r| r.reads.len())),
             defs: Vec::new(),
             contribs: Vec::new(),
             pubs: Vec::new(),
@@ -146,12 +159,17 @@ impl<'a> Ctx<'a> {
             careful: false,
             guessed: false,
             predicted: 0,
+            last: None,
+            from_last: 0,
             fuel: None,
             fuel_out: false,
             range_wait: None,
             narrowed: None,
             #[cfg(feature = "observe")]
             calls: std::cell::RefCell::new(None),
+            point: None,
+            chain: None,
+            cells: FxHashMap::default(),
         }
     }
 
@@ -253,16 +271,33 @@ impl<'a> Ctx<'a> {
 
     fn read_at_inner(&mut self, f: Field, at: Id, after: bool, own: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
         // (Fuel: one, and one per frame the read walks.)
-        let depth = self.w.node(at).map_or(1, |n| self.w.unit(n.unit).frames.get(&n.frame).map_or(1, |fr| u64::from(fr.depth) + 1));
+        let w = self.w;
+        let key = (at, after, own);
+        let (point, depth) = match &self.point {
+            Some((k, p, d)) if *k == key => (*p, *d),
+            _ => {
+                let d = w.node(at).map_or(1, |n| w.unit(n.unit).frames.get(&n.frame).map_or(1, |fr| u64::from(fr.depth) + 1));
+                let p = w.read_point(at, after, own);
+                self.point = Some((key, p, d));
+                (p, d)
+            }
+        };
         self.spend(depth)?;
-        if let Some(&lv) = self.w.loops.get(&f) {
+        if let Some(&lv) = w.loops.get(&f) {
             self.reads.push(Read::Loop { f, val: lv });
             return Ok(Some((lv, NONE)));
         }
-        let Some((u, pos, fr, skip)) = self.w.read_point(at, after, own) else {
+        let Some((u, pos, fr, skip)) = point else {
             return Ok(None);
         };
-        let reach = super::core::prof::time(21, || self.w.reaching(u, f, pos, fr, skip));
+        let reach = super::core::prof::time(21, || {
+            let cell = *self.cells.entry((u, f)).or_insert_with(|| w.field(u, f));
+            let cell = cell?;
+            if self.chain.as_ref().is_none_or(|c| c.0 != (u, fr)) {
+                self.chain = Some(((u, fr), w.chain_starts(u, fr)));
+            }
+            World::reaching_in(&cell.defs, &self.chain.as_ref().expect("set").1, pos, skip)
+        });
         // A pending definition set between the site and the reader: wait
         // (speculating, the read guesses past it; a definition it makes
         // re-asks the reader).
@@ -291,6 +326,12 @@ impl<'a> Ctx<'a> {
                         // The definer's prediction, as a guess the merge
                         // checks.
                         self.predicted += 1;
+                        Some(v)
+                    }
+                    None if self.predict && !self.careful && let Some(v) = self.last_read(f, key) => {
+                        // What its last evaluation read here, likewise.
+                        self.predicted += 1;
+                        self.from_last += 1;
                         Some(v)
                     }
                     None => {
@@ -339,11 +380,52 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// What this node's last result from a previous evaluation read of `f`
+    /// at `key`, when `f` is guessed from the last.
+    fn last_read(&mut self, f: Field, key: (Id, bool, bool)) -> Option<ValueId> {
+        if !self.core.guess_last.contains(&f) {
+            return None;
+        }
+        self.last_reads()?.vals.get(&(f, key.0, key.1, key.2)).copied()
+    }
+
+    /// Its last result from a previous evaluation's reads of the fields
+    /// guessed from the last, which its result carries on.
+    pub(crate) fn last_reads(&mut self) -> Option<Arc<LastReads>> {
+        if self.core.guess_last.is_empty() {
+            return None;
+        }
+        let (core, w, me) = (self.core, self.w, self.me);
+        self.last
+            .get_or_insert_with(|| w.node(me).and_then(|n| n.res.as_ref()).and_then(|r| r.last_reads(core, core.eval_no.load(std::sync::atomic::Ordering::Relaxed))))
+            .clone()
+    }
+
     /// Whether a range read of accumulator `f` folds its contributors in
     /// work as they last contributed (`Monoid::speculate`, predicting, not
     /// running carefully).
     fn guess_fold(&self, f: Field) -> bool {
         self.predict && !self.careful && self.core.acc(f).is_some_and(|m| m.speculate())
+    }
+
+    /// The node in work a range read of accumulator `f` over `(lo, hi)`
+    /// waits for: the first that may contribute; none when the fold is
+    /// guessed; guessing those that ran (`Monoid::guess_ran`), the first
+    /// without a result. (`guessed` set when it folds one in work.)
+    fn fold_blocker(&mut self, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let x = self.w.range_blocker(self.me, f, u, lo, hi)?;
+        if self.guess_fold(f) {
+            self.guessed = true;
+            return None;
+        }
+        if self.predict && !self.careful && self.core.acc(f).is_some_and(|m| m.guess_ran()) {
+            let open = self.w.range_blocker_open(self.me, f, u, lo, hi);
+            if open.is_none() {
+                self.guessed = true;
+            }
+            return open;
+        }
+        Some(x)
     }
 
     /// Whether node `id` is in work in this world.
@@ -1012,12 +1094,8 @@ impl<'a> Ctx<'a> {
         // guessing, it is passed as it last contributed. Waited for alone,
         // not with the rest of the window: it may be the next contributor,
         // and a page builder folds piece by piece as they finish.)
-        if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
-            if self.guess_fold(f) {
-                self.guessed = true;
-            } else {
-                return Err(self.stop(Wait::Node(x, Some(f))));
-            }
+        if let Some(x) = self.fold_blocker(f, u, lo, hi) {
+            return Err(self.stop(Wait::Node(x, Some(f))));
         }
         let val = match self.core.acc(f) {
             Some(mo) => {
@@ -1044,10 +1122,8 @@ impl<'a> Ctx<'a> {
         // for (one that declares its contributions, or whose last run made
         // none to `f`, is folded as it stands; its change re-asks), unless
         // the fold is guessed (`Monoid::speculate`).
-        if let Some(x) = self.w.range_blocker(self.me, f, u, lo, hi) {
-            if self.guess_fold(f) {
-                self.guessed = true;
-            } else {
+        if let Some(x) = self.fold_blocker(f, u, lo, hi) {
+            {
                 if super::core::debug() && self.w.node(x).is_some_and(|n| !matches!(n.st, St::Dirty | St::Held)) {
                     eprintln!("range {} of {f:?}: blocker {x} in state {:?}", self.me, self.w.node(x).map(|n| n.st));
                 }
