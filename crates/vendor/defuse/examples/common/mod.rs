@@ -2439,6 +2439,11 @@ impl Program {
         // (Conflicting loop-back declarations are the client's bug: an
         // error here.)
         eng.set_loop_option_check(true);
+        // FUZZ_LONG_US=n: runs longer than n µs do not run ahead (a speed
+        // policy: results must not change).
+        if let Some(us) = std::env::var("FUZZ_LONG_US").ok().and_then(|s| s.parse().ok()) {
+            eng.set_long_runs(Some(std::time::Duration::from_micros(us)));
+        }
         let lang = Lang::install(&mut eng);
         if std::env::var_os("FUZZ_STABLE").is_some() {
             // Stable is a hint: marked on fields the programs define often

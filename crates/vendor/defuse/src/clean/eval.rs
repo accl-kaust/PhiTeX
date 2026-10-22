@@ -125,6 +125,12 @@ impl Sched {
         self.careful.contains(&id)
     }
 
+    /// Whether node `id`'s runs are long (`Engine::set_long_runs`): its
+    /// time this evaluation, or the engine's record of it.
+    fn long(&self, run_time: &FxHashMap<Id, std::time::Duration>, limit: Option<std::time::Duration>, id: Id) -> bool {
+        limit.is_some_and(|l| self.time.get(&id).or_else(|| run_time.get(&id)).is_some_and(|&t| t > l))
+    }
+
     /// A refutation of node `id`'s result; `news`: of a loop-back value's
     /// move (it does not make the node careful).
     fn refuted(&mut self, id: Id, news: bool) {
@@ -741,6 +747,10 @@ impl Engine {
         // from the initial values.)
         rep.restarts += u64::from(had_old);
         rep.env_provided = self.core.env_provided.load(std::sync::atomic::Ordering::Relaxed);
+        // (Each node's time, for the next evaluation's `set_long_runs`.)
+        if self.long_runs.is_some() {
+            self.run_time.extend(s.time.iter().map(|(&id, &t)| (id, t)));
+        }
         let mut times: Vec<(NodeId, std::time::Duration)> = std::mem::take(&mut s.time).into_iter().map(|(id, t)| (NodeId(id), t)).collect();
         times.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         rep.run_times = times;
@@ -1491,6 +1501,14 @@ impl Engine {
                 && let Some((_, &x)) = self.w.work_of(k.0).and_then(|m| m.below(&k.1))
             {
                 s.held.insert(k.2, (x, crate::api::Hold::Careful));
+                continue;
+            }
+            // A long one (`set_long_runs`) does not run ahead either.
+            if !first
+                && s.long(&self.run_time, self.long_runs, k.2)
+                && let Some((_, &x)) = self.w.work_of(k.0).and_then(|m| m.below(&k.1))
+            {
+                s.held.insert(k.2, (x, crate::api::Hold::Long));
                 continue;
             }
             s.queue.remove(&k);
@@ -3512,8 +3530,9 @@ impl Merge<'_> {
             s.lane_new = Some(cands);
             // (Held by its hints, or refuted and behind a node in work: it
             // waits for the step.)
-            let behind = s.careful(k.2) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_some_and(|(_, &x)| {
-                s.held.insert(k.2, (x, crate::api::Hold::Careful));
+            let long = s.long(&eng.run_time, eng.long_runs, k.2);
+            let behind = (s.careful(k.2) || long) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_some_and(|(_, &x)| {
+                s.held.insert(k.2, (x, if s.careful(k.2) { crate::api::Hold::Careful } else { crate::api::Hold::Long }));
                 true
             });
             if behind || eng.w.hint_blocker(&eng.core, k.2, predict).is_err() {
