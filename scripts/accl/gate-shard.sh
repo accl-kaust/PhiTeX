@@ -24,8 +24,9 @@
 #                                       edit's PDF against a cold build of
 #                                       its text (red if not the same),
 #                                       its save-to-build ms against its
-#                                       kind's target, rounds, runs and
-#                                       cutoffs (recorded, not red)
+#                                       kind's target, rounds, runs,
+#                                       cutoffs, wasted reruns and their
+#                                       top causes (recorded, not red)
 #   gate-shard.sh control CTL           control CTL's CLI built, its cold
 #                                       watch timings at -j 1/8/16 (recorded
 #                                       by `gate-fast control`)
@@ -348,7 +349,7 @@ for l in open(sys.argv[1]):
     for j in 8 1; do
       rm -rf "$w/ek" "$w/ek-cold" && cp -a bench/amsldoc "$w/ek"
       (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/ekcache \
-        PHITEX_ROUND_ACCT=1 GATE_EDIT_STDERR="$r/editkinds-j$j.err" \
+        PHITEX_ROUND_ACCT=1 PHITEX_RUN_AUDIT=1 GATE_EDIT_STDERR="$r/editkinds-j$j.err" \
         timeout 2400 python3 -I "$py" "$bin" "$w/ek" amsldoc.tex $j "$r/editkinds-j$j.json" --exact-pdf) >> "$r/editkinds.txt" 2>&1
       v=$(python3 -I -c '
 import json, sys
