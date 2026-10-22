@@ -626,6 +626,10 @@ pub(crate) fn export(v: &Values, x: ValueId) -> Tree {
 
 pub(crate) fn import(v: &Values, t: &Tree) -> ValueId {
     match t {
+        // (a string or a number interned from where it is: no copy of the
+        // leaf made first)
+        Tree::Leaf(Value::Str(x)) => v.str(x),
+        Tree::Leaf(Value::Int(i)) => v.int(*i),
         Tree::Leaf(x) => v.intern(x.clone()),
         Tree::List(xs) => {
             let ys = xs.iter().map(|y| import(v, y)).collect();
@@ -737,8 +741,15 @@ pub(crate) const CAND: &str = "cand";
 
 /// Whether `e` is a candidate marker `["cand", piece, c]`, not an entry.
 pub(crate) fn is_cand_marker(v: &Values, e: ValueId) -> bool {
-    let xs = list_of(v, e);
-    xs.len() == 3 && v.as_str(xs[0]).as_deref() == Some(CAND)
+    // (the list and its tag looked at in place: no copy of either per
+    // entry)
+    let tag = v
+        .with_list(e, |xs| (xs.len() == 3).then(|| xs[0]))
+        .unwrap_or_else(|| {
+            let xs = list_of(v, e);
+            (xs.len() == 3).then(|| xs[0])
+        });
+    tag.is_some_and(|t| v.with_str(t, |s| s == CAND).unwrap_or(false))
 }
 
 /// A `streams` entry without its page tag (`[j, entry]` or
@@ -755,12 +766,22 @@ pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
 /// A page-tagged entry's page and, for a page whose break is inside a
 /// piece, that piece and candidate.
 fn page_tag(v: &Values, e: ValueId) -> Option<(i64, Option<(i64, i64)>)> {
-    let xs = list_of(v, e);
-    match xs.as_slice() {
-        [j, _] => Some((v.as_int(*j)?, None)),
-        [j, _, p, k] => Some((v.as_int(*j)?, Some((v.as_int(*p)?, v.as_int(*k)?)))),
+    // (the entry's ids looked at in place: no copy of the list)
+    let ids = |xs: &[ValueId]| match xs {
+        [j, _] => Some((*j, None)),
+        [j, _, p, k] => Some((*j, Some((*p, *k)))),
         _ => None,
-    }
+    };
+    let (j, pk) = v
+        .with_list(e, ids)
+        .unwrap_or_else(|| ids(&list_of(v, e)))?;
+    Some((
+        v.as_int(j)?,
+        match pk {
+            None => None,
+            Some((p, k)) => Some((v.as_int(p)?, v.as_int(k)?)),
+        },
+    ))
 }
 
 /// The `streams` entries (an accumulator's, in the nodes' order) in the
@@ -2649,10 +2670,34 @@ impl Graph {
     /// call to the engine).
     fn push_env(&mut self, env: Vec<(Field, ValueId)>) {
         // (a field given twice: the later entry, as the engine's map has
-        // it; the job's bindings first)
-        let map: FxHashMap<Field, ValueId> = self.job.iter().copied().chain(env).collect();
-        let mut env: Vec<(Field, ValueId)> = map.into_iter().collect();
-        env.sort_unstable_by_key(|e| e.0.0.raw());
+        // it; the job's bindings first, by field once for the job
+        // ([`job_env`]), merged with the few entries here: the format's
+        // bindings neither hashed nor sorted again per push)
+        let env = by_field(env);
+        let mut merged = Vec::with_capacity(self.job.len() + env.len());
+        let (mut i, mut j) = (0, 0);
+        while i < self.job.len() || j < env.len() {
+            match (self.job.get(i), env.get(j)) {
+                (Some(a), Some(b)) if a.0 == b.0 => {
+                    merged.push(*b);
+                    (i, j) = (i + 1, j + 1);
+                }
+                (Some(a), Some(b)) if a.0.0.raw() > b.0.0.raw() => {
+                    merged.push(*b);
+                    j += 1;
+                }
+                (Some(a), _) => {
+                    merged.push(*a);
+                    i += 1;
+                }
+                (None, Some(b)) => {
+                    merged.push(*b);
+                    j += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        let env = merged;
         let mut absent = self.absent.clone();
         absent.sort_unstable_by_key(|f| f.0.raw());
         absent.dedup();
@@ -6364,9 +6409,19 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     // graph has one unit, so the unit's start and the environment are
     // one place to read them)
     let _ = unit;
-    g.job = sets;
+    g.job = by_field(sets);
     let env = g.environment(opts.fixpoint);
     g.push_env(env);
+}
+
+/// Bindings by field, each field once: the last given for it.
+fn by_field(mut xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)> {
+    // (reversed, then a stable sort: the last given first among a
+    // field's, which the dedup keeps)
+    xs.reverse();
+    xs.sort_by_key(|e| e.0.0.raw());
+    xs.dedup_by_key(|e| e.0);
+    xs
 }
 
 /// The graph's accumulators and loop-backs (their round-one values).

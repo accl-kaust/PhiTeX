@@ -1166,7 +1166,17 @@ pub(crate) fn units_of<'t>(
         }
         let h = phitex_defuse::hash_bytes(0x7775_6e69_7400_0001, u.as_bytes());
         let n = seen.entry(h).or_insert(0);
-        let key = format!("wunit:{name}:{h:016x}:{n}");
+        // (built, not formatted: a key per unit of every file written)
+        let mut key = String::with_capacity(name.len() + 32);
+        key.push_str("wunit:");
+        key.push_str(name);
+        key.push(':');
+        for i in (0..16).rev() {
+            let d = u32::try_from((h >> (4 * i)) & 0xf).unwrap_or(0);
+            key.push(char::from_digit(d, 16).unwrap_or('0'));
+        }
+        key.push(':');
+        crate::print::print_int(&mut key, i64::from(*n));
         *n += 1;
         entries.push(v.list(vec![v.str(&key), v.int(i64::from(starts))]));
         units.push((key, u));
