@@ -1233,8 +1233,10 @@ impl Run<'_, '_> {
             let b = nodes::encode_box_with(v, &line.packed.node, list);
             // (its fonts from its nodes, for its unit's shape: not walked
             // again through its value, `crate::nodes::unit_shape`)
-            if seen == 0 {
-                let f = nodes::native_fonts(&line.packed.node.list).map(|ids| {
+            if seen == 0
+                && let Some(ids) = nodes::native_fonts(&line.packed.node.list)
+            {
+                let f = {
                     // (one value a set of fonts: the lines share few)
                     let ids = ids.as_slice();
                     let k = phitex_defuse::hash_words(0, &ids.iter().map(|&f| u64::from(f)).collect::<Vec<_>>());
@@ -1246,7 +1248,7 @@ impl Run<'_, '_> {
                             x
                         }
                     }
-                });
+                };
                 self.line_fonts.insert(b, f);
             }
             out.push(v.list(vec![tv, b, bs, ls, lsl]));

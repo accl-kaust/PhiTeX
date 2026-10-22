@@ -320,6 +320,8 @@ pub(crate) struct PagePiece {
     /// ([`page_box`]).
     bx: Mutex<BoxNode>,
     lazy: Vec<ValueId>,
+    /// Its sealed lines' whatsits' handles (`crate::nodes::sealed_bases`).
+    bases: Vec<(u32, u32, u32)>,
     /// The pieces its sealed lines are in (sorted).
     pieces: Vec<i64>,
     /// Where its sealed lines' units are: the finisher's window (after
@@ -383,7 +385,7 @@ fn with_page_box<T>(
     // decoded again, `crate::nodes::take_made`)
     let take = crate::nodes::TAKE_MADE.with(|c| c.replace(true));
     let mut saved = Vec::new();
-    let ok = crate::nodes::fill_sealed(v, &mut b.list, &pc.lazy, line, &mut 0, &mut saved);
+    let ok = crate::nodes::fill_sealed(v, &mut b.list, &pc.lazy, &pc.bases, line, &mut 0, &mut saved);
     crate::nodes::TAKE_MADE.with(|c| c.set(take));
     let r = ok.then(|| f(&b));
     let mut saved: std::collections::VecDeque<_> = saved.into();
@@ -1735,9 +1737,9 @@ pub(crate) fn ship(
         r.param("pdfdestmargin")?,
         r.param("pdfthreadmargin")?,
     ];
-    let marks = mark_events(v, &bx, &resolved);
+    let marks = mark_events(v, &bx, &resolved, side);
     page_allocs(r, ids, &fonts, &side.whats, marks)?;
-    ship_apart(r, page, &p, bx, &side.lazy, &side.whats, &resolved, fonts, margins)
+    ship_apart(r, page, &p, bx, side, &resolved, fonts, margins)
 }
 
 /// The page's whatsits as the writer asks for them: a form's from the
@@ -1770,13 +1772,13 @@ fn ship_apart(
     page_v: ValueId,
     p: &[ValueId],
     bx: BoxNode,
-    side_lazy: &[ValueId],
-    side_whats: &[ValueId],
+    side: &Side,
     resolved: &FxHashMap<u32, ValueId>,
     fonts: Fonts,
     margins: [i32; 3],
 ) -> R<()> {
     let v = r.v;
+    let (side_lazy, side_whats) = (&side.lazy, &side.whats);
     let mut whats: BTreeMap<u32, Whatsit> = BTreeMap::new();
     for (&h, &d) in resolved {
         if let Some(w) = whatsit(v, d) {
@@ -1807,7 +1809,8 @@ fn ship_apart(
         whats,
         fonts,
         bx: Mutex::new(bx),
-        lazy: side_lazy.to_vec(),
+        lazy: side_lazy.clone(),
+        bases: crate::nodes::sealed_bases(side),
         pieces: {
             let mut ps: Vec<i64> = side_lazy
                 .iter()
@@ -2177,13 +2180,15 @@ pub(crate) fn page_allocs(
 /// (a thread continues in each, `append_thread`); `[5, start, level,
 /// running, id]` a thread's bead (`do_thread`: the bead and its
 /// rectangle's object, the thread's own where first named); `[6]` a
-/// thread ended. The state they act on (the link stack, the thread)
-/// runs on over the pages, so the fold of the line ([`fold_allocs`])
-/// counts them.
-fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>) -> ValueId {
+/// thread ended (a sealed line's whatsits where its skeleton has them,
+/// `crate::nodes::sealed_skeleton`). The state they act on (the link
+/// stack, the thread) runs on over the pages, so the fold of the line
+/// ([`fold_allocs`]) counts them.
+fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>, side: &Side) -> ValueId {
     struct Walk<'a> {
         v: &'a Values,
         resolved: &'a FxHashMap<u32, ValueId>,
+        side: &'a Side,
         cur_s: i64,
         seg: BTreeMap<(i64, i64), i64>,
         ev: Vec<Vec<ValueId>>,
@@ -2267,13 +2272,14 @@ fn mark_events(v: &Values, bx: &BoxNode, resolved: &FxHashMap<u32, ValueId>) -> 
             self.cur_s += 1;
             let vertical = b.kind == BoxKind::V;
             self.count(if vertical { 4 } else { 0 }, self.cur_s);
-            self.nodes(&b.list, vertical);
+            self.nodes(crate::nodes::sealed_skeleton(b, self.side).unwrap_or(&b.list), vertical);
             self.cur_s -= 1;
         }
     }
     let mut w = Walk {
         v,
         resolved,
+        side,
         cur_s: -1,
         seg: BTreeMap::new(),
         ev: Vec::new(),

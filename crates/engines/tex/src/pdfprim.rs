@@ -3468,6 +3468,14 @@ impl Walk<'_> {
     }
 }
 
+/// Whether a whatsit of `kind` reads where it is on the page when the
+/// page ships (pdfTeX §1408: `\\pdfsavepos` sets `\\pdflastxpos` and
+/// `\\pdflastypos`); the others act on their data alone there, the
+/// writer placing what they draw ([`at_shipout`], [`writer_data`]).
+pub(crate) fn reads_position_at_shipout(kind: &str) -> bool {
+    kind == "pdf:savepos"
+}
+
 /// A pdfTeX whatsit met by `\shipout` (pdfTeX §1366 ff.): what TeX reads
 /// back of it.
 #[allow(clippy::unnecessary_wraps)]
@@ -3478,7 +3486,7 @@ pub(crate) fn at_shipout(
     p: &Positions,
 ) -> R<()> {
     let v = r.v;
-    if kind == "pdf:savepos" {
+    if reads_position_at_shipout(kind) {
         // pdfTeX §1408, and in DVI mode §1407
         let (h, vv) = pos.unwrap_or((0, 0));
         let (x, y) = if p.pdf {
