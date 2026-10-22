@@ -237,13 +237,20 @@ impl<'a> Builder<'a> {
             };
             let mut a = Asker::default();
             let check = memo_check();
+            let mut audit = super::core::lock(&self.core.rechecks);
             let mut broken = res.reads.iter().find(|r| {
                 asked(r) && {
                     let ok = holds_asked(self.core, &self.w, id, r, &mut a);
                     assert!(!check || ok == holds(self.core, &self.w, id, r), "reader {id}: its read {r:?} asked with memo: {ok}");
+                    if let Some(m) = audit.as_mut() {
+                        let e = m.entry(read_field(r)).or_default();
+                        e.0 += 1;
+                        e.1 += u64::from(!ok);
+                    }
                     !ok
                 }
             });
+            drop(audit);
             // (CLEAN_SCOPED_CHECK: a read of another field broken too is
             // an invalidation missed elsewhere; named, and taken.)
             if broken.is_none() && on.is_some() && scoped_check() {
@@ -251,6 +258,19 @@ impl<'a> Builder<'a> {
                 if let Some(r) = broken {
                     eprintln!("scoped check: {id} asked on {on:?}, broken {r:?}");
                 }
+            }
+            // (A run that marked points resumes at the last before its
+            // first broken read.)
+            if let Some(r) = broken
+                && !res.marks.is_empty()
+                && res.after.is_some()
+                && let Some(b) = res.reads.iter().position(|x| std::ptr::eq(x, r))
+            {
+                let b = u32::try_from(b).unwrap_or(u32::MAX);
+                let at = self.w.log_len;
+                let mut m = super::core::lock(&self.core.resume_at);
+                let e = m.entry(id).or_insert((b, at));
+                *e = (e.0.min(b), e.1.min(at));
             }
             if let Some(r) = broken {
                 let why = if rebound(self.core, &self.w, r) {
@@ -1841,7 +1861,7 @@ pub(crate) struct Asker<'w> {
 
 /// As [`holds`], with `a`'s lookups (of `w`, unchanged since).
 pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &mut Asker<'w>) -> bool {
-    let Read::Use { f, at, after, own, val, proj, .. } = r else {
+    let Read::Use { f, at, after, own, val, path, .. } = r else {
         return holds_with(core, w, me, r, false);
     };
     if w.loops.get(f).is_some() {
@@ -1876,8 +1896,8 @@ pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &m
         },
         None => w.env_of(core, u, *f),
     };
-    if *proj != 0 {
-        return v2.map(|x| core.project(*proj, x)) == val.map(|x| core.project(*proj, x));
+    if *path != 0 {
+        return v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x));
     }
     v2 == *val
 }
@@ -1894,7 +1914,7 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
             own,
             site,
             val,
-            proj,
+            path,
         } => {
             if let Some(&lv) = w.loops.get(f) {
                 let _ = lv;
@@ -1917,8 +1937,8 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
                 None => (NONE, w.env_of(core, u, *f)),
             };
             let _ = me;
-            if *proj != 0 {
-                return v2.map(|x| core.project(*proj, x)) == val.map(|x| core.project(*proj, x));
+            if *path != 0 {
+                return v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x));
             }
             let _ = (s2, site);
             v2 == *val
@@ -1958,13 +1978,15 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
             Ok((o, e, _)) => o == *outs && e == *end,
             Err(_) => false,
         },
-        Read::Range { f, from, to, val, past } => {
+        Read::Range { f, from, to, val, past, path } => {
             // (An end gone: the window it named is not there.)
             if [*from, *to].iter().any(|&x| x != NONE && w.node(x).is_none()) {
                 return false;
             }
+            // (Through a path: its answers equal.)
+            let same = |now: ValueId| now == *val || (*path != 0 && core.eval_path(*path, now) == core.eval_path(*path, *val));
             let Some(mo) = core.acc(*f) else {
-                return *val == ValueId::UNIT;
+                return same(ValueId::UNIT);
             };
             let m = AccMeasure {
                 m: &**mo,
@@ -1973,8 +1995,16 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
             let Some((u, lo, hi)) = w.window(me, *from, *to, *past) else {
                 return false;
             };
-            w.fold(&m, u, *f, lo, hi) == *val
+            same(w.fold(&m, u, *f, lo, hi))
         }
+    }
+}
+
+/// The field read `r` reads, if it reads one.
+fn read_field(r: &Read) -> Option<Field> {
+    match r {
+        Read::Use { f, .. } | Read::Loop { f, .. } | Read::Env { f, .. } | Read::Range { f, .. } | Read::Seq { f, .. } | Read::IsLoop { f, .. } => Some(*f),
+        _ => None,
     }
 }
 

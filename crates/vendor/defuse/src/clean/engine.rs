@@ -230,6 +230,13 @@ impl Engine {
         OpId((self.core.ops.len() - 1) as u32)
     }
 
+    /// The read path of `steps` ([`crate::PathId`]; for
+    /// [`Ctx::use_field_path`], [`Ctx::acc_fold_path`]). The same steps give
+    /// the same path.
+    pub fn path(&self, steps: &[crate::api::Step]) -> crate::api::PathId {
+        crate::api::PathId(self.core.intern_path(steps))
+    }
+
     /// Registers a projection for [`Ctx::use_field_proj`].
     ///
     /// # Panics
@@ -790,20 +797,20 @@ impl Engine {
         }
         let fs: FxHashSet<Field> = fields.iter().copied().collect();
         self.edit(|b| {
+            // (Each with the changed field it read, the first: its label.)
             let mut hit = Vec::new();
             for (&id, n) in b.w.nodes.iter() {
                 let Some(r) = &n.res else { continue };
-                if r.reads.iter().any(|rd| match rd {
-                    super::world::Read::Env { f, .. } => fs.contains(f),
-                    super::world::Read::Use { f, site, .. } => *site == super::world::NONE && fs.contains(f),
-                    super::world::Read::Stream { fields, .. } => fields.iter().any(|(f, _)| fs.contains(f)),
-                    _ => false,
+                if let Some(f) = r.reads.iter().find_map(|rd| match rd {
+                    super::world::Read::Env { f, .. } => fs.contains(f).then_some(*f),
+                    super::world::Read::Use { f, site, .. } => (*site == super::world::NONE && fs.contains(f)).then_some(*f),
+                    super::world::Read::Stream { fields, .. } => fields.iter().find(|(f, _)| fs.contains(f)).map(|&(f, _)| f),
+                    _ => None,
                 }) {
-                    hit.push(id);
+                    hit.push((id, f));
                 }
             }
-            for id in hit {
-                let f = fs.iter().next().copied().unwrap_or(Field(ValueId::UNIT));
+            for (id, f) in hit {
                 b.make_dirty_for(id, crate::api::Rerun::Environment { field: f });
             }
         });
@@ -1229,6 +1236,10 @@ impl Engine {
         }
         if ids(&self.w.publishers) != ids(&want.publishers) {
             out.push(format!("publishers {:?}, the nodes file {:?}", ids(&self.w.publishers), ids(&want.publishers)));
+        }
+        let pi = |w: &World| -> Vec<((Field, Id), ValueId)> { w.pub_ix.iter().map(|(&k, &x)| (k, x)).collect() };
+        if pi(&self.w) != pi(&want) {
+            out.push(format!("pub_ix {:?}, the nodes file {:?}", pi(&self.w), pi(&want)));
         }
         let fw = |w: &World| -> Vec<(u64, Id)> { w.fwds.iter().map(|(&k, _)| k).collect() };
         if fw(&self.w) != fw(&want) {

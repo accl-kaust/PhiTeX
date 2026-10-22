@@ -122,7 +122,9 @@ pub(crate) enum Read {
     /// The definition of `f` reaching position `at` (a node: before it,
     /// after its subtree when `after`, or right after its own definitions
     /// when `own`), answered by `site` (`NONE`: the environment or the
-    /// unit's start) with `val`, through projection `proj` (0: in full).
+    /// unit's start) with `val` (the value itself), through path `path`
+    /// (0: in full; below `PATH0` a projection): the run depends on the
+    /// path's answer only.
     Use {
         f: Field,
         at: Id,
@@ -130,7 +132,7 @@ pub(crate) enum Read {
         own: bool,
         site: Id,
         val: Option<ValueId>,
-        proj: u16,
+        path: u32,
     },
     /// A loop-back field's round value.
     Loop { f: Field, val: ValueId },
@@ -159,8 +161,9 @@ pub(crate) enum Read {
     /// the unit's start) up to `to` (`NONE`: the reader); `past`: `to` may
     /// lie past the reader (`Ctx::acc_fold`, `Ctx::acc_next`; with `to`
     /// `NONE`, the window runs to the unit's end), else the window stops
-    /// at it.
-    Range { f: Field, from: Id, to: Id, val: ValueId, past: bool },
+    /// at it. `val` is the fold, the run depending on path `path`'s answer
+    /// on it only (0: the fold).
+    Range { f: Field, from: Id, to: Id, val: ValueId, past: bool, path: u32 },
     /// The `i`-th following sibling (`Ctx::following`): its id and text.
     Sib { i: u32, ans: Option<(Id, usize)> },
     /// The siblings a declared count claim holds (`Ctx::claimed`).
@@ -188,6 +191,28 @@ pub(crate) enum ReadKey {
     Out(Id),
     /// A range reader of an accumulator over a window.
     Range(u32, Field, Pos, Pos),
+}
+
+/// A point a run marked (`Ctx::checkpoint`): the client's mark, how many
+/// reads the run had made, the client's state there and a digest of the
+/// run's outputs so far.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Mark {
+    pub mark: u32,
+    pub read_ix: u32,
+    pub state: ValueId,
+    pub digest: u64,
+}
+
+/// The token a run kept for a later run to resume from one of its marks
+/// (`Ctx::keep_after`).
+#[derive(Clone)]
+pub(crate) struct After(pub Arc<dyn std::any::Any + Send + Sync>);
+
+impl std::fmt::Debug for After {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("After")
+    }
 }
 
 /// A committed run's result.
@@ -220,6 +245,10 @@ pub(crate) struct Res {
     /// Its definitions that forward a loop-back field (target, locality,
     /// the field): their values follow the field's round value.
     pub forwards: Vec<(Field, Locality, Field)>,
+    /// The marks its run made (`Ctx::checkpoint`), in order, and the token
+    /// it kept for a later run to resume from one (`Ctx::keep_after`).
+    pub marks: Arc<[Mark]>,
+    pub after: Option<After>,
     /// What the node's last result from an earlier evaluation read of the
     /// fields guessed from the last (`Engine::guess_from_last`), carried
     /// through its commits in this one (`Res::last_reads`).
@@ -295,6 +324,8 @@ impl Default for Res {
             text: 0,
             eval: 0,
             forwards: Vec::new(),
+            marks: Arc::from([]),
+            after: None,
             last: None,
         }
     }
@@ -476,6 +507,14 @@ fn publishes(n: &Node) -> bool {
     n.st == St::Done && n.res.as_ref().is_some_and(|r| !r.pubs.is_empty())
 }
 
+/// A done node's publications (`pub_ix` entries).
+fn published(n: &Node) -> &[(Field, ValueId)] {
+    match &n.res {
+        Some(r) if n.st == St::Done => &r.pubs,
+        _ => &[],
+    }
+}
+
 /// The loop-back fields a done node's definitions forward (`fwds` keys).
 fn forwarded(n: &Node) -> Vec<u64> {
     let mut v: Vec<u64> = match &n.res {
@@ -580,6 +619,9 @@ pub(crate) struct World {
     /// definition (`Ctx::define_forward`), by that field (`Field` raw,
     /// node); checked against their results when asked.
     pub fwds: PMap<(u64, Id), ()>,
+    /// The done nodes' publications by field and node (what
+    /// `publications_of` merges with the loop-back values).
+    pub pub_ix: PMap<(Field, Id), ValueId>,
     /// Placed nodes whose placer runs again for a change (a read that
     /// broke, a new text) and has not placed them again yet: they wait for
     /// it (their texts may be stale).
@@ -684,6 +726,7 @@ impl World {
             && self.fins.ptr_eq(&other.fins)
             && self.publishers.ptr_eq(&other.publishers)
             && self.fwds.ptr_eq(&other.fwds)
+            && self.pub_ix.ptr_eq(&other.pub_ix)
     }
 
     /// Field `f` of unit `u`, if anything is filed under it.
@@ -1352,6 +1395,16 @@ impl World {
                 self.publishers.remove(&id, &NoMeasure);
             }
         }
+        let pw = self.nodes.get(&id).map_or(&[][..], |o| published(o));
+        if pw != published(&n) {
+            let old: Vec<(Field, ValueId)> = pw.to_vec();
+            for (f, _) in old {
+                self.pub_ix.remove(&(f, id), &NoMeasure);
+            }
+            for &(f, x) in published(&n) {
+                self.pub_ix.insert((f, id), x, &NoMeasure);
+            }
+        }
         let fw = forwarded(&n);
         let fw_was = self.nodes.get(&id).map(|o| forwarded(o)).unwrap_or_default();
         if fw != fw_was {
@@ -1402,6 +1455,10 @@ impl World {
         if let Some(o) = self.nodes.get(&id) {
             for k in forwarded(o) {
                 self.fwds.remove(&(k, id), &NoMeasure);
+            }
+            let ps: Vec<Field> = published(o).iter().map(|p| p.0).collect();
+            for f in ps {
+                self.pub_ix.remove(&(f, id), &NoMeasure);
             }
             let (u, p, w, ks) = (o.unit, o.pos, in_work(o.st), pset_keys(o));
             let o = w.then(|| o.clone());
@@ -1942,4 +1999,14 @@ fn prefix_step(h: u64, b: u8) -> u64 {
 /// A prefix's key: rolled byte by byte, so a name's prefixes take one pass.
 fn prefix_key(p: &str) -> u64 {
     p.bytes().fold(PREFIX_SEED, prefix_step) | 1
+}
+
+#[cfg(test)]
+mod size {
+    /// A read's record stays its size (paths fit in the padding): a run's
+    /// log is a vector of them.
+    #[test]
+    fn a_read_is_72_bytes() {
+        assert_eq!(std::mem::size_of::<super::Read>(), 72);
+    }
 }

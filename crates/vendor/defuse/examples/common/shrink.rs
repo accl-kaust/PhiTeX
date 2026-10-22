@@ -155,6 +155,7 @@ pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
         && let Ok(rep) = &r
     {
         eprintln!("EARLYMOVES {}", rep.early_loops.iter().map(|e| e.changes).max().unwrap_or(0));
+        eprintln!("MARKS resumed {} cut {}", rep.resumed_at_mark.min(1), rep.cut_in_run.min(1));
     }
     r.is_ok()
 }
