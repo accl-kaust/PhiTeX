@@ -1023,20 +1023,17 @@ fn list_fonts(v: &Values, l: ValueId) -> Option<ValueId> {
     static MEMO: std::sync::OnceLock<Memo> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(Memo::default);
     let got = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&l).cloned();
-    let ids = match got {
-        Some(x) => x,
-        None => {
-            let mut fonts = std::collections::BTreeSet::new();
-            let x: Option<std::sync::Arc<[i64]>> =
-                list_fonts_walk(v, l, &mut fonts).then(|| fonts.into_iter().collect());
-            let mut m = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if m.len() >= 1 << 16 {
-                m.clear();
-            }
-            m.insert(l, x.clone());
-            x
+    let ids = got.unwrap_or_else(|| {
+        let mut fonts = std::collections::BTreeSet::new();
+        let x: Option<std::sync::Arc<[i64]>> =
+            list_fonts_walk(v, l, &mut fonts).then(|| fonts.into_iter().collect());
+        let mut m = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if m.len() >= 1 << 16 {
+            m.clear();
         }
-    }?;
+        m.insert(l, x.clone());
+        x
+    })?;
     Some(v.list(ids.iter().map(|&f| v.int(f)).collect()))
 }
 

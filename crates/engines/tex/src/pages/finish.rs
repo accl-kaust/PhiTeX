@@ -1132,7 +1132,7 @@ impl Run<'_, '_> {
         if pos.pdf
             && let Node::Box(bx) = page_box
         {
-            crate::pdfout::ship(self, page, bx, &side, &ids)?;
+            crate::pdfout::ship(self, page, &bx, &side, &ids)?;
             // (the page's box for its writer, its sealed lines' lists
             // passed on at the run's end, `crate::pages::REALPAGES`)
             self.real_pages.push(b);
