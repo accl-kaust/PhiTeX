@@ -5691,8 +5691,10 @@ impl Run<'_, '_> {
             let ok_rest = a.rest_hash() == b.rest_hash();
             let ok_inc = self.mark_snaps[k as usize].0.mark_sum == Some(b.slot_sum());
             eprintln!(
-                "mark-table-check: node {} mark {k}: folded slots {ok_sum}, touched {ok_touched}, rest {ok_rest}, digest kept {ok_inc}",
-                self.cx.node().raw()
+                "mark-table-check: node {} mark {k}: folded slots {ok_sum}, touched {ok_touched} ({} / {}), rest {ok_rest}, digest kept {ok_inc}",
+                self.cx.node().raw(),
+                a.touched_len(),
+                b.touched_len()
             );
         }
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);

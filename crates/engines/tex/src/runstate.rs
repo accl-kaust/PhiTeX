@@ -370,9 +370,11 @@ impl Clone for State {
             muts: self.muts,
             cands: self.cands.clone(),
             undo: None,
-            track: false,
+            // (a copy put back is the table going back to it: a run's
+            // marks taken since no longer add up, [`State::mark_delta`])
+            track: self.track,
             mdirty: Vec::new(),
-            mbroken: false,
+            mbroken: self.track || self.mbroken,
         }
     }
 }
