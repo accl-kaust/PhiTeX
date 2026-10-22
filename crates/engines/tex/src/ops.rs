@@ -100,6 +100,7 @@ pub(crate) fn run_node_parking(
                 match Run::from_parked(cx, o, (*p).clone()) {
                     Ok(mut r) => {
                         r.mark_snaps = km.snaps[..=k as usize].to_vec();
+                        r.st.cur_mark = k + 1;
                         // (the mark again: the engine keeps the marks
                         // before it; the run is never cut off at its own)
                         let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
@@ -161,6 +162,9 @@ pub(crate) fn run_node_parking(
     // (spec-final A1: one pass; a piece's run ends at its first
     // page-builder candidate with input after it, `Halt::Cut`, and its
     // fold places the continuation for the rest)
+    // (the run's own end, its fold, open groups and publications: no
+    // command's access)
+    r.st.cur_mark = 0;
     if matches!(res, Ok(()) | Err(Halt::Cut)) {
         let tf = pp.and_then(|_| crate::prof::start());
         res = r.page_fold();
@@ -236,11 +240,16 @@ pub(crate) fn run_node_parking(
             {
                 return Err(s);
             }
-            // (the marks kept with the result: a later run resumes at one)
+            // (the marks kept with the result: a later run resumes at one;
+            // with the latest mark after which each field was accessed)
             if !r.mark_snaps.is_empty() {
                 let snaps = std::mem::take(&mut r.mark_snaps);
+                let acc = r.st.last_accesses();
+                let mut last: Vec<(phitex_defuse::Field, u32)> =
+                    acc.into_iter().map(|(l, m)| (r.loc_field(l), m)).collect();
+                last.sort_unstable_by_key(|x| x.0.0.raw());
                 r.cx
-                    .keep_after(std::sync::Arc::new(crate::run::KeptMarks { snaps }));
+                    .keep_after(std::sync::Arc::new(crate::run::KeptMarks { snaps, last }));
             }
             let t = std::time::Instant::now();
             let tf = pp.and_then(|_| crate::prof::start());

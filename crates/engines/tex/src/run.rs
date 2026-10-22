@@ -5339,6 +5339,10 @@ impl Run<'_, '_> {
 /// from `snaps[k]`.
 pub(crate) struct KeptMarks {
     pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
+    /// Each field a command of the run accessed after its first mark,
+    /// with the latest mark it accessed it after (numbered from 1:
+    /// after `snaps[m - 1]`), by field.
+    pub last: Vec<(Field, u32)>,
 }
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
@@ -5379,6 +5383,9 @@ impl Run<'_, '_> {
         let h = parked_digest(&p);
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
         self.mark_snaps.push((std::sync::Arc::new(p), h));
+        // (the accesses from here on stamped with this mark, numbered
+        // from 1)
+        self.st.cur_mark = k + 1;
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
         if let Err(s) = self.cx.checkpoint(k, state) {
             self.cut_off = true;
