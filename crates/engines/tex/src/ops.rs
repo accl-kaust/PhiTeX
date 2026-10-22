@@ -91,7 +91,16 @@ pub(crate) fn run_node_parking(
     // (marks, `Run::take_mark`: an exec or a finisher run that parks and
     // is not speculative; one resumed at a mark of its last run starts
     // from that mark's state)
-    let marks_ok = parks && (cx.op() == o.exec || cx.op() == o.finish) && !cx.is_speculative();
+    // (observe: `PHITEX_MARKS=off|exec|finish` for the measures)
+    let which = crate::exec::obs_str!("PHITEX_MARKS");
+    let marks_ok = parks
+        && !cx.is_speculative()
+        && match which.as_deref() {
+            Some("off") => false,
+            Some("exec") => cx.op() == o.exec,
+            Some("finish") => cx.op() == o.finish,
+            _ => cx.op() == o.exec || cx.op() == o.finish,
+        };
     let resumed_at = if marks_ok { cx.resumed() } else { None };
     let mut r = if let Some((tok, k)) = resumed_at {
         match tok.downcast::<crate::run::KeptMarks>() {
@@ -243,7 +252,7 @@ pub(crate) fn run_node_parking(
             }
             // (the marks kept with the result: a later run resumes at one;
             // with the latest mark after which each field was accessed)
-            if !r.mark_snaps.is_empty() {
+            if !r.mark_snaps.is_empty() && !crate::exec::obs_flag!("PHITEX_MARKS_NOKEEP") {
                 let snaps = std::mem::take(&mut r.mark_snaps);
                 let acc = r.st.last_accesses();
                 let mut last: Vec<(phitex_defuse::Field, u32)> =
