@@ -154,9 +154,20 @@ struct Opts {
         global = true
     )]
     jobs: Option<usize>,
-    /// (accepted for older scripts: the PDF is always pdfTeX's, byte for
-    /// byte)
-    #[arg(long = "exact-pdf", global = true, hide = true)]
+    /// Exact rounds (the default): the files the document reads back
+    /// (.aux, .toc, .out, .idx, …) change only between rounds, as
+    /// between latexmk's runs, so the PDF is byte for byte what pdflatex
+    /// under latexmk makes
+    #[arg(long, global = true, conflicts_with = "relaxed")]
+    exact: bool,
+    /// Relaxed rounds (experimental): a file read back changes as soon
+    /// as the run writing it does, and its readers run again within the
+    /// round. Usually the same PDF, but not guaranteed: a warning says
+    /// when the read-backs did not settle cleanly; not faster yet
+    #[arg(long, global = true)]
+    relaxed: bool,
+    /// (the same as --exact)
+    #[arg(long = "exact-pdf", global = true, hide = true, conflicts_with = "relaxed")]
     exact_pdf: bool,
     /// Whether the engine runs steps ahead of their inputs: on those an
     /// earlier run predicts (the default), never, or on any (not usable
@@ -226,7 +237,9 @@ pub struct Options {
     pub etex: bool,
     pub output_dir: Option<String>,
     pub threads: Option<usize>,
-    pub exact_pdf: bool,
+    /// The exact rounds (the default; `--exact`, `--exact-pdf`); false:
+    /// the relaxed ones (`--relaxed`).
+    pub exact: bool,
     pub spec: Option<String>,
     pub verbose: u8,
     pub quiet: bool,
@@ -262,7 +275,7 @@ impl Cli {
             etex: o.etex,
             output_dir: o.output_dir,
             threads: o.jobs,
-            exact_pdf: o.exact_pdf,
+            exact: o.exact || o.exact_pdf || !o.relaxed,
             spec: o.spec,
             verbose: o.verbose,
             quiet: o.quiet,
@@ -447,7 +460,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
         threads: o.threads,
-        exact_pdf: o.exact_pdf,
+        exact: o.exact,
         spec: o.spec.clone(),
         synctex: t.synctex,
         recorder: false,
