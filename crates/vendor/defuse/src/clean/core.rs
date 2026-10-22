@@ -458,6 +458,42 @@ impl Core {
         Some(cur)
     }
 
+    /// `x` with its part at path `p` replaced by `new` (`None`: a step
+    /// does not apply, or is not one a part is set by: an index of a list,
+    /// a key of an association list).
+    pub(crate) fn set_path(&self, p: u32, x: ValueId, new: ValueId) -> Option<ValueId> {
+        let steps = self.path_steps(p);
+        self.set_steps(steps, x, new)
+    }
+
+    fn set_steps(&self, steps: &[crate::api::Step], x: ValueId, new: ValueId) -> Option<ValueId> {
+        use crate::api::Step;
+        let Some((&s, rest)) = steps.split_first() else { return Some(new) };
+        let v = &self.values;
+        let items: Vec<ValueId> = v.with(x, |val| match val {
+            Value::List(l) => Some(l.to_vec()),
+            _ => None,
+        })?;
+        let mut items = items;
+        match s {
+            Step::Index(i) => {
+                let e = items.get_mut(i as usize)?;
+                *e = self.set_steps(rest, *e, new)?;
+            }
+            Step::Key(k) => {
+                let i = items.iter().position(|&e| v.with(e, |ev| matches!(ev, Value::List(p) if p.len() >= 2 && p[0] == k)))?;
+                let mut pair: Vec<ValueId> = v.with(items[i], |ev| match ev {
+                    Value::List(p) => Some(p.to_vec()),
+                    _ => None,
+                })?;
+                pair[1] = self.set_steps(rest, pair[1], new)?;
+                items[i] = v.list(pair);
+            }
+            _ => return None,
+        }
+        Some(v.list(items))
+    }
+
     /// One path step on `x`.
     pub(crate) fn step(&self, s: crate::api::Step, x: ValueId) -> Option<ValueId> {
         use crate::api::Step;
@@ -500,6 +536,37 @@ impl Core {
                 (Some(a), Some(b)) => Some(v.int(a.cmp(&b) as i64)),
                 _ => None,
             },
+            Step::Indices(ix) => {
+                let ix: Vec<ValueId> = v.with(ix, |val| match val {
+                    Value::List(l) => l.to_vec(),
+                    _ => Vec::new(),
+                });
+                let mut out = Vec::with_capacity(ix.len() + 1);
+                out.push(ValueId::UNIT);
+                for i in ix {
+                    let Some(y) = v.as_int(i).and_then(|i| u32::try_from(i).ok()).and_then(|i| self.step(Step::Index(i), x)) else { break };
+                    out.push(y);
+                }
+                #[allow(clippy::cast_possible_wrap)]
+                let n = v.int((out.len() - 1) as i64);
+                out[0] = n;
+                Some(v.list(out))
+            }
+            Step::Keys(ks) => {
+                let ks: Vec<ValueId> = v.with(ks, |val| match val {
+                    Value::List(l) => l.to_vec(),
+                    _ => Vec::new(),
+                });
+                let mut has = Vec::with_capacity(ks.len());
+                let mut out = vec![ValueId::UNIT];
+                for k in ks {
+                    let y = key(k);
+                    has.push(v.bool(y.is_some()));
+                    out.extend(y);
+                }
+                out[0] = v.list(has);
+                Some(v.list(out))
+            }
             Step::Each(p) => v
                 .with(x, |val| match val {
                     Value::List(l) => Some(Err(l.to_vec())),

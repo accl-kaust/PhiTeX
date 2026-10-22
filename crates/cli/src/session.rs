@@ -700,6 +700,12 @@ impl Session {
                         .pkgrec_path()
                         .and_then(|p| self.cache.as_ref()?.get(&p))
                         .unwrap_or_default(),
+                    // (the pieces' run times an earlier build measured:
+                    // beside the format, as the records are)
+                    runtimes: self
+                        .runtimes_path()
+                        .and_then(|p| self.cache.as_ref()?.get(&p))
+                        .unwrap_or_default(),
                     ..Options::default()
                 };
                 let opts = Options {
@@ -774,6 +780,8 @@ impl Session {
             if b.pkgrec_changed() {
                 self.store_pkgrec(b);
             }
+            // (written when it differs from the stored one)
+            self.store_runtimes(b);
             // (`PHITEX_CHAIN_DUMP=1`: the critical chain in full, and its
             // waits, for measurements)
             if phitex_tex::OBSERVE && std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {
@@ -1196,6 +1204,27 @@ impl Session {
         let c = self.cache.as_ref()?;
         let text = format!("\\input {}\n", self.job.engine.ini);
         Some(c.format_file(&self.format_name(&text), "pkgrec"))
+    }
+
+    /// The cache's file of the pieces' run times ([`Build::export_runtimes`]):
+    /// beside the format, as the package loads' records are.
+    fn runtimes_path(&self) -> Option<PathBuf> {
+        if self.job.ini {
+            return None;
+        }
+        let c = self.cache.as_ref()?;
+        let text = format!("\\input {}\n", self.job.engine.ini);
+        Some(c.format_file(&self.format_name(&text), "runtimes"))
+    }
+
+    fn store_runtimes(&self, b: &Build) {
+        let (Some(c), Some(p)) = (&self.cache, self.runtimes_path()) else {
+            return;
+        };
+        let out = b.export_runtimes();
+        if c.get(&p).as_deref() != Some(out.as_slice()) {
+            let _ = c.put(&p, &out, &[]);
+        }
     }
 
     fn store_pkgrec(&self, b: &Build) {

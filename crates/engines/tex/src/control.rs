@@ -2059,6 +2059,10 @@ impl Run<'_, '_> {
             Some(crate::run::FileLine::Piece(name)) => {
                 let v = self.v;
                 let lines = v.field("lines");
+                // (observe, `PHITEX_READS=lines`: each reader, where)
+                if crate::exec::obs_flag!("PHITEX_READS") {
+                    self.trace_read(lines, false);
+                }
                 let x = self.cx.acc_range(lines, None);
                 if x.is_err() {
                     self.trace_stop("range lines");

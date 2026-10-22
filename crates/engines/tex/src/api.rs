@@ -149,6 +149,16 @@ pub struct Options {
     /// load whose key matches is given them as the prediction of its
     /// outputs (also `PHITEX_PKG_PREDICT=1`).
     pub pkg_predict: bool,
+    /// Cost-aware speculation (`Engine::set_long_runs`): a piece whose
+    /// run takes longer than this does not run ahead of the pieces
+    /// before it still in work, on guesses a long run would lose when
+    /// refuted; it waits for them and runs once. `None`: every piece may
+    /// run ahead. Speed only, never results.
+    pub long_runs: Option<std::time::Duration>,
+    /// The pieces' run times an earlier build measured, by text
+    /// ([`crate::runtimes`], [`Build::export_runtimes`]): a cold build's
+    /// long pieces are held from their first attempt. Empty: none known.
+    pub runtimes: Vec<u8>,
     /// Whether a page's finisher is given the definitions the last
     /// finisher running its routine made as its prediction (on by
     /// default; off, the readers after it wait for its run: a test that
@@ -613,6 +623,8 @@ impl Default for Options {
             written_init: Vec::new(),
             pkgrec: Vec::new(),
             pkg_predict: false,
+            long_runs: Some(LONG_RUNS),
+            runtimes: Vec::new(),
             finisher_predictions: true,
             shell_escape: 2,
             prelude_jobname: "texput".to_owned(),
@@ -1428,6 +1440,9 @@ pub struct Stats {
     pub pkg_predicted: u64,
     pub pkg_predict_right: u64,
     pub pkg_predict_wrong: Vec<String>,
+    /// Each node's run time in the evaluations (all its attempts), in
+    /// microseconds, by node (`Report::run_times`, all of them).
+    pub piece_times: Vec<(u64, u64)>,
     /// spec-final §1: where each loop-back round's time went (the
     /// engine's `Report::round_times`), over the evaluations.
     pub round_times: Vec<phitex_defuse::RoundTimes>,
@@ -1880,6 +1895,11 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
+        self.piece_times.extend(
+            r.run_times
+                .iter()
+                .map(|(n, t)| (n.raw(), u64::try_from(t.as_micros()).unwrap_or(u64::MAX))),
+        );
         self.nodes_run += r.nodes_run;
         self.runs += r.runs;
         self.cutoffs += r.cutoffs;
@@ -2993,6 +3013,10 @@ impl Graph {
                     r.cutoffs
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
+                eprintln!(
+                    "acct-edit: marks: runs resumed at a mark {}, cut off at a later mark {} (patched {})",
+                    r.resumed_at_mark, r.cut_in_run, r.cut_patched
+                );
                 if let Some(a) = &r.audit {
                     print_audit(&self.eng, a);
                 }
@@ -3507,6 +3531,10 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
         crate::hints::unregister_text(reg, v.str(DOC_NAME));
     }
 }
+
+/// [`Options::long_runs`]'s default: a run this long is held until the
+/// pieces before it are done.
+pub const LONG_RUNS: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The fields the engine is told are stable (`Engine::set_stable`):
 /// read by more than half of para4000's nodes and defined only by the
@@ -4586,6 +4614,9 @@ pub struct Build {
     /// the loads' records change (`crate::pkgrec`; a record is only a
     /// load's run's), so only then are they merged and stored.
     loads_ran: bool,
+    /// The pieces' run times by text ([`crate::runtimes`]): those the
+    /// build was given, updated by its evaluations.
+    runtimes: phitex_defuse::FxHashMap<u64, u64>,
 }
 
 impl Drop for Build {
@@ -4785,7 +4816,19 @@ impl Build {
             memo: Mutex::default(),
             lines: Mutex::default(),
             loads_ran: false,
+            runtimes: phitex_defuse::FxHashMap::default(),
         };
+        // (cost-aware speculation, with the run times an earlier build
+        // measured for the cold build's first attempts)
+        b.g.eng.set_long_runs(b.opts.long_runs);
+        if b.opts.long_runs.is_some() {
+            b.runtimes = crate::runtimes::parse(&b.opts.runtimes);
+            for (_, n, src) in &b.nodes {
+                if let Some(&us) = b.runtimes.get(&crate::runtimes::key(src.text(&b.text))) {
+                    b.g.eng.set_run_time_hint(*n, std::time::Duration::from_micros(us));
+                }
+            }
+        }
         b.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -5023,6 +5066,7 @@ impl Build {
         crate::timeline::lap("engine: package load stats");
         self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
+        self.note_run_times(&stats);
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             self.note_edit_phases(t_all, t_before, t_apply, t_settle);
@@ -5333,6 +5377,38 @@ impl Build {
         match &self.g.loads {
             Some(l) => l.bytes(),
             None => self.opts.pkgrec.clone(),
+        }
+    }
+
+    /// The pieces' run times by text, for a later build's
+    /// [`Options::runtimes`] ([`crate::runtimes`]).
+    #[must_use]
+    pub fn export_runtimes(&self) -> Vec<u8> {
+        crate::runtimes::serialise(&self.runtimes)
+    }
+
+    /// The run times of the pieces the last evaluation ran, by text: a
+    /// long one kept, one that ran short dropped.
+    fn note_run_times(&mut self, stats: &Stats) {
+        if self.opts.long_runs.is_none() || stats.piece_times.is_empty() {
+            return;
+        }
+        let by: phitex_defuse::FxHashMap<u64, u64> = stats.piece_times.iter().copied().collect();
+        for (_, n, src) in &self.nodes {
+            let Some(&us) = by.get(&n.raw()) else {
+                continue;
+            };
+            let k = crate::runtimes::key(src.text(&self.text));
+            if us >= crate::runtimes::MIN_US {
+                // (a time near the one kept stays: the stored file is
+                // not written again for noise)
+                let old = self.runtimes.get(&k).copied();
+                if old.is_none_or(|o| o.abs_diff(us) > o / 4) {
+                    self.runtimes.insert(k, us);
+                }
+            } else {
+                self.runtimes.remove(&k);
+            }
         }
     }
 
@@ -5884,6 +5960,8 @@ impl Build {
         // (an `\input` file's text, read once a call, not once an entry)
         let mut files: phitex_defuse::FxHashMap<String, Arc<str>> =
             phitex_defuse::FxHashMap::default();
+        // (each text node's move since it was sliced, by its index)
+        let mut shifts: phitex_defuse::FxHashMap<usize, i64> = phitex_defuse::FxHashMap::default();
         for e in entries {
             let xs = list_of(v, e);
             let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
@@ -5896,8 +5974,28 @@ impl Build {
             let file_text: Arc<str>;
             let (file, text, at): (String, &str, usize) = if int(3) >= 0 && in_doc {
                 // a line of the document's own text: the position the
-                // node's frame carries is the byte in the document
-                let at = usize::try_from(int(3)).unwrap_or(0)
+                // node's frame carries is the byte in the document as the
+                // text node was sliced, moved by as much as an edit since
+                // moved that node (a node an edit left keeps its text, and
+                // the positions in it, [`apply_text`])
+                let node = u64::from_ne_bytes(int(4).to_ne_bytes());
+                let i = top(node);
+                let shift = *shifts.entry(i).or_insert_with(|| {
+                    let n = self.nodes.get(i).map(|x| x.1);
+                    let sliced = n
+                        .and_then(|n| self.g.eng.node_info(n))
+                        .and_then(|info| info.args.first().copied())
+                        .and_then(|fs| list_of(v, fs).first().copied())
+                        .map(|f| list_of(v, f))
+                        .filter(|xs| xs.first().is_some_and(|&t| str_of(v, t) == "s"))
+                        .and_then(|xs| xs.get(6).map(|&p| int_of(v, p)));
+                    let now = spans.get(i).copied().and_then(|s| i64::try_from(s).ok());
+                    match (sliced, now) {
+                        (Some(a), Some(b)) if contiguous => b - a,
+                        _ => 0,
+                    }
+                });
+                let at = usize::try_from(int(3) + shift).unwrap_or(0)
                     + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
                 (docname.clone(), doc, at)
             } else if int(3) >= 0
@@ -7091,5 +7189,70 @@ mod canonical_tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod park_tests {
+    use super::*;
+    use phitex_defuse::{Ctx, Locality, Operation, Stop};
+
+    /// The test's body as a node's run (a [`crate::run::Run`] lives in a
+    /// node's context): a run that looked up `\count316` and holds a map of
+    /// `\count315` parks at a command's start and resumes from its park.
+    struct ParkAndResume(Ops);
+
+    impl Operation for ParkAndResume {
+        fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+            Some(Vec::new())
+        }
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let o = &self.0;
+            let f = cx.values().field("count:315");
+            let other = cx.values().field("count:316");
+            let map = crate::regfold::Affine { keep: true, add: 1 };
+            let parked = {
+                let mut r = crate::run::Run::new(cx, o);
+                // (another location past the fixed ones first: the
+                // resumed table numbers them in the run's order)
+                let _ = r.loc_of(other);
+                let l = r.loc_of(f);
+                assert_eq!(r.count_reg(l), Some(315), "the location names count:315");
+                r.reg_pending.insert(l, map);
+                r.begin_command();
+                r.park().expect("a run at a command's start parks")
+            };
+            let Ok(mut r) = crate::run::Run::from_parked(cx, o, parked) else {
+                panic!("the park resumes in its own epoch");
+            };
+            // (the map's location as the resumed run holds it, before any
+            // lookup of the field notes it again: what its end reads,
+            // `Run::finish`)
+            let held: Vec<_> = r.reg_pending.iter().map(|(&l, m)| (l, m.keep, m.add)).collect();
+            assert_eq!(held.len(), 1, "the resumed run holds one map");
+            let (l, keep, add) = held[0];
+            assert_eq!(
+                r.count_reg(l),
+                Some(315),
+                "the resumed run's location of its map names count:315"
+            );
+            assert_eq!((keep, add), (true, 1), "the map is the one parked");
+            assert_eq!(r.loc_of(f), l, "the field's location is the map's");
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// A run parked with a map of a counter past 255 (a location past the
+    /// fixed ones, named by the field its table notes) resumes with it:
+    /// the resumed run restores its table before it maps the parked maps
+    /// back to locations (`Run::from_parked`).
+    #[test]
+    fn a_resumed_run_keeps_its_map_of_a_counter_past_255() {
+        let mut g = Graph::new(None, Some(1));
+        let op = g.eng.register(Arc::new(ParkAndResume(g.ops.clone())));
+        let u = g.eng.new_unit();
+        let n = g.eng.push(u, op, Vec::new());
+        g.eng.evaluate_sequential().expect("the run resumes its park with its map");
+        assert_eq!(g.eng.output(n), Some(ValueId::UNIT));
     }
 }

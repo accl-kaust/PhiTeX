@@ -420,6 +420,22 @@ impl Parser<'_> {
                     let items = self.pack_items()?;
                     return Ok(self.tagged("pack", vec![self.s(&x), items]));
                 }
+                // `cell x[i][j] = e`: `x` as itself with that element set.
+                "cell" => {
+                    self.pos += 1;
+                    let x = self.ident()?;
+                    let mut ix = Vec::new();
+                    while self.is_sym("[")
+                        && let Some(Tok::Int(n)) = self.peek_at(1).cloned()
+                        && matches!(self.peek_at(2), Some(Tok::Sym("]")))
+                    {
+                        self.pos += 3;
+                        ix.push(self.v.int(n));
+                    }
+                    self.eat("=")?;
+                    let e = self.expr()?;
+                    return Ok(self.tagged("cell", vec![self.s(&x), self.v.list(ix), e]));
+                }
                 "alias" => {
                     self.pos += 1;
                     let x = self.ident()?;
@@ -805,8 +821,9 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 39] = [
+const KEYWORDS: [&str; 40] = [
     "alias",
+    "cell",
     "pack",
     "gopen",
     "both",
@@ -1244,6 +1261,27 @@ pub fn fuzz_paths() -> u8 {
 }
 
 /// Element `i` of list or sequence `x` (`x[i]`).
+/// `cell`'s indices.
+pub fn cell_ix(v: &Values, ix: ValueId) -> Vec<u32> {
+    v.with(ix, |val| match val {
+        Value::List(l) => l.iter().filter_map(|&i| v.as_int(i).and_then(|i| u32::try_from(i).ok())).collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// List `x` with its element at indices `ix` (nested) set to `y` (`None`:
+/// one is not there).
+pub fn set_cell(v: &Values, x: ValueId, ix: &[u32], y: ValueId) -> Option<ValueId> {
+    let Some((&i, rest)) = ix.split_first() else { return Some(y) };
+    let mut l = v.with(x, |val| match val {
+        Value::List(l) => Some(l.to_vec()),
+        _ => None,
+    })?;
+    let e = l.get_mut(i as usize)?;
+    *e = set_cell(v, *e, rest, y)?;
+    Some(v.list(l))
+}
+
 pub fn index_of(v: &Values, x: ValueId, i: i64) -> Option<ValueId> {
     let i = u32::try_from(i).ok()?;
     v.with(x, |val| match val {
@@ -1669,7 +1707,7 @@ impl Operation for StmtOp {
             ]),
             // Declares nothing: its definition refutes the list.
             "sneak" => Some(Vec::new()),
-            "alias" | "pack" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
+            "alias" | "pack" | "cell" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
             "page" => Some(vec![(v.field("pg"), Locality::Local)]),
             // A contribution is a definition of the sequence.
             "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
@@ -1876,6 +1914,10 @@ impl Operation for StmtOp {
             }
             "if" => free_vars(v, a[0], &mut bound, &mut out),
             "listuntil" | "alias" => out.push(text(v, a[1])),
+            "cell" => {
+                out.push(text(v, a[0]));
+                free_vars(v, a[2], &mut bound, &mut out);
+            }
             "pack" => pack_names(v, a[1], &mut out),
             "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" | "take" => {}
             // `collect` reads the following text's outputs, not fields.
@@ -1949,6 +1991,24 @@ impl Operation for StmtOp {
                 };
                 cx.define_with(x, w, Locality::Local);
                 Ok(w)
+            }
+            // FUZZ_PATHS=2: the element set (`Ctx::define_set`); else read
+            // whole. Results must not change.
+            "cell" => {
+                let val = eval_expr(cx, ops, a[2])?;
+                let x = v.field(&text(v, a[0]));
+                let ix = cell_ix(v, a[1]);
+                if fuzz_paths() == 2 {
+                    let Some(m) = cx.view(x)? else { return Ok(ValueId::UNIT) };
+                    let p = cx.path(&ix.iter().map(|&i| defuse::Step::Index(i)).collect::<Vec<_>>());
+                    cx.define_set(x, m, p, val, Locality::Local);
+                    return Ok(ValueId::UNIT);
+                }
+                let Some(w) = cx.use_field(x)? else { return Ok(ValueId::UNIT) };
+                if let Some(w) = set_cell(v, w, &ix, val) {
+                    cx.define_with(x, w, Locality::Local);
+                }
+                Ok(ValueId::UNIT)
             }
             "gopen" => {
                 let x = eval_expr(cx, ops, a[1])?;
@@ -2439,6 +2499,11 @@ impl Program {
         // (Conflicting loop-back declarations are the client's bug: an
         // error here.)
         eng.set_loop_option_check(true);
+        // FUZZ_LONG_US=n: runs longer than n µs do not run ahead (a speed
+        // policy: results must not change).
+        if let Some(us) = std::env::var("FUZZ_LONG_US").ok().and_then(|s| s.parse().ok()) {
+            eng.set_long_runs(Some(std::time::Duration::from_micros(us)));
+        }
         let lang = Lang::install(&mut eng);
         if std::env::var_os("FUZZ_STABLE").is_some() {
             // Stable is a hint: marked on fields the programs define often

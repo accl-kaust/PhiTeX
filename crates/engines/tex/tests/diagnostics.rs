@@ -183,3 +183,30 @@ fn did_you_mean_no_names_with_characters_the_typo_lacks() {
         );
     }
 }
+
+/// A diagnostic after an edit that moved the text before it is where
+/// the text now has it, as a cold build of the new text places it: the
+/// nodes after the edit keep their texts, whose frames carry the byte
+/// positions they were sliced at.
+#[test]
+fn a_diagnostic_after_a_deletion_before_it_is_where_its_text_now_is() {
+    let par = |k: usize| format!("Paragraph {k} has some words in it.\n\n");
+    let mut doc = String::new();
+    for k in 0..12 {
+        doc.push_str(&par(k));
+    }
+    doc.push_str("Hello \\foo world.\n\\bye\n");
+    let mut b = build(&doc, |o| o);
+    let edited = doc.replacen(&par(3), "", 1);
+    b.edit(&edited);
+    let got = b.diagnostics();
+    let cold = build(&edited, |o| o).diagnostics();
+    show(&got);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(&edited[got[0].range.0..got[0].range.1], "\\foo", "{got:?}");
+    assert_eq!(
+        (got[0].range, got[0].line),
+        (cold[0].range, cold[0].line),
+        "the edit's diagnostic against a cold build's"
+    );
+}

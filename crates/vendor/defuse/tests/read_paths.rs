@@ -384,3 +384,20 @@ fn a_comparison_reader_runs_again_only_when_the_comparison_changes() {
         assert_eq!(eng.values().render(eng.output(p).unwrap()), out);
     }
 }
+
+#[test]
+fn a_view_reader_rebound_to_a_definer_giving_the_same_cell_stands() {
+    let mut t = T::new();
+    let v = t.eng.values();
+    let ints = |xs: &[i64]| v.list(xs.iter().map(|&x| v.int(x)).collect());
+    // A new definer of `rec` after `d`, element 0 changed, 1 and the length
+    // not: the view reader (`rv` reads the length and element 0) runs; the
+    // path reader of element 1 (`r1`) stands.
+    let before = t.runs.lock().unwrap().clone();
+    let a = vec![t.eng.values().str("d"), ints(&[5, 2, 3])];
+    t.eng.insert_after(t.nodes["d"], t.op, a);
+    t.eval();
+    let after = t.runs.lock().unwrap().clone();
+    let ran: Vec<&str> = READERS.iter().copied().filter(|r| after.get(*r) != before.get(*r)).collect();
+    assert_eq!(ran, vec!["rv", "rw"]);
+}

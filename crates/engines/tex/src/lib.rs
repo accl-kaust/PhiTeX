@@ -50,6 +50,7 @@ mod parbreak;
 mod pdfout;
 mod pdfprim;
 mod pkgrec;
+mod runtimes;
 mod regfold;
 mod prims;
 mod print;

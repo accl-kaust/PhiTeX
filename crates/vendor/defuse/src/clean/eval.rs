@@ -125,6 +125,12 @@ impl Sched {
         self.careful.contains(&id)
     }
 
+    /// Whether node `id`'s runs are long (`Engine::set_long_runs`): its
+    /// time this evaluation, or the engine's record of it.
+    fn long(&self, run_time: &FxHashMap<Id, std::time::Duration>, limit: Option<std::time::Duration>, id: Id) -> bool {
+        limit.is_some_and(|l| self.time.get(&id).or_else(|| run_time.get(&id)).is_some_and(|&t| t > l))
+    }
+
     /// A refutation of node `id`'s result; `news`: of a loop-back value's
     /// move (it does not make the node careful).
     fn refuted(&mut self, id: Id, news: bool) {
@@ -473,7 +479,7 @@ impl Engine {
                         self.enqueue(&mut s, id);
                     }
                     // (Early ones take what is published already.)
-                    self.move_early(&mut s, &mut rep, &mut hs, &early)?;
+                    self.move_early(&mut s, &mut rep, &mut hs, &early, true)?;
                     continue;
                 }
                 // Early moves held for their publications to be final: all
@@ -741,6 +747,10 @@ impl Engine {
         // from the initial values.)
         rep.restarts += u64::from(had_old);
         rep.env_provided = self.core.env_provided.load(std::sync::atomic::Ordering::Relaxed);
+        // (Each node's time, for the next evaluation's `set_long_runs`.)
+        if self.long_runs.is_some() {
+            self.run_time.extend(s.time.iter().map(|(&id, &t)| (id, t)));
+        }
         let mut times: Vec<(NodeId, std::time::Duration)> = std::mem::take(&mut s.time).into_iter().map(|(id, t)| (NodeId(id), t)).collect();
         times.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         rep.run_times = times;
@@ -1493,6 +1503,14 @@ impl Engine {
                 s.held.insert(k.2, (x, crate::api::Hold::Careful));
                 continue;
             }
+            // A long one (`set_long_runs`) does not run ahead either.
+            if !first
+                && s.long(&self.run_time, self.long_runs, k.2)
+                && let Some((_, &x)) = self.w.work_of(k.0).and_then(|m| m.below(&k.1))
+            {
+                s.held.insert(k.2, (x, crate::api::Hold::Long));
+                continue;
+            }
             s.queue.remove(&k);
             if let Some(r) = self.prepare(s, rep, k) {
                 if r.is_none()
@@ -1960,7 +1978,7 @@ impl Engine {
         let mut u = self.early_pending.first().map(|x| x.0);
         while let Some(unit) = u {
             let Some(&(_, pos, _)) = self.early_pending.range((Included((unit, 0, low)), Unbounded)).next() else { break };
-            let ready = all || self.w.work_of(unit).and_then(|m| m.at_or_above(&0)).is_none_or(|(&p, _)| pos < p);
+            let ready = all || self.w.work_of(unit).and_then(|m| m.at_or_above(&0)).is_none_or(|(&p, _)| pos < p) && self.publisher_settled(unit, pos);
             if ready {
                 let group: Vec<(u32, Pos, Field)> = self.early_pending.range((Included((unit, pos, low)), Excluded((unit, pos.saturating_add(1), low)))).copied().collect();
                 let mut fields = Vec::with_capacity(group.len());
@@ -1970,12 +1988,25 @@ impl Engine {
                 }
                 fields.sort_by_key(|f| f.0.raw());
                 fields.dedup();
-                self.move_early(s, rep, hs, &fields)?;
+                self.move_early(s, rep, hs, &fields, all)?;
                 return Ok(true);
             }
             u = self.early_pending.range((Excluded((unit, Pos::MAX, Field(ValueId::from_raw(u64::MAX)))), Unbounded)).next().map(|x| x.0);
         }
         Ok(false)
+    }
+
+    /// Whether the run of the publisher at `pos` in unit `u` is settled:
+    /// every read holds strictly (none standing on a definer in work or
+    /// still to come: a guess, a prediction), and no early field it read
+    /// has a move pending. Else what it published may be transient.
+    fn publisher_settled(&self, u: u32, pos: Pos) -> bool {
+        let Some(id) = self.w.unit(u).order.get(&pos).copied() else { return true };
+        let Some(res) = self.w.node(id).and_then(|n| n.res.as_deref()) else { return false };
+        res.reads.iter().all(|r| match r {
+            Read::Loop { f, .. } => !self.early_pending.iter().any(|k| k.2 == *f),
+            r => super::build::holds_with(&self.core, &self.w, id, r, true),
+        })
     }
 
     /// The run audit's account of node `id`'s run (of `t`), which replaced
@@ -2008,11 +2039,16 @@ impl Engine {
 
     /// Early loop-back fields `fs` take the values published for them now
     /// (a field published two values waits for the round's end); each
-    /// field's changes count against the round cap.
-    fn move_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, fs: &[Field]) -> Result<(), EvalError> {
+    /// field's changes count against the round cap. Not `quiet`, a field
+    /// published by none now (its publications withdrawn by reruns, say)
+    /// waits: its initial value would be a dip, not a publication.
+    fn move_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, fs: &[Field], quiet: bool) -> Result<(), EvalError> {
         let mut vals = Vec::new();
         for &f in fs {
             if self.early_frozen.contains(&f) {
+                continue;
+            }
+            if !quiet && self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))).next().is_none() {
                 continue;
             }
             let Some(v) = self.published(f) else { continue };
@@ -3512,8 +3548,9 @@ impl Merge<'_> {
             s.lane_new = Some(cands);
             // (Held by its hints, or refuted and behind a node in work: it
             // waits for the step.)
-            let behind = s.careful(k.2) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_some_and(|(_, &x)| {
-                s.held.insert(k.2, (x, crate::api::Hold::Careful));
+            let long = s.long(&eng.run_time, eng.long_runs, k.2);
+            let behind = (s.careful(k.2) || long) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_some_and(|(_, &x)| {
+                s.held.insert(k.2, (x, if s.careful(k.2) { crate::api::Hold::Careful } else { crate::api::Hold::Long }));
                 true
             });
             if behind || eng.w.hint_blocker(&eng.core, k.2, predict).is_err() {
@@ -3866,6 +3903,7 @@ fn run_job(
     cx.fuel = fuel;
     let op = core.ops[cx.op.0 as usize].clone();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
+    cx.flush_gets();
     if cx.named_gone && r.as_ref().is_ok() {
         drop(cx);
         return run_job(core, w, id, None, predict, careful, fuel);

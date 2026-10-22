@@ -78,6 +78,15 @@ pub(crate) struct KeptViews {
     pub composed: Vec<Vec<super::world::CPart>>,
 }
 
+/// What a run took by index and by key through one view (root read,
+/// path) since its last mark.
+pub(crate) struct Gets {
+    root: u32,
+    path: u32,
+    ix: Vec<u32>,
+    keys: Vec<ValueId>,
+}
+
 /// A run's view of the store.
 pub struct Ctx<'a> {
     pub(crate) core: &'a Core,
@@ -95,6 +104,12 @@ pub struct Ctx<'a> {
     pub(crate) views: Vec<(u32, u32, ValueId)>,
     /// The compositions its views name (`Ctx::compose`).
     pub(crate) composed: Vec<Vec<super::world::CPart>>,
+    /// What it took by index and by key through each view since the last
+    /// mark ([`Ctx::get`]), read as one at the next (`flush_gets`).
+    pub(crate) gets: Vec<Gets>,
+    /// The lists it took elements of by index lately (a few, most recent
+    /// last): a get looks its list up once.
+    lists: Vec<(ValueId, Arc<crate::values::Value>)>,
     /// The marks this attempt made, the token it keeps for a later run
     /// (`checkpoint`, `keep_after`), the run it resumes from a mark of
     /// (`resumed`), and the old mark it was cut off at (its index).
@@ -221,6 +236,8 @@ impl<'a> Ctx<'a> {
             forwards: Vec::new(),
             views,
             composed,
+            gets: Vec::new(),
+            lists: Vec::new(),
             // (Resumed at a mark: the marks before it stand.)
             passes: Vec::new(),
             out_from: None,
@@ -854,7 +871,9 @@ impl<'a> Ctx<'a> {
     }
 
     /// What step `s` gives of view `v` (`None` if it does not apply): the
-    /// run depends on it.
+    /// run depends on it. Elements taken by index or by key through one
+    /// view are read as one read of it, at the next mark and at the run's
+    /// end (cheap per get, one entry per view to commit).
     pub fn get(&mut self, v: View, s: crate::api::Step) -> Option<ValueId> {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&v), self.core.rec_step(s)]) } else { serde_json::Value::Null };
@@ -865,9 +884,89 @@ impl<'a> Ctx<'a> {
     }
 
     fn get_inner(&mut self, v: View, s: crate::api::Step) -> Option<ValueId> {
+        use crate::api::Step;
         let (root, path, x) = self.views[v.0 as usize];
-        self.view_read(root, self.core.extend_path(path, s));
+        match s {
+            // (Gathered: one read of the view, at the next mark.)
+            Step::Index(_) | Step::Key(_) if root & super::world::COMPOSED == 0 && matches!(self.reads.get(root as usize), Some(Read::Use { .. } | Read::Range { .. })) => {
+                let g = match self.gets.iter().rposition(|g| g.root == root && g.path == path) {
+                    Some(i) => &mut self.gets[i],
+                    None => {
+                        self.gets.push(Gets { root, path, ix: Vec::new(), keys: Vec::new() });
+                        self.gets.last_mut().expect("pushed")
+                    }
+                };
+                match s {
+                    Step::Index(i) => {
+                        g.ix.push(i);
+                        return self.index_of(x, i);
+                    }
+                    Step::Key(k) => g.keys.push(k),
+                    _ => {}
+                }
+            }
+            _ => self.view_read(root, self.core.extend_path(path, s)),
+        }
         self.core.step(s, x)
+    }
+
+    /// Element `i` of `x` (as `Step::Index`), a list's looked up once
+    /// for the gets that follow.
+    fn index_of(&mut self, x: ValueId, i: u32) -> Option<ValueId> {
+        use crate::values::Value;
+        let at = match self.lists.iter().rposition(|l| l.0 == x) {
+            Some(k) => k,
+            None => {
+                let val = self.core.values.get(x);
+                if !matches!(*val, Value::List(_)) {
+                    return self.core.step(crate::api::Step::Index(i), x);
+                }
+                if self.lists.len() == 4 {
+                    self.lists.remove(0);
+                }
+                self.lists.push((x, val));
+                self.lists.len() - 1
+            }
+        };
+        match &*self.lists[at].1 {
+            Value::List(l) => l.get(i as usize).copied(),
+            _ => None,
+        }
+    }
+
+    /// Reads what the run took by index and by key through each view since
+    /// the last mark: one read of the view's root each, through a path
+    /// ending in the indices (`Step::Indices`) or the keys (`Step::Keys`)
+    /// taken; one taken alone, through its own step. The run depends on
+    /// exactly those elements.
+    pub(crate) fn flush_gets(&mut self) {
+        use crate::api::Step;
+        if self.gets.is_empty() {
+            return;
+        }
+        let v = &self.core.values;
+        for mut g in std::mem::take(&mut self.gets) {
+            g.ix.sort_unstable();
+            g.ix.dedup();
+            let s = match g.ix[..] {
+                [] => None,
+                [i] => Some(Step::Index(i)),
+                _ => Some(Step::Indices(v.list(g.ix.iter().map(|&i| v.int(i64::from(i))).collect()))),
+            };
+            if let Some(s) = s {
+                self.view_read(g.root, self.core.extend_path(g.path, s));
+            }
+            g.keys.sort_unstable_by_key(|k| k.raw());
+            g.keys.dedup();
+            let s = match g.keys[..] {
+                [] => None,
+                [k] => Some(Step::Key(k)),
+                _ => Some(Step::Keys(v.list(g.keys))),
+            };
+            if let Some(s) = s {
+                self.view_read(g.root, self.core.extend_path(g.path, s));
+            }
+        }
     }
 
     /// View `v`'s length (as [`crate::Step::Len`]): the run depends on it.
@@ -954,12 +1053,48 @@ impl<'a> Ctx<'a> {
         }
         match self.reads.get(root as usize) {
             _ if soft => {}
-            _ if self.passable(root, path) => self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: x }),
+            _ if self.passable(root, path) => self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: x, set: None }),
             Some(&Read::Loop { f: from, .. }) if path == 0 => self.forwards.push((f, loc, from)),
             _ => self.view_read(root, path),
         }
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "define_from", a, serde_json::Value::Null);
+    }
+
+    /// Defines `f` as view `v`'s value with its part at path `p` replaced
+    /// by `x` (a cell of a record: an index of a list, a key of an
+    /// association list, nested). The run depends only on that part being
+    /// there: when the rest of `v`'s value changes, `f` is made again and
+    /// refiled, the node not run again. Returns false, defining nothing,
+    /// if the part is not there.
+    pub fn define_set(&mut self, f: Field, v: View, p: crate::api::PathId, x: ValueId, loc: Locality) -> bool {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&f), crate::record::j(&v), self.core.rec_steps(p.0), crate::record::j(&x), crate::record::j(&loc)]) } else { serde_json::Value::Null };
+        let r = self.define_set_inner(f, v, p.0, x, loc);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "define_set", a, crate::record::j(&r));
+        r
+    }
+
+    fn define_set_inner(&mut self, f: Field, v: View, p: u32, x: ValueId, loc: Locality) -> bool {
+        let (root, path, base) = self.views[v.0 as usize];
+        let mut at = path;
+        for &s in self.core.path_steps(p) {
+            at = self.core.extend_path(at, s);
+        }
+        let set = self.core.set_path(p, base, x);
+        if set.is_none() || !self.passable(root, path) {
+            // (Not one a part is set in: read in full.)
+            self.view_read(root, path);
+        } else {
+            self.view_read(root, self.core.extend_path(at, crate::api::Step::Present));
+        }
+        let Some(y) = set else { return false };
+        self.define_with_inner(f, y, loc);
+        if self.passable(root, path) {
+            self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: base, set: Some((p, x)) });
+        }
+        true
     }
 
     /// Contributes view `v`'s value to accumulator `f`, passed on as
@@ -972,7 +1107,7 @@ impl<'a> Ctx<'a> {
         let first = !self.ix.contains_key(&(2, f, 0));
         self.contribute_inner(f, x);
         if first && self.passable(root, path) {
-            self.passes.push(super::world::Pass { to: super::world::PassTo::Contrib(f), read: root, path, val: x });
+            self.passes.push(super::world::Pass { to: super::world::PassTo::Contrib(f), read: root, path, val: x, set: None });
         } else {
             self.view_read(root, path);
         }
@@ -1003,7 +1138,7 @@ impl<'a> Ctx<'a> {
         let (root, path, x) = self.views[v.0 as usize];
         self.passes.retain(|p| p.to != super::world::PassTo::Out);
         if self.passable(root, path) {
-            self.passes.push(super::world::Pass { to: super::world::PassTo::Out, read: root, path, val: x });
+            self.passes.push(super::world::Pass { to: super::world::PassTo::Out, read: root, path, val: x, set: None });
         } else {
             self.view_read(root, path);
             self.out_from = Some(x);
@@ -2217,6 +2352,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn mark_at(&mut self, mark: u32, state: ValueId, as_old: ValueId, patch: Option<&[(Field, Locality, Option<ValueId>)]>) -> Result<(), Stop> {
+        self.flush_gets();
         let (digest, odigest) = self.out_digests();
         let read_ix = u32::try_from(self.reads.len()).unwrap_or(u32::MAX);
         let (kids, conts) = (u32::try_from(self.kids.len()).unwrap_or(u32::MAX), u32::try_from(self.conts.len()).unwrap_or(u32::MAX));
@@ -2342,6 +2478,7 @@ impl<'a> Ctx<'a> {
         self.forwards.clear();
         self.views.clear();
         self.composed.clear();
+        self.gets.clear();
         self.marks.clear();
         self.passes.clear();
         self.out_from = None;

@@ -423,6 +423,9 @@ pub enum Hold {
     Careful,
     /// The node its read hints wait on (`Operation::reads`).
     Hint,
+    /// A node in work before it, while its runs are long
+    /// (`Engine::set_long_runs`): it runs once, not on guesses.
+    Long,
 }
 
 /// What [`crate::Ctx::use_field_at`] found at a position.
@@ -484,6 +487,14 @@ pub enum Step {
     /// sequence it is kept per rope node: after one element changed, only
     /// the nodes above it are made again.
     Each(PathId),
+    /// Elements `ix` (a sorted list of indices) of a list or a sequence:
+    /// how many are there, then those elements (`[n, x_i…]`). What a run
+    /// took by index through one view ([`crate::Ctx::get`]), read as one.
+    Indices(ValueId),
+    /// The values for keys `ks` (a list) of an association list: whether
+    /// each is there (a list of booleans), then those values. What a run
+    /// took by key through one view, read as one.
+    Keys(ValueId),
 }
 
 /// A read path: steps applied in turn to a value read. A run that reads
