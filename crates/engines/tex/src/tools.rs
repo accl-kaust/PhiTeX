@@ -43,6 +43,23 @@ pub(crate) fn text_field(v: &Values, name: &str) -> Field {
     v.field(&format!("wtext:{name}"))
 }
 
+/// The loop-back of a file the job writes, the size of its text in
+/// bytes as the round before wrote it (`UNIT`: not written), published
+/// with [`text_field`]: what `\\pdffilesize` reads of it, so that a reader
+/// of the size depends on the size, not on every byte.
+pub(crate) fn size_field(v: &Values, name: &str) -> Field {
+    v.field(&format!("wsize:{name}"))
+}
+
+/// [`size_field`]'s value of text `t` (`UNIT`: none).
+pub(crate) fn size_value(v: &Values, t: ValueId) -> ValueId {
+    if t == ValueId::UNIT {
+        return t;
+    }
+    let n = v.with_str(t, |s| s.chars().count()).unwrap_or(0);
+    v.int(i64::try_from(n).unwrap_or(i64::MAX))
+}
+
 /// The tools, in the order a name more than one claims is given to (the
 /// first whose input the job writes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -907,7 +907,14 @@ fn file_node(
     if !cx.is_loopback(wt) {
         cx.declare_loopback(wt, ValueId::UNIT);
     }
-    publish_traced(cx, wt, text.as_deref().map_or(ValueId::UNIT, |t| v.str(t)));
+    let tv = text.as_deref().map_or(ValueId::UNIT, |t| v.str(t));
+    publish_traced(cx, wt, tv);
+    // (and its size, for its size's readers, `Run::read_written_text`)
+    let ws = crate::tools::size_field(v, name);
+    if !cx.is_loopback(ws) {
+        cx.declare_loopback(ws, ValueId::UNIT);
+    }
+    publish_traced(cx, ws, crate::tools::size_value(v, tv));
     // (read back per field while every line written to it only defines;
     // as its text once one does more, `wkeys:` then marked so)
     let per_field = !as_text;
@@ -1027,7 +1034,13 @@ fn seed_decls(
         .into_iter()
         .map(|e| list_of(v, e))
         .find(|xs| xs.first().is_some_and(|&n| str_of(v, n) == name));
-    let mut decl = vec![(crate::tools::text_field(v, name), seed)];
+    let mut decl = vec![
+        (crate::tools::text_field(v, name), seed),
+        (
+            crate::tools::size_field(v, name),
+            crate::tools::size_value(v, seed),
+        ),
+    ];
     // (the key set and definitions a run read back, or the text mark of
     // a file read back as its text, or written so; none: the text alone)
     let mark = crate::api::text_mark(v);
@@ -1092,6 +1105,7 @@ fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
         crate::tools::text_field(v, name),
         k,
         v.field(&format!("wfile:{name}")),
+        crate::tools::size_field(v, name),
     ];
     if cx.is_loopback(k)
         && let Some(keys) = cx.use_field(k)?

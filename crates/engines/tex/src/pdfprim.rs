@@ -418,7 +418,9 @@ fn hex_upper(b: &[u8]) -> String {
 /// wrote before here is what it wrote ([`Run::read_file`]), as `\\input`
 /// and `\\openin` find it: TeX looks the name up in the file system the
 /// job's own writes changed.
-fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
+/// File `name` as `\\pdffilesize` and its kin find it (`name.tex` first
+/// where it has no extension): `[path, text]`.
+fn file_found(r: &mut Run<'_, '_>, name: &str) -> R<Option<ValueId>> {
     let base = name.rsplit('/').next().unwrap_or(name);
     let mut found = None;
     if !base.contains('.') {
@@ -427,7 +429,11 @@ fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
     if found.is_none() {
         found = r.read_file(name)?;
     }
-    let Some(x) = found else {
+    Ok(found)
+}
+
+fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
+    let Some(x) = file_found(r, name)? else {
         return Ok(None);
     };
     let xs = list_of(r.v, x);
@@ -454,7 +460,19 @@ fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
             }
         }
     }
-    Ok(file_bytes(r, name)?.map(|b| b.len()))
+    // (a file the job writes and reads back: its size, not its text,
+    // `Run::read_written_text`)
+    let was = std::mem::replace(&mut r.size_read, true);
+    let found = file_found(r, name);
+    r.size_read = was;
+    let Some(x) = found? else {
+        return Ok(None);
+    };
+    let v = r.v;
+    Ok(list_of(v, x).get(1).map(|&t| match v.as_int(t) {
+        Some(n) => usize::try_from(n).unwrap_or(0),
+        None => v.with_str(t, |s| s.chars().count()).unwrap_or(0),
+    }))
 }
 
 /// The conversions pdfTeX adds to `conv_toks` (pdfTeX §470 ff.).

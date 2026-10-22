@@ -801,6 +801,10 @@ pub(crate) struct Run<'c, 'a> {
     /// one by one); `Some(Some(cells))` each cell's value.
     #[allow(clippy::option_option)]
     pub(crate) recs: [Option<Option<Rc<[ValueId]>>>; crate::fields::NREC],
+    /// A read of a file's size (`\\pdffilesize`): a file the job writes
+    /// and reads back is read as its size, not its text
+    /// ([`Run::read_written_text`]).
+    pub(crate) size_read: bool,
     /// The records the run defines at its end ([`Run::ready_records`]).
     pub(crate) rec_out: Vec<(Field, ValueId, Locality)>,
     /// The engine values of record cells read for a stale record
@@ -954,6 +958,7 @@ impl<'c, 'a> Run<'c, 'a> {
             chars_eff: i32::MIN,
             tool_cut: None,
             recs: std::array::from_fn(|_| None),
+            size_read: false,
             rec_out: Vec::new(),
             rec_ready: false,
             rec_absent: None,
@@ -2084,7 +2089,9 @@ impl<'c, 'a> Run<'c, 'a> {
             let w = self.keyed(crate::fields::Fam::Wfile, key);
             if (self.cx.is_loopback(k) || self.cx.is_loopback(w))
                 && !self.tool_makes(key)?
-                && let Some(t) = self.cx.use_field(wt)?.filter(|&t| t != ValueId::UNIT)
+                && let Some(t) = self
+                    .read_written_text(key, wt)?
+                    .filter(|&t| t != ValueId::UNIT)
             {
                 return Ok(Some(v.list(vec![v.str(&format!("./{key}")), t])));
             }
@@ -2101,7 +2108,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let seed = self.seeded(key).map(|sd| sd.text);
             let t = match seed {
                 Some(t) if !self.cx.is_loopback(wt) => Some(t),
-                _ => self.cx.use_field(wt)?,
+                _ => self.read_written_text(key, wt)?,
             };
             let t = t
                 .filter(|&t| t != ValueId::UNIT)
@@ -2293,6 +2300,23 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// The round before's text of file `key`, one the job writes
+    /// (`wt`, [`crate::tools::text_field`]); where only its size is read
+    /// ([`Run::size_read`]), its size instead
+    /// ([`crate::tools::size_field`], an integer), so that a lookup's
+    /// size depends on the size and not on every byte written.
+    fn read_written_text(&mut self, key: &str, wt: Field) -> R<Option<ValueId>> {
+        let f = if self.size_read {
+            crate::tools::size_field(self.v, key)
+        } else {
+            wt
+        };
+        if crate::exec::obs_flag!("PHITEX_READS") {
+            self.trace_read(f, false);
+        }
+        Ok(self.cx.use_field(f)?)
+    }
+
     /// File `key`, one the job writes whose text the client gave, looked
     /// up while its loop-backs are not declared ([`Run::file_inner`]):
     /// `None` for another file.
@@ -2315,7 +2339,7 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let wt = crate::tools::text_field(v, key);
         let loopback = self.cx.is_loopback(wt);
-        let x = self.cx.use_field(wt)?;
+        let x = self.read_written_text(key, wt)?;
         let t = if loopback {
             x.unwrap_or(ValueId::UNIT)
         } else {
