@@ -5332,7 +5332,8 @@ pub(crate) struct Parked {
     step_memo: Vec<(Field, i64)>,
     defined_memo: Vec<(Field, bool)>,
     num_memo: Vec<(Field, bool)>,
-    fin_lazy: phitex_defuse::FxHashMap<Field, ValueId>,
+    /// [`Run::fin_lazy`], by field in the fields' order.
+    fin_lazy: Vec<(Field, ValueId)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -5505,7 +5506,7 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|(l, d)| (self.loc_field(l), d))
                 .collect(),
-            fin_lazy: std::mem::take(&mut self.fin_lazy),
+            fin_lazy: sorted_lazy(&std::mem::take(&mut self.fin_lazy)),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -5772,6 +5773,9 @@ impl Run<'_, '_> {
         let step_memo = by_field(self, m);
         let m = self.defined_memo.iter().map(|(&l, &d)| (l, d)).collect();
         let defined_memo = by_field(self, m);
+        let m = self.num_memo.iter().map(|(&l, &d)| (l, d)).collect();
+        let num_memo = by_field(self, m);
+        let fin_lazy = sorted_lazy(&self.fin_lazy);
         let pending_pre = self
             .pending_pre
             .clone()
@@ -5810,6 +5814,8 @@ impl Run<'_, '_> {
             outer_memo,
             step_memo,
             defined_memo,
+            num_memo,
+            fin_lazy,
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st,
@@ -5907,6 +5913,13 @@ fn parked_digest(p: &Parked) -> u64 {
 /// ([`parked_rest`]) and the slots' sum ([`crate::runstate::PState::slot_sum`]).
 fn parked_digest_with(rest: u64, slots: u64) -> u64 {
     phitex_defuse::hash_words(0x6d61_726b, &[rest, slots])
+}
+
+/// [`Run::fin_lazy`] in the fields' order ([`Parked::fin_lazy`]).
+fn sorted_lazy(m: &phitex_defuse::FxHashMap<Field, ValueId>) -> Vec<(Field, ValueId)> {
+    let mut xs: Vec<(Field, ValueId)> = m.iter().map(|(&f, &x)| (f, x)).collect();
+    xs.sort_by_key(|x| x.0.0.raw());
+    xs
 }
 
 /// A run's memo by field, in the fields' order: the same for equal memos
@@ -6009,6 +6022,12 @@ fn parked_rest(p: &Parked) -> u64 {
     }
     for (f, c) in &p.defined_memo {
         (f.0.raw(), c).hash(&mut h);
+    }
+    for (f, c) in &p.num_memo {
+        (f.0.raw(), c).hash(&mut h);
+    }
+    for (f, x) in &p.fin_lazy {
+        (f.0.raw(), x.raw()).hash(&mut h);
     }
     (p.rec_load, p.no_pull).hash(&mut h);
     w(&mut h, p.st.rest_hash());
@@ -6166,7 +6185,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .map(|(f, d)| (r.loc_of(f), d))
             .collect();
-        r.fin_lazy = p.fin_lazy;
+        r.fin_lazy = p.fin_lazy.into_iter().collect();
         r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
         r.contribs = p.contribs;
