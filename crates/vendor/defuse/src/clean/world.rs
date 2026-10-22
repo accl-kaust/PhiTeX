@@ -217,8 +217,22 @@ pub(crate) enum PassTo {
     Out,
 }
 
-/// A value passed on: where to, the read of its source (its index), the
-/// path from that read's value, and the value passed.
+/// A part of a composed value (`Ctx::compose`): a constant, a hole (a
+/// value passed through a view: its root read's index, the path, the
+/// value), or another composition (its index).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum CPart {
+    Val(ValueId),
+    Hole { read: u32, path: u32, val: ValueId },
+    Nested(u32),
+}
+
+/// A view root naming a composition (`COMPOSED | its index`), not a read.
+pub(crate) const COMPOSED: u32 = 1 << 31;
+
+/// A value passed on: where to, the read of its source (its index; or
+/// `COMPOSED | k`, composition `k`), the path from that read's value, and
+/// the value passed.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Pass {
     pub to: PassTo,
@@ -274,6 +288,8 @@ pub(crate) struct Res {
     pub after: Option<After>,
     /// The values it passed on without inspecting them.
     pub passes: Vec<Pass>,
+    /// The compositions its passes name (`Ctx::compose`).
+    pub composed: Vec<Vec<CPart>>,
     /// What the node's last result from an earlier evaluation read of the
     /// fields guessed from the last (`Engine::guess_from_last`), carried
     /// through its commits in this one (`Res::last_reads`).
@@ -352,6 +368,7 @@ impl Default for Res {
             marks: Arc::from([]),
             after: None,
             passes: Vec::new(),
+            composed: Vec::new(),
             last: None,
         }
     }

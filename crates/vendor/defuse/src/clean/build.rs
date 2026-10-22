@@ -302,43 +302,7 @@ impl<'a> Builder<'a> {
     /// value and is filed again (its readers re-asked), the node not run
     /// again.
     fn refile_passes(&mut self, id: Id, res: &Arc<Res>, on: Option<&[Field]>) {
-        let mut new: Option<Res> = None;
-        let (mut defs, mut contribs, mut out) = (Vec::new(), false, false);
-        for (i, p) in res.passes.iter().enumerate() {
-            let Some(rd @ Read::Use { f, .. }) = res.reads.get(p.read as usize) else { continue };
-            if on.is_some_and(|fs| !fs.contains(f)) {
-                continue;
-            }
-            let Some(raw) = use_now(self.core, &self.w, rd) else { continue };
-            let Some(x) = self.core.eval_path(p.path, raw) else { continue };
-            if x == p.val {
-                continue;
-            }
-            let r = new.get_or_insert_with(|| (**res).clone());
-            r.passes[i].val = x;
-            if let Some(Read::Use { val, .. }) = r.reads.get_mut(p.read as usize) {
-                *val = Some(raw);
-            }
-            match p.to {
-                super::world::PassTo::Def(f, loc) => {
-                    if let Some(d) = r.defs.iter_mut().find(|d| d.f == f && d.loc.entry_key() == loc.entry_key()) {
-                        d.val = x;
-                        defs.push((f, d.loc, x));
-                    }
-                }
-                super::world::PassTo::Contrib(f) => {
-                    if let Some(c) = r.contribs.iter_mut().find(|c| c.0 == f) {
-                        c.1 = x;
-                        contribs = true;
-                    }
-                }
-                super::world::PassTo::Out => {
-                    r.out = x;
-                    out = true;
-                }
-            }
-        }
-        let Some(r) = new else { return };
+        let Some((r, defs, contribs, out)) = passes_now(self.core, &self.w, res, on) else { return };
         let Some(mut n) = self.w.node(id).cloned() else { return };
         self.core.passes_refiled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let after = r.contribs.clone();
@@ -1703,6 +1667,13 @@ impl<'a> Builder<'a> {
     /// output changed.
     pub(crate) fn commit(&mut self, id: Id, mut res: Res, kids: &[Spec], conts: &[Spec]) -> bool {
         let Some(n) = self.w.node(id).cloned() else { return false };
+        // (The values it passed on, taken now: it read them in the world it
+        // ran in, and its presence reads hold here.)
+        if !res.passes.is_empty()
+            && let Some((r, ..)) = passes_now(self.core, &self.w, &res, None)
+        {
+            res = r;
+        }
         let old = n.res.clone();
         // Placements.
         let t = super::core::now();
@@ -1973,6 +1944,102 @@ pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &m
         return v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x));
     }
     v2 == *val
+}
+
+/// Result `res` with the values it passed on (`Res::passes`) taken
+/// again, through the reads of fields `on` (or all): `None` if none
+/// changed; else the result, and the targets changed (definitions; the
+/// contributions; the output).
+#[allow(clippy::type_complexity)]
+fn passes_now(core: &Core, w: &World, res: &Res, on: Option<&[Field]>) -> Option<(Res, Vec<(Field, Locality, ValueId)>, bool, bool)> {
+    let mut new: Option<Res> = None;
+    let (mut defs, mut contribs, mut out) = (Vec::new(), false, false);
+    // (A composition's holes taken again: (composition, part, value,
+    // root read, its value).)
+    let mut ups = Vec::new();
+    for (i, p) in res.passes.iter().enumerate() {
+        ups.clear();
+        let (x, raw) = if p.read & super::world::COMPOSED != 0 {
+            let k = (p.read & !super::world::COMPOSED) as usize;
+            let Some(x) = compose_now(core, w, res, k, on, &mut ups) else { continue };
+            (x, None)
+        } else {
+            let Some(rd @ Read::Use { f, .. }) = res.reads.get(p.read as usize) else { continue };
+            if on.is_some_and(|fs| !fs.contains(f)) {
+                continue;
+            }
+            let Some(raw) = use_now(core, w, rd) else { continue };
+            let Some(x) = core.eval_path(p.path, raw) else { continue };
+            (x, Some(raw))
+        };
+        if x == p.val {
+            continue;
+        }
+        let r = new.get_or_insert_with(|| res.clone());
+        r.passes[i].val = x;
+        for (rx, raw) in raw.map(|raw| (p.read, raw)).into_iter().chain(ups.iter().map(|u| (u.3, u.4))) {
+            if let Some(Read::Use { val, .. }) = r.reads.get_mut(rx as usize) {
+                *val = Some(raw);
+            }
+        }
+        for &(k, j, v, read, _) in &ups {
+            if let Some(c) = r.composed.get_mut(k).and_then(|c| c.get_mut(j)) {
+                *c = super::world::CPart::Hole { read, path: match *c {
+                    super::world::CPart::Hole { path, .. } => path,
+                    _ => 0,
+                }, val: v };
+            }
+        }
+        match p.to {
+            super::world::PassTo::Def(f, loc) => {
+                if let Some(d) = r.defs.iter_mut().find(|d| d.f == f && d.loc.entry_key() == loc.entry_key()) {
+                    d.val = x;
+                    defs.push((f, d.loc, x));
+                }
+            }
+            super::world::PassTo::Contrib(f) => {
+                if let Some(c) = r.contribs.iter_mut().find(|c| c.0 == f) {
+                    c.1 = x;
+                    contribs = true;
+                }
+            }
+            super::world::PassTo::Out => {
+                r.out = x;
+                out = true;
+            }
+        }
+    }
+    new.map(|r| (r, defs, contribs, out))
+}
+
+/// Composition `k` of result `res` now (`Ctx::compose`): its holes on
+/// fields `on` (or all) taken again, those that changed added to `ups`
+/// as (composition, part, value, root read, its value); `None` if one's
+/// answer is not there.
+fn compose_now(core: &Core, w: &World, res: &Res, k: usize, on: Option<&[Field]>, ups: &mut Vec<(usize, usize, ValueId, u32, ValueId)>) -> Option<ValueId> {
+    let parts = res.composed.get(k)?;
+    let mut xs = Vec::with_capacity(parts.len());
+    for (j, part) in parts.iter().enumerate() {
+        match *part {
+            super::world::CPart::Val(x) => xs.push(x),
+            super::world::CPart::Hole { read, path, val } => {
+                let rd = res.reads.get(read as usize)?;
+                let Read::Use { f, .. } = rd else { return None };
+                if on.is_some_and(|fs| !fs.contains(f)) {
+                    xs.push(val);
+                    continue;
+                }
+                let raw = use_now(core, w, rd)?;
+                let x = core.eval_path(path, raw)?;
+                if x != val {
+                    ups.push((k, j, x, read, raw));
+                }
+                xs.push(x);
+            }
+            super::world::CPart::Nested(i) => xs.push(compose_now(core, w, res, i as usize, on, ups)?),
+        }
+    }
+    Some(core.values.list(xs))
 }
 
 /// The raw value use `r` gets now (`None`: none, a loop-back field's, or

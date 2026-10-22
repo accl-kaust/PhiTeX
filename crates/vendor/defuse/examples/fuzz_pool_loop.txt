@@ -19,3 +19,4 @@ print w
 alias r = a
 alias r = c
 print r
+pack r = a, (c, 1)

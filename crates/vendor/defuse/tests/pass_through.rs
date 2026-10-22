@@ -5,13 +5,14 @@
 //! new value. Unit [d, pd, pw, ps, pc, po, readers…]: `d` defines `rec` (a
 //! list); `pd` defines `x` as `rec[1]`, `pw` defines `y` as `rec`, `ps`
 //! defines `rec` as itself (soft: no definition), `pc` contributes `rec[0]`
-//! to `acc` (a sum), `po` outputs `rec[2]`; the readers output `x`, `y`, `rec`, and
-//! the fold of `acc`.
+//! to `acc` (a sum), `po` outputs `rec[2]`, `pk` defines `z` and outputs
+//! a composition `["h", rec[0], ["n", rec[2]]]`; the readers output `x`,
+//! `y`, `rec`, `z`, and the fold of `acc`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use defuse::{Ctx, Engine, Field, Locality, NodeId, Operation, Step, Stop, SumMonoid, ValueId, Values};
+use defuse::{Ctx, Engine, Field, Locality, NodeId, Operation, Part, Step, Stop, SumMonoid, ValueId, Values};
 
 struct Ops {
     runs: Arc<Mutex<HashMap<String, usize>>>,
@@ -23,6 +24,7 @@ impl Operation for Ops {
             Some("d" | "ps") => vec![(v.field("rec"), Locality::Local)],
             Some("pd") => vec![(v.field("x"), Locality::Local)],
             Some("pw") => vec![(v.field("y"), Locality::Local)],
+            Some("pk") => vec![(v.field("z"), Locality::Local)],
             _ => Vec::new(),
         })
     }
@@ -74,6 +76,16 @@ impl Operation for Ops {
                 }
                 none()
             }
+            "pk" => {
+                let Some(m) = cx.view(rec)? else { return Ok(none()) };
+                let (Some(e0), Some(e2)) = (cx.at(m, Step::Index(0)), cx.at(m, Step::Index(2))) else { return Ok(none()) };
+                let inner = cx.compose(&[Part::Val(v.str("n")), Part::View(e2)]);
+                let c = cx.compose(&[Part::Val(v.str("h")), Part::View(e0), Part::View(inner)]);
+                cx.define_from(v.field("z"), c, Locality::Local);
+                cx.output_from(c);
+                none()
+            }
+            "rz" => cx.use_field(v.field("z"))?.unwrap_or_else(none),
             "rx" => cx.use_field(x)?.unwrap_or_else(none),
             "ry" => cx.use_field(y)?.unwrap_or_else(none),
             "rr" => cx.use_field(rec)?.unwrap_or_else(none),
@@ -83,7 +95,7 @@ impl Operation for Ops {
     }
 }
 
-const NODES: [&str; 10] = ["d", "pd", "pw", "ps", "pc", "po", "rx", "ry", "rr", "ra"];
+const NODES: [&str; 12] = ["d", "pd", "pw", "ps", "pc", "po", "pk", "rx", "ry", "rr", "ra", "rz"];
 
 struct T {
     eng: Engine,
@@ -150,10 +162,10 @@ fn a_passed_value_follows_without_its_passer_running() {
     assert_eq!(t.edit(&[1, 5, 3]), vec!["d", "rx", "ry", "rr"]);
     assert_eq!(t.out("rx"), "5");
     // Element 0: the contribution follows; the fold's reader runs.
-    assert_eq!(t.edit(&[7, 5, 3]), vec!["d", "ry", "rr", "ra"]);
+    assert_eq!(t.edit(&[7, 5, 3]), vec!["d", "ry", "rr", "ra", "rz"]);
     assert_eq!(t.out("ra"), "7");
     // Element 2: the output follows.
-    assert_eq!(t.edit(&[7, 5, 4]), vec!["d", "ry", "rr"]);
+    assert_eq!(t.edit(&[7, 5, 4]), vec!["d", "ry", "rr", "rz"]);
     assert_eq!(t.out("po"), "4");
 }
 
@@ -180,6 +192,23 @@ fn passes_refiled_are_counted() {
     let a = vec![v.str("d"), v.list(vec![v.int(4), v.int(5), v.int(6)])];
     t.eng.replace(t.nodes["d"], t.op, a);
     let rep = t.eng.evaluate_sequential().expect("evaluate");
-    // (`pw` and `pc` and `po`: `pd`'s element held.)
-    assert_eq!(rep.passes_refiled, 3);
+    // (`pw`, `pc`, `po` and `pk`: `pd`'s element held.)
+    assert_eq!(rep.passes_refiled, 4);
+}
+
+#[test]
+fn a_composition_follows_its_holes_without_its_composer_running() {
+    let mut t = T::new(&[1, 2, 3]);
+    assert_eq!((t.out("pk"), t.out("rz")), ("[\"h\" 1 [\"n\" 3]]".into(), "[\"h\" 1 [\"n\" 3]]".into()));
+    // Element 2, nested: the composition is made again; its reader runs.
+    let ran = t.edit(&[1, 2, 7]);
+    assert!(!ran.contains(&"pk") && ran.contains(&"rz"), "{ran:?}");
+    assert_eq!(t.out("pk"), "[\"h\" 1 [\"n\" 7]]");
+    // Element 1, in none of its holes: `z` stands.
+    let ran = t.edit(&[1, 9, 7]);
+    assert!(!ran.contains(&"pk") && !ran.contains(&"rz"), "{ran:?}");
+    // Element 2 gone: the composer runs.
+    let ran = t.edit(&[1, 9]);
+    assert!(ran.contains(&"pk"), "{ran:?}");
+    assert_eq!(t.out("rz"), "\"none\"");
 }

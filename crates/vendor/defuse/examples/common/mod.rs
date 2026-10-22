@@ -27,6 +27,7 @@
 //! both v = 5 6              v = 5 here, and 6 in the scope it opens (two levels)
 //! sneak v = 3               defines v though it declares nothing
 //! alias x = y[1]            x = y's element 1 (or y), nothing if none; outputs it
+//! pack x = y, z[1], 5, (w)  x = the list of those (a group nests), nothing if one is none
 //! grab s 2                  declares no claim; its run claims the next 2 (as sumnext)
 //! ```
 #![allow(dead_code, clippy::many_single_char_names)] // AST code reads best with short names
@@ -189,6 +190,39 @@ impl Parser<'_> {
 
     fn l(&self, xs: Vec<ValueId>) -> ValueId {
         self.v.list(xs)
+    }
+
+    /// `pack`'s items, comma-separated: `y`, `y[i]`, an integer, or a
+    /// parenthesized group (`["v", name, i or unit]`, `["c", n]`, `["n",
+    /// items]`).
+    fn pack_items(&mut self) -> PResult<ValueId> {
+        let mut out = Vec::new();
+        loop {
+            if self.is_sym("(") {
+                self.pos += 1;
+                let g = self.pack_items()?;
+                self.eat(")")?;
+                out.push(self.tagged("n", vec![g]));
+            } else if let Some(Tok::Int(n)) = self.peek().cloned() {
+                self.pos += 1;
+                out.push(self.tagged("c", vec![self.v.int(n)]));
+            } else {
+                let y = self.ident()?;
+                let mut i = ValueId::UNIT;
+                if self.is_sym("[")
+                    && let Some(Tok::Int(n)) = self.peek_at(1).cloned()
+                    && matches!(self.peek_at(2), Some(Tok::Sym("]")))
+                {
+                    self.pos += 3;
+                    i = self.v.int(n);
+                }
+                out.push(self.tagged("v", vec![self.s(&y), i]));
+            }
+            if !self.is_sym(",") {
+                return Ok(self.l(out));
+            }
+            self.pos += 1;
+        }
     }
 
     fn s(&self, x: &str) -> ValueId {
@@ -378,6 +412,13 @@ impl Parser<'_> {
                     self.eat("=")?;
                     let e = self.expr()?;
                     return Ok(self.tagged("sneak", vec![self.s(&x), e]));
+                }
+                "pack" => {
+                    self.pos += 1;
+                    let x = self.ident()?;
+                    self.eat("=")?;
+                    let items = self.pack_items()?;
+                    return Ok(self.tagged("pack", vec![self.s(&x), items]));
                 }
                 "alias" => {
                     self.pos += 1;
@@ -764,8 +805,9 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 38] = [
+const KEYWORDS: [&str; 39] = [
     "alias",
+    "pack",
     "gopen",
     "both",
     "sneak",
@@ -1342,6 +1384,67 @@ pub fn path_of(v: &Values, t: &str, x: ValueId, i: i64) -> Option<ValueId> {
     }
 }
 
+/// The names `pack`'s items read.
+pub fn pack_names(v: &Values, its: ValueId, out: &mut Vec<String>) {
+    for x in items(v, its) {
+        let (t, a) = tag(v, x);
+        match t.as_str() {
+            "v" => out.push(text(v, a[0])),
+            "n" => pack_names(v, a[0], out),
+            _ => {}
+        }
+    }
+}
+
+/// The value `pack`'s items make, each name read by `look` (`None` if one
+/// is none).
+pub fn pack_value<E>(v: &Values, its: ValueId, look: &mut dyn FnMut(Field) -> Result<Option<ValueId>, E>) -> Result<Option<ValueId>, E> {
+    let mut xs = Vec::new();
+    for x in items(v, its) {
+        let (t, a) = tag(v, x);
+        let y = match t.as_str() {
+            "c" => Some(a[0]),
+            "n" => pack_value(v, a[0], look)?,
+            _ => look(v.field(&text(v, a[0])))?.and_then(|y| match v.as_int(a[1]) {
+                Some(i) => index_of(v, y, i),
+                None => Some(y),
+            }),
+        };
+        let Some(y) = y else { return Ok(None) };
+        xs.push(y);
+    }
+    Ok(Some(v.list(xs)))
+}
+
+/// `pack`'s items composed through views (`Ctx::compose`; `None` if one
+/// is none).
+fn pack_view(cx: &mut Ctx<'_>, its: ValueId) -> Result<Option<defuse::View>, Stop> {
+    let v = cx.values();
+    let mut parts = Vec::new();
+    for x in items(v, its) {
+        let (t, a) = tag(v, x);
+        let p = match t.as_str() {
+            "c" => defuse::Part::Val(a[0]),
+            "n" => match pack_view(cx, a[0])? {
+                Some(w) => defuse::Part::View(w),
+                None => return Ok(None),
+            },
+            _ => {
+                let Some(m) = cx.view(v.field(&text(v, a[0])))? else { return Ok(None) };
+                match v.as_int(a[1]) {
+                    Some(i) => match cx.at(m, defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) {
+                        Some(e) => defuse::Part::View(e),
+                        None => return Ok(None),
+                    },
+                    None => defuse::Part::View(m),
+                }
+            }
+        };
+        parts.push(p);
+    }
+    Ok(Some(cx.compose(&parts)))
+}
+
 /// The length of a list, a sequence or a string (`len(x)`).
 pub fn len_of(v: &Values, x: ValueId) -> Option<ValueId> {
     #[allow(clippy::cast_possible_wrap)]
@@ -1561,7 +1664,7 @@ impl Operation for StmtOp {
             ]),
             // Declares nothing: its definition refutes the list.
             "sneak" => Some(Vec::new()),
-            "alias" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
+            "alias" | "pack" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
             // A contribution is a definition of the sequence.
             "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
             "fold" => Some(vec![
@@ -1767,6 +1870,7 @@ impl Operation for StmtOp {
             }
             "if" => free_vars(v, a[0], &mut bound, &mut out),
             "listuntil" | "alias" => out.push(text(v, a[1])),
+            "pack" => pack_names(v, a[1], &mut out),
             "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" | "take" => {}
             // `collect` reads the following text's outputs, not fields.
             _ => return None,
@@ -1797,6 +1901,20 @@ impl Operation for StmtOp {
                 let val = eval_expr(cx, ops, a[1])?;
                 cx.define_with(v.field(&text(v, a[0])), val, Locality::Local);
                 Ok(val)
+            }
+            // FUZZ_PATHS=2: composed through views and passed on (`Ctx::
+            // compose`); else read whole. Results must not change.
+            "pack" => {
+                let x = v.field(&text(v, a[0]));
+                if fuzz_paths() == 2 {
+                    let Some(c) = pack_view(cx, a[1])? else { return Ok(ValueId::UNIT) };
+                    cx.define_from(x, c, Locality::Local);
+                    cx.output_from(c);
+                    return Ok(ValueId::UNIT);
+                }
+                let Some(w) = pack_value(v, a[1], &mut |f| cx.use_field(f))? else { return Ok(ValueId::UNIT) };
+                cx.define_with(x, w, Locality::Local);
+                Ok(w)
             }
             // FUZZ_PATHS=2: passed on through a view (`Ctx::define_from`,
             // `Ctx::output_from`); else read whole. Results must not change.
