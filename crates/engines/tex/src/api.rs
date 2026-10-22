@@ -7078,8 +7078,8 @@ mod park_tests {
     use phitex_defuse::{Ctx, Locality, Operation, Stop};
 
     /// The test's body as a node's run (a [`crate::run::Run`] lives in a
-    /// node's context): a run holding a map of `\count315` parks at a
-    /// command's start and resumes from its park.
+    /// node's context): a run that looked up `\count316` and holds a map of
+    /// `\count315` parks at a command's start and resumes from its park.
     struct ParkAndResume(Ops);
 
     impl Operation for ParkAndResume {
@@ -7089,9 +7089,13 @@ mod park_tests {
         fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             let o = &self.0;
             let f = cx.values().field("count:315");
+            let other = cx.values().field("count:316");
             let map = crate::regfold::Affine { keep: true, add: 1 };
             let parked = {
                 let mut r = crate::run::Run::new(cx, o);
+                // (another location past the fixed ones first: the
+                // resumed table numbers them in the run's order)
+                let _ = r.loc_of(other);
                 let l = r.loc_of(f);
                 assert_eq!(r.count_reg(l), Some(315), "the location names count:315");
                 r.reg_pending.insert(l, map);
