@@ -19,6 +19,19 @@ pub(crate) struct Env {
     pub unknown: FxHashSet<Field>,
 }
 
+/// The first interned path's id (below it: 0 the whole value, else a
+/// projection's id).
+pub(crate) const PATH0: u32 = 1 << 16;
+
+/// The interned read paths.
+#[derive(Default)]
+pub(crate) struct PathTable {
+    pub list: Vec<Arc<[crate::api::Step]>>,
+    pub ix: FxHashMap<Arc<[crate::api::Step]>, u32>,
+    /// A path and a step after it: the path they make.
+    pub ext: FxHashMap<(u32, crate::api::Step), u32>,
+}
+
 pub(crate) struct Core {
     pub values: Values,
     pub ops: Vec<Arc<dyn Operation>>,
@@ -27,6 +40,22 @@ pub(crate) struct Core {
     /// size a run of it starts its read list at.
     pub op_reads: Vec<std::sync::atomic::AtomicU32>,
     pub projs: Vec<Projection>,
+    /// The read paths interned (`intern_path`): id `PATH0 + i` is
+    /// `list[i]`.
+    pub paths: RwLock<PathTable>,
+    /// While a run audit is on (`Engine::set_run_audit`): the reads the
+    /// merge re-checked, by field (`None`: a read of no field), and how
+    /// many it found broken.
+    pub rechecks: Mutex<Option<FxHashMap<Option<Field>, (u64, u64)>>>,
+    /// `Step::Each` answers per sequence node and path.
+    pub each_memo: crate::sync::Table<ValueId>,
+    /// Nodes whose run broke at a read (its index, the first, and the
+    /// world's log length then): one with marks resumes at the last before
+    /// it (`Ctx::checkpoint`), its reads before it asked of the changes
+    /// since.
+    pub resume_at: Mutex<FxHashMap<u64, (u32, u64)>>,
+    /// Runs cut off at a mark this evaluation.
+    pub cut_in_run: std::sync::atomic::AtomicU64,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     /// The environment's base layer (`Engine::set_environment_base`) and
     /// its answers, each asked once for the engine's life.
@@ -118,6 +147,11 @@ impl Core {
             op_names: Vec::new(),
             op_reads: Vec::new(),
             projs: Vec::new(),
+            paths: RwLock::new(PathTable::default()),
+            rechecks: Mutex::new(None),
+            each_memo: crate::sync::Table::new(),
+            resume_at: Mutex::new(FxHashMap::default()),
+            cut_in_run: std::sync::atomic::AtomicU64::new(0),
             accs: FxHashMap::default(),
             acc_prefixes: Vec::new(),
             acc_memo: crate::sync::Table::new(),
@@ -304,6 +338,172 @@ impl Core {
     pub(crate) fn likely_defines(&self, op: OpId, args: &[ValueId], f: Field) -> bool {
         let o = &self.ops[op.0 as usize];
         self.hook(None, op, "likely_defines", || true, || o.likely_defines(args, &self.values, f))
+    }
+
+    /// Path `steps`' id: 0 for none, a projection's own for one
+    /// projection step, else interned (`PATH0` on).
+    pub(crate) fn intern_path(&self, steps: &[crate::api::Step]) -> u32 {
+        match steps {
+            [] => 0,
+            [crate::api::Step::Proj(p)] => u32::from(p.0),
+            _ => {
+                if let Some(&i) = self.paths.read().unwrap_or_else(std::sync::PoisonError::into_inner).ix.get(steps) {
+                    return i;
+                }
+                let mut t = self.paths.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(&i) = t.ix.get(steps) {
+                    return i;
+                }
+                let i = PATH0 + u32::try_from(t.list.len()).expect("too many paths");
+                let a: Arc<[crate::api::Step]> = steps.into();
+                t.list.push(a.clone());
+                t.ix.insert(a, i);
+                i
+            }
+        }
+    }
+
+    /// Path `p` with step `s` after it (memoized).
+    pub(crate) fn extend_path(&self, p: u32, s: crate::api::Step) -> u32 {
+        if let Some(&q) = self.paths.read().unwrap_or_else(std::sync::PoisonError::into_inner).ext.get(&(p, s)) {
+            return q;
+        }
+        let mut steps = self.path_steps(p).to_vec();
+        steps.push(s);
+        let q = self.intern_path(&steps);
+        self.paths.write().unwrap_or_else(std::sync::PoisonError::into_inner).ext.insert((p, s), q);
+        q
+    }
+
+    /// Path `p`'s steps.
+    pub(crate) fn path_steps(&self, p: u32) -> Arc<[crate::api::Step]> {
+        if p == 0 {
+            return Arc::from([]);
+        }
+        if p < PATH0 {
+            #[allow(clippy::cast_possible_truncation)]
+            return Arc::from([crate::api::Step::Proj(crate::api::ProjId(p as u16))]);
+        }
+        self.paths.read().unwrap_or_else(std::sync::PoisonError::into_inner).list[(p - PATH0) as usize].clone()
+    }
+
+    /// Path `p`'s answer on value `x` (`None`: a step did not apply).
+    pub(crate) fn eval_path(&self, p: u32, x: ValueId) -> Option<ValueId> {
+        if p == 0 {
+            return Some(x);
+        }
+        if p < PATH0 {
+            #[allow(clippy::cast_possible_truncation)]
+            return Some(self.project(p as u16, x));
+        }
+        let steps = self.path_steps(p);
+        let mut cur = x;
+        for &s in steps.iter() {
+            cur = self.step(s, cur)?;
+        }
+        Some(cur)
+    }
+
+    /// One path step on `x`.
+    pub(crate) fn step(&self, s: crate::api::Step, x: ValueId) -> Option<ValueId> {
+        use crate::api::Step;
+        let v = &self.values;
+        let key = |k: ValueId| -> Option<ValueId> {
+            v.with(x, |val| match val {
+                Value::List(l) => l.iter().find_map(|&e| v.with(e, |ev| match ev {
+                    Value::List(p) if p.len() >= 2 && p[0] == k => Some(p[1]),
+                    _ => None,
+                })),
+                _ => None,
+            })
+        };
+        match s {
+            Step::Index(i) => v.with(x, |val| match val {
+                Value::List(l) => l.get(i as usize).copied(),
+                Value::Seq(_) => v.seq_nth(x, u64::from(i)),
+                _ => None,
+            }),
+            Step::Last => v.with(x, |val| match val {
+                Value::List(l) => l.last().copied(),
+                Value::Seq(n) => v.seq_nth(x, n.len - 1),
+                _ => None,
+            }),
+            #[allow(clippy::cast_possible_wrap)]
+            Step::Len => v.with(x, |val| match val {
+                Value::List(l) => Some(l.len() as i64),
+                Value::Str(t) => Some(t.len() as i64),
+                Value::Seq(n) => Some(n.len as i64),
+                Value::Nil => Some(0),
+                _ => None,
+            })
+            .map(|n| v.int(n)),
+            Step::Key(k) => key(k),
+            Step::Has(k) => Some(v.bool(key(k).is_some())),
+            Step::Proj(p) => Some(self.project(p.0, x)),
+            Step::Present => Some(v.bool(true)),
+            Step::Eq(k) => Some(v.bool(x == k)),
+            Step::Cmp(k) => match (v.as_int(x), v.as_int(k)) {
+                (Some(a), Some(b)) => Some(v.int(a.cmp(&b) as i64)),
+                _ => None,
+            },
+            Step::Each(p) => v
+                .with(x, |val| match val {
+                    Value::List(l) => Some(Err(l.to_vec())),
+                    Value::Seq(_) | Value::Nil => Some(Ok(())),
+                    _ => None,
+                })
+                .map(|k| match k {
+                    Err(xs) => v.list(xs.into_iter().map(|e| self.eval_path(p.0, e).unwrap_or(ValueId::UNIT)).collect()),
+                    Ok(()) => self.each_seq(p.0, x),
+                }),
+        }
+    }
+
+    /// `Step::Each(p)` on sequence `s`, kept per rope node (made bottom up,
+    /// without recursion: a rope may be deep).
+    fn each_seq(&self, p: u32, s: ValueId) -> ValueId {
+        let v = &self.values;
+        let key = |x: ValueId| hash_words(0xeac4, &[x.raw(), u64::from(p)]) | 1;
+        let got = |x: ValueId| if x == ValueId::NIL { Some(ValueId::NIL) } else { self.each_memo.get(key(x)).copied() };
+        let mut stack = vec![(s, false)];
+        while let Some((x, expanded)) = stack.pop() {
+            if got(x).is_some() {
+                continue;
+            }
+            match v.seq_split(x) {
+                Some(Ok(e)) => {
+                    let a = self.eval_path(p, e).unwrap_or(ValueId::UNIT);
+                    self.each_memo.get_or_insert(key(x), || v.seq_unit(a));
+                }
+                Some(Err((l, r))) if expanded => {
+                    let (a, b) = (got(l).unwrap_or(ValueId::NIL), got(r).unwrap_or(ValueId::NIL));
+                    self.each_memo.get_or_insert(key(x), || v.seq_concat(a, b));
+                }
+                Some(Err((l, r))) => {
+                    stack.push((x, true));
+                    stack.push((r, false));
+                    stack.push((l, false));
+                }
+                None => {}
+            }
+        }
+        got(s).unwrap_or(ValueId::NIL)
+    }
+
+    /// Path `p`'s steps for a recording: `Each` with its path's steps
+    /// (path ids are this engine's).
+    #[cfg(feature = "observe")]
+    pub(crate) fn rec_steps(&self, p: u32) -> serde_json::Value {
+        serde_json::Value::Array(self.path_steps(p).iter().map(|&s| self.rec_step(s)).collect())
+    }
+
+    /// One step for a recording (see `rec_steps`).
+    #[cfg(feature = "observe")]
+    pub(crate) fn rec_step(&self, s: crate::api::Step) -> serde_json::Value {
+        match s {
+            crate::api::Step::Each(q) => serde_json::json!({ "Each": self.rec_steps(q.0) }),
+            s => crate::record::j(&s),
+        }
     }
 
     pub(crate) fn project(&self, p: u16, x: ValueId) -> ValueId {

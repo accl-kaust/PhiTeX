@@ -492,6 +492,44 @@ impl Values {
         out
     }
 
+    /// Sequence node `s` split: its element (a one-element node), or its
+    /// two halves (`None`: not a non-empty sequence).
+    pub(crate) fn seq_split(&self, s: ValueId) -> Option<Result<ValueId, (ValueId, ValueId)>> {
+        if s.tag() != T_SEQ || s == ValueId::NIL {
+            return None;
+        }
+        match self.table.get(s.0) {
+            Some(Entry::Seq(n)) if n.unit => Some(Ok(n.right)),
+            Some(Entry::Seq(n)) => Some(Err((n.left, n.right))),
+            _ => None,
+        }
+    }
+
+    /// Element `i` of sequence `s` (`None` past its end, or not a
+    /// sequence): one walk down the rope.
+    #[must_use]
+    pub fn seq_nth(&self, s: ValueId, mut i: u64) -> Option<ValueId> {
+        let mut x = s;
+        loop {
+            if x.tag() != T_SEQ || x == ValueId::NIL {
+                return None;
+            }
+            match self.table.get(x.0) {
+                Some(Entry::Seq(n)) if n.unit => return (i == 0).then_some(n.right),
+                Some(Entry::Seq(n)) => {
+                    let la = self.seq_len(n.left);
+                    if i < la {
+                        x = n.left;
+                    } else {
+                        i -= la;
+                        x = n.right;
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// The length of sequence `s`.
     pub fn seq_len(&self, s: ValueId) -> u64 {
         if s.tag() == T_SEQ { self.seq_meta(s).0 } else { 0 }

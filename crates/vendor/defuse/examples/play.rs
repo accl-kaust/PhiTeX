@@ -206,6 +206,24 @@ fn print_audit(eng: &Engine, a: &defuse::RunAudit) {
     for (k, (n, t)) in v.iter().take(15) {
         println!("    wasted {n:5} {:8.2} ms  {k}", ms(*t));
     }
+    let checked: u64 = a.rechecked.iter().map(|r| r.1).sum();
+    println!("  audit: reads re-checked {checked}");
+    for (f, n, b) in a.rechecked.iter().take(15) {
+        println!("    re-checked {n:7} broken {b:6}  {}", f.map_or_else(|| "(no field)".to_string(), name));
+    }
+}
+
+/// A recorded step (`Each` with its path's steps, interned here).
+fn step(cx: &Ctx<'_>, j: &J) -> defuse::Step {
+    match j.get("Each") {
+        Some(inner) => defuse::Step::Each(cx.path(&steps(cx, inner))),
+        None => de(j),
+    }
+}
+
+/// Recorded steps.
+fn steps(cx: &Ctx<'_>, j: &J) -> Vec<defuse::Step> {
+    j.as_array().map(|a| a.iter().map(|s| step(cx, s)).collect()).unwrap_or_default()
 }
 
 /// Makes one recorded call on `cx`; returns its answer as recorded, or
@@ -228,6 +246,26 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "use_field_before" => return res(cx.use_field_before(de(&g(0)), de::<NodeId>(&g(1)))),
         "use_field_after_own" => return res(cx.use_field_after_own(de(&g(0)), de::<NodeId>(&g(1)))),
         "use_field_proj" => return res(cx.use_field_proj(de(&g(0)), de::<ProjId>(&g(1)))),
+        "use_field_path" => {
+            let p = cx.path(&steps(cx, &g(1)));
+            return res(cx.use_field_path(de(&g(0)), p));
+        }
+        "acc_fold_path" => {
+            let p = cx.path(&steps(cx, &g(3)));
+            return res(cx.acc_fold_path(de(&g(0)), de(&g(1)), de(&g(2)), p));
+        }
+        "view" => return res(cx.view(de(&g(0)))),
+        "acc_view" => return res(cx.acc_view(de(&g(0)), de(&g(1)), de(&g(2)))),
+        "at" => {
+            let s = step(cx, &g(1));
+            json!(cx.at(de::<defuse::View>(&g(0)), s))
+        }
+        "get" => {
+            let s = step(cx, &g(1));
+            json!(cx.get(de::<defuse::View>(&g(0)), s))
+        }
+        "whole" => json!(cx.whole(de::<defuse::View>(&g(0)))),
+        "checkpoint" => return res(cx.checkpoint(de(&g(0)), de(&g(1)))),
         "use_fields" => {
             let mut out = Vec::new();
             return res(cx.use_fields(&de::<Vec<Field>>(&g(0)), &mut out).map(|()| out));
@@ -525,6 +563,11 @@ impl Run {
                 cx.park_continuing(Box::new(self.origins.clone()));
                 Ok(J::Null)
             }
+            "keep_after" => {
+                cx.keep_after(Arc::new(self.origins.clone()));
+                Ok(J::Null)
+            }
+            "resumed" => Ok(json!(cx.resumed().map(|r| r.1))),
             m => call(cx, m, &c[1]),
         }
     }

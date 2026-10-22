@@ -61,6 +61,8 @@ fn a_rerun_that_changes_nothing_is_reported_wasted() {
     assert!(matches!(a.wasted[0].cause, Some(Rerun::Changed { field, .. }) if field == x), "{a:?}");
     assert!(!a.wasted.iter().any(|w| w.node == s));
     assert_eq!(a.by_cause().len(), 1);
+    // (`r` and `s` re-checked their reads of `x`: both broke.)
+    assert!(a.rechecked.iter().any(|&(f, n, b)| f == Some(x) && n >= 2 && b >= 2), "{:?}", a.rechecked);
     // Off: none.
     eng.set_run_audit(false);
     let c = vec![eng.values().str("d"), eng.values().str("c")];

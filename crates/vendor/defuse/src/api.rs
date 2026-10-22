@@ -453,6 +453,57 @@ impl ProjId {
     pub const IS_EMPTY: ProjId = ProjId(1);
 }
 
+/// One step of a read path ([`crate::Engine::path`], [`crate::Ctx::path`]).
+/// A step that does not apply (an index past the end, a key not there, a
+/// value of another kind) gives nothing, and the path's answer is none.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub enum Step {
+    /// Element `i` of a list or a sequence.
+    Index(u32),
+    /// The last element of a list or a sequence.
+    Last,
+    /// The length of a list, a sequence (`Nil`: 0) or a string (bytes).
+    Len,
+    /// The value for key `k` of an association list (a list of lists
+    /// `[k, v, ..]`: the first whose head is `k`).
+    Key(ValueId),
+    /// Whether an association list has key `k`.
+    Has(ValueId),
+    /// A projection.
+    Proj(ProjId),
+    /// Whether there is a value (`true`).
+    Present,
+    /// Whether the value is `k` (a run that only compares depends only on
+    /// the comparison: "is this the last page").
+    Eq(ValueId),
+    /// The order of an integer against integer `k`: -1, 0 or 1.
+    Cmp(ValueId),
+    /// Path `p` on every element of a list (a list) or a sequence (a
+    /// sequence), each element where `p` does not apply giving unit. On a
+    /// sequence it is kept per rope node: after one element changed, only
+    /// the nodes above it are made again.
+    Each(PathId),
+}
+
+/// A read path: steps applied in turn to a value read. A run that reads
+/// through a path depends only on the path's answer, so a change
+/// elsewhere in the value leaves it standing. [`PathId::WHOLE`] is the
+/// value itself; a projection is a one-step path ([`PathId::of_proj`]).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub struct PathId(pub(crate) u32);
+
+impl PathId {
+    pub const WHOLE: PathId = PathId(0);
+
+    /// Projection `p` as a path.
+    #[must_use]
+    pub fn of_proj(p: ProjId) -> PathId {
+        PathId(u32::from(p.0))
+    }
+}
+
 /// A client projection: pure, from a value to a small value.
 pub type Projection = Arc<dyn Fn(ValueId, &Values) -> ValueId + Send + Sync>;
 
@@ -911,6 +962,9 @@ pub struct RunAudit {
     /// before: in commit order, and their time.
     pub wasted: Vec<WastedRun>,
     pub wasted_time: std::time::Duration,
+    /// The reads the commits re-checked, by field (`None`: reads of no
+    /// field), the most first: how many, and how many of them broke.
+    pub rechecked: Vec<(Option<Field>, u64, u64)>,
 }
 
 /// A run that changed nothing outside itself ([`RunAudit::wasted`]).
@@ -1109,6 +1163,10 @@ pub struct Report {
     /// changed this evaluation, by field (not canonical: their changes, and
     /// with them `rounds`, depend on the schedule).
     pub early_loops: Vec<EarlyLoop>,
+    /// Runs resumed at a mark of their last run (`Ctx::checkpoint`), and
+    /// runs cut off at one (that run's result standing).
+    pub resumed_at_mark: u64,
+    pub cut_in_run: u64,
     /// With `Engine::set_run_audit`: the runs that were reruns, and those
     /// of them that changed nothing (not canonical: a schedule may run a
     /// node more often).
