@@ -135,6 +135,9 @@ pub struct Definitions {
     /// or register (unique in the process; none: 0): two sets of
     /// definitions with a name's same stamp give it the same.
     stamps: HashMap<String, u64>,
+    /// The stamp of the last change to [`Definitions::stamps`] (0: none):
+    /// two sets of definitions with the same one have the same stamps.
+    gen: u64,
 }
 
 /// [`Definitions::closures`].
@@ -147,6 +150,9 @@ pub(crate) struct Kept {
     set: std::sync::Arc<DefSet>,
     names: std::sync::Arc<Vec<String>>,
     stamps: Vec<u64>,
+    /// The last [`Definitions::gen`] found to give these stamps: the
+    /// definitions with that generation take it with no stamp looked up.
+    ok_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The source of [`Definitions::stamps`].
@@ -478,6 +484,7 @@ impl Definitions {
     fn touch(&mut self, name: &str) {
         let s = STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.stamps.insert(name.to_owned(), s);
+        self.gen = s;
     }
 
     fn stamp(&self, name: &str) -> u64 {
@@ -498,10 +505,19 @@ impl Definitions {
         c.get(key)?
             .iter()
             .find(|k| {
-                k.names
+                use std::sync::atomic::Ordering::Relaxed;
+                if k.ok_gen.load(Relaxed) == self.gen {
+                    return true;
+                }
+                let ok = k
+                    .names
                     .iter()
                     .zip(&k.stamps)
-                    .all(|(n, &s)| self.stamp(n) == s)
+                    .all(|(n, &s)| self.stamp(n) == s);
+                if ok {
+                    k.ok_gen.store(self.gen, Relaxed);
+                }
+                ok
             })
             .map(|k| {
                 for n in k.names.iter() {
@@ -530,7 +546,12 @@ impl Definitions {
         if v.len() >= 8 {
             v.remove(0);
         }
-        v.push(Kept { set, names, stamps });
+        v.push(Kept {
+            set,
+            names,
+            stamps,
+            ok_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(self.gen)),
+        });
     }
 
     /// Declares the order the files load in: `files[0]` first. A use then

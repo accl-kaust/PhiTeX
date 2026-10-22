@@ -1599,6 +1599,18 @@ impl<'a> Closure<'a> {
             }
             return false;
         }
+        self.document_defines_(names)
+    }
+
+    /// [`Closure::document_defines`] of the names of a set the prelude's
+    /// cache just gave ([`Definitions::closure`]), which noted each
+    /// read: a text that defines nothing defines none of them, with no
+    /// name read again.
+    fn document_defines_kept(&self, names: &[String]) -> bool {
+        !self.document.holds_no_name() && self.document_defines_(names)
+    }
+
+    fn document_defines_(&self, names: &[String]) -> bool {
         names
             .iter()
             .any(|n| self.document.effects(n).is_some() || self.document.shapes(n).is_some())
@@ -1706,7 +1718,7 @@ impl<'a> Closure<'a> {
         // (the names a top call looked up are no other call's: no frame
         // takes them)
         if let Some((s, names)) = cached
-            && !self.document_defines(&names)
+            && !self.document_defines_kept(&names)
         {
             return s;
         }
@@ -1739,7 +1751,7 @@ impl<'a> Closure<'a> {
         let cached = self.prelude.closure(name);
         if let Some((s, names)) = cached
             && !names.iter().any(|n| self.busy.contains(n))
-            && !self.document_defines(&names)
+            && !self.document_defines_kept(&names)
         {
             self.frame.0.extend(names.iter().cloned());
             self.memo.insert(name.to_owned(), (s.clone(), names, false));
