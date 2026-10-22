@@ -552,12 +552,11 @@ impl Run<'_, '_> {
                 let (c, h) = self.x_char_or_active()?;
                 if this_if == 0 { n == h } else { m == c }
             }
-            2 | 3 => {
-                let n = if this_if == 2 {
-                    self.scan_int()?
-                } else {
-                    self.scan_normal_dimen()?
-                };
+            2 => {
+                // (`\ifnum`: an operand that is a macro's number is read as
+                // the comparison's outcome alone, `crate::scan::Num`)
+                use crate::scan::Num;
+                let a = self.scan_int_num()?;
                 self.skip_blanks_x()?;
                 let rel = match self.cur.tok {
                     _ if self.cur.tok.cat() == Some(12)
@@ -571,11 +570,52 @@ impl Run<'_, '_> {
                         61
                     }
                 };
-                let x = if this_if == 2 {
-                    self.scan_int()?
-                } else {
-                    self.scan_normal_dimen()?
+                let b = self.scan_int_num()?;
+                // (the order of the first operand against the second)
+                let o = match (a, b) {
+                    (Num::Int(n), Num::Int(x)) => order(n, x),
+                    (Num::Macro(t, neg), Num::Int(x)) => {
+                        // (-m against x is m against -x, reversed)
+                        if neg {
+                            -self.num_order(t, -i64::from(x))?
+                        } else {
+                            self.num_order(t, i64::from(x))?
+                        }
+                    }
+                    (Num::Int(n), Num::Macro(t, neg)) => {
+                        if neg {
+                            self.num_order(t, -i64::from(n))?
+                        } else {
+                            -self.num_order(t, i64::from(n))?
+                        }
+                    }
+                    (a, b) => {
+                        let (n, x) = (self.num_int(a)?, self.num_int(b)?);
+                        order(n, x)
+                    }
                 };
+                match rel {
+                    60 => o < 0,
+                    61 => o == 0,
+                    _ => o > 0,
+                }
+            }
+            3 => {
+                let n = self.scan_normal_dimen()?;
+                self.skip_blanks_x()?;
+                let rel = match self.cur.tok {
+                    _ if self.cur.tok.cat() == Some(12)
+                        && (60..=62).contains(&self.cur.tok.chr()) =>
+                    {
+                        self.cur.tok.chr()
+                    }
+                    _ => {
+                        let t = self.cur.tok;
+                        self.back_input(t);
+                        61
+                    }
+                };
+                let x = self.scan_normal_dimen()?;
                 match rel {
                     60 => n < x,
                     61 => n == x,
@@ -1075,5 +1115,14 @@ fn char_tok(c: char) -> Tok {
         crate::val::space_tok()
     } else {
         Tok::ch(12, u32::from(c))
+    }
+}
+
+/// The order of `a` against `b`: -1, 0 or 1.
+fn order(a: i32, b: i32) -> i64 {
+    match a.cmp(&b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
     }
 }
