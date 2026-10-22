@@ -1441,8 +1441,8 @@ pub struct Stats {
     pub pkg_predict_right: u64,
     pub pkg_predict_wrong: Vec<String>,
     /// Each node's run time in the evaluations (all its attempts), in
-    /// microseconds, by node (`Report::run_times`).
-    pub run_times: Vec<(u64, u64)>,
+    /// microseconds, by node (`Report::run_times`, all of them).
+    pub piece_times: Vec<(u64, u64)>,
     /// spec-final §1: where each loop-back round's time went (the
     /// engine's `Report::round_times`), over the evaluations.
     pub round_times: Vec<phitex_defuse::RoundTimes>,
@@ -1895,7 +1895,7 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
-        self.run_times.extend(
+        self.piece_times.extend(
             r.run_times
                 .iter()
                 .map(|(n, t)| (n.raw(), u64::try_from(t.as_micros()).unwrap_or(u64::MAX))),
@@ -5397,10 +5397,10 @@ impl Build {
     /// long one kept, one that ran short dropped.
     fn note_run_times(&mut self, stats: &Stats) {
         self.runtimes_changed = false;
-        if self.opts.long_runs.is_none() || stats.run_times.is_empty() {
+        if self.opts.long_runs.is_none() || stats.piece_times.is_empty() {
             return;
         }
-        let by: phitex_defuse::FxHashMap<u64, u64> = stats.run_times.iter().copied().collect();
+        let by: phitex_defuse::FxHashMap<u64, u64> = stats.piece_times.iter().copied().collect();
         for (_, n, src) in &self.nodes {
             let Some(&us) = by.get(&n.raw()) else {
                 continue;
