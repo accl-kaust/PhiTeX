@@ -904,6 +904,8 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "declare_loopback_with" => eng.declare_loopback_with(de(&g(0)), de(&g(1)), de::<defuse::LoopOptions>(&g(2))),
         "declare_loopbacks" => eng.declare_loopbacks(&de::<Vec<(Field, ValueId)>>(&g(0))),
         "set_loop_start" => eng.set_loop_start(de::<LoopStart>(&g(0))),
+        "set_long_runs" => eng.set_long_runs(de::<Option<std::time::Duration>>(&g(0))),
+        "set_run_time_hint" => eng.set_run_time_hint(de::<NodeId>(&g(0)), de::<std::time::Duration>(&g(1))),
         "set_max_rounds" => eng.set_max_rounds(de(&g(0))),
         "set_limits" => eng.set_limits(de::<Limits>(&g(0))),
         "set_environment" => eng.set_environment(de::<Vec<(Field, ValueId)>>(a)),
@@ -1256,6 +1258,10 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
     let book = Arc::new(book);
     let units = Arc::new(Mutex::new(Vec::new()));
     let mut eng = Engine::new();
+    // PLAY_LONG_MS=n: `Engine::set_long_runs` at n ms.
+    if let Some(ms) = std::env::var("PLAY_LONG_MS").ok().and_then(|s| s.parse::<u64>().ok()) {
+        eng.set_long_runs(Some(std::time::Duration::from_millis(ms)));
+    }
     if argv.iter().any(|a| a == "--no-heights") {
         eng.set_heights(false);
     }
