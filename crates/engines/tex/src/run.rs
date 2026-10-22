@@ -4135,6 +4135,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .chain(self.outer_memo.keys())
             .chain(self.step_memo.keys())
             .chain(self.defined_memo.keys())
+            .chain(self.num_memo.keys())
             .copied()
             .collect();
         let mut fs: Vec<Field> = ls.into_iter().map(|l| self.loc_field(l)).collect();
@@ -5202,6 +5203,7 @@ pub(crate) struct Parked {
     outer_memo: Vec<(Field, bool)>,
     step_memo: Vec<(Field, i64)>,
     defined_memo: Vec<(Field, bool)>,
+    num_memo: Vec<(Field, bool)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -5365,6 +5367,10 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|(l, d)| (self.loc_field(l), d))
                 .collect(),
+            num_memo: std::mem::take(&mut self.num_memo)
+                .into_iter()
+                .map(|(l, d)| (self.loc_field(l), d))
+                .collect(),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -5491,6 +5497,11 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         r.defined_memo = p
             .defined_memo
+            .into_iter()
+            .map(|(f, d)| (r.loc_of(f), d))
+            .collect();
+        r.num_memo = p
+            .num_memo
             .into_iter()
             .map(|(f, d)| (r.loc_of(f), d))
             .collect();
