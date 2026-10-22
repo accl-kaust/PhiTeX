@@ -536,6 +536,37 @@ impl Core {
                 (Some(a), Some(b)) => Some(v.int(a.cmp(&b) as i64)),
                 _ => None,
             },
+            Step::Indices(ix) => {
+                let ix: Vec<ValueId> = v.with(ix, |val| match val {
+                    Value::List(l) => l.to_vec(),
+                    _ => Vec::new(),
+                });
+                let mut out = Vec::with_capacity(ix.len() + 1);
+                out.push(ValueId::UNIT);
+                for i in ix {
+                    let Some(y) = v.as_int(i).and_then(|i| u32::try_from(i).ok()).and_then(|i| self.step(Step::Index(i), x)) else { break };
+                    out.push(y);
+                }
+                #[allow(clippy::cast_possible_wrap)]
+                let n = v.int((out.len() - 1) as i64);
+                out[0] = n;
+                Some(v.list(out))
+            }
+            Step::Keys(ks) => {
+                let ks: Vec<ValueId> = v.with(ks, |val| match val {
+                    Value::List(l) => l.to_vec(),
+                    _ => Vec::new(),
+                });
+                let mut has = Vec::with_capacity(ks.len());
+                let mut out = vec![ValueId::UNIT];
+                for k in ks {
+                    let y = key(k);
+                    has.push(v.bool(y.is_some()));
+                    out.extend(y);
+                }
+                out[0] = v.list(has);
+                Some(v.list(out))
+            }
             Step::Each(p) => v
                 .with(x, |val| match val {
                     Value::List(l) => Some(Err(l.to_vec())),

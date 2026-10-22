@@ -3898,6 +3898,7 @@ fn run_job(
     cx.fuel = fuel;
     let op = core.ops[cx.op.0 as usize].clone();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
+    cx.flush_gets();
     if cx.named_gone && r.as_ref().is_ok() {
         drop(cx);
         return run_job(core, w, id, None, predict, careful, fuel);
