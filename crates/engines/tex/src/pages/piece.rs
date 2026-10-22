@@ -1049,9 +1049,8 @@ impl Run<'_, '_> {
         // close the piece made after the candidate came after them)
         read.extend(self.streams_since(0).into_iter().map(|f| f.0));
         let mut why = None;
-        for xs in list_of(v, reads).chunks_exact(2) {
-            if let [f, x] = xs[..]
-                && let Some(&(_, y)) = gdefs.iter().find(|(g, _)| *g == f)
+        for &[f, x] in list_of(v, reads).as_chunks::<2>().0 {
+            if let Some(&(_, y)) = gdefs.iter().find(|(g, _)| *g == f)
                 && y != x
             {
                 why = Some(format!("changed {}", str_of(v, f)));
@@ -1763,7 +1762,9 @@ pub(crate) fn names_at(v: &Values, data: ValueId, k: u32) -> (ValueId, bool) {
         return (ValueId::UNIT, false);
     };
     let names = list_of(v, stretches)
-        .chunks_exact(5)
+        .as_chunks::<5>()
+        .0
+        .iter()
         .filter(|s| int_of(v, s[3]) <= k && k < int_of(v, s[4]))
         .map(|s| v.list(s[..3].to_vec()))
         .collect();
