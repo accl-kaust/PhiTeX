@@ -2068,7 +2068,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// (where a following region's walk may park), or any read that
     /// parked, with the node and its operation.
     #[cold]
-    fn trace_read(&mut self, f: Field, parked: bool) {
+    pub(crate) fn trace_read(&mut self, f: Field, parked: bool) {
         const HEADS: [&str; 6] = [
             "pg:",
             "parshape",
