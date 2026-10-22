@@ -422,12 +422,11 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
     let mut b = decode_box_head(v, xs);
     b.list = xs.get(9).map_or_else(Vec::new, |&l| {
         let before = crate::exec::obs_flag!("PHITEX_MADE_CHECK").then(|| side.clone());
-        match take_made(l, side) {
-            Some(m) => checked_made(v, l, m, before, side),
-            None => {
-                made_stat(4);
-                decode_list(v, l, side)
-            }
+        if let Some(m) = take_made(l, side) {
+            checked_made(v, l, m, before, side)
+        } else {
+            made_stat(4);
+            decode_list(v, l, side)
         }
     });
     b
