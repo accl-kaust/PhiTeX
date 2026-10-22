@@ -88,21 +88,53 @@ pub(crate) fn run_node_parking(
     } else {
         None
     };
-    let parked = if parks { cx.parked() } else { None };
-    let mut r = match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
-        Some(Ok(p)) => match Run::from_parked(cx, o, *p) {
-            Ok(r) => r,
-            Err(cx) => {
+    // (marks, `Run::take_mark`: an exec or a finisher run that parks and
+    // is not speculative; one resumed at a mark of its last run starts
+    // from that mark's state)
+    let marks_ok = parks && (cx.op() == o.exec || cx.op() == o.finish) && !cx.is_speculative();
+    let resumed_at = if marks_ok { cx.resumed() } else { None };
+    let mut r = if let Some((tok, k)) = resumed_at {
+        match tok.downcast::<crate::run::KeptMarks>() {
+            Ok(km) if (k as usize) < km.snaps.len() => {
+                let (p, h) = km.snaps[k as usize].clone();
+                match Run::from_parked(cx, o, (*p).clone()) {
+                    Ok(mut r) => {
+                        r.mark_snaps = km.snaps[..=k as usize].to_vec();
+                        // (the mark again: the engine keeps the marks
+                        // before it; the run is never cut off at its own)
+                        let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
+                        let _ = r.cx.checkpoint(k, state);
+                        r
+                    }
+                    Err(cx) => {
+                        cx.restart();
+                        Run::new(cx, o)
+                    }
+                }
+            }
+            _ => {
                 cx.restart();
                 Run::new(cx, o)
             }
-        },
-        Some(Err(_)) => {
-            cx.restart();
-            Run::new(cx, o)
         }
-        None => Run::new(cx, o),
+    } else {
+        let parked = if parks { cx.parked() } else { None };
+        match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
+            Some(Ok(p)) => match Run::from_parked(cx, o, *p) {
+                Ok(r) => r,
+                Err(cx) => {
+                    cx.restart();
+                    Run::new(cx, o)
+                }
+            },
+            Some(Err(_)) => {
+                cx.restart();
+                Run::new(cx, o)
+            }
+            None => Run::new(cx, o),
+        }
     };
+    r.marks_on = marks_ok;
     let t_body = std::time::Instant::now();
     let mut res = body(&mut r);
     // (a second pass from the start, ending at the candidate the first
@@ -112,6 +144,8 @@ pub(crate) fn run_node_parking(
         cx.restart();
         r = Run::new(cx, o);
         r.stop_at = Some(k);
+        // (a second pass to a candidate takes no marks)
+        r.marks_on = false;
         res = body(&mut r);
     }
     // the run's end on the page (`crate::pages`): its items folded into
@@ -202,6 +236,12 @@ pub(crate) fn run_node_parking(
             {
                 return Err(s);
             }
+            // (the marks kept with the result: a later run resumes at one)
+            if !r.mark_snaps.is_empty() {
+                let snaps = std::mem::take(&mut r.mark_snaps);
+                r.cx
+                    .keep_after(std::sync::Arc::new(crate::run::KeptMarks { snaps }));
+            }
             let t = std::time::Instant::now();
             let tf = pp.and_then(|_| crate::prof::start());
             let x = r.finish();
@@ -219,6 +259,8 @@ pub(crate) fn run_node_parking(
             }
             Ok(x)
         }
+        // (cut off at a mark: the last run's result stands, nothing kept)
+        Err(Halt::Stop(s)) if r.cut_off => Err(s),
         Err(Halt::Stop(s)) => {
             if parks
                 && !r.cx.is_speculative()

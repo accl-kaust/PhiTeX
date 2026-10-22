@@ -1970,16 +1970,19 @@ impl State {
 
 /// A location of a parked table: a fixed one or a meaning's (stable for
 /// the process), or a spill one by its field.
+#[derive(Clone)]
 enum PLoc {
     Fixed(Loc),
     Spill(Field),
 }
 
+#[derive(Clone)]
 struct PEntry {
     id: Option<ValueId>,
     flags: u8,
 }
 
+#[derive(Clone)]
 struct PMeta {
     // None: not read; Some(None): read, undefined in the engine
     #[allow(clippy::option_option)]
@@ -1990,6 +1993,7 @@ struct PMeta {
     ldef_gid: Option<u32>,
 }
 
+#[derive(Clone)]
 struct PSlot {
     loc: PLoc,
     e: PEntry,
@@ -1999,6 +2003,7 @@ struct PSlot {
     meta: Option<PMeta>,
 }
 
+#[derive(Clone)]
 struct PSaved {
     loc: PLoc,
     prev: PEntry,
@@ -2009,6 +2014,7 @@ struct PSaved {
 }
 
 /// A run's table, parked ([`State::park`]).
+#[derive(Clone)]
 pub(crate) struct PState {
     cands: Vec<(u64, Vec<(PLoc, PEntry)>)>,
     cont_locs: Vec<PLoc>,
@@ -2024,6 +2030,61 @@ pub(crate) struct PState {
     kinds: Option<Vec<(PLoc, bool)>>,
     stamp: u64,
     next_gid: u32,
+}
+
+impl PLoc {
+    fn word(&self) -> u64 {
+        match self {
+            PLoc::Fixed(l) => u64::from(*l),
+            PLoc::Spill(f) => f.0.raw() ^ (1 << 63),
+        }
+    }
+}
+
+impl PState {
+    /// A digest of the table: equal for equal tables, the slots summed
+    /// (their order, the run's, left out), the rest in order.
+    pub(crate) fn digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
+        let mut sum: u64 = 0;
+        for s in &self.slots {
+            let mut h = phitex_defuse::FxHasher::default();
+            (s.loc.word(), ent(&s.e), s.save_gid, s.save_stamp, s.ginert).hash(&mut h);
+            if let Some(m) = &s.meta {
+                (
+                    m.eng.map(|x| x.map(ValueId::raw)),
+                    m.publ.map(|(x, l)| (x.map(ValueId::raw), format!("{l:?}"))),
+                    m.ldef_stamp,
+                    m.ldef_local,
+                    m.ldef_gid,
+                )
+                    .hash(&mut h);
+            }
+            sum = sum.wrapping_add(h.finish());
+        }
+        let mut h = phitex_defuse::FxHasher::default();
+        sum.hash(&mut h);
+        for s in &self.save {
+            (s.loc.word(), ent(&s.prev), s.gid, s.stamp, s.at, s.ldef).hash(&mut h);
+        }
+        for l in self.defined.iter().chain(&self.base_defs).chain(&self.cont_locs) {
+            l.word().hash(&mut h);
+        }
+        for (st, xs) in &self.cands {
+            st.hash(&mut h);
+            for (l, e) in xs {
+                (l.word(), ent(e)).hash(&mut h);
+            }
+        }
+        if let Some(k) = &self.kinds {
+            for (l, a) in k {
+                (l.word(), a).hash(&mut h);
+            }
+        }
+        (self.pp_dirty, self.stamp, self.next_gid).hash(&mut h);
+        h.finish()
+    }
 }
 
 /// An entry as a definition stores it: loaded, its engine value and

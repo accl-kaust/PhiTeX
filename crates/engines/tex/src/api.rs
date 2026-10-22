@@ -2999,6 +2999,10 @@ impl Graph {
                     r.cutoffs
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
+                eprintln!(
+                    "acct-edit: marks: runs resumed at a mark {}, cut off at a later mark {}",
+                    r.resumed_at_mark, r.cut_in_run
+                );
                 if let Some(a) = &r.audit {
                     print_audit(&self.eng, a);
                 }

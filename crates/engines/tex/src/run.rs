@@ -661,6 +661,18 @@ pub(crate) struct Run<'c, 'a> {
     pub rt_rels: i64,
     /// Whether this run continues a parked attempt ([`Run::from_parked`]).
     pub resumed: bool,
+    /// The marks this run took ([`Run::take_mark`]): each one's state as a
+    /// parked run's, and its digest; the ones before the mark a resumed
+    /// run began at are its last run's ([`phitex_defuse::Ctx::resumed`]).
+    pub mark_snaps: Vec<(std::sync::Arc<Parked>, u64)>,
+    /// The commands run when the last mark was taken.
+    pub mark_cmds: u64,
+    /// Whether this run takes marks (an exec or a finisher run that is
+    /// not speculative).
+    pub marks_on: bool,
+    /// The engine cut the run off at a mark: its last run's result stands
+    /// ([`phitex_defuse::Ctx::checkpoint`]).
+    pub cut_off: bool,
     /// Changes to the run's state a stopped command cannot undo (own
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
@@ -919,6 +931,10 @@ impl<'c, 'a> Run<'c, 'a> {
             rt_cells: 0,
             rt_rels: 0,
             resumed: false,
+            mark_snaps: Vec::new(),
+            mark_cmds: 0,
+            marks_on: false,
+            cut_off: false,
             muts: 0,
             interp: None,
             interp_short: false,
@@ -4261,6 +4277,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 if self.input.arena.len() > self.input.compact_at.max(crate::input::ARENA_COMPACT) {
                     self.input.compact();
                 }
+                self.take_mark()?;
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
@@ -5022,6 +5039,7 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
 // ------------------------------------------------------------- parking
 
 /// A [`crate::nest::Level`] without `Rc`.
+#[derive(Clone)]
 struct PLevel {
     mode: i32,
     group: i64,
@@ -5066,6 +5084,7 @@ pub(crate) struct Seeded {
 /// abandoned ([`Run::rewind`]): every owned field of [`Run`] but the
 /// caches, which the resumed run rebuilds ([`phitex_defuse::Ctx::park`]).
 #[allow(clippy::struct_excessive_bools)]
+#[derive(Clone)]
 pub(crate) struct Parked {
     /// The values' epoch the ids below belong to.
     epoch: u64,
@@ -5306,6 +5325,305 @@ impl Run<'_, '_> {
             fin: self.fin.take(),
         })
     }
+}
+
+/// A run's marks, kept with its result ([`phitex_defuse::Ctx::keep_after`]):
+/// each mark's state as a parked run's, and its digest. A later run of
+/// the node resumed at mark `k` ([`phitex_defuse::Ctx::resumed`]) starts
+/// from `snaps[k]`.
+pub(crate) struct KeptMarks {
+    pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
+}
+
+/// The commands between two marks of a run ([`Run::take_mark`]):
+/// `PHITEX_MARK_EVERY` (observe), else this.
+pub(crate) const MARK_EVERY: u64 = 500;
+
+fn mark_every() -> u64 {
+    crate::exec::obs_str!("PHITEX_MARK_EVERY")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(MARK_EVERY)
+}
+
+impl Run<'_, '_> {
+    /// Takes a mark between commands, every [`MARK_EVERY`] commands: the
+    /// run's state as a parked run's ([`Run::snapshot`]) and its digest,
+    /// given to the engine ([`phitex_defuse::Ctx::checkpoint`]). `Err`
+    /// when the engine cuts the run off there: its last run's result
+    /// stands.
+    pub(crate) fn take_mark(&mut self) -> R<()> {
+        if !self.marks_on || self.cmds < self.mark_cmds + mark_every() || self.mark.active {
+            return Ok(());
+        }
+        self.mark_cmds = self.cmds;
+        let p = self.snapshot();
+        let h = parked_digest(&p);
+        let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
+        self.mark_snaps.push((std::sync::Arc::new(p), h));
+        let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
+        if let Err(s) = self.cx.checkpoint(k, state) {
+            self.cut_off = true;
+            return Err(Halt::Stop(s));
+        }
+        Ok(())
+    }
+
+    /// The run's state between two commands, as [`Run::park`] gives it but
+    /// copied: the run goes on.
+    #[allow(clippy::too_many_lines, reason = "one state field a line")]
+    pub(crate) fn snapshot(&mut self) -> Parked {
+        let v = self.v;
+        // (the native items of the lists made values, kept so: the
+        // snapshot's lists are values)
+        for l in &mut self.nest {
+            for it in &mut l.list {
+                it.value(v);
+            }
+        }
+        let mut segs = Vec::new();
+        let input = &self.input;
+        for l in input.levels.iter().rev() {
+            match l.kind {
+                crate::input::kind::TOKS => {
+                    segs.push(Seg::Toks(input.arena.get(l.rest()).to_vec()));
+                }
+                crate::input::kind::LINE => segs.push(Seg::Line(input.line(*l).clone())),
+                _ => segs.push(Seg::File(input.file(*l).clone())),
+            }
+        }
+        let nlev = input.levels.len();
+        let last = self.pull_at.len().wrapping_sub(1);
+        let mut pull_at = Vec::with_capacity(self.pull_at.len());
+        let mut pull_orig = Vec::with_capacity(self.pull_at.len());
+        for (i, p) in self.pull_at.iter().enumerate() {
+            let (at, orig) = match *p {
+                Some(at) if at >= input.text_at => (Some(nlev + at - input.text_at), None),
+                Some(at) if i == last && at + 1 == input.text_at => {
+                    match (self.pull_lev, &input.text[at]) {
+                        (Some(j), Seg::Line(orig))
+                            if j + 1 < nlev
+                                && input.levels[j].kind == crate::input::kind::LINE
+                                && input.levels[j + 1].kind == crate::input::kind::TOKS
+                                && input.levels[j + 1].ty == crate::input::ty::BACKED_UP
+                                && input.levels[j + 1].b - input.levels[j + 1].a == 1 =>
+                        {
+                            (Some(nlev - 2 - j), Some(orig.clone()))
+                        }
+                        _ => (None, None),
+                    }
+                }
+                _ => (None, None),
+            };
+            pull_at.push(at);
+            pull_orig.push(orig);
+        }
+        let nlev_all = nlev + self.parked_levels.saturating_sub(input.text_at);
+        segs.extend(input.text_rest().iter().cloned());
+        let nest = self
+            .nest
+            .iter()
+            .map(|l| PLevel {
+                mode: l.mode,
+                group: l.group,
+                lid: l.lid,
+                owns: l.owns,
+                list: l.list.clone(),
+                fold: l.fold,
+                par: l.par,
+                prev_graf: l.prev_graf,
+                extra: l.extra.clone(),
+                gid: l.gid,
+                save_base: l.save_base,
+                def_base: l.def_base,
+                open_stamp: l.open_stamp,
+                ag: l.ag.clone(),
+            })
+            .collect();
+        let fields = |r: &Self, xs: &[Loc]| -> Vec<Field> { xs.iter().map(|&l| r.loc_field(l)).collect() };
+        let skip_first = fields(self, &self.skip_first);
+        let reg_pending = self
+            .reg_pending
+            .iter()
+            .map(|&(l, m)| (self.loc_field(l), m))
+            .collect();
+        let class_memo = self.class_memo.iter().map(|&(l, c)| (self.loc_field(l), c)).collect();
+        let outer_memo = self.outer_memo.iter().map(|&(l, o)| (self.loc_field(l), o)).collect();
+        let step_memo = self.step_memo.iter().map(|&(l, k)| (self.loc_field(l), k)).collect();
+        let defined_memo = self
+            .defined_memo
+            .iter()
+            .map(|&(l, d)| (self.loc_field(l), d))
+            .collect();
+        let pending_pre = self
+            .pending_pre
+            .iter()
+            .map(|&(l, x)| (self.loc_field(l), x))
+            .collect();
+        Parked {
+            epoch: self.cx.values_epoch(),
+            segs,
+            nlev: nlev_all,
+            pulled: self.pulled,
+            pull_at,
+            pull_orig,
+            pull_box: self.pull_box.clone(),
+            top: self.top,
+            claim_rest: self.claim_rest,
+            hint_void: self.hint_void,
+            nest,
+            next_lid: self.next_lid,
+            last_par: self.last_par,
+            doc: self.doc,
+            fread: self.fread.clone(),
+            fmiss: self.fmiss.clone(),
+            skip_first,
+            reg_pending,
+            incs: self.incs.clone(),
+            closed: self.closed.clone(),
+            error_count: self.error_count,
+            class_memo,
+            outer_memo,
+            step_memo,
+            defined_memo,
+            rec_load: self.rec_load,
+            no_pull: self.no_pull,
+            st: self.st.park(v),
+            contribs: self.contribs.clone(),
+            kids: self.kids.clone(),
+            effect: self.effect,
+            conds: self.conds.clone(),
+            if_codes: self.if_codes.clone(),
+            cond_loaded: self.cond_loaded,
+            cond_stop: self.cond_stop,
+            astate: self.astate,
+            aopen: self.aopen,
+            lines_entered: self.lines_entered,
+            lines_read: self.lines_read,
+            doc_lines: self.doc_lines.clone(),
+            eof: self.eof,
+            radix: self.radix,
+            cur_order: self.cur_order,
+            pdf_occ: self.pdf_occ,
+            rt_made: self.rt_made,
+            rt_cells: self.rt_cells,
+            rt_rels: self.rt_rels,
+            muts: self.muts,
+            read_back_done: self.read_back_done,
+            read_back_at: self.read_back_at,
+            read_point_here: self.read_point_here,
+            text_written: self.text_written.clone(),
+            seeded: self.seeded.clone(),
+            cont_lines: self.cont_lines.clone(),
+            read_point_pending: self.read_point_pending.clone(),
+            pending_pre,
+            cand: self.cand,
+            cand_marks: self.cand_marks.clone(),
+            ins_pending: self.ins_pending.clone(),
+            fin: self.fin.clone(),
+        }
+    }
+}
+
+/// A digest of a run's state at a mark ([`Run::take_mark`]): equal for
+/// equal states. Not of what the run gave the engine so far (its
+/// contributions and children): the engine compares those itself.
+fn parked_digest(p: &Parked) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = phitex_defuse::FxHasher::default();
+    let w = |h: &mut phitex_defuse::FxHasher, x: u64| x.hash(h);
+    let line = |h: &mut phitex_defuse::FxHasher, l: &crate::input::Line| {
+        l.buf.hash(h);
+        (l.loc, l.state, l.endch, l.starts, l.ends, l.lineno, l.rescanned).hash(h);
+        l.origin.map(|(x, o)| (x.raw(), o)).hash(h);
+    };
+    w(&mut h, p.segs.len() as u64);
+    for s in &p.segs {
+        match s {
+            Seg::Line(l) => {
+                w(&mut h, 1);
+                line(&mut h, l);
+            }
+            Seg::Toks(t) => {
+                w(&mut h, 2);
+                w(&mut h, t.len() as u64);
+                for x in t {
+                    w(&mut h, u64::from(x.raw()));
+                }
+            }
+            Seg::File(f) => {
+                w(&mut h, 3);
+                (f.id.raw(), f.off, f.name.raw(), f.line).hash(&mut h);
+            }
+        }
+    }
+    (p.nlev, p.pulled, &p.pull_box, p.top, p.claim_rest, p.hint_void).hash(&mut h);
+    for (a, o) in p.pull_at.iter().zip(&p.pull_orig) {
+        a.hash(&mut h);
+        if let Some(l) = o {
+            line(&mut h, l);
+        }
+    }
+    w(&mut h, p.nest.len() as u64);
+    for l in &p.nest {
+        (l.mode, l.group, l.lid, l.owns, l.par, l.prev_graf, l.gid, l.save_base, l.def_base, l.open_stamp).hash(&mut h);
+        format!("{:?}", l.fold).hash(&mut h);
+        w(&mut h, l.list.len() as u64);
+        for it in &l.list {
+            match it {
+                crate::nest::Item::V(x) => w(&mut h, x.raw()),
+                crate::nest::Item::N(n) => format!("{n:?}").hash(&mut h),
+            }
+        }
+        for x in &l.extra {
+            w(&mut h, x.raw());
+        }
+        for t in &l.ag {
+            w(&mut h, u64::from(t.raw()));
+        }
+    }
+    (p.next_lid, p.last_par, p.doc, &p.fread, &p.fmiss, p.error_count).hash(&mut h);
+    for f in &p.skip_first {
+        w(&mut h, f.0.raw());
+    }
+    for (f, m) in &p.reg_pending {
+        w(&mut h, f.0.raw());
+        format!("{m:?}").hash(&mut h);
+    }
+    for (k, x) in &p.incs {
+        (k, x.raw()).hash(&mut h);
+    }
+    p.closed.hash(&mut h);
+    for (f, c) in &p.class_memo {
+        (f.0.raw(), c).hash(&mut h);
+    }
+    for (f, c) in &p.outer_memo {
+        (f.0.raw(), c).hash(&mut h);
+    }
+    for (f, c) in &p.step_memo {
+        (f.0.raw(), c).hash(&mut h);
+    }
+    for (f, c) in &p.defined_memo {
+        (f.0.raw(), c).hash(&mut h);
+    }
+    (p.rec_load, p.no_pull).hash(&mut h);
+    w(&mut h, p.st.digest());
+    format!("{:?}", p.effect).hash(&mut h);
+    (&p.conds, &p.if_codes, p.cond_loaded, p.cond_stop, p.astate, p.aopen).hash(&mut h);
+    (p.lines_entered, p.lines_read, p.eof, p.radix, p.pdf_occ, p.rt_made, p.rt_cells, p.rt_rels, p.muts).hash(&mut h);
+    format!("{:?}", p.cur_order).hash(&mut h);
+    for (x, n) in &p.doc_lines {
+        (x.raw(), n).hash(&mut h);
+    }
+    (p.read_back_done, p.read_point_here, &p.text_written, &p.read_point_pending).hash(&mut h);
+    p.read_back_at.map(|l| (l.kind, l.ty, l.a, l.b, l.c)).hash(&mut h);
+    w(&mut h, p.seeded.len() as u64);
+    w(&mut h, p.cont_lines.len() as u64);
+    for (f, x) in &p.pending_pre {
+        (f.0.raw(), x.raw()).hash(&mut h);
+    }
+    (p.cand, &p.ins_pending).hash(&mut h);
+    format!("{:?}{:?}", p.cand_marks, p.fin).hash(&mut h);
+    h.finish()
 }
 
 impl<'c, 'a> Run<'c, 'a> {
