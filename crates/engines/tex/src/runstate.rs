@@ -2072,32 +2072,121 @@ impl PLoc {
             PLoc::Spill(f) => f.0.raw() ^ (1 << 63),
         }
     }
+
+    fn key(&self) -> PLocKey {
+        match self {
+            PLoc::Fixed(l) => PLocKey::Fixed(*l),
+            PLoc::Spill(f) => PLocKey::Spill(*f),
+        }
+    }
+}
+
+/// A parked table's location as a caller names it: a fixed location, or
+/// a spill one by its field.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PLocKey {
+    Fixed(Loc),
+    Spill(Field),
 }
 
 impl PState {
+    /// A slot's part of [`PState::slot_sum`].
+    fn slot_hash(s: &PSlot) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
+        let mut h = phitex_defuse::FxHasher::default();
+        (s.loc.word(), ent(&s.e), s.save_gid, s.save_stamp, s.ginert).hash(&mut h);
+        if let Some(m) = &s.meta {
+            (
+                m.eng.map(|x| x.map(ValueId::raw)),
+                m.publ.map(|(x, l)| (x.map(ValueId::raw), format!("{l:?}"))),
+                m.ldef_stamp,
+                m.ldef_local,
+                m.ldef_gid,
+            )
+                .hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// The slots' digests summed: their order, the run's, left out.
+    pub(crate) fn slot_sum(&self) -> u64 {
+        self.slots
+            .iter()
+            .fold(0u64, |a, s| a.wrapping_add(Self::slot_hash(s)))
+    }
+
+    /// The slots that differ from `old`'s only in their value (and the
+    /// value their definition publishes), each as (location, the old
+    /// value, the new value, the old and new values published at the
+    /// base level, the value read from the engine); `None` if another
+    /// slot differs otherwise, or one is in only one of the tables.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn value_diff(
+        &self,
+        old: &PState,
+    ) -> Option<Vec<(PLocKey, Option<ValueId>, Option<ValueId>, Option<Option<ValueId>>, Option<Option<ValueId>>, Option<Option<ValueId>>)>> {
+        if self.slots.len() != old.slots.len() {
+            return None;
+        }
+        let by: FxHashMap<u64, &PSlot> = old.slots.iter().map(|s| (s.loc.word(), s)).collect();
+        // (a slot a group saved: what a scope publishes of it may be the
+        // saved value, not its own; not patched)
+        let saved: phitex_defuse::FxHashSet<u64> = old.save.iter().map(|x| x.loc.word()).collect();
+        let mut out = Vec::new();
+        for s in &self.slots {
+            let o = by.get(&s.loc.word())?;
+            if Self::slot_hash(s) == Self::slot_hash(o) {
+                continue;
+            }
+            if saved.contains(&s.loc.word()) {
+                return None;
+            }
+            let same_shape = s.e.flags == o.e.flags
+                && s.save_gid == o.save_gid
+                && s.save_stamp == o.save_stamp
+                && s.ginert == o.ginert
+                && match (&s.meta, &o.meta) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => {
+                        a.eng == b.eng
+                            && a.ldef_stamp == b.ldef_stamp
+                            && a.ldef_local == b.ldef_local
+                            && a.ldef_gid == b.ldef_gid
+                            && a.publ.map(|x| x.1) == b.publ.map(|x| x.1)
+                    }
+                    _ => false,
+                };
+            if !same_shape {
+                return None;
+            }
+            out.push((
+                s.loc.key(),
+                o.e.id,
+                s.e.id,
+                o.meta.as_ref().and_then(|m| m.publ.map(|x| x.0)),
+                s.meta.as_ref().and_then(|m| m.publ.map(|x| x.0)),
+                s.meta.as_ref().and_then(|m| m.eng),
+            ));
+        }
+        Some(out)
+    }
+
     /// A digest of the table: equal for equal tables, the slots summed
     /// (their order, the run's, left out), the rest in order.
     pub(crate) fn digest(&self) -> u64 {
         use std::hash::{Hash, Hasher};
-        let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
-        let mut sum: u64 = 0;
-        for s in &self.slots {
-            let mut h = phitex_defuse::FxHasher::default();
-            (s.loc.word(), ent(&s.e), s.save_gid, s.save_stamp, s.ginert).hash(&mut h);
-            if let Some(m) = &s.meta {
-                (
-                    m.eng.map(|x| x.map(ValueId::raw)),
-                    m.publ.map(|(x, l)| (x.map(ValueId::raw), format!("{l:?}"))),
-                    m.ldef_stamp,
-                    m.ldef_local,
-                    m.ldef_gid,
-                )
-                    .hash(&mut h);
-            }
-            sum = sum.wrapping_add(h.finish());
-        }
         let mut h = phitex_defuse::FxHasher::default();
-        sum.hash(&mut h);
+        self.slot_sum().hash(&mut h);
+        self.rest_hash().hash(&mut h);
+        h.finish()
+    }
+
+    /// [`PState::digest`] but for the slots.
+    pub(crate) fn rest_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
+        let mut h = phitex_defuse::FxHasher::default();
         for s in &self.save {
             (s.loc.word(), ent(&s.prev), s.gid, s.stamp, s.at, s.ldef).hash(&mut h);
         }
@@ -2111,9 +2200,14 @@ impl PState {
             }
         }
         if let Some(k) = &self.kinds {
+            // (summed: the map's order is its insertions')
+            let mut sum: u64 = 0;
             for (l, a) in k {
-                (l.word(), a).hash(&mut h);
+                let mut e = phitex_defuse::FxHasher::default();
+                (l.word(), a).hash(&mut e);
+                sum = sum.wrapping_add(e.finish());
             }
+            sum.hash(&mut h);
         }
         (self.pp_dirty, self.stamp, self.next_gid).hash(&mut h);
         h.finish()

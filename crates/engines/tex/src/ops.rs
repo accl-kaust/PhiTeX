@@ -101,6 +101,7 @@ pub(crate) fn run_node_parking(
                     Ok(mut r) => {
                         r.mark_snaps = km.snaps[..=k as usize].to_vec();
                         r.st.cur_mark = k + 1;
+                        r.old_marks = Some(km.clone());
                         // (the mark again: the engine keeps the marks
                         // before it; the run is never cut off at its own)
                         let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
@@ -248,8 +249,17 @@ pub(crate) fn run_node_parking(
                 let mut last: Vec<(phitex_defuse::Field, u32)> =
                     acc.into_iter().map(|(l, m)| (r.loc_field(l), m)).collect();
                 last.sort_unstable_by_key(|x| x.0.0.raw());
-                r.cx
-                    .keep_after(std::sync::Arc::new(crate::run::KeptMarks { snaps, last }));
+                let pubd = r.st.published(r.v, r.rec_load);
+                let mut defs: Vec<(phitex_defuse::Field, Locality, ValueId)> = pubd
+                    .into_iter()
+                    .map(|(l, x, loc)| (r.loc_field(l), loc, x))
+                    .collect();
+                defs.sort_by_key(|x| x.0.0.raw());
+                r.cx.keep_after(std::sync::Arc::new(crate::run::KeptMarks {
+                    snaps,
+                    defs,
+                    last,
+                }));
             }
             let t = std::time::Instant::now();
             let tf = pp.and_then(|_| crate::prof::start());

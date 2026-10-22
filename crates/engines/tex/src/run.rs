@@ -667,6 +667,9 @@ pub(crate) struct Run<'c, 'a> {
     pub mark_snaps: Vec<(std::sync::Arc<Parked>, u64)>,
     /// The commands run when the last mark was taken.
     pub mark_cmds: u64,
+    /// The marks of the run this one resumed from ([`Run::take_mark`]'s
+    /// patched cutoff compares its marks with theirs).
+    pub old_marks: Option<std::sync::Arc<KeptMarks>>,
     /// Whether this run takes marks (an exec or a finisher run that is
     /// not speculative).
     pub marks_on: bool,
@@ -933,6 +936,7 @@ impl<'c, 'a> Run<'c, 'a> {
             resumed: false,
             mark_snaps: Vec::new(),
             mark_cmds: 0,
+            old_marks: None,
             marks_on: false,
             cut_off: false,
             muts: 0,
@@ -5339,6 +5343,9 @@ impl Run<'_, '_> {
 /// from `snaps[k]`.
 pub(crate) struct KeptMarks {
     pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
+    /// The definitions its table published at its end
+    /// ([`crate::runstate::State::published`]), by field.
+    pub defs: Vec<(Field, Locality, ValueId)>,
     /// Each field a command of the run accessed after its first mark,
     /// with the latest mark it accessed it after (numbered from 1:
     /// after `snaps[m - 1]`), by field.
@@ -5387,11 +5394,92 @@ impl Run<'_, '_> {
         // from 1)
         self.st.cur_mark = k + 1;
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
-        if let Err(s) = self.cx.checkpoint(k, state) {
+        // (the last run's mark here differs from this one in a few slots'
+        // values only, which that run never touched after it: a cutoff
+        // with those definitions patched, `Ctx::checkpoint_patched`)
+        let patched = self.patch_at(k as usize);
+        let r = match patched {
+            Some((as_old, patch)) => {
+                let as_old = self.v.int(i64::from_ne_bytes(as_old.to_ne_bytes()) >> 4);
+                self.cx.checkpoint_patched(k, state, as_old, &patch)
+            }
+            None => self.cx.checkpoint(k, state),
+        };
+        if let Err(s) = r {
             self.cut_off = true;
             return Err(Halt::Stop(s));
         }
         Ok(())
+    }
+
+    /// The patch of a cutoff at mark `k` ([`Run::take_mark`]): the last
+    /// run's state there as this one's (its digest), and the definitions
+    /// this run's result makes otherwise. `None` where the states differ
+    /// otherwise than in a few slots' values, or the last run touched one
+    /// of those slots after its mark there, or its result's definition of
+    /// one is not that slot's value.
+    #[allow(clippy::type_complexity)]
+    fn patch_at(
+        &mut self,
+        k: usize,
+    ) -> Option<(u64, Vec<(Field, Locality, Option<ValueId>)>)> {
+        let old = self.old_marks.clone()?;
+        let (op, oh) = old.snaps.get(k)?;
+        let (np, nh) = self.mark_snaps.get(k)?.clone();
+        if *oh == nh || parked_rest(op) != parked_rest(&np) {
+            return None;
+        }
+        let diff = np.st.value_diff(&op.st)?;
+        if diff.is_empty() || diff.len() > 16 {
+            return None;
+        }
+        let mut patch = Vec::new();
+        for (key, oval, nval, opub, npub, eng) in diff {
+            let f = match key {
+                crate::runstate::PLocKey::Spill(f) => f,
+                // (`\afterassignment`'s token: published by a rule of its
+                // own, `unchanged_transient`)
+                crate::runstate::PLocKey::Fixed(l) if l == crate::fields::cell::AFTERTOKEN => {
+                    return None;
+                }
+                crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
+            };
+            // (never touched by the last run after its mark here)
+            let last = old
+                .last
+                .binary_search_by_key(&f.0.raw(), |x| x.0.0.raw())
+                .ok()
+                .map_or(0, |i| old.last[i].1);
+            if last as usize > k {
+                return None;
+            }
+            // (its definitions of the field: each the slot's value or its
+            // base level's, then this run's)
+            let i = old.defs.partition_point(|x| x.0.0.raw() < f.0.raw());
+            let mut any = false;
+            for &(g, l, x) in old.defs[i..].iter().take_while(|x| x.0 == f) {
+                any = true;
+                let y = if Some(x) == oval {
+                    nval
+                } else if Some(Some(x)) == opub {
+                    npub.flatten()
+                } else {
+                    return None;
+                };
+                // (a base level's definition equal to the value read is
+                // none, [`crate::runstate::State::published`]; a scope's
+                // stands)
+                let y = y.filter(|&y| {
+                    matches!(l, Locality::ScopeAt(_))
+                        || !((self.rec_load || l != Locality::Global) && eng == Some(Some(y)))
+                });
+                patch.push((g, l, y));
+            }
+            if !any {
+                return None;
+            }
+        }
+        Some((*oh, patch))
     }
 
     /// The run's state between two commands, as [`Run::park`] gives it but
@@ -5557,6 +5645,17 @@ impl Run<'_, '_> {
 /// equal states. Not of what the run gave the engine so far (its
 /// contributions and children): the engine compares those itself.
 fn parked_digest(p: &Parked) -> u64 {
+    parked_digest_with(parked_rest(p), p.st.slot_sum())
+}
+
+/// [`parked_digest`] from its two parts: the state but the table's slots
+/// ([`parked_rest`]) and the slots' sum ([`crate::runstate::PState::slot_sum`]).
+fn parked_digest_with(rest: u64, slots: u64) -> u64 {
+    phitex_defuse::hash_words(0x6d61_726b, &[rest, slots])
+}
+
+/// [`parked_digest`]'s part but the table's slots.
+fn parked_rest(p: &Parked) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = phitex_defuse::FxHasher::default();
     let w = |h: &mut phitex_defuse::FxHasher, x: u64| x.hash(h);
@@ -5635,7 +5734,7 @@ fn parked_digest(p: &Parked) -> u64 {
         (f.0.raw(), c).hash(&mut h);
     }
     (p.rec_load, p.no_pull).hash(&mut h);
-    w(&mut h, p.st.digest());
+    w(&mut h, p.st.rest_hash());
     format!("{:?}", p.effect).hash(&mut h);
     (&p.conds, &p.if_codes, p.cond_loaded, p.cond_stop, p.astate, p.aopen).hash(&mut h);
     (p.lines_entered, p.lines_read, p.eof, p.radix, p.pdf_occ, p.rt_made, p.rt_cells, p.rt_rels, p.muts).hash(&mut h);
