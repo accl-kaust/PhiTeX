@@ -96,6 +96,10 @@ pub struct Engine {
     /// that ran it, or as hinted (`set_run_time_hint`).
     pub(crate) long_runs: Option<std::time::Duration>,
     pub(crate) run_time: FxHashMap<Id, std::time::Duration>,
+    /// Speculation by operation: its runs ahead of a node in work, and of
+    /// those the refuted (halved each evaluation). An operation whose
+    /// runs ahead keep being refuted runs less far ahead.
+    pub(crate) spec: FxHashMap<crate::api::OpId, (f32, f32)>,
     pub(crate) loop_check: bool,
     pub(crate) decl_error: Option<crate::api::EvalError>,
     /// This pass: whether early values are taken (not in the final phase),
@@ -186,6 +190,7 @@ impl Engine {
             early: FxHashSet::default(),
             loop_decls: FxHashMap::default(),
             long_runs: None,
+            spec: FxHashMap::default(),
             run_time: FxHashMap::default(),
             loop_check: cfg!(debug_assertions) || cfg!(feature = "observe"),
             decl_error: None,

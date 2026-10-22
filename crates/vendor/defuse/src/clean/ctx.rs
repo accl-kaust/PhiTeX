@@ -169,6 +169,9 @@ pub struct Ctx<'a> {
     pub(crate) predict: bool,
     /// Committed values only: a read of a definer in work waits for it.
     pub(crate) careful: bool,
+    /// Running carefully, it passed a mark past the one it resumed at
+    /// (the broken read is behind it): it runs carefully no longer.
+    pub(crate) lapsed: bool,
     /// It read a definer in work (a guess the merge checks).
     pub(crate) guessed: bool,
     /// It folded contributors in work as they last contributed
@@ -270,6 +273,7 @@ impl<'a> Ctx<'a> {
             pset_wait: false,
             predict: false,
             careful: false,
+            lapsed: false,
             guessed: false,
             fold_ran: false,
             predicted: 0,
@@ -2358,6 +2362,12 @@ impl<'a> Ctx<'a> {
         let (kids, conts) = (u32::try_from(self.kids.len()).unwrap_or(u32::MAX), u32::try_from(self.conts.len()).unwrap_or(u32::MAX));
         self.marks.push(super::world::Mark { mark, read_ix, state, digest, odigest, kids, conts });
         let Some(fm) = &self.from_mark else { return Ok(()) };
+        // (Resumed at the mark before its first broken read, a careful run
+        // is past that read at a later mark: it guesses again.)
+        if self.careful && mark > fm.old.marks[fm.j].mark {
+            self.careful = false;
+            self.lapsed = true;
+        }
         let old = fm.old.clone();
         let patched = patch.is_some_and(|p| !p.is_empty());
         let Some(j) = (fm.j + 1..old.marks.len()).find(|&j| {
