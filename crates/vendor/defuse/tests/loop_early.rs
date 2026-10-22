@@ -150,3 +150,76 @@ fn a_one_change_field_does_not_warn() {
     assert_eq!(rep.early_loops[0].changes, 1);
     assert!(!rep.early_may_differ());
 }
+
+/// An early field moves when its publication is final for the round (its
+/// publisher committed, nothing before it in work): a reader after the
+/// publisher runs once per real change, however the schedule ran the
+/// publisher ahead. Unit [d, d2, p, r]: `d` and `d2` define `y` and `z`,
+/// `p` publishes `n := y + z`, `r` reads `n`. An edit of both `d` and
+/// `d2`, under random schedules that speculate.
+#[test]
+fn a_reader_after_the_publisher_runs_once_per_change() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Final {
+        r_runs: Arc<AtomicUsize>,
+    }
+    impl Operation for Final {
+        fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+            Some(match v.as_str(a[0]).as_deref() {
+                Some("d") => vec![(v.field("y"), Locality::Local)],
+                Some("d2") => vec![(v.field("z"), Locality::Local)],
+                _ => Vec::new(),
+            })
+        }
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            let a = cx.args();
+            match v.as_str(a[0]).as_deref() {
+                Some("d") => {
+                    cx.define(v.field("y"), a[1]);
+                    Ok(ValueId::UNIT)
+                }
+                Some("d2") => {
+                    cx.define(v.field("z"), a[1]);
+                    Ok(ValueId::UNIT)
+                }
+                Some("p") => {
+                    let y = cx.use_field(v.field("y"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+                    let z = cx.use_field(v.field("z"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+                    cx.publish(v.field("n"), v.int(y + z));
+                    Ok(ValueId::UNIT)
+                }
+                _ => {
+                    self.r_runs.fetch_add(1, Ordering::Relaxed);
+                    Ok(cx.use_field(v.field("n"))?.unwrap_or(ValueId::UNIT))
+                }
+            }
+        }
+    }
+    for seed in 0..64 {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(Final { r_runs: runs.clone() }));
+        let (n, zero) = (eng.values().field("n"), eng.values().int(0));
+        eng.declare_loopback_early(n, zero);
+        let u = eng.new_unit();
+        let da = vec![eng.values().str("d"), eng.values().int(1)];
+        let d = eng.push(u, op, da);
+        let da2 = vec![eng.values().str("d2"), eng.values().int(10)];
+        let d2 = eng.push(u, op, da2);
+        let p = vec![eng.values().str("p")];
+        eng.push(u, op, p);
+        let r = vec![eng.values().str("r")];
+        let r = eng.push(u, op, r);
+        eng.evaluate_sequential().unwrap();
+        assert_eq!(eng.output(r).and_then(|x| eng.values().as_int(x)), Some(11));
+        let before = runs.load(Ordering::Relaxed);
+        let da = vec![eng.values().str("d"), eng.values().int(2)];
+        eng.replace(d, op, da);
+        let da2 = vec![eng.values().str("d2"), eng.values().int(20)];
+        eng.replace(d2, op, da2);
+        eng.evaluate(&mut defuse::RandomScheduler::new(seed, true), &mut defuse::Sequential).unwrap();
+        assert_eq!(eng.output(r).and_then(|x| eng.values().as_int(x)), Some(22), "seed {seed}");
+        assert_eq!(runs.load(Ordering::Relaxed) - before, 1, "seed {seed}: the reader ran more than once");
+    }
+}

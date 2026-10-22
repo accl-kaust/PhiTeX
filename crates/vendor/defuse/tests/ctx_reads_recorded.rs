@@ -68,6 +68,7 @@ const WRITES: &[&str] = &[
     "restart",
     "diagnostic",
     "checkpoint",
+    "checkpoint_patched",
     "keep_after",
 ];
 /// The run's own inputs and state, pure memos, and hints that may not

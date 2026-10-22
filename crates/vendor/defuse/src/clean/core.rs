@@ -56,6 +56,7 @@ pub(crate) struct Core {
     pub resume_at: Mutex<FxHashMap<u64, (u32, u64)>>,
     /// Runs cut off at a mark this evaluation.
     pub cut_in_run: std::sync::atomic::AtomicU64,
+    pub cut_patched: std::sync::atomic::AtomicU64,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     /// The environment's base layer (`Engine::set_environment_base`) and
     /// its answers, each asked once for the engine's life.
@@ -152,6 +153,7 @@ impl Core {
             each_memo: crate::sync::Table::new(),
             resume_at: Mutex::new(FxHashMap::default()),
             cut_in_run: std::sync::atomic::AtomicU64::new(0),
+            cut_patched: std::sync::atomic::AtomicU64::new(0),
             accs: FxHashMap::default(),
             acc_prefixes: Vec::new(),
             acc_memo: crate::sync::Table::new(),

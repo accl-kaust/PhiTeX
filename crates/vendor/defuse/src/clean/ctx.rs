@@ -85,7 +85,7 @@ pub struct Ctx<'a> {
     pub(crate) marks: Vec<super::world::Mark>,
     pub(crate) after: Option<super::world::After>,
     pub(crate) from_mark: Option<MarkResume>,
-    pub(crate) cutoff: Option<usize>,
+    pub(crate) cutoff: Option<(usize, Option<Vec<(Field, Locality, Option<ValueId>)>>)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) pubs: Vec<(Field, ValueId)>,
     pub(crate) kids: Vec<Spec>,
@@ -1951,12 +1951,43 @@ impl<'a> Ctx<'a> {
     }
 
     fn checkpoint_inner(&mut self, mark: u32, state: ValueId) -> Result<(), Stop> {
-        let digest = self.out_digest();
+        self.mark_at(mark, state, state, None)
+    }
+
+    /// Marks a point as [`Ctx::checkpoint`] does, and offers a cut off
+    /// with a patch: `as_old` is the client's state with the slots it
+    /// patches at the last run's values there, and `patch` the definitions
+    /// this run's result makes otherwise than that run's, given that from
+    /// here it runs as that run did (`None`: none of that field). The
+    /// client answers that the last run never read those slots after this
+    /// point, and that its definitions so far equal that run's but for
+    /// them; the engine checks its other outputs. Cut off, the last
+    /// run's result stands with `patch` applied; only the patched
+    /// definitions' readers are asked again.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] when the run is cut off.
+    pub fn checkpoint_patched(&mut self, mark: u32, state: ValueId, as_old: ValueId, patch: &[(Field, Locality, Option<ValueId>)]) -> Result<(), Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&mark, &state, &as_old, &patch, )) } else { serde_json::Value::Null };
+        let r = self.mark_at(mark, state, as_old, Some(patch));
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "checkpoint_patched", a, crate::record::stop_or(&r));
+        r
+    }
+
+    fn mark_at(&mut self, mark: u32, state: ValueId, as_old: ValueId, patch: Option<&[(Field, Locality, Option<ValueId>)]>) -> Result<(), Stop> {
+        let (digest, odigest) = self.out_digests();
         let read_ix = u32::try_from(self.reads.len()).unwrap_or(u32::MAX);
-        self.marks.push(super::world::Mark { mark, read_ix, state, digest });
+        self.marks.push(super::world::Mark { mark, read_ix, state, digest, odigest });
         let Some(fm) = &self.from_mark else { return Ok(()) };
         let old = fm.old.clone();
-        let Some(j) = (fm.j + 1..old.marks.len()).find(|&j| old.marks[j].state == state && old.marks[j].digest == digest) else {
+        let patched = patch.is_some_and(|p| !p.is_empty());
+        let Some(j) = (fm.j + 1..old.marks.len()).find(|&j| {
+            let m = &old.marks[j];
+            if patched { m.state == as_old && m.odigest == odigest } else { m.state == state && m.digest == digest }
+        }) else {
             return Ok(());
         };
         // (Its last run's reads after the mark must hold; a run of an
@@ -1968,19 +1999,27 @@ impl<'a> Ctx<'a> {
         if !old.reads[from..].iter().all(|r| super::build::holds(self.core, self.w, self.me, r)) {
             return Ok(());
         }
-        self.cutoff = Some(j);
+        self.cutoff = Some((j, patch.filter(|p| !p.is_empty()).map(<[_]>::to_vec)));
         Err(Stop { _private: () })
     }
 
     /// A digest of the run's outputs so far: its definitions,
     /// contributions, publications and environment by key, its placements,
     /// kinds and diagnostics in order, its effect and claim.
-    fn out_digest(&self) -> u64 {
+    fn out_digests(&self) -> (u64, u64) {
+        use crate::values::hash_words;
+        let mut d: u64 = 0;
+        for x in &self.defs {
+            d = d.wrapping_add(hash_words(1, &[x.f.0.raw(), u64::from(x.loc.entry_key()), x.val.raw()]));
+        }
+        let h = self.out_digest_rest();
+        (h.wrapping_add(d), h)
+    }
+
+    /// [`Ctx::out_digests`] of the outputs but definitions.
+    fn out_digest_rest(&self) -> u64 {
         use crate::values::hash_words;
         let mut h: u64 = 0;
-        for d in &self.defs {
-            h = h.wrapping_add(hash_words(1, &[d.f.0.raw(), u64::from(d.loc.entry_key()), d.val.raw()]));
-        }
         for (k, l) in [(2, &self.contribs), (3, &self.pubs), (4, &self.env)] {
             for &(f, x) in l {
                 h = h.wrapping_add(hash_words(k, &[f.0.raw(), x.raw()]));

@@ -202,6 +202,9 @@ pub(crate) struct Mark {
     pub read_ix: u32,
     pub state: ValueId,
     pub digest: u64,
+    /// The digest of its outputs but its definitions (a patched cutoff
+    /// compares this; the client answers for its definitions).
+    pub odigest: u64,
 }
 
 /// The token a run kept for a later run to resume from one of its marks

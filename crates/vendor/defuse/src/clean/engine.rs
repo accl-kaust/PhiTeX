@@ -92,6 +92,10 @@ pub struct Engine {
     pub(crate) early_live: bool,
     pub(crate) early_changes: FxHashMap<Field, u32>,
     pub(crate) early_frozen: FxHashSet<Field>,
+    /// Early fields whose publication changed, not moved yet: by their
+    /// publisher's unit and position (moved once nothing before it is in
+    /// work, together).
+    pub(crate) early_pending: std::collections::BTreeSet<(u32, super::world::Pos, Field)>,
     /// Whether evaluations audit their runs (`set_run_audit`), and the
     /// running evaluation's audit.
     pub(crate) audit_on: bool,
@@ -171,6 +175,7 @@ impl Engine {
             early_live: false,
             early_changes: FxHashMap::default(),
             early_frozen: FxHashSet::default(),
+            early_pending: std::collections::BTreeSet::new(),
             audit_on: false,
             audit: None,
             limits: Limits::default(),
@@ -631,8 +636,10 @@ impl Engine {
     /// field declared already keeps its initial value) and opts it in to
     /// early round values: when a commit changes the value published for
     /// `f`, its readers (and the definitions forwarding it,
-    /// `Ctx::define_forward`) take that value at once, not when the round
-    /// ends. The round ends as before, when nothing moves; a field moved
+    /// `Ctx::define_forward`) take that value as soon as the publication is
+    /// final for the round (its publisher committed, no node before it in
+    /// its unit in work), not when the round ends; the moves that become
+    /// final together are made together. The round ends as before, when nothing moves; a field moved
     /// early does not move at its end.
     ///
     /// # Determinism

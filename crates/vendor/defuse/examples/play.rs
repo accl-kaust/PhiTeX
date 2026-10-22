@@ -266,6 +266,10 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         }
         "whole" => json!(cx.whole(de::<defuse::View>(&g(0)))),
         "checkpoint" => return res(cx.checkpoint(de(&g(0)), de(&g(1)))),
+        "checkpoint_patched" => {
+            let patch = de::<Vec<(Field, Locality, Option<ValueId>)>>(&g(3));
+            return res(cx.checkpoint_patched(de(&g(0)), de(&g(1)), de(&g(2)), &patch));
+        }
         "use_fields" => {
             let mut out = Vec::new();
             return res(cx.use_fields(&de::<Vec<Field>>(&g(0)), &mut out).map(|()| out));
