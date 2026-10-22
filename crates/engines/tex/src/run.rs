@@ -5764,7 +5764,32 @@ impl Run<'_, '_> {
                 old.map(|(j, (_, oh))| (j, *oh == h))
             );
         }
+        let why_old = if crate::exec::obs_flag!("PHITEX_ANCHOR_TRACE") {
+            self.old_marks.as_ref().and_then(|km| {
+                let j = km.snaps.iter().position(|(q, oh)| q.at_cmds == p.at_cmds && *oh != h)?;
+                Some((j, mark_table(&km.snaps, j)))
+            })
+        } else {
+            None
+        };
         self.mark_snaps.push((std::sync::Arc::new(p), h));
+        if let Some((j, op)) = why_old {
+            let np = mark_table(&self.mark_snaps, k as usize);
+            mark_why(self.cx.node().raw(), j, &op, &np);
+            let v = self.v;
+            let mut shown = Vec::new();
+            for d in np.st.slot_diffs(&op.st).into_iter().take(8) {
+                let f = match d.0 {
+                    crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
+                    crate::runstate::PLocKey::Spill(f) => f,
+                };
+                let r = |x: Option<(Option<ValueId>, u8)>| {
+                    x.map_or_else(|| "no slot".to_owned(), |(x, fl)| format!("{}/{fl}", x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(50).collect())))
+                };
+                shown.push(format!("{} last {} this {}", crate::val::field_name(v, f), r(d.1), r(d.2)));
+            }
+            eprintln!("anchor: slots differing {shown:?}");
+        }
         // (observe, `PHITEX_MARK_TABLE_CHECK=1`: the marks' tables folded
         // against the table parked whole, and the digest kept up to date
         // against the one made again)
