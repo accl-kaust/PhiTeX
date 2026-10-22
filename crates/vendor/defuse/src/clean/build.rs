@@ -1941,6 +1941,46 @@ pub(crate) struct Asker<'w> {
     /// The last field asked at the last point, and its value there (`Err`:
     /// a definer in work): reads of it through other paths ask no further.
     last: Option<(Field, Result<Option<ValueId>, ()>)>,
+    /// The last window a path's fold read asked, and its fold now.
+    range: LastRange,
+}
+
+/// The last window a fold read through a path asked (field, ends, past),
+/// and its fold now (`None`: the window gone): reads of it through other
+/// paths (a view's) fold no further.
+pub(crate) type LastRange = Option<((Field, Id, Id, bool), Option<ValueId>)>;
+
+/// As [`holds`] for fold read `r` through a path, the window the last one
+/// asked folded once (`last`).
+fn holds_range(core: &Core, w: &World, me: Id, r: &Read, last: &mut LastRange) -> bool {
+    let Read::Range { f, from, to, val, past, path } = r else { return holds(core, w, me, r) };
+    let k = (*f, *from, *to, *past);
+    let now = match *last {
+        Some((lk, now)) if lk == k => now,
+        _ => {
+            let now = range_now(core, w, me, *f, *from, *to, *past);
+            *last = Some((k, now));
+            now
+        }
+    };
+    now.is_some_and(|now| now == *val || core.eval_path(*path, now) == core.eval_path(*path, *val))
+}
+
+/// The fold a read of `f` over the window (`from`, `to`, `past`) of node
+/// `me` gets now (`None`: an end or the window gone).
+fn range_now(core: &Core, w: &World, me: Id, f: Field, from: Id, to: Id, past: bool) -> Option<ValueId> {
+    if [from, to].iter().any(|&x| x != NONE && w.node(x).is_none()) {
+        return None;
+    }
+    let Some(mo) = core.acc(f) else {
+        return Some(ValueId::UNIT);
+    };
+    let m = AccMeasure {
+        m: &**mo,
+        v: &core.values,
+    };
+    let (u, lo, hi) = w.window(me, from, to, past)?;
+    Some(w.fold(&m, u, f, lo, hi))
 }
 
 /// The last path read asked by [`holds_paths`]: its field and point, and
@@ -1950,8 +1990,10 @@ pub(crate) type LastUse = Option<((Field, Id, bool, bool), Option<ValueId>)>;
 /// As [`holds`], a path read of the field at the point the last one asked
 /// taking that one's value (a plain read asks as `holds`, nothing kept);
 /// checked against [`holds`] under `CLEAN_KEPT_CHECK`.
-pub(crate) fn holds_paths(core: &Core, w: &World, me: Id, r: &Read, last: &mut LastUse) -> bool {
+pub(crate) fn holds_paths(core: &Core, w: &World, me: Id, r: &Read, memo: &mut (LastUse, LastRange)) -> bool {
+    let last = &mut memo.0;
     let ok = match r {
+        Read::Range { path, .. } if *path >= super::core::PATH0 => holds_range(core, w, me, r, &mut memo.1),
         Read::Use { f, at, after, own, val, path, .. } if *path >= super::core::PATH0 => {
             let k = (*f, *at, *after, *own);
             let v2 = match *last {
@@ -1989,6 +2031,11 @@ fn use_value(core: &Core, w: &World, r: &Read) -> Option<Option<ValueId>> {
 /// As [`holds`], with `a`'s lookups (of `w`, unchanged since).
 pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &mut Asker<'w>) -> bool {
     let Read::Use { f, at, after, own, val, path, .. } = r else {
+        if let Read::Range { path, .. } = r
+            && *path >= super::core::PATH0
+        {
+            return holds_range(core, w, me, r, &mut a.range);
+        }
         return holds_with(core, w, me, r, false);
     };
     if w.loops.get(f).is_some() {
