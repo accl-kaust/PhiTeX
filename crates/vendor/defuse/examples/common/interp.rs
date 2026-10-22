@@ -397,6 +397,17 @@ impl Interp<'_> {
                 self.run_list(u, &items(v, a[0]));
                 ValueId::UNIT
             }
+            // Its assignments in the enclosing scope (the rest: nothing).
+            "run" => {
+                for s in items(v, a[0]) {
+                    let (st, sa) = tag(v, s);
+                    if st == "assign" {
+                        let val = self.expr(u, sa[1]);
+                        self.define(u, v.field(&text(v, sa[0])), val, truthy(v, sa[2]));
+                    }
+                }
+                ValueId::UNIT
+            }
             "if" => {
                 let c = self.expr(u, a[0]);
                 self.visits += 1;
@@ -560,6 +571,16 @@ impl Interp<'_> {
                 .unwrap_or_else(|| v.str("none")),
             "before" => v.list(u.seqs.last().cloned().unwrap_or_default()),
             "var" => self.lookup(u, v.field(&text(v, a[0]))).unwrap_or(ValueId::UNIT),
+            "mklist" => {
+                let xs: Vec<ValueId> = a.iter().map(|&x| self.expr(u, x)).collect();
+                v.list(xs)
+            }
+            "index" | "len" | "lens" => {
+                let x = self.lookup(u, v.field(&text(v, a[0])));
+                let i = a.get(1).and_then(|&i| v.as_int(i)).unwrap_or(0);
+                let got = x.and_then(|x| super::path_of(v, &t, x, i));
+                got.unwrap_or_else(|| v.str(&format!("error: {t}")))
+            }
             "op" => {
                 let x = self.expr(u, a[1]);
                 let y = self.expr(u, a[2]);

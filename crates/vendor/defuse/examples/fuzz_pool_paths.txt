@@ -1,0 +1,40 @@
+l = [1, 2, 3]
+l = [4, 2, 3]
+l = [1, 5]
+l = [x, 2, 1]
+m = [7, [1, 2], 3]
+m = [7, [1, 3]]
+a = l[1]
+b = len(l)
+c = l[0] + l[1]
+d = m[1]
+e = len(m)
+print a
+print b
+print c
+print d
+print e
+{ l = [9, 9, 9]  f = l[2]  print f }
+g = l[5]
+print g
+x = 3
+x = 4
+s = "ab"
+s = "abc"
+n = len(s)
+print n
+global l = [2, 2]
+emit a
+page
+h = fn(k) { t = l[0] return t + k }
+y = h(2)
+print y
+k = [a, b, c]
+w = k[2] + len(k)
+print w
+q = lens(m)
+print q
+o = lens(k)
+r = [l, s, [1]]
+p = lens(r)
+print p

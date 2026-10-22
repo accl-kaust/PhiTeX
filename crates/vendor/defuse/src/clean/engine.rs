@@ -83,6 +83,19 @@ pub struct Engine {
     pub(crate) loop_start: LoopStart,
     pub(crate) max_rounds: u64,
     pub(crate) cap_policy: CapPolicy,
+    /// The loop-back fields that take their round values early
+    /// (`declare_loopback_early`).
+    pub(crate) early: FxHashSet<Field>,
+    /// This pass: whether early values are taken (not in the final phase),
+    /// each early field's value changes, and those capped (kept as they
+    /// are).
+    pub(crate) early_live: bool,
+    pub(crate) early_changes: FxHashMap<Field, u32>,
+    pub(crate) early_frozen: FxHashSet<Field>,
+    /// Whether evaluations audit their runs (`set_run_audit`), and the
+    /// running evaluation's audit.
+    pub(crate) audit_on: bool,
+    pub(crate) audit: Option<crate::api::RunAudit>,
     pub(crate) limits: Limits,
     pub(crate) roots: Vec<NodeId>,
     pub(crate) version: u64,
@@ -154,6 +167,12 @@ impl Engine {
             loop_start: LoopStart::Initial,
             max_rounds: 64,
             cap_policy: CapPolicy::Error,
+            early: FxHashSet::default(),
+            early_live: false,
+            early_changes: FxHashMap::default(),
+            early_frozen: FxHashSet::default(),
+            audit_on: false,
+            audit: None,
             limits: Limits::default(),
             roots: Vec::new(),
             version: 0,
@@ -209,6 +228,13 @@ impl Engine {
         self.core_mut().op_reads.push(std::sync::atomic::AtomicU32::new(0));
         #[allow(clippy::cast_possible_truncation)]
         OpId((self.core.ops.len() - 1) as u32)
+    }
+
+    /// The read path of `steps` ([`crate::PathId`]; for
+    /// [`Ctx::use_field_path`], [`Ctx::acc_fold_path`]). The same steps give
+    /// the same path.
+    pub fn path(&self, steps: &[crate::api::Step]) -> crate::api::PathId {
+        crate::api::PathId(self.core.intern_path(steps))
     }
 
     /// Registers a projection for [`Ctx::use_field_proj`].
@@ -588,6 +614,56 @@ impl Engine {
         self.rec_call("declare_loopback", crate::record::rec().map(|_| crate::record::j(&(&f, &init))), &());
     }
 
+    /// Audits every evaluation's runs ([`crate::Report::audit`]): each run
+    /// of a node that had a result is compared with that result, and one
+    /// whose effects outside the run (output, definitions, contributions,
+    /// publications, scope effect and kinds, placements, diagnostics,
+    /// claim) all came out the same is reported wasted, with what made it
+    /// run again and its time. Off by default (the comparison costs a
+    /// little per commit).
+    pub fn set_run_audit(&mut self, on: bool) {
+        self.audit_on = on;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_run_audit", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
+    }
+
+    /// Declares loop-back field `f` (as [`Self::declare_loopback`]; a
+    /// field declared already keeps its initial value) and opts it in to
+    /// early round values: when a commit changes the value published for
+    /// `f`, its readers (and the definitions forwarding it,
+    /// `Ctx::define_forward`) take that value at once, not when the round
+    /// ends. The round ends as before, when nothing moves; a field moved
+    /// early does not move at its end.
+    ///
+    /// # Determinism
+    ///
+    /// This is chaotic (asynchronous) iteration, not rounds: readers of
+    /// the next value run while the round still runs, and what they give
+    /// feeds it. It is **not deterministic**: when the fields' loop has
+    /// one fixed point and the rounds reach it, the result is the rounds'
+    /// result; otherwise it can depend on the schedule (the thread count
+    /// among it) and differ from the rounds'. A loop that oscillates, or
+    /// has more than one fixed point, can settle on another fixed point, or
+    /// on one where the rounds would not settle at all. With no field
+    /// declared early, evaluations are as without this (deterministic).
+    /// With one, every evaluation starts the loop-back fields from their
+    /// last values ([`crate::LoopStart::Previous`], whatever
+    /// `set_loop_start` says): rounds are not kept to start again from.
+    /// [`Report::early_loops`] says, per field, how often it changed and
+    /// whether its changes reached the round cap
+    /// ([`EarlyLoop::capped`], [`EarlyLoop::oscillated`]); the cap counts
+    /// each field's changes, as rounds do.
+    ///
+    /// [`Report::early_loops`]: crate::Report::early_loops
+    /// [`EarlyLoop::capped`]: crate::EarlyLoop::capped
+    /// [`EarlyLoop::oscillated`]: crate::EarlyLoop::oscillated
+    pub fn declare_loopback_early(&mut self, f: Field, init: ValueId) {
+        self.declare_loopbacks_inner(&[(f, init)]);
+        self.early.insert(f);
+        #[cfg(feature = "observe")]
+        self.rec_call("declare_loopback_early", crate::record::rec().map(|_| crate::record::j(&(&f, &init))), &());
+    }
+
     /// Declares several loop-back fields at once: one pass over the runs
     /// (a field declared already is left as it is).
     pub fn declare_loopbacks(&mut self, fields: &[(Field, ValueId)]) {
@@ -721,20 +797,20 @@ impl Engine {
         }
         let fs: FxHashSet<Field> = fields.iter().copied().collect();
         self.edit(|b| {
+            // (Each with the changed field it read, the first: its label.)
             let mut hit = Vec::new();
             for (&id, n) in b.w.nodes.iter() {
                 let Some(r) = &n.res else { continue };
-                if r.reads.iter().any(|rd| match rd {
-                    super::world::Read::Env { f, .. } => fs.contains(f),
-                    super::world::Read::Use { f, site, .. } => *site == super::world::NONE && fs.contains(f),
-                    super::world::Read::Stream { fields, .. } => fields.iter().any(|(f, _)| fs.contains(f)),
-                    _ => false,
+                if let Some(f) = r.reads.iter().find_map(|rd| match rd {
+                    super::world::Read::Env { f, .. } => fs.contains(f).then_some(*f),
+                    super::world::Read::Use { f, site, .. } => (*site == super::world::NONE && fs.contains(f)).then_some(*f),
+                    super::world::Read::Stream { fields, .. } => fields.iter().find(|(f, _)| fs.contains(f)).map(|&(f, _)| f),
+                    _ => None,
                 }) {
-                    hit.push(id);
+                    hit.push((id, f));
                 }
             }
-            for id in hit {
-                let f = fs.iter().next().copied().unwrap_or(Field(ValueId::UNIT));
+            for (id, f) in hit {
                 b.make_dirty_for(id, crate::api::Rerun::Environment { field: f });
             }
         });
@@ -1160,6 +1236,10 @@ impl Engine {
         }
         if ids(&self.w.publishers) != ids(&want.publishers) {
             out.push(format!("publishers {:?}, the nodes file {:?}", ids(&self.w.publishers), ids(&want.publishers)));
+        }
+        let pi = |w: &World| -> Vec<((Field, Id), ValueId)> { w.pub_ix.iter().map(|(&k, &x)| (k, x)).collect() };
+        if pi(&self.w) != pi(&want) {
+            out.push(format!("pub_ix {:?}, the nodes file {:?}", pi(&self.w), pi(&want)));
         }
         let fw = |w: &World| -> Vec<(u64, Id)> { w.fwds.iter().map(|(&k, _)| k).collect() };
         if fw(&self.w) != fw(&want) {

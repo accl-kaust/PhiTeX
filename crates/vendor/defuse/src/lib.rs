@@ -18,10 +18,10 @@ mod sync;
 mod values;
 
 pub use api::{
-    Brackets, Candidate, CapPolicy, Cause, Claim, Edit, EditQueue, EditSource, Effect, EnvBase, EnvProvider, EvalError, Hold,
+    Brackets, Candidate, CapPolicy, Cause, Claim, EarlyLoop, PathId, RunAudit, Step, WastedRun, Edit, EditQueue, EditSource, Effect, EnvBase, EnvProvider, EvalError, Hold,
     Executor, FieldAt, Greedy, Job, Lifted, Limits, Locality, LoopStart, MayDefine, Monoid, NoEdits, NodeId,
     NodeInfo, NodeState, OpId, Operation, ProjId, Projection, RandomScheduler, Report, Rerun, RoundTimes, LinkTimes, MergeTimes, RunResult,
     Scheduler, SeqMonoid, Sequential, Settled, Speculation, Stop, SumMonoid, UnitId, Until, WaitKind, WaitOn, Waiter,
 };
-pub use clean::{Ctx, Engine};
+pub use clean::{Ctx, Engine, View};
 pub use values::{Field, FxHashMap, FxHashSet, FxHasher, Rng, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};

@@ -31,6 +31,15 @@ const READS: &[&str] = &[
     "take_prev_contribution",
     "is_loopback",
     "define_forward",
+    "use_field_path",
+    "acc_fold_path",
+    "view",
+    "acc_view",
+    "at",
+    "get",
+    "len",
+    "has",
+    "whole",
 ];
 const WRITES: &[&str] = &[
     "define",
@@ -38,6 +47,7 @@ const WRITES: &[&str] = &[
     "define_in_scope",
     "define_in_scope_at",
     "declare_loopback",
+    "declare_loopback_early",
     "publish",
     "child",
     "follow",
@@ -57,6 +67,8 @@ const WRITES: &[&str] = &[
     "park_continuing",
     "restart",
     "diagnostic",
+    "checkpoint",
+    "keep_after",
 ];
 /// The run's own inputs and state, pure memos, and hints that may not
 /// change a result.
@@ -71,6 +83,8 @@ const LOCAL: &[&str] = &[
     "is_speculative",
     "values_epoch",
     "tick",
+    "path",
+    "resumed",
 ];
 
 #[test]

@@ -82,20 +82,21 @@ pub(crate) struct FieldReaders {
     pub range_readers: Ranges,
 }
 
-/// Range readers by the end of their window and the reader, each with the
-/// window's start; summed by the least start (what starts at or past a
-/// point is passed whole).
-pub(crate) type Ranges = PMap<(Pos, Id), Pos, Pos>;
+/// Range readers by the end of their window, the reader and the window's
+/// start (a reader's windows differing in start only are entries apart),
+/// each with the window's start; summed by the least start (what starts
+/// at or past a point is passed whole).
+pub(crate) type Ranges = PMap<(Pos, Id, Pos), Pos, Pos>;
 
 /// [`Ranges`]'s summary: the least window start.
 pub(crate) struct LeastStart;
 
-impl Measure<(Pos, Id), Pos> for LeastStart {
+impl Measure<(Pos, Id, Pos), Pos> for LeastStart {
     type S = Pos;
     fn zero(&self) -> Pos {
         Pos::MAX
     }
-    fn of(&self, _: &(Pos, Id), lo: &Pos) -> Pos {
+    fn of(&self, _: &(Pos, Id, Pos), lo: &Pos) -> Pos {
         *lo
     }
     fn add(&self, a: &Pos, b: &Pos) -> Pos {
@@ -109,7 +110,7 @@ impl FieldReaders {
     /// but for runs of them that all start at or past it.
     pub(crate) fn over(&self, q: Pos) -> Vec<Id> {
         let mut out = Vec::new();
-        self.range_readers.visit_where(std::ops::Bound::Excluded(&(q, Id::MAX)), &LeastStart, &|&lo| lo >= q, &mut |k, &lo| {
+        self.range_readers.visit_where(std::ops::Bound::Excluded(&(q, Id::MAX, Pos::MAX)), &LeastStart, &|&lo| lo >= q, &mut |k, &lo| {
             if lo < q {
                 out.push(k.1);
             }
@@ -317,16 +318,16 @@ mod tests {
         for id in 1..400u64 {
             let lo = next(1000);
             let hi = lo + 1 + next(300);
-            r.range_readers.insert((hi, id), lo, &LeastStart);
+            r.range_readers.insert((hi, id, lo), lo, &LeastStart);
             if next(5) == 0 {
-                let k = (next(1300), next(400));
+                let k = (next(1300), next(400), next(1000));
                 r.range_readers.remove(&k, &LeastStart);
             }
         }
         for q in 0..1400 {
             let walk: Vec<Id> = r
                 .range_readers
-                .range(std::ops::Bound::Excluded(&(q, Id::MAX)), std::ops::Bound::Unbounded)
+                .range(std::ops::Bound::Excluded(&(q, Id::MAX, Pos::MAX)), std::ops::Bound::Unbounded)
                 .filter(|(_, lo)| **lo < q)
                 .map(|(k, _)| k.1)
                 .collect();

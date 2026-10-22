@@ -73,6 +73,9 @@ struct Sched {
     why: FxHashMap<Id, std::collections::VecDeque<crate::api::Cause>>,
     /// Each node's run time (all its attempts).
     time: FxHashMap<Id, std::time::Duration>,
+    /// Each node's last attempt's time, until its commit takes it (the
+    /// run audit's).
+    last_ran: FxHashMap<Id, std::time::Duration>,
     /// Nodes whose speculative run ran out of fuel: they run in full.
     no_fuel: FxHashSet<Id>,
     /// How often each node's result was refuted.
@@ -302,6 +305,8 @@ impl Engine {
     ) -> Result<Report, EvalError> {
         let t0 = std::time::Instant::now();
         let mut rep = Report::default();
+        self.audit = self.audit_on.then(crate::api::RunAudit::default);
+        *super::core::lock(&self.core.rechecks) = self.audit_on.then(FxHashMap::default);
         // (No run is out: no late filing for a node gone.)
         self.w.rd.purge_gone();
         (self.t_op, self.t_commit, self.t_idle) = (0, 0, 0);
@@ -317,12 +322,12 @@ impl Engine {
         // The provider is asked again about fields it did not know.
         self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner).unknown.clear();
         self.core.env_provided.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.core.hold_fin.store(self.loop_start != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
+        self.core.hold_fin.store(self.loop_start_now() != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
         let mut s = Sched::default();
         // Per-round worlds: each round starts from its own old world (the
         // edits already applied to it), the final phase from the old final
         // world (the current one, unless it is the last round's).
-        let per_round = self.loop_start != LoopStart::Previous && !self.core.loops.is_empty();
+        let per_round = self.loop_start_now() != LoopStart::Previous && !self.core.loops.is_empty();
         self.ev_olds = std::mem::take(&mut self.rounds)
             .into_iter()
             .zip(std::mem::take(&mut self.round_dirty))
@@ -373,6 +378,9 @@ impl Engine {
         // middle of per-round rounds starts another.
         'pass: loop {
             self.ev_prev = None;
+            self.early_changes.clear();
+            self.early_frozen.clear();
+            self.early_live = true;
             if per_round {
                 if let Some((w, d)) = self.ev_olds.pop_front() {
                     self.w = w;
@@ -438,19 +446,35 @@ impl Engine {
                 let later = std::mem::take(&mut *super::core::lock(&self.core.loops_later));
                 if !later.is_empty() {
                     // (Each field's declaring run: its readers' link.)
-                    for &(f, _, by) in &later {
+                    let mut early = Vec::new();
+                    for &(f, _, by, e) in &later {
                         hs.loop_decl.entry(f).or_insert(by);
+                        if e && self.early.insert(f) {
+                            early.push(f);
+                        }
                     }
-                    let later: Vec<(Field, ValueId)> = later.into_iter().map(|(f, x, _)| (f, x)).collect();
+                    let later: Vec<(Field, ValueId)> = later.into_iter().map(|(f, x, _, _)| (f, x)).collect();
                     // (All at once: one pass over the runs' reads.)
                     self.declare_loopbacks(&later);
                     for id in std::mem::take(&mut self.pending) {
                         self.enqueue(&mut s, id);
                     }
+                    // (Early ones take what is published already.)
+                    self.move_early(&mut s, &mut rep, &mut hs, &early)?;
                     continue;
                 }
-                // The next round's loop-back values.
-                let next = self.publications()?;
+                // The next round's loop-back values (a capped early field
+                // keeps its own).
+                let mut next = self.publications()?;
+                if !self.early_frozen.is_empty() {
+                    for (f, x) in &mut next {
+                        if self.early_frozen.contains(f)
+                            && let Some(&v) = self.w.loops.get(f)
+                        {
+                            *x = v;
+                        }
+                    }
+                }
                 let moved: Vec<Field> = next.iter().filter(|(f, x)| self.w.loops.get(f) != Some(x)).map(|&(f, _)| f).collect();
                 if !moved.is_empty() && !self.loop_readers(&moved).is_empty() {
                     if rounds >= self.max_rounds {
@@ -479,6 +503,11 @@ impl Engine {
                                 moved_vs_old |= had_old;
                             }
                         }
+                        for f in &moved {
+                            if self.early.contains(f) {
+                                *self.early_changes.entry(*f).or_default() += 1;
+                            }
+                        }
                         // (The round's last commit: its loop readers' link.)
                         hs.round_end = hs.last;
                         moved_vs_old |= self.set_loops(&mut s, &next) && from_old;
@@ -489,6 +518,7 @@ impl Engine {
                     self.set_loops(&mut s, &next);
                 }
                 // The final phase: held nodes run once, in the final world.
+                self.early_live = false;
                 let held = !self.w.fins_in(St::Held).is_empty();
                 self.round_done(&mut rep, &mut round_runs, from_old);
                 if !held {
@@ -550,7 +580,13 @@ impl Engine {
                 let last = self.ev_done.last().map_or_else(|| round_w.clone(), |d| d.0.clone());
                 let before = publications_of(&self.core, &last)?;
                 let after = publications_of(&self.core, &self.w)?;
-                if let Some(&(f, _)) = after.iter().find(|p| !before.contains(p)) {
+                // (Both by field, the same fields: compared in step.)
+                let differs = if before.len() == after.len() {
+                    after.iter().zip(&before).find(|(a, b)| a != b).map(|(a, _)| *a)
+                } else {
+                    after.iter().find(|p| !before.contains(p)).copied()
+                };
+                if let Some((f, _)) = differs {
                     let mut by: Vec<(u64, Id)> = self
                         .w
                         .nodes
@@ -575,6 +611,20 @@ impl Engine {
                 break;
             }
             break;
+        }
+        self.early_live = false;
+        if !self.early_changes.is_empty() || !self.early_frozen.is_empty() {
+            let mut fs: Vec<Field> = self.early_changes.keys().chain(self.early_frozen.iter()).copied().collect();
+            fs.sort_by_key(|f| f.0.raw());
+            fs.dedup();
+            rep.early_loops = fs
+                .into_iter()
+                .map(|field| crate::api::EarlyLoop {
+                    field,
+                    changes: self.early_changes.get(&field).copied().unwrap_or(0),
+                    capped: self.early_frozen.contains(&field),
+                })
+                .collect();
         }
         if per_round {
             let done = std::mem::take(&mut self.ev_done);
@@ -694,10 +744,17 @@ impl Engine {
             .collect();
         causes.sort_by_key(|c| c.0);
         rep.rerun_causes = causes;
+        rep.audit = self.audit.take();
+        rep.cut_in_run = self.core.cut_in_run.swap(0, std::sync::atomic::Ordering::Relaxed);
+        if let (Some(a), Some(m)) = (rep.audit.as_mut(), super::core::lock(&self.core.rechecks).take()) {
+            let mut v: Vec<(Option<Field>, u64, u64)> = m.into_iter().map(|(f, (n, b))| (f, n, b)).collect();
+            v.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.map(|f| f.0.raw()).cmp(&y.0.map(|f| f.0.raw()))));
+            a.rechecked = v;
+        }
         // (Complete runs: a stopped attempt is not one; the limits count
         // attempts.)
         rep.runs -= self.stopped;
-        self.core.hold_fin.store(self.loop_start != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
+        self.core.hold_fin.store(self.loop_start_now() != LoopStart::Previous, std::sync::atomic::Ordering::Relaxed);
         super::core::prof::dump();
         Ok(rep)
     }
@@ -811,6 +868,7 @@ impl Engine {
             };
             idle = 0;
             *s.time.entry(id).or_default() += d;
+            s.last_ran.insert(id, d);
             self.t_op += u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
             let applied = matches!(outcome, Outcome::Done(_));
             let tc = std::time::Instant::now();
@@ -1090,6 +1148,7 @@ impl Engine {
                             continue;
                         }
                         *g.m.s.time.entry(id).or_default() += d;
+                        g.m.s.last_ran.insert(id, d);
                         let ahead = g.m.eng.w.node(id).is_some_and(|n| g.m.eng.w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
                         if let Err(e) = g.m.one(&snap, usize::from(ahead), id, o, &mut Sequential) {
                             g.m.err = Some(e);
@@ -1602,6 +1661,23 @@ impl Engine {
         }
     }
 
+    /// Node `id`'s last run as a kept state resumed at its last mark before
+    /// read `b` (that run's reads before it, asked of the world's changes
+    /// since log length `at`; its kept token and result with it).
+    fn mark_resume(&mut self, rep: &mut Report, id: Id, b: u32, at: u64) {
+        let Some(n) = self.w.node(id) else { return };
+        let Some(old) = n.res.clone() else { return };
+        let Some(after) = old.after.clone() else { return };
+        let Some(j) = old.marks.iter().rposition(|m| m.read_ix <= b) else { return };
+        let reads = old.reads[..old.marks[j].read_ix as usize].to_vec();
+        self.kept_text.insert(id, n.text.clone());
+        let mut ix = KeptIx::new(&self.w, at);
+        ix.add(&self.w, id, &reads);
+        self.kept_ix.insert(id, ix);
+        self.kept.insert(id, (Box::new(super::ctx::MarkResume { after: after.0, old, j }), reads, None));
+        rep.resumed_at_mark += 1;
+    }
+
     /// The first of node `id`'s kept reads that no longer holds: asked of
     /// those its index names (a change since its last check reaches
     /// them), or all; none broken, the index is brought up to now.
@@ -1719,6 +1795,14 @@ impl Engine {
         if let Some(n) = self.w.node(id) {
             bump(&mut rep.runs_by_op, self.core.op_name(n.text.op));
         }
+        // A run broken at a read after a mark of its last run: resumed at
+        // the mark, as a kept state.
+        let at_mark = super::core::lock(&self.core.resume_at).remove(&id);
+        if !self.kept.contains_key(&id)
+            && let Some((b, at)) = at_mark
+        {
+            self.mark_resume(rep, id, b, at);
+        }
         // A stopped run's kept state: resumed while its reads hold.
         let broken = if self.kept.contains_key(&id) { self.kept_first_broken(id) } else { None };
         Some(match self.kept.remove(&id) {
@@ -1787,10 +1871,100 @@ impl Engine {
         fresh: bool,
     ) -> Result<(), EvalError> {
         let t = super::core::now();
+        // (Early loop-back fields: those it published before and after.)
+        let mut early = Vec::new();
+        if self.early_live && !self.early.is_empty() {
+            self.early_published(id, &mut early);
+        }
         let r = self.apply_one(s, rep, ran, cut, hs, id, outcome, fresh);
         rep.merge.total += super::core::ns_since(t);
         rep.merged += 1;
-        r
+        r?;
+        if self.early_live && !self.early.is_empty() {
+            self.early_published(id, &mut early);
+            if !early.is_empty() {
+                early.sort_by_key(|f| f.0.raw());
+                early.dedup();
+                self.move_early(s, rep, hs, &early)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The run audit's account of node `id`'s run (of `t`), which replaced
+    /// result `old`: wasted when the new result changes nothing outside
+    /// the run.
+    fn audit_run(&mut self, id: Id, old: &Res, t: std::time::Duration) {
+        let same = self.w.node(id).and_then(|n| n.res.as_deref()).is_some_and(|new| same_effects(old, new));
+        let cause = if same { super::core::lock(&self.core.causes).get(&id).copied() } else { None };
+        let Some(a) = self.audit.as_mut() else { return };
+        a.reruns += 1;
+        a.rerun_time += t;
+        if same {
+            a.wasted_time += t;
+            a.wasted.push(crate::api::WastedRun { node: NodeId(id), cause, time: t });
+        }
+    }
+
+    /// Where the loop-backs start: with an early field, from the last
+    /// values (its rounds are not kept, `LoopStart::Previous`).
+    pub(crate) fn loop_start_now(&self) -> LoopStart {
+        if self.early.is_empty() { self.loop_start } else { LoopStart::Previous }
+    }
+
+    /// Pushes the early loop-back fields node `id`'s result publishes.
+    fn early_published(&self, id: Id, out: &mut Vec<Field>) {
+        if let Some(r) = self.w.node(id).and_then(|n| n.res.as_ref()) {
+            out.extend(r.pubs.iter().map(|p| p.0).filter(|f| self.early.contains(f)));
+        }
+    }
+
+    /// Early loop-back fields `fs` take the values published for them now
+    /// (a field published two values waits for the round's end); each
+    /// field's changes count against the round cap.
+    fn move_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, fs: &[Field]) -> Result<(), EvalError> {
+        let mut vals = Vec::new();
+        for &f in fs {
+            if self.early_frozen.contains(&f) {
+                continue;
+            }
+            let Some(v) = self.published(f) else { continue };
+            if self.w.loops.get(&f) == Some(&v) {
+                continue;
+            }
+            let c = self.early_changes.entry(f).or_default();
+            if u64::from(*c) >= self.max_rounds {
+                match self.cap_policy {
+                    CapPolicy::Error => return Err(EvalError::NonConvergence { rounds: u64::from(*c) }),
+                    CapPolicy::Finalize => {
+                        self.early_frozen.insert(f);
+                        rep.capped.get_or_insert_with(Vec::new).push(f);
+                        continue;
+                    }
+                }
+            }
+            *c += 1;
+            vals.push((f, v));
+        }
+        if !vals.is_empty() {
+            // (The commit that moved them: their readers' link.)
+            hs.round_end = hs.last;
+            self.set_loops(s, &vals);
+        }
+        Ok(())
+    }
+
+    /// The value published for loop-back field `f` in the current world
+    /// (none published: its initial value; two: `None`).
+    fn published(&self, f: Field) -> Option<ValueId> {
+        let mut v = None;
+        for (_, &x) in self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))) {
+            if v.is_some_and(|y| y != x) {
+                return None;
+            }
+            v = Some(x);
+        }
+        v.or_else(|| self.core.loops.get(&f).copied())
     }
 
     /// [`Self::apply`] untimed.
@@ -1884,6 +2058,8 @@ impl Engine {
                     }
                     let dbg = super::core::debug().then(|| format!("{:?} out {}", r.res.reads, self.core.values.render(r.res.out)));
                     let s0 = super::core::prof::snapshot();
+                    // (The run audit: the result it replaces.)
+                    let audit_old = if self.audit.is_some() { self.w.node(id).and_then(|n| n.res.clone()) } else { None };
                     let w = std::mem::take(&mut self.w);
                     let mut b = Builder::new(&self.core, w);
                     b.app_env(id, &r.env);
@@ -1900,6 +2076,10 @@ impl Engine {
                     let (dirty, created, freed, woken) = (m.dirty, m.created, m.freed, m.woken);
                     self.rebinds += m.rebinds;
                     self.w = m.w;
+                    let ran = s.last_ran.remove(&id);
+                    if let (Some(o), Some(t)) = (audit_old, ran) {
+                        self.audit_run(id, &o, t);
+                    }
                     if changed {
                         cut.remove(&id);
                     } else {
@@ -2250,7 +2430,7 @@ impl Engine {
                 }
                 // (A range's last contributor: a chain through an
                 // accumulator falls by one through each.)
-                Read::Range { f, from, to, past, val } => {
+                Read::Range { f, from, to, past, val, .. } => {
                     if !fold_redo
                         && moved(*f, *from, *to, *val)
                         && let Some((u, lo, hi)) = self.w.window(id, *from, *to, *past)
@@ -2757,11 +2937,52 @@ fn read_kind(r: &Read) -> &'static str {
     }
 }
 
+/// Whether results `a` and `b` have the same effects outside their runs:
+/// output, definitions, contributions, publications, scope effect and
+/// kinds, placements, diagnostics and claim.
+fn same_effects(a: &Res, b: &Res) -> bool {
+    a.out == b.out
+        && a.defs == b.defs
+        && a.contribs == b.contribs
+        && a.pubs == b.pubs
+        && a.effect == b.effect
+        && a.kinds == b.kinds
+        && a.kids == b.kids
+        && a.conts == b.conts
+        && a.diag == b.diag
+        && a.claim == b.claim
+        && a.forwards == b.forwards
+}
+
 /// The loop-back values world `w`'s publications give (every declared
 /// field: unpublished, its initial value).
 fn publications_of(core: &super::core::Core, w: &World) -> Result<Vec<(Field, ValueId)>, EvalError> {
     if core.loops.is_empty() {
         return Ok(Vec::new());
+    }
+    // (The world's loop-back values hold every declared field: merged in
+    // field order with the publications index.)
+    if w.loops.len() == core.loops.len() {
+        let mut out = Vec::with_capacity(w.loops.len());
+        let mut it = w.pub_ix.iter().peekable();
+        for (&f, _) in w.loops.iter() {
+            while it.peek().is_some_and(|((g, _), _)| *g < f) {
+                it.next();
+            }
+            let mut val = None;
+            while let Some(&(&(g, _), &x)) = it.peek() {
+                if g != f {
+                    break;
+                }
+                if val.is_some_and(|y| y != x) {
+                    return Err(EvalError::ConflictingPublication { field: f });
+                }
+                val = Some(x);
+                it.next();
+            }
+            out.push((f, val.unwrap_or(core.loops[&f])));
+        }
+        return Ok(out);
     }
     let mut pubs: FxHashMap<Field, Vec<ValueId>> = FxHashMap::default();
     for (id, _) in w.publishers.iter() {
@@ -2905,6 +3126,7 @@ impl Flow<'_> {
                     }
                 };
                 *self.m.s.time.entry(id).or_default() += d;
+                self.m.s.last_ran.insert(id, d);
                 let ahead = self.m.eng.w.node(id).is_some_and(|n| self.m.eng.w.work_of(n.unit).is_some_and(|m| m.below(&n.pos).is_some()));
                 if let Err(e) = self.m.one(&snap, usize::from(ahead), id, o, &mut Sequential) {
                     self.m.err = Some(e);
@@ -2987,6 +3209,7 @@ impl Merge<'_> {
                 continue;
             }
             *self.s.time.entry(id).or_default() += d;
+            self.s.last_ran.insert(id, d);
             if let Err(e) = self.one(snap, i, id, o, exec) {
                 self.err = Some(e);
             }
@@ -3037,6 +3260,7 @@ impl Merge<'_> {
             let d = std::time::Duration::ZERO;
             t_ops += u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
             *self.s.time.entry(id).or_default() += d;
+            self.s.last_ran.insert(id, d);
             let (eng, s, rep) = (&mut *self.eng, &mut *self.s, &mut *self.rep);
             // (What it stopped on, if in work: the chain's next link.)
             let want = match &o {
@@ -3204,6 +3428,14 @@ impl Merge<'_> {
         };
         let Some(n) = eng.w.node(id) else { return true };
         let old = n.res.as_deref();
+        // (An early loop-back's publisher moves it in its commit: no field
+        // write is recorded around that.)
+        if eng.early_live
+            && !eng.early.is_empty()
+            && r.res.pubs.iter().chain(old.map_or(&[][..], |x| &x.pubs[..])).any(|p| eng.early.contains(&p.0))
+        {
+            return true;
+        }
         if !r.kids.is_empty() || !r.conts.is_empty() || old.is_some_and(|x| !x.kids.is_empty() || !x.conts.is_empty()) {
             count(7);
             return true;
@@ -3527,10 +3759,17 @@ fn run_job(
             def_ix: std::sync::OnceLock::new(),
             text: 0,
             eval: core.eval_no.load(std::sync::atomic::Ordering::Relaxed),
+            marks: std::mem::take(&mut cx.marks).into(),
+            after: cx.after.take(),
         },
         kids: cx.kids,
         conts: cx.conts,
-        kept: cx.kept,
+        // (Its views kept with its token: held in the client's state, they
+        // stand when it resumes.)
+        kept: match cx.kept {
+            Some(t) if !cx.views.is_empty() => Some(Box::new(super::ctx::KeptViews { token: t, views: cx.views }) as Box<dyn std::any::Any + Send>),
+            k => k,
+        },
         apps: cx.apps,
         env: cx.env,
         pset_wait: cx.pset_wait,
@@ -3549,6 +3788,51 @@ fn run_job(
         text: text.clone(),
         log_at,
     };
+    // Cut off at a mark of its last run: that run's result stands, with
+    // this run's reads up to the mark and that run's after it.
+    if let (Some(j), Some(fm)) = (cx.cutoff, cx.from_mark.take())
+        && matches!(r, Ok(Err(_)))
+    {
+        let old = fm.old;
+        let from = old.marks[j].read_ix as usize;
+        let mut reads = std::mem::take(&mut cx.reads);
+        let shift = reads.len() as i64 - from as i64;
+        reads.extend_from_slice(&old.reads[from..]);
+        let mut marks = std::mem::take(&mut cx.marks);
+        marks.extend(old.marks[j + 1..].iter().map(|m| super::world::Mark {
+            read_ix: u32::try_from(i64::from(m.read_ix) + shift).unwrap_or(u32::MAX),
+            ..*m
+        }));
+        // (Its placements as the last run made them: the same nodes.)
+        let spec = |x: &Id| {
+            w.node(*x).map(|n| super::ctx::Spec {
+                op: n.text.op,
+                args: n.text.args.clone(),
+                place: n.place,
+            })
+        };
+        let kids: Option<Vec<_>> = old.kids.iter().map(spec).collect();
+        let conts: Option<Vec<_>> = old.conts.iter().map(spec).collect();
+        if let (Some(kids), Some(conts)) = (kids, conts) {
+            let mut res = (*old).clone();
+            res.reads = reads;
+            res.marks = marks.into();
+            res.filed = None;
+            res.def_ix = std::sync::OnceLock::new();
+            res.eval = core.eval_no.load(std::sync::atomic::Ordering::Relaxed);
+            let mut r = run(cx, old.out);
+            r.res = res;
+            r.kids = kids;
+            r.conts = conts;
+            r.kept = None;
+            core.cut_in_run.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if kept_check() {
+                check_cutoff(core, w, id, &r, predict, careful);
+            }
+            return Outcome::Done(r);
+        }
+        return run_job(core, w, id, None, predict, careful, fuel);
+    }
     match r {
         Ok(Ok(out)) => {
             let mut r = run(cx, out);
@@ -3568,6 +3852,19 @@ fn run_job(
             op: core.op_name(cx.op).to_string(),
             message: super::core::panic_message(&*p),
         }),
+    }
+}
+
+/// `CLEAN_KEPT_CHECK`: a run cut off at a mark has the effects a run from
+/// the start makes.
+fn check_cutoff(core: &super::core::Core, w: &World, id: Id, cut: &Run, predict: bool, careful: bool) {
+    if let Outcome::Done(full) = run_job(core, w, id, None, predict, careful, None) {
+        assert!(
+            full.res.out == cut.res.out && same_effects(&full.res, &cut.res) && full.kids == cut.kids && full.conts == cut.conts,
+            "cut off run of {id}: its result is not a full run's (out {:?} against {:?})",
+            cut.res.out,
+            full.res.out
+        );
     }
 }
 

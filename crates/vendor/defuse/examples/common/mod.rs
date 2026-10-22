@@ -102,6 +102,8 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                 ')' => ")",
                 '{' => "{",
                 '}' => "}",
+                '[' => "[",
+                ']' => "]",
                 ',' => ",",
                 ':' => ":",
                 '.' => ".",
@@ -234,6 +236,13 @@ impl Parser<'_> {
         if self.is_sym("{") {
             let b = self.block()?;
             return Ok(self.tagged("block", vec![b]));
+        }
+        // `run { a = .. b = .. }`: the assignments run in one node, in the
+        // enclosing scope, a mark before each (`Ctx::checkpoint`).
+        if self.is_kw("run") && matches!(self.peek_at(1), Some(Tok::Sym("{"))) {
+            self.pos += 1;
+            let b = self.block()?;
+            return Ok(self.tagged("run", vec![b]));
         }
         if self.is_sym("~") {
             self.pos += 1;
@@ -553,8 +562,37 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(self.tagged("lit", vec![self.v.bool(k == "true")]))
             }
+            Some(Tok::Ident(k)) if (k == "len" || k == "lens") && matches!(self.peek_at(1), Some(Tok::Sym("("))) => {
+                self.pos += 2;
+                let n = self.name()?;
+                self.eat(")")?;
+                Ok(self.tagged(&k, vec![self.s(&n)]))
+            }
+            Some(Tok::Sym("[")) => {
+                self.pos += 1;
+                let mut xs = Vec::new();
+                while !self.is_sym("]") {
+                    if self.peek().is_none() {
+                        return Err("unclosed list".into());
+                    }
+                    xs.push(self.expr()?);
+                    if self.is_sym(",") {
+                        self.pos += 1;
+                    }
+                }
+                self.pos += 1;
+                Ok(self.tagged("mklist", xs))
+            }
             Some(Tok::Ident(_)) => {
                 let n = self.name()?;
+                // `x[i]`: element `i` (a constant) of `x`.
+                if self.is_sym("[")
+                    && let Some(Tok::Int(i)) = self.peek_at(1).cloned()
+                    && matches!(self.peek_at(2), Some(Tok::Sym("]")))
+                {
+                    self.pos += 3;
+                    return Ok(self.tagged("index", vec![self.s(&n), self.v.int(i)]));
+                }
                 Ok(self.tagged("var", vec![self.s(&n)]))
             }
             t => Err(format!("unexpected {t:?}")),
@@ -923,7 +961,7 @@ fn exports(v: &Values, stmts: &[ValueId]) -> Option<Vec<String>> {
             // An `add` may emit a fold output whose text defines globals.
             "eval" | "do" | "invoke" | "seq" | "add" => return None,
             "when" => out.extend(exports(v, &[a[1]])?),
-            "block" => out.extend(exports(v, &items(v, a[0]))?),
+            "block" | "run" => out.extend(exports(v, &items(v, a[0]))?),
             "if" => {
                 out.extend(exports(v, &items(v, a[1]))?);
                 out.extend(exports(v, &items(v, a[2]))?);
@@ -945,7 +983,12 @@ fn free_vars(v: &Values, e: ValueId, bound: &mut Vec<String>, out: &mut Vec<Stri
         }
     };
     match t.as_str() {
-        "var" => add(text(v, a[0]), bound, out),
+        "var" | "index" | "len" | "lens" => add(text(v, a[0]), bound, out),
+        "mklist" => {
+            for &x in &a {
+                free_vars(v, x, bound, out);
+            }
+        }
         "layout" => {
             let n = text(v, a[0]);
             add(format!("{n}.x"), bound, out);
@@ -1122,6 +1165,121 @@ pub fn out_field(v: &Values) -> Field {
     v.field("out")
 }
 
+/// Whether loop-back fields are declared early (`FUZZ_LOOP_EARLY`).
+pub fn loop_early() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FUZZ_LOOP_EARLY").is_some())
+}
+
+/// How `x[i]` and `len(x)` read `x` (`FUZZ_PATHS`: 1 a path, 2 a view,
+/// else the whole value).
+pub fn fuzz_paths() -> u8 {
+    static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FUZZ_PATHS").ok().and_then(|s| s.parse().ok()).unwrap_or(0))
+}
+
+/// Element `i` of list or sequence `x` (`x[i]`).
+pub fn index_of(v: &Values, x: ValueId, i: i64) -> Option<ValueId> {
+    let i = u32::try_from(i).ok()?;
+    v.with(x, |val| match val {
+        Value::List(l) => l.get(i as usize).copied(),
+        Value::Seq(_) => v.seq_nth(x, u64::from(i)),
+        _ => None,
+    })
+}
+
+/// `run { .. }`: its assignments in one run, a mark before each. The state
+/// at statement `i` is `[i, bindings]` (the names it assigned so far with
+/// their values, in order); the kept token is every mark's bindings. A run
+/// resumed at a mark takes its bindings from there and defines them again
+/// (a resumed run makes its whole result).
+fn run_marked(cx: &mut Ctx<'_>, ops: Ops, stmts: &[ValueId]) -> Result<ValueId, Stop> {
+    let v = cx.values();
+    let (mut i, mut env, mut kept): (usize, Vec<(ValueId, ValueId, bool)>, Vec<ValueId>) = match cx.resumed() {
+        Some((tok, mark)) => {
+            let states = tok.downcast_ref::<Vec<ValueId>>().expect("run's token");
+            let i = mark as usize;
+            let env: Vec<(ValueId, ValueId, bool)> = items(v, states[i])
+                .into_iter()
+                .map(|b| {
+                    let b = items(v, b);
+                    (b[0], b[1], truthy(v, b[2]))
+                })
+                .collect();
+            (i, env, states[..i].to_vec())
+        }
+        None => (0, Vec::new(), Vec::new()),
+    };
+    let loc = |g: bool| if g { Locality::Global } else { Locality::Local };
+    for &(n, x, g) in &env {
+        cx.define_with(v.field(&text(v, n)), x, loc(g));
+    }
+    while i < stmts.len() {
+        let bindings = v.list(env.iter().map(|&(n, x, g)| v.list(vec![n, x, v.bool(g)])).collect());
+        kept.push(bindings);
+        #[allow(clippy::cast_possible_wrap)]
+        let state = v.list(vec![v.int(i as i64), bindings]);
+        cx.checkpoint(u32::try_from(i).unwrap_or(u32::MAX), state)?;
+        let (st, sa) = tag(v, stmts[i]);
+        if st == "assign" {
+            // (Its own bindings first: they are the run's, not the store's.)
+            let e = subst(v, sa[1], &env);
+            let x = eval_expr(cx, ops, e)?;
+            let g = truthy(v, sa[2]);
+            env.retain(|b| b.0 != sa[0] || b.2 != g);
+            env.push((sa[0], x, g));
+            cx.define_with(v.field(&text(v, sa[0])), x, loc(g));
+        }
+        i += 1;
+    }
+    cx.keep_after(Arc::new(kept));
+    Ok(ValueId::UNIT)
+}
+
+/// Expression `e` with the variables bound in `env` replaced by their
+/// values (the run's last binding of each).
+fn subst(v: &Values, e: ValueId, env: &[(ValueId, ValueId, bool)]) -> ValueId {
+    if let Value::Int(_) = *v.get(e) {
+        return e;
+    }
+    let (t, a) = tag(v, e);
+    match t.as_str() {
+        "var" => env.iter().rev().find(|b| text(v, b.0) == text(v, a[0])).map_or(e, |b| literal(v, b.1)),
+        "op" => v.list(vec![v.str("op"), a[0], subst(v, a[1], env), subst(v, a[2], env)]),
+        "mklist" => {
+            let mut xs = vec![v.str("mklist")];
+            xs.extend(a.iter().map(|&x| subst(v, x, env)));
+            v.list(xs)
+        }
+        _ => e,
+    }
+}
+
+/// What `x[i]`, `len(x)` or `lens(x)` (`t`) gives of `x`, whole.
+pub fn path_of(v: &Values, t: &str, x: ValueId, i: i64) -> Option<ValueId> {
+    match t {
+        "len" => len_of(v, x),
+        "lens" => match &*v.get(x) {
+            Value::List(l) => Some(v.list(l.iter().map(|&e| len_of(v, e).unwrap_or(ValueId::UNIT)).collect())),
+            _ => None,
+        },
+        _ => index_of(v, x, i),
+    }
+}
+
+/// The length of a list, a sequence or a string (`len(x)`).
+pub fn len_of(v: &Values, x: ValueId) -> Option<ValueId> {
+    #[allow(clippy::cast_possible_wrap)]
+    v.with(x, |val| match val {
+        Value::List(l) => Some(l.len() as i64),
+        Value::Str(t) => Some(t.len() as i64),
+        Value::Seq(n) => Some(n.len as i64),
+        Value::Nil => Some(0),
+        _ => None,
+    })
+    .map(|n| v.int(n))
+}
+
 /// Whether `var` reads go through `Ctx::use_fields` (`FUZZ_READ_MANY`).
 fn read_many() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1161,6 +1319,39 @@ fn eval_expr(cx: &mut Ctx<'_>, ops: Ops, e: ValueId) -> Result<ValueId, Stop> {
             let x = eval_expr(cx, ops, a[1])?;
             let y = eval_expr(cx, ops, a[2])?;
             binop(v, &text(v, a[0]), x, y)
+        }
+        "mklist" => {
+            let mut xs = Vec::new();
+            for &x in &a {
+                xs.push(eval_expr(cx, ops, x)?);
+            }
+            v.list(xs)
+        }
+        // FUZZ_PATHS=1: read through a path (`Ctx::use_field_path`); =2:
+        // through a view; else the whole value. Results must not change.
+        "index" | "len" | "lens" => {
+            let f = v.field(&text(v, a[0]));
+            let i = v.as_int(a.get(1).copied().unwrap_or(ValueId::UNIT)).unwrap_or(0);
+            let step = match t.as_str() {
+                "len" => defuse::Step::Len,
+                "lens" => defuse::Step::Each(cx.path(&[defuse::Step::Len])),
+                _ => defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX)),
+            };
+            let got = match fuzz_paths() {
+                1 => {
+                    let p = cx.path(&[step]);
+                    cx.use_field_path(f, p)?
+                }
+                2 => match cx.view(f)? {
+                    Some(m) => cx.get(m, step),
+                    None => None,
+                },
+                _ => {
+                    let x = cx.use_field(f)?;
+                    x.and_then(|x| path_of(v, &t, x, i))
+                }
+            };
+            got.unwrap_or_else(|| v.str(&format!("error: {t}")))
         }
         "call" => {
             let f = eval_expr(cx, ops, a[0])?;
@@ -1263,6 +1454,16 @@ impl Operation for StmtOp {
         };
         match t.as_str() {
             "assign" => Some(vec![(v.field(&text(v, a[0])), loc(a[2]))]),
+            "run" => {
+                let mut out: Vec<(Field, Locality)> = Vec::new();
+                for s in items(v, a[0]) {
+                    let (st, sa) = tag(v, s);
+                    if st == "assign" && !out.iter().any(|d| d.0 == v.field(&text(v, sa[0])) && d.1 == loc(sa[2])) {
+                        out.push((v.field(&text(v, sa[0])), loc(sa[2])));
+                    }
+                }
+                Some(out)
+            }
             "record" => {
                 let base = text(v, a[0]);
                 Some(
@@ -1579,6 +1780,7 @@ impl Operation for StmtOp {
                 }
                 Ok(ValueId::UNIT)
             }
+            "run" => run_marked(cx, ops, &items(v, a[0])),
             "if" => {
                 let c = eval_expr(cx, ops, a[0])?;
                 let branch = if truthy(v, c) { a[1] } else { a[2] };
@@ -1933,7 +2135,13 @@ impl Lang {
                 let name = text(v, a[0]);
                 let f = v.field(&name);
                 let init = a[1];
-                eng.declare_loopback(f, init);
+                // FUZZ_LOOP_EARLY=1: early round values (not deterministic;
+                // the check takes a result the report warns of).
+                if loop_early() {
+                    eng.declare_loopback_early(f, init);
+                } else {
+                    eng.declare_loopback(f, init);
+                }
                 names.push(name);
             }
         }

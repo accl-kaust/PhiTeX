@@ -665,8 +665,10 @@ impl Default for Aux {
 }
 
 impl PdfState {
-    /// Brings the tracked collections' sums up to date.
-    pub(crate) fn refresh_digests(&mut self) {
+    /// Brings the tracked collections' sums up to date: a copy made
+    /// after this starts with nothing to hash again (its digest costs
+    /// what changes after the copy).
+    pub fn refresh_digests(&mut self) {
         let a = &mut self.aux;
         a.raw.refresh();
         a.xforms.refresh();

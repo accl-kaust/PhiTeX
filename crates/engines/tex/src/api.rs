@@ -166,6 +166,9 @@ pub struct Options {
     /// round ran with, and a warning names the fields still moving
     /// ([`Build::diagnostics`]).
     pub max_rounds: u64,
+    /// How the loop-back rounds run ([`Rounds`]): exact (the default) or
+    /// relaxed.
+    pub rounds: Rounds,
     /// Where a tool's support files come from (bibliography styles and
     /// databases, index styles: [`ToolSearch`]); `None` asks
     /// [`Options::finder`] by name.
@@ -579,6 +582,23 @@ fn apply_text(
     true
 }
 
+/// How a build's loop-back rounds run (the files the job writes and
+/// reads back: its `.aux`, `.toc`, `.out`, `.idx` and their kin).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rounds {
+    /// As latexmk's runs: a file read back moves only between rounds,
+    /// so the output is byte for byte pdfTeX's under latexmk.
+    #[default]
+    Exact,
+    /// A file read back moves as soon as a run changes what it holds,
+    /// and its readers run again within the round: fewer rounds. The
+    /// result is usually the same, but a document whose read-backs
+    /// change more than once or reach the round cap may differ from the
+    /// exact rounds' (a warning says so, [`Build::diagnostics`]), and
+    /// one that settles cleanly is not proved to match either.
+    Relaxed,
+}
+
 impl Default for Options {
     fn default() -> Self {
         Options {
@@ -608,6 +628,7 @@ impl Default for Options {
             speculation: Speculation::Predicted,
             speculation_budget: 256,
             max_rounds: 5,
+            rounds: Rounds::Exact,
             tool_finder: None,
             bibtex: phitex_bibtex::Options::default(),
             out_name_ok: None,
@@ -1417,6 +1438,61 @@ pub struct Stats {
     pub env_calls: u64,
 }
 
+/// The run audit's line (`acct-edit: audit`, with `PHITEX_ROUND_ACCT`
+/// and `PHITEX_RUN_AUDIT`): the reruns and their time, the wasted ones
+/// (every effect outside the run as before) and their time, and the
+/// wasted ones by operation, cause and field, the most time first.
+///
+/// Example: `acct-edit: audit reruns 12 in 3.1 ms, wasted 9 in 2.4 ms,
+/// top [exec Changed cs:@currentlabel 4 1.200 ms; finish Range pdf:xpages
+/// 3 0.900 ms]`.
+fn print_audit(eng: &Engine, a: &phitex_defuse::RunAudit) {
+    use phitex_defuse::Rerun;
+    let v = eng.values();
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let mut by: FxHashMap<(String, &'static str, String), (u64, std::time::Duration)> =
+        FxHashMap::default();
+    for w in &a.wasted {
+        let op = eng.node_info(w.node).map_or("gone", |i| i.op).to_owned();
+        let (kind, field) = match w.cause {
+            None => ("unknown", None),
+            Some(Rerun::Text) => ("Text", None),
+            Some(Rerun::Changed { field, .. }) => ("Changed", Some(field)),
+            Some(Rerun::Rebind { field }) => ("Rebind", Some(field)),
+            Some(Rerun::Refuted { field }) => ("Refuted", field),
+            Some(Rerun::Woken { field }) => ("Woken", field),
+            Some(Rerun::Loop { field }) => ("Loop", Some(field)),
+            Some(Rerun::Environment { field }) => ("Environment", Some(field)),
+            Some(Rerun::Output { .. }) => ("Output", None),
+            Some(Rerun::Claim) => ("Claim", None),
+            Some(Rerun::Anchor { .. }) => ("Anchor", None),
+            Some(Rerun::SiblingScan) => ("SiblingScan", None),
+            Some(Rerun::Range { field }) => ("Range", field),
+            Some(Rerun::Scope) => ("Scope", None),
+            Some(Rerun::Other) => ("Other", None),
+        };
+        let f = field.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
+        let e = by.entry((op, kind, f)).or_default();
+        e.0 += 1;
+        e.1 += w.time;
+    }
+    let mut by: Vec<_> = by.into_iter().collect();
+    by.sort_by(|a, b| b.1.1.cmp(&a.1.1).then_with(|| a.0.cmp(&b.0)));
+    let top: Vec<String> = by
+        .iter()
+        .take(8)
+        .map(|((op, kind, f), (n, t))| format!("{op} {kind} {f} {n} {:.3} ms", ms(*t)))
+        .collect();
+    eprintln!(
+        "acct-edit: audit reruns {} in {:.1} ms, wasted {} in {:.1} ms, top [{}]",
+        a.reruns,
+        ms(a.rerun_time),
+        a.wasted.len(),
+        ms(a.wasted_time),
+        top.join("; ")
+    );
+}
+
 /// The cold accounting of an evaluation (spec-final §1), with
 /// `PHITEX_TEX_TIME`: per round the engine's split of its time, the
 /// runs per node, the parallel shape (§9b: pending waits), the op time
@@ -2110,6 +2186,7 @@ impl Graph {
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            early_loops: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pdf_cmds: Arc::default(),
             class_proj,
             outer_proj,
@@ -2542,6 +2619,18 @@ impl Graph {
         names
     }
 
+    /// Declares the read-back loop-backs `decl`, early in the relaxed
+    /// rounds ([`Rounds::Relaxed`]).
+    fn decl_loops(&mut self, decl: &[(Field, ValueId)]) {
+        if self.ops.early_loops.load(std::sync::atomic::Ordering::Relaxed) {
+            for &(f, x) in decl {
+                self.eng.declare_loopback_early(f, x);
+            }
+        } else {
+            self.eng.declare_loopbacks(decl);
+        }
+    }
+
     /// Round one's guesses for the loop-backs: the last build's values
     /// (`opts`); none without one.
     fn guesses(&mut self, opts: &Options) {
@@ -2555,7 +2644,7 @@ impl Graph {
             let names = v.list(self.seeds.iter().map(|(n, _)| v.str(n)).collect());
             let f = v.field(crate::ops::WSEEN);
             decl_trace(&self.eng, f, names);
-            self.eng.declare_loopback(f, names);
+            self.decl_loops(&[(f, names)]);
         }
         // (a file read back from its text needs no guess of its keys)
         self.wkeys_guess = opts
@@ -2626,7 +2715,7 @@ impl Graph {
             for (f, x) in [(wf, none), (w, guess)] {
                 decl_trace(&self.eng, f, x);
             }
-            self.eng.declare_loopbacks(&[(wf, none), (w, guess)]);
+            self.decl_loops(&[(wf, none), (w, guess)]);
             // the guessed keys' `wdef:<field>` loop-backs declared with
             // it: a read-back of a guessed key never waits for them
             let keys: Vec<String> = self
@@ -2652,7 +2741,7 @@ impl Graph {
                     self.wdefs.push(k);
                 }
             }
-            self.eng.declare_loopbacks(&decl);
+            self.decl_loops(&decl);
         }
         self.written.push(name.to_owned());
     }
@@ -2762,6 +2851,11 @@ impl Graph {
                 let fd = o.fin_defs.locked().clone();
                 *o.fin_defs_start.locked() = Arc::new(fd);
             }
+            // (the engine's run audit, `PHITEX_RUN_AUDIT=1`: the reruns
+            // whose effects all came out as before, printed below)
+            if crate::exec::prof_flag!("PHITEX_RUN_AUDIT") {
+                self.eng.set_run_audit(true);
+            }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
@@ -2802,6 +2896,23 @@ impl Graph {
                 self.eval_warnings.push(format!(
                     "the files read back still changed after {} rounds (latexmk's limit); the output is the last round's; still changing: {}",
                     r.rounds,
+                    names.join(", ")
+                ));
+            }
+            // (the relaxed rounds, [`Rounds::Relaxed`]: a field
+            // read back that changed more than once, or reached the round
+            // limit, may have left another output than the exact rounds')
+            if r.early_may_differ() {
+                let v = self.eng.values();
+                let mut names: Vec<String> = r
+                    .early_loops
+                    .iter()
+                    .filter(|e| e.capped || e.oscillated())
+                    .map(|e| field_name(v, e.field))
+                    .collect();
+                names.sort();
+                self.eval_warnings.push(format!(
+                    "relaxed rounds: the files read back changed more than once or reached the round limit ({}); the output may differ from an exact build's, which --exact-pdf makes",
                     names.join(", ")
                 ));
             }
@@ -2865,8 +2976,8 @@ impl Graph {
             if crate::exec::prof_flag!("PHITEX_ROUND_ACCT") {
                 // (the edit's cost by round, cheap enough for the edit
                 // histories the gate times: the runs and the per-round
-                // memo's hits of each round, its bytes, the runs by
-                // operation)
+                // memo's hits of each round, its bytes, the nodes run and
+                // those whose output did not change, the runs by operation)
                 let rounds: Vec<String> = r
                     .round_times
                     .iter()
@@ -2879,14 +2990,28 @@ impl Graph {
                     r.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
                 ops.sort_unstable();
                 eprintln!(
-                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits/wall by round [{}], {} runs, {} nodes run, runs by op {ops:?}",
+                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits/wall by round [{}], {} runs, {} nodes run, {} cutoffs, runs by op {ops:?}",
                     t0.elapsed().as_secs_f64() * 1e3,
                     r.rounds,
                     rounds.join(" "),
                     r.runs,
-                    r.nodes_run
+                    r.nodes_run,
+                    r.cutoffs
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
+                if let Some(a) = &r.audit {
+                    print_audit(&self.eng, a);
+                }
+                if !r.early_loops.is_empty() {
+                    eprintln!(
+                        "acct-edit: early loops: {} fields, {} changes, {} oscillated, {} capped, may differ {}",
+                        r.early_loops.len(),
+                        r.early_loops.iter().map(|e| u64::from(e.changes)).sum::<u64>(),
+                        r.early_loops.iter().filter(|e| e.oscillated()).count(),
+                        r.early_loops.iter().filter(|e| e.capped).count(),
+                        r.early_may_differ()
+                    );
+                }
                 // (the guesses this edit paid for: refuted runs, the
                 // fields they were refuted on, and the parked runs that
                 // started over and why)
@@ -3086,7 +3211,7 @@ impl Graph {
                     // evaluation more)
                     self.wdefs.push(f);
                 }
-                self.eng.declare_loopbacks(&decl);
+                self.decl_loops(&decl);
             }
             let asked_names: Vec<String> = {
                 let v = self.eng.values();
@@ -4517,6 +4642,9 @@ impl Build {
             opts.finisher_predictions,
             std::sync::atomic::Ordering::Relaxed,
         );
+        g.ops
+            .early_loops
+            .store(opts.rounds == Rounds::Relaxed, std::sync::atomic::Ordering::Relaxed);
         // (observe: `PHITEX_MAX_ROUNDS`, a lower cap, so the warning names
         // the fields still moving after that round)
         let cap = crate::exec::obs_str!("PHITEX_MAX_ROUNDS")

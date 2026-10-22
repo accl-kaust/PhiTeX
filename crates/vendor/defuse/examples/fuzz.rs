@@ -58,7 +58,11 @@ fn main() {
             s ^= s << 17;
             usize::try_from(s % m as u64).unwrap()
         };
-        let src: Vec<String> = (0..30).map(|_| pool[next(pool.len())].clone()).collect();
+        // (A pool's loop-back declarations head every program: its other
+        // lines may all read them.)
+        let decls = pool.iter().filter(|l| l.starts_with("loop ")).cloned();
+        let body: Vec<String> = (0..30).map(|_| pool[next(pool.len())].clone()).filter(|l| !l.starts_with("loop ")).collect();
+        let src: Vec<String> = decls.chain(body).collect();
         BASE.with(|b| b.set(shrink::counter()));
         let (mut eng, mut prog) = Program::load(src.clone());
         if !ok(&mut eng, &prog) {
@@ -82,6 +86,16 @@ fn main() {
                 1 if i < prog.lines.len() => Ed::Set(i, pool[next(pool.len())].clone()),
                 _ => Ed::Ins(i, pool[next(pool.len())].clone()),
             };
+            // (Loop-back fields are declared when the program loads: their
+            // lines stay, and none comes in.)
+            let line = |e: &Ed| match e {
+                Ed::Rm(i) => prog.lines[*i].clone(),
+                Ed::Set(i, l) => format!("{}{l}", prog.lines[*i]),
+                Ed::Ins(_, l) => l.clone(),
+            };
+            if line(&e).contains("loop ") {
+                continue;
+            }
             apply(&mut eng, &mut prog, &e);
             if (step + 1) % batch != 0 {
                 hist.push((pre, e));

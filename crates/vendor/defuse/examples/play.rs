@@ -171,6 +171,61 @@ impl PlayOp {
     }
 }
 
+/// The run audit: reruns, the wasted ones, and those by cause (the field
+/// named), the most time first.
+fn print_audit(eng: &Engine, a: &defuse::RunAudit) {
+    use defuse::Rerun;
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    println!(
+        "  audit: reruns {} ({:.2} ms), wasted {} ({:.2} ms)",
+        a.reruns,
+        ms(a.rerun_time),
+        a.wasted.len(),
+        ms(a.wasted_time)
+    );
+    let name = |f: defuse::Field| eng.values().as_str(f.0).unwrap_or_else(|| format!("{f:?}"));
+    let mut by: std::collections::BTreeMap<String, (u64, std::time::Duration)> = std::collections::BTreeMap::new();
+    for w in &a.wasted {
+        let k = match w.cause {
+            None => "unknown".to_string(),
+            Some(Rerun::Changed { field, .. }) => format!("changed {}", name(field)),
+            Some(Rerun::Rebind { field }) => format!("rebind {}", name(field)),
+            Some(Rerun::Loop { field }) => format!("loop {}", name(field)),
+            Some(Rerun::Environment { field }) => format!("env {}", name(field)),
+            Some(Rerun::Range { field: Some(f) }) => format!("range {}", name(f)),
+            Some(Rerun::Woken { field: Some(f) }) => format!("woken {}", name(f)),
+            Some(Rerun::Refuted { field: Some(f) }) => format!("refuted {}", name(f)),
+            Some(c) => format!("{c:?}"),
+        };
+        let e = by.entry(k).or_default();
+        e.0 += 1;
+        e.1 += w.time;
+    }
+    let mut v: Vec<_> = by.into_iter().collect();
+    v.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+    for (k, (n, t)) in v.iter().take(15) {
+        println!("    wasted {n:5} {:8.2} ms  {k}", ms(*t));
+    }
+    let checked: u64 = a.rechecked.iter().map(|r| r.1).sum();
+    println!("  audit: reads re-checked {checked}");
+    for (f, n, b) in a.rechecked.iter().take(15) {
+        println!("    re-checked {n:7} broken {b:6}  {}", f.map_or_else(|| "(no field)".to_string(), name));
+    }
+}
+
+/// A recorded step (`Each` with its path's steps, interned here).
+fn step(cx: &Ctx<'_>, j: &J) -> defuse::Step {
+    match j.get("Each") {
+        Some(inner) => defuse::Step::Each(cx.path(&steps(cx, inner))),
+        None => de(j),
+    }
+}
+
+/// Recorded steps.
+fn steps(cx: &Ctx<'_>, j: &J) -> Vec<defuse::Step> {
+    j.as_array().map(|a| a.iter().map(|s| step(cx, s)).collect()).unwrap_or_default()
+}
+
 /// Makes one recorded call on `cx`; returns its answer as recorded, or
 /// `Err` with the run's stop when the call stopped it.
 #[allow(clippy::too_many_lines)]
@@ -191,6 +246,26 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "use_field_before" => return res(cx.use_field_before(de(&g(0)), de::<NodeId>(&g(1)))),
         "use_field_after_own" => return res(cx.use_field_after_own(de(&g(0)), de::<NodeId>(&g(1)))),
         "use_field_proj" => return res(cx.use_field_proj(de(&g(0)), de::<ProjId>(&g(1)))),
+        "use_field_path" => {
+            let p = cx.path(&steps(cx, &g(1)));
+            return res(cx.use_field_path(de(&g(0)), p));
+        }
+        "acc_fold_path" => {
+            let p = cx.path(&steps(cx, &g(3)));
+            return res(cx.acc_fold_path(de(&g(0)), de(&g(1)), de(&g(2)), p));
+        }
+        "view" => return res(cx.view(de(&g(0)))),
+        "acc_view" => return res(cx.acc_view(de(&g(0)), de(&g(1)), de(&g(2)))),
+        "at" => {
+            let s = step(cx, &g(1));
+            json!(cx.at(de::<defuse::View>(&g(0)), s))
+        }
+        "get" => {
+            let s = step(cx, &g(1));
+            json!(cx.get(de::<defuse::View>(&g(0)), s))
+        }
+        "whole" => json!(cx.whole(de::<defuse::View>(&g(0)))),
+        "checkpoint" => return res(cx.checkpoint(de(&g(0)), de(&g(1)))),
         "use_fields" => {
             let mut out = Vec::new();
             return res(cx.use_fields(&de::<Vec<Field>>(&g(0)), &mut out).map(|()| out));
@@ -205,6 +280,7 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "define_forward" => return res(cx.define_forward(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "publish" => json!(cx.publish(de(&g(0)), de(&g(1)))),
         "declare_loopback" => json!(cx.declare_loopback(de(&g(0)), de(&g(1)))),
+        "declare_loopback_early" => json!(cx.declare_loopback_early(de(&g(0)), de(&g(1)))),
         "child" => json!(cx.child(de(&g(0)), de(&g(1)))),
         "follow" => json!(cx.follow(de(&g(0)), de(&g(1)))),
         "open_scope" => json!(cx.open_scope()),
@@ -487,6 +563,11 @@ impl Run {
                 cx.park_continuing(Box::new(self.origins.clone()));
                 Ok(J::Null)
             }
+            "keep_after" => {
+                cx.keep_after(Arc::new(self.origins.clone()));
+                Ok(J::Null)
+            }
+            "resumed" => Ok(json!(cx.resumed().map(|r| r.1))),
             m => call(cx, m, &c[1]),
         }
     }
@@ -793,6 +874,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "remove" => eng.remove(de(&g(0))),
         "declare_sequence" => eng.declare_sequence(de(&g(0))),
         "declare_loopback" => eng.declare_loopback(de(&g(0)), de(&g(1))),
+        "declare_loopback_early" => eng.declare_loopback_early(de(&g(0)), de(&g(1))),
         "declare_loopbacks" => eng.declare_loopbacks(&de::<Vec<(Field, ValueId)>>(&g(0))),
         "set_loop_start" => eng.set_loop_start(de::<LoopStart>(&g(0))),
         "set_max_rounds" => eng.set_max_rounds(de(&g(0))),
@@ -813,6 +895,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "guess_from_last" => eng.guess_from_last(de(&g(0))),
         "set_claim_window" => eng.set_claim_window(de(&g(0))),
         "set_claim_chain" => eng.set_claim_chain(de(&g(0))),
+        "set_run_audit" => eng.set_run_audit(de(&g(0))),
         "wait_on_pending" => eng.wait_on_pending(de(&g(0))),
         "set_heights" => eng.set_heights(de(&g(0))),
         "set_round_cap_policy" => eng.set_round_cap_policy(de::<CapPolicy>(&g(0))),
@@ -1184,6 +1267,10 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                 eng.pin(v);
             }
             "api" if l["f"] == "evaluate_begin" => {
+                // PLAY_AUDIT=1: the run audit (wasted reruns) printed.
+                if std::env::var_os("PLAY_AUDIT").is_some() {
+                    eng.set_run_audit(true);
+                }
                 // PLAY_WAIT_PENDING=<names>: those fields' readers wait on
                 // pending definition sets whatever was recorded.
                 if let Ok(ns) = std::env::var("PLAY_WAIT_PENDING") {
@@ -1272,6 +1359,9 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                         "  mispredictions {} refuted nodes {} claims past reach {} claimed after run {}; refuted by field {by:?}",
                         rep.mispredictions, rep.refuted_nodes, rep.claims_past_reach, rep.claimed_after_run
                     );
+                    if let Some(a) = &rep.audit {
+                        print_audit(&eng, a);
+                    }
                     // Where the time went, and two bounds on the wall time:
                     // the busy time spread over the workers, and the
                     // critical path at the mean run's cost.

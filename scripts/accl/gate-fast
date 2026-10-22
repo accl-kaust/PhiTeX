@@ -27,7 +27,11 @@
 # PHITEX_TEX_TIME=1; then the cold watch build at -j 1/8/16 timed by op
 # class beside the control GATE_CONTROL's recorded timings, default
 # 566fb842: gate-time.py); amsedit 8, amsedit 16 (the edit histories,
-# GATE_AMS_EDITS edits, 10); para (bench/para4000.tex, plain pdfTeX, md5
+# GATE_AMS_EDITS edits, 10); editkinds (amsldoc in one watch session
+# per -j, 8 and 1, every edit kind in turn, gate-editkinds.py: each
+# edit's PDF against a cold build, red if not the same; its save-to-build
+# ms against its kind's target, rounds, runs and cutoffs, recorded in
+# editkinds-j*.json, not red); para (bench/para4000.tex, plain pdfTeX, md5
 # against GATE_PARA_MD5, wall, us per paragraph and realised critical path
 # at -j 1/8/16, its edit histories); cg (para4000 at one thread under
 # callgrind: startup Ir, node bodies' Ir per command, top 15).
@@ -62,8 +66,9 @@ stage() {
   tmp=$(mktemp -d)
   cp "$here/gate-shard.sh" "$tmp/gate-shard.sh"
   cp "$here/gate-time.py" "$tmp/gate-time.py"
+  cp "$here/gate-editkinds.py" "$tmp/gate-editkinds.py"
   printf '%s\n' "$order" > "$tmp/order"
-  key=$(cat "$tmp/gate-shard.sh" "$tmp/gate-time.py" "$tmp/order" | sha256sum | cut -c1-16)
+  key=$(cat "$tmp/gate-shard.sh" "$tmp/gate-time.py" "$tmp/gate-editkinds.py" "$tmp/order" | sha256sum | cut -c1-16)
   sdir=code/flinner/phitex-runs/gate-scripts/gs-$key
   if ! $SSH $H "mkdir -p $sdir.part && tar -xf - -C $sdir.part && rm -rf $sdir && mv -T $sdir.part $sdir" < <(tar -cf - -C "$tmp" .) 2>/dev/null; then
     rm -rf "$tmp"
@@ -71,7 +76,7 @@ stage() {
     exit 1
   fi
   rm -rf "$tmp"
-  boot='d=$w/bin/gs-'$key'; GATE_TIME_PY=$(cat "$d/gate-time.py") GATE_LATEX_ORDER=$(cat "$d/order") exec bash "$d/gate-shard.sh" "$@"'
+  boot='d=$w/bin/gs-'$key'; GATE_TIME_PY=$(cat "$d/gate-time.py") GATE_EDITKINDS=$d/gate-editkinds.py GATE_LATEX_ORDER=$(cat "$d/order") exec bash "$d/gate-shard.sh" "$@"'
 }
 
 # sbatch options OPTS with the staged scripts added to the store parts
@@ -176,6 +181,9 @@ submit() {
     ids+=("$(sub "-c 10 --mem=16G -t 00:30:00 -J gf-amsedit8 $(on_bins "$C")" amsedit 8)")
     ids+=("$(sub "-c 18 --mem=16G -t 00:30:00 -J gf-amsedit16 $(on_bins "$C")" amsedit 16)")
   fi
+  # (every edit kind on amsldoc in one watch session per -j: each
+  # edit's PDF against a cold build, its time against its kind's target)
+  if on editkinds; then ids+=("$(sub "-c 10 --mem=16G -t 00:40:00 -J gf-editkinds $(on_bins "$C")" editkinds)"); fi
   # (para4000: plain pdfTeX, bytes against its bar, wall and the
   # realised critical path at -j 1/8/16)
   if on para; then ids+=("$(sub "--hint=multithread -c 32 --mem=16G -t 00:30:00 -J gf-para $(on_bins "$C")" para "${GATE_PARA_MD5:-4146793290dc0ea887d79a1d2d1b4c89}")"); fi
@@ -300,6 +308,7 @@ table() {
     d=$runs/cmd-$j
     if [ -f "$d/ams.txt" ]; then echo "amsldoc:"; sed 's/^/  /' "$d/ams.txt"; fi
     if [ -f "$d/para.txt" ]; then echo "para4000:"; sed 's/^/  /' "$d/para.txt"; fi
+    if [ -f "$d/editkinds.txt" ]; then echo "amsldoc edit kinds (one watch session per -j; ms save to build event, ! over target, not red):"; sed 's/^/  /' "$d/editkinds.txt"; fi
     if [ -f "$d/big.txt" ]; then echo "para40000:"; sed 's/^/  /' "$d/big.txt"; fi
     if [ -f "$d/table.txt" ]; then cat "$d/table.txt"; fi
     if [ -f "$d/acct.txt" ]; then cat "$d/acct.txt"; fi

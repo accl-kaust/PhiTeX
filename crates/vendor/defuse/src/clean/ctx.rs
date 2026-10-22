@@ -39,6 +39,31 @@ pub(crate) enum Wait {
     Env(Field),
 }
 
+/// A value read through a view ([`Ctx::view`], [`Ctx::acc_view`]): the
+/// run depends on what it inspects of it ([`Ctx::at`], [`Ctx::get`],
+/// [`Ctx::len`], [`Ctx::has`], [`Ctx::whole`]), path by path, not on the
+/// value. A handle: valid in the run attempt that made it (not across a
+/// park or a restart).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub struct View(u32);
+
+/// A run resumed at one of its last run's marks (`Ctx::resumed`): that
+/// run's kept token and result, and the mark (its index in the result's
+/// marks).
+pub(crate) struct MarkResume {
+    pub after: Arc<dyn Any + Send + Sync>,
+    pub old: Arc<super::world::Res>,
+    pub j: usize,
+}
+
+/// A parked token with the views its attempt made (they stand when the
+/// next attempt resumes it).
+pub(crate) struct KeptViews {
+    pub token: Box<dyn Any + Send>,
+    pub views: Vec<(u32, u32, ValueId)>,
+}
+
 /// A run's view of the store.
 pub struct Ctx<'a> {
     pub(crate) core: &'a Core,
@@ -51,6 +76,16 @@ pub struct Ctx<'a> {
     pub(crate) defs: Vec<Def>,
     /// Its definitions forwarding a loop-back field (`define_forward`).
     pub(crate) forwards: Vec<(Field, Locality, Field)>,
+    /// The views this attempt made ([`View`]): each one's root read (its
+    /// index in `reads`; `u32::MAX`: none, a constant), path and value.
+    pub(crate) views: Vec<(u32, u32, ValueId)>,
+    /// The marks this attempt made, the token it keeps for a later run
+    /// (`checkpoint`, `keep_after`), the run it resumes from a mark of
+    /// (`resumed`), and the old mark it was cut off at (its index).
+    pub(crate) marks: Vec<super::world::Mark>,
+    pub(crate) after: Option<super::world::After>,
+    pub(crate) from_mark: Option<MarkResume>,
+    pub(crate) cutoff: Option<usize>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) pubs: Vec<(Field, ValueId)>,
     pub(crate) kids: Vec<Spec>,
@@ -86,7 +121,7 @@ pub struct Ctx<'a> {
     /// Each definition read made (field, at, after, projection): its
     /// entry in `reads`. The world a run sees does not change, so the same
     /// question asked again has the same answer and is not logged again.
-    read_ix: FxHashMap<(Field, Id, bool, bool, u16), usize>,
+    read_ix: FxHashMap<(Field, Id, bool, bool, u32), usize>,
     pub(crate) nkids: usize,
     /// The run stopped on a pending definition set.
     pub(crate) pset_wait: bool,
@@ -132,6 +167,18 @@ pub struct Ctx<'a> {
 impl<'a> Ctx<'a> {
     pub(crate) fn new(core: &'a Core, w: &'a World, me: Id, kept: Option<Box<dyn Any + Send>>) -> Ctx<'a> {
         let n = w.node(me).expect("a live node");
+        // (A token kept with the stopped attempt's views: they stand.)
+        let (kept, views) = match kept.map(|k| k.downcast::<KeptViews>()) {
+            Some(Ok(kv)) => (Some(kv.token), kv.views),
+            Some(Err(k)) => (Some(k), Vec::new()),
+            None => (None, Vec::new()),
+        };
+        // (Resumed at a mark: no client token, the mark's.)
+        let (kept, from_mark) = match kept.map(|k| k.downcast::<MarkResume>()) {
+            Some(Ok(m)) => (None, Some(*m)),
+            Some(Err(k)) => (Some(k), None),
+            None => (None, None),
+        };
         // (About as many reads as its last run made, or its operation's.)
         let hint = n.res.as_ref().map_or(0, |r| r.reads.len()).max(core.op_reads.get(n.text.op.0 as usize).map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed) as usize));
         Ctx {
@@ -144,6 +191,12 @@ impl<'a> Ctx<'a> {
             reads: Vec::with_capacity(hint),
             defs: Vec::new(),
             forwards: Vec::new(),
+            views,
+            // (Resumed at a mark: the marks before it stand.)
+            marks: from_mark.as_ref().map_or_else(Vec::new, |m| m.old.marks[..m.j].to_vec()),
+            after: None,
+            from_mark,
+            cutoff: None,
             contribs: Vec::new(),
             pubs: Vec::new(),
             kids: Vec::new(),
@@ -263,8 +316,8 @@ impl<'a> Ctx<'a> {
 
     /// Reads `f` at node `at` (before it, or after its subtree when
     /// `after`): the value and the site.
-    fn read_at(&mut self, f: Field, at: Id, after: bool, own: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
-        let key = (f, at, after, own, proj);
+    fn read_at(&mut self, f: Field, at: Id, after: bool, own: bool, path: u32) -> Result<Option<(ValueId, Id)>, Stop> {
+        let key = (f, at, after, own, path);
         if let Some(&i) = self.read_ix.get(&key) {
             match self.reads[i] {
                 Read::Use { site, val, .. } => return Ok(val.map(|v| (v, site))),
@@ -274,7 +327,7 @@ impl<'a> Ctx<'a> {
         }
         let t = super::core::prof::start();
         let before = self.reads.len();
-        let r = self.read_at_inner(f, at, after, own, proj);
+        let r = self.read_at_inner(f, at, after, own, path);
         if r.is_ok() && self.reads.len() == before + 1 {
             self.read_ix.insert(key, before);
         }
@@ -282,7 +335,7 @@ impl<'a> Ctx<'a> {
         r
     }
 
-    fn read_at_inner(&mut self, f: Field, at: Id, after: bool, own: bool, proj: u16) -> Result<Option<(ValueId, Id)>, Stop> {
+    fn read_at_inner(&mut self, f: Field, at: Id, after: bool, own: bool, path: u32) -> Result<Option<(ValueId, Id)>, Stop> {
         // (Fuel: one, and one per frame the read walks.)
         let w = self.w;
         let key = (at, after, own);
@@ -374,7 +427,7 @@ impl<'a> Ctx<'a> {
                     own,
                     site,
                     val,
-                    proj,
+                    path,
                 });
                 Ok(val.map(|v| (v, site)))
             }
@@ -387,7 +440,7 @@ impl<'a> Ctx<'a> {
                     own,
                     site: NONE,
                     val,
-                    proj,
+                    path,
                 });
                 Ok(val.map(|v| (v, NONE)))
             }
@@ -580,8 +633,191 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn use_field_proj_inner(&mut self, f: Field, p: crate::api::ProjId) -> Result<Option<ValueId>, Stop> {
-        let r = self.read_at(f, self.me, false, false, p.0)?;
+        let r = self.read_at(f, self.me, false, false, u32::from(p.0))?;
         Ok(r.map(|(x, _)| self.core.project(p.0, x)))
+    }
+
+    /// The path of `steps` ([`crate::Engine::path`]), for this and later
+    /// runs.
+    pub fn path(&self, steps: &[crate::api::Step]) -> crate::api::PathId {
+        crate::api::PathId(self.core.intern_path(steps))
+    }
+
+    /// Uses field `f` through path `p`: returns the path's answer (`None`
+    /// if nothing defines `f`, or a step does not apply), and the run
+    /// depends only on it.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] as for [`Ctx::use_field`].
+    pub fn use_field_path(&mut self, f: Field, p: crate::api::PathId) -> Result<Option<ValueId>, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&f), self.core.rec_steps(p.0)]) } else { serde_json::Value::Null };
+        let r = self.use_field_path_inner(f, p);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "use_field_path", a, crate::record::stop_or(&r));
+        r
+    }
+
+    #[inline]
+    fn use_field_path_inner(&mut self, f: Field, p: crate::api::PathId) -> Result<Option<ValueId>, Stop> {
+        let r = self.read_at(f, self.me, false, false, p.0)?;
+        Ok(r.and_then(|(x, _)| self.core.eval_path(p.0, x)))
+    }
+
+    /// [`Ctx::acc_fold`] through path `p`: the path's answer on the fold,
+    /// the run depending on it only.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] as for [`Ctx::acc_fold`].
+    pub fn acc_fold_path(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, p: crate::api::PathId) -> Result<Option<ValueId>, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&f), crate::record::j(&from), crate::record::j(&to), self.core.rec_steps(p.0)]) } else { serde_json::Value::Null };
+        let r = self.acc_fold_path_inner(f, from, to, p.0);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "acc_fold_path", a, crate::record::stop_or(&r));
+        r
+    }
+
+    fn acc_fold_path_inner(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, p: u32) -> Result<Option<ValueId>, Stop> {
+        let before = self.reads.len();
+        let x = self.acc_window(f, from, to, true)?;
+        if self.reads.len() > before
+            && let Some(Read::Range { path, .. }) = self.reads.last_mut()
+        {
+            *path = p;
+        }
+        Ok(self.core.eval_path(p, x))
+    }
+
+    /// Views field `f` ([`View`]): the run depends on whether `f` has a
+    /// value (`None` if not), and on what it inspects through the view.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] as for [`Ctx::use_field`].
+    pub fn view(&mut self, f: Field) -> Result<Option<View>, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, )) } else { serde_json::Value::Null };
+        let r = self.view_inner(f);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "view", a, crate::record::stop_or(&r));
+        r
+    }
+
+    fn view_inner(&mut self, f: Field) -> Result<Option<View>, Stop> {
+        let present = self.core.intern_path(&[crate::api::Step::Present]);
+        let Some((x, _)) = self.read_at(f, self.me, false, false, present)? else {
+            return Ok(None);
+        };
+        let root = self.read_ix.get(&(f, self.me, false, false, present)).map_or(u32::MAX, |&i| u32::try_from(i).unwrap_or(u32::MAX));
+        Ok(Some(self.new_view(root, 0, x)))
+    }
+
+    /// Views the fold of accumulator `f` over a window, as [`Ctx::acc_fold`]
+    /// folds it ([`View`]): the run depends on what it inspects.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] as for [`Ctx::acc_fold`].
+    pub fn acc_view(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<View, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &from, &to, )) } else { serde_json::Value::Null };
+        let r = self.acc_view_inner(f, from, to);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "acc_view", a, crate::record::stop_or(&r));
+        r
+    }
+
+    fn acc_view_inner(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<View, Stop> {
+        let present = self.core.intern_path(&[crate::api::Step::Present]);
+        let before = self.reads.len();
+        self.acc_fold_path_inner(f, from, to, present)?;
+        // (The fold's read, unless the window was empty: a constant.)
+        let (root, x) = match self.reads.last() {
+            Some(Read::Range { val, .. }) if self.reads.len() > before => (u32::try_from(self.reads.len() - 1).unwrap_or(u32::MAX), *val),
+            _ => (u32::MAX, ValueId::UNIT),
+        };
+        Ok(self.new_view(root, 0, x))
+    }
+
+    fn new_view(&mut self, root: u32, path: u32, x: ValueId) -> View {
+        self.views.push((root, path, x));
+        View(u32::try_from(self.views.len() - 1).expect("too many views"))
+    }
+
+    /// Records a read of a view's root (read `root`) through path `p`: the
+    /// root's own read, its path replaced (none for a constant, or a
+    /// loop-back's read, which is of the whole value).
+    fn view_read(&mut self, root: u32, p: u32) {
+        let Some(r) = self.reads.get(root as usize) else { return };
+        match *r {
+            Read::Use { f, at, after, own, site, val, .. } => {
+                let key = (f, at, after, own, p);
+                if self.read_ix.contains_key(&key) {
+                    return;
+                }
+                self.read_ix.insert(key, self.reads.len());
+                self.reads.push(Read::Use { f, at, after, own, site, val, path: p });
+            }
+            Read::Range { f, from, to, val, past, .. } => self.reads.push(Read::Range { f, from, to, val, past, path: p }),
+            _ => {}
+        }
+    }
+
+    /// Step `s` into view `v`: the view of what it gives (`None` if it
+    /// does not apply). The run depends on whether it applies.
+    pub fn at(&mut self, v: View, s: crate::api::Step) -> Option<View> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&v), self.core.rec_step(s)]) } else { serde_json::Value::Null };
+        let (root, path, x) = self.views[v.0 as usize];
+        let p = self.core.extend_path(path, s);
+        self.view_read(root, self.core.extend_path(p, crate::api::Step::Present));
+        let r = self.core.step(s, x).map(|y| self.new_view(root, p, y));
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "at", a, crate::record::j(&r));
+        r
+    }
+
+    /// What step `s` gives of view `v` (`None` if it does not apply): the
+    /// run depends on it.
+    pub fn get(&mut self, v: View, s: crate::api::Step) -> Option<ValueId> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&v), self.core.rec_step(s)]) } else { serde_json::Value::Null };
+        let r = self.get_inner(v, s);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "get", a, crate::record::j(&r));
+        r
+    }
+
+    fn get_inner(&mut self, v: View, s: crate::api::Step) -> Option<ValueId> {
+        let (root, path, x) = self.views[v.0 as usize];
+        self.view_read(root, self.core.extend_path(path, s));
+        self.core.step(s, x)
+    }
+
+    /// View `v`'s length (as [`crate::Step::Len`]): the run depends on it.
+    pub fn len(&mut self, v: View) -> Option<u64> {
+        let n = self.get(v, crate::api::Step::Len)?;
+        self.core.values.as_int(n).and_then(|n| u64::try_from(n).ok())
+    }
+
+    /// Whether view `v` has key `k` (as [`crate::Step::Has`]): the run
+    /// depends on it.
+    pub fn has(&mut self, v: View, k: ValueId) -> bool {
+        self.get(v, crate::api::Step::Has(k)).and_then(|b| self.core.values.as_bool(b)) == Some(true)
+    }
+
+    /// View `v`'s value: the run depends on all of it.
+    pub fn whole(&mut self, v: View) -> ValueId {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&v, )) } else { serde_json::Value::Null };
+        let (root, path, x) = self.views[v.0 as usize];
+        self.view_read(root, path);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "whole", a, crate::record::j(&x));
+        x
     }
 
     /// Reads each of `fs` as [`Ctx::use_field`] reads one, in order, into
@@ -775,7 +1011,20 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn declare_loopback_inner(&mut self, f: Field, init: ValueId) {
-        self.core.declare_loop_later(f, init, self.me);
+        self.core.declare_loop_later(f, init, self.me, false);
+    }
+
+    /// Declares loop-back field `f` (as `declare_loopback`), its round
+    /// values early: see [`Engine::declare_loopback_early`] (not
+    /// deterministic).
+    ///
+    /// [`Engine::declare_loopback_early`]: crate::Engine::declare_loopback_early
+    pub fn declare_loopback_early(&mut self, f: Field, init: ValueId) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &init, )) } else { serde_json::Value::Null };
+        self.core.declare_loop_later(f, init, self.me, true);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "declare_loopback_early", a, serde_json::Value::Null);
     }
 
     /// Publishes a loop-back field's next round value.
@@ -1242,7 +1491,7 @@ impl<'a> Ctx<'a> {
             None => ValueId::UNIT,
         };
         let to = next.map_or(NONE, |(_, x)| x);
-        self.reads.push(Read::Range { f, from, to, val, past: true });
+        self.reads.push(Read::Range { f, from, to, val, past: true, path: 0 });
         Ok(next.map(|(_, x)| (NodeId(x), val)))
     }
 
@@ -1277,7 +1526,7 @@ impl<'a> Ctx<'a> {
             }
             None => ValueId::UNIT,
         };
-        self.reads.push(Read::Range { f, from, to, val, past });
+        self.reads.push(Read::Range { f, from, to, val, past, path: 0 });
         Ok(val)
     }
 
@@ -1677,6 +1926,106 @@ impl<'a> Ctx<'a> {
         crate::record::call(&self.calls, "park_continuing", a, serde_json::Value::Null);
     }
 
+    /// Marks a point of the run the next run may resume from: `mark`, the
+    /// client's name for it (an undo-log position, say), and `state`, a
+    /// version of the client's whole state there (equal states: the run
+    /// goes on alike from there). A run resumed at an earlier mark
+    /// ([`Ctx::resumed`]) that reaches a mark of its last run with an
+    /// equal state, the same outputs so far and that run's reads after it
+    /// still holding is cut off there: the last run's result stands (the
+    /// call returns `Err`; the run returns it).
+    ///
+    /// A run resumed at a mark makes its whole result again, as one
+    /// resumed from a park does: what it made before the mark too.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] when the run is cut off.
+    pub fn checkpoint(&mut self, mark: u32, state: ValueId) -> Result<(), Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&mark, &state, )) } else { serde_json::Value::Null };
+        let r = self.checkpoint_inner(mark, state);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "checkpoint", a, crate::record::stop_or(&r));
+        r
+    }
+
+    fn checkpoint_inner(&mut self, mark: u32, state: ValueId) -> Result<(), Stop> {
+        let digest = self.out_digest();
+        let read_ix = u32::try_from(self.reads.len()).unwrap_or(u32::MAX);
+        self.marks.push(super::world::Mark { mark, read_ix, state, digest });
+        let Some(fm) = &self.from_mark else { return Ok(()) };
+        let old = fm.old.clone();
+        let Some(j) = (fm.j + 1..old.marks.len()).find(|&j| old.marks[j].state == state && old.marks[j].digest == digest) else {
+            return Ok(());
+        };
+        // (Its last run's reads after the mark must hold; a run of an
+        // application, which sets its unit's environment, goes on.)
+        if !self.env.is_empty() || !self.apps.is_empty() {
+            return Ok(());
+        }
+        let from = old.marks[j].read_ix as usize;
+        if !old.reads[from..].iter().all(|r| super::build::holds(self.core, self.w, self.me, r)) {
+            return Ok(());
+        }
+        self.cutoff = Some(j);
+        Err(Stop { _private: () })
+    }
+
+    /// A digest of the run's outputs so far: its definitions,
+    /// contributions, publications and environment by key, its placements,
+    /// kinds and diagnostics in order, its effect and claim.
+    fn out_digest(&self) -> u64 {
+        use crate::values::hash_words;
+        let mut h: u64 = 0;
+        for d in &self.defs {
+            h = h.wrapping_add(hash_words(1, &[d.f.0.raw(), u64::from(d.loc.entry_key()), d.val.raw()]));
+        }
+        for (k, l) in [(2, &self.contribs), (3, &self.pubs), (4, &self.env)] {
+            for &(f, x) in l {
+                h = h.wrapping_add(hash_words(k, &[f.0.raw(), x.raw()]));
+            }
+        }
+        for (k, l) in [(5, &self.kids), (6, &self.conts)] {
+            for (i, s) in l.iter().enumerate() {
+                let mut w: Vec<u64> = vec![i as u64, u64::from(s.op.0)];
+                w.extend(s.args.iter().map(|a| a.raw()));
+                h = h.wrapping_add(hash_words(k, &w));
+            }
+        }
+        for (k, l) in [(7, &self.kinds), (8, &self.diag)] {
+            for (i, x) in l.iter().enumerate() {
+                h = h.wrapping_add(hash_words(k, &[i as u64, x.raw()]));
+            }
+        }
+        h = h.wrapping_add(hash_words(9, &[self.claim.map_or(u64::MAX, |c| c as u64)]));
+        h = h.wrapping_add(hash_words(10, &[u64::from(self.effect.is_some())]));
+        h
+    }
+
+    /// Keeps `token` with the run's result: a later run of the node that
+    /// resumes at one of this run's marks gets it ([`Ctx::resumed`]), and
+    /// takes the client's state back to the mark from it (its undo log).
+    pub fn keep_after(&mut self, token: Arc<dyn Any + Send + Sync>) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
+        self.after = Some(super::world::After(token));
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "keep_after", a, serde_json::Value::Null);
+    }
+
+    /// Resumed at a mark of the node's last run ([`Ctx::checkpoint`]): the
+    /// token that run kept and the mark. The run goes on from the mark's
+    /// state; its reads before the mark are its own (they still hold).
+    pub fn resumed(&mut self) -> Option<(Arc<dyn Any + Send + Sync>, u32)> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&()) } else { serde_json::Value::Null };
+        let r = self.from_mark.as_ref().map(|m| (m.after.clone(), m.old.marks[m.j].mark));
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "resumed", a, crate::record::j(&r.as_ref().map(|r| r.1)));
+        r
+    }
+
     /// The token a stopped run of this node kept.
     pub fn parked(&mut self) -> Option<Box<dyn Any + Send>> {
         #[cfg(feature = "observe")]
@@ -1711,6 +2060,11 @@ impl<'a> Ctx<'a> {
         self.read_ix.clear();
         self.defs.clear();
         self.forwards.clear();
+        self.views.clear();
+        self.marks.clear();
+        self.after = None;
+        self.from_mark = None;
+        self.cutoff = None;
         self.contribs.clear();
         self.pubs.clear();
         self.kids.clear();

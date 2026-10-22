@@ -453,6 +453,57 @@ impl ProjId {
     pub const IS_EMPTY: ProjId = ProjId(1);
 }
 
+/// One step of a read path ([`crate::Engine::path`], [`crate::Ctx::path`]).
+/// A step that does not apply (an index past the end, a key not there, a
+/// value of another kind) gives nothing, and the path's answer is none.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub enum Step {
+    /// Element `i` of a list or a sequence.
+    Index(u32),
+    /// The last element of a list or a sequence.
+    Last,
+    /// The length of a list, a sequence (`Nil`: 0) or a string (bytes).
+    Len,
+    /// The value for key `k` of an association list (a list of lists
+    /// `[k, v, ..]`: the first whose head is `k`).
+    Key(ValueId),
+    /// Whether an association list has key `k`.
+    Has(ValueId),
+    /// A projection.
+    Proj(ProjId),
+    /// Whether there is a value (`true`).
+    Present,
+    /// Whether the value is `k` (a run that only compares depends only on
+    /// the comparison: "is this the last page").
+    Eq(ValueId),
+    /// The order of an integer against integer `k`: -1, 0 or 1.
+    Cmp(ValueId),
+    /// Path `p` on every element of a list (a list) or a sequence (a
+    /// sequence), each element where `p` does not apply giving unit. On a
+    /// sequence it is kept per rope node: after one element changed, only
+    /// the nodes above it are made again.
+    Each(PathId),
+}
+
+/// A read path: steps applied in turn to a value read. A run that reads
+/// through a path depends only on the path's answer, so a change
+/// elsewhere in the value leaves it standing. [`PathId::WHOLE`] is the
+/// value itself; a projection is a one-step path ([`PathId::of_proj`]).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub struct PathId(pub(crate) u32);
+
+impl PathId {
+    pub const WHOLE: PathId = PathId(0);
+
+    /// Projection `p` as a path.
+    #[must_use]
+    pub fn of_proj(p: ProjId) -> PathId {
+        PathId(u32::from(p.0))
+    }
+}
+
 /// A client projection: pure, from a value to a small value.
 pub type Projection = Arc<dyn Fn(ValueId, &Values) -> ValueId + Send + Sync>;
 
@@ -901,6 +952,73 @@ impl MergeTimes {
     }
 }
 
+/// An evaluation's run audit (`Engine::set_run_audit`).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct RunAudit {
+    /// Runs of nodes that had a result, and their time.
+    pub reruns: u64,
+    pub rerun_time: std::time::Duration,
+    /// Of those, the runs whose effects outside the run all came out as
+    /// before: in commit order, and their time.
+    pub wasted: Vec<WastedRun>,
+    pub wasted_time: std::time::Duration,
+    /// The reads the commits re-checked, by field (`None`: reads of no
+    /// field), the most first: how many, and how many of them broke.
+    pub rechecked: Vec<(Option<Field>, u64, u64)>,
+}
+
+/// A run that changed nothing outside itself ([`RunAudit::wasted`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WastedRun {
+    pub node: NodeId,
+    /// What made it run again (the last when several did; `None`: not
+    /// known, e.g. a run on its own).
+    pub cause: Option<Rerun>,
+    pub time: std::time::Duration,
+}
+
+impl RunAudit {
+    /// The wasted runs by cause kind (`Rerun`'s variant, with its field
+    /// when it names one): count and time, the most time first.
+    #[must_use]
+    pub fn by_cause(&self) -> Vec<(String, u64, std::time::Duration)> {
+        let mut m: std::collections::BTreeMap<String, (u64, std::time::Duration)> = std::collections::BTreeMap::new();
+        for w in &self.wasted {
+            let k = match w.cause {
+                None => "unknown".to_string(),
+                // (By field: the values it changed between apart.)
+                Some(Rerun::Changed { field, .. }) => format!("Changed {{ field: {field:?} }}"),
+                Some(c) => format!("{c:?}"),
+            };
+            let e = m.entry(k).or_default();
+            e.0 += 1;
+            e.1 += w.time;
+        }
+        let mut v: Vec<_> = m.into_iter().map(|(k, (n, t))| (k, n, t)).collect();
+        v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        v
+    }
+}
+
+/// An early loop-back field's evaluation (`Engine::declare_loopback_early`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EarlyLoop {
+    pub field: Field,
+    /// How often its value changed (the first: its first publication).
+    pub changes: u32,
+    /// Its changes reached the round cap: under [`CapPolicy::Finalize`] it
+    /// kept the value it had then.
+    pub capped: bool,
+}
+
+impl EarlyLoop {
+    /// It changed more than once after its first publication.
+    #[must_use]
+    pub fn oscillated(&self) -> bool {
+        self.changes > 2
+    }
+}
+
 /// What an evaluation did. The first seven counters (`nodes_run` ..
 /// `restarts`) are canonical: functions of the texts before and after,
 /// equal under every schedule.
@@ -1041,6 +1159,18 @@ pub struct Report {
     /// Under [`CapPolicy::Finalize`], when the round cap was reached: the
     /// loop-back fields that were still moving.
     pub capped: Option<Vec<Field>>,
+    /// The early loop-back fields (`Engine::declare_loopback_early`) that
+    /// changed this evaluation, by field (not canonical: their changes, and
+    /// with them `rounds`, depend on the schedule).
+    pub early_loops: Vec<EarlyLoop>,
+    /// Runs resumed at a mark of their last run (`Ctx::checkpoint`), and
+    /// runs cut off at one (that run's result standing).
+    pub resumed_at_mark: u64,
+    pub cut_in_run: u64,
+    /// With `Engine::set_run_audit`: the runs that were reruns, and those
+    /// of them that changed nothing (not canonical: a schedule may run a
+    /// node more often).
+    pub audit: Option<RunAudit>,
     /// Under [`LoopStart::PerRound`]: the quick path held (the edits were
     /// evaluated from the last fixed point only).
     pub quick_held: bool,
@@ -1051,6 +1181,13 @@ pub struct Report {
 }
 
 impl Report {
+    /// Some early loop-back field was capped or oscillated: the result may
+    /// differ from the rounds' (see `Engine::declare_loopback_early`).
+    #[must_use]
+    pub fn early_may_differ(&self) -> bool {
+        self.early_loops.iter().any(|e| e.capped || e.oscillated())
+    }
+
     /// The count for operation `name` in a per-operation list.
     #[must_use]
     pub fn by_op(list: &[(&'static str, u64)], name: &str) -> u64 {

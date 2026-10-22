@@ -125,6 +125,12 @@ pub fn set_counter(v: u64) {
 
 thread_local! { static COUNTER: Cell<u64> = const { Cell::new(0) }; }
 
+thread_local! {
+    /// The last evaluation's report warned its early loop-backs may differ
+    /// from the rounds (`FUZZ_LOOP_EARLY`).
+    static WARNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Evaluates; false on an evaluation error.
 pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
     let m = COUNTER.with(|c| {
@@ -144,6 +150,13 @@ pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
     {
         println!("WHY evaluate failed: {e}");
     }
+    WARNED.with(|w| w.set(r.as_ref().is_ok_and(defuse::Report::early_may_differ)));
+    if std::env::var_os("FUZZ_EARLY_STATS").is_some()
+        && let Ok(rep) = &r
+    {
+        eprintln!("EARLYMOVES {}", rep.early_loops.iter().map(|e| e.changes).max().unwrap_or(0));
+        eprintln!("MARKS resumed {} cut {}", rep.resumed_at_mark.min(1), rep.cut_in_run.min(1));
+    }
     r.is_ok()
 }
 
@@ -159,7 +172,12 @@ pub fn ok(eng: &mut Engine, p: &Program, sched: Sched) -> bool {
         && {
             let want = interpret(&p.lines);
             let got = p.result(eng);
-            let same = want.as_ref().is_ok_and(|r| *r == got);
+            let exact = want.as_ref().is_ok_and(|r| *r == got);
+            let warned = WARNED.with(std::cell::Cell::get);
+            if std::env::var_os("FUZZ_EARLY_STATS").is_some() {
+                eprintln!("EARLYSTAT exact={exact} warned={warned} conv={}", want.is_ok());
+            }
+            let same = exact || warned;
             if !same && why() {
                 println!("WHY result: want {want:?}");
                 println!("WHY result: got  {got:?}");
