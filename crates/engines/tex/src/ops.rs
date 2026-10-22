@@ -91,7 +91,7 @@ pub(crate) fn run_node_parking(
     // (marks, `Run::take_mark`: an exec or a finisher run that parks and
     // is not speculative; one resumed at a mark of its last run starts
     // from that mark's state)
-    // (observe: `PHITEX_MARKS=off|exec|finish` for the measures)
+    // (observe: `PHITEX_MARKS=off|exec|finish|all` for the measures)
     let which = crate::exec::obs_str!("PHITEX_MARKS");
     let marks_ok = parks
         && !cx.is_speculative()
@@ -100,9 +100,12 @@ pub(crate) fn run_node_parking(
             Some("exec") => cx.op() == o.exec,
             Some("finish") => cx.op() == o.finish,
             Some("all") => cx.op() == o.exec || cx.op() == o.finish,
-            // (a finisher resumed at a mark has given other results than
-            // its full run: off until that is understood)
-            _ => cx.op() == o.exec,
+            // (none by default: measured on amsldoc, marks every 2000
+            // commands cost 3-6% of a cold build (their snapshots and the
+            // memory they keep) while no edit kind was cut off at one and
+            // the few resumed gained nothing at -j 8; `PHITEX_MARKS` (observe)
+            // takes them for exec runs, finishers or both)
+            _ => false,
         };
     let resumed_at = if marks_ok { cx.resumed() } else { None };
     let mut r = if let Some((tok, k)) = resumed_at {
