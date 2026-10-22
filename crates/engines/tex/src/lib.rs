@@ -33,6 +33,7 @@ mod etex;
 mod exec;
 mod expand;
 mod fields;
+mod fmtenv;
 mod fonts;
 mod getnext;
 mod hints;
