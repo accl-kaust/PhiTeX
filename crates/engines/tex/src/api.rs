@@ -2852,8 +2852,8 @@ impl Graph {
             if crate::exec::prof_flag!("PHITEX_ROUND_ACCT") {
                 // (the edit's cost by round, cheap enough for the edit
                 // histories the gate times: the runs and the per-round
-                // memo's hits of each round, its bytes, the runs by
-                // operation)
+                // memo's hits of each round, its bytes, the nodes run and
+                // those whose output did not change, the runs by operation)
                 let rounds: Vec<String> = r
                     .round_times
                     .iter()
@@ -2866,12 +2866,13 @@ impl Graph {
                     r.runs_by_op.iter().copied().filter(|x| x.1 > 0).collect();
                 ops.sort_unstable();
                 eprintln!(
-                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits/wall by round [{}], {} runs, {} nodes run, runs by op {ops:?}",
+                    "acct-edit: wall {:.1} ms, {} rounds, runs/memo hits/wall by round [{}], {} runs, {} nodes run, {} cutoffs, runs by op {ops:?}",
                     t0.elapsed().as_secs_f64() * 1e3,
                     r.rounds,
                     rounds.join(" "),
                     r.runs,
-                    r.nodes_run
+                    r.nodes_run,
+                    r.cutoffs
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
                 // (the guesses this edit paid for: refuted runs, the
