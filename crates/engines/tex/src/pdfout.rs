@@ -3576,28 +3576,6 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
     // then the chunks placed by their lengths' prefix sums and the
     // cross-reference section
     let key = st.digest();
-    // (`PHITEX_TAIL_WHY=1`, observe: where this link's final state
-    // differs from the last one's, the tail kept by state)
-    if crate::exec::obs_flag!("PHITEX_TAIL_WHY") {
-        static LAST: Mutex<Option<String>> = Mutex::new(None);
-        let now = format!("{st:#?}");
-        let mut last = LAST.locked();
-        if let Some(old) = last.as_ref() {
-            let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), now.lines().collect());
-            let pre = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-            let suf = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count();
-            eprintln!(
-                "tail-why: {} lines then {}, first difference at line {pre}, {} lines differ (old) / {} (new); context: {:?} -> {:?}",
-                a.len(),
-                b.len(),
-                a.len().saturating_sub(pre + suf),
-                b.len().saturating_sub(pre + suf),
-                a.get(pre.saturating_sub(3)..(pre + 3).min(a.len())),
-                b.get(pre.saturating_sub(3)..(pre + 3).min(b.len()))
-            );
-        }
-        *last = Some(now);
-    }
     let t1 = std::time::Instant::now();
     let kept = tails().locked().get(&key).cloned();
     let tail = match kept {

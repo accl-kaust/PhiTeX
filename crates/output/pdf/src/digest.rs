@@ -326,6 +326,13 @@ impl<K: Ord + Clone + fmt::Debug, V: Clone + fmt::Debug> TMap<K, V> {
         self.dirty.insert(k.clone());
         Arc::make_mut(&mut self.map).entry(k).or_insert_with(f)
     }
+    /// The map's content as its digest and its size (equal maps, equal
+    /// keys): a key to memoize a function of the map by.
+    pub(crate) fn content_key(&mut self) -> (u64, usize) {
+        self.refresh();
+        (self.sum, self.map.len())
+    }
+
     /// Brings the sum up to date.
     pub(crate) fn refresh(&mut self) {
         if self.dirty.is_empty() {
