@@ -639,8 +639,8 @@ impl Db {
 /// A reader over a kept database's bytes.
 struct Rd<'a>(&'a [u8]);
 
-impl Rd<'_> {
-    fn take(&mut self, n: usize) -> Option<&[u8]> {
+impl<'a> Rd<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let (a, rest) = self.0.split_at_checked(n)?;
         self.0 = rest;
         Some(a)
