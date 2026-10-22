@@ -2125,6 +2125,15 @@ fn passes_now(core: &Core, w: &World, me: Id, res: &Res, on: Option<&[Field]>) -
         if x == p.val {
             continue;
         }
+        // (Passed with a part replaced: its part not there now, the node's
+        // read of it re-runs it.)
+        let y = match p.set {
+            Some((sp, nv)) => match core.set_path(sp, x, nv) {
+                Some(y) => y,
+                None => continue,
+            },
+            None => x,
+        };
         let r = new.get_or_insert_with(|| res.clone());
         r.passes[i].val = x;
         for (rx, raw) in raw.map(|raw| (p.read, raw)).into_iter().chain(ups.iter().map(|u| (u.3, u.4))) {
@@ -2145,8 +2154,8 @@ fn passes_now(core: &Core, w: &World, me: Id, res: &Res, on: Option<&[Field]>) -
         match p.to {
             super::world::PassTo::Def(f, loc) => {
                 if let Some(d) = r.defs.iter_mut().find(|d| d.f == f && d.loc.entry_key() == loc.entry_key()) {
-                    d.val = x;
-                    defs.push((f, d.loc, x));
+                    d.val = y;
+                    defs.push((f, d.loc, y));
                 }
             }
             super::world::PassTo::Contrib(f) => {

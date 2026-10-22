@@ -370,6 +370,14 @@ impl Interp<'_> {
                     None => ValueId::UNIT,
                 }
             }
+            "cell" => {
+                let val = self.expr(u, a[2]);
+                let x = v.field(&text(v, a[0]));
+                if let Some(w) = self.lookup(u, x).and_then(|w| super::set_cell(v, w, &super::cell_ix(v, a[1]), val)) {
+                    self.define(u, x, w, false);
+                }
+                ValueId::UNIT
+            }
             "alias" => {
                 let y = self.lookup(u, v.field(&text(v, a[1])));
                 let w = match v.as_int(a[2]) {

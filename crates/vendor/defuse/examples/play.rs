@@ -300,6 +300,10 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "define_with" => json!(cx.define_with(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "define_forward" => return res(cx.define_forward(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "publish" => json!(cx.publish(de(&g(0)), de(&g(1)))),
+        "define_set" => {
+            let p = cx.path(&steps(cx, &g(2)));
+            json!(cx.define_set(de(&g(0)), de::<defuse::View>(&g(1)), p, de(&g(3)), de::<Locality>(&g(4))))
+        }
         "define_from" => json!(cx.define_from(de(&g(0)), de::<defuse::View>(&g(1)), de::<Locality>(&g(2)))),
         "contribute_from" => json!(cx.contribute_from(de(&g(0)), de::<defuse::View>(&g(1)))),
         "publish_from" => json!(cx.publish_from(de(&g(0)), de::<defuse::View>(&g(1)))),
