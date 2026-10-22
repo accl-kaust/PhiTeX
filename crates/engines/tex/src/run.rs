@@ -5375,7 +5375,15 @@ impl Run<'_, '_> {
         // (not where siblings were pulled: their places are the text's
         // and the levels'; `PHITEX_MARK_TEXT_ONLY=1` (observe): only where
         // no token list is on the stack)
-        if !self.pull_at.is_empty()
+        // (nor where the state holds what a snapshot does not: a
+        // character run not on the list yet and its ligature stack, §1034;
+        // a read-back line being interpreted; the locations a read-back
+        // point noted)
+        if self.chars_live.is_some()
+            || !self.lig_buf.is_empty()
+            || self.interp.is_some()
+            || !self.pre_noted.is_empty()
+            || !self.pull_at.is_empty()
             || crate::exec::obs_flag!("PHITEX_MARK_TEXT_ONLY")
                 && self
                     .input
