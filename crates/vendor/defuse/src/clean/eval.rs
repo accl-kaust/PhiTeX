@@ -1754,6 +1754,16 @@ impl Engine {
         {
             panic!("kept state of {id}: its index missed a broken read {r:?}");
         }
+        // (A resume at a mark goes on from its last run's state there: only
+        // when every read before the mark holds outright, none standing on
+        // a definer still in work. Else that state may be no world's, and
+        // the run starts over.)
+        let broken = match broken {
+            None if self.kept.get(&id).is_some_and(|k| k.0.downcast_ref::<super::ctx::MarkResume>().is_some()) => {
+                reads.iter().find(|r| !super::build::holds_with(&self.core, &self.w, id, r, true))
+            }
+            b => b,
+        };
         let broken = broken.cloned();
         self.kept_asked += asked;
         self.kept_held += n as u64;
