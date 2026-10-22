@@ -271,10 +271,10 @@ pub(crate) fn run_node_parking(
                     let v = r.v;
                     let mut o: Vec<String> = defs
                         .iter()
-                        .map(|(f, l, x)| format!("def {} {l:?} {}", crate::val::field_name(v, *f), v.render(*x).chars().take(200).collect::<String>()))
+                        .map(|(f, l, x)| format!("def {} {l:?} {}", crate::val::field_name(v, *f), x.raw()))
                         .collect();
-                    o.extend(r.contribs.iter().map(|(f, x)| format!("contrib {} {}", crate::val::field_name(v, *f), v.render(*x).chars().take(300).collect::<String>())));
-                    o.extend(r.kids.iter().map(|(op, a)| format!("kid {op:?} {}", a.iter().map(|x| v.render(*x).chars().take(80).collect::<String>()).collect::<Vec<_>>().join(" | "))));
+                    o.extend(r.contribs.iter().map(|(f, x)| format!("contrib {} {}", crate::val::field_name(v, *f), x.raw())));
+                    o.extend(r.kids.iter().map(|(op, a)| format!("kid {op:?} {:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())));
                     o.push(format!("effect {:?}", r.effect));
                     o
                 } else {
