@@ -207,6 +207,26 @@ pub(crate) struct Mark {
     pub odigest: u64,
 }
 
+/// Where a run passed on a value it read through a view without
+/// inspecting it (`Ctx::define_from` and the others): a forward, the
+/// target refiled when the value read changes.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum PassTo {
+    Def(Field, Locality),
+    Contrib(Field),
+    Out,
+}
+
+/// A value passed on: where to, the read of its source (its index), the
+/// path from that read's value, and the value passed.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Pass {
+    pub to: PassTo,
+    pub read: u32,
+    pub path: u32,
+    pub val: ValueId,
+}
+
 /// The token a run kept for a later run to resume from one of its marks
 /// (`Ctx::keep_after`).
 #[derive(Clone)]
@@ -252,6 +272,8 @@ pub(crate) struct Res {
     /// it kept for a later run to resume from one (`Ctx::keep_after`).
     pub marks: Arc<[Mark]>,
     pub after: Option<After>,
+    /// The values it passed on without inspecting them.
+    pub passes: Vec<Pass>,
     /// What the node's last result from an earlier evaluation read of the
     /// fields guessed from the last (`Engine::guess_from_last`), carried
     /// through its commits in this one (`Res::last_reads`).
@@ -329,6 +351,7 @@ impl Default for Res {
             forwards: Vec::new(),
             marks: Arc::from([]),
             after: None,
+            passes: Vec::new(),
             last: None,
         }
     }

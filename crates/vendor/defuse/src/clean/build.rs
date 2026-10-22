@@ -221,6 +221,13 @@ impl<'a> Builder<'a> {
                 self.recheck_on(id, f);
             }
         }
+        // (Rounds: a value passed on refiled re-asks its readers.)
+        while !self.recheck.is_empty() {
+            self.settle_round();
+        }
+    }
+
+    fn settle_round(&mut self) {
         let ids: Vec<(Id, Option<Vec<Field>>)> = std::mem::take(&mut self.recheck).into_iter().collect();
         for (id, on) in ids {
             let Some(n) = self.w.node(id) else { continue };
@@ -283,6 +290,70 @@ impl<'a> Builder<'a> {
                     why_broken(self.core, &self.w, id, r)
                 };
                 self.make_dirty_for(id, why);
+            } else if !res.passes.is_empty() {
+                self.refile_passes(id, &res, on.as_deref());
+            }
+        }
+    }
+
+    /// The values done node `id` (result `res`) passed on through views
+    /// (`Ctx::define_from` and the others) follow what they read, its
+    /// reads holding (re-asked on `on`, or all): each target takes the new
+    /// value and is filed again (its readers re-asked), the node not run
+    /// again.
+    fn refile_passes(&mut self, id: Id, res: &Arc<Res>, on: Option<&[Field]>) {
+        let mut new: Option<Res> = None;
+        let (mut defs, mut contribs, mut out) = (Vec::new(), false, false);
+        for (i, p) in res.passes.iter().enumerate() {
+            let Some(rd @ Read::Use { f, .. }) = res.reads.get(p.read as usize) else { continue };
+            if on.is_some_and(|fs| !fs.contains(f)) {
+                continue;
+            }
+            let Some(raw) = use_now(self.core, &self.w, rd) else { continue };
+            let Some(x) = self.core.eval_path(p.path, raw) else { continue };
+            if x == p.val {
+                continue;
+            }
+            let r = new.get_or_insert_with(|| (**res).clone());
+            r.passes[i].val = x;
+            if let Some(Read::Use { val, .. }) = r.reads.get_mut(p.read as usize) {
+                *val = Some(raw);
+            }
+            match p.to {
+                super::world::PassTo::Def(f, loc) => {
+                    if let Some(d) = r.defs.iter_mut().find(|d| d.f == f && d.loc.entry_key() == loc.entry_key()) {
+                        d.val = x;
+                        defs.push((f, d.loc, x));
+                    }
+                }
+                super::world::PassTo::Contrib(f) => {
+                    if let Some(c) = r.contribs.iter_mut().find(|c| c.0 == f) {
+                        c.1 = x;
+                        contribs = true;
+                    }
+                }
+                super::world::PassTo::Out => {
+                    r.out = x;
+                    out = true;
+                }
+            }
+        }
+        let Some(r) = new else { return };
+        let Some(mut n) = self.w.node(id).cloned() else { return };
+        self.core.passes_refiled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let after = r.contribs.clone();
+        n.res = Some(Arc::new(r));
+        self.w.put(id, n.clone());
+        for (f, loc, x) in defs {
+            self.file_if(id, &n, f, loc, Some(x), true);
+        }
+        if contribs {
+            self.swap_contribs(n.unit, n.pos, &res.contribs, &after);
+        }
+        if out {
+            self.w.touch_key(Key::Out(id));
+            for r in self.w.out_readers_of(id) {
+                self.recheck(r, 18);
             }
         }
     }
@@ -956,7 +1027,7 @@ impl<'a> Builder<'a> {
         }
         if let Some(decl) = n.text.stat.defs.clone() {
             for &(f, loc) in decl.iter() {
-                if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc.entry_key() == loc.entry_key())) {
+                if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc == loc)) {
                     self.unfile(id, n, f, loc);
                 }
             }
@@ -981,7 +1052,7 @@ impl<'a> Builder<'a> {
         let old_b = n.brackets();
         if let Some(decl) = n.text.stat.defs.clone() {
             for &(f, loc) in decl.iter() {
-                if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc.entry_key() == loc.entry_key())) {
+                if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc == loc)) {
                     self.unfile(id, &n, f, loc);
                 }
             }
@@ -1200,7 +1271,7 @@ impl<'a> Builder<'a> {
         }
         if let Some(decl) = &n.text.stat.defs {
             for &(f, loc) in decl.iter() {
-                if !keys.iter().any(|e| e.0 == f && e.1.entry_key() == loc.entry_key()) {
+                if !keys.iter().any(|e| e.0 == f && e.1 == loc) {
                     keys.push((f, loc));
                 }
             }
@@ -1660,11 +1731,13 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // Declared entries this run did not make go.
+        // Declared entries this run did not make go. (One the last run
+        // made went above, as made. A global entry and a local one share a
+        // key, not an entry: matched exactly.)
         if let Some(dl) = decl.as_ref() {
             for &(f, loc) in dl.iter() {
-                let made = res.defs.iter().any(|e| e.f == f && e.loc.entry_key() == loc.entry_key());
-                let had = old_defs.iter().any(|e| e.f == f && e.loc.entry_key() == loc.entry_key());
+                let made = res.defs.iter().any(|e| e.f == f && e.loc == loc);
+                let had = old_defs.iter().any(|e| e.f == f && e.loc == loc);
                 if !made && !had {
                     self.unfile(id, &n, f, loc);
                 }
@@ -1900,6 +1973,20 @@ pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &m
         return v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x));
     }
     v2 == *val
+}
+
+/// The raw value use `r` gets now (`None`: none, a loop-back field's, or
+/// a definer's in work).
+fn use_now(core: &Core, w: &World, r: &Read) -> Option<ValueId> {
+    let Read::Use { f, at, after, own, .. } = r else { return None };
+    if w.loops.get(f).is_some() {
+        return None;
+    }
+    let (u, pos, fr, skip) = w.read_point(*at, *after, *own)?;
+    match w.reaching(u, *f, pos, fr, skip) {
+        Some((_, e)) => e.val,
+        None => w.env_of(core, u, *f),
+    }
 }
 
 /// Whether read `r` of node `me` still holds; `strict`: a definition still

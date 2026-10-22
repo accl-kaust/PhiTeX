@@ -161,6 +161,11 @@ pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
 }
 
 /// `FUZZ_WHY` set: a failed check says which (shrinking asks many times).
+/// Edits evaluated together (`FUZZ_BATCH`, at least 1).
+pub fn batch() -> usize {
+    std::env::var("FUZZ_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(1).max(1)
+}
+
 fn why() -> bool {
     std::env::var_os("FUZZ_WHY").is_some()
 }
@@ -239,6 +244,9 @@ pub fn replay_bad(start: &[String], eds: &[Ed], sched: Sched) -> bool {
     if !ok(&mut eng, &p, sched) {
         return false;
     }
+    // (FUZZ_BATCH=k: evaluated after every k-th edit and the last, as the
+    // fuzzer evaluates.)
+    let batch = batch();
     for (n, e) in eds.iter().enumerate() {
         let len = p.lines.len();
         let i = idx(e);
@@ -246,6 +254,9 @@ pub fn replay_bad(start: &[String], eds: &[Ed], sched: Sched) -> bool {
             return false;
         }
         apply(&mut eng, &mut p, e);
+        if (n + 1) % batch != 0 && n + 1 != eds.len() {
+            continue;
+        }
         if !ok(&mut eng, &p, sched) {
             return n + 1 == eds.len();
         }
@@ -364,8 +375,15 @@ pub fn report(start: &[String], eds: &[Ed], sched: Sched) {
     }
     let (mut eng, mut p) = Program::load(start.to_vec());
     evaluate(&mut eng, sched);
-    for e in eds {
+    let batch = batch();
+    if batch > 1 {
+        println!("BATCH {batch}");
+    }
+    for (n, e) in eds.iter().enumerate() {
         apply(&mut eng, &mut p, e);
+        if (n + 1) % batch != 0 && n + 1 != eds.len() {
+            continue;
+        }
         let fine = evaluate(&mut eng, sched);
         if !fine {
             println!("evaluation error after {e:?}");

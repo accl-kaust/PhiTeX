@@ -26,6 +26,7 @@
 //! gopen a = 1 b = 2         opens two scopes: a local to the outer, b to the inner
 //! both v = 5 6              v = 5 here, and 6 in the scope it opens (two levels)
 //! sneak v = 3               defines v though it declares nothing
+//! alias x = y[1]            x = y's element 1 (or y), nothing if none; outputs it
 //! grab s 2                  declares no claim; its run claims the next 2 (as sumnext)
 //! ```
 #![allow(dead_code, clippy::many_single_char_names)] // AST code reads best with short names
@@ -377,6 +378,21 @@ impl Parser<'_> {
                     self.eat("=")?;
                     let e = self.expr()?;
                     return Ok(self.tagged("sneak", vec![self.s(&x), e]));
+                }
+                "alias" => {
+                    self.pos += 1;
+                    let x = self.ident()?;
+                    self.eat("=")?;
+                    let y = self.ident()?;
+                    let mut i = ValueId::UNIT;
+                    if self.is_sym("[")
+                        && let Some(Tok::Int(n)) = self.peek_at(1).cloned()
+                        && matches!(self.peek_at(2), Some(Tok::Sym("]")))
+                    {
+                        self.pos += 3;
+                        i = self.v.int(n);
+                    }
+                    return Ok(self.tagged("alias", vec![self.s(&x), self.s(&y), i]));
                 }
                 "listto" => {
                     self.pos += 1;
@@ -748,7 +764,8 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 37] = [
+const KEYWORDS: [&str; 38] = [
+    "alias",
     "gopen",
     "both",
     "sneak",
@@ -1544,6 +1561,7 @@ impl Operation for StmtOp {
             ]),
             // Declares nothing: its definition refutes the list.
             "sneak" => Some(Vec::new()),
+            "alias" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
             // A contribution is a definition of the sequence.
             "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
             "fold" => Some(vec![
@@ -1748,7 +1766,7 @@ impl Operation for StmtOp {
                 out.extend([FOLD, FOLD_STATE, "cap"].map(String::from));
             }
             "if" => free_vars(v, a[0], &mut bound, &mut out),
-            "listuntil" => out.push(text(v, a[1])),
+            "listuntil" | "alias" => out.push(text(v, a[1])),
             "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" | "take" => {}
             // `collect` reads the following text's outputs, not fields.
             _ => return None,
@@ -1779,6 +1797,34 @@ impl Operation for StmtOp {
                 let val = eval_expr(cx, ops, a[1])?;
                 cx.define_with(v.field(&text(v, a[0])), val, Locality::Local);
                 Ok(val)
+            }
+            // FUZZ_PATHS=2: passed on through a view (`Ctx::define_from`,
+            // `Ctx::output_from`); else read whole. Results must not change.
+            "alias" => {
+                let (x, y) = (v.field(&text(v, a[0])), v.field(&text(v, a[1])));
+                let i = v.as_int(a[2]);
+                if fuzz_paths() == 2 {
+                    let Some(m) = cx.view(y)? else { return Ok(ValueId::UNIT) };
+                    let e = match i {
+                        Some(i) => match cx.at(m, defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) {
+                            Some(e) => e,
+                            None => return Ok(ValueId::UNIT),
+                        },
+                        None => m,
+                    };
+                    cx.define_from(x, e, Locality::Local);
+                    cx.output_from(e);
+                    return Ok(ValueId::UNIT);
+                }
+                let Some(w) = cx.use_field(y)? else { return Ok(ValueId::UNIT) };
+                let Some(w) = (match i {
+                    Some(i) => index_of(v, w, i),
+                    None => Some(w),
+                }) else {
+                    return Ok(ValueId::UNIT);
+                };
+                cx.define_with(x, w, Locality::Local);
+                Ok(w)
             }
             "gopen" => {
                 let x = eval_expr(cx, ops, a[1])?;

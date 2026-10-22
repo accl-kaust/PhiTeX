@@ -1183,6 +1183,9 @@ pub struct Report {
     pub cut_in_run: u64,
     /// Of those cut off, those with a patch (`Ctx::checkpoint_patched`).
     pub cut_patched: u64,
+    /// Done nodes whose values passed on through views (`Ctx::define_from`
+    /// and the others) followed a change, the nodes not run again.
+    pub passes_refiled: u64,
     /// With `Engine::set_run_audit`: the runs that were reruns, and those
     /// of them that changed nothing (not canonical: a schedule may run a
     /// node more often).
