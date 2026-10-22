@@ -5823,6 +5823,19 @@ fn parked_digest_with(rest: u64, slots: u64) -> u64 {
     phitex_defuse::hash_words(0x6d61_726b, &[rest, slots])
 }
 
+/// A value's `Debug` form fed to `h` as it is written (no string made):
+/// for the parts of a mark's state without a `Hash` ([`parked_rest`]).
+fn dbg_hash(h: &mut phitex_defuse::FxHasher, x: &dyn std::fmt::Debug) {
+    struct W<'a>(&'a mut phitex_defuse::FxHasher);
+    impl std::fmt::Write for W<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            std::hash::Hasher::write(self.0, s.as_bytes());
+            Ok(())
+        }
+    }
+    let _ = std::fmt::write(&mut W(h), format_args!("{x:?}"));
+}
+
 /// [`parked_digest`]'s part but the table's slots.
 fn parked_rest(p: &Parked) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -5863,12 +5876,12 @@ fn parked_rest(p: &Parked) -> u64 {
     w(&mut h, p.nest.len() as u64);
     for l in &p.nest {
         (l.mode, l.group, l.lid, l.owns, l.par, l.prev_graf, l.gid, l.save_base, l.def_base, l.open_stamp).hash(&mut h);
-        format!("{:?}", l.fold).hash(&mut h);
+        dbg_hash(&mut h, &l.fold);
         w(&mut h, l.list.len() as u64);
         for it in &l.list {
             match it {
                 crate::nest::Item::V(x) => w(&mut h, x.raw()),
-                crate::nest::Item::N(n) => format!("{n:?}").hash(&mut h),
+                crate::nest::Item::N(n) => dbg_hash(&mut h, n),
             }
         }
         for x in &l.extra {
@@ -5884,7 +5897,7 @@ fn parked_rest(p: &Parked) -> u64 {
     }
     for (f, m) in &p.reg_pending {
         w(&mut h, f.0.raw());
-        format!("{m:?}").hash(&mut h);
+        dbg_hash(&mut h, m);
     }
     for (k, x) in &p.incs {
         (k, x.raw()).hash(&mut h);

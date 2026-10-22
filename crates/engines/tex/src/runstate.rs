@@ -2155,7 +2155,7 @@ impl PState {
         if let Some(m) = &s.meta {
             (
                 m.eng.map(|x| x.map(ValueId::raw)),
-                m.publ.map(|(x, l)| (x.map(ValueId::raw), format!("{l:?}"))),
+                m.publ.map(|(x, l)| (x.map(ValueId::raw), l)),
                 m.ldef_stamp,
                 m.ldef_local,
                 m.ldef_gid,
