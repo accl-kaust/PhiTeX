@@ -2043,12 +2043,11 @@ impl State {
         let changed: Vec<Loc> = if first {
             img.begun = true;
             self.track = true;
-            for &l in &self.mdirty {
+            for l in std::mem::take(&mut self.mdirty) {
                 if let Some(sl) = self.slot_mut_raw(l) {
                     sl.mdirty = false;
                 }
             }
-            self.mdirty.clear();
             self.touched.clone()
         } else {
             let ls = std::mem::take(&mut self.mdirty);
