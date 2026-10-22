@@ -356,6 +356,20 @@ impl Interp<'_> {
                 self.define(u, v.field(&text(v, a[0])), val, false);
                 val
             }
+            "alias" => {
+                let y = self.lookup(u, v.field(&text(v, a[1])));
+                let w = match v.as_int(a[2]) {
+                    Some(i) => y.and_then(|y| super::index_of(v, y, i)),
+                    None => y,
+                };
+                match w {
+                    Some(w) => {
+                        self.define(u, v.field(&text(v, a[0])), w, false);
+                        w
+                    }
+                    None => ValueId::UNIT,
+                }
+            }
             // Both expressions are taken before the scopes open.
             "gopen" => {
                 let (x, y) = (self.expr(u, a[1]), self.expr(u, a[3]));

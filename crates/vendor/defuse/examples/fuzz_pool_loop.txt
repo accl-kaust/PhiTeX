@@ -16,3 +16,6 @@ page
 { q = b  print q }
 w = x + y
 print w
+alias r = a
+alias r = c
+print r

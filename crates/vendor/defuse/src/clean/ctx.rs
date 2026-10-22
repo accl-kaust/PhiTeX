@@ -83,6 +83,11 @@ pub struct Ctx<'a> {
     /// (`checkpoint`, `keep_after`), the run it resumes from a mark of
     /// (`resumed`), and the old mark it was cut off at (its index).
     pub(crate) marks: Vec<super::world::Mark>,
+    /// The values it passed on through views (`define_from` and the
+    /// others).
+    pub(crate) passes: Vec<super::world::Pass>,
+    /// The output `output_from` set from a view not passed (read in full).
+    pub(crate) out_from: Option<ValueId>,
     pub(crate) after: Option<super::world::After>,
     pub(crate) from_mark: Option<MarkResume>,
     pub(crate) cutoff: Option<(usize, Option<Vec<(Field, Locality, Option<ValueId>)>>)>,
@@ -193,6 +198,8 @@ impl<'a> Ctx<'a> {
             forwards: Vec::new(),
             views,
             // (Resumed at a mark: the marks before it stand.)
+            passes: Vec::new(),
+            out_from: None,
             marks: from_mark.as_ref().map_or_else(Vec::new, |m| m.old.marks[..m.j].to_vec()),
             after: None,
             from_mark,
@@ -809,6 +816,86 @@ impl<'a> Ctx<'a> {
         self.get(v, crate::api::Step::Has(k)).and_then(|b| self.core.values.as_bool(b)) == Some(true)
     }
 
+    /// Defines `f` (at `loc`) as view `v`'s value, passed on without
+    /// inspecting it: the run depends on whether `v` has a value, not on
+    /// the value; when the value read changes and stays there, the
+    /// definition follows it without the node running again (only `f`'s
+    /// readers are asked again). A view of a loop-back field forwards it
+    /// (`define_forward`). Soft: `f` defined locally as `f` reaching this
+    /// node (`view(f)`), not defined here yet, is not defined (its readers
+    /// read what this node read).
+    pub fn define_from(&mut self, f: Field, v: View, loc: Locality) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &v, &loc, )) } else { serde_json::Value::Null };
+        let (root, path, x) = self.views[v.0 as usize];
+        let me = self.me;
+        let soft = path == 0
+            && matches!(loc, Locality::Local)
+            && !self.ix.contains_key(&(0, f, loc.entry_key()))
+            && matches!(self.reads.get(root as usize), Some(&Read::Use { f: g, at, after: false, own: false, .. }) if g == f && at == me);
+        if !soft {
+            self.define_with_inner(f, x, loc);
+        }
+        match self.reads.get(root as usize) {
+            _ if soft => {}
+            Some(Read::Use { .. }) => self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: x }),
+            Some(&Read::Loop { f: from, .. }) if path == 0 => self.forwards.push((f, loc, from)),
+            _ => self.view_read(root, path),
+        }
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "define_from", a, serde_json::Value::Null);
+    }
+
+    /// Contributes view `v`'s value to accumulator `f`, passed on as
+    /// [`Ctx::define_from`] passes it (the run's only contribution to `f`;
+    /// another combined with it reads it in full).
+    pub fn contribute_from(&mut self, f: Field, v: View) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &v, )) } else { serde_json::Value::Null };
+        let (root, path, x) = self.views[v.0 as usize];
+        let first = !self.ix.contains_key(&(2, f, 0));
+        self.contribute_inner(f, x);
+        if first && matches!(self.reads.get(root as usize), Some(Read::Use { .. })) {
+            self.passes.push(super::world::Pass { to: super::world::PassTo::Contrib(f), read: root, path, val: x });
+        } else {
+            self.view_read(root, path);
+        }
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "contribute_from", a, serde_json::Value::Null);
+    }
+
+    /// Publishes view `v`'s value for loop-back field `f`. (For now the
+    /// run depends on all of the value, as [`Ctx::whole`] makes it: a
+    /// publication follows its value at the merge only, where the early
+    /// moves are made.)
+    pub fn publish_from(&mut self, f: Field, v: View) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &v, )) } else { serde_json::Value::Null };
+        let (root, path, x) = self.views[v.0 as usize];
+        self.publish_inner(f, x);
+        self.view_read(root, path);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "publish_from", a, serde_json::Value::Null);
+    }
+
+    /// Makes view `v`'s value the run's output, passed on as
+    /// [`Ctx::define_from`] passes it: whatever the run returns, its output
+    /// is this value (the last such call's).
+    pub fn output_from(&mut self, v: View) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&v, )) } else { serde_json::Value::Null };
+        let (root, path, x) = self.views[v.0 as usize];
+        self.passes.retain(|p| p.to != super::world::PassTo::Out);
+        if matches!(self.reads.get(root as usize), Some(Read::Use { .. })) {
+            self.passes.push(super::world::Pass { to: super::world::PassTo::Out, read: root, path, val: x });
+        } else {
+            self.view_read(root, path);
+            self.out_from = Some(x);
+        }
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "output_from", a, serde_json::Value::Null);
+    }
+
     /// View `v`'s value: the run depends on all of it.
     pub fn whole(&mut self, v: View) -> ValueId {
         #[cfg(feature = "observe")]
@@ -945,6 +1032,9 @@ impl<'a> Ctx<'a> {
         let k = loc.entry_key();
         if !self.forwards.is_empty() {
             self.forwards.retain(|x| !(x.0 == f && x.1.entry_key() == k));
+        }
+        if !self.passes.is_empty() {
+            self.passes.retain(|p| !matches!(p.to, super::world::PassTo::Def(g, l) if g == f && l.entry_key() == k));
         }
         if let Some(&i) = self.ix.get(&(0, f, k)) {
             let d = &mut self.defs[i];
@@ -1342,6 +1432,12 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn contribute_inner(&mut self, f: Field, x: ValueId) {
+        // (A value passed to it before is combined with this one: read in
+        // full now.)
+        if let Some(i) = self.passes.iter().position(|p| p.to == super::world::PassTo::Contrib(f)) {
+            let p = self.passes.remove(i);
+            self.view_read(p.read, p.path);
+        }
         if let Some(&i) = self.ix.get(&(2, f, 0)) {
             let c = &mut self.contribs[i];
             c.1 = match self.core.acc(f) {
@@ -2112,6 +2208,8 @@ impl<'a> Ctx<'a> {
         self.forwards.clear();
         self.views.clear();
         self.marks.clear();
+        self.passes.clear();
+        self.out_from = None;
         self.after = None;
         self.from_mark = None;
         self.cutoff = None;

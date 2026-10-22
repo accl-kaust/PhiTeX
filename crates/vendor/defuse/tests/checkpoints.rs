@@ -63,3 +63,17 @@ fn a_run_differing_in_a_slot_never_read_again_is_cut_off_with_a_patch() {
     assert_eq!((rep.resumed_at_mark, rep.cut_patched), (1, 0), "{rep:?}");
     assert_eq!(p.result(&e), interpret(&p.lines).unwrap());
 }
+
+#[test]
+fn a_run_given_another_text_with_a_read_broken_starts_over() {
+    let (mut e, mut p) = Program::load(lines(&["y = 3", "run { a = x + 1  b = y * 2  c = b + 1 }", "w = h + 1"]));
+    e.evaluate_sequential().unwrap();
+    // (Both edits evaluated together: the read of `y` broken, the run's
+    // marks are of its old text.)
+    apply(&mut e, &mut p, &Ed::Rm(0));
+    apply(&mut e, &mut p, &Ed::Set(0, "run { global g = x * 3  h = g + 1 }".into()));
+    let rep = e.evaluate_sequential().unwrap();
+    assert_eq!(rep.resumed_at_mark, 0, "{rep:?}");
+    assert_eq!(p.result(&e), interpret(&p.lines).unwrap());
+    assert!(e.check_reads().is_empty(), "{:?}", e.check_reads());
+}

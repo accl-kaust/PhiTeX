@@ -753,6 +753,7 @@ impl Engine {
         rep.rerun_causes = causes;
         rep.audit = self.audit.take();
         rep.cut_in_run = self.core.cut_in_run.swap(0, std::sync::atomic::Ordering::Relaxed);
+        rep.passes_refiled = self.core.passes_refiled.swap(0, std::sync::atomic::Ordering::Relaxed);
         rep.cut_patched = self.core.cut_patched.swap(0, std::sync::atomic::Ordering::Relaxed);
         if let (Some(a), Some(m)) = (rep.audit.as_mut(), super::core::lock(&self.core.rechecks).take()) {
             let mut v: Vec<(Option<Field>, u64, u64)> = m.into_iter().map(|(f, (n, b))| (f, n, b)).collect();
@@ -1675,6 +1676,11 @@ impl Engine {
     fn mark_resume(&mut self, rep: &mut Report, id: Id, b: u32, at: u64) {
         let Some(n) = self.w.node(id) else { return };
         let Some(old) = n.res.clone() else { return };
+        // (Its marks are of the text it ran: the node given another since
+        // starts over.)
+        if old.text != super::world::text_key(&n.text) {
+            return;
+        }
         let Some(after) = old.after.clone() else { return };
         let Some(j) = old.marks.iter().rposition(|m| m.read_ix <= b) else { return };
         let reads = old.reads[..old.marks[j].read_ix as usize].to_vec();
@@ -3015,6 +3021,7 @@ fn same_effects(a: &Res, b: &Res) -> bool {
         && a.diag == b.diag
         && a.claim == b.claim
         && a.forwards == b.forwards
+        && a.passes == b.passes
 }
 
 /// The loop-back values world `w`'s publications give (every declared
@@ -3829,7 +3836,8 @@ fn run_job(
     let run = |mut cx: Ctx<'_>, out: ValueId| Run {
         res: Res {
             last: cx.last_reads(),
-            out,
+            // (Its output as `output_from` set it, if it did.)
+            out: cx.passes.iter().rev().find(|p| p.to == super::world::PassTo::Out).map(|p| p.val).or(cx.out_from).unwrap_or(out),
             defs: cx.defs,
             forwards: cx.forwards,
             contribs: cx.contribs,
@@ -3847,6 +3855,7 @@ fn run_job(
             eval: core.eval_no.load(std::sync::atomic::Ordering::Relaxed),
             marks: std::mem::take(&mut cx.marks).into(),
             after: cx.after.take(),
+            passes: std::mem::take(&mut cx.passes),
         },
         kids: cx.kids,
         conts: cx.conts,
@@ -3880,6 +3889,11 @@ fn run_job(
         && matches!(r, Ok(Err(_)))
     {
         let old = fm.old;
+        // (Values passed on name reads by index: run in full.)
+        if !old.passes.is_empty() || !cx.passes.is_empty() {
+            drop(cx);
+            return run_job(core, w, id, None, predict, careful, fuel);
+        }
         let from = old.marks[j].read_ix as usize;
         let mut reads = std::mem::take(&mut cx.reads);
         let shift = reads.len() as i64 - from as i64;
