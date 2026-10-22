@@ -1,4 +1,5 @@
-//! The crate's own identity: a hash of its sources, part of the exported
+//! The crate's own identity: a hash of its sources (and the source
+//! pass's, whose harvest a format keeps), part of the exported
 //! prelude's identity (`api::engine_identity`), so a format written by
 //! one build of the crate is never read by a build whose encodings may
 //! differ.
@@ -9,6 +10,12 @@ fn main() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     collect(&src, &mut files);
+    // (and the source pass's: the format keeps its harvest of the
+    // format's definitions, `api::prelude_defs`)
+    collect(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/source/src"),
+        &mut files,
+    );
     files.sort();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for f in &files {
