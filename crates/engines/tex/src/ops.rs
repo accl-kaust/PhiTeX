@@ -174,7 +174,9 @@ pub(crate) fn run_node_parking(
                 r.verify_at = Some((k, p, h, km.args.clone()));
                 r
             }
-            Ok(km) if (k as usize) < km.snaps.len() => {
+            // (a mark whose run held sealed lines: their views were that
+            // run's, `crate::pages::seal`; the run starts over)
+            Ok(km) if (k as usize) < km.snaps.len() && !km.snaps[k as usize].0.has_sealed() => {
                 let (p, h) = km.snaps[k as usize].clone();
                 let tr = crate::prof::start();
                 let from = Run::from_parked(cx, o, (*p).clone());
@@ -864,10 +866,11 @@ impl Operation for Link {
         Some(vec![(v.field(crate::assemble::LINKED), Locality::Global)])
     }
     /// What the file is made of: held until the pages and the line's
-    /// records before it are done.
+    /// records before it are done (and the pieces' items: the pages'
+    /// sealed lines, `crate::pages::seal`).
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [crate::pages::PAGES_END, "pages", crate::pdfout::XPAGES]
+            [crate::pages::PAGES_END, "pages", crate::pdfout::XPAGES, crate::pages::PITEMS]
                 .iter()
                 .map(|&f| v.field(f))
                 .collect(),

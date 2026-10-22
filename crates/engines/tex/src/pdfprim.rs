@@ -2339,7 +2339,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 s("")
             };
             let k = r.scan_register_num()?;
-            let b = r.box_reg(k)?;
+            // (its sealed lines' lists in it: a form's writer reads them,
+            // `crate::pages::seal`)
+            let b = r.box_reg(k)?.map(|b| r.unseal(b));
             let got = if pdf_mode(r)? {
                 xform_step(r, b, at, res, immediate)?
             } else {
