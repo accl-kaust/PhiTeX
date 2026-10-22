@@ -616,6 +616,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The meanings this run found to be numbers, read through the
     /// number projection's test only ([`Run::num_lookup`]).
     pub num_memo: phitex_defuse::FxHashMap<Loc, bool>,
+    /// A finisher's fields preloaded where the routine reads them, by
+    /// field: the lazy tag of the value ([`Run::preload_candidate`],
+    /// [`Run::fin_lazy_value`]).
+    pub fin_lazy: phitex_defuse::FxHashMap<Field, ValueId>,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -904,6 +908,7 @@ impl<'c, 'a> Run<'c, 'a> {
             defined_memo: phitex_defuse::FxHashMap::default(),
             num_reads: false,
             num_memo: phitex_defuse::FxHashMap::default(),
+            fin_lazy: phitex_defuse::FxHashMap::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -1474,6 +1479,17 @@ impl<'c, 'a> Run<'c, 'a> {
     fn load_slow(&mut self, loc: Loc) -> R<()> {
         if self.in_skip && self.rec_load {
             self.skip_first.push(loc);
+        }
+        // (a finisher's field preloaded where the routine reads it: its
+        // value at the candidate, read now, [`Run::fin_lazy_value`])
+        if !self.fin_lazy.is_empty() {
+            let f = self.loc_field(loc);
+            if let Some(&x) = self.fin_lazy.get(&f) {
+                let y = self.fin_lazy_preload(x)?;
+                self.fin_lazy.remove(&f);
+                self.st.preload(loc, y);
+                return Ok(());
+            }
         }
         // (a record's cell: read from the record, once a run)
         if let Some((b, i)) = crate::fields::record_of(loc as usize)
@@ -3926,7 +3942,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        if self.st.is_loaded(l) {
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
         if let Some(&c) = self.class_memo.get(&l) {
@@ -3954,7 +3970,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        if self.st.is_loaded(l) {
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
         if let Some(&k) = self.step_memo.get(&l) {
@@ -3969,6 +3985,15 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(k))
     }
 
+    /// Whether `l` is a finisher's field preloaded where the routine reads
+    /// it ([`Run::fin_lazy`]): the run's own, read in full.
+    fn lazy_pre(&mut self, l: Loc) -> bool {
+        !self.fin_lazy.is_empty() && {
+            let f = self.loc_field(l);
+            self.fin_lazy.contains_key(&f)
+        }
+    }
+
     /// Whether `tok`'s meaning is a macro whose body is a number
     /// ([`crate::val::num_projection`]), where the run has not bound it
     /// itself: read as that test alone (the number against -1), so the
@@ -3979,7 +4004,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(false);
         };
-        if self.st.is_loaded(l) {
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(false);
         }
         if let Some(&b) = self.num_memo.get(&l) {
@@ -4035,7 +4060,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        if self.st.is_loaded(l) || self.interp.is_some() || self.rec_load {
+        if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
         }
         if let Some(&d) = self.defined_memo.get(&l) {
@@ -4060,7 +4085,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        if self.st.is_loaded(l) {
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
         if let Some(&o) = self.outer_memo.get(&l) {
@@ -5204,6 +5229,7 @@ pub(crate) struct Parked {
     step_memo: Vec<(Field, i64)>,
     defined_memo: Vec<(Field, bool)>,
     num_memo: Vec<(Field, bool)>,
+    fin_lazy: phitex_defuse::FxHashMap<Field, ValueId>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -5371,6 +5397,7 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|(l, d)| (self.loc_field(l), d))
                 .collect(),
+            fin_lazy: std::mem::take(&mut self.fin_lazy),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -5505,6 +5532,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .map(|(f, d)| (r.loc_of(f), d))
             .collect();
+        r.fin_lazy = p.fin_lazy;
         r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
         r.contribs = p.contribs;

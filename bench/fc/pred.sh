@@ -3,7 +3,7 @@
 set -u
 export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1
 git log --oneline -1 | cut -c1-80
-cargo clippy -q --release -p phitex-tex --features profile -- -D warnings > "$r/clippy.log" 2>&1; echo "clippy exit $? $(grep -c '^error\|^warning' $r/clippy.log)"; grep -m5 -A12 '^error\|^warning' "$r/clippy.log" | head -60
+cargo clippy -q --workspace --exclude defuse --no-deps --all-targets -- -D warnings > "$r/clippy.log" 2>&1; echo "clippy exit $? $(grep -c '^error\|^warning' $r/clippy.log)"; grep -m5 -A12 '^error\|^warning' "$r/clippy.log" | head -60
 cargo build -q --release -p phitex-cli --features phitex-tex/profile > "$r/b.log" 2>&1 || { echo build failed; grep -m3 -A12 '^error' "$r/b.log"; exit 1; }
 S=$(date +%s); B=$w/pr-$S; mkdir -p "$B"; bin=$B/phitex; cp target/release/phitex "$bin"
 export PHITEX_CACHE_DIR=$B/tc

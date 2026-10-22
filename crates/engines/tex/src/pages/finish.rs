@@ -554,13 +554,15 @@ impl Run<'_, '_> {
             std::mem::take(&mut fire.rest)
         };
         // (the own unit's other parts read as they are used: its locals
-        // always, its check only where the candidate is inside it)
+        // always, its check only where the candidate is inside it; of a
+        // local or a name standing at the candidate, which it is, and its
+        // value only where the routine uses it, [`Run::fin_lazy_value`])
         let part = |r: &mut Self, k: u32| {
             own_view
-                .and_then(|w| r.cx.get(w, phitex_defuse::Step::Index(k)))
+                .and_then(|(w, _)| r.cx.get(w, phitex_defuse::Step::Index(k)))
                 .unwrap_or(ValueId::UNIT)
         };
-        let locals = list_of(v, part(self, 5));
+        let locals = self.lazy_locals(own_view)?;
         let mut args = vec![
             pos.first().copied().unwrap_or(ValueId::UNIT),
             fire.data,
@@ -574,7 +576,7 @@ impl Run<'_, '_> {
             // (the names at the candidate, and whether the run could end
             // there)
             let defs_k;
-            (defs_k, cuttable) = super::piece::names_at(v, part(self, 4), fire.k);
+            (defs_k, cuttable) = self.lazy_names_at(own_view, fire.k)?;
             let reads = part(self, 3);
             if crate::exec::prof_flag!("PHITEX_FIN_ITEMS") {
                 let d4 = part(self, 4);
@@ -633,7 +635,7 @@ impl Run<'_, '_> {
         &mut self,
         fin: &FinishIn,
         pid: i64,
-    ) -> R<(Vec<i64>, Vec<(i64, ValueId, Vec<ValueId>)>, Option<phitex_defuse::View>)> {
+    ) -> R<(Vec<i64>, Vec<(i64, ValueId, Vec<ValueId>)>, Option<(phitex_defuse::View, u32)>)> {
         use phitex_defuse::Step;
         let v = self.v;
         if cfg!(feature = "observe") {
@@ -660,7 +662,8 @@ impl Run<'_, '_> {
             if !want.contains(&p) || units.iter().any(|u| u.0 == p) {
                 continue;
             }
-            let Some(u) = self.cx.at(w, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
+            let ui = u32::try_from(i).unwrap_or(u32::MAX);
+            let Some(u) = self.cx.at(w, Step::Index(ui)) else {
                 continue;
             };
             let mut raw = match self.cx.at(u, Step::Index(2)) {
@@ -685,7 +688,7 @@ impl Run<'_, '_> {
             self.resolve_params_of(p, &mut raw)?;
             // (the own piece's last candidate; its other parts read later)
             let shape = if p == pid {
-                own = Some(u);
+                own = Some((u, ui));
                 let last = self.cx.get(u, Step::Index(1)).unwrap_or(ValueId::UNIT);
                 v.list(vec![v.int(p), last])
             } else {
@@ -1884,6 +1887,12 @@ impl Run<'_, '_> {
                 if replaced(&gdefs, Field(f), piece.unwrap_or(-2), after) {
                     continue;
                 }
+                // (a value read where the routine uses it, [`Run::fin_lazy_value`])
+                if self.is_lazy(x) {
+                    self.fin_lazy.insert(Field(f), x);
+                    continue;
+                }
+                self.fin_lazy.remove(&Field(f));
                 let loc = self.loc_of(Field(f));
                 self.st.preload(loc, some(x));
             }
@@ -1906,9 +1915,13 @@ impl Run<'_, '_> {
                     phitex_defuse::FieldAt::Unset => None,
                     phitex_defuse::FieldAt::Gone => continue,
                 }
+            } else if self.is_lazy(kv) {
+                self.fin_lazy.insert(Field(f), kv);
+                continue;
             } else {
                 list_of(v, kv).first().copied()
             };
+            self.fin_lazy.remove(&Field(f));
             let loc = self.loc_of(Field(f));
             self.st.preload(loc, x);
         }
@@ -2058,5 +2071,131 @@ impl Run<'_, '_> {
             e.prev = out;
             e.prev_j = j;
         }
+    }
+}
+
+/// The tag of a value a finisher reads only where it uses it
+/// ([`Run::fin_lazy_value`]): `[LAZY, unit, part, i]`, the own unit's
+/// index in the window, its part (4 the check data, 5 the locals) and the
+/// element.
+const LAZY: &str = "\u{1}lazy";
+
+impl Run<'_, '_> {
+    /// The own piece's locals ([`Run::finisher_args`]): each `[field,
+    /// value, after]`, the value a lazy tag: the run reads the fields and
+    /// where they were made, a value only where the routine uses it.
+    fn lazy_locals(&mut self, own: Option<(phitex_defuse::View, u32)>) -> R<Vec<ValueId>> {
+        use phitex_defuse::Step;
+        let v = self.v;
+        let Some((u, ui)) = own else {
+            return Ok(Vec::new());
+        };
+        let Some(l) = self.cx.at(u, Step::Index(5)) else {
+            return Ok(Vec::new());
+        };
+        let p0 = self.cx.path(&[Step::Index(0)]);
+        let p2 = self.cx.path(&[Step::Index(2)]);
+        let fs = self.cx.get(l, Step::Each(p0)).map(|x| list_of(v, x)).unwrap_or_default();
+        let afters = self.cx.get(l, Step::Each(p2)).map(|x| list_of(v, x)).unwrap_or_default();
+        let tag = v.str(LAZY);
+        Ok(fs
+            .iter()
+            .enumerate()
+            .map(|(j, &f)| {
+                let lazy = v.list(vec![tag, v.int(i64::from(ui)), v.int(5), v.int(i64::try_from(j).unwrap_or(0))]);
+                v.list(vec![f, lazy, afters.get(j).copied().unwrap_or_else(|| v.int(-1))])
+            })
+            .collect())
+    }
+
+    /// The own piece's names at candidate `k` from its check data's index
+    /// ([`super::piece::names_index_at`]): each `[field, standing, value]`, a
+    /// value a lazy tag where the piece had one; and whether the run
+    /// could end there.
+    fn lazy_names_at(&mut self, own: Option<(phitex_defuse::View, u32)>, k: u32) -> R<(ValueId, bool)> {
+        use phitex_defuse::Step;
+        let v = self.v;
+        let Some((u, ui)) = own else {
+            return Ok((ValueId::UNIT, false));
+        };
+        let Some(d) = self.cx.at(u, Step::Index(4)) else {
+            return Ok((ValueId::UNIT, false));
+        };
+        let Some(cuts) = self.cx.at(d, Step::Index(1)) else {
+            return Ok((ValueId::UNIT, false));
+        };
+        let Some(cut) = self.cx.get(cuts, Step::Index(k)) else {
+            return Ok((ValueId::UNIT, false));
+        };
+        let index = self.cx.get(d, Step::Index(2)).unwrap_or(ValueId::UNIT);
+        let tag = v.str(LAZY);
+        let before = v.str(BEFORE_PIECE);
+        let names = super::piece::names_index_at(v, index, k)
+            .into_iter()
+            .map(|(f, g, kind, i)| {
+                let kv = match kind {
+                    0 => ValueId::UNIT,
+                    1 => before,
+                    _ => v.list(vec![
+                        tag,
+                        v.int(i64::from(ui)),
+                        v.int(4),
+                        v.int(i64::try_from(i * 5 + 2).unwrap_or(0)),
+                    ]),
+                };
+                v.list(vec![f, g, kv])
+            })
+            .collect();
+        Ok((v.list(names), int_of(v, cut) != 0))
+    }
+
+    /// The value a lazily preloaded field takes ([`Run::preload_candidate`]):
+    /// a local's value as it is, a name's `[value]` or `[]`.
+    pub(crate) fn fin_lazy_preload(&mut self, x: ValueId) -> R<Option<ValueId>> {
+        let v = self.v;
+        let part = list_of(v, x).get(2).map_or(0, |&p| int_of(v, p));
+        let y = self.fin_lazy_value(x)?;
+        Ok(if part == 5 { some(y) } else { list_of(v, y).first().copied() })
+    }
+
+    /// Whether `x` is a value a finisher reads only where it uses it.
+    pub(crate) fn is_lazy(&self, x: ValueId) -> bool {
+        let v = self.v;
+        v.with_list(x, |xs| xs.len() == 4 && v.with_str(xs[0], |s| s == LAZY).unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    /// The value lazy tag `x` stands for ([`Run::lazy_locals`],
+    /// [`Run::lazy_names_at`]), read through the window now: the run
+    /// depends on that element alone.
+    pub(crate) fn fin_lazy_value(&mut self, x: ValueId) -> R<ValueId> {
+        use phitex_defuse::Step;
+        let v = self.v;
+        let xs = list_of(v, x);
+        let n = |i: usize| u32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(u32::MAX);
+        let pos = self.cx.args();
+        let Some(fin) = FinishIn::of(v, &pos) else {
+            return Ok(ValueId::UNIT);
+        };
+        let w = self.cx.acc_view(v.field(PITEMS), fin.after, Some(fin.piece))?;
+        let Some(u) = self.cx.at(w, Step::Index(n(1))) else {
+            return Ok(ValueId::UNIT);
+        };
+        let Some(p) = self.cx.at(u, Step::Index(n(2))) else {
+            return Ok(ValueId::UNIT);
+        };
+        Ok(if n(2) == 5 {
+            // (a local: `[field, value, after]`)
+            self.cx
+                .at(p, Step::Index(n(3)))
+                .and_then(|e| self.cx.get(e, Step::Index(1)))
+                .unwrap_or(ValueId::UNIT)
+        } else {
+            // (a name's value in the check data's stretches)
+            self.cx
+                .at(p, Step::Index(0))
+                .and_then(|s| self.cx.get(s, Step::Index(n(3))))
+                .unwrap_or(ValueId::UNIT)
+        })
     }
 }
