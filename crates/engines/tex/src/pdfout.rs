@@ -1860,9 +1860,11 @@ impl phitex_defuse::Operation for PdfPage {
         else {
             return Ok(ValueId::UNIT);
         };
-        let keys = cx.use_field(v.field(PAGE_KEYS))?;
-        let Some(k) = keys
-            .and_then(|ks| list_of(v, ks).get(i).copied())
+        // (its own key only: a shipout of the same run elsewhere in the
+        // list changing leaves it standing)
+        let p = cx.path(&[phitex_defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX))]);
+        let Some(k) = cx
+            .use_field_path(v.field(PAGE_KEYS), p)?
             .and_then(|x| v.as_int(x))
         else {
             return Ok(ValueId::UNIT);

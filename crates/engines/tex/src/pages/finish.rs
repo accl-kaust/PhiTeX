@@ -340,12 +340,16 @@ impl Run<'_, '_> {
         let pid = me(fin.piece);
         // (the window's units, by piece: their items with the markers
         // resolved where each piece is)
-        let window = v.seq_to_vec(self.fold_own(PITEMS, fin.after, Some(fin.piece))?);
-        let unit_pid = |u: ValueId| list_of(v, u).first().map_or(-1, |&x| int_of(v, x));
+        // (the window read through paths, [`Run::window_units`]: each
+        // unit's piece, then only the units the page names, their items
+        // whole and the own piece's other parts; a unit of the window
+        // the page does not name changing (its items, its check) leaves
+        // this finisher standing)
+        let (pids, units) = self.window_units(fin, pid)?;
         let names_own = fin.spans.iter().any(|s| {
             matches!(s.src, Src::Piece { piece, .. } | Src::Held { piece, .. } if piece == pid)
         });
-        if names_own && !window.iter().any(|&u| unit_pid(u) == pid) {
+        if names_own && !pids.contains(&pid) {
             // (the piece stands after this finisher in the view, placed
             // again, the page builder to place the finisher after it
             // again: a view the engine replaces, the window read here to
@@ -363,36 +367,12 @@ impl Run<'_, '_> {
                 fin.k,
                 fin.after.map(phitex_defuse::NodeId::raw),
                 fin.spans.len(),
-                window
-                    .iter()
-                    .map(|&u| (
-                        list_of(v, u).first().map_or(-1, |&x| int_of(v, x)),
-                        unit_items(v, u).len()
-                    ))
-                    .collect::<Vec<_>>()
+                pids
             );
         }
-        let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
-        let mut want: Vec<i64> = vec![pid];
-        for s in &fin.spans {
-            if let Src::Piece { piece, .. } | Src::Held { piece, .. } = s.src
-                && !want.contains(&piece)
-            {
-                want.push(piece);
-            }
-        }
-        // (by sets and an index: the window's units and the page's items
-        // looked up, not searched for each)
-        let want: phitex_defuse::FxHashSet<i64> = want.into_iter().collect();
         let mut unit_ix: phitex_defuse::FxHashMap<i64, usize> = phitex_defuse::FxHashMap::default();
-        for &u in &window {
-            let p = unit_pid(u);
-            if want.contains(&p) && !unit_ix.contains_key(&p) {
-                let mut raw = unit_items(v, u);
-                self.resolve_params_of(p, &mut raw)?;
-                unit_ix.insert(p, units.len());
-                units.push((p, u, raw));
-            }
+        for (i, u) in units.iter().enumerate() {
+            unit_ix.insert(u.0, i);
         }
         let defect = |r: &mut Self, what: String| {
             let msg = format!(
@@ -606,6 +586,74 @@ impl Run<'_, '_> {
         ]));
         let brk = Some((pid, i64::from(fire.k), !at_end && !own.is_empty()));
         Ok((args, brk))
+    }
+
+    /// The [`PITEMS`] window of finisher `fin` (after `fin.after`, to its
+    /// piece `pid`) read through paths: every unit's piece (one read),
+    /// then for each unit whose piece the page's spans name (or `pid`)
+    /// its items, whole, with their markers resolved where the piece is,
+    /// and for `pid` the unit's other parts one by one (its last
+    /// candidate, its check, its locals, its cut) in the unit's shape
+    /// (the items left out). The finisher depends on those alone.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn window_units(
+        &mut self,
+        fin: &FinishIn,
+        pid: i64,
+    ) -> R<(Vec<i64>, Vec<(i64, ValueId, Vec<ValueId>)>)> {
+        use phitex_defuse::Step;
+        let v = self.v;
+        if cfg!(feature = "observe") {
+            let k = PageNode::of(self.ops, v, self.cx.op(), &self.cx.args());
+            assert!(k.is_some_and(|k| k.folds().contains(&PITEMS)), "a window of {PITEMS} outside a finisher");
+        }
+        let w = self.cx.acc_view(v.field(PITEMS), fin.after, Some(fin.piece))?;
+        let first = self.cx.path(&[Step::Index(0)]);
+        let pids: Vec<i64> = self
+            .cx
+            .get(w, Step::Each(first))
+            .map(|x| v.seq_to_vec(x).into_iter().map(|p| int_of(v, p)).collect())
+            .unwrap_or_default();
+        let mut want: phitex_defuse::FxHashSet<i64> = phitex_defuse::FxHashSet::default();
+        want.insert(pid);
+        for s in &fin.spans {
+            if let Src::Piece { piece, .. } | Src::Held { piece, .. } = s.src {
+                want.insert(piece);
+            }
+        }
+        let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
+        for (i, &p) in pids.iter().enumerate() {
+            if !want.contains(&p) || units.iter().any(|u| u.0 == p) {
+                continue;
+            }
+            let Some(u) = self.cx.at(w, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
+                continue;
+            };
+            let mut raw = match self.cx.at(u, Step::Index(2)) {
+                Some(x) => {
+                    let x = self.cx.whole(x);
+                    list_of(v, x)
+                }
+                None => Vec::new(),
+            };
+            self.resolve_params_of(p, &mut raw)?;
+            // (the own piece's parts but its items, as the unit has them)
+            let shape = if p == pid {
+                let mut xs = Vec::with_capacity(7);
+                for k in 0..7u32 {
+                    xs.push(if k == 2 {
+                        ValueId::UNIT
+                    } else {
+                        self.cx.get(u, Step::Index(k)).unwrap_or(ValueId::UNIT)
+                    });
+                }
+                v.list(xs)
+            } else {
+                ValueId::UNIT
+            };
+            units.push((p, shape, raw));
+        }
+        Ok((pids, units))
     }
 
     /// Where the next page begins, for the text after this finisher
