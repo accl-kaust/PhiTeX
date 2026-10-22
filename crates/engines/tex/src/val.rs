@@ -199,6 +199,12 @@ pub(crate) struct CsEntry {
 /// control sequence is frozen is a range test on its number.
 pub(crate) const FROZEN_MAX: u32 = 1 << 15;
 
+/// Whether an internal name was numbered past [`FROZEN_MAX`] (more of
+/// them than it leaves room for): then [`Tok::is_internal_cs`] reads the
+/// name.
+static INTERNAL_PAST_FROZEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// The entries by number, in chunks made once (read without a lock).
 const CS_CHUNK_BITS: usize = 12;
 const CS_CHUNK: usize = 1 << CS_CHUNK_BITS;
@@ -236,6 +242,9 @@ impl CsId {
                     t.1 += 1;
                     t.1 - 1
                 } else {
+                    if name.starts_with('\u{10FFFE}') {
+                        INTERNAL_PAST_FROZEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     t.2 += 1;
                     FROZEN_MAX + t.2 - 1
                 };
@@ -401,6 +410,16 @@ impl Tok {
     #[inline]
     pub(crate) fn is_frozen_cs(self) -> bool {
         self.0 & CS_BIT != 0 && self.0 & !CS_BIT < FROZEN_MAX
+    }
+
+    /// Whether this is a control sequence with an internal name
+    /// (`\u{10FFFE}…`): its number below [`FROZEN_MAX`], the name read
+    /// only where internal names were numbered past it.
+    #[inline]
+    pub(crate) fn is_internal_cs(self) -> bool {
+        self.is_frozen_cs()
+            || (INTERNAL_PAST_FROZEN.load(std::sync::atomic::Ordering::Relaxed)
+                && self.as_cs().is_some_and(|n| n.starts_with('\u{10FFFE}')))
     }
 
     /// The category of a character token.
