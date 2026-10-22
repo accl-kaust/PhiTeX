@@ -951,6 +951,12 @@ impl Run<'_, '_> {
 
     /// The fonts the nodes use.
     pub(crate) fn font_view(&mut self, list: &[Node]) -> R<crate::fonts::View> {
+        self.font_view_with(list, &[])
+    }
+
+    /// [`Self::font_view`] with fonts `extra` too (a page's sealed lines',
+    /// `crate::pages`).
+    pub(crate) fn font_view_with(&mut self, list: &[Node], extra: &[u32]) -> R<crate::fonts::View> {
         fn walk(l: &[Node], ids: &mut std::collections::BTreeSet<u32>) {
             // (a run of characters in one font is one insert)
             let mut last = None;
@@ -988,6 +994,7 @@ impl Run<'_, '_> {
         }
         let mut ids = std::collections::BTreeSet::new();
         walk(list, &mut ids);
+        ids.extend(extra.iter().copied());
         let mut view = crate::fonts::View::default();
         for f in ids {
             self.add_font_metrics(&mut view, f)?;
@@ -1224,6 +1231,24 @@ impl Run<'_, '_> {
             self.box_report(true, line.packed.report, true);
             let (list, seen) = nodes::encode_list_side_free(v, &line.packed.node.list, &side);
             let b = nodes::encode_box_with(v, &line.packed.node, list);
+            // (its fonts from its nodes, for its unit's shape: not walked
+            // again through its value, `crate::nodes::unit_shape`)
+            if seen == 0 {
+                let f = nodes::native_fonts(&line.packed.node.list).map(|ids| {
+                    // (one value a set of fonts: the lines share few)
+                    let ids = ids.as_slice();
+                    let k = phitex_defuse::hash_words(0, &ids.iter().map(|&f| u64::from(f)).collect::<Vec<_>>());
+                    match self.font_sets.get(&k) {
+                        Some((s, x)) if s.as_slice() == ids => *x,
+                        _ => {
+                            let x = v.list(ids.iter().map(|&f| v.int(i64::from(f))).collect());
+                            self.font_sets.insert(k, (ids.to_vec(), x));
+                            x
+                        }
+                    }
+                });
+                self.line_fonts.insert(b, f);
+            }
             out.push(v.list(vec![tv, b, bs, ls, lsl]));
             for a in &line.packed.adjustments {
                 out.push(nodes::encode(v, a, &side));
@@ -1664,6 +1689,13 @@ impl Run<'_, '_> {
             // "Incompatible list can't be unboxed"
             return Ok(());
         }
+        // (a finisher's sealed line opened: its own list, read now; the
+        // lines in an opened box stay sealed, `crate::pages::seal`)
+        let b = if list_of(v, b).get(9).is_some_and(|&l| nodes::is_sealed(v, l)) {
+            self.unseal(b)
+        } else {
+            b
+        };
         let xs = list_of(v, b);
         for x in xs.get(9).map(|&l| list_of(v, l)).unwrap_or_default() {
             self.append(md.lid, x);

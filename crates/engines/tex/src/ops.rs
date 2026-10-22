@@ -57,6 +57,58 @@ pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 pub(crate) static COMMANDS_BY: [std::sync::atomic::AtomicU64; 4] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// (observe) The last kept marks of each node, by node
+/// ([`retext_potential`]).
+fn retext_kept() -> &'static std::sync::Mutex<FxHashMap<u64, std::sync::Arc<crate::run::KeptMarks>>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<FxHashMap<u64, std::sync::Arc<crate::run::KeptMarks>>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()))
+}
+
+/// (observe, `PHITEX_RETEXT_POTENTIAL`) For a node whose text changed
+/// since its last run kept marks: the first segment that differs, and
+/// the last mark that had begun no later segment (a run resumed there
+/// reads the same text up to it), with the commands it would skip.
+fn retext_potential(cx: &mut Ctx<'_>) {
+    let node = cx.node().raw();
+    let Some(km) = retext_kept().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&node).cloned() else {
+        return;
+    };
+    let args = cx.args();
+    if args == km.args {
+        return;
+    }
+    let v = cx.values();
+    let frames = |a: &[ValueId]| a.first().map(|&x| list_of(v, x)).unwrap_or_default();
+    let (old, new) = (frames(&km.args), frames(&args));
+    let d = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let best = km
+        .snaps
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, (p, _))| p.text_at <= d && p.text_at > 0);
+    match best {
+        Some((k, (p, _))) => eprintln!(
+            "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks; resume at mark {k} (segment {}, after {} of {} commands: {}% skipped)",
+            old.len(),
+            new.len(),
+            km.snaps.len(),
+            p.text_at,
+            p.at_cmds(),
+            km.total_cmds,
+            p.at_cmds() * 100 / km.total_cmds.max(1)
+        ),
+        None => eprintln!(
+            "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks, none before it ({} commands)",
+            old.len(),
+            new.len(),
+            km.snaps.len(),
+            km.total_cmds
+        ),
+    }
+}
+
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead. With `parks`, a run that stops inside a command parks
@@ -107,6 +159,12 @@ pub(crate) fn run_node_parking(
             _ => false,
         };
     let resumed_at = if marks_ok { cx.resumed() } else { None };
+    // (observe, `PHITEX_RETEXT_POTENTIAL=1`: a node run again with another
+    // text, where its last run's marks and how much of that run a resume
+    // at the last mark before the first changed segment would skip)
+    if marks_ok && resumed_at.is_none() && crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
+        retext_potential(cx);
+    }
     let mut r = if let Some((tok, k)) = resumed_at {
         match tok.downcast::<crate::run::KeptMarks>() {
             Ok(km) if (k as usize) < km.snaps.len() && crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") => {
@@ -116,7 +174,9 @@ pub(crate) fn run_node_parking(
                 r.verify_at = Some((k, p, h, km.args.clone()));
                 r
             }
-            Ok(km) if (k as usize) < km.snaps.len() => {
+            // (a mark whose run held sealed lines: their views were that
+            // run's, `crate::pages::seal`; the run starts over)
+            Ok(km) if (k as usize) < km.snaps.len() && !km.snaps[k as usize].0.has_sealed() => {
                 let (p, h) = km.snaps[k as usize].clone();
                 let tr = crate::prof::start();
                 let from = Run::from_parked(cx, o, (*p).clone());
@@ -296,12 +356,22 @@ pub(crate) fn run_node_parking(
                         eprintln!("mark-check: node {} cut at mark {k} holds", r.cx.node().raw());
                     }
                 }
-                let args = if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") { r.cx.args() } else { Vec::new() };
-                r.cx.keep_after(std::sync::Arc::new(crate::run::KeptMarks {
+                let args = if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") || crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
+                    r.cx.args()
+                } else {
+                    Vec::new()
+                };
+                let total_cmds = r.cmds_before + r.cmds;
+                let km = std::sync::Arc::new(crate::run::KeptMarks {
                     snaps,
                     outs,
                     args,
-                }));
+                    total_cmds,
+                });
+                if crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
+                    retext_kept().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(r.cx.node().raw(), km.clone());
+                }
+                r.cx.keep_after(km);
                 crate::prof::add(crate::prof::KEEP, tk);
             }
             // (observe, `PHITEX_MARK_TRACE=1`: a finisher's or exec run's
@@ -796,10 +866,11 @@ impl Operation for Link {
         Some(vec![(v.field(crate::assemble::LINKED), Locality::Global)])
     }
     /// What the file is made of: held until the pages and the line's
-    /// records before it are done.
+    /// records before it are done (and the pieces' items: the pages'
+    /// sealed lines, `crate::pages::seal`).
     fn reads(&self, _: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         Some(
-            [crate::pages::PAGES_END, "pages", crate::pdfout::XPAGES]
+            [crate::pages::PAGES_END, "pages", crate::pdfout::XPAGES, crate::pages::PITEMS]
                 .iter()
                 .map(|&f| v.field(f))
                 .collect(),
@@ -1313,7 +1384,7 @@ pub(crate) fn units_of<'t>(
     text: &'t str,
     defs: &crate::hints::Defs,
 ) -> (ValueId, Vec<(String, &'t str)>) {
-    let (ends, sliceable) = unit_ends(text, defs);
+    let (ends, sliceable) = unit_ends(name, text, defs);
     let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
     let mut entries = Vec::with_capacity(ends.len());
     let mut units = Vec::with_capacity(ends.len());
@@ -1354,14 +1425,19 @@ pub(crate) fn units_of<'t>(
 /// the text and the definitions, kept by both (a file a round writes
 /// as the round before wrote it is not analysed again: amsldoc's index
 /// file, 40 kB, 125 ms).
-fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
+fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
     type Kept = (
         std::sync::Weak<phitex_source::pass::Definitions>,
         Arc<[usize]>,
         bool,
     );
+    type Last = std::sync::Mutex<FxHashMap<String, (Arc<str>, Kept)>>;
     static MEMO: std::sync::OnceLock<std::sync::Mutex<FxHashMap<(u64, usize), Kept>>> =
         std::sync::OnceLock::new();
+    // (the file's text the last time it was cut, with its cuts: the part
+    // of the text an edit left keeps its units, the rest is cut again,
+    // [`units_again`])
+    static LAST: std::sync::OnceLock<Last> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
     let key = (
         phitex_defuse::hash_bytes(0x756e_6974_656e_6473, text.as_bytes()),
@@ -1372,15 +1448,37 @@ fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
     {
         return (ends.clone(), *sl);
     }
-    let t = crate::hints::text_hints(text, phitex_source::pass::FileKind::Document, defs);
+    let last = LAST.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
+    let before = last.locked().get(name).cloned().filter(|(_, (d, _, _))| {
+        d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
+    });
+    let cut = |t: &str| -> Vec<usize> {
+        let h = crate::hints::text_hints(t, phitex_source::pass::FileKind::Document, defs);
+        h.slices.iter().map(|&(_, e)| e).collect()
+    };
+    let mut ends: Vec<usize> = match &before {
+        Some((old, (_, old_ends, _))) => units_again(old, old_ends, text, cut),
+        None => cut(text),
+    };
     // (the units cover the text: each from the end of the one before to
     // its slice's end, the last to the text's end)
-    let mut ends: Vec<usize> = t.slices.iter().map(|&(_, e)| e).collect();
     ends.retain(|&e| e > 0 && e <= text.len());
     ends.sort_unstable();
     ends.dedup();
     if ends.last() != Some(&text.len()) {
         ends.push(text.len());
+    }
+    // (`PHITEX_UNITS_CHECK=1`, observe: the cuts made again against the
+    // whole text's)
+    if before.is_some() && crate::exec::obs_flag!("PHITEX_UNITS_CHECK") {
+        let mut whole = cut(text);
+        whole.retain(|&e| e > 0 && e <= text.len());
+        whole.sort_unstable();
+        whole.dedup();
+        if whole.last() != Some(&text.len()) {
+            whole.push(text.len());
+        }
+        eprintln!("units-check: {name}: {} units, the same as the whole text's: {}", ends.len(), whole == ends);
     }
     // (the job's own text: what kind of file it is comes from its text)
     let sliceable = crate::inputs::document_text(text);
@@ -1390,7 +1488,63 @@ fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
         m.clear();
     }
     m.insert(key, (Arc::downgrade(defs), ends.clone(), sliceable));
+    drop(m);
+    last.locked().insert(
+        name.to_owned(),
+        (Arc::from(text), (Arc::downgrade(defs), ends.clone(), sliceable)),
+    );
     (ends, sliceable)
+}
+
+/// The units of `text`, a written file's text that was `old` when it was
+/// cut at `old_ends`: the units wholly in the part both texts begin with
+/// kept, those wholly in the part both end with kept (moved), each but
+/// the one next to the change (a unit's end can depend on the text after
+/// it, `\section` taking its arguments), and the text between cut again
+/// by `cut`, at a unit's start, as a text of its own. The cuts only
+/// decide how the file is read back in pieces, never what is read.
+fn units_again(old: &str, old_ends: &[usize], text: &str, cut: impl Fn(&str) -> Vec<usize>) -> Vec<usize> {
+    let (o, n) = (old.as_bytes(), text.as_bytes());
+    let pre = o.iter().zip(n).take_while(|(a, b)| a == b).count();
+    let max_suf = o.len().min(n.len()) - pre;
+    let suf = o.iter().rev().zip(n.iter().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+    if pre == o.len() && pre == n.len() {
+        return old_ends.to_vec();
+    }
+    // (a cut at a line's start, so that the text cut again begins as a
+    // file's line does)
+    let at_line = |b: &[u8], e: usize| e == 0 || b.get(e - 1) == Some(&b'\n');
+    // the kept prefix: the units ending at or before the change, but the
+    // last of them
+    let left: Vec<usize> = old_ends.iter().copied().filter(|&e| e <= pre).collect();
+    let l_keep = left.len().saturating_sub(1);
+    let mut l_at = 0;
+    let mut kept = Vec::new();
+    for &e in &left[..l_keep] {
+        if at_line(o, e) {
+            l_at = e;
+        }
+    }
+    kept.extend(left[..l_keep].iter().copied().filter(|&e| e <= l_at));
+    // the kept suffix: the units starting at or after the change's end
+    // in the old text, but the first of them; moved to the new text
+    let o_end = o.len() - suf;
+    let shift = |e: usize| e + n.len() - o.len();
+    let starts: Vec<usize> = std::iter::once(0).chain(old_ends.iter().copied()).collect();
+    let right: Vec<usize> = starts.iter().copied().filter(|&s| s >= o_end && s < o.len()).collect();
+    let r_from = right.iter().copied().skip(1).find(|&s| at_line(o, s));
+    let r_at = r_from.map_or(n.len(), shift);
+    if r_at < l_at {
+        return cut(text);
+    }
+    let mid = cut(&text[l_at..r_at]);
+    let mut ends = kept;
+    ends.extend(mid.into_iter().map(|e| e + l_at));
+    ends.push(r_at);
+    if let Some(r) = r_from {
+        ends.extend(old_ends.iter().copied().filter(|&e| e > r).map(shift));
+    }
+    ends
 }
 
 /// Publishes a loop-back's next round value; under `observe` with

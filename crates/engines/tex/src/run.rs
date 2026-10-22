@@ -874,6 +874,14 @@ pub(crate) struct Run<'c, 'a> {
     /// A finisher's `\box255`, native, from its page's assembly to its
     /// routine ([`crate::pages::Fire::b255`]).
     pub fin_box: Option<(phitex_typeset::node::BoxNode, crate::nodes::Side)>,
+    /// A finisher's sealed lines (`crate::pages::Run::seal_items`).
+    pub(crate) sealed: crate::pages::Sealing,
+    /// The fonts of the lines this run made (by their box values), from
+    /// their nodes; `None` for a line not sealed
+    /// ([`crate::nodes::unit_shape`]).
+    pub(crate) line_fonts: crate::FxHashMap<ValueId, Option<ValueId>>,
+    /// The font sets of those lines, each as one value.
+    pub(crate) font_sets: crate::FxHashMap<u64, (Vec<u32>, ValueId)>,
     /// The main loop's `lig_stack`, kept between words (§1034).
     pub(crate) lig_buf: Vec<crate::build::LigItem>,
 }
@@ -1032,6 +1040,9 @@ impl<'c, 'a> Run<'c, 'a> {
             cell_eng: phitex_defuse::FxHashMap::default(),
             rec_sig: (0, 0, 0, 0),
             fin_box: None,
+            sealed: crate::pages::Sealing::default(),
+            line_fonts: crate::FxHashMap::default(),
+            font_sets: crate::FxHashMap::default(),
             lig_buf: Vec::new(),
             reach_reads: 0,
         }
@@ -4625,6 +4636,13 @@ impl<'c, 'a> Run<'c, 'a> {
             .collect();
         let recs = self.records_at_finish();
         published.extend(recs.iter().copied());
+        // (a finisher's sealed lines in what leaves it: their own lists,
+        // read now, `crate::pages::Run::unseal`)
+        if !self.sealed.is_empty() {
+            for d in &mut published {
+                d.1 = self.unseal(d.1);
+            }
+        }
         // (debug, `PHITEX_PUB_TRACE=<a>|<b>…`: the definitions of a run whose
         // first text segment contains one of the texts)
         if let Some(pat) = crate::exec::obs_str!("PHITEX_PUB_TRACE") {
@@ -4809,7 +4827,11 @@ impl<'c, 'a> Run<'c, 'a> {
         } else {
             Vec::new()
         };
+        // (a finisher's pages leave as their shapes, `pages`: their
+        // writers read the lines, `crate::pdfout::PdfPage`)
+        let pages_f = self.v.field("pages");
         for (f, x) in std::mem::take(&mut self.contribs) {
+            let x = if f == pages_f { x } else { self.unseal(x) };
             self.cx.contribute(f, x);
         }
         // (a page's PDF side is a child of the run that shipped it, named
@@ -5298,6 +5320,10 @@ pub(crate) struct Parked {
     /// The commands the run began before this (all its attempts): not
     /// part of its state ([`Run::cmds_before`]).
     at_cmds: u64,
+    /// The text's segments the run had begun when parked or marked
+    /// ([`crate::input::Input::text_at`]): those before are read (the
+    /// one before it, maybe, in part), those after not yet.
+    pub(crate) text_at: usize,
     /// The input left, top first: the levels' rests, then the text.
     segs: Vec<Seg>,
     /// How many of `segs` were levels ([`Run::parked_levels`]).
@@ -5375,6 +5401,14 @@ pub(crate) struct Parked {
     cand_marks: Vec<crate::pages::CandMark>,
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
+    sealed: crate::pages::Sealing,
+}
+
+impl Parked {
+    /// The commands its run began before it.
+    pub(crate) fn at_cmds(&self) -> u64 {
+        self.at_cmds
+    }
 }
 
 impl Run<'_, '_> {
@@ -5465,6 +5499,7 @@ impl Run<'_, '_> {
             // counted then, not now, so that its marks fall on the same
             // commands as a run's that never parked, `Run::next_mark`)
             at_cmds: (self.cmds_before + self.cmds).saturating_sub(1),
+            text_at: 0,
             segs,
             nlev: nlev_all,
             level_tys: Vec::new(),
@@ -5551,6 +5586,7 @@ impl Run<'_, '_> {
             cand_marks: std::mem::take(&mut self.cand_marks),
             ins_pending: std::mem::take(&mut self.ins_pending),
             fin: self.fin.take(),
+            sealed: std::mem::take(&mut self.sealed),
         })
     }
 }
@@ -5559,13 +5595,24 @@ impl Run<'_, '_> {
 /// each mark's state as a parked run's, and its digest. A later run of
 /// the node resumed at mark `k` ([`phitex_defuse::Ctx::resumed`]) starts
 /// from `snaps[k]`.
+impl Parked {
+    /// Whether the run held sealed lines (`crate::pages::seal`): their
+    /// views are its own run's, not a later run's that resumes here.
+    pub(crate) fn has_sealed(&self) -> bool {
+        !self.sealed.is_empty()
+    }
+}
+
 pub(crate) struct KeptMarks {
     pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
     /// (observe, `PHITEX_MARK_CHECK`) Its contributions and children, to
     /// compare a run the engine would cut off with.
     pub outs: Vec<String>,
-    /// (observe, `PHITEX_RESUME_VERIFY`) Its node's text.
+    /// (observe, `PHITEX_RESUME_VERIFY`, `PHITEX_RETEXT_POTENTIAL`) Its
+    /// node's text.
     pub args: Vec<ValueId>,
+    /// (observe) The commands the run began in all.
+    pub total_cmds: u64,
 }
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
@@ -5795,6 +5842,7 @@ impl Run<'_, '_> {
         Parked {
             epoch: self.cx.values_epoch(),
             at_cmds: self.cmds_before + self.cmds,
+            text_at: self.input.text_at,
             segs,
             nlev: nlev_all,
             level_tys,
@@ -5857,6 +5905,7 @@ impl Run<'_, '_> {
             cand_marks: self.cand_marks.clone(),
             ins_pending: self.ins_pending.clone(),
             fin: self.fin.clone(),
+            sealed: self.sealed.clone(),
         }
     }
 }
@@ -6231,6 +6280,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
+        r.sealed = p.sealed;
         r.cmds_before = p.at_cmds;
         r.resumed = true;
         Ok(r)

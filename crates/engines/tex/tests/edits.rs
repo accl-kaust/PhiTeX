@@ -506,8 +506,9 @@ fn oscillating_written_file() {
 /// same width, height and depth, no kern or ligature, too short to
 /// hyphenate), so the paragraph's vertical profile is unchanged: the edit
 /// runs exactly that paragraph's exec and the resume piece after it, its
-/// page's finisher, the link and the end node, once each, at 1 and at 8
-/// threads. (A paragraph that begins a text unit is a cut at its start,
+/// page's PDF side (which reads the page's lines; the page's finisher
+/// reads their shape only, `crate::pages::seal`), the link and the end
+/// node, once each, at 1 and at 8 threads. (A paragraph that begins a text unit is a cut at its start,
 /// a page-builder candidate: its exec runs to it and the resume placed
 /// after it reads the rest of the paragraph, so both read the edited
 /// text.) No block scan, no node run twice, no speculative run dropped;
@@ -567,7 +568,6 @@ fn one_word_edit_reruns_little() {
             [
                 ("dvi", 1),
                 ("exec", 1),
-                ("finish", 1),
                 ("link", 1),
                 // (one node a paragraph: no rest after a cut at its
                 // start)
