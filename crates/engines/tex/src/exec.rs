@@ -556,7 +556,7 @@ impl Executor for Threads {
             }
         });
         let t1 = now();
-        flush_workers(self.n);
+        flush_workers(here_pool(self.n));
         if let (Some(a), Some(b)) = (t0, t1) {
             self.pooled.fetch_add(1, Ordering::Relaxed);
             self.pooled_jobs
@@ -701,13 +701,16 @@ fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
 }
 
 /// `f(i)` for every `i < n`, one job a task: the first on this thread,
-/// the others on the pool. The engine's thread runs a job of its batch
-/// itself, warm, instead of waiting while a woken worker runs it cold (a
-/// batch of two, a page's finisher and its neighbour, ran both on the
-/// pool at twice its time on this thread).
+/// the others on the pool of the other `threads - 1` workers
+/// ([`here_pool`]). The engine's thread runs a job of its batch itself,
+/// warm, instead of waiting while a woken worker runs it cold (a batch of
+/// two, a page's finisher and its neighbour, ran both on the pool at
+/// twice its time on this thread); with this thread one of the
+/// `threads`, at most `threads` jobs run at once (on the pool of
+/// `threads` workers, this thread made `threads + 1`).
 #[cfg(feature = "rayon")]
 fn on_pool_here(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
-    pool(threads).in_place_scope(|s| {
+    pool(here_pool(threads)).in_place_scope(|s| {
         for i in 1..n {
             s.spawn(move |_| f(i));
         }
@@ -720,6 +723,12 @@ fn on_pool_here(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
 #[cfg(not(feature = "rayon"))]
 fn on_pool_here(threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
     on_pool(threads, n, 1, f);
+}
+
+/// The workers [`on_pool_here`] spawns on beside the calling thread: one
+/// fewer than the threads asked for (at least one).
+fn here_pool(threads: usize) -> usize {
+    threads.saturating_sub(1).max(1)
 }
 
 /// Every worker of the pool of `threads` adds its probe counts and spans
