@@ -5422,16 +5422,9 @@ impl Run<'_, '_> {
 /// from `snaps[k]`.
 pub(crate) struct KeptMarks {
     pub snaps: Vec<(std::sync::Arc<Parked>, u64)>,
-    /// The definitions its table published at its end
-    /// ([`crate::runstate::State::published`]), by field.
-    pub defs: Vec<(Field, Locality, ValueId)>,
     /// (observe, `PHITEX_MARK_CHECK`) Its contributions and children, to
     /// compare a run the engine would cut off with.
     pub outs: Vec<String>,
-    /// Each field a command of the run accessed after its first mark,
-    /// with the latest mark it accessed it after (numbered from 1:
-    /// after `snaps[m - 1]`), by field.
-    pub last: Vec<(Field, u32)>,
     /// (observe, `PHITEX_RESUME_VERIFY`) Its node's text.
     pub args: Vec<ValueId>,
 }
@@ -5455,7 +5448,12 @@ impl Run<'_, '_> {
     /// given to the engine ([`phitex_defuse::Ctx::checkpoint`]). `Err`
     /// when the engine cuts the run off there: its last run's result
     /// stands.
+    #[inline]
     pub(crate) fn take_mark(&mut self) -> R<()> {
+        // (one test a command where the run takes none)
+        if !self.marks_on {
+            return Ok(());
+        }
         // (observe: the resume check, where the last run took the mark the
         // engine resumed at, by the commands begun since the run's start)
         if let Some((k, op, oh, args)) = &self.verify_at
@@ -5472,7 +5470,7 @@ impl Run<'_, '_> {
         if self.next_mark == 0 {
             self.next_mark = (at / every + 1) * every;
         }
-        if !self.marks_on || at < self.next_mark || self.mark.active {
+        if at < self.next_mark || self.mark.active {
             return Ok(());
         }
         // (not where siblings were pulled: their places are the text's
@@ -5506,28 +5504,8 @@ impl Run<'_, '_> {
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
         self.mark_snaps.push((std::sync::Arc::new(p), h));
-
-        // (the accesses from here on stamped with this mark, numbered
-        // from 1)
-        self.st.cur_mark = k + 1;
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
-        // (the last run's mark here differs from this one in a few slots'
-        // values only, which that run never touched after it: a cutoff
-        // with those definitions patched, `Ctx::checkpoint_patched`)
-        let patched = self.patch_at(k as usize);
-        let r = match patched {
-            // (no definition differs: the states are alike for all that
-            // follows, the last run's continuing as it did)
-            Some((as_old, patch)) if patch.is_empty() => {
-                let as_old = self.v.int(i64::from_ne_bytes(as_old.to_ne_bytes()) >> 4);
-                self.cx.checkpoint(k, as_old)
-            }
-            Some((as_old, patch)) => {
-                let as_old = self.v.int(i64::from_ne_bytes(as_old.to_ne_bytes()) >> 4);
-                self.cx.checkpoint_patched(k, state, as_old, &patch)
-            }
-            None => self.cx.checkpoint(k, state),
-        };
+        let r = self.cx.checkpoint(k, state);
         crate::prof::add(crate::prof::MARK_CK, tp);
         if let Err(s) = r {
             if crate::exec::obs_flag!("PHITEX_MARK_CHECK") {
@@ -5577,121 +5555,6 @@ impl Run<'_, '_> {
             shown.push(format!("{} last {} this {}", crate::val::field_name(v, f), r(d.1), r(d.2)));
         }
         eprintln!("resume-verify: node {node} (finisher {fin}) mark {k} DIFFERS: {shown:?}");
-    }
-
-    /// The patch of a cutoff at mark `k` ([`Run::take_mark`]): the last
-    /// run's state there as this one's (its digest), and the definitions
-    /// this run's result makes otherwise. `None` where the states differ
-    /// otherwise than in a few slots' values, or the last run touched one
-    /// of those slots after its mark there, or its result's definition of
-    /// one is not that slot's value.
-    #[allow(clippy::type_complexity)]
-    fn patch_at(
-        &mut self,
-        k: usize,
-    ) -> Option<(u64, Vec<(Field, Locality, Option<ValueId>)>)> {
-        // (observe, `PHITEX_MARK_PATCH=1`: a run's contributions at its
-        // end hold its slots' values too (a piece's check data, its
-        // records), which a patch of its definitions does not reach: off)
-        if !crate::exec::obs_flag!("PHITEX_MARK_PATCH") {
-            return None;
-        }
-        let old = self.old_marks.clone()?;
-        let (op, oh) = old.snaps.get(k)?;
-        let (np, nh) = self.mark_snaps.get(k)?.clone();
-        if crate::exec::obs_flag!("PHITEX_MARK_WHY") {
-            mark_why(self.cx.node().raw(), k, op, &np);
-        }
-        if *oh == nh || parked_rest(op) != parked_rest(&np) {
-            return None;
-        }
-        let diff = np.st.value_diff(&op.st)?;
-        if diff.is_empty() || diff.len() > 16 {
-            return None;
-        }
-        let mut patch = Vec::new();
-        for (key, saved, oval, nval, opub, npub, eng) in diff {
-            let f = match key {
-                crate::runstate::PLocKey::Spill(f) => f,
-                // (`\afterassignment`'s token: published by a rule of its
-                // own, `unchanged_transient`)
-                crate::runstate::PLocKey::Fixed(l) if l == crate::fields::cell::AFTERTOKEN => {
-                    return None;
-                }
-                crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
-            };
-            // (never touched by the last run after its mark here)
-            let last = old
-                .last
-                .binary_search_by_key(&f.0.raw(), |x| x.0.0.raw())
-                .ok()
-                .map_or(0, |i| old.last[i].1);
-            let why = crate::exec::obs_flag!("PHITEX_MARK_WHY");
-            if last as usize > k {
-                if why {
-                    eprintln!(
-                        "mark-why: patch refused: {} touched by the last run after mark {k} (last {last})",
-                        crate::val::field_name(self.v, f)
-                    );
-                }
-                return None;
-            }
-            // (its definitions of the field: each the slot's value or its
-            // base level's, then this run's)
-            let i = old.defs.partition_point(|x| x.0.0.raw() < f.0.raw());
-            let mut any = false;
-            for &(g, l, x) in old.defs[i..].iter().take_while(|x| x.0 == f) {
-                any = true;
-                // (a value a group saved: published from the save, the
-                // same for both runs, or from the slot: not told apart)
-                if saved.contains(&Some(x)) {
-                    if why {
-                        eprintln!("mark-why: patch refused: {} published a saved value", crate::val::field_name(self.v, f));
-                    }
-                    return None;
-                }
-                let y = if Some(x) == oval {
-                    nval
-                } else if Some(Some(x)) == opub {
-                    npub.flatten()
-                } else {
-                    if why {
-                        eprintln!(
-                            "mark-why: patch refused: {} published {l:?} = {} (not its value {:?} or its base's {:?})",
-                            crate::val::field_name(self.v, f),
-                            self.v.render(x).chars().take(80).collect::<String>(),
-                            oval.map(|y| self.v.render(y).chars().take(60).collect::<String>()),
-                            opub
-                        );
-                    }
-                    return None;
-                };
-                // (a base level's definition equal to the value read is
-                // none, [`crate::runstate::State::published`]; a scope's
-                // stands)
-                let y = y.filter(|&y| {
-                    matches!(l, Locality::ScopeAt(_))
-                        || !((self.rec_load || l != Locality::Global) && eng == Some(Some(y)))
-                });
-                patch.push((g, l, y));
-            }
-            // (none: none for this run either where its base level
-            // publishes nothing of it; whether a scope publishes it is by
-            // the slot's history alone, the same for both runs)
-            let quiet = npub.is_none();
-            if !any && !quiet {
-                if why {
-                    eprintln!(
-                        "mark-why: patch refused: {} not defined by the last run's result (value {:?} -> {:?})",
-                        crate::val::field_name(self.v, f),
-                        oval.map(|y| self.v.render(y).chars().take(60).collect::<String>()),
-                        nval.map(|y| self.v.render(y).chars().take(60).collect::<String>())
-                    );
-                }
-                return None;
-            }
-        }
-        Some((*oh, patch))
     }
 
     /// The run's state between two commands, as [`Run::park`] gives it but

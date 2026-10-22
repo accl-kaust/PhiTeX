@@ -124,7 +124,6 @@ pub(crate) fn run_node_parking(
                 match from {
                     Ok(mut r) => {
                         r.mark_snaps = km.snaps[..=k as usize].to_vec();
-                        r.st.cur_mark = k + 1;
                         r.old_marks = Some(km.clone());
                         // (the mark again: the engine keeps the marks
                         // before it; the run is never cut off at its own)
@@ -187,9 +186,6 @@ pub(crate) fn run_node_parking(
     // (spec-final A1: one pass; a piece's run ends at its first
     // page-builder candidate with input after it, `Halt::Cut`, and its
     // fold places the continuation for the rest)
-    // (the run's own end, its fold, open groups and publications: no
-    // command's access)
-    r.st.cur_mark = 0;
     if matches!(res, Ok(()) | Err(Halt::Cut)) {
         let tf = pp.and_then(|_| crate::prof::start());
         res = r.page_fold();
@@ -270,21 +266,12 @@ pub(crate) fn run_node_parking(
             if !r.mark_snaps.is_empty() && !crate::exec::obs_flag!("PHITEX_MARKS_NOKEEP") {
                 let tk = crate::prof::start();
                 let snaps = std::mem::take(&mut r.mark_snaps);
-                let acc = r.st.last_accesses();
-                let mut last: Vec<(phitex_defuse::Field, u32)> =
-                    acc.into_iter().map(|(l, m)| (r.loc_field(l), m)).collect();
-                last.sort_unstable_by_key(|x| x.0.0.raw());
-                let pubd = r.st.published(r.v, r.rec_load);
-                let mut defs: Vec<(phitex_defuse::Field, Locality, ValueId)> = pubd
-                    .into_iter()
-                    .map(|(l, x, loc)| (r.loc_field(l), loc, x))
-                    .collect();
-                defs.sort_by_key(|x| x.0.0.raw());
                 let outs = if crate::exec::obs_flag!("PHITEX_MARK_CHECK") {
                     let v = r.v;
-                    let mut o: Vec<String> = defs
-                        .iter()
-                        .map(|(f, l, x)| format!("def {} {l:?} {}", crate::val::field_name(v, *f), x.raw()))
+                    let pubd = r.st.published(v, r.rec_load);
+                    let mut o: Vec<String> = pubd
+                        .into_iter()
+                        .map(|(l, x, loc)| format!("def {} {loc:?} {}", crate::val::field_name(v, r.loc_field(l)), x.raw()))
                         .collect();
                     o.extend(r.contribs.iter().map(|(f, x)| format!("contrib {} {}", crate::val::field_name(v, *f), x.raw())));
                     o.extend(r.kids.iter().map(|(op, a)| format!("kid {op:?} {:?}", a.iter().map(|x| x.raw()).collect::<Vec<_>>())));
@@ -312,9 +299,7 @@ pub(crate) fn run_node_parking(
                 let args = if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") { r.cx.args() } else { Vec::new() };
                 r.cx.keep_after(std::sync::Arc::new(crate::run::KeptMarks {
                     snaps,
-                    defs,
                     outs,
-                    last,
                     args,
                 }));
                 crate::prof::add(crate::prof::KEEP, tk);

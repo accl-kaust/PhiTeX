@@ -118,10 +118,6 @@ struct Slot {
     meta: u32,
     touched: bool,
     field: Option<Field>,
-    /// The run's mark current at its latest access by a command, read or
-    /// write ([`State::stamp`]; 0: none since a mark): a later run cut off
-    /// past that mark with this slot patched never looked at it there.
-    last: std::cell::Cell<u32>,
 }
 
 impl Default for Slot {
@@ -134,7 +130,6 @@ impl Default for Slot {
             meta: 0,
             touched: false,
             field: None,
-            last: std::cell::Cell::new(0),
         }
     }
 }
@@ -257,10 +252,6 @@ pub(crate) struct State {
     /// The table as it stood at [`State::checkpoint`], kept as it
     /// changes: [`State::rollback`] puts it back.
     undo: Option<Box<Undo>>,
-    /// The run's current mark (its marks are numbered from 1; 0: before
-    /// any, or stamps off): what a command's access of a slot stamps
-    /// ([`Slot::last`]).
-    pub(crate) cur_mark: u32,
 }
 
 /// What [`State::rollback`] puts back: each slot and metas entry as it
@@ -367,7 +358,6 @@ impl Clone for State {
             muts: self.muts,
             cands: self.cands.clone(),
             undo: None,
-            cur_mark: 0,
         }
     }
 }
@@ -470,7 +460,6 @@ impl State {
             muts: 0,
             cands: Vec::new(),
             undo: None,
-            cur_mark: 0,
         }
     }
 
@@ -690,25 +679,11 @@ impl State {
             }
             &mut self.spill[i]
         };
-        s.last.set(self.cur_mark);
         if !s.touched {
             s.touched = true;
             self.touched.push(loc);
         }
         s
-    }
-
-    /// Each slot a command accessed since the run's first mark, with the
-    /// mark current at its latest access ([`Slot::last`]).
-    pub(crate) fn last_accesses(&self) -> Vec<(Loc, u32)> {
-        self.touched
-            .iter()
-            .filter_map(|&l| {
-                let s = self.slot_ref(l)?;
-                let m = s.last.get();
-                (m > 0).then_some((l, m))
-            })
-            .collect()
     }
 
     /// The spill locations of `prev` (the state a continuation's
@@ -753,16 +728,12 @@ impl State {
     pub(crate) fn cmd_chr_fast(&self, loc: Loc) -> Option<(u8, i32)> {
         // (a meaning's location is never a spill one: one bounds test)
         let s = self.eq.get(loc as usize)?;
-        s.last.set(self.cur_mark);
         (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
     }
 
     #[inline]
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
-        self.slot_ref(loc).is_some_and(|s| {
-            s.last.set(self.cur_mark);
-            s.e.flags & LOADED != 0
-        })
+        self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }
 
     /// The engine's value of `loc`, read: `Unloaded -> Loaded`.
@@ -924,13 +895,11 @@ impl State {
         if self.undo.is_some() {
             self.log_slot(loc);
         }
-        let m = self.cur_mark;
         let s = if loc & SPILL == 0 {
             &mut self.eq[loc as usize]
         } else {
             &mut self.spill[(loc & !SPILL) as usize]
         };
-        s.last.set(m);
         &mut s.e
     }
 
@@ -1058,7 +1027,6 @@ impl State {
     #[inline]
     pub(crate) fn macro_at(&self, loc: Loc) -> Option<Rc<crate::val::Macro>> {
         let s = self.slot_ref(loc)?;
-        s.last.set(self.cur_mark);
         if s.e.flags & LOADED == 0 || s.e.kind != K_MACRO {
             return None;
         }
