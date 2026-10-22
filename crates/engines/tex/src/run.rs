@@ -4933,7 +4933,13 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a finisher's output: what its routine gave back, which the
         // page builder reads where it placed it, `crate::pages::RTN`)
-        let out = self.fin.as_ref().and_then(|c| c.rtn).unwrap_or(ValueId::UNIT);
+        // (its register maps left out: the builder folds the rest,
+        // `crate::pages::rtn_strip`)
+        let out = self
+            .fin
+            .as_ref()
+            .and_then(|c| c.rtn)
+            .map_or(ValueId::UNIT, |x| crate::pages::rtn_strip(self.v, x));
         if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
             let v = self.v;
             let mut pubd: Vec<String> = published_trace

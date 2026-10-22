@@ -46,6 +46,27 @@ pub(crate) fn rtn_value(
     v.list(vec![markers, list, v.int(dead), v.list(ms)])
 }
 
+/// A give-back without its register maps: what the page builder folds
+/// (its markers, its list, `\deadcycles`), the finisher's output; the
+/// maps, which differ from page to page as the routine's own reads of a
+/// register make its write a map or a definition, stay in [`RTN`].
+pub(crate) fn rtn_strip(v: &Values, x: ValueId) -> ValueId {
+    let xs = list_of(v, x);
+    if xs.len() < 4 {
+        return x;
+    }
+    rtn_value(v, xs[0], xs[1], int_of(v, xs[2]), &[])
+}
+
+/// Give-back `x` with register maps `maps` ([`rtn_value`]).
+pub(crate) fn rtn_with_maps(v: &Values, x: ValueId, maps: &[(i32, crate::regfold::Affine)]) -> ValueId {
+    let xs = list_of(v, x);
+    if xs.len() < 2 {
+        return x;
+    }
+    rtn_value(v, xs[0], xs[1], xs.get(2).map_or(0, |&d| int_of(v, d)), maps)
+}
+
 /// The register maps of a give-back ([`rtn_value`]).
 pub(crate) fn rtn_maps(v: &Values, x: ValueId) -> Vec<(i32, crate::regfold::Affine)> {
     list_of(v, x)
@@ -816,7 +837,7 @@ impl Run<'_, '_> {
         // material as the finisher's output, [`Feedback::RoutineGivesBack`])
         let pos = self.cx.args();
         let guess = FinishIn::of(v, &pos).map(|f| f.rtn_guess);
-        if guess.is_some_and(|g| g != x) {
+        if guess.is_some_and(|g| rtn_strip(v, g) != rtn_strip(v, x)) {
             Feedback::RoutineGivesBack.missed();
             let j = pos.first().map_or(0, |&y| int_of(v, y));
             if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {

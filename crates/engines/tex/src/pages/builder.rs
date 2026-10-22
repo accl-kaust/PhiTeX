@@ -1440,6 +1440,21 @@ impl Run<'_, '_> {
                 None => self.rtn_guess(hint, key.1),
             }
         };
+        // (the finisher's output, which the read below compares with the
+        // guess, has no register maps, [`crate::pages::rtn_strip`]; the
+        // guess in its arguments has the maps the routine's last run
+        // wrote where the page before gave none, for the register folds,
+        // [`Finish::static_contribs`])
+        let rtn_guess = if !in_material && crate::pages::finish::rtn_maps(v, rtn_guess).is_empty() {
+            let maps = crate::pages::finish::rtn_maps(v, self.rtn_guess(hint, key.1));
+            if maps.is_empty() {
+                rtn_guess
+            } else {
+                crate::pages::finish::rtn_with_maps(v, rtn_guess, &maps)
+            }
+        } else {
+            rtn_guess
+        };
         if cfg!(feature = "observe") {
             // (the evaluation: its values and their epoch, the guesses
             // it began with)
@@ -1549,7 +1564,9 @@ impl Run<'_, '_> {
         // guess while it has none, the read holding while it gives the
         // guess; its page parameter markers resolved where the page
         // fired)
-        let rtn = self.cx.placed_output_or(at, rtn_guess);
+        let rtn = self
+            .cx
+            .placed_output_or(at, crate::pages::finish::rtn_strip(v, rtn_guess));
         // (`PHITEX_RTN_TRACE=1`, profile: each page's routine material
         // as read, against the guess it was placed with)
         if crate::exec::prof_flag!("PHITEX_RTN_TRACE") {
@@ -1557,7 +1574,7 @@ impl Run<'_, '_> {
                 "rtn-trace: page {} node {} {} guess {} read {}",
                 j + 1,
                 self.cx.node().raw(),
-                if rtn == rtn_guess { "same" } else { "DIFF" },
+                if rtn == crate::pages::finish::rtn_strip(v, rtn_guess) { "same" } else { "DIFF" },
                 v.render(rtn_guess).chars().take(400).collect::<String>(),
                 v.render(rtn).chars().take(400).collect::<String>()
             );
