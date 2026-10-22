@@ -1684,9 +1684,9 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         let times: FxHashMap<phitex_defuse::NodeId, [u64; 4]> =
             eng.critical_chain_times().into_iter().collect();
         let v = eng.values();
+        use phitex_defuse::Cause as C;
         for (n, c) in &chain {
             let op = eng.node_info(*n).map_or("?", |i| i.op);
-            use phitex_defuse::Cause as C;
             let f = match c {
                 C::Rebind { field, .. }
                 | C::Changed { field, .. }
