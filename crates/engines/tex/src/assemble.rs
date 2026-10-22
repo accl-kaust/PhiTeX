@@ -473,6 +473,7 @@ fn dvi_page(
 /// Example: pieces `A B`, a page finishing at `A`'s end, `B` running
 /// `\immediate\pdfobj`: the line is `A, finish, B`; the file numbers
 /// page 1's objects, then `B`'s object.
+#[allow(clippy::too_many_lines)]
 fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let v = cx.values();
     let t0 = std::time::Instant::now();
@@ -482,6 +483,14 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
 
     let t_acc = t0.elapsed();
     let xpages = crate::pdfout::order_line(v, &line);
+    // (the pieces' items, by piece: the pages' sealed lines,
+    // `crate::pages::seal`)
+    let mut units = crate::FxHashMap::default();
+    for u in v.seq_to_vec(cx.acc_range(v.field(crate::pages::PITEMS), None)?) {
+        if let Some(Some((p, items))) = v.with_list(u, |xs| Some((v.as_int(*xs.first()?)?, *xs.get(2)?))) {
+            units.entry(p).or_insert(items);
+        }
+    }
     if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
         for (tag, l) in [("in", &line), ("out", &xpages)] {
             for &x in l {
@@ -529,7 +538,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };
     let t_seed = t0.elapsed();
-    let l = crate::pdfout::finish_exact(v, &f, &xpages, &o.pdf_cmds);
+    let l = crate::pdfout::finish_exact(v, &f, &xpages, &units, &o.pdf_cmds);
     let t_fin = t0.elapsed();
     // a page the link shipped and the writer could not write is the
     // job's error, in the log and loudly, naming the node that shipped
@@ -558,6 +567,12 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
             v.int(i64::try_from(l.shipped).unwrap_or(0)),
         ])),
     );
+    // (each page's identity, for a viewer: `crate::api::Build::pages`)
+    let shown = l
+        .shown
+        .iter()
+        .fold(ValueId::NIL, |a, &h| v.seq_concat(a, v.seq_unit(v.int(i64::from_ne_bytes(h.to_ne_bytes())))));
+    cx.contribute(v.field(crate::pdfout::SHOWN), shown);
     let x = bytes_value(v, l.file, l.hash);
     {
         use crate::timeline::note;
