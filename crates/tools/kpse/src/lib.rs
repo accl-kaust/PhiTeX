@@ -593,41 +593,41 @@ impl Db {
 
     /// What [`Db::to_bytes`] wrote for `key`; `None` for other bytes or
     /// another key (a database changed since).
-    fn from_bytes(b: &[u8], key: &[(Bytes, u64, u128)]) -> Option<Db> {
-        let mut r = Rd(b.strip_prefix(DB_MAGIC.as_slice())?);
-        if r.len()? != key.len() {
+    fn from_bytes(bytes: &[u8], key: &[(Bytes, u64, u128)]) -> Option<Db> {
+        let mut rd = Rd(bytes.strip_prefix(DB_MAGIC.as_slice())?);
+        if rd.len()? != key.len() {
             return None;
         }
-        for (f, len, at) in key {
-            let m = r.len()?;
-            if r.take(m)? != f.as_slice() || r.u64()? != *len || r.u128()? != *at {
+        for (file, len, at) in key {
+            let size = rd.len()?;
+            if rd.take(size)? != file.as_slice() || rd.u64()? != *len || rd.u128()? != *at {
                 return None;
             }
         }
         let mut lists = [Vec::new(), Vec::new()];
         for list in &mut lists {
-            for _ in 0..r.len()? {
-                let m = r.len()?;
-                list.push(r.take(m)?.to_vec());
+            for _ in 0..rd.len()? {
+                let size = rd.len()?;
+                list.push(rd.take(size)?.to_vec());
             }
         }
         let [dirs, roots] = lists;
-        let m = r.len()?;
-        let text = r.take(m)?.to_vec();
-        let n = r.len()?;
-        let raw = r.take(n.checked_mul(20)?)?;
-        if !r.0.is_empty() {
+        let size = rd.len()?;
+        let text = rd.take(size)?.to_vec();
+        let count = rd.len()?;
+        let raw = rd.take(count.checked_mul(20)?)?;
+        if !rd.0.is_empty() {
             return None;
         }
-        let mut index = Vec::with_capacity(n);
-        for e in raw.as_chunks::<20>().0 {
-            let w = |a: usize| u32::from_le_bytes([e[a], e[a + 1], e[a + 2], e[a + 3]]);
-            let h = u64::from(w(0)) | (u64::from(w(4)) << 32);
-            let (o, l, d) = (w(8), w(12), w(16));
-            if (o as usize).checked_add(l as usize)? > text.len() || d as usize >= dirs.len() {
+        let mut index = Vec::with_capacity(count);
+        for entry in raw.as_chunks::<20>().0 {
+            let word = |a: usize| u32::from_le_bytes([entry[a], entry[a + 1], entry[a + 2], entry[a + 3]]);
+            let hash = u64::from(word(0)) | (u64::from(word(4)) << 32);
+            let (off, len, dir) = (word(8), word(12), word(16));
+            if (off as usize).checked_add(len as usize)? > text.len() || dir as usize >= dirs.len() {
                 return None;
             }
-            index.push((h, o, l, d));
+            index.push((hash, off, len, dir));
         }
         if !index.is_sorted_by_key(|e| e.0) {
             return None;
@@ -1766,7 +1766,7 @@ mod tests {
         let d = |s: &str| [top.as_slice(), b"/", s.as_bytes()].concat();
         assert_eq!(dirs(&db, b"x.sty"), [d("a/"), d("b/")]);
         assert_eq!(dirs(&db, b"z"), [d("b/")]);
-        assert!(dirs(&db, b"w").is_empty());
+        assert_eq!(dirs(&db, b"w").len(), 0);
         let key = vec![(f.clone(), 7, 9)];
         let b = db.to_bytes(&key);
         let e = Db::from_bytes(&b, &key).expect("read back");

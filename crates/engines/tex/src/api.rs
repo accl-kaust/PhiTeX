@@ -6344,14 +6344,15 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, made: &Arc<crate::fmtenv::Mad
             .set_environment_base(Arc::new(move |v, f| fmt.get_field(v, f, &made)));
     }
     let v = g.eng.values();
-    let mut sets = Vec::new();
-    sets.push((v.field("jobname"), v.str(&opts.jobname)));
-    sets.push((v.field("dvicomment"), v.str(&opts.comment)));
-    sets.push((v.field("shellescape"), v.int(i64::from(opts.shell_escape))));
-    sets.push((
-        v.field("pdfdate"),
-        v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
-    ));
+    let mut sets = vec![
+        (v.field("jobname"), v.str(&opts.jobname)),
+        (v.field("dvicomment"), v.str(&opts.comment)),
+        (v.field("shellescape"), v.int(i64::from(opts.shell_escape))),
+        (
+            v.field("pdfdate"),
+            v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
+        ),
+    ];
     if let Some(t) = opts.epoch {
         // §241 fix_date_and_time, at the job's start
         for (k, x) in date_params(t) {
