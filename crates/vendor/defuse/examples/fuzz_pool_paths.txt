@@ -38,3 +38,17 @@ o = lens(k)
 r = [l, s, [1]]
 p = lens(r)
 print p
+alias z = l[1]
+alias z = l
+alias z = m[1]
+alias l = l
+alias v = k[0]
+print z
+print v
+t = z[0] + 1
+print t
+{ alias z = l[0]  print z }
+pack z = l[0], m[1], 5
+pack z = (l[1], x), s
+pack u = z, (k[2], 1)
+print u

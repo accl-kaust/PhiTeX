@@ -33,6 +33,7 @@ const READS: &[&str] = &[
     "define_forward",
     "use_field_path",
     "acc_fold_path",
+    "acc_range_path",
     "view",
     "acc_view",
     "at",
@@ -40,14 +41,20 @@ const READS: &[&str] = &[
     "len",
     "has",
     "whole",
+    "compose",
 ];
 const WRITES: &[&str] = &[
     "define",
     "define_with",
     "define_in_scope",
     "define_in_scope_at",
+    "define_from",
+    "contribute_from",
+    "publish_from",
+    "output_from",
     "declare_loopback",
     "declare_loopback_early",
+    "declare_loopback_with",
     "publish",
     "child",
     "follow",
@@ -68,6 +75,7 @@ const WRITES: &[&str] = &[
     "restart",
     "diagnostic",
     "checkpoint",
+    "checkpoint_patched",
     "keep_after",
 ];
 /// The run's own inputs and state, pure memos, and hints that may not

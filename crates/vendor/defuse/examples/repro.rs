@@ -60,7 +60,20 @@ fn main() {
         }
         for (j, e) in eds.iter().enumerate() {
             shrink::apply(&mut eng, &mut p, e);
-            if !shrink::ok(&mut eng, &p, sched) {
+            // (FUZZ_BATCH=k: checked after every k-th edit and the last.)
+            if (j + 1) % shrink::batch() != 0 && j + 1 != eds.len() {
+                continue;
+            }
+            let fine = shrink::ok(&mut eng, &p, sched);
+            if std::env::var_os("REPRO_INV").is_some() {
+                for b in eng.check_invariants().iter().take(3) {
+                    println!("INV after edit {j}: {b}");
+                }
+                for b in eng.check_reads().iter().take(3) {
+                    println!("READS after edit {j}: {b:?}");
+                }
+            }
+            if !fine {
                 bad += 1;
                 println!("try {k}: edit {j} bad: {e:?}");
                 break;

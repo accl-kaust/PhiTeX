@@ -23,13 +23,30 @@ pub(crate) struct Env {
 /// projection's id).
 pub(crate) const PATH0: u32 = 1 << 16;
 
-/// The interned read paths.
+/// The `[Present]` path's id (interned first).
+pub(crate) const PRESENT: u32 = PATH0;
+
+/// The interned read paths, read from every worker without a lock: each
+/// path's steps by id, and two memos keyed by hash (a hit checked, a miss
+/// or a collision asked of the table under its lock): steps to their id,
+/// and a path and a step after it to the path they make.
 #[derive(Default)]
 pub(crate) struct PathTable {
-    pub list: Vec<Arc<[crate::api::Step]>>,
-    pub ix: FxHashMap<Arc<[crate::api::Step]>, u32>,
-    /// A path and a step after it: the path they make.
-    pub ext: FxHashMap<(u32, crate::api::Step), u32>,
+    steps: crate::sync::Table<Box<[crate::api::Step]>>,
+    ids: crate::sync::Table<(Box<[crate::api::Step]>, u32)>,
+    ext: crate::sync::Table<(u32, crate::api::Step, u32)>,
+    /// Exact, for making paths (and for a hash collision).
+    ix: Mutex<FxHashMap<Box<[crate::api::Step]>, u32>>,
+}
+
+/// A key for `sync::Table` (non-zero) from a hashable value.
+fn table_key(x: &impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = crate::FxHasher::default();
+    x.hash(&mut h);
+    // (Fx leaves the low bits weak for small integers: mixed.)
+    let k = h.finish().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    k.max(1)
 }
 
 pub(crate) struct Core {
@@ -42,11 +59,16 @@ pub(crate) struct Core {
     pub projs: Vec<Projection>,
     /// The read paths interned (`intern_path`): id `PATH0 + i` is
     /// `list[i]`.
-    pub paths: RwLock<PathTable>,
+    pub paths: PathTable,
     /// While a run audit is on (`Engine::set_run_audit`): the reads the
     /// merge re-checked, by field (`None`: a read of no field), and how
     /// many it found broken.
     pub rechecks: Mutex<Option<FxHashMap<Option<Field>, (u64, u64)>>>,
+    /// With them: the readers re-checked on all their reads, by why, and
+    /// the reads asked (`RunAudit::rechecked_all`).
+    pub rechecks_all: Mutex<FxHashMap<u8, (u64, u64)>>,
+    /// Whether `rechecks` is on (read without its lock).
+    pub auditing: std::sync::atomic::AtomicBool,
     /// `Step::Each` answers per sequence node and path.
     pub each_memo: crate::sync::Table<ValueId>,
     /// Nodes whose run broke at a read (its index, the first, and the
@@ -56,6 +78,9 @@ pub(crate) struct Core {
     pub resume_at: Mutex<FxHashMap<u64, (u32, u64)>>,
     /// Runs cut off at a mark this evaluation.
     pub cut_in_run: std::sync::atomic::AtomicU64,
+    pub cut_patched: std::sync::atomic::AtomicU64,
+    /// Done nodes whose passed values were refiled this evaluation.
+    pub passes_refiled: std::sync::atomic::AtomicU64,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     /// The environment's base layer (`Engine::set_environment_base`) and
     /// its answers, each asked once for the engine's life.
@@ -86,7 +111,10 @@ pub(crate) struct Core {
     pub loops: FxHashMap<Field, ValueId>,
     /// Loop-backs declared by runs, taken in when the evaluation is quiet.
     /// Loop-back fields runs declared, each with its run's node.
-    pub loops_later: Mutex<Vec<(Field, ValueId, u64, bool)>>,
+    pub loops_later: Mutex<Vec<(Field, ValueId, u64, crate::api::LoopOptions)>>,
+    /// The loop-back fields whose last publication in text order wins
+    /// (`LoopOptions::last_wins`).
+    pub last_wins: FxHashSet<Field>,
     pub env: RwLock<Env>,
     pub provider: Option<Box<crate::api::EnvProvider>>,
     /// Held while the provider is asked (runs asking for the same field at
@@ -141,17 +169,21 @@ impl Core {
     }
 
     pub(crate) fn new() -> Core {
-        Core {
+        let c = Core {
             values: Values::new(),
             ops: Vec::new(),
             op_names: Vec::new(),
             op_reads: Vec::new(),
             projs: Vec::new(),
-            paths: RwLock::new(PathTable::default()),
+            paths: PathTable::default(),
             rechecks: Mutex::new(None),
+            rechecks_all: Mutex::new(FxHashMap::default()),
+            auditing: std::sync::atomic::AtomicBool::new(false),
             each_memo: crate::sync::Table::new(),
             resume_at: Mutex::new(FxHashMap::default()),
             cut_in_run: std::sync::atomic::AtomicU64::new(0),
+            passes_refiled: std::sync::atomic::AtomicU64::new(0),
+            cut_patched: std::sync::atomic::AtomicU64::new(0),
             accs: FxHashMap::default(),
             acc_prefixes: Vec::new(),
             acc_memo: crate::sync::Table::new(),
@@ -167,6 +199,7 @@ impl Core {
 
             loops: FxHashMap::default(),
             loops_later: Mutex::new(Vec::new()),
+            last_wins: FxHashSet::default(),
             env: RwLock::new(Env::default()),
             provider: None,
             texts: Mutex::new(FxHashMap::default()),
@@ -181,7 +214,11 @@ impl Core {
             env_provided: std::sync::atomic::AtomicU64::new(0),
             hold_fin: std::sync::atomic::AtomicBool::new(true),
             asking: Mutex::new(()),
-        }
+        };
+        // (`[Present]` first: `PRESENT`.)
+        let p = c.intern_path(&[crate::api::Step::Present]);
+        debug_assert_eq!(p, PRESENT);
+        c
     }
 
     pub(crate) fn op_name(&self, op: OpId) -> &'static str {
@@ -347,17 +384,26 @@ impl Core {
             [] => 0,
             [crate::api::Step::Proj(p)] => u32::from(p.0),
             _ => {
-                if let Some(&i) = self.paths.read().unwrap_or_else(std::sync::PoisonError::into_inner).ix.get(steps) {
-                    return i;
+                let t = &self.paths;
+                let k = table_key(&steps);
+                if let Some((s, i)) = t.ids.get(k)
+                    && **s == *steps
+                {
+                    return *i;
                 }
-                let mut t = self.paths.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(&i) = t.ix.get(steps) {
-                    return i;
-                }
-                let i = PATH0 + u32::try_from(t.list.len()).expect("too many paths");
-                let a: Arc<[crate::api::Step]> = steps.into();
-                t.list.push(a.clone());
-                t.ix.insert(a, i);
+                let mut ix = lock(&t.ix);
+                let i = match ix.get(steps) {
+                    Some(&i) => i,
+                    None => {
+                        let i = PATH0 + u32::try_from(ix.len()).expect("too many paths");
+                        ix.insert(steps.into(), i);
+                        t.steps.get_or_insert(u64::from(i), || steps.into());
+                        i
+                    }
+                };
+                drop(ix);
+                // (Taken by another path's steps: asked under the lock.)
+                t.ids.get_or_insert(k, || (steps.into(), i));
                 i
             }
         }
@@ -365,26 +411,31 @@ impl Core {
 
     /// Path `p` with step `s` after it (memoized).
     pub(crate) fn extend_path(&self, p: u32, s: crate::api::Step) -> u32 {
-        if let Some(&q) = self.paths.read().unwrap_or_else(std::sync::PoisonError::into_inner).ext.get(&(p, s)) {
+        let k = table_key(&(p, s));
+        if let Some(&(p2, s2, q)) = self.paths.ext.get(k)
+            && p2 == p
+            && s2 == s
+        {
             return q;
         }
         let mut steps = self.path_steps(p).to_vec();
         steps.push(s);
         let q = self.intern_path(&steps);
-        self.paths.write().unwrap_or_else(std::sync::PoisonError::into_inner).ext.insert((p, s), q);
+        self.paths.ext.get_or_insert(k, || (p, s, q));
         q
     }
 
     /// Path `p`'s steps.
-    pub(crate) fn path_steps(&self, p: u32) -> Arc<[crate::api::Step]> {
+    pub(crate) fn path_steps(&self, p: u32) -> &[crate::api::Step] {
         if p == 0 {
-            return Arc::from([]);
+            return &[];
         }
         if p < PATH0 {
+            // (A projection's: its one step, kept under its id.)
             #[allow(clippy::cast_possible_truncation)]
-            return Arc::from([crate::api::Step::Proj(crate::api::ProjId(p as u16))]);
+            return self.paths.steps.get_or_insert(u64::from(p), || Box::new([crate::api::Step::Proj(crate::api::ProjId(p as u16))]));
         }
-        self.paths.read().unwrap_or_else(std::sync::PoisonError::into_inner).list[(p - PATH0) as usize].clone()
+        self.paths.steps.get(u64::from(p)).map_or(&[], |s| &s[..])
     }
 
     /// Path `p`'s answer on value `x` (`None`: a step did not apply).
@@ -614,9 +665,9 @@ impl Core {
         self.loops.contains_key(&f)
     }
 
-    pub(crate) fn declare_loop_later(&self, f: Field, init: ValueId, by: u64, early: bool) {
-        if early || !self.loops.contains_key(&f) {
-            lock(&self.loops_later).push((f, init, by, early));
+    pub(crate) fn declare_loop_later(&self, f: Field, init: ValueId, by: u64, o: crate::api::LoopOptions) {
+        if o != crate::api::LoopOptions::default() || !self.loops.contains_key(&f) {
+            lock(&self.loops_later).push((f, init, by, o));
         }
     }
 }

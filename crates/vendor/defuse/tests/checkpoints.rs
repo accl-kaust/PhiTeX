@@ -41,3 +41,39 @@ fn a_run_whose_state_changes_resumes_and_runs_to_its_end() {
     assert_eq!(p.result(&e), interpret(&p.lines).unwrap());
     assert!(e.check_reads().is_empty(), "{:?}", e.check_reads());
 }
+
+#[test]
+fn a_run_differing_in_a_slot_never_read_again_is_cut_off_with_a_patch() {
+    let (mut e, mut p) = Program::load(lines(&["x = 1", "y = 5", "run { a = x + 1  b = y * 2  c = b + 1 }", "print a", "print c"]));
+    e.evaluate_sequential().unwrap();
+    // (`a` differs at the second mark, read by none after it: cut off
+    // there, patched. A patched result keeps the marks its last run's
+    // token takes the client back to, up to the one resumed at: the next
+    // edit runs to the end, and the one after is cut off again.)
+    for (k, x, cut) in [(1, "x = 2", 1), (2, "x = 7", 0), (3, "x = 9", 1)] {
+        apply(&mut e, &mut p, &Ed::Set(0, x.into()));
+        let rep = e.evaluate_sequential().unwrap();
+        assert_eq!((rep.resumed_at_mark, rep.cut_in_run, rep.cut_patched), (1, cut, cut), "edit {k}: {rep:?}");
+        assert_eq!(p.result(&e), interpret(&p.lines).unwrap(), "edit {k}");
+        assert!(e.check_reads().is_empty(), "{:?}", e.check_reads());
+    }
+    // `y`, read after: no patch; resumed at the second mark, to its end.
+    apply(&mut e, &mut p, &Ed::Set(1, "y = 6".into()));
+    let rep = e.evaluate_sequential().unwrap();
+    assert_eq!((rep.resumed_at_mark, rep.cut_patched), (1, 0), "{rep:?}");
+    assert_eq!(p.result(&e), interpret(&p.lines).unwrap());
+}
+
+#[test]
+fn a_run_given_another_text_with_a_read_broken_starts_over() {
+    let (mut e, mut p) = Program::load(lines(&["y = 3", "run { a = x + 1  b = y * 2  c = b + 1 }", "w = h + 1"]));
+    e.evaluate_sequential().unwrap();
+    // (Both edits evaluated together: the read of `y` broken, the run's
+    // marks are of its old text.)
+    apply(&mut e, &mut p, &Ed::Rm(0));
+    apply(&mut e, &mut p, &Ed::Set(0, "run { global g = x * 3  h = g + 1 }".into()));
+    let rep = e.evaluate_sequential().unwrap();
+    assert_eq!(rep.resumed_at_mark, 0, "{rep:?}");
+    assert_eq!(p.result(&e), interpret(&p.lines).unwrap());
+    assert!(e.check_reads().is_empty(), "{:?}", e.check_reads());
+}

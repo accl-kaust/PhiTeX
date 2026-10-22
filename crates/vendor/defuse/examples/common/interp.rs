@@ -63,6 +63,8 @@ struct Interp<'v> {
     v: &'v Values,
     pos: u64,
     loops: FxHashMap<Field, ValueId>,
+    /// The loop-back fields whose last publication wins (`loop last`).
+    last: FxHashSet<Field>,
     pubs: FxHashMap<Field, ValueId>,
     apps: FxHashMap<ValueId, ValueId>,
     running: FxHashSet<ValueId>,
@@ -90,12 +92,16 @@ pub fn interpret_env(lines: &[String], env: &[(&str, i64)]) -> Result<Vec<u64>, 
     let v = Values::new();
     let asts: Vec<ValueId> = lines.iter().map(|l| parse_stmt(&v, l)).collect();
     let mut loops = FxHashMap::default();
+    let mut last = FxHashSet::default();
     let mut names = Vec::new();
     for &s in &asts {
         let (t, a) = tag(&v, s);
         if t == "loop" {
             let name = text(&v, a[0]);
             loops.insert(v.field(&name), a[1]);
+            if a.get(2).is_some_and(|&l| truthy(&v, l)) {
+                last.insert(v.field(&name));
+            }
             names.push(name);
         }
     }
@@ -104,6 +110,7 @@ pub fn interpret_env(lines: &[String], env: &[(&str, i64)]) -> Result<Vec<u64>, 
         v: &v,
         pos: 0,
         loops,
+        last,
         pubs: FxHashMap::default(),
         apps: FxHashMap::default(),
         running: FxHashSet::default(),
@@ -349,6 +356,30 @@ impl Interp<'_> {
                 self.define(u, v.field(&text(v, a[0])), val, false);
                 val
             }
+            "pack" => {
+                let w = super::pack_value::<()>(v, a[1], &mut |f| Ok(self.lookup(u, f))).ok().flatten();
+                match w {
+                    Some(w) => {
+                        self.define(u, v.field(&text(v, a[0])), w, false);
+                        w
+                    }
+                    None => ValueId::UNIT,
+                }
+            }
+            "alias" => {
+                let y = self.lookup(u, v.field(&text(v, a[1])));
+                let w = match v.as_int(a[2]) {
+                    Some(i) => y.and_then(|y| super::index_of(v, y, i)),
+                    None => y,
+                };
+                match w {
+                    Some(w) => {
+                        self.define(u, v.field(&text(v, a[0])), w, false);
+                        w
+                    }
+                    None => ValueId::UNIT,
+                }
+            }
             // Both expressions are taken before the scopes open.
             "gopen" => {
                 let (x, y) = (self.expr(u, a[1]), self.expr(u, a[3]));
@@ -369,7 +400,7 @@ impl Interp<'_> {
             "publish" => {
                 let val = self.expr(u, a[1]);
                 let f = v.field(&text(v, a[0]));
-                if self.pubs.insert(f, val).is_some_and(|p| p != val) {
+                if self.pubs.insert(f, val).is_some_and(|p| p != val) && !self.last.contains(&f) {
                     self.error.get_or_insert_with(|| "conflicting publication".into());
                 }
                 val

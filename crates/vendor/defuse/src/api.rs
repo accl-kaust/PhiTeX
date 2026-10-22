@@ -952,6 +952,20 @@ impl MergeTimes {
     }
 }
 
+/// How a loop-back field moves (`Engine::declare_loopback_with`,
+/// `Ctx::declare_loopback_with`).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub struct LoopOptions {
+    /// Its round values early (`Engine::declare_loopback_early`; not
+    /// deterministic).
+    pub early: bool,
+    /// Published by several nodes, the last publication in text order
+    /// (by unit, then position) is its value (else two different values
+    /// are an error). A publisher after the last appearing moves it.
+    pub last_wins: bool,
+}
+
 /// An evaluation's run audit (`Engine::set_run_audit`).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct RunAudit {
@@ -965,6 +979,13 @@ pub struct RunAudit {
     /// The reads the commits re-checked, by field (`None`: reads of no
     /// field), the most first: how many, and how many of them broke.
     pub rechecked: Vec<(Option<Field>, u64, u64)>,
+    /// Of those, the readers re-checked on all their reads (13: a node
+    /// they read the output of gone; 15: an output they read gone; 16: a
+    /// scope kind they read; 17: their own frame moved), or on all those
+    /// of structure and outputs (14: the structure at a window they read;
+    /// 18: an output they read changed), by why: how many readers, and how
+    /// many reads asked.
+    pub rechecked_all: Vec<(u8, u64, u64)>,
 }
 
 /// A run that changed nothing outside itself ([`RunAudit::wasted`]).
@@ -1167,6 +1188,11 @@ pub struct Report {
     /// runs cut off at one (that run's result standing).
     pub resumed_at_mark: u64,
     pub cut_in_run: u64,
+    /// Of those cut off, those with a patch (`Ctx::checkpoint_patched`).
+    pub cut_patched: u64,
+    /// Done nodes whose values passed on through views (`Ctx::define_from`
+    /// and the others) followed a change, the nodes not run again.
+    pub passes_refiled: u64,
     /// With `Engine::set_run_audit`: the runs that were reruns, and those
     /// of them that changed nothing (not canonical: a schedule may run a
     /// node more often).

@@ -26,6 +26,8 @@
 //! gopen a = 1 b = 2         opens two scopes: a local to the outer, b to the inner
 //! both v = 5 6              v = 5 here, and 6 in the scope it opens (two levels)
 //! sneak v = 3               defines v though it declares nothing
+//! alias x = y[1]            x = y's element 1 (or y), nothing if none; outputs it
+//! pack x = y, z[1], 5, (w)  x = the list of those (a group nests), nothing if one is none
 //! grab s 2                  declares no claim; its run claims the next 2 (as sumnext)
 //! ```
 #![allow(dead_code, clippy::many_single_char_names)] // AST code reads best with short names
@@ -190,6 +192,39 @@ impl Parser<'_> {
         self.v.list(xs)
     }
 
+    /// `pack`'s items, comma-separated: `y`, `y[i]`, an integer, or a
+    /// parenthesized group (`["v", name, i or unit]`, `["c", n]`, `["n",
+    /// items]`).
+    fn pack_items(&mut self) -> PResult<ValueId> {
+        let mut out = Vec::new();
+        loop {
+            if self.is_sym("(") {
+                self.pos += 1;
+                let g = self.pack_items()?;
+                self.eat(")")?;
+                out.push(self.tagged("n", vec![g]));
+            } else if let Some(Tok::Int(n)) = self.peek().cloned() {
+                self.pos += 1;
+                out.push(self.tagged("c", vec![self.v.int(n)]));
+            } else {
+                let y = self.ident()?;
+                let mut i = ValueId::UNIT;
+                if self.is_sym("[")
+                    && let Some(Tok::Int(n)) = self.peek_at(1).cloned()
+                    && matches!(self.peek_at(2), Some(Tok::Sym("]")))
+                {
+                    self.pos += 3;
+                    i = self.v.int(n);
+                }
+                out.push(self.tagged("v", vec![self.s(&y), i]));
+            }
+            if !self.is_sym(",") {
+                return Ok(self.l(out));
+            }
+            self.pos += 1;
+        }
+    }
+
     fn s(&self, x: &str) -> ValueId {
         self.v.str(x)
     }
@@ -336,10 +371,16 @@ impl Parser<'_> {
                 }
                 "loop" => {
                     self.pos += 1;
+                    // `loop last n = ..`: its last publication in text
+                    // order wins.
+                    let last = self.is_kw("last") && matches!(self.peek_at(1), Some(Tok::Ident(_)));
+                    if last {
+                        self.pos += 1;
+                    }
                     let n = self.ident()?;
                     self.eat("=")?;
                     let e = self.expr()?;
-                    return Ok(self.tagged("loop", vec![self.s(&n), e]));
+                    return Ok(self.tagged("loop", vec![self.s(&n), e, self.v.bool(last)]));
                 }
                 "sumnext" | "grab" => {
                     self.pos += 1;
@@ -371,6 +412,28 @@ impl Parser<'_> {
                     self.eat("=")?;
                     let e = self.expr()?;
                     return Ok(self.tagged("sneak", vec![self.s(&x), e]));
+                }
+                "pack" => {
+                    self.pos += 1;
+                    let x = self.ident()?;
+                    self.eat("=")?;
+                    let items = self.pack_items()?;
+                    return Ok(self.tagged("pack", vec![self.s(&x), items]));
+                }
+                "alias" => {
+                    self.pos += 1;
+                    let x = self.ident()?;
+                    self.eat("=")?;
+                    let y = self.ident()?;
+                    let mut i = ValueId::UNIT;
+                    if self.is_sym("[")
+                        && let Some(Tok::Int(n)) = self.peek_at(1).cloned()
+                        && matches!(self.peek_at(2), Some(Tok::Sym("]")))
+                    {
+                        self.pos += 3;
+                        i = self.v.int(n);
+                    }
+                    return Ok(self.tagged("alias", vec![self.s(&x), self.s(&y), i]));
                 }
                 "listto" => {
                     self.pos += 1;
@@ -742,7 +805,9 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 37] = [
+const KEYWORDS: [&str; 39] = [
+    "alias",
+    "pack",
     "gopen",
     "both",
     "sneak",
@@ -1192,12 +1257,17 @@ pub fn index_of(v: &Values, x: ValueId, i: i64) -> Option<ValueId> {
 /// at statement `i` is `[i, bindings]` (the names it assigned so far with
 /// their values, in order); the kept token is every mark's bindings. A run
 /// resumed at a mark takes its bindings from there and defines them again
-/// (a resumed run makes its whole result).
+/// (a resumed run makes its whole result). Resumed, at each mark it offers
+/// a patched cutoff: the bindings that differ from the last run's there,
+/// when no statement from there reads them (those assigned again: the
+/// last run's, not patched).
 fn run_marked(cx: &mut Ctx<'_>, ops: Ops, stmts: &[ValueId]) -> Result<ValueId, Stop> {
     let v = cx.values();
+    let mut old: Option<Vec<ValueId>> = None;
     let (mut i, mut env, mut kept): (usize, Vec<(ValueId, ValueId, bool)>, Vec<ValueId>) = match cx.resumed() {
         Some((tok, mark)) => {
             let states = tok.downcast_ref::<Vec<ValueId>>().expect("run's token");
+            old = Some(states.clone());
             let i = mark as usize;
             let env: Vec<(ValueId, ValueId, bool)> = items(v, states[i])
                 .into_iter()
@@ -1219,7 +1289,12 @@ fn run_marked(cx: &mut Ctx<'_>, ops: Ops, stmts: &[ValueId]) -> Result<ValueId, 
         kept.push(bindings);
         #[allow(clippy::cast_possible_wrap)]
         let state = v.list(vec![v.int(i as i64), bindings]);
-        cx.checkpoint(u32::try_from(i).unwrap_or(u32::MAX), state)?;
+        let mark = u32::try_from(i).unwrap_or(u32::MAX);
+        match old.as_ref().and_then(|o| o.get(i)).and_then(|&ob| patch_at(v, stmts, i, &env, ob)) {
+            #[allow(clippy::cast_possible_wrap)]
+            Some((ob, patch)) => cx.checkpoint_patched(mark, state, v.list(vec![v.int(i as i64), ob]), &patch)?,
+            None => cx.checkpoint(mark, state)?,
+        }
         let (st, sa) = tag(v, stmts[i]);
         if st == "assign" {
             // (Its own bindings first: they are the run's, not the store's.)
@@ -1234,6 +1309,48 @@ fn run_marked(cx: &mut Ctx<'_>, ops: Ops, stmts: &[ValueId]) -> Result<ValueId, 
     }
     cx.keep_after(Arc::new(kept));
     Ok(ValueId::UNIT)
+}
+
+/// At statement `i` of a resumed `run`: the last run's bindings there
+/// (`ob`), and the definitions to patch, when this run's bindings differ
+/// from them only in names no statement from `i` on reads (none: no
+/// patch to offer, or the same bindings).
+#[allow(clippy::type_complexity)]
+fn patch_at(v: &Values, stmts: &[ValueId], i: usize, env: &[(ValueId, ValueId, bool)], ob: ValueId) -> Option<(ValueId, Vec<(Field, Locality, Option<ValueId>)>)> {
+    let old: Vec<(ValueId, ValueId, bool)> = items(v, ob)
+        .into_iter()
+        .map(|b| {
+            let b = items(v, b);
+            (b[0], b[1], truthy(v, b[2]))
+        })
+        .collect();
+    if old.len() != env.len() || old.iter().zip(env).any(|(o, n)| o.0 != n.0 || o.2 != n.2) {
+        return None;
+    }
+    let diff: Vec<usize> = (0..env.len()).filter(|&k| old[k].1 != env[k].1).collect();
+    if diff.is_empty() {
+        return None;
+    }
+    // (Read from here: not patchable. Assigned again: the last run's.)
+    let mut read = Vec::new();
+    let mut assigned = Vec::new();
+    for &s in &stmts[i..] {
+        let (st, sa) = tag(v, s);
+        if st == "assign" {
+            free_vars(v, sa[1], &mut Vec::new(), &mut read);
+            assigned.push(text(v, sa[0]));
+        }
+    }
+    if diff.iter().any(|&k| read.contains(&text(v, env[k].0))) {
+        return None;
+    }
+    let loc = |g: bool| if g { Locality::Global } else { Locality::Local };
+    let patch = diff
+        .iter()
+        .filter(|&&k| !assigned.contains(&text(v, env[k].0)))
+        .map(|&k| (v.field(&text(v, env[k].0)), loc(env[k].2), Some(env[k].1)))
+        .collect();
+    Some((ob, patch))
 }
 
 /// Expression `e` with the variables bound in `env` replaced by their
@@ -1265,6 +1382,67 @@ pub fn path_of(v: &Values, t: &str, x: ValueId, i: i64) -> Option<ValueId> {
         },
         _ => index_of(v, x, i),
     }
+}
+
+/// The names `pack`'s items read.
+pub fn pack_names(v: &Values, its: ValueId, out: &mut Vec<String>) {
+    for x in items(v, its) {
+        let (t, a) = tag(v, x);
+        match t.as_str() {
+            "v" => out.push(text(v, a[0])),
+            "n" => pack_names(v, a[0], out),
+            _ => {}
+        }
+    }
+}
+
+/// The value `pack`'s items make, each name read by `look` (`None` if one
+/// is none).
+pub fn pack_value<E>(v: &Values, its: ValueId, look: &mut dyn FnMut(Field) -> Result<Option<ValueId>, E>) -> Result<Option<ValueId>, E> {
+    let mut xs = Vec::new();
+    for x in items(v, its) {
+        let (t, a) = tag(v, x);
+        let y = match t.as_str() {
+            "c" => Some(a[0]),
+            "n" => pack_value(v, a[0], look)?,
+            _ => look(v.field(&text(v, a[0])))?.and_then(|y| match v.as_int(a[1]) {
+                Some(i) => index_of(v, y, i),
+                None => Some(y),
+            }),
+        };
+        let Some(y) = y else { return Ok(None) };
+        xs.push(y);
+    }
+    Ok(Some(v.list(xs)))
+}
+
+/// `pack`'s items composed through views (`Ctx::compose`; `None` if one
+/// is none).
+fn pack_view(cx: &mut Ctx<'_>, its: ValueId) -> Result<Option<defuse::View>, Stop> {
+    let v = cx.values();
+    let mut parts = Vec::new();
+    for x in items(v, its) {
+        let (t, a) = tag(v, x);
+        let p = match t.as_str() {
+            "c" => defuse::Part::Val(a[0]),
+            "n" => match pack_view(cx, a[0])? {
+                Some(w) => defuse::Part::View(w),
+                None => return Ok(None),
+            },
+            _ => {
+                let Some(m) = cx.view(v.field(&text(v, a[0])))? else { return Ok(None) };
+                match v.as_int(a[1]) {
+                    Some(i) => match cx.at(m, defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) {
+                        Some(e) => defuse::Part::View(e),
+                        None => return Ok(None),
+                    },
+                    None => defuse::Part::View(m),
+                }
+            }
+        };
+        parts.push(p);
+    }
+    Ok(Some(cx.compose(&parts)))
 }
 
 /// The length of a list, a sequence or a string (`len(x)`).
@@ -1486,6 +1664,7 @@ impl Operation for StmtOp {
             ]),
             // Declares nothing: its definition refutes the list.
             "sneak" => Some(Vec::new()),
+            "alias" | "pack" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
             // A contribution is a definition of the sequence.
             "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
             "fold" => Some(vec![
@@ -1690,7 +1869,8 @@ impl Operation for StmtOp {
                 out.extend([FOLD, FOLD_STATE, "cap"].map(String::from));
             }
             "if" => free_vars(v, a[0], &mut bound, &mut out),
-            "listuntil" => out.push(text(v, a[1])),
+            "listuntil" | "alias" => out.push(text(v, a[1])),
+            "pack" => pack_names(v, a[1], &mut out),
             "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" | "take" => {}
             // `collect` reads the following text's outputs, not fields.
             _ => return None,
@@ -1721,6 +1901,48 @@ impl Operation for StmtOp {
                 let val = eval_expr(cx, ops, a[1])?;
                 cx.define_with(v.field(&text(v, a[0])), val, Locality::Local);
                 Ok(val)
+            }
+            // FUZZ_PATHS=2: composed through views and passed on (`Ctx::
+            // compose`); else read whole. Results must not change.
+            "pack" => {
+                let x = v.field(&text(v, a[0]));
+                if fuzz_paths() == 2 {
+                    let Some(c) = pack_view(cx, a[1])? else { return Ok(ValueId::UNIT) };
+                    cx.define_from(x, c, Locality::Local);
+                    cx.output_from(c);
+                    return Ok(ValueId::UNIT);
+                }
+                let Some(w) = pack_value(v, a[1], &mut |f| cx.use_field(f))? else { return Ok(ValueId::UNIT) };
+                cx.define_with(x, w, Locality::Local);
+                Ok(w)
+            }
+            // FUZZ_PATHS=2: passed on through a view (`Ctx::define_from`,
+            // `Ctx::output_from`); else read whole. Results must not change.
+            "alias" => {
+                let (x, y) = (v.field(&text(v, a[0])), v.field(&text(v, a[1])));
+                let i = v.as_int(a[2]);
+                if fuzz_paths() == 2 {
+                    let Some(m) = cx.view(y)? else { return Ok(ValueId::UNIT) };
+                    let e = match i {
+                        Some(i) => match cx.at(m, defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) {
+                            Some(e) => e,
+                            None => return Ok(ValueId::UNIT),
+                        },
+                        None => m,
+                    };
+                    cx.define_from(x, e, Locality::Local);
+                    cx.output_from(e);
+                    return Ok(ValueId::UNIT);
+                }
+                let Some(w) = cx.use_field(y)? else { return Ok(ValueId::UNIT) };
+                let Some(w) = (match i {
+                    Some(i) => index_of(v, w, i),
+                    None => Some(w),
+                }) else {
+                    return Ok(ValueId::UNIT);
+                };
+                cx.define_with(x, w, Locality::Local);
+                Ok(w)
             }
             "gopen" => {
                 let x = eval_expr(cx, ops, a[1])?;
@@ -2137,7 +2359,10 @@ impl Lang {
                 let init = a[1];
                 // FUZZ_LOOP_EARLY=1: early round values (not deterministic;
                 // the check takes a result the report warns of).
-                if loop_early() {
+                let last = a.get(2).is_some_and(|&l| truthy(v, l));
+                if last {
+                    eng.declare_loopback_with(f, init, defuse::LoopOptions { early: loop_early(), last_wins: true });
+                } else if loop_early() {
                     eng.declare_loopback_early(f, init);
                 } else {
                     eng.declare_loopback(f, init);

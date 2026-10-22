@@ -76,6 +76,12 @@ pub(crate) struct Builder<'a> {
     /// (`None`), or only those of the fields whose definitions or
     /// contributions changed.
     recheck: FxHashMap<Id, Option<Vec<Field>>>,
+    /// Of those, the readers re-asked on their reads of structure too (the
+    /// structure in a window they read changed).
+    shaped: FxHashSet<Id>,
+    /// Auditing (`Core::rechecks` on): why each reader re-asked on all its
+    /// reads was.
+    all_why: Option<FxHashMap<Id, u8>>,
     /// Readers past a shadow bound, asked under CLEAN_SCOPED_CHECK only.
     beyond: Vec<(Id, Field)>,
     /// Readers made dirty because a use now reaches another site.
@@ -137,6 +143,8 @@ impl<'a> Builder<'a> {
             freed: Vec::new(),
             woken: Vec::new(),
             recheck: FxHashMap::default(),
+            shaped: FxHashSet::default(),
+            all_why: core.auditing.load(std::sync::atomic::Ordering::Relaxed).then(FxHashMap::default),
             beyond: Vec::new(),
             rebinds: 0,
             defer_claims: false,
@@ -162,7 +170,23 @@ impl<'a> Builder<'a> {
     /// Reader `r` re-asked on all its reads.
     fn recheck(&mut self, r: Id, src: usize) {
         super::core::prof::count(src);
+        if let Some(m) = &mut self.all_why {
+            m.insert(r, u8::try_from(src).unwrap_or(u8::MAX));
+        }
         self.recheck.insert(r, None);
+    }
+
+    /// Reader `r` re-asked on its reads of structure and outputs
+    /// (`structural`): the structure in a window it reads changed (`why`
+    /// 14), or an output it reads (18). (Its uses of fields are re-asked
+    /// through the definitions that come or go.)
+    fn recheck_shape(&mut self, r: Id, why: u8) {
+        super::core::prof::count(usize::from(why));
+        if let Some(m) = &mut self.all_why {
+            m.insert(r, why);
+        }
+        self.recheck.entry(r).or_insert_with(|| Some(Vec::new()));
+        self.shaped.insert(r);
     }
 
     /// Reader `r` re-asked on its reads of `f` (a definition or a
@@ -221,15 +245,24 @@ impl<'a> Builder<'a> {
                 self.recheck_on(id, f);
             }
         }
+        // (Rounds: a value passed on refiled re-asks its readers.)
+        while !self.recheck.is_empty() {
+            self.settle_round();
+        }
+    }
+
+    fn settle_round(&mut self) {
         let ids: Vec<(Id, Option<Vec<Field>>)> = std::mem::take(&mut self.recheck).into_iter().collect();
+        let shaped = std::mem::take(&mut self.shaped);
         for (id, on) in ids {
+            let shape = on.is_some() && shaped.contains(&id);
             let Some(n) = self.w.node(id) else { continue };
             if n.st != St::Done {
                 continue;
             }
             let Some(res) = n.res.clone() else { continue };
             let asked = |r: &Read| {
-                let a = on.as_ref().is_none_or(|fs| read_on(r, fs));
+                let a = on.as_ref().is_none_or(|fs| read_on(r, fs)) || (shape && structural(r));
                 if a {
                     super::core::prof::count(20);
                 }
@@ -238,8 +271,10 @@ impl<'a> Builder<'a> {
             let mut a = Asker::default();
             let check = memo_check();
             let mut audit = super::core::lock(&self.core.rechecks);
+            let mut n_asked = 0u64;
             let mut broken = res.reads.iter().find(|r| {
                 asked(r) && {
+                    n_asked += 1;
                     let ok = holds_asked(self.core, &self.w, id, r, &mut a);
                     assert!(!check || ok == holds(self.core, &self.w, id, r), "reader {id}: its read {r:?} asked with memo: {ok}");
                     if let Some(m) = audit.as_mut() {
@@ -250,6 +285,15 @@ impl<'a> Builder<'a> {
                     !ok
                 }
             });
+            if audit.is_some()
+                && (on.is_none() || shape)
+            {
+                let why = self.all_why.as_ref().and_then(|m| m.get(&id)).copied().unwrap_or(0);
+                let mut m = super::core::lock(&self.core.rechecks_all);
+                let e = m.entry(why).or_default();
+                e.0 += 1;
+                e.1 += n_asked;
+            }
             drop(audit);
             // (CLEAN_SCOPED_CHECK: a read of another field broken too is
             // an invalidation missed elsewhere; named, and taken.)
@@ -283,6 +327,34 @@ impl<'a> Builder<'a> {
                     why_broken(self.core, &self.w, id, r)
                 };
                 self.make_dirty_for(id, why);
+            } else if !res.passes.is_empty() {
+                self.refile_passes(id, &res, on.as_deref());
+            }
+        }
+    }
+
+    /// The values done node `id` (result `res`) passed on through views
+    /// (`Ctx::define_from` and the others) follow what they read, its
+    /// reads holding (re-asked on `on`, or all): each target takes the new
+    /// value and is filed again (its readers re-asked), the node not run
+    /// again.
+    fn refile_passes(&mut self, id: Id, res: &Arc<Res>, on: Option<&[Field]>) {
+        let Some((r, defs, contribs, out)) = passes_now(self.core, &self.w, res, on) else { return };
+        let Some(mut n) = self.w.node(id).cloned() else { return };
+        self.core.passes_refiled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let after = r.contribs.clone();
+        n.res = Some(Arc::new(r));
+        self.w.put(id, n.clone());
+        for (f, loc, x) in defs {
+            self.file_if(id, &n, f, loc, Some(x), true);
+        }
+        if contribs {
+            self.swap_contribs(n.unit, n.pos, &res.contribs, &after);
+        }
+        if out {
+            self.w.touch_key(Key::Out(id));
+            for r in self.w.out_readers_of(id) {
+                self.recheck_shape(r, 18);
             }
         }
     }
@@ -866,7 +938,7 @@ impl<'a> Builder<'a> {
         let _t = super::core::prof::Span::new(33);
         self.shape_changed(u);
         for r in self.w.window_readers_at(u, p) {
-            self.recheck(r, 14);
+            self.recheck_shape(r, 14);
         }
         self.claim_point(u, p);
     }
@@ -956,7 +1028,7 @@ impl<'a> Builder<'a> {
         }
         if let Some(decl) = n.text.stat.defs.clone() {
             for &(f, loc) in decl.iter() {
-                if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc.entry_key() == loc.entry_key())) {
+                if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc == loc)) {
                     self.unfile(id, n, f, loc);
                 }
             }
@@ -981,7 +1053,7 @@ impl<'a> Builder<'a> {
         let old_b = n.brackets();
         if let Some(decl) = n.text.stat.defs.clone() {
             for &(f, loc) in decl.iter() {
-                if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc.entry_key() == loc.entry_key())) {
+                if !n.res.as_ref().is_some_and(|r| r.defs.iter().any(|d| d.f == f && d.loc == loc)) {
                     self.unfile(id, &n, f, loc);
                 }
             }
@@ -1200,7 +1272,7 @@ impl<'a> Builder<'a> {
         }
         if let Some(decl) = &n.text.stat.defs {
             for &(f, loc) in decl.iter() {
-                if !keys.iter().any(|e| e.0 == f && e.1.entry_key() == loc.entry_key()) {
+                if !keys.iter().any(|e| e.0 == f && e.1 == loc) {
                     keys.push((f, loc));
                 }
             }
@@ -1632,6 +1704,13 @@ impl<'a> Builder<'a> {
     /// output changed.
     pub(crate) fn commit(&mut self, id: Id, mut res: Res, kids: &[Spec], conts: &[Spec]) -> bool {
         let Some(n) = self.w.node(id).cloned() else { return false };
+        // (The values it passed on, taken now: it read them in the world it
+        // ran in, and its presence reads hold here.)
+        if !res.passes.is_empty()
+            && let Some((r, ..)) = passes_now(self.core, &self.w, &res, None)
+        {
+            res = r;
+        }
         let old = n.res.clone();
         // Placements.
         let t = super::core::now();
@@ -1660,11 +1739,13 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // Declared entries this run did not make go.
+        // Declared entries this run did not make go. (One the last run
+        // made went above, as made. A global entry and a local one share a
+        // key, not an entry: matched exactly.)
         if let Some(dl) = decl.as_ref() {
             for &(f, loc) in dl.iter() {
-                let made = res.defs.iter().any(|e| e.f == f && e.loc.entry_key() == loc.entry_key());
-                let had = old_defs.iter().any(|e| e.f == f && e.loc.entry_key() == loc.entry_key());
+                let made = res.defs.iter().any(|e| e.f == f && e.loc == loc);
+                let had = old_defs.iter().any(|e| e.f == f && e.loc == loc);
                 if !made && !had {
                     self.unfile(id, &n, f, loc);
                 }
@@ -1759,7 +1840,7 @@ impl<'a> Builder<'a> {
             if out_changed {
                 self.w.touch_key(Key::Out(id));
                 for r in self.w.out_readers_of(id) {
-                    self.recheck(r, 18);
+                    self.recheck_shape(r, 18);
                 }
             }
         });
@@ -1857,6 +1938,52 @@ pub(crate) struct Asker<'w> {
     point: Option<((Id, bool, bool), Option<(u32, Pos, FrameId, Id)>)>,
     chain: Option<((u32, FrameId), Vec<(FrameId, Pos)>)>,
     cells: FxHashMap<(u32, Field), Option<&'w super::world::FieldCell>>,
+    /// The last field asked at the last point, and its value there (`Err`:
+    /// a definer in work): reads of it through other paths ask no further.
+    last: Option<(Field, Result<Option<ValueId>, ()>)>,
+}
+
+/// The last path read asked by [`holds_paths`]: its field and point, and
+/// the field's value there.
+pub(crate) type LastUse = Option<((Field, Id, bool, bool), Option<ValueId>)>;
+
+/// As [`holds`], a path read of the field at the point the last one asked
+/// taking that one's value (a plain read asks as `holds`, nothing kept);
+/// checked against [`holds`] under `CLEAN_KEPT_CHECK`.
+pub(crate) fn holds_paths(core: &Core, w: &World, me: Id, r: &Read, last: &mut LastUse) -> bool {
+    let ok = match r {
+        Read::Use { f, at, after, own, val, path, .. } if *path >= super::core::PATH0 => {
+            let k = (*f, *at, *after, *own);
+            let v2 = match *last {
+                Some((lk, v2)) if lk == k => Some(v2),
+                _ => use_value(core, w, r),
+            };
+            match v2 {
+                Some(v2) => {
+                    *last = Some((k, v2));
+                    v2 == *val || v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x))
+                }
+                None => holds(core, w, me, r),
+            }
+        }
+        _ => holds(core, w, me, r),
+    };
+    assert!(!memo_check() || ok == holds(core, w, me, r), "reader {me}: its read {r:?} asked with memo: {ok}");
+    ok
+}
+
+/// The value use `r` gets now, for [`holds_paths`] to keep (`None`: not
+/// one to keep: a loop-back field's, the point gone, a definer in work).
+fn use_value(core: &Core, w: &World, r: &Read) -> Option<Option<ValueId>> {
+    let Read::Use { f, at, after, own, .. } = r else { return None };
+    if w.loops.get(f).is_some() {
+        return None;
+    }
+    let (u, pos, fr, skip) = w.read_point(*at, *after, *own)?;
+    match w.reaching(u, *f, pos, fr, skip) {
+        Some((_, e)) => e.val.map(Some),
+        None => Some(w.env_of(core, u, *f)),
+    }
 }
 
 /// As [`holds`], with `a`'s lookups (of `w`, unchanged since).
@@ -1873,12 +2000,22 @@ pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &m
         _ => {
             let p = w.read_point(*at, *after, *own);
             a.point = Some((key, p));
+            a.last = None;
             p
         }
     };
     let Some((u, pos, fr, skip)) = point else {
         return false;
     };
+    if *path >= super::core::PATH0
+        && let Some((g, got)) = a.last
+        && g == *f
+    {
+        return match got {
+            Err(()) => true,
+            Ok(v2) => v2 == *val || (*path != 0 && v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x))),
+        };
+    }
     let reach = match *a.cells.entry((u, *f)).or_insert_with(|| w.field(u, *f)) {
         None => None,
         Some(cell) => {
@@ -1892,14 +2029,133 @@ pub(crate) fn holds_asked<'w>(core: &Core, w: &'w World, me: Id, r: &Read, a: &m
         Some((_, e)) => match e.val {
             Some(v) => Some(v),
             // (A definer in work: the answer stands as a guess.)
-            None => return true,
+            None => {
+                if *path >= super::core::PATH0 {
+                    a.last = Some((*f, Err(())));
+                }
+                return true;
+            }
         },
         None => w.env_of(core, u, *f),
     };
-    if *path != 0 {
-        return v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x));
+    if *path >= super::core::PATH0 {
+        a.last = Some((*f, Ok(v2)));
     }
-    v2 == *val
+    // (The value unchanged: any path's answer too.)
+    if v2 == *val {
+        return true;
+    }
+    *path != 0 && v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x))
+}
+
+/// Result `res` with the values it passed on (`Res::passes`) taken
+/// again, through the reads of fields `on` (or all): `None` if none
+/// changed; else the result, and the targets changed (definitions; the
+/// contributions; the output).
+#[allow(clippy::type_complexity)]
+fn passes_now(core: &Core, w: &World, res: &Res, on: Option<&[Field]>) -> Option<(Res, Vec<(Field, Locality, ValueId)>, bool, bool)> {
+    let mut new: Option<Res> = None;
+    let (mut defs, mut contribs, mut out) = (Vec::new(), false, false);
+    // (A composition's holes taken again: (composition, part, value,
+    // root read, its value).)
+    let mut ups = Vec::new();
+    for (i, p) in res.passes.iter().enumerate() {
+        ups.clear();
+        let (x, raw) = if p.read & super::world::COMPOSED != 0 {
+            let k = (p.read & !super::world::COMPOSED) as usize;
+            let Some(x) = compose_now(core, w, res, k, on, &mut ups) else { continue };
+            (x, None)
+        } else {
+            let Some(rd @ Read::Use { f, .. }) = res.reads.get(p.read as usize) else { continue };
+            if on.is_some_and(|fs| !fs.contains(f)) {
+                continue;
+            }
+            let Some(raw) = use_now(core, w, rd) else { continue };
+            let Some(x) = core.eval_path(p.path, raw) else { continue };
+            (x, Some(raw))
+        };
+        if x == p.val {
+            continue;
+        }
+        let r = new.get_or_insert_with(|| res.clone());
+        r.passes[i].val = x;
+        for (rx, raw) in raw.map(|raw| (p.read, raw)).into_iter().chain(ups.iter().map(|u| (u.3, u.4))) {
+            if let Some(Read::Use { val, .. }) = r.reads.get_mut(rx as usize) {
+                *val = Some(raw);
+            }
+        }
+        for &(k, j, v, read, _) in &ups {
+            if let Some(c) = r.composed.get_mut(k).and_then(|c| c.get_mut(j)) {
+                *c = super::world::CPart::Hole { read, path: match *c {
+                    super::world::CPart::Hole { path, .. } => path,
+                    _ => 0,
+                }, val: v };
+            }
+        }
+        match p.to {
+            super::world::PassTo::Def(f, loc) => {
+                if let Some(d) = r.defs.iter_mut().find(|d| d.f == f && d.loc.entry_key() == loc.entry_key()) {
+                    d.val = x;
+                    defs.push((f, d.loc, x));
+                }
+            }
+            super::world::PassTo::Contrib(f) => {
+                if let Some(c) = r.contribs.iter_mut().find(|c| c.0 == f) {
+                    c.1 = x;
+                    contribs = true;
+                }
+            }
+            super::world::PassTo::Out => {
+                r.out = x;
+                out = true;
+            }
+        }
+    }
+    new.map(|r| (r, defs, contribs, out))
+}
+
+/// Composition `k` of result `res` now (`Ctx::compose`): its holes on
+/// fields `on` (or all) taken again, those that changed added to `ups`
+/// as (composition, part, value, root read, its value); `None` if one's
+/// answer is not there.
+fn compose_now(core: &Core, w: &World, res: &Res, k: usize, on: Option<&[Field]>, ups: &mut Vec<(usize, usize, ValueId, u32, ValueId)>) -> Option<ValueId> {
+    let parts = res.composed.get(k)?;
+    let mut xs = Vec::with_capacity(parts.len());
+    for (j, part) in parts.iter().enumerate() {
+        match *part {
+            super::world::CPart::Val(x) => xs.push(x),
+            super::world::CPart::Hole { read, path, val } => {
+                let rd = res.reads.get(read as usize)?;
+                let Read::Use { f, .. } = rd else { return None };
+                if on.is_some_and(|fs| !fs.contains(f)) {
+                    xs.push(val);
+                    continue;
+                }
+                let raw = use_now(core, w, rd)?;
+                let x = core.eval_path(path, raw)?;
+                if x != val {
+                    ups.push((k, j, x, read, raw));
+                }
+                xs.push(x);
+            }
+            super::world::CPart::Nested(i) => xs.push(compose_now(core, w, res, i as usize, on, ups)?),
+        }
+    }
+    Some(core.values.list(xs))
+}
+
+/// The raw value use `r` gets now (`None`: none, a loop-back field's, or
+/// a definer's in work).
+fn use_now(core: &Core, w: &World, r: &Read) -> Option<ValueId> {
+    let Read::Use { f, at, after, own, .. } = r else { return None };
+    if w.loops.get(f).is_some() {
+        return None;
+    }
+    let (u, pos, fr, skip) = w.read_point(*at, *after, *own)?;
+    match w.reaching(u, *f, pos, fr, skip) {
+        Some((_, e)) => e.val,
+        None => w.env_of(core, u, *f),
+    }
 }
 
 /// Whether read `r` of node `me` still holds; `strict`: a definition still
@@ -1936,12 +2192,12 @@ pub(crate) fn holds_with(core: &Core, w: &World, me: Id, r: &Read, strict: bool)
                 },
                 None => (NONE, w.env_of(core, u, *f)),
             };
-            let _ = me;
-            if *path != 0 {
-                return v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x));
+            let _ = (me, s2, site);
+            // (The value unchanged: any path's answer too.)
+            if v2 == *val {
+                return true;
             }
-            let _ = (s2, site);
-            v2 == *val
+            *path != 0 && v2.map(|x| core.eval_path(*path, x)) == val.map(|x| core.eval_path(*path, x))
         }
         Read::Loop { f, val } => w.loops.get(f) == Some(val),
         Read::Env { f, val } => core.env_get(w, *f).flatten() == *val,
@@ -2103,6 +2359,14 @@ fn read_on(r: &Read, fs: &[Field]) -> bool {
         Read::Stream { fields, .. } => fields.iter().any(|(f, _)| fs.contains(f)),
         _ => false,
     }
+}
+
+/// Whether read `r` walks the structure (a window, siblings, claims, the
+/// stream, a sequence, an output, a kind): a change of structure in a
+/// window its reader reads may change it. A use of a field changes only
+/// through a definition, re-asked as one.
+fn structural(r: &Read) -> bool {
+    !matches!(r, Read::Use { .. } | Read::Loop { .. } | Read::Env { .. } | Read::IsLoop { .. })
 }
 
 /// Whether `CLEAN_SCOPED_CHECK` asks settle to check every read of a

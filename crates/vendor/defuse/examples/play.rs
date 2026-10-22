@@ -211,6 +211,18 @@ fn print_audit(eng: &Engine, a: &defuse::RunAudit) {
     for (f, n, b) in a.rechecked.iter().take(15) {
         println!("    re-checked {n:7} broken {b:6}  {}", f.map_or_else(|| "(no field)".to_string(), name));
     }
+    for (s, n, k) in &a.rechecked_all {
+        let why = match s {
+            13 => "a node read gone",
+            14 => "structure at a window read",
+            15 => "an output read gone",
+            16 => "a scope kind read",
+            17 => "own frame moved",
+            18 => "an output read changed",
+            _ => "other",
+        };
+        println!("    re-checked widely: {n:6} readers {k:8} reads  ({why})");
+    }
 }
 
 /// A recorded step (`Each` with its path's steps, interned here).
@@ -250,6 +262,10 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
             let p = cx.path(&steps(cx, &g(1)));
             return res(cx.use_field_path(de(&g(0)), p));
         }
+        "acc_range_path" => {
+            let p = cx.path(&steps(cx, &g(2)));
+            return res(cx.acc_range_path(de(&g(0)), de::<Option<NodeId>>(&g(1)), p));
+        }
         "acc_fold_path" => {
             let p = cx.path(&steps(cx, &g(3)));
             return res(cx.acc_fold_path(de(&g(0)), de(&g(1)), de(&g(2)), p));
@@ -265,7 +281,12 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
             json!(cx.get(de::<defuse::View>(&g(0)), s))
         }
         "whole" => json!(cx.whole(de::<defuse::View>(&g(0)))),
+        "compose" => json!(cx.compose(&de::<Vec<defuse::Part>>(&g(0)))),
         "checkpoint" => return res(cx.checkpoint(de(&g(0)), de(&g(1)))),
+        "checkpoint_patched" => {
+            let patch = de::<Vec<(Field, Locality, Option<ValueId>)>>(&g(3));
+            return res(cx.checkpoint_patched(de(&g(0)), de(&g(1)), de(&g(2)), &patch));
+        }
         "use_fields" => {
             let mut out = Vec::new();
             return res(cx.use_fields(&de::<Vec<Field>>(&g(0)), &mut out).map(|()| out));
@@ -279,8 +300,13 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "define_with" => json!(cx.define_with(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "define_forward" => return res(cx.define_forward(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
         "publish" => json!(cx.publish(de(&g(0)), de(&g(1)))),
+        "define_from" => json!(cx.define_from(de(&g(0)), de::<defuse::View>(&g(1)), de::<Locality>(&g(2)))),
+        "contribute_from" => json!(cx.contribute_from(de(&g(0)), de::<defuse::View>(&g(1)))),
+        "publish_from" => json!(cx.publish_from(de(&g(0)), de::<defuse::View>(&g(1)))),
+        "output_from" => json!(cx.output_from(de::<defuse::View>(&g(0)))),
         "declare_loopback" => json!(cx.declare_loopback(de(&g(0)), de(&g(1)))),
         "declare_loopback_early" => json!(cx.declare_loopback_early(de(&g(0)), de(&g(1)))),
+        "declare_loopback_with" => json!(cx.declare_loopback_with(de(&g(0)), de(&g(1)), de::<defuse::LoopOptions>(&g(2)))),
         "child" => json!(cx.child(de(&g(0)), de(&g(1)))),
         "follow" => json!(cx.follow(de(&g(0)), de(&g(1)))),
         "open_scope" => json!(cx.open_scope()),
@@ -875,6 +901,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "declare_sequence" => eng.declare_sequence(de(&g(0))),
         "declare_loopback" => eng.declare_loopback(de(&g(0)), de(&g(1))),
         "declare_loopback_early" => eng.declare_loopback_early(de(&g(0)), de(&g(1))),
+        "declare_loopback_with" => eng.declare_loopback_with(de(&g(0)), de(&g(1)), de::<defuse::LoopOptions>(&g(2))),
         "declare_loopbacks" => eng.declare_loopbacks(&de::<Vec<(Field, ValueId)>>(&g(0))),
         "set_loop_start" => eng.set_loop_start(de::<LoopStart>(&g(0))),
         "set_max_rounds" => eng.set_max_rounds(de(&g(0))),

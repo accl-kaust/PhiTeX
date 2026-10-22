@@ -307,6 +307,7 @@ impl Engine {
         let mut rep = Report::default();
         self.audit = self.audit_on.then(crate::api::RunAudit::default);
         *super::core::lock(&self.core.rechecks) = self.audit_on.then(FxHashMap::default);
+        self.core.auditing.store(self.audit_on, std::sync::atomic::Ordering::Relaxed);
         // (No run is out: no late filing for a node gone.)
         self.w.rd.purge_gone();
         (self.t_op, self.t_commit, self.t_idle) = (0, 0, 0);
@@ -380,6 +381,7 @@ impl Engine {
             self.ev_prev = None;
             self.early_changes.clear();
             self.early_frozen.clear();
+            self.early_pending.clear();
             self.early_live = true;
             if per_round {
                 if let Some((w, d)) = self.ev_olds.pop_front() {
@@ -447,11 +449,12 @@ impl Engine {
                 if !later.is_empty() {
                     // (Each field's declaring run: its readers' link.)
                     let mut early = Vec::new();
-                    for &(f, _, by, e) in &later {
+                    for &(f, _, by, o) in &later {
                         hs.loop_decl.entry(f).or_insert(by);
-                        if e && self.early.insert(f) {
+                        if o.early && !self.early.contains(&f) {
                             early.push(f);
                         }
+                        self.set_loop_options(f, o);
                     }
                     let later: Vec<(Field, ValueId)> = later.into_iter().map(|(f, x, _, _)| (f, x)).collect();
                     // (All at once: one pass over the runs' reads.)
@@ -461,6 +464,11 @@ impl Engine {
                     }
                     // (Early ones take what is published already.)
                     self.move_early(&mut s, &mut rep, &mut hs, &early)?;
+                    continue;
+                }
+                // Early moves held for their publications to be final: all
+                // final now (their readers run, in this round).
+                if self.early_live && !self.early_pending.is_empty() && self.flush_early(&mut s, &mut rep, &mut hs, true)? {
                     continue;
                 }
                 // The next round's loop-back values (a capped early field
@@ -746,10 +754,15 @@ impl Engine {
         rep.rerun_causes = causes;
         rep.audit = self.audit.take();
         rep.cut_in_run = self.core.cut_in_run.swap(0, std::sync::atomic::Ordering::Relaxed);
+        rep.passes_refiled = self.core.passes_refiled.swap(0, std::sync::atomic::Ordering::Relaxed);
+        rep.cut_patched = self.core.cut_patched.swap(0, std::sync::atomic::Ordering::Relaxed);
         if let (Some(a), Some(m)) = (rep.audit.as_mut(), super::core::lock(&self.core.rechecks).take()) {
             let mut v: Vec<(Option<Field>, u64, u64)> = m.into_iter().map(|(f, (n, b))| (f, n, b)).collect();
             v.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.map(|f| f.0.raw()).cmp(&y.0.map(|f| f.0.raw()))));
             a.rechecked = v;
+            let mut all: Vec<(u8, u64, u64)> = std::mem::take(&mut *super::core::lock(&self.core.rechecks_all)).into_iter().map(|(s, (n, k))| (s, n, k)).collect();
+            all.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)));
+            a.rechecked_all = all;
         }
         // (Complete runs: a stopped attempt is not one; the limits count
         // attempts.)
@@ -1667,6 +1680,11 @@ impl Engine {
     fn mark_resume(&mut self, rep: &mut Report, id: Id, b: u32, at: u64) {
         let Some(n) = self.w.node(id) else { return };
         let Some(old) = n.res.clone() else { return };
+        // (Its marks are of the text it ran: the node given another since
+        // starts over.)
+        if old.text != super::world::text_key(&n.text) {
+            return;
+        }
         let Some(after) = old.after.clone() else { return };
         let Some(j) = old.marks.iter().rposition(|m| m.read_ix <= b) else { return };
         let reads = old.reads[..old.marks[j].read_ix as usize].to_vec();
@@ -1882,13 +1900,45 @@ impl Engine {
         r?;
         if self.early_live && !self.early.is_empty() {
             self.early_published(id, &mut early);
-            if !early.is_empty() {
-                early.sort_by_key(|f| f.0.raw());
-                early.dedup();
-                self.move_early(s, rep, hs, &early)?;
+            if let Some(n) = self.w.node(id) {
+                let (u, p) = (n.unit, n.pos);
+                self.early_pending.extend(early.into_iter().map(|f| (u, p, f)));
+            }
+            if !self.early_pending.is_empty() {
+                self.flush_early(s, rep, hs, false)?;
             }
         }
         Ok(())
+    }
+
+    /// Moves the pending early fields whose publication is final: no node
+    /// at or before its publisher in its unit in work (`all`: every one,
+    /// at a quiet point). Whether any were taken.
+    fn flush_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, all: bool) -> Result<bool, EvalError> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let low = Field(ValueId::from_raw(0));
+        let mut fields = Vec::new();
+        let mut u = self.early_pending.first().map(|x| x.0);
+        while let Some(unit) = u {
+            let first = if all { None } else { self.w.work_of(unit).and_then(|m| m.at_or_above(&0)).map(|(&p, _)| p) };
+            let hi = match first {
+                Some(p) => Excluded((unit, p, low)),
+                None => Excluded((unit.saturating_add(1), 0, low)),
+            };
+            let ready: Vec<(u32, Pos, Field)> = self.early_pending.range((Included((unit, 0, low)), hi)).copied().collect();
+            for k in ready {
+                self.early_pending.remove(&k);
+                fields.push(k.2);
+            }
+            u = self.early_pending.range((Excluded((unit, Pos::MAX, Field(ValueId::from_raw(u64::MAX)))), Unbounded)).next().map(|x| x.0);
+        }
+        if fields.is_empty() {
+            return Ok(false);
+        }
+        fields.sort_by_key(|f| f.0.raw());
+        fields.dedup();
+        self.move_early(s, rep, hs, &fields)?;
+        Ok(true)
     }
 
     /// The run audit's account of node `id`'s run (of `t`), which replaced
@@ -1957,8 +2007,31 @@ impl Engine {
     /// The value published for loop-back field `f` in the current world
     /// (none published: its initial value; two: `None`).
     fn published(&self, f: Field) -> Option<ValueId> {
+        let last = self.core.last_wins.contains(&f);
+        // (A publisher in work may publish otherwise yet: held. Of a
+        // field whose last publication wins, only the last publisher
+        // matters.)
+        let in_work = |id: Id| self.w.node(id).is_some_and(|n| n.st != St::Done);
+        let all = self.w.pub_any.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX)));
+        if last {
+            let lastp = all.filter_map(|(&(_, id), _)| self.w.node(id).map(|n| ((n.unit, n.pos), id))).max();
+            if lastp.is_some_and(|(_, id)| in_work(id)) {
+                return None;
+            }
+        } else if all.into_iter().any(|(&(_, id), _)| in_work(id)) {
+            return None;
+        }
         let mut v = None;
-        for (_, &x) in self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))) {
+        let mut at = None;
+        for (&(_, id), &x) in self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))) {
+            if last {
+                let p = self.w.node(id).map(|n| (n.unit, n.pos));
+                if at.is_none() || p > at {
+                    at = p;
+                    v = Some(x);
+                }
+                continue;
+            }
             if v.is_some_and(|y| y != x) {
                 return None;
             }
@@ -2952,6 +3025,7 @@ fn same_effects(a: &Res, b: &Res) -> bool {
         && a.diag == b.diag
         && a.claim == b.claim
         && a.forwards == b.forwards
+        && a.passes == b.passes
 }
 
 /// The loop-back values world `w`'s publications give (every declared
@@ -2969,15 +3043,26 @@ fn publications_of(core: &super::core::Core, w: &World) -> Result<Vec<(Field, Va
             while it.peek().is_some_and(|((g, _), _)| *g < f) {
                 it.next();
             }
+            let last = core.last_wins.contains(&f);
             let mut val = None;
-            while let Some(&(&(g, _), &x)) = it.peek() {
+            let mut at = None;
+            while let Some(&(&(g, id), &x)) = it.peek() {
                 if g != f {
                     break;
                 }
-                if val.is_some_and(|y| y != x) {
-                    return Err(EvalError::ConflictingPublication { field: f });
+                if last {
+                    // (The last publisher in text order.)
+                    let p = w.node(id).map(|n| (n.unit, n.pos));
+                    if at.is_none() || p > at {
+                        at = p;
+                        val = Some(x);
+                    }
+                } else {
+                    if val.is_some_and(|y| y != x) {
+                        return Err(EvalError::ConflictingPublication { field: f });
+                    }
+                    val = Some(x);
                 }
-                val = Some(x);
                 it.next();
             }
             out.push((f, val.unwrap_or(core.loops[&f])));
@@ -2985,11 +3070,23 @@ fn publications_of(core: &super::core::Core, w: &World) -> Result<Vec<(Field, Va
         return Ok(out);
     }
     let mut pubs: FxHashMap<Field, Vec<ValueId>> = FxHashMap::default();
+    let mut lasts: FxHashMap<Field, ((u32, Pos), ValueId)> = FxHashMap::default();
     for (id, _) in w.publishers.iter() {
-        let Some(r) = w.node(*id).and_then(|n| n.res.as_ref()) else { continue };
+        let Some(n) = w.node(*id) else { continue };
+        let Some(r) = n.res.as_ref() else { continue };
         for &(f, x) in &r.pubs {
-            pubs.entry(f).or_default().push(x);
+            if core.last_wins.contains(&f) {
+                let p = (n.unit, n.pos);
+                if lasts.get(&f).is_none_or(|l| p > l.0) {
+                    lasts.insert(f, (p, x));
+                }
+            } else {
+                pubs.entry(f).or_default().push(x);
+            }
         }
+    }
+    for (f, (_, x)) in lasts {
+        pubs.insert(f, vec![x]);
     }
     let mut fields: Vec<Field> = core.loops.keys().copied().collect();
     fields.sort_by_key(|f| f.0.raw());
@@ -3536,7 +3633,8 @@ impl Merge<'_> {
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
                 let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate() || (m.guess_ran() && r.fold_ran)));
-                let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd));
+                let mut last = None;
+                let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds_paths(&eng.core, &eng.w, id, rd, &mut last));
                 match broken.next() {
                     Some(rd) if speculated(rd) && broken.all(speculated) => {
                         let Read::Range { f, .. } = rd else { unreachable!("a fold") };
@@ -3573,7 +3671,10 @@ impl Merge<'_> {
                 eng.enqueue(s, id);
                 return Ok(());
             }
-            Outcome::Done(r) => match r.res.reads.iter().find(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd)) {
+            Outcome::Done(r) => match {
+                let mut last = None;
+                r.res.reads.iter().find(|rd| asked(rd) && !super::build::holds_paths(&eng.core, &eng.w, id, rd, &mut last))
+            } {
                 Some(rd) => {
                     rep.merge.validate += super::core::ns_since(tv);
                     let tr = super::core::now();
@@ -3743,7 +3844,8 @@ fn run_job(
     let run = |mut cx: Ctx<'_>, out: ValueId| Run {
         res: Res {
             last: cx.last_reads(),
-            out,
+            // (Its output as `output_from` set it, if it did.)
+            out: cx.passes.iter().rev().find(|p| p.to == super::world::PassTo::Out).map(|p| p.val).or(cx.out_from).unwrap_or(out),
             defs: cx.defs,
             forwards: cx.forwards,
             contribs: cx.contribs,
@@ -3761,13 +3863,16 @@ fn run_job(
             eval: core.eval_no.load(std::sync::atomic::Ordering::Relaxed),
             marks: std::mem::take(&mut cx.marks).into(),
             after: cx.after.take(),
+            // (The compositions, when a pass names one.)
+            composed: if cx.passes.iter().any(|p| p.read & super::world::COMPOSED != 0) { cx.composed.clone() } else { Vec::new() },
+            passes: std::mem::take(&mut cx.passes),
         },
         kids: cx.kids,
         conts: cx.conts,
         // (Its views kept with its token: held in the client's state, they
         // stand when it resumes.)
         kept: match cx.kept {
-            Some(t) if !cx.views.is_empty() => Some(Box::new(super::ctx::KeptViews { token: t, views: cx.views }) as Box<dyn std::any::Any + Send>),
+            Some(t) if !cx.views.is_empty() => Some(Box::new(super::ctx::KeptViews { token: t, views: cx.views, composed: cx.composed }) as Box<dyn std::any::Any + Send>),
             k => k,
         },
         apps: cx.apps,
@@ -3790,19 +3895,29 @@ fn run_job(
     };
     // Cut off at a mark of its last run: that run's result stands, with
     // this run's reads up to the mark and that run's after it.
-    if let (Some(j), Some(fm)) = (cx.cutoff, cx.from_mark.take())
+    if let (Some((j, patch)), Some(fm)) = (cx.cutoff.take(), cx.from_mark.take())
         && matches!(r, Ok(Err(_)))
     {
         let old = fm.old;
+        // (Values passed on name reads by index: run in full.)
+        if !old.passes.is_empty() || !cx.passes.is_empty() {
+            drop(cx);
+            return run_job(core, w, id, None, predict, careful, fuel);
+        }
         let from = old.marks[j].read_ix as usize;
         let mut reads = std::mem::take(&mut cx.reads);
         let shift = reads.len() as i64 - from as i64;
         reads.extend_from_slice(&old.reads[from..]);
-        let mut marks = std::mem::take(&mut cx.marks);
-        marks.extend(old.marks[j + 1..].iter().map(|m| super::world::Mark {
-            read_ix: u32::try_from(i64::from(m.read_ix) + shift).unwrap_or(u32::MAX),
-            ..*m
-        }));
+        // (The marks the kept token takes the client back to: those up to
+        // the one resumed at, where both runs are one; and, unpatched,
+        // those from the one cut off at, where they are one again.)
+        let mut marks: Vec<super::world::Mark> = old.marks[..=fm.j].to_vec();
+        if patch.is_none() {
+            marks.extend(old.marks[j..].iter().map(|m| super::world::Mark {
+                read_ix: u32::try_from(i64::from(m.read_ix) + shift).unwrap_or(u32::MAX),
+                ..*m
+            }));
+        }
         // (Its placements as the last run made them: the same nodes.)
         let spec = |x: &Id| {
             w.node(*x).map(|n| super::ctx::Spec {
@@ -3815,6 +3930,20 @@ fn run_job(
         let conts: Option<Vec<_>> = old.conts.iter().map(spec).collect();
         if let (Some(kids), Some(conts)) = (kids, conts) {
             let mut res = (*old).clone();
+            if patch.is_some() {
+                core.cut_patched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            for (f, loc, x) in patch.unwrap_or_default() {
+                let k = loc.entry_key();
+                match (res.defs.iter().position(|d| d.f == f && d.loc.entry_key() == k), x) {
+                    (Some(i), Some(val)) => res.defs[i] = super::world::Def { f, loc, val },
+                    (Some(i), None) => {
+                        res.defs.remove(i);
+                    }
+                    (None, Some(val)) => res.defs.push(super::world::Def { f, loc, val }),
+                    (None, None) => {}
+                }
+            }
             res.reads = reads;
             res.marks = marks.into();
             res.filed = None;

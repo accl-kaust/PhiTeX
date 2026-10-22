@@ -202,6 +202,43 @@ pub(crate) struct Mark {
     pub read_ix: u32,
     pub state: ValueId,
     pub digest: u64,
+    /// The digest of its outputs but its definitions (a patched cutoff
+    /// compares this; the client answers for its definitions).
+    pub odigest: u64,
+}
+
+/// Where a run passed on a value it read through a view without
+/// inspecting it (`Ctx::define_from` and the others): a forward, the
+/// target refiled when the value read changes.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum PassTo {
+    Def(Field, Locality),
+    Contrib(Field),
+    Out,
+}
+
+/// A part of a composed value (`Ctx::compose`): a constant, a hole (a
+/// value passed through a view: its root read's index, the path, the
+/// value), or another composition (its index).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum CPart {
+    Val(ValueId),
+    Hole { read: u32, path: u32, val: ValueId },
+    Nested(u32),
+}
+
+/// A view root naming a composition (`COMPOSED | its index`), not a read.
+pub(crate) const COMPOSED: u32 = 1 << 31;
+
+/// A value passed on: where to, the read of its source (its index; or
+/// `COMPOSED | k`, composition `k`), the path from that read's value, and
+/// the value passed.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Pass {
+    pub to: PassTo,
+    pub read: u32,
+    pub path: u32,
+    pub val: ValueId,
 }
 
 /// The token a run kept for a later run to resume from one of its marks
@@ -249,6 +286,10 @@ pub(crate) struct Res {
     /// it kept for a later run to resume from one (`Ctx::keep_after`).
     pub marks: Arc<[Mark]>,
     pub after: Option<After>,
+    /// The values it passed on without inspecting them.
+    pub passes: Vec<Pass>,
+    /// The compositions its passes name (`Ctx::compose`).
+    pub composed: Vec<Vec<CPart>>,
     /// What the node's last result from an earlier evaluation read of the
     /// fields guessed from the last (`Engine::guess_from_last`), carried
     /// through its commits in this one (`Res::last_reads`).
@@ -326,6 +367,8 @@ impl Default for Res {
             forwards: Vec::new(),
             marks: Arc::from([]),
             after: None,
+            passes: Vec::new(),
+            composed: Vec::new(),
             last: None,
         }
     }
@@ -515,6 +558,11 @@ fn published(n: &Node) -> &[(Field, ValueId)] {
     }
 }
 
+/// A node's last result's publications, whatever its state (`pub_any`).
+fn published_any(n: &Node) -> &[(Field, ValueId)] {
+    n.res.as_ref().map_or(&[], |r| &r.pubs)
+}
+
 /// The loop-back fields a done node's definitions forward (`fwds` keys).
 fn forwarded(n: &Node) -> Vec<u64> {
     let mut v: Vec<u64> = match &n.res {
@@ -622,6 +670,9 @@ pub(crate) struct World {
     /// The done nodes' publications by field and node (what
     /// `publications_of` merges with the loop-back values).
     pub pub_ix: PMap<(Field, Id), ValueId>,
+    /// Every node's last result's publications, done or in work (the
+    /// early path holds a move while a publisher is in work).
+    pub pub_any: PMap<(Field, Id), ValueId>,
     /// Placed nodes whose placer runs again for a change (a read that
     /// broke, a new text) and has not placed them again yet: they wait for
     /// it (their texts may be stale).
@@ -727,6 +778,7 @@ impl World {
             && self.publishers.ptr_eq(&other.publishers)
             && self.fwds.ptr_eq(&other.fwds)
             && self.pub_ix.ptr_eq(&other.pub_ix)
+            && self.pub_any.ptr_eq(&other.pub_any)
     }
 
     /// Field `f` of unit `u`, if anything is filed under it.
@@ -1395,6 +1447,16 @@ impl World {
                 self.publishers.remove(&id, &NoMeasure);
             }
         }
+        let aw = self.nodes.get(&id).map_or(&[][..], |o| published_any(o));
+        if aw != published_any(&n) {
+            let old: Vec<(Field, ValueId)> = aw.to_vec();
+            for (f, _) in old {
+                self.pub_any.remove(&(f, id), &NoMeasure);
+            }
+            for &(f, x) in published_any(&n) {
+                self.pub_any.insert((f, id), x, &NoMeasure);
+            }
+        }
         let pw = self.nodes.get(&id).map_or(&[][..], |o| published(o));
         if pw != published(&n) {
             let old: Vec<(Field, ValueId)> = pw.to_vec();
@@ -1456,7 +1518,10 @@ impl World {
             for k in forwarded(o) {
                 self.fwds.remove(&(k, id), &NoMeasure);
             }
-            let ps: Vec<Field> = published(o).iter().map(|p| p.0).collect();
+            let ps: Vec<Field> = published_any(o).iter().map(|p| p.0).collect();
+            for &f in &ps {
+                self.pub_any.remove(&(f, id), &NoMeasure);
+            }
             for f in ps {
                 self.pub_ix.remove(&(f, id), &NoMeasure);
             }
