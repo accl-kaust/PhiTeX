@@ -1459,6 +1459,33 @@ impl State {
             .collect()
     }
 
+    /// Every location the run defined: its latest definition's stamp,
+    /// whether local, and the group it was made in.
+    /// [`State::defined_since_in_order`] of any stamp and group mark is
+    /// these filtered as it filters them (`stamp > since`, no local one
+    /// of a group opened after `gids`).
+    pub(crate) fn defined_stamped(&self) -> Vec<(Loc, u64, bool, Option<u32>)> {
+        self.metas
+            .iter()
+            .filter(|m| m.ldef_stamp > 0)
+            .map(|m| (m.loc, m.ldef_stamp, m.ldef_local, m.ldef_gid))
+            .collect()
+    }
+
+    /// The locations whose latest definition after stamp `since` is
+    /// local, as [`State::defined_since_in_order`] filters them, in the
+    /// order of their first definitions in the run, without their values
+    /// (none encoded).
+    pub(crate) fn defined_local_since(&self, since: u64, gids: u32) -> Vec<Loc> {
+        self.metas
+            .iter()
+            .filter(|m| m.ldef_stamp > since)
+            .filter(|m| !(m.ldef_local && m.ldef_gid.is_some_and(|g| g > gids)))
+            .filter(|m| m.ldef_local)
+            .map(|m| m.loc)
+            .collect()
+    }
+
     /// The definitions made after stamp `since`, at any level (a line
     /// read back is interpreted wherever the run is): the location, the
     /// value in force and the locality of the latest one. A local one
