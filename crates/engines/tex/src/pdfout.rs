@@ -2009,7 +2009,7 @@ pub(crate) fn page_allocs(
             "alloc-src: node {} resumed {} dests loaded before {dests_loaded} mark {}",
             r.cx.node().raw(),
             r.resumed,
-            r.st.cur_mark
+            r.mark_snaps.len()
         );
     }
     r.contribute(ALLOCS, v.seq_unit(e));
