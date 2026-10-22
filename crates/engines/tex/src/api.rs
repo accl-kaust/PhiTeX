@@ -7101,17 +7101,19 @@ mod park_tests {
             let Ok(mut r) = crate::run::Run::from_parked(cx, o, parked) else {
                 panic!("the park resumes in its own epoch");
             };
-            let l = r.loc_of(f);
+            // (the map's location as the resumed run holds it, before any
+            // lookup of the field notes it again: what its end reads,
+            // `Run::finish`)
+            let held: Vec<_> = r.reg_pending.iter().map(|(&l, m)| (l, m.keep, m.add)).collect();
+            assert_eq!(held.len(), 1, "the resumed run holds one map");
+            let (l, keep, add) = held[0];
             assert_eq!(
                 r.count_reg(l),
                 Some(315),
-                "the resumed run's location of count:315 names it"
+                "the resumed run's location of its map names count:315"
             );
-            assert_eq!(
-                r.reg_pending.get(&l).map(|m| (m.keep, m.add)),
-                Some((true, 1)),
-                "the resumed run holds its map of count:315"
-            );
+            assert_eq!((keep, add), (true, 1), "the map is the one parked");
+            assert_eq!(r.loc_of(f), l, "the field's location is the map's");
             Ok(ValueId::UNIT)
         }
     }
