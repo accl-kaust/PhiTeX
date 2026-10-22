@@ -317,8 +317,8 @@ pub(crate) struct PagePiece {
     fonts: Fonts,
     /// The page's box, its sealed lines shallow (`crate::pages::seal`),
     /// and their stand-ins (by `LAZY + k`): filled in for its writer
-    /// ([`page_box`]).
-    bx: Mutex<BoxNode>,
+    /// ([`with_page_box`]).
+    bx: Mutex<PageBox>,
     lazy: Vec<ValueId>,
     /// Its sealed lines' whatsits' handles (`crate::nodes::sealed_bases`).
     bases: Vec<(u32, u32, u32)>,
@@ -340,6 +340,31 @@ pub(crate) struct PagePiece {
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
+
+/// A page's box ([`PagePiece::bx`]) and, where its sealed lines are
+/// filled in, the hash of the units they were read from
+/// ([`lines_hash`]) and what the filling replaced
+/// (`crate::nodes::fill_sealed`): the lines stay filled while the units
+/// are the same (a cold build fills each page once and never puts the
+/// stand-ins back, nor drops the lines).
+struct PageBox {
+    bx: BoxNode,
+    filled: Option<u64>,
+    saved: Vec<(usize, phitex_typeset::glue::GlueSet, phitex_typeset::node::List)>,
+}
+
+impl PageBox {
+    /// The box as its shape again (the stand-ins put back).
+    fn unfill(&mut self) {
+        if self.saved.is_empty() {
+            self.filled = None;
+            return;
+        }
+        let mut saved: std::collections::VecDeque<_> = std::mem::take(&mut self.saved).into();
+        crate::nodes::unfill_sealed(&mut self.bx.list, &mut 0, &mut saved);
+        self.filled = None;
+    }
+}
 
 /// A page as its PDF side wrote it, for the link to place, and the fonts
 /// used on the state it was written on, and the objects numbered before
@@ -369,28 +394,34 @@ fn lines_hash(pc: &PagePiece, units: &FxHashMap<i64, ValueId>) -> Option<u64> {
 
 /// `f` of page `pc`'s box with its sealed lines filled in
 /// ([`crate::nodes::fill_sealed`], `line` giving a line's box as its
-/// piece made it), the box filled in place and put back after (no copy
-/// of the page); `None` where a line is not found.
+/// piece made it from the units hashed `h`, [`lines_hash`]), the box
+/// filled in place (no copy of the page) and left so while the units
+/// are the same ([`PageBox`]); `None` where a line is not found.
 fn with_page_box<T>(
     v: &Values,
     pc: &PagePiece,
+    h: u64,
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
     f: impl FnOnce(&BoxNode) -> T,
 ) -> Option<T> {
-    let mut b = pc.bx.locked();
-    if pc.lazy.is_empty() {
-        return Some(f(&b));
+    let mut g = pc.bx.locked();
+    if pc.lazy.is_empty() || g.filled == Some(h) {
+        return Some(f(&g.bx));
     }
+    g.unfill();
     // (its lines' lists as their runs made them, where kept: not
     // decoded again, `crate::nodes::take_made`)
     let take = crate::nodes::TAKE_MADE.with(|c| c.replace(true));
     let mut saved = Vec::new();
-    let ok = crate::nodes::fill_sealed(v, &mut b.list, &pc.lazy, &pc.bases, line, &mut 0, &mut saved);
+    let ok = crate::nodes::fill_sealed(v, &mut g.bx.list, &pc.lazy, &pc.bases, line, &mut 0, &mut saved);
     crate::nodes::TAKE_MADE.with(|c| c.set(take));
-    let r = ok.then(|| f(&b));
-    let mut saved: std::collections::VecDeque<_> = saved.into();
-    crate::nodes::unfill_sealed(&mut b.list, &mut 0, &mut saved);
-    r
+    g.saved = saved;
+    if !ok {
+        g.unfill();
+        return None;
+    }
+    g.filled = Some(h);
+    Some(f(&g.bx))
 }
 
 /// The record of page `pc` (key `key`), its sealed lines' units hashed
@@ -414,8 +445,8 @@ fn record_of(
         all.entry(k).or_default().clone()
     };
     m.get_or_init(|| {
-        with_page_box(v, pc, line, |bx| write_page(v, pc, bx))
-            .unwrap_or_else(|| write_page(v, pc, &pc.bx.locked()))
+        with_page_box(v, pc, h, line, |bx| write_page(v, pc, bx))
+            .unwrap_or_else(|| write_page(v, pc, &pc.bx.locked().bx))
     });
     m
 }
@@ -1808,7 +1839,11 @@ fn ship_apart(
         margins,
         whats,
         fonts,
-        bx: Mutex::new(bx),
+        bx: Mutex::new(PageBox {
+            bx,
+            filled: None,
+            saved: Vec::new(),
+        }),
         lazy: side_lazy.clone(),
         bases: crate::nodes::sealed_bases(side),
         pieces: {
@@ -1880,7 +1915,7 @@ fn ship_apart(
 }
 
 /// Page `pc`'s PDF side ([`PdfPage`]), its box `bx` (its sealed lines
-/// filled in, [`page_box`]): written once, apart, on a writer of its own
+/// filled in, [`with_page_box`]): written once, apart, on a writer of its own
 /// as the link's stands between two pages ([`base_fold`]), its record
 /// kept for the link (a page whose record is not placed as it is is
 /// shipped again by the link, whose error is the job's,
@@ -3541,7 +3576,7 @@ fn link(
                 let mut wh = |h: u32, _leaders: bool| {
                     page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &reloc))
                 };
-                if let Some(Err(e)) = with_page_box(v, pc, &mut line, |bx| st.ship_out_with(bx, &src, &mut wh)) {
+                if let Some(Err(e)) = with_page_box(v, pc, h, &mut line, |bx| st.ship_out_with(bx, &src, &mut wh)) {
                     errors.push((format!("pdfTeX error: {e}"), pc.node));
                 }
                 shipped += 1;

@@ -1229,12 +1229,12 @@ impl Run<'_, '_> {
         let mut out = Vec::with_capacity(para.lines.len() * 2);
         for (k, mut line) in para.lines.into_iter().enumerate() {
             self.box_report(true, line.packed.report, true);
-            let (list, seen) = nodes::encode_list_side_free(v, &line.packed.node.list, &side);
+            let (list, seen, line_fonts) = nodes::encode_line(v, &line.packed.node.list, &side);
             let b = nodes::encode_box_with(v, &line.packed.node, list);
             // (its fonts from its nodes, for its unit's shape: not walked
             // again through its value, `crate::nodes::unit_shape`)
             if seen == 0
-                && let Some(ids) = nodes::native_fonts(&line.packed.node.list)
+                && let Some(ids) = line_fonts
             {
                 let f = {
                     // (one value a set of fonts: the lines share few)

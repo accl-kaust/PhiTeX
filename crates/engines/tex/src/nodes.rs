@@ -282,14 +282,17 @@ pub(crate) fn encode_box_with(v: &Values, b: &BoxNode, list: ValueId) -> ValueId
 
 /// A node of fixed shape (a character, glue without leaders, a kern, a
 /// penalty), through the worker's cache in a run ([`node_id`]).
+/// The value of character node `(font, ch)`.
+#[inline]
+fn char_value(v: &Values, font: u32, ch: u16) -> ValueId {
+    crate::val::char_node_id(v, font, ch, || {
+        v.list(vec![i(v, T_CHAR), i(v, i64::from(font)), i(v, i64::from(ch))])
+    })
+}
+
 fn encode_fixed(v: &Values, n: &Node) -> Option<ValueId> {
     Some(match n {
-        Node::Char { font, ch } => {
-            let (f, c) = (i64::from(*font), i64::from(*ch));
-            crate::val::char_node_id(v, *font, *ch, || {
-                v.list(vec![i(v, T_CHAR), i(v, f), i(v, c)])
-            })
-        }
+        Node::Char { font, ch } => char_value(v, *font, *ch),
         Node::Glue(g) if g.leader.is_none() => {
             let k = glue_kind_code(g.kind);
             node_id(v, (T_GLUE, [k, 0, 0], Some(g.spec)), || {
@@ -617,10 +620,23 @@ fn rebase(list: &mut [Node], marks: &[ValueId], whats: &[ValueId], side: &mut Si
     }
 }
 
-static MADE: std::sync::Mutex<Option<Made>> = std::sync::Mutex::new(None);
+/// The store of [`Made`] lines, in shards by the lines' ids: line
+/// breaking keeps lines and the pages' writers take them on many threads
+/// at once, each line under its shard's lock only.
+static MADE: [std::sync::Mutex<Option<Made>>; MADE_SHARDS] =
+    [const { std::sync::Mutex::new(None) }; MADE_SHARDS];
 
-/// The nodes [`MADE`] holds at most.
-const MADE_NODES: usize = 1 << 22;
+/// The shards of [`MADE`].
+const MADE_SHARDS: usize = 64;
+
+/// The nodes a shard of [`MADE`] holds at most.
+const MADE_NODES: usize = (1 << 22) / MADE_SHARDS;
+
+/// The shard of [`MADE`] line `id` is kept in.
+fn made_shard(id: ValueId) -> &'static std::sync::Mutex<Option<Made>> {
+    let h = id.raw().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58;
+    &MADE[usize::try_from(h).unwrap_or(0) % MADE_SHARDS]
+}
 
 thread_local! {
     /// Set by an encoding that met a node of the side tables (a mark, a
@@ -641,7 +657,7 @@ pub(crate) fn keep_made(
     marks: Vec<ValueId>,
     whats: Vec<ValueId>,
 ) -> Option<List> {
-    let mut g = MADE
+    let mut g = made_shard(id)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let m = g.get_or_insert_with(|| Made {
@@ -659,13 +675,50 @@ pub(crate) fn keep_made(
     None
 }
 
-/// [`encode_list`] of `list`, and whether it met no node of the side
-/// tables ([`SIDE_SEEN`]).
-pub(crate) fn encode_list_side_free(v: &Values, list: &[Node], side: &Side) -> (ValueId, u8) {
+/// [`encode_list`] of line `list`, whether it met a node of the side
+/// tables ([`SIDE_SEEN`]), and the fonts of its characters where it
+/// holds only characters, boxes of them, discretionaries, glue without
+/// leaders, rules, kerns and the like ([`native_walk`]), noted on the
+/// way: the walk that encodes it.
+pub(crate) fn encode_line(v: &Values, list: &[Node], side: &Side) -> (ValueId, u8, Option<FontIds>) {
     let was = SIDE_SEEN.with(|c| c.replace(0));
-    let x = encode_list(v, list, side);
+    let mut fonts = FontIds::default();
+    let mut plain = true;
+    let mut last = u32::MAX;
+    // (a line's interword glue is one node many times: the last glue
+    // encoded is kept, as [`encode_list`] does)
+    let mut glue: Option<(&GlueNode, ValueId)> = None;
+    let mut xs = Vec::with_capacity(list.len());
+    for n in list {
+        let x = match n {
+            Node::Char { font, ch } => {
+                if *font != last {
+                    fonts.insert(*font);
+                    last = *font;
+                }
+                char_value(v, *font, *ch)
+            }
+            Node::Glue(g) if g.leader.is_none() => match glue {
+                Some((h, x)) if h == g => x,
+                _ => {
+                    let x = encode(v, n, side);
+                    glue = Some((g, x));
+                    x
+                }
+            },
+            Node::Kern(..) | Node::Penalty(_) | Node::Rule(_) | Node::Math(..) | Node::Language { .. } => {
+                encode(v, n, side)
+            }
+            _ => {
+                plain = plain && native_walk(std::slice::from_ref(n), &mut fonts);
+                encode(v, n, side)
+            }
+        };
+        xs.push(x);
+    }
+    let x = v.list(xs);
     let seen = SIDE_SEEN.with(|c| c.replace(was | c.get()));
-    (x, seen)
+    (x, seen, plain.then_some(fonts))
 }
 
 /// [`SIDE_SEEN`]'s bit for a mark or a whatsit.
@@ -685,7 +738,7 @@ fn take_made(id: ValueId, side: &mut Side) -> Option<List> {
     if !TAKE_MADE.with(std::cell::Cell::get) {
         return None;
     }
-    let mut g = MADE
+    let mut g = made_shard(id)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let m = g.as_mut()?;
@@ -1195,7 +1248,7 @@ pub(crate) fn unfill_sealed(list: &mut [Node], seen: &mut usize, saved: &mut std
 }
 
 /// A few font ids, sorted, without an allocation for a line's usual
-/// one to four ([`native_fonts`]).
+/// one to four ([`encode_line`]).
 #[derive(Default)]
 pub(crate) struct FontIds {
     few: [u32; 8],
@@ -1228,34 +1281,30 @@ impl FontIds {
     }
 }
 
-/// The fonts of a native list (their ids, sorted), or `None` where it
-/// holds a node other than characters, boxes of them, discretionaries,
-/// glue without leaders, rules, kerns and the like ([`line_shape`]
-/// decides those from the list's value).
-pub(crate) fn native_fonts(list: &[Node]) -> Option<FontIds> {
-    fn walk(l: &[Node], out: &mut FontIds) -> bool {
-        let mut last = None;
-        l.iter().all(|n| match n {
-            Node::Char { font, .. } => {
-                if last != Some(*font) {
-                    out.insert(*font);
-                    last = Some(*font);
-                }
-                true
+/// The fonts of native list `l` into `out` (their ids, sorted); `false`
+/// where it holds a node other than characters, boxes of them,
+/// discretionaries, glue without leaders, rules, kerns and the like
+/// ([`line_shape`] decides those from the list's value).
+fn native_walk(l: &[Node], out: &mut FontIds) -> bool {
+    let mut last = None;
+    l.iter().all(|n| match n {
+        Node::Char { font, .. } => {
+            if last != Some(*font) {
+                out.insert(*font);
+                last = Some(*font);
             }
-            Node::Lig(g) => {
-                out.insert(g.font);
-                true
-            }
-            Node::Box(b) => walk(&b.list, out),
-            Node::Disc(d) => walk(&d.pre, out) && walk(&d.post, out) && walk(&d.replace, out),
-            Node::Glue(g) => g.leader.is_none(),
-            Node::Rule(_) | Node::Language { .. } | Node::Math(..) | Node::Kern(..) | Node::Penalty(_) => true,
-            _ => false,
-        })
-    }
-    let mut out = FontIds::default();
-    walk(list, &mut out).then_some(out)
+            true
+        }
+        Node::Lig(g) => {
+            out.insert(g.font);
+            true
+        }
+        Node::Box(b) => native_walk(&b.list, out),
+        Node::Disc(d) => native_walk(&d.pre, out) && native_walk(&d.post, out) && native_walk(&d.replace, out),
+        Node::Glue(g) => g.leader.is_none(),
+        Node::Rule(_) | Node::Language { .. } | Node::Math(..) | Node::Kern(..) | Node::Penalty(_) => true,
+        _ => false,
+    })
 }
 
 /// The fonts of box list `l`'s characters at any depth (sorted ids) and
@@ -1382,8 +1431,8 @@ pub(crate) fn unit_shape(
                     if ys.len() != 5 || v.as_int(ys[0]) != Some(T_VBOX) {
                         return None;
                     }
-                    let bx = v.with_list(ys[1], <[ValueId]>::to_vec)?;
-                    if bx.len() != 10 || v.as_int(bx[0]) != Some(T_BOX) {
+                    let bx = v.with_list(ys[1], |xs| <[ValueId; 10]>::try_from(xs).ok()).flatten()?;
+                    if v.as_int(bx[0]) != Some(T_BOX) {
                         return None;
                     }
                     // (a line this run made: its fonts known from its nodes)
@@ -1397,18 +1446,17 @@ pub(crate) fn unit_shape(
                     b[6] = zero;
                     b[7] = zero;
                     b[8] = zero;
-                    let mut st = vec![
+                    let st = [
                         v.int(T_SEALED),
                         v.int(piece),
                         v.int(i64::try_from(k).unwrap_or(i64::MAX)),
                         fonts,
                         v.int(head),
+                        skel.unwrap_or(ValueId::UNIT),
                     ];
-                    st.extend(skel);
-                    b[9] = v.list(st);
-                    let mut y = ys.to_vec();
-                    y[1] = v.list(b);
-                    Some(v.list(y))
+                    b[9] = v.list_from(&st[..if skel.is_some() { 6 } else { 5 }]);
+                    let y = [ys[0], v.list_from(&b), ys[2], ys[3], ys[4]];
+                    Some(v.list_from(&y))
                 })
                 .flatten();
             match shaped {
