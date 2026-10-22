@@ -1681,10 +1681,10 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
     // (`PHITEX_CHAIN_ALL=1`, profile: every link of the chain, its field
     // by name, and when it was queued, started, ended and committed)
     if crate::exec::prof_flag!("PHITEX_CHAIN_ALL") {
+        use phitex_defuse::Cause as C;
         let times: FxHashMap<phitex_defuse::NodeId, [u64; 4]> =
             eng.critical_chain_times().into_iter().collect();
         let v = eng.values();
-        use phitex_defuse::Cause as C;
         for (n, c) in &chain {
             let op = eng.node_info(*n).map_or("?", |i| i.op);
             let f = match c {
