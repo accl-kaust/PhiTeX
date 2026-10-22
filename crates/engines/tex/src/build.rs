@@ -1671,9 +1671,13 @@ impl Run<'_, '_> {
             // "Incompatible list can't be unboxed"
             return Ok(());
         }
-        // (a finisher's sealed line opened: its own list, read now,
-        // `crate::pages::seal`)
-        let b = self.unseal(b);
+        // (a finisher's sealed line opened: its own list, read now; the
+        // lines in an opened box stay sealed, `crate::pages::seal`)
+        let b = if list_of(v, b).get(9).is_some_and(|&l| nodes::is_sealed(v, l)) {
+            self.unseal(b)
+        } else {
+            b
+        };
         let xs = list_of(v, b);
         for x in xs.get(9).map(|&l| list_of(v, l)).unwrap_or_default() {
             self.append(md.lid, x);
