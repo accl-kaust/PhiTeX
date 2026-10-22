@@ -1590,8 +1590,8 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.capped.as_ref().map_or(0, Vec::len)
     );
     eprintln!(
-        "round guesses: {} claims refuted, {} effects refuted, {} claim siblings, {} definitions refuted",
-        r.claims_refuted, r.effects_refuted, r.claim_siblings, r.defs_refuted
+        "round guesses: {} claims refuted, {} effects refuted, {} claim siblings, {} definitions refuted, {} claims past reach",
+        r.claims_refuted, r.effects_refuted, r.claim_siblings, r.defs_refuted, r.claims_past_reach
     );
     eprintln!(
         "round rerun causes: {} nodes, {causes:?}, realised cp {} nodes {:?}, longest runs {:?}",
@@ -1970,6 +1970,21 @@ fn file_units(
     out
 }
 
+/// How many siblings after a pending claimer with no reach of its own
+/// wait for its claim ([`phitex_defuse::Engine::set_claim_window`]); the
+/// rest run on the guess that it claims no more, taken back where it does.
+/// `PHITEX_CLAIM_WINDOW=none|<n>` overrides.
+const CLAIM_WINDOW: Option<usize> = Some(2);
+
+/// [`CLAIM_WINDOW`], or `PHITEX_CLAIM_WINDOW`'s.
+fn claim_window() -> Option<usize> {
+    match crate::exec::env_str!("PHITEX_CLAIM_WINDOW") {
+        Some("none") => None,
+        Some(n) => n.parse().ok().or(CLAIM_WINDOW),
+        None => CLAIM_WINDOW,
+    }
+}
+
 impl Graph {
     #[allow(clippy::too_many_lines)]
     fn new(time: Option<std::time::Duration>, threads: Option<usize>) -> Graph {
@@ -1979,6 +1994,7 @@ impl Graph {
         // (`PHITEX_NO_HEIGHTS`: a profile build without them, as a
         // release build runs, for its timings)
         eng.set_heights(cfg!(feature = "profile") && !crate::exec::prof_flag!("PHITEX_NO_HEIGHTS"));
+        eng.set_claim_window(claim_window());
         eng.set_limits(phitex_defuse::Limits {
             // a node's children are bounded by the text it reads (one per
             // `\hyphenation` word, per character of a long run), not by a
@@ -6154,13 +6170,25 @@ fn dump_chain(eng: &Engine, r: &Report, path: &str) {
         .iter()
         .map(|(n, d)| (n.raw(), d.as_nanos()))
         .collect();
-    // (the same order as the heights: index by index)
-    let at: Vec<[u64; 4]> = eng
-        .critical_chain_times()
-        .into_iter()
-        .map(|(_, t)| t)
-        .collect();
-    let chain = eng.critical_chain_heights();
+    // (the same order as the heights: index by index; with
+    // `PHITEX_CHAIN_BY_TIME`, the chain by time instead, each run linked
+    // to the one whose commit let it start, its height its place)
+    let (at, chain): (Vec<[u64; 4]>, Vec<_>) = if crate::exec::obs_flag!("PHITEX_CHAIN_BY_TIME") {
+        let c = eng.critical_chain_by_time();
+        let n = c.len();
+        c.into_iter()
+            .enumerate()
+            .map(|(i, (x, cause, t))| (t, (x, u32::try_from(n - i).unwrap_or(0), cause)))
+            .unzip()
+    } else {
+        (
+            eng.critical_chain_times()
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect(),
+            eng.critical_chain_heights(),
+        )
+    };
     let mut s = format!(
         "# eval {} {} {}\n",
         chain.len(),

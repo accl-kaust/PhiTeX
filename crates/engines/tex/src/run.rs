@@ -4546,6 +4546,23 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.cut
             );
         }
+        // (`PHITEX_CLAIM_TRACE`: each claim a run makes, with its hint's
+        // cause and its text)
+        if n > 0 && crate::exec::obs_flag!("PHITEX_CLAIM_TRACE") {
+            let args = self.cx.args();
+            let h = crate::hints::hint_of_args(&self.ops.hints, self.v, &args);
+            eprintln!(
+                "claim-made: {n}\t{}\t{:?}",
+                if h.bound.is_some() {
+                    "bounded".to_owned()
+                } else {
+                    h.cause.clone()
+                },
+                args.first()
+                    .map(|&x| self.v.render(x).chars().take(120).collect::<String>())
+                    .unwrap_or_default()
+            );
+        }
         // (what the run took, none included: a declared claim is a
         // guess, and a run that makes no claim is held to it, so the
         // siblings it declared it would take and did not read stayed
