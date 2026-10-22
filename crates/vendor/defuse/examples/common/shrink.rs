@@ -172,7 +172,17 @@ pub fn ok(eng: &mut Engine, p: &Program, sched: Sched) -> bool {
         && {
             let want = interpret(&p.lines);
             let got = p.result(eng);
-            let exact = want.as_ref().is_ok_and(|r| *r == got);
+            let mut exact = want.as_ref().is_ok_and(|r| *r == got);
+            // (Early loop-backs may settle on another fixed point than the
+            // rounds' (`Engine::declare_loopback_early`): a result that is
+            // one, the interpreter from the engine's values reproducing
+            // them, stands.)
+            if !exact
+                && super::loop_early()
+                && let Some(lines) = seeded(eng, &p.lines)
+            {
+                exact = interpret(&lines).is_ok_and(|r| r == got);
+            }
             let warned = WARNED.with(std::cell::Cell::get);
             if std::env::var_os("FUZZ_EARLY_STATS").is_some() {
                 eprintln!("EARLYSTAT exact={exact} warned={warned} conv={}", want.is_ok());
@@ -194,6 +204,29 @@ pub fn ok(eng: &mut Engine, p: &Program, sched: Sched) -> bool {
             }
             bad.is_empty()
         }
+}
+
+/// `lines` with each loop-back declaration's initial value the engine's
+/// round value now (`None` if one is not a literal the language writes).
+fn seeded(eng: &Engine, lines: &[String]) -> Option<Vec<String>> {
+    let v = eng.values();
+    let lit = |x: defuse::ValueId| -> Option<String> {
+        match &*v.get(x) {
+            defuse::Value::Int(i) => Some(i.to_string()),
+            defuse::Value::Str(s) if !s.contains('"') => Some(format!("\"{s}\"")),
+            _ => None,
+        }
+    };
+    lines
+        .iter()
+        .map(|l| {
+            let Some(rest) = l.strip_prefix("loop ") else { return Some(l.clone()) };
+            let (head, _) = rest.split_once('=')?;
+            let name = head.trim().trim_start_matches("last ").trim();
+            let x = eng.loop_value(v.field(name))?;
+            Some(format!("loop {}= {}", head, lit(x)?))
+        })
+        .collect()
 }
 
 /// Whether `start` is fine cold, every edit but the last keeps it fine, and

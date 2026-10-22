@@ -952,6 +952,20 @@ impl MergeTimes {
     }
 }
 
+/// How a loop-back field moves (`Engine::declare_loopback_with`,
+/// `Ctx::declare_loopback_with`).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub struct LoopOptions {
+    /// Its round values early (`Engine::declare_loopback_early`; not
+    /// deterministic).
+    pub early: bool,
+    /// Published by several nodes, the last publication in text order
+    /// (by unit, then position) is its value (else two different values
+    /// are an error). A publisher after the last appearing moves it.
+    pub last_wins: bool,
+}
+
 /// An evaluation's run audit (`Engine::set_run_audit`).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct RunAudit {

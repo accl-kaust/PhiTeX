@@ -448,11 +448,12 @@ impl Engine {
                 if !later.is_empty() {
                     // (Each field's declaring run: its readers' link.)
                     let mut early = Vec::new();
-                    for &(f, _, by, e) in &later {
+                    for &(f, _, by, o) in &later {
                         hs.loop_decl.entry(f).or_insert(by);
-                        if e && self.early.insert(f) {
+                        if o.early && !self.early.contains(&f) {
                             early.push(f);
                         }
+                        self.set_loop_options(f, o);
                     }
                     let later: Vec<(Field, ValueId)> = later.into_iter().map(|(f, x, _, _)| (f, x)).collect();
                     // (All at once: one pass over the runs' reads.)
@@ -1996,8 +1997,31 @@ impl Engine {
     /// The value published for loop-back field `f` in the current world
     /// (none published: its initial value; two: `None`).
     fn published(&self, f: Field) -> Option<ValueId> {
+        let last = self.core.last_wins.contains(&f);
+        // (A publisher in work may publish otherwise yet: held. Of a
+        // field whose last publication wins, only the last publisher
+        // matters.)
+        let in_work = |id: Id| self.w.node(id).is_some_and(|n| n.st != St::Done);
+        let all = self.w.pub_any.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX)));
+        if last {
+            let lastp = all.filter_map(|(&(_, id), _)| self.w.node(id).map(|n| ((n.unit, n.pos), id))).max();
+            if lastp.is_some_and(|(_, id)| in_work(id)) {
+                return None;
+            }
+        } else if all.into_iter().any(|(&(_, id), _)| in_work(id)) {
+            return None;
+        }
         let mut v = None;
-        for (_, &x) in self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))) {
+        let mut at = None;
+        for (&(_, id), &x) in self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))) {
+            if last {
+                let p = self.w.node(id).map(|n| (n.unit, n.pos));
+                if at.is_none() || p > at {
+                    at = p;
+                    v = Some(x);
+                }
+                continue;
+            }
             if v.is_some_and(|y| y != x) {
                 return None;
             }
@@ -3008,15 +3032,26 @@ fn publications_of(core: &super::core::Core, w: &World) -> Result<Vec<(Field, Va
             while it.peek().is_some_and(|((g, _), _)| *g < f) {
                 it.next();
             }
+            let last = core.last_wins.contains(&f);
             let mut val = None;
-            while let Some(&(&(g, _), &x)) = it.peek() {
+            let mut at = None;
+            while let Some(&(&(g, id), &x)) = it.peek() {
                 if g != f {
                     break;
                 }
-                if val.is_some_and(|y| y != x) {
-                    return Err(EvalError::ConflictingPublication { field: f });
+                if last {
+                    // (The last publisher in text order.)
+                    let p = w.node(id).map(|n| (n.unit, n.pos));
+                    if at.is_none() || p > at {
+                        at = p;
+                        val = Some(x);
+                    }
+                } else {
+                    if val.is_some_and(|y| y != x) {
+                        return Err(EvalError::ConflictingPublication { field: f });
+                    }
+                    val = Some(x);
                 }
-                val = Some(x);
                 it.next();
             }
             out.push((f, val.unwrap_or(core.loops[&f])));
@@ -3024,11 +3059,23 @@ fn publications_of(core: &super::core::Core, w: &World) -> Result<Vec<(Field, Va
         return Ok(out);
     }
     let mut pubs: FxHashMap<Field, Vec<ValueId>> = FxHashMap::default();
+    let mut lasts: FxHashMap<Field, ((u32, Pos), ValueId)> = FxHashMap::default();
     for (id, _) in w.publishers.iter() {
-        let Some(r) = w.node(*id).and_then(|n| n.res.as_ref()) else { continue };
+        let Some(n) = w.node(*id) else { continue };
+        let Some(r) = n.res.as_ref() else { continue };
         for &(f, x) in &r.pubs {
-            pubs.entry(f).or_default().push(x);
+            if core.last_wins.contains(&f) {
+                let p = (n.unit, n.pos);
+                if lasts.get(&f).is_none_or(|l| p > l.0) {
+                    lasts.insert(f, (p, x));
+                }
+            } else {
+                pubs.entry(f).or_default().push(x);
+            }
         }
+    }
+    for (f, (_, x)) in lasts {
+        pubs.insert(f, vec![x]);
     }
     let mut fields: Vec<Field> = core.loops.keys().copied().collect();
     fields.sort_by_key(|f| f.0.raw());
