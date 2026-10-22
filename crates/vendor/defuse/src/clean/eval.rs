@@ -479,7 +479,7 @@ impl Engine {
                         self.enqueue(&mut s, id);
                     }
                     // (Early ones take what is published already.)
-                    self.move_early(&mut s, &mut rep, &mut hs, &early)?;
+                    self.move_early(&mut s, &mut rep, &mut hs, &early, true)?;
                     continue;
                 }
                 // Early moves held for their publications to be final: all
@@ -1988,7 +1988,7 @@ impl Engine {
                 }
                 fields.sort_by_key(|f| f.0.raw());
                 fields.dedup();
-                self.move_early(s, rep, hs, &fields)?;
+                self.move_early(s, rep, hs, &fields, all)?;
                 return Ok(true);
             }
             u = self.early_pending.range((Excluded((unit, Pos::MAX, Field(ValueId::from_raw(u64::MAX)))), Unbounded)).next().map(|x| x.0);
@@ -2039,11 +2039,16 @@ impl Engine {
 
     /// Early loop-back fields `fs` take the values published for them now
     /// (a field published two values waits for the round's end); each
-    /// field's changes count against the round cap.
-    fn move_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, fs: &[Field]) -> Result<(), EvalError> {
+    /// field's changes count against the round cap. Not `quiet`, a field
+    /// published by none now (its publications withdrawn by reruns, say)
+    /// waits: its initial value would be a dip, not a publication.
+    fn move_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, fs: &[Field], quiet: bool) -> Result<(), EvalError> {
         let mut vals = Vec::new();
         for &f in fs {
             if self.early_frozen.contains(&f) {
+                continue;
+            }
+            if !quiet && self.w.pub_ix.range(std::ops::Bound::Included(&(f, 0)), std::ops::Bound::Included(&(f, Id::MAX))).next().is_none() {
                 continue;
             }
             let Some(v) = self.published(f) else { continue };
@@ -3898,6 +3903,7 @@ fn run_job(
     cx.fuel = fuel;
     let op = core.ops[cx.op.0 as usize].clone();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
+    cx.flush_gets();
     if cx.named_gone && r.as_ref().is_ok() {
         drop(cx);
         return run_job(core, w, id, None, predict, careful, fuel);

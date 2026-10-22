@@ -78,6 +78,15 @@ pub(crate) struct KeptViews {
     pub composed: Vec<Vec<super::world::CPart>>,
 }
 
+/// What a run took by index and by key through one view (root read,
+/// path) since its last mark.
+pub(crate) struct Gets {
+    root: u32,
+    path: u32,
+    ix: Vec<u32>,
+    keys: Vec<ValueId>,
+}
+
 /// A run's view of the store.
 pub struct Ctx<'a> {
     pub(crate) core: &'a Core,
@@ -95,6 +104,9 @@ pub struct Ctx<'a> {
     pub(crate) views: Vec<(u32, u32, ValueId)>,
     /// The compositions its views name (`Ctx::compose`).
     pub(crate) composed: Vec<Vec<super::world::CPart>>,
+    /// What it took by index and by key through each view since the last
+    /// mark ([`Ctx::get`]), read as one at the next (`flush_gets`).
+    pub(crate) gets: Vec<Gets>,
     /// The marks this attempt made, the token it keeps for a later run
     /// (`checkpoint`, `keep_after`), the run it resumes from a mark of
     /// (`resumed`), and the old mark it was cut off at (its index).
@@ -221,6 +233,7 @@ impl<'a> Ctx<'a> {
             forwards: Vec::new(),
             views,
             composed,
+            gets: Vec::new(),
             // (Resumed at a mark: the marks before it stand.)
             passes: Vec::new(),
             out_from: None,
@@ -854,7 +867,9 @@ impl<'a> Ctx<'a> {
     }
 
     /// What step `s` gives of view `v` (`None` if it does not apply): the
-    /// run depends on it.
+    /// run depends on it. Elements taken by index or by key through one
+    /// view are read as one read of it, at the next mark and at the run's
+    /// end (cheap per get, one entry per view to commit).
     pub fn get(&mut self, v: View, s: crate::api::Step) -> Option<ValueId> {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&v), self.core.rec_step(s)]) } else { serde_json::Value::Null };
@@ -865,9 +880,62 @@ impl<'a> Ctx<'a> {
     }
 
     fn get_inner(&mut self, v: View, s: crate::api::Step) -> Option<ValueId> {
+        use crate::api::Step;
         let (root, path, x) = self.views[v.0 as usize];
-        self.view_read(root, self.core.extend_path(path, s));
+        match s {
+            // (Gathered: one read of the view, at the next mark.)
+            Step::Index(_) | Step::Key(_) if root & super::world::COMPOSED == 0 && matches!(self.reads.get(root as usize), Some(Read::Use { .. } | Read::Range { .. })) => {
+                let g = match self.gets.iter().rposition(|g| g.root == root && g.path == path) {
+                    Some(i) => &mut self.gets[i],
+                    None => {
+                        self.gets.push(Gets { root, path, ix: Vec::new(), keys: Vec::new() });
+                        self.gets.last_mut().expect("pushed")
+                    }
+                };
+                match s {
+                    Step::Index(i) => g.ix.push(i),
+                    Step::Key(k) => g.keys.push(k),
+                    _ => {}
+                }
+            }
+            _ => self.view_read(root, self.core.extend_path(path, s)),
+        }
         self.core.step(s, x)
+    }
+
+    /// Reads what the run took by index and by key through each view since
+    /// the last mark: one read of the view's root each, through a path
+    /// ending in the indices (`Step::Indices`) or the keys (`Step::Keys`)
+    /// taken; one taken alone, through its own step. The run depends on
+    /// exactly those elements.
+    pub(crate) fn flush_gets(&mut self) {
+        use crate::api::Step;
+        if self.gets.is_empty() {
+            return;
+        }
+        let v = &self.core.values;
+        for mut g in std::mem::take(&mut self.gets) {
+            g.ix.sort_unstable();
+            g.ix.dedup();
+            let s = match g.ix[..] {
+                [] => None,
+                [i] => Some(Step::Index(i)),
+                _ => Some(Step::Indices(v.list(g.ix.iter().map(|&i| v.int(i64::from(i))).collect()))),
+            };
+            if let Some(s) = s {
+                self.view_read(g.root, self.core.extend_path(g.path, s));
+            }
+            g.keys.sort_unstable_by_key(|k| k.raw());
+            g.keys.dedup();
+            let s = match g.keys[..] {
+                [] => None,
+                [k] => Some(Step::Key(k)),
+                _ => Some(Step::Keys(v.list(g.keys))),
+            };
+            if let Some(s) = s {
+                self.view_read(g.root, self.core.extend_path(g.path, s));
+            }
+        }
     }
 
     /// View `v`'s length (as [`crate::Step::Len`]): the run depends on it.
@@ -2253,6 +2321,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn mark_at(&mut self, mark: u32, state: ValueId, as_old: ValueId, patch: Option<&[(Field, Locality, Option<ValueId>)]>) -> Result<(), Stop> {
+        self.flush_gets();
         let (digest, odigest) = self.out_digests();
         let read_ix = u32::try_from(self.reads.len()).unwrap_or(u32::MAX);
         let (kids, conts) = (u32::try_from(self.kids.len()).unwrap_or(u32::MAX), u32::try_from(self.conts.len()).unwrap_or(u32::MAX));
@@ -2378,6 +2447,7 @@ impl<'a> Ctx<'a> {
         self.forwards.clear();
         self.views.clear();
         self.composed.clear();
+        self.gets.clear();
         self.marks.clear();
         self.passes.clear();
         self.out_from = None;
