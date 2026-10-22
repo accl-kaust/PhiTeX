@@ -3138,8 +3138,8 @@ impl Graph {
                 by.sort_by_key(|e| std::cmp::Reverse(e.1));
                 by.truncate(8);
                 eprintln!(
-                    "acct-edit: guesses: speculations {} mispredictions {} refuted nodes {} restarted {} by {:?}; refuted by field {by:?}",
-                    r.speculations, r.mispredictions, r.refuted_nodes, r.restarted, r.restarted_by
+                    "acct-edit: guesses: speculations {} mispredictions {} refuted nodes {} restarted {} by {:?}; refuted by field {by:?}; conservative {} careful lapsed {}",
+                    r.speculations, r.mispredictions, r.refuted_nodes, r.restarted, r.restarted_by, r.nodes_conservative, r.careful_lapsed
                 );
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
