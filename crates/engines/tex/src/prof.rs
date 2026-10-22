@@ -20,7 +20,10 @@ pub(crate) const MARK: usize = 10;
 pub(crate) const MARK_CK: usize = 11;
 pub(crate) const KEEP: usize = 12;
 pub(crate) const RESUME: usize = 13;
-const N: usize = 14;
+pub(crate) const MARK_TEXT: usize = 14;
+pub(crate) const MARK_STATE: usize = 15;
+pub(crate) const MARK_DIGEST: usize = 16;
+const N: usize = 17;
 const NAMES: [&str; N] = [
     "exec run (body+fold+finish)",
     "char_run",
@@ -36,6 +39,9 @@ const NAMES: [&str; N] = [
     "marks: checkpoint",
     "marks: kept token",
     "marks: resume",
+    "  snapshot: input",
+    "  snapshot: table",
+    "  digest",
 ];
 
 static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];

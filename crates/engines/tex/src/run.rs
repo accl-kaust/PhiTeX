@@ -5404,7 +5404,9 @@ impl Run<'_, '_> {
         self.mark_cmds = self.cmds;
         let tp = crate::prof::start();
         let p = self.snapshot();
+        let td = crate::prof::start();
         let h = parked_digest(&p);
+        crate::prof::add(crate::prof::MARK_DIGEST, td);
         crate::prof::add(crate::prof::MARK, tp);
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
@@ -5562,6 +5564,7 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines, reason = "one state field a line")]
     pub(crate) fn snapshot(&mut self) -> Parked {
         let v = self.v;
+        let ti = crate::prof::start();
         let mut segs = Vec::new();
         let input = &self.input;
         for l in input.levels.iter().rev() {
@@ -5601,6 +5604,7 @@ impl Run<'_, '_> {
         }
         let nlev_all = nlev + self.parked_levels.saturating_sub(input.text_at);
         segs.extend(input.text_rest().iter().cloned());
+        crate::prof::add(crate::prof::MARK_TEXT, ti);
         let nest = self
             .nest
             .iter()
@@ -5650,6 +5654,9 @@ impl Run<'_, '_> {
             .map(|(l, x)| (self.loc_field(l), x))
             .collect();
         let level_tys = self.input.levels.iter().rev().map(|l| l.ty).collect();
+        let ts = crate::prof::start();
+        let st = self.st.park(v);
+        crate::prof::add(crate::prof::MARK_STATE, ts);
         Parked {
             epoch: self.cx.values_epoch(),
             segs,
@@ -5679,7 +5686,7 @@ impl Run<'_, '_> {
             defined_memo,
             rec_load: self.rec_load,
             no_pull: self.no_pull,
-            st: self.st.park(v),
+            st,
             contribs: self.contribs.clone(),
             kids: self.kids.clone(),
             effect: self.effect,

@@ -1805,6 +1805,46 @@ impl State {
         }
     }
 
+    /// Each touched slot's entry, saved entry and publication encoded
+    /// once ([`State::id_of`]): a run's marks park its table again and
+    /// again ([`State::park`]), the entries it did not change since not
+    /// encoded again. No access stamped, nothing logged: the entries'
+    /// values are as they were.
+    fn cache_ids(&mut self, v: &Values) {
+        fn enc(st: &State, e: &Entry, v: &Values) -> Option<Entry> {
+            (e.flags & HAS_ID == 0 && e.kind != K_RAW).then(|| Entry {
+                id: st.encode(e, v),
+                flags: e.flags | HAS_ID,
+                ..*e
+            })
+        }
+        for i in 0..self.touched.len() {
+            let l = self.touched[i];
+            let Some(sl) = self.slot_ref(l) else { continue };
+            if let Some(e) = enc(self, &sl.e, v) {
+                let sl = if l & SPILL == 0 {
+                    &mut self.eq[l as usize]
+                } else {
+                    &mut self.spill[(l & !SPILL) as usize]
+                };
+                sl.e = e;
+            }
+        }
+        for i in 0..self.save.len() {
+            if let Some(e) = enc(self, &self.save[i].prev, v) {
+                self.save[i].prev = e;
+            }
+        }
+        for i in 0..self.metas.len() {
+            if let Some((x, _)) = &self.metas[i].publ
+                && let Some(e) = enc(self, x, v)
+                && let Some((x, _)) = &mut self.metas[i].publ
+            {
+                *x = e;
+            }
+        }
+    }
+
     /// The table without `Rc`, for a parked run ([`PState`]): the table
     /// the run had, so the run resumed from it holds what a run that never
     /// parked would (whether a run parks is the schedule's choice): every
@@ -1812,6 +1852,7 @@ impl State {
     /// values (they still hold when the engine gives the park back), its
     /// definitions' bookkeeping in its order.
     pub(crate) fn park(&mut self, v: &Values) -> PState {
+        self.cache_ids(v);
         let ploc = |s: &State, l: Loc| -> PLoc {
             if l & SPILL == 0 {
                 PLoc::Fixed(l)
