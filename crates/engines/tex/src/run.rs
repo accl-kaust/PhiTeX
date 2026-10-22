@@ -1517,9 +1517,12 @@ impl<'c, 'a> Run<'c, 'a> {
             return None;
         }
         let f = self.st.field(loc)?;
-        crate::val::field_name(self.v, f)
-            .strip_prefix("count:")
-            .and_then(|n| n.parse::<i32>().ok())
+        // (the name read in place: no copy of it per location loaded)
+        self.v
+            .with_str(f.0, |s| {
+                s.strip_prefix("count:").and_then(|n| n.parse::<i32>().ok())
+            })
+            .flatten()
     }
 
     /// A write of integer register `loc` as a map of its value
