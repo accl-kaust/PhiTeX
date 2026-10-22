@@ -2077,6 +2077,18 @@ struct PSlot {
     meta: Option<PMeta>,
 }
 
+impl PSlot {
+    /// Whether the slot only holds what the run read of its field (no
+    /// definition, no group's save of it, not made inert by one): the
+    /// engine's value, which every run reaching here with the same reads
+    /// has, loaded or not as its path went (a lookahead that fetched the
+    /// next command's name before a mark, a memo kept over a park that
+    /// spared a lookup). Not part of the state a mark compares.
+    fn is_read_cache(&self) -> bool {
+        self.meta.is_none() && self.save_gid == 0 && self.ginert == 0
+    }
+}
+
 #[derive(Clone)]
 struct PSaved {
     loc: PLoc,
@@ -2152,9 +2164,10 @@ impl PState {
         let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
         let mut h = phitex_defuse::FxHasher::default();
         (s.loc.word(), ent(&s.e), s.save_gid, s.save_stamp, s.ginert).hash(&mut h);
+        // (the engine's value the run read before its definition is a
+        // read's cache too, [`PSlot::is_read_cache`]: left out)
         if let Some(m) = &s.meta {
             (
-                m.eng.map(|x| x.map(ValueId::raw)),
                 m.publ.map(|(x, l)| (x.map(ValueId::raw), l)),
                 m.ldef_stamp,
                 m.ldef_local,
@@ -2172,24 +2185,31 @@ impl PState {
         let by: FxHashMap<u64, &PSlot> = old.slots.iter().map(|s| (s.loc.word(), s)).collect();
         let mine: FxHashMap<u64, &PSlot> = self.slots.iter().map(|s| (s.loc.word(), s)).collect();
         let mut out = Vec::new();
+        // (a read's cache in one state and none in the other is no
+        // difference; two caches of one read differ only where their
+        // values do, a read that did not hold)
         for s in &self.slots {
             match by.get(&s.loc.word()) {
                 Some(o) if Self::slot_hash(o) == Self::slot_hash(s) => {}
+                Some(o) if o.is_read_cache() && s.is_read_cache() && o.e.id == s.e.id => {}
+                None if s.is_read_cache() => {}
                 o => out.push((s.loc.key(), o.map(|o| (o.e.id, o.e.flags)), Some((s.e.id, s.e.flags)))),
             }
         }
         for o in &old.slots {
-            if !mine.contains_key(&o.loc.word()) {
+            if !mine.contains_key(&o.loc.word()) && !o.is_read_cache() {
                 out.push((o.loc.key(), Some((o.e.id, o.e.flags)), None));
             }
         }
         out
     }
 
-    /// The slots' digests summed: their order, the run's, left out.
+    /// The slots' digests summed: their order, the run's, left out, and
+    /// the slots that only cache a read ([`PSlot::is_read_cache`]).
     pub(crate) fn slot_sum(&self) -> u64 {
         self.slots
             .iter()
+            .filter(|s| !s.is_read_cache())
             .fold(0u64, |a, s| a.wrapping_add(Self::slot_hash(s)))
     }
 
