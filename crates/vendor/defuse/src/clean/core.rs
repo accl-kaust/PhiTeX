@@ -87,7 +87,10 @@ pub(crate) struct Core {
     pub loops: FxHashMap<Field, ValueId>,
     /// Loop-backs declared by runs, taken in when the evaluation is quiet.
     /// Loop-back fields runs declared, each with its run's node.
-    pub loops_later: Mutex<Vec<(Field, ValueId, u64, bool)>>,
+    pub loops_later: Mutex<Vec<(Field, ValueId, u64, crate::api::LoopOptions)>>,
+    /// The loop-back fields whose last publication in text order wins
+    /// (`LoopOptions::last_wins`).
+    pub last_wins: FxHashSet<Field>,
     pub env: RwLock<Env>,
     pub provider: Option<Box<crate::api::EnvProvider>>,
     /// Held while the provider is asked (runs asking for the same field at
@@ -169,6 +172,7 @@ impl Core {
 
             loops: FxHashMap::default(),
             loops_later: Mutex::new(Vec::new()),
+            last_wins: FxHashSet::default(),
             env: RwLock::new(Env::default()),
             provider: None,
             texts: Mutex::new(FxHashMap::default()),
@@ -616,9 +620,9 @@ impl Core {
         self.loops.contains_key(&f)
     }
 
-    pub(crate) fn declare_loop_later(&self, f: Field, init: ValueId, by: u64, early: bool) {
-        if early || !self.loops.contains_key(&f) {
-            lock(&self.loops_later).push((f, init, by, early));
+    pub(crate) fn declare_loop_later(&self, f: Field, init: ValueId, by: u64, o: crate::api::LoopOptions) {
+        if o != crate::api::LoopOptions::default() || !self.loops.contains_key(&f) {
+            lock(&self.loops_later).push((f, init, by, o));
         }
     }
 }

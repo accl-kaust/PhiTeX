@@ -63,6 +63,8 @@ struct Interp<'v> {
     v: &'v Values,
     pos: u64,
     loops: FxHashMap<Field, ValueId>,
+    /// The loop-back fields whose last publication wins (`loop last`).
+    last: FxHashSet<Field>,
     pubs: FxHashMap<Field, ValueId>,
     apps: FxHashMap<ValueId, ValueId>,
     running: FxHashSet<ValueId>,
@@ -90,12 +92,16 @@ pub fn interpret_env(lines: &[String], env: &[(&str, i64)]) -> Result<Vec<u64>, 
     let v = Values::new();
     let asts: Vec<ValueId> = lines.iter().map(|l| parse_stmt(&v, l)).collect();
     let mut loops = FxHashMap::default();
+    let mut last = FxHashSet::default();
     let mut names = Vec::new();
     for &s in &asts {
         let (t, a) = tag(&v, s);
         if t == "loop" {
             let name = text(&v, a[0]);
             loops.insert(v.field(&name), a[1]);
+            if a.get(2).is_some_and(|&l| truthy(&v, l)) {
+                last.insert(v.field(&name));
+            }
             names.push(name);
         }
     }
@@ -104,6 +110,7 @@ pub fn interpret_env(lines: &[String], env: &[(&str, i64)]) -> Result<Vec<u64>, 
         v: &v,
         pos: 0,
         loops,
+        last,
         pubs: FxHashMap::default(),
         apps: FxHashMap::default(),
         running: FxHashSet::default(),
@@ -369,7 +376,7 @@ impl Interp<'_> {
             "publish" => {
                 let val = self.expr(u, a[1]);
                 let f = v.field(&text(v, a[0]));
-                if self.pubs.insert(f, val).is_some_and(|p| p != val) {
+                if self.pubs.insert(f, val).is_some_and(|p| p != val) && !self.last.contains(&f) {
                     self.error.get_or_insert_with(|| "conflicting publication".into());
                 }
                 val

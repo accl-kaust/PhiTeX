@@ -336,10 +336,16 @@ impl Parser<'_> {
                 }
                 "loop" => {
                     self.pos += 1;
+                    // `loop last n = ..`: its last publication in text
+                    // order wins.
+                    let last = self.is_kw("last") && matches!(self.peek_at(1), Some(Tok::Ident(_)));
+                    if last {
+                        self.pos += 1;
+                    }
                     let n = self.ident()?;
                     self.eat("=")?;
                     let e = self.expr()?;
-                    return Ok(self.tagged("loop", vec![self.s(&n), e]));
+                    return Ok(self.tagged("loop", vec![self.s(&n), e, self.v.bool(last)]));
                 }
                 "sumnext" | "grab" => {
                     self.pos += 1;
@@ -2189,7 +2195,10 @@ impl Lang {
                 let init = a[1];
                 // FUZZ_LOOP_EARLY=1: early round values (not deterministic;
                 // the check takes a result the report warns of).
-                if loop_early() {
+                let last = a.get(2).is_some_and(|&l| truthy(v, l));
+                if last {
+                    eng.declare_loopback_with(f, init, defuse::LoopOptions { early: loop_early(), last_wins: true });
+                } else if loop_early() {
                     eng.declare_loopback_early(f, init);
                 } else {
                     eng.declare_loopback(f, init);

@@ -671,6 +671,34 @@ impl Engine {
         self.rec_call("declare_loopback_early", crate::record::rec().map(|_| crate::record::j(&(&f, &init))), &());
     }
 
+    /// Loop-back field `f`'s round value now (`None`: not declared).
+    #[must_use]
+    pub fn loop_value(&self, f: Field) -> Option<ValueId> {
+        self.w.loops.get(&f).copied()
+    }
+
+    /// Declares loop-back field `f` (as [`Self::declare_loopback`]) with
+    /// options `o`: early round values ([`Self::declare_loopback_early`]),
+    /// and the last publication in text order winning
+    /// ([`crate::LoopOptions::last_wins`]: each of several publishers may
+    /// publish it as it goes, a page's finisher its labels, say).
+    pub fn declare_loopback_with(&mut self, f: Field, init: ValueId, o: crate::api::LoopOptions) {
+        self.declare_loopbacks_inner(&[(f, init)]);
+        self.set_loop_options(f, o);
+        #[cfg(feature = "observe")]
+        self.rec_call("declare_loopback_with", crate::record::rec().map(|_| crate::record::j(&(&f, &init, &o))), &());
+    }
+
+    /// Field `f`'s options taken in (once set, kept).
+    pub(crate) fn set_loop_options(&mut self, f: Field, o: crate::api::LoopOptions) {
+        if o.early {
+            self.early.insert(f);
+        }
+        if o.last_wins && !self.core.last_wins.contains(&f) {
+            self.core_mut().last_wins.insert(f);
+        }
+    }
+
     /// Declares several loop-back fields at once: one pass over the runs
     /// (a field declared already is left as it is).
     pub fn declare_loopbacks(&mut self, fields: &[(Field, ValueId)]) {
@@ -1247,6 +1275,10 @@ impl Engine {
         let pi = |w: &World| -> Vec<((Field, Id), ValueId)> { w.pub_ix.iter().map(|(&k, &x)| (k, x)).collect() };
         if pi(&self.w) != pi(&want) {
             out.push(format!("pub_ix {:?}, the nodes file {:?}", pi(&self.w), pi(&want)));
+        }
+        let pa = |w: &World| -> Vec<((Field, Id), ValueId)> { w.pub_any.iter().map(|(&k, &x)| (k, x)).collect() };
+        if pa(&self.w) != pa(&want) {
+            out.push(format!("pub_any {:?}, the nodes file {:?}", pa(&self.w), pa(&want)));
         }
         let fw = |w: &World| -> Vec<(u64, Id)> { w.fwds.iter().map(|(&k, _)| k).collect() };
         if fw(&self.w) != fw(&want) {

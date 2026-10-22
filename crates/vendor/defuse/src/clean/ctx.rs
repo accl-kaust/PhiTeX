@@ -1011,7 +1011,7 @@ impl<'a> Ctx<'a> {
 
     #[inline]
     fn declare_loopback_inner(&mut self, f: Field, init: ValueId) {
-        self.core.declare_loop_later(f, init, self.me, false);
+        self.core.declare_loop_later(f, init, self.me, crate::api::LoopOptions::default());
     }
 
     /// Declares loop-back field `f` (as `declare_loopback`), its round
@@ -1022,9 +1022,20 @@ impl<'a> Ctx<'a> {
     pub fn declare_loopback_early(&mut self, f: Field, init: ValueId) {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &init, )) } else { serde_json::Value::Null };
-        self.core.declare_loop_later(f, init, self.me, true);
+        self.core.declare_loop_later(f, init, self.me, crate::api::LoopOptions { early: true, last_wins: false });
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "declare_loopback_early", a, serde_json::Value::Null);
+    }
+
+    /// Declares loop-back field `f` (as `declare_loopback`) with options
+    /// `o` ([`crate::LoopOptions`]: early values, the last publication
+    /// winning).
+    pub fn declare_loopback_with(&mut self, f: Field, init: ValueId, o: crate::api::LoopOptions) {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(&f, &init, &o, )) } else { serde_json::Value::Null };
+        self.core.declare_loop_later(f, init, self.me, o);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "declare_loopback_with", a, serde_json::Value::Null);
     }
 
     /// Publishes a loop-back field's next round value.

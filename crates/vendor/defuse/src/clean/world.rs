@@ -518,6 +518,11 @@ fn published(n: &Node) -> &[(Field, ValueId)] {
     }
 }
 
+/// A node's last result's publications, whatever its state (`pub_any`).
+fn published_any(n: &Node) -> &[(Field, ValueId)] {
+    n.res.as_ref().map_or(&[], |r| &r.pubs)
+}
+
 /// The loop-back fields a done node's definitions forward (`fwds` keys).
 fn forwarded(n: &Node) -> Vec<u64> {
     let mut v: Vec<u64> = match &n.res {
@@ -625,6 +630,9 @@ pub(crate) struct World {
     /// The done nodes' publications by field and node (what
     /// `publications_of` merges with the loop-back values).
     pub pub_ix: PMap<(Field, Id), ValueId>,
+    /// Every node's last result's publications, done or in work (the
+    /// early path holds a move while a publisher is in work).
+    pub pub_any: PMap<(Field, Id), ValueId>,
     /// Placed nodes whose placer runs again for a change (a read that
     /// broke, a new text) and has not placed them again yet: they wait for
     /// it (their texts may be stale).
@@ -730,6 +738,7 @@ impl World {
             && self.publishers.ptr_eq(&other.publishers)
             && self.fwds.ptr_eq(&other.fwds)
             && self.pub_ix.ptr_eq(&other.pub_ix)
+            && self.pub_any.ptr_eq(&other.pub_any)
     }
 
     /// Field `f` of unit `u`, if anything is filed under it.
@@ -1398,6 +1407,16 @@ impl World {
                 self.publishers.remove(&id, &NoMeasure);
             }
         }
+        let aw = self.nodes.get(&id).map_or(&[][..], |o| published_any(o));
+        if aw != published_any(&n) {
+            let old: Vec<(Field, ValueId)> = aw.to_vec();
+            for (f, _) in old {
+                self.pub_any.remove(&(f, id), &NoMeasure);
+            }
+            for &(f, x) in published_any(&n) {
+                self.pub_any.insert((f, id), x, &NoMeasure);
+            }
+        }
         let pw = self.nodes.get(&id).map_or(&[][..], |o| published(o));
         if pw != published(&n) {
             let old: Vec<(Field, ValueId)> = pw.to_vec();
@@ -1459,7 +1478,10 @@ impl World {
             for k in forwarded(o) {
                 self.fwds.remove(&(k, id), &NoMeasure);
             }
-            let ps: Vec<Field> = published(o).iter().map(|p| p.0).collect();
+            let ps: Vec<Field> = published_any(o).iter().map(|p| p.0).collect();
+            for &f in &ps {
+                self.pub_any.remove(&(f, id), &NoMeasure);
+            }
             for f in ps {
                 self.pub_ix.remove(&(f, id), &NoMeasure);
             }
