@@ -2081,6 +2081,21 @@ impl PLoc {
     }
 }
 
+/// A slot whose value differs between two parked tables
+/// ([`PState::value_diff`]): its location, the values groups saved of
+/// it, its old and new value, its old and new base-level publication,
+/// the value it read from the engine.
+#[allow(clippy::option_option)]
+pub(crate) type ValueDiff = (
+    PLocKey,
+    Vec<Option<ValueId>>,
+    Option<ValueId>,
+    Option<ValueId>,
+    Option<Option<ValueId>>,
+    Option<Option<ValueId>>,
+    Option<Option<ValueId>>,
+);
+
 /// A parked table's location as a caller names it: a fixed location, or
 /// a spill one by its field.
 #[derive(Clone, Copy, Debug)]
@@ -2125,23 +2140,24 @@ impl PState {
     pub(crate) fn value_diff(
         &self,
         old: &PState,
-    ) -> Option<Vec<(PLocKey, Option<ValueId>, Option<ValueId>, Option<Option<ValueId>>, Option<Option<ValueId>>, Option<Option<ValueId>>)>> {
+    ) -> Option<Vec<ValueDiff>> {
         if self.slots.len() != old.slots.len() {
             return None;
         }
         let by: FxHashMap<u64, &PSlot> = old.slots.iter().map(|s| (s.loc.word(), s)).collect();
-        // (a slot a group saved: what a scope publishes of it may be the
-        // saved value, not its own; not patched)
-        let saved: phitex_defuse::FxHashSet<u64> = old.save.iter().map(|x| x.loc.word()).collect();
+        // (the values the groups saved of each slot: what a scope
+        // publishes of a slot may be one of those, not its own)
+        let mut saved: FxHashMap<u64, Vec<Option<ValueId>>> = FxHashMap::default();
+        for x in &old.save {
+            saved.entry(x.loc.word()).or_default().push(x.prev.id);
+        }
         let mut out = Vec::new();
         for s in &self.slots {
             let o = by.get(&s.loc.word())?;
             if Self::slot_hash(s) == Self::slot_hash(o) {
                 continue;
             }
-            if saved.contains(&s.loc.word()) {
-                return None;
-            }
+
             let same_shape = s.e.flags == o.e.flags
                 && s.save_gid == o.save_gid
                 && s.save_stamp == o.save_stamp
@@ -2162,6 +2178,7 @@ impl PState {
             }
             out.push((
                 s.loc.key(),
+                saved.get(&s.loc.word()).cloned().unwrap_or_default(),
                 o.e.id,
                 s.e.id,
                 o.meta.as_ref().and_then(|m| m.publ.map(|x| x.0)),

@@ -5434,7 +5434,7 @@ impl Run<'_, '_> {
             return None;
         }
         let mut patch = Vec::new();
-        for (key, oval, nval, opub, npub, eng) in diff {
+        for (key, saved, oval, nval, opub, npub, eng) in diff {
             let f = match key {
                 crate::runstate::PLocKey::Spill(f) => f,
                 // (`\afterassignment`'s token: published by a rule of its
@@ -5459,6 +5459,11 @@ impl Run<'_, '_> {
             let mut any = false;
             for &(g, l, x) in old.defs[i..].iter().take_while(|x| x.0 == f) {
                 any = true;
+                // (a value a group saved: published from the save, the
+                // same for both runs, or from the slot: not told apart)
+                if saved.contains(&Some(x)) {
+                    return None;
+                }
                 let y = if Some(x) == oval {
                     nval
                 } else if Some(Some(x)) == opub {
