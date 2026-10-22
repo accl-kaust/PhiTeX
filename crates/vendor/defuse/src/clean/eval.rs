@@ -380,6 +380,7 @@ impl Engine {
             self.ev_prev = None;
             self.early_changes.clear();
             self.early_frozen.clear();
+            self.early_pending.clear();
             self.early_live = true;
             if per_round {
                 if let Some((w, d)) = self.ev_olds.pop_front() {
@@ -461,6 +462,11 @@ impl Engine {
                     }
                     // (Early ones take what is published already.)
                     self.move_early(&mut s, &mut rep, &mut hs, &early)?;
+                    continue;
+                }
+                // Early moves held for their publications to be final: all
+                // final now (their readers run, in this round).
+                if self.early_live && !self.early_pending.is_empty() && self.flush_early(&mut s, &mut rep, &mut hs, true)? {
                     continue;
                 }
                 // The next round's loop-back values (a capped early field
@@ -746,6 +752,7 @@ impl Engine {
         rep.rerun_causes = causes;
         rep.audit = self.audit.take();
         rep.cut_in_run = self.core.cut_in_run.swap(0, std::sync::atomic::Ordering::Relaxed);
+        rep.cut_patched = self.core.cut_patched.swap(0, std::sync::atomic::Ordering::Relaxed);
         if let (Some(a), Some(m)) = (rep.audit.as_mut(), super::core::lock(&self.core.rechecks).take()) {
             let mut v: Vec<(Option<Field>, u64, u64)> = m.into_iter().map(|(f, (n, b))| (f, n, b)).collect();
             v.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.map(|f| f.0.raw()).cmp(&y.0.map(|f| f.0.raw()))));
@@ -1882,13 +1889,45 @@ impl Engine {
         r?;
         if self.early_live && !self.early.is_empty() {
             self.early_published(id, &mut early);
-            if !early.is_empty() {
-                early.sort_by_key(|f| f.0.raw());
-                early.dedup();
-                self.move_early(s, rep, hs, &early)?;
+            if let Some(n) = self.w.node(id) {
+                let (u, p) = (n.unit, n.pos);
+                self.early_pending.extend(early.into_iter().map(|f| (u, p, f)));
+            }
+            if !self.early_pending.is_empty() {
+                self.flush_early(s, rep, hs, false)?;
             }
         }
         Ok(())
+    }
+
+    /// Moves the pending early fields whose publication is final: no node
+    /// at or before its publisher in its unit in work (`all`: every one,
+    /// at a quiet point). Whether any were taken.
+    fn flush_early(&mut self, s: &mut Sched, rep: &mut Report, hs: &mut Heights, all: bool) -> Result<bool, EvalError> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let low = Field(ValueId::from_raw(0));
+        let mut fields = Vec::new();
+        let mut u = self.early_pending.first().map(|x| x.0);
+        while let Some(unit) = u {
+            let first = if all { None } else { self.w.work_of(unit).and_then(|m| m.at_or_above(&0)).map(|(&p, _)| p) };
+            let hi = match first {
+                Some(p) => Excluded((unit, p, low)),
+                None => Excluded((unit.saturating_add(1), 0, low)),
+            };
+            let ready: Vec<(u32, Pos, Field)> = self.early_pending.range((Included((unit, 0, low)), hi)).copied().collect();
+            for k in ready {
+                self.early_pending.remove(&k);
+                fields.push(k.2);
+            }
+            u = self.early_pending.range((Excluded((unit, Pos::MAX, Field(ValueId::from_raw(u64::MAX)))), Unbounded)).next().map(|x| x.0);
+        }
+        if fields.is_empty() {
+            return Ok(false);
+        }
+        fields.sort_by_key(|f| f.0.raw());
+        fields.dedup();
+        self.move_early(s, rep, hs, &fields)?;
+        Ok(true)
     }
 
     /// The run audit's account of node `id`'s run (of `t`), which replaced
@@ -3790,7 +3829,7 @@ fn run_job(
     };
     // Cut off at a mark of its last run: that run's result stands, with
     // this run's reads up to the mark and that run's after it.
-    if let (Some(j), Some(fm)) = (cx.cutoff, cx.from_mark.take())
+    if let (Some((j, patch)), Some(fm)) = (cx.cutoff.take(), cx.from_mark.take())
         && matches!(r, Ok(Err(_)))
     {
         let old = fm.old;
@@ -3798,11 +3837,16 @@ fn run_job(
         let mut reads = std::mem::take(&mut cx.reads);
         let shift = reads.len() as i64 - from as i64;
         reads.extend_from_slice(&old.reads[from..]);
-        let mut marks = std::mem::take(&mut cx.marks);
-        marks.extend(old.marks[j + 1..].iter().map(|m| super::world::Mark {
-            read_ix: u32::try_from(i64::from(m.read_ix) + shift).unwrap_or(u32::MAX),
-            ..*m
-        }));
+        // (The marks the kept token takes the client back to: those up to
+        // the one resumed at, where both runs are one; and, unpatched,
+        // those from the one cut off at, where they are one again.)
+        let mut marks: Vec<super::world::Mark> = old.marks[..=fm.j].to_vec();
+        if patch.is_none() {
+            marks.extend(old.marks[j..].iter().map(|m| super::world::Mark {
+                read_ix: u32::try_from(i64::from(m.read_ix) + shift).unwrap_or(u32::MAX),
+                ..*m
+            }));
+        }
         // (Its placements as the last run made them: the same nodes.)
         let spec = |x: &Id| {
             w.node(*x).map(|n| super::ctx::Spec {
@@ -3815,6 +3859,20 @@ fn run_job(
         let conts: Option<Vec<_>> = old.conts.iter().map(spec).collect();
         if let (Some(kids), Some(conts)) = (kids, conts) {
             let mut res = (*old).clone();
+            if patch.is_some() {
+                core.cut_patched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            for (f, loc, x) in patch.unwrap_or_default() {
+                let k = loc.entry_key();
+                match (res.defs.iter().position(|d| d.f == f && d.loc.entry_key() == k), x) {
+                    (Some(i), Some(val)) => res.defs[i] = super::world::Def { f, loc, val },
+                    (Some(i), None) => {
+                        res.defs.remove(i);
+                    }
+                    (None, Some(val)) => res.defs.push(super::world::Def { f, loc, val }),
+                    (None, None) => {}
+                }
+            }
             res.reads = reads;
             res.marks = marks.into();
             res.filed = None;

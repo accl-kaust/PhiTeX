@@ -1192,12 +1192,17 @@ pub fn index_of(v: &Values, x: ValueId, i: i64) -> Option<ValueId> {
 /// at statement `i` is `[i, bindings]` (the names it assigned so far with
 /// their values, in order); the kept token is every mark's bindings. A run
 /// resumed at a mark takes its bindings from there and defines them again
-/// (a resumed run makes its whole result).
+/// (a resumed run makes its whole result). Resumed, at each mark it offers
+/// a patched cutoff: the bindings that differ from the last run's there,
+/// when no statement from there reads them (those assigned again: the
+/// last run's, not patched).
 fn run_marked(cx: &mut Ctx<'_>, ops: Ops, stmts: &[ValueId]) -> Result<ValueId, Stop> {
     let v = cx.values();
+    let mut old: Option<Vec<ValueId>> = None;
     let (mut i, mut env, mut kept): (usize, Vec<(ValueId, ValueId, bool)>, Vec<ValueId>) = match cx.resumed() {
         Some((tok, mark)) => {
             let states = tok.downcast_ref::<Vec<ValueId>>().expect("run's token");
+            old = Some(states.clone());
             let i = mark as usize;
             let env: Vec<(ValueId, ValueId, bool)> = items(v, states[i])
                 .into_iter()
@@ -1219,7 +1224,12 @@ fn run_marked(cx: &mut Ctx<'_>, ops: Ops, stmts: &[ValueId]) -> Result<ValueId, 
         kept.push(bindings);
         #[allow(clippy::cast_possible_wrap)]
         let state = v.list(vec![v.int(i as i64), bindings]);
-        cx.checkpoint(u32::try_from(i).unwrap_or(u32::MAX), state)?;
+        let mark = u32::try_from(i).unwrap_or(u32::MAX);
+        match old.as_ref().and_then(|o| o.get(i)).and_then(|&ob| patch_at(v, stmts, i, &env, ob)) {
+            #[allow(clippy::cast_possible_wrap)]
+            Some((ob, patch)) => cx.checkpoint_patched(mark, state, v.list(vec![v.int(i as i64), ob]), &patch)?,
+            None => cx.checkpoint(mark, state)?,
+        }
         let (st, sa) = tag(v, stmts[i]);
         if st == "assign" {
             // (Its own bindings first: they are the run's, not the store's.)
@@ -1234,6 +1244,48 @@ fn run_marked(cx: &mut Ctx<'_>, ops: Ops, stmts: &[ValueId]) -> Result<ValueId, 
     }
     cx.keep_after(Arc::new(kept));
     Ok(ValueId::UNIT)
+}
+
+/// At statement `i` of a resumed `run`: the last run's bindings there
+/// (`ob`), and the definitions to patch, when this run's bindings differ
+/// from them only in names no statement from `i` on reads (none: no
+/// patch to offer, or the same bindings).
+#[allow(clippy::type_complexity)]
+fn patch_at(v: &Values, stmts: &[ValueId], i: usize, env: &[(ValueId, ValueId, bool)], ob: ValueId) -> Option<(ValueId, Vec<(Field, Locality, Option<ValueId>)>)> {
+    let old: Vec<(ValueId, ValueId, bool)> = items(v, ob)
+        .into_iter()
+        .map(|b| {
+            let b = items(v, b);
+            (b[0], b[1], truthy(v, b[2]))
+        })
+        .collect();
+    if old.len() != env.len() || old.iter().zip(env).any(|(o, n)| o.0 != n.0 || o.2 != n.2) {
+        return None;
+    }
+    let diff: Vec<usize> = (0..env.len()).filter(|&k| old[k].1 != env[k].1).collect();
+    if diff.is_empty() {
+        return None;
+    }
+    // (Read from here: not patchable. Assigned again: the last run's.)
+    let mut read = Vec::new();
+    let mut assigned = Vec::new();
+    for &s in &stmts[i..] {
+        let (st, sa) = tag(v, s);
+        if st == "assign" {
+            free_vars(v, sa[1], &mut Vec::new(), &mut read);
+            assigned.push(text(v, sa[0]));
+        }
+    }
+    if diff.iter().any(|&k| read.contains(&text(v, env[k].0))) {
+        return None;
+    }
+    let loc = |g: bool| if g { Locality::Global } else { Locality::Local };
+    let patch = diff
+        .iter()
+        .filter(|&&k| !assigned.contains(&text(v, env[k].0)))
+        .map(|&k| (v.field(&text(v, env[k].0)), loc(env[k].2), Some(env[k].1)))
+        .collect();
+    Some((ob, patch))
 }
 
 /// Expression `e` with the variables bound in `env` replaced by their
