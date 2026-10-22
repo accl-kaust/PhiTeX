@@ -135,7 +135,7 @@ pub(crate) const fn end_sub_of(item: u32) -> Option<(u32, u32)> {
 }
 
 /// A unit the loop folded: the piece it names, its items.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct UnitRec {
     pub pid: i64,
     pub items: std::sync::Arc<Vec<crate::vprof::PItem>>,
@@ -247,6 +247,80 @@ pub(crate) struct PageLoop {
     /// Rare (a node before the piece still in work, defining what is
     /// read there), so no unit's fold saves the loop before it.
     pub torn: bool,
+}
+
+/// The page builder's loop marks kept with its result
+/// ([`Run::page_mark`], [`phitex_defuse::Ctx::keep_after`]): the loop at
+/// each mark and its state's version.
+pub(crate) struct KeptLoop {
+    pub snaps: Vec<(std::sync::Arc<PageLoop>, u64)>,
+}
+
+/// A parked page builder's loop and its marks so far.
+pub(crate) struct ParkedLoop {
+    pub lp: PageLoop,
+    pub marks: Vec<(std::sync::Arc<PageLoop>, u64)>,
+}
+
+/// A version of what the loop's fold from a mark depends on
+/// ([`Run::page_mark`]): its builder, its position and the current
+/// page's input, the guesses of the routines' material, the marks, the
+/// units a carried contribution may fold again and those pieces' places;
+/// not the pages fired before (their finishers are the run's outputs,
+/// which the engine compares), nor what the loop memoises.
+pub(crate) fn loop_state(lp: &PageLoop) -> u64 {
+    use std::hash::Hasher as _;
+    use std::fmt::Write as _;
+    struct W<'a>(&'a mut phitex_defuse::FxHasher);
+    impl std::fmt::Write for W<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0.write(s.as_bytes());
+            Ok(())
+        }
+    }
+    let mut h = phitex_defuse::FxHasher::default();
+    let carried: Vec<i64> = lp.units.iter().map(|u| u.pid).collect();
+    let mut places: Vec<(i64, Option<u64>, Option<u64>)> = carried
+        .iter()
+        .map(|p| {
+            (
+                *p,
+                lp.prev.get(p).map(|x| x.map_or(0, phitex_defuse::NodeId::raw)),
+                lp.order.get(p).copied(),
+            )
+        })
+        .collect();
+    places.sort_unstable();
+    let _ = write!(
+        W(&mut h),
+        "{:?}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+        lp.st,
+        lp.cur.map(phitex_defuse::NodeId::raw),
+        lp.srcs,
+        lp.post,
+        lp.post_markers,
+        lp.post_k,
+        lp.began,
+        lp.top_marks,
+        lp.rtn_dead,
+        lp.dead,
+        lp.inf,
+        lp.last_rtn,
+        lp.prev_rtn,
+        lp.last_markers,
+        lp.prev_fire,
+        lp.marks,
+        lp.pend,
+        lp.page_src,
+        lp.units,
+        lp.frontier,
+        lp.last_fire.map(|(n, a, b)| (n.raw(), a, b)),
+        lp.page_ins,
+        lp.held_nodes,
+        (places, lp.rtns.last().map(|r| (r.0, r.1))),
+        lp.pages.len()
+    );
+    h.finish()
 }
 
 /// The reads at one owner piece ([`crate::vprof::unit_owner`]): its page
@@ -751,15 +825,40 @@ impl Operation for Pages {
         let o = ops(&self.0);
         let parked = cx
             .parked()
-            .and_then(|t| t.downcast::<PageLoop>().ok())
+            .and_then(|t| t.downcast::<ParkedLoop>().ok())
             .map(|b| *b);
+        // (resumed at a mark of its last run, [`Run::page_mark`]: the loop
+        // as it was there, every page before placed again)
+        let at_mark = if parked.is_none() && page_marks() { cx.resumed() } else { None };
         // (a run, for its reads where a piece is; no text runs in it)
         let mut r = Run::new(cx, o);
+        r.page_marks_on = page_marks();
         // (resumed from its token: the run continues, its placements
         // committed at the stop stay and it places only new pages)
         let resumed = parked.is_some();
-        let mut lp = parked.unwrap_or_else(PageLoop::new);
-        lp.resumed = resumed && CONTINUES;
+        let mut lp = match parked {
+            Some(p) => {
+                r.page_marks = p.marks;
+                p.lp
+            }
+            None => match at_mark.map(|(t, k)| (t.downcast::<KeptLoop>(), k)) {
+                Some((Ok(kl), k)) if (k as usize) < kl.snaps.len() => {
+                    let (snap, h) = kl.snaps[k as usize].clone();
+                    r.page_marks = kl.snaps[..=k as usize].to_vec();
+                    // (the mark again: the engine keeps the marks before it;
+                    // the run is never cut off at its own)
+                    let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
+                    let _ = r.cx.checkpoint(k, state);
+                    let mut lp = (*snap).clone();
+                    lp.resumed = false;
+                    lp
+                }
+                _ => PageLoop::new(),
+            },
+        };
+        if resumed {
+            lp.resumed = CONTINUES;
+        }
         crate::prof::pages::attempt();
         let t = crate::prof::pages::start();
         let res = r.page_loop(&mut lp);
@@ -767,23 +866,39 @@ impl Operation for Pages {
         match res {
             Ok(()) => {}
             Err(Halt::Stop(s)) => {
-                // (torn mid-unit: no token, the next run starts over)
-                if lp.torn {
+                // (torn mid-unit: no token, the next run starts over; cut
+                // off at a mark: the last run's result stands)
+                if lp.torn || r.cut_off {
                     return Err(s);
                 }
+                let tok = Box::new(ParkedLoop {
+                    lp,
+                    marks: std::mem::take(&mut r.page_marks),
+                });
                 // (a run that continues: resumed, its placements stand)
                 if CONTINUES {
-                    r.cx.park_continuing(Box::new(lp));
+                    r.cx.park_continuing(tok);
                 } else {
-                    r.cx.park(Box::new(lp));
+                    r.cx.park(tok);
                 }
                 return Err(s);
             }
             Err(_) => unreachable!("the page builder's loop runs no command"),
         }
         r.place_pages(&lp);
+        // (the marks kept with the result: a later run resumes at one)
+        if !r.page_marks.is_empty() {
+            let snaps = std::mem::take(&mut r.page_marks);
+            r.cx.keep_after(std::sync::Arc::new(KeptLoop { snaps }));
+        }
         Ok(ValueId::UNIT)
     }
+}
+
+/// Whether the page builder takes marks ([`Run::page_mark`]; profile:
+/// `PHITEX_PAGE_MARKS=0` none, to measure them).
+fn page_marks() -> bool {
+    !(cfg!(feature = "profile") && crate::exec::env_str!("PHITEX_PAGE_MARKS") == Some("0"))
 }
 
 impl Run<'_, '_> {
@@ -1089,6 +1204,33 @@ impl Run<'_, '_> {
                 }
             }
             lp.cur = Some(node);
+            // (a page fired in this contributor: a mark, where a later
+            // run of the loop resumes, or is cut off where it comes to the
+            // same state, [`Run::page_mark`])
+            if self.page_marks_on
+                && self.page_marks.last().map_or(0, |m| m.0.pages.len()) < lp.pages.len()
+            {
+                self.page_mark(lp)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A mark of the page builder's loop between contributors, after a
+    /// page fired ([`phitex_defuse::Ctx::checkpoint`]): the loop as it
+    /// stands, and a version of what its fold from here depends on
+    /// ([`loop_state`]). A run that comes to a mark of its last run with
+    /// the same state, the pages before it the same and its reads after
+    /// it holding is cut off there; one whose read after a mark broke
+    /// resumes at that mark instead of folding the document again.
+    fn page_mark(&mut self, lp: &PageLoop) -> R<()> {
+        let k = u32::try_from(self.page_marks.len()).unwrap_or(u32::MAX);
+        let h = loop_state(lp);
+        self.page_marks.push((std::sync::Arc::new(lp.clone()), h));
+        let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
+        if let Err(s) = self.cx.checkpoint(k, state) {
+            self.cut_off = true;
+            return Err(Halt::Stop(s));
         }
         Ok(())
     }
