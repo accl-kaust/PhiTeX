@@ -5402,8 +5402,11 @@ impl Run<'_, '_> {
             return Ok(());
         }
         self.mark_cmds = self.cmds;
+        let tp = crate::prof::start();
         let p = self.snapshot();
         let h = parked_digest(&p);
+        crate::prof::add(crate::prof::MARK, tp);
+        let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
         self.mark_snaps.push((std::sync::Arc::new(p), h));
         // (the accesses from here on stamped with this mark, numbered
@@ -5427,6 +5430,7 @@ impl Run<'_, '_> {
             }
             None => self.cx.checkpoint(k, state),
         };
+        crate::prof::add(crate::prof::MARK_CK, tp);
         if let Err(s) = r {
             if crate::exec::obs_flag!("PHITEX_MARK_CHECK") {
                 self.cut_check.get_or_insert(k);

@@ -16,7 +16,11 @@ pub(crate) const LB_TS: usize = 6;
 pub(crate) const LB_COMMIT: usize = 7;
 pub(crate) const FOLD: usize = 8;
 pub(crate) const FINISH: usize = 9;
-const N: usize = 10;
+pub(crate) const MARK: usize = 10;
+pub(crate) const MARK_CK: usize = 11;
+pub(crate) const KEEP: usize = 12;
+pub(crate) const RESUME: usize = 13;
+const N: usize = 14;
 const NAMES: [&str; N] = [
     "exec run (body+fold+finish)",
     "char_run",
@@ -28,6 +32,10 @@ const NAMES: [&str; N] = [
     "  lines encoded + appended",
     "page_fold",
     "finish",
+    "marks: snapshot + digest",
+    "marks: checkpoint",
+    "marks: kept token",
+    "marks: resume",
 ];
 
 static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -84,7 +92,9 @@ pub(crate) fn print() {
     let per = |x: u64| x as f64 / pars as f64 / 1000.0;
     eprintln!("parprof: {pars} paragraphs, {runs} exec runs; µs per paragraph:");
     for (k, name) in NAMES.iter().enumerate() {
-        eprintln!("parprof:   {name:<32} {:8.1}", per(ns[k]));
+        #[allow(clippy::cast_precision_loss)]
+        let ms = ns[k] as f64 / 1e6;
+        eprintln!("parprof:   {name:<32} {:8.1}  ({ms:.1} ms)", per(ns[k]));
     }
 }
 

@@ -109,7 +109,10 @@ pub(crate) fn run_node_parking(
         match tok.downcast::<crate::run::KeptMarks>() {
             Ok(km) if (k as usize) < km.snaps.len() => {
                 let (p, h) = km.snaps[k as usize].clone();
-                match Run::from_parked(cx, o, (*p).clone()) {
+                let tr = crate::prof::start();
+                let from = Run::from_parked(cx, o, (*p).clone());
+                crate::prof::add(crate::prof::RESUME, tr);
+                match from {
                     Ok(mut r) => {
                         r.mark_snaps = km.snaps[..=k as usize].to_vec();
                         r.st.cur_mark = k + 1;
@@ -256,6 +259,7 @@ pub(crate) fn run_node_parking(
             // (the marks kept with the result: a later run resumes at one;
             // with the latest mark after which each field was accessed)
             if !r.mark_snaps.is_empty() && !crate::exec::obs_flag!("PHITEX_MARKS_NOKEEP") {
+                let tk = crate::prof::start();
                 let snaps = std::mem::take(&mut r.mark_snaps);
                 let acc = r.st.last_accesses();
                 let mut last: Vec<(phitex_defuse::Field, u32)> =
@@ -302,6 +306,7 @@ pub(crate) fn run_node_parking(
                     outs,
                     last,
                 }));
+                crate::prof::add(crate::prof::KEEP, tk);
             }
             // (observe, `PHITEX_MARK_TRACE=1`: a finisher's or exec run's
             // outputs, to compare a run resumed at a mark with a full one)
