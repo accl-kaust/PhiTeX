@@ -866,7 +866,11 @@ impl Operation for Pages {
                     let state = r.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
                     let _ = r.cx.checkpoint(k, state);
                     let mut lp = (*snap).clone();
-                    lp.resumed = false;
+                    // (the placements before the mark stand, as a run
+                    // continuing from a park keeps those before its stop;
+                    // profile `PHITEX_PAGE_MARK_REPLACE=1`: placed again)
+                    lp.resumed = !(cfg!(feature = "profile")
+                        && crate::exec::env_str!("PHITEX_PAGE_MARK_REPLACE") == Some("1"));
                     lp
                 }
                 _ => PageLoop::new(),
