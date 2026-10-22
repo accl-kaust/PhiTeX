@@ -169,6 +169,15 @@ pub trait Operation: Send + Sync {
         true
     }
 
+    /// Whether a node with a pending definition set that may define `f`
+    /// likely does: its readers of a field waited on when predicting
+    /// ([`crate::Engine::wait_on_pending`]) wait on it; past one that
+    /// likely does not, they read on (a guess, as for any field, that its
+    /// definition re-asks). A speed hint, never a result.
+    fn likely_defines(&self, _args: &[ValueId], _values: &Values, _f: Field) -> bool {
+        true
+    }
+
     /// The fields the run reads (a hint).
     fn reads(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<Field>> {
         None
@@ -323,6 +332,10 @@ pub trait Monoid: Send + Sync {
 /// ([`Engine::set_env_provider`]), with the value table to name the field
 /// (`values.get(field.0)` is its name) and to intern the answer.
 pub type EnvProvider = dyn Fn(&Values, Field) -> Option<Option<ValueId>> + Send + Sync;
+
+/// An environment's base layer ([`crate::Engine::set_environment_base`]):
+/// a field's value under the supplied ones, `None` where it has none.
+pub type EnvBase = dyn Fn(&Values, Field) -> Option<ValueId> + Send + Sync;
 
 /// Sequence concatenation (structurally shared, see [`Values::seq_concat`]).
 pub struct SeqMonoid;
@@ -925,6 +938,9 @@ pub struct Report {
     /// (`Operation::claim_limit`, `Engine::set_claim_window`): those had
     /// run on the guess, and were taken back.
     pub claims_past_reach: u64,
+    /// Siblings a claim took that had a result (ran ahead of the claim,
+    /// or before an edit): their facts and unfolding went.
+    pub claimed_after_run: u64,
     /// Definitions a run made outside its node's static list (`defs`):
     /// the list widened, the field's later readers re-validated.
     pub defs_refuted: u64,

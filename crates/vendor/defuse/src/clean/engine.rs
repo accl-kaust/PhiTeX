@@ -529,6 +529,18 @@ impl Engine {
         self.rec_call("set_heights", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
     }
 
+    /// Readers of field `f` wait on a node still in work whose pending
+    /// definition set (`Operation::defs` `None`) may hold `f`, before them,
+    /// even when the scheduler predicts (which otherwise reads past it, a
+    /// guess its definition re-asks): for a field such a node usually does
+    /// change, read early by many (a preamble's category codes, say). Their
+    /// read hints (`Operation::reads`) hold them back likewise.
+    pub fn wait_on_pending(&mut self, f: Field) {
+        self.core_mut().wait_pending.insert(f);
+        #[cfg(feature = "observe")]
+        self.rec_call("wait_on_pending", crate::record::rec().map(|_| crate::record::j(&(&f,))), &());
+    }
+
     /// Bounds what a pending claimer (`Claim::Pending`) without a reach of
     /// its own (`Operation::claim_limit`, or a smaller one) holds back to
     /// the `w` siblings after it: those past them run before its claim is
@@ -539,6 +551,17 @@ impl Engine {
         self.core_mut().claim_window = w;
         #[cfg(feature = "observe")]
         self.rec_call("set_claim_window", crate::record::rec().map(|_| crate::record::j(&(&w,))), &());
+    }
+
+    /// With a claim window (`set_claim_window`), a sibling that is itself a
+    /// pending claimer is not held by the pending claimer before it at
+    /// all: guessed not claimed, taken back when it is
+    /// (`Report::claimed_after_run`), so a run of pending claimers goes on
+    /// together. Off by default.
+    pub fn set_claim_chain(&mut self, on: bool) {
+        self.core_mut().claim_chain = on;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_claim_chain", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
     }
 
     /// Opts field `f` in to guessing from the last evaluation: a reader
@@ -663,9 +686,9 @@ impl Engine {
         let changed = {
             let mut e = self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let fs: FxHashSet<Field> = e.known.keys().chain(new.keys()).copied().collect();
-            let before: Vec<(Field, Option<Option<ValueId>>)> = fs.into_iter().map(|f| (f, e.get(f))).collect();
+            let before: Vec<(Field, Option<Option<ValueId>>)> = fs.into_iter().map(|f| (f, self.core.env_answer(&e, f))).collect();
             e.known = new;
-            before.into_iter().filter(|(f, b)| e.get(*f) != *b).map(|(f, _)| f).collect::<Vec<_>>()
+            before.into_iter().filter(|(f, b)| self.core.env_answer(&e, *f) != *b).map(|(f, _)| f).collect::<Vec<_>>()
         };
         self.env_changed(&changed);
     }
@@ -684,9 +707,9 @@ impl Engine {
         let changed = {
             let mut e = self.core.env.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let fs: Vec<Field> = new.symmetric_difference(&e.absent).copied().collect();
-            let before: Vec<(Field, Option<Option<ValueId>>)> = fs.into_iter().map(|f| (f, e.get(f))).collect();
+            let before: Vec<(Field, Option<Option<ValueId>>)> = fs.into_iter().map(|f| (f, self.core.env_answer(&e, f))).collect();
             e.absent = new;
-            before.into_iter().filter(|(f, b)| e.get(*f) != *b).map(|(f, _)| f).collect::<Vec<_>>()
+            before.into_iter().filter(|(f, b)| self.core.env_answer(&e, *f) != *b).map(|(f, _)| f).collect::<Vec<_>>()
         };
         self.env_changed(&changed);
     }
@@ -732,6 +755,26 @@ impl Engine {
         // The provider's answers stay with it.
         v.extend(e.provided.iter().filter(|(f, _)| !e.known.contains_key(f)).filter_map(|(f, x)| Some((*f, (*x)?))));
         v.into_iter()
+    }
+
+    /// Lays `base` under the supplied environment: a field neither
+    /// supplied nor declared absent reads its value there (asked at most
+    /// once per field for the engine's life, its answer kept through every
+    /// evaluation and `set_environment`), else (by `Ctx::use_env`) the
+    /// provider's. As if
+    /// `base`'s whole domain were supplied, the supplied entries over it,
+    /// made as read. Set it before the first evaluation; `environment`
+    /// leaves it out.
+    pub fn set_environment_base(&mut self, base: Arc<crate::api::EnvBase>) {
+        self.w.note(super::world::Change::All);
+        #[cfg(feature = "observe")]
+        let base = {
+            crate::record::api(&self.core.values, "set_environment_base", serde_json::Value::Null, serde_json::Value::Null);
+            crate::record::rec_base(base)
+        };
+        let core = self.core_mut();
+        core.base = Some(base);
+        core.base_memo = crate::sync::Table::new();
     }
 
     pub fn set_env_provider(&mut self, provider: Box<crate::api::EnvProvider>) {

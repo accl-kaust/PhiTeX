@@ -176,6 +176,35 @@ fn upper_index<K: Ord, V>(es: &[(K, V)], hi: Bound<&K>) -> usize {
 }
 
 impl<K: Ord + Clone, V: Clone, S: Clone> Node<K, V, S> {
+    /// [`PMap::get_sorted`] on this subtree.
+    fn get_sorted<'a>(&'a self, ks: &[K], out: &mut Vec<Option<&'a V>>) {
+        match self {
+            Node::Leaf(es) => {
+                let mut i = 0;
+                for k in ks {
+                    while i < es.len() && es[i].0 < *k {
+                        i += 1;
+                    }
+                    out.push(es.get(i).filter(|e| e.0 == *k).map(|e| &e.1));
+                }
+            }
+            Node::Inner { keys, kids } => {
+                // (Kid j holds the keys below separator j.)
+                let mut a = 0;
+                for (j, kid) in kids.iter().enumerate() {
+                    if a == ks.len() {
+                        break;
+                    }
+                    let b = keys.get(j).map_or(ks.len(), |s| a + ks[a..].partition_point(|k| k < s));
+                    if b > a {
+                        kid.node.get_sorted(&ks[a..b], out);
+                    }
+                    a = b;
+                }
+            }
+        }
+    }
+
     /// Entries in a leaf, children of an inner node.
     fn size(&self) -> usize {
         match self {
@@ -592,6 +621,17 @@ impl<K: Ord + Clone, V: Clone, S: Clone> PMap<K, V, S> {
                 Node::Inner { keys, kids } => node = &kids[prefix(keys, |s| s <= k)].node,
                 Node::Leaf(es) => return find(es, k).ok().map(|i| &es[i].1),
             }
+        }
+    }
+
+    /// The values of `ks` (in ascending order, repeats allowed), in their
+    /// order, to `out`: one walk down the tree for all of them, each node
+    /// on the way searched once for the keys under it.
+    pub fn get_sorted<'a>(&'a self, ks: &[K], out: &mut Vec<Option<&'a V>>) {
+        debug_assert!(ks.windows(2).all(|w| w[0] <= w[1]), "get_sorted: keys not in order");
+        match &self.root {
+            Some(r) => r.node.get_sorted(ks, out),
+            None => out.extend(ks.iter().map(|_| None)),
         }
     }
 
@@ -1148,6 +1188,11 @@ mod tests {
             assert_eq!(kv(t.below(&k)), kv(b.range(..k).next_back()));
             assert_eq!(kv(t.at_or_below(&k)), kv(b.range(..=k).next_back()));
             assert_eq!(kv(t.above(&k)), kv(b.range((Excluded(k), Unbounded)).next()));
+            let mut ks: Vec<u32> = (0..r.below(40)).map(|_| r.below(u64::from(space) + 2) as u32).collect();
+            ks.sort_unstable();
+            let mut got = Vec::new();
+            t.get_sorted(&ks, &mut got);
+            assert_eq!(got, ks.iter().map(|k| b.get(k)).collect::<Vec<_>>());
             assert_eq!(kv(t.at_or_above(&k)), kv(b.range(k..).next()));
             assert_eq!(t.rank(&k), b.range(..k).count());
             let i = r.below(b.len() as u64 + 2) as usize;

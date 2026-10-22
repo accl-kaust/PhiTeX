@@ -38,6 +38,7 @@ pub(crate) struct Made {
 pub(crate) struct Counts {
     pub claims_refuted: u64,
     pub claims_past_reach: u64,
+    pub claimed_after_run: u64,
     pub effects_refuted: u64,
     pub claim_siblings: u64,
     pub defs_refuted: u64,
@@ -51,6 +52,7 @@ impl Counts {
     pub(crate) fn add_to(&self, r: &mut crate::api::Report) {
         r.claims_refuted += self.claims_refuted;
         r.claims_past_reach += self.claims_past_reach;
+        r.claimed_after_run += self.claimed_after_run;
         r.effects_refuted += self.effects_refuted;
         r.claim_siblings += self.claim_siblings;
         r.defs_refuted += self.defs_refuted;
@@ -2062,6 +2064,16 @@ enum Which {
 /// The reader entries (`which` of them) of read log `reads` of node `id`
 /// in world `w`, sorted and distinct, and its scope and sibling windows.
 fn read_keys(w: &World, id: Id, n: &Node, reads: &[Read], which: Which) -> (Vec<ReadKey>, ReadAgg) {
+    // (Most reads are at the reader itself: its position asked once.)
+    let mut last_at: Option<(Id, Pos)> = None;
+    let mut read_pos = |at: Id, n: &Node| match last_at {
+        Some((a, p)) if a == at => p,
+        _ => {
+            let p = read_pos(w, at, n);
+            last_at = Some((at, p));
+            p
+        }
+    };
     let _t = super::core::prof::Span::new(25);
     if super::core::prof::on() {
         super::core::prof::add(26, reads.len() as u64);
@@ -2079,7 +2091,7 @@ fn read_keys(w: &World, id: Id, n: &Node, reads: &[Read], which: Which) -> (Vec<
         match r {
             Read::Use { f, at, .. } => {
                 if fixed {
-                    keys.push(ReadKey::Field(u, *f, read_pos(w, *at, n)));
+                    keys.push(ReadKey::Field(u, *f, read_pos(*at, n)));
                 }
                 // (Its answer follows the frame chain it reads through.)
                 agg.kind |= moving;

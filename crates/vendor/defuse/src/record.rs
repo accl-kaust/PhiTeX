@@ -252,6 +252,11 @@ impl Operation for RecOp {
         self.st(values, "may_define_field", args, j(&f), j(&r));
         r
     }
+    fn likely_defines(&self, args: &[ValueId], values: &Values, f: Field) -> bool {
+        let r = self.inner.likely_defines(args, values, f);
+        self.st(values, "likely_defines", args, j(&f), j(&r));
+        r
+    }
     fn reads(&self, args: &[ValueId], values: &Values) -> Option<Vec<Field>> {
         let r = self.inner.reads(args, values);
         self.st(values, "reads", args, J::Null, j(&r));
@@ -452,6 +457,17 @@ pub(crate) fn rec_provider(p: Box<crate::api::EnvProvider>) -> Box<crate::api::E
                 json!({"k": "env", "f": j(&f), "known": r.is_some(), "r": j(&r.flatten())}),
                 false,
             );
+        }
+        r
+    })
+}
+
+/// An environment base layer that records its answers (replayed by play).
+pub(crate) fn rec_base(b: std::sync::Arc<crate::api::EnvBase>) -> std::sync::Arc<crate::api::EnvBase> {
+    std::sync::Arc::new(move |values: &Values, f: Field| {
+        let r = b(values, f);
+        if let Some(rc) = rec() {
+            rc.line(values, json!({"k": "envbase", "f": j(&f), "r": j(&r)}), false);
         }
         r
     })

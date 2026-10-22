@@ -82,6 +82,8 @@ struct Book {
     proj: HashMap<String, J>,
     /// field -> the provider's answers (their lines).
     env: HashMap<String, Timed>,
+    /// The environment base layer's answers, by field.
+    envbase: HashMap<String, J>,
     /// Every string value recorded (the fields a prefix declaration names).
     strs: Vec<String>,
 }
@@ -189,6 +191,14 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "use_field_before" => return res(cx.use_field_before(de(&g(0)), de::<NodeId>(&g(1)))),
         "use_field_after_own" => return res(cx.use_field_after_own(de(&g(0)), de::<NodeId>(&g(1)))),
         "use_field_proj" => return res(cx.use_field_proj(de(&g(0)), de::<ProjId>(&g(1)))),
+        "use_fields" => {
+            let mut out = Vec::new();
+            return res(cx.use_fields(&de::<Vec<Field>>(&g(0)), &mut out).map(|()| out));
+        }
+        "use_fields_proj" => {
+            let mut out = Vec::new();
+            return res(cx.use_fields_proj(&de::<Vec<(Field, ProjId)>>(&g(0)), &mut out).map(|()| out));
+        }
         "use_env" => return res(cx.use_env(de(&g(0)))),
         "define" => json!(cx.define(de(&g(0)), de(&g(1)))),
         "define_with" => json!(cx.define_with(de(&g(0)), de(&g(1)), de::<Locality>(&g(2)))),
@@ -253,6 +263,9 @@ impl Operation for PlayOp {
     }
     fn may_define_field(&self, args: &[ValueId], _: &Values, f: Field) -> bool {
         self.st("may_define_field", args, json!(f), true)
+    }
+    fn likely_defines(&self, args: &[ValueId], _: &Values, f: Field) -> bool {
+        self.st("likely_defines", args, json!(f), true)
     }
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         // `PLAY_DROP_READS=a,b`: those fields left out of the recorded
@@ -757,6 +770,12 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
                 })
             }));
         }
+        "set_environment_base" => {
+            let b = book.clone();
+            eng.set_environment_base(Arc::new(move |_: &Values, f: Field| {
+                b.envbase.get(&json!(f).to_string()).and_then(|r| de::<Option<ValueId>>(r))
+            }));
+        }
         "new_unit" => {
             let u = eng.new_unit();
             units.lock().unwrap().push(u);
@@ -792,6 +811,8 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "set_stable" => eng.set_stable(de(&g(0))),
         "guess_from_last" => eng.guess_from_last(de(&g(0))),
         "set_claim_window" => eng.set_claim_window(de(&g(0))),
+        "set_claim_chain" => eng.set_claim_chain(de(&g(0))),
+        "wait_on_pending" => eng.wait_on_pending(de(&g(0))),
         "set_heights" => eng.set_heights(de(&g(0))),
         "set_round_cap_policy" => eng.set_round_cap_policy(de::<CapPolicy>(&g(0))),
         "refresh_where" => {
@@ -1111,6 +1132,9 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
             "val" if l["t"] == "str" => {
                 book.strs.extend(l["x"].as_str().map(str::to_string));
             }
+            "envbase" => {
+                book.envbase.insert(l["f"].to_string(), l["r"].clone());
+            }
             "env" => {
                 book.env.entry(l["f"].to_string()).or_default().push((at, l.clone()));
             }
@@ -1159,6 +1183,14 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                 eng.pin(v);
             }
             "api" if l["f"] == "evaluate_begin" => {
+                // PLAY_WAIT_PENDING=<names>: those fields' readers wait on
+                // pending definition sets whatever was recorded.
+                if let Ok(ns) = std::env::var("PLAY_WAIT_PENDING") {
+                    for n in ns.split(',').filter(|n| !n.is_empty()) {
+                        let f = eng.values().field(n);
+                        eng.wait_on_pending(f);
+                    }
+                }
                 // Gather this evaluation's absorbed batches; it answers as
                 // the recording did by its end.
                 let mut batches = std::collections::VecDeque::new();
@@ -1232,6 +1264,13 @@ fn replay(all: &[J], engine: u64, v2: bool, o: &Opts) -> usize {
                         rep.nodes_run, rep.stops, rep.rounds, rep.steps
                     );
                     println!("  restarted_by {:?} resumed {} play op {} ms ctx {} ms, kept reads asked {} of {}", rep.restarted_by, rep.resumed, T_OP.load(Ordering::Relaxed) / 1_000_000, T_CTX.load(Ordering::Relaxed) / 1_000_000, rep.kept_asked, rep.kept_held);
+                    let mut by: Vec<(String, u64)> = rep.refuted_by_field.iter().map(|&(f, n)| (eng.values().as_str(f.0).unwrap_or_default(), n)).collect();
+                    by.sort_by(|a, b| b.1.cmp(&a.1));
+                    by.truncate(12);
+                    println!(
+                        "  mispredictions {} refuted nodes {} claims past reach {} claimed after run {}; refuted by field {by:?}",
+                        rep.mispredictions, rep.refuted_nodes, rep.claims_past_reach, rep.claimed_after_run
+                    );
                     // Where the time went, and two bounds on the wall time:
                     // the busy time spread over the workers, and the
                     // critical path at the mean run's cost.

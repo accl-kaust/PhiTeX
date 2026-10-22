@@ -9,6 +9,8 @@ const READS: &[&str] = &[
     "use_field_before",
     "use_field_after_own",
     "use_field_proj",
+    "use_fields",
+    "use_fields_proj",
     "use_env",
     "output_of",
     "placed_output",
