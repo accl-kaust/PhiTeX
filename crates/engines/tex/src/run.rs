@@ -5167,6 +5167,10 @@ pub(crate) struct Parked {
     /// The commands the run began before this (all its attempts): not
     /// part of its state ([`Run::cmds_before`]).
     at_cmds: u64,
+    /// The text's segments the run had begun when parked or marked
+    /// ([`crate::input::Input::text_at`]): those before are read (the
+    /// one before it, maybe, in part), those after not yet.
+    pub(crate) text_at: usize,
     /// The input left, top first: the levels' rests, then the text.
     segs: Vec<Seg>,
     /// How many of `segs` were levels ([`Run::parked_levels`]).
@@ -5241,6 +5245,13 @@ pub(crate) struct Parked {
     cand_marks: Vec<crate::pages::CandMark>,
     ins_pending: Vec<u16>,
     fin: Option<crate::pages::FinCtx>,
+}
+
+impl Parked {
+    /// The commands its run began before it.
+    pub(crate) fn at_cmds(&self) -> u64 {
+        self.at_cmds
+    }
 }
 
 impl Run<'_, '_> {
@@ -5331,6 +5342,7 @@ impl Run<'_, '_> {
             // counted then, not now, so that its marks fall on the same
             // commands as a run's that never parked, `Run::next_mark`)
             at_cmds: (self.cmds_before + self.cmds).saturating_sub(1),
+            text_at: 0,
             segs,
             nlev: nlev_all,
             level_tys: Vec::new(),
@@ -5425,8 +5437,11 @@ pub(crate) struct KeptMarks {
     /// (observe, `PHITEX_MARK_CHECK`) Its contributions and children, to
     /// compare a run the engine would cut off with.
     pub outs: Vec<String>,
-    /// (observe, `PHITEX_RESUME_VERIFY`) Its node's text.
+    /// (observe, `PHITEX_RESUME_VERIFY`, `PHITEX_RETEXT_POTENTIAL`) Its
+    /// node's text.
     pub args: Vec<ValueId>,
+    /// (observe) The commands the run began in all.
+    pub total_cmds: u64,
 }
 
 /// The commands between two marks of a run ([`Run::take_mark`]):
@@ -5653,6 +5668,7 @@ impl Run<'_, '_> {
         Parked {
             epoch: self.cx.values_epoch(),
             at_cmds: self.cmds_before + self.cmds,
+            text_at: self.input.text_at,
             segs,
             nlev: nlev_all,
             level_tys,

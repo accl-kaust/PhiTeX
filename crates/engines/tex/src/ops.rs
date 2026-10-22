@@ -57,6 +57,58 @@ pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 pub(crate) static COMMANDS_BY: [std::sync::atomic::AtomicU64; 4] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// (observe) The last kept marks of each node, by node
+/// ([`retext_potential`]).
+fn retext_kept() -> &'static std::sync::Mutex<FxHashMap<u64, std::sync::Arc<crate::run::KeptMarks>>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<FxHashMap<u64, std::sync::Arc<crate::run::KeptMarks>>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()))
+}
+
+/// (observe, `PHITEX_RETEXT_POTENTIAL`) For a node whose text changed
+/// since its last run kept marks: the first segment that differs, and
+/// the last mark that had begun no later segment (a run resumed there
+/// reads the same text up to it), with the commands it would skip.
+fn retext_potential(cx: &mut Ctx<'_>) {
+    let node = cx.node().raw();
+    let Some(km) = retext_kept().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&node).cloned() else {
+        return;
+    };
+    let args = cx.args();
+    if args == km.args {
+        return;
+    }
+    let v = cx.values();
+    let frames = |a: &[ValueId]| a.first().map(|&x| list_of(v, x)).unwrap_or_default();
+    let (old, new) = (frames(&km.args), frames(&args));
+    let d = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let best = km
+        .snaps
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, (p, _))| p.text_at <= d && p.text_at > 0);
+    match best {
+        Some((k, (p, _))) => eprintln!(
+            "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks; resume at mark {k} (segment {}, after {} of {} commands: {:.0}% skipped)",
+            old.len(),
+            new.len(),
+            km.snaps.len(),
+            p.text_at,
+            p.at_cmds(),
+            km.total_cmds,
+            100.0 * p.at_cmds() as f64 / km.total_cmds.max(1) as f64
+        ),
+        None => eprintln!(
+            "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks, none before it ({} commands)",
+            old.len(),
+            new.len(),
+            km.snaps.len(),
+            km.total_cmds
+        ),
+    }
+}
+
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead. With `parks`, a run that stops inside a command parks
@@ -107,6 +159,12 @@ pub(crate) fn run_node_parking(
             _ => false,
         };
     let resumed_at = if marks_ok { cx.resumed() } else { None };
+    // (observe, `PHITEX_RETEXT_POTENTIAL=1`: a node run again with another
+    // text, where its last run's marks and how much of that run a resume
+    // at the last mark before the first changed segment would skip)
+    if marks_ok && resumed_at.is_none() && crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
+        retext_potential(cx);
+    }
     let mut r = if let Some((tok, k)) = resumed_at {
         match tok.downcast::<crate::run::KeptMarks>() {
             Ok(km) if (k as usize) < km.snaps.len() && crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") => {
@@ -296,12 +354,22 @@ pub(crate) fn run_node_parking(
                         eprintln!("mark-check: node {} cut at mark {k} holds", r.cx.node().raw());
                     }
                 }
-                let args = if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") { r.cx.args() } else { Vec::new() };
-                r.cx.keep_after(std::sync::Arc::new(crate::run::KeptMarks {
+                let args = if crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") || crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
+                    r.cx.args()
+                } else {
+                    Vec::new()
+                };
+                let total_cmds = r.cmds_before + r.cmds;
+                let km = std::sync::Arc::new(crate::run::KeptMarks {
                     snaps,
                     outs,
                     args,
-                }));
+                    total_cmds,
+                });
+                if crate::exec::obs_flag!("PHITEX_RETEXT_POTENTIAL") {
+                    retext_kept().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(r.cx.node().raw(), km.clone());
+                }
+                r.cx.keep_after(km);
                 crate::prof::add(crate::prof::KEEP, tk);
             }
             // (observe, `PHITEX_MARK_TRACE=1`: a finisher's or exec run's
