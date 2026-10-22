@@ -5453,7 +5453,14 @@ impl Run<'_, '_> {
                 .binary_search_by_key(&f.0.raw(), |x| x.0.0.raw())
                 .ok()
                 .map_or(0, |i| old.last[i].1);
+            let why = crate::exec::obs_flag!("PHITEX_MARK_WHY");
             if last as usize > k {
+                if why {
+                    eprintln!(
+                        "mark-why: patch refused: {} touched by the last run after mark {k} (last {last})",
+                        crate::val::field_name(self.v, f)
+                    );
+                }
                 return None;
             }
             // (its definitions of the field: each the slot's value or its
@@ -5465,6 +5472,9 @@ impl Run<'_, '_> {
                 // (a value a group saved: published from the save, the
                 // same for both runs, or from the slot: not told apart)
                 if saved.contains(&Some(x)) {
+                    if why {
+                        eprintln!("mark-why: patch refused: {} published a saved value", crate::val::field_name(self.v, f));
+                    }
                     return None;
                 }
                 let y = if Some(x) == oval {
@@ -5472,6 +5482,15 @@ impl Run<'_, '_> {
                 } else if Some(Some(x)) == opub {
                     npub.flatten()
                 } else {
+                    if why {
+                        eprintln!(
+                            "mark-why: patch refused: {} published {l:?} = {} (not its value {:?} or its base's {:?})",
+                            crate::val::field_name(self.v, f),
+                            self.v.render(x).chars().take(80).collect::<String>(),
+                            oval.map(|y| self.v.render(y).chars().take(60).collect::<String>()),
+                            opub
+                        );
+                    }
                     return None;
                 };
                 // (a base level's definition equal to the value read is
@@ -5484,6 +5503,14 @@ impl Run<'_, '_> {
                 patch.push((g, l, y));
             }
             if !any {
+                if why {
+                    eprintln!(
+                        "mark-why: patch refused: {} not defined by the last run's result (value {:?} -> {:?})",
+                        crate::val::field_name(self.v, f),
+                        oval.map(|y| self.v.render(y).chars().take(60).collect::<String>()),
+                        nval.map(|y| self.v.render(y).chars().take(60).collect::<String>())
+                    );
+                }
                 return None;
             }
         }
