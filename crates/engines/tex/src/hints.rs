@@ -1893,6 +1893,16 @@ struct Analysis<'t> {
     /// The control sequences' and braces' atoms, in order.
     structural: Vec<u32>,
     memo: std::cell::RefCell<FxHashMap<String, Arc<DefSet>>>,
+    /// The heads each pair of call lists adds
+    /// ([`Analysis::calls_state_split`]), by the lists' hash, with the
+    /// lists.
+    /// What each set adds to a bound ([`Analysis::add_set_parts`]), by
+    /// the set (kept alive here).
+    #[allow(clippy::type_complexity)]
+    parts_memo: std::cell::RefCell<FxHashMap<usize, (Arc<DefSet>, std::rc::Rc<Bound>)>>,
+    #[allow(clippy::type_complexity)]
+    split_memo:
+        std::cell::RefCell<FxHashMap<u64, (Vec<String>, Vec<String>, Option<Vec<&'static str>>)>>,
     /// The names whose state [`Analysis::defined_state`] is reading.
     visiting: std::cell::RefCell<Vec<String>>,
     /// The format's definitions, behind the text's own.
@@ -2112,6 +2122,8 @@ impl Analysis<'_> {
             sig,
             structural,
             memo: std::cell::RefCell::new(FxHashMap::default()),
+            split_memo: std::cell::RefCell::new(FxHashMap::default()),
+            parts_memo: std::cell::RefCell::new(FxHashMap::default()),
             visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
             reg_hash,
@@ -2671,6 +2683,50 @@ impl Analysis<'_> {
         outer: &[String],
         st: &mut Option<Vec<&'static str>>,
     ) {
+        if st.is_none() {
+            return;
+        }
+        // (the heads a pair of call lists adds, made once per pair in the
+        // analysis and added to each state that asks; not while a name's
+        // state is being read, where a recursion cuts it short)
+        if self.visiting.borrow().is_empty() {
+            let key = {
+                let mut h = phitex_defuse::FxHasher::default();
+                calls.hash(&mut h);
+                outer.hash(&mut h);
+                h.finish()
+            };
+            // (a hit is checked against the lists themselves)
+            let known = self
+                .split_memo
+                .borrow()
+                .get(&key)
+                .filter(|e| e.0 == calls && e.1 == outer)
+                .map(|e| e.2.clone());
+            let d = known.unwrap_or_else(|| {
+                let mut d = Some(Vec::new());
+                self.calls_state_split_(calls, outer, &mut d);
+                self.split_memo
+                    .borrow_mut()
+                    .insert(key, (calls.to_vec(), outer.to_vec(), d.clone()));
+                d
+            });
+            match d {
+                None => *st = None,
+                Some(hs) => add_heads(st, Some(&hs)),
+            }
+            return;
+        }
+        self.calls_state_split_(calls, outer, st);
+    }
+
+    /// [`Analysis::calls_state_split`], made.
+    fn calls_state_split_(
+        &self,
+        calls: &[String],
+        outer: &[String],
+        st: &mut Option<Vec<&'static str>>,
+    ) {
         // (by a set of the outer calls: no scan of them per call)
         let outer: phitex_defuse::FxHashSet<&str> = outer.iter().map(String::as_str).collect();
         let (out, inner): (Vec<&str>, Vec<&str>) = calls
@@ -2823,7 +2879,7 @@ impl Analysis<'_> {
     }
 
     /// The set's fields and relied macros into the bound.
-    fn add_set(&self, set: &DefSet, b: &mut Bound, cause: &mut String) -> bool {
+    fn add_set(&self, set: &Arc<DefSet>, b: &mut Bound, cause: &mut String) -> bool {
         if let Some(u) = set.unbounded.first() {
             cause.clone_from(u);
             return false;
@@ -2845,7 +2901,61 @@ impl Analysis<'_> {
 
     /// A definition set's names, prefixes and calls' state, whether or
     /// not the pass bounds it.
-    fn add_set_parts(&self, set: &DefSet, b: &mut Bound) {
+    fn add_set_parts(&self, set: &Arc<DefSet>, b: &mut Bound) {
+        // (what a set adds, made once per set in the analysis (its sets
+        // are kept in `memo`, each by its name) and added to each bound
+        // that asks, each entry once; not while a name's state is being
+        // read, where a recursion cuts it short)
+        if !self.visiting.borrow().is_empty() {
+            return self.add_set_parts_(set, b);
+        }
+        let key = Arc::as_ptr(set) as usize;
+        let known = self.parts_memo.borrow().get(&key).map(|e| e.1.clone());
+        let d = known.unwrap_or_else(|| {
+            let mut d = Bound {
+                state: Some(Vec::new()),
+                ..Bound::default()
+            };
+            self.add_set_parts_(set, &mut d);
+            let d = std::rc::Rc::new(d);
+            self.parts_memo
+                .borrow_mut()
+                .insert(key, (set.clone(), d.clone()));
+            d
+        });
+        let means: phitex_defuse::FxHashSet<&str> = b.means.iter().map(|m| m.0.as_str()).collect();
+        let new_means: Vec<(String, u8)> = d
+            .means
+            .iter()
+            .filter(|m| !means.contains(m.0.as_str()))
+            .cloned()
+            .collect();
+        b.means.extend(new_means);
+        let names: phitex_defuse::FxHashSet<&str> = b.names.iter().map(String::as_str).collect();
+        let new_names: Vec<String> = d
+            .names
+            .iter()
+            .filter(|n| !names.contains(n.as_str()))
+            .cloned()
+            .collect();
+        b.names.extend(new_names);
+        let prefixes: phitex_defuse::FxHashSet<&str> =
+            b.prefixes.iter().map(String::as_str).collect();
+        let new_prefixes: Vec<String> = d
+            .prefixes
+            .iter()
+            .filter(|p| !prefixes.contains(p.as_str()))
+            .cloned()
+            .collect();
+        b.prefixes.extend(new_prefixes);
+        match &d.state {
+            None => b.state = None,
+            Some(hs) => add_heads(&mut b.state, Some(hs)),
+        }
+    }
+
+    /// [`Analysis::add_set_parts`], made.
+    fn add_set_parts_(&self, set: &DefSet, b: &mut Bound) {
         // (what the bound has already, by name: each name added once
         // without a scan of the lists per name)
         let mut means: phitex_defuse::FxHashSet<String> =
