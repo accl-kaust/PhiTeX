@@ -318,7 +318,7 @@ pub(crate) struct PagePiece {
     /// The page's box, its sealed lines shallow (`crate::pages::seal`),
     /// and their stand-ins (by `LAZY + k`): filled in for its writer
     /// ([`page_box`]).
-    bx: Arc<BoxNode>,
+    bx: Mutex<BoxNode>,
     lazy: Vec<ValueId>,
     /// The pieces its sealed lines are in (sorted).
     pieces: Vec<i64>,
@@ -365,25 +365,30 @@ fn lines_hash(pc: &PagePiece, units: &FxHashMap<i64, ValueId>) -> Option<u64> {
     Some(h)
 }
 
-/// Page `pc`'s box with its sealed lines filled in
+/// `f` of page `pc`'s box with its sealed lines filled in
 /// ([`crate::nodes::fill_sealed`], `line` giving a line's box as its
-/// piece made it); `None` where a line is not found.
-fn page_box(
+/// piece made it), the box filled in place and put back after (no copy
+/// of the page); `None` where a line is not found.
+fn with_page_box<T>(
     v: &Values,
     pc: &PagePiece,
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
-) -> Option<BoxNode> {
-    let mut b = (*pc.bx).clone();
+    f: impl FnOnce(&BoxNode) -> T,
+) -> Option<T> {
+    let mut b = pc.bx.locked();
     if pc.lazy.is_empty() {
-        return Some(b);
+        return Some(f(&b));
     }
     // (its lines' lists as their runs made them, where kept: not
     // decoded again, `crate::nodes::take_made`)
     let take = crate::nodes::TAKE_MADE.with(|c| c.replace(true));
-    let mut h = 0;
-    let ok = crate::nodes::fill_sealed(v, &mut b.list, &pc.lazy, line, &mut h);
+    let mut saved = Vec::new();
+    let ok = crate::nodes::fill_sealed(v, &mut b.list, &pc.lazy, line, &mut 0, &mut saved);
     crate::nodes::TAKE_MADE.with(|c| c.set(take));
-    ok.then_some(b)
+    let r = ok.then(|| f(&b));
+    let mut saved: std::collections::VecDeque<_> = saved.into();
+    crate::nodes::unfill_sealed(&mut b.list, &mut 0, &mut saved);
+    r
 }
 
 /// The record of page `pc` (key `key`), its sealed lines' units hashed
@@ -407,8 +412,8 @@ fn record_of(
         all.entry(k).or_default().clone()
     };
     m.get_or_init(|| {
-        let bx = page_box(v, pc, line).unwrap_or_else(|| (*pc.bx).clone());
-        write_page(v, pc, &bx)
+        with_page_box(v, pc, line, |bx| write_page(v, pc, bx))
+            .unwrap_or_else(|| write_page(v, pc, &pc.bx.locked()))
     });
     m
 }
@@ -1801,7 +1806,7 @@ fn ship_apart(
         margins,
         whats,
         fonts,
-        bx: Arc::new(bx),
+        bx: Mutex::new(bx),
         lazy: side_lazy.to_vec(),
         pieces: {
             let mut ps: Vec<i64> = side_lazy
@@ -3530,9 +3535,7 @@ fn link(
                 let mut wh = |h: u32, _leaders: bool| {
                     page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &reloc))
                 };
-                if let Some(bx) = page_box(v, pc, &mut line)
-                    && let Err(e) = st.ship_out_with(&bx, &src, &mut wh)
-                {
+                if let Some(Err(e)) = with_page_box(v, pc, &mut line, |bx| st.ship_out_with(bx, &src, &mut wh)) {
                     errors.push((format!("pdfTeX error: {e}"), pc.node));
                 }
                 shipped += 1;

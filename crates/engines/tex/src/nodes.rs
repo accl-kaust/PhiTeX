@@ -1024,19 +1024,24 @@ pub(crate) fn head_hash(head: &[ValueId]) -> i64 {
 
 /// The sealed lines in `list` (shallow boxes whose stand-ins `lazy`
 /// holds, [`T_SEALED`], at any depth) given their glue settings and
-/// lists: `line` gives a line's box as its piece made it (its unit's
-/// items, `crate::pages::seal`); each line's box hashed into `h` in
-/// order. `false` where a line is not found.
+/// lists in place: `line` gives a line's box as its piece made it (its
+/// unit's items, `crate::pages::seal`). Each box filled is noted in
+/// `saved` (its place among the boxes in the walk's order, its glue
+/// setting and list before) for [`unfill_sealed`]. `false` where a line
+/// is not found.
 pub(crate) fn fill_sealed(
     v: &Values,
     list: &mut [Node],
     lazy: &[ValueId],
     line: &mut dyn FnMut(&Sealed) -> Option<ValueId>,
-    h: &mut u64,
+    seen: &mut usize,
+    saved: &mut Vec<(usize, GlueSet, List)>,
 ) -> bool {
     for n in list.iter_mut() {
         let ok = match n {
             Node::Box(b) => {
+                let at = *seen;
+                *seen += 1;
                 let stand_in = match b.list.as_slice() {
                     [Node::Whatsit(k, None)] if *k >= LAZY => {
                         lazy.get((*k - LAZY) as usize).and_then(|&l| sealed_of(v, l))
@@ -1049,18 +1054,18 @@ pub(crate) fn fill_sealed(
                         let Some(xs) = v.with_list(x, |xs| <[ValueId; 10]>::try_from(xs).ok()).flatten() else {
                             return false;
                         };
-                        b.glue = decode_box_head(v, &xs).glue;
                         let mut side = Side::default();
-                        b.list = take_made(xs[9], &mut side).unwrap_or_else(|| decode_list(v, xs[9], &mut side));
-                        *h = phitex_defuse::hash_words(*h, &[x.raw()]);
+                        let list = take_made(xs[9], &mut side).unwrap_or_else(|| decode_list(v, xs[9], &mut side));
+                        let glue = std::mem::replace(&mut b.glue, decode_box_head(v, &xs).glue);
+                        saved.push((at, glue, std::mem::replace(&mut b.list, list)));
                         true
                     }
-                    None => fill_sealed(v, &mut b.list, lazy, line, h),
+                    None => fill_sealed(v, &mut b.list, lazy, line, seen, saved),
                 }
             }
-            Node::Ins(i) => fill_sealed(v, &mut i.list, lazy, line, h),
-            Node::Adjust(l) => fill_sealed(v, l, lazy, line, h),
-            Node::Unset(u) => fill_sealed(v, &mut u.list, lazy, line, h),
+            Node::Ins(i) => fill_sealed(v, &mut i.list, lazy, line, seen, saved),
+            Node::Adjust(l) => fill_sealed(v, l, lazy, line, seen, saved),
+            Node::Unset(u) => fill_sealed(v, &mut u.list, lazy, line, seen, saved),
             _ => true,
         };
         if !ok {
@@ -1068,6 +1073,30 @@ pub(crate) fn fill_sealed(
         }
     }
     true
+}
+
+/// The boxes [`fill_sealed`] filled back as they were (`saved`, in its
+/// walk's order, taken from the back), so the box is the shape again.
+pub(crate) fn unfill_sealed(list: &mut [Node], seen: &mut usize, saved: &mut std::collections::VecDeque<(usize, GlueSet, List)>) {
+    for n in list.iter_mut() {
+        match n {
+            Node::Box(b) => {
+                let at = *seen;
+                *seen += 1;
+                if saved.front().is_some_and(|s| s.0 == at) {
+                    let (_, glue, l) = saved.pop_front().expect("a saved box");
+                    b.glue = glue;
+                    b.list = l;
+                } else {
+                    unfill_sealed(&mut b.list, seen, saved);
+                }
+            }
+            Node::Ins(i) => unfill_sealed(&mut i.list, seen, saved),
+            Node::Adjust(l) => unfill_sealed(l, seen, saved),
+            Node::Unset(u) => unfill_sealed(&mut u.list, seen, saved),
+            _ => {}
+        }
+    }
 }
 
 /// A few font ids, sorted, without an allocation for a line's usual
