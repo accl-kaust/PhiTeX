@@ -552,9 +552,15 @@ impl PlayOp {
                 );
                 // The run goes on as the recorded run it followed (its
                 // children and definitions made: what comes after does not
-                // diverge for want of them).
+                // diverge for want of them), as far as its calls apply here
+                // (a view that run made and this one did not, say).
                 for j in i + 1..runs[followed].calls.len() {
-                    runs[followed].call(cx, j)?;
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runs[followed].call(cx, j))) {
+                        Ok(r) => {
+                            r?;
+                        }
+                        Err(_) => break,
+                    }
                 }
                 return Ok(match &runs[followed].r {
                     J::Object(o) => de(&o["ok"]),
@@ -598,6 +604,8 @@ impl Run {
                 Ok(J::Null)
             }
             "resumed" => Ok(json!(cx.resumed().map(|r| r.1))),
+            "resumed_retext" => Ok(json!(cx.resumed_retext().map(|r| (r.1, r.2.to_vec())))),
+            "resume_at" => Ok(json!(cx.resume_at(de(&c[1][0])))),
             m => call(cx, m, &c[1]),
         }
     }
