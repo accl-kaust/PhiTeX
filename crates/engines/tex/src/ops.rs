@@ -1313,7 +1313,7 @@ pub(crate) fn units_of<'t>(
     text: &'t str,
     defs: &crate::hints::Defs,
 ) -> (ValueId, Vec<(String, &'t str)>) {
-    let (ends, sliceable) = unit_ends(text, defs);
+    let (ends, sliceable) = unit_ends(name, text, defs);
     let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
     let mut entries = Vec::with_capacity(ends.len());
     let mut units = Vec::with_capacity(ends.len());
@@ -1354,7 +1354,7 @@ pub(crate) fn units_of<'t>(
 /// the text and the definitions, kept by both (a file a round writes
 /// as the round before wrote it is not analysed again: amsldoc's index
 /// file, 40 kB, 125 ms).
-fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
+fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
     type Kept = (
         std::sync::Weak<phitex_source::pass::Definitions>,
         Arc<[usize]>,
@@ -1372,15 +1372,42 @@ fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
     {
         return (ends.clone(), *sl);
     }
-    let t = crate::hints::text_hints(text, phitex_source::pass::FileKind::Document, defs);
+    // (the file's text the last time it was cut, with its cuts: the part
+    // of the text an edit left keeps its units, the rest is cut again,
+    // [`units_again`])
+    static LAST: std::sync::OnceLock<std::sync::Mutex<FxHashMap<String, (Arc<str>, Kept)>>> =
+        std::sync::OnceLock::new();
+    let last = LAST.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
+    let before = last.locked().get(name).cloned().filter(|(_, (d, _, _))| {
+        d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
+    });
+    let cut = |t: &str| -> Vec<usize> {
+        let h = crate::hints::text_hints(t, phitex_source::pass::FileKind::Document, defs);
+        h.slices.iter().map(|&(_, e)| e).collect()
+    };
+    let mut ends: Vec<usize> = match &before {
+        Some((old, (_, old_ends, _))) => units_again(old, old_ends, text, cut),
+        None => cut(text),
+    };
     // (the units cover the text: each from the end of the one before to
     // its slice's end, the last to the text's end)
-    let mut ends: Vec<usize> = t.slices.iter().map(|&(_, e)| e).collect();
     ends.retain(|&e| e > 0 && e <= text.len());
     ends.sort_unstable();
     ends.dedup();
     if ends.last() != Some(&text.len()) {
         ends.push(text.len());
+    }
+    // (`PHITEX_UNITS_CHECK=1`, observe: the cuts made again against the
+    // whole text's)
+    if before.is_some() && crate::exec::obs_flag!("PHITEX_UNITS_CHECK") {
+        let mut whole = cut(text);
+        whole.retain(|&e| e > 0 && e <= text.len());
+        whole.sort_unstable();
+        whole.dedup();
+        if whole.last() != Some(&text.len()) {
+            whole.push(text.len());
+        }
+        eprintln!("units-check: {name}: {} units, the same as the whole text's: {}", ends.len(), whole == ends);
     }
     // (the job's own text: what kind of file it is comes from its text)
     let sliceable = crate::inputs::document_text(text);
@@ -1390,7 +1417,63 @@ fn unit_ends(text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
         m.clear();
     }
     m.insert(key, (Arc::downgrade(defs), ends.clone(), sliceable));
+    drop(m);
+    last.locked().insert(
+        name.to_owned(),
+        (Arc::from(text), (Arc::downgrade(defs), ends.clone(), sliceable)),
+    );
     (ends, sliceable)
+}
+
+/// The units of `text`, a written file's text that was `old` when it was
+/// cut at `old_ends`: the units wholly in the part both texts begin with
+/// kept, those wholly in the part both end with kept (moved), each but
+/// the one next to the change (a unit's end can depend on the text after
+/// it, `\section` taking its arguments), and the text between cut again
+/// by `cut`, at a unit's start, as a text of its own. The cuts only
+/// decide how the file is read back in pieces, never what is read.
+fn units_again(old: &str, old_ends: &[usize], text: &str, cut: impl Fn(&str) -> Vec<usize>) -> Vec<usize> {
+    let (o, n) = (old.as_bytes(), text.as_bytes());
+    let pre = o.iter().zip(n).take_while(|(a, b)| a == b).count();
+    let max_suf = o.len().min(n.len()) - pre;
+    let suf = o.iter().rev().zip(n.iter().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+    if pre == o.len() && pre == n.len() {
+        return old_ends.to_vec();
+    }
+    // (a cut at a line's start, so that the text cut again begins as a
+    // file's line does)
+    let at_line = |b: &[u8], e: usize| e == 0 || b.get(e - 1) == Some(&b'\n');
+    // the kept prefix: the units ending at or before the change, but the
+    // last of them
+    let left: Vec<usize> = old_ends.iter().copied().filter(|&e| e <= pre).collect();
+    let l_keep = left.len().saturating_sub(1);
+    let mut l_at = 0;
+    let mut kept = Vec::new();
+    for &e in &left[..l_keep] {
+        if at_line(o, e) {
+            l_at = e;
+        }
+    }
+    kept.extend(left[..l_keep].iter().copied().filter(|&e| e <= l_at));
+    // the kept suffix: the units starting at or after the change's end
+    // in the old text, but the first of them; moved to the new text
+    let o_end = o.len() - suf;
+    let shift = |e: usize| e + n.len() - o.len();
+    let starts: Vec<usize> = std::iter::once(0).chain(old_ends.iter().copied()).collect();
+    let right: Vec<usize> = starts.iter().copied().filter(|&s| s >= o_end && s < o.len()).collect();
+    let r_from = right.iter().copied().skip(1).find(|&s| at_line(o, s));
+    let r_at = r_from.map_or(n.len(), shift);
+    if r_at < l_at {
+        return cut(text);
+    }
+    let mid = cut(&text[l_at..r_at]);
+    let mut ends = kept;
+    ends.extend(mid.into_iter().map(|e| e + l_at));
+    ends.push(r_at);
+    if let Some(r) = r_from {
+        ends.extend(old_ends.iter().copied().filter(|&e| e > r).map(shift));
+    }
+    ends
 }
 
 /// Publishes a loop-back's next round value; under `observe` with
