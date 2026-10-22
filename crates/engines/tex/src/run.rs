@@ -4560,6 +4560,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.rec_load && op == self.ops.exec && !self.claim_rest && self.pulled_only_blanks() {
             self.record_load(&published);
         }
+        let published_trace = if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
+            published.clone()
+        } else {
+            Vec::new()
+        };
         {
             let (n, t_list) = (published.len(), t_pub.elapsed());
             for (f, x, l) in published {
@@ -4637,6 +4642,12 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.contribs.push((crate::regfold::acc_field(v, n), m.encode(v)));
             }
         }
+        let contribs_trace: Vec<String> = if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
+            let v = self.v;
+            self.contribs.iter().map(|(f, x)| format!("{}+={}", crate::val::field_name(v, *f), x.raw())).collect()
+        } else {
+            Vec::new()
+        };
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);
         }
@@ -4739,7 +4750,23 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a finisher's output: what its routine gave back, which the
         // page builder reads where it placed it, `crate::pages::RTN`)
-        self.fin.as_ref().and_then(|c| c.rtn).unwrap_or(ValueId::UNIT)
+        let out = self.fin.as_ref().and_then(|c| c.rtn).unwrap_or(ValueId::UNIT);
+        if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
+            let v = self.v;
+            let mut pubd: Vec<String> = published_trace
+                .iter()
+                .map(|(f, x, l)| format!("{}{l:?}={}", crate::val::field_name(v, *f), x.raw()))
+                .collect();
+            pubd.sort();
+            eprintln!(
+                "mark-trace-end: node {} resumed {} out {} claim {n} effect {:?} defs {pubd:?} contribs {contribs_trace:?}",
+                self.cx.node().raw(),
+                self.resumed,
+                out.raw(),
+                self.effect
+            );
+        }
+        out
     }
 
     /// The following siblings this run takes, once its input is read
