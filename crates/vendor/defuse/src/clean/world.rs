@@ -205,6 +205,10 @@ pub(crate) struct Mark {
     /// The digest of its outputs but its definitions (a patched cutoff
     /// compares this; the client answers for its definitions).
     pub odigest: u64,
+    /// The children and continuations the run had placed there (a run
+    /// resumed at the mark starts with them).
+    pub kids: u32,
+    pub conts: u32,
 }
 
 /// Where a run passed on a value it read through a view without

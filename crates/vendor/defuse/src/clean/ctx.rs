@@ -64,6 +64,10 @@ pub(crate) struct MarkResume {
     pub after: Arc<dyn Any + Send + Sync>,
     pub old: Arc<super::world::Res>,
     pub j: usize,
+    /// The placements that run made before the mark: the resumed run's
+    /// first ones.
+    pub kids: Vec<Spec>,
+    pub conts: Vec<Spec>,
 }
 
 /// A parked token with the views its attempt made (they stand when the
@@ -200,6 +204,9 @@ impl<'a> Ctx<'a> {
             Some(Err(k)) => (Some(k), None),
             None => (None, None),
         };
+        // (Resumed at a mark: the placements before it stand.)
+        let (kids0, conts0) = from_mark.as_ref().map_or_else(Default::default, |m| (m.kids.clone(), m.conts.clone()));
+        let nkids = kids0.len();
         // (About as many reads as its last run made, or its operation's.)
         let hint = n.res.as_ref().map_or(0, |r| r.reads.len()).max(core.op_reads.get(n.text.op.0 as usize).map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed) as usize));
         Ctx {
@@ -223,8 +230,8 @@ impl<'a> Ctx<'a> {
             cutoff: None,
             contribs: Vec::new(),
             pubs: Vec::new(),
-            kids: Vec::new(),
-            conts: Vec::new(),
+            kids: kids0,
+            conts: conts0,
             effect: None,
             kinds: Vec::new(),
             diag: Vec::new(),
@@ -242,7 +249,7 @@ impl<'a> Ctx<'a> {
             ix: FxHashMap::default(),
             read_ix: FxHashMap::with_capacity_and_hasher(hint, Default::default()),
             raw_ix: FxHashMap::default(),
-            nkids: 0,
+            nkids,
             pset_wait: false,
             predict: false,
             careful: false,
@@ -2211,7 +2218,8 @@ impl<'a> Ctx<'a> {
     fn mark_at(&mut self, mark: u32, state: ValueId, as_old: ValueId, patch: Option<&[(Field, Locality, Option<ValueId>)]>) -> Result<(), Stop> {
         let (digest, odigest) = self.out_digests();
         let read_ix = u32::try_from(self.reads.len()).unwrap_or(u32::MAX);
-        self.marks.push(super::world::Mark { mark, read_ix, state, digest, odigest });
+        let (kids, conts) = (u32::try_from(self.kids.len()).unwrap_or(u32::MAX), u32::try_from(self.conts.len()).unwrap_or(u32::MAX));
+        self.marks.push(super::world::Mark { mark, read_ix, state, digest, odigest, kids, conts });
         let Some(fm) = &self.from_mark else { return Ok(()) };
         let old = fm.old.clone();
         let patched = patch.is_some_and(|p| !p.is_empty());

@@ -430,12 +430,24 @@ impl Interp<'_> {
             }
             // Its assignments in the enclosing scope (the rest: nothing).
             "run" => {
+                // (Its emits after it, each with the run's bindings at its
+                // point.)
+                let mut env: Vec<(ValueId, ValueId, bool)> = Vec::new();
+                let mut emits = Vec::new();
                 for s in items(v, a[0]) {
                     let (st, sa) = tag(v, s);
                     if st == "assign" {
                         let val = self.expr(u, sa[1]);
-                        self.define(u, v.field(&text(v, sa[0])), val, truthy(v, sa[2]));
+                        let g = truthy(v, sa[2]);
+                        self.define(u, v.field(&text(v, sa[0])), val, g);
+                        env.retain(|b| b.0 != sa[0] || b.2 != g);
+                        env.push((sa[0], val, g));
+                    } else if st == "emit" {
+                        emits.push(super::subst(v, sa[0], &env));
                     }
+                }
+                for e in emits {
+                    self.stmt(u, "emit", &[e]);
                 }
                 ValueId::UNIT
             }

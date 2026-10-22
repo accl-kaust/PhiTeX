@@ -1687,12 +1687,27 @@ impl Engine {
         }
         let Some(after) = old.after.clone() else { return };
         let Some(j) = old.marks.iter().rposition(|m| m.read_ix <= b) else { return };
+        // (Its placements before the mark, as specs: the nodes they are.)
+        let spec = |x: &Id| {
+            self.w.node(*x).map(|n| super::ctx::Spec {
+                op: n.text.op,
+                args: n.text.args.clone(),
+                place: n.place,
+            })
+        };
+        let (nk, nc) = (old.marks[j].kids as usize, old.marks[j].conts as usize);
+        let (Some(kids), Some(conts)) = (
+            old.kids.get(..nk).and_then(|k| k.iter().map(spec).collect::<Option<Vec<_>>>()),
+            old.conts.get(..nc).and_then(|c| c.iter().map(spec).collect::<Option<Vec<_>>>()),
+        ) else {
+            return;
+        };
         let reads = old.reads[..old.marks[j].read_ix as usize].to_vec();
         self.kept_text.insert(id, n.text.clone());
         let mut ix = KeptIx::new(&self.w, at);
         ix.add(&self.w, id, &reads);
         self.kept_ix.insert(id, ix);
-        self.kept.insert(id, (Box::new(super::ctx::MarkResume { after: after.0, old, j }), reads, None));
+        self.kept.insert(id, (Box::new(super::ctx::MarkResume { after: after.0, old, j, kids, conts }), reads, None));
         rep.resumed_at_mark += 1;
     }
 
@@ -3947,6 +3962,10 @@ fn run_job(
                 }
             }
             res.reads = reads;
+            // (Its placements are made by the merge, from `kids` and
+            // `conts`, as a fresh run's are.)
+            res.kids = Vec::new();
+            res.conts = Vec::new();
             res.marks = marks.into();
             res.filed = None;
             res.def_ix = std::sync::OnceLock::new();
@@ -3990,12 +4009,28 @@ fn run_job(
 /// the start makes.
 fn check_cutoff(core: &super::core::Core, w: &World, id: Id, cut: &Run, predict: bool, careful: bool) {
     if let Outcome::Done(full) = run_job(core, w, id, None, predict, careful, None) {
-        assert!(
-            full.res.out == cut.res.out && same_effects(&full.res, &cut.res) && full.kids == cut.kids && full.conts == cut.conts,
-            "cut off run of {id}: its result is not a full run's (out {:?} against {:?})",
-            cut.res.out,
-            full.res.out
-        );
+        let (a, b) = (&full.res, &cut.res);
+        let differ: Vec<&str> = [
+            ("out", a.out == b.out),
+            ("defs", a.defs == b.defs),
+            ("contribs", a.contribs == b.contribs),
+            ("pubs", a.pubs == b.pubs),
+            ("effect", a.effect == b.effect),
+            ("kinds", a.kinds == b.kinds),
+            ("res.kids", a.kids == b.kids),
+            ("res.conts", a.conts == b.conts),
+            ("diag", a.diag == b.diag),
+            ("claim", a.claim == b.claim),
+            ("forwards", a.forwards == b.forwards),
+            ("passes", a.passes == b.passes),
+            ("kids", full.kids == cut.kids),
+            ("conts", full.conts == cut.conts),
+        ]
+        .into_iter()
+        .filter(|x| !x.1)
+        .map(|x| x.0)
+        .collect();
+        assert!(differ.is_empty(), "cut off run of {id}: its result is not a full run's: {differ:?} differ (kids {:?} against {:?})", cut.kids, full.kids);
     }
 }
 
