@@ -5355,6 +5355,18 @@ impl Run<'_, '_> {
         if !self.marks_on || self.cmds < self.mark_cmds + mark_every() || self.mark.active {
             return Ok(());
         }
+        // (only where the input is the node's text and its lines: a
+        // token list on the stack, a macro's or a routine's, is no place
+        // to stand, `PHITEX_MARK_TOKS=1` (observe) takes one there too)
+        if !crate::exec::obs_flag!("PHITEX_MARK_TOKS")
+            && self
+                .input
+                .levels
+                .iter()
+                .any(|l| l.kind == crate::input::kind::TOKS)
+        {
+            return Ok(());
+        }
         self.mark_cmds = self.cmds;
         let p = self.snapshot();
         let h = parked_digest(&p);
@@ -5373,13 +5385,6 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines, reason = "one state field a line")]
     pub(crate) fn snapshot(&mut self) -> Parked {
         let v = self.v;
-        // (the native items of the lists made values, kept so: the
-        // snapshot's lists are values)
-        for l in &mut self.nest {
-            for it in &mut l.list {
-                it.value(v);
-            }
-        }
         let mut segs = Vec::new();
         let input = &self.input;
         for l in input.levels.iter().rev() {
