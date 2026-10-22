@@ -1983,13 +1983,12 @@ impl State {
 
     /// One slot as [`State::park`] parks it (`None`: left out, no
     /// definition, save or load of it), its entry encoded once.
-    /// One slot for a mark: its entry in the mark's table (`None`: none,
-    /// a read's cache among them, [`PSlot::is_read_cache`], which a run
-    /// resumed there reads again) and its digest (a cache's too: a run cut
-    /// off at a mark goes on with the values it holds).
+    /// One slot for a mark: its entry in the mark's table (`None`: none)
+    /// and its digest. A read's cache is in both ([`PSlot::is_read_cache`]):
+    /// a run cut off at a mark goes on with the values it holds, and a run
+    /// resumed there holds what its last run held.
     fn slot_mark(&mut self, v: &Values, l: Loc) -> (Option<PSlot>, u64) {
         match self.park_slot(v, l) {
-            Some(p) if p.is_read_cache() => (None, PState::slot_hash(&p)),
             Some(p) => {
                 let h = PState::slot_hash(&p);
                 (Some(p), h)
@@ -2348,10 +2347,8 @@ impl PSlot {
     /// engine's value, which every run reaching here with the same reads
     /// has, loaded or not as its path went (a lookahead that fetched the
     /// next command's name before a mark, a memo kept over a park that
-    /// spared a lookup). Not part of a mark's table: a run resumed there
-    /// reads it again. Part of the state a mark compares: a run cut off
-    /// there goes on with the values its tables hold. A value the run
-    /// preloaded (from its text: a candidate's bindings) is no read's.
+    /// spared a lookup). A value the run preloaded (from its text: a
+    /// candidate's bindings) is no read's.
     fn is_read_cache(&self) -> bool {
         self.meta.is_none() && self.save_gid == 0 && self.ginert == 0 && self.e.flags & PRELOADED == 0
     }
