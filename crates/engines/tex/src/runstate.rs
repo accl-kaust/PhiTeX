@@ -193,6 +193,7 @@ struct Saved {
 pub(crate) type Ldef = (u64, bool, Option<u32>);
 
 /// The table.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct State {
     eq: Vec<Slot>,
     spill: Vec<Slot>,
@@ -2025,10 +2026,7 @@ impl State {
         let s = self.slot_ref(l)?;
         let meta = if s.meta != 0 {
             let mi = s.meta as usize - 1;
-            let publ = match self.metas[mi].publ {
-                Some((x, lc)) => Some((self.encode(&x, v), lc)),
-                None => None,
-            };
+            let publ = self.metas[mi].publ.map(|(x, lc)| (self.encode(&x, v), lc));
             let m = &self.metas[mi];
             Some(PMeta {
                 eng: m.eng,
@@ -2119,9 +2117,9 @@ impl State {
         let rest = self.park_rest(v);
         Some(MarkDelta {
             st: PState {
-                slots,
                 touched,
                 meta_order,
+                slots,
                 ..rest
             },
             gone,
@@ -2452,9 +2450,9 @@ impl MarkDelta {
             next_gid: 0,
         });
         PState {
-            slots,
             touched,
             meta_order,
+            slots,
             ..rest
         }
     }
@@ -2570,14 +2568,6 @@ impl PState {
         self.slots.iter().fold(0u64, |a, s| a.wrapping_add(Self::slot_hash(s)))
     }
 
-    /// [`PState::slot_sum`] but for the slots that only cache a read (what
-    /// a mark's table holds, [`State::mark_delta`]).
-    pub(crate) fn def_sum(&self) -> u64 {
-        self.slots
-            .iter()
-            .filter(|s| !s.is_read_cache())
-            .fold(0u64, |a, s| a.wrapping_add(Self::slot_hash(s)))
-    }
 
     /// The slots that differ from `old`'s only in their value (and the
     /// value their definition publishes), each as (location, the old

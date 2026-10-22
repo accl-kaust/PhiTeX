@@ -5945,6 +5945,7 @@ impl Run<'_, '_> {
 
     /// [`Run::snapshot`] with the table as `delta` holds it (a mark's,
     /// [`crate::runstate::State::mark_delta`]), else parked whole.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn snapshot_of(&mut self, delta: Option<crate::runstate::MarkDelta>) -> Parked {
         let v = self.v;
         let ti = crate::prof::start();

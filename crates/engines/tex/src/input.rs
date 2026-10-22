@@ -423,7 +423,10 @@ struct Snap {
 /// A level saved for a rewind ([`Snap`]): the level, its line's
 /// `(loc, state, endch, len)` or its file's `(off, _, _, pos)`, and the
 /// push that filled its slot.
-type Saved = (Level, (usize, u8, i64, usize), u64);
+type Saved = (Level, SavedPos, u64);
+
+/// A saved line's `(loc, state, endch, len)` or file's `(off, _, _, pos)`.
+type SavedPos = (usize, u8, i64, usize);
 
 /// The least arena size, in tokens, at which a run compacts it.
 pub(crate) const ARENA_COMPACT: usize = 1 << 22;
@@ -738,7 +741,7 @@ impl Input {
     /// slot refilled since, a line reduced in place).
     pub(crate) fn segs_at_command_start(&self, s: &Snapshot) -> Option<(Vec<Seg>, Vec<u8>, usize)> {
         let sn = self.snap.as_ref()?;
-        let mut levels: Vec<(Level, Option<(usize, u8, i64, usize)>)> =
+        let mut levels: Vec<(Level, Option<SavedPos>)> =
             self.levels[..sn.from.min(self.levels.len())].iter().map(|&l| (l, None)).collect();
         for (l, pos, push) in sn.saved.iter().rev() {
             let now = match l.kind {

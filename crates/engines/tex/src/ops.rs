@@ -148,7 +148,6 @@ pub(crate) fn run_node_parking(
     let marks_ok = parks
         && !cx.is_speculative()
         && match which {
-            Some("exec") => cx.op() == o.exec,
             Some("finish") => cx.op() == o.finish,
             Some("all") => cx.op() == o.exec || cx.op() == o.finish,
             Some("off") => false,
