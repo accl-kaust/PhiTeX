@@ -30,6 +30,8 @@ struct Run {
     env: Vec<(Field, ValueId)>,
     pset_wait: bool,
     predicted: u32,
+    /// Reads it guessed from the last (`Engine::guess_from_last`).
+    from_last: u32,
     /// It read a prediction or a definer in work.
     guessed: bool,
     fuel_out: bool,
@@ -1463,6 +1465,7 @@ impl Engine {
             env: Vec::new(),
             pset_wait: false,
             predicted: 0,
+            from_last: 0,
             guessed: false,
             fuel_out: false,
             range_wait: None,
@@ -3206,6 +3209,9 @@ impl Merge<'_> {
         // job's commit may change.)
         let ahead = i > 0;
         rep.speculations += u64::from(ahead);
+        if let Outcome::Done(r) | Outcome::Stopped(r, _) = &o {
+            rep.guessed_from_last += u64::from(r.from_last);
+        }
         // A result whose only broken reads are guessed folds
         // (`Monoid::speculate`), placing nothing: committed for its
         // contributions (which do not depend on what it read), and run
@@ -3434,6 +3440,7 @@ fn run_job(
         env: cx.env,
         pset_wait: cx.pset_wait,
         predicted: cx.predicted,
+        from_last: cx.from_last,
         guessed: cx.guessed || cx.predicted > 0 || ahead,
         fuel_out: cx.fuel_out,
         range_wait: cx.range_wait,

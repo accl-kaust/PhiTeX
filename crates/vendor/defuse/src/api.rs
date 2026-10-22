@@ -969,6 +969,10 @@ pub struct Report {
     pub predictions_confirmed: u64,
     /// Speculative runs that read a predicted value and were refuted.
     pub predictions_refuted: u64,
+    /// Reads that guessed from a previous evaluation
+    /// ([`crate::Engine::guess_from_last`]), in every run merged (none in
+    /// an evaluation where no node has a result from an earlier one).
+    pub guessed_from_last: u64,
     /// Nodes refuted this evaluation (a guess or prediction broke) that
     /// ran conservatively afterwards, on committed values only (not those
     /// refuted only on a definition whose definer ran again for a

@@ -94,12 +94,14 @@ fn a_reader_guesses_a_remade_definer_from_its_last_evaluation() {
         let outs = |eng: &Engine| rs.iter().map(|&r| eng.output(r).and_then(|q| eng.values().as_int(q))).collect::<Vec<_>>();
         let cold = eval(&mut eng);
         assert_eq!(outs(&eng), vec![Some(1000); N as usize], "guess {guess}: cold");
+        assert_eq!(cold.guessed_from_last, 0, "guess {guess}: cold");
         reps.push((cold.stops, cold.nodes_run, cold.predictions_confirmed + cold.predictions_refuted));
         // `x` moves, `y` stays.
         let a = vec![eng.values().str("s"), eng.values().int(2)];
         eng.replace(s, op, a);
         let same = eval(&mut eng);
         assert_eq!(outs(&eng), vec![Some(2000); N as usize], "guess {guess}: x 2");
+        assert_eq!(same.guessed_from_last > 0, guess, "guess {guess}: x 2");
         reps.push((same.stops, same.nodes_run, same.predictions_confirmed));
         // `y` moves too: the guesses are refuted.
         let a = vec![eng.values().str("s"), eng.values().int(15)];
@@ -248,6 +250,7 @@ fn a_placer_asked_again_guesses_from_its_last_evaluation() {
         let ystops = || ops.1.swap(0, std::sync::atomic::Ordering::Relaxed);
         let cold = eval(&mut eng);
         assert_eq!(out(&eng), Some(1000 + K * (K - 1) / 2), "guess {guess}: cold");
+        assert_eq!(cold.guessed_from_last, 0, "guess {guess}: cold");
         reps.push((cold.stops, ystops()));
         for xv in [2, 3, 4] {
             let a = vec![eng.values().str("s"), eng.values().int(xv)];
@@ -256,6 +259,7 @@ fn a_placer_asked_again_guesses_from_its_last_evaluation() {
             let bump = if xv == 3 { 50 } else { 0 };
             assert_eq!(out(&eng), Some(xv * 1000 + K * (K - 1) / 2 + bump), "guess {guess}: x {xv}");
             reps.push((rep.stops, ystops()));
+            assert_eq!(rep.guessed_from_last > 0, guess, "guess {guess}: x {xv}");
             assert!(eng.check_reads().is_empty(), "guess {guess}: {:?}", eng.check_reads());
             assert!(eng.check_invariants().is_empty(), "guess {guess}: {:?}", eng.check_invariants());
         }

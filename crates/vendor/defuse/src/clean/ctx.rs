@@ -100,6 +100,8 @@ pub struct Ctx<'a> {
     /// the fields guessed from the last (`Engine::guess_from_last`): taken
     /// on first need.
     last: Option<Option<Arc<LastReads>>>,
+    /// Reads it guessed from the last.
+    pub(crate) from_last: u32,
     /// A speculative run's read budget; spent, the run stops (`fuel_out`).
     pub(crate) fuel: Option<u64>,
     pub(crate) fuel_out: bool,
@@ -158,6 +160,7 @@ impl<'a> Ctx<'a> {
             guessed: false,
             predicted: 0,
             last: None,
+            from_last: 0,
             fuel: None,
             fuel_out: false,
             range_wait: None,
@@ -328,6 +331,7 @@ impl<'a> Ctx<'a> {
                     None if self.predict && !self.careful && let Some(v) = self.last_read(f, key) => {
                         // What its last evaluation read here, likewise.
                         self.predicted += 1;
+                        self.from_last += 1;
                         Some(v)
                     }
                     None => {
