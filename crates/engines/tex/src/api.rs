@@ -149,6 +149,16 @@ pub struct Options {
     /// load whose key matches is given them as the prediction of its
     /// outputs (also `PHITEX_PKG_PREDICT=1`).
     pub pkg_predict: bool,
+    /// Cost-aware speculation (`Engine::set_long_runs`): a piece whose
+    /// run takes longer than this does not run ahead of the pieces
+    /// before it still in work, on guesses a long run would lose when
+    /// refuted; it waits for them and runs once. `None`: every piece may
+    /// run ahead. Speed only, never results.
+    pub long_runs: Option<std::time::Duration>,
+    /// The pieces' run times an earlier build measured, by text
+    /// ([`crate::runtimes`], [`Build::export_runtimes`]): a cold build's
+    /// long pieces are held from their first attempt. Empty: none known.
+    pub runtimes: Vec<u8>,
     /// Whether a page's finisher is given the definitions the last
     /// finisher running its routine made as its prediction (on by
     /// default; off, the readers after it wait for its run: a test that
@@ -613,6 +623,8 @@ impl Default for Options {
             written_init: Vec::new(),
             pkgrec: Vec::new(),
             pkg_predict: false,
+            long_runs: Some(LONG_RUNS),
+            runtimes: Vec::new(),
             finisher_predictions: true,
             shell_escape: 2,
             prelude_jobname: "texput".to_owned(),
@@ -1428,6 +1440,9 @@ pub struct Stats {
     pub pkg_predicted: u64,
     pub pkg_predict_right: u64,
     pub pkg_predict_wrong: Vec<String>,
+    /// Each node's run time in the evaluations (all its attempts), in
+    /// microseconds, by node (`Report::run_times`).
+    pub run_times: Vec<(u64, u64)>,
     /// spec-final §1: where each loop-back round's time went (the
     /// engine's `Report::round_times`), over the evaluations.
     pub round_times: Vec<phitex_defuse::RoundTimes>,
@@ -1880,6 +1895,11 @@ impl Stats {
     }
 
     fn add(&mut self, r: &Report) {
+        self.run_times.extend(
+            r.run_times
+                .iter()
+                .map(|(n, t)| (n.raw(), u64::try_from(t.as_micros()).unwrap_or(u64::MAX))),
+        );
         self.nodes_run += r.nodes_run;
         self.runs += r.runs;
         self.cutoffs += r.cutoffs;
@@ -3508,6 +3528,10 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
     }
 }
 
+/// [`Options::long_runs`]'s default: a run this long is held until the
+/// pieces before it are done.
+pub const LONG_RUNS: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// The fields the engine is told are stable (`Engine::set_stable`):
 /// read by more than half of para4000's nodes and defined only by the
 /// format or the job's environment (`PHITEX_READERS=1` counted them:
@@ -4586,6 +4610,11 @@ pub struct Build {
     /// the loads' records change (`crate::pkgrec`; a record is only a
     /// load's run's), so only then are they merged and stored.
     loads_ran: bool,
+    /// The pieces' run times by text ([`crate::runtimes`]): those the
+    /// build was given, updated by its evaluations.
+    runtimes: phitex_defuse::FxHashMap<u64, u64>,
+    /// Whether [`Self::runtimes`] changed in the last evaluation.
+    runtimes_changed: bool,
 }
 
 impl Drop for Build {
@@ -4785,7 +4814,20 @@ impl Build {
             memo: Mutex::default(),
             lines: Mutex::default(),
             loads_ran: false,
+            runtimes: phitex_defuse::FxHashMap::default(),
+            runtimes_changed: false,
         };
+        // (cost-aware speculation, with the run times an earlier build
+        // measured for the cold build's first attempts)
+        b.g.eng.set_long_runs(b.opts.long_runs);
+        if b.opts.long_runs.is_some() {
+            b.runtimes = crate::runtimes::parse(&b.opts.runtimes);
+            for (_, n, src) in &b.nodes {
+                if let Some(&us) = b.runtimes.get(&crate::runtimes::key(src.text(&b.text))) {
+                    b.g.eng.set_run_time_hint(*n, std::time::Duration::from_micros(us));
+                }
+            }
+        }
         b.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -5023,6 +5065,7 @@ impl Build {
         crate::timeline::lap("engine: package load stats");
         self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
+        self.note_run_times(&stats);
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             self.note_edit_phases(t_all, t_before, t_apply, t_settle);
@@ -5333,6 +5376,42 @@ impl Build {
         match &self.g.loads {
             Some(l) => l.bytes(),
             None => self.opts.pkgrec.clone(),
+        }
+    }
+
+    /// The pieces' run times by text, for a later build's
+    /// [`Options::runtimes`] ([`crate::runtimes`]).
+    #[must_use]
+    pub fn export_runtimes(&self) -> Vec<u8> {
+        crate::runtimes::serialise(&self.runtimes)
+    }
+
+    /// Whether the run times [`Self::export_runtimes`] gives changed in
+    /// the last evaluation.
+    #[must_use]
+    pub fn runtimes_changed(&self) -> bool {
+        self.runtimes_changed
+    }
+
+    /// The run times of the pieces the last evaluation ran, by text: a
+    /// long one kept, one that ran short dropped.
+    fn note_run_times(&mut self, stats: &Stats) {
+        self.runtimes_changed = false;
+        if self.opts.long_runs.is_none() || stats.run_times.is_empty() {
+            return;
+        }
+        let by: phitex_defuse::FxHashMap<u64, u64> = stats.run_times.iter().copied().collect();
+        for (_, n, src) in &self.nodes {
+            let Some(&us) = by.get(&n.raw()) else {
+                continue;
+            };
+            let k = crate::runtimes::key(src.text(&self.text));
+            let changed = if us >= crate::runtimes::MIN_US {
+                self.runtimes.insert(k, us).is_none_or(|old| old.abs_diff(us) > old / 4)
+            } else {
+                self.runtimes.remove(&k).is_some()
+            };
+            self.runtimes_changed |= changed;
         }
     }
 
