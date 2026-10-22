@@ -723,6 +723,9 @@ pub(crate) struct Run<'c, 'a> {
     /// The run read a job-written file back ([`Run::read_back`]): what
     /// it defines from then on keeps its value there ([`Run::note_pre`]).
     pub read_back_done: bool,
+    /// The locations [`Run::note_pre`] is done with in this run (their
+    /// value at the read-back point noted, or none to note).
+    pub pre_noted: phitex_defuse::FxHashSet<Loc>,
     /// A lookup of the output writer's own (a font's file at a
     /// `\shipout`, `crate::pdfout::file_bytes`), not the text's: a file
     /// looked for in vain there is no read-back point.
@@ -917,6 +920,7 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_base: 0,
             closed: Vec::new(),
             read_back_done: false,
+            pre_noted: phitex_defuse::FxHashSet::default(),
             writer_lookup: false,
             read_back_at: None,
             read_point_here: false,
@@ -1736,17 +1740,24 @@ impl<'c, 'a> Run<'c, 'a> {
             self.read_back_done = false;
             return;
         }
+        // (a location noted once: its first definition after the
+        // read-back is the one whose value before it counts)
+        if self.pre_noted.contains(&loc) {
+            return;
+        }
         let f = self.loc_field(loc);
         let name = crate::val::field_name(v, f);
         if ["wpre:", "wpoint:", "cat:", "wread:", REREAD]
             .iter()
             .any(|p| name.starts_with(p))
         {
+            self.pre_noted.insert(loc);
             return;
         }
         let pre = v.field(&format!("wpre:{name}"));
         let pl = self.loc_of(pre);
         if self.st.defined_after(pl, 0) {
+            self.pre_noted.insert(loc);
             return;
         }
         // (a stop here stops the run: it runs again from its start)
@@ -1762,6 +1773,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return;
         }
         self.set_pre(loc, old);
+        self.pre_noted.insert(loc);
     }
 
     /// `wpre:<field>` of location `loc`: its value at the read-back
