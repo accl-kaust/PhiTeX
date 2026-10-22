@@ -2340,18 +2340,22 @@ impl Run<'_, '_> {
         let v = self.v;
         let mut raws = raws.into_iter().peekable();
         if let Some(l) = self.level_of(lid) {
-            // (the run's own list: the nodes go on it native, in one go)
+            // (the run's own list: the nodes go on it native, each stretch
+            // between two transitions in one go)
             l.list.reserve(out.len() + raws.len());
-            for (k, n) in out.drain(..).enumerate() {
-                while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
-                    fold_item(v, lid, r, &mut l.fold, &mut l.list);
+            let mut nodes = out.drain(..);
+            let mut k = 0;
+            for (at, r) in raws {
+                if at > k {
+                    l.list.extend(nodes.by_ref().take(at - k).map(crate::nest::Item::N));
+                    l.fold.since_bp += at - k;
+                    k = at;
                 }
-                l.list.push(crate::nest::Item::N(n));
-                l.fold.since_bp += 1;
-            }
-            for (_, r) in raws {
                 fold_item(v, lid, r, &mut l.fold, &mut l.list);
             }
+            let rest = nodes.len();
+            l.list.extend(nodes.map(crate::nest::Item::N));
+            l.fold.since_bp += rest;
         } else {
             for (k, n) in out.drain(..).enumerate() {
                 while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
@@ -2756,6 +2760,29 @@ impl Run<'_, '_> {
                 L::Lig => {
                     // §1039–§1040
                     let Some(step) = lookup(cur_l, cur_r) else {
+                        // (§1035–§1037 where nothing is to wrap up: the
+                        // input's character, alone on the stack, goes on
+                        // the list and the next is looked ahead)
+                        if let [top] = lig_stack.as_slice()
+                            && !top.lig
+                            && cur_l.is_some()
+                            && !lig_present
+                            && !ins_disc
+                            && !(out.len() > cur_q
+                                && matches!(out.last(), Some(Node::Char { ch, .. }) if i32::from(*ch) == hyphen_char))
+                            && view.exists(f, top.ch)
+                        {
+                            let c = top.ch;
+                            lig_stack.clear();
+                            cur_q = out.len();
+                            cur_l = Some(c);
+                            out.push(Node::Char {
+                                font: f,
+                                ch: u16::try_from(c).unwrap_or(0),
+                            });
+                            at = L::Lookahead;
+                            continue;
+                        }
                         at = L::Wrapup;
                         continue;
                     };

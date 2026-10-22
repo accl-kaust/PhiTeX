@@ -1064,9 +1064,8 @@ fn post_line_break(
     let mut pos = 0usize;
     let mut front: Vec<Node> = Vec::new();
     let mut lines = Vec::with_capacity(breaks.len());
-    let mut cur_line = params.prev_graf + 1;
     let mut last_at = 0usize;
-    for (k, &brk) in breaks.iter().enumerate() {
+    for (cur_line, (k, &brk)) in (params.prev_graf + 1..).zip(breaks.iter().enumerate()) {
         // §881
         let mut line = spare.pop().unwrap_or_default();
         line.reserve(match brk {
@@ -1172,7 +1171,6 @@ fn post_line_break(
             }
         }
         lines.push(Line { packed, penalty });
-        cur_line += 1;
         // §879
         if let Some(&next) = breaks.get(k + 1)
             && !post_disc_break
