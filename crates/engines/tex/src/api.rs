@@ -1410,13 +1410,6 @@ pub struct Stats {
     pub env_calls: u64,
 }
 
-/// The cold accounting of an evaluation (spec-final §1), with
-/// `PHITEX_TEX_TIME`: per round the engine's split of its time, the
-/// runs per node, the parallel shape (§9b: pending waits), the op time
-/// by node kind, the realised
-/// critical path in nodes and time and the kinds on the engine's
-/// critical chain, and the environment pushes.
-#[allow(clippy::too_many_lines)]
 /// The run audit's line (`acct-edit: audit`, with `PHITEX_ROUND_ACCT`
 /// and `PHITEX_RUN_AUDIT`): the reruns and their time, the wasted ones
 /// (every effect outside the run as before) and their time, and the
@@ -1472,6 +1465,13 @@ fn print_audit(eng: &Engine, a: &phitex_defuse::RunAudit) {
     );
 }
 
+/// The cold accounting of an evaluation (spec-final §1), with
+/// `PHITEX_TEX_TIME`: per round the engine's split of its time, the
+/// runs per node, the parallel shape (§9b: pending waits), the op time
+/// by node kind, the realised
+/// critical path in nodes and time and the kinds on the engine's
+/// critical chain, and the environment pushes.
+#[allow(clippy::too_many_lines)]
 fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_calls: u64) {
     let ms = |ns: u64| {
         #[allow(clippy::cast_precision_loss)]
