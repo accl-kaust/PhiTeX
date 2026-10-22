@@ -72,7 +72,12 @@ impl Group {
                             m.insert(pos, e, &NoMeasure);
                         });
                     }
-                    self.def_changed(core, at, fr, e.loc == Locality::Global);
+                    // (A pending entry breaks no read: `pending_breaks_none`.)
+                    if e.val.is_none() && super::build::pending_breaks_none(core, f) {
+                        self.defs_touched = true;
+                    } else {
+                        self.def_changed(core, at, fr, e.loc == Locality::Global);
+                    }
                 }
                 FieldOp::Unfile { pos, fr, global, at } => {
                     if global {

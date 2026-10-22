@@ -94,6 +94,9 @@ pub struct Ctx<'a> {
     pub(crate) careful: bool,
     /// It read a definer in work (a guess the merge checks).
     pub(crate) guessed: bool,
+    /// It folded contributors in work as they last contributed
+    /// (`Monoid::guess_ran`).
+    pub(crate) fold_ran: bool,
     /// Reads answered by a prediction.
     pub(crate) predicted: u32,
     /// Its last result from a previous evaluation's definition reads of
@@ -123,6 +126,8 @@ pub struct Ctx<'a> {
 impl<'a> Ctx<'a> {
     pub(crate) fn new(core: &'a Core, w: &'a World, me: Id, kept: Option<Box<dyn Any + Send>>) -> Ctx<'a> {
         let n = w.node(me).expect("a live node");
+        // (About as many reads as its last run made, or its operation's.)
+        let hint = n.res.as_ref().map_or(0, |r| r.reads.len()).max(core.op_reads.get(n.text.op.0 as usize).map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed) as usize));
         Ctx {
             core,
             w,
@@ -130,8 +135,7 @@ impl<'a> Ctx<'a> {
             unit: n.unit,
             op: n.text.op,
             args: n.text.args.clone(),
-            // (About as many as its last run read.)
-            reads: Vec::with_capacity(n.res.as_ref().map_or(0, |r| r.reads.len())),
+            reads: Vec::with_capacity(hint),
             defs: Vec::new(),
             contribs: Vec::new(),
             pubs: Vec::new(),
@@ -152,12 +156,13 @@ impl<'a> Ctx<'a> {
             apps: Vec::new(),
             env: Vec::new(),
             ix: FxHashMap::default(),
-            read_ix: FxHashMap::default(),
+            read_ix: FxHashMap::with_capacity_and_hasher(hint, Default::default()),
             nkids: 0,
             pset_wait: false,
             predict: false,
             careful: false,
             guessed: false,
+            fold_ran: false,
             predicted: 0,
             last: None,
             from_last: 0,
@@ -169,7 +174,7 @@ impl<'a> Ctx<'a> {
             calls: std::cell::RefCell::new(None),
             point: None,
             chain: None,
-            cells: FxHashMap::default(),
+            cells: FxHashMap::with_capacity_and_hasher(hint / 2, Default::default()),
         }
     }
 
@@ -419,9 +424,10 @@ impl<'a> Ctx<'a> {
             return None;
         }
         if self.predict && !self.careful && self.core.acc(f).is_some_and(|m| m.guess_ran()) {
-            let open = self.w.range_blocker_open(self.me, f, u, lo, hi);
+            let open = self.w.range_blocker_open(self.core, self.me, f, u, lo, hi);
             if open.is_none() {
                 self.guessed = true;
+                self.fold_ran = true;
             }
             return open;
         }

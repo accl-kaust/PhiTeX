@@ -34,6 +34,9 @@ struct Run {
     from_last: u32,
     /// It read a prediction or a definer in work.
     guessed: bool,
+    /// It folded contributors in work as they last contributed
+    /// (`Monoid::guess_ran`).
+    fold_ran: bool,
     fuel_out: bool,
     range_wait: Option<(Field, Id, Id, bool)>,
     narrowed: Option<super::world::May>,
@@ -80,6 +83,9 @@ struct Sched {
     careful: FxHashSet<Id>,
     /// Nodes whose committed result rests on a guess.
     guessed: FxHashSet<Id>,
+    /// Nodes whose committed result folded contributors as they last
+    /// contributed (`Monoid::guess_ran`).
+    fold_ran: FxHashSet<Id>,
     /// Whether the scheduler predicts (runs guess).
     predict: bool,
     /// Nodes whose run stopped on an accumulator range, with the range.
@@ -131,6 +137,7 @@ impl Sched {
             refutes: std::mem::take(&mut self.refutes),
             careful: std::mem::take(&mut self.careful),
             guessed: std::mem::take(&mut self.guessed),
+            fold_ran: std::mem::take(&mut self.fold_ran),
             fold_refutes: std::mem::take(&mut self.fold_refutes),
             ran_ready: std::mem::take(&mut self.ran_ready),
             ..Sched::default()
@@ -1467,6 +1474,7 @@ impl Engine {
             predicted: 0,
             from_last: 0,
             guessed: false,
+            fold_ran: false,
             fuel_out: false,
             range_wait: None,
             narrowed: None,
@@ -1639,7 +1647,7 @@ impl Engine {
         let ran = |f: Field| guessing && self.core.acc(f).is_some_and(|m| m.guess_ran());
         if let Some((f, from, to, past)) = s.range_wait.remove(&id)
             && let Some((u, lo, hi)) = self.w.window(id, from, to, past)
-            && let Some(x) = if ran(f) { self.w.range_blocker_open_last(id, f, u, lo, hi) } else { self.w.range_blocker_last(id, f, u, lo, hi) }
+            && let Some(x) = if ran(f) { self.w.range_blocker_open_last(&self.core, id, f, u, lo, hi) } else { self.w.range_blocker_last(id, f, u, lo, hi) }
         {
             s.range_wait.insert(id, (f, from, to, past));
             s.parked.insert(id, Wait::Node(x, Some(f)));
@@ -1800,13 +1808,14 @@ impl Engine {
                         });
                     }
                     let was_guess = if r.guessed { !s.guessed.insert(id) } else { s.guessed.remove(&id) };
+                    let was_ran = if r.fold_ran { !s.fold_ran.insert(id) } else { s.fold_ran.remove(&id) };
                     if !ran.insert(id) && was_guess {
                         // Committed again: its earlier result rested on a
                         // guess that broke (a round's loop-back aside; a
                         // rerun for a committed value's change is none).
                         let why = super::core::lock(&self.core.causes).get(&id).copied();
                         match why {
-                            Some(crate::api::Rerun::Range { field: Some(f) }) if fold_guess(&self.core, s, id, f, true) => {
+                            Some(crate::api::Rerun::Range { field: Some(f) }) if fold_guess(&self.core, s, id, f, was_ran, true) => {
                                 rep.mispredictions += 1;
                                 bump_field(&mut rep.refuted_by_field, f);
                             }
@@ -3225,12 +3234,12 @@ impl Merge<'_> {
         let asked = |rd: &Read| !same || matches!(rd, Read::Env { .. });
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
-                let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate() || m.guess_ran()));
+                let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate() || (m.guess_ran() && r.fold_ran)));
                 let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd));
                 match broken.next() {
                     Some(rd) if speculated(rd) && broken.all(speculated) => {
                         let Read::Range { f, .. } = rd else { unreachable!("a fold") };
-                        fold_guess(&eng.core, s, id, *f, false).then(|| (*f, super::build::why_broken(&eng.core, &eng.w, id, rd)))
+                        fold_guess(&eng.core, s, id, *f, r.fold_ran, false).then(|| (*f, super::build::why_broken(&eng.core, &eng.w, id, rd)))
                     }
                     _ => None,
                 }
@@ -3269,7 +3278,7 @@ impl Merge<'_> {
                     let tr = super::core::now();
                     // A read an earlier commit of this step broke.
                     eng.core.cause(id, super::build::why_broken(&eng.core, &eng.w, id, rd));
-                    if !matches!(rd, Read::Range { f, .. } if fold_guess(&eng.core, s, id, *f, true)) {
+                    if !matches!(rd, Read::Range { f, .. } if fold_guess(&eng.core, s, id, *f, r.fold_ran, true)) {
                         let news = matches!(rd, Read::Use { site, .. } if eng.loop_news(*site));
                         s.refuted(id, news);
                     }
@@ -3414,6 +3423,16 @@ fn run_job(
     if let Some(e) = cx.error.take() {
         return Outcome::Failed(e);
     }
+    // (Its operation's next run starts its read list at the most its runs
+    // read lately: this one's, or the last most less an eighth.)
+    if let Some(a) = core.op_reads.get(cx.op.0 as usize) {
+        let n = u32::try_from(cx.reads.len()).unwrap_or(u32::MAX);
+        let old = a.load(std::sync::atomic::Ordering::Relaxed);
+        let new = n.max(old - old / 8);
+        if new != old {
+            a.store(new, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     let run = |mut cx: Ctx<'_>, out: ValueId| Run {
         res: Res {
             last: cx.last_reads(),
@@ -3442,6 +3461,7 @@ fn run_job(
         predicted: cx.predicted,
         from_last: cx.from_last,
         guessed: cx.guessed || cx.predicted > 0 || ahead,
+        fold_ran: cx.fold_ran,
         fuel_out: cx.fuel_out,
         range_wait: cx.range_wait,
         narrowed: cx.narrowed,
@@ -3478,9 +3498,11 @@ fn run_job(
 /// Whether a refutation of `id`'s read of accumulator `f` is one of a
 /// guessed fold's first two (`Monoid::speculate`): the node runs again
 /// guessing, not carefully, its contributors now as they last contributed.
+/// `ran`: the run folded contributors as they last contributed
+/// (`Monoid::guess_ran`; a fold that guessed none is not a guess).
 /// `count`: this refutation is counted (else only asked).
-fn fold_guess(core: &super::core::Core, s: &mut Sched, id: Id, f: Field, count: bool) -> bool {
-    if !core.acc(f).is_some_and(|m| m.speculate() || m.guess_ran()) {
+fn fold_guess(core: &super::core::Core, s: &mut Sched, id: Id, f: Field, ran: bool, count: bool) -> bool {
+    if !core.acc(f).is_some_and(|m| m.speculate() || (m.guess_ran() && ran)) {
         return false;
     }
     let c = s.fold_refutes.entry(id).or_default();

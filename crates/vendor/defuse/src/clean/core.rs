@@ -37,6 +37,9 @@ pub(crate) struct Core {
     pub values: Values,
     pub ops: Vec<Arc<dyn Operation>>,
     pub op_names: Vec<&'static str>,
+    /// The most reads each operation's runs made lately (decaying): the
+    /// size a run of it starts its read list at.
+    pub op_reads: Vec<std::sync::atomic::AtomicU32>,
     pub projs: Vec<Projection>,
     pub accs: FxHashMap<Field, Arc<dyn Monoid>>,
     /// Accumulators declared by field-name prefix, first declared first,
@@ -48,6 +51,9 @@ pub(crate) struct Core {
     /// Fields a reader guesses from its last evaluation's read of them
     /// while their definer is declared, not made (`Engine::guess_from_last`).
     pub guess_last: FxHashSet<Field>,
+    /// The siblings a pending claimer with no reach holds back
+    /// (`Engine::set_claim_window`; `None`: all after it).
+    pub claim_window: Option<usize>,
     /// The evaluation running (or last run): counted from 1 at each start.
     pub eval_no: std::sync::atomic::AtomicU64,
 
@@ -113,6 +119,7 @@ impl Core {
             values: Values::new(),
             ops: Vec::new(),
             op_names: Vec::new(),
+            op_reads: Vec::new(),
             projs: Vec::new(),
             accs: FxHashMap::default(),
             acc_prefixes: Vec::new(),
@@ -120,6 +127,7 @@ impl Core {
             seqs: FxHashSet::default(),
             stable: FxHashSet::default(),
             guess_last: FxHashSet::default(),
+            claim_window: None,
             eval_no: std::sync::atomic::AtomicU64::new(0),
 
             loops: FxHashMap::default(),

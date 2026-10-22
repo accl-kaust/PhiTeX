@@ -488,6 +488,16 @@ impl Run {
 /// are associative, so equal folds have equal ids whatever the grouping;
 /// an op handed one is answered with the value the recorded run got (or
 /// the fold of the recorded combines, when they make it).
+/// Whether accumulator `name` folds those that ran (`Monoid::guess_ran`)
+/// whatever was recorded: `PLAY_GUESS_RAN`, names separated by commas.
+fn guess_ran_forced(name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| std::env::var("PLAY_GUESS_RAN").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default())
+        .iter()
+        .any(|n| n == name)
+}
+
 struct PlayMonoid {
     book: Arc<Book>,
     field: J,
@@ -699,14 +709,16 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
             }));
         }
         "declare_accumulator" => {
+            let f: Field = de(a);
+            let forced = guess_ran_forced(&eng.values().as_str(f.0).unwrap_or_default());
             eng.declare_accumulator(
-                de(a),
+                f,
                 Arc::new(PlayMonoid {
                     book: book.clone(),
                     field: a.clone(),
                     exact: book.exact.contains(&a.to_string()),
                     speculate: want.as_bool().unwrap_or(false),
-                    guess_ran: want.as_str() == Some("ran"),
+                    guess_ran: want.as_str() == Some("ran") || forced,
                     zero: book.monoid.get(&key(&[a, &json!("empty"), &J::Null])).map(de),
                 }),
             );
@@ -725,7 +737,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
                         field: fj.clone(),
                         exact: book.exact.contains(&fj.to_string()),
                         speculate: want.as_bool().unwrap_or(false),
-                        guess_ran: want.as_str() == Some("ran"),
+                        guess_ran: want.as_str() == Some("ran") || guess_ran_forced(name),
                         zero: book.monoid.get(&key(&[&fj, &json!("empty"), &J::Null])).map(de),
                     }),
                 );
@@ -779,6 +791,7 @@ fn apply(eng: &mut Engine, l: &J, book: &Arc<Book>, units: &Arc<Mutex<Vec<UnitId
         "set_version" => eng.set_version(de(&g(0))),
         "set_stable" => eng.set_stable(de(&g(0))),
         "guess_from_last" => eng.guess_from_last(de(&g(0))),
+        "set_claim_window" => eng.set_claim_window(de(&g(0))),
         "set_heights" => eng.set_heights(de(&g(0))),
         "set_round_cap_policy" => eng.set_round_cap_policy(de::<CapPolicy>(&g(0))),
         "refresh_where" => {

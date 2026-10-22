@@ -50,6 +50,14 @@ impl super::ptree::Measure<super::world::Pos, (Id, super::world::Pos)> for MaxRe
     }
 }
 
+/// A pending claim's reach: its limit, the claim window, the smaller.
+fn reach(limit: Option<usize>, window: Option<usize>) -> Option<usize> {
+    match (limit, window) {
+        (Some(l), Some(w)) => Some(l.min(w)),
+        (l, w) => l.or(w),
+    }
+}
+
 impl ClaimSt {
     fn new(decl: Claim) -> ClaimSt {
         ClaimSt {
@@ -192,7 +200,7 @@ impl World {
         if until == Until::Yes {
             return false;
         }
-        match st.early.or(st.limit) {
+        match st.early.or_else(|| reach(st.limit, core.claim_window)) {
             Some(0) => false,
             Some(k) => self.forward(c, |_, x| self.taken_from(c, x)).take(k).any(|x| x == s),
             None => true,
@@ -538,6 +546,15 @@ impl Builder<'_> {
             None => ClaimSt::new(Claim::None),
         };
         st.early = None;
+        // (A pending claim past its reach: the siblings past it ran on the
+        // guess and are taken back.)
+        if st.decl == Claim::Pending
+            && st.run != n
+            && let (Some(k), Some(r)) = (n, reach(st.limit, self.core.claim_window))
+            && k > r
+        {
+            self.counts.claims_past_reach += 1;
+        }
         if st.run == n && self.w.claims.contains_key(&id) {
             self.w.claims.insert(id, st, &NoMeasure);
         self.w.refresh_holder(id);

@@ -206,6 +206,7 @@ impl Engine {
         let name = op.name();
         self.core_mut().ops.push(op);
         self.core_mut().op_names.push(name);
+        self.core_mut().op_reads.push(std::sync::atomic::AtomicU32::new(0));
         #[allow(clippy::cast_possible_truncation)]
         OpId((self.core.ops.len() - 1) as u32)
     }
@@ -526,6 +527,18 @@ impl Engine {
         self.heights = on;
         #[cfg(feature = "observe")]
         self.rec_call("set_heights", crate::record::rec().map(|_| crate::record::j(&(&on,))), &());
+    }
+
+    /// Bounds what a pending claimer (`Claim::Pending`) without a reach of
+    /// its own (`Operation::claim_limit`, or a smaller one) holds back to
+    /// the `w` siblings after it: those past them run before its claim is
+    /// known, as a guess that it claims no more, taken back when it does
+    /// (`Report::claims_past_reach`). `None` (the default): it holds back
+    /// all after it.
+    pub fn set_claim_window(&mut self, w: Option<usize>) {
+        self.core_mut().claim_window = w;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_claim_window", crate::record::rec().map(|_| crate::record::j(&(&w,))), &());
     }
 
     /// Opts field `f` in to guessing from the last evaluation: a reader

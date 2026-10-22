@@ -1952,6 +1952,10 @@ impl Program {
                 eng.set_stable(f);
             }
         }
+        // FUZZ_CLAIM_WINDOW=w: pending claimers hold back `w` siblings.
+        if let Some(w) = std::env::var("FUZZ_CLAIM_WINDOW").ok().and_then(|w| w.parse().ok()) {
+            eng.set_claim_window(Some(w));
+        }
         if std::env::var_os("FUZZ_GUESS_LAST").is_some() {
             // Guessed from the last evaluation: results must not change.
             for name in ["x", "y", "u", "w", "g", "s", "k", "z", "q", "r", "cap"] {

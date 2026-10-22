@@ -37,6 +37,7 @@ pub(crate) struct Made {
 #[derive(Default, Clone, Copy)]
 pub(crate) struct Counts {
     pub claims_refuted: u64,
+    pub claims_past_reach: u64,
     pub effects_refuted: u64,
     pub claim_siblings: u64,
     pub defs_refuted: u64,
@@ -49,6 +50,7 @@ pub(crate) struct Counts {
 impl Counts {
     pub(crate) fn add_to(&self, r: &mut crate::api::Report) {
         r.claims_refuted += self.claims_refuted;
+        r.claims_past_reach += self.claims_past_reach;
         r.effects_refuted += self.effects_refuted;
         r.claim_siblings += self.claim_siblings;
         r.defs_refuted += self.defs_refuted;
@@ -613,7 +615,11 @@ impl<'a> Builder<'a> {
             return;
         }
         self.w.file_def(n.unit, f, pos, fr, e);
-        self.def_changed_in(n.unit, f, n.pos, Some(fr), loc == Locality::Global);
+        if val.is_none() && pending_breaks_none(self.core, f) {
+            self.w.touch_key(Key::Defs(n.unit, f));
+        } else {
+            self.def_changed_in(n.unit, f, n.pos, Some(fr), loc == Locality::Global);
+        }
     }
 
     /// The value and locality of node `n`'s filed entry of `f` (`None`:
@@ -2006,6 +2012,14 @@ pub(crate) fn new_unit(w: &mut World, u: u32, app: Id) {
 
 /// Whether read `r` is one of fields `fs` (a change to their definitions
 /// or contributions can break no other read).
+/// Whether a pending entry of `f` filed breaks no read: a definition read
+/// reaching it stands as a guess until its definer commits (which re-asks
+/// it), one reaching past it is as it was, and no other read of `f` asks
+/// its definitions (an accumulator's or a sequence's would).
+pub(crate) fn pending_breaks_none(core: &Core, f: Field) -> bool {
+    core.acc(f).is_none() && !core.seqs.contains(&f)
+}
+
 fn read_on(r: &Read, fs: &[Field]) -> bool {
     match r {
         Read::Use { f, .. }

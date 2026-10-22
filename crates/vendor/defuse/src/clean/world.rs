@@ -1447,30 +1447,54 @@ impl World {
         }
     }
 
-    /// The first node in `(lo, hi)` (other than `me`) in work without a
-    /// result that may contribute to `f` (a range read waits for these
-    /// when it guesses those that ran: `Monoid::guess_ran`).
-    pub(crate) fn range_blocker_open(&self, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
-        let mut lo = lo;
-        loop {
-            let (p, x) = self.first_open(f, u, lo, hi)?;
-            if x != me {
-                return Some(x);
+    /// The first node in `(lo, hi)` (other than `me`) in work that may
+    /// contribute to `f` without a result from an earlier evaluation (a
+    /// range read waits for these when it guesses those that ran:
+    /// `Monoid::guess_ran`; none ran before in a cold build).
+    pub(crate) fn range_blocker_open(&self, core: &super::core::Core, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let open = {
+            let mut lo = lo;
+            loop {
+                match self.first_open(f, u, lo, hi) {
+                    Some((p, x)) if x == me => lo = p,
+                    o => break o,
+                }
             }
-            lo = p;
+        };
+        let fresh = self
+            .field(u, f)
+            .and_then(|c| c.acc_res.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)).find(|&(_, &x)| x != me && !self.ran_before(core, x)))
+            .map(|(&p, &x)| (p, x));
+        match (open, fresh) {
+            (Some(a), Some(b)) => Some(a.min(b).1),
+            (a, b) => a.or(b).map(|x| x.1),
         }
     }
 
     /// The last such node before `hi` (other than `me`).
-    pub(crate) fn range_blocker_open_last(&self, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
-        let mut hi = hi;
-        loop {
-            let (p, x) = self.last_open(f, u, lo, hi)?;
-            if x != me {
-                return Some(x);
+    pub(crate) fn range_blocker_open_last(&self, core: &super::core::Core, me: Id, f: Field, u: u32, lo: Pos, hi: Pos) -> Option<Id> {
+        let open = {
+            let mut hi = hi;
+            loop {
+                match self.last_open(f, u, lo, hi) {
+                    Some((p, x)) if x == me => hi = p,
+                    o => break o,
+                }
             }
-            hi = p;
+        };
+        let fresh = self
+            .field(u, f)
+            .and_then(|c| c.acc_res.range(std::ops::Bound::Excluded(&lo), std::ops::Bound::Excluded(&hi)).rev().find(|&(_, &x)| x != me && !self.ran_before(core, x)))
+            .map(|(&p, &x)| (p, x));
+        match (open, fresh) {
+            (Some(a), Some(b)) => Some(a.max(b).1),
+            (a, b) => a.or(b).map(|x| x.1),
         }
+    }
+
+    /// Whether node `x` has a result from an evaluation before this one.
+    fn ran_before(&self, core: &super::core::Core, x: Id) -> bool {
+        self.node(x).and_then(|n| n.res.as_ref()).is_some_and(|r| r.eval < core.eval_no.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// The last such blocker in `(lo, hi)` before `hi` (other than `me`):
@@ -1584,7 +1608,7 @@ impl World {
                 let x = if predict && m.speculate() {
                     None
                 } else if predict && m.guess_ran() {
-                    self.range_blocker_open_last(id, f, u, 0, pos)
+                    self.range_blocker_open_last(core, id, f, u, 0, pos)
                 } else {
                     self.range_blocker_last(id, f, u, 0, pos)
                 };

@@ -306,12 +306,13 @@ pub trait Monoid: Send + Sync {
     }
 
     /// As [`Self::speculate`] for the contributors in work that have a
-    /// committed result: a range read of this accumulator, when the
-    /// scheduler predicts, folds those as they last contributed, and
-    /// waits for the ones that never ran. For accumulators whose
+    /// committed result from an earlier evaluation: a range read of this
+    /// accumulator, when the scheduler predicts, folds those as they last
+    /// contributed, and waits for the others (those that never ran, or
+    /// ran in this evaluation only). For accumulators whose
     /// contributions usually stand when their contributor runs again (a
-    /// piece re-run for a change elsewhere), where a cold build has
-    /// nothing to fold yet: the reader runs ahead of re-runs, not of
+    /// piece re-run for an edit), where a cold build has nothing to fold
+    /// and runs as without it: the reader runs ahead of re-runs, not of
     /// first runs. Validated as a guessed fold is.
     fn guess_ran(&self) -> bool {
         false
@@ -920,6 +921,10 @@ pub struct Report {
     /// Runs whose claim differed from the one in force (a static
     /// `Claim::None`/`Count` taken as a guess, or the run's last claim).
     pub claims_refuted: u64,
+    /// Pending claims that took siblings past their reach
+    /// (`Operation::claim_limit`, `Engine::set_claim_window`): those had
+    /// run on the guess, and were taken back.
+    pub claims_past_reach: u64,
     /// Definitions a run made outside its node's static list (`defs`):
     /// the list widened, the field's later readers re-validated.
     pub defs_refuted: u64,
