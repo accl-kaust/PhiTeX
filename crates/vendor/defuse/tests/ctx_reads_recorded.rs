@@ -33,6 +33,7 @@ const READS: &[&str] = &[
     "define_forward",
     "use_field_path",
     "acc_fold_path",
+    "acc_range_path",
     "view",
     "acc_view",
     "at",

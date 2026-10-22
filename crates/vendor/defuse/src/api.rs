@@ -979,6 +979,13 @@ pub struct RunAudit {
     /// The reads the commits re-checked, by field (`None`: reads of no
     /// field), the most first: how many, and how many of them broke.
     pub rechecked: Vec<(Option<Field>, u64, u64)>,
+    /// Of those, the readers re-checked on all their reads (13: a node
+    /// they read the output of gone; 15: an output they read gone; 16: a
+    /// scope kind they read; 17: their own frame moved), or on all those
+    /// of structure and outputs (14: the structure at a window they read;
+    /// 18: an output they read changed), by why: how many readers, and how
+    /// many reads asked.
+    pub rechecked_all: Vec<(u8, u64, u64)>,
 }
 
 /// A run that changed nothing outside itself ([`RunAudit::wasted`]).

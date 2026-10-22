@@ -307,6 +307,7 @@ impl Engine {
         let mut rep = Report::default();
         self.audit = self.audit_on.then(crate::api::RunAudit::default);
         *super::core::lock(&self.core.rechecks) = self.audit_on.then(FxHashMap::default);
+        self.core.auditing.store(self.audit_on, std::sync::atomic::Ordering::Relaxed);
         // (No run is out: no late filing for a node gone.)
         self.w.rd.purge_gone();
         (self.t_op, self.t_commit, self.t_idle) = (0, 0, 0);
@@ -759,6 +760,9 @@ impl Engine {
             let mut v: Vec<(Option<Field>, u64, u64)> = m.into_iter().map(|(f, (n, b))| (f, n, b)).collect();
             v.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.map(|f| f.0.raw()).cmp(&y.0.map(|f| f.0.raw()))));
             a.rechecked = v;
+            let mut all: Vec<(u8, u64, u64)> = std::mem::take(&mut *super::core::lock(&self.core.rechecks_all)).into_iter().map(|(s, (n, k))| (s, n, k)).collect();
+            all.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)));
+            a.rechecked_all = all;
         }
         // (Complete runs: a stopped attempt is not one; the limits count
         // attempts.)
@@ -3629,7 +3633,8 @@ impl Merge<'_> {
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
                 let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate() || (m.guess_ran() && r.fold_ran)));
-                let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd));
+                let mut last = None;
+                let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds_paths(&eng.core, &eng.w, id, rd, &mut last));
                 match broken.next() {
                     Some(rd) if speculated(rd) && broken.all(speculated) => {
                         let Read::Range { f, .. } = rd else { unreachable!("a fold") };
@@ -3666,7 +3671,10 @@ impl Merge<'_> {
                 eng.enqueue(s, id);
                 return Ok(());
             }
-            Outcome::Done(r) => match r.res.reads.iter().find(|rd| asked(rd) && !super::build::holds(&eng.core, &eng.w, id, rd)) {
+            Outcome::Done(r) => match {
+                let mut last = None;
+                r.res.reads.iter().find(|rd| asked(rd) && !super::build::holds_paths(&eng.core, &eng.w, id, rd, &mut last))
+            } {
                 Some(rd) => {
                     rep.merge.validate += super::core::ns_since(tv);
                     let tr = super::core::now();
