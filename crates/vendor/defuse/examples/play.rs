@@ -211,6 +211,18 @@ fn print_audit(eng: &Engine, a: &defuse::RunAudit) {
     for (f, n, b) in a.rechecked.iter().take(15) {
         println!("    re-checked {n:7} broken {b:6}  {}", f.map_or_else(|| "(no field)".to_string(), name));
     }
+    for (s, n, k) in &a.rechecked_all {
+        let why = match s {
+            13 => "a node read gone",
+            14 => "structure at a window read",
+            15 => "an output read gone",
+            16 => "a scope kind read",
+            17 => "own frame moved",
+            18 => "an output read changed",
+            _ => "other",
+        };
+        println!("    re-checked widely: {n:6} readers {k:8} reads  ({why})");
+    }
 }
 
 /// A recorded step (`Each` with its path's steps, interned here).
@@ -249,6 +261,10 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
         "use_field_path" => {
             let p = cx.path(&steps(cx, &g(1)));
             return res(cx.use_field_path(de(&g(0)), p));
+        }
+        "acc_range_path" => {
+            let p = cx.path(&steps(cx, &g(2)));
+            return res(cx.acc_range_path(de(&g(0)), de::<Option<NodeId>>(&g(1)), p));
         }
         "acc_fold_path" => {
             let p = cx.path(&steps(cx, &g(3)));

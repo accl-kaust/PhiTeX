@@ -37,19 +37,23 @@ pub(crate) fn output(cx: &mut Ctx<'_>, _o: &crate::run::Ops) -> Result<ValueId, 
     // node started before would assemble the pages so far and run again
     // at each page added)
     cx.use_field(v.field(crate::pages::PAGES_END))?;
-    let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
-    let pdf = is_pdf(v, &pages);
+    // (a PDF's file is the link's: the pages read for their mode only,
+    // the first page's, [`pdf_mode`]; a DVI file is made of them all)
+    let pdf = pdf_mode(cx)?;
+    let mut n = 0;
     let r = if pdf {
         Ok(field(cx, LINKED)?
             .filter(|&x| x != ValueId::UNIT)
             .unwrap_or_else(|| v.str("")))
     } else {
+        let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
+        n = pages.len();
         dvi_file(cx, &pages)
     };
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "output file: {} pages, {:?}{}",
-            pages.len(),
+            "output file: {} pages (a DVI's), {:?}{}",
+            n,
             t0.elapsed(),
             if r.is_ok() { "" } else { " (stopped)" }
         );
@@ -135,12 +139,19 @@ pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::s
 /// The format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`):
 /// a page entry is `[box, counts, fonts, pdf params, pdf data]`, the
 /// params' first element whether the file is PDF.
-fn is_pdf(v: &Values, pages: &[ValueId]) -> bool {
-    pages.first().is_some_and(|&p| {
-        list_of(v, p)
-            .get(3)
-            .is_some_and(|&x| crate::val::int_at(v, x, 0) != 0)
-    })
+/// Whether the pages are a PDF's: the first page's mode
+/// (`pages[0][3][0]`), read through a path, so the reader depends on it
+/// alone (no page: not).
+fn pdf_mode(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
+    use phitex_defuse::Step;
+    let v = cx.values();
+    let p = cx.path(&[Step::Index(0), Step::Index(3), Step::Index(0)]);
+    // (up to this node, as `acc_range` reads: a fold to the unit's end
+    // would wait on the end node, which waits on this one)
+    let me = cx.node();
+    Ok(cx
+        .acc_fold_path(v.field("pages"), None, Some(me), p)?
+        .is_some_and(|x| v.as_int(x).is_some_and(|n| n != 0)))
 }
 
 /// The link's run (spec-redesign §1, `link`): in exact PDF mode the file
@@ -151,8 +162,7 @@ pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Sto
     let t0 = std::time::Instant::now();
     let v = cx.values();
     cx.use_field(v.field(crate::pages::PAGES_END))?;
-    let pages = v.seq_to_vec(cx.acc_range(v.field("pages"), None)?);
-    if !is_pdf(v, &pages) {
+    if !pdf_mode(cx)? {
         // (its declared definition made in every mode: none here)
         cx.define_with(
             v.field(LINKED),
@@ -164,7 +174,7 @@ pub(crate) fn link(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Sto
     let file = pdf_exact(cx, o)?;
     cx.define_with(v.field(LINKED), file, phitex_defuse::Locality::Global);
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-        eprintln!("link: {} pages, {:?}", pages.len(), t0.elapsed());
+        eprintln!("link: {:?}", t0.elapsed());
     }
     Ok(ValueId::UNIT)
 }

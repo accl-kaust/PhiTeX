@@ -139,6 +139,10 @@ pub struct Ctx<'a> {
     /// entry in `reads`. The world a run sees does not change, so the same
     /// question asked again has the same answer and is not logged again.
     read_ix: FxHashMap<(Field, Id, bool, bool, u32), usize>,
+    /// The first path read of each field at each point: another path's
+    /// read there takes its value without asking again (a whole read's is
+    /// in `read_ix`).
+    raw_ix: FxHashMap<(Field, Id, bool, bool), usize>,
     pub(crate) nkids: usize,
     /// The run stopped on a pending definition set.
     pub(crate) pset_wait: bool,
@@ -237,6 +241,7 @@ impl<'a> Ctx<'a> {
             env: Vec::new(),
             ix: FxHashMap::default(),
             read_ix: FxHashMap::with_capacity_and_hasher(hint, Default::default()),
+            raw_ix: FxHashMap::default(),
             nkids: 0,
             pset_wait: false,
             predict: false,
@@ -345,6 +350,10 @@ impl<'a> Ctx<'a> {
                 _ => {}
             }
         }
+        // (Plain and projection reads: as ever. A path's read: out of line.)
+        if path >= super::core::PATH0 {
+            return self.read_at_path(f, at, after, own, path);
+        }
         let t = super::core::prof::start();
         let before = self.reads.len();
         let r = self.read_at_inner(f, at, after, own, path);
@@ -352,6 +361,31 @@ impl<'a> Ctx<'a> {
             self.read_ix.insert(key, before);
         }
         super::core::prof::stop(18, t);
+        r
+    }
+
+    /// [`Self::read_at`] through a path (`PATH0` on), not read at this key
+    /// yet: at a point read already, whole or through another path, that
+    /// read's value, read again through this one.
+    #[inline(never)]
+    fn read_at_path(&mut self, f: Field, at: Id, after: bool, own: bool, path: u32) -> Result<Option<(ValueId, Id)>, Stop> {
+        let key = (f, at, after, own, path);
+        if let Some(&i) = self.read_ix.get(&(f, at, after, own, 0)).or_else(|| self.raw_ix.get(&(f, at, after, own)))
+            && let Read::Use { site, val, .. } = self.reads[i]
+        {
+            self.spend(1)?;
+            self.read_ix.insert(key, self.reads.len());
+            self.reads.push(Read::Use { f, at, after, own, site, val, path });
+            return Ok(val.map(|v| (v, site)));
+        }
+        let before = self.reads.len();
+        let r = self.read_at_inner(f, at, after, own, path);
+        if r.is_ok() && self.reads.len() == before + 1 {
+            self.read_ix.insert(key, before);
+            if matches!(self.reads[before], Read::Use { .. }) {
+                self.raw_ix.entry((f, at, after, own)).or_insert(before);
+            }
+        }
         r
     }
 
@@ -694,15 +728,15 @@ impl<'a> Ctx<'a> {
     pub fn acc_fold_path(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, p: crate::api::PathId) -> Result<Option<ValueId>, Stop> {
         #[cfg(feature = "observe")]
         let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&f), crate::record::j(&from), crate::record::j(&to), self.core.rec_steps(p.0)]) } else { serde_json::Value::Null };
-        let r = self.acc_fold_path_inner(f, from, to, p.0);
+        let r = self.acc_fold_path_inner(f, from, to, true, p.0);
         #[cfg(feature = "observe")]
         crate::record::call(&self.calls, "acc_fold_path", a, crate::record::stop_or(&r));
         r
     }
 
-    fn acc_fold_path_inner(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, p: u32) -> Result<Option<ValueId>, Stop> {
+    fn acc_fold_path_inner(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>, past: bool, p: u32) -> Result<Option<ValueId>, Stop> {
         let before = self.reads.len();
-        let x = self.acc_window(f, from, to, true)?;
+        let x = self.acc_window(f, from, to, past)?;
         if self.reads.len() > before
             && let Some(Read::Range { path, .. }) = self.reads.last_mut()
         {
@@ -727,7 +761,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn view_inner(&mut self, f: Field) -> Result<Option<View>, Stop> {
-        let present = self.core.intern_path(&[crate::api::Step::Present]);
+        let present = super::core::PRESENT;
         let Some((x, _)) = self.read_at(f, self.me, false, false, present)? else {
             return Ok(None);
         };
@@ -751,9 +785,9 @@ impl<'a> Ctx<'a> {
     }
 
     fn acc_view_inner(&mut self, f: Field, from: Option<NodeId>, to: Option<NodeId>) -> Result<View, Stop> {
-        let present = self.core.intern_path(&[crate::api::Step::Present]);
+        let present = super::core::PRESENT;
         let before = self.reads.len();
-        self.acc_fold_path_inner(f, from, to, present)?;
+        self.acc_fold_path_inner(f, from, to, true, present)?;
         // (The fold's read, unless the window was empty: a constant.)
         let (root, x) = match self.reads.last() {
             Some(Read::Range { val, .. }) if self.reads.len() > before => (u32::try_from(self.reads.len() - 1).unwrap_or(u32::MAX), *val),
@@ -1543,6 +1577,22 @@ impl<'a> Ctx<'a> {
         self.acc_range_to_inner(f, from, None)
     }
 
+    /// [`Ctx::acc_range`] through path `p`: the path's answer on the fold
+    /// of `f`'s contributions after `from` and before this node, the run
+    /// depending on it only.
+    ///
+    /// # Errors
+    ///
+    /// `Stop` as for [`Ctx::acc_range`].
+    pub fn acc_range_path(&mut self, f: Field, from: Option<NodeId>, p: crate::api::PathId) -> Result<Option<ValueId>, Stop> {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { serde_json::json!([crate::record::j(&f), crate::record::j(&from), self.core.rec_steps(p.0)]) } else { serde_json::Value::Null };
+        let r = self.acc_fold_path_inner(f, from, None, false, p.0);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "acc_range_path", a, crate::record::stop_or(&r));
+        r
+    }
+
     /// A register kept as definitions and contributions: the definition
     /// of `f` reaching this node (as [`Self::use_field`]), and the fold of
     /// accumulator `acc`'s contributions after that definition's node
@@ -2278,6 +2328,7 @@ impl<'a> Ctx<'a> {
         self.restart = true;
         self.reads.clear();
         self.read_ix.clear();
+        self.raw_ix.clear();
         self.defs.clear();
         self.forwards.clear();
         self.views.clear();

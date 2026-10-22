@@ -1719,14 +1719,6 @@ impl Operation for Resume {
     }
 }
 
-/// A [`PITEMS`] unit's items.
-pub(crate) fn unit_items(v: &Values, u: ValueId) -> Vec<ValueId> {
-    list_of(v, u)
-        .get(2)
-        .map(|&x| list_of(v, x))
-        .unwrap_or_default()
-}
-
 /// Two lists each sorted by field then standing first, merged in that
 /// order, `a`'s before `b`'s at a tie: a stable sort of `a` then `b`.
 fn merge_stable(

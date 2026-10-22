@@ -72,6 +72,11 @@ impl Operation for Ops {
                 let x = cx.acc_fold_path(acc, None, Some(cx.node()), p)?.unwrap_or_else(none);
                 v.list(v.seq_to_vec(x))
             }
+            // (The fold before it, `acc_range`'s, through a path.)
+            "rq" => {
+                let p = cx.path(&[Step::Last]);
+                cx.acc_range_path(acc, None, p)?.unwrap_or_else(none)
+            }
             "rfv" => {
                 let m = cx.acc_view(acc, None, Some(cx.node()))?;
                 cx.get(m, Step::Last).unwrap_or_else(none)
@@ -81,7 +86,7 @@ impl Operation for Ops {
     }
 }
 
-const READERS: [&str; 7] = ["r1", "rk", "rv", "rw", "rf", "rfv", "re"];
+const READERS: [&str; 8] = ["r1", "rk", "rv", "rw", "rf", "rfv", "re", "rq"];
 
 struct T {
     eng: Engine,
@@ -194,7 +199,7 @@ fn a_key_reader_runs_again_only_when_its_key_changes() {
 #[test]
 fn a_fold_path_reader_runs_again_only_when_its_part_changes() {
     let mut t = T::new();
-    assert_eq!((t.out("rf"), t.out("rfv"), t.out("re")), ("2".into(), "\"y\"".into(), "[1 1]".into()));
+    assert_eq!((t.out("rf"), t.out("rfv"), t.out("re"), t.out("rq")), ("2".into(), "\"y\"".into(), "[1 1]".into(), "\"y\"".into()));
     // The first contribution's content: neither the length, the last, nor
     // each one's length.
     let x = t.eng.values().str("z");
@@ -205,8 +210,8 @@ fn a_fold_path_reader_runs_again_only_when_its_part_changes() {
     assert_eq!(t.out("re"), "[2 1]");
     // The last one's: the last.
     let x = t.eng.values().str("w");
-    assert_eq!(t.edit("c2", x), vec!["rfv"]);
-    assert_eq!(t.out("rfv"), "\"w\"");
+    assert_eq!(t.edit("c2", x), vec!["rfv", "rq"]);
+    assert_eq!((t.out("rfv"), t.out("rq")), ("\"w\"".into(), "\"w\"".into()));
     // One gone: the length (and not the last, still `w`).
     let c1 = t.nodes["c1"];
     t.eng.remove(c1);

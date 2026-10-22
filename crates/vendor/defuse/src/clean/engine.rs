@@ -638,9 +638,12 @@ impl Engine {
     /// `f`, its readers (and the definitions forwarding it,
     /// `Ctx::define_forward`) take that value as soon as the publication is
     /// final for the round (its publisher committed, no node before it in
-    /// its unit in work), not when the round ends; the moves that become
-    /// final together are made together. The round ends as before, when nothing moves; a field moved
-    /// early does not move at its end.
+    /// its unit in work), not when the round ends. Moves are made one
+    /// publisher at a time, in text order, its readers running before the
+    /// next publisher's moves are taken. (Made together, two fields read
+    /// crosswise each move on the other's old value, and may swap two
+    /// states for good.) The round ends as before, when nothing moves; a
+    /// field moved early does not move at its end.
     ///
     /// # Determinism
     ///

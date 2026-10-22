@@ -2776,12 +2776,6 @@ impl Graph {
         let v = self.eng.values();
         let mut env = self.files.clone();
         env.extend(self.marks.entries(v));
-        // (and how many there are, nobody's read: an environment that
-        // lacks this entry, the canonical text of a document with no
-        // comment, makes `sweep_input_include`'s edit of `chap2.tex`
-        // with the format built in the same evaluation run its first
-        // piece again on `file:inputs.aux`, an engine matter)
-        env.push((v.field(DOC_MARK_COUNT), v.int(self.marks.count())));
         // (the files the job writes kept in memory, a fixpoint's; none
         // otherwise: `UNIT`, never a wait on the client. Listed: the files
         // written before that the last evaluation did not open, each
@@ -3636,8 +3630,6 @@ pub(crate) const DOC_MARKS: &str = "doc:mark:";
 /// the line is in the file.
 pub(crate) type CommentMark = (u32, u64, String);
 
-/// The environment field of the number of the canonical text's comments.
-const DOC_MARK_COUNT: &str = "doc:marks";
 
 /// The hash of a comment line's text before its `%`.
 fn prefix_hash(prefix: &str) -> u64 {
@@ -3739,11 +3731,6 @@ impl Marks {
                 (v.field(&format!("{DOC_MARKS}{id:016x}")), v.str(c))
             })
             .collect()
-    }
-
-    /// How many comments there are.
-    fn count(&self) -> i64 {
-        i64::try_from(self.0.locked().0.len()).unwrap_or(i64::MAX)
     }
 
     /// Whether marks changed since the environment was set.
@@ -6826,15 +6813,25 @@ fn decl_trace(eng: &Engine, f: Field, init: ValueId) {
 /// `PHITEX_DECL_TRACE`: a full environment map, by family: fields new,
 /// changed, unchanged and dropped against the map supplied before.
 fn env_trace(eng: &Engine, env: &[(Field, ValueId)]) {
-    static LAST: std::sync::Mutex<Option<FxHashMap<Field, ValueId>>> = std::sync::Mutex::new(None);
+    // (the last environment pushed, with the value store its fields are
+    // of: a build after another in one process has its own, and an
+    // earlier build's field is no name in it)
+    #[allow(clippy::type_complexity)]
+    static LAST: std::sync::Mutex<Option<(usize, FxHashMap<Field, ValueId>)>> =
+        std::sync::Mutex::new(None);
 
     if !crate::exec::obs_flag!("PHITEX_DECL_TRACE") {
         return;
     }
-    let mut l = LAST.locked();
-    let old = l.take().unwrap_or_default();
-    let new: FxHashMap<Field, ValueId> = env.iter().copied().collect();
     let v = eng.values();
+    let store = std::ptr::from_ref(v) as usize;
+    let mut l = LAST.locked();
+    let old = l
+        .take()
+        .filter(|(s, _)| *s == store)
+        .map(|(_, m)| m)
+        .unwrap_or_default();
+    let new: FxHashMap<Field, ValueId> = env.iter().copied().collect();
     let fam = |f: Field| field_name(v, f).split(':').next().unwrap_or("").to_owned();
     let mut c: std::collections::BTreeMap<String, [u32; 4]> = std::collections::BTreeMap::new();
     for (&f, &x) in &new {
@@ -6857,7 +6854,7 @@ fn env_trace(eng: &Engine, env: &[(Field, ValueId)]) {
         new.len(),
         s.join("; ")
     );
-    *l = Some(new);
+    *l = Some((store, new));
 }
 
 /// (debug) The first leaf where two values differ: its path, and both
