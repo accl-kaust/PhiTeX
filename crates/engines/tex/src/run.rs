@@ -5439,23 +5439,33 @@ impl Run<'_, '_> {
                 ag: l.ag.clone(),
             })
             .collect();
-        let fields = |r: &Self, xs: &[Loc]| -> Vec<Field> { xs.iter().map(|&l| r.loc_field(l)).collect() };
-        let skip_first = fields(self, &self.skip_first);
+        let skip_first: Vec<Field> = self
+            .skip_first
+            .clone()
+            .into_iter()
+            .map(|l| self.loc_field(l))
+            .collect();
         // (the memos by field: their order the same for equal memos)
-        fn by_field<T: Copy>(r: &Run<'_, '_>, m: impl Iterator<Item = (Loc, T)>) -> Vec<(Field, T)> {
-            let mut xs: Vec<(Field, T)> = m.map(|(l, x)| (r.loc_field(l), x)).collect();
+        fn by_field<T: Copy>(r: &mut Run<'_, '_>, m: Vec<(Loc, T)>) -> Vec<(Field, T)> {
+            let mut xs: Vec<(Field, T)> = m.into_iter().map(|(l, x)| (r.loc_field(l), x)).collect();
             xs.sort_by_key(|x| x.0.0.raw());
             xs
         }
-        let reg_pending = by_field(self, self.reg_pending.iter().map(|(&l, &m)| (l, m)));
-        let class_memo = by_field(self, self.class_memo.iter().map(|(&l, &c)| (l, c)));
-        let outer_memo = by_field(self, self.outer_memo.iter().map(|(&l, &o)| (l, o)));
-        let step_memo = by_field(self, self.step_memo.iter().map(|(&l, &k)| (l, k)));
-        let defined_memo = by_field(self, self.defined_memo.iter().map(|(&l, &d)| (l, d)));
+        let m = self.reg_pending.iter().map(|(&l, &m)| (l, m)).collect();
+        let reg_pending = by_field(self, m);
+        let m = self.class_memo.iter().map(|(&l, &c)| (l, c)).collect();
+        let class_memo = by_field(self, m);
+        let m = self.outer_memo.iter().map(|(&l, &o)| (l, o)).collect();
+        let outer_memo = by_field(self, m);
+        let m = self.step_memo.iter().map(|(&l, &k)| (l, k)).collect();
+        let step_memo = by_field(self, m);
+        let m = self.defined_memo.iter().map(|(&l, &d)| (l, d)).collect();
+        let defined_memo = by_field(self, m);
         let pending_pre = self
             .pending_pre
-            .iter()
-            .map(|&(l, x)| (self.loc_field(l), x))
+            .clone()
+            .into_iter()
+            .map(|(l, x)| (self.loc_field(l), x))
             .collect();
         Parked {
             epoch: self.cx.values_epoch(),
