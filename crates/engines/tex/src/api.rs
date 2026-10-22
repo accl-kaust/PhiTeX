@@ -1461,6 +1461,65 @@ pub struct Stats {
 /// Example: `acct-edit: audit reruns 12 in 3.1 ms, wasted 9 in 2.4 ms,
 /// top [exec Changed cs:@currentlabel 4 1.200 ms; finish Range pdf:xpages
 /// 3 0.900 ms]`.
+/// (`PHITEX_RUN_AUDIT`) Every node run again in the evaluation by what
+/// made it (its operation, the cause's kind and field), how many of
+/// those ended with the effects they had (wasted, [`print_audit`]) and
+/// their time; with `PHITEX_RERUN_VALUES=part`, a changed field whose
+/// name has `part` shown with its old and new value.
+fn print_rerun_classes(eng: &Engine, r: &Report, a: &phitex_defuse::RunAudit) {
+    use phitex_defuse::Rerun;
+    let v = eng.values();
+    let mut wasted: FxHashMap<phitex_defuse::NodeId, std::time::Duration> = FxHashMap::default();
+    for w in &a.wasted {
+        *wasted.entry(w.node).or_default() += w.time;
+    }
+    let show = if cfg!(feature = "profile") { crate::exec::env_str!("PHITEX_RERUN_VALUES") } else { None };
+    // (op, kind, field) -> (runs, wasted, wasted time)
+    let mut by: std::collections::BTreeMap<(String, &'static str, String), (u64, u64, std::time::Duration)> =
+        std::collections::BTreeMap::new();
+    for &(n, c) in &r.rerun_causes {
+        let op = eng.node_info(n).map_or("gone", |i| i.op).to_owned();
+        let (kind, field) = match c {
+            Rerun::Text => ("Text", None),
+            Rerun::Changed { field, old, new } => {
+                let name = crate::val::field_name(v, field);
+                if show.is_some_and(|p| name.contains(p)) {
+                    let cut = |x: ValueId| v.render(x).chars().take(80).collect::<String>();
+                    eprintln!("acct-edit: rerun value {op} node {} {name}: {} -> {}", n.raw(), cut(old), cut(new));
+                }
+                ("Changed", Some(field))
+            }
+            Rerun::Rebind { field } => ("Rebind", Some(field)),
+            Rerun::Refuted { field } => ("Refuted", field),
+            Rerun::Woken { field } => ("Woken", field),
+            Rerun::Loop { field } => ("Loop", Some(field)),
+            Rerun::Environment { field } => ("Environment", Some(field)),
+            Rerun::Output { .. } => ("Output", None),
+            Rerun::Claim => ("Claim", None),
+            Rerun::Anchor { .. } => ("Anchor", None),
+            Rerun::SiblingScan => ("SiblingScan", None),
+            Rerun::Range { field } => ("Range", field),
+            Rerun::Scope => ("Scope", None),
+            Rerun::Other => ("Other", None),
+        };
+        let f = field.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
+        let e = by.entry((op, kind, f)).or_default();
+        e.0 += 1;
+        if let Some(t) = wasted.get(&n) {
+            e.1 += 1;
+            e.2 += *t;
+        }
+    }
+    let mut rows: Vec<_> = by.into_iter().collect();
+    rows.sort_by(|x, y| y.1.0.cmp(&x.1.0).then_with(|| x.0.cmp(&y.0)));
+    for ((op, kind, f), (n, w, t)) in rows {
+        eprintln!(
+            "acct-edit: rerun class {op} {kind} {f}: {n} runs, {w} wasted in {:.2} ms",
+            t.as_secs_f64() * 1e3
+        );
+    }
+}
+
 fn print_audit(eng: &Engine, a: &phitex_defuse::RunAudit) {
     use phitex_defuse::Rerun;
     let v = eng.values();
@@ -1617,6 +1676,40 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
         *links.entry(format!("{op} {c}")).or_default() += 1;
         if first.len() < 40 {
             first.push(format!("{op}:{c}"));
+        }
+    }
+    // (`PHITEX_CHAIN_ALL=1`, profile: every link of the chain, its field
+    // by name, and when it was queued, started, ended and committed)
+    if crate::exec::prof_flag!("PHITEX_CHAIN_ALL") {
+        use phitex_defuse::Cause as C;
+        let times: FxHashMap<phitex_defuse::NodeId, [u64; 4]> =
+            eng.critical_chain_times().into_iter().collect();
+        let v = eng.values();
+        for (n, c) in &chain {
+            let op = eng.node_info(*n).map_or("?", |i| i.op);
+            let f = match c {
+                C::Rebind { field, .. }
+                | C::Changed { field, .. }
+                | C::Loop { field }
+                | C::Environment { field }
+                | C::Range { field, .. }
+                | C::Woken { field: Some(field), .. } => crate::val::field_name(v, *field),
+                C::Created { from_hint: Some((field, _)), .. } => format!("hint {}", crate::val::field_name(v, *field)),
+                _ => String::new(),
+            };
+            let c = format!("{c:?} {f}");
+            let t = times.get(n).copied().unwrap_or_default();
+            #[allow(clippy::cast_precision_loss)]
+            let ms = |x: u64| x as f64 / 1e6;
+            eprintln!(
+                "acct-chain: {op} {} q {:.2} s {:.2} e {:.2} c {:.2} ms {}",
+                n.raw(),
+                ms(t[0]),
+                ms(t[1]),
+                ms(t[2]),
+                ms(t[3]),
+                c.chars().take(200).collect::<String>()
+            );
         }
     }
     eprintln!(
@@ -2181,6 +2274,7 @@ impl Graph {
         let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
         let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));
+        let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         // (handles held outside the graph: pinned, or a value sweep
         // frees them while a run still defines through them)
         for f in fields.handles() {
@@ -2213,6 +2307,7 @@ impl Graph {
             step_proj,
             defined_proj,
             tail_proj,
+            num_proj,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -3019,6 +3114,7 @@ impl Graph {
                 );
                 if let Some(a) = &r.audit {
                     print_audit(&self.eng, a);
+                    print_rerun_classes(&self.eng, &r, a);
                 }
                 if !r.early_loops.is_empty() {
                     eprintln!(

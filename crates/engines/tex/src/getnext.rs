@@ -436,7 +436,11 @@ impl Run<'_, '_> {
             }
             // (a macro: its body goes on top here, no expansion level)
             if (cmd::CALL..cmd::END_TEMPLATE).contains(&self.cur.cmd) {
+                // (a number scan's first token, [`Run::num_reads`]: what
+                // a macro's arguments are made of is read in full)
+                let nr = std::mem::replace(&mut self.num_reads, false);
                 self.macro_call();
+                self.num_reads = nr;
                 if self.halt.is_some() {
                     return;
                 }
@@ -445,7 +449,9 @@ impl Run<'_, '_> {
             if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
                 return;
             }
+            let nr = std::mem::replace(&mut self.num_reads, false);
             self.expand();
+            self.num_reads = nr;
             if self.halt.is_some() {
                 return;
             }

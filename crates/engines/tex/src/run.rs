@@ -233,6 +233,10 @@ pub(crate) struct Ops {
     /// ([`crate::val::tail_projection`]): a reader of its kind reads that,
     /// not the item ([`Run::list_last_kind`]).
     pub tail_proj: phitex_defuse::ProjId,
+    /// The number projection of meanings ([`crate::val::num_projection`]):
+    /// `\ifnum` comparing a macro's number reads the comparison's outcome
+    /// ([`Run::num_order`]).
+    pub num_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -608,6 +612,18 @@ pub(crate) struct Run<'c, 'a> {
     /// The meanings this run read as defined or not only
     /// ([`Run::defined_lookup`]; kept over a park like [`Run::class_memo`]).
     pub defined_memo: phitex_defuse::FxHashMap<Loc, bool>,
+    /// Set while a number scan of an `\ifnum` operand looks for its first
+    /// token (§440): a macro not this run's own whose body is a number
+    /// is not read, the scan keeps it as that macro's number
+    /// ([`Run::num_lookup`], [`crate::scan::Num`]).
+    pub num_reads: bool,
+    /// The meanings this run found to be numbers, read through the
+    /// number projection's test only ([`Run::num_lookup`]).
+    pub num_memo: phitex_defuse::FxHashMap<Loc, bool>,
+    /// A finisher's fields preloaded where the routine reads them, by
+    /// field: the lazy tag of the value ([`Run::preload_candidate`],
+    /// [`Run::fin_lazy_value`]).
+    pub fin_lazy: phitex_defuse::FxHashMap<Field, ValueId>,
     pub contribs: Vec<(Field, ValueId)>,
     /// Set while `\advance` defines its register ([`State::note_kind`]).
     pub in_advance: bool,
@@ -922,6 +938,9 @@ impl<'c, 'a> Run<'c, 'a> {
             outer_memo: phitex_defuse::FxHashMap::default(),
             step_memo: phitex_defuse::FxHashMap::default(),
             defined_memo: phitex_defuse::FxHashMap::default(),
+            num_reads: false,
+            num_memo: phitex_defuse::FxHashMap::default(),
+            fin_lazy: phitex_defuse::FxHashMap::default(),
             contribs: Vec::new(),
             in_advance: false,
             kids: Vec::new(),
@@ -1499,6 +1518,17 @@ impl<'c, 'a> Run<'c, 'a> {
     fn load_slow(&mut self, loc: Loc) -> R<()> {
         if self.in_skip && self.rec_load {
             self.skip_first.push(loc);
+        }
+        // (a finisher's field preloaded where the routine reads it: its
+        // value at the candidate, read now, [`Run::fin_lazy_value`])
+        if !self.fin_lazy.is_empty() {
+            let f = self.loc_field(loc);
+            if let Some(&x) = self.fin_lazy.get(&f) {
+                let y = self.fin_lazy_preload(x)?;
+                self.fin_lazy.remove(&f);
+                self.st.preload(loc, y);
+                return Ok(());
+            }
         }
         // (a record's cell: read from the record, once a run)
         if let Some((b, i)) = crate::fields::record_of(loc as usize)
@@ -2885,6 +2915,18 @@ impl<'c, 'a> Run<'c, 'a> {
                 let Some(x) = self.cx.use_field(wd)? else {
                     continue;
                 };
+                // (`PHITEX_KEYS_SHOW=part`, profile: the value a read-back
+                // of a key whose id has `part` finds, by node)
+                if cfg!(feature = "profile")
+                    && crate::exec::env_str!("PHITEX_KEYS_SHOW").is_some_and(|p| id.contains(p))
+                {
+                    let xs = list_of(v, x);
+                    eprintln!(
+                        "keys-read: {id} = {} node {}",
+                        xs.first().map_or_else(|| "(none: its initial value)".to_owned(), |&d| crate::val::show_def(v, d)),
+                        self.cx.node().raw()
+                    );
+                }
                 x
             };
             let xs = list_of(v, x);
@@ -3915,6 +3957,22 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        // (the first token of an `\ifnum` operand's number scan: a
+        // macro whose body is a number, kept as that macro's number, its
+        // meaning not read, [`crate::scan::Num`])
+        if self.num_reads
+            && self.interp.is_none()
+            && !self.rec_load
+            && !tok.is_internal_cs()
+            && self.num_lookup(tok)?
+        {
+            self.cur = Cur {
+                tok,
+                cmd: cmd::RELAX,
+                chr: crate::scan::NUM_CHR,
+            };
+            return Ok(());
+        }
         if self.class_reads
             && let Some(c) = self.class_lookup(tok)?
         {
@@ -3941,7 +3999,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        if self.st.is_loaded(l) {
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
         if let Some(&c) = self.class_memo.get(&l) {
@@ -3969,7 +4027,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        if self.st.is_loaded(l) {
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
         if let Some(&k) = self.step_memo.get(&l) {
@@ -3984,6 +4042,72 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(k))
     }
 
+    /// Whether `l` is a finisher's field preloaded where the routine reads
+    /// it ([`Run::fin_lazy`]): the run's own, read in full.
+    fn lazy_pre(&mut self, l: Loc) -> bool {
+        !self.fin_lazy.is_empty() && {
+            let f = self.loc_field(l);
+            self.fin_lazy.contains_key(&f)
+        }
+    }
+
+    /// Whether `tok`'s meaning is a macro whose body is a number
+    /// ([`crate::val::num_projection`]), where the run has not bound it
+    /// itself: read as that test alone (the number against -1), so the
+    /// reading run depends on the number only where it compares it
+    /// ([`Run::num_order`]) or uses it ([`Run::num_value`]).
+    #[inline(never)]
+    fn num_lookup(&mut self, tok: Tok) -> R<bool> {
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(false);
+        };
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
+            return Ok(false);
+        }
+        if let Some(&b) = self.num_memo.get(&l) {
+            return Ok(b);
+        }
+        let f = self.loc_field(l);
+        let v = self.v;
+        let p = self.cx.path(&[
+            phitex_defuse::Step::Proj(self.ops.num_proj),
+            phitex_defuse::Step::Cmp(v.int(-1)),
+        ]);
+        let b = self.cx.use_field_path(f, p)?.is_some_and(|x| int_of(v, x) > 0);
+        self.num_memo.insert(l, b);
+        Ok(b)
+    }
+
+    /// The order of the number of `tok`'s meaning (a macro
+    /// [`Run::num_lookup`] found to be a number) against `k`: -1, 0 or 1,
+    /// read as that alone.
+    pub(crate) fn num_order(&mut self, tok: Tok, k: i64) -> R<i64> {
+        let v = self.v;
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(0);
+        };
+        let f = self.loc_field(l);
+        let p = self.cx.path(&[
+            phitex_defuse::Step::Proj(self.ops.num_proj),
+            phitex_defuse::Step::Cmp(v.int(k)),
+        ]);
+        Ok(self.cx.use_field_path(f, p)?.map_or(0, |x| int_of(v, x)))
+    }
+
+    /// The number of `tok`'s meaning (a macro [`Run::num_lookup`] found
+    /// to be a number), read as that number.
+    pub(crate) fn num_value(&mut self, tok: Tok) -> R<i32> {
+        let v = self.v;
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(0);
+        };
+        let f = self.loc_field(l);
+        Ok(self
+            .cx
+            .use_field_proj(f, self.ops.num_proj)?
+            .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
+    }
+
     /// Whether `tok`'s meaning is defined, read through the engine's
     /// definedness projection ([`crate::val::defined_projection`]) where
     /// the run has not bound it itself, nor interprets a line or records a
@@ -3993,7 +4117,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        if self.st.is_loaded(l) || self.interp.is_some() || self.rec_load {
+        if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
         }
         if let Some(&d) = self.defined_memo.get(&l) {
@@ -4018,7 +4142,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        if self.st.is_loaded(l) {
+        if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
         if let Some(&o) = self.outer_memo.get(&l) {
@@ -4093,6 +4217,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .chain(self.outer_memo.keys())
             .chain(self.step_memo.keys())
             .chain(self.defined_memo.keys())
+            .chain(self.num_memo.keys())
             .copied()
             .collect();
         let mut fs: Vec<Field> = ls.into_iter().map(|l| self.loc_field(l)).collect();
@@ -5210,6 +5335,9 @@ pub(crate) struct Parked {
     outer_memo: Vec<(Field, bool)>,
     step_memo: Vec<(Field, i64)>,
     defined_memo: Vec<(Field, bool)>,
+    num_memo: Vec<(Field, bool)>,
+    /// [`Run::fin_lazy`], by field in the fields' order.
+    fin_lazy: Vec<(Field, ValueId)>,
     rec_load: bool,
     no_pull: bool,
     st: crate::runstate::PState,
@@ -5386,6 +5514,11 @@ impl Run<'_, '_> {
                 .into_iter()
                 .map(|(l, d)| (self.loc_field(l), d))
                 .collect(),
+            num_memo: std::mem::take(&mut self.num_memo)
+                .into_iter()
+                .map(|(l, d)| (self.loc_field(l), d))
+                .collect(),
+            fin_lazy: sorted_lazy(&std::mem::take(&mut self.fin_lazy)),
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st: self.st.park(self.v),
@@ -5655,6 +5788,9 @@ impl Run<'_, '_> {
         let step_memo = by_field(self, m);
         let m = self.defined_memo.iter().map(|(&l, &d)| (l, d)).collect();
         let defined_memo = by_field(self, m);
+        let m = self.num_memo.iter().map(|(&l, &d)| (l, d)).collect();
+        let num_memo = by_field(self, m);
+        let fin_lazy = sorted_lazy(&self.fin_lazy);
         let pending_pre = self
             .pending_pre
             .clone()
@@ -5694,6 +5830,8 @@ impl Run<'_, '_> {
             outer_memo,
             step_memo,
             defined_memo,
+            num_memo,
+            fin_lazy,
             rec_load: self.rec_load,
             no_pull: self.no_pull,
             st,
@@ -5791,6 +5929,13 @@ fn parked_digest(p: &Parked) -> u64 {
 /// ([`parked_rest`]) and the slots' sum ([`crate::runstate::PState::slot_sum`]).
 fn parked_digest_with(rest: u64, slots: u64) -> u64 {
     phitex_defuse::hash_words(0x6d61_726b, &[rest, slots])
+}
+
+/// [`Run::fin_lazy`] in the fields' order ([`Parked::fin_lazy`]).
+fn sorted_lazy(m: &phitex_defuse::FxHashMap<Field, ValueId>) -> Vec<(Field, ValueId)> {
+    let mut xs: Vec<(Field, ValueId)> = m.iter().map(|(&f, &x)| (f, x)).collect();
+    xs.sort_by_key(|x| x.0.0.raw());
+    xs
 }
 
 /// A run's memo by field, in the fields' order: the same for equal memos
@@ -5893,6 +6038,12 @@ fn parked_rest(p: &Parked) -> u64 {
     }
     for (f, c) in &p.defined_memo {
         (f.0.raw(), c).hash(&mut h);
+    }
+    for (f, c) in &p.num_memo {
+        (f.0.raw(), c).hash(&mut h);
+    }
+    for (f, x) in &p.fin_lazy {
+        (f.0.raw(), x.raw()).hash(&mut h);
     }
     (p.rec_load, p.no_pull).hash(&mut h);
     w(&mut h, p.st.rest_hash());
@@ -6045,6 +6196,12 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .map(|(f, d)| (r.loc_of(f), d))
             .collect();
+        r.num_memo = p
+            .num_memo
+            .into_iter()
+            .map(|(f, d)| (r.loc_of(f), d))
+            .collect();
+        r.fin_lazy = p.fin_lazy.into_iter().collect();
         r.rec_load = p.rec_load;
         r.no_pull = p.no_pull;
         r.contribs = p.contribs;

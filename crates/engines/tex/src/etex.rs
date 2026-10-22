@@ -626,6 +626,50 @@ fn normalize(g: &mut Glue) {
     }
 }
 
+/// `\numexpr` as an `\ifnum` operand ([`crate::scan::Num`]): an
+/// expression that is one macro's number alone (its first factor, no
+/// operator after it) stays that macro's number, not read; any other
+/// expression is scanned as `scan_expr` scans it, from the same tokens.
+pub(crate) fn scan_numexpr_num(run: &mut Run<'_, '_>) -> R<crate::scan::Num> {
+    use crate::scan::Num;
+    run.num_reads = true;
+    let s = run.skip_blanks_x();
+    run.num_reads = false;
+    s?;
+    if run.cur.cmd == cmd::RELAX && run.cur.chr == crate::scan::NUM_CHR {
+        run.back_cur();
+        let f = run.scan_int_num()?;
+        // §1666: the next operator
+        run.skip_blanks_x()?;
+        let op = b"+-*/".iter().any(|&c| run.is_other(c));
+        if !op && matches!(f, Num::Macro(..)) {
+            // (the expression ends: at the top, `\relax` is taken)
+            if run.cur.cmd != cmd::RELAX {
+                run.back_cur();
+            }
+            return Ok(f);
+        }
+        // (the expression goes on: its first factor as the number it is,
+        // the rest scanned as `scan_expr` scans it)
+        run.back_cur();
+        let x = run.num_int(f)?;
+        let mut toks: Vec<Tok> = Vec::new();
+        if x < 0 {
+            toks.push(Tok::ch(12, u32::from(b'-')));
+        }
+        toks.extend(
+            x.unsigned_abs()
+                .to_string()
+                .bytes()
+                .map(|d| Tok::ch(12, u32::from(d))),
+        );
+        run.push_toks(toks);
+        return Ok(Num::Int(scan_expr(run, 0)?.int()));
+    }
+    run.back_cur();
+    Ok(Num::Int(scan_expr(run, 0)?.int()))
+}
+
 /// One saved level of the expression stack (pdfTeX §1669).
 struct Level {
     l: u8,
