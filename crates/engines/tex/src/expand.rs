@@ -20,7 +20,7 @@ pub(crate) const OR_CODE: i32 = 4;
 const OUTSIDE_LIMIT: u8 = 4;
 
 thread_local! {
-    static NAME: std::cell::Cell<String> = std::cell::Cell::default();
+    pub(crate) static NAME: std::cell::Cell<String> = std::cell::Cell::default();
 }
 
 /// A control sequence interned once a process.

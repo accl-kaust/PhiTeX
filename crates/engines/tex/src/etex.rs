@@ -347,21 +347,27 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
         IF_CS => {
             // pdfTeX §1760
             let _g = InCsname::enter();
-            let mut name = String::new();
-            loop {
+            // (the name built in the thread's buffer, `\csname`'s: no
+            // string grown per test)
+            let mut name = crate::expand::NAME.with(std::cell::Cell::take);
+            name.clear();
+            let t = loop {
                 r.get_x_token();
-                r.ck()?;
+                if let Err(e) = r.ck() {
+                    crate::expand::NAME.with(|c| c.set(name));
+                    return Err(e);
+                }
                 if r.cur.is_cs() {
-                    break;
+                    break Tok::cs(&name);
                 }
                 crate::print::push_code(&mut name, r.cur.tok.chr() & 0xFF);
-            }
+            };
+            crate::expand::NAME.with(|c| c.set(name));
             if r.cur.cmd != cmd::END_CS_NAME {
                 // "Missing \endcsname inserted"
                 r.log("error", "Missing \\endcsname inserted")?;
                 r.back_cur();
             }
-            let t = Tok::cs(&name);
             r.mean_of(t)? != Mean::Undefined
         }
         IF_FONT_CHAR => {
