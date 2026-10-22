@@ -13,5 +13,5 @@ mod eval;
 pub(crate) mod ptree;
 mod world;
 
-pub use ctx::{Ctx, View};
+pub use ctx::{Ctx, Part, View};
 pub use engine::Engine;

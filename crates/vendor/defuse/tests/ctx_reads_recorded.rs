@@ -40,6 +40,7 @@ const READS: &[&str] = &[
     "len",
     "has",
     "whole",
+    "compose",
 ];
 const WRITES: &[&str] = &[
     "define",

@@ -356,6 +356,16 @@ impl Interp<'_> {
                 self.define(u, v.field(&text(v, a[0])), val, false);
                 val
             }
+            "pack" => {
+                let w = super::pack_value::<()>(v, a[1], &mut |f| Ok(self.lookup(u, f))).ok().flatten();
+                match w {
+                    Some(w) => {
+                        self.define(u, v.field(&text(v, a[0])), w, false);
+                        w
+                    }
+                    None => ValueId::UNIT,
+                }
+            }
             "alias" => {
                 let y = self.lookup(u, v.field(&text(v, a[1])));
                 let w = match v.as_int(a[2]) {

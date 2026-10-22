@@ -23,5 +23,5 @@ pub use api::{
     NodeInfo, NodeState, OpId, Operation, ProjId, Projection, RandomScheduler, Report, Rerun, RoundTimes, LinkTimes, MergeTimes, RunResult,
     Scheduler, SeqMonoid, Sequential, Settled, Speculation, Stop, SumMonoid, UnitId, Until, WaitKind, WaitOn, Waiter,
 };
-pub use clean::{Ctx, Engine, View};
+pub use clean::{Ctx, Engine, Part, View};
 pub use values::{Field, FxHashMap, FxHashSet, FxHasher, Rng, SeqNode, Value, ValueId, Values, hash_bytes, hash_words};

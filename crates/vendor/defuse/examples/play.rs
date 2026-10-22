@@ -265,6 +265,7 @@ fn call0(cx: &mut Ctx<'_>, m: &str, a: &J) -> Result<J, Stop> {
             json!(cx.get(de::<defuse::View>(&g(0)), s))
         }
         "whole" => json!(cx.whole(de::<defuse::View>(&g(0)))),
+        "compose" => json!(cx.compose(&de::<Vec<defuse::Part>>(&g(0)))),
         "checkpoint" => return res(cx.checkpoint(de(&g(0)), de(&g(1)))),
         "checkpoint_patched" => {
             let patch = de::<Vec<(Field, Locality, Option<ValueId>)>>(&g(3));

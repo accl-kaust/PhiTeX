@@ -3855,6 +3855,8 @@ fn run_job(
             eval: core.eval_no.load(std::sync::atomic::Ordering::Relaxed),
             marks: std::mem::take(&mut cx.marks).into(),
             after: cx.after.take(),
+            // (The compositions, when a pass names one.)
+            composed: if cx.passes.iter().any(|p| p.read & super::world::COMPOSED != 0) { cx.composed.clone() } else { Vec::new() },
             passes: std::mem::take(&mut cx.passes),
         },
         kids: cx.kids,
@@ -3862,7 +3864,7 @@ fn run_job(
         // (Its views kept with its token: held in the client's state, they
         // stand when it resumes.)
         kept: match cx.kept {
-            Some(t) if !cx.views.is_empty() => Some(Box::new(super::ctx::KeptViews { token: t, views: cx.views }) as Box<dyn std::any::Any + Send>),
+            Some(t) if !cx.views.is_empty() => Some(Box::new(super::ctx::KeptViews { token: t, views: cx.views, composed: cx.composed }) as Box<dyn std::any::Any + Send>),
             k => k,
         },
         apps: cx.apps,

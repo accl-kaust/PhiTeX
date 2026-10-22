@@ -48,6 +48,15 @@ pub(crate) enum Wait {
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct View(u32);
 
+/// A part of a value composed by [`Ctx::compose`]: a value of the run's
+/// own, or a view's value (another composition's included), passed on.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
+pub enum Part {
+    Val(ValueId),
+    View(View),
+}
+
 /// A run resumed at one of its last run's marks (`Ctx::resumed`): that
 /// run's kept token and result, and the mark (its index in the result's
 /// marks).
@@ -62,6 +71,7 @@ pub(crate) struct MarkResume {
 pub(crate) struct KeptViews {
     pub token: Box<dyn Any + Send>,
     pub views: Vec<(u32, u32, ValueId)>,
+    pub composed: Vec<Vec<super::world::CPart>>,
 }
 
 /// A run's view of the store.
@@ -79,6 +89,8 @@ pub struct Ctx<'a> {
     /// The views this attempt made ([`View`]): each one's root read (its
     /// index in `reads`; `u32::MAX`: none, a constant), path and value.
     pub(crate) views: Vec<(u32, u32, ValueId)>,
+    /// The compositions its views name (`Ctx::compose`).
+    pub(crate) composed: Vec<Vec<super::world::CPart>>,
     /// The marks this attempt made, the token it keeps for a later run
     /// (`checkpoint`, `keep_after`), the run it resumes from a mark of
     /// (`resumed`), and the old mark it was cut off at (its index).
@@ -173,10 +185,10 @@ impl<'a> Ctx<'a> {
     pub(crate) fn new(core: &'a Core, w: &'a World, me: Id, kept: Option<Box<dyn Any + Send>>) -> Ctx<'a> {
         let n = w.node(me).expect("a live node");
         // (A token kept with the stopped attempt's views: they stand.)
-        let (kept, views) = match kept.map(|k| k.downcast::<KeptViews>()) {
-            Some(Ok(kv)) => (Some(kv.token), kv.views),
-            Some(Err(k)) => (Some(k), Vec::new()),
-            None => (None, Vec::new()),
+        let (kept, views, composed) = match kept.map(|k| k.downcast::<KeptViews>()) {
+            Some(Ok(kv)) => (Some(kv.token), kv.views, kv.composed),
+            Some(Err(k)) => (Some(k), Vec::new(), Vec::new()),
+            None => (None, Vec::new(), Vec::new()),
         };
         // (Resumed at a mark: no client token, the mark's.)
         let (kept, from_mark) = match kept.map(|k| k.downcast::<MarkResume>()) {
@@ -197,6 +209,7 @@ impl<'a> Ctx<'a> {
             defs: Vec::new(),
             forwards: Vec::new(),
             views,
+            composed,
             // (Resumed at a mark: the marks before it stand.)
             passes: Vec::new(),
             out_from: None,
@@ -758,6 +771,18 @@ impl<'a> Ctx<'a> {
     /// root's own read, its path replaced (none for a constant, or a
     /// loop-back's read, which is of the whole value).
     fn view_read(&mut self, root: u32, p: u32) {
+        // (A composition inspected: its holes read in full.)
+        if root & super::world::COMPOSED != 0 {
+            let k = (root & !super::world::COMPOSED) as usize;
+            for i in 0..self.composed.get(k).map_or(0, Vec::len) {
+                match self.composed[k][i] {
+                    super::world::CPart::Hole { read, path, .. } => self.view_read(read, path),
+                    super::world::CPart::Nested(j) => self.view_read(super::world::COMPOSED | j, 0),
+                    super::world::CPart::Val(_) => {}
+                }
+            }
+            return;
+        }
         let Some(r) = self.reads.get(root as usize) else { return };
         match *r {
             Read::Use { f, at, after, own, site, val, .. } => {
@@ -816,6 +841,55 @@ impl<'a> Ctx<'a> {
         self.get(v, crate::api::Step::Has(k)).and_then(|b| self.core.values.as_bool(b)) == Some(true)
     }
 
+    /// Whether a view (root `root`, path `path`) can be passed on: a use's,
+    /// or a whole composition.
+    fn passable(&self, root: u32, path: u32) -> bool {
+        if root & super::world::COMPOSED != 0 {
+            return path == 0;
+        }
+        matches!(self.reads.get(root as usize), Some(Read::Use { .. }))
+    }
+
+    /// Composes a list of `parts` (a [`View`] of it): the run's own values
+    /// and views' values, passed on. Passed on in turn ([`Ctx::define_from`]
+    /// and the others), it follows its views' values: when one changes and
+    /// stays there, the list is made again and refiled, the node not run
+    /// again. Inspected, it depends on all of its views' values.
+    pub fn compose(&mut self, parts: &[Part]) -> View {
+        #[cfg(feature = "observe")]
+        let a = if self.calls.borrow().is_some() { crate::record::j(&(parts, )) } else { serde_json::Value::Null };
+        use super::world::{COMPOSED, CPart};
+        let mut cp = Vec::with_capacity(parts.len());
+        let mut xs = Vec::with_capacity(parts.len());
+        for p in parts {
+            match *p {
+                Part::Val(x) => {
+                    cp.push(CPart::Val(x));
+                    xs.push(x);
+                }
+                Part::View(v) => {
+                    let (root, path, x) = self.views[v.0 as usize];
+                    if root & COMPOSED != 0 && path == 0 {
+                        cp.push(CPart::Nested(root & !COMPOSED));
+                    } else if self.passable(root, path) {
+                        cp.push(CPart::Hole { read: root, path, val: x });
+                    } else {
+                        self.view_read(root, path);
+                        cp.push(CPart::Val(x));
+                    }
+                    xs.push(x);
+                }
+            }
+        }
+        let x = self.core.values.list(xs);
+        self.composed.push(cp);
+        let k = u32::try_from(self.composed.len() - 1).expect("too many compositions");
+        let r = self.new_view(COMPOSED | k, 0, x);
+        #[cfg(feature = "observe")]
+        crate::record::call(&self.calls, "compose", a, crate::record::j(&r));
+        r
+    }
+
     /// Defines `f` (at `loc`) as view `v`'s value, passed on without
     /// inspecting it: the run depends on whether `v` has a value, not on
     /// the value; when the value read changes and stays there, the
@@ -838,7 +912,7 @@ impl<'a> Ctx<'a> {
         }
         match self.reads.get(root as usize) {
             _ if soft => {}
-            Some(Read::Use { .. }) => self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: x }),
+            _ if self.passable(root, path) => self.passes.push(super::world::Pass { to: super::world::PassTo::Def(f, loc), read: root, path, val: x }),
             Some(&Read::Loop { f: from, .. }) if path == 0 => self.forwards.push((f, loc, from)),
             _ => self.view_read(root, path),
         }
@@ -855,7 +929,7 @@ impl<'a> Ctx<'a> {
         let (root, path, x) = self.views[v.0 as usize];
         let first = !self.ix.contains_key(&(2, f, 0));
         self.contribute_inner(f, x);
-        if first && matches!(self.reads.get(root as usize), Some(Read::Use { .. })) {
+        if first && self.passable(root, path) {
             self.passes.push(super::world::Pass { to: super::world::PassTo::Contrib(f), read: root, path, val: x });
         } else {
             self.view_read(root, path);
@@ -886,7 +960,7 @@ impl<'a> Ctx<'a> {
         let a = if self.calls.borrow().is_some() { crate::record::j(&(&v, )) } else { serde_json::Value::Null };
         let (root, path, x) = self.views[v.0 as usize];
         self.passes.retain(|p| p.to != super::world::PassTo::Out);
-        if matches!(self.reads.get(root as usize), Some(Read::Use { .. })) {
+        if self.passable(root, path) {
             self.passes.push(super::world::Pass { to: super::world::PassTo::Out, read: root, path, val: x });
         } else {
             self.view_read(root, path);
@@ -2207,6 +2281,7 @@ impl<'a> Ctx<'a> {
         self.defs.clear();
         self.forwards.clear();
         self.views.clear();
+        self.composed.clear();
         self.marks.clear();
         self.passes.clear();
         self.out_from = None;
