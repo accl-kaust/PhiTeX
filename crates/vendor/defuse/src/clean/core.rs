@@ -69,6 +69,8 @@ pub(crate) struct Core {
     pub rechecks_all: Mutex<FxHashMap<u8, (u64, u64)>>,
     /// Whether `rechecks` is on (read without its lock).
     pub auditing: std::sync::atomic::AtomicBool,
+    /// `Engine::set_loop_option_check`.
+    pub loop_check: std::sync::atomic::AtomicBool,
     /// `Step::Each` answers per sequence node and path.
     pub each_memo: crate::sync::Table<ValueId>,
     /// Nodes whose run broke at a read (its index, the first, and the
@@ -179,6 +181,7 @@ impl Core {
             rechecks: Mutex::new(None),
             rechecks_all: Mutex::new(FxHashMap::default()),
             auditing: std::sync::atomic::AtomicBool::new(false),
+            loop_check: std::sync::atomic::AtomicBool::new(cfg!(debug_assertions) || cfg!(feature = "observe")),
             each_memo: crate::sync::Table::new(),
             resume_at: Mutex::new(FxHashMap::default()),
             cut_in_run: std::sync::atomic::AtomicU64::new(0),
@@ -666,7 +669,8 @@ impl Core {
     }
 
     pub(crate) fn declare_loop_later(&self, f: Field, init: ValueId, by: u64, o: crate::api::LoopOptions) {
-        if o != crate::api::LoopOptions::default() || !self.loops.contains_key(&f) {
+        // (Checked, every declaration: a plain one may conflict too.)
+        if o != crate::api::LoopOptions::default() || !self.loops.contains_key(&f) || self.loop_check.load(std::sync::atomic::Ordering::Relaxed) {
             lock(&self.loops_later).push((f, init, by, o));
         }
     }

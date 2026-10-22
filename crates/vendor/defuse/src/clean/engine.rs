@@ -86,6 +86,13 @@ pub struct Engine {
     /// The loop-back fields that take their round values early
     /// (`declare_loopback_early`).
     pub(crate) early: FxHashSet<Field>,
+    /// Each loop-back field's first declaration: its options and its
+    /// declarer (`None`: the API); and whether a later one with other
+    /// options is an error (`set_loop_option_check`), the first such
+    /// made through the API kept for the next evaluation.
+    pub(crate) loop_decls: FxHashMap<Field, (crate::api::LoopOptions, Option<Id>)>,
+    pub(crate) loop_check: bool,
+    pub(crate) decl_error: Option<crate::api::EvalError>,
     /// This pass: whether early values are taken (not in the final phase),
     /// each early field's value changes, and those capped (kept as they
     /// are).
@@ -172,6 +179,9 @@ impl Engine {
             max_rounds: 64,
             cap_policy: CapPolicy::Error,
             early: FxHashSet::default(),
+            loop_decls: FxHashMap::default(),
+            loop_check: cfg!(debug_assertions) || cfg!(feature = "observe"),
+            decl_error: None,
             early_live: false,
             early_changes: FxHashMap::default(),
             early_frozen: FxHashSet::default(),
@@ -614,6 +624,7 @@ impl Engine {
     }
 
     pub fn declare_loopback(&mut self, f: Field, init: ValueId) {
+        self.api_decl(f, crate::api::LoopOptions::default());
         self.declare_loopbacks_inner(&[(f, init)]);
         #[cfg(feature = "observe")]
         self.rec_call("declare_loopback", crate::record::rec().map(|_| crate::record::j(&(&f, &init))), &());
@@ -668,6 +679,7 @@ impl Engine {
     /// [`EarlyLoop::capped`]: crate::EarlyLoop::capped
     /// [`EarlyLoop::oscillated`]: crate::EarlyLoop::oscillated
     pub fn declare_loopback_early(&mut self, f: Field, init: ValueId) {
+        self.api_decl(f, crate::api::LoopOptions { early: true, last_wins: false });
         self.declare_loopbacks_inner(&[(f, init)]);
         self.early.insert(f);
         #[cfg(feature = "observe")]
@@ -686,10 +698,48 @@ impl Engine {
     /// ([`crate::LoopOptions::last_wins`]: each of several publishers may
     /// publish it as it goes, a page's finisher its labels, say).
     pub fn declare_loopback_with(&mut self, f: Field, init: ValueId, o: crate::api::LoopOptions) {
+        self.api_decl(f, o);
         self.declare_loopbacks_inner(&[(f, init)]);
         self.set_loop_options(f, o);
         #[cfg(feature = "observe")]
         self.rec_call("declare_loopback_with", crate::record::rec().map(|_| crate::record::j(&(&f, &init, &o))), &());
+    }
+
+    /// Whether a loop-back declared with options that differ from its
+    /// first declaration's is an error ([`crate::EvalError::ConflictingLoopOptions`],
+    /// naming both declarers): on by default in debug and `observe` builds.
+    /// Off, the field is early, and last wins, if any declaration says so.
+    pub fn set_loop_option_check(&mut self, on: bool) {
+        self.loop_check = on;
+        self.core.loop_check.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Notes a declaration of `f` with options `o` by `by` (`None`: the
+    /// API): the first is kept; a later one differing is an error, with
+    /// the check on.
+    pub(crate) fn note_loop_decl(&mut self, f: Field, o: crate::api::LoopOptions, by: Option<Id>) -> Result<(), crate::api::EvalError> {
+        match self.loop_decls.get(&f) {
+            None => {
+                self.loop_decls.insert(f, (o, by));
+                Ok(())
+            }
+            Some(&(o0, by0)) if o0 != o && self.loop_check => Err(crate::api::EvalError::ConflictingLoopOptions {
+                field: f,
+                first: by0.map(NodeId),
+                first_options: o0,
+                by: by.map(NodeId),
+                options: o,
+            }),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// [`Self::note_loop_decl`] for an API declaration: an error waits for
+    /// the next evaluation.
+    fn api_decl(&mut self, f: Field, o: crate::api::LoopOptions) {
+        if let Err(e) = self.note_loop_decl(f, o, None) {
+            self.decl_error.get_or_insert(e);
+        }
     }
 
     /// Field `f`'s options taken in (once set, kept).
@@ -705,12 +755,15 @@ impl Engine {
     /// Declares several loop-back fields at once: one pass over the runs
     /// (a field declared already is left as it is).
     pub fn declare_loopbacks(&mut self, fields: &[(Field, ValueId)]) {
+        for &(f, _) in fields {
+            self.api_decl(f, crate::api::LoopOptions::default());
+        }
         self.declare_loopbacks_inner(fields);
         #[cfg(feature = "observe")]
         self.rec_call("declare_loopbacks", crate::record::rec().map(|_| crate::record::j(&(fields,))), &());
     }
 
-    fn declare_loopbacks_inner(&mut self, fields: &[(Field, ValueId)]) {
+    pub(crate) fn declare_loopbacks_inner(&mut self, fields: &[(Field, ValueId)]) {
         let mut new: FxHashMap<Field, ValueId> = FxHashMap::default();
         for &(f, init) in fields {
             if !self.core.loops.contains_key(&f) {

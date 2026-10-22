@@ -303,6 +303,10 @@ impl Engine {
         exec: &mut dyn Executor,
         src: &mut dyn EditSource,
     ) -> Result<Report, EvalError> {
+        // (A declaration made through the API since, conflicting.)
+        if let Some(e) = self.decl_error.take() {
+            return Err(e);
+        }
         let t0 = std::time::Instant::now();
         let mut rep = Report::default();
         self.audit = self.audit_on.then(crate::api::RunAudit::default);
@@ -450,6 +454,7 @@ impl Engine {
                     // (Each field's declaring run: its readers' link.)
                     let mut early = Vec::new();
                     for &(f, _, by, o) in &later {
+                        self.note_loop_decl(f, o, Some(by))?;
                         hs.loop_decl.entry(f).or_insert(by);
                         if o.early && !self.early.contains(&f) {
                             early.push(f);
@@ -457,8 +462,13 @@ impl Engine {
                         self.set_loop_options(f, o);
                     }
                     let later: Vec<(Field, ValueId)> = later.into_iter().map(|(f, x, _, _)| (f, x)).collect();
+                    if loop_trace() {
+                        let v = &self.core.values;
+                        let names: Vec<String> = later.iter().filter(|(f, _)| !self.core.loops.contains_key(f)).map(|(f, _)| v.render(f.0)).collect();
+                        eprintln!("LOOPS declared in runs {}: {}", names.len(), names.join(" "));
+                    }
                     // (All at once: one pass over the runs' reads.)
-                    self.declare_loopbacks(&later);
+                    self.declare_loopbacks_inner(&later);
                     for id in std::mem::take(&mut self.pending) {
                         self.enqueue(&mut s, id);
                     }
@@ -2877,6 +2887,11 @@ impl Engine {
         if moved.is_empty() {
             return false;
         }
+        if loop_trace() {
+            let v = &self.core.values;
+            let names: Vec<String> = moved.iter().map(|f| v.render(f.0)).collect();
+            eprintln!("LOOPS moved {} (early {}): {}", moved.len(), moved.iter().filter(|f| self.early.contains(f)).count(), names.join(" "));
+        }
         let readers = self.loop_readers(&moved);
         let w = std::mem::take(&mut self.w);
         let mut b = Builder::new(&self.core, w);
@@ -3650,7 +3665,7 @@ impl Merge<'_> {
         let redo = match &o {
             Outcome::Done(r) if r.kids.is_empty() && r.conts.is_empty() => {
                 let speculated = |rd: &Read| matches!(rd, Read::Range { f, .. } if eng.core.acc(*f).is_some_and(|m| m.speculate() || (m.guess_ran() && r.fold_ran)));
-                let mut last = None;
+                let mut last = (None, None);
                 let mut broken = r.res.reads.iter().filter(|rd| asked(rd) && !super::build::holds_paths(&eng.core, &eng.w, id, rd, &mut last));
                 match broken.next() {
                     Some(rd) if speculated(rd) && broken.all(speculated) => {
@@ -3689,7 +3704,7 @@ impl Merge<'_> {
                 return Ok(());
             }
             Outcome::Done(r) => match {
-                let mut last = None;
+                let mut last = (None, None);
                 r.res.reads.iter().find(|rd| asked(rd) && !super::build::holds_paths(&eng.core, &eng.w, id, rd, &mut last))
             } {
                 Some(rd) => {
@@ -4003,6 +4018,12 @@ fn run_job(
             message: super::core::panic_message(&*p),
         }),
     }
+}
+
+/// `CLEAN_LOOP_TRACE`: loop-back moves and run declarations, named.
+fn loop_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CLEAN_LOOP_TRACE").is_some())
 }
 
 /// `CLEAN_KEPT_CHECK`: a run cut off at a mark has the effects a run from

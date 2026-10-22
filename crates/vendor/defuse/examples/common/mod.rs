@@ -2140,6 +2140,23 @@ impl Operation for StmtOp {
                 // A layout consumer: reads only its segment of the output.
                 let stmt = ops.stmt;
                 let prev = cx.prev_sibling_where(&|op, args| op == stmt && tag(v, args[0]).0 == "page");
+                // (FUZZ_PATHS=2: through a view of the window, an element
+                // at a time; =1: its length through a path, then whole.)
+                if fuzz_paths() == 2 {
+                    let me = cx.node();
+                    let m = cx.acc_view(out_field(v), prev, Some(me))?;
+                    let n = cx.len(m).unwrap_or(0);
+                    let mut sum = 0i64;
+                    for i in 0..n {
+                        let x = cx.get(m, defuse::Step::Index(u32::try_from(i).unwrap_or(u32::MAX)));
+                        sum = sum.wrapping_add(x.and_then(|x| v.as_int(x)).unwrap_or(0));
+                    }
+                    return Ok(v.list(vec![v.int(i64::try_from(n).unwrap_or(0)), v.int(sum)]));
+                }
+                if fuzz_paths() == 1 {
+                    let p = cx.path(&[defuse::Step::Len]);
+                    let _ = cx.acc_range_path(out_field(v), prev, p)?;
+                }
                 let seg = cx.acc_range(out_field(v), prev)?;
                 let xs = v.seq_to_vec(seg);
                 let sum = xs
@@ -2411,6 +2428,9 @@ impl Program {
     /// Loads `lines` into a fresh engine.
     pub fn load(lines: Vec<String>) -> (Engine, Program) {
         let mut eng = Engine::new();
+        // (Conflicting loop-back declarations are the client's bug: an
+        // error here.)
+        eng.set_loop_option_check(true);
         let lang = Lang::install(&mut eng);
         if std::env::var_os("FUZZ_STABLE").is_some() {
             // Stable is a hint: marked on fields the programs define often
