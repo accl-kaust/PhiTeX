@@ -2165,6 +2165,27 @@ impl PState {
         h.finish()
     }
 
+    /// (observe) The slots whose digests differ from `old`'s ([`PState::slot_hash`]):
+    /// each with its value in `old` and here (`None`: no such slot).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn slot_diffs(&self, old: &PState) -> Vec<(PLocKey, Option<(Option<ValueId>, u8)>, Option<(Option<ValueId>, u8)>)> {
+        let by: FxHashMap<u64, &PSlot> = old.slots.iter().map(|s| (s.loc.word(), s)).collect();
+        let mine: FxHashMap<u64, &PSlot> = self.slots.iter().map(|s| (s.loc.word(), s)).collect();
+        let mut out = Vec::new();
+        for s in &self.slots {
+            match by.get(&s.loc.word()) {
+                Some(o) if Self::slot_hash(o) == Self::slot_hash(s) => {}
+                o => out.push((s.loc.key(), o.map(|o| (o.e.id, o.e.flags)), Some((s.e.id, s.e.flags)))),
+            }
+        }
+        for o in &old.slots {
+            if !mine.contains_key(&o.loc.word()) {
+                out.push((o.loc.key(), Some((o.e.id, o.e.flags)), None));
+            }
+        }
+        out
+    }
+
     /// The slots' digests summed: their order, the run's, left out.
     pub(crate) fn slot_sum(&self) -> u64 {
         self.slots

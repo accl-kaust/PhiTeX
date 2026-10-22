@@ -107,6 +107,13 @@ pub(crate) fn run_node_parking(
     let resumed_at = if marks_ok { cx.resumed() } else { None };
     let mut r = if let Some((tok, k)) = resumed_at {
         match tok.downcast::<crate::run::KeptMarks>() {
+            Ok(km) if (k as usize) < km.snaps.len() && crate::exec::obs_flag!("PHITEX_RESUME_VERIFY") => {
+                let (p, h) = km.snaps[k as usize].clone();
+                cx.restart();
+                let mut r = Run::new(cx, o);
+                r.verify_at = Some((k, p, h));
+                r
+            }
             Ok(km) if (k as usize) < km.snaps.len() => {
                 let (p, h) = km.snaps[k as usize].clone();
                 let tr = crate::prof::start();

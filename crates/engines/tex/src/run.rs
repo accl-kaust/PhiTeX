@@ -676,6 +676,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The engine cut the run off at a mark: its last run's result stands
     /// ([`phitex_defuse::Ctx::checkpoint`]).
     pub cut_off: bool,
+    /// (observe, `PHITEX_RESUME_VERIFY=1`) The mark the engine resumed
+    /// this run at, with the last run's state there: the run goes from its
+    /// start instead and compares its state at that mark.
+    pub verify_at: Option<(u32, std::sync::Arc<Parked>, u64)>,
     /// (observe, `PHITEX_MARK_CHECK=1`) The mark the engine would have cut
     /// the run off at: it runs on, and compares its result with the last
     /// run's at its end.
@@ -944,6 +948,7 @@ impl<'c, 'a> Run<'c, 'a> {
             marks_on: false,
             cut_off: false,
             cut_check: None,
+            verify_at: None,
             muts: 0,
             interp: None,
             interp_short: false,
@@ -5411,6 +5416,11 @@ impl Run<'_, '_> {
         let tp = crate::prof::start();
         let k = u32::try_from(self.mark_snaps.len()).unwrap_or(u32::MAX);
         self.mark_snaps.push((std::sync::Arc::new(p), h));
+        if let Some((vk, op, oh)) = self.verify_at.clone()
+            && vk == k
+        {
+            self.resume_verify(k, &op, oh, h);
+        }
         // (the accesses from here on stamped with this mark, numbered
         // from 1)
         self.st.cur_mark = k + 1;
@@ -5442,6 +5452,36 @@ impl Run<'_, '_> {
             return Err(Halt::Stop(s));
         }
         Ok(())
+    }
+
+    /// (observe, `PHITEX_RESUME_VERIFY=1`) Whether this full run's state
+    /// at mark `k` is the last run's there, which a run resumed at `k`
+    /// starts from ([`Run::verify_at`]); where not, how they differ.
+    fn resume_verify(&mut self, k: u32, op: &Parked, oh: u64, h: u64) {
+        let node = self.cx.node().raw();
+        let fin = self.cx.op() == self.ops.finish;
+        if oh == h {
+            eprintln!("resume-verify: node {node} (finisher {fin}) mark {k} holds");
+            return;
+        }
+        let Some((np, _)) = self.mark_snaps.get(k as usize).cloned() else { return };
+        mark_why(node, k as usize, op, &np);
+        let v = self.v;
+        let mut shown = Vec::new();
+        for d in np.st.slot_diffs(&op.st).into_iter().take(12) {
+            let f = match d.0 {
+                crate::runstate::PLocKey::Fixed(l) => self.loc_field(l),
+                crate::runstate::PLocKey::Spill(f) => f,
+            };
+            let r = |x: Option<(Option<ValueId>, u8)>| {
+                x.map_or_else(
+                    || "no slot".to_owned(),
+                    |(x, fl)| format!("{}/{fl}", x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(60).collect())),
+                )
+            };
+            shown.push(format!("{} last {} this {}", crate::val::field_name(v, f), r(d.1), r(d.2)));
+        }
+        eprintln!("resume-verify: node {node} (finisher {fin}) mark {k} DIFFERS: {shown:?}");
     }
 
     /// The patch of a cutoff at mark `k` ([`Run::take_mark`]): the last
