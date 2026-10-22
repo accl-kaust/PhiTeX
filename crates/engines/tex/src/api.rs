@@ -7075,7 +7075,7 @@ mod canonical_tests {
 #[cfg(test)]
 mod park_tests {
     use super::*;
-    use phitex_defuse::{Ctx, Operation, Stop};
+    use phitex_defuse::{Ctx, Locality, Operation, Stop};
 
     /// The test's body as a node's run (a [`crate::run::Run`] lives in a
     /// node's context): a run holding a map of `\count315` parks at a
