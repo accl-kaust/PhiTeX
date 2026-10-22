@@ -190,8 +190,10 @@ impl FormatEnv {
             binds.push((f, nm, k));
             rest = rest.get(16..)?;
         }
+        // (a name's node a string: its bytes are read as UTF-8 when a
+        // job makes it, [`FormatEnv::value`], not all of them here)
         let env = FormatEnv { nodes, offs, binds };
-        if env.binds.iter().any(|&(_, n, _)| env.str_at(n).is_none()) {
+        if env.binds.iter().any(|&(_, n, _)| env.nodes[env.offs[n as usize] as usize] != STR) {
             return None;
         }
         Some((env, rest))

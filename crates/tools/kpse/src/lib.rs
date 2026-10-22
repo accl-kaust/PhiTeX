@@ -467,58 +467,62 @@ impl std::hash::Hasher for Fnv {
 }
 
 /// The `ls-R` databases (`kpse->db`): file name → directories (with a
-/// trailing `/`) in insertion order, chained through `entries`. Names
-/// borrow the database text, kept for the life of the process.
+/// trailing `/`) in the order the databases list them. One flat index,
+/// by the name's hash and then that order, over the databases' texts:
+/// kept as it is in a client's cache ([`set_db_cache`]), so a process
+/// reads it back instead of parsing every `ls-R` again.
 #[derive(Default)]
 struct Db {
     dirs: Vec<Bytes>,
-    entries: Vec<(u32, u32)>,
-    map: HashMap<&'static [u8], (u32, u32), std::hash::BuildHasherDefault<Fnv>>,
+    /// The databases' texts, one after the other: the names in place.
+    text: Bytes,
+    /// Each file: its name's hash, where its name is in `text` and how
+    /// long, its directory; by hash, then in the databases' order.
+    index: Vec<(u64, u32, u32, u32)>,
     /// `kpse->roots`: the directories holding an `ls-R`.
     roots: Vec<Bytes>,
 }
 
+/// A name's hash in [`Db::index`].
+fn name_hash(name: &[u8]) -> u64 {
+    use std::hash::Hasher as _;
+    let mut h = Fnv::default();
+    h.write(name);
+    h.finish()
+}
+
 impl Db {
-    fn insert(&mut self, name: &'static [u8], dir: u32) {
-        let e = u32::try_from(self.entries.len()).expect("ls-R too large");
-        self.entries.push((dir, u32::MAX));
-        match self.map.entry(name) {
-            std::collections::hash_map::Entry::Occupied(mut o) => {
-                let (_, tail) = o.get_mut();
-                self.entries[*tail as usize].1 = e;
-                *tail = e;
-            }
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert((e, e));
-            }
-        }
-    }
-
     fn lookup<'a>(&'a self, name: &[u8]) -> impl Iterator<Item = &'a [u8]> + 'a {
-        let mut e = self.map.get(name).map_or(u32::MAX, |&(h, _)| h);
-        std::iter::from_fn(move || {
-            let &(d, next) = self.entries.get(e as usize)?;
-            e = next;
-            Some(self.dirs[d as usize].as_slice())
-        })
+        let h = name_hash(name);
+        let name = name.to_vec();
+        let from = self.index.partition_point(|e| e.0 < h);
+        self.index[from..]
+            .iter()
+            .take_while(move |e| e.0 == h)
+            .filter(move |e| self.text.get(e.1 as usize..(e.1 + e.2) as usize) == Some(name.as_slice()))
+            .map(|e| self.dirs[e.3 as usize].as_slice())
     }
 
-    /// `db.c`, `db_build`: add the `ls-R` file `db_filename`.
+    /// `db.c`, `db_build`: add the `ls-R` file `db_filename` (the index
+    /// is put in order by [`Db::finish`]).
     fn build(&mut self, db_filename: &[u8]) -> bool {
         let Ok(text) = std::fs::read(os(db_filename)) else {
             return false;
         };
-        let text: &'static [u8] = Box::leak(text.into_boxed_slice());
+        let base = self.text.len();
+        self.text.extend_from_slice(&text);
         // Keep the `/` before `ls-R`.
         let top_dir = &db_filename[..db_filename.len() - 4];
-        // Size the tables up front: rehashing dominated the build.
+        // Size the index up front.
         #[allow(clippy::naive_bytecount)] // one pass, no dependency
         let lines = text.iter().filter(|&&c| c == b'\n').count();
-        self.map.reserve(lines);
-        self.entries.reserve(lines);
+        self.index.reserve(lines);
         let mut cur_dir: Option<u32> = None; // first thing might be a file name
         let mut file_count = 0;
+        let mut at = base;
         for line in text.split(|&c| c == b'\n') {
+            let off = at;
+            at += line.len() + 1;
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             if line.ends_with(b":") && absolute_p(line, true) {
                 if ignore_dir_p(line) {
@@ -539,7 +543,9 @@ impl Db {
                 && line != b"."
                 && line != b".."
             {
-                self.insert(line, dir);
+                let o = u32::try_from(off).expect("ls-R too large");
+                let n = u32::try_from(line.len()).expect("ls-R too large");
+                self.index.push((name_hash(line), o, n, dir));
                 file_count += 1;
             }
         }
@@ -548,6 +554,134 @@ impl Db {
         }
         file_count > 0
     }
+
+    /// The index by hash, each name's entries in the databases' order
+    /// (a stable sort).
+    fn finish(&mut self) {
+        self.index.sort_by_key(|e| e.0);
+    }
+
+    /// As bytes, after `key` (the databases' files, lengths and times).
+    fn to_bytes(&self, key: &[(Bytes, u64, u128)]) -> Bytes {
+        let mut out = DB_MAGIC.to_vec();
+        let put = |out: &mut Bytes, b: &[u8]| {
+            out.extend_from_slice(&(b.len() as u64).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        out.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        for (f, len, at) in key {
+            put(&mut out, f);
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&at.to_le_bytes());
+        }
+        for list in [&self.dirs, &self.roots] {
+            out.extend_from_slice(&(list.len() as u64).to_le_bytes());
+            for d in list {
+                put(&mut out, d);
+            }
+        }
+        put(&mut out, &self.text);
+        out.extend_from_slice(&(self.index.len() as u64).to_le_bytes());
+        for &(h, o, n, d) in &self.index {
+            out.extend_from_slice(&h.to_le_bytes());
+            out.extend_from_slice(&o.to_le_bytes());
+            out.extend_from_slice(&n.to_le_bytes());
+            out.extend_from_slice(&d.to_le_bytes());
+        }
+        out
+    }
+
+    /// What [`Db::to_bytes`] wrote for `key`; `None` for other bytes or
+    /// another key (a database changed since).
+    fn from_bytes(b: &[u8], key: &[(Bytes, u64, u128)]) -> Option<Db> {
+        let mut r = Rd(b.strip_prefix(DB_MAGIC.as_slice())?);
+        if r.len()? != key.len() {
+            return None;
+        }
+        for (f, len, at) in key {
+            let m = r.len()?;
+            if r.take(m)? != f.as_slice() || r.u64()? != *len || r.u128()? != *at {
+                return None;
+            }
+        }
+        let mut lists = [Vec::new(), Vec::new()];
+        for list in &mut lists {
+            for _ in 0..r.len()? {
+                let m = r.len()?;
+                list.push(r.take(m)?.to_vec());
+            }
+        }
+        let [dirs, roots] = lists;
+        let m = r.len()?;
+        let text = r.take(m)?.to_vec();
+        let n = r.len()?;
+        let raw = r.take(n.checked_mul(20)?)?;
+        if !r.0.is_empty() {
+            return None;
+        }
+        let mut index = Vec::with_capacity(n);
+        for e in raw.as_chunks::<20>().0 {
+            let w = |a: usize| u32::from_le_bytes([e[a], e[a + 1], e[a + 2], e[a + 3]]);
+            let h = u64::from(w(0)) | (u64::from(w(4)) << 32);
+            let (o, l, d) = (w(8), w(12), w(16));
+            if (o as usize).checked_add(l as usize)? > text.len() || d as usize >= dirs.len() {
+                return None;
+            }
+            index.push((h, o, l, d));
+        }
+        if !index.is_sorted_by_key(|e| e.0) {
+            return None;
+        }
+        Some(Db { dirs, text, index, roots })
+    }
+}
+
+/// A reader over a kept database's bytes.
+struct Rd<'a>(&'a [u8]);
+
+impl Rd<'_> {
+    fn take(&mut self, n: usize) -> Option<&[u8]> {
+        let (a, rest) = self.0.split_at_checked(n)?;
+        self.0 = rest;
+        Some(a)
+    }
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    fn u128(&mut self) -> Option<u128> {
+        Some(u128::from_le_bytes(self.take(16)?.try_into().ok()?))
+    }
+    /// A count, never more than the bytes left.
+    fn len(&mut self) -> Option<usize> {
+        let n = usize::try_from(self.u64()?).ok()?;
+        (n <= self.0.len()).then_some(n)
+    }
+}
+
+/// The first bytes of a kept database ([`Db::to_bytes`]): its layout.
+const DB_MAGIC: &[u8; 8] = b"PHXLSR01";
+
+/// Where the `ls-R` databases are kept between processes (none: they are
+/// parsed in each).
+static DB_CACHE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Keeps the `ls-R` databases in `dir` (none: not kept): a process reads
+/// a database kept there while its files have the length and time they
+/// had, instead of parsing them.
+pub fn set_db_cache(dir: Option<std::path::PathBuf>) {
+    *DB_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+}
+
+/// The file a database of the `ls-R` files `key` is kept in: one per set
+/// of files, rewritten when one changes.
+fn db_cache_file(key: &[(Bytes, u64, u128)]) -> Option<std::path::PathBuf> {
+    let dir = DB_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
+    let mut names = Vec::new();
+    for (f, _, _) in key {
+        names.extend_from_slice(f);
+        names.push(0);
+    }
+    Some(dir.join(format!("ls-r-{:016x}.db", name_hash(&names))))
 }
 
 /// A kpathsea instance for one program (`kpathsea_instance`).
@@ -938,6 +1072,18 @@ impl Kpse {
             self.db = Some(db.clone());
             return;
         }
+        // (kept by an earlier process: read, not parsed again)
+        let kept = db_cache_file(&key);
+        if let Some(db) = kept
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| Db::from_bytes(&b, &key))
+        {
+            let db = std::sync::Arc::new(db);
+            held.insert(key, db.clone());
+            self.db = Some(db);
+            return;
+        }
         let mut db = Db::default();
         let mut i = 0;
         while i < files.len() {
@@ -951,6 +1097,17 @@ impl Kpse {
             }
             db.build(&files[i]);
             i += 1;
+        }
+        db.finish();
+        // (written beside, then moved in place: a reader never sees half)
+        if let Some(p) = kept
+            && let Some(dir) = p.parent()
+            && std::fs::create_dir_all(dir).is_ok()
+        {
+            let tmp = p.with_extension(format!("tmp{}", std::process::id()));
+            if std::fs::write(&tmp, db.to_bytes(&key)).is_ok() && std::fs::rename(&tmp, &p).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
         let db = std::sync::Arc::new(db);
         held.insert(key, db.clone());
@@ -1592,6 +1749,33 @@ mod tests {
             Some((b"foo".to_vec(), b"a#b".to_vec()))
         );
         assert_eq!(do_line(b"  % only a comment"), None);
+    }
+
+    #[test]
+    fn a_kept_database_reads_back_as_built() {
+        let dir = std::env::temp_dir().join(format!("phitex-kpse-db-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let ls = dir.join("ls-R");
+        std::fs::write(&ls, b"% ls-R\n./a:\nx.sty\ny.tex\n\n./b:\nx.sty\nz\n").expect("write");
+        let f = ls.as_os_str().as_bytes().to_vec();
+        let mut db = Db::default();
+        assert!(db.build(&f));
+        db.finish();
+        let dirs = |db: &Db, n: &[u8]| db.lookup(n).map(<[u8]>::to_vec).collect::<Vec<_>>();
+        let top = dir.as_os_str().as_bytes().to_vec();
+        let d = |s: &str| [top.as_slice(), b"/", s.as_bytes()].concat();
+        assert_eq!(dirs(&db, b"x.sty"), [d("a/"), d("b/")]);
+        assert_eq!(dirs(&db, b"z"), [d("b/")]);
+        assert!(dirs(&db, b"w").is_empty());
+        let key = vec![(f.clone(), 7, 9)];
+        let b = db.to_bytes(&key);
+        let e = Db::from_bytes(&b, &key).expect("read back");
+        assert_eq!(e.to_bytes(&key), b);
+        assert_eq!(dirs(&e, b"x.sty"), [d("a/"), d("b/")]);
+        assert_eq!(e.roots, db.roots);
+        assert!(Db::from_bytes(&b, &[(f, 7, 10)]).is_none());
+        assert!(Db::from_bytes(&b[..b.len() - 1], &key).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
