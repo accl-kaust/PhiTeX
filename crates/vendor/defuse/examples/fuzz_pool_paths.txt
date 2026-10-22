@@ -52,3 +52,5 @@ pack z = l[0], m[1], 5
 pack z = (l[1], x), s
 pack u = z, (k[2], 1)
 print u
+q = pg + 1
+print pg

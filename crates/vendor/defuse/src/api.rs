@@ -423,6 +423,9 @@ pub enum Hold {
     Careful,
     /// The node its read hints wait on (`Operation::reads`).
     Hint,
+    /// A node in work before it, while its runs are long
+    /// (`Engine::set_long_runs`): it runs once, not on guesses.
+    Long,
 }
 
 /// What [`crate::Ctx::use_field_at`] found at a position.

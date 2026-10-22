@@ -91,6 +91,11 @@ pub struct Engine {
     /// options is an error (`set_loop_option_check`), the first such
     /// made through the API kept for the next evaluation.
     pub(crate) loop_decls: FxHashMap<Field, (crate::api::LoopOptions, Option<Id>)>,
+    /// `set_long_runs`: a node whose runs took longer does not run ahead of
+    /// a node before it in work; each node's time in the last evaluation
+    /// that ran it, or as hinted (`set_run_time_hint`).
+    pub(crate) long_runs: Option<std::time::Duration>,
+    pub(crate) run_time: FxHashMap<Id, std::time::Duration>,
     pub(crate) loop_check: bool,
     pub(crate) decl_error: Option<crate::api::EvalError>,
     /// This pass: whether early values are taken (not in the final phase),
@@ -180,6 +185,8 @@ impl Engine {
             cap_policy: CapPolicy::Error,
             early: FxHashSet::default(),
             loop_decls: FxHashMap::default(),
+            long_runs: None,
+            run_time: FxHashMap::default(),
             loop_check: cfg!(debug_assertions) || cfg!(feature = "observe"),
             decl_error: None,
             early_live: false,
@@ -703,6 +710,25 @@ impl Engine {
         self.set_loop_options(f, o);
         #[cfg(feature = "observe")]
         self.rec_call("declare_loopback_with", crate::record::rec().map(|_| crate::record::j(&(&f, &init, &o))), &());
+    }
+
+    /// Cost-aware speculation: a node whose run took longer than `limit`
+    /// (this evaluation, the last one that ran it, or as hinted) does not
+    /// run ahead of a node before it in its unit still in work, on guesses
+    /// that may fail after a long run: it waits, and runs once. `None`
+    /// (the default): every node may run ahead. Speed only, never results.
+    pub fn set_long_runs(&mut self, limit: Option<std::time::Duration>) {
+        self.long_runs = limit;
+        #[cfg(feature = "observe")]
+        self.rec_call("set_long_runs", crate::record::rec().map(|_| crate::record::j(&(&limit,))), &());
+    }
+
+    /// Node `node`'s expected run time, for [`Self::set_long_runs`] before
+    /// it has run (a client's cache of an earlier build's times, say).
+    pub fn set_run_time_hint(&mut self, node: NodeId, t: std::time::Duration) {
+        self.run_time.insert(node.0, t);
+        #[cfg(feature = "observe")]
+        self.rec_call("set_run_time_hint", crate::record::rec().map(|_| crate::record::j(&(&node, &t))), &());
     }
 
     /// Whether a loop-back declared with options that differ from its

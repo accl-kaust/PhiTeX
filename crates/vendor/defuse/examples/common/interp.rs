@@ -261,6 +261,10 @@ impl Interp<'_> {
                     .flat_map(|c| v.seq_to_vec(c.1))
                     .collect();
                 last_page = self.pos;
+                // (`pg`: the segment's first element, if any.)
+                if let Some(&x0) = xs.first() {
+                    self.define(u, v.field("pg"), x0, false);
+                }
                 let sum = xs
                     .iter()
                     .map(|&x| v.as_int(x).unwrap_or(0))
