@@ -1245,6 +1245,9 @@ impl Run<'_, '_> {
         self.page_marks.push((std::sync::Arc::new(lp.clone()), h));
         let state = self.v.int(i64::from_ne_bytes(h.to_ne_bytes()) >> 4);
         if let Err(s) = self.cx.checkpoint(k, state) {
+            if crate::exec::prof_flag!("PHITEX_PAGES_STOPS") {
+                eprintln!("pages-cut: at mark {k} ({} pages)", lp.pages.len());
+            }
             self.cut_off = true;
             return Err(Halt::Stop(s));
         }
