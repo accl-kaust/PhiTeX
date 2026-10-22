@@ -4613,8 +4613,6 @@ pub struct Build {
     /// The pieces' run times by text ([`crate::runtimes`]): those the
     /// build was given, updated by its evaluations.
     runtimes: phitex_defuse::FxHashMap<u64, u64>,
-    /// Whether [`Self::runtimes`] changed in the last evaluation.
-    runtimes_changed: bool,
 }
 
 impl Drop for Build {
@@ -4815,7 +4813,6 @@ impl Build {
             lines: Mutex::default(),
             loads_ran: false,
             runtimes: phitex_defuse::FxHashMap::default(),
-            runtimes_changed: false,
         };
         // (cost-aware speculation, with the run times an earlier build
         // measured for the cold build's first attempts)
@@ -5386,17 +5383,9 @@ impl Build {
         crate::runtimes::serialise(&self.runtimes)
     }
 
-    /// Whether the run times [`Self::export_runtimes`] gives changed in
-    /// the last evaluation.
-    #[must_use]
-    pub fn runtimes_changed(&self) -> bool {
-        self.runtimes_changed
-    }
-
     /// The run times of the pieces the last evaluation ran, by text: a
     /// long one kept, one that ran short dropped.
     fn note_run_times(&mut self, stats: &Stats) {
-        self.runtimes_changed = false;
         if self.opts.long_runs.is_none() || stats.piece_times.is_empty() {
             return;
         }
@@ -5406,12 +5395,16 @@ impl Build {
                 continue;
             };
             let k = crate::runtimes::key(src.text(&self.text));
-            let changed = if us >= crate::runtimes::MIN_US {
-                self.runtimes.insert(k, us).is_none_or(|old| old.abs_diff(us) > old / 4)
+            if us >= crate::runtimes::MIN_US {
+                // (a time near the one kept stays: the stored file is
+                // not written again for noise)
+                let old = self.runtimes.get(&k).copied();
+                if old.is_none_or(|o| o.abs_diff(us) > o / 4) {
+                    self.runtimes.insert(k, us);
+                }
             } else {
-                self.runtimes.remove(&k).is_some()
-            };
-            self.runtimes_changed |= changed;
+                self.runtimes.remove(&k);
+            }
         }
     }
 

@@ -780,9 +780,8 @@ impl Session {
             if b.pkgrec_changed() {
                 self.store_pkgrec(b);
             }
-            if b.runtimes_changed() {
-                self.store_runtimes(b);
-            }
+            // (written when it differs from the stored one)
+            self.store_runtimes(b);
             // (`PHITEX_CHAIN_DUMP=1`: the critical chain in full, and its
             // waits, for measurements)
             if phitex_tex::OBSERVE && std::env::var_os("PHITEX_CHAIN_DUMP").is_some() {
