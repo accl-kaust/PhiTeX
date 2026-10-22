@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::ptree::{Count, Measure, NoMeasure, PMap};
 use crate::api::{Brackets, Effect, Locality, MayDefine, OpId};
-use crate::values::{Field, FxHashMap, ValueId};
+use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
 
 /// A node id (`NodeId`'s raw value).
 pub(crate) type Id = u64;
@@ -217,9 +217,40 @@ pub(crate) struct Res {
     pub text: usize,
     /// The evaluation its run ran in (`Core::eval_no`; 0: none).
     pub eval: u64,
+    /// What the node's last result from an earlier evaluation read of the
+    /// fields guessed from the last (`Engine::guess_from_last`), carried
+    /// through its commits in this one (`Res::last_reads`).
+    pub last: Option<Arc<LastReads>>,
+}
+
+/// A node's definition reads of the fields guessed from the last, as its
+/// last result from an earlier evaluation made them: by field and point.
+#[derive(Debug, Default)]
+pub(crate) struct LastReads {
+    pub vals: FxHashMap<(Field, Id, bool, bool), ValueId>,
+    pub fields: FxHashSet<Field>,
 }
 
 impl Res {
+    /// What the node read of the fields guessed from the last in its last
+    /// result from an evaluation before `cur`: this one's reads when it is
+    /// one, else what this one carried.
+    pub(crate) fn last_reads(&self, core: &super::core::Core, cur: u64) -> Option<Arc<LastReads>> {
+        if self.eval >= cur {
+            return self.last.clone();
+        }
+        let mut l = LastReads::default();
+        for rd in &self.reads {
+            if let Read::Use { f, at, after, own, val: Some(v), .. } = *rd
+                && core.guess_last.contains(&f)
+            {
+                l.vals.entry((f, at, after, own)).or_insert(v);
+                l.fields.insert(f);
+            }
+        }
+        (!l.vals.is_empty()).then(|| Arc::new(l))
+    }
+
     /// The value it defines for `f` (defined at more than one locality,
     /// the first made).
     pub(crate) fn def_value(&self, f: Field) -> Option<ValueId> {
@@ -255,6 +286,7 @@ impl Default for Res {
             def_ix: std::sync::OnceLock::new(),
             text: 0,
             eval: 0,
+            last: None,
         }
     }
 }
@@ -1583,15 +1615,19 @@ impl World {
         Ok(())
     }
 
-    /// Whether node `id`'s result from a previous evaluation read `f`, a
-    /// field guessed from the last (`Engine::guess_from_last`): its read
+    /// Whether node `id`'s last result from a previous evaluation read `f`
+    /// (carried through its commits in this one), a field guessed from the last (`Engine::guess_from_last`): its read
     /// guesses that, and need not wait.
     fn read_last(&self, core: &super::core::Core, id: Id, f: Field) -> bool {
-        core.guess_last.contains(&f)
-            && self
-                .node(id)
-                .and_then(|n| n.res.as_ref())
-                .is_some_and(|r| r.eval < core.eval_no.load(std::sync::atomic::Ordering::Relaxed) && r.reads.iter().any(|rd| matches!(rd, Read::Use { f: g, val: Some(_), .. } if *g == f)))
+        if !core.guess_last.contains(&f) {
+            return false;
+        }
+        let Some(r) = self.node(id).and_then(|n| n.res.as_ref()) else { return false };
+        if r.eval < core.eval_no.load(std::sync::atomic::Ordering::Relaxed) {
+            r.reads.iter().any(|rd| matches!(rd, Read::Use { f: g, val: Some(_), .. } if *g == f))
+        } else {
+            r.last.as_ref().is_some_and(|l| l.fields.contains(&f))
+        }
     }
 
     /// The first node in work strictly between `lo` and `hi` in unit `u`

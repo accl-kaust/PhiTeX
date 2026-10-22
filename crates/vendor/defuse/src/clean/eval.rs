@@ -3408,8 +3408,9 @@ fn run_job(
     if let Some(e) = cx.error.take() {
         return Outcome::Failed(e);
     }
-    let run = |cx: Ctx<'_>, out: ValueId| Run {
+    let run = |mut cx: Ctx<'_>, out: ValueId| Run {
         res: Res {
+            last: cx.last_reads(),
             out,
             defs: cx.defs,
             contribs: cx.contribs,

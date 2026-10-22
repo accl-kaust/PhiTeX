@@ -5,7 +5,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::core::Core;
-use super::world::{Def, FieldCell, FrameId, Id, NONE, Place, Pos, Read, St, World};
+use super::world::{Def, FieldCell, FrameId, Id, LastReads, NONE, Place, Pos, Read, St, World};
 use crate::api::{Effect, FieldAt, Locality, NodeId, OpId, Stop};
 use crate::values::FxHashMap;
 use crate::values::{Field, ValueId, Values};
@@ -96,10 +96,10 @@ pub struct Ctx<'a> {
     pub(crate) guessed: bool,
     /// Reads answered by a prediction.
     pub(crate) predicted: u32,
-    /// Its result from a previous evaluation's definition reads of the
-    /// fields guessed from the last (`Engine::guess_from_last`), by field
-    /// and point: made on first need.
-    last: Option<FxHashMap<(Field, Id, bool, bool), ValueId>>,
+    /// Its last result from a previous evaluation's definition reads of
+    /// the fields guessed from the last (`Engine::guess_from_last`): taken
+    /// on first need.
+    last: Option<Option<Arc<LastReads>>>,
     /// A speculative run's read budget; spent, the run stops (`fuel_out`).
     pub(crate) fuel: Option<u64>,
     pub(crate) fuel_out: bool,
@@ -376,27 +376,25 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// What this node's result from a previous evaluation read of `f` at
-    /// `key`, when `f` is guessed from the last.
+    /// What this node's last result from a previous evaluation read of `f`
+    /// at `key`, when `f` is guessed from the last.
     fn last_read(&mut self, f: Field, key: (Id, bool, bool)) -> Option<ValueId> {
         if !self.core.guess_last.contains(&f) {
             return None;
         }
+        self.last_reads()?.vals.get(&(f, key.0, key.1, key.2)).copied()
+    }
+
+    /// Its last result from a previous evaluation's reads of the fields
+    /// guessed from the last, which its result carries on.
+    pub(crate) fn last_reads(&mut self) -> Option<Arc<LastReads>> {
+        if self.core.guess_last.is_empty() {
+            return None;
+        }
         let (core, w, me) = (self.core, self.w, self.me);
-        let m = self.last.get_or_insert_with(|| {
-            let mut m = FxHashMap::default();
-            if let Some(r) = w.node(me).and_then(|n| n.res.as_ref()).filter(|r| r.eval < core.eval_no.load(std::sync::atomic::Ordering::Relaxed)) {
-                for rd in &r.reads {
-                    if let Read::Use { f, at, after, own, val: Some(v), .. } = *rd
-                        && core.guess_last.contains(&f)
-                    {
-                        m.entry((f, at, after, own)).or_insert(v);
-                    }
-                }
-            }
-            m
-        });
-        m.get(&(f, key.0, key.1, key.2)).copied()
+        self.last
+            .get_or_insert_with(|| w.node(me).and_then(|n| n.res.as_ref()).and_then(|r| r.last_reads(core, core.eval_no.load(std::sync::atomic::Ordering::Relaxed))))
+            .clone()
     }
 
     /// Whether a range read of accumulator `f` folds its contributors in
