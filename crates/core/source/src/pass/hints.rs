@@ -1439,14 +1439,24 @@ impl Acc {
                 Acc::push(&mut self.s.outer_calls, outer_calls, x);
             }
         }
+        // (a name the set has already: its flag updated in place, the
+        // name not copied to look it up)
+        fn put(m: &mut BTreeMap<String, bool>, k: &str, v: bool) {
+            match m.get_mut(k) {
+                Some(x) => *x |= v,
+                None => {
+                    m.insert(k.to_owned(), v);
+                }
+            }
+        }
         for (k, v) in &o.names {
             if outer || *v {
-                *self.s.names.entry(k.clone()).or_default() |= v;
+                put(&mut self.s.names, k, *v);
             }
         }
         for (k, v) in &o.prefixes {
             if outer || *v {
-                *self.s.prefixes.entry(k.clone()).or_default() |= v;
+                put(&mut self.s.prefixes, k, *v);
             }
         }
         for x in &o.unbounded {
@@ -1477,10 +1487,20 @@ impl DefSet {
         merge(&mut self.calls, &o.calls);
         merge(&mut self.outer_calls, &o.outer_calls);
         for (k, v) in &o.names {
-            *self.names.entry(k.clone()).or_default() |= v;
+            match self.names.get_mut(k) {
+                Some(x) => *x |= v,
+                None => {
+                    self.names.insert(k.clone(), *v);
+                }
+            }
         }
         for (k, v) in &o.prefixes {
-            *self.prefixes.entry(k.clone()).or_default() |= v;
+            match self.prefixes.get_mut(k) {
+                Some(x) => *x |= v,
+                None => {
+                    self.prefixes.insert(k.clone(), *v);
+                }
+            }
         }
         merge(&mut self.unbounded, &o.unbounded);
     }
