@@ -2285,42 +2285,6 @@ impl Graph {
         }
     }
 
-    /// [`Graph::supply`] of every file of `names` in order, the files
-    /// found, read, hashed and made values on the pool (spec-final §9b:
-    /// the cold build's serial part), recorded in the same order.
-    fn supply_all(&mut self, finder: &Finder, names: &[String]) {
-        let mut seen = phitex_defuse::FxHashSet::default();
-        let todo: Vec<(&str, Field)> = names
-            .iter()
-            .filter(|n| seen.insert(n.as_str()))
-            .map(|n| (n.as_str(), self.eng.values().field(&format!("file:{n}"))))
-            .filter(|&(n, f)| {
-                !(self.files.iter().any(|(g, _)| *g == f)
-                    || self.absent.contains(&f)
-                    || self.written.iter().any(|w| w == n))
-            })
-            .collect();
-        let v = self.eng.values();
-        let mut ex = crate::exec::Coarse(crate::exec::Threads::new(self.threads));
-        let got: Vec<(u64, Option<ValueId>)> = crate::exec::map_on(&mut ex, todo.len(), &|k| {
-            let found = finder(todo[k].0);
-            let hash = file_hash(found.as_ref());
-            let val = found.map(|(path, bytes)| {
-                let text = latin1(&bytes);
-                v.list(vec![v.str(&path), v.str(&text)])
-            });
-            (hash, val)
-        });
-        for (&(name, f), (hash, val)) in todo.iter().zip(got) {
-            self.queries.push((name.to_owned(), val.is_some()));
-            self.reads.push((name.to_owned(), hash));
-            match val {
-                Some(x) => self.files.push((f, x)),
-                None => self.absent.push(f),
-            }
-        }
-    }
-
     /// Installs the environment provider: a run reading a file the
     /// environment does not hold gets it from the finder in place, as
     /// [`Graph::supply`] would have supplied it, instead of stopping;
@@ -4449,27 +4413,11 @@ impl Build {
         }
         let unit = g.eng.new_unit();
         crate::timeline::lap("engine: the graph made");
-        // the files the format read (fonts, data) are supplied before the
-        // document's first evaluation: a run reading one never stops
-        let t_sup = std::time::Instant::now();
-        g.supply_all(
-            &opts.finder,
-            &cached
-                .reads
-                .iter()
-                .map(|(n, _)| n.clone())
-                .collect::<Vec<_>>(),
-        );
-        crate::timeline::lap("engine: the format's files supplied (fonts, data)");
+        // (the files the format read are not supplied up front: a run
+        // reading one gets it from the provider in place, `Graph::provide`,
+        // and one no run reads is never read, hashed or made a value)
         g.guesses(&opts);
         crate::timeline::lap("engine: the guesses (read-back keys)");
-        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
-            eprintln!(
-                "time: supply the format's {} files (fonts, data) {:?}",
-                cached.reads.len(),
-                t_sup.elapsed()
-            );
-        }
         // (a document's nodes hold its canonical text, [`canonical_text`],
         // unless it has none: a comment-only edit changes no node)
         let canon_text = (is_doc(prelude, document))
