@@ -5327,7 +5327,10 @@ impl Run<'_, '_> {
         self.pending_locs.clear();
         Some(Parked {
             epoch: self.cx.values_epoch(),
-            at_cmds: self.cmds_before + self.cmds,
+            // (the command it stopped in is begun again where it resumes:
+            // counted then, not now, so that its marks fall on the same
+            // commands as a run's that never parked, `Run::next_mark`)
+            at_cmds: (self.cmds_before + self.cmds).saturating_sub(1),
             segs,
             nlev: nlev_all,
             level_tys: Vec::new(),
