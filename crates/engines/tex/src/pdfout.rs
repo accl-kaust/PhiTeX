@@ -325,7 +325,7 @@ pub(crate) struct PagePiece {
     /// Where its sealed lines' units are: the finisher's window (after
     /// which node, to which piece) and each unit's place in it, by piece
     /// (`crate::pages::Sealing::places`).
-    places: Option<(Option<i64>, i64, Vec<(i64, u32)>)>,
+    places: Option<crate::pages::Places>,
     /// What the writer it is written on starts from ([`base_fold`]).
     base_in: BaseIn,
     /// The page's index in the page chain (for traces).
@@ -1903,7 +1903,7 @@ fn write_page(v: &Values, pc: &PagePiece, bx: &BoxNode) -> Made {
         let mut wh = |h: u32, _leaders: bool| {
             page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &local))
         };
-        st.ship_recorded(&bx, &pc.fonts, &mut wh)
+        st.ship_recorded(bx, &pc.fonts, &mut wh)
     };
     let _ = res.err();
     (rec, base, floor)

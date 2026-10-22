@@ -473,6 +473,7 @@ fn dvi_page(
 /// Example: pieces `A B`, a page finishing at `A`'s end, `B` running
 /// `\immediate\pdfobj`: the line is `A, finish, B`; the file numbers
 /// page 1's objects, then `B`'s object.
+#[allow(clippy::too_many_lines)]
 fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let v = cx.values();
     let t0 = std::time::Instant::now();

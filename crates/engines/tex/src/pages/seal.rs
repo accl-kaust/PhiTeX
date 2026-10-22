@@ -22,6 +22,11 @@ use phitex_defuse::{Step, ValueId, View};
 use crate::nodes;
 use crate::run::Run;
 
+/// Where a page's sealed lines' units are: the finisher's window (after
+/// which node, none: the unit's start; to which piece; raw ids) and each
+/// unit's place in it, by piece (sorted).
+pub(crate) type Places = (Option<i64>, i64, Vec<(i64, u32)>);
+
 /// A finisher's sealed lines: the view of each piece's unit's items the
 /// run read by its shape, and the views of the line boxes made from them.
 #[derive(Clone, Debug, Default)]
@@ -41,7 +46,7 @@ impl Sealing {
     /// The window the sealed units were read in and each one's place in
     /// it (by piece, sorted): where the page's writer reads them
     /// (`crate::pdfout::PdfPage`).
-    pub(crate) fn places(&self) -> Option<(Option<i64>, i64, Vec<(i64, u32)>)> {
+    pub(crate) fn places(&self) -> Option<Places> {
         let (after, to) = self.window?;
         let mut at: Vec<(i64, u32)> = self.units.iter().map(|(&p, &(_, i))| (p, i)).collect();
         at.sort_unstable();
