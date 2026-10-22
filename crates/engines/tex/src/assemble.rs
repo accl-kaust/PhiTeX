@@ -146,8 +146,11 @@ fn pdf_mode(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
     use phitex_defuse::Step;
     let v = cx.values();
     let p = cx.path(&[Step::Index(0), Step::Index(3), Step::Index(0)]);
+    // (up to this node, as `acc_range` reads: a fold to the unit's end
+    // would wait on the end node, which waits on this one)
+    let me = cx.node();
     Ok(cx
-        .acc_fold_path(v.field("pages"), None, None, p)?
+        .acc_fold_path(v.field("pages"), None, Some(me), p)?
         .is_some_and(|x| v.as_int(x).is_some_and(|n| n != 0)))
 }
 
