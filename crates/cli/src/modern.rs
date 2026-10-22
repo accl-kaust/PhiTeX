@@ -154,17 +154,16 @@ struct Opts {
         global = true
     )]
     jobs: Option<usize>,
-    /// Exact rounds: the files the document reads back (.aux, .toc,
-    /// .out, .idx, …) change only between rounds, as between latexmk's
-    /// runs, so the PDF is byte for byte what pdflatex under latexmk
-    /// makes. Slower where a document needs several rounds
+    /// Exact rounds (the default): the files the document reads back
+    /// (.aux, .toc, .out, .idx, …) change only between rounds, as
+    /// between latexmk's runs, so the PDF is byte for byte what pdflatex
+    /// under latexmk makes
     #[arg(long, global = true, conflicts_with = "relaxed")]
     exact: bool,
-    /// Relaxed rounds (the default): a file read back changes as soon as
-    /// the run writing it does, and its readers run again within the
-    /// round. Usually the same PDF in fewer rounds, but not guaranteed:
-    /// a warning says when the read-backs did not settle cleanly; use
-    /// --exact for latexmk's result
+    /// Relaxed rounds (experimental): a file read back changes as soon
+    /// as the run writing it does, and its readers run again within the
+    /// round. Usually the same PDF, but not guaranteed: a warning says
+    /// when the read-backs did not settle cleanly; not faster yet
     #[arg(long, global = true)]
     relaxed: bool,
     /// (the same as --exact)
@@ -238,8 +237,8 @@ pub struct Options {
     pub etex: bool,
     pub output_dir: Option<String>,
     pub threads: Option<usize>,
-    /// The exact rounds (`--exact`, `--exact-pdf`); false: the relaxed
-    /// ones (the default).
+    /// The exact rounds (the default; `--exact`, `--exact-pdf`); false:
+    /// the relaxed ones (`--relaxed`).
     pub exact: bool,
     pub spec: Option<String>,
     pub verbose: u8,
@@ -276,7 +275,7 @@ impl Cli {
             etex: o.etex,
             output_dir: o.output_dir,
             threads: o.jobs,
-            exact: (o.exact || o.exact_pdf) && !o.relaxed,
+            exact: o.exact || o.exact_pdf || !o.relaxed,
             spec: o.spec,
             verbose: o.verbose,
             quiet: o.quiet,

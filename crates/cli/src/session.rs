@@ -136,8 +136,8 @@ pub struct Job {
     pub threads: Option<usize>,
     /// The exact rounds: the files read back move between rounds as
     /// between latexmk's runs, so the output is pdfTeX's under latexmk,
-    /// byte for byte (`--exact`, `--exact-pdf`; the compatible mode
-    /// always). False: the relaxed rounds (`--relaxed`, the default),
+    /// byte for byte (the default; the compatible mode always). False:
+    /// the relaxed rounds (`--relaxed`),
     /// [`phitex_tex::Rounds::Relaxed`].
     pub exact: bool,
     /// `--spec`: when the engine runs steps ahead of their inputs (none:
