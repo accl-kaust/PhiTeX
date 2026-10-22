@@ -1417,6 +1417,61 @@ pub struct Stats {
 /// critical path in nodes and time and the kinds on the engine's
 /// critical chain, and the environment pushes.
 #[allow(clippy::too_many_lines)]
+/// The run audit's line (`acct-edit: audit`, with `PHITEX_ROUND_ACCT`
+/// and `PHITEX_RUN_AUDIT`): the reruns and their time, the wasted ones
+/// (every effect outside the run as before) and their time, and the
+/// wasted ones by operation, cause and field, the most time first.
+///
+/// Example: `acct-edit: audit reruns 12 in 3.1 ms, wasted 9 in 2.4 ms,
+/// top [exec Changed cs:@currentlabel 4 1.200 ms; finish Range pdf:xpages
+/// 3 0.900 ms]`.
+fn print_audit(eng: &Engine, a: &phitex_defuse::RunAudit) {
+    use phitex_defuse::Rerun;
+    let v = eng.values();
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let mut by: FxHashMap<(String, &'static str, String), (u64, std::time::Duration)> =
+        FxHashMap::default();
+    for w in &a.wasted {
+        let op = eng.node_info(w.node).map_or("gone", |i| i.op).to_owned();
+        let (kind, field) = match w.cause {
+            None => ("unknown", None),
+            Some(Rerun::Text) => ("Text", None),
+            Some(Rerun::Changed { field, .. }) => ("Changed", Some(field)),
+            Some(Rerun::Rebind { field }) => ("Rebind", Some(field)),
+            Some(Rerun::Refuted { field }) => ("Refuted", field),
+            Some(Rerun::Woken { field }) => ("Woken", field),
+            Some(Rerun::Loop { field }) => ("Loop", Some(field)),
+            Some(Rerun::Environment { field }) => ("Environment", Some(field)),
+            Some(Rerun::Output { .. }) => ("Output", None),
+            Some(Rerun::Claim) => ("Claim", None),
+            Some(Rerun::Anchor { .. }) => ("Anchor", None),
+            Some(Rerun::SiblingScan) => ("SiblingScan", None),
+            Some(Rerun::Range { field }) => ("Range", field),
+            Some(Rerun::Scope) => ("Scope", None),
+            Some(Rerun::Other) => ("Other", None),
+        };
+        let f = field.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
+        let e = by.entry((op, kind, f)).or_default();
+        e.0 += 1;
+        e.1 += w.time;
+    }
+    let mut by: Vec<_> = by.into_iter().collect();
+    by.sort_by(|a, b| b.1.1.cmp(&a.1.1).then_with(|| a.0.cmp(&b.0)));
+    let top: Vec<String> = by
+        .iter()
+        .take(8)
+        .map(|((op, kind, f), (n, t))| format!("{op} {kind} {f} {n} {:.3} ms", ms(*t)))
+        .collect();
+    eprintln!(
+        "acct-edit: audit reruns {} in {:.1} ms, wasted {} in {:.1} ms, top [{}]",
+        a.reruns,
+        ms(a.rerun_time),
+        a.wasted.len(),
+        ms(a.wasted_time),
+        top.join("; ")
+    );
+}
+
 fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_calls: u64) {
     let ms = |ns: u64| {
         #[allow(clippy::cast_precision_loss)]
@@ -2749,6 +2804,11 @@ impl Graph {
                 let fd = o.fin_defs.locked().clone();
                 *o.fin_defs_start.locked() = Arc::new(fd);
             }
+            // (the engine's run audit, `PHITEX_RUN_AUDIT=1`: the reruns
+            // whose effects all came out as before, printed below)
+            if crate::exec::prof_flag!("PHITEX_RUN_AUDIT") {
+                self.eng.set_run_audit(true);
+            }
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
@@ -2875,6 +2935,9 @@ impl Graph {
                     r.cutoffs
                 );
                 eprintln!("acct-edit: quick path held {}", r.quick_held);
+                if let Some(a) = &r.audit {
+                    print_audit(&self.eng, a);
+                }
                 // (the guesses this edit paid for: refuted runs, the
                 // fields they were refuted on, and the parked runs that
                 // started over and why)
