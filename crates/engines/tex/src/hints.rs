@@ -2568,8 +2568,12 @@ impl Analysis<'_> {
         outer: &[String],
         st: &mut Option<Vec<&'static str>>,
     ) {
-        let (out, inner): (Vec<String>, Vec<String>) =
-            calls.iter().cloned().partition(|c| outer.contains(c));
+        // (by a set of the outer calls: no scan of them per call)
+        let outer: phitex_defuse::FxHashSet<&str> = outer.iter().map(String::as_str).collect();
+        let (out, inner): (Vec<&str>, Vec<&str>) = calls
+            .iter()
+            .map(String::as_str)
+            .partition(|c| outer.contains(c));
         self.calls_state(&out, st);
         if inner.is_empty() || st.is_none() {
             return;
@@ -2591,8 +2595,8 @@ impl Analysis<'_> {
         }
     }
 
-    fn calls_state(&self, calls: &[String], st: &mut Option<Vec<&'static str>>) {
-        for c in calls {
+    fn calls_state(&self, calls: &[&str], st: &mut Option<Vec<&'static str>>) {
+        for &c in calls {
             if st.is_none() {
                 return;
             }
@@ -2606,7 +2610,7 @@ impl Analysis<'_> {
                 add_heads(st, Some(&["pg:"]));
             }
             let row = class_state(c);
-            if row.is_none() && !is_prim(c.as_str()) && !table_param(c) {
+            if row.is_none() && !is_prim(c) && !table_param(c) {
                 // (a name neither a primitive nor defined: a `\\let`'s
                 // value that may be undefined, `\\let\\next\\undefined`;
                 // a call of it is unbounded in the may-define set, not
@@ -2739,16 +2743,23 @@ impl Analysis<'_> {
     /// A definition set's names, prefixes and calls' state, whether or
     /// not the pass bounds it.
     fn add_set_parts(&self, set: &DefSet, b: &mut Bound) {
+        // (what the bound has already, by name: each name added once
+        // without a scan of the lists per name)
+        let mut means: phitex_defuse::FxHashSet<String> =
+            b.means.iter().map(|m| m.0.clone()).collect();
         for r in &set.relied {
             if let Some(f) = Tok::cs(&caret_name(r)).field_name()
-                && !b.means.iter().any(|m| m.0 == f)
+                && !means.contains(&f)
             {
+                means.insert(f.clone());
                 b.means.push((f, 1));
             }
         }
+        let mut names: phitex_defuse::FxHashSet<String> = b.names.iter().cloned().collect();
         for f in set.names.keys() {
             if let Some(f) = engine_field(f) {
-                if !b.names.contains(&f) {
+                if !names.contains(&f) {
+                    names.insert(f.clone());
                     b.names.push(f);
                 }
             } else if let Some(p) = self.param_field(f) {
@@ -2768,9 +2779,11 @@ impl Analysis<'_> {
                 }
             }
         }
+        let mut prefixes: phitex_defuse::FxHashSet<String> = b.prefixes.iter().cloned().collect();
         for f in set.prefixes.keys() {
             if let Some(p) = engine_prefix(f) {
-                if !b.prefixes.contains(&p) {
+                if !prefixes.contains(&p) {
+                    prefixes.insert(p.clone());
                     b.prefixes.push(p);
                 }
             } else if let Some(p) = self.param_field(f) {
