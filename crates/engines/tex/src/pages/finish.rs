@@ -381,11 +381,16 @@ impl Run<'_, '_> {
                 want.push(piece);
             }
         }
+        // (by sets and an index: the window's units and the page's items
+        // looked up, not searched for each)
+        let want: phitex_defuse::FxHashSet<i64> = want.into_iter().collect();
+        let mut unit_ix: phitex_defuse::FxHashMap<i64, usize> = phitex_defuse::FxHashMap::default();
         for &u in &window {
             let p = unit_pid(u);
-            if want.contains(&p) && !units.iter().any(|x| x.0 == p) {
+            if want.contains(&p) && !unit_ix.contains_key(&p) {
                 let mut raw = unit_items(v, u);
                 self.resolve_params_of(p, &mut raw)?;
+                unit_ix.insert(p, units.len());
                 units.push((p, u, raw));
             }
         }
@@ -398,23 +403,34 @@ impl Run<'_, '_> {
             assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
             r.engine_diag(&msg);
         };
-        let rtn_items = |page: i64| -> Vec<ValueId> {
-            fin.rtns
-                .iter()
-                .find(|r| r.0 == page)
-                .map(|r| {
-                    let rs = list_of(v, r.1);
-                    let mut out = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
-                    out.extend(rs.get(1).map(|&x| list_of(v, x)).unwrap_or_default());
-                    out
-                })
-                .unwrap_or_default()
+        // (each page's given-back items decoded once, not per item)
+        let rtns: std::cell::RefCell<phitex_defuse::FxHashMap<i64, std::rc::Rc<Vec<ValueId>>>> =
+            std::cell::RefCell::default();
+        let rtn_items = |page: i64| -> std::rc::Rc<Vec<ValueId>> {
+            if let Some(x) = rtns.borrow().get(&page) {
+                return x.clone();
+            }
+            let x = std::rc::Rc::new(
+                fin.rtns
+                    .iter()
+                    .find(|r| r.0 == page)
+                    .map(|r| {
+                        let rs = list_of(v, r.1);
+                        let mut out = rs.first().map(|&x| list_of(v, x)).unwrap_or_default();
+                        out.extend(rs.get(1).map(|&x| list_of(v, x)).unwrap_or_default());
+                        out
+                    })
+                    .unwrap_or_default(),
+            );
+            rtns.borrow_mut().insert(page, x.clone());
+            x
         };
+        let unit_of = |piece: i64| unit_ix.get(&piece).map(|&i| &units[i]);
         // (an item a source names, real)
         let item_raw = |src: Src| -> Option<ValueId> {
             match src {
                 Src::Piece { piece, item } => {
-                    let raw = &units.iter().find(|u| u.0 == piece)?.2;
+                    let raw = &unit_of(piece)?.2;
                     match crate::pages::end_sub_of(item) {
                         None => raw.get(item as usize).copied(),
                         Some((e, s)) => list_of(v, *raw.get(e as usize)?).get(1 + s as usize).copied(),
@@ -422,7 +438,7 @@ impl Run<'_, '_> {
                 }
                 Src::Rtn { page, item } => rtn_items(page).get(item as usize).copied(),
                 Src::Held { piece, item, from } => {
-                    let raw = &units.iter().find(|u| u.0 == piece)?.2;
+                    let raw = &unit_of(piece)?.2;
                     let x = *raw.get(item as usize)?;
                     if from == 0 {
                         return Some(x);
