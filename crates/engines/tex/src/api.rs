@@ -1678,6 +1678,40 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
             first.push(format!("{op}:{c}"));
         }
     }
+    // (`PHITEX_CHAIN_ALL=1`, profile: every link of the chain, its field
+    // by name, and when it was queued, started, ended and committed)
+    if crate::exec::prof_flag!("PHITEX_CHAIN_ALL") {
+        let times: FxHashMap<phitex_defuse::NodeId, [u64; 4]> =
+            eng.critical_chain_times().into_iter().collect();
+        let v = eng.values();
+        for (n, c) in &chain {
+            let op = eng.node_info(*n).map_or("?", |i| i.op);
+            use phitex_defuse::Cause as C;
+            let f = match c {
+                C::Rebind { field, .. }
+                | C::Changed { field, .. }
+                | C::Loop { field }
+                | C::Environment { field }
+                | C::Range { field, .. }
+                | C::Woken { field: Some(field), .. } => crate::val::field_name(v, *field),
+                C::Created { from_hint: Some((field, _)), .. } => format!("hint {}", crate::val::field_name(v, *field)),
+                _ => String::new(),
+            };
+            let c = format!("{c:?} {f}");
+            let t = times.get(n).copied().unwrap_or_default();
+            #[allow(clippy::cast_precision_loss)]
+            let ms = |x: u64| x as f64 / 1e6;
+            eprintln!(
+                "acct-chain: {op} {} q {:.2} s {:.2} e {:.2} c {:.2} ms {}",
+                n.raw(),
+                ms(t[0]),
+                ms(t[1]),
+                ms(t[2]),
+                ms(t[3]),
+                c.chars().take(200).collect::<String>()
+            );
+        }
+    }
     eprintln!(
         "acct: critical chain {} links by kind and cause {links:?}; first: {}",
         chain.len(),
