@@ -5092,6 +5092,11 @@ pub(crate) struct Parked {
     segs: Vec<Seg>,
     /// How many of `segs` were levels ([`Run::parked_levels`]).
     nlev: usize,
+    /// A mark's ([`Run::snapshot`]): the token types of the levels it
+    /// had, top first, its first segments; a run resumed there puts them
+    /// back as levels, not as text (a routine's list stays the routine's,
+    /// §1100). Empty for a park: its levels are read on as text.
+    level_tys: Vec<u8>,
     pulled: usize,
     /// Where each pulled sibling's text begins, as an index into `segs`'
     /// text part: [`Run::pull_at`], kept so a resumed run can still give a
@@ -5245,6 +5250,7 @@ impl Run<'_, '_> {
             epoch: self.cx.values_epoch(),
             segs,
             nlev: nlev_all,
+            level_tys: Vec::new(),
             pulled: self.pulled,
             pull_at,
             pull_orig,
@@ -5355,15 +5361,16 @@ impl Run<'_, '_> {
         if !self.marks_on || self.cmds < self.mark_cmds + mark_every() || self.mark.active {
             return Ok(());
         }
-        // (only where the input is the node's text and its lines: a
-        // token list on the stack, a macro's or a routine's, is no place
-        // to stand, `PHITEX_MARK_TOKS=1` (observe) takes one there too)
-        if !crate::exec::obs_flag!("PHITEX_MARK_TOKS")
-            && self
-                .input
-                .levels
-                .iter()
-                .any(|l| l.kind == crate::input::kind::TOKS)
+        // (not where siblings were pulled: their places are the text's
+        // and the levels'; `PHITEX_MARK_TEXT_ONLY=1` (observe): only where
+        // no token list is on the stack)
+        if !self.pull_at.is_empty()
+            || crate::exec::obs_flag!("PHITEX_MARK_TEXT_ONLY")
+                && self
+                    .input
+                    .levels
+                    .iter()
+                    .any(|l| l.kind == crate::input::kind::TOKS)
         {
             return Ok(());
         }
@@ -5472,10 +5479,12 @@ impl Run<'_, '_> {
             .into_iter()
             .map(|(l, x)| (self.loc_field(l), x))
             .collect();
+        let level_tys = self.input.levels.iter().rev().map(|l| l.ty).collect();
         Parked {
             epoch: self.cx.values_epoch(),
             segs,
             nlev: nlev_all,
+            level_tys,
             pulled: self.pulled,
             pull_at,
             pull_orig,
@@ -5569,7 +5578,7 @@ fn parked_digest(p: &Parked) -> u64 {
             }
         }
     }
-    (p.nlev, p.pulled, &p.pull_box, p.top, p.claim_rest, p.hint_void).hash(&mut h);
+    (p.nlev, &p.level_tys, p.pulled, &p.pull_box, p.top, p.claim_rest, p.hint_void).hash(&mut h);
     for (a, o) in p.pull_at.iter().zip(&p.pull_orig) {
         a.hash(&mut h);
         if let Some(l) = o {
@@ -5656,6 +5665,31 @@ impl<'c, 'a> Run<'c, 'a> {
         r.input.text = p.segs;
         r.input.text_at = 0;
         r.parked_levels = p.nlev;
+        // (a mark's levels put back as levels, each with its token type:
+        // the bottom first)
+        if !p.level_tys.is_empty() {
+            let n = p.level_tys.len();
+            let rest = r.input.text.split_off(n);
+            let lev = std::mem::replace(&mut r.input.text, rest);
+            r.parked_levels = p.nlev.saturating_sub(n);
+            for (seg, ty) in lev.into_iter().zip(p.level_tys).rev() {
+                match seg {
+                    Seg::Toks(t) => {
+                        let g = r.input.arena.alloc(&t);
+                        r.input.levels.push(crate::input::Level::toks(g, ty));
+                    }
+                    Seg::Line(l) => {
+                        r.input.push_line(l);
+                    }
+                    Seg::File(f) => {
+                        r.input.push_file(f);
+                    }
+                }
+                if let Some(l) = r.input.levels.last_mut() {
+                    l.ty = ty;
+                }
+            }
+        }
         if crate::exec::obs_flag!("PHITEX_PARK_TRACE") {
             eprintln!(
                 "park-trace: resume {}: {}",
