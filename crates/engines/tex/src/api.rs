@@ -311,7 +311,7 @@ struct Absorb<'a> {
     lines: &'a Mutex<Option<Vec<usize>>>,
     /// Whether the nodes hold the document's canonical text
     /// ([`canonical_text`]; off for good once a text cannot be), and its
-    /// comments by line, for the environment (`doc:marks`).
+    /// comments, for the environment (`doc:mark:<id>`).
     canon: &'a mut bool,
     marks: Marks,
     /// The package loads' hints (`crate::pkgrec`).
@@ -349,39 +349,46 @@ impl phitex_defuse::EditSource for Absorb<'_> {
         let canon = if *self.canon && !raw_marks {
             match self.raw.as_deref() {
                 Some(old) => {
-                    let ms = self.marks.get();
-                    let (ms, r) = canonical_splice(old, self.text, &ms, &raw, ends);
-                    // (`PHITEX_CANON_CHECK`: against the whole text's)
-                    if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
-                        assert!(
-                            canonical_text(&raw).as_ref() == Some(&(self.text.clone(), ms.clone())),
-                            "canonical_splice differs from canonical_text"
-                        );
-                    }
-                    range = Some(r);
-                    // (the line starts: those in the range made again,
-                    // those after it moved)
-                    let mut ls = self.lines.locked();
-                    if let Some(v) = ls.as_mut() {
-                        let (a, b, c) = r;
-                        let i = v.partition_point(|&k| k <= a);
-                        let j = v.partition_point(|&k| k <= b);
-                        let made: Vec<usize> = self.text.as_bytes()[a..c]
-                            .iter()
-                            .enumerate()
-                            .filter(|x| *x.1 == b'\n')
-                            .map(|x| a + x.0 + 1)
-                            .collect();
-                        let n = made.len();
-                        v.splice(i..j, made);
-                        for k in &mut v[i + n..] {
-                            *k = *k + c - b;
+                    match canonical_splice(old, self.text, &self.marks.get(), &raw, ends) {
+                        None => canonical_text(&raw).map(|(t, ms)| (Some(t), ms)),
+                        Some((ms, r)) => {
+                            // (`PHITEX_CANON_CHECK`: against the whole text's)
+                            if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
+                                assert!(
+                                    canonical_text(&raw).as_ref()
+                                        == Some(&(self.text.clone(), ms.clone())),
+                                    "canonical_splice differs from canonical_text"
+                                );
+                            }
+                            range = Some(r);
+                            // (the line starts: those in the range made again,
+                            // those after it moved)
+                            let mut ls = self.lines.locked();
+                            if let Some(v) = ls.as_mut() {
+                                let (a, b, c) = r;
+                                let i = v.partition_point(|&k| k <= a);
+                                let j = v.partition_point(|&k| k <= b);
+                                let made: Vec<usize> = self.text.as_bytes()[a..c]
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|x| *x.1 == b'\n')
+                                    .map(|x| a + x.0 + 1)
+                                    .collect();
+                                let n = made.len();
+                                v.splice(i..j, made);
+                                for k in &mut v[i + n..] {
+                                    *k = *k + c - b;
+                                }
+                                if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
+                                    assert!(
+                                        *v == line_starts(self.text),
+                                        "the line starts moved wrong"
+                                    );
+                                }
+                            }
+                            Some((None, ms))
                         }
-                        if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
-                            assert!(*v == line_starts(self.text), "the line starts moved wrong");
-                        }
                     }
-                    Some((None, ms))
                 }
                 None => canonical_text(&raw).map(|(t, ms)| (Some(t), ms)),
             }
@@ -1901,8 +1908,8 @@ struct Graph {
     opened_last: Vec<String>,
     /// The executor's threads ([`Options::threads`]).
     threads: usize,
-    /// The comments of the document's canonical text by line
-    /// ([`canonical_text`]): `doc:marks` in the environment, read by a
+    /// The comments of the document's canonical text
+    /// ([`canonical_text`]): `doc:mark:<id>` in the environment, read by a
     /// run that reads a comment's mark as text (`Run::splice_mark`).
     marks: Marks,
     /// The `wdef:<field>` loop-backs declared: the fields the read-back
@@ -2679,7 +2686,13 @@ impl Graph {
     fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
         let v = self.eng.values();
         let mut env = self.files.clone();
-        env.push((v.field(DOC_MARKS), self.marks.value(v)));
+        env.extend(self.marks.entries(v));
+        // (and how many there are, nobody's read: an environment that
+        // lacks this entry, the canonical text of a document with no
+        // comment, makes `sweep_input_include`'s edit of `chap2.tex`
+        // with the format built in the same evaluation run its first
+        // piece again on `file:inputs.aux`, an engine matter)
+        env.push((v.field(DOC_MARK_COUNT), v.int(self.marks.count())));
         // (the files the job writes kept in memory, a fixpoint's; none
         // otherwise: `UNIT`, never a wait on the client. Listed: the files
         // written before that the last evaluation did not open, each
@@ -3483,9 +3496,72 @@ pub(crate) fn key(piece: &str, starts: bool) -> u64 {
     phitex_defuse::hash_bytes(1 + u64::from(starts), piece.as_bytes())
 }
 
-/// The environment field of the canonical text's comments
-/// ([`canonical_text`]): `[[line, comment], ...]`.
-pub(crate) const DOC_MARKS: &str = "doc:marks";
+/// The prefix of the environment fields of the canonical text's
+/// comments ([`canonical_text`]): `doc:mark:<id>`, a comment's text by
+/// the id its mark carries ([`CommentMark`]).
+pub(crate) const DOC_MARKS: &str = "doc:mark:";
+
+/// A comment of the canonical text: its line (1-based), the hash of its
+/// line's text before the `%` ([`prefix_hash`]), its text. The mark in
+/// the text is a NUL and the comment's id ([`mark_id`], 16 hex digits),
+/// so a run reads its comment by the id in its own line, not by where
+/// the line is in the file.
+pub(crate) type CommentMark = (u32, u64, String);
+
+/// The environment field of the number of the canonical text's comments.
+const DOC_MARK_COUNT: &str = "doc:marks";
+
+/// The hash of a comment line's text before its `%`.
+fn prefix_hash(prefix: &str) -> u64 {
+    phitex_defuse::hash_bytes(0x5c0d_e5ed, prefix.as_bytes())
+}
+
+/// The id of comment `c` on a line whose text before the `%` hashes to
+/// `h`: `h` itself, unless another comment's line has the same text
+/// before its `%` and another comment (`collide`): then the comment's
+/// text too. So a comment-only edit keeps the line's text (its id), and
+/// two marks of one id have the same comment.
+fn mark_id(h: u64, c: &str, collide: bool) -> u64 {
+    if collide {
+        phitex_defuse::hash_bytes(h, c.as_bytes())
+    } else {
+        h
+    }
+}
+
+/// The prefix hashes of `marks` with more than one comment.
+fn collisions<'a>(
+    marks: impl IntoIterator<Item = &'a CommentMark>,
+) -> phitex_defuse::FxHashSet<u64> {
+    let mut first: FxHashMap<u64, &str> = FxHashMap::default();
+    let mut out = phitex_defuse::FxHashSet::default();
+    for (_, h, c) in marks {
+        match first.get(h) {
+            Some(&c0) if c0 != c.as_str() => {
+                out.insert(*h);
+            }
+            Some(_) => {}
+            None => {
+                first.insert(*h, c);
+            }
+        }
+    }
+    out
+}
+
+/// Writes the ids of `marks` over their places in `out` (`at`: where each
+/// one's 16 digits begin, [`canonical_line`]).
+fn fill_ids(
+    out: &mut String,
+    at: &[usize],
+    marks: &[CommentMark],
+    collide: &phitex_defuse::FxHashSet<u64>,
+) {
+    for (&p, (_, h, c)) in at.iter().zip(marks) {
+        let id = format!("{:016x}", mark_id(*h, c, collide.contains(h)));
+        out.replace_range(p..p + 16, &id);
+    }
+}
 
 /// The comments of the document's canonical text by line, shared with
 /// the edits a running evaluation takes ([`Absorb`]); `dirty` while the
@@ -3510,29 +3586,36 @@ struct OutMemo {
 }
 
 /// The comments by line, and whether the environment lacks them.
-type MarksState = (Vec<(u32, String)>, bool);
+type MarksState = (Vec<CommentMark>, bool);
 
 impl Marks {
-    fn get(&self) -> Vec<(u32, String)> {
+    fn get(&self) -> Vec<CommentMark> {
         self.0.locked().0.clone()
     }
 
-    fn set(&self, ms: Vec<(u32, String)>) {
+    fn set(&self, ms: Vec<CommentMark>) {
         let mut m = self.0.locked();
         if m.0 != ms {
             *m = (ms, true);
         }
     }
 
-    /// The `doc:marks` value; the environment holds them from here.
-    fn value(&self, v: &Values) -> ValueId {
+    /// The `doc:mark:<id>` entries; the environment holds them from here.
+    fn entries(&self, v: &Values) -> Vec<(Field, ValueId)> {
         let mut m = self.0.locked();
         m.1 = false;
-        v.list(
-            m.0.iter()
-                .map(|(n, c)| v.list(vec![v.int(i64::from(*n)), v.str(c)]))
-                .collect(),
-        )
+        let collide = collisions(&m.0);
+        m.0.iter()
+            .map(|(_, h, c)| {
+                let id = mark_id(*h, c, collide.contains(h));
+                (v.field(&format!("{DOC_MARKS}{id:016x}")), v.str(c))
+            })
+            .collect()
+    }
+
+    /// How many comments there are.
+    fn count(&self) -> i64 {
+        i64::try_from(self.0.locked().0.len()).unwrap_or(i64::MAX)
     }
 
     /// Whether marks changed since the environment was set.
@@ -3543,21 +3626,23 @@ impl Marks {
 
 /// The document's text as its tokens need it (spec-redesign §8: a unit's
 /// value is its tokens, not its text): each comment's text after its
-/// `%` replaced by one NUL, the comment's mark, and the comments by line
-/// (1-based). Under the catcodes a document is read with (`\\` an
+/// `%` replaced by a NUL and the comment's id ([`CommentMark`]), and the
+/// comments (each its line, 1-based). Under the catcodes a document is read with (`\\` an
 /// escape, `%` a comment) the tokens are the same, and a comment-only
 /// edit changes no node. A run that reads a mark as text (`%` no
 /// comment there, a verbatim's) puts the comment back in its line from
-/// `doc:marks` (`Run::splice_mark`): the tokens are TeX's either way.
+/// `doc:mark:<id>`, by the id its mark carries after the NUL
+/// (`Run::splice_mark`): the tokens are TeX's either way.
 /// `None` for a text this cannot mark (one holding NUL, or `^^`, which
 /// can spell an escape or a `%`).
-pub(crate) fn canonical_text(text: &str) -> Option<(String, Vec<(u32, String)>)> {
+pub(crate) fn canonical_text(text: &str) -> Option<(String, Vec<CommentMark>)> {
     if has_raw_marks(text) {
         return None;
     }
     let mut out = String::with_capacity(text.len());
-    let mut marks = Vec::new();
-    canonical_lines(text, 0, &mut out, &mut marks);
+    let (mut marks, mut at) = (Vec::new(), Vec::new());
+    canonical_lines(text, 0, &mut out, &mut marks, &mut at);
+    fill_ids(&mut out, &at, &marks, &collisions(&marks));
     Some((out, marks))
 }
 
@@ -3643,14 +3728,17 @@ fn line_starts(s: &str) -> Vec<usize> {
 /// text `canon` and its `marks` are made from): the lines where the
 /// texts differ made again in place, the rest kept (each line's
 /// canonical form is its own; the marks after them renumbered). The new
-/// marks, and the range of `canon` replaced, `(start, old end, new end)`.
+/// marks, and the range of `canon` replaced, `(start, old end, new end)`;
+/// `None` (`canon` untouched) where a comment's line made again or gone
+/// has the text before its `%` of another one's, whose id may change
+/// with it ([`mark_id`]): the whole text is made again.
 fn canonical_splice(
     old: &str,
     canon: &mut String,
-    marks: &[(u32, String)],
+    marks: &[CommentMark],
     new: &str,
     ends: Option<(usize, usize)>,
-) -> (Vec<(u32, String)>, (usize, usize, usize)) {
+) -> Option<(Vec<CommentMark>, (usize, usize, usize))> {
     let (o, n) = (old.as_bytes(), new.as_bytes());
     let (p, s) = ends.unwrap_or_else(|| byte_ends(o, n));
     canonical_lines_splice(old, canon, marks, new, p, s)
@@ -3686,11 +3774,11 @@ pub fn byte_ends(o: &[u8], n: &[u8]) -> (usize, usize) {
 fn canonical_lines_splice(
     old: &str,
     canon: &mut String,
-    marks: &[(u32, String)],
+    marks: &[CommentMark],
     new: &str,
     p: usize,
     s: usize,
-) -> (Vec<(u32, String)>, (usize, usize, usize)) {
+) -> Option<(Vec<CommentMark>, (usize, usize, usize))> {
     let (o, n) = (old.as_bytes(), new.as_bytes());
     // (whole lines: from the start of the line the first difference is
     // on to the end of the line the last one is on)
@@ -3731,8 +3819,8 @@ fn canonical_lines_splice(
     );
     let t0 = std::time::Instant::now();
     let mut out = String::with_capacity(le - ls + 16);
-    let mut mid = Vec::new();
-    canonical_lines(&new[ls..le], 0, &mut out, &mut mid);
+    let (mut mid, mut at) = (Vec::new(), Vec::new());
+    canonical_lines(&new[ls..le], 0, &mut out, &mut mid, &mut at);
     // (the changed lines' marks numbered from their first line's)
     let first = match first {
         Some(f) => f,
@@ -3743,31 +3831,53 @@ fn canonical_lines_splice(
     for m in &mut mid {
         m.0 = m.0.saturating_add(lift);
     }
+    // (the marks of the lines kept, and of those made again or gone: a
+    // line text before a `%` they share takes the whole text again)
+    let lo = u32::try_from(first).unwrap_or(u32::MAX);
+    let hi = u32::try_from(first + old_lines).unwrap_or(u32::MAX);
+    let kept: phitex_defuse::FxHashSet<u64> = marks
+        .iter()
+        .filter(|m| m.0 <= lo || m.0 > hi)
+        .map(|m| m.1)
+        .collect();
+    if marks
+        .iter()
+        .filter(|m| m.0 > lo && m.0 <= hi)
+        .chain(&mid)
+        .any(|m| kept.contains(&m.1))
+    {
+        return None;
+    }
+    fill_ids(&mut out, &at, &mid, &collisions(&mid));
     canon.replace_range(cs..ce, &out);
     crate::timeline::note("canonical: spliced in place", t0.elapsed());
     // (the marks: before the lines, theirs made again, after them moved)
     let new_lines = newlines(&n[ls..le]);
-    let lo = u32::try_from(first).unwrap_or(u32::MAX);
-    let hi = u32::try_from(first + old_lines).unwrap_or(u32::MAX);
     let shift = |l: u32| -> u32 {
         let l = i64::from(l) + i64::try_from(new_lines).unwrap_or(0)
             - i64::try_from(old_lines).unwrap_or(0);
         u32::try_from(l).unwrap_or(u32::MAX)
     };
-    let mut ms: Vec<(u32, String)> = marks.iter().filter(|m| m.0 <= lo).cloned().collect();
+    let mut ms: Vec<CommentMark> = marks.iter().filter(|m| m.0 <= lo).cloned().collect();
     ms.extend(mid);
     ms.extend(
         marks
             .iter()
             .filter(|m| m.0 > hi && le_old < o.len())
-            .map(|(l, c)| (shift(*l), c.clone())),
+            .map(|(l, h, c)| (shift(*l), *h, c.clone())),
     );
-    (ms, (cs, ce, cs + out.len()))
+    Some((ms, (cs, ce, cs + out.len())))
 }
 
 /// [`canonical_text`]'s lines of `text`, the first numbered `first`
 /// (from 0), onto `out` and `marks`.
-fn canonical_lines(text: &str, first: usize, out: &mut String, marks: &mut Vec<(u32, String)>) {
+fn canonical_lines(
+    text: &str,
+    first: usize,
+    out: &mut String,
+    marks: &mut Vec<CommentMark>,
+    at: &mut Vec<usize>,
+) {
     // (only a line with a `%` can change: the lines between two such
     // lines are copied at once, their ends counted, eight bytes at a time)
     let b = text.as_bytes();
@@ -3777,7 +3887,7 @@ fn canonical_lines(text: &str, first: usize, out: &mut String, marks: &mut Vec<(
         n += newlines(&b[done..ls]);
         out.push_str(&text[done..ls]);
         let le = text[p..].find('\n').map_or(text.len(), |k| p + k);
-        canonical_line(&text[ls..le], n, out, marks);
+        canonical_line(&text[ls..le], n, out, marks, at);
         if le < text.len() {
             out.push('\n');
             n += 1;
@@ -3792,7 +3902,13 @@ fn canonical_lines(text: &str, first: usize, out: &mut String, marks: &mut Vec<(
 
 /// [`canonical_lines`] of one line `body` (its end not in it), line `n`
 /// (0-based) of the text.
-fn canonical_line(body: &str, n: usize, out: &mut String, marks: &mut Vec<(u32, String)>) {
+fn canonical_line(
+    body: &str,
+    n: usize,
+    out: &mut String,
+    marks: &mut Vec<CommentMark>,
+    at: &mut Vec<usize>,
+) {
     let b = body.as_bytes();
     let mut i = 0;
     let mut cut = None;
@@ -3812,12 +3928,19 @@ fn canonical_line(body: &str, n: usize, out: &mut String, marks: &mut Vec<(u32, 
         Some(k) if k + 1 < body.len() => {
             out.push_str(&body[..=k]);
             out.push('\0');
+            // (its id's place, [`fill_ids`])
+            at.push(out.len());
+            out.push_str("0000000000000000");
             // (the comment as web2c's `input_line` keeps it: the
             // line's end, then its trailing blanks removed, §31)
             let c = body[k + 1..]
                 .trim_end_matches(['\r', '\n'])
                 .trim_end_matches([' ', '\t']);
-            marks.push((u32::try_from(n + 1).unwrap_or(u32::MAX), c.to_owned()));
+            marks.push((
+                u32::try_from(n + 1).unwrap_or(u32::MAX),
+                prefix_hash(&body[..k]),
+                c.to_owned(),
+            ));
         }
         _ => out.push_str(body),
     }
@@ -6783,16 +6906,17 @@ mod canonical_tests {
 
     /// The marking line by line, as it was before the copy between
     /// lines with comments (the invariant: the same text and marks).
-    fn by_lines(text: &str) -> (String, Vec<(u32, String)>) {
-        let (mut out, mut marks) = (String::new(), Vec::new());
+    fn by_lines(text: &str) -> (String, Vec<CommentMark>) {
+        let (mut out, mut marks, mut at) = (String::new(), Vec::new(), Vec::new());
         for (n, line) in text.split_inclusive('\n').enumerate() {
             let (body, nl) = match line.strip_suffix('\n') {
                 Some(b) => (b, "\n"),
                 None => (line, ""),
             };
-            canonical_line(body, n, &mut out, &mut marks);
+            canonical_line(body, n, &mut out, &mut marks, &mut at);
             out.push_str(nl);
         }
+        fill_ids(&mut out, &at, &marks, &collisions(&marks));
         (out, marks)
     }
 
@@ -6809,13 +6933,16 @@ mod canonical_tests {
             "é % ü\nü\n",
         ] {
             assert_eq!(canonical_text(t).unwrap(), by_lines(t), "{t:?}");
-            let (mut out, mut marks) = (String::new(), Vec::new());
-            canonical_lines(t, 7, &mut out, &mut marks);
+            let (mut out, mut marks, mut at) = (String::new(), Vec::new(), Vec::new());
+            canonical_lines(t, 7, &mut out, &mut marks, &mut at);
+            fill_ids(&mut out, &at, &marks, &collisions(&marks));
             let (o, m) = by_lines(t);
             assert_eq!(out, o);
             assert_eq!(
                 marks,
-                m.into_iter().map(|(n, c)| (n + 7, c)).collect::<Vec<_>>()
+                m.into_iter()
+                    .map(|(n, h, c)| (n + 7, h, c))
+                    .collect::<Vec<_>>()
             );
         }
     }
