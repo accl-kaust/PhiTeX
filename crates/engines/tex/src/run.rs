@@ -1600,6 +1600,24 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a routine's global write too: its run's own groups, the output
         // routine's among them, hold no binding a global write passes)
         let routine = op == self.ops.finish && global;
+        if crate::exec::obs_flag!("PHITEX_REG_TRACE") && self.count_reg(loc).is_some() {
+            let sk = self.scope_kind()?.is_some();
+            eprintln!(
+                "reg-ok: node {} resumed {} register {:?} global {global} op-ok {} doc {} rec_load {} interp {} read_back {} point {} cands {} group {} defined_after {} scope {sk}",
+                self.cx.node().raw(),
+                self.resumed,
+                self.count_reg(loc),
+                op == self.ops.exec || op == self.ops.resume || routine,
+                self.doc,
+                self.rec_load,
+                self.interp.is_some(),
+                self.read_back_done,
+                self.read_point_here,
+                self.cand_marks.len(),
+                !global && self.innermost_group().is_some(),
+                self.st.defined_after(loc, 0),
+            );
+        }
         if self.count_reg(loc).is_none()
             || !(op == self.ops.exec || op == self.ops.resume || routine)
             || (!self.doc && !routine)
