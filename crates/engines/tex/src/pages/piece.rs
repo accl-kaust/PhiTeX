@@ -21,7 +21,7 @@ use super::*;
 /// finishing at its last candidate finishes at the end of the piece iff
 /// nothing of this changed after it; a finisher's check of a page
 /// finishing at an earlier one takes what the run defined after it
-/// (`stamp`, `gids`: [`State::defined_since`]).
+/// (`stamp`, `gids`: [`State::defined_since_in_order`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CandMark {
     pub k: u32,
@@ -753,6 +753,7 @@ impl Run<'_, '_> {
     /// candidate the names the run defined after it (and its local
     /// definitions at any time: a scope closing after the candidate hides
     /// them from a finisher placed after the piece). Units otherwise.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn check_data(&mut self, last: Option<u32>) -> (ValueId, ValueId) {
         let v = self.v;
         let n = self.cand_marks.len();
@@ -780,23 +781,29 @@ impl Run<'_, '_> {
         let gids = self.st.gid_mark();
         let mut locals: Vec<(Loc, Field)> = self
             .st
-            .defined_since(v, 0, gids)
+            .defined_local_since(0, gids)
             .into_iter()
-            .filter(|(_, _, l)| *l == Locality::Local)
-            .map(|(l, _, _)| (l, self.loc_field(l)))
+            .map(|l| (l, self.loc_field(l)))
             .collect();
         // (by field once for every candidate: a candidate's names are
         // these merged with its own, the first of a field kept)
         locals.sort_by_key(|x| x.1.0.raw());
         // (every definition of the run, by field once, a standing one
         // first: a candidate's are those made after it, filtered in
-        // order, [`State::defined_since`])
+        // order, [`State::defined_since_in_order`])
         let mut defs: Vec<RunDef> = self
             .st
             .defined_stamped()
             .into_iter()
             .map(|(l, stamp, local, gid)| {
-                (self.loc_field(l), self.st.def_stands(l), l, stamp, local, gid)
+                (
+                    self.loc_field(l),
+                    self.st.def_stands(l),
+                    l,
+                    stamp,
+                    local,
+                    gid,
+                )
             })
             .collect();
         defs.sort_by_key(|x| (x.0.0.raw(), !x.1));
@@ -818,7 +825,8 @@ impl Run<'_, '_> {
         held.sort_unstable_by_key(|x| (x.0.0.raw(), x.1));
         // (a candidate's `[value]` lists, one per value: the same value
         // stands at many candidates)
-        let kvs: std::cell::RefCell<phitex_defuse::FxHashMap<Option<ValueId>, ValueId>> = std::cell::RefCell::default();
+        let kvs: std::cell::RefCell<phitex_defuse::FxHashMap<Option<ValueId>, ValueId>> =
+            std::cell::RefCell::default();
         let kv_list = |x: Option<ValueId>| {
             *kvs.borrow_mut()
                 .entry(x)
@@ -834,7 +842,10 @@ impl Run<'_, '_> {
             None => ValueId::UNIT,
         };
         // (the files written after each candidate)
-        let streams: Vec<Vec<Field>> = marks.iter().map(|m| self.streams_since(m.contribs)).collect();
+        let streams: Vec<Vec<Field>> = marks
+            .iter()
+            .map(|m| self.streams_since(m.contribs))
+            .collect();
         let is_last: Vec<bool> = marks.iter().map(|m| Some(m.k) == last).collect();
         // (with whether the run could end there: a finisher of a page
         // firing at a candidate where it could not runs its routine as if
@@ -870,7 +881,12 @@ impl Run<'_, '_> {
             let mut b = src.by_candidate(&kv_at);
             a.sort_unstable_by_key(|x| (x.0.raw(), x.3));
             b.sort_unstable_by_key(|x| (x.0.raw(), x.3));
-            assert!(a == b, "check data stretches differ: {} by field, {} by candidate", a.len(), b.len());
+            assert!(
+                a == b,
+                "check data stretches differ: {} by field, {} by candidate",
+                a.len(),
+                b.len()
+            );
         }
         // (by field, then by the stretch's first candidate: one list
         // whatever order the run met them in)
@@ -1802,12 +1818,17 @@ impl NameSources<'_> {
                 // candidate, restored at the group's close after it: the
                 // routine runs inside that group and sees the binding,
                 // which the run's end no longer holds, §1012)
-                let restored = self.held.iter().filter_map(|&(f, l, end)| match self.at.get(i, l) {
-                    Some(Some(x)) if x != end => Some((f.0, false, kv_of(l))),
-                    _ => None,
-                });
-                let mut streams: Vec<(ValueId, bool, ValueId)> =
-                    self.streams[i].iter().map(|f| (f.0, false, ValueId::UNIT)).collect();
+                let restored =
+                    self.held
+                        .iter()
+                        .filter_map(|&(f, l, end)| match self.at.get(i, l) {
+                            Some(Some(x)) if x != end => Some((f.0, false, kv_of(l))),
+                            _ => None,
+                        });
+                let mut streams: Vec<(ValueId, bool, ValueId)> = self.streams[i]
+                    .iter()
+                    .map(|f| (f.0, false, ValueId::UNIT))
+                    .collect();
                 streams.sort_by_key(|x| x.0.raw());
                 let names = merge_stable(restored, streams);
                 let after = self
@@ -1901,7 +1922,8 @@ impl NameSources<'_> {
     /// Each field's sources, with the candidates each covers.
     fn sources(&self) -> phitex_defuse::FxHashMap<ValueId, Vec<NameSource>> {
         let n = self.n;
-        let mut by: phitex_defuse::FxHashMap<ValueId, Vec<NameSource>> = phitex_defuse::FxHashMap::default();
+        let mut by: phitex_defuse::FxHashMap<ValueId, Vec<NameSource>> =
+            phitex_defuse::FxHashMap::default();
         for (k, &(l, f)) in self.locals.iter().enumerate() {
             by.entry(f.0).or_default().push(NameSource {
                 rank: (true, 0, k),
@@ -1944,7 +1966,8 @@ impl NameSources<'_> {
                 loc: Some(l),
             });
         }
-        let mut written: phitex_defuse::FxHashMap<ValueId, Vec<(usize, usize)>> = phitex_defuse::FxHashMap::default();
+        let mut written: phitex_defuse::FxHashMap<ValueId, Vec<(usize, usize)>> =
+            phitex_defuse::FxHashMap::default();
         for (i, fs) in self.streams.iter().enumerate() {
             for f in fs {
                 let c = written.entry(f.0).or_default();

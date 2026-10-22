@@ -43,10 +43,42 @@ pub(crate) struct Arena {
     bodies: phitex_defuse::FxHashMap<usize, (std::rc::Rc<[Tok]>, Range)>,
 }
 
+thread_local! {
+    /// The token vectors of the thread's arenas dropped (a run's, or
+    /// the one a compaction leaves), emptied: the next arena takes one
+    /// as large as it asks for instead of growing a new one again.
+    static ARENAS: std::cell::RefCell<Vec<Vec<Tok>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The largest token vector [`ARENAS`] keeps (64 MB).
+const ARENA_KEEP: usize = 1 << 24;
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        let mut t = std::mem::take(&mut self.toks);
+        if t.capacity() > 0 && t.capacity() <= ARENA_KEEP {
+            t.clear();
+            ARENAS.with(|p| {
+                let mut p = p.borrow_mut();
+                if p.len() < 2 {
+                    p.push(t);
+                }
+            });
+        }
+    }
+}
+
 impl Arena {
     pub(crate) fn with_capacity(n: usize) -> Arena {
+        let toks = ARENAS
+            .with(|p| {
+                let mut p = p.borrow_mut();
+                let i = p.iter().position(|t| t.capacity() >= n)?;
+                Some(p.swap_remove(i))
+            })
+            .unwrap_or_else(|| Vec::with_capacity(n));
         Arena {
-            toks: Vec::with_capacity(n),
+            toks,
             scratch: Vec::with_capacity(256),
             sbounds: Vec::with_capacity(16),
             bodies: phitex_defuse::FxHashMap::default(),

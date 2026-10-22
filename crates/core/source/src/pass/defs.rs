@@ -3,7 +3,13 @@
 //! (`\newcommand`), its argument spec (`\NewDocumentCommand`), or what it
 //! was declared as (`\newcount`, `\newif`, `\let`).
 
-use std::collections::{HashMap, HashSet};
+/// The maps of definitions, hashed with [`crate::pass::hints::Fx`]: looked
+/// up by name at every analysis step, never iterated in an order that
+/// matters (a digest sorts first).
+type HashMap<K, V, S = std::hash::BuildHasherDefault<crate::pass::hints::Fx>> =
+    std::collections::HashMap<K, V, S>;
+type HashSet<K, S = std::hash::BuildHasherDefault<crate::pass::hints::Fx>> =
+    std::collections::HashSet<K, S>;
 
 use super::FileKind;
 use super::atoms::{self, Atom, AtomKind};

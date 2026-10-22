@@ -1459,25 +1459,11 @@ impl State {
             .collect()
     }
 
-    /// The definitions made after stamp `since`, at any level (a line
-    /// read back is interpreted wherever the run is): the location, the
-    /// value in force and the locality of the latest one. A local one
-    /// made in a group opened after `gids` (see [`State::gid_mark`]) is
-    /// left out: that group has ended (§282), its value restored.
-    pub(crate) fn defined_since(
-        &mut self,
-        v: &Values,
-        since: u64,
-        gids: u32,
-    ) -> Vec<(Loc, Option<ValueId>, Locality)> {
-        self.defined_since_by(v, since, gids, false)
-    }
-
     /// Every location the run defined: its latest definition's stamp,
-    /// whether local, and the group it was made in. [`State::defined_since`]
-    /// of any stamp and group mark is these filtered as it filters them
-    /// (`stamp > since`, no local one of a group opened after `gids`), in
-    /// this order.
+    /// whether local, and the group it was made in.
+    /// [`State::defined_since_in_order`] of any stamp and group mark is
+    /// these filtered as it filters them (`stamp > since`, no local one
+    /// of a group opened after `gids`).
     pub(crate) fn defined_stamped(&self) -> Vec<(Loc, u64, bool, Option<u32>)> {
         self.metas
             .iter()
@@ -1486,10 +1472,29 @@ impl State {
             .collect()
     }
 
-    /// [`State::defined_since`] in the order of the latest definitions
-    /// (their stamps), not of the locations' first definitions in the
-    /// run: what a stretch of the run defined, listed as that stretch
-    /// alone decides, whatever the run touched before it.
+    /// The locations whose latest definition after stamp `since` is
+    /// local, as [`State::defined_since_in_order`] filters them, in the
+    /// order of their first definitions in the run, without their values
+    /// (none encoded).
+    pub(crate) fn defined_local_since(&self, since: u64, gids: u32) -> Vec<Loc> {
+        self.metas
+            .iter()
+            .filter(|m| m.ldef_stamp > since)
+            .filter(|m| !(m.ldef_local && m.ldef_gid.is_some_and(|g| g > gids)))
+            .filter(|m| m.ldef_local)
+            .map(|m| m.loc)
+            .collect()
+    }
+
+    /// The definitions made after stamp `since`, at any level (a line
+    /// read back is interpreted wherever the run is): the location, the
+    /// value in force and the locality of the latest one. A local one
+    /// made in a group opened after `gids` (see [`State::gid_mark`]) is
+    /// left out: that group has ended (§282), its value restored. In the
+    /// order of the latest definitions (their stamps), not of the
+    /// locations' first definitions in the run: what a stretch of the
+    /// run defined, listed as that stretch alone decides, whatever the
+    /// run touched before it.
     pub(crate) fn defined_since_in_order(
         &mut self,
         v: &Values,

@@ -53,6 +53,10 @@ pub(crate) static EXEC_CLAIMS: [std::sync::atomic::AtomicU64; 3] = [
 /// counted too): Ir per command is a profile's total over this.
 pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// [`COMMANDS`] by the run's operation: exec, finish, resume, the rest.
+pub(crate) static COMMANDS_BY: [std::sync::atomic::AtomicU64; 4] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead. With `parks`, a run that stops inside a command parks
@@ -130,6 +134,16 @@ pub(crate) fn run_node_parking(
     }
     let t_body = t_body.elapsed();
     COMMANDS.fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
+    let k = if r.cx.op() == o.exec {
+        0
+    } else if r.cx.op() == o.finish {
+        1
+    } else if r.cx.op() == o.resume {
+        2
+    } else {
+        3
+    };
+    COMMANDS_BY[k].fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
     if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
         // (measure: every attempt, for `Stats::run_log`)
         let how = match &res {

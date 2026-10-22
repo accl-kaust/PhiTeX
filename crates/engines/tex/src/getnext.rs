@@ -687,9 +687,14 @@ impl Run<'_, '_> {
         let trace = crate::exec::obs_flag!("PHITEX_GIVEBACK_TRACE") && (self.rec_load || all);
         let pulled = self.pulled;
         let node = self.cx.node().raw();
-        let refuse = |why: &str| {
+        // (the reason made only when traced: this is asked at every
+        // command of a run that pulled a sibling)
+        let refuse = |why: &dyn Fn() -> String| {
             if trace {
-                eprintln!("giveback: refused (node {node}, pulled {pulled}): {why}");
+                eprintln!(
+                    "giveback: refused (node {node}, pulled {pulled}): {}",
+                    why()
+                );
             }
             Ok(false)
         };
@@ -697,27 +702,29 @@ impl Run<'_, '_> {
             return Ok(false);
         }
         if self.pull_at.len() != self.pulled || self.pull_orig.len() != self.pulled {
-            return refuse("an earlier sibling was not given back");
+            return refuse(&|| "an earlier sibling was not given back".to_owned());
         }
         // (one group of the run's own open is no bar: it is left to the
         // engine as the scope the given-back sibling runs in,
         // `Run::run_all`)
         if (self.open_span() && !self.can_leave_scope()) || self.aopen != 0 {
-            return refuse(&format!(
-                "open: {} nest levels, {} conditionals, {} alignments",
-                self.nest.len(),
-                self.conds.len(),
-                self.aopen
-            ));
+            return refuse(&|| {
+                format!(
+                    "open: {} nest levels, {} conditionals, {} alignments",
+                    self.nest.len(),
+                    self.conds.len(),
+                    self.aopen
+                )
+            });
         }
         if self.claim_rest {
-            return refuse("the rest claimed");
+            return refuse(&|| "the rest claimed".to_owned());
         }
         let Some(at) = self.pull_at[self.pulled - 1] else {
-            return refuse("the sibling's text joined a continuation line");
+            return refuse(&|| "the sibling's text joined a continuation line".to_owned());
         };
         if !self.giveback_only_allows() {
-            return refuse("PHITEX_GIVEBACK_ONLY");
+            return refuse(&|| "PHITEX_GIVEBACK_ONLY".to_owned());
         }
         if let Some(orig) = self.pull_orig.get(self.pulled - 1).cloned().flatten() {
             let given = self.give_back_resumed(at, orig)?;
@@ -736,10 +743,12 @@ impl Run<'_, '_> {
         }
         // (only the sibling's first segment reached)
         if self.input.text_at != at + 1 {
-            return refuse(&format!(
-                "the sibling's segments reached: {} (first at {at})",
-                self.input.text_at
-            ));
+            return refuse(&|| {
+                format!(
+                    "the sibling's segments reached: {} (first at {at})",
+                    self.input.text_at
+                )
+            });
         }
         // the levels left, spent ones aside: the sibling's
         let left: Vec<crate::input::Level> = self
@@ -766,12 +775,14 @@ impl Run<'_, '_> {
                     || back.ty != crate::input::ty::BACKED_UP
                     || back.b - back.a != 1
                 {
-                    return refuse(&format!(
-                        "levels left: a line and a token list of kind {} type {} length {}",
-                        back.kind,
-                        back.ty,
-                        back.b - back.a
-                    ));
+                    return refuse(&|| {
+                        format!(
+                            "levels left: a line and a token list of kind {} type {} length {}",
+                            back.kind,
+                            back.ty,
+                            back.b - back.a
+                        )
+                    });
                 }
                 let peeked = self.input.arena.at(back.a);
                 let (loc, state, endch) = {
@@ -781,19 +792,21 @@ impl Run<'_, '_> {
                 self.same_first_token(orig.clone(), peeked, loc, state, endch)?
             }
             _ => {
-                return refuse(&format!(
-                    "{} levels left over a {} first segment",
-                    left.len(),
-                    if matches!(first, Seg::Toks(_)) {
-                        "token"
-                    } else {
-                        "line"
-                    }
-                ));
+                return refuse(&|| {
+                    format!(
+                        "{} levels left over a {} first segment",
+                        left.len(),
+                        if matches!(first, Seg::Toks(_)) {
+                            "token"
+                        } else {
+                            "line"
+                        }
+                    )
+                });
             }
         };
         if !ok {
-            return refuse("the first token or its position differs re-read now");
+            return refuse(&|| "the first token or its position differs re-read now".to_owned());
         }
         if trace {
             let sib = self

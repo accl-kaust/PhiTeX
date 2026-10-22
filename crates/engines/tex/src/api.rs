@@ -1523,8 +1523,12 @@ fn print_accounting(eng: &Engine, r: &Report, ex: &crate::exec::Threads, env_cal
     }
     let ld = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
-        "acct: commands {}; exec claims declared: none {}, a count {}, pending {}",
+        "acct: commands {} (exec {}, finish {}, resume {}, other {}); exec claims declared: none {}, a count {}, pending {}",
         ld(&crate::ops::COMMANDS),
+        ld(&crate::ops::COMMANDS_BY[0]),
+        ld(&crate::ops::COMMANDS_BY[1]),
+        ld(&crate::ops::COMMANDS_BY[2]),
+        ld(&crate::ops::COMMANDS_BY[3]),
         ld(&crate::ops::EXEC_CLAIMS[0]),
         ld(&crate::ops::EXEC_CLAIMS[1]),
         ld(&crate::ops::EXEC_CLAIMS[2])

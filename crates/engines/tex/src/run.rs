@@ -727,6 +727,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The run read a job-written file back ([`Run::read_back`]): what
     /// it defines from then on keeps its value there ([`Run::note_pre`]).
     pub read_back_done: bool,
+    /// The locations [`Run::note_pre`] is done with in this run (their
+    /// value at the read-back point noted, or none to note).
+    pub pre_noted: phitex_defuse::FxHashSet<Loc>,
+    /// Where on the input stack [`Run::read_back_at`]'s level was found
+    /// last ([`Run::note_pre`]).
+    pub read_back_ix: std::cell::Cell<Option<usize>>,
     /// A lookup of the output writer's own (a font's file at a
     /// `\shipout`, `crate::pdfout::file_bytes`), not the text's: a file
     /// looked for in vain there is no read-back point.
@@ -921,6 +927,8 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_base: 0,
             closed: Vec::new(),
             read_back_done: false,
+            pre_noted: phitex_defuse::FxHashSet::default(),
+            read_back_ix: std::cell::Cell::new(None),
             writer_lookup: false,
             read_back_at: None,
             read_point_here: false,
@@ -1516,9 +1524,12 @@ impl<'c, 'a> Run<'c, 'a> {
             return None;
         }
         let f = self.st.field(loc)?;
-        crate::val::field_name(self.v, f)
-            .strip_prefix("count:")
-            .and_then(|n| n.parse::<i32>().ok())
+        // (the name read in place: no copy of it per location loaded)
+        self.v
+            .with_str(f.0, |s| {
+                s.strip_prefix("count:").and_then(|n| n.parse::<i32>().ok())
+            })
+            .flatten()
     }
 
     /// A write of integer register `loc` as a map of its value
@@ -1724,6 +1735,43 @@ impl<'c, 'a> Run<'c, 'a> {
     /// then redefines what the file's lines use (makes a command an
     /// error from then on) leaves the lines read under the meanings at
     /// the read-back point.
+    /// The field `wpre:<f>` of field `f` ([`Run::note_pre`]), none for a
+    /// field whose value at a read-back point is not kept (`wpre:`,
+    /// `wpoint:`, `cat:`, `wread:` and [`REREAD`] fields): made once per
+    /// field and values epoch on this thread, not formatted per
+    /// definition.
+    fn wpre_of(&self, f: Field) -> Option<Field> {
+        thread_local! {
+            static C: std::cell::RefCell<(u64, u64, phitex_defuse::FxHashMap<u64, Option<Field>>)> =
+                std::cell::RefCell::default();
+        }
+        let v = self.v;
+        let (inst, epoch) = (v.instance(), self.cx.values_epoch());
+        let hit = C.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != inst || c.1 != epoch {
+                *c = (inst, epoch, phitex_defuse::FxHashMap::default());
+            }
+            c.2.get(&f.0.raw()).copied()
+        });
+        if let Some(x) = hit {
+            return x;
+        }
+        let name = crate::val::field_name(v, f);
+        let x = (!["wpre:", "wpoint:", "cat:", "wread:", REREAD]
+            .iter()
+            .any(|p| name.starts_with(p)))
+        .then(|| v.field(&format!("wpre:{name}")));
+        C.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.2.len() >= 1 << 16 {
+                c.2.clear();
+            }
+            c.2.insert(f.0.raw(), x);
+        });
+        x
+    }
+
     pub(crate) fn note_pre(&mut self, loc: Loc) {
         let v = self.v;
         // (only while the macro that read the file back runs:
@@ -1731,10 +1779,20 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a level's position moves as it is read; its start and end
         // stay)
         let still = self.read_back_at.is_some_and(|m| {
-            self.input
-                .levels
-                .iter()
-                .any(|l| l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b)
+            let same =
+                |l: &crate::input::Level| l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b;
+            // (where it was found last: a level stays at its place on the
+            // stack while it is there; else looked for again)
+            if self
+                .read_back_ix
+                .get()
+                .is_some_and(|i| self.input.levels.get(i).is_some_and(same))
+            {
+                return true;
+            }
+            let i = self.input.levels.iter().position(same);
+            self.read_back_ix.set(i);
+            i.is_some()
         });
         // (the run that is a file's read-back point: to its end, as the
         // lines read the rest of the state at the end of its node,
@@ -1743,17 +1801,19 @@ impl<'c, 'a> Run<'c, 'a> {
             self.read_back_done = false;
             return;
         }
-        let f = self.loc_field(loc);
-        let name = crate::val::field_name(v, f);
-        if ["wpre:", "wpoint:", "cat:", "wread:", REREAD]
-            .iter()
-            .any(|p| name.starts_with(p))
-        {
+        // (a location noted once: its first definition after the
+        // read-back is the one whose value before it counts)
+        if self.pre_noted.contains(&loc) {
             return;
         }
-        let pre = v.field(&format!("wpre:{name}"));
+        let f = self.loc_field(loc);
+        let Some(pre) = self.wpre_of(f) else {
+            self.pre_noted.insert(loc);
+            return;
+        };
         let pl = self.loc_of(pre);
         if self.st.defined_after(pl, 0) {
+            self.pre_noted.insert(loc);
             return;
         }
         // (a stop here stops the run: it runs again from its start)
@@ -1769,6 +1829,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return;
         }
         self.set_pre(loc, old);
+        self.pre_noted.insert(loc);
     }
 
     /// `wpre:<field>` of location `loc`: its value at the read-back
@@ -3710,7 +3771,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if (self.in_skip || self.step_reads)
             && self.interp.is_none()
             && !self.rec_load
-            && !tok.as_cs().is_some_and(|n| n.starts_with('\u{10FFFE}'))
+            && !tok.is_internal_cs()
             && let Some(k) = self.step_lookup(tok)?
         {
             let code = |base: i64| i32::try_from(k - base).unwrap_or(0);
@@ -3736,7 +3797,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a marker of the input's own, a file's end, is never stepped
         // over by its meaning's class: read in full)
         if self.outer_reads
-            && !tok.as_cs().is_some_and(|n| n.starts_with('\u{10FFFE}'))
+            && !tok.is_internal_cs()
             && self.outer_lookup(tok)? == Some(false)
         {
             // (not outer: get_next checks nothing of it, §336, and the
