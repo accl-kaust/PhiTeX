@@ -492,6 +492,10 @@ pub(crate) struct Run<'c, 'a> {
     /// heartbeat's next tick is at (`u64::MAX`: off) and the count its
     /// last tick took in.
     pub cmds: u64,
+    /// The commands the run's earlier attempts began before it was
+    /// parked ([`Run::park`]): with [`Run::cmds`], where it is in its
+    /// text (observe: the resume check says where marks were taken).
+    pub cmds_before: u64,
     pub hb_at: u64,
     pub hb_done: u64,
     pub pulled: usize,
@@ -877,6 +881,7 @@ impl<'c, 'a> Run<'c, 'a> {
             doc_lines: Vec::new(),
             mode_zero: false,
             cmds: 0,
+            cmds_before: 0,
             hb_at: Run::heartbeat_start(),
             hb_done: 0,
             pulled: 0,
@@ -5102,6 +5107,9 @@ pub(crate) struct Seeded {
 pub(crate) struct Parked {
     /// The values' epoch the ids below belong to.
     epoch: u64,
+    /// The commands the run began before this (all its attempts): not
+    /// part of its state ([`Run::cmds_before`]).
+    at_cmds: u64,
     /// The input left, top first: the levels' rests, then the text.
     segs: Vec<Seg>,
     /// How many of `segs` were levels ([`Run::parked_levels`]).
@@ -5262,6 +5270,7 @@ impl Run<'_, '_> {
         self.pending_locs.clear();
         Some(Parked {
             epoch: self.cx.values_epoch(),
+            at_cmds: self.cmds_before + self.cmds,
             segs,
             nlev: nlev_all,
             level_tys: Vec::new(),
@@ -5473,6 +5482,10 @@ impl Run<'_, '_> {
             return;
         }
         let Some((np, _)) = self.mark_snaps.get(k as usize).cloned() else { return };
+        eprintln!(
+            "resume-verify: node {node} mark {k}: the last run took it after {} commands, this one after {}",
+            op.at_cmds, np.at_cmds
+        );
         mark_why(node, k as usize, op, &np);
         let v = self.v;
         let mut shown = Vec::new();
@@ -5707,6 +5720,7 @@ impl Run<'_, '_> {
         crate::prof::add(crate::prof::MARK_STATE, ts);
         Parked {
             epoch: self.cx.values_epoch(),
+            at_cmds: self.cmds_before + self.cmds,
             segs,
             nlev: nlev_all,
             level_tys,
@@ -6102,6 +6116,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.cand_marks = p.cand_marks;
         r.ins_pending = p.ins_pending;
         r.fin = p.fin;
+        r.cmds_before = p.at_cmds;
         r.resumed = true;
         Ok(r)
     }
