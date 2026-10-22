@@ -90,14 +90,14 @@ fn retext_potential(cx: &mut Ctx<'_>) {
         .find(|(_, (p, _))| p.text_at <= d && p.text_at > 0);
     match best {
         Some((k, (p, _))) => eprintln!(
-            "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks; resume at mark {k} (segment {}, after {} of {} commands: {:.0}% skipped)",
+            "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks; resume at mark {k} (segment {}, after {} of {} commands: {}% skipped)",
             old.len(),
             new.len(),
             km.snaps.len(),
             p.text_at,
             p.at_cmds(),
             km.total_cmds,
-            100.0 * p.at_cmds() as f64 / km.total_cmds.max(1) as f64
+            p.at_cmds() * 100 / km.total_cmds.max(1)
         ),
         None => eprintln!(
             "retext-potential: node {node}: {} segments then {}, first differing {d}; {} marks, none before it ({} commands)",
@@ -1428,8 +1428,13 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         Arc<[usize]>,
         bool,
     );
+    type Last = std::sync::Mutex<FxHashMap<String, (Arc<str>, Kept)>>;
     static MEMO: std::sync::OnceLock<std::sync::Mutex<FxHashMap<(u64, usize), Kept>>> =
         std::sync::OnceLock::new();
+    // (the file's text the last time it was cut, with its cuts: the part
+    // of the text an edit left keeps its units, the rest is cut again,
+    // [`units_again`])
+    static LAST: std::sync::OnceLock<Last> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
     let key = (
         phitex_defuse::hash_bytes(0x756e_6974_656e_6473, text.as_bytes()),
@@ -1440,11 +1445,6 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
     {
         return (ends.clone(), *sl);
     }
-    // (the file's text the last time it was cut, with its cuts: the part
-    // of the text an edit left keeps its units, the rest is cut again,
-    // [`units_again`])
-    static LAST: std::sync::OnceLock<std::sync::Mutex<FxHashMap<String, (Arc<str>, Kept)>>> =
-        std::sync::OnceLock::new();
     let last = LAST.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
     let before = last.locked().get(name).cloned().filter(|(_, (d, _, _))| {
         d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs))
