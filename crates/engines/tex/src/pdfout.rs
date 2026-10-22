@@ -1972,6 +1972,11 @@ pub(crate) fn page_allocs(
         -1
     };
     let rt_fonts = r.get(RT_FONTS)?.unwrap_or_else(|| v.list(Vec::new()));
+    let dests_loaded = crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") && {
+        let f = r.ops.fields.get_at(v, r.cx.values_epoch(), RT_DESTS);
+        let l = r.loc_of(f);
+        r.st.is_loaded(l)
+    };
     let rt_dests = r.get(RT_DESTS)?.unwrap_or_else(|| v.list(Vec::new()));
     let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
     let rt_pages = r.get(RT_PAGES)?.unwrap_or_else(|| v.list(Vec::new()));
@@ -2000,6 +2005,12 @@ pub(crate) fn page_allocs(
     ]);
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
+        eprintln!(
+            "alloc-src: node {} resumed {} dests loaded before {dests_loaded} mark {}",
+            r.cx.node().raw(),
+            r.resumed,
+            r.st.cur_mark
+        );
     }
     r.contribute(ALLOCS, v.seq_unit(e));
     Ok(())
