@@ -196,7 +196,6 @@ impl Cats {
 /// sequences, from tex.web; `None`: a command whose state is not
 /// listed here (every head). The alignment state (`align:`), `\\prevgraf`
 /// (`pg:`) and `aftertoken` come from the context, not from the command ([`Analysis::cs_hint`]).
-#[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn class_state(name: &str) -> Option<&'static [&'static str]> {
     // (one table lookup per name seen on the thread: the rows are a
     // long match of strings, asked for every call of every body)
@@ -241,6 +240,7 @@ fn cs_field(name: &str) -> Option<String> {
 }
 
 /// [`class_state`], looked up in its table.
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn class_state_of(name: &str) -> Option<&'static [&'static str]> {
     let n = name
         .strip_prefix("tex_")

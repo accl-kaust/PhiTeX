@@ -753,6 +753,7 @@ impl Run<'_, '_> {
     /// candidate the names the run defined after it (and its local
     /// definitions at any time: a scope closing after the candidate hides
     /// them from a finisher placed after the piece). Units otherwise.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn check_data(&mut self, last: Option<u32>) -> (ValueId, ValueId) {
         let v = self.v;
         let n = self.cand_marks.len();
