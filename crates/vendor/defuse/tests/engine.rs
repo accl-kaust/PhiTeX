@@ -1039,7 +1039,7 @@ fn generated_programs_match_the_interpreter() {
 
 /// Every link of the critical chain lands one below the node it names: a
 /// read's site, a range's last contributor, the node a raise stands above.
-/// A wait's node may have risen since. The chain's top is the critical
+/// A wait's or a hold's node may have risen since. The chain's top is the critical
 /// path, and it ends only at a creation (or at height 0).
 #[test]
 fn the_critical_chain_falls_by_one_through_reads_ranges_and_waits() {
@@ -1077,7 +1077,8 @@ fn the_critical_chain_falls_by_one_through_reads_ranges_and_waits() {
                     assert_eq!((*to, *by), (h, Some(next)), "seed {seed}: {w:?}");
                     assert_eq!(hn + 1, h, "seed {seed}: {w:?}");
                 }
-                Cause::Woken { by, .. } => {
+                // (A hold, as a wait: its node may have risen since.)
+                Cause::Woken { by, .. } | Cause::Held { by, .. } => {
                     assert_eq!(*by, next, "seed {seed}: {w:?}");
                     assert!(hn + 1 >= h, "seed {seed}: {w:?}");
                 }

@@ -86,9 +86,9 @@ struct Sched {
     /// Nodes whose committed result folded contributors as they last
     /// contributed (`Monoid::guess_ran`).
     fold_ran: FxHashSet<Id>,
-    /// The pending claimer each node was last held back by before it ran
-    /// (its start's link in the chain, as a wait's).
-    claim_held: FxHashMap<Id, Id>,
+    /// What each node was last held back by before it ran: its start's
+    /// link in the chain (`Cause::Held`).
+    held: FxHashMap<Id, (Id, crate::api::Hold)>,
     /// Whether the scheduler predicts (runs guess).
     predict: bool,
     /// Nodes whose run stopped on an accumulator range, with the range.
@@ -179,6 +179,8 @@ struct Heights {
     hc: FxHashMap<Id, (Height, u64, [u64; 4])>,
     /// What each parked node last waited on.
     woke: FxHashMap<Id, (Id, Option<Field>)>,
+    /// What held each node back before its run (`Cause::Held`).
+    held: FxHashMap<Id, (Id, crate::api::Hold)>,
     /// The evaluation's start, and for each node's last committed run
     /// when it was queued, started, ended and committed (ns since).
     epoch: Option<std::time::Instant>,
@@ -1379,12 +1381,17 @@ impl Engine {
                     s.parked.insert(k.2, Wait::Node(x, None));
                     s.waiters.entry(x).or_default().push(k.2);
                     s.hint_parked.insert(k.2, x);
+                    s.held.insert(k.2, (x, crate::api::Hold::Hint));
                 }
                 continue;
             }
             // A node refuted this evaluation runs in text order: when
             // nothing before it in its unit is in work (or it is first).
-            if !first && s.careful(k.2) && self.w.work_of(k.0).is_some_and(|m| m.below(&k.1).is_some()) {
+            if !first
+                && s.careful(k.2)
+                && let Some((_, &x)) = self.w.work_of(k.0).and_then(|m| m.below(&k.1))
+            {
+                s.held.insert(k.2, (x, crate::api::Hold::Careful));
                 continue;
             }
             s.queue.remove(&k);
@@ -1685,7 +1692,7 @@ impl Engine {
         }
         // Held back by an earlier claimer whose claim is pending.
         if let Some(c) = super::core::prof::time(5, || self.w.held_by(&self.core, id)) {
-            s.claim_held.insert(id, c);
+            s.held.insert(id, (c, crate::api::Hold::Claim));
             s.parked.insert(id, Wait::Node(c, None));
             s.waiters.entry(c).or_default().push(id);
             rep.stops += 1;
@@ -1850,9 +1857,11 @@ impl Engine {
                         let t_ns = s.time.get(&id).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
                         let t = super::core::now();
                         let span = r.span.map(|(a, b)| (s.ran_ready.get(&id).copied().unwrap_or(a).min(a), a, b));
-                        if let Some(c) = s.claim_held.remove(&id) {
-                            hs.woke.insert(id, (c, None));
-                        }
+                        // (What held this run back, if anything did.)
+                        match s.held.remove(&id) {
+                            Some(h) => hs.held.insert(id, h),
+                            None => hs.held.remove(&id),
+                        };
                         self.height(hs, id, &r.res, r.fold_redo, span, t_ns, false);
                         rep.merge.heights += super::core::ns_since(t);
                     }
@@ -1916,9 +1925,11 @@ impl Engine {
                     if hs.on && (matches!(wait, Wait::Child(_)) || !r.kids.is_empty() || !r.conts.is_empty()) {
                         let t_ns = s.time.get(&id).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
                         let span = r.span.map(|(a, b)| (s.ran_ready.get(&id).copied().unwrap_or(a).min(a), a, b));
-                        if let Some(c) = s.claim_held.remove(&id) {
-                            hs.woke.insert(id, (c, None));
-                        }
+                        // (What held this run back, if anything did.)
+                        match s.held.remove(&id) {
+                            Some(h) => hs.held.insert(id, h),
+                            None => hs.held.remove(&id),
+                        };
                         self.height(hs, id, &r.res, r.fold_redo, span, t_ns, true);
                         hs.committed(id);
                     }
@@ -2078,7 +2089,8 @@ impl Engine {
                     };
                     if let Wait::Node(x, f) = &wait {
                         hs.woke.insert(id, (*x, *f));
-                        s.claim_held.remove(&id);
+                        s.held.remove(&id);
+                        hs.held.remove(&id);
                     }
                     s.parked.insert(id, wait);
                     if let Some(x) = subject {
@@ -2243,6 +2255,9 @@ impl Engine {
                 field: f,
                 prefix,
             });
+        }
+        if let Some(&(x, why)) = hs.held.get(&id) {
+            offer(hs, x, Cause::Held { by: NodeId(x), why });
         }
         let parent = self.w.node(id).map_or(super::world::NONE, |n| n.parent);
         let created = Cause::Created {
@@ -3094,7 +3109,10 @@ impl Merge<'_> {
             s.lane_new = Some(cands);
             // (Held by its hints, or refuted and behind a node in work: it
             // waits for the step.)
-            let behind = s.careful(k.2) && eng.w.work_of(k.0).is_some_and(|m| m.below(&k.1).is_some());
+            let behind = s.careful(k.2) && eng.w.work_of(k.0).and_then(|m| m.below(&k.1)).is_some_and(|(_, &x)| {
+                s.held.insert(k.2, (x, crate::api::Hold::Careful));
+                true
+            });
             if behind || eng.w.hint_blocker(&eng.core, k.2, predict).is_err() {
                 count(25);
                 return Ok(None);

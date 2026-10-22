@@ -149,7 +149,7 @@ fn a_run_of_pending_claimers_goes_on_together() {
 
 /// A hold is a link of the critical chain: unit [z, c, d_1 .. d_N, r]
 /// with the claim pending and no window, the `d`s start after `c`, held
-/// back by it: the chain to `r` passes `c` as the one that woke them.
+/// back by it: the chain to `r` passes `c` as the one that held them.
 #[test]
 fn a_claim_hold_is_a_link_of_the_chain() {
     let mut eng = Engine::new();
@@ -169,7 +169,7 @@ fn a_claim_hold_is_a_link_of_the_chain() {
     eng.evaluate(&mut defuse::Greedy::speculative(defuse::Speculation::Predicted, 256), &mut defuse::Sequential).expect("evaluate");
     let chain = eng.critical_chain();
     assert!(
-        chain.iter().any(|(_, why)| matches!(why, defuse::Cause::Woken { by, field: None, .. } if *by == c)),
+        chain.iter().any(|(_, why)| matches!(why, defuse::Cause::Held { by, why: defuse::Hold::Claim } if *by == c)),
         "{chain:?}"
     );
 }
