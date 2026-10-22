@@ -221,11 +221,11 @@ pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
 
 pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
     if let Some(x) = lazy_value(b, side) {
-        side_seen();
+        side_seen(SEEN_LAZY);
         return x;
     }
     if let Some(l) = lazy_list(b, side) {
-        side_seen();
+        side_seen(SEEN_LAZY);
         return encode_box_with(v, b, l);
     }
     encode_box_with(v, b, encode_list(v, &b.list, side))
@@ -314,7 +314,7 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
             encode_list(v, &x.list, side),
         ]),
         Node::Mark(k) => {
-            side_seen();
+            side_seen(SEEN_MARK);
             v.list(vec![
                 i(v, T_MARK),
                 side.marks
@@ -339,7 +339,7 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
             encode_list(v, &d.replace, side),
         ]),
         Node::Whatsit(k, dims) => {
-            side_seen();
+            side_seen(SEEN_MARK);
             let mut xs = vec![
                 i(v, T_WHATSIT),
                 side.whats
@@ -421,9 +421,32 @@ pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
 pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode {
     let mut b = decode_box_head(v, xs);
     b.list = xs.get(9).map_or_else(Vec::new, |&l| {
-        take_made(l).map_or_else(|| decode_list(v, l, side), |m| checked_made(v, l, m))
+        let before = crate::exec::obs_flag!("PHITEX_MADE_CHECK").then(|| side.clone());
+        if let Some(m) = take_made(l, side) {
+            checked_made(v, l, m, before, side)
+        } else {
+            made_stat(4);
+            decode_list(v, l, side)
+        }
     });
     b
+}
+
+/// (observe) `PHITEX_MADE_STATS`: plain lines, (unused), lines not
+/// kept (full), taken, box lists decoded while shipping, lines with
+/// marks, whatsits or shallow boxes kept and not kept.
+pub(crate) static MADE_STATS: [std::sync::atomic::AtomicU64; 7] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 7];
+
+/// Counts event `k` of [`MADE_STATS`] (under `observe`, while a page
+/// is decoded for shipping for `k = 4`).
+#[inline]
+pub(crate) fn made_stat(k: usize) {
+    if crate::exec::obs_flag!("PHITEX_MADE_STATS")
+        && (k != 4 || TAKE_MADE.with(std::cell::Cell::get))
+    {
+        MADE_STATS[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The lists line breaking made, native, by their values' ids: a page
@@ -434,8 +457,111 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
 /// adjustment, leaders or unset box anywhere in them); bounded by their
 /// nodes, emptied when full.
 struct Made {
-    lists: phitex_defuse::FxHashMap<u64, List>,
+    /// Each list with the values of its marks and whatsits, numbered
+    /// in the order its value's decoding meets them ([`localize`]).
+    lists: phitex_defuse::FxHashMap<u64, (List, Vec<ValueId>, Vec<ValueId>)>,
     nodes: usize,
+}
+
+/// Line `list`, encoded with `side`, made independent of it: each mark
+/// and whatsit numbered in the order its value's decoding meets them,
+/// their values in `marks` and `whats`, and each shallow box's list
+/// decoded in place ([`decode_shallow`]): the list its value decodes to
+/// but for those numbers ([`rebase`]). `false` where it cannot be.
+pub(crate) fn localize(
+    v: &Values,
+    list: &mut [Node],
+    side: &Side,
+    marks: &mut Vec<ValueId>,
+    whats: &mut Vec<ValueId>,
+) -> bool {
+    for n in list.iter_mut() {
+        let ok = match n {
+            Node::Mark(k) => {
+                marks.push(
+                    side.marks
+                        .get(*k as usize)
+                        .copied()
+                        .unwrap_or(ValueId::UNIT),
+                );
+                *k = u32::try_from(marks.len() - 1).unwrap_or(0);
+                true
+            }
+            Node::Whatsit(h, _) if *h >= LAZY => false,
+            Node::Whatsit(h, _) => {
+                whats.push(
+                    side.whats
+                        .get(*h as usize)
+                        .copied()
+                        .unwrap_or(ValueId::UNIT),
+                );
+                *h = u32::try_from(whats.len() - 1).unwrap_or(0);
+                true
+            }
+            Node::Box(b) => match b.list.as_slice() {
+                [Node::Whatsit(h, None)] if *h >= LAZY => {
+                    let Some(&l) = side.lazy.get((*h - LAZY) as usize) else {
+                        return false;
+                    };
+                    let mut s = Side::default();
+                    b.list = decode_list(v, l, &mut s);
+                    localize(v, &mut b.list, &s, marks, whats)
+                }
+                _ => localize(v, &mut b.list, side, marks, whats),
+            },
+            Node::Ins(i) => localize(v, &mut i.list, side, marks, whats),
+            Node::Adjust(l) => localize(v, l, side, marks, whats),
+            Node::Disc(d) => {
+                localize(v, &mut d.pre, side, marks, whats)
+                    && localize(v, &mut d.post, side, marks, whats)
+                    && localize(v, &mut d.replace, side, marks, whats)
+            }
+            Node::Unset(u) => localize(v, &mut u.list, side, marks, whats),
+            Node::Glue(g) => match &mut g.leader {
+                Some(l) => localize(v, std::slice::from_mut(&mut **l), side, marks, whats),
+                None => true,
+            },
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// A list [`localize`]d, its marks and whatsits put on `side` as its
+/// value's decoding with `side` puts them, in the same order.
+fn rebase(list: &mut [Node], marks: &[ValueId], whats: &[ValueId], side: &mut Side) {
+    for n in list.iter_mut() {
+        match n {
+            Node::Mark(k) => {
+                side.marks
+                    .push(marks.get(*k as usize).copied().unwrap_or(ValueId::UNIT));
+                *k = u32::try_from(side.marks.len() - 1).unwrap_or(0);
+            }
+            Node::Whatsit(h, _) => {
+                side.whats
+                    .push(whats.get(*h as usize).copied().unwrap_or(ValueId::UNIT));
+                *h = u32::try_from(side.whats.len() - 1).unwrap_or(0);
+            }
+            Node::Box(b) => rebase(&mut b.list, marks, whats, side),
+            Node::Ins(i) => rebase(&mut i.list, marks, whats, side),
+            Node::Adjust(l) => rebase(l, marks, whats, side),
+            Node::Disc(d) => {
+                rebase(&mut d.pre, marks, whats, side);
+                rebase(&mut d.post, marks, whats, side);
+                rebase(&mut d.replace, marks, whats, side);
+            }
+            Node::Unset(u) => rebase(&mut u.list, marks, whats, side),
+            Node::Glue(g) => {
+                if let Some(l) = &mut g.leader {
+                    rebase(std::slice::from_mut(&mut **l), marks, whats, side);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 static MADE: std::sync::Mutex<Option<Made>> = std::sync::Mutex::new(None);
@@ -447,7 +573,7 @@ thread_local! {
     /// Set by an encoding that met a node of the side tables (a mark, a
     /// whatsit, a shallow box's list): its value decodes to another
     /// list than the one encoded, or touches the decoding's tables.
-    static SIDE_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SIDE_SEEN: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     /// Set while a page is decoded for shipping ([`take_made`]).
     pub(crate) static TAKE_MADE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -456,7 +582,12 @@ thread_local! {
 /// no node of the side tables ([`side_seen`]), for the page that ships
 /// it; the list back where it is not kept (the store full: the lines
 /// kept first ship first).
-pub(crate) fn keep_made(id: ValueId, list: List) -> Option<List> {
+pub(crate) fn keep_made(
+    id: ValueId,
+    list: List,
+    marks: Vec<ValueId>,
+    whats: Vec<ValueId>,
+) -> Option<List> {
     let mut g = MADE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -465,33 +596,39 @@ pub(crate) fn keep_made(id: ValueId, list: List) -> Option<List> {
         nodes: 0,
     });
     if m.nodes + list.len() > MADE_NODES {
+        made_stat(2);
         return Some(list);
     }
     m.nodes += list.len();
-    if let Some(old) = m.lists.insert(id.raw(), list) {
-        m.nodes -= old.len();
+    if let Some(old) = m.lists.insert(id.raw(), (list, marks, whats)) {
+        m.nodes -= old.0.len();
     }
     None
 }
 
 /// [`encode_list`] of `list`, and whether it met no node of the side
 /// tables ([`SIDE_SEEN`]).
-pub(crate) fn encode_list_side_free(v: &Values, list: &[Node], side: &Side) -> (ValueId, bool) {
-    let was = SIDE_SEEN.with(|c| c.replace(false));
+pub(crate) fn encode_list_side_free(v: &Values, list: &[Node], side: &Side) -> (ValueId, u8) {
+    let was = SIDE_SEEN.with(|c| c.replace(0));
     let x = encode_list(v, list, side);
-    let seen = SIDE_SEEN.with(|c| c.replace(was || c.get()));
-    (x, !seen)
+    let seen = SIDE_SEEN.with(|c| c.replace(was | c.get()));
+    (x, seen)
 }
+
+/// [`SIDE_SEEN`]'s bit for a mark or a whatsit.
+pub(crate) const SEEN_MARK: u8 = 1;
+/// [`SIDE_SEEN`]'s bit for a shallow box's list ([`decode_shallow`]).
+pub(crate) const SEEN_LAZY: u8 = 2;
 
 /// Notes an encoding that met a node of the side tables ([`SIDE_SEEN`]).
 #[inline]
-fn side_seen() {
-    SIDE_SEEN.with(|c| c.set(true));
+fn side_seen(bit: u8) {
+    SIDE_SEEN.with(|c| c.set(c.get() | bit));
 }
 
 /// Line list `id` as line breaking made it, taken, while a page is
 /// decoded for shipping.
-fn take_made(id: ValueId) -> Option<List> {
+fn take_made(id: ValueId, side: &mut Side) -> Option<List> {
     if !TAKE_MADE.with(std::cell::Cell::get) {
         return None;
     }
@@ -499,17 +636,25 @@ fn take_made(id: ValueId) -> Option<List> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let m = g.as_mut()?;
-    let l = m.lists.remove(&id.raw())?;
+    let (mut l, marks, whats) = m.lists.remove(&id.raw())?;
     m.nodes -= l.len();
+    drop(g);
+    if !(marks.is_empty() && whats.is_empty()) {
+        rebase(&mut l, &marks, &whats, side);
+    }
+    made_stat(3);
     Some(l)
 }
 
 /// A list taken from [`MADE`]; under `observe`, `PHITEX_MADE_CHECK`
 /// checks it against its value's decoding.
-fn checked_made(v: &Values, id: ValueId, m: List) -> List {
-    if crate::exec::obs_flag!("PHITEX_MADE_CHECK") {
-        let d = decode_list(v, id, &mut Side::default());
-        assert!(d == m, "a made line list differs from its value's decoding");
+fn checked_made(v: &Values, id: ValueId, m: List, before: Option<Side>, side: &Side) -> List {
+    if let Some(mut s) = before {
+        let d = decode_list(v, id, &mut s);
+        assert!(
+            d == m && s.marks == side.marks && s.whats == side.whats,
+            "a made line list differs from its value's decoding"
+        );
     }
     m
 }

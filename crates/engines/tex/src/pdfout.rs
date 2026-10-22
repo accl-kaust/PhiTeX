@@ -2559,22 +2559,41 @@ pub(crate) fn font_tag_read(r: &mut Run<'_, '_>, f: i64) -> R<i64> {
 /// written apart names its fonts by it): the link numbers by the line's
 /// records in TeX's order ([`FontNums`]) and rewrites a name it moved.
 pub(crate) fn load_numbers(r: &mut Run<'_, '_>) -> R<FxHashMap<i64, i64>> {
+    static M: OnceLock<Once<Arc<FxHashMap<i64, i64>>>> = OnceLock::new();
     let v = r.v;
-    let mut out: FxHashMap<i64, i64> = FxHashMap::default();
     let put = |k: i64, out: &mut FxHashMap<i64, i64>| {
         let n = i64::try_from(out.len()).unwrap_or(0) + 1;
         out.entry(k).or_insert(n);
     };
-    if let Some(x) = r.get(crate::api::FONT_ORDER)? {
-        for k in list_of(v, x) {
-            put(int_of(v, k), &mut out);
-        }
-    }
+    let order = r.get(crate::api::FONT_ORDER)?;
     let f = v.field(FONT_LOADS);
     let before = r.cx.acc_range(f, None)?;
-    for k in v.seq_to_vec(before) {
-        put(int_of(v, k), &mut out);
+    // (the numbers of the format's fonts and of the loads before the run:
+    // a pure function's memo by those values, every page step asks)
+    let key = phitex_defuse::hash_words(
+        0x6c6f_6164_6e75_6d73,
+        &[order.map_or(0, ValueId::raw), before.raw()],
+    );
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    {
+        let mut g = m.locked();
+        if g.len() > 1 << 10 {
+            g.clear();
+        }
     }
+    let base = once(m, key, || {
+        let mut out: FxHashMap<i64, i64> = FxHashMap::default();
+        if let Some(x) = order {
+            for k in list_of(v, x) {
+                put(int_of(v, k), &mut out);
+            }
+        }
+        for k in v.seq_to_vec(before) {
+            put(int_of(v, k), &mut out);
+        }
+        Arc::new(out)
+    });
+    let mut out = (*base).clone();
     for &(g, x) in &r.contribs {
         if g == f {
             for k in v.seq_to_vec(x) {

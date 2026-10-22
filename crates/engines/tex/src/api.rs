@@ -3257,7 +3257,7 @@ impl Graph {
 
 /// A file's bytes as TeX's characters, one each (Latin-1): ASCII bytes
 /// are their characters' UTF-8 already, copied at once.
-fn latin1(bytes: &[u8]) -> String {
+pub(crate) fn latin1(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes)
         && s.is_ascii()
     {

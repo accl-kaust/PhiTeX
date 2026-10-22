@@ -955,6 +955,16 @@ impl Run<'_, '_> {
         let decoded = nodes::decode(v, b, &mut side);
         nodes::TAKE_MADE.with(|c| c.set(take));
         crate::val::NO_KEEP.with(|c| c.set(prev));
+        if crate::exec::obs_flag!("PHITEX_MADE_STATS") {
+            let n: Vec<u64> = nodes::MADE_STATS
+                .iter()
+                .map(|x| x.load(std::sync::atomic::Ordering::Relaxed))
+                .collect();
+            eprintln!(
+                "made-stats: kept {} side {} full {} taken {} decoded {} lazy kept {} lazy not {}",
+                n[0], n[1], n[2], n[3], n[4], n[5], n[6]
+            );
+        }
         let Some(Node::Box(bx)) = decoded else {
             return Ok(());
         };
@@ -1820,6 +1830,29 @@ impl Run<'_, '_> {
         } else {
             v.list(names)
         };
+        if crate::exec::obs_flag!("PHITEX_FIN_DEFS") {
+            let all: Vec<String> = self
+                .st
+                .published(v, false)
+                .into_iter()
+                .map(|d| crate::val::field_name(v, self.loc_field(d.0)))
+                .collect();
+            let same: Vec<String> = self
+                .st
+                .published_as_read(v)
+                .into_iter()
+                .map(|l| crate::val::field_name(v, self.loc_field(l)))
+                .collect();
+            eprintln!(
+                "fin-defs node {} spec {}: {} published, {} global as read: {}  ALL: {}",
+                self.cx.node().raw(),
+                self.cx.is_speculative(),
+                all.len(),
+                same.len(),
+                same.join(" "),
+                all.join(" ")
+            );
+        }
         let at = fin_at(v, &self.cx.args());
         self.contribute(GDEFS, gdefs_unit(v, x, at));
         x

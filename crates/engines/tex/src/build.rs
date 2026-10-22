@@ -1194,9 +1194,9 @@ impl Run<'_, '_> {
         let lsl = v.int(i64::from(self.ipar(Par::lineskiplimit)?));
         let tv = v.int(nodes::T_VBOX);
         let mut out = Vec::with_capacity(para.lines.len() * 2);
-        for (k, line) in para.lines.into_iter().enumerate() {
+        for (k, mut line) in para.lines.into_iter().enumerate() {
             self.box_report(true, line.packed.report, true);
-            let (list, plain) = nodes::encode_list_side_free(v, &line.packed.node.list, &side);
+            let (list, seen) = nodes::encode_list_side_free(v, &line.packed.node.list, &side);
             let b = nodes::encode_box_with(v, &line.packed.node, list);
             out.push(v.list(vec![tv, b, bs, ls, lsl]));
             for a in &line.packed.adjustments {
@@ -1207,11 +1207,34 @@ impl Run<'_, '_> {
             }
             if display && k == last_k {
                 just_box = Some(line.packed.node);
-            } else if !plain {
-                phitex_typeset::linebreak::recycle_line(line.packed.node.list);
-            } else if let Some(l) = nodes::keep_made(list, line.packed.node.list) {
-                // (kept for the page that ships it, else reused)
-                phitex_typeset::linebreak::recycle_line(l);
+            } else {
+                // (its marks and whatsits numbered as its value's
+                // decoding numbers them, its shallow boxes' lists
+                // decoded: the line kept as its value decodes)
+                let (mut marks, mut whats) = (Vec::new(), Vec::new());
+                let ok = seen == 0
+                    || nodes::localize(
+                        v,
+                        &mut line.packed.node.list,
+                        &side,
+                        &mut marks,
+                        &mut whats,
+                    );
+                nodes::made_stat(if seen == 0 {
+                    0
+                } else if ok {
+                    5
+                } else {
+                    6
+                });
+                let kept = if ok {
+                    nodes::keep_made(list, line.packed.node.list, marks, whats)
+                } else {
+                    Some(line.packed.node.list)
+                };
+                if let Some(l) = kept {
+                    phitex_typeset::linebreak::recycle_line(l);
+                }
             }
         }
         // the paragraph's lines: one contribution
