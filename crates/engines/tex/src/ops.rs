@@ -95,12 +95,11 @@ pub(crate) fn run_node_parking(
     let which = crate::exec::obs_str!("PHITEX_MARKS");
     let marks_ok = parks
         && !cx.is_speculative()
-        && match which.as_deref() {
-            Some("off") => false,
+        && match which {
             Some("exec") => cx.op() == o.exec,
             Some("finish") => cx.op() == o.finish,
             Some("all") => cx.op() == o.exec || cx.op() == o.finish,
-            // (none by default: measured on amsldoc, marks every 2000
+            // (`off`, or none given: measured on amsldoc, marks every 2000
             // commands cost 3-6% of a cold build (their snapshots and the
             // memory they keep) while no edit kind was cut off at one and
             // the few resumed gained nothing at -j 8; `PHITEX_MARKS` (observe)

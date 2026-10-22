@@ -5764,11 +5764,6 @@ impl Run<'_, '_> {
             .map(|l| self.loc_field(l))
             .collect();
         // (the memos by field: their order the same for equal memos)
-        fn by_field<T: Copy>(r: &mut Run<'_, '_>, m: Vec<(Loc, T)>) -> Vec<(Field, T)> {
-            let mut xs: Vec<(Field, T)> = m.into_iter().map(|(l, x)| (r.loc_field(l), x)).collect();
-            xs.sort_by_key(|x| x.0.0.raw());
-            xs
-        }
         let m = self.reg_pending.iter().map(|(&l, &m)| (l, m)).collect();
         let reg_pending = by_field(self, m);
         let m = self.class_memo.iter().map(|(&l, &c)| (l, c)).collect();
@@ -5916,6 +5911,14 @@ fn parked_digest_with(rest: u64, slots: u64) -> u64 {
     phitex_defuse::hash_words(0x6d61_726b, &[rest, slots])
 }
 
+/// A run's memo by field, in the fields' order: the same for equal memos
+/// ([`Run::snapshot`]).
+fn by_field<T: Copy>(r: &mut Run<'_, '_>, m: Vec<(Loc, T)>) -> Vec<(Field, T)> {
+    let mut xs: Vec<(Field, T)> = m.into_iter().map(|(l, x)| (r.loc_field(l), x)).collect();
+    xs.sort_by_key(|x| x.0.0.raw());
+    xs
+}
+
 /// A value's `Debug` form fed to `h` as it is written (no string made):
 /// for the parts of a mark's state without a `Hash` ([`parked_rest`]).
 fn dbg_hash(h: &mut phitex_defuse::FxHasher, x: &dyn std::fmt::Debug) {
@@ -5930,6 +5933,7 @@ fn dbg_hash(h: &mut phitex_defuse::FxHasher, x: &dyn std::fmt::Debug) {
 }
 
 /// [`parked_digest`]'s part but the table's slots.
+#[allow(clippy::too_many_lines)]
 fn parked_rest(p: &Parked) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = phitex_defuse::FxHasher::default();

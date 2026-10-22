@@ -2271,17 +2271,7 @@ impl PState {
         Some(out)
     }
 
-    /// A digest of the table: equal for equal tables, the slots summed
-    /// (their order, the run's, left out), the rest in order.
-    pub(crate) fn digest(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = phitex_defuse::FxHasher::default();
-        self.slot_sum().hash(&mut h);
-        self.rest_hash().hash(&mut h);
-        h.finish()
-    }
-
-    /// [`PState::digest`] but for the slots.
+    /// The table's digest but for its slots ([`PState::slot_sum`]).
     pub(crate) fn rest_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let ent = |e: &PEntry| (e.id.map(ValueId::raw), e.flags);
