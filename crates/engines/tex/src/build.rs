@@ -951,6 +951,12 @@ impl Run<'_, '_> {
 
     /// The fonts the nodes use.
     pub(crate) fn font_view(&mut self, list: &[Node]) -> R<crate::fonts::View> {
+        self.font_view_with(list, &[])
+    }
+
+    /// [`Self::font_view`] with fonts `extra` too (a page's sealed lines',
+    /// `crate::pages`).
+    pub(crate) fn font_view_with(&mut self, list: &[Node], extra: &[u32]) -> R<crate::fonts::View> {
         fn walk(l: &[Node], ids: &mut std::collections::BTreeSet<u32>) {
             // (a run of characters in one font is one insert)
             let mut last = None;
@@ -988,6 +994,7 @@ impl Run<'_, '_> {
         }
         let mut ids = std::collections::BTreeSet::new();
         walk(list, &mut ids);
+        ids.extend(extra.iter().copied());
         let mut view = crate::fonts::View::default();
         for f in ids {
             self.add_font_metrics(&mut view, f)?;
@@ -1664,6 +1671,9 @@ impl Run<'_, '_> {
             // "Incompatible list can't be unboxed"
             return Ok(());
         }
+        // (a finisher's sealed line opened: its own list, read now,
+        // `crate::pages::seal`)
+        let b = self.unseal(b);
         let xs = list_of(v, b);
         for x in xs.get(9).map(|&l| list_of(v, l)).unwrap_or_default() {
             self.append(md.lid, x);

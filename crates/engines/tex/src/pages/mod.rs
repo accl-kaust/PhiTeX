@@ -60,11 +60,13 @@ mod builder;
 mod feedback;
 mod finish;
 mod piece;
+mod seal;
 
 pub(crate) use builder::*;
 pub(crate) use feedback::*;
 pub(crate) use finish::*;
 pub(crate) use piece::*;
+pub(crate) use seal::*;
 
 /// The pieces' main-list items, one unit per piece (and per paragraph's
 /// lines, `crate::parbreak`) beside its profile: `[piece, last, items,

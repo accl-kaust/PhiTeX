@@ -307,21 +307,12 @@ pub(crate) type CmdMemo = Mutex<FxHashMap<u64, Arc<Cmd>>>;
 pub(crate) struct PagePiece {
     /// The writer's parameters where it was shipped ([`WParams`]).
     wparams: WParams,
-    /// The page's box as `\shipout` got it (decoded again only for a
-    /// page the finish cannot place).
-    boxv: ValueId,
     params: Vec<ValueId>,
     margins: [i32; 3],
     whats: BTreeMap<u32, Whatsit>,
     fonts: Fonts,
-    /// The page's box, for its PDF side ([`PdfPage`]).
-    bx: Arc<BoxNode>,
     /// What the writer it is written on starts from ([`base_fold`]).
     base_in: BaseIn,
-    /// The page as its PDF side wrote it, for the link to place, and the
-    /// fonts used on the state it was written on: set once, by the
-    /// page's [`PdfPage`] (final, after the loop-backs settle).
-    made: OnceLock<(phitex_pdf::PageRecord, BTreeSet<FontId>, usize)>,
     /// The page's index in the page chain (for traces).
     pj: i64,
     /// The node that shipped it, for the link's errors ([`Linked`]).
@@ -332,6 +323,38 @@ pub(crate) struct PagePiece {
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
+
+/// A page as its PDF side wrote it, for the link to place, and the fonts
+/// used on the state it was written on, and the objects numbered before
+/// its own ([`write_page`]).
+type Made = (phitex_pdf::PageRecord, BTreeSet<FontId>, usize);
+
+/// The pages written, by their piece's key and their box (with its
+/// sealed lines' lists, `crate::pages::REALPAGES`): the piece is the
+/// page's shape, the box what its writer writes.
+type RecordMemo = Mutex<FxHashMap<u64, Arc<OnceLock<Made>>>>;
+
+fn records() -> &'static RecordMemo {
+    static P: OnceLock<RecordMemo> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// The record of page `pc` (key `key`) with box `real`, made once, by
+/// whichever asks first ([`write_page`]).
+fn record_of(v: &Values, key: u64, pc: &PagePiece, real: ValueId) -> Arc<OnceLock<Made>> {
+    let k = phitex_defuse::hash_words(0x7265_636f_7264_0001, &[key, real.raw()]);
+    let m = {
+        let mut all = records().locked();
+        // (the records of builds gone: dropped wholesale past a bound,
+        // made again where asked)
+        if all.len() > 1 << 14 {
+            all.clear();
+        }
+        all.entry(k).or_default().clone()
+    };
+    m.get_or_init(|| write_page(v, pc, real));
+    m
+}
 
 /// The pages by key: a pure function's memo.
 fn pieces() -> &'static PieceMemo {
@@ -1652,7 +1675,7 @@ pub(crate) fn ship(
     ];
     let marks = mark_events(v, &bx, &resolved);
     page_allocs(r, ids, &fonts, &side.whats, marks)?;
-    ship_apart(r, page, &p, bx, &side.whats, &resolved, fonts, margins)
+    ship_apart(r, page, &p, &side.whats, &resolved, fonts, margins)
 }
 
 /// The page's whatsits as the writer asks for them: a form's from the
@@ -1684,7 +1707,6 @@ fn ship_apart(
     r: &mut Run<'_, '_>,
     page_v: ValueId,
     p: &[ValueId],
-    bx: BoxNode,
     side_whats: &[ValueId],
     resolved: &FxHashMap<u32, ValueId>,
     fonts: Fonts,
@@ -1716,13 +1738,10 @@ fn ship_apart(
     let base_in = base_inputs(r)?;
     let pc = PagePiece {
         wparams,
-        boxv: list_of(v, page_v).first().copied().unwrap_or(ValueId::UNIT),
         params: p.to_vec(),
         margins,
         whats,
         fonts,
-        bx: Arc::new(bx),
-        made: OnceLock::new(),
         pj: i64::try_from(r.page_index()).unwrap_or(i64::MAX),
         node: i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()),
         brk: r
@@ -1773,43 +1792,52 @@ fn ship_apart(
     Ok(())
 }
 
-/// Page `pc`'s PDF side ([`PdfPage`]): written once, apart, on a writer
-/// of its own as the link's stands between two pages ([`base_fold`]),
-/// its record kept for the link (a page whose record is not placed as
-/// it is is shipped again by the link, whose error is the job's,
-/// [`Linked::errors`]). The record is made once, by whichever asks first.
-fn write_page(v: &Values, pc: &PagePiece) {
-    pc.made.get_or_init(|| {
-        let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
-        set_writer_params(&mut st, pc.wparams);
-        set_page_params(v, &mut st, &pc.params, pc.margins);
-        let base = st.fonts_used();
-        // (the objects TeX numbered before the page that its whatsits
-        // name, a link's, an annotation's: numbered here first, so that
-        // the page's own objects come after them and the record keeps
-        // their numbers as names, mapping only its own; on a writer that
-        // starts from fewer objects a link's number was taken for one of
-        // the page's own, and the replay renumbered the link)
-        // (the read-time numbers only its bytes name: named after
-        // those, [`apart_names`])
-        // (named past the objects the writer it starts from made too,
-        // [`base_fold`]: a name one of those has is scheduled there, and
-        // the line's number of the same object is not)
-        let floor = st.objects_numbered();
-        let (named, aliases) = apart_names(&pc.whats, floor);
-        while st.objects_numbered() < (named.max(floor) + aliases.len()).min(1 << 24) {
-            st.new_objnum();
+/// Page `pc`'s PDF side ([`PdfPage`]), its box `real` (the page's box
+/// with its lines' lists): written once, apart, on a writer of its own
+/// as the link's stands between two pages ([`base_fold`]), its record
+/// kept for the link (a page whose record is not placed as it is is
+/// shipped again by the link, whose error is the job's,
+/// [`Linked::errors`]).
+fn write_page(v: &Values, pc: &PagePiece, real: ValueId) -> Made {
+    let bx = {
+        let prev = crate::val::NO_KEEP.with(|c| c.replace(true));
+        let mut side = crate::nodes::Side::default();
+        let d = crate::nodes::decode(v, real, &mut side);
+        crate::val::NO_KEEP.with(|c| c.set(prev));
+        match d {
+            Some(phitex_typeset::node::Node::Box(b)) => b,
+            _ => BoxNode::default(),
         }
-        let local: Reloc = aliases.iter().map(|&(p, t)| (t, p)).collect();
-        let (res, rec) = {
-            let mut wh = |h: u32, _leaders: bool| {
-                page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &local))
-            };
-            st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
+    };
+    let Fold { mut st, forms } = base_fold(v, &pc.base_in, &pc.params, pc.wparams);
+    set_writer_params(&mut st, pc.wparams);
+    set_page_params(v, &mut st, &pc.params, pc.margins);
+    let base = st.fonts_used();
+    // (the objects TeX numbered before the page that its whatsits
+    // name, a link's, an annotation's: numbered here first, so that
+    // the page's own objects come after them and the record keeps
+    // their numbers as names, mapping only its own; on a writer that
+    // starts from fewer objects a link's number was taken for one of
+    // the page's own, and the replay renumbered the link)
+    // (the read-time numbers only its bytes name: named after
+    // those, [`apart_names`])
+    // (named past the objects the writer it starts from made too,
+    // [`base_fold`]: a name one of those has is scheduled there, and
+    // the line's number of the same object is not)
+    let floor = st.objects_numbered();
+    let (named, aliases) = apart_names(&pc.whats, floor);
+    while st.objects_numbered() < (named.max(floor) + aliases.len()).min(1 << 24) {
+        st.new_objnum();
+    }
+    let local: Reloc = aliases.iter().map(|&(p, t)| (t, p)).collect();
+    let (res, rec) = {
+        let mut wh = |h: u32, _leaders: bool| {
+            page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &local))
         };
-        let _ = res.err();
-        (rec, base, floor)
-    });
+        st.ship_recorded(&bx, &pc.fonts, &mut wh)
+    };
+    let _ = res.err();
+    (rec, base, floor)
 }
 
 /// A page's PDF side (`[key]`, the [`PagePiece`] its finisher kept):
@@ -1869,12 +1897,30 @@ impl phitex_defuse::Operation for PdfPage {
         else {
             return Ok(ValueId::UNIT);
         };
-        let pc = pieces()
-            .locked()
-            .get(&u64::from_ne_bytes(k.to_ne_bytes()))
-            .cloned();
-        if let Some(pc) = pc {
-            write_page(v, &pc);
+        let key = u64::from_ne_bytes(k.to_ne_bytes());
+        let pc = pieces().locked().get(&key).cloned();
+        // (its box, its sealed lines' lists in it: its place among the
+        // run's shipouts counted from the end of the boxes before it,
+        // `crate::pages::REALPAGES`; the last one by itself, so the boxes
+        // before it changing leave it standing)
+        let n = cx
+            .use_field_path(v.field(PAGE_KEYS), cx.path(&[phitex_defuse::Step::Len]))?
+            .and_then(|x| v.as_int(x))
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0);
+        let me = cx.node();
+        let w = cx.acc_view(v.field(crate::pages::REALPAGES), None, Some(me))?;
+        let at = if i + 1 == n {
+            cx.at(w, phitex_defuse::Step::Last)
+        } else {
+            cx.len(w)
+                .and_then(|len| usize::try_from(len).ok())
+                .and_then(|len| len.checked_sub(n - i))
+                .and_then(|j| cx.at(w, phitex_defuse::Step::Index(u32::try_from(j).unwrap_or(u32::MAX))))
+        };
+        let real = at.map(|a| cx.whole(a));
+        if let (Some(pc), Some(real)) = (pc, real) {
+            record_of(v, key, &pc, real);
         }
         Ok(ValueId::UNIT)
     }
@@ -3041,6 +3087,35 @@ pub(crate) const LINKED: &str = "pdf:linked";
 /// content rewritten), or shipped again from its box where the replay
 /// cannot give the walk's bytes; a read-time command's step applied
 /// ([`Cmd`]); a document-level command applied ([`apply_doc_op`]).
+/// The box of each page record of `xpages` (the line in the link's
+/// order): the pages' boxes `reals` ([`crate::pages::REALPAGES`], in the
+/// shipouts' order) paired in order with the page records of `line`
+/// (the line as contributed, the same order), then found for each
+/// record of `xpages` by its key; `None` for a record not a page's.
+pub(crate) fn pair_reals(
+    v: &Values,
+    line: &[ValueId],
+    reals: &[ValueId],
+    xpages: &[ValueId],
+) -> Vec<Option<ValueId>> {
+    let mut by_key: FxHashMap<u64, std::collections::VecDeque<ValueId>> = FxHashMap::default();
+    let mut rs = reals.iter();
+    for &x in line {
+        if v.as_int(x).is_some()
+            && let Some(&r) = rs.next()
+        {
+            by_key.entry(x.raw()).or_default().push_back(r);
+        }
+    }
+    xpages
+        .iter()
+        .map(|&x| {
+            v.as_int(x)?;
+            by_key.get_mut(&x.raw()).and_then(std::collections::VecDeque::pop_front)
+        })
+        .collect()
+}
+
 /// Each record's bytes are chunks; a page's content whose font numbers
 /// changed is rewritten and compressed on the executor, the pages apart
 /// in parallel (spec-final §6.1); then the tail (the fonts embedded,
@@ -3051,13 +3126,14 @@ pub(crate) fn finish_exact(
     v: &Values,
     f: &EndFields,
     xpages: &[ValueId],
+    reals: &[Option<ValueId>],
     cmds: &CmdMemo,
 ) -> Linked {
-    let out = link(v, f, xpages, cmds, true);
+    let out = link(v, f, xpages, reals, cmds, true);
     if crate::exec::obs_flag!("PHITEX_LINK_CHECK") {
         // (the file linked from the last link's records, and from the
         // start: the same bytes)
-        let full = link(v, f, xpages, cmds, false);
+        let full = link(v, f, xpages, reals, cmds, false);
         let at = out
             .file
             .iter()
@@ -3082,7 +3158,15 @@ pub(crate) fn finish_exact(
 /// [`finish_exact`]'s link, from the last link's records (`memo`, kept
 /// for the next) or from the start.
 #[allow(clippy::too_many_lines)]
-fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: bool) -> Linked {
+#[allow(clippy::too_many_arguments)]
+fn link(
+    v: &Values,
+    f: &EndFields,
+    xpages: &[ValueId],
+    reals: &[Option<ValueId>],
+    cmds: &CmdMemo,
+    memo: bool,
+) -> Linked {
     let none = Linked {
         file: Vec::new(),
         hash: None,
@@ -3145,7 +3229,16 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
     // the same from the file's start, are not placed again: their chunks
     // are copied, and the writer goes on from the state it had after
     // them, kept every `LINK_SNAP` records)
-    let ids: Vec<u64> = xpages.iter().map(|x| x.raw()).collect();
+    // (a page by its key and its box: a word edited in one of its
+    // lines changes the box, not the key)
+    let ids: Vec<u64> = xpages
+        .iter()
+        .zip(reals)
+        .map(|(x, r)| match r {
+            Some(r) => phitex_defuse::hash_words(x.raw(), &[r.raw()]),
+            None => x.raw(),
+        })
+        .collect();
     // (what the writer starts from: the same for the copy to stand)
     let mut head = phitex_defuse::hash_bytes(
         phitex_defuse::hash_words(
@@ -3297,9 +3390,15 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
             // its virtual fonts' local fonts numbered where its walk
             // reads them in, after every font loaded before it
             // (a page whose PDF side has not run yet: written here)
-            write_page(v, pc);
-            let empty = phitex_pdf::PageRecord::default();
-            let rec = pc.made.get().map_or(&empty, |m| &m.0);
+            // (its box with its lines' lists, from the pages' boxes in
+            // the line's order, [`pair_reals`])
+            let Some(real) = reals.get(i).copied().flatten() else {
+                return none;
+            };
+            let made = record_of(v, u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()), pc, real);
+            let empty = (phitex_pdf::PageRecord::default(), BTreeSet::new(), 0);
+            let made = made.get().unwrap_or(&empty);
+            let rec = &made.0;
             let fwd = nums.resolve(&pc.fonts, Some(rec.font_loads()));
             let src = Mapped::new(&pc.fonts, &nums, &fwd);
             let fmap = |g: FontId| fwd.get(&g).copied().unwrap_or(g);
@@ -3315,7 +3414,7 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
             // (the names the page was written apart with for the
             // read-time numbers only its bytes name: the line's numbers
             // of their objects)
-            let floor = pc.made.get().map_or(0, |m| m.2);
+            let floor = made.2;
             let (_, aliases) = apart_names(&pc.whats, floor);
             let tex: FxHashMap<usize, usize> = aliases
                 .iter()
@@ -3337,7 +3436,7 @@ fn link(v: &Values, f: &EndFields, xpages: &[ValueId], cmds: &CmdMemo, memo: boo
                 };
                 let mut side = crate::nodes::Side::default();
                 if let Some(phitex_typeset::node::Node::Box(bx)) =
-                    crate::nodes::decode(v, pc.boxv, &mut side)
+                    crate::nodes::decode(v, real, &mut side)
                     && let Err(e) = st.ship_out_with(&bx, &src, &mut wh)
                 {
                     errors.push((format!("pdfTeX error: {e}"), pc.node));

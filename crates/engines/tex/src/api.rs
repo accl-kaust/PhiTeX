@@ -2161,6 +2161,7 @@ impl Graph {
         let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
         let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));
+        let unit_shape = eng.register_projection(Arc::new(crate::nodes::unit_shape));
         // (handles held outside the graph: pinned, or a value sweep
         // frees them while a run still defines through them)
         for f in fields.handles() {
@@ -2193,6 +2194,7 @@ impl Graph {
             step_proj,
             defined_proj,
             tail_proj,
+            unit_shape,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -6321,7 +6323,12 @@ impl Build {
     pub fn pages(&self) -> Vec<u64> {
         let v = self.g.eng.values();
         let f = v.field("pagehash");
-        let acc = self.g.eng.acc_value(self.unit, f);
+        let acc = self.g.eng.acc_value(self.unit, f).map(|x| {
+            // (and the pages' boxes: a PDF page's entry is its shape,
+            // its lines' lists in its box, `crate::pages::REALPAGES`)
+            let r = self.g.eng.acc_value(self.unit, v.field(crate::pages::REALPAGES));
+            v.list(vec![x, r.unwrap_or(ValueId::UNIT)])
+        });
         if let Some((k, x)) = &self.memo.locked().pages
             && *k == acc
         {
@@ -6335,7 +6342,8 @@ impl Build {
     fn pages_made(&self) -> Vec<u64> {
         let v = self.g.eng.values();
         let f = v.field("pagehash");
-        self.g
+        let mut out: Vec<u64> = self
+            .g
             .eng
             .acc_value(self.unit, f)
             .map(|s| {
@@ -6344,7 +6352,21 @@ impl Build {
                     .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // (a PDF page's hash is its shape's: its box's too, where the
+        // pages' boxes are one a page)
+        let boxes = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field(crate::pages::REALPAGES))
+            .map(|x| crate::pages::real_pages(v, x))
+            .unwrap_or_default();
+        if boxes.len() == out.len() {
+            for (h, b) in out.iter_mut().zip(boxes) {
+                *h = phitex_defuse::hash_words(*h, &[b.raw()]);
+            }
+        }
+        out
     }
 
     /// The `\write` streams' lines: `(stream, text)`.
@@ -6707,6 +6729,8 @@ fn declare_fields(eng: &mut Engine) {
     eng.declare_accumulator(loads, Arc::new(crate::pages::MissMonoid));
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
     eng.declare_accumulator(allocs, Arc::new(SeqMonoid));
+    let real = eng.values().field(crate::pages::REALPAGES);
+    eng.declare_accumulator(real, Arc::new(crate::pages::ListSeqMonoid));
     let rels = eng.values().field(crate::pdfprim::RT_RELS);
     eng.declare_accumulator(rels, Arc::new(SeqMonoid));
     let linked = eng.values().field(crate::pdfout::LINKED);

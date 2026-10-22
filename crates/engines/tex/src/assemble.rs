@@ -482,6 +482,13 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
 
     let t_acc = t0.elapsed();
     let xpages = crate::pdfout::order_line(v, &line);
+    // (the pages' boxes, their lines' lists in them, each page's to its
+    // record, `crate::pages::REALPAGES`)
+    let boxes = crate::pages::real_pages(
+        v,
+        cx.acc_range(v.field(crate::pages::REALPAGES), None)?,
+    );
+    let reals = crate::pdfout::pair_reals(v, &line, &boxes, &xpages);
     if crate::exec::obs_flag!("PHITEX_LINE_TRACE") {
         for (tag, l) in [("in", &line), ("out", &xpages)] {
             for &x in l {
@@ -529,7 +536,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
     };
     let t_seed = t0.elapsed();
-    let l = crate::pdfout::finish_exact(v, &f, &xpages, &o.pdf_cmds);
+    let l = crate::pdfout::finish_exact(v, &f, &xpages, &reals, &o.pdf_cmds);
     let t_fin = t0.elapsed();
     // a page the link shipped and the writer could not write is the
     // job's error, in the log and loudly, naming the node that shipped

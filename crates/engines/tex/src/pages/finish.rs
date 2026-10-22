@@ -631,6 +631,10 @@ impl Run<'_, '_> {
         }
         let mut units: Vec<(i64, ValueId, Vec<ValueId>)> = Vec::new();
         let mut own = None;
+        // (a PDF page's lines read by their shape: their dimensions and
+        // fonts, not their characters, `crate::pages::seal`;
+        // `PHITEX_NO_SEAL=1` reads them whole)
+        let seal = !crate::exec::obs_flag!("PHITEX_NO_SEAL") && self.param("pdfoutput")? > 0;
         for (i, &p) in pids.iter().enumerate() {
             if !want.contains(&p) || units.iter().any(|u| u.0 == p) {
                 continue;
@@ -639,6 +643,12 @@ impl Run<'_, '_> {
                 continue;
             };
             let mut raw = match self.cx.at(u, Step::Index(2)) {
+                Some(x) if seal => {
+                    let shape = self.cx.get(x, Step::Proj(self.ops.unit_shape)).unwrap_or(ValueId::UNIT);
+                    let mut xs = list_of(v, shape);
+                    self.seal_items(x, &mut xs);
+                    xs
+                }
                 Some(x) => {
                     let x = self.cx.whole(x);
                     list_of(v, x)
@@ -751,6 +761,8 @@ impl Run<'_, '_> {
         }
         maps.sort_by_key(|e| e.0);
         let x = rtn_value(v, v.list(raw), v.list(list), dead, &maps);
+        // (what it gives back leaves the run: its sealed lines' lists)
+        let x = self.unseal(x);
         self.cx.define_with(v.field(RTN), x, Locality::Global);
         // (a routine that gave back other than the page builder folded
         // the next page on: counted; the builder's node reads the real
@@ -1093,7 +1105,16 @@ impl Run<'_, '_> {
         phitex_pdf::phase::add(2, t_p2);
         let t_p3 = std::time::Instant::now();
         let page_box = Node::Box(bx);
-        let view = self.font_view(std::slice::from_ref(&page_box))?;
+        // (its sealed lines' fonts, from their stand-ins: their lists
+        // are not read, `crate::pages::seal`)
+        let sealed_fonts: Vec<u32> = side
+            .lazy
+            .iter()
+            .filter_map(|&l| nodes::sealed_of(v, l))
+            .flat_map(|(_, f)| list_of(v, f))
+            .filter_map(|f| u32::try_from(int_of(v, f)).ok())
+            .collect();
+        let view = self.font_view_with(std::slice::from_ref(&page_box), &sealed_fonts)?;
         // (spec-final §3.2: the page's own font usage, by id; the end
         // node resolves names and files from the fonts' fields)
         let mut ids: Vec<u32> = view.fonts.ids();
@@ -1112,6 +1133,9 @@ impl Run<'_, '_> {
             && let Node::Box(bx) = page_box
         {
             crate::pdfout::ship(self, page, bx, &side, &ids)?;
+            // (the page's box for its writer, its sealed lines' lists
+            // passed on at the run's end, `crate::pages::REALPAGES`)
+            self.real_pages.push(b);
         }
         let shown = Some(page.raw());
         phitex_pdf::phase::add(4, t_p4);
@@ -1942,6 +1966,7 @@ impl Run<'_, '_> {
             if is_page_field(&name) {
                 continue;
             }
+            let x = self.unseal(x);
             out.push((f, x));
         }
         if let Some(x) = self.fin.as_ref().and_then(|c| c.rtn) {
