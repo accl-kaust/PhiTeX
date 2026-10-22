@@ -5399,6 +5399,12 @@ impl Run<'_, '_> {
         // with those definitions patched, `Ctx::checkpoint_patched`)
         let patched = self.patch_at(k as usize);
         let r = match patched {
+            // (no definition differs: the states are alike for all that
+            // follows, the last run's continuing as it did)
+            Some((as_old, patch)) if patch.is_empty() => {
+                let as_old = self.v.int(i64::from_ne_bytes(as_old.to_ne_bytes()) >> 4);
+                self.cx.checkpoint(k, as_old)
+            }
             Some((as_old, patch)) => {
                 let as_old = self.v.int(i64::from_ne_bytes(as_old.to_ne_bytes()) >> 4);
                 self.cx.checkpoint_patched(k, state, as_old, &patch)
@@ -5502,7 +5508,11 @@ impl Run<'_, '_> {
                 });
                 patch.push((g, l, y));
             }
-            if !any {
+            // (none: none for this run either where its base level
+            // publishes nothing of it; whether a scope publishes it is by
+            // the slot's history alone, the same for both runs)
+            let quiet = npub.is_none();
+            if !any && !quiet {
                 if why {
                     eprintln!(
                         "mark-why: patch refused: {} not defined by the last run's result (value {:?} -> {:?})",
