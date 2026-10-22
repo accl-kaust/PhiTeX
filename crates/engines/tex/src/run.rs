@@ -5840,6 +5840,15 @@ impl Run<'_, '_> {
     /// command has changed nothing yet (its input as it found it, read
     /// without putting it back, [`crate::input::Input::segs_at_command_start`]).
     pub(crate) fn mark_before_read(&mut self) -> R<()> {
+        // (observe, `PHITEX_ANCHOR_MARKS=1`: measured on amsldoc's preamble
+        // edit, the runs resume at these marks but are not cut off after
+        // the group: a later `\inputlineno` read in the run reads another
+        // number too, and the page builder's candidate notes
+        // (`crate::runstate::State::mark_candidate`) keep the moved value for
+        // a second pass, so the states never meet again; off)
+        if !crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS") {
+            return Ok(());
+        }
         if !self.marks_on || self.cut_off || self.watch_exit.is_some() || !self.mark.active {
             return Ok(());
         }

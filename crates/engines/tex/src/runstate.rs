@@ -261,6 +261,9 @@ pub(crate) struct State {
     pub(crate) track: bool,
     /// The slots changed since the last mark, while [`State::track`].
     mdirty: Vec<Loc>,
+    /// (with the marks before a lines read, `Run::mark_before_read`) A
+    /// group's end that puts back the engine's value unloads the slot.
+    pub(crate) unload_restored: bool,
     /// A rollback since marks began: the marks' deltas no longer add up
     /// to the table ([`State::rollback`]).
     mbroken: bool,
@@ -374,6 +377,7 @@ impl Clone for State {
             // marks taken since no longer add up, [`State::mark_delta`])
             track: self.track,
             mdirty: Vec::new(),
+            unload_restored: self.unload_restored,
             mbroken: self.track || self.mbroken,
         }
     }
@@ -479,6 +483,7 @@ impl State {
             undo: None,
             track: false,
             mdirty: Vec::new(),
+            unload_restored: crate::exec::obs_flag!("PHITEX_ANCHOR_MARKS"),
             mbroken: false,
         }
     }
@@ -1380,6 +1385,7 @@ impl State {
             // compares equal whatever the engine gave it, its uses after
             // the mark reads the engine sees, [`State::mark_delta`])
             let unload = self.track
+                && self.unload_restored
                 && s.ldef == (0, false, None)
                 && s.prev.flags & LOADED != 0
                 && s.prev.flags & PRELOADED == 0
