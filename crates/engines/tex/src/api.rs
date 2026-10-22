@@ -2687,6 +2687,12 @@ impl Graph {
         let v = self.eng.values();
         let mut env = self.files.clone();
         env.extend(self.marks.entries(v));
+        // (and how many there are, nobody's read: an environment that
+        // lacks this entry, the canonical text of a document with no
+        // comment, makes `sweep_input_include`'s edit of `chap2.tex`
+        // with the format built in the same evaluation run its first
+        // piece again on `file:inputs.aux`, an engine matter)
+        env.push((v.field(DOC_MARK_COUNT), v.int(self.marks.count())));
         // (the files the job writes kept in memory, a fixpoint's; none
         // otherwise: `UNIT`, never a wait on the client. Listed: the files
         // written before that the last evaluation did not open, each
@@ -3501,6 +3507,9 @@ pub(crate) const DOC_MARKS: &str = "doc:mark:";
 /// the line is in the file.
 pub(crate) type CommentMark = (u32, u64, String);
 
+/// The environment field of the number of the canonical text's comments.
+const DOC_MARK_COUNT: &str = "doc:marks";
+
 /// The hash of a comment line's text before its `%`.
 fn prefix_hash(prefix: &str) -> u64 {
     phitex_defuse::hash_bytes(0x5c0d_e5ed, prefix.as_bytes())
@@ -3601,6 +3610,11 @@ impl Marks {
                 (v.field(&format!("{DOC_MARKS}{id:016x}")), v.str(c))
             })
             .collect()
+    }
+
+    /// How many comments there are.
+    fn count(&self) -> i64 {
+        i64::try_from(self.0.locked().0.len()).unwrap_or(i64::MAX)
     }
 
     /// Whether marks changed since the environment was set.
